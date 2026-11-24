@@ -11,7 +11,7 @@ try {
     const saves=[]
     let revision=1, fail=false, delay=false, pending, markDelay
     const reachedDelay = new Promise(resolve => markDelay = resolve)
-    const purposes = ["route","chat","research","title","extract","disclosure","yolo","draft","flow","mail","compose"]
+    const purposes = ["route","chat","research","title","extract","disclosure","draft","flow","mail","compose"]
     const lightKeys = ["route","title","disclosure","flow"]
     const view = () => ({lightweight:null,steve:{harness:"claude-code",model:"old-model",models:["old-model"]}, bot_revision:revision, harnesses:[{id:"claude-code",name:"Claude Code",ready:true,judgments:true},{id:"codex",name:"Codex",ready:true,judgments:true},{id:"pi",name:"Pi",ready:true,judgments:false}], purposes:purposes.map(key=>({key,label:key,role:lightKeys.includes(key)?"lightweight":"primary",follows:!lightKeys.includes(key),effective:{harness:"claude-code",models:["old-model"]}}))})
     page.on("pageerror", e=>errors.push(e.message))

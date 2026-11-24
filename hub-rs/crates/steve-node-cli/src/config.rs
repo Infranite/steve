@@ -92,8 +92,8 @@ impl Home {
     pub fn pairing(&self) -> Result<Pairing> {
         let p = self.pairing_file();
         let text = std::fs::read_to_string(&p)
-            .with_context(|| format!("not paired yet ({} is missing)", p.display()))?;
-        Ok(serde_json::from_str(&text)?)
+            .with_context(|| format!("reading Node pairing {}", p.display()))?;
+        serde_json::from_str(&text).context("invalid Node pairing document")
     }
 
     pub fn save_pairing(&self, p: &Pairing) -> Result<()> {

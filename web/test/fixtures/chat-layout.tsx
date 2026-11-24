@@ -78,7 +78,7 @@ window.addEventListener("fixture-thinking-stage", (event) => {
       ...(stage==="stopped"?{}:{steps:{route:{kind:"research",title:"",bot:"steve",project:null,tags:[],newTags:[],why:"核对模型配置",model:"fixture-model",fallback:false,ms:200},
         answer:{thought:reasoning,model:"fixture-model",ms:5000,failed:stage==="failure"},
         research:{run:"fixture-research",model:"fixture-model",ms:28000,turns:2,tools:3,stopped:stage==="failure"?"failed":undefined},
-        tools:[{name:"Read",kind:"read",args:{brief:"src/app.ts"},status:"ok",ms:20},{name:"Read",kind:"read",args:{brief:"src/config.ts"},status:"ok",ms:20},{name:"Bash",kind:"exec",args:{brief:"npm run check"},status:"failed",error:"transport",ms:500}]}}) }])
+        tools:[{name:"Read",kind:"read",args:{brief:"src/app.ts"},status:"ok",ms:20},{name:"Read",kind:"read",args:{brief:"src/config.ts"},status:"ok",ms:20},{name:"Bash",kind:"exec",args:{brief:"npm run check"},result:{records:Array.from({length:1200}, (_, i) => `output record ${i}`),end:"fixture output end"},status:"failed",error:"transport",ms:500}]}}) }])
   }
   emit()
 })

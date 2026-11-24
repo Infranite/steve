@@ -23,7 +23,7 @@ use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
 use steve_modules::contacts::people_repo;
 use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::outbound::Verdict;
-use steve_modules::outbound::{YOLO_ACTOR, decided_by_yolo, strip_ai_prefix, with_ai_prefix};
+use steve_modules::outbound::{legacy_automatic_decision, strip_ai_prefix};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
 use steve_store::{Decision, NewDecision, uid};
 
@@ -76,13 +76,6 @@ pub trait DraftHooks: Send + Sync {
     /// user like after `steve_request_approval` (pending = approval, item “在等你批准”).
     fn awaiting_approval(&self, ws: &str, session_id: &str, item_id: Option<&str>) {
         let _ = (ws, session_id, item_id);
-    }
-    /// YOLO decides drafts of `item_id` (or of the workspace) now: the check model then runs as the draft
-    /// is written; otherwise only the local checks do and the card offers the model check. Without the
-    /// hook the model always runs.
-    fn yolo_on(&self, ws: &str, item_id: Option<&str>) -> bool {
-        let _ = (ws, item_id);
-        true
     }
 }
 
@@ -203,13 +196,8 @@ impl MailDraftHandler {
                 repo::draft_transition(tx, &draft.id, &["pending"], "approved", now)?;
                 repo::set_draft_send_at(tx, &draft.id, Some(send_at))?;
                 repo::set_draft_error(tx, &draft.id, None)?;
-                let yolo = cx.actor == YOLO_ACTOR;
                 if let Some(item) = &draft.item_id {
-                    let (who, line) = if yolo {
-                        ("steve", format!("YOLO：批准发送邮件「{}」", draft.subject))
-                    } else {
-                        ("me", format!("批准发送邮件「{}」", draft.subject))
-                    };
+                    let (who, line) = ("me", format!("批准发送邮件「{}」", draft.subject));
                     people_repo::timeline_add(tx, item, who, "sys", &line)?;
                 }
                 tx.audit(
@@ -221,9 +209,6 @@ impl MailDraftHandler {
                 )?;
                 result["content_hash"] = json!(draft.content_hash);
                 result["send_at"] = json!(send_at);
-                if yolo {
-                    result["decided_by"] = json!(YOLO_ACTOR);
-                }
             }
             "no" => {
                 repo::draft_transition(tx, &draft.id, &["pending"], "discarded", now)?;
@@ -272,7 +257,7 @@ impl MailDraftHandler {
             // Normal REST callers are authenticated users; autonomous decisions use synthetic actors.
             // Check membership as well as known actor names so arbitrary bot ids cannot opt in.
             let member = steve_store::settings::user_is_member(tx, cx.ws, cx.actor)?;
-            if cx.actor == YOLO_ACTOR || cx.actor == "steve" || !member {
+            if !member {
                 return Err(
                     ApiError::rule(steve_i18n::t!("mail.decision.unknown_needs_user")).into(),
                 );
@@ -299,11 +284,7 @@ impl MailDraftHandler {
             &draft.id,
             &json!({"decision": d.id}),
         )?;
-        let mut result = choice_result(cx);
-        if cx.actor == YOLO_ACTOR && cx.choice == "retry" {
-            result["decided_by"] = json!(YOLO_ACTOR);
-        }
-        Ok(result)
+        Ok(choice_result(cx))
     }
 }
 
@@ -537,7 +518,7 @@ impl Mail {
             let approval = steve_store::decision_repo::send_approval(tx, &d.workspace_id, id)?;
             let current = content_hash(&d);
             let ok = approval.as_ref().is_some_and(|a| {
-                a.result.get("content_hash").and_then(Value::as_str)
+                !legacy_automatic_decision(&a.result) && a.result.get("content_hash").and_then(Value::as_str)
                     == Some(d.content_hash.as_str())
             }) && current == d.content_hash;
             let Some(a) = approval.filter(|_| ok) else {
@@ -653,7 +634,7 @@ impl Mail {
 
     /// Sends one approved draft whose delay is over. Every path, retries included, needs a resolved
     /// `send` for this content and a fresh full disclosure check of its final audience and wire body.
-    /// Neither a manual approval nor YOLO can bypass the check. Refusals write `mail.send.blocked`.
+    /// A manual approval cannot bypass the check. Refusals write `mail.send.blocked`.
     pub async fn execute(&self, draft_id: &str) -> MailResult<SendOutcome> {
         let Some(_activity) = self.0.m.store.try_activity("mail_send") else {
             return Ok(SendOutcome::Skipped);
@@ -673,11 +654,7 @@ impl Mail {
         };
         // Check exactly what the MIME builder sends, after the outbound identity mark is applied.
         let mut d = stored.clone();
-        d.body = if decided_by_yolo(&approval.result) {
-            with_ai_prefix(&d.body)
-        } else {
-            strip_ai_prefix(&d.body).to_string()
-        };
+        d.body = strip_ai_prefix(&d.body).to_string();
         let built = match self.0.m.store.read(|c| self.build(c, &d, now)) {
             Ok(b) => b,
             Err(e) => return self.fail(&d, &e.to_string()),

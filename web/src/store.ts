@@ -15,11 +15,10 @@ import { api, setPageWorkspace, stream, Unauthenticated, BotPlacementError, type
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
-import i18n, { lang, t } from "./i18n"
+import i18n, { t } from "./i18n"
 import { decisionText } from "./i18n/decision"
 import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
-import { yoloApi, type RYolo } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
@@ -36,7 +35,7 @@ export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
   tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; revision: number; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
-  /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
+  /** Historical reason when the retired automatic resolver made this decision. */
   yolo?: string
   /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
   via?: string }
@@ -148,13 +147,16 @@ export const defaultHarness = (): string => {
 /** the bot modes `harness` can be set to (all while the Hub does not know) */
 export const permModes = (harness: string): string[] => {
   const r = runtimes().find(r => r.id === harness)
-  const offered = Object.keys(permissionModes).filter(k => canConfigurePermission(r, k))
-  return offered.length ? offered : r?.modes?.length ? ["default"] : Object.keys(permissionModes)
+  // Session-native auto is a workspace decision, not a Bot preference.
+  const supported = Object.keys(permissionModes).filter(k => canConfigurePermission(r, k))
+  if (supported.length === 1 && supported[0] === "bypassPermissions") return supported
+  const offered = supported.filter(k => k === "plan" || k === "default")
+  return offered.length ? offered : ["default"]
 }
 /** a compatible permission mode for `harness`, in priority order */
 export const defaultPermMode = (harness: string): string => {
   const ms = permModes(harness)
-  return (["default", "auto", "acceptEdits", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
+  return (["default", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
 }
 /** the reasoning efforts `harness` takes, as its adapter reported them */
 export const harnessEfforts = (harness: string): string[] => runtimes().find((r) => r.id === harness)?.efforts ?? []
@@ -184,8 +186,6 @@ export const st = {
   bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
   tags: [] as Tag[],
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>,
-  /* The last successful YOLO status for this workspace. */
-  yolo: null as RYolo | null,
   localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
   noticeSeen: 0,
   quote: null as string | null, focus: null as { item: string; until: number } | null,
@@ -552,7 +552,7 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
   })
   return {
-    id: i.id, t: i.title, b: i.bot_id ?? "steve", get st() { return itemStatus(i) }, phase: i.state.kind, cycle: i.cycle, deps: i.deps ?? [], src: det?.source ?? [i.source, i.source], get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: !!i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
+    id: i.id, t: i.title, b: i.bot_id ?? "", get st() { return itemStatus(i) }, phase: i.state.kind, cycle: i.cycle, deps: i.deps ?? [], src: det?.source ?? [i.source, i.source], get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: !!i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
     workflowPaused: i.workflow?.paused ?? undefined, workflowCycle: i.workflow?.cycle ?? undefined, workflowFailed: i.workflow?.failed, workflowAttempt: i.workflow?.attempt ?? undefined, workflowSuperseded: i.workflow?.superseded,
     goals: det?.goalsList.map((g) => g.text) ?? [], progress: det?.timeline.findLast((entry) => entry.kind === "progress")?.text ?? "", plan: det?.plan.length ? steps(det.plan) : undefined, planDone: i.plan_done, planTotal: i.plan_total,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
@@ -721,7 +721,7 @@ export async function loadItem(id: string, force = false) {
 }
 /* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
  * pages refetch what they show. */
-export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "yolo", "yolo_action", "stats"] as const
+export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "approval_policy", "stats"] as const
 export type ModuleEvent = Extract<HubEvent, { type: (typeof MODULE_EVENTS)[number] }> | { type: "resync"; id: string }
 const moduleTypes = new Set<string>(MODULE_EVENTS)
 /** every stream event, for pages that keep their own data (contacts, knowledge, accounts, vault, signals, flows, GitHub …) */
@@ -736,35 +736,6 @@ export function useHubEvents(types: readonly string[], f: () => void, ms = 300, 
     hubSubs.add(h); return () => { hubSubs.delete(h); d.cancel() }
   }, [key, ms, maxWait]) // eslint-disable-line react-hooks/exhaustive-deps
 }
-/* ───────── YOLO status; a visible badge reads its own decision's action ───────── */
-let yoloTimer: ReturnType<typeof setTimeout>
-async function loadYolo() {
-  const scope = scopeKey()
-  const yolo = await yoloApi.status()
-  if (scope !== scopeKey()) return
-  st.yolo = yolo
-  emit()
-}
-const yoloDecisionKey = () => ["detail", scopeKey(), "yolo-decision"] as const
-export function useYoloDecisionAction(id: string) {
-  const window = useStoreSelector(() => st.yolo?.window?.id)
-  return useQuery({
-    queryKey: [...yoloDecisionKey(), id, window, lang()],
-    queryFn: ({ signal }) => yoloApi.decisionAction(id, signal),
-    enabled: !!window,
-  }, qc).data
-}
-const yoloSoon = () => { clearTimeout(yoloTimer); yoloTimer = setTimeout(() => void loadYolo().catch(fail), 250) }
-async function yoloCall<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
-  try { const r = await p; if (ok) toast(ok); await loadYolo(); return r } catch (e) { fail(e); return undefined }
-}
-export const yoloSet = (mode: "off" | "on" | "full", includeOpen = false) => yoloCall(yoloApi.set(mode, includeOpen), t(`core:yolo.${mode}`))
-export const yoloScope = (type: "project" | "item", id: string, mode: "on" | "off" | "inherit" | "full") => yoloCall(yoloApi.scope(type, id, mode), t("common:state.saved"))
-export const yoloResume = () => yoloCall(yoloApi.resume(), t("core:yolo.resumed"))
-export const yoloUndo = (id: string, text?: string) => yoloCall(yoloApi.undo(id, text), t("core:toast.undone"))
-export const yoloNow = (id: string) => yoloCall(yoloApi.now(id))
-export const yoloCancel = (id: string) => yoloCall(yoloApi.cancel(id), t("core:yolo.leftToYou"))
-
 function forgetResearchActivity() {
   const { live } = chatLive()
   if (live) updateChat({ live: { ...live, now: undefined, active: [], at: undefined } })
@@ -781,8 +752,6 @@ function onHub(e: HubEvent) {
   if (e.type === "stream.gap") {
     void recoverTranscripts()
     if (chatLive().thinking) void loadSummary()
-    void qc.invalidateQueries({ queryKey: yoloDecisionKey() })
-    yoloSoon()
     return
   }
   hubSubs.forEach((f) => f(e))
@@ -824,10 +793,6 @@ function onHub(e: HubEvent) {
     }
     return
   }
-  if (e.type === "yolo_action" && e.decision_id) {
-    void qc.invalidateQueries({ queryKey: [...yoloDecisionKey(), e.decision_id] })
-  }
-  if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
   /* Only pages displaying clients subscribe to their presence. */
   if (e.type === "client") return
   if (moduleTypes.has(e.type)) return
@@ -850,12 +815,12 @@ function onHub(e: HubEvent) {
     if (nextDraft || draft?.mid !== e.mid) priorDraftReplies = new Set(messageViews().map(msgOfView).filter((m) => m.k === "steve" && m.origin === e.mid).map((m) => m.id!))
     nextDraft = false
     const was = draft?.mid === e.mid ? draft : undefined, now = Date.now()
-    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } })
+    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } }, was && !!was.text === !!e.text ? "reply" : "frame")
     return
   }
   if (e.type === "steve.tool") {
     if (!messageViews().some((v) => msgOfView(v).steps?.research?.run === e.run))
-      updateChat({ live: researchEvent(chatLive().live, e) })
+      updateChat({ live: researchEvent(chatLive().live, e) }, "frame")
     return
   }
   if (e.type === "thread.run") return
@@ -894,7 +859,6 @@ function resync(): Promise<void> {
       if (scope !== scopeKey()) return
       await Promise.all([qc.invalidateQueries({ queryKey: ["detail", scopeKey()] }), qc.invalidateQueries({ queryKey: noticeKey() })])
       if (scope !== scopeKey()) return
-      yoloSoon()
     } while (resyncAgain)
   })().finally(() => { resyncing = null; if (resyncAgain) void resync() })
   return resyncing
@@ -923,7 +887,6 @@ const connect = () => {
     if (gen !== streamGen || st.down || downTimer) return
     downTimer = setTimeout(() => { downTimer = null; if (gen === streamGen) { st.down = true; forgetResearchActivity(); emit() } }, DOWN_AFTER_MS)
   })
-  yoloSoon()
 }
 export function start() {
   let live = true
@@ -1411,7 +1374,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void shellCall(api.
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); st.ready = false; st.yolo = null; emit(); resetTranscripts(); st.noticeSeen = 0; st.hold = null; resetViews(); updateChat({}); closeStream(); await loadReadSide(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); st.ready = false; emit(); resetTranscripts(); st.noticeSeen = 0; st.hold = null; resetViews(); updateChat({}); closeStream(); await loadReadSide(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; node?: string }) { const r = await shellCall(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }

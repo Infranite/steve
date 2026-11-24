@@ -1919,7 +1919,7 @@ fn withdrawing_a_queued_refresh_does_not_mark_the_protocol_delivered() {
 }
 
 #[test]
-fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
+fn startup_blocker_survives_queued_input() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     let sid = k.session(&i, "error");
@@ -1960,11 +1960,6 @@ fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
         steve_types::DecisionStatus::Open
     );
     assert!(!k.open_kinds(&i).is_empty());
-    assert!(
-        k.core
-            .resolve(&card.id, "retry", "", steve_modules::outbound::YOLO_ACTOR)
-            .is_err()
-    );
     k.db().session_patch(&sid, patch![status:"ended"]).unwrap();
     let before = k.db().store().sessions().stop(&sid).unwrap();
     k.core

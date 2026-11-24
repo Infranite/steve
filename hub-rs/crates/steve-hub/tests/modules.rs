@@ -353,7 +353,6 @@ async fn model_settings() {
             "title",
             "extract",
             "disclosure",
-            "yolo",
             "draft",
             "flow",
             "mail",

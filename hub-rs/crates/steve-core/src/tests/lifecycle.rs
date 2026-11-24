@@ -286,16 +286,6 @@ fn design_delivery_waits_for_the_users_implementation_decision() {
         })
         .unwrap();
     assert!(!k.open_kinds(&item).is_empty());
-    assert!(
-        k.core
-            .resolve(
-                &decision.id,
-                "只保留设计",
-                "",
-                steve_modules::outbound::YOLO_ACTOR
-            )
-            .is_err()
-    );
     k.core
         .resolve(&decision.id, "只保留设计", "", "me")
         .unwrap();

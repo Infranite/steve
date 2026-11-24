@@ -33,6 +33,7 @@ impl Store {
 pub struct NewItem {
     pub title: String,
     pub goal: String,
+    /// An empty ID leaves the item unassigned (it has not passed placement yet).
     pub bot_id: String,
     pub project_id: Option<String>,
     pub kind: Option<String>,
@@ -195,7 +196,7 @@ impl Items<'_> {
             };
             let parent = p.parent.as_ref().map(to_json).transpose()?;
             tx.run(
-                "INSERT INTO items (id, workspace_id, no, kind, title, phase, bot_id, project_id, source, parent, created, updated, requested_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO items (id, workspace_id, no, kind, title, phase, bot_id, project_id, source, parent, created, updated, requested_by) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?)",
                 params![
                     id,
                     ws,

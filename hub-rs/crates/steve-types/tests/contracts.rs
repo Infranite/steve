@@ -40,7 +40,6 @@ fn ids_are_transparent_labels() {
         ChanMessageId,
         PersonaId,
         CalendarId,
-        YoloActionId,
         KbSourceId,
         KbDocId,
         MailThreadId,

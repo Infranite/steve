@@ -216,6 +216,65 @@ async fn only_the_owner_confirms_and_a_pending_node_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devices_offline_reason_and_duration_follow_link_evidence() {
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    let read = || async {
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!("{}/api/nodes", h.url()))
+            .header("x-test-user", "u1")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        body["nodes"][0].clone()
+    };
+    let first = read().await;
+    assert_eq!(first["offline"]["reason"], "never_connected");
+    assert_eq!(first["offline"]["since"], first["created"]);
+    assert!(first["offline"]["duration_ms"].as_i64().unwrap() >= 0);
+
+    for (message, reason) in [
+        (
+            "invalid: a welcome whose signature does not hold",
+            "handshake_failed",
+        ),
+        (
+            "incompatible: no common upgrade protocol",
+            "protocol_mismatch",
+        ),
+    ] {
+        h.fleet
+            .link_failed(&node, first["created"].as_i64().unwrap(), message);
+        assert_eq!(read().await["offline"]["reason"], reason);
+    }
+
+    let link = dial(&h, &id, &node, FakeNode::new(node.as_str()), 1)
+        .await
+        .unwrap();
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
+    let online = read().await;
+    assert_eq!(online["linked"], true);
+    assert_eq!(online["offline"], serde_json::Value::Null);
+    link.conn
+        .close(None, steve_node_wire::close::GOODBYE, "fixture finished");
+    eventually_sync("offline", || {
+        h.svc.registry.current(node.as_str()).is_none()
+    })
+    .await;
+    let down = read().await;
+    assert_eq!(down["offline"]["reason"], "unreachable");
+    assert_eq!(down["offline"]["since"], down["last_seen"]);
+    assert!(down["offline"]["since"].as_i64().unwrap() >= online["last_seen"].as_i64().unwrap());
+    assert!(
+        down.get("link_error").is_none(),
+        "a successful link clears stale failure evidence"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn revoking_a_live_node_closes_it_and_refuses_it_after() {
     let h = Hub::start().await;
     let (id, node) = h.paired("u1").await;

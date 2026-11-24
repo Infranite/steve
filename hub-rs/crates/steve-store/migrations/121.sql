@@ -1,179 +1,94 @@
--- Ordinary Node RPC errors now use the shared contract. Convert retained receipts in place.
--- The old after_reconcile hint never proves that the operation can be resent.
-CREATE TEMP TABLE ordinary_rpc_errors (table_name TEXT, column_name TEXT, id INTEGER, path TEXT, value TEXT);
-INSERT INTO ordinary_rpc_errors
- SELECT 'node_commands', 'receipt', rowid, '$.payload', json_extract(receipt,'$.payload')
- FROM node_commands WHERE json_type(receipt,'$.payload.retry')='text';
-INSERT INTO ordinary_rpc_errors
- SELECT 'node_commands', 'receipt', rowid, '$.payload.state.error', json_extract(receipt,'$.payload.state.error')
- FROM node_commands WHERE json_type(receipt,'$.payload.state.error.retry')='text';
-INSERT INTO ordinary_rpc_errors
- SELECT 'node_commands', 'receipt', rowid, '$.payload.state.result.error', json_extract(receipt,'$.payload.state.result.error')
- FROM node_commands WHERE json_type(receipt,'$.payload.state.result.error.retry')='text';
-INSERT INTO ordinary_rpc_errors
- SELECT 'node_commands', 'receipt', rowid, '$.last_error', json_extract(receipt,'$.last_error')
- FROM node_commands WHERE json_type(receipt,'$.last_error.retry')='text';
-INSERT INTO ordinary_rpc_errors
- SELECT 'runtime_attempts', 'receipt', rowid, '$.state.error', json_extract(receipt,'$.state.error')
- FROM runtime_attempts WHERE json_type(receipt,'$.state.error.retry')='text';
-INSERT INTO ordinary_rpc_errors
- SELECT 'runtime_attempts', 'receipt', rowid, '$.state.result.error', json_extract(receipt,'$.state.result.error')
- FROM runtime_attempts WHERE json_type(receipt,'$.state.result.error.retry')='text';
-INSERT INTO ordinary_rpc_errors
- SELECT 'runtime_attempts', 'completion', rowid, '$.error', json_extract(completion,'$.error')
- FROM runtime_attempts WHERE json_type(completion,'$.error.retry')='text';
-INSERT INTO ordinary_rpc_errors
- SELECT 'runtime_job_attempts', 'receipt', rowid, '$.state.error', json_extract(receipt,'$.state.error')
- FROM runtime_job_attempts WHERE json_type(receipt,'$.state.error.retry')='text';
-INSERT INTO ordinary_rpc_errors
- SELECT 'runtime_job_attempts', 'receipt', rowid, '$.state.result.error', json_extract(receipt,'$.state.result.error')
- FROM runtime_job_attempts WHERE json_type(receipt,'$.state.result.error.retry')='text';
-INSERT INTO ordinary_rpc_errors
- SELECT 'runtime_job_attempts', 'completion', rowid, '$.error', json_extract(completion,'$.error')
- FROM runtime_job_attempts WHERE json_type(completion,'$.error.retry')='text';
+-- Old approvals are not authority to send anything after the cutover. Leave sent and in-flight
+-- (outcome to reconcile) records alone. Retain decisions, audit and external references.
+UPDATE chan_messages SET status = 'discarded'
+ WHERE status = 'pending' AND sent IS NULL
+ AND decision_id IN (SELECT id FROM decisions WHERE json_extract(result, '$.decided_by') = 'yolo');
+UPDATE mail_drafts SET status = 'discarded', send_at = NULL
+ WHERE status = 'approved'
+ AND decision_id IN (SELECT id FROM decisions WHERE json_extract(result, '$.decided_by') = 'yolo');
+UPDATE decisions SET status = 'expired'
+ WHERE status = 'open' AND subject_type = 'release'
+ AND json_extract(result, '$.decided_by') = 'yolo';
 
-UPDATE ordinary_rpc_errors SET value=json_object(
- 'code', CASE json_extract(value,'$.code')
-   WHEN 'offline' THEN 'unavailable' WHEN 'denied' THEN 'forbidden'
-   WHEN 'expired' THEN 'stale' WHEN 'downgrade' THEN 'invalid'
-   WHEN 'busy' THEN 'busy' WHEN 'unsupported' THEN 'unsupported'
-   WHEN 'stale' THEN 'stale' WHEN 'conflict' THEN 'conflict'
-   WHEN 'exhausted' THEN 'exhausted' WHEN 'invalid' THEN 'invalid'
-   WHEN 'outcome_unknown' THEN 'outcome_unknown' WHEN 'gap' THEN 'gap'
-   ELSE 'internal' END,
- 'retry', CASE WHEN json_extract(value,'$.retry')='same_operation'
-   AND json_extract(value,'$.code') NOT IN ('outcome_unknown','gap')
-   AND (path='$.payload' OR path='$.last_error')
-   THEN json_object('kind','later','after_ms',NULL) ELSE json_object('kind','never') END,
- 'reason', CASE json_extract(value,'$.code') WHEN 'downgrade' THEN 'node.downgrade' END,
- 'params', json_patch(
-   CASE WHEN json_extract(value,'$.operation') IS NULL THEN '{}' ELSE
-     json_object('operation',json_extract(value,'$.operation')) END,
-   CASE WHEN json_extract(value,'$.state') IS NULL THEN '{}' ELSE
-     json_object('state',json_extract(value,'$.state')) END),
- 'safe_detail', COALESCE(json_extract(value,'$.safe_detail'),''));
-CREATE INDEX ordinary_rpc_error_source ON ordinary_rpc_errors(table_name,column_name,path,id);
-UPDATE node_commands SET receipt=json_set(receipt,'$.payload',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='node_commands' AND e.column_name='receipt'
-   AND e.path='$.payload' AND e.id=node_commands.rowid;
-UPDATE node_commands SET receipt=json_set(receipt,'$.payload.state.error',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='node_commands' AND e.column_name='receipt'
-   AND e.path='$.payload.state.error' AND e.id=node_commands.rowid;
-UPDATE node_commands SET receipt=json_set(receipt,'$.payload.state.result.error',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='node_commands' AND e.column_name='receipt'
-   AND e.path='$.payload.state.result.error' AND e.id=node_commands.rowid;
-UPDATE node_commands SET receipt=json_set(receipt,'$.last_error',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='node_commands' AND e.column_name='receipt'
-   AND e.path='$.last_error' AND e.id=node_commands.rowid;
-UPDATE runtime_attempts SET receipt=json_set(receipt,'$.state.error',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='runtime_attempts' AND e.column_name='receipt'
-   AND e.path='$.state.error' AND e.id=runtime_attempts.rowid;
-UPDATE runtime_attempts SET receipt=json_set(receipt,'$.state.result.error',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='runtime_attempts' AND e.column_name='receipt'
-   AND e.path='$.state.result.error' AND e.id=runtime_attempts.rowid;
-UPDATE runtime_attempts SET completion=json_set(completion,'$.error',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='runtime_attempts' AND e.column_name='completion'
-   AND e.path='$.error' AND e.id=runtime_attempts.rowid;
-UPDATE runtime_job_attempts SET receipt=json_set(receipt,'$.state.error',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='runtime_job_attempts' AND e.column_name='receipt'
-   AND e.path='$.state.error' AND e.id=runtime_job_attempts.rowid;
-UPDATE runtime_job_attempts SET receipt=json_set(receipt,'$.state.result.error',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='runtime_job_attempts' AND e.column_name='receipt'
-   AND e.path='$.state.result.error' AND e.id=runtime_job_attempts.rowid;
-UPDATE runtime_job_attempts SET completion=json_set(completion,'$.error',json(e.value))
- FROM ordinary_rpc_errors e
- WHERE e.table_name='runtime_job_attempts' AND e.column_name='completion'
-   AND e.path='$.error' AND e.id=runtime_job_attempts.rowid;
+-- Cancel only old auto answers proven never to have reached a Node. An accepted or uncertain
+-- operation is left for normal reconciliation; the migration does not guess its outcome.
+CREATE TEMP TABLE retired_approval_commands AS
+ SELECT p.decision_id, p.answer_operation
+ FROM runtime_permissions p
+ JOIN node_commands c ON c.operation_id = p.answer_operation
+ JOIN decisions d ON d.id = p.decision_id
+ WHERE p.state = 'answering' AND c.method = 'resolve_permission'
+ AND c.state = 'pending' AND c.maybe_sent = 0
+ AND (json_extract(d.result, '$.decided_by') = 'yolo' OR EXISTS (
+     SELECT 1 FROM yolo_actions a WHERE a.decision_id = d.id
+     AND a.outcome IN ('running','decided')
+ ));
+UPDATE node_commands SET state = 'rejected', revision = revision + 1
+ WHERE operation_id IN (SELECT answer_operation FROM retired_approval_commands);
+UPDATE runtime_permissions SET state = 'expired', revision = revision + 1
+ WHERE decision_id IN (SELECT decision_id FROM retired_approval_commands);
+UPDATE decisions SET status = 'expired' WHERE status = 'open'
+ AND id IN (SELECT decision_id FROM retired_approval_commands);
+DROP TABLE retired_approval_commands;
 
-DROP TABLE ordinary_rpc_errors;
+DROP TABLE yolo_actions;
+DROP TABLE yolo_windows;
+DROP TABLE yolo_scopes;
+DELETE FROM settings WHERE key LIKE 'yolo.%' OR key IN ('yolo', 'models.yolo');
+DELETE FROM revisions WHERE object_type = 'yolo_scope';
+-- Fresh installs add the conditional item lifecycle columns after replaying the numbered
+-- SQL. The pre-existing item triggers cannot yet be reparsed by ALTER TABLE DROP COLUMN.
+-- Rebuild this unreferenced table, keeping every other statistic and its indexes.
+CREATE TABLE item_stats_new (
+  item_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+  created INTEGER NOT NULL, first_turn INTEGER, first_deliver INTEGER, last_deliver INTEGER,
+  accepted INTEGER, done_at INTEGER, dropped_at INTEGER,
+  lead_ms INTEGER, cycle_ms INTEGER, wait_ms INTEGER, agent_ms INTEGER,
+  turns INTEGER NOT NULL DEFAULT 0, delivers INTEGER NOT NULL DEFAULT 0, reworks INTEGER NOT NULL DEFAULT 0,
+  first_pass INTEGER,
+  fails INTEGER NOT NULL DEFAULT 0, stalls INTEGER NOT NULL DEFAULT 0,
+  releases INTEGER NOT NULL DEFAULT 0, release_fails INTEGER NOT NULL DEFAULT 0,
+  decisions INTEGER NOT NULL DEFAULT 0,
+  input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
+  cost_reported REAL NOT NULL DEFAULT 0, models TEXT NOT NULL DEFAULT '{}',
+  dirty INTEGER NOT NULL DEFAULT 1, updated INTEGER NOT NULL);
+INSERT INTO item_stats_new (
+  item_id, workspace_id, created, first_turn, first_deliver, last_deliver,
+  accepted, done_at, dropped_at, lead_ms, cycle_ms, wait_ms, agent_ms,
+  turns, delivers, reworks, first_pass, fails, stalls, releases, release_fails, decisions,
+  input, output, cache_read, cache_write, cost_reported, models, dirty, updated)
+ SELECT item_id, workspace_id, created, first_turn, first_deliver, last_deliver,
+  accepted, done_at, dropped_at, lead_ms, cycle_ms, wait_ms, agent_ms,
+  turns, delivers, reworks, first_pass, fails, stalls, releases, release_fails, decisions,
+  input, output, cache_read, cache_write, cost_reported, models, dirty, updated
+ FROM item_stats;
+DROP TABLE item_stats;
+PRAGMA legacy_alter_table=ON;
+ALTER TABLE item_stats_new RENAME TO item_stats;
+PRAGMA legacy_alter_table=OFF;
+CREATE INDEX item_stats_done ON item_stats(workspace_id, done_at);
+CREATE INDEX item_stats_dirty ON item_stats(dirty) WHERE dirty = 1;
 
-UPDATE runtime_sessions AS s SET mode_refusal_code=p.refusal_code
- FROM runtime_mode_projection p WHERE p.session_id=s.session_id;
+-- Retire Bot-level widening, keeping read-only Plan and the separately validated
+-- native-only admission setting. The latter is ignored for ordinary harnesses.
+UPDATE bots SET perm_mode = 'default' WHERE perm_mode IN ('auto', 'acceptEdits', 'dontAsk');
 
--- Older commands cannot be replayed into a replaced Node journal.
--- The lease generation makes the never-leased case safe even for rows predating maybe_sent.
-UPDATE node_commands SET state='rejected', lease_owner=NULL, lease_until=NULL, revision=revision+1,
- receipt=json_object('success',json('false'),'payload',json_object(
-   'code','stale','retry',json_object('kind','never'),
-   'reason','node.protocol_changed','safe_detail','Node protocol changed before dispatch'))
- WHERE state='pending' AND maybe_sent=0 AND lease_generation=0 AND receipt IS NULL;
-
-INSERT OR IGNORE INTO realtime_output_attempts
- (attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started,ended,baseline,stop_evidence,not_started)
- SELECT a.attempt_id,s.id,s.workspace_id,i.project_id,s.bot_id,a.node_id,a.created,
-        MAX(a.created,c.updated),0,'unsent',1
- FROM runtime_attempts a JOIN runtime_turns t USING(turn_id)
- JOIN sessions s ON s.id=t.session_id
- LEFT JOIN items i ON i.id=s.item_id AND i.workspace_id=s.workspace_id
- JOIN node_commands c ON c.operation_id=a.operation_id AND c.node_id=a.node_id
-   AND c.target_attempt=a.attempt_id AND c.method='start_turn'
- WHERE s.readonly=0 AND c.state='rejected'
-   AND json_extract(c.receipt,'$.payload.reason')='node.protocol_changed';
-
-UPDATE node_commands SET state='unknown', maybe_sent=1,
- lease_owner=NULL, lease_until=NULL, revision=revision+1,
- receipt=json_set(COALESCE(receipt,'{}'),'$.success',json('false'),'$.payload',json_object(
-   'operation',operation_id,'state',json_object('state','unknown','reason','node_protocol_changed')))
- WHERE state IN ('pending','accepted','active');
-UPDATE runtime_attempts SET state='unknown', revision=revision+1 WHERE state <> 'finished';
-UPDATE runtime_job_attempts SET state='unknown', revision=revision+1 WHERE state <> 'finished';
-UPDATE runtime_sessions AS s SET sending_mode=p.sending_mode, mode_problem=p.problem
- FROM runtime_mode_projection p WHERE p.session_id=s.session_id;
-
-ALTER TABLE node_commands ADD COLUMN intent_purpose TEXT;
-ALTER TABLE node_commands ADD COLUMN intent_subject TEXT;
-ALTER TABLE node_commands ADD COLUMN intent_revision INTEGER CHECK(intent_revision>=0);
-
--- Preserve command and receipt identity across the upgrade. A command whose old subject cannot
--- be determined stays non-replayable and supplies no positive evidence.
-WITH subjects AS (
- SELECT c.rowid AS id,
-   CASE c.method WHEN 'open_session' THEN 'open' WHEN 'release_session' THEN 'release'
-     WHEN 'configure_session' THEN 'configure' WHEN 'start_turn' THEN 'start_turn'
-     WHEN 'prepare_workspace' THEN 'prepare' WHEN 'tidy_workspace' THEN 'tidy' END AS purpose,
-   CASE c.method
-     WHEN 'start_turn' THEN json_extract(c.request,'$.body.turn')
-     WHEN 'tidy_workspace' THEN length(c.node_id)||':'||c.node_id||':'||
-                    length(c.workspace_id)||':'||c.workspace_id
-     WHEN 'prepare_workspace' THEN (SELECT session_id FROM node_commands o
-                     WHERE o.dependency_operation=c.operation_id AND o.method='open_session'
-                     ORDER BY o.created,o.rowid LIMIT 1)
-     ELSE c.session_id END AS subject
- FROM node_commands c
-), numbered AS (
- SELECT id,purpose,subject,
-   row_number() OVER(PARTITION BY purpose,subject ORDER BY id)-1 AS revision
- FROM subjects WHERE purpose IS NOT NULL AND subject IS NOT NULL
-)
-UPDATE node_commands AS c SET intent_purpose=n.purpose, intent_subject=n.subject,
- intent_revision=n.revision FROM numbered n WHERE c.rowid=n.id;
-CREATE UNIQUE INDEX node_commands_intent ON node_commands(intent_purpose,intent_subject,intent_revision)
- WHERE intent_purpose IS NOT NULL;
-
-CREATE TABLE runtime_turn_progress (
- turn_id TEXT PRIMARY KEY REFERENCES runtime_turns(turn_id) ON DELETE CASCADE,
- summary TEXT NOT NULL,
- decision_id TEXT UNIQUE REFERENCES decisions(id),
- stalled_attempt TEXT UNIQUE REFERENCES runtime_attempts(attempt_id),
- CHECK ((decision_id IS NULL) = (stalled_attempt IS NULL))
+-- No old on/full setting can grant this new authority.
+CREATE TABLE approval_policies (
+  workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),
+  mode TEXT NOT NULL CHECK(mode IN ('ask_owner','harness_auto')),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  actor TEXT NOT NULL
 );
 
-ALTER TABLE workflow_units ADD COLUMN verified_output TEXT;
-ALTER TABLE workflow_units ADD COLUMN inputs TEXT;
-CREATE TABLE workflow_review_findings (
- workflow_id TEXT NOT NULL REFERENCES workflows(item_id) ON DELETE CASCADE,
- fingerprint TEXT NOT NULL,
- scope TEXT NOT NULL,
- findings TEXT NOT NULL,
- applied_revision INTEGER,
- PRIMARY KEY(workflow_id,fingerprint)
+-- Facts are scoped, replay-safe and contain no tool arguments.
+CREATE TABLE approval_turns (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL,
+  created INTEGER NOT NULL,
+  PRIMARY KEY (session_id, turn_id)
 );
+-- A pre-cutover request has no observed resolver; keep it instead of retroactively
+-- attributing it to the new policy.
+ALTER TABLE runtime_permissions ADD COLUMN resolver TEXT NOT NULL DEFAULT 'legacy';

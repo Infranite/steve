@@ -71,7 +71,7 @@ impl Fixture {
             data_dir: dir.join("data"),
             core: Default::default(),
             flow: Default::default(),
-            yolo: Default::default(),
+            approval: Default::default(),
             local_node: Default::default(),
         });
         let local: Arc<dyn HostNode> = Arc::new(InProcess(ServiceNode::new(

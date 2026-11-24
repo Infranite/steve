@@ -98,6 +98,7 @@
   "hub.nodes.install_no_ssh": "Hub 所在机器无法生成 SSH 密钥（需要 OpenSSH 的 ssh 和 ssh-keygen）：%{error}",
   "hub.nodes.install_bad_address": "这不是 tailcat 地址：请粘贴目标机器上 tailcat serve 输出的 tc… 地址",
   "hub.nodes.install_no_route": "新 Node 连不到这个 Hub：请先开启“经 tailcat 连接”，或为 Hub 配置 HTTPS 地址（STEVE_PUBLIC_URL）",
+  "hub.nodes.install_macos_admin": "macOS Node 的开机服务需要本机管理员授权。请在 Mac 上用配对码运行 Steve 安装向导，然后以该账户执行 steve node enable-boot。",
   "hub.nodes.install_unsupported": "目标平台没有发布包：%{platform}（支持 Apple 芯片 macOS 和 x86_64 Linux）",
   "hub.nodes.install_dev_build": "这个 Hub 是开发版（%{version}），没有对应的发布包；请在目标机器上手动安装",
   "hub.nodes.install_not_paired": "安装已运行完，但 Node 没有完成配对",

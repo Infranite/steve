@@ -28,7 +28,6 @@ impl ReportScope<'_> {
 pub struct MarkReads<'a, C>(pub &'a mut C);
 pub struct TimelineReads<'a, C>(pub &'a mut C);
 pub struct SessionReads<'a, C>(pub &'a mut C);
-pub struct YoloReads<'a, C>(pub &'a mut C);
 
 pub struct CompletedItem {
     pub id: String,
@@ -319,19 +318,5 @@ impl<C: Read> SessionReads<'_, C> {
                 |r| r.get(0),
             )?
             .unwrap_or_default())
-    }
-}
-
-impl<C: Read> YoloReads<'_, C> {
-    pub fn actions(&mut self, scope: ReportScope<'_>) -> Result<Vec<(String, String, bool)>> {
-        self.0.all(
-            Query::select()
-                .columns(["outcome", "reason"])
-                .expr(Expr::col("undone").is_not_null())
-                .from("yolo_actions")
-                .and_where(Expr::col("workspace_id").eq(scope.ws))
-                .and_where(range(Expr::col("created"), scope)),
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
     }
 }

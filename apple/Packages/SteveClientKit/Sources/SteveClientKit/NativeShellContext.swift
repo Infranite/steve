@@ -71,7 +71,7 @@ public enum NativeShellRoute {
               !decoded.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
         let path = decoded.components(separatedBy: "?")[0]
         let parts = path.dropFirst().components(separatedBy: "/")
-        let roots: Set<String> = ["", "c", "feed", "inbox", "items", "projects", "sessions", "settings", "bots", "capabilities", "design", "knowledge", "devices", "github", "integrations", "channels", "auto", "signals", "mail", "accounts", "vault", "yolo", "stats", "contacts", "orgs", "teams", "publications", "more", "hub"]
+        let roots: Set<String> = ["", "c", "feed", "inbox", "items", "projects", "sessions", "settings", "bots", "capabilities", "design", "knowledge", "devices", "github", "integrations", "channels", "auto", "signals", "mail", "accounts", "vault", "stats", "contacts", "orgs", "teams", "publications", "more", "hub"]
         guard let root = parts.first, roots.contains(root), !path.contains("//"),
               !parts.contains("."), !parts.contains("..") else { return nil }
         if root == "hub" && (parts.count != 2 || !["add", "pair"].contains(parts[1]) || decoded.contains("?")) { return nil }

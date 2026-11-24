@@ -6,6 +6,8 @@ mod realtime;
 
 pub use realtime::{Attempt, RealtimeReads, RealtimeScope, Sample};
 
+pub mod approval;
+
 mod items;
 pub use items::{
     DecisionReads, DecisionRow, HUMAN_KINDS, ItemFacts, ItemHistory, ItemInput, ItemStats, MarkRow,
@@ -24,7 +26,6 @@ pub use coverage::{Attribution, CoverageRows, CoverageScope, Entity, Meter, Miss
 mod reports;
 pub use reports::{
     CompletedItem, MarkChange, MarkReads, ReportScope, SessionReads, TimelineReads, TurnMeasure,
-    YoloReads,
 };
 
 mod events;

@@ -136,7 +136,7 @@ pub fn split_static(prompt: &str) -> (Option<&str>, &str) {
 /// What a gateway call is for, set by the caller around the call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallTag {
-    /// route | chat | draft | extract | compose | disclosure | intent | flow | yolo | digest | other
+    /// route | chat | draft | extract | compose | disclosure | intent | flow | digest | other
     pub purpose: &'static str,
     /// `""` when the caller does not know (the page books it as unassigned).
     pub workspace_id: String,
@@ -192,7 +192,7 @@ pub async fn tagged<F: Future>(purpose: &'static str, ws: &str, f: F) -> F::Outp
     .await
 }
 
-/// Books the gateway calls made by `f` to an item (YOLO answers, a flow's item node).
+/// Books the gateway calls made by `f` to an item (for instance, a flow's item node).
 pub async fn for_item<F: Future>(item_id: &str, f: F) -> F::Output {
     with_tag(|t| t.item_id = Some(item_id.to_string()), f).await
 }

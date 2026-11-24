@@ -282,6 +282,12 @@ details[open]::details-content { height: auto; }
 .md li + li { margin-top: 4px; }
 .md li > :is(ul, ol) { margin-top: 4px; }
 .md li::marker { color: var(--muted-foreground); }
+/* A virtual history row is itself the layout placeholder. Don't let a second
+   intrinsic-size placeholder inside it resize the row as it crosses the viewport. */
+[data-chat-scroll] [data-index] [data-streamdown="code-block"] {
+  content-visibility: visible !important;
+  contain-intrinsic-size: none !important;
+}
 /* code: one surface, a quiet header, no frame inside the frame */
 .md [data-streamdown="code-block"] { margin: 12px 0; padding: 0; gap: 0; border-radius: 10px; background: var(--code); overflow: hidden; }
 .md [data-streamdown="code-block-header"] { height: 32px; padding: 0 12px; border-bottom: 1px solid var(--border); font-size: calc(12px * var(--type-scale)); }
@@ -310,3 +316,10 @@ details[open]::details-content { height: auto; }
 .md blockquote { border-left: 2px solid var(--border); padding-left: 12px; color: var(--muted-foreground); font-style: normal; }
 /* where a note on selected text is (ST-38), found again when the note is located */
 ::highlight(steve-ann) { background-color: color-mix(in oklab, var(--attention) 35%, transparent); color: inherit; }
+
+/* Skip the draft's layout and paint while reading far above it. Retain
+   its last measured height offscreen; the visible draft still grows naturally. */
+[data-chat-draft] > [data-steve-msg] {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 0px;
+}

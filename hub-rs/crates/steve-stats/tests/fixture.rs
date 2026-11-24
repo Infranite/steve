@@ -117,13 +117,7 @@ fn metrics_match_the_hand_count() {
     // 8 resolved by a person (the YOLO one and the open stall card are not)
     assert_eq!(h.response.n, 8);
     assert_eq!(h.messages, 1);
-    // migration 14 (YOLO) is in: H4 is reported, from the ledger, which this fixture leaves empty
-    // (y1 only carries `decided_by: yolo` on the decision)
-    let y = h.yolo.as_ref().expect("yolo_actions exists");
-    assert_eq!(
-        (y.decided, y.declined, y.undone, y.rate),
-        (0, 0, 0, Some(0.0))
-    );
+    assert_eq!(h.approval.permissions, 0);
 
     let a = &sm.agents;
     assert_eq!((a.turns, a.retries, a.interrupted), (5, 1, 1));

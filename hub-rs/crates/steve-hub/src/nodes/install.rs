@@ -1,4 +1,4 @@
-//! Installing a Node on another machine from the Hub, over tailcat's SSH (A6b).
+//! Installing a Linux Node on another machine from the Hub, over tailcat's SSH (A6b).
 //!
 //! The owner starts an install in Devices and gets one line to run on the target:
 //! `tailcat serve --ssh-authorized-keys='<this install's key>' ssh`. It prints an address, which the
@@ -639,6 +639,12 @@ async fn install(
     let target = target_of(&uname).with_context(|| {
         steve_i18n::t!("hub.nodes.install_unsupported", platform = uname.trim())
     })?;
+    // The tunnel runs as an unprivileged account. Never stage pairing or attempt
+    // an admin prompt for a system LaunchDaemon on this unattended path.
+    anyhow::ensure!(
+        target != "aarch64-apple-darwin",
+        steve_i18n::t!("hub.nodes.install_macos_admin")
+    );
 
     step(
         op,

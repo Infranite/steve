@@ -94,7 +94,8 @@ try {
     assert.ok(Math.abs(box.y + box.height / 2 - (view.y + view.height / 2)) < 60, "the hit is centred")
     assert.ok(await page.locator("[data-msg]").count() < 24, "only the visible rows are mounted")
     assert.equal(calls.filter((c) => c.startsWith("/api/views/page?kind=message")).length, 3)
-    if (width === 390) assert.equal(await page.locator('[data-history="sheet"]').count(), 0, "the sheet closes on a jump")
+    // The jump can finish before the sheet's exit animation unmounts it.
+    if (width === 390) await page.locator('[data-history="sheet"]').waitFor({ state: "detached", timeout: 3000 })
     await page.locator("[data-jump-back]").click()
     await page.waitForTimeout(200)
     assert.ok(near(await offsetOf(reading.id), reading.off), "back to where you were")
@@ -124,6 +125,7 @@ try {
     await page.locator('[data-msg^="o"]').first().waitFor({ state: "attached" })
     assert.ok(calls.filter((c) => c.startsWith("/api/views/page?kind=message")).length > pagesBefore, "scrolling loads an earlier page")
     await page.waitForTimeout(250)
+    assert.ok(!(await atBottom()), "loading older messages must not resume following the latest reply")
     const top = await anchor()
     assert.ok(top.id.startsWith("o") || top.id.startsWith("w"))
     assert.ok(near(await offsetOf(top.id), top.off))

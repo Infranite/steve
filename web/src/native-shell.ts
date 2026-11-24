@@ -39,7 +39,7 @@ export function shellRoute(raw: unknown): string | null {
   if (/[#\\\u0000-\u001f\u007f]/u.test(decoded)) return null
   const path = decoded.split("?")[0], parts = path.slice(1).split("/")
   if (path.includes("//") || parts.some((p) => p === "." || p === "..")) return null
-  const roots = ["", "c", "feed", "inbox", "items", "projects", "sessions", "settings", "bots", "capabilities", "design", "knowledge", "devices", "github", "integrations", "channels", "auto", "signals", "mail", "accounts", "vault", "yolo", "stats", "contacts", "orgs", "teams", "publications", "more", "hub"]
+  const roots = ["", "c", "feed", "inbox", "items", "projects", "sessions", "settings", "bots", "capabilities", "design", "knowledge", "devices", "github", "integrations", "channels", "auto", "signals", "mail", "accounts", "vault", "stats", "contacts", "orgs", "teams", "publications", "more", "hub"]
   if (!roots.includes(parts[0])) return null
   // Hub actions are the two explicit modal routes.
   if (parts[0] === "hub" && (parts.length !== 2 || !["add", "pair"].includes(parts[1]) || route.includes("?"))) return null

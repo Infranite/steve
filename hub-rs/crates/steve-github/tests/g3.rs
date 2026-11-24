@@ -695,7 +695,7 @@ async fn a_failed_check_supplements_the_item_through_the_template() {
     h.gh.settle().await;
     h.gh.settle().await;
     let want = format!(
-        "PR #{n} 的检查失败：build。用 steve_github_ci_log 读日志后修复，修完推送到同一分支。"
+        "PR #{n} 的检查失败：build。用 steve_github_ci_log 读日志后修复，修完请主人更新同一 PR 分支。"
     );
     let mut got = Vec::new();
     for _ in 0..100 {

@@ -94,6 +94,8 @@ fn wire_hub() -> Harness {
                 "member",
                 steve_store::now(),
             )?;
+            tx.members().add("default", "owner", "owner", 1)?;
+            tx.members().add("default", "member", "member", 2)?;
             Ok::<_, StoreError>(())
         })
         .expect("seed users");
@@ -1490,6 +1492,18 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                 ..Default::default()
             },
         );
+        if subject == "question" {
+            assert_refused_cleanly(
+                &h.w,
+                store,
+                &caller(ws, "member"),
+                &d.id,
+                d.revision,
+                choice,
+                "",
+                "core question non-owner",
+            );
+        }
         assert_success_replay_and_conflict(
             &h.w,
             store,
@@ -1542,6 +1556,16 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                 }),
                 ..Default::default()
             },
+        );
+        assert_refused_cleanly(
+            &h.w,
+            store,
+            &caller(ws, "member"),
+            &d.id,
+            d.revision,
+            "allow",
+            "",
+            "core tool_call non-owner",
         );
         assert_refused_cleanly(
             &h.w,
@@ -1609,16 +1633,6 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                 }),
                 ..Default::default()
             },
-        );
-        assert_refused_cleanly(
-            &h.w,
-            store,
-            &caller(ws, steve_modules::outbound::YOLO_ACTOR),
-            &d.id,
-            d.revision,
-            "只保留设计",
-            "",
-            "core design_implementation yolo",
         );
         assert_refused_cleanly(
             &h.w,
@@ -1730,16 +1744,6 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
         assert_refused_cleanly(
             &h.w,
             store,
-            &caller(ws, steve_modules::outbound::YOLO_ACTOR),
-            &d.id,
-            d.revision,
-            "retry",
-            "",
-            "core session_start yolo",
-        );
-        assert_refused_cleanly(
-            &h.w,
-            store,
             &owner,
             &d.id,
             d.revision,
@@ -1785,12 +1789,12 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
         assert_refused_cleanly(
             &h.w,
             store,
-            &caller(ws, steve_modules::outbound::YOLO_ACTOR),
+            &caller(ws, "member"),
             &d.id,
             d.revision,
             "drop",
             "",
-            "core turn_stall yolo",
+            "core turn_stall non-owner",
         );
         assert_refused_cleanly(
             &h.w,
@@ -1855,6 +1859,29 @@ async fn answering_an_ask_decision_wakes_an_idle_node_session() {
     )
     .unwrap();
     store.ensure_workspace().unwrap();
+    store
+        .write(|tx| {
+            UserRows(tx).insert(
+                "owner",
+                "default",
+                "sub_owner",
+                "Owner",
+                "owner",
+                steve_store::now(),
+            )?;
+            UserRows(tx).insert(
+                "member",
+                "default",
+                "sub_member",
+                "Member",
+                "member",
+                steve_store::now(),
+            )?;
+            tx.members().add("default", "owner", "owner", 1)?;
+            tx.members().add("default", "member", "member", 2)?;
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
     let item = create_item(&store, "default", "Wake test", "Answer wakes idle session");
     let bot_id = ensure_bot(&store, "default");
     let session = store
@@ -1900,7 +1927,7 @@ async fn answering_an_ask_decision_wakes_an_idle_node_session() {
         data_dir: dir.path().to_path_buf(),
         core: std::sync::OnceLock::new(),
         flow: std::sync::OnceLock::new(),
-        yolo: std::sync::OnceLock::new(),
+        approval: super::approval::ApprovalModes::default(),
         local_node: std::sync::OnceLock::new(),
     });
     let workspaces = super::workspaces::Workspaces::new(store.clone(), None, None, vec![]);
@@ -1939,6 +1966,19 @@ async fn answering_an_ask_decision_wakes_an_idle_node_session() {
         },
     );
 
+    let refused = core.decision_command(
+        &caller("default", "member"),
+        &d.id,
+        Some(d.revision),
+        DecisionCommand::Resolve {
+            choice: "option_a".into(),
+            text: String::new(),
+        },
+    );
+    assert!(
+        matches!(refused, Err(steve_core::CoreError::Status(403, _))),
+        "non-owner must receive 403 on AskOwner question: {refused:?}"
+    );
     let settled = core
         .decision_command(
             &caller("default", "owner"),
@@ -1967,4 +2007,315 @@ async fn answering_an_ask_decision_wakes_an_idle_node_session() {
     );
     rt.stop("acceptance test done");
     tokio::time::sleep(Duration::from_millis(20)).await;
+}
+
+struct ApprovalDomain(std::sync::Mutex<Option<super::node_runtime::ApprovalTarget>>);
+impl NodeDomain for ApprovalDomain {
+    fn approval(
+        &self,
+        _: &str,
+    ) -> steve_store::Result<Option<super::node_runtime::ApprovalTarget>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|target| super::node_runtime::ApprovalTarget {
+                mode: target.mode,
+                policy: target.policy,
+                native_id: target.native_id.clone(),
+                native: target.native,
+            }))
+    }
+    fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
+    fn attempt_started(&self, _: &str, _: &str, _: i64, _: Option<i64>, _: i64) {}
+    fn attempt_finished(
+        &self,
+        _: &str,
+        _: &str,
+        _: &steve_node_api::Completion,
+        _: &super::node_runtime::AttemptFacts,
+        _: i64,
+    ) {
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ask_owner_and_harness_native_permission_flow_through_unified_settlement() {
+    use steve_harness_spec::NativeApprovalFallback;
+    use steve_node_api::{ExecutionRef, PermissionMode, Timestamp};
+    use steve_store::core_fixture::work::audit_count;
+    use steve_store::decision_repo::choice_receipt;
+    use steve_store::testkit::hub::node_fixtures;
+
+    let make_perm = |pid: &str, exec: ExecutionRef, command: &str| {
+        let mut r = build::permission(pid, exec, command);
+        r.expires_at = Timestamp(steve_store::now() + 600_000);
+        r
+    };
+    let latest_exec = |store: &Store| -> ExecutionRef {
+        let rows = node_fixtures::ordered_attempt_executions(store).unwrap();
+        serde_json::from_str(rows.last().expect("attempt execution")).unwrap()
+    };
+
+    let dir = tempfile::tempdir().expect("tmp");
+    let store = Store::open(
+        dir.path().join("steve.sqlite3"),
+        steve_store::FnPublisher(|_| {}),
+    )
+    .unwrap();
+    store.ensure_workspace().unwrap();
+    store
+        .write(|tx| {
+            UserRows(tx).insert(
+                "owner",
+                "default",
+                "sub_owner",
+                "Owner",
+                "owner",
+                steve_store::now(),
+            )?;
+            UserRows(tx).insert(
+                "member",
+                "default",
+                "sub_member",
+                "Member",
+                "member",
+                steve_store::now(),
+            )?;
+            tx.members().add("default", "owner", "owner", 1)?;
+            tx.members().add("default", "member", "member", 2)?;
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    let item = create_item(&store, "default", "Approval port", "Test AskOwner wiring");
+    let bot_id = ensure_bot(&store, "default");
+
+    let make_session = |title: &str, tok: &str| {
+        store
+            .sessions()
+            .create(&NewSession {
+                workspace_id: "default".into(),
+                item_id: Some(item.id.clone()),
+                bot_id: Some(bot_id.clone()),
+                harness: "claude".into(),
+                model: None,
+                reasoning_effort: None,
+                cwd: dir.path().display().to_string(),
+                title: title.into(),
+                token: tok.into(),
+            })
+            .unwrap()
+    };
+
+    // 1. AskOwner: PermissionRequested opens a tool_call card with DecisionSource::Permission,
+    //    refuses non-owner (403), and settles through Core::decision_command with receipt + audit.
+    {
+        let session = make_session("AskOwner session", "tok_perm_ask");
+        let domain = Arc::new(ApprovalDomain(std::sync::Mutex::new(None)));
+        let fake_node = FakeNode::new("n_perm_ask");
+        let rt = NodeRuntime::new(store.clone(), fake_node.clone(), domain);
+        fake_node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+        rt.start();
+
+        rt.bind(&Binding {
+            session: session.id.clone(),
+            resource: format!("item:{}", item.id),
+            prepare: PrepareKind::Scratch,
+            choice: build::choice(),
+            policy: build::policy(),
+        })
+        .unwrap();
+        eventually_sync("AskOwner session ready", || {
+            steve_store::testkit::hub::node_checks::binding_phase_by_session(&store, &session.id)
+                .is_ok_and(|p| p == "ready")
+        })
+        .await;
+
+        let cfg = steve_core::CoreConfig::for_home(dir.path());
+        let host = Arc::new(super::core::HubHost {
+            store: store.clone(),
+            data_dir: dir.path().to_path_buf(),
+            core: std::sync::OnceLock::new(),
+            flow: std::sync::OnceLock::new(),
+            approval: super::approval::ApprovalModes::default(),
+            local_node: std::sync::OnceLock::new(),
+        });
+        let workspaces = super::workspaces::Workspaces::new(store.clone(), None, None, vec![]);
+        let routed = Arc::new(super::core::RoutedRuntime {
+            node: Some(rt.clone()),
+            fleet: None,
+            store: store.clone(),
+            host,
+            workspaces,
+            worktrees: None,
+            dispatch_harnesses: None,
+        });
+        let core = steve_core::Core::new(
+            steve_core::repo::Db::new(store.clone()),
+            routed,
+            Arc::new(NoopGateway),
+            cfg,
+        );
+
+        rt.prompt(&session.id, "run tool", "me", &[]).unwrap();
+        eventually_sync("AskOwner attempt started", || {
+            fake_node.log().iter().any(|(m, _)| *m == "start_turn")
+        })
+        .await;
+        let exec = latest_exec(&store);
+
+        fake_node
+            .ask_permission(make_perm("perm_ask_owner", exec, "write fixture"))
+            .await
+            .unwrap();
+        eventually_sync("AskOwner card opened", || {
+            store
+                .decisions()
+                .open("default")
+                .unwrap()
+                .iter()
+                .any(|d| d.subject_type == "tool_call" && d.subject_id == "perm_ask_owner")
+        })
+        .await;
+        let card = store
+            .decisions()
+            .open("default")
+            .unwrap()
+            .into_iter()
+            .find(|d| d.subject_id == "perm_ask_owner")
+            .unwrap();
+        let member_err = core.decision_command(
+            &caller("default", "member"),
+            &card.id,
+            Some(card.revision),
+            DecisionCommand::Resolve {
+                choice: "allow_once".into(),
+                text: String::new(),
+            },
+        );
+        assert!(
+            matches!(member_err, Err(steve_core::CoreError::Status(403, _))),
+            "non-owner must get 403 on AskOwner tool_call: {member_err:?}"
+        );
+        assert_eq!(
+            store.decisions().get(&card.id).unwrap().unwrap().status,
+            DecisionStatus::Open
+        );
+
+        let resolved = core
+            .decision_command(
+                &caller("default", "owner"),
+                &card.id,
+                Some(card.revision),
+                DecisionCommand::Resolve {
+                    choice: "allow_once".into(),
+                    text: String::new(),
+                },
+            )
+            .expect("owner settles AskOwner tool_call");
+        assert_eq!(resolved.status, DecisionStatus::Resolved);
+        assert_eq!(
+            core.decision_command(
+                &caller("default", "owner"),
+                &card.id,
+                Some(card.revision),
+                DecisionCommand::Resolve {
+                    choice: "allow_once".into(),
+                    text: String::new(),
+                },
+            )
+            .expect("idempotent replay"),
+            resolved
+        );
+        assert!(
+            store
+                .read(|r| choice_receipt(r, &card.id, card.revision))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            audit_count(&store, &["decision.resolve"], Some(&card.id)),
+            1
+        );
+        eventually_sync("resolve_permission sent for AskOwner", || {
+            fake_node
+                .log()
+                .iter()
+                .any(|(m, _)| *m == "resolve_permission")
+        })
+        .await;
+        rt.stop("ask owner done");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. HarnessNative(Reject): settles through DecisionRows::apply(Expire) with audit + reject command.
+    {
+        let session = make_session("HarnessNative session", "tok_perm_native");
+        let domain = Arc::new(ApprovalDomain(std::sync::Mutex::new(Some(
+            super::node_runtime::ApprovalTarget {
+                mode: PermissionMode::Auto,
+                policy: steve_types::ApprovalMode::HarnessAuto,
+                native_id: Some("auto".into()),
+                native: Some(NativeApprovalFallback::Reject),
+            },
+        ))));
+        let fake_node = FakeNode::new("n_perm_native");
+        let rt = NodeRuntime::new(store.clone(), fake_node.clone(), domain);
+        fake_node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+        rt.start();
+
+        rt.bind(&Binding {
+            session: session.id.clone(),
+            resource: format!("item:{}", item.id),
+            prepare: PrepareKind::Scratch,
+            choice: build::choice(),
+            policy: build::policy(),
+        })
+        .unwrap();
+        eventually_sync("HarnessNative session ready in auto mode", || {
+            rt.mode_state(&session.id)
+                .ok()
+                .flatten()
+                .and_then(|m| m.applied)
+                .as_deref()
+                == Some("auto")
+        })
+        .await;
+
+        rt.prompt(&session.id, "run tool", "me", &[]).unwrap();
+        eventually_sync("HarnessNative attempt started", || {
+            fake_node.log().iter().any(|(m, _)| *m == "start_turn")
+        })
+        .await;
+        let exec = latest_exec(&store);
+
+        fake_node
+            .ask_permission(make_perm("perm_native_reject", exec, "bash fixture"))
+            .await
+            .unwrap();
+        eventually_sync("HarnessNative reject sent", || {
+            fake_node
+                .log()
+                .iter()
+                .any(|(m, _)| *m == "resolve_permission")
+        })
+        .await;
+        let rejected = store
+            .decisions()
+            .of_item(&item.id)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.subject_id == "perm_native_reject")
+            .expect("reject card persisted");
+        assert_eq!(rejected.status, DecisionStatus::Expired);
+        assert_eq!(rejected.result["superseded"], "harness_native");
+        assert_eq!(
+            audit_count(&store, &["decision.expire"], Some(&rejected.id)),
+            1
+        );
+
+        rt.stop("harness native done");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

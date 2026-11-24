@@ -22,7 +22,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use steve_modules::outbound::YOLO_ACTOR;
 use steve_modules::outbound::{UNTRUSTED_CLOSE, UNTRUSTED_OPEN, quote_untrusted};
 use steve_store::decision_repo::DecisionChange;
 use steve_store::{DecisionUndo, Ingest, bots, file_repo, seeded};
@@ -146,11 +145,7 @@ fn write_answer_line(
     text: &str,
     sid: Option<&str>,
 ) -> Result<()> {
-    if actor == YOLO_ACTOR {
-        db.timeline_add(item, "steve", "sys", &format!("YOLO：{text}"), sid)
-    } else {
-        db.timeline_add(item, actor, "me", text, sid)
-    }
+    db.timeline_add(item, actor, "me", text, sid)
 }
 
 /// Result of a fork: `{"session": id}` or `{"item": id}`.
@@ -224,7 +219,7 @@ fn settle_answer(
 /// The bot that develops Steve itself, as `seed` makes it beside Steve's own source (a `NewBot` as JSON).
 pub(crate) fn dev_bot(project: Option<&str>) -> Value {
     json!({
-        "name": "Steve 开发", "harness": steve_harness_spec::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::DEV_ROLE), "accept_mode": "inherit", "perm_mode": "auto",
+        "name": "Steve 开发", "harness": steve_harness_spec::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::DEV_ROLE), "accept_mode": "inherit", "perm_mode": "default",
         "persona": seeded::text(seeded::DEV_PERSONA), "default_project": project, "avatar": {"color": "#8c7ae6", "round": 45},
         "rules": seeded::text(seeded::DEV_RULES),
     })
@@ -463,6 +458,19 @@ impl Core {
             .decision(id)?
             .filter(|d| d.workspace_id == caller.ws)
             .ok_or_else(|| steve_modules::ApiError::not_found("决定"))?;
+        if matches!(
+            d.subject_type.as_str(),
+            "question" | "tool_call" | steve_types::orchestration::TURN_STALL
+        ) && !self
+            .store()
+            .store()
+            .read(|r| steve_store::approval::owner(r, &caller.ws, &caller.me))?
+        {
+            return Err(CoreError::Status(
+                403,
+                "only the workspace owner can answer this card".into(),
+            ));
+        }
         let revision = revision.unwrap_or(d.revision);
         if d.revision != revision {
             return Err(CoreError::Status(
@@ -956,7 +964,7 @@ impl Tx<'_> {
         }
     }
 
-    /// [`AgentRuntime::prompt`] with a pending YOLO note in front.
+    /// Queue a prompt for this session.
     pub(crate) fn rt_prompt(
         &self,
         sid: &str,
@@ -965,7 +973,6 @@ impl Tx<'_> {
         files: &[FileRef],
     ) -> Result<Prompted> {
         let text = self.c.with_steve_note(sid, text);
-        let text = self.c.with_yolo_note(sid, &text);
         let refresh = self.protocol_refresh(sid)?;
         let text = match &refresh {
             Some((protocol, _)) => format!(
@@ -1219,32 +1226,21 @@ impl Tx<'_> {
         if context {
             lines.push(self.c.session_context(item));
         }
-        /* YOLO on for this item: the lines; off: unchanged */
-        let yolo = self.c.yolo_on(item);
-        lines.push("How to work with Steve — use the steve MCP tools:".into());
-        lines.push(crate::yolo::agent::UPDATE.into());
-        if yolo {
-            use crate::yolo::agent as y;
-            lines.extend([y::ON, y::ASK, y::APPROVAL, y::DELIVER].map(String::from));
-        } else {
-            lines.push("- steve_ask: when you need a decision from the user. Never ask questions in plain text. After calling it, end your turn.".into());
-            lines.push("- steve_request_approval: before outside effects (deploy, release, push, send, pay, delete) that lack explicit user authorization. Follow a recorded approval within its scope without requesting it again; approval is not evidence of completion. After calling it, end your turn.".into());
-            lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.".into());
-        }
-        /* the harness asks nothing (完全放开, or the bot bypasses prompts): the agent hears the brakes itself */
-        lines.extend(self.c.yolo_full_lines(item));
+        lines.extend([
+            "How to work with Steve — use the steve MCP tools:",
+            "- steve_update: record a short plan first, and update it whenever your step or plan changes. Write `now` in Chinese.",
+            "- steve_ask: send questions that need the owner as a decision card, not as plain text. After calling it, end your turn.",
+            "- External effects: use scoped Steve tools for sends, Git host writes, payments and vault access. Do not use shell credentials as a substitute; ask the owner when there is no appropriate tool or authorization.",
+            "- steve_deliver: deliver the result and the checks you actually ran. Mark finished steps with steve_update first and list deliberately open steps in `unfinished`. Then end your turn.",
+        ].map(String::from));
         let proof = self.proof_line(item)?;
         if !self.workflow_child(item)?
             && p.as_ref().is_some_and(|p| p.release.is_some())
             && item.branch.as_deref().is_some_and(|b| !b.is_empty())
         {
-            let mut line = String::from(
-                "- steve_publish: when the user explicitly wants these commits released, request approval for the release of your branch. End the turn after making the request.",
+            lines.push(
+                "- steve_publish: when the user explicitly wants these commits released, request approval for the release of your branch. End the turn after making the request.".into(),
             );
-            if yolo && p.as_ref().is_some_and(|p| self.c.yolo_releases_itself(p)) {
-                line.push_str(crate::yolo::agent::PUBLISH);
-            }
-            lines.push(line);
         }
         /* what the item's own goal asks to be shown before it closes (ST-57) */
         lines.extend(proof);
@@ -1283,8 +1279,17 @@ impl Tx<'_> {
     }
 
     pub(crate) fn create_item(&mut self, n: CreateItem) -> Result<Item> {
+        self.create_item_from(n, false)
+    }
+
+    pub(crate) fn create_chat_item(&mut self, n: CreateItem) -> Result<Item> {
+        let owner_started = !n.propose;
+        self.create_item_from(n, owner_started)
+    }
+
+    fn create_item_from(&mut self, n: CreateItem, owner_chat: bool) -> Result<Item> {
         let db = self.db();
-        let (item, bot, project, guessed) = db.store().write::<_, crate::CoreError>(|w| {
+        let (item, bot, project, guessed, blocked) = db.store().write::<_, crate::CoreError>(|w| {
             let ws = n.ws.as_str();
             for dep in &n.deps {
                 let prerequisite = db.item(dep)?.filter(|i| i.workspace_id == ws && i.kind == "task")
@@ -1306,7 +1311,7 @@ impl Tx<'_> {
                 })?;
                 Ok::<_, CoreError>(steve_store::nodes::with_tag(w, &tag)?)
             }).transpose()?;
-            let (placement, project) = crate::placement::select(
+            let selected = crate::placement::select(
                 db,
                 self.rt(),
                 crate::placement::DispatchRequest {
@@ -1321,9 +1326,22 @@ impl Tx<'_> {
                     required_nodes: required_nodes.as_deref(),
                 },
                 |bot| bot.model.clone().or_else(|| self.c.models().agent_model(ws, &bot.harness)),
-            )?;
-            let bot = db.bot(placement.explanation.bot.as_str())?
-                .ok_or(steve_store::StoreError::NotFound("Bot"))?;
+            );
+            let (placement, bot, project, blocked) = match selected {
+                Ok((placement, project)) => {
+                    let bot = db.bot(placement.explanation.bot.as_str())?
+                        .ok_or(steve_store::StoreError::NotFound("Bot"))?;
+                    (Some(placement), Some(bot), project, None)
+                }
+                // Creation and placement are distinct for the owner taking work out of chat.
+                // Store errors still propagate; only a typed selection refusal leaves it unassigned.
+                Err(CoreError::Placement(blocked)) if owner_chat => {
+                    let project = db.project(n.project.as_ref().and_then(|p| p.as_deref()))?
+                        .filter(|p| p.workspace_id == ws && !p.archived);
+                    (None, None, project, Some(blocked))
+                }
+                Err(e) => return Err(e),
+            };
             /* exactly one category, in the same write as the item: Steve's pick if nobody named one */
             let (tags, guessed) = crate::kinds::settle(db, ws, &n.tag_ids, &n.title, &n.goal)?;
             /* whose access its runs use: the member who asked (Steve, a flow or a stranger: nobody) */
@@ -1336,7 +1354,7 @@ impl Tx<'_> {
                 &NewItem {
                     title: n.title.clone(),
                     goal: n.goal.clone(),
-                    bot_id: bot.id.clone(),
+                    bot_id: bot.as_ref().map(|b| b.id.clone()).unwrap_or_default(),
                     project_id: project.as_ref().map(|p| p.id.clone()),
                     kind: None,
                     phase: None,
@@ -1367,8 +1385,21 @@ impl Tx<'_> {
             if n.node_tag.is_some() {
                 steve_store::nodes::set_item_tag(w, &item.id, n.node_tag.as_deref())?;
             }
-            steve_store::bot_dispatch::record(w, ws, &item.id, None, Ok(&placement))?;
-            Ok((item, bot, project, guessed))
+            if let Some(placement) = &placement {
+                steve_store::bot_dispatch::record(w, ws, &item.id, None, Ok(placement))?;
+            }
+            let mut detail = json!({"bot":item.bot_id, "project":item.project_id, "deps":n.deps});
+            if let Some((a, b)) = &n.source {
+                detail["source"] = json!([a, b]);
+            }
+            if let Some(blocked) = &blocked {
+                // The #521 placement table requires a session for refusals. At this
+                // entrance there is deliberately no session; keep the initial reason in
+                // the creation audit, in the same transaction as the unassigned item.
+                detail["placement_blocked"] = serde_json::to_value(blocked)?;
+            }
+            db.audit(n.actor.as_deref().unwrap_or("steve"), "item.create", &item.id, &detail, ws)?;
+            Ok((item, bot, project, guessed, blocked))
         })?;
         let ws = n.ws.as_str();
         let where_ = project
@@ -1378,23 +1409,15 @@ impl Tx<'_> {
         let kind = guessed
             .map(|g| format!("，按目标归为 {}", g.kind))
             .unwrap_or_default();
+        let assigned = bot
+            .map(|b| format!("，交给 {}", b.display()))
+            .unwrap_or_default();
         db.timeline_add(
             &item.id,
             "steve",
             "sys",
-            &format!("Steve 建立事项，交给 {}{where_}{kind}", bot.display()),
+            &format!("Steve 建立事项{assigned}{where_}{kind}"),
             None,
-        )?;
-        let mut detail = json!({"bot": bot.id, "project": item.project_id, "deps": n.deps});
-        if let Some((a, b)) = &n.source {
-            detail["source"] = json!([a, b]);
-        }
-        db.audit(
-            n.actor.as_deref().unwrap_or("steve"),
-            "item.create",
-            &item.id,
-            &detail,
-            ws,
         )?;
         if n.propose {
             db.decision_create(NewDecision {
@@ -1412,6 +1435,11 @@ impl Tx<'_> {
                 }),
                 ..Default::default()
             })?;
+        } else if blocked.is_some() {
+            self.fail(
+                &item.id,
+                &steve_i18n::stored(|| steve_i18n::t!("core.thread.choose_execution_bot")),
+            )?;
         } else {
             self.start_or_fail_files(&item.id, n.opening.as_deref(), None, &n.files)?;
         }
@@ -1491,7 +1519,14 @@ impl Tx<'_> {
                     rejected: vec![],
                 })
             })?,
-            None => self.db().main_bot()?,
+            None => {
+                if let Some(blocked) = self.db().store().read(|r| {
+                    steve_store::bot_dispatch::creation_blocked(r, &item.workspace_id, item_id)
+                })? {
+                    return Err(CoreError::Placement(blocked));
+                }
+                self.db().main_bot()?
+            }
         };
         self.rt().can_run(item_id, &bot.id, &bot.harness)?;
         /* taken first: a start that fails leaves nothing behind for a later one */
@@ -1578,10 +1613,6 @@ impl Tx<'_> {
         )?;
         let it = self.item(item_id)?;
         let head = self.protocol(&it, &bot, &s)?;
-        self.c
-            .0
-            .yolo_sessions
-            .started(&s.id, self.c.yolo_level(&it));
         let text = match opening.filter(|o| !o.is_empty()) {
             Some(o) => format!("{head}\n\n{o}"),
             None => head,
@@ -1650,7 +1681,7 @@ impl Tx<'_> {
                 return Ok(());
             }
             let mut opts: Vec<String> = vec!["continue".into(), "delivered".into(), "look".into()];
-            if i.bot_id.as_deref() != Some("steve") {
+            if i.bot_id.as_deref().is_some_and(|bot| bot != "steve") {
                 opts.push("tosteve".into());
             }
             let (d, opened) = steve_store::DecisionRows(w).open_in(&NewDecision {
@@ -1770,17 +1801,35 @@ impl Tx<'_> {
         recommended: Option<&str>,
         why: Option<&str>,
     ) -> Result<()> {
-        let draft = crate::yolo::answer::hint_draft(recommended, why);
-        let mut spec = NewDecision {
-            kind: "ask".into(),
-            subject_type: "question".into(),
-            question: question.into(),
-            draft,
-            options: Some(options.to_vec()),
-            ..Default::default()
-        };
-        self.scope_owner_prompt(s, &mut spec)?;
-        self.with_turn_receipt(s, |tx| tx.open_owner_prompt(s, spec, Mark::Asked))
+        use crate::approval::{Outcome, Question, Request};
+        // A question has its own policy on the same port.
+        let resolution = crate::approval::resolve(
+            steve_types::ApprovalMode::AskOwner,
+            None,
+            Request::Question(Question {
+                text: question,
+                options,
+                recommended,
+                why,
+            }),
+        );
+        match resolution.outcome {
+            Outcome::OwnerDecision => {
+                /* the agent's recommendation is shown as a hint, not an answer */
+                let draft = crate::agent_questions::hint_draft(recommended, why);
+                let mut spec = NewDecision {
+                    kind: "ask".into(),
+                    subject_type: "question".into(),
+                    question: question.into(),
+                    draft,
+                    options: Some(options.to_vec()),
+                    ..Default::default()
+                };
+                self.scope_owner_prompt(s, &mut spec)?;
+                self.with_turn_receipt(s, |tx| tx.open_owner_prompt(s, spec, Mark::Asked))
+            }
+            Outcome::Answer(_) => unreachable!("the question policy only asks the owner"),
+        }
     }
 
     pub(crate) fn tool_request_approval(
@@ -1862,6 +1911,9 @@ impl Tx<'_> {
             Ok(true)
         })?;
         if opened {
+            if mark == Mark::Asked {
+                metrics::counter!("steve_approval_questions_total").increment(1);
+            }
             self.mark(&s.id, mark);
         }
         Ok(())
@@ -2651,9 +2703,9 @@ impl Tx<'_> {
                 let why = graph_failed.unwrap_or_default();
                 /* it may have stopped to ask you about it */
                 let last = self.last_agent_text(&session.id)?;
-                if crate::yolo::answer::looks_like_question(&last).is_some()
+                if crate::agent_questions::looks_like_question(&last).is_some()
                     || answered_you
-                    || crate::yolo::limits::own_action(&self.db().final_reply(&session.id)?)
+                    || crate::agent_questions::own_action(&self.db().final_reply(&session.id)?)
                         .is_some()
                 {
                     format!("{why}；Agent 停下来等你：{}", js_head(&last, 160))
@@ -3042,7 +3094,7 @@ impl Tx<'_> {
             }
             settle_answer(w, d, cx, result, DecisionChange::Resolve, None)?;
             if let Some(item) = item {
-                self.record_conversation_answer(item, d, cx.actor, line)?;
+                self.answer_line(item, cx.actor, line, d.session_id.as_deref())?;
                 if d.kind == "accept" && cx.choice == "rework" {
                     self.invalidate_delivery(
                         item,
@@ -3056,23 +3108,7 @@ impl Tx<'_> {
         self.wake_conversation(wake, prompt)
     }
 
-    fn record_conversation_answer(
-        &self,
-        item: &str,
-        decision: &Decision,
-        actor: &str,
-        line: &str,
-    ) -> Result<()> {
-        let session = decision.session_id.as_deref();
-        if actor == YOLO_ACTOR && decision.kind == "ask" {
-            self.db().timeline_add(item, "steve", "sys", line, session)
-        } else {
-            self.answer_line(item, actor, line, session)
-        }
-    }
-
-    /// The timeline line of an answer: the user's own (`kind=me`), or for YOLO's a system line
-    /// `YOLO：…` by Steve, so it never reads as something the user said.
+    /// The timeline line of the user's own answer.
     pub(crate) fn answer_line(
         &self,
         item: &str,
@@ -3116,7 +3152,7 @@ impl Tx<'_> {
             );
         }
         if d.subject_type == steve_types::orchestration::TURN_STALL {
-            if actor == YOLO_ACTOR || !matches!(choice, "continue" | "drop") {
+            if !matches!(choice, "continue" | "drop") {
                 return Err(msg(steve_i18n::t!("core.decision.stall_owner")));
             }
             if choice == "continue"
@@ -3180,7 +3216,7 @@ impl Tx<'_> {
         let tl = |t: &Tx, item: &str, text: &str| t.answer_line(item, actor, text, sid.as_deref());
         match (d.kind.as_str(), d.subject_type.as_str()) {
             ("fail", steve_store::SESSION_START_FAILURE) => {
-                if actor == YOLO_ACTOR || choice != "retry" {
+                if choice != "retry" {
                     return Err(msg("会话启动失败需要你修正配置后手动重试。"));
                 }
                 let session = s
@@ -3256,9 +3292,6 @@ impl Tx<'_> {
                 return reget(self);
             }
             ("ask", DESIGN_DECISION) => {
-                if actor == YOLO_ACTOR {
-                    return Err(crate::cycle::conflict("设计是否实现必须由用户决定"));
-                }
                 if !d.options.iter().any(|option| option == choice) {
                     return Err(crate::cycle::conflict("请选择设计确认卡上的选项"));
                 }
@@ -3374,12 +3407,7 @@ impl Tx<'_> {
                             plan: before.plan.clone(),
                         }),
                     )?;
-                    let (by, kind, text) = if actor == YOLO_ACTOR {
-                        ("steve", "sys", "YOLO：验收通过")
-                    } else {
-                        (actor, "me", "验收通过")
-                    };
-                    db.timeline_add(&i, by, kind, text, None)?;
+                    db.timeline_add(&i, actor, "me", "验收通过", None)?;
                     Ok(())
                 };
                 if before.phase == crate::cycle::CLOSING {
@@ -3409,14 +3437,7 @@ impl Tx<'_> {
             }
             ("ask", _) => {
                 let i = iid()?;
-                /* YOLO answers with the plain answer as `choice` and the whole message for the agent as `text` */
-                let yolo = actor == YOLO_ACTOR;
-                let answer = if yolo {
-                    or(choice, text)
-                } else {
-                    or(text, choice)
-                }
-                .to_string();
+                let answer = or(text, choice).to_string();
                 /* an item without a project that asked which project it belongs to: move it there, a new session continues in it */
                 let i0 = self.item(&i)?;
                 let attach = if i0.project_id.is_none() {
@@ -3427,16 +3448,8 @@ impl Tx<'_> {
                 } else {
                     None
                 };
-                let line = if yolo {
-                    format!("YOLO 代答：{answer}")
-                } else {
-                    format!("回答：{answer}")
-                };
-                let prompt = if yolo && !text.is_empty() {
-                    text.to_owned()
-                } else {
-                    format!("用户的回答：{answer}")
-                };
+                let line = format!("回答：{answer}");
+                let prompt = format!("用户的回答：{answer}");
                 if let Some(p) = attach {
                     let last = match &s {
                         Some(s) => js_head(&self.last_agent_text(&s.id)?, 600).to_string(),
@@ -3451,7 +3464,7 @@ impl Tx<'_> {
                             DecisionChange::Resolve,
                             None,
                         )?;
-                        self.record_conversation_answer(&i, &d, actor, &line)?;
+                        self.answer_line(&i, actor, &line, d.session_id.as_deref())?;
                         self.db().item_patch(
                             &i,
                             patch![project_id: p.id.as_str(), cwd: Value::Null, branch: Value::Null],
@@ -3473,12 +3486,7 @@ impl Tx<'_> {
                     {
                         self.st.handoffs.insert(i.clone(), op);
                     }
-                    let who = if yolo {
-                        "Steve（YOLO，代用户）"
-                    } else {
-                        "用户"
-                    };
-                    self.start_or_fail(&i, Some(&format!("{who}把这个事项关联到了项目 {}。上一个会话的最后进展：{last}\n在这个项目里继续。", p.name)), None)?;
+                    self.start_or_fail(&i, Some(&format!("用户把这个事项关联到了项目 {}。上一个会话的最后进展：{last}\n在这个项目里继续。", p.name)), None)?;
                 } else {
                     self.settle_conversation_answer(
                         &d,
@@ -3626,21 +3634,12 @@ impl Tx<'_> {
                                 None,
                             )?;
                             recover_quiet(self.db(), &i);
-                            if actor == YOLO_ACTOR {
-                                self.answer_line(&i, actor, "让它继续", sid.as_deref())?;
-                            }
                             self.stage_conversation_reply(w, &to, prompt)
                         })?;
                         self.wake_conversation(wake, prompt)?;
                     }
                     "delivered" => {
-                        if actor == YOLO_ACTOR {
-                            return Err(crate::cycle::conflict(
-                                "确认已交付必须由你决定，自动验收不能代选",
-                            ));
-                        }
-                        // The owner's explicit choice is the acceptance (#434). A second
-                        // card with no agent checks lets YOLO overrule it and restart the loop.
+                        // The owner's explicit choice is the acceptance (#434); no second card.
                         let line = if text.trim().is_empty() {
                             "你确认已交付并验收通过".into()
                         } else {
@@ -3868,7 +3867,7 @@ impl Tx<'_> {
         let id = d.id.as_str();
         let steve_modules::decisions::DecisionCx {
             choice,
-            actor,
+            actor: _,
             text,
             ..
         } = *cx;
@@ -3892,16 +3891,6 @@ impl Tx<'_> {
                 None,
                 false,
             ),
-            ("ask", _) if actor == YOLO_ACTOR => {
-                let answer = or(choice, text);
-                (
-                    json!({"answer": answer}),
-                    DecisionChange::Resolve,
-                    Some(format!("YOLO 代答：{}", js_head(answer, 200))),
-                    Some(if text.is_empty() { answer } else { text }.to_string()),
-                    false,
-                )
-            }
             ("ask", _) => {
                 let answer = or(text, choice);
                 (
@@ -4517,6 +4506,16 @@ impl Tx<'_> {
         };
         /* refused before the old session is stopped: a Bot that could not run it does not take it */
         self.rt().can_run(id, &b.id, &b.harness)?;
+        if i.bot_id.is_none()
+            && let Some((opening, files)) = self.c.thread_start(&i)?
+        {
+            self.start_or_fail_files(id, Some(&opening), Some(bot_id), &files)?;
+            if self.active_session(id)?.is_some() {
+                supersede(self.db(), id, &["fail"], "已选择执行 Bot")?;
+                recover_quiet(self.db(), id);
+            }
+            return self.item(id);
+        }
         let s = self.active_session(id)?;
         let handoff = match &s {
             Some(s) => js_head(&self.last_agent_text(&s.id)?, 800).to_string(),

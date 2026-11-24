@@ -6,10 +6,9 @@
 //!
 //! 1. before drafting ([`crate::respond`]: no composer runs, no card opens);
 //! 2. after the composer answered, before its draft or question opens ([`crate::replies`]);
-//! 3. before YOLO approves the draft or retries it ([`crate::outbound`]'s decision handler);
-//! 4. before it is sent, unless you approved it yourself ([`crate::outbound`]'s send).
+//! 3. before it is sent, unless you approved it yourself ([`crate::outbound`]'s send).
 //!
-//! Gates 3 and 4 also hold what the space's `reply_as_you` no longer allows (a draft made before you
+//! The send check also holds what the space's `reply_as_you` no longer allows (a draft made before you
 //! changed it). And when your own message comes in, every draft and card about an older message in
 //! that space that you are now there for closes as superseded ([`supersede`], “你已亲自回复”).
 //!
@@ -30,15 +29,15 @@
 //! those. The moment a gate judges is the later of the Hub's clock and the newest time stored for
 //! the space ([`owner_engaged`]): a message Steve has stored has happened, even when the provider's
 //! clock runs ahead of the Hub's, and your own message that reached the Hub late (a rate-limited
-//! gateway) counts as soon as it is stored — gates 3 and 4 judge again right before YOLO approves
-//! and before anything is sent, so one that missed an earlier gate is still seen.
+//! gateway) counts as soon as it is stored. The send checks again, so one that missed an earlier
+//! gate is still seen.
 //!
 //! Consecutive messages of one sender are one turn ([`burst`]) only while nobody else (you included)
 //! speaks between them, each follows the one before within [`BURST_GAP_MS`], and none of them has a
 //! reply in your name approved or sent already (that one was answered: it ends the turn and stays
 //! out). The composer answers the turn together; the earlier messages are marked as taken by it
-//! (`chan_messages.turn_of`), so their own drafts and cards close and are never opened, approved by
-//! YOLO or sent, whichever composer finishes first.
+//! (`chan_messages.turn_of`), so their own drafts and cards close and are never opened or sent,
+//! whichever composer finishes first.
 //!
 //! The window lengths were swept with the offline reply eval (`examples/reply_eval.rs sweep`) on the
 //! operator's cases; see the constants. They are provisional: one day of cases.
@@ -455,7 +454,7 @@ pub fn turn(c: &mut impl Read, ws: &str, target: &str) -> ChannelResult<Vec<Stri
 /// The turn stored inbound message `target` ends ([`burst`]): the ids and what each says (with the
 /// note on what Steve cannot read of its attachments), oldest first. The earlier messages are marked
 /// as taken by it (`turn_of`) in the same transaction, so from now on no reply of their own is
-/// opened, approved by YOLO or sent ([`stop`]); Releasing the turn undoes it.
+/// opened or sent ([`stop`]); Releasing the turn undoes it.
 pub fn take_turn(tx: &mut W<'_>, ws: &str, target: &str) -> ChannelResult<Vec<(String, String)>> {
     let Some((t, space, _)) = said(tx, ws, target)? else {
         return Ok(Vec::new());
@@ -820,7 +819,7 @@ mod tests {
         let you = s("o", 1_000_000 + 38_500, true, "me");
         // before it is stored: nothing to see
         assert_eq!(engaged(true, &them, &[], 1_000_000 + 40_200, W), None);
-        // stored by the time YOLO would approve, or the send would go
+        // stored by the time the draft opens or the send would go
         for at in [1_000_000 + 40_200, 1_000_000 + 600_000] {
             assert!(engaged(true, &them, std::slice::from_ref(&you), at, W).is_some());
         }

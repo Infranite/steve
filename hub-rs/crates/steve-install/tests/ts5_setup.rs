@@ -168,10 +168,15 @@ esac
         );
     }
     fn invoke(&self, role: &str, args: &[&str]) -> Output {
-        Command::new(&self.cli)
+        let mut command = Command::new(&self.cli);
+        command
             .args(["setup", role, "--home"])
             .arg(&self.home)
-            .args(args)
+            .args(args);
+        if cfg!(target_os = "macos") && role == "node" {
+            command.args(["--label", "test.fixture.ts5-node"]);
+        }
+        command
             .env_clear()
             .env("HOME", &self.account)
             .env("PATH", &self.bin)

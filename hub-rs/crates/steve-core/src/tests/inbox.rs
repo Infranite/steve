@@ -34,9 +34,28 @@ fn session_decisions_commit_the_input_and_choice_together() {
         let sid = k.session(&item, "idle");
         let id = k.decision(&item, Some(&sid), kind, subject, &[choice]);
         let store = k.db().store();
+        store
+            .write(|w| {
+                steve_store::UserRows(w).insert("me", WS, "sub_me", "Owner", "owner", 1)?;
+                steve_store::UserRows(w).insert(
+                    "member",
+                    WS,
+                    "sub_member",
+                    "Member",
+                    "member",
+                    2,
+                )?;
+                w.members().add(WS, "me", "owner", 1)?;
+                w.members().add(WS, "member", "member", 2)
+            })
+            .unwrap();
         let owner = steve_modules::Caller {
             ws: WS.into(),
             me: "me".into(),
+        };
+        let member = steve_modules::Caller {
+            ws: WS.into(),
+            me: "member".into(),
         };
         let outsider = steve_modules::Caller {
             ws: "elsewhere".into(),
@@ -56,6 +75,12 @@ fn session_decisions_commit_the_input_and_choice_together() {
         let audit = || audit_count(store, &["decision.resolve"], Some(&id));
 
         assert!(resolve(&outsider, choice).is_err());
+        if subject == "question" {
+            assert!(matches!(
+                resolve(&member, choice),
+                Err(crate::CoreError::Status(403, _))
+            ));
+        }
         let before = k.timeline_texts(&item);
         k.rt.st().decision_prompt_error = true;
         assert!(resolve(&owner, choice).is_err());

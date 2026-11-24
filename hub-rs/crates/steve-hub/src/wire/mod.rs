@@ -6,6 +6,7 @@
 //! GitHub), whose MCP tools [`mcp_extra`] serves next to steve-mcp's.
 
 pub mod acp_stats;
+pub(crate) mod approval;
 pub mod auth;
 pub(crate) mod bot_dispatch;
 pub(crate) mod bot_proposals;
@@ -79,10 +80,6 @@ pub struct Wired {
     pub seams: modules::Seams,
     /// What the modules' MCP tools run on (tests drive them directly).
     pub tools: modules::Tools,
-    /// The YOLO switch (its routes are in `module_routes`).
-    pub yolo: steve_core::yolo::Yolo,
-    /// The YOLO executor (its event and tick loops are in `jobs`).
-    pub yolo_engine: steve_core::yolo::Engine,
     /// Remote Nodes (enabled by default): their routes and the coordinators sessions go to.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.

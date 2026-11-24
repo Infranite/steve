@@ -348,11 +348,13 @@ pub async fn set_default(
 }
 
 /// The Team snapshot belongs to this item. Placement explanations are in the projected views.
-pub(super) fn item_dispatch(store: &Store, id: &str) -> steve_store::Result<Value> {
+pub(super) fn item_dispatch(store: &Store, id: &str, ws: &str) -> steve_store::Result<Value> {
     store.read(|c| {
         let team = bot_dispatch::item_team(c, id)?;
+        let blocked = bot_dispatch::creation_blocked(c, ws, id)?;
         Ok(json!({
             "team": team.map(|(t, source)| json!({"id":t.id,"name":t.name,"source":source})),
+            "blocked": blocked,
         }))
     })
 }

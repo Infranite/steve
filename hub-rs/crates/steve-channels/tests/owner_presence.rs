@@ -28,7 +28,6 @@ use steve_flow::nodes::action::Action;
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor, NodeOutcome, RunCx};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::outbound::YOLO_ACTOR;
 use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
@@ -280,11 +279,6 @@ fn your_line_in(h: &H, space_ext: &str) -> impl Fn(i64) + Send + 'static {
     }
 }
 
-fn yolo(h: &H, d: &str, choice: &str) -> ApiResult<steve_store::Decision> {
-    steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, YOLO_ACTOR), d, choice, "")
-        .expect("ours")
-}
-
 fn you_decide(h: &H, d: &str, choice: &str) -> ApiResult<steve_store::Decision> {
     steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, ME), d, choice, "")
         .expect("ours")
@@ -496,20 +490,6 @@ async fn your_own_message_closes_older_drafts_and_cards() {
 // ---------------------------------------------------------------- gate 3: YOLO
 
 #[tokio::test(flavor = "multi_thread")]
-async fn yolo_never_approves_what_you_answered_yourself() {
-    let h = setup().await;
-    let (draft, card) = drafted(&h, "l1").await;
-    you_said_elsewhere(&h, "D_LI", 5);
-    h.env.clock.advance(10_000);
-    let d = yolo(&h, &card, "yes").expect("answered");
-    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
-    assert_eq!(d.result["superseded"], BY_YOU);
-    assert_eq!(status(&h, &draft), "discarded");
-    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
-    assert!(h.fake.sent.lock().unwrap().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn what_you_approve_yourself_still_goes() {
     let h = setup().await;
     let (draft, card) = drafted(&h, "l1").await;
@@ -521,107 +501,9 @@ async fn what_you_approve_yourself_still_goes() {
     assert_eq!(status(&h, &draft), "sent");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn yolo_never_retries_what_you_answered_yourself() {
-    let h = setup().await;
-    let (draft, card) = drafted(&h, "l1").await;
-    you_decide(&h, &card, "yes").expect("approved");
-    *h.fake.fail_send.lock().unwrap() = Some("假渠道发不出去".into());
-    h.env.clock.advance(11_000);
-    h.outbox.send_due(&h.ch).await;
-    assert_eq!(status(&h, &draft), "failed");
-    let fail: String = inspect::messages::message_decision_id(h.env.store(), &draft).unwrap()[0]
-        .as_str()
-        .unwrap()
-        .into();
-    *h.fake.fail_send.lock().unwrap() = None;
-    you_said_elsewhere(&h, "D_LI", 1);
-    h.env.clock.advance(5_000);
-    let d = yolo(&h, &fail, "retry").expect("answered");
-    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
-    assert_eq!(d.result["superseded"], BY_YOU);
-    assert_eq!(status(&h, &draft), "discarded");
-    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
-    assert!(h.fake.sent.lock().unwrap().is_empty());
-}
-
 // ---------------------------------------------------------------- gate 4: sending
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_yolo_approved_reply_is_not_sent_once_you_answered() {
-    let h = setup().await;
-    let (draft, card) = drafted(&h, "l1").await;
-    let d = yolo(&h, &card, "yes").expect("approved");
-    assert_eq!(d.status, steve_types::DecisionStatus::Resolved);
-    assert_eq!(status(&h, &draft), "pending");
-    // you answer before the queue picks it up
-    you_said_elsewhere(&h, "D_LI", 1);
-    h.env.clock.advance(2_000);
-    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
-    assert_eq!(status(&h, &draft), "discarded");
-    assert!(h.fake.sent.lock().unwrap().is_empty());
-}
-
 // ---------------------------------------------------------------- times: late and early clocks
-
-/// Case-shaped (a private chat the owner dismissed: only the gaps): they write; you answer 38.5 s
-/// later, 1.7 s before the draft opens, but your answer reaches the Hub only afterwards (a
-/// rate-limited gateway). The draft opened; YOLO, judging again right before it approves, sees your
-/// answer and closes the card instead.
-#[tokio::test(flavor = "multi_thread")]
-async fn your_answer_that_reached_the_hub_after_the_draft_opened_stops_yolo() {
-    let h = setup().await;
-    let me = h.me.clone();
-    h.model.advance.store(40_200, Ordering::SeqCst);
-    let r = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "今晚能看下吗", 0))
-        .await
-        .response
-        .unwrap();
-    let (draft, card) = (
-        r.out_message_id.expect("draft"),
-        r.decision_id.expect("card"),
-    );
-    // said 38.5 s after their message, stored now, without passing the inbound path
-    you_said_elsewhere(&h, "D_LI", -2);
-    h.env.clock.advance(600_000);
-    let d = yolo(&h, &card, "yes").expect("answered");
-    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
-    assert_eq!(d.result["superseded"], BY_YOU);
-    assert_eq!(status(&h, &draft), "discarded");
-    assert!(h.fake.sent.lock().unwrap().is_empty());
-}
-
-/// … and when YOLO approved before your answer was stored, the send, judging again, drops it.
-#[tokio::test(flavor = "multi_thread")]
-async fn your_late_answer_stops_a_yolo_approved_reply_before_it_is_sent() {
-    let h = setup().await;
-    let (draft, card) = drafted(&h, "l1").await;
-    assert_eq!(
-        yolo(&h, &card, "yes").expect("approved").status,
-        steve_types::DecisionStatus::Resolved
-    );
-    // your answer, written before YOLO approved, is stored only now
-    you_said_elsewhere(&h, "D_LI", -1);
-    h.env.clock.advance(11_000);
-    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
-    assert_eq!(status(&h, &draft), "discarded");
-    assert!(h.fake.sent.lock().unwrap().is_empty());
-}
-
-/// The provider's clock runs a few seconds ahead of the Hub's: your stored answer carries a time
-/// after the Hub's “now”. It has happened all the same (the moment judged is the later of the two),
-/// so YOLO does not approve.
-#[tokio::test(flavor = "multi_thread")]
-async fn your_answer_stamped_ahead_of_the_hubs_clock_still_counts() {
-    let h = setup().await;
-    let (draft, card) = drafted(&h, "l1").await;
-    you_said_elsewhere(&h, "D_LI", 8);
-    let d = yolo(&h, &card, "yes").expect("answered");
-    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
-    assert_eq!(d.result["superseded"], BY_YOU);
-    assert_eq!(status(&h, &draft), "discarded");
-}
-
 // ---------------------------------------------------------------- a busy group
 
 /// A busy group: two people @ you a few seconds apart and others talk; you answer one of them by
@@ -668,7 +550,7 @@ async fn in_a_busy_group_answering_one_person_leaves_the_others_draft() {
     .into();
     h.env.clock.advance(10_000);
     assert_eq!(
-        yolo(&h, &card, "yes").expect("approved").status,
+        you_decide(&h, &card, "yes").expect("approved").status,
         steve_types::DecisionStatus::Resolved
     );
     assert_eq!(status(&h, &han_draft), "pending");
@@ -931,7 +813,7 @@ async fn an_automatic_reply_on_your_account_is_not_you() {
     h.env.clock.advance(5_000);
     checked(&h).await;
     assert_eq!(
-        yolo(&h, &card, "yes").expect("answered").status,
+        you_decide(&h, &card, "yes").expect("answered").status,
         steve_types::DecisionStatus::Resolved
     );
 }
@@ -1017,7 +899,7 @@ async fn a_message_already_answered_in_your_name_stays_out_of_the_next_turn() {
     let (draft1, card1) = (first.out_message_id.unwrap(), first.decision_id.unwrap());
     checked(&h).await;
     assert_eq!(
-        yolo(&h, &card1, "yes").expect("approved").status,
+        you_decide(&h, &card1, "yes").expect("approved").status,
         steve_types::DecisionStatus::Resolved
     );
     h.env.clock.advance(11_000);
@@ -1037,45 +919,6 @@ async fn a_message_already_answered_in_your_name_stays_out_of_the_next_turn() {
     assert!(!last.contains("在吗\n想问下周五的会"), "{last}");
     assert_eq!(status(&h, &draft1), "sent");
     assert_eq!(drafts(&h), 1);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn yolo_never_approves_a_draft_a_later_turn_took_while_it_drafts() {
-    let h = setup().await;
-    let me = h.me.clone();
-    // the earlier message's draft is open when the later one's composer starts…
-    let first = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "在吗", 0))
-        .await
-        .response
-        .unwrap();
-    let (draft1, card1) = (first.out_message_id.unwrap(), first.decision_id.unwrap());
-    h.env.clock.advance(20_000);
-    // … and YOLO comes to it while that composer runs
-    let got = Arc::new(Mutex::new(None));
-    let (modules, card, g) = (h.env.modules.clone(), card1.clone(), got.clone());
-    *h.model.during.lock().unwrap() = Some(Box::new(move || {
-        let d =
-            steve_modules::decisions::dispatch(&modules, &caller(WS, YOLO_ACTOR), &card, "yes", "")
-                .expect("ours");
-        *g.lock().unwrap() = Some(d);
-    }));
-    let second = push(
-        &h,
-        &me,
-        msg(&h, "D_LI", "l2", "ulilei", "想问下周五的会", 0),
-    )
-    .await
-    .response
-    .unwrap();
-    assert!(second.out_message_id.is_some());
-    let d = got.lock().unwrap().take().expect("ran").expect("answered");
-    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
-    assert_eq!(d.result["superseded"], BY_LATER);
-    assert_eq!(status(&h, &draft1), "discarded");
-    assert_eq!(drafts(&h), 1);
-    h.env.clock.advance(11_000);
-    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
-    assert!(h.fake.sent.lock().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1102,49 +945,3 @@ async fn a_draft_whose_message_a_later_turn_took_while_it_drafted_never_opens() 
 }
 
 // ---------------------------------------------------------------- reply_as_you after the message came in
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_setting_holds_drafts_made_before_it_changed() {
-    let h = setup().await;
-    let (draft1, card1) = drafted(&h, "l1").await;
-    let space: String = inspect::messages::message_space_id(h.env.store(), &draft1).unwrap()[0]
-        .as_str()
-        .unwrap()
-        .into();
-    h.env.clock.advance(120_000);
-    let (draft2, card2) = drafted(&h, "l2").await;
-    assert_eq!(
-        yolo(&h, &card2, "yes").expect("approved").status,
-        steve_types::DecisionStatus::Resolved
-    );
-    // set to 只记录 behind the page's back (nothing closed on the way): YOLO approves nothing more
-    // and what it approved is not sent
-    let now = h.ch.now();
-    h.env
-        .store()
-        .write(|tx| spaces::write_reply_as_you(tx, WS, &space, spaces::ReplyAsYou::Record, now))
-        .expect("set");
-    let d = yolo(&h, &card1, "yes").expect("answered");
-    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
-    assert_eq!(d.result["superseded"], presence::BY_SETTING);
-    assert_eq!(status(&h, &draft1), "discarded");
-    h.env.clock.advance(11_000);
-    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
-    assert_eq!(status(&h, &draft2), "discarded");
-    assert!(h.fake.sent.lock().unwrap().is_empty());
-
-    // set from the page: what is still open closes at once
-    h.env
-        .store()
-        .write(|tx| spaces::write_reply_as_you(tx, WS, &space, spaces::ReplyAsYou::Draft, now))
-        .expect("set");
-    h.env.clock.advance(120_000);
-    let (draft3, card3) = drafted(&h, "l3").await;
-    assert_eq!(set_reply(&h, &space, "off").await.0, 200);
-    let (st, res) = decision(&h, &card3);
-    assert_eq!(
-        (st.as_str(), res["superseded"].as_str()),
-        ("expired", Some(presence::BY_SETTING))
-    );
-    assert_eq!(status(&h, &draft3), "discarded");
-}

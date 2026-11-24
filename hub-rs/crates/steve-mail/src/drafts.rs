@@ -270,7 +270,7 @@ pub fn audience_of(
 }
 
 /// A check whose model part did not run (`skipped`) passed nothing: with no span from the local checks it
-/// is `unchecked` (YOLO declines it, the card offers the model check), spans and secrets stay as found.
+/// is `unchecked` (the card offers the model check), spans and secrets stay as found.
 pub fn local_only(mut r: CheckResult, skipped: bool) -> CheckResult {
     if skipped && r.verdict == Verdict::Pass {
         r.verdict = Verdict::Unchecked;
@@ -564,14 +564,6 @@ pub(crate) fn emit_draft(w: &mut steve_store::W<'_>, d: &DraftRow) {
 impl Mail {
     pub(crate) fn viewer_of(&self, who: &Caller) -> MailResult<Viewer> {
         Ok(self.0.m.viewer(who)?)
-    }
-
-    /// Whether a draft written now gets the model check at once: only while YOLO decides for it (it treats
-    /// an unchecked draft as failed). Otherwise the local checks run and the card offers the model check
-    /// ([`Mail::check_draft`]), so writing a draft does not wait for it. Every actual send runs the
-    /// full check again on its final recipients and body, regardless of this preview policy.
-    pub(crate) fn preview_model_now(&self, ws: &str, item_id: Option<&str>) -> bool {
-        self.0.link.hooks().yolo_on(ws, item_id)
     }
 
     /// `POST /mail/drafts/:id/check`: the whole disclosure check, the model included, on the draft as it is

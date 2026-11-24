@@ -254,10 +254,13 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/119.sql"),
     // 120: immutable Bot selection and session placement facts.
     include_str!("../migrations/120.sql"),
-    // 121: ordinary Node errors, intent identity, stall evidence, and scoped review findings.
+    // 121: retire Steve's automatic decisions and add native harness approval.
     include_str!("../migrations/121.sql"),
+    // 122: ordinary Node errors, intent identity, stall evidence, and scoped review findings.
     include_str!("../migrations/122.sql"),
+    // 123: item lifecycle and delivery cutover.
     include_str!("../migrations/123.sql"),
+    // 124: decision revisions, choice receipts, natural keys, prompt templates, and typed undo.
     include_str!("../migrations/124.sql"),
 ];
 

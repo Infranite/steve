@@ -38,7 +38,6 @@ export default {
     saved: "Saved",
     empty: "Nothing yet",
     none: "None",
-    off: "Off",
   },
   settings: {
     language: "Language",

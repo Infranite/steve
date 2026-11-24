@@ -118,6 +118,49 @@ pub fn introduce_link(
     )? == 1)
 }
 
+/// Record an observation of the current authenticated link. Only its close
+/// publishes a Node change for the owner.
+pub fn observe_link(
+    w: &mut W<'_>,
+    node: &str,
+    generation: i64,
+    at: i64,
+    closed: bool,
+) -> Result<()> {
+    let seen = Expr::col("last_seen");
+    let updated = w.exec(
+        Query::update()
+            .table("nodes")
+            .value(
+                "last_seen",
+                Expr::case(seen.clone().gt(at), seen).finally(at),
+            )
+            .and_where(connectable(node))
+            .and_where(Expr::col("generation").eq(generation)),
+    )?;
+    if closed && updated == 1 {
+        crate::nodes::changed(w, node)?;
+    }
+    Ok(())
+}
+
+/// Remember a machine observation only from the current link.
+pub fn set_host(w: &mut W<'_>, node: &str, generation: i64, host: &str) -> Result<()> {
+    let previous = Expr::col("host");
+    let updated = w.exec(
+        Query::update()
+            .table("nodes")
+            .value("host", host)
+            .and_where(connectable(node))
+            .and_where(Expr::col("generation").eq(generation))
+            .and_where(previous.clone().is_null().or(previous.ne(host))),
+    )?;
+    if updated == 1 {
+        crate::nodes::changed(w, node)?;
+    }
+    Ok(())
+}
+
 pub fn pause_after_takeover(w: &mut W<'_>, node: &str) -> Result<Option<String>> {
     w.one(
         Query::update()

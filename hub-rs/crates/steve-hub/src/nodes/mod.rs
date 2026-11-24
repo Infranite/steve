@@ -265,6 +265,10 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
         .route("/nodes/{id}/upgrade", post(upgrade::start))
         .route("/nodes/{id}/upgrade/switch", post(upgrade::switch_now))
         .route("/nodes/{id}/remove", post(removal::start))
+        .route(
+            "/nodes/{id}/file-access",
+            post(pairing::recheck_file_access),
+        )
         .route("/nodes/{id}/{action}", post(pairing::act))
         .with_state(svc)
 }

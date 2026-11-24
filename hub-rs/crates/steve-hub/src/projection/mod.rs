@@ -384,6 +384,9 @@ mod tests {
         // The initial load establishes a baseline without publishing patches.
         f.p.snapshot(ws).await.expect("the projection is warm");
         let mut rx = f.bus.subscribe();
+        // A stream client reads the initial hot state before expecting incremental changes.
+        let initial = f.p.snapshot(ws).await.unwrap().views.item.unwrap();
+        assert_eq!(initial[0].id.as_str(), item.id);
         let mut random = 7_u64;
         for sequence in 0..1_000 {
             random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -466,7 +469,9 @@ mod tests {
                 }
             })
             .await
-            .expect("the patch reaches the subscriber");
+            .unwrap_or_else(|error| {
+                panic!("patch for sequence {sequence}, item revision {revision}: {error}")
+            });
             assert_eq!(
                 replayed,
                 serde_json::to_value(&snap[0]).unwrap(),

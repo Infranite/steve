@@ -8,7 +8,7 @@
 //!   ([`active`]), so no model runs and no card appears for a message that cannot go out;
 //! - repeated automatic refusals share one notice ([`record`]); explicit requests and
 //!   manual retries always get their own recoverable failure card;
-//! - YOLO never retries a permission refusal. Human retry rechecks the actual permission; clearing
+//! - Only a person can retry a permission refusal. Retry rechecks the actual permission; clearing
 //!   this cache grants nothing and never revives discarded messages.
 //!
 //! It is lifted early when the provider reports the connection writable again ([`lift_connection`],

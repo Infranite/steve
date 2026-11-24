@@ -25,7 +25,7 @@ impl Service {
         self.require_registration("uninstall")?;
         let present = exists(&self.config);
         let definition = if present {
-            Some(regular(&self.config)?)
+            Some(self.definition_bytes()?)
         } else {
             None
         };

@@ -1,6 +1,6 @@
 /* The app's frame, after affectUI's App Shell Flat: a gray sidebar beside the edge-to-edge page, split by one hairline.
  * Its head is the workspace (Steve's mark, the workspace's name, its menu) with the button that folds the sidebar to a
- * rail of icons; under it the Hub, the YOLO line, the running-status pill and search as a field with ⌘K; then the nav
+ * rail of icons; under it the Hub, the running-status pill and search as a field with ⌘K; then the nav
  * groups; at the bottom the signed-in account (affectUI Profile Menu), the theme and the versions. A phone has no
  * sidebar: the tab bar at the bottom (对话 · 待处理 · 日历 · 待办 · 事项), and 我的 for the rest, behind the avatar at the
  * top left of each top-level page (mine.tsx). */
@@ -21,7 +21,6 @@ import { useNextMeetingAt } from "@/calendar/data"
 import { getTheme, go, openSheet, setTheme, useScrollMore, type ThemePref } from "@/ui"
 import { shortVersion } from "@/updates"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
-import { YoloPill } from "@/yolo/switch"
 import { ProfileMenu, type ProfileMenuItem } from "@/components/affect/profile-menu-clean"
 import { Kbd } from "@/components/ui/kbd"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -123,7 +122,6 @@ export function Sidebar({ route: full }: { route: string }) {
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
   useStoreSelector(() => st.workspace)
   useStoreSelector(() => st.workspaces)
-  useStoreSelector(() => st.yolo)
   useStoreSelector(() => st.version)
   useStoreSelector(() => st.webVersion)
   const n = useStoreSelector(decisionBadgeCount), now = useMinute(), todos = useTodos().todos, next = useNextMeetingAt(now)
@@ -161,7 +159,6 @@ export function Sidebar({ route: full }: { route: string }) {
         </div>
         <SidebarMenu>
           {!nativeHubChrome(nativeBridge()) && <HubSwitcher />}
-          {st.yolo && <SidebarMenuItem className="group-data-[collapsible=icon]:hidden" data-sidebar-yolo><YoloPill className="h-[30px] w-full gap-[13px] rounded-lg pr-2 pl-[11px] hover:bg-sidebar-accent" /></SidebarMenuItem>}
           <SidebarMenuItem className="group-data-[collapsible=icon]:hidden" data-sidebar-running><RunningNowPill className="steve-rn-side" /></SidebarMenuItem>
           {/* search as App Shell's field: a lifted card with its shortcut; in the rail only its icon */}
           <SidebarMenuItem className="mt-1.5 group-data-[collapsible=icon]:mt-0">

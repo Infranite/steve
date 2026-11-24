@@ -203,12 +203,33 @@ export default {
     tagDeleted_other: "已删除标签「{{name}}」，{{count}} 件事项上的这个标签已移除",
     tagMerged: "已把「{{from}}」合并到「{{into}}」",
   },
-  yolo: {
-    off: "已关闭，每个决定都等你",
-    on: "YOLO 已打开",
-    full: "完全放开已打开",
-    resumed: "YOLO 已恢复",
-    leftToYou: "这张卡留给你",
+  approval: {
+    "title": "原生免批（YOLO）",
+    "description": "只有支持的 harness 会接管工具审批。Agent 提问和 Steve 对外操作仍走各自的授权流程。",
+    "on": "免批：开",
+    "off": "免批：关",
+    "unsupported": "免批：该 harness 不支持",
+    "applied": "实际：{{mode}}",
+    "pending": "待生效：{{mode}}",
+    "unreported": "未报告",
+    "refused": "切换未生效",
+    "stats": "原生免批",
+    "sessions": "有免批回合的会话",
+    "turns": "免批回合",
+    "permissions": "到达 Steve 的权限请求",
+    "questions": "Agent 提问",
+    "resolver": {
+      "ask_owner": "询问主人",
+      "harness_native": "harness 原生"
+    },
+    "result": {
+      "pending": "待处理",
+      "expired": "过期",
+      "refused": "未能应用",
+      "allowed": "允许",
+      "rejected": "拒绝",
+      "unknown": "未知"
+    }
   },
 
   /* ── ui.tsx ── */

@@ -28,7 +28,6 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::ApiResult;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::outbound::YOLO_ACTOR;
 use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
@@ -391,14 +390,21 @@ async fn the_card_says_who_why_the_lines_and_the_draft() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn your_click_sends_the_draft_or_your_words_and_yolo_clicks_none() {
+async fn your_click_sends_the_draft_or_your_words_and_non_owners_cannot_approve() {
     let h = setup().await;
     let (_, d) = asked(&h, "a1", 0).await;
+    seed::people::seed_user_u_li(h.env.store(), WS).unwrap();
+    seed::people::seed_workspace_member(h.env.store(), WS).unwrap();
     for choice in ["send_draft", "verbatim", "instruct"] {
-        assert!(
-            decide_as(&h, YOLO_ACTOR, &d, choice, "好").is_err(),
-            "{choice}"
-        );
+        for actor in ["not-a-member", "u_li"] {
+            assert!(
+                matches!(
+                    decide_as(&h, actor, &d, choice, "好"),
+                    Err(steve_modules::ApiError::Forbidden(_))
+                ),
+                "{actor}: {choice}"
+            );
+        }
     }
     // the card's draft is checked before it goes out; it passes: approved by your click
     decide_as(&h, ME, &d, "send_draft", "").expect("answered");

@@ -62,6 +62,11 @@ pub struct RpcError {
 }
 
 impl RpcError {
+    /// ACP AuthenticationRequired. Do not infer the provider or its credential store.
+    pub fn auth_required(&self) -> bool {
+        self.data.as_ref().and_then(|d| d["code"].as_i64()) == Some(-32000)
+    }
+
     fn msg(m: impl Into<String>) -> Self {
         Self {
             message: m.into(),
@@ -128,7 +133,7 @@ pub struct Conn {
 
 /// What an agent's harness never inherits from the Hub: the user's GitHub tokens and SSH agent,
 /// with which its shell could push or call GitHub as the user without going through Steve. The
-/// adapter outlives a YOLO switch, so they are left out whatever YOLO says; Steve's own pushes take
+/// adapter outlives a permission-mode switch, so they are left out in every mode; Steve's own pushes take
 /// their credential from the vault. `gh`'s own login (its keyring) is not touched.
 pub const AGENT_ENV_DROPPED: [&str; 5] = [
     "GH_TOKEN",
