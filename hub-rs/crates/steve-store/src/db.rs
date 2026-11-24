@@ -266,6 +266,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/125.sql"),
     // 126: remove retired dynamic work-graph tables and steve_workflow tool pins.
     include_str!("../migrations/126.sql"),
+    // 127: remove legacy raw ACP event rows and backfill sessions.first_tool_at from steve.v1 tool events.
+    include_str!("../migrations/127.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

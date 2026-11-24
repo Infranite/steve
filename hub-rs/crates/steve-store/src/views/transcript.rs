@@ -214,7 +214,7 @@ impl<C: Read> Transcript<'_, C> {
             decode,
         )?;
         for event in &mut events {
-            if matches!(event.kind.as_str(), "tool_call" | "tool_call_update") {
+            if event.kind == crate::TOOL_CALL_EVENT {
                 let refs = self.0.all(
                     Query::select().from(Alias::new("event_payload_refs"))
                         .exprs([Expr::cust("event_payload_refs.path"), Expr::cust("p.data"), Expr::cust("event_payload_refs.session_id")])

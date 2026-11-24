@@ -108,7 +108,7 @@ pub async fn events(
         };
         for event in &mut page.events {
             system_shown(&event.kind, &mut event.data);
-            event.data = super::slim::ev_out(std::mem::take(&mut event.data));
+            event.data = super::slim::ev_out(&event.kind, std::mem::take(&mut event.data));
         }
         Ok(page)
     })

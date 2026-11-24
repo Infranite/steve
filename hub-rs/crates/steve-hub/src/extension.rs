@@ -910,13 +910,26 @@ mod tests {
         let long = "😀".repeat(2500);
         let diff = "line\n".repeat(5000);
         let data = serde_json::json!({
-            "rawOutput": long,
-            "_meta": {"claudeCode": {"toolName": "Read", "toolResponse": "private"}},
-            "rawInput": {"command": "cat file", "timeout": 5},
-            "content": [
-                {"type": "image", "data": "base64", "mimeType": "image/png"},
-                {"type": "diff", "oldText": diff, "newText": diff}
-            ]
+            "tool": {
+                "id": "t1",
+                "origin": "harness",
+                "name": "Read",
+                "category": "read",
+                "title": "Read file",
+                "phase": "succeeded",
+                "action": {
+                    "type": "tool",
+                    "name": "steve_update",
+                    "args": {
+                        "now": long,
+                        "image": {"type": "image", "data": "base64", "mimeType": "image/png"}
+                    }
+                },
+                "result": [
+                    {"type": "text", "text": long},
+                    {"type": "diff", "path": "a.rs", "old": diff, "new": diff, "added": 5000, "removed": 5000}
+                ]
+            }
         });
         for seq in 1..=2 {
             bus.live(
@@ -946,22 +959,21 @@ mod tests {
             assert_eq!(event["ws"], "a");
             assert_eq!(event["rev"], 0);
             assert!(frame.id.is_none());
-            assert!(event["data"].get("_meta").is_none());
-            assert_eq!(event["data"]["tool"], "Read");
+            assert_eq!(event["data"]["tool"]["name"], "Read");
             assert_eq!(
-                event["data"]["rawInput"],
-                serde_json::json!({"command": "cat file"})
+                event["data"]["tool"]["action"]["args"]["now"],
+                format!("{}…", "😀".repeat(2000))
             );
             assert_eq!(
-                event["data"]["content"][0],
+                event["data"]["tool"]["action"]["args"]["image"],
                 serde_json::json!({"type": "image"})
             );
             assert_eq!(
-                event["data"]["rawOutput"],
+                event["data"]["tool"]["result"][0]["text"],
                 format!("{}…", "😀".repeat(2000))
             );
-            assert_eq!(event["data"]["content"][1]["oldText"], diff);
-            assert_eq!(event["data"]["content"][1]["newText"], diff);
+            assert_eq!(event["data"]["tool"]["result"][1]["old"], diff);
+            assert_eq!(event["data"]["tool"]["result"][1]["new"], diff);
             assert_eq!(
                 serde_json::to_value(&*typed.recv().await.unwrap()).unwrap()["data"],
                 data

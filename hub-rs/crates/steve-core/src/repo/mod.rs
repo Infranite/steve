@@ -447,20 +447,15 @@ impl Db {
                     continue;
                 }
                 let user = e.kind == "user"
-                    || e.kind == "user_message_chunk"
                     || e.kind == steve_transcript::TEXT
                         && e.data.get("role").and_then(Value::as_str) == Some("user");
                 if user || read >= SCAN {
                     break 'back;
                 }
-                if matches!(
-                    e.kind.as_str(),
-                    steve_transcript::TOOL | "tool_call" | "tool_call_update"
-                ) {
+                if e.kind == steve_transcript::TOOL {
                     let call = e
                         .data
                         .pointer("/tool/id")
-                        .or_else(|| e.data.get("toolCallId"))
                         .and_then(Value::as_str)
                         .map(String::from);
                     turn.push(Seen::Tool(call));

@@ -98,7 +98,7 @@ pub fn seed_delivery(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     sql.push_str(&format!(
         "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, source, created, updated, outcome) VALUES ('ST-2', 'default', 2, 't', 'active', 'dev', '[\"对话\",\"chat\"]', {t0}, {t0}, NULL);
          UPDATE sessions SET item_id='ST-2' WHERE id='sr1';
-         INSERT INTO events (session_id, ts, kind, data) VALUES ('sw1', {}, 'tool_call', '{{}}'), ('sw1', {}, 'tool_call', '{{}}');
+         INSERT INTO events (session_id, ts, kind, data) VALUES ('sw1', {}, 'tool', '{{}}'), ('sw1', {}, 'tool', '{{}}');
          INSERT INTO item_stats (item_id, workspace_id, created, accepted, done_at, updated) VALUES
            ('ST-1', 'default', {t0}, {}, {}, {t0}), ('ST-5', 'default', {t0}, NULL, {}, {t0});
          INSERT INTO item_marks (workspace_id, item_id, ts, kind, to_v, actor, detail) VALUES
@@ -279,15 +279,15 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
         &mut sql,
         "s1",
         m(2),
-        "tool_call",
-        r#"{"toolCallId":"a","kind":"execute","_meta":{"claudeCode":{"toolName":"Bash"}}}"#,
+        "tool",
+        r#"{"tool":{"id":"a","origin":"harness","name":"Bash","category":"exec","title":"Bash","phase":"running"}}"#,
     );
     ev(
         &mut sql,
         "s1",
         m(3),
-        "tool_call_update",
-        r#"{"toolCallId":"a","status":"failed"}"#,
+        "tool",
+        r#"{"tool":{"id":"a","origin":"harness","name":"Bash","category":"exec","title":"Bash","phase":"failed"}}"#,
     );
     ev(
         &mut sql,

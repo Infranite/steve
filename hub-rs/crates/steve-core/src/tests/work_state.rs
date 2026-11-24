@@ -513,20 +513,6 @@ fn no_final_text_after_tool_does_not_revive_obsolete_request() {
     assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
     assert!(k.open_fails(&i).is_empty());
 
-    // the same with an ACP tool_call row
-    let i = k.item("run", "执行", None);
-    let s = k.session(&i, "idle");
-    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
-    k.rt.say(&s, "请扫码授权，完成后告诉我。");
-    k.db()
-        .event_add(
-            &s,
-            "tool_call",
-            json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "status": "completed"}),
-        )
-        .unwrap();
-    assert_eq!(k.db().final_reply(&s).unwrap(), "");
-
     // after the last tool call: a long request, streamed in pieces, read whole and yours
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
