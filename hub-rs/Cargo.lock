@@ -5959,6 +5959,7 @@ name = "steve-install"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "data-encoding",
  "hex",
  "libc",
  "plist",

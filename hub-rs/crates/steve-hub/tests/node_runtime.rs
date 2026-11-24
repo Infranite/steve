@@ -281,28 +281,27 @@ async fn bind_prepares_opens_then_runs_what_is_queued() {
 async fn a_message_during_a_turn_goes_next_and_the_item_hears_one_end() {
     let h = hub();
     h.bind();
-    h.rt.prompt(S, "one", "user", &[]).unwrap();
-    eventually_sync("first attempt", || h.attempts().len() == 1).await;
-    eventually_sync("active", || h.phase() == "active").await;
+    let first = h.running("one").await;
     assert_eq!(
         h.rt.prompt(S, "two", "user", &[]).unwrap(),
         Planned::Busy,
         "waits for the turn"
     );
 
-    let first = h.attempts()[0].clone();
     h.node.finish(&first, build::done()).await.unwrap();
     eventually_sync("second attempt", || h.attempts().len() == 2).await;
     assert!(h.ends().is_empty(), "the turn goes on with what was queued");
     let second = h.attempts()[1].clone();
     assert_ne!(turn_of(&first), turn_of(&second), "a new logical turn");
-    eventually_sync("second running", || {
-        h.methods().iter().filter(|m| **m == "start_turn").count() == 2
-    })
-    .await;
+    h.wait_for_start(&second).await;
     h.node.finish(&second, build::done()).await.unwrap();
     eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends().len(), 1);
+    assert_eq!(
+        h.node.unacked(),
+        0,
+        "both starts and completions reached the Hub"
+    );
 }
 
 #[tokio::test]
@@ -417,9 +416,7 @@ async fn cancel_targets_the_attempt_running_when_asked() {
 async fn cancel_attempt_with_an_old_attempt_queues_nothing() {
     let h = hub();
     h.bind();
-    h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
-    let exec = h.attempts()[0].clone();
+    let exec = h.running("hello").await;
     let a1 = h.rt.active_attempt(S).unwrap().expect("a1 runs");
     h.rt.prompt(S, "next", "user", &[]).unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();

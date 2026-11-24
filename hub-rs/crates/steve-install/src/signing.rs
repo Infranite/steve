@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 pub(crate) struct Tools {
     pub codesign: PathBuf,
     pub security: PathBuf,
+    pub openssl: PathBuf,
     pub shell: PathBuf,
 }
 impl Default for Tools {
@@ -22,9 +23,89 @@ impl Default for Tools {
         Self {
             codesign: "/usr/bin/codesign".into(),
             security: "/usr/bin/security".into(),
+            openssl: "/usr/bin/openssl".into(),
             shell: "/bin/zsh".into(),
         }
     }
+}
+
+pub(crate) const NODE_CERTIFICATE_NAME: &str = "Steve Node";
+pub(crate) const NODE_CLI_IDENTIFIER: &str = "io.github.infranite.steve.cli";
+pub(crate) const NODE_RUNTIME_IDENTIFIER: &str = "io.github.infranite.steve.node";
+pub(crate) const NODE_KEYSTORE_DIR: &str = "secrets/keystore";
+pub(crate) const NODE_SIGNING_PASS_ENTRY: &str = "steve__signing__keychain-pass";
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct NodeSigningIdentity {
+    pub label: String,
+    pub cli_identifier: String,
+    pub node_identifier: String,
+    pub certificate_name: String,
+    pub certificate_sha1: String,
+}
+
+impl NodeSigningIdentity {
+    pub(crate) fn validate(&self, expected_label: &str) -> Result<()> {
+        ensure!(
+            valid_identity(&self.label) && self.label == expected_label,
+            "Node signing identity label differs from service label"
+        );
+        ensure!(
+            valid_identity(&self.cli_identifier) && valid_identity(&self.node_identifier),
+            "invalid Node signing identifier"
+        );
+        ensure!(
+            !self.certificate_name.is_empty()
+                && !self
+                    .certificate_name
+                    .chars()
+                    .any(|c| c.is_control() || "\"'\\".contains(c)),
+            "invalid Node signing certificate name"
+        );
+        ensure!(
+            valid_sha1(&self.certificate_sha1),
+            "invalid Node signing certificate fingerprint"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn node_requirement(&self) -> String {
+        self_signed_requirement(&self.node_identifier, &self.certificate_sha1)
+    }
+
+    pub(crate) fn cli_requirement(&self) -> String {
+        self_signed_requirement(&self.cli_identifier, &self.certificate_sha1)
+    }
+}
+
+pub(crate) fn valid_sha1(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+pub(crate) fn self_signed_requirement(identifier: &str, sha1: &str) -> String {
+    format!("identifier \"{identifier}\" and certificate leaf = H\"{sha1}\"")
+}
+
+pub(crate) fn leaf_sha1_of(designated: &str) -> Option<String> {
+    const MARK: &str = "certificate leaf = H\"";
+    let start = designated.find(MARK)? + MARK.len();
+    let rest = &designated[start..];
+    let hex = &rest[..rest.find('"')?];
+    (hex.len() == 40 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| hex.to_ascii_lowercase())
+}
+
+pub(crate) fn parse_designated_requirement(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    let from = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes).lines().find_map(|line| {
+            line.strip_prefix("designated => ")
+                .map(|s| s.trim().to_owned())
+        })
+    };
+    from(stdout).or_else(|| from(stderr))
 }
 
 pub(crate) fn json_file(path: &Path) -> Result<Value> {
@@ -315,38 +396,44 @@ impl Drop for Unlocked<'_> {
         );
     }
 }
-fn unlock<'a>(
-    keychain: &'a Path,
-    password: &str,
-    tools: &'a Tools,
-    timeout: Duration,
-) -> Result<Unlocked<'a>> {
-    use std::os::fd::AsRawFd;
-
+fn check_security_token(value: &str, what: &str) -> Result<()> {
     ensure!(
-        !password.is_empty()
-            && !password
+        !value.is_empty()
+            && !value
                 .chars()
                 .any(|c| c.is_whitespace() || "\"'\\".contains(c)),
-        "signing password cannot be represented safely"
+        "{what} cannot be represented safely"
     );
-    let keychain_text = keychain.to_string_lossy();
+    Ok(())
+}
+
+fn check_security_path(path: &Path, what: &str) -> Result<String> {
+    let text = path
+        .to_str()
+        .with_context(|| format!("{what} must be UTF-8"))?;
     ensure!(
-        !keychain_text.contains(['"', '\\', '\n', '\r']),
-        "signing keychain path cannot be represented safely"
+        !text.is_empty() && !text.contains(['"', '\\', '\n', '\r']),
+        "{what} cannot be represented safely"
     );
-    let mut command = Command::new(&tools.security);
+    Ok(text.to_owned())
+}
+
+fn run_security_stdin(
+    security: &Path,
+    input: &Zeroizing<String>,
+    timeout: Duration,
+    timeout_msg: &str,
+    failure_msg: &str,
+) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut command = Command::new(security);
     command
         .arg("-i")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // Even a failed or interrupted command may have unlocked the keychain.
-    let guard = Unlocked { keychain, tools };
     let mut child = command.spawn()?;
-    let input = Zeroizing::new(format!(
-        "unlock-keychain -p {password} \"{keychain_text}\"\n"
-    ));
     let deadline = Instant::now() + timeout;
     let result = (|| -> Result<()> {
         let mut stdin = child.stdin.take().context("keychain stdin missing")?;
@@ -360,10 +447,7 @@ fn unlock<'a>(
         );
         let mut written = 0;
         while written < input.len() {
-            ensure!(
-                Instant::now() < deadline,
-                "signing keychain unlock timed out"
-            );
+            ensure!(Instant::now() < deadline, "{timeout_msg}");
             match stdin.write(&input.as_bytes()[written..]) {
                 Ok(0) => bail!("keychain input closed"),
                 Ok(count) => written += count,
@@ -377,13 +461,10 @@ fn unlock<'a>(
         drop(stdin);
         loop {
             if let Some(status) = child.try_wait()? {
-                ensure!(status.success(), "signing keychain did not unlock");
+                ensure!(status.success(), "{failure_msg}");
                 return Ok(());
             }
-            ensure!(
-                Instant::now() < deadline,
-                "signing keychain unlock timed out"
-            );
+            ensure!(Instant::now() < deadline, "{timeout_msg}");
             std::thread::sleep(Duration::from_millis(20));
         }
     })();
@@ -391,7 +472,29 @@ fn unlock<'a>(
         let _ = child.kill();
         let _ = child.wait();
     }
-    result?;
+    result
+}
+
+fn unlock<'a>(
+    keychain: &'a Path,
+    password: &str,
+    tools: &'a Tools,
+    timeout: Duration,
+) -> Result<Unlocked<'a>> {
+    check_security_token(password, "signing password")?;
+    let keychain_text = check_security_path(keychain, "signing keychain path")?;
+    // Even a failed or interrupted command may have unlocked the keychain.
+    let guard = Unlocked { keychain, tools };
+    let input = Zeroizing::new(format!(
+        "unlock-keychain -p {password} \"{keychain_text}\"\n"
+    ));
+    run_security_stdin(
+        &tools.security,
+        &input,
+        timeout,
+        "signing keychain unlock timed out",
+        "signing keychain did not unlock",
+    )?;
     Ok(guard)
 }
 fn sign(binary: &Path, keychain: &Path, password: &str, id: &str, tools: &Tools) -> Result<()> {
@@ -683,6 +786,503 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
     Ok(result)
 }
 
+pub(crate) fn node_signing_identity_path(home: &Path) -> PathBuf {
+    home.join("signing/identity.json")
+}
+
+pub(crate) fn node_signing_keychain(home: &Path) -> PathBuf {
+    home.join("signing/steve-signing.keychain-db")
+}
+
+pub(crate) fn node_signing_password_path(home: &Path) -> PathBuf {
+    home.join(NODE_KEYSTORE_DIR).join(NODE_SIGNING_PASS_ENTRY)
+}
+
+fn random_bytes<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
+    let mut raw = Zeroizing::new([0u8; N]);
+    let mut source = File::open("/dev/urandom").context("open random source")?;
+    source.read_exact(raw.as_mut())?;
+    Ok(raw)
+}
+
+fn strict_private_file(path: &Path) -> Result<()> {
+    let m = fs::symlink_metadata(path)?;
+    ensure!(
+        m.is_file()
+            && !m.file_type().is_symlink()
+            && m.uid() == unsafe { libc::getuid() }
+            && m.mode() & 0o077 == 0,
+        "key store entry must be a regular 0600 file owned by this user: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn store_node_signing_password(home: &Path, raw: &[u8; 32]) -> Result<()> {
+    private_dir(&home.join("secrets"))?;
+    let store = home.join(NODE_KEYSTORE_DIR);
+    private_dir(&store)?;
+    let path = store.join(NODE_SIGNING_PASS_ENTRY);
+    let encoded = Zeroizing::new(data_encoding::BASE64.encode(raw));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .context("store Node signing keychain password")?;
+    file.write_all(encoded.as_bytes())?;
+    file.sync_all()?;
+    File::open(&store)?.sync_all()?;
+    let readback = load_node_signing_password(home)?;
+    let expected = Zeroizing::new(hex::encode(raw));
+    ensure!(
+        readback.as_str() == expected.as_str(),
+        "Node signing keychain password did not read back"
+    );
+    Ok(())
+}
+
+fn load_node_signing_password(home: &Path) -> Result<Zeroizing<String>> {
+    let path = node_signing_password_path(home);
+    strict_private_file(&path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .context("read Node signing keychain password")?;
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.take(1025).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 1024,
+        "Node signing key store entry is too large"
+    );
+    let raw = Zeroizing::new(
+        data_encoding::BASE64
+            .decode(bytes.trim_ascii())
+            .map_err(|_| anyhow::anyhow!("Node signing key store entry is malformed"))?,
+    );
+    ensure!(raw.len() == 32, "Node signing key store entry is malformed");
+    Ok(Zeroizing::new(hex::encode(raw.as_slice())))
+}
+
+struct TempDirGuard(PathBuf);
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct TempFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+struct NodeInitCleanup<'a> {
+    keychain: &'a Path,
+    pass_path: &'a Path,
+    tools: &'a Tools,
+    armed: bool,
+}
+impl Drop for NodeInitCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if fs::symlink_metadata(self.keychain).is_ok() {
+            let _ = output(
+                Command::new(&self.tools.security)
+                    .arg("delete-keychain")
+                    .arg(self.keychain)
+                    .stdin(Stdio::null()),
+                Duration::from_secs(30),
+            );
+            let _ = fs::remove_file(self.keychain);
+        }
+        let _ = fs::remove_file(self.pass_path);
+    }
+}
+
+fn parse_openssl_sha1(stdout: &[u8]) -> Result<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let (_, value) = text
+        .split_once('=')
+        .context("certificate fingerprint missing")?;
+    let hex: String = value
+        .chars()
+        .filter(|c| *c != ':' && !c.is_whitespace())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    ensure!(valid_sha1(&hex), "invalid certificate SHA-1 fingerprint");
+    Ok(hex)
+}
+
+/// Load and validate an existing Node signing identity, keychain and key store password.
+pub(crate) fn load_node_identity(home: &Path, expected_label: &str) -> Result<NodeSigningIdentity> {
+    let identity_path = node_signing_identity_path(home);
+    let keychain_path = node_signing_keychain(home);
+    owned_file(&identity_path)?;
+    let identity: NodeSigningIdentity = serde_json::from_value(json_file(&identity_path)?)
+        .context("invalid Node signing identity")?;
+    identity.validate(expected_label)?;
+    owned_file(&keychain_path)?;
+    let _ = load_node_signing_password(home)?;
+    Ok(identity)
+}
+
+/// Load the Node's existing local self-signed identity, or create it once inside `home`.
+/// Partial or foreign signing state is refused rather than silently replaced.
+pub(crate) fn ensure_node_identity(
+    home: &Path,
+    label: &str,
+    tools: &Tools,
+) -> Result<NodeSigningIdentity> {
+    ensure!(valid_identity(label), "invalid service label");
+    let identity_path = node_signing_identity_path(home);
+    let keychain_path = node_signing_keychain(home);
+    let pass_path = node_signing_password_path(home);
+    let present = [
+        fs::symlink_metadata(&identity_path).is_ok(),
+        fs::symlink_metadata(&keychain_path).is_ok(),
+        fs::symlink_metadata(&pass_path).is_ok(),
+    ];
+    if present.iter().all(|exists| *exists) {
+        return load_node_identity(home, label);
+    }
+    ensure!(
+        present.iter().all(|exists| !*exists),
+        "incomplete Node signing identity; inspect {}/signing instead of replacing it",
+        home.display()
+    );
+
+    let keychain_text = check_security_path(&keychain_path, "signing keychain path")?;
+    let codesign_text = check_security_path(&tools.codesign, "codesign path")?;
+    let signing_dir = home.join("signing");
+    private_dir(&signing_dir)?;
+    let work_dir = signing_dir.join(format!(".init-{}", uuid::Uuid::new_v4()));
+    private_dir(&work_dir)?;
+    let _work_guard = TempDirGuard(work_dir.clone());
+    let mut cleanup = NodeInitCleanup {
+        keychain: &keychain_path,
+        pass_path: &pass_path,
+        tools,
+        armed: true,
+    };
+
+    let cert_cnf = work_dir.join("cert.cnf");
+    let key_pem = work_dir.join("key.pem");
+    let cert_pem = work_dir.join("cert.pem");
+    let id_p12 = work_dir.join("id.p12");
+    let p12_text = check_security_path(&id_p12, "temporary signing bundle path")?;
+    {
+        let mut cnf = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&cert_cnf)?;
+        write!(
+            cnf,
+            "[req]\ndistinguished_name=dn\nx509_extensions=v3\nprompt=no\n[dn]\nCN={NODE_CERTIFICATE_NAME}\n[v3]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n"
+        )?;
+    }
+
+    successful(
+        Command::new(&tools.openssl)
+            .args([
+                "req", "-x509", "-newkey", "rsa:3072", "-nodes", "-days", "36500",
+            ])
+            .arg("-keyout")
+            .arg(&key_pem)
+            .arg("-out")
+            .arg(&cert_pem)
+            .arg("-config")
+            .arg(&cert_cnf)
+            .stdin(Stdio::null()),
+        Duration::from_secs(60),
+    )
+    .context("generate local Node signing certificate")?;
+
+    let fingerprint = successful(
+        Command::new(&tools.openssl)
+            .args(["x509", "-noout", "-fingerprint", "-sha1", "-in"])
+            .arg(&cert_pem)
+            .stdin(Stdio::null()),
+        Duration::from_secs(15),
+    )
+    .context("read local Node signing certificate fingerprint")?;
+    let certificate_sha1 = parse_openssl_sha1(&fingerprint.stdout)?;
+
+    let raw_password = random_bytes::<32>()?;
+    let password = Zeroizing::new(hex::encode(raw_password.as_slice()));
+    let p12_pass = Zeroizing::new(hex::encode(random_bytes::<16>()?.as_slice()));
+    check_security_token(&password, "signing password")?;
+    check_security_token(&p12_pass, "temporary export password")?;
+
+    let export_legacy = output(
+        Command::new(&tools.openssl)
+            .args(["pkcs12", "-export", "-legacy", "-passout", "env:P12"])
+            .arg("-inkey")
+            .arg(&key_pem)
+            .arg("-in")
+            .arg(&cert_pem)
+            .arg("-out")
+            .arg(&id_p12)
+            .env("P12", p12_pass.as_str())
+            .stdin(Stdio::null()),
+        Duration::from_secs(30),
+    )?;
+    if !export_legacy.status.success() {
+        successful(
+            Command::new(&tools.openssl)
+                .args(["pkcs12", "-export", "-passout", "env:P12"])
+                .arg("-inkey")
+                .arg(&key_pem)
+                .arg("-in")
+                .arg(&cert_pem)
+                .arg("-out")
+                .arg(&id_p12)
+                .env("P12", p12_pass.as_str())
+                .stdin(Stdio::null()),
+            Duration::from_secs(30),
+        )
+        .context("export local Node signing identity")?;
+    }
+
+    let create_cmd = Zeroizing::new(format!(
+        "create-keychain -p {} \"{keychain_text}\"\n",
+        password.as_str()
+    ));
+    run_security_stdin(
+        &tools.security,
+        &create_cmd,
+        Duration::from_secs(30),
+        "Node signing keychain creation timed out",
+        "create Node signing keychain",
+    )?;
+    {
+        let _lock = unlock(&keychain_path, &password, tools, Duration::from_secs(30))?;
+        successful(
+            Command::new(&tools.security)
+                .args(["set-keychain-settings", "-l", "-u", "-t", "300"])
+                .arg(&keychain_path)
+                .stdin(Stdio::null()),
+            Duration::from_secs(30),
+        )?;
+        let import_cmd = Zeroizing::new(format!(
+            "import \"{p12_text}\" -k \"{keychain_text}\" -P {} -T \"{codesign_text}\"\n",
+            p12_pass.as_str()
+        ));
+        run_security_stdin(
+            &tools.security,
+            &import_cmd,
+            Duration::from_secs(30),
+            "Node signing identity import timed out",
+            "import local Node signing identity",
+        )?;
+        let partition_cmd = Zeroizing::new(format!(
+            "set-key-partition-list -S apple-tool:,apple: -s -k {} \"{keychain_text}\"\n",
+            password.as_str()
+        ));
+        run_security_stdin(
+            &tools.security,
+            &partition_cmd,
+            Duration::from_secs(30),
+            "Node signing keychain partition update timed out",
+            "configure local Node signing keychain access",
+        )?;
+        let listed = successful(
+            Command::new(&tools.security)
+                .args(["find-identity", "-p", "codesigning"])
+                .arg(&keychain_path)
+                .stdin(Stdio::null()),
+            Duration::from_secs(30),
+        )?;
+        let found = String::from_utf8_lossy(&listed.stdout).to_ascii_lowercase();
+        ensure!(
+            found.contains(&certificate_sha1)
+                || found.contains(&NODE_CERTIFICATE_NAME.to_ascii_lowercase()),
+            "local Node signing identity did not verify in keychain"
+        );
+    }
+
+    owned_file(&keychain_path)?;
+    store_node_signing_password(home, &raw_password)?;
+    let identity = NodeSigningIdentity {
+        label: label.to_owned(),
+        cli_identifier: NODE_CLI_IDENTIFIER.to_owned(),
+        node_identifier: NODE_RUNTIME_IDENTIFIER.to_owned(),
+        certificate_name: NODE_CERTIFICATE_NAME.to_owned(),
+        certificate_sha1,
+    };
+    exclusive_json(&identity_path, &serde_json::to_value(&identity)?)?;
+    cleanup.armed = false;
+    Ok(identity)
+}
+
+/// Read a binary's embedded certificate-bound designated requirement (`None` for unsigned/ad-hoc).
+pub(crate) fn read_node_designated_requirement(
+    binary: &Path,
+    tools: &Tools,
+) -> Result<Option<String>> {
+    let result = output(
+        Command::new(&tools.codesign)
+            .args(["--display", "-r-"])
+            .arg(binary)
+            .stdin(Stdio::null()),
+        Duration::from_secs(30),
+    )?;
+    if !result.status.success() {
+        return Ok(None);
+    }
+    let Some(designated) = parse_designated_requirement(&result.stdout, &result.stderr) else {
+        return Ok(None);
+    };
+    Ok(leaf_sha1_of(&designated).map(|_| designated))
+}
+
+/// Verify that `binary` has a valid signature satisfying `requirement` AND embeds the matching
+/// certificate-bound designated requirement so macOS TCC preserves grants across upgrades.
+pub(crate) fn verify_node_binary(binary: &Path, requirement: &str, tools: &Tools) -> Result<()> {
+    owned_file(binary)?;
+    ensure!(
+        leaf_sha1_of(requirement).is_some(),
+        "Node code requirement must bind a certificate leaf"
+    );
+    successful(
+        Command::new(&tools.codesign)
+            .args(["--verify", "--strict", "-R"])
+            .arg(format!("={requirement}"))
+            .arg(binary)
+            .stdin(Stdio::null()),
+        Duration::from_secs(30),
+    )
+    .context("executable failed strict code-signature requirement verification")?;
+    let actual = read_node_designated_requirement(binary, tools)?
+        .context("signed executable has no certificate-bound designated requirement")?;
+    ensure!(
+        actual == requirement,
+        "executable designated requirement differs from installation signing identity"
+    );
+    Ok(())
+}
+
+/// Sign `binary` with the Node's local self-signed identity via an atomic sibling copy,
+/// skipping keychain unlock when `binary` already satisfies the exact requirement.
+pub(crate) fn sign_node_binary(
+    home: &Path,
+    binary: &Path,
+    identity: &NodeSigningIdentity,
+    identifier: &str,
+    tools: &Tools,
+) -> Result<()> {
+    let requirement = self_signed_requirement(identifier, &identity.certificate_sha1);
+    if verify_node_binary(binary, &requirement, tools).is_ok() {
+        return Ok(());
+    }
+    owned_file(binary)?;
+    let keychain = node_signing_keychain(home);
+    owned_file(&keychain)?;
+    let password = load_node_signing_password(home)?;
+    let mode = fs::symlink_metadata(binary)?.mode() & 0o755;
+    let parent = binary.parent().context("binary has no parent directory")?;
+    let name = binary
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("binary name must be UTF-8")?;
+    let staged = parent.join(format!(".{name}.sign-{}", uuid::Uuid::new_v4().simple()));
+    let mut staged_guard = TempFileGuard::new(staged.clone());
+    {
+        let mut src = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(binary)?;
+        let mut dst = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&staged)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.set_permissions(fs::Permissions::from_mode(mode))?;
+        dst.sync_all()?;
+    }
+    let sign_ref = identity.certificate_sha1.to_ascii_uppercase();
+    {
+        let _lock = unlock(&keychain, &password, tools, Duration::from_secs(30))?;
+        successful(
+            Command::new(&tools.security)
+                .args(["set-keychain-settings", "-l", "-u", "-t", "300"])
+                .arg(&keychain)
+                .stdin(Stdio::null()),
+            Duration::from_secs(30),
+        )?;
+        successful(
+            Command::new(&tools.codesign)
+                .args(["--force", "--sign", &sign_ref, "--identifier", identifier])
+                .arg("--keychain")
+                .arg(&keychain)
+                .arg("-r")
+                .arg(format!("=designated => {requirement}"))
+                .arg(&staged)
+                .stdin(Stdio::null()),
+            Duration::from_secs(60),
+        )
+        .context("sign macOS Node executable with local identity")?;
+    }
+    verify_node_binary(&staged, &requirement, tools)?;
+    fs::rename(&staged, binary)?;
+    File::open(parent)?.sync_all()?;
+    staged_guard.disarm();
+    Ok(())
+}
+
+/// Copy `source` into `destination_dir` as a mode-0700 temporary file signed with the Node's
+/// local CLI identity and verified against its designated requirement.
+pub(crate) fn stage_signed_node_runner(
+    home: &Path,
+    source: &Path,
+    destination_dir: &Path,
+    identity: &NodeSigningIdentity,
+    tools: &Tools,
+) -> Result<PathBuf> {
+    private_dir(destination_dir)?;
+    let staged = destination_dir.join(format!(
+        ".node-boot-runner.sign-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut staged_guard = TempFileGuard::new(staged.clone());
+    {
+        let mut src = File::open(source)?;
+        let mut dst = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&staged)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.set_permissions(fs::Permissions::from_mode(0o700))?;
+        dst.sync_all()?;
+    }
+    sign_node_binary(home, &staged, identity, &identity.cli_identifier, tools)?;
+    staged_guard.disarm();
+    Ok(staged)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -747,6 +1347,7 @@ pub(crate) mod tests {
             Tools {
                 codesign,
                 security,
+                openssl: "/usr/bin/false".into(),
                 shell: "/bin/sh".into(),
             },
         )
@@ -942,5 +1543,427 @@ pub(crate) mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Fake openssl/security/codesign stand-ins that persist synthetic signatures inside a
+    /// sidecar directory, check secret hygiene (stdin/env only, never argv), and enforce
+    /// keychain lock/unlock ordering without touching any real macOS keychain.
+    fn node_signing_fixture() -> (tempfile::TempDir, PathBuf, Tools) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let home = root.join("node-home");
+        fs::create_dir(&home).unwrap();
+        let state = root.join("fake-state");
+        fs::create_dir(&state).unwrap();
+        let argv_log = root.join("argv.log");
+        let events_log = root.join("events.log");
+        let sha1 = "0123456789abcdef0123456789abcdef01234567";
+        let sha1_colon = "01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67";
+
+        let openssl = root.join("fake-openssl");
+        executable(
+            &openssl,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+printf 'openssl %s\n' "$*" >> '{argv}'
+printf 'openssl:%s\n' "$1" >> '{events}'
+case "$1" in
+  req)
+    keyout=''; out=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -keyout) keyout="$2"; shift 2 ;;
+        -out) out="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'PRIVATE KEY\n' > "$keyout"
+    printf 'CERT\n' > "$out"
+    ;;
+  x509)
+    printf 'SHA1 Fingerprint={sha1_colon}\n'
+    ;;
+  pkcs12)
+    [ -n "${{P12:-}}" ] || exit 11
+    out=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -out) out="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'P12\n' > "$out"
+    ;;
+  *) exit 99 ;;
+esac
+"#,
+                argv = argv_log.display(),
+                events = events_log.display(),
+            ),
+        );
+
+        let security = root.join("fake-security");
+        executable(
+            &security,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+printf 'security %s\n' "$*" >> '{argv}'
+if [ "$1" = "-i" ]; then
+  line=$(cat)
+  cmd=$(printf '%s' "$line" | awk '{{print $1}}')
+  printf 'security:-i:%s\n' "$cmd" >> '{events}'
+  case "$cmd" in
+    create-keychain)
+      kc=$(printf '%s' "$line" | sed -n 's/^create-keychain -p [^ ]* "\(.*\)"$/\1/p')
+      [ -n "$kc" ] || exit 21
+      umask 077
+      printf 'keychain\n' > "$kc"
+      ;;
+    unlock-keychain)
+      printf 'unlocked' > '{state}/unlocked'
+      ;;
+    import|set-key-partition-list)
+      [ -f '{state}/unlocked' ] || exit 22
+      ;;
+    *) exit 23 ;;
+  esac
+  exit 0
+fi
+printf 'security:%s\n' "$1" >> '{events}'
+case "$1" in
+  set-keychain-settings) ;;
+  lock-keychain) rm -f '{state}/unlocked' ;;
+  delete-keychain) rm -f "$2" ;;
+  find-identity)
+    printf '  1) %s "Steve Node"\n     1 identities found\n' "$(printf '%s' '{sha1}' | tr 'a-f' 'A-F')"
+    ;;
+  *) exit 24 ;;
+esac
+"#,
+                argv = argv_log.display(),
+                events = events_log.display(),
+                state = state.display(),
+            ),
+        );
+
+        let codesign = root.join("fake-codesign");
+        executable(
+            &codesign,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+printf 'codesign %s\n' "$*" >> '{argv}'
+printf 'codesign:%s\n' "$1" >> '{events}'
+case "$1" in
+  --force)
+    [ -f '{state}/unlocked' ] || exit 31
+    if [ -f '{state}/fail-sign' ]; then exit 32; fi
+    req=''
+    target=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -r) req="$2"; shift 2 ;;
+        --sign|--identifier|--keychain) shift 2 ;;
+        *) target="$1"; shift ;;
+      esac
+    done
+    req=${{req#=}}
+    # Embed the designated requirement at the end of the fake binary so atomic rename carries it.
+    printf '\n#FAKE_SIG:%s\n' "$req" >> "$target"
+    ;;
+  --display)
+    target="$3"
+    line=$(grep -a '^#FAKE_SIG:' "$target" | tail -n 1 || true)
+    [ -n "$line" ] || exit 33
+    printf '%s\n' "${{line#\#FAKE_SIG:}}"
+    ;;
+  --verify)
+    want="${{4#=}}"
+    target="$5"
+    line=$(grep -a '^#FAKE_SIG:' "$target" | tail -n 1 || true)
+    [ -n "$line" ] || exit 34
+    actual="${{line#\#FAKE_SIG:designated => }}"
+    [ "$actual" = "$want" ] || exit 35
+    ;;
+  *) exit 39 ;;
+esac
+"#,
+                argv = argv_log.display(),
+                events = events_log.display(),
+                state = state.display(),
+            ),
+        );
+
+        (
+            dir,
+            home,
+            Tools {
+                codesign,
+                security,
+                openssl,
+                shell: "/bin/sh".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn node_local_self_signing_creates_reuses_and_keeps_identity_stable_across_versions() {
+        let (dir, home, tools) = node_signing_fixture();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let label = "io.github.infranite.steve.node";
+
+        let identity = ensure_node_identity(&home, label, &tools).unwrap();
+        assert_eq!(identity.label, label);
+        assert_eq!(identity.certificate_name, NODE_CERTIFICATE_NAME);
+        assert_eq!(
+            identity.certificate_sha1,
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        // Keychain, identity metadata and key store entry all have strict private permissions.
+        assert_eq!(
+            fs::metadata(node_signing_identity_path(&home))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(node_signing_password_path(&home))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(home.join(NODE_KEYSTORE_DIR)).unwrap().mode() & 0o777,
+            0o700
+        );
+        // Temporary key/cert/p12 files were cleaned up; password never leaked to argv or identity.json.
+        let signing_entries: Vec<_> = fs::read_dir(home.join("signing"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(signing_entries.len(), 2, "{signing_entries:?}");
+        let password = load_node_signing_password(&home).unwrap();
+        assert_eq!(password.len(), 64);
+        assert!(
+            !fs::read_to_string(root.join("argv.log"))
+                .unwrap()
+                .contains(password.as_str())
+        );
+        assert!(
+            !fs::read_to_string(node_signing_identity_path(&home))
+                .unwrap()
+                .contains(password.as_str())
+        );
+        assert!(!root.join("fake-state/unlocked").exists());
+
+        // Re-running ensure_node_identity reuses the existing identity without invoking openssl/security.
+        let events_before = fs::read_to_string(root.join("events.log")).unwrap();
+        assert_eq!(
+            ensure_node_identity(&home, label, &tools).unwrap(),
+            identity
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("events.log")).unwrap(),
+            events_before
+        );
+
+        // Two distinct versions signed by this installation share the exact same designated requirements.
+        let v1_node = root.join("v1-steve-node");
+        let v2_node = root.join("v2-steve-node");
+        let v1_cli = root.join("v1-steve");
+        let v2_cli = root.join("v2-steve");
+        for (path, body) in [
+            (&v1_node, "#!/bin/sh\necho v1-node\n"),
+            (&v2_node, "#!/bin/sh\necho v2-node\n"),
+            (&v1_cli, "#!/bin/sh\necho v1-cli\n"),
+            (&v2_cli, "#!/bin/sh\necho v2-cli\n"),
+        ] {
+            executable(path, body);
+        }
+        sign_node_binary(
+            &home,
+            &v1_node,
+            &identity,
+            &identity.node_identifier,
+            &tools,
+        )
+        .unwrap();
+        sign_node_binary(
+            &home,
+            &v2_node,
+            &identity,
+            &identity.node_identifier,
+            &tools,
+        )
+        .unwrap();
+        sign_node_binary(&home, &v1_cli, &identity, &identity.cli_identifier, &tools).unwrap();
+        sign_node_binary(&home, &v2_cli, &identity, &identity.cli_identifier, &tools).unwrap();
+        let runner = home.join("services/node-boot-runner");
+        let staged_runner =
+            stage_signed_node_runner(&home, &v1_cli, &home.join("services"), &identity, &tools)
+                .unwrap();
+        fs::rename(&staged_runner, &runner).unwrap();
+
+        assert_eq!(
+            read_node_designated_requirement(&v1_node, &tools).unwrap(),
+            Some(identity.node_requirement())
+        );
+        assert_eq!(
+            read_node_designated_requirement(&v2_node, &tools).unwrap(),
+            Some(identity.node_requirement())
+        );
+        assert_eq!(
+            read_node_designated_requirement(&v1_cli, &tools).unwrap(),
+            Some(identity.cli_requirement())
+        );
+        assert_eq!(
+            read_node_designated_requirement(&v2_cli, &tools).unwrap(),
+            Some(identity.cli_requirement())
+        );
+        assert_eq!(
+            read_node_designated_requirement(&runner, &tools).unwrap(),
+            Some(identity.cli_requirement())
+        );
+        verify_node_binary(&v2_node, &identity.node_requirement(), &tools).unwrap();
+        verify_node_binary(&v2_cli, &identity.cli_requirement(), &tools).unwrap();
+        verify_node_binary(&runner, &identity.cli_requirement(), &tools).unwrap();
+        assert!(!root.join("fake-state/unlocked").exists());
+
+        // Already-signed binary does not unlock the keychain again.
+        let before_idempotent = fs::read_to_string(root.join("events.log")).unwrap();
+        sign_node_binary(
+            &home,
+            &v2_node,
+            &identity,
+            &identity.node_identifier,
+            &tools,
+        )
+        .unwrap();
+        let after_idempotent = fs::read_to_string(root.join("events.log")).unwrap();
+        assert!(!after_idempotent[before_idempotent.len()..].contains("unlock-keychain"));
+
+        // Different certificate or ad-hoc binary fails verification.
+        let other_cert = self_signed_requirement(
+            &identity.node_identifier,
+            "ffffffffffffffffffffffffffffffffffffffff",
+        );
+        assert!(verify_node_binary(&v2_node, &other_cert, &tools).is_err());
+        let adhoc = root.join("adhoc");
+        executable(&adhoc, "#!/bin/sh\necho adhoc\n");
+        assert!(verify_node_binary(&adhoc, &identity.node_requirement(), &tools).is_err());
+    }
+
+    #[test]
+    fn node_signing_refuses_partial_identity_loose_keystore_and_relocks_on_failure() {
+        let (dir, home, tools) = node_signing_fixture();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let label = "io.github.infranite.steve.node";
+
+        // Incomplete signing state is refused rather than silently regenerated.
+        private_dir(&home.join("signing")).unwrap();
+        fs::write(node_signing_keychain(&home), b"partial").unwrap();
+        assert!(
+            ensure_node_identity(&home, label, &tools)
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete Node signing identity")
+        );
+        fs::remove_file(node_signing_keychain(&home)).unwrap();
+
+        let identity = ensure_node_identity(&home, label, &tools).unwrap();
+        // Wrong label is refused.
+        assert!(ensure_node_identity(&home, "other.label", &tools).is_err());
+
+        // Group-readable password file is refused.
+        fs::set_permissions(
+            node_signing_password_path(&home),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        assert!(load_node_identity(&home, label).is_err());
+        fs::set_permissions(
+            node_signing_password_path(&home),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        // Failed codesign leaves original binary intact and relocks the keychain.
+        let bin = root.join("unsigned-node");
+        executable(&bin, "#!/bin/sh\necho intact\n");
+        let original = fs::read(&bin).unwrap();
+        fs::write(root.join("fake-state/fail-sign"), b"1").unwrap();
+        assert!(
+            sign_node_binary(&home, &bin, &identity, &identity.node_identifier, &tools).is_err()
+        );
+        assert_eq!(fs::read(&bin).unwrap(), original);
+        assert!(!root.join("fake-state/unlocked").exists());
+        assert!(
+            fs::read_to_string(root.join("events.log"))
+                .unwrap()
+                .ends_with("security:lock-keychain\n")
+        );
+        assert!(
+            !fs::read_to_string(root.join("argv.log"))
+                .unwrap()
+                .contains(load_node_signing_password(&home).unwrap().as_str())
+        );
+
+        // Unsafe path with quote is rejected before calling security.
+        let quoted = root.join("bad\"home");
+        fs::create_dir(&quoted).unwrap();
+        assert!(
+            ensure_node_identity(&quoted, label, &tools)
+                .unwrap_err()
+                .to_string()
+                .contains("represented safely")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "creates a temporary macOS keychain and runs real openssl/security/codesign; opt-in only"]
+    fn real_macos_self_signed_identity_persists_across_two_built_binaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let home = root.join("node-home");
+        fs::create_dir(&home).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("/usr/bin/security")
+                    .args(["delete-keychain"])
+                    .arg(&self.0)
+                    .output();
+            }
+        }
+        let _cleanup = Cleanup(node_signing_keychain(&home));
+        let tools = Tools::default();
+        let identity =
+            ensure_node_identity(&home, "io.github.infranite.steve.node", &tools).unwrap();
+        let v1 = root.join("steve-node-v1");
+        let v2 = root.join("steve-node-v2");
+        fs::copy("/usr/bin/true", &v1).unwrap();
+        fs::copy("/usr/bin/false", &v2).unwrap();
+        fs::set_permissions(&v1, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&v2, fs::Permissions::from_mode(0o755)).unwrap();
+        sign_node_binary(&home, &v1, &identity, &identity.node_identifier, &tools).unwrap();
+        sign_node_binary(&home, &v2, &identity, &identity.node_identifier, &tools).unwrap();
+        let req1 = read_node_designated_requirement(&v1, &tools)
+            .unwrap()
+            .unwrap();
+        let req2 = read_node_designated_requirement(&v2, &tools)
+            .unwrap()
+            .unwrap();
+        assert_eq!(req1, identity.node_requirement());
+        assert_eq!(req1, req2);
+        verify_node_binary(&v1, &req1, &tools).unwrap();
+        verify_node_binary(&v2, &req1, &tools).unwrap();
     }
 }

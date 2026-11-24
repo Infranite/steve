@@ -11,17 +11,19 @@ const shots = process.env.STEVE_TEST_SHOTS
 if (shots) await mkdir(shots, { recursive: true })
 const hub = Array.from({ length: older }, (_, i) => ({ id: "o" + i, author: i % 2 ? "steve" : "me", text: text(i), item_id: i === 51 ? "ST-7" : null, meta: null, created: created(i) }))
 const errors = []
-const near = (a, b, d = 4) => Math.abs(a - b) <= d
+const near = (a, b, d = 4) => a !== null && Math.abs(a - b) <= d
 try {
   for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 900 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", e => errors.push(e.message))
     const calls = []
-    await page.route("**/api/**", route => {
+    let holdOlder
+    await page.route("**/api/**", async route => {
       const u = new URL(route.request().url())
       if (!u.pathname.startsWith("/api/")) return route.continue()
       calls.push(u.pathname + u.search)
       if (u.pathname === "/api/views/page" && u.searchParams.get("kind") === "message") {
+        if (holdOlder) await holdOlder
         const before = Number(u.searchParams.get("before")?.split(":")[0] ?? Infinity)
         const all = hub.filter(m => m.created < before).reverse(), views = all.slice(0, 100)
         const last = views.at(-1)
@@ -44,7 +46,27 @@ try {
     assert.ok(await atBottom())
     /** the message at the top of the list and its offset, as the reader sees it */
     const anchor = () => scroller.evaluate(el => { const t = el.getBoundingClientRect().top; for (const x of el.querySelectorAll("[data-msg]")) { const r = x.getBoundingClientRect(); if (r.bottom > t + 1) return { id: x.dataset.msg, off: r.top - t } } })
-    const offsetOf = id => scroller.evaluate((el, id) => el.querySelector(`[data-msg="${id}"]`).getBoundingClientRect().top - el.getBoundingClientRect().top, id)
+    const offsetOf = id => scroller.evaluate((el, id) => {
+      const row = el.querySelector(`[data-msg="${id}"]`)
+      return row ? row.getBoundingClientRect().top - el.getBoundingClientRect().top : null
+    }, id)
+    const waitForAnchor = async ({ id, off }, tolerance = 4) => {
+      // A virtual row can briefly align before a later layout pass changes its position.
+      const aligned = await scroller.evaluate(async (el, { id, off, tolerance }) => {
+        const deadline = performance.now() + 3000
+        let since
+        while (performance.now() < deadline) {
+          const now = await new Promise(requestAnimationFrame)
+          const row = el.querySelector(`[data-msg="${id}"]`)
+          if (row && Math.abs(row.getBoundingClientRect().top - el.getBoundingClientRect().top - off) <= tolerance) {
+            since ??= now
+            if (now - since >= 150) return true
+          } else since = undefined
+        }
+        return false
+      }, { id, off, tolerance })
+      assert.ok(aligned, `${id} did not settle at offset ${off} (at ${await offsetOf(id)})`)
+    }
 
     // A8: one bar — who, Steve's own state, 历史 and 事项; no “你和 Steve / 会话列表” row, no “在跟 N 件事”.
     const header = page.locator("[data-chat-header]")
@@ -97,7 +119,7 @@ try {
     // The jump can finish before the sheet's exit animation unmounts it.
     if (width === 390) await page.locator('[data-history="sheet"]').waitFor({ state: "detached", timeout: 3000 })
     await page.locator("[data-jump-back]").click()
-    await page.waitForTimeout(200)
+    await waitForAnchor(reading)
     assert.ok(near(await offsetOf(reading.id), reading.off), "back to where you were")
     assert.equal(await page.locator("[data-jump-bar]").count(), 0)
 
@@ -120,15 +142,23 @@ try {
     await page.locator('[data-msg="w499"]').waitFor()
     await page.waitForTimeout(250)
     await page.mouse.move(width / 2, 400)
-    const pagesBefore = calls.filter((c) => c.startsWith("/api/views/page?kind=message")).length
-    for (let n = 0; n < 40 && !(await page.locator('[data-msg^="o"]').count()); n++) { await page.mouse.wheel(0, -2500); await page.waitForTimeout(120) }
-    await page.locator('[data-msg^="o"]').first().waitFor({ state: "attached" })
-    assert.ok(calls.filter((c) => c.startsWith("/api/views/page?kind=message")).length > pagesBefore, "scrolling loads an earlier page")
-    await page.waitForTimeout(250)
-    assert.ok(!(await atBottom()), "loading older messages must not resume following the latest reply")
+    const pageCount = () => calls.filter((c) => c.startsWith("/api/views/page?kind=message")).length
+    const pagesBefore = pageCount()
+    const olderResponse = Promise.withResolvers()
+    holdOlder = olderResponse.promise
+    for (let n = 0; n < 40 && pageCount() === pagesBefore; n++) { await page.mouse.wheel(0, -2500); await page.waitForTimeout(120) }
+    assert.ok(pageCount() > pagesBefore, "scrolling loads an earlier page")
     const top = await anchor()
-    assert.ok(top.id.startsWith("o") || top.id.startsWith("w"))
-    assert.ok(near(await offsetOf(top.id), top.off))
+    assert.ok(top?.id.startsWith("w"))
+    holdOlder = null
+    olderResponse.resolve()
+    await scroller.locator('[data-chat-older="more"]').waitFor({ state: "attached" })
+    await waitForAnchor(top)
+    assert.ok(!(await atBottom()), "loading older messages must not resume following the latest reply")
+    const prepended = await offsetOf(top.id)
+    assert.ok(near(prepended, top.off), `prepending shifted ${top.id}: ${top.off} → ${prepended}`)
+    await page.mouse.wheel(0, -600)
+    await page.locator('[data-msg^="o"]').first().waitFor({ state: "attached" })
 
     // A7: the reading position and the draft survive a reload; at the bottom it stays the bottom.
     await page.mouse.wheel(0, 1200)
@@ -138,8 +168,9 @@ try {
     await page.waitForTimeout(400)
     await page.reload()
     await page.locator(`[data-msg="${before.id}"]`).waitFor({ state: "attached" })
-    await page.waitForTimeout(400)
-    assert.ok(near(await offsetOf(before.id), before.off, 8), `restored ${before.id}: ${await offsetOf(before.id)} vs ${before.off}, saved ${await page.evaluate(() => localStorage.getItem("steve:read:v1:ws-history"))}, now ${JSON.stringify(await anchor())}`)
+    await waitForAnchor(before, 8)
+    const restored = await offsetOf(before.id)
+    assert.ok(near(restored, before.off, 8), `restored ${before.id}: ${restored} vs ${before.off}, saved ${await page.evaluate(() => localStorage.getItem("steve:read:v1:ws-history"))}, now ${JSON.stringify(await anchor())}`)
     assert.equal(await page.locator('[data-composer="chat"] textarea').inputValue(), "还没发出去的话")
     await page.locator("[data-jump-latest]").click()
     await page.waitForTimeout(500)

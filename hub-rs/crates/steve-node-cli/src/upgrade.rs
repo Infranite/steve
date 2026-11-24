@@ -409,7 +409,7 @@ async fn stage_release(
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             unpack(&a, &s)?;
             if boot_supervised() {
-                InstalledService::open(&home)?.0.verify_boot_upgrade(&s)?;
+                InstalledService::open(&home)?.0.prepare_boot_upgrade(&s)?;
             }
             verify(&s, &b)
         })
@@ -1337,10 +1337,15 @@ mod tests {
         let exe = bin.join("steve-node");
         std::fs::write(&exe, b"fixture").unwrap();
         let legacy = serde_json::json!({ "release": release.path() });
+        let unsigned_boot = serde_json::json!({
+            "boot_release": release.path(), "code_requirement": null
+        });
         let boot = serde_json::json!({
-            "boot_release": release.path(), "code_requirement": "identifier \"node\""
+            "boot_release": release.path(),
+            "code_requirement": "identifier \"io.github.infranite.steve.node\" and certificate leaf = H\"0123456789abcdef0123456789abcdef01234567\""
         });
         assert!(service_release_for(&legacy, &exe, true, true).is_none());
+        assert!(service_release_for(&unsigned_boot, &exe, true, true).is_none());
         assert!(service_release_for(&boot, &exe, true, false).is_none());
         assert_eq!(
             service_release_for(&boot, &exe, true, true),

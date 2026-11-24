@@ -22,13 +22,26 @@ export function seedDecisions(waits: Wait[]) {
   patch(waits.map((w): PatchOp => ({ type: "decision", op: "upsert", id: w.decision, view: decisionFixture(w) })))
 }
 
+/** The typed lifecycle a fixture's display status stands for (a waiting item is active with an open decision). */
+function fixtureState(st: Item["st"]): ItemView["state"] {
+  switch (st) {
+    case "done": return { kind: "closed", outcome: "finished", by: "owner" }
+    case "drop": return { kind: "closed", outcome: "cancelled", by: "owner" }
+    case "fail": return { kind: "closed", outcome: "failed", by: "acceptance" }
+    case "pause": return { kind: "paused" }
+    case "prop": return { kind: "ready" }
+    default: return { kind: "active" }
+  }
+}
+
 export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<Item>)[]) {
   const ops: PatchOp[] = []
   for (const i of items) {
     const parent = typeof i.parent === "object" ? i.parent : null
     const view: ItemView = {
       id: i.id, ws: "default", no: Number(i.id.split("-")[1]) || 0, title: i.t, bot_id: i.b,
-      status: i.st, phase: i.phase ?? "active", stage: "执行", cycle: i.cycle ?? 1,
+      state: fixtureState(i.st), cycle: i.cycle ?? 1, revision: 1, delivery_revision: 0, delivery: [],
+      waits: i.st === "block" ? ["prerequisite"] : [],
       priority: i.pri ?? "中", star: !!i.star, archived: !!i.arch, design_gate: !!i.designGate,
       parent: parent ? { item: parent.item, session: parent.s, at: parent.at } : undefined,
       accept_mode: i.acc, project_id: i.project ?? undefined, source: i.src?.[1] ?? "",
