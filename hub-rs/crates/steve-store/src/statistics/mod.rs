@@ -31,8 +31,8 @@ pub use reports::{
 mod events;
 pub use events::{DecisionEvent, EventItem, MarkEvent, TurnEvent};
 
-mod workflow;
-pub use workflow::{ConversationMeasures, WorkflowHistory, WorkflowReads};
+mod delivery;
+pub use delivery::ConversationMeasures;
 
 mod views;
 pub use views::{

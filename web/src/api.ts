@@ -7,7 +7,6 @@ import { reasonText } from "./i18n/reason.ts"
 import { resumableStream } from "./stream-cursor"
 import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { ItemDispatch } from "./bot-dispatch"
-import type { Workflow } from "./workflow"
 import type { Delivery, DeliveryShare } from "./delivery"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type DependencyWait = {
@@ -20,7 +19,6 @@ export type DependencyWait = {
   can_register: boolean; register_blocker: string | null
 }
 export type RItemDetail = { id: string; source?: [string, string]; cwd?: string | null; branch?: string | null; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id: string | null }[]; decisions: DecisionView[]; dependents: string[]
-  workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   dispatch?: ItemDispatch
   /** outputs delivered as records of the work (self-check screenshots, logs): `{artifact id: "record"}` */
@@ -336,8 +334,6 @@ export const api = {
   readNotifications: (at?: number) => post<{ seen: number }>("/notifications/read", { at }),
   dismissNotice: (id: string) => post<{ ok: true }>(`/notifications/${encodeURIComponent(id)}/dismiss`, {}),
   item: (id: string, signal?: AbortSignal) => req<RItemDetail>("GET", "/items/" + id, undefined, undefined, signal),
-  workflow: (id: string) => get<Workflow | null>(`/items/${encodeURIComponent(id)}/workflow`),
-  workflowChange: (id: string, p: { action: "pause" | "resume" | "retry" | "cancel" | "single_session"; expected_revision: number; reason: string; unit_id?: string }) => post<Workflow>(`/items/${encodeURIComponent(id)}/workflow`, p),
   outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
   delivery: (id: string) => get<Delivery>(`/file-deliveries/${encodeURIComponent(id)}`),
   /** "我的发布": the deliveries this user manages in the current workspace, newest first */

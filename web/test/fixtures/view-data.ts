@@ -50,10 +50,6 @@ export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<
       tags: i.tags ?? [], deps: i.deps ?? [], plan_total: i.plan?.length ?? 0,
       plan_done: i.plan?.filter((p) => p[1] === 1).length ?? 0, op_blockers: [], active_operations: 0,
       detail_stamp: 0, has_branch: !!i.branch,
-      workflow: i.workflowCycle != null || i.workflowPaused || i.workflowAttempt ? {
-        paused: i.workflowPaused ?? null, cycle: i.workflowCycle ?? null,
-        failed: i.workflowFailed ?? [], attempt: i.workflowAttempt ?? null, superseded: !!i.workflowSuperseded,
-      } : undefined,
     }
     ops.push({ type: "item", op: "upsert", id: i.id, view })
     for (const [n, w] of (i.waits ?? []).entries()) {
@@ -66,9 +62,9 @@ export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<
         resolved: null, undo_until: null, space_id: null, tier: w.tier ?? "decide", folded: null, revision: 1,
       } })
     }
-    if (i.workflow || i.outs?.length) {
+    if (i.outs?.length) {
       qc.setQueryData(["detail", scopeKey(), "item", i.id], {
-        workflow: i.workflow, decisions: [], timeline: [], dependents: [], goalsList: [], plan: [], planRounds: [],
+        decisions: [], timeline: [], dependents: [], goalsList: [], plan: [], planRounds: [],
         artifacts: (i.outs ?? []).map(([kind, title, location, id, created, , delivery_id]) => ({ kind, title, location, id, created, delivery_id })),
       })
     }

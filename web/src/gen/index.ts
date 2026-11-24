@@ -48,7 +48,6 @@ export type { ItemSnooze } from "./ItemSnooze";
 export type { ItemState } from "./ItemState";
 export type { ItemView } from "./ItemView";
 export type { ItemWait } from "./ItemWait";
-export type { ItemWorkflow } from "./ItemWorkflow";
 export type { KbDocId } from "./KbDocId";
 export type { KbSourceId } from "./KbSourceId";
 export type { KnowledgeEvent } from "./KnowledgeEvent";
