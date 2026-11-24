@@ -249,3 +249,6 @@ impl Kit {
             .collect()
     }
 }
+
+#[path = "../../tests/fixtures/thread_replay.rs"]
+mod thread_replay;
