@@ -182,6 +182,7 @@ fn source(
                 tokio::task::spawn_blocking(move || {
                     // Repository maintenance reports failures through backup telemetry.
                     crate::backup::retain(&store, &home, now.max(0) as u64)
+                        .map(|()| false)
                         .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))
                 })
                 .await

@@ -70,11 +70,17 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
     fs::create_dir(h.join("backups")).unwrap();
     fs::set_permissions(h.join("backups"), fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(h.join("backups/old-copy"), b"keep").unwrap();
-    for part in ["workspaces/item/node_modules", "signing", "secrets"] {
+    for part in [
+        "workspaces/item/node_modules",
+        "deliveries/objects",
+        "signing",
+        "secrets",
+    ] {
         fs::create_dir_all(h.join(part)).unwrap();
     }
     for path in [
         "data/files/asset",
+        "deliveries/objects/sample",
         "workspaces/item/output",
         "workspaces/item/node_modules/cache",
         "signing/identity.json",
@@ -109,7 +115,10 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
     let second: BackupReceipt = serde_json::from_str(&out).unwrap();
     assert_eq!(second.database.sha256, first.database.sha256);
     assert_ne!(first.snapshot_id, second.snapshot_id);
-    assert!(second.written_bytes < 4096, "{second:?}");
+    assert!(
+        second.written_bytes < first.written_bytes && second.written_bytes < first.database.bytes,
+        "first={first:?} second={second:?}"
+    );
     assert_eq!(fs::read_dir(foreign.path()).unwrap().count(), 1);
     assert!(h.join("backups/.restic-cache").is_dir());
 
@@ -149,8 +158,15 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
         let state = receipt.purpose != BackupPurpose::Diagnostic;
         let all = state && receipt.purpose != BackupPurpose::PreUpgrade;
         assert_eq!(path.join("files/data/files/asset").is_file(), all);
+        assert_eq!(path.join("files/deliveries/objects/sample").is_file(), all);
         assert_eq!(path.join("files/signing/identity.json").is_file(), state);
+        assert_eq!(
+            path.join("files/signing/steve-signing.keychain-db")
+                .is_file(),
+            state
+        );
         assert_eq!(path.join("files/secrets/token").is_file(), state);
+        assert_eq!(path.join("files/steve.env").is_file(), state);
         assert_eq!(path.join("files/workspaces/item/output").is_file(), all);
         for excluded in [
             "signing/keychain-pass",

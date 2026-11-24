@@ -155,22 +155,19 @@ async fn status(State(store): State<Store>) -> Response {
 
 #[derive(Default, Deserialize, Serialize)]
 pub(super) struct BackupRequest {
-    pub reason: Option<String>,
+    pub reason: Option<crate::backup::Purpose>,
 }
 async fn make_backup(
     State(store): State<Store>,
     Extension(home): Extension<PathBuf>,
     input: Option<Json<BackupRequest>>,
 ) -> Response {
-    let input = input.map(|Json(input)| input).unwrap_or_default();
-    let args = vec![
-        "backup".into(),
-        "--reason".into(),
-        input.reason.unwrap_or_else(|| "manual".into()),
-    ];
+    let purpose = input
+        .and_then(|Json(input)| input.reason)
+        .unwrap_or(crate::backup::Purpose::Manual);
     let result = tokio::task::spawn_blocking(move || {
-        let db = store.path();
-        super::client::backup::command(&home, db, &args)
+        let receipt = crate::backup::create(&home, store.path(), purpose)?;
+        Ok::<_, anyhow::Error>(serde_json::to_string_pretty(&receipt)?)
     })
     .await;
     let output =

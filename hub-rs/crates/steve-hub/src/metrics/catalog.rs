@@ -16,6 +16,8 @@ pub(super) const LONG: &[&str] = &[
     "steve_node_link_uptime_seconds",
     "steve_model_call_seconds",
     "steve_backup_operation_seconds",
+    "steve_backup_phase_seconds",
+    "steve_backup_engine_command_seconds",
 ];
 
 pub(super) fn describe() {
@@ -150,10 +152,50 @@ pub(super) fn describe() {
         Seconds,
         "Backup operation time. Labels: operation, purpose."
     );
+    describe_histogram!(
+        "steve_backup_phase_seconds",
+        Seconds,
+        "Backup phase duration across SQLite, staging and repository boundaries. Labels: phase, purpose."
+    );
+    describe_counter!(
+        "steve_backup_engine_commands_total",
+        Count,
+        "Backup engine subprocess invocations. Labels: command, result."
+    );
+    describe_histogram!(
+        "steve_backup_engine_command_seconds",
+        Seconds,
+        "Backup engine subprocess duration. Labels: command."
+    );
     describe_counter!(
         "steve_backup_written_bytes_total",
         Bytes,
         "Bytes written by repository initialization, completed backups or restores. Labels: operation, purpose."
+    );
+    describe_counter!(
+        "steve_backup_staged_files_total",
+        Count,
+        "Allowlisted installation files staged for backup. Labels: purpose."
+    );
+    describe_counter!(
+        "steve_backup_staged_bytes_total",
+        Bytes,
+        "Bytes copied while staging allowlisted installation files for backup. Labels: purpose."
+    );
+    describe_counter!(
+        "steve_backup_skipped_caches_total",
+        Count,
+        "Disposable workspace cache directories excluded during backup staging. Labels: purpose."
+    );
+    describe_counter!(
+        "steve_backup_snapshots_deleted_total",
+        Count,
+        "Expired or incomplete backup snapshots forgotten during retention. Labels: purpose."
+    );
+    describe_counter!(
+        "steve_backup_reclaimed_bytes_total",
+        Bytes,
+        "Repository bytes reclaimed by backup pruning."
     );
     describe_counter!(
         "steve_backup_failures_total",

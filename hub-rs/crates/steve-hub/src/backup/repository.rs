@@ -2,7 +2,9 @@ use super::{
     Purpose,
     engine::{Engine, private, private_tempdir},
 };
-use crate::metrics::backup::{self as telemetry, Observation, Operation};
+use crate::metrics::backup::{
+    self as telemetry, EngineCommand, Event, Observation, Operation, Phase,
+};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -148,39 +150,43 @@ impl Repository {
         }
         repo.engine.reset_work()?;
         if !exists {
-            let init = private_tempdir(&repo.work(), "init-")?;
-            repo.engine.run_at(
-                init.path(),
-                &repo.key,
-                "init",
-                &["--repository-version".as_ref(), "2".as_ref()],
-                init.path(),
-            )?;
-            private(init.path())?;
-            fs::rename(init.path(), &path)?;
-            File::open(path.parent().context("missing repository parent")?)?.sync_all()?;
-            let elapsed = started.elapsed();
-            let bytes = super::capacity(&path).ok().map(|capacity| capacity.bytes);
+            let init_result = (|| -> Result<Option<u64>> {
+                let init = private_tempdir(&repo.work(), "init-")?;
+                repo.engine.run_at(
+                    init.path(),
+                    &repo.key,
+                    EngineCommand::Init,
+                    &["--repository-version".as_ref(), "2".as_ref()],
+                    init.path(),
+                )?;
+                private(init.path())?;
+                fs::rename(init.path(), &path)?;
+                File::open(path.parent().context("missing repository parent")?)?.sync_all()?;
+                Ok(super::capacity(&path).ok().map(|capacity| capacity.bytes))
+            })();
+            let bytes = init_result.as_ref().ok().copied().flatten();
             telemetry::report(
                 home,
                 Observation {
                     operation: Operation::Initialize,
                     purpose: None,
-                    elapsed,
+                    elapsed: started.elapsed(),
                     bytes,
-                    failure: None,
+                    failure: init_result.as_ref().err().map(super::error_code),
                 },
             );
+            init_result?;
         }
         #[derive(Deserialize)]
         struct Config {
             version: u32,
         }
-        let config: Config = serde_json::from_slice(&repo.command("cat", &["config".as_ref()])?)?;
+        let config: Config =
+            serde_json::from_slice(&repo.command(EngineCommand::Cat, &["config".as_ref()])?)?;
         ensure!(config.version == 2, "backup repository must use format v2");
         // The repository's own liveness check removes stale locks left by an interrupted
         // restic process. It preserves locks belonging to active clients.
-        repo.command("unlock", &[])?;
+        repo.command(EngineCommand::Unlock, &[])?;
         Ok(Some(repo))
     }
 
@@ -194,12 +200,12 @@ impl Repository {
         self.engine.remaining()
     }
 
-    pub fn command(&self, operation: &'static str, args: &[&OsStr]) -> Result<Vec<u8>> {
+    pub fn command(&self, operation: EngineCommand, args: &[&OsStr]) -> Result<Vec<u8>> {
         self.engine.run(&self.key, operation, args, &self.work())
     }
 
     pub fn snapshots(&self) -> Result<Vec<Snapshot>> {
-        let bytes = self.command("snapshots", &[])?;
+        let bytes = self.command(EngineCommand::Snapshots, &[])?;
         Ok(serde_json::from_slice::<Option<Vec<Snapshot>>>(&bytes)?.unwrap_or_default())
     }
 
@@ -222,9 +228,31 @@ impl Repository {
         if required.len() > 2 {
             args.push("files".as_ref());
         }
-        let bytes = match self.engine.run(&self.key, "backup", &args, cwd) {
-            Ok(bytes) => bytes,
+        let backup_started = Instant::now();
+        let bytes = match self
+            .engine
+            .run(&self.key, EngineCommand::Backup, &args, cwd)
+        {
+            Ok(bytes) => {
+                telemetry::emit(
+                    self.engine.home(),
+                    Event::Phase {
+                        phase: Phase::RepoBackup,
+                        purpose: Some(purpose),
+                        elapsed: backup_started.elapsed(),
+                    },
+                );
+                bytes
+            }
             Err(error) => {
+                telemetry::emit(
+                    self.engine.home(),
+                    Event::Phase {
+                        phase: Phase::RepoBackup,
+                        purpose: Some(purpose),
+                        elapsed: backup_started.elapsed(),
+                    },
+                );
                 return match self.require_prune() {
                     Ok(()) => Err(error),
                     Err(mark) => {
@@ -246,41 +274,66 @@ impl Repository {
         }
         let (pending, written) =
             summary.context("backup summary omitted snapshot ID or written bytes")?;
-        let mut args: Vec<&OsStr> = vec![pending.as_str().as_ref()];
-        args.extend(required.iter().map(OsStr::new));
-        let listing = self.command("ls", &args)?;
-        let mut present = std::collections::HashSet::new();
-        for message in messages(&listing) {
-            if let Message::Node { path, kind, size } = message?
-                && match path.as_str() {
-                    super::DATABASE_ENTRY => kind == "file" && size == Some(database.bytes),
-                    super::CHECKSUM_ENTRY => kind == "file" && size == Some(64),
-                    _ => true,
+        let verify_started = Instant::now();
+        let verify_result = (|| -> Result<()> {
+            let mut args: Vec<&OsStr> = vec![pending.as_str().as_ref()];
+            args.extend(required.iter().map(OsStr::new));
+            let listing = self.command(EngineCommand::Ls, &args)?;
+            let mut present = std::collections::HashSet::new();
+            for message in messages(&listing) {
+                if let Message::Node { path, kind, size } = message?
+                    && match path.as_str() {
+                        super::DATABASE_ENTRY => kind == "file" && size == Some(database.bytes),
+                        super::CHECKSUM_ENTRY => kind == "file" && size == Some(64),
+                        _ => true,
+                    }
+                {
+                    present.insert(path);
                 }
-            {
-                present.insert(path);
             }
-        }
-        ensure!(
-            required.iter().all(|path| present.contains(path)),
-            "backup_required_file_missing"
+            ensure!(
+                required.iter().all(|path| present.contains(path)),
+                "backup_required_file_missing"
+            );
+            let checksum = self.command(
+                EngineCommand::Dump,
+                &[pending.as_str().as_ref(), super::CHECKSUM_ENTRY.as_ref()],
+            )?;
+            ensure!(
+                checksum == database.sha256.as_bytes(),
+                "backup database checksum metadata mismatch"
+            );
+            Ok(())
+        })();
+        telemetry::emit(
+            self.engine.home(),
+            Event::Phase {
+                phase: Phase::RepoVerify,
+                purpose: Some(purpose),
+                elapsed: verify_started.elapsed(),
+            },
         );
-        let checksum = self.command(
-            "dump",
-            &[pending.as_str().as_ref(), super::CHECKSUM_ENTRY.as_ref()],
-        )?;
-        ensure!(
-            checksum == database.sha256.as_bytes(),
-            "backup database checksum metadata mismatch"
-        );
+        verify_result?;
         // Only a successful, verified pending snapshot gets a durable publication intent.
+        let publish_started = Instant::now();
         let intent = Publication {
             pending,
             purpose,
             operation,
         };
-        crate::upgrades::atomic(&self.publication_path(), &intent)?;
-        Ok((self.finish_publication(&intent)?, written))
+        let published = (|| -> Result<Snapshot> {
+            crate::upgrades::atomic(&self.publication_path(), &intent)?;
+            self.finish_publication(&intent)
+        })();
+        telemetry::emit(
+            self.engine.home(),
+            Event::Phase {
+                phase: Phase::RepoPublish,
+                purpose: Some(purpose),
+                elapsed: publish_started.elapsed(),
+            },
+        );
+        Ok((published?, written))
     }
 
     fn publication_path(&self) -> PathBuf {
@@ -298,8 +351,10 @@ impl Repository {
 
     fn finish_publication(&self, intent: &Publication) -> Result<Snapshot> {
         let identities = |repo: &Self| -> Result<Vec<Snapshot>> {
-            let bytes =
-                repo.command("snapshots", &["--tag".as_ref(), intent.operation.as_ref()])?;
+            let bytes = repo.command(
+                EngineCommand::Snapshots,
+                &["--tag".as_ref(), intent.operation.as_ref()],
+            )?;
             Ok(serde_json::from_slice::<Option<Vec<Snapshot>>>(&bytes)?.unwrap_or_default())
         };
         let mut identities_before = identities(self)?;
@@ -315,7 +370,7 @@ impl Repository {
             );
             let tag = purpose_tag(intent.purpose);
             self.command(
-                "tag",
+                EngineCommand::Tag,
                 &[
                     "--add".as_ref(),
                     tag.as_ref(),
@@ -342,35 +397,53 @@ impl Repository {
         Ok(snapshot)
     }
 
-    pub fn restore(&self, id: &SnapshotId, target: &Path, db_only: bool) -> Result<u64> {
-        let mut args = vec![
-            id.as_str().as_ref(),
-            "--target".as_ref(),
-            target.as_os_str(),
-            "--verify".as_ref(),
-        ];
-        if db_only {
-            args.extend(
-                [
-                    "--include",
-                    super::DATABASE_ENTRY,
-                    "--include",
-                    super::CHECKSUM_ENTRY,
-                ]
-                .map(OsStr::new),
-            );
-        }
-        let output = self.command("restore", &args)?;
-        for message in messages(&output) {
-            if let Message::Summary {
-                bytes_restored: Some(bytes),
-                ..
-            } = message?
-            {
-                return Ok(bytes);
+    pub fn restore(
+        &self,
+        id: &SnapshotId,
+        purpose: Purpose,
+        target: &Path,
+        db_only: bool,
+    ) -> Result<u64> {
+        let started = Instant::now();
+        let result = (|| -> Result<u64> {
+            let mut args = vec![
+                id.as_str().as_ref(),
+                "--target".as_ref(),
+                target.as_os_str(),
+                "--verify".as_ref(),
+            ];
+            if db_only {
+                args.extend(
+                    [
+                        "--include",
+                        super::DATABASE_ENTRY,
+                        "--include",
+                        super::CHECKSUM_ENTRY,
+                    ]
+                    .map(OsStr::new),
+                );
             }
-        }
-        anyhow::bail!("restore summary omitted bytes restored")
+            let output = self.command(EngineCommand::Restore, &args)?;
+            for message in messages(&output) {
+                if let Message::Summary {
+                    bytes_restored: Some(bytes),
+                    ..
+                } = message?
+                {
+                    return Ok(bytes);
+                }
+            }
+            anyhow::bail!("restore summary omitted bytes restored")
+        })();
+        telemetry::emit(
+            self.engine.home(),
+            Event::Phase {
+                phase: Phase::RepoRestore,
+                purpose: Some(purpose),
+                elapsed: started.elapsed(),
+            },
+        );
+        result
     }
 
     pub fn require_prune(&self) -> Result<()> {
@@ -388,21 +461,53 @@ impl Repository {
         Ok(())
     }
 
-    pub fn prune_if_needed(&self) -> Result<()> {
+    pub fn prune_if_needed(&self) -> Result<bool> {
         let mark = self.path().with_file_name(".restic-needs-prune");
         if mark.try_exists()? {
-            self.command("prune", &["--max-unused".as_ref(), "0".as_ref()])?;
-            fs::remove_file(&mark)?;
-            File::open(mark.parent().context("missing prune marker parent")?)?.sync_all()?;
+            let started = Instant::now();
+            let result = (|| -> Result<()> {
+                self.command(
+                    EngineCommand::Prune,
+                    &["--max-unused".as_ref(), "0".as_ref()],
+                )?;
+                fs::remove_file(&mark)?;
+                File::open(mark.parent().context("missing prune marker parent")?)?.sync_all()?;
+                Ok(())
+            })();
+            telemetry::emit(
+                self.engine.home(),
+                Event::Phase {
+                    phase: Phase::RepoPrune,
+                    purpose: None,
+                    elapsed: started.elapsed(),
+                },
+            );
+            result?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
-    pub fn forget(&self, ids: &[SnapshotId]) -> Result<()> {
-        for chunk in ids.chunks(256) {
-            let args: Vec<_> = chunk.iter().map(|id| OsStr::new(id.as_str())).collect();
-            self.command("forget", &args)?;
+    pub fn forget(&self, purpose: Option<Purpose>, ids: &[SnapshotId]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let started = Instant::now();
+        let result = (|| -> Result<()> {
+            for chunk in ids.chunks(256) {
+                let args: Vec<_> = chunk.iter().map(|id| OsStr::new(id.as_str())).collect();
+                self.command(EngineCommand::Forget, &args)?;
+            }
+            Ok(())
+        })();
+        telemetry::emit(
+            self.engine.home(),
+            Event::Phase {
+                phase: Phase::RepoForget,
+                purpose,
+                elapsed: started.elapsed(),
+            },
+        );
+        result
     }
 }

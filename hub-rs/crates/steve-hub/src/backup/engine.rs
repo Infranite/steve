@@ -1,5 +1,6 @@
 //! The local restic backend. A future destination driver supplies a restic REST endpoint
 //! here while snapshot, retention and restore policy stay in the Hub.
+use crate::metrics::backup::{self as telemetry, EngineCommand, Event, Failure as Code};
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::{self, File, OpenOptions},
@@ -30,6 +31,7 @@ pub(super) enum Failure {
 }
 
 pub(super) struct Engine {
+    home: PathBuf,
     binary: PathBuf,
     base: PathBuf,
     lock: File,
@@ -38,7 +40,8 @@ pub(super) struct Engine {
 
 impl Engine {
     pub(super) fn lock(home: &Path, deadline: Instant) -> Result<Self> {
-        let base = home.canonicalize()?.join("backups");
+        let home_canonical = home.canonicalize()?;
+        let base = home_canonical.join("backups");
         fs::DirBuilder::new()
             .mode(0o700)
             .recursive(true)
@@ -78,6 +81,7 @@ impl Engine {
             private(&dir)?;
         }
         Ok(Self {
+            home: home.to_path_buf(),
             binary,
             base,
             lock,
@@ -85,6 +89,9 @@ impl Engine {
         })
     }
 
+    pub(super) fn home(&self) -> &Path {
+        &self.home
+    }
     pub(super) fn repository(&self) -> PathBuf {
         self.base.join("restic")
     }
@@ -113,7 +120,7 @@ impl Engine {
     pub(super) fn run(
         &self,
         key: &Kek,
-        operation: &'static str,
+        operation: EngineCommand,
         args: &[&std::ffi::OsStr],
         cwd: &Path,
     ) -> Result<Vec<u8>> {
@@ -124,7 +131,37 @@ impl Engine {
         &self,
         repository: &Path,
         key: &Kek,
-        operation: &'static str,
+        operation: EngineCommand,
+        args: &[&std::ffi::OsStr],
+        cwd: &Path,
+    ) -> Result<Vec<u8>> {
+        let started = Instant::now();
+        let result = self.execute_at(repository, key, operation, args, cwd);
+        let failure = result
+            .as_ref()
+            .err()
+            .map(|error| match error.downcast_ref::<Failure>() {
+                Some(Failure::Locked) => Code::Locked,
+                Some(Failure::Incomplete) => Code::SourceIncomplete,
+                Some(Failure::Deadline) => Code::Deadline,
+                _ => Code::Failed,
+            });
+        telemetry::emit(
+            &self.home,
+            Event::Engine {
+                command: operation,
+                elapsed: started.elapsed(),
+                failure,
+            },
+        );
+        result
+    }
+
+    fn execute_at(
+        &self,
+        repository: &Path,
+        key: &Kek,
+        operation: EngineCommand,
         args: &[&std::ffi::OsStr],
         cwd: &Path,
     ) -> Result<Vec<u8>> {
@@ -142,7 +179,7 @@ impl Engine {
             .args(["--password-file", "/dev/stdin", "--cache-dir"])
             .arg(self.base.join(".restic-cache"))
             .arg("--json")
-            .arg(operation)
+            .arg(operation.code())
             .args(args)
             .stdin(Stdio::piped())
             .stdout(output.try_clone()?)
@@ -189,9 +226,9 @@ impl Engine {
         };
         match status.code() {
             Some(0) => {}
-            Some(3) if operation == "backup" => return Err(Failure::Incomplete.into()),
+            Some(3) if operation == EngineCommand::Backup => return Err(Failure::Incomplete.into()),
             Some(11) => return Err(Failure::Locked.into()),
-            code => return Err(Failure::Command(operation, code).into()),
+            code => return Err(Failure::Command(operation.code(), code).into()),
         }
         const MAX_OUTPUT: u64 = 32 * 1024 * 1024;
         ensure!(

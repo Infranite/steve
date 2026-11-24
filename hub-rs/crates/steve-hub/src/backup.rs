@@ -3,7 +3,9 @@ mod engine;
 mod files;
 mod repository;
 
-use crate::metrics::backup::{self as telemetry, Failure as Code, Observation, Operation};
+use crate::metrics::backup::{
+    self as telemetry, Event, Failure as Code, Observation, Operation, Phase,
+};
 use anyhow::{Context, Result, ensure};
 pub(crate) use engine::private as private_directory;
 use engine::{Failure, private_tempdir};
@@ -62,6 +64,7 @@ pub fn root(home: &Path) -> PathBuf {
 }
 
 pub fn create(home: &Path, db: &Path, purpose: Purpose) -> Result<BackupReceipt> {
+    let _telemetry = telemetry::scope(home);
     let start = Instant::now();
     let budget = if purpose == Purpose::PreUpgrade {
         UPGRADE_BUDGET
@@ -77,23 +80,56 @@ pub fn create(home: &Path, db: &Path, purpose: Purpose) -> Result<BackupReceipt>
         DirBuilder::new().mode(0o700).create(&stage)?;
         let stage = Scratch(stage);
         let data = stage.0.join("data");
-        let copied = storage::backup_file(
-            db,
-            &data,
-            &CopyOptions {
-                deadline: Some(repo.remaining()?),
-                ..CopyOptions::default()
+        let snapshot_started = Instant::now();
+        let copied = (|| -> Result<_> {
+            let copied = storage::backup_file(
+                db,
+                &data,
+                &CopyOptions {
+                    deadline: Some(repo.remaining()?),
+                    ..CopyOptions::default()
+                },
+                &|_| {},
+                &CancelFlag::default(),
+            )?;
+            let staged_db = stage.0.join(&DATABASE_ENTRY[1..]);
+            if copied.path != staged_db {
+                fs::rename(&copied.path, &staged_db)?;
+            }
+            fs::write(stage.0.join(&CHECKSUM_ENTRY[1..]), copied.sha256.as_bytes())?;
+            Ok(copied)
+        })();
+        telemetry::emit(
+            home,
+            Event::Phase {
+                phase: Phase::SqliteSnapshot,
+                purpose: Some(purpose),
+                elapsed: snapshot_started.elapsed(),
             },
-            &|_| {},
-            &CancelFlag::default(),
-        )?;
-        let staged_db = stage.0.join(&DATABASE_ENTRY[1..]);
-        if copied.path != staged_db {
-            fs::rename(copied.path, &staged_db)?;
-        }
-        fs::write(stage.0.join(&CHECKSUM_ENTRY[1..]), copied.sha256.as_bytes())?;
+        );
+        let copied = copied?;
         let mut required = vec![DATABASE_ENTRY.into(), CHECKSUM_ENTRY.into()];
-        required.extend(files::stage(home, &stage.0.join("files"), scope(purpose))?);
+        let stage_started = Instant::now();
+        let staged = files::stage(home, &stage.0.join("files"), scope(purpose));
+        telemetry::emit(
+            home,
+            Event::Phase {
+                phase: Phase::FileStage,
+                purpose: Some(purpose),
+                elapsed: stage_started.elapsed(),
+            },
+        );
+        let staged = staged?;
+        telemetry::emit(
+            home,
+            Event::Staged {
+                purpose,
+                files: staged.files,
+                bytes: staged.bytes,
+                skipped_caches: staged.skipped_caches,
+            },
+        );
+        required.extend(staged.required);
         let database = VerifiedDatabase {
             sha256: copied.sha256,
             bytes: copied.bytes,
@@ -139,27 +175,41 @@ fn valid_snapshot(repo: &Repository, id: &SnapshotId) -> Result<Purpose> {
 }
 
 fn restore_verified(
+    home: &Path,
     repo: &Repository,
     id: &SnapshotId,
+    purpose: Purpose,
     target: &Path,
     db_only: bool,
 ) -> Result<(PathBuf, u64)> {
-    let bytes = repo.restore(id, target, db_only)?;
-    let db = target.join(&DATABASE_ENTRY[1..]);
-    let checksum = target.join(&CHECKSUM_ENTRY[1..]);
-    ensure!(
-        fs::symlink_metadata(target.join("data"))?.is_dir()
-            && fs::symlink_metadata(&db)?.is_file()
-            && fs::symlink_metadata(&checksum).is_ok_and(|m| m.is_file() && m.len() == 64),
-        "backup_required_file_missing"
+    let bytes = repo.restore(id, purpose, target, db_only)?;
+    let verify_started = Instant::now();
+    let verified = (|| -> Result<PathBuf> {
+        let db = target.join(&DATABASE_ENTRY[1..]);
+        let checksum = target.join(&CHECKSUM_ENTRY[1..]);
+        ensure!(
+            fs::symlink_metadata(target.join("data"))?.is_dir()
+                && fs::symlink_metadata(&db)?.is_file()
+                && fs::symlink_metadata(&checksum).is_ok_and(|m| m.is_file() && m.len() == 64),
+            "backup_required_file_missing"
+        );
+        storage::verify_file(&db, &fs::read_to_string(checksum)?)?;
+        Ok(db)
+    })();
+    telemetry::emit(
+        home,
+        Event::Phase {
+            phase: Phase::SqliteVerify,
+            purpose: Some(purpose),
+            elapsed: verify_started.elapsed(),
+        },
     );
-    storage::verify_file(&db, &fs::read_to_string(checksum)?)?;
-    Ok((db, bytes))
+    Ok((verified?, bytes))
 }
 
 /// Restore every backed-up file into a newly allocated private directory within `parent`.
 pub fn restore_to(home: &Path, id: &SnapshotId, parent: &Path) -> Result<PathBuf> {
-    restore_operation(home, id, |repo| {
+    restore_operation(home, id, |repo, purpose| {
         let parent = parent.canonicalize()?;
         let path = repo.path();
         ensure!(
@@ -167,7 +217,7 @@ pub fn restore_to(home: &Path, id: &SnapshotId, parent: &Path) -> Result<PathBuf
             "restore destination overlaps the backup directory"
         );
         let stage = private_tempdir(&parent, "steve-restore-")?;
-        let (_, bytes) = restore_verified(repo, id, stage.path(), false)?;
+        let (_, bytes) = restore_verified(home, repo, id, purpose, stage.path(), false)?;
         Ok((stage.keep(), bytes))
     })
 }
@@ -175,10 +225,10 @@ pub fn restore_to(home: &Path, id: &SnapshotId, parent: &Path) -> Result<PathBuf
 /// Restore the database with the installation instance lock held by the offline caller. Keep the failed probe
 /// next to the database, then publish the verified replacement with one same-filesystem rename.
 pub fn restore_database(home: &Path, db: &Path, id: &SnapshotId) -> Result<()> {
-    restore_operation(home, id, |repo| {
+    restore_operation(home, id, |repo, purpose| {
         let parent = db.parent().context("missing database parent")?;
         let stage = private_tempdir(parent, ".steve-restore-")?;
-        let (verified, bytes) = restore_verified(repo, id, stage.path(), true)?;
+        let (verified, bytes) = restore_verified(home, repo, id, purpose, stage.path(), true)?;
         File::open(&verified)?.sync_all()?;
         if db.try_exists()? {
             let mut wal_path = db.as_os_str().to_os_string();
@@ -204,15 +254,17 @@ pub fn restore_database(home: &Path, db: &Path, id: &SnapshotId) -> Result<()> {
 fn restore_operation<T>(
     home: &Path,
     id: &SnapshotId,
-    restore: impl FnOnce(&Repository) -> Result<(T, u64)>,
+    restore: impl FnOnce(&Repository, Purpose) -> Result<(T, u64)>,
 ) -> Result<T> {
+    let _telemetry = telemetry::scope(home);
     let start = Instant::now();
     let mut purpose = None;
     let result = (|| {
         let repo = Repository::open(home, start + BACKUP_BUDGET, false)?
             .context("backup_repository_missing")?;
-        purpose = Some(valid_snapshot(&repo, id)?);
-        restore(&repo)
+        let found = valid_snapshot(&repo, id)?;
+        purpose = Some(found);
+        restore(&repo, found)
     })();
     let written = result.as_ref().ok().map(|(_, bytes)| *bytes);
     record(home, Operation::Restore, purpose, start, &result, written);
@@ -241,11 +293,12 @@ fn expired(snapshots: &[Snapshot], now: u64, daily_days: u64, purpose: Purpose) 
         .collect()
 }
 
-pub fn retain(store: &steve_store::Store, home: &Path, now: u64) -> Result<bool> {
+pub fn retain(store: &steve_store::Store, home: &Path, now: u64) -> Result<()> {
+    let _telemetry = telemetry::scope(home);
     let start = Instant::now();
     let result = (|| {
         let Some(repo) = Repository::open(home, start + BACKUP_BUDGET, false)? else {
-            return Ok(false);
+            return Ok(());
         };
         repo.recover_publication()?;
         let daily = daily_settings(store)?.keep_days;
@@ -263,7 +316,8 @@ pub fn retain(store: &steve_store::Store, home: &Path, now: u64) -> Result<bool>
             for (purpose, ids) in by_purpose {
                 if !ids.is_empty() {
                     let start = Instant::now();
-                    let result = repo.forget(&ids);
+                    let count = ids.len() as u64;
+                    let result = repo.forget(Some(purpose), &ids);
                     record(
                         home,
                         Operation::Cleanup,
@@ -273,13 +327,39 @@ pub fn retain(store: &steve_store::Store, home: &Path, now: u64) -> Result<bool>
                         None,
                     );
                     result?;
+                    telemetry::emit(
+                        home,
+                        Event::Deleted {
+                            purpose: Some(purpose),
+                            count,
+                        },
+                    );
                 }
             }
-            repo.forget(&pending)?;
+            if !pending.is_empty() {
+                let count = pending.len() as u64;
+                repo.forget(None, &pending)?;
+                telemetry::emit(
+                    home,
+                    Event::Deleted {
+                        purpose: None,
+                        count,
+                    },
+                );
+            }
         }
-        repo.prune_if_needed()?;
-        observe_capacity(&repo.path());
-        Ok(false)
+        let before = capacity(&repo.path()).ok().map(|c| c.bytes);
+        let pruned = repo.prune_if_needed()?;
+        let after = observe_capacity(&repo.path()).map(|c| c.bytes);
+        if pruned && let (Some(before), Some(after)) = (before, after) {
+            telemetry::emit(
+                home,
+                Event::Reclaimed {
+                    bytes: before.saturating_sub(after),
+                },
+            );
+        }
+        Ok(())
     })();
     record(home, Operation::Cleanup, None, start, &result, None);
     result
@@ -305,7 +385,7 @@ fn record<T>(
     );
 }
 
-fn error_code(error: &anyhow::Error) -> Code {
+pub(super) fn error_code(error: &anyhow::Error) -> Code {
     match error.downcast_ref::<Failure>() {
         Some(Failure::Locked) => Code::Locked,
         Some(Failure::Incomplete) => Code::SourceIncomplete,
@@ -414,6 +494,7 @@ pub struct SnapshotInfo {
 }
 
 pub fn list(home: &Path) -> Result<Vec<SnapshotInfo>> {
+    let _telemetry = telemetry::scope(home);
     let Some(repo) = Repository::open(home, Instant::now() + STATUS_BUDGET, false)? else {
         return Ok(Vec::new());
     };
