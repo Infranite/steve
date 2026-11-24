@@ -393,7 +393,8 @@ async fn model_settings() {
     assert_eq!(h_of(&v, "claude-code")["efforts"][4]["key"], "max");
     assert_eq!(h_of(&v, "codex")["id"], "codex");
     assert_eq!(h_of(&v, "gemini")["id"], "gemini");
-    assert_eq!(v["harnesses"].as_array().unwrap().len(), 17);
+    assert_eq!(h_of(&v, "antigravity")["id"], "antigravity");
+    assert_eq!(v["harnesses"].as_array().unwrap().len(), 18);
     let native = v["harnesses"]
         .as_array()
         .unwrap()

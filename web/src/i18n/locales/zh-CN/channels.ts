@@ -264,7 +264,7 @@ export default {
   /* the 新群 card in 待处理; its parts are joined with " · " */
   newSpace: {
     current: "现在用“{{persona}}”，按账号的默认规则处理",
-    suggest: "{{reason}}。建议设为“不提醒”：照样记录、可以搜索，但不进待处理、不起草、不提醒你。",
+    suggest: "{{reason}}。建议设为“不提醒”：照样记录、可以搜索，但不进待我决定、不起草、不提醒你。",
     legend: "不提醒：只记录，不打扰你。屏蔽：不处理，也不保存新消息。只记录：Steve 在这里不发言。",
     block: "屏蔽",
     quiet: "不提醒",
@@ -466,7 +466,7 @@ export default {
     steveHere: "Steve 在这里",
     role: "角色",
     roleOff: "你设了“{{attention}}”：这里的响应规则暂不生效",
-    mutedSub: "不发言，也不起草；转给你的仍进待处理（静默）",
+    mutedSub: "不发言，也不起草；转给你的仍进待我决定（静默）",
     replyAsYou: "替你回复",
     replyAsYouSaved: "已设为替你回复：{{level}}",
     botNotices: "机器人的通知",
@@ -529,6 +529,6 @@ export default {
     historyLateHint: "写完很久才收到的消息：只记录，Steve 没有处理",
     historyBackfillHint: "连接中断后补取回来的消息：只记录，Steve 没有处理",
     madeItem: "建成了事项 {{id}}",
-    approve: "在待处理里批准",
+    approve: "在待我决定里批准",
   },
 }

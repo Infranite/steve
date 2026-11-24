@@ -22,6 +22,7 @@ import { WhereSection } from "@/stats/where"
 import { BotCompare, ModelCompare } from "@/stats/compare"
 import { WorkflowSection } from "@/stats/workflow"
 import { StatsItemView } from "@/stats/drill"
+import { NavUsageSection } from "@/stats/nav-usage"
 import { EventsSection } from "@/stats/events"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
@@ -158,6 +159,7 @@ function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f:
           <ModelCompare f={f} fkey={fkey} live={live} />
         </Section>
       </>}
+      <NavUsageSection />
       <EventsSection f={f} fkey={fkey} live={live} />
       <footer className="max-w-[72ch] type-footnote text-tertiary" data-stats-foot>
         {t("stats:page.foot.all", {

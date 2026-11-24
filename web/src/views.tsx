@@ -563,18 +563,19 @@ function MeRow() {
 export function MoreView() {
   const t = useT()
   const groups = [
-    { name: "", rows: [["feed", t("views:more.feed"), t("views:more.feedSub"), NewspaperIcon], ["projects", t("views:more.projects"), t("views:more.projectsSub", { name: st.workspace?.name }), FolderIcon], ["sessions", t("views:more.sessions"), t("views:more.sessionsSub"), SquareTerminalIcon], ["stats", t("views:more.stats"), t("views:more.statsSub"), ChartNoAxesColumnIcon], ["publications", t("views:more.publications"), t("views:more.publicationsSub"), UploadIcon]] },
-    { name: t("views:more.groupLinks"), rows: [["integrations", t("views:more.integrations"), t("views:more.integrationsSub"), PlugIcon], ["channels", t("views:more.channels"), t("views:more.channelsSub"), MessagesSquareIcon], ["mail", t("views:more.mail"), t("views:more.mailSub"), MailIcon], ["contacts", t("views:more.contacts"), t("views:more.contactsSub"), ContactRoundIcon], ["knowledge", t("views:more.knowledge"), t("views:more.knowledgeSub"), BookOpenIcon]] },
-    { name: t("views:more.groupAuto"), rows: [["bots", t("views:more.bots"), t("views:more.botsSub"), BotIcon], ["capabilities", t("views:more.capabilities"), t("views:more.capabilitiesSub"), BlocksIcon], ["auto", t("views:more.auto"), t("views:more.autoSub"), WorkflowIcon], ["signals", t("views:more.signals"), t("views:more.signalsSub"), RadioIcon]] },
-    { name: t("views:more.groupSystem"), rows: [/* the devices page is the first row of the Hub section below */["accounts", t("views:more.accounts"), t("views:more.accountsSub"), KeyRoundIcon], ["vault", t("views:more.vault"), t("views:more.vaultSub"), LockIcon], ["settings", t("views:more.settings"), t("views:more.settingsSub"), SettingsIcon]] },
+    { key: "primary", name: "", rows: [["projects", t("views:more.projects"), t("views:more.projectsSub", { name: st.workspace?.name }), FolderIcon], ["publications", t("views:more.publications"), t("views:more.publicationsSub"), UploadIcon]] },
+    { key: "messages", name: t("core:navGroup.messages"), rows: [["feed", t("views:more.feed"), t("views:more.feedSub"), NewspaperIcon], ["channels", t("views:more.channels"), t("views:more.channelsSub"), MessagesSquareIcon], ["mail", t("views:more.mail"), t("views:more.mailSub"), MailIcon], ["contacts", t("views:more.contacts"), t("views:more.contactsSub"), ContactRoundIcon]] },
+    { key: "library", name: t("core:navGroup.library"), rows: [["knowledge", t("views:more.knowledge"), t("views:more.knowledgeSub"), BookOpenIcon], ["integrations", t("views:more.integrations"), t("views:more.integrationsSub"), PlugIcon]] },
+    { key: "automate", name: t("core:navGroup.automate"), rows: [["bots", t("views:more.bots"), t("views:more.botsSub"), BotIcon], ["sessions", t("views:more.sessions"), t("views:more.sessionsSub"), SquareTerminalIcon], ["auto", t("views:more.auto"), t("views:more.autoSub"), WorkflowIcon], ["capabilities", t("views:more.capabilities"), t("views:more.capabilitiesSub"), BlocksIcon], ["signals", t("views:more.signals"), t("views:more.signalsSub"), RadioIcon]] },
+    { key: "more", name: t("core:navGroup.more"), rows: [/* the devices page is the first row of the Hub section below */["stats", t("views:more.stats"), t("views:more.statsSub"), ChartNoAxesColumnIcon], ["accounts", t("views:more.accounts"), t("views:more.accountsSub"), KeyRoundIcon], ["vault", t("views:more.vault"), t("views:more.vaultSub"), LockIcon], ["settings", t("views:more.settings"), t("views:more.settingsSub"), SettingsIcon]] },
   ] as const
   return (
     <Page title={t("views:more.title")} max={640}>
       <div className="flex flex-col gap-8">
         <MeRow />
         <Panel><Row icon={<BotAvatar k="steve" size={44} />} className="py-3" title={<span className="type-headline">{st.bots.steve?.n ?? "Steve"}</span>} sub={t("views:more.steveSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel>
-        {groups.map((group) => <Section key={group.name} label={group.name}><Panel>{group.rows.map(([h, title, s, I]) => (
-          <Row key={h} icon={<Tile I={I} />} title={title} sub={s} onClick={() => go("#/" + h)}><Chevron /></Row>
+        {groups.map((group) => <Section key={group.key} label={group.name} data-more-group={group.key}><Panel>{group.rows.map(([h, title, s, I]) => (
+          <Row key={h} icon={<Tile I={I} />} title={title} sub={s} onClick={() => go("#/" + h)} data-more-nav={h}><Chevron /></Row>
         ))}</Panel></Section>)}
         <HubMore />
         <Panel><GitHubMoreRow /></Panel>

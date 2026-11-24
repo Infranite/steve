@@ -38,3 +38,6 @@ mod views;
 pub use views::{
     BotReads, ItemHead, ItemMark, ItemTurn, ItemView, TokenGroup, TreeItem, WaitingCard, WorkAt,
 };
+
+mod telemetry;
+pub use telemetry::{TelemetryDaily, TelemetryMetric, TelemetryTotals};

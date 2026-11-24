@@ -27,6 +27,7 @@ import { closeSheet, go } from "@/ui"
 import { st, toast } from "@/store"
 import { useT } from "@/i18n"
 import { fpCheck, fpGroups, fpSpread, FP_GROUP, hostLine, hostOf, linkRoute, nodeViews } from "@/device-model"
+import { nodeHref } from "@/node-detail-model"
 import { useHubAddress, useHubs } from "@/hub-ui"
 import { AgentTrail } from "@/components/affect/agent-trail-clean"
 import { Progress } from "@/components/ui/progress"
@@ -39,7 +40,6 @@ type V = { kind: Kind; via: Via }
 type StepId = "kind" | "via" | "run" | "confirm" | "install" | "scan"
 /** how often the dialog looks for the Node that claimed the code */
 const POLL = 2000
-const nodeHref = (id: string) => "#/devices/nodes/" + encodeURIComponent(id)
 
 /** the steps of a flow, by what it adds and how; only the instance owner confirms a Node (anyone signed in may pair one) */
 export function stepsOf(kind: Kind, via: Via, owner = true): StepId[] {
