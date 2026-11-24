@@ -503,7 +503,7 @@ pub fn nudge(w: &mut W<'_>, decision: &str, text: &str) -> ChannelResult<bool> {
     let mut decisions = DecisionRows(w);
     let Some(card) = decisions
         .get(decision)?
-        .filter(|card| card.status == "open")
+        .filter(|card| card.status == steve_types::DecisionStatus::Open)
     else {
         return Ok(false);
     };
@@ -722,6 +722,7 @@ pub fn open_card(w: &mut W<'_>, plan: &Plan, card: &Card) -> ChannelResult<Strin
     } else {
         HANDOFF_OPTIONS.map(String::from).to_vec()
     };
+    let previous = repo::outbound::decision_id(w, &plan.message_id)?;
     let d = DecisionRows(w).open(&NewDecision {
         workspace_id: plan.ws.clone(),
         kind: DecisionKind::Ask.code().into(),
@@ -733,6 +734,14 @@ pub fn open_card(w: &mut W<'_>, plan: &Plan, card: &Card) -> ChannelResult<Strin
         draft: (!draft.is_empty()).then(|| draft.to_string()),
         options: Some(options),
         requested_by: "steve".into(),
+        question_template: None,
+        source: Some(steve_store::DecisionSource::Revision {
+            revision: format!(
+                "ask:{}:{}",
+                previous.as_deref().unwrap_or("initial"),
+                card.reason.code()
+            ),
+        }),
     })?;
     repo::outbound::link_decision(w, &plan.message_id, &d.id)?;
     repo::emit(w, &plan.ws, &plan.space_id, &plan.message_id);

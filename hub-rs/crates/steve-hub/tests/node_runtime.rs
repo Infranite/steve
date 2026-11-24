@@ -675,7 +675,16 @@ async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
         .commit(EventBatch { events: replay })
         .await
         .unwrap();
-    assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    assert!(
+        h.rt.answer_permission(steve_core::PermissionAnswer::resolve(
+            &d,
+            1,
+            "owner",
+            "allow_once",
+            ""
+        ))
+        .unwrap()
+    );
     eventually_sync("answered", || h.methods().contains(&"resolve_permission")).await;
     eventually_sync("card settled", || {
         node_checks::decision_status_by_id(&h.store, &d).unwrap() == "resolved"
@@ -686,7 +695,15 @@ async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
         1
     );
     assert!(
-        !h.rt.answer_permission(&d, Some("allow_once")).unwrap(),
+        !h.rt
+            .answer_permission(steve_core::PermissionAnswer::resolve(
+                &d,
+                1,
+                "owner",
+                "allow_once",
+                ""
+            ))
+            .unwrap(),
         "answered once"
     );
 }
@@ -711,7 +728,13 @@ async fn workflow_pause_cancel_and_replan_expire_late_permission_allows() {
         fixtures::change_workflow_permission(&h.store, change).unwrap();
         assert!(
             !h.rt
-                .answer_permission(&decision, Some("allow_once"))
+                .answer_permission(steve_core::PermissionAnswer::resolve(
+                    &decision,
+                    1,
+                    "owner",
+                    "allow_once",
+                    ""
+                ))
                 .unwrap(),
             "{change:?}",
         );
@@ -753,7 +776,17 @@ async fn a_card_expires_with_its_attempt() {
     .await;
     let d: String = node_checks::decision_id_by_subject_type(&h.store, "tool_call").unwrap();
     assert_eq!(h.perm_state(&d), "expired");
-    assert!(!h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    assert!(
+        !h.rt
+            .answer_permission(steve_core::PermissionAnswer::resolve(
+                &d,
+                1,
+                "owner",
+                "allow_once",
+                ""
+            ))
+            .unwrap()
+    );
 }
 
 fn usage(id: &str, cost: &str) -> EventBody {
@@ -2094,15 +2127,17 @@ async fn a_card_expires_at_its_expires_at() {
     let h = hub();
     h.bind();
     let exec = h.running("hello").await;
-    h.node
-        .ask_permission(perm_ttl("p1", exec.clone(), "rm x", 300))
-        .await
-        .unwrap();
+    let request = perm_ttl("p1", exec.clone(), "rm x", 60_000);
+    let deadline = request.expires_at.0;
+    h.node.ask_permission(request).await.unwrap();
     eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
     assert_eq!(h.status(&d), "open");
     // only the Hub's clock: the Node says nothing
-    eventually_sync("expired", || h.status(&d) == "expired").await;
+    NodeRuntime::expire_permissions(&h.store, deadline - 1).unwrap();
+    assert_eq!(h.status(&d), "open");
+    NodeRuntime::expire_permissions(&h.store, deadline).unwrap();
+    assert_eq!(h.status(&d), "expired");
     assert_eq!(h.perm_state(&d), "expired");
     let op = format!("answer:{d}:r0");
     eventually_sync("reject sent", || h.cmd_state(&op) == "finished").await;
@@ -2117,7 +2152,17 @@ async fn a_card_expires_at_its_expires_at() {
         "the Node's confirmation leaves the card"
     );
     assert_eq!(h.perm_state(&d), "expired");
-    assert!(!h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    assert!(
+        !h.rt
+            .answer_permission(steve_core::PermissionAnswer::resolve(
+                &d,
+                1,
+                "owner",
+                "allow_once",
+                ""
+            ))
+            .unwrap()
+    );
     assert_eq!(h.commands("resolve_permission"), 1);
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("turn end", || h.ends().len() == 1).await;
@@ -2157,20 +2202,17 @@ async fn a_refused_answer_is_not_an_answer() {
     let d = h.cards()[0].clone();
     // the Node's clock is past the request's expiry
     h.node.set_now(steve_store::now() + 120_000);
-    assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    assert!(
+        h.rt.answer_permission(steve_core::PermissionAnswer::resolve(
+            &d,
+            1,
+            "owner",
+            "allow_once",
+            ""
+        ))
+        .unwrap()
+    );
     assert_eq!(h.perm_state(&d), "answering");
-    // as the orchestrator does after a true
-    h.store
-        .write::<_, StoreError>(|tx| {
-            steve_store::decision_resolve_in(
-                tx,
-                &d,
-                &serde_json::json!({"optionId": "allow_once"}),
-                "resolved",
-            )?;
-            Ok(())
-        })
-        .unwrap();
     eventually_sync("refused", || {
         h.cmd_state(&format!("answer:{d}:r0")) == "rejected"
     })
@@ -2178,11 +2220,9 @@ async fn a_refused_answer_is_not_an_answer() {
     assert_eq!(h.perm_state(&d), "refused");
     assert_eq!(
         h.status(&d),
-        "expired",
-        "never claims an answer that was not applied"
+        "resolved",
+        "the recorded choice survives the Node refusing to apply it"
     );
-    let refused: String = node_checks::decision_refused_by_id(&h.store, &d).unwrap();
-    assert_eq!(refused, "stale");
 }
 
 #[tokio::test]
@@ -2197,7 +2237,7 @@ async fn an_overdue_card_expires_after_a_restart() {
     eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
     h.restart(Duration::from_millis(600)).await;
-    // the sweep at start closes it, no wait for a tick
+    NodeRuntime::expire_permissions(&h.store, steve_store::now()).unwrap();
     assert_eq!(h.status(&d), "expired");
     assert_eq!(h.commands("resolve_permission"), 1);
 }
@@ -2226,7 +2266,17 @@ async fn a_card_closes_when_its_attempt_ends_without_the_nodes_expiry() {
     eventually_sync("closed", || h.status(&d) == "expired").await;
     assert_eq!(h.perm_state(&d), "expired");
     assert_eq!(h.commands("resolve_permission"), 0);
-    assert!(!h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    assert!(
+        !h.rt
+            .answer_permission(steve_core::PermissionAnswer::resolve(
+                &d,
+                1,
+                "owner",
+                "allow_once",
+                ""
+            ))
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -2244,12 +2294,21 @@ async fn a_late_answer_never_reaches_a_newer_attempt() {
         .unwrap();
     eventually_sync("card A", || h.cards().len() == 1).await;
     let da = h.cards()[0].clone();
-    assert!(h.rt.answer_permission(&da, Some("allow_once")).unwrap());
+    assert!(
+        h.rt.answer_permission(steve_core::PermissionAnswer::resolve(
+            &da,
+            1,
+            "owner",
+            "allow_once",
+            ""
+        ))
+        .unwrap()
+    );
     assert_eq!(h.perm_state(&da), "answering");
     h.node.finish(&a, build::done()).await.unwrap();
     eventually_sync("turn A end", || h.ends().len() == 1).await;
-    eventually_sync("card A closed", || h.status(&da) == "expired").await;
-    assert_eq!(h.perm_state(&da), "expired");
+    eventually_sync("the old request closed", || h.perm_state(&da) == "expired").await;
+    assert_eq!(h.status(&da), "resolved");
 
     // attempt B asks the very same thing under the very same id
     let b = h.running("two").await;
@@ -2273,7 +2332,16 @@ async fn a_late_answer_never_reaches_a_newer_attempt() {
     assert_eq!(h.perm_state(&db), "waiting");
 
     // B's own answer is its own command
-    assert!(h.rt.answer_permission(&db, Some("allow_once")).unwrap());
+    assert!(
+        h.rt.answer_permission(steve_core::PermissionAnswer::resolve(
+            &db,
+            1,
+            "owner",
+            "allow_once",
+            ""
+        ))
+        .unwrap()
+    );
     eventually_sync("B applied", || h.perm_state(&db) == "applied").await;
     eventually_sync("B resolved", || h.status(&db) == "resolved").await;
     assert_eq!(h.commands("resolve_permission"), 2);
@@ -3410,6 +3478,7 @@ async fn a_turn_sets_the_session_running_then_idle_and_keeps_the_harness_id() {
     eventually_sync("harness id", || h.acp_id().is_some()).await;
     assert_eq!(h.acp_id().as_deref(), Some(resume.as_str()));
     let exec = h.attempts()[0].clone();
+    h.wait_for_start(&exec).await;
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("turn end", || h.ends().len() == 1).await;
     assert_eq!(h.session_status(), "idle");
@@ -3419,13 +3488,13 @@ async fn a_turn_sets_the_session_running_then_idle_and_keeps_the_harness_id() {
     eventually_sync("second running", || h.attempts().len() == 2).await;
     eventually_sync("running again", || h.session_status() == "running").await;
     h.rt.prompt(S, "three", "user", &[]).unwrap();
-    eventually_sync("second started", || h.count("start_turn") == 2).await;
     let second = h.attempts()[1].clone();
+    h.wait_for_start(&second).await;
     h.node.finish(&second, build::done()).await.unwrap();
     eventually_sync("third planned", || h.attempts().len() == 3).await;
     assert_eq!(h.session_status(), "running", "a turn follows");
-    eventually_sync("third started", || h.count("start_turn") == 3).await;
     let third = h.attempts()[2].clone();
+    h.wait_for_start(&third).await;
     h.node.finish(&third, build::done()).await.unwrap();
     eventually_sync("idle", || h.session_status() == "idle").await;
 }
@@ -3636,7 +3705,16 @@ async fn working_counts_a_turn_waiting_for_a_permission_until_it_settles() {
     eventually_sync("card", || h.cards().len() == 1).await;
     assert_eq!(h.rt.working(), 1, "a permission wait holds the drain");
     let d = h.cards()[0].clone();
-    assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    assert!(
+        h.rt.answer_permission(steve_core::PermissionAnswer::resolve(
+            &d,
+            1,
+            "owner",
+            "allow_once",
+            ""
+        ))
+        .unwrap()
+    );
     eventually_sync("answered", || h.status(&d) == "resolved").await;
     assert_eq!(h.rt.working(), 1, "the turn goes on after the answer");
     h.node.finish(&exec, build::done()).await.unwrap();
@@ -3651,14 +3729,16 @@ async fn working_drops_to_zero_after_an_expired_card_and_the_turn_end() {
     let h = hub();
     h.bind();
     let exec = h.running("hello").await;
-    h.node
-        .ask_permission(perm_ttl("p1", exec.clone(), "rm x", 300))
-        .await
-        .unwrap();
+    let request = perm_ttl("p1", exec.clone(), "rm x", 60_000);
+    let deadline = request.expires_at.0;
+    h.node.ask_permission(request).await.unwrap();
     eventually_sync("card", || h.cards().len() == 1).await;
     assert_eq!(h.rt.working(), 1);
     let d = h.cards()[0].clone();
-    eventually_sync("expired", || h.status(&d) == "expired").await;
+    NodeRuntime::expire_permissions(&h.store, deadline - 1).unwrap();
+    assert_eq!(h.status(&d), "open");
+    NodeRuntime::expire_permissions(&h.store, deadline).unwrap();
+    assert_eq!(h.status(&d), "expired");
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("turn end", || h.ends().len() == 1).await;
     h.ready().await;
@@ -4282,7 +4362,16 @@ async fn stop_retires_an_unknown_answer_and_leaves_its_attempt_alone() {
     .await;
     let d: String = node_checks::decision_id_by_subject_type(&h.store, "tool_call").unwrap();
     h.node.script_once("resolve_permission", Scripted::Unknown);
-    assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
+    assert!(
+        h.rt.answer_permission(steve_core::PermissionAnswer::resolve(
+            &d,
+            1,
+            "owner",
+            "allow_once",
+            ""
+        ))
+        .unwrap()
+    );
     eventually_sync("answer unknown", || {
         h.state_of(&format!("answer:{d}:r0")) == "unknown"
     })
@@ -4578,10 +4667,10 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
     }
 }
 
-/// ST-174: a startup message is not an unlimited retry token. The stop survives a runtime
-/// restart and even dismissal of the card; explicit retries reuse the same card on failure.
+/// A startup failure survives a runtime restart. If an owner retries and it fails again,
+/// one new card represents that failure while the previous answer remains recorded.
 #[tokio::test]
-async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry() {
+async fn startup_failure_holds_the_queue_and_keeps_the_previous_answer() {
     let h = hub();
     h.node.refuse_next(
         "open_session",
@@ -4613,8 +4702,8 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
         .resolve(
             &card,
             &serde_json::json!({"choice":"retry"}),
-            "resolved",
-            &serde_json::Value::Null,
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
         )
         .unwrap();
     h.node.refuse_next(
@@ -4627,11 +4716,15 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
             && h.phase() == "released"
     })
     .await;
-    assert_eq!(node_checks::decision_count(&h.store).unwrap(), 1);
+    assert_eq!(node_checks::decision_count(&h.store).unwrap(), 2);
     assert_eq!(
         h.store.decisions().get(&card).unwrap().unwrap().status,
-        "open"
+        steve_types::DecisionStatus::Resolved
     );
+    let open = h.store.decisions().open(steve_store::WS).unwrap();
+    assert_eq!(open.len(), 1);
+    assert_ne!(open[0].id, card);
+    assert_eq!(open[0].subject_type, "session_start");
     h.rt.retry_open(S, &build::choice()).unwrap();
     eventually_sync("retry started the queued task", || {
         h.count("start_turn") == 1

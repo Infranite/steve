@@ -84,6 +84,11 @@
       "qoder",
       "STEVE_ADAPTER_QODER",
       "qodercli"
+    ],
+    [
+      "antigravity",
+      "STEVE_ADAPTER_ANTIGRAVITY",
+      "agy"
     ]
   ],
   "installed_bins": [
@@ -171,6 +176,11 @@
       "qoder",
       "STEVE_ADAPTER_QODER",
       "qodercli"
+    ],
+    [
+      "antigravity",
+      "STEVE_ADAPTER_ANTIGRAVITY",
+      "agy"
     ]
   ]
 }

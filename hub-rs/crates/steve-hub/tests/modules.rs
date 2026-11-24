@@ -393,7 +393,8 @@ async fn model_settings() {
     assert_eq!(h_of(&v, "claude-code")["efforts"][4]["key"], "max");
     assert_eq!(h_of(&v, "codex")["id"], "codex");
     assert_eq!(h_of(&v, "gemini")["id"], "gemini");
-    assert_eq!(v["harnesses"].as_array().unwrap().len(), 17);
+    assert_eq!(h_of(&v, "antigravity")["id"], "antigravity");
+    assert_eq!(v["harnesses"].as_array().unwrap().len(), 18);
     let native = v["harnesses"]
         .as_array()
         .unwrap()
@@ -714,7 +715,7 @@ async fn a_module_decision_is_undone_through_the_route() {
         )
         .await;
     assert_eq!(s, 200, "{d}");
-    assert_eq!(d["undo"], json!({ "module": "attr_def" }));
+    assert_eq!(d["undo"], json!({ "operation": "domain" }));
     assert_eq!(def(), "active");
     let (s, d) = c
         .call("POST", "/api/decisions/dec_undo/undo", None, None)

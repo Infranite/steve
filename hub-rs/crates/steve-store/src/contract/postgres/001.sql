@@ -100,8 +100,22 @@ CREATE TABLE decisions (
     requested_by TEXT NOT NULL,
     created BIGINT NOT NULL,
     resolved BIGINT,
-    undo TEXT
+    undo TEXT,
+    revision BIGINT NOT NULL DEFAULT 1,
+    source_revision TEXT,
+    question_template TEXT CHECK (question_template IS NULL OR question = ''),
+    UNIQUE (workspace_id, subject_type, subject_id, kind, source_revision)
 );
+CREATE TABLE decision_choice_receipts (
+    decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+    revision BIGINT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    recorded_at BIGINT NOT NULL,
+    PRIMARY KEY (decision_id, revision)
+);
+
 CREATE TABLE chan_write_blocks (
     connection_id TEXT NOT NULL,
     space_id TEXT NOT NULL,

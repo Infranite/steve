@@ -383,14 +383,43 @@ async fn dismissing_a_draft_reply_discards_it() {
     // a draft of a space this test does not set up: rows only, without their references
     outbox_checks::seed_orphan_draft(&e.db).unwrap();
     let status = || outbox_checks::chan_messages_status_by_id(&e.db, "cm_d1").unwrap();
-    let (s, v) = e.call("POST", "/api/decisions/dc_d1/dismiss", None).await;
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/decisions/dc_d1/dismiss",
+            Some(json!({"revision": 1})),
+        )
+        .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["result"]["choice"], "no", "{v}");
     assert_eq!(status(), "discarded");
-    let (s, v) = e.call("POST", "/api/decisions/dc_d1/dismiss", None).await;
-    assert_eq!(s, 409, "{v}");
-    let (s, v) = e.call("POST", "/api/decisions/dc_d1/undo", None).await;
-    assert_eq!(s, 200, "{v}");
+    let (s, replay) = e
+        .call(
+            "POST",
+            "/api/decisions/dc_d1/dismiss",
+            Some(json!({"revision": 1})),
+        )
+        .await;
+    assert_eq!(s, 200, "{replay}");
+    assert_eq!(replay, v);
+    let (s, reopened) = e
+        .call(
+            "POST",
+            "/api/decisions/dc_d1/undo",
+            Some(json!({"revision": 1})),
+        )
+        .await;
+    assert_eq!(s, 200, "{reopened}");
+    assert_eq!(reopened["revision"], 2);
+    assert_eq!(status(), "draft");
+    let (s, stale) = e
+        .call(
+            "POST",
+            "/api/decisions/dc_d1/dismiss",
+            Some(json!({"revision": 1})),
+        )
+        .await;
+    assert_eq!(s, 409, "{stale}");
     assert_eq!(status(), "draft");
 }
 

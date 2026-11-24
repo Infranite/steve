@@ -344,17 +344,12 @@ fn declining_a_proposal_closes_that_cycle() {
         })
         .unwrap();
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
-    k.core.resolve(&d.id, "no", "", "me").unwrap();
+    let first = k.core.resolve(&d.id, "no", "", "me").unwrap();
     assert_eq!(k.item_label(&i.id), "drop");
     assert!(k.core.undo_decision(&d.id, "me").is_err());
     assert_eq!(k.db().item(&i.id).unwrap().unwrap().cycle, 1);
-    assert_eq!(
-        k.core
-            .resolve(&d.id, "no", "", "me")
-            .unwrap_err()
-            .to_string(),
-        "这个决定已经处理过了"
-    );
+    assert_eq!(k.core.resolve(&d.id, "no", "", "me").unwrap(), first);
+    assert!(k.core.resolve(&d.id, "yes", "", "me").is_err());
 }
 
 #[test]
@@ -592,7 +587,10 @@ fn approvals_and_permissions() {
     let p2 = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &[]);
     k.core.resolve(&p2, "deny", "", "me").unwrap();
     assert_eq!(k.rt.st().answered.last().unwrap(), &(p2.clone(), None));
-    assert_eq!(k.db().decision(&p2).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&p2).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert!(
         k.rt.prompts_of(&s.id)
             .last()
@@ -622,13 +620,6 @@ fn a_permission_answer_follows_the_runtime_outcome() {
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.rt.st().pending_permissions.insert(p.clone());
     k.core.resolve(&p, "ok", "", "me").unwrap();
-    assert_eq!(
-        k.db().decision(&p).unwrap().unwrap().status,
-        "open",
-        "a queued answer is not a Node receipt"
-    );
-    k.rt.st().permissions.insert(p.clone());
-    k.core.resolve(&p, "ok", "", "me").unwrap();
     let d = k.db().decision(&p).unwrap().unwrap();
     assert_eq!(
         (d.status.as_str(), d.result),
@@ -639,22 +630,34 @@ fn a_permission_answer_follows_the_runtime_outcome() {
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.rt.st().answer_error = true;
     assert!(k.core.resolve(&p, "ok", "", "me").is_err());
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert!(
         k.core.dismiss_decision(&p, "me").is_err(),
         "a dismiss that cannot deny keeps the card"
     );
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert_eq!(expired(&k), 0);
 
     k.rt.st().answer_error = false;
-    k.rt.st().permissions.insert(p.clone());
+    k.rt.st().pending_permissions.insert(p.clone());
     k.core.resolve(&p, "no", "", "me").unwrap();
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "resolved");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Resolved
+    );
 
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.core.resolve(&p, "ok", "", "me").unwrap();
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert_eq!(expired(&k), 1, "a gone request is today's expired path");
 }
 
@@ -1387,7 +1390,7 @@ fn dependencies_block_and_start_when_done() {
         .decision_resolve(
             &k.db().decisions_of_item(&b.id).unwrap()[0].id,
             json!({}),
-            "resolved",
+            steve_store::decision_repo::DecisionChange::Resolve,
             None,
         )
         .unwrap();
@@ -1952,7 +1955,10 @@ fn startup_blocker_survives_queued_input() {
         .add(&sid, "initial task", "steve", &[])
         .unwrap();
     crate::lifecycle::supersede(k.db(), &i, &["fail"], "background queue").unwrap();
-    assert_eq!(k.db().decision(&card.id).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&card.id).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert!(!k.open_kinds(&i).is_empty());
     k.db().session_patch(&sid, patch![status:"ended"]).unwrap();
     let before = k.db().store().sessions().stop(&sid).unwrap();
@@ -1968,7 +1974,7 @@ fn startup_blocker_survives_queued_input() {
     assert!(k.db().queued(&sid).unwrap().is_empty());
     assert_eq!(
         k.db().decision(&card.id).unwrap().unwrap().status,
-        "expired"
+        steve_types::DecisionStatus::Expired
     );
 }
 

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::base::ObjRef;
 use steve_store::base::links::Links;
@@ -99,6 +99,10 @@ fn account(cx: &FlowCx, session_id: &str) -> FlowResult<Option<(String, String, 
                     draft: None,
                     options: Some(vec![CONTINUE_ONCE.into(), STOP.into()]),
                     requested_by: "steve".into(),
+                    question_template: None,
+                    source: Some(steve_store::DecisionSource::Revision {
+                        revision: limit.to_string(),
+                    }),
                 })?;
                 run.context[ASKED] = json!(limit);
                 opened = Some((ws.clone(), item.clone(), d.id));
@@ -130,9 +134,10 @@ impl FlowRunDecisions {
 }
 
 impl DecisionHandler for FlowRunDecisions {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let mut run = steve_store::RunRows(tx)
             .get(&d.subject_id)?
+            .filter(|r| r.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("运行"))?;
         match cx.choice {
             CONTINUE_ONCE => {
@@ -160,7 +165,7 @@ impl DecisionHandler for FlowRunDecisions {
             crate::engine::DROP => {}
             _ => return Err(ApiError::invalid("choice")),
         }
-        Ok(choice_result(cx))
+        Ok(choice_result(cx).into())
     }
 }
 

@@ -2358,9 +2358,9 @@ pub async fn oidc_delete(
     Ok(reply(StatusCode::OK, view))
 }
 
-/// Notes which client a decision was answered from (A4c): `result.via` on the decision, and the audit.
+/// Records the client for the settled version when the caller has a choice receipt.
 /// Off the request; a browser session (no client) notes nothing.
-pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
+pub fn note_via(st: &AppState, decision: &str, revision: i64, c: &crate::api::Ctx) {
     let (Some(client), Some(store)) = (
         c.client.clone(),
         st.modules.as_ref().map(|m| m.store.clone()),
@@ -2375,13 +2375,11 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
             name: &client.name,
             route: &client.route,
         };
-        let r = store.write(|w| steve_store::decision_repo::record_via(w, &id, &via));
+        let r = store
+            .write(|w| steve_store::decision_repo::record_via(w, &ws, &id, revision, &me, &via));
         if let Err(e) = r {
             tracing::warn!("decision {id} via: {e}");
         }
-        store
-            .audit(&me, "decision.resolve", &id, &json!({"via": via}), &ws)
-            .ok();
     });
 }
 

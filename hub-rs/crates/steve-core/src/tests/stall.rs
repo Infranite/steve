@@ -100,12 +100,16 @@ fn a_turn_starting_expires_the_card_and_continue_sends_a_turn() {
     assert_eq!(
         stall_cards(&k, &i)
             .iter()
-            .filter(|d| d.status == "open")
+            .filter(|d| d.status == steve_types::DecisionStatus::Open)
             .count(),
         1
     );
     k.core.expire_stall(&s).unwrap();
-    assert!(stall_cards(&k, &i).iter().all(|d| d.status != "open"));
+    assert!(
+        stall_cards(&k, &i)
+            .iter()
+            .all(|d| d.status != steve_types::DecisionStatus::Open)
+    );
     assert_eq!(k.item_label(&i), "run");
     assert!(
         k.events.lock().unwrap().iter().any(|e| matches!(

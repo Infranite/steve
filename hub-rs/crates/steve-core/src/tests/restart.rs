@@ -428,7 +428,7 @@ fn a_session_that_recovers_itself_is_left_to_its_backend() {
     assert!(k.open_fails(&i).is_empty(), "no failure card");
     assert_eq!(
         k.db().decision(&card).unwrap().unwrap().status,
-        "open",
+        steve_types::DecisionStatus::Open,
         "the Node expires its own cards"
     );
     assert!(

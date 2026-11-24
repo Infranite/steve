@@ -58,6 +58,21 @@ pub(super) fn describe() {
         Count,
         "Delivery verification rejected because its item cycle or scope changed."
     );
+    describe_histogram!(
+        "steve_decision_transition_seconds",
+        Seconds,
+        "Time spent applying a decision transition in the store. Label: operation."
+    );
+    describe_counter!(
+        "steve_decision_duplicate_prompts_total",
+        Count,
+        "Repeated permission requests suppressed by their existing attempt and request identity."
+    );
+    describe_gauge!(
+        "steve_decision_open",
+        Count,
+        "Open decisions in the Hub projection. Label: tier (decide, draft, or folded)."
+    );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(
         "steve_http_requests_total",

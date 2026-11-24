@@ -504,7 +504,6 @@ async fn what_you_approve_yourself_still_goes() {
 // ---------------------------------------------------------------- gate 4: sending
 
 // ---------------------------------------------------------------- times: late and early clocks
-
 // ---------------------------------------------------------------- a busy group
 
 /// A busy group: two people @ you a few seconds apart and others talk; you answer one of them by
@@ -552,7 +551,7 @@ async fn in_a_busy_group_answering_one_person_leaves_the_others_draft() {
     h.env.clock.advance(10_000);
     assert_eq!(
         you_decide(&h, &card, "yes").expect("approved").status,
-        "resolved"
+        steve_types::DecisionStatus::Resolved
     );
     assert_eq!(status(&h, &han_draft), "pending");
 }
@@ -815,7 +814,7 @@ async fn an_automatic_reply_on_your_account_is_not_you() {
     checked(&h).await;
     assert_eq!(
         you_decide(&h, &card, "yes").expect("answered").status,
-        "resolved"
+        steve_types::DecisionStatus::Resolved
     );
 }
 
@@ -901,7 +900,7 @@ async fn a_message_already_answered_in_your_name_stays_out_of_the_next_turn() {
     checked(&h).await;
     assert_eq!(
         you_decide(&h, &card1, "yes").expect("approved").status,
-        "resolved"
+        steve_types::DecisionStatus::Resolved
     );
     h.env.clock.advance(11_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);

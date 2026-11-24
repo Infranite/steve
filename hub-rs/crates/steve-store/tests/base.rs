@@ -6,9 +6,7 @@ mod common;
 use common::*;
 use rusqlite::Connection;
 use serde_json::json;
-use steve_store::base::{
-    self, Level, ObjRef, Viewer, Visibility, changesets, decisions, links, mems, tags,
-};
+use steve_store::base::{self, Level, ObjRef, Viewer, Visibility, changesets, links, mems, tags};
 use steve_store::{NewDecision, NoPublisher, Store, StoreError, db};
 
 const A: &str = "usr_a";
@@ -802,19 +800,16 @@ fn confirm_decisions_without_an_item() {
     let t = setup();
     let s = &t.store;
     let d = tx(s, |tx| {
-        decisions::open(
-            tx,
-            &NewDecision {
-                workspace_id: "default".into(),
-                kind: base::DecisionKind::Confirm.code().into(),
-                subject_type: "mem".into(),
-                subject_id: "mm_1".into(),
-                question: "记住：喜欢简短的邮件？".into(),
-                options: Some(base::CONFIRM_OPTIONS.map(String::from).to_vec()),
-                requested_by: "steve".into(),
-                ..Default::default()
-            },
-        )
+        steve_store::DecisionRows(tx).open(&NewDecision {
+            workspace_id: "default".into(),
+            kind: base::DecisionKind::Confirm.code().into(),
+            subject_type: "mem".into(),
+            subject_id: "mm_1".into(),
+            question: "记住：喜欢简短的邮件？".into(),
+            options: Some(base::CONFIRM_OPTIONS.map(String::from).to_vec()),
+            requested_by: "steve".into(),
+            ..Default::default()
+        })
     });
     assert_eq!(
         (d.kind.as_str(), d.item_id.as_ref(), d.options.clone()),
@@ -839,25 +834,23 @@ fn confirm_decisions_without_an_item() {
     // the old repository sees it (待处理 lists every open decision)
     assert_eq!(s.decisions().open("default").unwrap().len(), 1);
     assert_eq!(
-        s.fixture_read(|c| decisions::open_for(c, "default", "mem", "mm_1"))
+        s.read(|r| steve_store::DecisionRows(r).open_for("default", "mem", "mm_1"))
             .unwrap()
             .unwrap()
             .id,
         d.id
     );
-    assert!(tx(s, |tx| decisions::settle(
-        tx,
+    assert!(tx(s, |tx| steve_store::DecisionRows(tx).settle(
         &d.id,
         &json!({"choice": "yes"}),
-        "resolved",
-        &serde_json::Value::Null
+        steve_store::decision_repo::DecisionChange::Resolve,
+        None
     )));
-    assert!(!tx(s, |tx| decisions::settle(
-        tx,
+    assert!(!tx(s, |tx| steve_store::DecisionRows(tx).settle(
         &d.id,
         &json!({}),
-        "resolved",
-        &serde_json::Value::Null
+        steve_store::decision_repo::DecisionChange::Resolve,
+        None
     )));
     let d = s.decisions().get(&d.id).unwrap().unwrap();
     assert_eq!(
@@ -865,7 +858,7 @@ fn confirm_decisions_without_an_item() {
         ("resolved", json!({"choice": "yes"}))
     );
     assert!(
-        s.fixture_read(|c| decisions::open_for(c, "default", "mem", "mm_1"))
+        s.read(|r| steve_store::DecisionRows(r).open_for("default", "mem", "mm_1"))
             .unwrap()
             .is_none()
     );

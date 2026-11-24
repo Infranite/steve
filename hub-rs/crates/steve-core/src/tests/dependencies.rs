@@ -250,7 +250,7 @@ fn creation_waits_for_success_and_respects_notify_and_proposal_decisions() {
         .decisions_of_item(&automatic.id)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open")
+        .find(|d| d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     k.core.resolve(&d.id, "yes", "", "me").unwrap();
     assert_eq!(k.db().sessions_of_item(&automatic.id).unwrap().len(), 1);
@@ -584,7 +584,7 @@ fn notify_and_workspace_modes_prompt_once_and_user_can_start() {
             .decisions_of_item(&item)
             .unwrap()
             .into_iter()
-            .find(|d| d.status == "open")
+            .find(|d| d.status == steve_types::DecisionStatus::Open)
             .unwrap();
         k.core.resolve(&d.id, "yes", "", "me").unwrap();
         assert_eq!(k.item_label(&item), "run");

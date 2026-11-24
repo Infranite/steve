@@ -1495,7 +1495,9 @@ pub(crate) fn out_state(
     {
         status = "blocked".into();
     }
-    let open = decision.filter(|d| d.status == "open").map(|d| d.id);
+    let open = decision
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
+        .map(|d| d.id);
     Ok(Some(match (status.as_str(), open) {
         ("draft", Some(d)) => (status, Some(d)),
         ("draft", None) => (crate::outbound::DISCARDED.to_owned(), None),

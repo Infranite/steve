@@ -1574,11 +1574,10 @@ async fn a_drafted_answer_is_closed_in_its_own_conversation() {
     assert_eq!(h.outbox.send_due(&h.ch).await, 0, "never sent");
     assert!(sent(&h).is_empty());
     // answered once: a second 不发出 is refused, nothing changes
-    assert!(
-        steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, ME), &d1, "no", "")
-            .expect("ours")
-            .is_err()
-    );
+    let replay = steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, ME), &d1, "no", "")
+        .expect("ours")
+        .expect("same answer");
+    assert_eq!(replay.result["choice"], "no");
 
     // a draft whose approval was taken out of 待处理 without discarding it
     let (ops, r2, d2) = draft("q2").await;

@@ -12,7 +12,7 @@ import { ItemView } from "../../src/views"
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const ID = "ST-9", T1 = Date.parse("2026-11-04T10:00:00+08:00"), T2 = T1 + 3_600_000
 const design = new URLSearchParams(location.search).has("design")
-const designDecision = { id: "design-1", kind: "ask" as const, subject_type: "design_implementation", subject_id: "{}", item_id: ID, session_id: null, question: "设计报告已交付，下一步？", draft: "请先查看产出。", options: ["按方案实现", "只保留设计", "修改设计"], status: "open" as const, result: null, requested_by: "dev", created: T2, resolved: null, undo: null }
+const designDecision = { id: "design-1", kind: "ask" as const, subject_type: "design_implementation", subject_id: "{}", item_id: ID, session_id: null, question: { kind: "raw" as const, text: "设计报告已交付，下一步？" }, draft: "请先查看产出。", options: ["按方案实现", "只保留设计", "修改设计"], status: "open" as const, result: null, requested_by: "dev", created: T2, resolved: null, undo: null }
 const art = (id: string, kind: string, title: string, location: string | null, created: number) => ({ id, kind, title, location, created })
 const artifacts = [
   art("a_branch1", "分支", "steve/st-9", null, T1), art("a_shots", "文件", "自查截图", "/tmp/st9/shots", T1 + 1), art("a_plan1", "文档", "方案", "docs/plan.md", T1 + 2),

@@ -164,7 +164,7 @@ impl Core {
             .store()
             .decisions_of_item(&item.id)?
             .into_iter()
-            .rfind(|d| d.kind == "accept" && d.status == "open");
+            .rfind(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open);
         if let Some(d) = delivered {
             let id = self.store().message_add_in(
                 ws,

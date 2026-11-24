@@ -182,6 +182,10 @@ impl StepWrite {
         if let Some(d) = &w.decision {
             let mut d = d.clone();
             d.subject_id = format!("{run_id}:{cursor}");
+            d.source = Some(steve_store::DecisionSource::FlowStep {
+                started_at: self.started,
+                retry: r.attempts,
+            });
             let opened = DecisionRows(tx).open(&d)?;
             out["decision_id"] = json!(opened.id);
             decision_id = Some(opened.id.clone());

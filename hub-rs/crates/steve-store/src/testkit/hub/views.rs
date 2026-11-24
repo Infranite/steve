@@ -1,4 +1,4 @@
-use crate::{NewDecision, Result, Store, StoreError, WS, decision_create_in};
+use crate::{NewDecision, Result, Store, StoreError, WS};
 use steve_types::{ChannelsEvent, PeopleEvent};
 
 pub fn seed_channel_tiers(store: &Store) -> Result<()> {
@@ -31,18 +31,16 @@ pub fn seed_channel_tiers(store: &Store) -> Result<()> {
 pub fn channel_decisions(store: &Store) -> Result<(String, String, String)> {
     store.write(|tx| -> Result<_, StoreError> {
         let mut decision = |kind: &str, message: &str| {
-            decision_create_in(
-                tx,
-                &NewDecision {
+            crate::DecisionRows(tx)
+                .open(&NewDecision {
                     workspace_id: WS.into(),
                     subject_type: "chan_message".into(),
                     subject_id: message.into(),
                     kind: kind.into(),
                     options: Some(vec!["no".into()]),
                     ..Default::default()
-                },
-            )
-            .map(|d| d.id)
+                })
+                .map(|d| d.id)
         };
         let star = decision("approve", "tier-out-a")?;
         let quiet = decision("approve", "tier-out-b")?;

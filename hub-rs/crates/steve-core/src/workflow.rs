@@ -1241,7 +1241,7 @@ impl Tx<'_> {
                 .db()
                 .decisions_of_item(s.item_id.as_deref().unwrap_or(""))?
                 .iter()
-                .any(|d| d.status == "open")
+                .any(|d| d.status == steve_types::DecisionStatus::Open)
         {
             // Resuming a confirmed-idle session acquires capacity again. Logical
             // `running` survives a pause, but must not bypass another graph's reservation.
@@ -1789,7 +1789,7 @@ impl Tx<'_> {
                     .db()
                     .decisions_of_item(child)?
                     .iter()
-                    .any(|d| d.status == "open")
+                    .any(|d| d.status == steve_types::DecisionStatus::Open)
             {
                 // stored: what every member reads, worded again at read time
                 let reason = steve_i18n::stored(|| match end.error.as_deref() {
