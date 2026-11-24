@@ -933,13 +933,24 @@ fn migration_125_preserves_history_commits_seq_and_notices() {
     c.execute_batch(
         "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('u1','default','u1','U1','owner',1);
          INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','u1','owner',1);
-         INSERT INTO items(id,workspace_id,no,title,phase,created,updated) VALUES('ST-1','default',1,'T1','active',1,1),('ST-2','default',2,'T2','active',1,1);
+         INSERT INTO items(id,workspace_id,no,title,phase,created,updated) VALUES
+           ('ST-1','default',1,'T1','active',1,1),
+           ('ST-2','default',2,'T2','active',1,1),
+           ('ST-3','default',3,'T3','active',1,1);
          INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES
            ('m_done','default','steve','me','done q',10),
            ('m_done_r','default','steve','steve','done a',11),
            ('m_run','default','steve','me','running q',12),
            ('m_route','default','steve','me','route only q',13),
            ('m_route_r','default','steve','steve','route only a',14),
+           ('m_ans','default','steve','me','ans fallback q',15),
+           ('m_ans_r','default','steve','steve','ans fallback a',16),
+           ('m_dup','default','steve','me','rerun q',17),
+           ('m_dup_r','default','steve','steve','rerun a',18),
+           ('m_item','default','steve','me','item q',19),
+           ('m_item_r','default','steve','steve','item a',19),
+           ('m_supp','default','steve','me','supp q',20),
+           ('m_supp_r','default','steve','steve','supp a',20),
            ('n_fail_1','default','notify','steve','fail 1',20),
            ('n_ok_2','default','notify','steve','ok 2',21),
            ('n_fail_3','default','notify','steve','fail 3',22);
@@ -952,16 +963,24 @@ fn migration_125_preserves_history_commits_seq_and_notices() {
          INSERT INTO settings(workspace_id,key,value,updated) VALUES
            ('default','noticeDismissed','[\"n_fail_3\",\"dec_alert_9\"]',25),
            ('default','thread.pending.m_run','{}',12);
-         INSERT INTO route_log(id,workspace_id,message_id,reply_id,model_kind,kind,ms,created) VALUES
-           ('rl_1','default','m_done','m_done_r','research','research',50,10),
-           ('rl_2','default','m_route','m_route_r','answer','answer',30,13);
+         INSERT INTO route_log(id,workspace_id,message_id,reply_id,model_kind,kind,item_id,ms,created) VALUES
+           ('rl_1','default','m_done','m_done_r','research','research','ST-2',50,10),
+           ('rl_2','default','m_route','m_route_r','answer','answer',NULL,30,13),
+           ('rl_ans','default','m_ans','m_ans_r','answer','answer',NULL,20,15),
+           ('rl_dup','default','m_dup','m_dup_r','answer','answer',NULL,20,17),
+           ('rl_item','default','m_item','m_item_r','item','item','ST-3',20,19),
+           ('rl_supp','default','m_supp','m_supp_r','supplement','supplement','ST-3',20,20);
          INSERT INTO thread_runs(id,workspace_id,message_id,reply_id,user_id,status,created,started,ended) VALUES
            ('tr_done','default','m_done','m_done_r','u1','done',10,10,11),
-           ('tr_run','default','m_run',NULL,'u1','running',12,12,NULL);
+           ('tr_run','default','m_run',NULL,'u1','running',12,12,NULL),
+           ('tr_ans','default','m_ans',NULL,'u1','done',15,15,16),
+           ('tr_dup_fail','default','m_dup',NULL,'u1','failed',17,17,17),
+           ('tr_dup_done','default','m_dup',NULL,'u1','done',18,18,18);
          INSERT INTO thread_resume(run_id,created,attempts) VALUES('tr_run',12,1);
          INSERT INTO thread_items(item_id,workspace_id,origin_msg,reply_msg,from_question,follow,last_post,created) VALUES
            ('ST-1','default','m_done','m_done_r',1,1,15,10),
-           ('ST-2','default','m_done',NULL,0,0,NULL,11);
+           ('ST-2','default','m_done',NULL,0,0,NULL,11),
+           ('ST-3','default','m_item','m_item_r',0,1,19,19);
          INSERT INTO thread_reply_commits(seq,message_id,run_id,workspace_id,user_id) VALUES(7,'m_done_r','tr_done','default','u1');
          DELETE FROM sqlite_sequence WHERE name='thread_reply_commits';
          INSERT INTO sqlite_sequence(name,seq) VALUES('thread_reply_commits',19);",
@@ -993,6 +1012,64 @@ fn migration_125_preserves_history_commits_seq_and_notices() {
                 "unknown"
             );
             assert_eq!(
+                c.query_row(
+                    "SELECT reply_message_id FROM thread_reply_receipts WHERE id='tr_ans'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?
+                .as_deref(),
+                Some("m_ans_r"),
+                "null thread_runs.reply_id falls back to route_log.reply_id"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT reply_message_id FROM thread_reply_receipts WHERE id='tr_dup_done'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?
+                .as_deref(),
+                Some("m_dup_r"),
+                "done rerun wins UNIQUE reply_message_id fallback"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT reply_message_id FROM thread_reply_receipts WHERE id='tr_dup_fail'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?,
+                None,
+                "failed sibling rerun stays NULL after losing UNIQUE fallback"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT dispatch_ref_id FROM thread_reply_receipts WHERE id='tr_done'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?
+                .as_deref(),
+                Some("mig_disp_ST-2"),
+                "multi-item legacy origin prefers the dispatch ref matching receipt item_id"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT dispatch_ref_id FROM thread_reply_receipts WHERE id='mig_route_rl_item'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?
+                .as_deref(),
+                Some("mig_disp_ST-3"),
+                "non-run route_log item receipt backfills dispatch_ref_id"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT dispatch_ref_id FROM thread_reply_receipts WHERE id='mig_route_rl_supp'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?,
+                None,
+                "supplement targeting an earlier origin's item does not borrow that origin's create_item ref"
+            );
+            assert_eq!(
                 count(
                     c,
                     "SELECT count(*) FROM thread_reply_receipts WHERE origin_message_id='m_route'"
@@ -1015,7 +1092,7 @@ fn migration_125_preserves_history_commits_seq_and_notices() {
                 )?,
                 19
             );
-            assert_eq!(count(c, "SELECT count(*) FROM thread_dispatch_refs"), 2);
+            assert_eq!(count(c, "SELECT count(*) FROM thread_dispatch_refs"), 3);
             assert_eq!(count(c, "SELECT count(*) FROM messages WHERE space='notify'"), 0);
             assert_eq!(
                 count(

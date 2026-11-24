@@ -199,21 +199,52 @@ SELECT
   COALESCE(r.ended, r.started, r.created)
 FROM thread_runs r;
 
-WITH runs AS (
+-- Backfill reply_message_id from thread_runs.reply_id, falling back to route_log.reply_id
+-- (historical answer runs recorded reply_id on route_log while leaving thread_runs.reply_id NULL).
+-- Rows remain NULL only when neither table has a non-empty reply_id, or when multiple runs
+-- share the same reply_id and lose the UNIQUE tie-breaker (prefer explicit thread_runs.reply_id,
+-- then status = 'done', then earliest created/id).
+WITH run_candidates AS (
   SELECT
     r.*,
     COALESCE((SELECT m.space FROM messages m WHERE m.id = r.message_id), 'steve') AS space,
+    COALESCE(NULLIF(r.reply_id, ''), NULLIF(rl.reply_id, '')) AS candidate_reply_id,
+    rl.kind AS rl_kind,
+    rl.model_kind AS rl_model_kind,
+    rl.guard AS rl_guard,
+    rl.model AS rl_model,
+    rl.confidence AS rl_confidence,
+    rl.signals AS rl_signals,
+    rl.fallback AS rl_fallback,
+    rl.ms AS rl_ms,
+    rl.override AS rl_override,
+    rl.override_at AS rl_override_at,
+    rl.outcome AS rl_outcome,
+    rl.item_id AS rl_item_id
+  FROM thread_runs r
+  LEFT JOIN route_log rl ON rl.message_id = r.message_id
+),
+runs AS (
+  SELECT
+    rc.*,
     ROW_NUMBER() OVER (
-      PARTITION BY r.workspace_id, COALESCE((SELECT m.space FROM messages m WHERE m.id = r.message_id), 'steve'), r.message_id
-      ORDER BY r.created, r.id
+      PARTITION BY rc.workspace_id, rc.space, rc.message_id
+      ORDER BY rc.created, rc.id
     ) - 1 AS reply_revision,
     CASE
-      WHEN r.reply_id IS NOT NULL
-       AND ROW_NUMBER() OVER (PARTITION BY r.reply_id ORDER BY r.created, r.id) = 1
-      THEN r.reply_id
+      WHEN rc.candidate_reply_id IS NOT NULL
+       AND ROW_NUMBER() OVER (
+         PARTITION BY rc.candidate_reply_id
+         ORDER BY
+           CASE WHEN NULLIF(rc.reply_id, '') IS NOT NULL THEN 0 ELSE 1 END,
+           CASE WHEN rc.status = 'done' THEN 0 ELSE 1 END,
+           rc.created,
+           rc.id
+       ) = 1
+      THEN rc.candidate_reply_id
       ELSE NULL
     END AS safe_reply_id
-  FROM thread_runs r
+  FROM run_candidates rc
 )
 INSERT INTO thread_reply_receipts (
   id, task_id, workspace_id, space, origin_message_id, reply_revision,
@@ -240,18 +271,18 @@ SELECT
   END,
   r.safe_reply_id,
   CASE WHEN r.status IN ('failed', 'budget', 'violated') THEN r.status ELSE NULL END,
-  COALESCE(rl.kind, 'research'),
-  COALESCE(rl.model_kind, 'research'),
-  rl.guard,
-  rl.model,
-  rl.confidence,
-  COALESCE(rl.signals, '[]'),
-  COALESCE(rl.fallback, 0),
-  COALESCE(rl.ms, 0),
-  rl.override,
-  rl.override_at,
-  rl.outcome,
-  rl.item_id,
+  COALESCE(r.rl_kind, 'research'),
+  COALESCE(r.rl_model_kind, 'research'),
+  r.rl_guard,
+  r.rl_model,
+  r.rl_confidence,
+  COALESCE(r.rl_signals, '[]'),
+  COALESCE(r.rl_fallback, 0),
+  COALESCE(r.rl_ms, 0),
+  r.rl_override,
+  r.rl_override_at,
+  r.rl_outcome,
+  r.rl_item_id,
   r.user_id,
   r.project_id,
   r.model,
@@ -263,8 +294,7 @@ SELECT
   r.error,
   1,
   COALESCE(r.ended, r.started, r.created)
-FROM runs r
-LEFT JOIN route_log rl ON rl.message_id = r.message_id;
+FROM runs r;
 
 -- Migrate historical route_log rows that had no thread_runs entry.
 INSERT INTO thread_reply_tasks (
@@ -287,19 +317,27 @@ SELECT
 FROM route_log rl
 WHERE NOT EXISTS (SELECT 1 FROM thread_runs r WHERE r.message_id = rl.message_id);
 
-WITH routes AS (
+-- Non-run route_log rows stay NULL only when route_log.reply_id is NULL/empty or collides
+-- with an already-backfilled reply_message_id on the UNIQUE constraint.
+WITH route_candidates AS (
   SELECT
     rl.*,
     COALESCE((SELECT m.space FROM messages m WHERE m.id = rl.message_id), 'steve') AS space,
-    CASE
-      WHEN rl.reply_id IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM thread_reply_receipts x WHERE x.reply_message_id = rl.reply_id)
-       AND ROW_NUMBER() OVER (PARTITION BY rl.reply_id ORDER BY rl.created, rl.id) = 1
-      THEN rl.reply_id
-      ELSE NULL
-    END AS safe_reply_id
+    NULLIF(rl.reply_id, '') AS candidate_reply_id
   FROM route_log rl
   WHERE NOT EXISTS (SELECT 1 FROM thread_runs r WHERE r.message_id = rl.message_id)
+),
+routes AS (
+  SELECT
+    rc.*,
+    CASE
+      WHEN rc.candidate_reply_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM thread_reply_receipts x WHERE x.reply_message_id = rc.candidate_reply_id)
+       AND ROW_NUMBER() OVER (PARTITION BY rc.candidate_reply_id ORDER BY rc.created, rc.id) = 1
+      THEN rc.candidate_reply_id
+      ELSE NULL
+    END AS safe_reply_id
+  FROM route_candidates rc
 )
 INSERT INTO thread_reply_receipts (
   id, task_id, workspace_id, space, origin_message_id, reply_revision,
@@ -402,6 +440,41 @@ SELECT
   ti.created,
   COALESCE(ti.last_post, ti.created)
 FROM legacy_items ti;
+
+-- Backfill thread_reply_receipts.dispatch_ref_id from migrated create_item dispatch refs
+-- matched deterministically by (workspace_id, origin_message_id). When legacy thread_items
+-- had multiple items for the same origin (suffixed ':legacy:<item_id>' on rn > 1), prefer
+-- the ref whose target_item_id matches the receipt's item_id, else the earliest ref (rn = 1).
+-- Receipts stay NULL when:
+--   (a) the turn never created an item (inline answer/research/ask/config/open suggest);
+--   (b) the turn appended/supplemented an existing item created by an earlier origin
+--       (legacy thread_items only recorded create_item dispatches, never append_item);
+--   (c) the legacy thread_items row referenced a deleted item and was skipped above.
+UPDATE thread_reply_receipts
+SET dispatch_ref_id = (
+  SELECT d.id
+  FROM thread_dispatch_refs d
+  WHERE d.workspace_id = thread_reply_receipts.workspace_id
+    AND d.effect_kind = 'create_item'
+    AND d.origin_message_id IN (
+      thread_reply_receipts.origin_message_id,
+      CASE
+        WHEN thread_reply_receipts.item_id IS NOT NULL
+        THEN thread_reply_receipts.origin_message_id || ':legacy:' || thread_reply_receipts.item_id
+      END
+    )
+  ORDER BY
+    CASE
+      WHEN thread_reply_receipts.item_id IS NOT NULL
+       AND d.target_item_id = thread_reply_receipts.item_id
+      THEN 0
+      ELSE 1
+    END,
+    d.created,
+    d.id
+  LIMIT 1
+)
+WHERE dispatch_ref_id IS NULL;
 
 -- Migrate messages(space='notify') and settings.noticeDismissed into typed thread_notices.
 INSERT INTO thread_notices (
