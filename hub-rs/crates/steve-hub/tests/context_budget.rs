@@ -249,6 +249,42 @@ for raw in sys.stdin:
                 "stopReason": "end_turn",
                 "usage": {"inputTokens": 150, "outputTokens": 30, "cachedReadTokens": 0, "cachedWriteTokens": 0, "totalTokens": 180},
             }})
+        elif "HUB:BUILTIN_1M_COMPACT" in text:
+            # Builtin 1M harness compacts on its own before hitting 8_000 budget -> no handoff.
+            update(sid, {"sessionUpdate": "usage_update", "used": 7000, "size": 1000000})
+            update(sid, {"sessionUpdate": "usage_update", "used": 1200, "size": 1000000})
+            update(sid, {"sessionUpdate": "usage_update", "used": 1500, "size": 1000000})
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "builtin 1m self compacted"}})
+            send({"id": mid, "result": {
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 350, "outputTokens": 70, "cachedReadTokens": 120, "cachedWriteTokens": 0, "totalTokens": 540},
+            }})
+        elif "HUB:BUILTIN_1M_HANDOFF" in text and "工作记忆" not in text:
+            # Builtin 1M harness climbs past declared budget (8_000) without compacting -> Node
+            # cancels with context_budget -> Core hands off on same Bot & surface.
+            with open(os.path.join(os.getcwd(), "b1m_part1.txt"), "w", encoding="utf-8") as f:
+                f.write("b1m-step1")
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Builtin 1M step 1 before budget"}})
+            update(sid, {"sessionUpdate": "usage_update", "used": 8500, "size": 1000000})
+            cancelled = wait_for_cancel(5.0)
+            send({"id": mid, "result": {
+                "stopReason": "cancelled" if cancelled else "end_turn",
+                "usage": {"inputTokens": 500, "outputTokens": 90, "cachedReadTokens": 200, "cachedWriteTokens": 0, "totalTokens": 790},
+            }})
+        elif "HUB:BUILTIN_1M_HANDOFF" in text:
+            with open(os.path.join(ctrl_dir, "b1m_s2.prompt"), "w", encoding="utf-8") as f:
+                f.write(text)
+            part1 = open(os.path.join(os.getcwd(), "b1m_part1.txt"), "r", encoding="utf-8").read()
+            with open(os.path.join(os.getcwd(), "b1m_part2.txt"), "w", encoding="utf-8") as f:
+                f.write(part1 + "+b1m-step2")
+            with open(os.path.join(ctrl_dir, "b1m_s2.cwd"), "w", encoding="utf-8") as f:
+                f.write(os.getcwd())
+            update(sid, {"sessionUpdate": "usage_update", "used": 1100, "size": 1000000})
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Builtin 1M step 2 done"}})
+            send({"id": mid, "result": {
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 300, "outputTokens": 60, "cachedReadTokens": 80, "cachedWriteTokens": 0, "totalTokens": 440},
+            }})
         elif "HUB:HANDOFF" in text and "工作记忆" not in text:
             # Session #1 of handoff test: do real workspace work + tool call + progress, wait for
             # test to attach plan/decision/queued follow-up, then cross budget threshold.
@@ -382,6 +418,16 @@ impl HubEnv {
                             "nested_sandbox": false,
                             "context_limit": 20000,
                             "context_budget_pct": 80
+                        }
+                    },
+                    "builtin-1m-bot": {
+                        "command": adapter.display().to_string(),
+                        "name": "Builtin 1M Bot",
+                        "properties": {
+                            "nested_sandbox": false,
+                            "context_limit": 10000,
+                            "context_budget_pct": 80,
+                            "native_compaction": { "kind": "builtin" }
                         }
                     },
                     "loop-bot": {
@@ -1586,4 +1632,122 @@ async fn provider_error_switches_fallback_surface_and_escalates_card_when_all_un
         .expect("peer view");
     assert_eq!(peer_view["placement"]["bot"], peer);
     assert_eq!(peer_view["placement"]["reason"], "handoff_owner_request");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn builtin_native_1m_window_hands_off_when_uncompacted_and_skips_when_self_compacted() {
+    let e = HubEnv::start(&[("STEVE_TURN_CONTEXT_HANDOFF_LIMIT", "2")]).await;
+    let bot = e.create_bot("Builtin1MBot", "builtin-1m-bot").await;
+
+    // 1. Builtin native-compaction harness on a 1M window climbs past declared budget (8_000)
+    //    without compacting -> Node stops with context_budget -> Core hands off to a new session
+    //    on the SAME Bot and SAME execution surface carrying the deterministic handoff package.
+    let (iid_ho, s1) = e
+        .create_item(&bot, "Builtin 1M handoff", "HUB:BUILTIN_1M_HANDOFF")
+        .await;
+    eventually(
+        on_timeout(|| async {
+            format!(
+                "waiting for builtin-1m handoff session #2; sessions={:?}",
+                e.store.sessions().of_item(&iid_ho)
+            )
+        }),
+        || async {
+            let sessions = e.store.sessions().of_item(&iid_ho).unwrap_or_default();
+            if sessions.len() < 2 {
+                return false;
+            }
+            fixtures::acp_turns(&e.db, &sessions[1].id)
+                .map(|t| t.len() == 1 && t[0].0.is_some())
+                .unwrap_or(false)
+        },
+    )
+    .await;
+
+    let mut sessions = e.store.sessions().of_item(&iid_ho).unwrap();
+    sessions.sort_by_key(|s| s.no);
+    assert_eq!(sessions.len(), 2, "{sessions:?}");
+    assert_eq!(sessions[0].id, s1);
+    assert_eq!(sessions[0].status, "ended");
+    let s2 = &sessions[1];
+    assert_eq!(s2.bot_id.as_deref(), Some(bot.as_str()));
+    assert_eq!(s2.harness, "builtin-1m-bot");
+    let t1 = fixtures::acp_turns(&e.db, &s1).unwrap();
+    assert_eq!(t1.len(), 1);
+    assert_eq!(t1[0].3, "context_budget");
+    let s2_prompt = std::fs::read_to_string(e.ctrl.join("b1m_s2.prompt")).expect("b1m s2 prompt");
+    for expected in [
+        "工作记忆",
+        "[目标与验收]",
+        "[工作区与分支]",
+        "Builtin 1M step 1 before budget",
+    ] {
+        assert!(
+            s2_prompt.contains(expected),
+            "builtin 1M handoff prompt missing {expected:?}:\n{s2_prompt}"
+        );
+    }
+    let s2_cwd = PathBuf::from(
+        std::fs::read_to_string(e.ctrl.join("b1m_s2.cwd"))
+            .unwrap()
+            .trim(),
+    );
+    assert_eq!(
+        std::fs::read_to_string(s2_cwd.join("b1m_part2.txt")).unwrap(),
+        "b1m-step1+b1m-step2"
+    );
+    let views = e.session_views(&iid_ho).await;
+    let s2_view = views
+        .iter()
+        .find(|v| v["id"] == s2.id.as_str())
+        .expect("s2 view");
+    assert_eq!(s2_view["placement"]["bot"], bot);
+    assert_eq!(s2_view["placement"]["reason"], "handoff_context_budget");
+    assert_eq!(
+        sum_tokens(&fixtures::acp_usage(&e.db, &s1).unwrap()),
+        (500, 90, 200, 0)
+    );
+    assert_eq!(
+        sum_tokens(&fixtures::acp_usage(&e.db, &s2.id).unwrap()),
+        (300, 60, 80, 0)
+    );
+
+    // 2. When the same builtin 1M harness self-compacts before reaching budget, no handoff occurs
+    //    and the native compaction is recorded in diagnostics.
+    let (iid_cmp, sc) = e
+        .create_item(&bot, "Builtin 1M self-compact", "HUB:BUILTIN_1M_COMPACT")
+        .await;
+    eventually(
+        on_timeout(|| async {
+            format!(
+                "waiting for builtin-1m self-compact turn end: {:?}",
+                fixtures::acp_turns(&e.db, &sc)
+            )
+        }),
+        || async {
+            fixtures::acp_turns(&e.db, &sc)
+                .map(|t| t.len() == 1 && t[0].0.is_some())
+                .unwrap_or(false)
+        },
+    )
+    .await;
+    let cmp_sessions = e.store.sessions().of_item(&iid_cmp).unwrap();
+    assert_eq!(
+        cmp_sessions.len(),
+        1,
+        "self-compacted builtin 1M turn must not trigger handoff: {cmp_sessions:?}"
+    );
+    assert_eq!(fixtures::acp_turns(&e.db, &sc).unwrap()[0].3, "end_turn");
+    eventually("builtin native compaction diagnostic recorded", || async {
+        !e.debug_events(&iid_cmp, "context.compacted")
+            .await
+            .is_empty()
+    })
+    .await;
+    let diag = e.debug_events(&iid_cmp, "context.compacted").await;
+    assert_eq!(diag.len(), 1, "{diag:?}");
+    assert_eq!(diag[0]["reason_code"], "native_compaction");
+    assert_eq!(diag[0]["details"]["context_before"], 7_000);
+    assert_eq!(diag[0]["details"]["context_after"], 1_200);
+    assert_eq!(diag[0]["details"]["limit"], 1_000_000);
 }

@@ -382,10 +382,15 @@ pub enum UsageFallback {
     ClaudeTranscript,
 }
 
-/// How a harness compacts its own context natively. `None` on
-/// [`AdapterProperties::native_compaction`] means no native compaction is declared, so Steve
-/// enforces the turn context budget deterministically by ending the turn and handing off into a
-/// fresh session with compact working memory.
+/// How a harness compacts its own context natively.
+///
+/// - Configurable variants (`EnvPercent`, `EnvRatio`, `EnvTokens`, `CliArgs`) receive Steve's
+///   resolved turn context budget at launch so the harness compacts natively on schedule.
+/// - `Builtin` marks built-in auto-compaction with no launch-time threshold override: Steve
+///   observes native drops and enforces the turn context budget via `ContextBudget` handoff as a
+///   backstop if the harness does not compact before reaching the threshold.
+/// - `None` on [`AdapterProperties::native_compaction`] means no native compaction is declared, so
+///   Steve enforces the turn context budget deterministically via `ContextBudget` handoff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NativeCompaction {
@@ -405,6 +410,24 @@ pub enum NativeCompaction {
     /// CLI arguments appended at launch with `{tokens}`, `{percent}`, or `{ratio}` placeholders.
     CliArgs { args: Vec<String> },
 }
+
+impl NativeCompaction {
+    /// Whether Steve can pass a turn context budget threshold into this harness at launch.
+    pub fn is_configurable(&self) -> bool {
+        match self {
+            Self::Builtin => false,
+            Self::EnvPercent { var, window_var } => {
+                !var.is_empty() || window_var.as_deref().is_some_and(|w| !w.is_empty())
+            }
+            Self::EnvRatio { var } | Self::EnvTokens { var } => !var.is_empty(),
+            Self::CliArgs { args } => !args.is_empty(),
+        }
+    }
+}
+
+/// Inclusive bounds for percentage-based turn context budgets (`1%..=99%`).
+const MIN_CONTEXT_BUDGET_PCT: u8 = 1;
+const MAX_CONTEXT_BUDGET_PCT: u8 = 99;
 
 /// Launch-time environment variables and CLI arguments rendered from [`NativeCompaction`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -533,9 +556,30 @@ impl AdapterProperties {
         }
     }
 
-    /// Whether the harness declares native context compaction.
+    /// Whether the harness declares native context compaction (configurable or built-in).
+    /// Enables native compaction drop observation.
     pub fn has_native_compaction(&self) -> bool {
         self.native_compaction.is_some()
+    }
+
+    /// Whether the harness declares native context compaction whose budget can be configured at
+    /// launch (`env_percent`, `env_ratio`, `env_tokens`, or `cli_args`).
+    pub fn has_configurable_native_compaction(&self) -> bool {
+        self.native_compaction
+            .as_ref()
+            .is_some_and(NativeCompaction::is_configurable)
+    }
+
+    /// Whether Steve enforces the turn context budget via `ContextBudget` handoff when observed
+    /// context reaches the resolved threshold.
+    ///
+    /// - `false` when the harness accepts a launch-time budget (`env_percent`, `env_ratio`,
+    ///   `env_tokens`, `cli_args`), delegating compaction to the harness.
+    /// - `true` when the harness has unconfigurable `builtin` native compaction or no native
+    ///   compaction, so Steve acts as a deterministic backstop if the harness does not compact on
+    ///   its own before the budget is reached.
+    pub fn enforces_turn_context_budget(&self) -> bool {
+        !self.has_configurable_native_compaction()
     }
 
     /// Effective context window in tokens: the adapter's live reported `size`, falling back to
@@ -552,7 +596,7 @@ impl AdapterProperties {
         budget
             .and_then(|b| b.ratio_pct)
             .or(self.context_budget_pct)
-            .filter(|&p| (1..=99).contains(&p))
+            .filter(|&p| (MIN_CONTEXT_BUDGET_PCT..=MAX_CONTEXT_BUDGET_PCT).contains(&p))
     }
 
     /// Deterministic token threshold at which a turn reaches its context budget.
@@ -599,7 +643,12 @@ impl AdapterProperties {
         let cap = budget.and_then(|b| b.max_tokens).filter(|&n| n > 0);
         let derived_pct = cap
             .zip(self.context_limit.filter(|&l| l > 0))
-            .map(|(c, l)| ((c.saturating_mul(100)) / l).clamp(1, 99) as u8);
+            .map(|(c, l)| {
+                ((c.saturating_mul(100)) / l).clamp(
+                    u64::from(MIN_CONTEXT_BUDGET_PCT),
+                    u64::from(MAX_CONTEXT_BUDGET_PCT),
+                ) as u8
+            });
         let tokens = self.turn_context_budget_tokens(budget, None);
         let mut out = NativeCompactionLaunch::default();
         match compaction {
@@ -749,14 +798,16 @@ adapter_properties! {
     /// (for example `--no-sandbox` so Copilot CLI disables its nested inner sandbox rather than
     /// aborting inside Seatbelt or Bubblewrap).
     outer_sandbox_args: Vec<String> = vec![] => Option<Vec<String>>, "Option::is_none", cloned;
-    /// Declared default context window limit in tokens, used when the adapter omits `size` in
-    /// `usage_update` and as baseline for launch-time token thresholds.
+    /// Declared default baseline context window limit in tokens, used when the adapter omits
+    /// `size` in `usage_update` and as the default ceiling (`context_limit × context_budget_pct`)
+    /// so 1M-window models stay constrained unless raised by workspace/Hub settings.
     context_limit: Option<u64> = None => Option<u64>, "Option::is_none", copied_option;
     /// Declared default turn context budget ratio in percent (`1..=99`), used when neither the
     /// workspace `handoff` setting nor Hub installation configuration overrides it.
     context_budget_pct: Option<u8> = None => Option<u8>, "Option::is_none", copied_option;
-    /// Declared native context compaction mechanism. `None` means the harness has no declared
-    /// native compaction and Steve enforces the turn context budget deterministically.
+    /// Declared native context compaction mechanism. Configurable variants delegate compaction to
+    /// the harness; `builtin` and `None` remain enforced by Steve's deterministic turn context
+    /// budget backstop.
     native_compaction: Option<NativeCompaction> = None => Option<NativeCompaction>, "Option::is_none", state;
 }
 /// What a manifest declares about an adapter besides its command.
@@ -937,6 +988,8 @@ mod context_budget_tests {
         }
         let claude = builtin("claude-code").expect("claude-code");
         assert!(claude.properties.has_native_compaction());
+        assert!(claude.properties.has_configurable_native_compaction());
+        assert!(!claude.properties.enforces_turn_context_budget());
         // Default launch constrains 1M-window Claude models to context_limit (200k * 80% = 160k).
         let claude_default = claude.properties.native_compaction_launch(None);
         assert_eq!(
@@ -963,6 +1016,8 @@ mod context_budget_tests {
 
         let codex = builtin("codex").expect("codex");
         assert!(codex.properties.has_native_compaction());
+        assert!(codex.properties.has_configurable_native_compaction());
+        assert!(!codex.properties.enforces_turn_context_budget());
         let codex_default = codex.properties.native_compaction_launch(None);
         assert_eq!(
             codex_default.args,
@@ -985,10 +1040,39 @@ mod context_budget_tests {
             ]
         );
 
+        // Builtin-only native compaction (cannot pass budget at launch) still observes native
+        // compaction while keeping Steve's deterministic budget enforcement active (constraining
+        // 1M-window models to 200k * 80% = 160k by default, raisable via max_tokens).
+        for id in ["gemini", "antigravity"] {
+            let b = builtin(id).expect(id);
+            assert!(b.properties.has_native_compaction(), "{id}");
+            assert!(!b.properties.has_configurable_native_compaction(), "{id}");
+            assert!(b.properties.enforces_turn_context_budget(), "{id}");
+            assert_eq!(
+                b.properties
+                    .turn_context_budget_tokens(None, Some(1_000_000)),
+                Some(160_000),
+                "{id}"
+            );
+            assert_eq!(
+                b.properties.turn_context_budget_tokens(
+                    Some(ContextBudget {
+                        ratio_pct: None,
+                        max_tokens: Some(400_000),
+                    }),
+                    Some(1_000_000)
+                ),
+                Some(400_000),
+                "{id}"
+            );
+        }
+
         // Non-native harness constrains 1M reported windows to declared context_limit * pct by
         // default, and honors raised workspace max_tokens up to the reported model window.
         let kiro = builtin("kiro").expect("kiro");
         assert!(!kiro.properties.has_native_compaction());
+        assert!(!kiro.properties.has_configurable_native_compaction());
+        assert!(kiro.properties.enforces_turn_context_budget());
         assert_eq!(
             kiro.properties
                 .turn_context_budget_tokens(None, Some(1_000_000)),
@@ -1011,14 +1095,17 @@ mod context_budget_tests {
         );
 
         let goose = builtin("goose").expect("goose");
+        assert!(goose.properties.has_configurable_native_compaction());
+        assert!(!goose.properties.enforces_turn_context_budget());
         assert_eq!(
             goose.properties.native_compaction_launch(None).env,
             vec![("GOOSE_AUTO_COMPACT_THRESHOLD".into(), "0.80".into())]
         );
 
-        // Undeclared custom adapter defaults to no magic thresholds.
+        // Undeclared custom adapter defaults to no magic thresholds, and enforces when configured.
         let custom = AdapterProperties::default();
         assert!(!custom.has_native_compaction());
+        assert!(custom.enforces_turn_context_budget());
         assert_eq!(custom.turn_context_budget_tokens(None, Some(200_000)), None);
         assert_eq!(
             custom.turn_context_budget_tokens(
@@ -1030,5 +1117,33 @@ mod context_budget_tests {
             ),
             Some(150_000)
         );
+
+        // Degenerate/empty configurable declarations fall back safely to Steve enforcement.
+        for empty in [
+            NativeCompaction::Builtin,
+            NativeCompaction::EnvPercent {
+                var: String::new(),
+                window_var: None,
+            },
+            NativeCompaction::EnvRatio { var: String::new() },
+            NativeCompaction::EnvTokens { var: String::new() },
+            NativeCompaction::CliArgs { args: vec![] },
+        ] {
+            let props = AdapterProperties {
+                native_compaction: Some(empty),
+                ..Default::default()
+            };
+            assert!(props.has_native_compaction());
+            assert!(!props.has_configurable_native_compaction());
+            assert!(props.enforces_turn_context_budget());
+        }
+        let env_tokens = AdapterProperties {
+            native_compaction: Some(NativeCompaction::EnvTokens {
+                var: "COMPACT_TOKENS".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(env_tokens.has_configurable_native_compaction());
+        assert!(!env_tokens.enforces_turn_context_budget());
     }
 }

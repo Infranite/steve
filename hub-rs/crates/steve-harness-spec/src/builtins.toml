@@ -143,6 +143,7 @@ skills = "skills"
 resume_cli = "pi --resume {id}"
 outer_sandbox_args = []
 context_limit = 200000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "pi"
@@ -196,7 +197,8 @@ model_fallback = false
 fast_models = ["flash-lite", "flash"]
 resume_cli = "gemini --resume {id}"
 outer_sandbox_args = []
-context_limit = 1000000
+context_limit = 200000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
@@ -243,6 +245,7 @@ fast_models = ["haiku", "flash", "mini"]
 resume_cli = "copilot --resume={id}"
 outer_sandbox_args = ["--no-sandbox"]
 context_limit = 200000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
@@ -290,6 +293,7 @@ resume_cli = "opencode -s {id}"
 fork_cli = "opencode -s {id} --fork"
 outer_sandbox_args = []
 context_limit = 200000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
@@ -336,6 +340,7 @@ fast_models = ["flash", "turbo", "mini", "haiku", "lite"]
 resume_cli = "qwen --resume {id}"
 outer_sandbox_args = []
 context_limit = 256000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
@@ -430,6 +435,7 @@ fast_models = []
 resume_cli = "kimi --session {id}"
 outer_sandbox_args = []
 context_limit = 256000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
@@ -522,6 +528,7 @@ fast_models = ["haiku", "mini", "flash", "nano", "lite", "small", "free"]
 resume_cli = "kilo --session {id}"
 outer_sandbox_args = []
 context_limit = 200000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
@@ -568,6 +575,7 @@ fast_models = ["haiku", "luna", "flash", "mini"]
 resume_cli = "droid --resume {id}"
 outer_sandbox_args = []
 context_limit = 200000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
@@ -659,6 +667,7 @@ fast_models = ["composer", "flash", "mini", "nano", "haiku", "luna"]
 resume_cli = "cursor-agent --resume {id}"
 outer_sandbox_args = []
 context_limit = 200000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 
 [[adapters]]
@@ -736,6 +745,7 @@ fast_models = ["small", "ministral", "codestral", "flash", "mini", "haiku"]
 resume_cli = "vibe --resume {id}"
 outer_sandbox_args = []
 context_limit = 200000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}
 
 [[adapters]]
@@ -813,5 +823,6 @@ model_fallback = false
 fast_models = ["flash-lite", "flash"]
 resume_cli = "agy --resume {id}"
 outer_sandbox_args = []
-context_limit = 1000000
+context_limit = 200000
+context_budget_pct = 80
 native_compaction = {"kind" = "builtin"}

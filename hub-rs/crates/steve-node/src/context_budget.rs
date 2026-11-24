@@ -10,12 +10,65 @@ use steve_node_api::{
     CompactionMode, CompactionReason, ContextBudget, EventBody, ToolCategory, ToolPhase, ToolView,
 };
 
+/// Denominator for integer percentage thresholds in [`ContextMonitor`].
+const PERCENT_DENOMINATOR: u64 = 100;
+
+/// ACP `ToolCategory::Think` tool name emitted by harnesses that expose native compaction as an
+/// explicit tool call (observed on Claude Code in `CONTEXT-BUDGET.md` §1.3).
+const EXPLICIT_COMPACT_TOOL_NAME: &str = "compact";
+
+/// Upper bound (% of `before`) for tolerating one trailing pre-compaction `usage_update` arriving
+/// immediately after an explicit `compact` tool completes.
+///
+/// Protocol & empirical basis (`CONTEXT-BUDGET.md` §1.3): in ACP, `tool_call_update(completed)`
+/// for `compact` can precede one trailing `usage_update` from the pre-compaction prompt step
+/// (observed climbing slightly at trigger time, e.g. 199k -> 201k before dropping to 10k–18k).
+/// Keeping the pending explicit drop alive up to 125% covers that single trailing reading while
+/// dropping it if context continues climbing far past the pre-compact watermark.
+const EXPLICIT_COMPACT_STALE_CEILING_PCT: u64 = 125;
+
+/// Sustained confirmation ceiling (% of `before`) for an implicit native compaction drop.
+///
+/// Empirical basis (`CONTEXT-BUDGET.md` §1.3): 82 production turns exhibited alternating
+/// dual-counter `usage_update` oscillation (e.g. 689k -> 148k -> 691k, bouncing back to ~100% of
+/// `before`), whereas real implicit native compactions (Codex 247k–250k -> 19k–22k and
+/// 789k–792k -> 28k–33k) stay near 4%–10% of `before` on the subsequent update. Requiring the
+/// follow-up reading to stay strictly below 75% rejects oscillation bounces while leaving headroom
+/// for new tool output added in the first post-compaction step.
+const IMPLICIT_DROP_CONFIRM_CEILING_PCT: u64 = 75;
+
+/// Maximum retained context (% of `prev`) to open an implicit native compaction candidate.
+///
+/// Empirical basis (`CONTEXT-BUDGET.md` §1.3 & §2.3): real native compactions observed in
+/// production cut context by >85% (Claude Code 165k–200k -> 10k–18k; Codex 247k–250k -> 19k–22k
+/// and 789k–792k -> 28k–33k). Requiring `used <= 50%` of `prev` filters routine prompt/cache
+/// fluctuations without missing real compactions.
+const IMPLICIT_DROP_MAX_RETAINED_PCT: u64 = 50;
+
+/// Minimum absolute token drop (% of the active declared/configured budget scale, falling back to
+/// `effective_context_limit`) required to open an implicit compaction candidate.
+///
+/// Derived from declared/configured context scale so 1M-window models constrained to a smaller
+/// turn budget (e.g. 160k) still detect self-compaction relative to their active budget, while
+/// ignoring tiny early-turn fluctuations well below the 22.5k–30.4k first-turn P50 baseline in
+/// `CONTEXT-BUDGET.md` §1.4.
+const IMPLICIT_DROP_MIN_WINDOW_PCT: u64 = 10;
+
+/// Fallback minimum absolute token drop when neither the adapter declaration nor `usage_update`
+/// provides a context limit or budget.
+///
+/// Empirical basis (`CONTEXT-BUDGET.md` §1.4): real turns start at P50 22.5k–30.4k tokens and
+/// compact down to 10k–33k; drops smaller than 1,000 tokens without a known window are noise.
+const IMPLICIT_DROP_MIN_TOKENS_FALLBACK: u64 = 1_000;
+
 /// Result of feeding one `usage_update` context snapshot into [`ContextMonitor`].
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct ContextObservation {
-    /// Emitted when native compaction is confirmed or when a non-native harness hits its budget.
+    /// Emitted when native compaction is confirmed or when a budget-enforced harness hits its
+    /// turn context budget.
     pub compacted: Option<EventBody>,
-    /// True once on a harness without declared native compaction when `context_used >= threshold`.
+    /// True once when [`AdapterProperties::enforces_turn_context_budget`] holds and
+    /// `context_used >= threshold` without native compaction intervening.
     pub stop_budget: bool,
 }
 
@@ -25,6 +78,7 @@ struct PendingDrop {
     after: Option<u64>,
     limit: Option<u64>,
     explicit: bool,
+    stale_seen: bool,
 }
 
 /// Per-attempt context tracker on the Node.
@@ -59,7 +113,7 @@ impl ContextMonitor {
     /// think tool emit this before the post-compaction `usage_update` arrives.
     pub(crate) fn on_tool(&mut self, tool: &ToolView) {
         if tool.category == ToolCategory::Think
-            && tool.name.eq_ignore_ascii_case("compact")
+            && tool.name.eq_ignore_ascii_case(EXPLICIT_COMPACT_TOOL_NAME)
             && tool.phase == ToolPhase::Succeeded
             && let Some(before) = self.last_used.or(self.peak_used).filter(|&n| n > 0)
         {
@@ -68,6 +122,7 @@ impl ContextMonitor {
                 after: None,
                 limit: self.props.effective_context_limit(self.last_limit),
                 explicit: true,
+                stale_seen: false,
             });
         }
     }
@@ -86,12 +141,17 @@ impl ContextMonitor {
             return out;
         };
         let effective_limit = self.props.effective_context_limit(self.last_limit);
+        let budget_threshold = self
+            .props
+            .turn_context_budget_tokens(self.budget, self.last_limit);
         let prev = self.last_used;
         self.last_used = Some(used);
         self.peak_used = Some(self.peak_used.map_or(used, |p| p.max(used)));
 
-        if let Some(p) = self.pending_drop.take() {
+        if let Some(mut p) = self.pending_drop.take() {
             if p.explicit {
+                let stale_ceiling = p.before.saturating_mul(EXPLICIT_COMPACT_STALE_CEILING_PCT)
+                    / PERCENT_DENOMINATOR;
                 if used < p.before {
                     out.compacted = Some(EventBody::ContextCompacted {
                         mode: CompactionMode::Native,
@@ -100,41 +160,57 @@ impl ContextMonitor {
                         after_tokens: used,
                         limit_tokens: effective_limit.or(p.limit),
                     });
-                } else if used <= p.before.saturating_mul(5) / 4 {
-                    // Pre-compaction usage update arrived right after tool completion; keep waiting.
+                } else if !p.stale_seen && used <= stale_ceiling {
+                    // One trailing pre-compaction usage update arrived right after tool
+                    // completion; wait for the post-compaction reading once.
+                    p.stale_seen = true;
                     self.pending_drop = Some(p);
                 }
-            } else if used < p.before.saturating_mul(3) / 4 {
-                // Drop held across a subsequent observation: confirmed native compaction.
-                let after = p.after.unwrap_or(used).min(used);
-                out.compacted = Some(EventBody::ContextCompacted {
-                    mode: CompactionMode::Native,
-                    reason: CompactionReason::NativeCompaction,
-                    before_tokens: p.before,
-                    after_tokens: after,
-                    limit_tokens: effective_limit.or(p.limit),
-                });
+            } else {
+                let confirm_ceiling = p.before.saturating_mul(IMPLICIT_DROP_CONFIRM_CEILING_PCT)
+                    / PERCENT_DENOMINATOR;
+                if used < confirm_ceiling {
+                    // Drop held across a subsequent observation: confirmed native compaction.
+                    let after = p.after.unwrap_or(used).min(used);
+                    out.compacted = Some(EventBody::ContextCompacted {
+                        mode: CompactionMode::Native,
+                        reason: CompactionReason::NativeCompaction,
+                        before_tokens: p.before,
+                        after_tokens: after,
+                        limit_tokens: effective_limit.or(p.limit),
+                    });
+                }
+                // Otherwise the reading bounced back to the high mark (dual-counter oscillation): ignore.
             }
-            // Otherwise the reading bounced back to the high mark (dual-counter oscillation): ignore.
         } else if self.props.has_native_compaction()
             && let Some(prev) = prev
         {
-            let min_drop = effective_limit.map_or(1_000, |l| (l / 10).max(1));
-            if used <= prev / 2 && prev.saturating_sub(used) >= min_drop {
+            let min_drop = budget_threshold.or(effective_limit).map_or(
+                IMPLICIT_DROP_MIN_TOKENS_FALLBACK,
+                |scale| {
+                    (scale.saturating_mul(IMPLICIT_DROP_MIN_WINDOW_PCT) / PERCENT_DENOMINATOR)
+                        .max(1)
+                },
+            );
+            let max_retained =
+                prev.saturating_mul(IMPLICIT_DROP_MAX_RETAINED_PCT) / PERCENT_DENOMINATOR;
+            if used <= max_retained && prev.saturating_sub(used) >= min_drop {
                 self.pending_drop = Some(PendingDrop {
                     before: prev,
                     after: Some(used),
                     limit: effective_limit,
                     explicit: false,
+                    stale_seen: false,
                 });
             }
         }
 
-        if !self.props.has_native_compaction()
+        let awaiting_explicit_compact = self.pending_drop.is_some_and(|p| p.explicit);
+        if self.props.enforces_turn_context_budget()
             && !self.budget_triggered
-            && let Some(threshold) = self
-                .props
-                .turn_context_budget_tokens(self.budget, self.last_limit)
+            && !awaiting_explicit_compact
+            && out.compacted.is_none()
+            && let Some(threshold) = budget_threshold
             && used >= threshold
         {
             self.budget_triggered = true;
@@ -224,9 +300,21 @@ mod tests {
     use steve_harness_spec::NativeCompaction;
     use steve_node_api::{CallId, ToolOrigin};
 
-    fn native_props() -> AdapterProperties {
+    fn configurable_native_props() -> AdapterProperties {
         AdapterProperties {
             context_limit: Some(100_000),
+            context_budget_pct: Some(80),
+            native_compaction: Some(NativeCompaction::EnvPercent {
+                var: "COMPACT_PCT".into(),
+                window_var: Some("COMPACT_WINDOW".into()),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn builtin_native_props() -> AdapterProperties {
+        AdapterProperties {
+            context_limit: Some(200_000),
             context_budget_pct: Some(80),
             native_compaction: Some(NativeCompaction::Builtin),
             ..Default::default()
@@ -242,8 +330,27 @@ mod tests {
         }
     }
 
+    fn compact_tool() -> ToolView {
+        ToolView {
+            id: CallId::new("c1").unwrap(),
+            parent: None,
+            origin: ToolOrigin::Harness,
+            name: "compact".into(),
+            category: ToolCategory::Think,
+            title: "compact".into(),
+            description: None,
+            target: None,
+            phase: ToolPhase::Succeeded,
+            action: None,
+            evidence: None,
+            result: vec![],
+            error: None,
+            duration_ms: None,
+        }
+    }
+
     #[test]
-    fn non_native_harness_stops_deterministically_at_budget_and_native_does_not() {
+    fn non_native_harness_stops_deterministically_at_budget_and_configurable_native_does_not() {
         let mut non_native = ContextMonitor::new(non_native_props(), None);
         let below = non_native.observe_usage(Some(79_999), Some(100_000));
         assert!(!below.stop_budget && below.compacted.is_none());
@@ -264,9 +371,33 @@ mod tests {
         assert!(!again.stop_budget && again.compacted.is_none());
         assert_eq!(non_native.peak_used(), Some(90_000));
 
-        let mut native = ContextMonitor::new(native_props(), None);
-        let high = native.observe_usage(Some(95_000), Some(100_000));
-        assert!(!high.stop_budget && high.compacted.is_none());
+        // Configurable native compaction (env_percent/env_ratio/env_tokens/cli_args) delegates to
+        // the harness and does not stop on budget.
+        for compaction in [
+            NativeCompaction::EnvPercent {
+                var: "PCT".into(),
+                window_var: Some("WIN".into()),
+            },
+            NativeCompaction::EnvRatio {
+                var: "RATIO".into(),
+            },
+            NativeCompaction::EnvTokens {
+                var: "TOKENS".into(),
+            },
+            NativeCompaction::CliArgs {
+                args: vec!["--limit={tokens}".into()],
+            },
+        ] {
+            let props = AdapterProperties {
+                context_limit: Some(100_000),
+                context_budget_pct: Some(80),
+                native_compaction: Some(compaction),
+                ..Default::default()
+            };
+            let mut native = ContextMonitor::new(props, None);
+            let high = native.observe_usage(Some(95_000), Some(100_000));
+            assert!(!high.stop_budget && high.compacted.is_none());
+        }
 
         // 1M-window model on a non-native harness is constrained to declared context_limit * pct
         // (100k * 80% = 80k) by default, and can be raised explicitly via budget.max_tokens.
@@ -299,9 +430,114 @@ mod tests {
     }
 
     #[test]
+    fn builtin_native_1m_window_enforces_budget_unless_harness_self_compacts() {
+        // 1. Builtin native compaction on a 1M window does not accept a launch threshold: when it
+        //    climbs past the resolved default budget (200k * 80% = 160k) without compacting, Steve
+        //    stops the turn for ContextBudget handoff.
+        let mut uncompacted = ContextMonitor::new(builtin_native_props(), None);
+        assert!(
+            !uncompacted
+                .observe_usage(Some(159_999), Some(1_000_000))
+                .stop_budget
+        );
+        let hit = uncompacted.observe_usage(Some(160_000), Some(1_000_000));
+        assert!(hit.stop_budget);
+        assert_eq!(
+            hit.compacted,
+            Some(EventBody::ContextCompacted {
+                mode: CompactionMode::Handoff,
+                reason: CompactionReason::BudgetReached,
+                before_tokens: 160_000,
+                after_tokens: 0,
+                limit_tokens: Some(1_000_000),
+            })
+        );
+
+        // 2. When a builtin 1M harness self-compacts implicitly before hitting budget (including a
+        //    mid-turn drop <100k that still exceeds 10% of the active 160k budget), Steve records
+        //    native compaction and does not interrupt the turn.
+        let mut self_compacted = ContextMonitor::new(builtin_native_props(), None);
+        assert!(
+            !self_compacted
+                .observe_usage(Some(100_000), Some(1_000_000))
+                .stop_budget
+        );
+        let dropped = self_compacted.observe_usage(Some(15_000), Some(1_000_000));
+        assert!(!dropped.stop_budget && dropped.compacted.is_none());
+        let confirmed = self_compacted.observe_usage(Some(20_000), Some(1_000_000));
+        assert!(!confirmed.stop_budget);
+        assert_eq!(
+            confirmed.compacted,
+            Some(EventBody::ContextCompacted {
+                mode: CompactionMode::Native,
+                reason: CompactionReason::NativeCompaction,
+                before_tokens: 100_000,
+                after_tokens: 15_000,
+                limit_tokens: Some(1_000_000),
+            })
+        );
+
+        // 3. Explicit `compact` tool with one trailing pre-compaction reading slightly above
+        //    budget waits for the post-compaction drop instead of falsely cancelling.
+        let mut explicit = ContextMonitor::new(builtin_native_props(), None);
+        assert!(
+            !explicit
+                .observe_usage(Some(155_000), Some(1_000_000))
+                .stop_budget
+        );
+        explicit.on_tool(&compact_tool());
+        let stale = explicit.observe_usage(Some(162_000), Some(1_000_000));
+        assert!(!stale.stop_budget && stale.compacted.is_none());
+        let post = explicit.observe_usage(Some(18_000), Some(1_000_000));
+        assert!(!post.stop_budget);
+        assert_eq!(
+            post.compacted,
+            Some(EventBody::ContextCompacted {
+                mode: CompactionMode::Native,
+                reason: CompactionReason::NativeCompaction,
+                before_tokens: 155_000,
+                after_tokens: 18_000,
+                limit_tokens: Some(1_000_000),
+            })
+        );
+
+        // 4. If an explicit `compact` tool fails to actually shrink context on the follow-up
+        //    reading, the budget backstop still fires rather than waiting forever.
+        let mut noop_compact = ContextMonitor::new(builtin_native_props(), None);
+        noop_compact.observe_usage(Some(155_000), Some(1_000_000));
+        noop_compact.on_tool(&compact_tool());
+        assert!(
+            !noop_compact
+                .observe_usage(Some(162_000), Some(1_000_000))
+                .stop_budget
+        );
+        let still_high = noop_compact.observe_usage(Some(165_000), Some(1_000_000));
+        assert!(still_high.stop_budget);
+
+        // 5. Explicit workspace max_tokens raises the builtin 1M threshold up to reported_limit.
+        let mut raised = ContextMonitor::new(
+            builtin_native_props(),
+            Some(ContextBudget {
+                ratio_pct: None,
+                max_tokens: Some(400_000),
+            }),
+        );
+        assert!(
+            !raised
+                .observe_usage(Some(250_000), Some(1_000_000))
+                .stop_budget
+        );
+        assert!(
+            raised
+                .observe_usage(Some(400_000), Some(1_000_000))
+                .stop_budget
+        );
+    }
+
+    #[test]
     fn native_compaction_confirms_sustained_drop_and_ignores_oscillation() {
         // Dual-counter oscillation (689k -> 148k -> 691k) is ignored.
-        let mut osc = ContextMonitor::new(native_props(), None);
+        let mut osc = ContextMonitor::new(configurable_native_props(), None);
         assert!(
             osc.observe_usage(Some(689_000), Some(200_000))
                 .compacted
@@ -320,7 +556,7 @@ mod tests {
         assert!(osc.finish().is_none());
 
         // Real sustained drop (249k -> 21k -> 24k) is confirmed.
-        let mut codex = ContextMonitor::new(native_props(), None);
+        let mut codex = ContextMonitor::new(configurable_native_props(), None);
         assert!(
             codex
                 .observe_usage(Some(249_000), Some(258_400))
@@ -346,24 +582,9 @@ mod tests {
         );
 
         // Explicit `compact` tool confirms on the very next drop.
-        let mut claude = ContextMonitor::new(native_props(), None);
+        let mut claude = ContextMonitor::new(configurable_native_props(), None);
         claude.observe_usage(Some(195_000), Some(200_000));
-        claude.on_tool(&ToolView {
-            id: CallId::new("c1").unwrap(),
-            parent: None,
-            origin: ToolOrigin::Harness,
-            name: "compact".into(),
-            category: ToolCategory::Think,
-            title: "compact".into(),
-            description: None,
-            target: None,
-            phase: ToolPhase::Succeeded,
-            action: None,
-            evidence: None,
-            result: vec![],
-            error: None,
-            duration_ms: None,
-        });
+        claude.on_tool(&compact_tool());
         let dropped = claude.observe_usage(Some(14_000), Some(200_000));
         assert_eq!(
             dropped.compacted,

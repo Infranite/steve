@@ -45,6 +45,8 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
 
 #[test]
 fn every_builtin_declares_context_budget_and_native_compaction() {
+    let mut configurable_native = vec![];
+    let mut builtin_native = vec![];
     let mut non_native = vec![];
     for b in builtins() {
         assert!(
@@ -52,25 +54,44 @@ fn every_builtin_declares_context_budget_and_native_compaction() {
             "{} must declare context_limit",
             b.id
         );
-        if !b.properties.has_native_compaction()
-            || !matches!(
-                b.properties.native_compaction,
-                Some(NativeCompaction::Builtin)
-            )
-        {
-            assert!(
-                b.properties
-                    .context_budget_pct
-                    .is_some_and(|p| (1..=99).contains(&p)),
-                "{} must declare context_budget_pct",
-                b.id
-            );
-        }
-        if !b.properties.has_native_compaction() {
+        assert!(
+            b.properties
+                .context_budget_pct
+                .is_some_and(|p| (1..=99).contains(&p)),
+            "{} must declare context_budget_pct",
+            b.id
+        );
+        if b.properties.has_configurable_native_compaction() {
+            assert!(!b.properties.enforces_turn_context_budget(), "{}", b.id);
+            configurable_native.push(b.id);
+        } else if b.properties.has_native_compaction() {
+            assert!(b.properties.enforces_turn_context_budget(), "{}", b.id);
+            builtin_native.push(b.id);
+        } else {
+            assert!(b.properties.enforces_turn_context_budget(), "{}", b.id);
             non_native.push(b.id);
         }
     }
+    configurable_native.sort_unstable();
+    builtin_native.sort_unstable();
     non_native.sort_unstable();
+    assert_eq!(configurable_native, vec!["claude-code", "codex", "goose"]);
+    assert_eq!(
+        builtin_native,
+        vec![
+            "antigravity",
+            "cursor",
+            "factory-droid",
+            "gemini",
+            "github-copilot-cli",
+            "kilo",
+            "kimi-code",
+            "mistral-vibe",
+            "opencode",
+            "pi",
+            "qwen-code",
+        ]
+    );
     assert_eq!(
         non_native,
         vec!["codebuddy-code", "grok-build", "kiro", "qoder"]

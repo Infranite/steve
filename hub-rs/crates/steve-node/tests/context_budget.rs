@@ -104,6 +104,17 @@ for raw in sys.stdin:
         elif "SCENARIO:CLI_CHECK" in text:
             update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "cli ok"}})
             send({"id": mid, "result": {"stopReason": "end_turn"}})
+        elif "SCENARIO:BUILTIN_1M_SELF_COMPACT" in text:
+            # Builtin-compaction 1M harness self-compacts before reaching the 8_000 budget ->
+            # Node observes native compaction and does NOT cancel the turn.
+            update(sid, {"sessionUpdate": "usage_update", "used": 7000, "size": 1000000})
+            update(sid, {"sessionUpdate": "usage_update", "used": 1200, "size": 1000000})
+            update(sid, {"sessionUpdate": "usage_update", "used": 1500, "size": 1000000})
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "builtin compacted"}})
+            send({"id": mid, "result": {
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 400, "outputTokens": 80, "cachedReadTokens": 100, "cachedWriteTokens": 0, "totalTokens": 580},
+            }})
         elif "SCENARIO:BUDGET_STOP_1M" in text:
             # 1M-window model reporting size=1_000_000 must still be constrained by declared
             # context_limit * context_budget_pct (10_000 * 80% = 8_000) by default.
@@ -212,6 +223,18 @@ impl Harness {
                 .unwrap(),
             ),
             (
+                "builtin_native".into(),
+                serde_json::from_value(json!({
+                    "properties": {
+                        "nested_sandbox": false,
+                        "context_limit": 10000,
+                        "context_budget_pct": 80,
+                        "native_compaction": { "kind": "builtin" }
+                    }
+                }))
+                .unwrap(),
+            ),
+            (
                 "plain".into(),
                 serde_json::from_value(json!({
                     "properties": {
@@ -233,6 +256,7 @@ impl Harness {
                 adapters: HashMap::from([
                     ("native_env".into(), adapter.clone()),
                     ("native_cli".into(), adapter.clone()),
+                    ("builtin_native".into(), adapter.clone()),
                     ("plain".into(), adapter),
                 ]),
                 declared,
@@ -619,6 +643,78 @@ async fn non_native_harness_stops_deterministically_at_context_budget() {
             .any(|v| v.get("budget_1m_cancelled") == Some(&json!(true))),
         "1M-window model must be stopped by declared budget"
     );
+
+    h.node.shutdown().await;
+}
+
+#[tokio::test]
+async fn builtin_native_1m_window_enforces_budget_unless_harness_self_compacts() {
+    let h = Harness::new();
+
+    // 1. Builtin native-compaction harness reporting a 1M window climbs past declared budget
+    //    (10_000 * 80% = 8_000) without compacting -> Node stops with ContextBudget for handoff.
+    h.open_session("s_builtin_stop", "builtin_native", None, vec![])
+        .await;
+    let stopped = h
+        .run_turn(
+            "s_builtin_stop",
+            "builtin_native",
+            "a_builtin_stop",
+            "SCENARIO:BUDGET_STOP_1M",
+            None,
+        )
+        .await;
+    assert_eq!(stopped.outcome, Outcome::Cancelled);
+    assert_eq!(stopped.stop_reason, CONTEXT_BUDGET);
+    assert_eq!(
+        stopped.error.as_ref().and_then(NodeStop::of),
+        Some(NodeStop::ContextBudget)
+    );
+    assert_eq!(stopped.context_peak, Some(8_200));
+    assert_eq!(
+        h.compacted_events("a_builtin_stop"),
+        vec![EventBody::ContextCompacted {
+            mode: CompactionMode::Handoff,
+            reason: CompactionReason::BudgetReached,
+            before_tokens: 8_200,
+            after_tokens: 0,
+            limit_tokens: Some(1_000_000),
+        }]
+    );
+    assert!(
+        h.log_lines()
+            .iter()
+            .any(|v| v.get("budget_1m_cancelled") == Some(&json!(true))),
+        "builtin 1M harness exceeding budget without compacting must receive session/cancel"
+    );
+
+    // 2. When the same builtin 1M harness self-compacts before hitting budget, Node records native
+    //    compaction and lets the turn finish without triggering handoff.
+    h.open_session("s_builtin_cmp", "builtin_native", None, vec![])
+        .await;
+    let ok = h
+        .run_turn(
+            "s_builtin_cmp",
+            "builtin_native",
+            "a_builtin_cmp",
+            "SCENARIO:BUILTIN_1M_SELF_COMPACT",
+            None,
+        )
+        .await;
+    assert_eq!(ok.outcome, Outcome::Succeeded);
+    assert_eq!(ok.stop_reason, "end_turn");
+    assert_eq!(ok.context_peak, Some(7_000));
+    assert_eq!(
+        h.compacted_events("a_builtin_cmp"),
+        vec![EventBody::ContextCompacted {
+            mode: CompactionMode::Native,
+            reason: CompactionReason::NativeCompaction,
+            before_tokens: 7_000,
+            after_tokens: 1_200,
+            limit_tokens: Some(1_000_000),
+        }]
+    );
+    assert_eq!(h.final_usage_reports("a_builtin_cmp").len(), 1);
 
     h.node.shutdown().await;
 }
