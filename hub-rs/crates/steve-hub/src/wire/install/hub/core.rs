@@ -22,6 +22,10 @@ install! { install(reg, _cx) [core_cfg, db, fleet, gateway, harnesses, host, nod
         });
     });
     let _ = host.core.set(core.clone());
+    match crate::workflow_step::StepRunner::current_exe() {
+        Ok(runner) => core.set_workflow_executor(Arc::new(runner)),
+        Err(e) => tracing::warn!("workflow step subprocess runner unavailable: {e}"),
+    }
     /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
     if node_host.is_some() || fleet.is_some() {
         core.set_node_git(Arc::new(item_git::ItemGit::new(workspaces.clone())));

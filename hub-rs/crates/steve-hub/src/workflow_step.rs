@@ -288,6 +288,13 @@ impl StepRunner {
     }
 }
 
+#[async_trait::async_trait]
+impl steve_core::WorkflowStepExecutor for StepRunner {
+    async fn execute(&self, input: &StepInput) -> StepFrame {
+        StepRunner::execute(self, input).await
+    }
+}
+
 enum AsyncFrameError {
     TooLarge { actual: usize, limit: usize },
     EmptyEof,

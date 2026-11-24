@@ -532,7 +532,11 @@ impl Tx<'_> {
                     .workflows()
                     .get(item_id)?
                     .map(|g| g.revision),
-                wf_run_revision: None,
+                wf_run_revision: self
+                    .db()
+                    .store()
+                    .read(|r| steve_store::WorkflowRuns(r).latest_run_for_cycle(item_id, i.cycle))?
+                    .map(|r| r.run_revision),
                 fingerprint: print,
                 print_pending,
                 policy: Some(policy),
@@ -902,6 +906,7 @@ impl Tx<'_> {
         if !self
             .workflow_blockers(&i.id, c.kind == CloseKind::Complete)?
             .is_empty()
+            || (c.kind == CloseKind::Complete && !self.wf_run_delivery_blockers(i)?.is_empty())
         {
             g.operation = true;
         }
@@ -947,6 +952,11 @@ impl Tx<'_> {
                     && d.created > c.at
                     && (d.kind == "ask" || (d.kind == "approve" && d.subject_type != "tool_call"))
             });
+            let current_wf_rev = self
+                .db()
+                .store()
+                .read(|r| steve_store::WorkflowRuns(r).latest_run_for_cycle(&i.id, i.cycle))?
+                .map(|r| r.run_revision);
             if c.frozen_revision != i.delivery_revision
                 || c.scope_revision != self.scope_revision(&i.id)?
                 || c.workflow_revision
@@ -956,6 +966,7 @@ impl Tx<'_> {
                         .workflows()
                         .get(&i.id)?
                         .map(|g| g.revision)
+                || c.wf_run_revision != current_wf_rev
                 || now.is_some_and(|n| result_moved(n, c.fingerprint.as_deref()))
             {
                 g.changed = true;
@@ -1284,6 +1295,11 @@ impl Tx<'_> {
         if item.phase == CLOSED {
             return Err(conflict(closed_msg()));
         }
+        // Script-workflow child items forbid unstructured owner finish (§2.4 #2):
+        // owner takeover must go through structured delivery (`wf_child_owner_deliver`) or fail/cancel.
+        if self.is_wf_run_child(&item.id)? {
+            return Err(conflict("wf_child_structured_delivery_required"));
+        }
         let started = std::time::Instant::now();
         let close = CloseRequest {
             kind: CloseKind::Complete,
@@ -1316,19 +1332,19 @@ impl Tx<'_> {
         let (ws, id) = (i.workspace_id.clone(), i.id.clone());
         let cycle = i.cycle;
         let rev = i.delivery_revision;
-        let committed = self.db().store().write(|tx| -> Result<bool> {
+        let (committed, wf_finalized, cancelled_wf_runs) = self.db().store().write(|tx| {
             steve_store::require_item_revision_in(tx, &id, cycle, i.cas_revision, i.phase)?;
             if let Some(proof) = proof {
                 if !steve_store::item_delivery::record_proof(tx, &ws, proof)? {
                     metrics::counter!("steve_item_stale_delivery_total").increment(1);
-                    return Ok(false);
+                    return Ok::<_, CoreError>((false, None, Vec::new()));
                 }
             }
             if owner.is_none()
                 && c.kind == CloseKind::Complete
                 && steve_store::item_delivery::unsettled_github_writes(tx, &id)?
             {
-                return Ok(false);
+                return Ok((false, None, Vec::new()));
             }
             if let Some(actor) = owner {
                 steve_store::finish_item_dispatch_in(tx, &id, cycle)?;
@@ -1354,7 +1370,7 @@ impl Tx<'_> {
                 closed,
                 owner.map(|_| i.cas_revision),
             )? {
-                return Ok(false);
+                return Ok((false, None, Vec::new()));
             }
             if let Some(n) = &note {
                 steve_store::item_repo::append_system_note(tx, &id, n)?;
@@ -1366,6 +1382,30 @@ impl Tx<'_> {
             }
             /* nothing productive runs any more: what was still open for this item is moot */
             steve_store::decision_repo::expire_open_for_item(tx, &id, &json!({"closed": outcome}))?;
+            // Phase 2 of atomic WF-3 settlement (BEFORE ITEM_LIFECYCLE / ITEM_DONE outbox).
+            let wf_finalize_started = std::time::Instant::now();
+            let wf_finalized = if let Some(attempt) =
+                steve_store::WorkflowRuns(tx).attempt_by_child_item(&id)?
+                && attempt.status.is_active()
+            {
+                let is_review = steve_store::WorkflowRuns(tx)
+                    .get_call(&attempt.call_id)?
+                    .is_some_and(|call| call.is_review);
+                steve_store::WorkflowRuns(tx)
+                    .finalize_attempt(&id, rev, outcome, c.rule.as_deref(), Some(&reason))?
+                    .map(|fin| {
+                        (
+                            fin,
+                            attempt.attempt_no,
+                            is_review,
+                            wf_finalize_started.elapsed(),
+                        )
+                    })
+            } else {
+                None
+            };
+            let cancelled_wf_runs =
+                steve_store::WorkflowRuns(tx).cancel_runs_for_parent_cycle(&id, cycle)?;
             steve_store::outbox::append(
                 tx,
                 &ws,
@@ -1396,13 +1436,42 @@ impl Tx<'_> {
                     &serde_json::to_value(p)?,
                 )?;
             }
-            Ok(true)
+            Ok((true, wf_finalized, cancelled_wf_runs))
         })?;
         if !committed {
             return Ok(false);
         }
+        for run_id in cancelled_wf_runs {
+            self.cancel_wf_run_and_children(&run_id, "parent", &reason)?;
+        }
+        if let Some((fin, attempt_no, is_review, elapsed)) = wf_finalized {
+            tracing::info_span!(
+                "wf.finalize",
+                run_id = %fin.run_id,
+                call_id = %fin.call_id,
+                attempt_no = attempt_no,
+                run_revision = fin.new_run_revision,
+                duration_ms = elapsed.as_millis() as u64,
+            )
+            .in_scope(|| {});
+            let call_outcome = match fin.status {
+                steve_store::workflow_runs::WfAttemptStatus::Succeeded => "completed",
+                steve_store::workflow_runs::WfAttemptStatus::Failed => "failed",
+                _ => "cancelled",
+            };
+            metrics::counter!(
+                "steve_wf_calls_total",
+                "outcome" => call_outcome,
+                "review" => if is_review { "true" } else { "false" },
+                "hydrated" => "false"
+            )
+            .increment(1);
+            self.schedule_wf_step(&fin.run_id);
+        }
         if owner.is_none() {
             self.after_cycle_closed(i, outcome, &acceptance, &reason)?;
+        } else {
+            self.retire_closed_cycle_children(&i.id)?;
         }
         Ok(true)
     }

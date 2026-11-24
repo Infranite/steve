@@ -152,9 +152,14 @@ pub(super) fn scope(store: &Store, session: &Session) -> Result<(Session, ItemSc
     }
     let own = ItemScope::Conversation([id.to_string()].into_iter().collect());
     let work_unit = item.source.1 == "workflow"
+        || item.source.1 == steve_core::WF_CHILD_SOURCE_KIND
         || store
             .workflows()
             .by_child(id)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        || store
+            .read(|r| steve_store::WorkflowRuns(r).attempt_by_child_item(id))
             .map_err(|e| e.to_string())?
             .is_some();
     // Work units have a separate upstream projection in steve_workflow. Do not inherit the
@@ -217,10 +222,16 @@ fn only_own(
         .items()
         .get(own)
         .map_err(|e| e.to_string())?
-        .is_some_and(|i| i.source.1 == "workflow")
+        .is_some_and(|i| {
+            i.source.1 == "workflow" || i.source.1 == steve_core::WF_CHILD_SOURCE_KIND
+        })
         || store
             .workflows()
             .by_child(own)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        || store
+            .read(|r| steve_store::WorkflowRuns(r).attempt_by_child_item(own))
             .map_err(|e| e.to_string())?
             .is_some();
     Ok(Some(if unit {

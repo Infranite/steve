@@ -44,6 +44,7 @@ impl Tx<'_> {
         let before = self.st.pending.get(&s.id).cloned();
         let hooks = self.st.hooks.len();
         let cancels = self.st.cancels.len();
+        let wf_wakeups = self.st.wf_step_wakeups.len();
         let store = self.db().store().clone();
         let result = store.write(|w| {
             let i = self.item(item_id)?;
@@ -84,6 +85,7 @@ impl Tx<'_> {
             // Acceptance/finish hooks and deferred stops must not escape a rolled-back save.
             self.st.hooks.truncate(hooks);
             self.st.cancels.truncate(cancels);
+            self.st.wf_step_wakeups.truncate(wf_wakeups);
             match before {
                 Some(m) => {
                     self.st.pending.insert(s.id.clone(), m);

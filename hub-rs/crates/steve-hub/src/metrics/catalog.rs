@@ -73,6 +73,32 @@ pub(super) fn describe() {
         Count,
         "Open decisions in the Hub projection. Label: tier (decide, draft, or folded)."
     );
+    // Dynamic script workflows (WF-3)
+    describe_histogram!(
+        "steve_wf_step_duration_seconds",
+        Seconds,
+        "Wall-clock duration of one sandboxed workflow JS step. Label: outcome."
+    );
+    describe_counter!(
+        "steve_wf_calls_total",
+        Count,
+        "Workflow calls by outcome, review flag, and cross-version hydration. Labels: outcome, review, hydrated."
+    );
+    describe_counter!(
+        "steve_wf_deliver_schema_reject_total",
+        Count,
+        "Workflow child steve_deliver calls rejected before file reception. Label: reason."
+    );
+    describe_counter!(
+        "steve_wf_review_gate_total",
+        Count,
+        "Hub-authoritative independent final review gate evaluations. Label: result."
+    );
+    describe_gauge!(
+        "steve_wf_active_runs",
+        Count,
+        "Currently non-terminal (running or paused) script workflow runs."
+    );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(
         "steve_http_requests_total",

@@ -1833,6 +1833,7 @@ impl steve_mcp::Backend for CoreMcp {
         outputs: Vec<steve_mcp::Output>,
         checks: Vec<steve_mcp::Check>,
         unfinished: Option<Vec<String>>,
+        result: Option<Value>,
     ) -> ToolResult {
         let observation = super::diagnostics::ToolObservation::new(&self.store, s, "steve_deliver");
         let svc = crate::deliveries::Service::new(
@@ -1867,6 +1868,27 @@ impl steve_mcp::Backend for CoreMcp {
         let unfinished = unfinished.unwrap_or_default();
         observation
             .run(async move {
+                // Pre-file-receive schema validation for script-workflow child items (§2.4 #2):
+                // rejects missing/oversized/non-canonical/schema-violating `result` BEFORE any
+                // file is received into Hub storage (zero orphan files, zero DB side effects).
+                let validated_wf_child = if let Some(item_id) = s.item_id.as_deref() {
+                    let store_check = store.clone();
+                    let item_check = item_id.to_owned();
+                    let res_check = result.clone();
+                    tokio::task::spawn_blocking(move || {
+                        steve_core::validate_child_result(
+                            &store_check,
+                            &item_check,
+                            res_check.as_ref(),
+                        )
+                    })
+                    .await
+                    .map_err(|e| steve_mcp::ToolError::from(e.to_string()))?
+                    .map_err(|e| steve_mcp::ToolError::from(e.to_string()))?
+                    .is_some()
+                } else {
+                    false
+                };
                 if s.item_id.is_some() {
                     for output in &mut outputs {
                         if let Some(location) = output.location.as_deref()
@@ -1888,7 +1910,7 @@ impl steve_mcp::Backend for CoreMcp {
                     }
                 }
                 tool(move || {
-                    if let Some(item) = s.item_id.as_deref() {
+                    if !validated_wf_child && let Some(item) = s.item_id.as_deref() {
                         let goal = store.items().goal(item)?;
                         /* the design gate confirms a file Steve holds: while a design is pending,
                          * the delivery body is always saved as one, whatever else the Bot listed (an
@@ -1941,7 +1963,15 @@ impl steve_mcp::Backend for CoreMcp {
                             }
                         }
                     }
-                    c.tool_deliver(&s, &summary, &outputs, &checks, &unfinished)
+                    c.tool_deliver_with_result(
+                        &s,
+                        &summary,
+                        &outputs,
+                        &checks,
+                        &unfinished,
+                        result.as_ref(),
+                        validated_wf_child,
+                    )
                 })
                 .await
             })

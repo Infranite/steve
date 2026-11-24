@@ -5761,6 +5761,7 @@ dependencies = [
  "steve-transcript",
  "steve-types",
  "steve-work-api",
+ "steve-workflow-api",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

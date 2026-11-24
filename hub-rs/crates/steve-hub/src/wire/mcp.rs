@@ -54,6 +54,7 @@ impl steve_mcp::Backend for McpBackend {
         _outputs: Vec<Output>,
         _checks: Vec<Check>,
         _unfinished: Option<Vec<String>>,
+        _result: Option<serde_json::Value>,
     ) -> Result<(), ToolError> {
         not_wired("steve_deliver")
     }

@@ -228,6 +228,21 @@ impl Drop for Tx<'_> {
                 }
             }
         }
+        /* script workflow step wakeups: run asynchronously outside the lock */
+        let wf_wakeups = std::mem::take(&mut self.st.wf_step_wakeups);
+        if !wf_wakeups.is_empty()
+            && self.c.workflow_executor().is_some()
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+        {
+            for run_id in wf_wakeups {
+                let core = self.c.clone();
+                rt.spawn(async move {
+                    if let Err(e) = core.step_workflow_run(&run_id).await {
+                        tracing::warn!(run_id = %run_id, "async workflow step failed: {e}");
+                    }
+                });
+            }
+        }
         if self.st.hooks.is_empty() {
             return;
         }

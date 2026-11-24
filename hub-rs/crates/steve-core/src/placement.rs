@@ -129,8 +129,89 @@ pub(crate) fn select(
     request: DispatchRequest<'_>,
     model: impl Fn(&Bot) -> Option<String>,
 ) -> Result<(BotPlacement, Option<Project>)> {
+    select_with_policy(db, rt, request, model, true)
+}
+
+/// Worker-only selection aligned with PR #544 (`reform/steve-coordinator`): when no explicit `bot`
+/// is named, excludes the workspace main coordinator bot (`!b.main`) so unassigned work never
+/// silently falls back to Steve unless the workspace setting `noExecutor = "steve"` or the owner
+/// explicitly delegates to Steve on the decision card.
+pub(crate) fn select_worker(
+    db: &Db,
+    rt: &dyn AgentRuntime,
+    request: DispatchRequest<'_>,
+    model: impl Fn(&Bot) -> Option<String>,
+) -> Result<(BotPlacement, Option<Project>)> {
+    select_with_policy(db, rt, request, model, false)
+}
+
+/// Explicit coordinator placement aligned with PR #544's `select_coordinator`: places work onto
+/// the workspace main bot (`b.main`) when workspace setting `noExecutor = "steve"` or the owner
+/// explicitly chose `"steve"` on a placement decision card.
+pub(crate) fn select_coordinator_fallback(
+    db: &Db,
+    rt: &dyn AgentRuntime,
+    req: DispatchRequest<'_>,
+    model: impl Fn(&Bot) -> Option<String>,
+    blocked: PlacementBlocked,
+) -> Result<(BotPlacement, Option<Project>)> {
+    let main = db
+        .bots(req.workspace)?
+        .into_iter()
+        .find(|b| b.main)
+        .ok_or_else(|| CoreError::Placement(blocked.clone()))?;
+    let main_id = main.id.clone();
+    let task = words(req.goal);
+    let evaluated = candidate(db, rt, &req, main, &task, &[], &model, true)?;
+    let best = match evaluated {
+        Ok(candidate) => candidate,
+        Err(reasons) => {
+            let mut rejected = blocked.rejected;
+            rejected.extend(reasons.iter().copied().map(|reason| PlacementBlocker {
+                bot: Some(main_id.clone().into()),
+                reason,
+            }));
+            let reason = reasons.first().copied().unwrap_or(blocked.reason);
+            return Err(CoreError::Placement(PlacementBlocked { reason, rejected }));
+        }
+    };
+    let mut rejected = blocked.rejected;
+    rejected.extend(best.skipped.into_iter().map(|reason| PlacementBlocker {
+        bot: Some(best.bot.id.clone().into()),
+        reason,
+    }));
+    Ok((
+        BotPlacement {
+            rule_version: RULE_VERSION,
+            bot_revision: best.bot.revision,
+            at: Millis(steve_store::now()),
+            node: best.node.into(),
+            required_node: req.node.map(Into::into),
+            node_priority: best.priority,
+            harness: best.choice.harness,
+            model: best.choice.model,
+            reasoning_effort: best.choice.effort,
+            explanation: PlacementExplanation {
+                bot: best.bot.id.into(),
+                reason: PlacementReason::SteveFallback,
+                matched: vec![],
+                rejected,
+                fallback: Some(blocked.reason),
+            },
+        },
+        best.project,
+    ))
+}
+
+fn select_with_policy(
+    db: &Db,
+    rt: &dyn AgentRuntime,
+    request: DispatchRequest<'_>,
+    model: impl Fn(&Bot) -> Option<String>,
+    allow_main_implicit: bool,
+) -> Result<(BotPlacement, Option<Project>)> {
     let started = Instant::now();
-    let result = select_inner(db, rt, request, model);
+    let result = select_inner(db, rt, request, model, allow_main_implicit);
     metrics::histogram!("steve_bot_selection_seconds").record(started.elapsed().as_secs_f64());
     if let Err(CoreError::Placement(blocked)) = &result {
         let reasons = blocked
@@ -154,6 +235,7 @@ fn select_inner(
     rt: &dyn AgentRuntime,
     req: DispatchRequest<'_>,
     model: impl Fn(&Bot) -> Option<String>,
+    allow_main_implicit: bool,
 ) -> Result<(BotPlacement, Option<Project>)> {
     let mut bots = db.bots(req.workspace)?;
     bots.sort_unstable_by(|a, b| a.id.cmp(&b.id));
@@ -177,10 +259,12 @@ fn select_inner(
     let mut rejected = Vec::new();
     for bot in bots.into_iter().filter(|b| match req.bot {
         Some(id) => id == b.id,
-        None => req.team.is_none_or(|t| t.member(&b.id).is_some()),
+        None => {
+            (allow_main_implicit || !b.main) && req.team.is_none_or(|t| t.member(&b.id).is_some())
+        }
     }) {
         let id = bot.id.clone();
-        let evaluated = candidate(db, rt, &req, bot, &task, &mandatory, &model)?;
+        let evaluated = candidate(db, rt, &req, bot, &task, &mandatory, &model, false)?;
         match evaluated {
             Ok(candidate) => eligible.push(candidate),
             Err(reasons) => rejected.extend(reasons.into_iter().map(|reason| PlacementBlocker {
@@ -252,6 +336,7 @@ fn select_inner(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn candidate(
     db: &Db,
     rt: &dyn AgentRuntime,
@@ -260,8 +345,11 @@ fn candidate(
     task: &[String],
     mandatory: &[Vec<String>],
     model: &impl Fn(&Bot) -> Option<String>,
+    coordinator_bypass_team: bool,
 ) -> Result<std::result::Result<Candidate, Vec<Rejection>>> {
-    if req.team.is_some_and(|t| t.member(&bot.id).is_none()) {
+    if !(coordinator_bypass_team && bot.main)
+        && req.team.is_some_and(|t| t.member(&bot.id).is_none())
+    {
         return Ok(Err(vec![Rejection::OutsideTeam]));
     }
     if !mandatory
@@ -286,9 +374,18 @@ fn candidate(
         return Ok(Err(vec![Rejection::Project]));
     }
 
-    let scope = db
-        .store()
-        .read(|r| bot_dispatch::scope_for(r, req.workspace, req.team, &bot.id))?;
+    let scope = db.store().read(|r| {
+        bot_dispatch::scope_for(
+            r,
+            req.workspace,
+            if coordinator_bypass_team && bot.main {
+                None
+            } else {
+                req.team
+            },
+            &bot.id,
+        )
+    })?;
     let Scope::Nodes(nodes) = scope else {
         return Ok(Err(vec![Rejection::OutsideTeam]));
     };

@@ -51,6 +51,7 @@ mod turn_wait;
 pub mod upstream;
 pub mod util;
 pub mod workflow;
+pub mod workflow_run;
 pub mod workspace;
 mod worktrees;
 
@@ -68,6 +69,10 @@ pub use orchestrator::{
 pub use runtime::{
     AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, PermissionAction,
     PermissionAnswer, Prompted, Released, Running, Stop, TurnEnd,
+};
+pub use workflow_run::{
+    ChildResultError, WF_CHILD_SOURCE_KIND, WF_RUN_SUBJECT, WfBudget, WfDeliveryBlocker,
+    WfRunAction, WfRunSnapshot, WorkflowStepExecutor, validate_child_result,
 };
 
 use repo::Db;
@@ -96,6 +101,10 @@ pub(crate) struct Inner {
     reclaiming: std::sync::atomic::AtomicBool,
     /// The way to items' Nodes, once wired (`node_git`); unset: the Hub's own git everywhere.
     node_git: OnceLock<Arc<dyn node_git::NodeGit>>,
+    /// Out-of-process JS workflow step executor (`StepRunner` wired by `steve-hub`).
+    workflow_executor: OnceLock<Arc<dyn workflow_run::WorkflowStepExecutor>>,
+    /// Per-run async locks serializing `step_workflow_run` executions for the same `run_id`.
+    workflow_run_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// What a session's last Steve tool call left behind, consumed at its turn end.
@@ -151,6 +160,8 @@ pub(crate) struct State {
     /// The periodic closing check is running: it fingerprints a worktree only when nothing else
     /// holds the closing (`cycle.rs`).
     evaluating_closing_cycles: bool,
+    /// Script-workflow `run_id`s whose next replay step should run asynchronously after the lock drops.
+    wf_step_wakeups: Vec<String>,
 }
 
 /// One critical section: the core plus the held state lock.
@@ -182,6 +193,8 @@ impl Core {
             steve_notes: Default::default(),
             reclaiming: Default::default(),
             node_git: OnceLock::new(),
+            workflow_executor: OnceLock::new(),
+            workflow_run_locks: Default::default(),
         }))
     }
 

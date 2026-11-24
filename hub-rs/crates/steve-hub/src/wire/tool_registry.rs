@@ -140,7 +140,7 @@ fn steve_meta(name: &str) -> (&'static [&'static str], bool) {
     let res: &'static [&'static str] = match n {
         "update" | "ask" | "request_approval" | "deliver" => &["item", "turn"],
         "publish" => &["item", "release", "git"],
-        "workflow" => &["workflow", "item"],
+        "workflow" | "workflow_run" => &["workflow", "item"],
         "sessions_list" => &["session"],
         "devices" => &["device"],
         "debug" => &["diagnostics", "session"],

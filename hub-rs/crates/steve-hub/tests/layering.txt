@@ -14,6 +14,7 @@ edge steve-core steve-node-api	1
 edge steve-core steve-runtime	1
 edge steve-core steve-types	1
 edge steve-core steve-work-api	1
+edge steve-core steve-workflow-api	1
 edge steve-digest steve-runtime	1
 edge steve-digest steve-types	1
 edge steve-flow steve-runtime	1
