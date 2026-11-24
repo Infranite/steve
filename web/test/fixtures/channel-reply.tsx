@@ -12,7 +12,7 @@ import { seedDecisions } from "./view-data"
 const params = new URLSearchParams(location.search)
 document.documentElement.classList.toggle("dark", params.has("dark"))
 const kind = params.get("case") ?? "draft"
-const approval: Wait = { type: "approve", subject: "chan_message", subjectId: "cm_reply", q: "以值班助手回复「产品讨论群」的消息", draft: "我是值班助手，是负责答疑的 AI 助手。\n你可以直接告诉我需要什么帮助。", since: "刚刚", decision: "dc_reply", session: null, options: ["yes", "no", "to_item", "rewrite"], by: "steve" }
+const approval: Wait = { type: "approve", subject: "chan_message", subjectId: "cm_reply", q: "以值班助手回复「产品讨论群」的消息", draft: "我是值班助手，是负责答疑的 AI 助手。\n你可以直接告诉我需要什么帮助。", since: "刚刚", decision: "dc_reply", session: null, options: ["yes", "no", "to_item", "rewrite"], by: "steve", tier: "decide" }
 const scenario: Wait = kind === "handoff"
   ? { ...approval, type: "ask", subjectId: "cm_in", q: "陈同学找你：你是谁啊？这件事需要主人决定。", draft: "", options: ["instruct", "verbatim", "to_item", "done"] }
   : kind === "restricted" ? { ...approval, options: ["no", "to_item"] }
@@ -35,7 +35,7 @@ function Fixture() {
     {kind === "duplicate" && cards[0] && <DecisionCard i={cards[0].i} w={cards[0].w} showItem={false} />}
     <button type="button" data-fixture-rebuild onClick={() => seedDecisions(waits)}>Rebuild existing snapshot</button>
     <button type="button" data-fixture-fresh onClick={() => void refreshViews()}>Refresh open snapshot (undo)</button>
-    <button type="button" data-fixture-undo onClick={() => void api.undo("dc_reply").then(refreshViews)}>Undo through fixture API</button>
+    <button type="button" data-fixture-undo onClick={() => void api.undo("dc_reply", 1).then(refreshViews)}>Undo through fixture API</button>
     <Toaster />
   </main>
 }

@@ -467,7 +467,7 @@ docs/            architecture, protocol and release notes
 
 ## Contributing
 
-Issues and pull requests are welcome. Before you open a PR, read **[CONTRIBUTING.md](CONTRIBUTING.md)**. It has the development checks, how release notes are written as fragments, and how versions and migrations are assigned at release time.
+Issues and pull requests are welcome. Before you open a PR, read **[CONTRIBUTING.md](CONTRIBUTING.md)**. It has the development checks, commit and pull-request conventions for automatic release notes, and how versions and migrations are assigned at release time.
 
 ## License
 

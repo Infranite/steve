@@ -16,16 +16,17 @@ import { HubTab } from "@/devices-hub"
 import { NodesTab } from "@/devices-nodes"
 import { ClientsTab } from "@/devices-clients"
 import { NodePage } from "@/devices-node"
+import { parseNodeTab } from "@/node-detail-model"
 import "./devices.css"
 
 const TABS = ["overview", "hub", "nodes", "clients"] as const
 type Tab = (typeof TABS)[number]
 export const devicesHref = (tab: Tab) => (tab === "overview" ? "#/devices" : "#/devices/" + tab)
 
-/** the route under #/devices: a tab or a Node's page */
-export function DevicesRoute({ b, c }: { b?: string; c?: string }) {
+/** the route under #/devices: a tab or a Node's page (with optional tab segment) */
+export function DevicesRoute({ b, c, d }: { b?: string; c?: string; d?: string }) {
   const tab: Tab = b && (TABS as readonly string[]).includes(b) ? (b as Tab) : "overview"
-  return <DevicesProvider>{tab === "nodes" && c ? <NodePage key={c} id={decodeURIComponent(c)} /> : <DevicesPage tab={tab} focus={tab === "clients" && c ? decodeURIComponent(c) : undefined} />}</DevicesProvider>
+  return <DevicesProvider>{tab === "nodes" && c ? <NodePage key={c} id={decodeURIComponent(c)} tab={parseNodeTab(d)} /> : <DevicesPage tab={tab} focus={tab === "clients" && c ? decodeURIComponent(c) : undefined} />}</DevicesProvider>
 }
 
 function DevicesPage({ tab, focus }: { tab: Tab; focus?: string }) {

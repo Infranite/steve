@@ -377,7 +377,7 @@ docs/            架构、协议和发布说明
 
 ## 参与贡献
 
-欢迎提 Issue 和 Pull Request。提 PR 前请阅读 **[CONTRIBUTING.md](CONTRIBUTING.md)**，里面有开发检查项、如何以片段形式写发布说明，以及版本号和迁移编号如何在发布时分配。
+欢迎提 Issue 和 Pull Request。提 PR 前请阅读 **[CONTRIBUTING.md](CONTRIBUTING.md)**，里面有开发检查项、用于自动生成发布说明的提交与 PR 规范，以及版本号和迁移编号如何在发布时分配。
 
 ## 许可证
 

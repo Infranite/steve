@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.app.json --noEmit && vite build",
-    "check": "tsc -p tsconfig.app.json --noEmit"
+    "check": "tsc -b --noEmit"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
