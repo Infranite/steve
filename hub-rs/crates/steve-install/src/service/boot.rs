@@ -2,6 +2,7 @@
 //! Root installs the definition and controls that domain; the Node, including the
 //! launcher that reads user-owned data, always runs as the original account.
 use super::*;
+use crate::signing::{NodeSigningIdentity, Tools};
 use std::io::{BufRead, BufReader};
 use steve_types::devices::NODE_BOOT_SERVICE_ENV;
 
@@ -9,6 +10,88 @@ use steve_types::devices::NODE_BOOT_SERVICE_ENV;
 // attribute the Node and its ordinary children to the same responsible code.
 pub(super) const RUNNER: &str = "services/node-boot-runner";
 const RUNNER_ARG: &str = "__node-boot-run";
+
+pub(super) trait NodeSigner: Send + Sync {
+    fn ensure_identity(&self, home: &Path, label: &str) -> Result<NodeSigningIdentity>;
+    fn load_identity(&self, home: &Path, label: &str) -> Result<NodeSigningIdentity>;
+    fn sign_binary(
+        &self,
+        home: &Path,
+        binary: &Path,
+        identity: &NodeSigningIdentity,
+        identifier: &str,
+    ) -> Result<()>;
+    fn verify_binary(&self, binary: &Path, requirement: &str) -> Result<()>;
+    fn stage_runner(
+        &self,
+        home: &Path,
+        source: &Path,
+        destination_dir: &Path,
+        identity: &NodeSigningIdentity,
+    ) -> Result<PathBuf>;
+    fn commit_runner(&self, staged: &Path, destination: &Path) -> Result<()> {
+        let parent = destination.parent().context("runner has no parent")?;
+        fs::rename(staged, destination)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    }
+}
+
+pub(super) struct LocalNodeSigner(pub(super) Tools);
+
+impl NodeSigner for LocalNodeSigner {
+    fn ensure_identity(&self, home: &Path, label: &str) -> Result<NodeSigningIdentity> {
+        crate::signing::ensure_node_identity(home, label, &self.0)
+    }
+    fn load_identity(&self, home: &Path, label: &str) -> Result<NodeSigningIdentity> {
+        crate::signing::load_node_identity(home, label)
+    }
+    fn sign_binary(
+        &self,
+        home: &Path,
+        binary: &Path,
+        identity: &NodeSigningIdentity,
+        identifier: &str,
+    ) -> Result<()> {
+        crate::signing::sign_node_binary(home, binary, identity, identifier, &self.0)
+    }
+    fn verify_binary(&self, binary: &Path, requirement: &str) -> Result<()> {
+        crate::signing::verify_node_binary(binary, requirement, &self.0)
+    }
+    fn stage_runner(
+        &self,
+        home: &Path,
+        source: &Path,
+        destination_dir: &Path,
+        identity: &NodeSigningIdentity,
+    ) -> Result<PathBuf> {
+        crate::signing::stage_signed_node_runner(home, source, destination_dir, identity, &self.0)
+    }
+}
+
+struct StagedRunnerGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagedRunnerGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+    fn install_to(&mut self, signer: &dyn NodeSigner, destination: &Path) -> Result<()> {
+        signer.commit_runner(&self.path, destination)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for StagedRunnerGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
 
 struct LegacyAgent {
     definition: Option<Vec<u8>>,
@@ -303,11 +386,6 @@ impl Service {
             .map(Path::to_owned)
             .or_else(|| self.record["boot_release"].as_str().map(PathBuf::from))
             .unwrap_or_else(|| self.home.join("current"));
-        let (release, info, requirement) = self.boot_bundle(&release)?;
-        let same = self.record["boot_release"].as_str() == release.to_str()
-            && self.record["build"] == info
-            && self.record["uninstalled"] != true
-            && self.record.get("uninstall").is_none();
         let installed = exists(&self.config);
         if installed
             || (self.record["boot_release"].is_string() && self.record["uninstalled"] != true)
@@ -316,6 +394,25 @@ impl Service {
                 self.record["uninstalled"] != true && self.record.get("uninstall").is_none(),
                 "finish uninstall before changing the registered Node"
             );
+        }
+        let (release, info) = self.bundle(&release)?;
+        let identity = self.node_signing_identity()?;
+        let requirement = identity.node_requirement();
+        let runner = self.home.join(RUNNER);
+        let runner_signed = !installed
+            || self
+                .node_signer
+                .verify_binary(&runner, &identity.cli_requirement())
+                .is_ok();
+        let same = self.record["boot_release"].as_str() == release.to_str()
+            && self.record["build"] == info
+            && self.record["code_requirement"].as_str() == Some(requirement.as_str())
+            && self.record["uninstalled"] != true
+            && self.record.get("uninstall").is_none()
+            && runner_signed;
+        if installed
+            || (self.record["boot_release"].is_string() && self.record["uninstalled"] != true)
+        {
             if !same {
                 let supervised = update && installed;
                 if supervised {
@@ -333,14 +430,33 @@ impl Service {
                 self.check_owner()?;
             }
         }
-        directory(&self.home.join("logs"))?;
-        let previous = if update && !same {
-            self.record["boot_release"].clone()
+        if same {
+            self.verify_release_signatures(&release, &identity)?;
         } else {
-            self.record["previous"].clone()
-        };
-        // Identical requests must not replace a receipt or trigger a restart.
-        if !same {
+            self.sign_release_binaries(&release, &identity)?;
+            if installed && !runner_signed {
+                let cli = release.join("bin/steve");
+                let source = if cli.is_file() {
+                    cli
+                } else if runner.is_file() {
+                    runner.clone()
+                } else {
+                    std::env::current_exe()?
+                };
+                let mut staged = StagedRunnerGuard::new(self.node_signer.stage_runner(
+                    &self.home,
+                    &source,
+                    &self.home.join("services"),
+                    &identity,
+                )?);
+                staged.install_to(self.node_signer.as_ref(), &runner)?;
+            }
+            directory(&self.home.join("logs"))?;
+            let previous = if update {
+                self.record["boot_release"].clone()
+            } else {
+                self.record["previous"].clone()
+            };
             self.write_boot_record(&release, &info, previous, requirement)?;
         }
         Ok(
@@ -350,11 +466,50 @@ impl Service {
         )
     }
 
-    fn boot_bundle(&self, release: &Path) -> Result<(PathBuf, Value, Option<String>)> {
-        let release = resolve(release)?;
-        let requirement = self.node_requirement(&release.join("bin/steve-node"))?;
-        let (release, info) = self.bundle(&release)?;
-        Ok((release, info, requirement))
+    fn node_signing_identity(&self) -> Result<NodeSigningIdentity> {
+        if let Some(pinned) = self.record["code_requirement"].as_str() {
+            let identity = self.node_signer.load_identity(&self.home, &self.label)?;
+            ensure!(
+                identity.node_requirement() == pinned,
+                "Node signing identity differs from registered code requirement"
+            );
+            Ok(identity)
+        } else {
+            self.node_signer.ensure_identity(&self.home, &self.label)
+        }
+    }
+
+    fn sign_release_binaries(&self, release: &Path, identity: &NodeSigningIdentity) -> Result<()> {
+        let node = release.join("bin/steve-node");
+        self.node_signer
+            .sign_binary(&self.home, &node, identity, &identity.node_identifier)?;
+        self.node_signer
+            .verify_binary(&node, &identity.node_requirement())?;
+        let cli = release.join("bin/steve");
+        if exists(&cli) {
+            self.node_signer
+                .sign_binary(&self.home, &cli, identity, &identity.cli_identifier)?;
+            self.node_signer
+                .verify_binary(&cli, &identity.cli_requirement())?;
+        }
+        Ok(())
+    }
+
+    fn verify_release_signatures(
+        &self,
+        release: &Path,
+        identity: &NodeSigningIdentity,
+    ) -> Result<()> {
+        self.node_signer.verify_binary(
+            &release.join("bin/steve-node"),
+            &identity.node_requirement(),
+        )?;
+        let cli = release.join("bin/steve");
+        if exists(&cli) {
+            self.node_signer
+                .verify_binary(&cli, &identity.cli_requirement())?;
+        }
+        Ok(())
     }
 
     fn write_boot_record(
@@ -362,7 +517,7 @@ impl Service {
         release: &Path,
         info: &Value,
         previous: Value,
-        requirement: Option<String>,
+        requirement: String,
     ) -> Result<()> {
         // Deliberately not "release": an old Node can run here for migration/rollback but
         // must not advertise remote maintenance via its old gui-domain service helper.
@@ -378,75 +533,62 @@ impl Service {
         Ok(())
     }
 
-    fn developer_requirement(&self, binary: &Path) -> Result<Option<String>> {
-        let signature = self.command(
-            vec![
-                "/usr/bin/codesign".into(),
-                "--display".into(),
-                "-r-".into(),
-                "--verbose=4".into(),
-                text(binary)?,
-            ],
-            false,
+    /// Sign both staged executables with this installation's existing local self-signed identity
+    /// and verify their pinned designated requirements before executing either binary.
+    pub fn prepare_boot_upgrade(&self, candidate: &Path) -> Result<()> {
+        ensure!(
+            self.boot_node() && self.record["boot_release"].is_string(),
+            "not a boot Node"
+        );
+        let identity = self.node_signer.load_identity(&self.home, &self.label)?;
+        let node_req = self.record["code_requirement"]
+            .as_str()
+            .context("unverified Node signing identity")?;
+        ensure!(
+            node_req == identity.node_requirement(),
+            "Node signing identity differs from registered code requirement"
+        );
+        self.node_signer
+            .verify_binary(&self.home.join(RUNNER), &identity.cli_requirement())
+            .context("unverified boot supervisor signing identity")?;
+        self.node_signer.sign_binary(
+            &self.home,
+            &candidate.join("bin/steve-node"),
+            &identity,
+            &identity.node_identifier,
         )?;
-        let developer_id = signature
-            .stderr
-            .lines()
-            .any(|line| line.starts_with("Authority=Developer ID Application:"));
-        if signature.code != 0 || !developer_id {
-            return Ok(None);
-        }
-        Ok(Some(
-            signature
-                .stderr
-                .lines()
-                .find_map(|line| line.strip_prefix("designated => "))
-                .context("signed executable has no designated code requirement")?
-                .to_owned(),
-        ))
+        self.node_signer.sign_binary(
+            &self.home,
+            &candidate.join("bin/steve"),
+            &identity,
+            &identity.cli_identifier,
+        )?;
+        self.verify_boot_upgrade(candidate)
     }
 
-    fn require_code(&self, binary: &Path, requirement: &str) -> Result<()> {
-        self.command(
-            vec![
-                "/usr/bin/codesign".into(),
-                "--verify".into(),
-                "--strict".into(),
-                "-R".into(),
-                requirement.into(),
-                text(binary)?,
-            ],
-            true,
-        )
-        .context("candidate executable must satisfy the installation's designated requirement")?;
-        Ok(())
-    }
-
-    fn node_requirement(&self, candidate: &Path) -> Result<Option<String>> {
-        let requirement = match self.record["code_requirement"].as_str() {
-            Some(requirement) => Some(requirement.to_owned()),
-            None => self.developer_requirement(candidate)?,
-        };
-        if let Some(requirement) = &requirement {
-            self.require_code(candidate, requirement)?;
-        }
-        Ok(requirement)
-    }
-
-    /// Check both staged executables before the updater runs either one's build-info command.
+    /// Check both staged executables against this installation's pinned local self-signed
+    /// designated requirements (matching both the registered Node and the boot supervisor).
     pub fn verify_boot_upgrade(&self, candidate: &Path) -> Result<()> {
         ensure!(
             self.boot_node() && self.record["boot_release"].is_string(),
             "not a boot Node"
         );
+        let identity = self.node_signer.load_identity(&self.home, &self.label)?;
         let node = self.record["code_requirement"]
             .as_str()
             .context("unverified Node signing identity")?;
-        let cli = self
-            .developer_requirement(&self.home.join(RUNNER))?
+        ensure!(
+            node == identity.node_requirement(),
+            "Node signing identity differs from registered code requirement"
+        );
+        let cli = identity.cli_requirement();
+        self.node_signer
+            .verify_binary(&self.home.join(RUNNER), &cli)
             .context("unverified boot supervisor signing identity")?;
-        self.require_code(&candidate.join("bin/steve-node"), node)?;
-        self.require_code(&candidate.join("bin/steve"), &cli)
+        self.node_signer
+            .verify_binary(&candidate.join("bin/steve-node"), node)?;
+        self.node_signer
+            .verify_binary(&candidate.join("bin/steve"), &cli)
     }
 
     fn sudo(&self, arguments: &[&str]) -> Result<Output> {
@@ -479,7 +621,7 @@ impl Service {
         Ok(name.into())
     }
 
-    fn boot_definition(&self, account: &str) -> Result<Vec<u8>> {
+    pub(super) fn boot_definition(&self, account: &str) -> Result<Vec<u8>> {
         let mut output = Vec::new();
         plist::to_writer_xml(
             &mut output,
@@ -512,15 +654,51 @@ impl Service {
         self.check_owner()?;
         if exists(&self.config) {
             self.require_no_agent()?;
-            self.boot_bundle(&release)?;
+            let (release, info) = self.bundle(&release)?;
+            let identity = self.node_signing_identity()?;
+            self.sign_release_binaries(&release, &identity)?;
+            let runner = self.home.join(RUNNER);
+            if self
+                .node_signer
+                .verify_binary(&runner, &identity.cli_requirement())
+                .is_err()
+            {
+                let mut staged = StagedRunnerGuard::new(self.node_signer.stage_runner(
+                    &self.home,
+                    &std::env::current_exe()?,
+                    &self.home.join("services"),
+                    &identity,
+                )?);
+                staged.install_to(self.node_signer.as_ref(), &runner)?;
+            }
+            let requirement = identity.node_requirement();
+            if self.record["code_requirement"].as_str() != Some(requirement.as_str()) {
+                self.write_boot_record(
+                    &release,
+                    &info,
+                    self.record["previous"].clone(),
+                    requirement,
+                )?;
+            }
         } else {
             self.wait_unloaded("system", &self.config, 0)?;
             let legacy = self.legacy_before()?;
-            let (release, info, requirement) = if self.record["boot_release"].is_null() {
+            let (release, info) = if self.record["boot_release"].is_null() {
                 self.migration_release(&legacy, &release)?
             } else {
-                self.boot_bundle(&release)?
+                self.bundle(&release)?
             };
+            let identity = self.node_signing_identity()?;
+            let requirement = identity.node_requirement();
+            self.sign_release_binaries(&release, &identity)?;
+            // Keep the supervisor independent of the selected (possibly older) runtime, and sign
+            // it before requesting sudo so any signing failure aborts without touching launchd.
+            let mut staged_runner = StagedRunnerGuard::new(self.node_signer.stage_runner(
+                &self.home,
+                &std::env::current_exe()?,
+                &self.home.join("services"),
+                &identity,
+            )?);
             let data = self.boot_definition(&account)?;
             let args = [
                 "/usr/bin/sudo".into(),
@@ -539,7 +717,9 @@ impl Service {
             register(&args, &mut || {
                 self.retire_agent(legacy.definition.as_deref())?;
                 self.wait_node_exit(15)?;
-                if self.record["boot_release"].is_null() {
+                if self.record["boot_release"].is_null()
+                    || self.record["code_requirement"].as_str() != Some(requirement.as_str())
+                {
                     self.write_boot_record(
                         &release,
                         &info,
@@ -548,12 +728,7 @@ impl Service {
                     )?;
                 }
                 directory(&self.home.join("logs"))?;
-                // Keep the supervisor independent of the selected (possibly older) runtime.
-                atomic_mode(
-                    &self.home.join(RUNNER),
-                    &fs::read(std::env::current_exe()?)?,
-                    0o700,
-                )?;
+                staged_runner.install_to(self.node_signer.as_ref(), &self.home.join(RUNNER))?;
                 Ok(())
             })?;
             ensure!(
@@ -624,13 +799,9 @@ impl Service {
         })
     }
 
-    fn migration_release(
-        &self,
-        agent: &LegacyAgent,
-        receipt: &Path,
-    ) -> Result<(PathBuf, Value, Option<String>)> {
+    fn migration_release(&self, agent: &LegacyAgent, receipt: &Path) -> Result<(PathBuf, Value)> {
         if let Some(running) = &agent.running
-            && let Ok(bundle) = self.boot_bundle(running)
+            && let Ok(bundle) = self.bundle(running)
         {
             return Ok(bundle);
         }
@@ -664,7 +835,7 @@ impl Service {
         versions.sort_unstable_by(|a, b| b.cmp(a));
         versions
             .into_iter()
-            .find_map(|(_, path)| self.boot_bundle(&path).ok())
+            .find_map(|(_, path)| self.bundle(&path).ok())
             .context("no verified Node release available for boot migration")
     }
 
