@@ -1,6 +1,7 @@
 import { StrictMode, useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
+import type { IAdapter } from "../../src/api/integrations"
 import { st } from "../../src/store"
 import { FeishuGuide, SelfButtons } from "../../src/integrations/feishu"
 
@@ -14,9 +15,9 @@ function RaceFixture() {
 }
 const race = new URLSearchParams(location.search).has("race")
 /* the Hub's two Feishu adapters: the bot, and the side acting as you that pairs with it (device code first, OAuth too) */
-const adapters = [
-  { id: "feishu_app", name: "飞书应用机器人", identity: "bot" as const, auth: "credential" as const, device: false, capabilities: [] },
-  { id: "feishu_user", name: "飞书个人授权", identity: "self" as const, auth: "oauth" as const, device: true, capabilities: [], pairing: { with: ["feishu_app"], required: true } },
+const adapters: IAdapter[] = [
+  { id: "feishu_app", name: "飞书应用机器人", identity: "bot", auth: "credential", device: false, capabilities: [], pairing: null, channel: null },
+  { id: "feishu_user", name: "飞书个人授权", identity: "self", auth: "oauth", device: true, capabilities: [], pairing: { with: ["feishu_app"], required: true }, channel: null },
 ]
 createRoot(document.getElementById("root")!).render(<StrictMode>
   <main style={{ maxWidth: 760, margin: "auto", padding: 20 }}>

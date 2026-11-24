@@ -2,7 +2,7 @@
  * PLAYWRIGHT_MODULE / PLAYWRIGHT_EXECUTABLE / PLAYWRIGHT_CHANNEL choose an installed browser; STEVE_TEST_SHOTS saves evidence. */
 import assert from "node:assert/strict"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
-import { deliveryFixture, longName, staticHtmlCsp } from "./fixtures/delivery-api.mjs"
+import { deliveryFixture, longName, staticHtmlCsp } from "./fixtures/delivery-api.ts"
 import { createWebProxy } from "./fixtures/hub-proxy.mjs"
 import { settle } from "./settle.mjs"
 

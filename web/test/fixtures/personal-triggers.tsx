@@ -13,7 +13,7 @@ function Settings({ id }: { id: string }) {
   const reload = async () => { const [account, list] = await Promise.all([modReq<{ trigger: Trigger }>("GET", `/channels/${id}`), channelsApi.spaces({ connection: id })]); setTrigger(account.trigger); setSpaces(list) }
   useEffect(() => { void reload() }, [id])
   if (!trigger) return <p>Loading fixture account</p>
-  return <div className="mx-auto max-w-2xl p-4"><TriggerSection a={{ connection: { id }, trigger, editable: true, spaces }} busy={busy} onSave={async (patch) => { setBusy(true); try { await channelsApi.patchAccount(id, { trigger: patch }); await reload(); return true } finally { setBusy(false) } }} /></div>
+  return <div className="mx-auto max-w-2xl p-4"><TriggerSection a={{ connection: { id }, trigger, spaces }} busy={busy} onSave={async (patch) => { setBusy(true); try { await channelsApi.patchAccount(id, { trigger: patch }); await reload(); return true } finally { setBusy(false) } }} /></div>
 }
 
 function Fixture() {

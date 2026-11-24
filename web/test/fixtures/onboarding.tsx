@@ -9,9 +9,9 @@ import { st, useStore, meeting, setRuntimes } from "../../src/store"
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const q = location.search, now = Date.now()
 const calls: string[] = []
-;(window as any).__calls = calls
+window.__calls = calls
 api.onboardStart = async () => { calls.push("start"); st.settings = { ...st.settings, onboard: "pending" }; return { message: "hello" } }
-api.onboardSkip = async () => { calls.push("skip"); st.settings = { ...st.settings, onboard: "done" }; return undefined as never }
+api.onboardSkip = async () => { calls.push("skip"); st.settings = { ...st.settings, onboard: "done" }; return undefined }
 st.owner = !q.includes("member")
 st.workspace = { id: "w1", name: "个人", description: "", item_prefix: "ST", sort: 0, created: now }
 const rt = (id: string, name: string, ok: boolean, models: string[], extra = {}) => ({ id, name, ok, version: "", path: "", models, note: "通过 ACP 适配器运行", ...extra })

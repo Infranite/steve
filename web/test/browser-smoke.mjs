@@ -68,6 +68,7 @@ export const SMOKE = [
   "message-surfaces",
   "models-settings",
   "node-harnesses",
+  "node-tabs",
   "onboarding",
   "people-management",
   "personal-triggers",
