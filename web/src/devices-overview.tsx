@@ -29,7 +29,7 @@ export function OverviewTab() {
   const [all, setAll] = useState(false), [busy, setBusy] = useState("")
   const now = Date.now()
   const live = views.filter((v) => v.state !== "revoked")
-  const open = (v: NodeView, label = t("devices:attn.open")) => <Button size="xs" variant="ghost" onClick={() => go(nodeHref(v.id))} data-attention-open={v.id}>{label}</Button>
+  const open = (v: NodeView, label = t("devices:attn.open"), tab?: "overview" | "version" | "work") => <Button size="xs" variant="ghost" onClick={() => go(nodeHref(v.id, tab))} data-attention-open={v.id}>{label}</Button>
   const upgrade = async (v: NodeView) => {
     setBusy(v.id)
     try { await api.upgradeNode(v.id); toast(t("devices:attn.upgradeStarted", { name: v.name })); reloadNodes() } catch (e) { toast((e as Error).message) } finally { setBusy("") }
@@ -39,15 +39,15 @@ export function OverviewTab() {
     const s = nodeStatus(v, hubVersion), name = v.local ? t("devices:map.localNode") : v.name, card = upgradeCard(v, hubVersion)
     if (s.kind === "pending") rows.push({ key: v.id, tone: "warn", icon: ShieldAlertIcon, text: t("devices:attn.pending", { name }),
       actions: st.owner ? <Button size="xs" onClick={() => openSheet("addDevice", { kind: "node", node: v.id })} data-attention-confirm={v.id}>{t("devices:attn.confirm")}</Button> : open(v) })
-    else if (s.kind === "rolledBack") rows.push({ key: v.id, tone: "bad", icon: RotateCcwIcon, text: t("devices:attn.failed", { name, to: s.version ?? "", from: s.from ?? "" }), actions: open(v, t("devices:attn.why")) })
-    else if (s.kind === "upgrading") rows.push({ key: v.id, tone: "info", icon: LoaderIcon, text: t("devices:attn.upgrading", { name, to: s.version ?? "" }), actions: open(v) })
+    else if (s.kind === "rolledBack") rows.push({ key: v.id, tone: "bad", icon: RotateCcwIcon, text: t("devices:attn.failed", { name, to: s.version ?? "", from: s.from ?? "" }), actions: open(v, t("devices:attn.why"), "version") })
+    else if (s.kind === "upgrading") rows.push({ key: v.id, tone: "info", icon: LoaderIcon, text: t("devices:attn.upgrading", { name, to: s.version ?? "" }), actions: open(v, t("devices:attn.open"), "version") })
     else if (s.kind === "offline") rows.push({ key: v.id, tone: "warn", icon: WifiOffIcon,
       text: <>{t("devices:attn.nodeStatus", { name, status: statusText(s, now) })}{offlineReason(v) && <span className="text-muted-foreground">{t("devices:attn.reason", { why: offlineReason(v) })}</span>}</>, actions: open(v) })
     else if (card.kind === "outdated" || card.kind === "manual" && card.behind) rows.push({ key: v.id, tone: "warn", icon: ArrowUpCircleIcon, text: t("devices:attn.outdated", { name, v: v.version ?? "?", hub: hubVersion }),
-      actions: <>{open(v, t("devices:card.details"))}{card.kind === "outdated" && st.owner && <Button size="xs" disabled={busy === v.id} onClick={() => void upgrade(v)} data-attention-upgrade={v.id}>{t("devices:attn.upgrade")}</Button>}</> })
+      actions: <>{open(v, t("devices:card.details"), "version")}{card.kind === "outdated" && st.owner && <Button size="xs" disabled={busy === v.id} onClick={() => void upgrade(v)} data-attention-upgrade={v.id}>{t("devices:attn.upgrade")}</Button>}</> })
     const asks = v.device && deviceWorkEvidence().loaded ? deviceGroups(v.device.id).attention.length : 0
     if (asks > 0) rows.push({ key: v.id + ":ask", tone: "warn", icon: MessageCircleIcon, text: t("devices:attn.ask", { name, count: asks }),
-      actions: <Button size="xs" variant="outline" onClick={() => go(nodeHref(v.id))} data-attention-ask={v.id}>{t("devices:attn.answer")}</Button> })
+      actions: <Button size="xs" variant="outline" onClick={() => go(nodeHref(v.id, "work"))} data-attention-ask={v.id}>{t("devices:attn.answer")}</Button> })
   }
   const order = { bad: 0, warn: 1, info: 2 }
   rows.sort((a, b) => order[a.tone] - order[b.tone])
