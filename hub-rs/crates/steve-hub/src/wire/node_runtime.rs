@@ -309,11 +309,15 @@ const IDLE_EVERY: Duration = Duration::from_secs(1);
 /// The most pending gateway accounting rows the upkeep worker applies at once.
 const LOCAL_RUN: usize = 128;
 
-fn command<T: serde::Serialize>(op: &str, body: T) -> Result<(Value, String), StoreError> {
+fn command_at<T: serde::Serialize>(
+    op: &str,
+    body: T,
+    at: i64,
+) -> Result<(Value, String), StoreError> {
     let c = Command {
         id: idv::<OperationId>(op)?,
-        issued_at: Timestamp(now()),
-        accept_before: Timestamp(now() + ACCEPT_WINDOW_MS),
+        issued_at: Timestamp(at),
+        accept_before: Timestamp(at + ACCEPT_WINDOW_MS),
         grant: idv::<GrantId>("hub")?,
         body,
     };
@@ -573,12 +577,13 @@ impl NodeRuntime {
         let (weak, wake) = (Arc::downgrade(self), self.wake_upkeep.clone());
         let clock = self.clock.clone();
         tokio::spawn(async move {
-            let mut idled = std::time::Instant::now();
+            let mut idled = clock.now();
             loop {
                 let Some(me) = weak.upgrade() else { return };
-                let idle = idled.elapsed() >= IDLE_EVERY;
+                let at = clock.now();
+                let idle = at.saturating_sub(idled) >= IDLE_EVERY.as_millis() as i64;
                 if idle {
-                    idled = std::time::Instant::now();
+                    idled = at;
                 }
                 let tick = clock.sleep(stall::POLL_INTERVAL);
                 let more = tokio::task::spawn_blocking(move || me.upkeep(idle))
@@ -854,9 +859,17 @@ impl NodeRuntime {
         })
     }
 
+    fn command<T: serde::Serialize>(
+        &self,
+        op: &str,
+        body: T,
+    ) -> Result<(Value, String), StoreError> {
+        command_at(op, body, self.clock.now())
+    }
+
     fn status_in(&self, session: &str, status: &str) -> Result<(), StoreError> {
         self.store
-            .write(|w| node_sessions::set_status(w, session, status, now()))
+            .write(|w| node_sessions::set_status(w, session, status, self.clock.now()))
     }
 
     fn attempt_row(&self, attempt: &str) -> Result<Option<node_turns::Attempt>, StoreError> {
