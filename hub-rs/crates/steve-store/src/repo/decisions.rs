@@ -120,12 +120,33 @@ impl Store {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DecisionSource {
-    Permission { node: String, attempt: String },
-    TurnStall { attempt: String },
-    TurnInput { attempt: String, prompt: String },
-    FlowStep { started_at: i64, retry: i64 },
+    Permission {
+        node: String,
+        attempt: String,
+    },
+    TurnStall {
+        attempt: String,
+    },
+    TurnInput {
+        attempt: String,
+        prompt: String,
+    },
+    FlowStep {
+        started_at: i64,
+        retry: i64,
+    },
+    Delivery {
+        cycle: i64,
+        revision: i64,
+    },
+    MailDraft {
+        previous: Option<String>,
+        content_hash: String,
+    },
     Record,
-    Revision { revision: String },
+    Revision {
+        revision: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

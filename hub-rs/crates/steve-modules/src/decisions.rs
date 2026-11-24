@@ -296,7 +296,7 @@ fn reverse(
     actor: &str,
     handler: &dyn DecisionHandler,
 ) -> ApiResult<()> {
-    if d.undo != Some(DecisionUndo::Domain) {
+    if d.undo.is_none() {
         return Err(ApiError::rule(steve_i18n::t!(
             "modules.decision.not_undoable"
         )));

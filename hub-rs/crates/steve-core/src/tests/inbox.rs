@@ -22,6 +22,65 @@ fn count(k: &Kit) -> usize {
     k.db().items(WS).unwrap().len()
 }
 
+#[test]
+fn session_decisions_commit_the_input_and_choice_together() {
+    use crate::DecisionCommand;
+    use steve_store::{core_fixture::work::audit_count, decision_repo::choice_receipt};
+    use steve_types::DecisionStatus;
+
+    for (kind, subject, choice) in [("ask", "question", "answer"), ("approve", "action", "yes")] {
+        let k = Kit::new();
+        let item = k.item("run", "confirm", None);
+        let sid = k.session(&item, "idle");
+        let id = k.decision(&item, Some(&sid), kind, subject, &[choice]);
+        let store = k.db().store();
+        let owner = steve_modules::Caller {
+            ws: WS.into(),
+            me: "me".into(),
+        };
+        let outsider = steve_modules::Caller {
+            ws: "elsewhere".into(),
+            me: "me".into(),
+        };
+        let resolve = |caller: &steve_modules::Caller, choice: &str| {
+            k.core.decision_command(
+                caller,
+                &id,
+                Some(1),
+                DecisionCommand::Resolve {
+                    choice: choice.into(),
+                    text: "go on".into(),
+                },
+            )
+        };
+        let audit = || audit_count(store, &["decision.resolve"], Some(&id));
+
+        assert!(resolve(&outsider, choice).is_err());
+        let before = k.timeline_texts(&item);
+        k.rt.st().decision_prompt_error = true;
+        assert!(resolve(&owner, choice).is_err());
+        assert_eq!(
+            store.decisions().get(&id).unwrap().unwrap().status,
+            DecisionStatus::Open
+        );
+        assert_eq!(k.timeline_texts(&item), before);
+        assert_eq!(audit(), 0);
+        assert!(store.read(|r| choice_receipt(r, &id, 1)).unwrap().is_none());
+
+        k.rt.st().decision_prompt_error = false;
+        assert_eq!(
+            resolve(&owner, choice).unwrap().status,
+            DecisionStatus::Resolved
+        );
+        assert_eq!(
+            resolve(&owner, choice).unwrap().status,
+            DecisionStatus::Resolved
+        );
+        assert_eq!(audit(), 1);
+        assert_eq!(k.rt.prompts_of(&sid).len(), 1);
+    }
+}
+
 #[tokio::test]
 async fn promoting_the_same_answer_twice_at_once_makes_one_item() {
     let k = Kit::new();

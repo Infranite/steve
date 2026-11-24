@@ -644,7 +644,7 @@ pub fn park(
 }
 
 /// Queues a message (with its `queued` event) at `created`.
-fn queue_in(
+pub(crate) fn queue_in(
     w: &mut W<'_>,
     session: &str,
     text: &str,

@@ -848,6 +848,21 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Err(e) => Err(CoreError::Msg(e.to_string())),
         }
     }
+    fn stage_decision_prompt(
+        &self,
+        w: &mut steve_store::W<'_>,
+        session_id: &str,
+        text: &str,
+    ) -> steve_core::Result<()> {
+        if let Some(why) = steve_store::workflow_gate::session_blocker(w, session_id)? {
+            return Err(CoreError::Msg(why));
+        }
+        if steve_store::node_sessions::principal_state(w, session_id)?.is_none() {
+            return Err(CoreError::Msg(self.refused(session_id)));
+        }
+        super::node_runtime::queue_in(w, session_id, text, "steve", &[], steve_store::now())?;
+        Ok(())
+    }
     fn running(&self, session_id: &str) -> Option<steve_core::Running> {
         match self.route(session_id) {
             Backend::Node(n) => match n.active_attempt(session_id) {

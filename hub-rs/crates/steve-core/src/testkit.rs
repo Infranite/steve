@@ -42,6 +42,8 @@ pub struct FakeState {
     pub pending_permissions: HashSet<String>,
     /// Every answer fails (the backend's store, say).
     pub answer_error: bool,
+    /// A decision's input queue refuses the write.
+    pub decision_prompt_error: bool,
     /// The user's stop fails: the backend cannot tell whether it reached the turn (its Node
     /// unreachable, say). Recorded in `stopped`, nothing is cancelled.
     pub user_stop_error: bool,
@@ -252,6 +254,18 @@ impl AgentRuntime for FakeRuntime {
         st.files.push((sid.into(), files.to_vec()));
         self.run(&mut st, sid, &[(text.into(), via.into())]);
         Ok(Prompted::Sent)
+    }
+    fn stage_decision_prompt(
+        &self,
+        _: &mut steve_store::W<'_>,
+        sid: &str,
+        text: &str,
+    ) -> Result<()> {
+        if self.st().decision_prompt_error {
+            return Err(msg("input queue refused"));
+        }
+        self.prompt(sid, text, "steve", &[])?;
+        Ok(())
     }
     fn running(&self, sid: &str) -> Option<Running> {
         self.st().attempts.get(sid).map(|a| Running {

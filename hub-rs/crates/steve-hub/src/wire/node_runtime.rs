@@ -77,7 +77,7 @@ pub use node_jobs::{
     News, NodePrint, RESEARCH_GRANT, ResearchAttempt, ResearchFile, ResearchJobRun,
 };
 pub use plan::{Planned, park};
-pub(crate) use plan::{deliver_mid_turn, mid_turn_note};
+pub(crate) use plan::{deliver_mid_turn, mid_turn_note, queue_in};
 pub use receive::Sink;
 pub use workspace::WorkspaceFact;
 

@@ -140,6 +140,22 @@ async fn execute_without_a_decision_refuses() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn requesting_approval_for_the_same_draft_content_keeps_the_open_decision() {
+    let h = setup().await;
+    let (conn, thread) = with_thread(&h).await;
+    let d = h
+        .mail
+        .create_draft(&me(), my_draft(&conn, Some(&thread), None, "draft"))
+        .unwrap();
+    let first = h.mail.request_approval(&d.id).unwrap();
+    let second = h.mail.request_approval(&d.id).unwrap();
+    assert_eq!(first, second);
+    let card = decision(&h, &first);
+    assert_eq!(card.status, steve_types::DecisionStatus::Open);
+    assert_eq!(card.revision, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn content_changed_after_approval_is_refused() {
     let h = setup().await;
     let (conn, thread) = with_thread(&h).await;

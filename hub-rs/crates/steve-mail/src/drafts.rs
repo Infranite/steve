@@ -497,8 +497,17 @@ pub fn open_approval(
     requested_by: &str,
     now: i64,
 ) -> MailResult<String> {
+    let hash = content_hash(d);
+    if d.content_hash == hash
+        && let Some(id) = &d.decision_id
+        && let Some(current) = steve_store::DecisionRows(tx).get(id)?
+        && current.status == steve_types::DecisionStatus::Open
+        && current.kind == "approve"
+    {
+        return Ok(current.id);
+    }
     expire_open(tx, &d.workspace_id, &d.id)?;
-    d.content_hash = content_hash(d);
+    d.content_hash = hash;
     let dec = steve_store::DecisionRows(tx).open(&NewDecision {
         workspace_id: d.workspace_id.clone(),
         kind: "approve".into(),
@@ -511,7 +520,10 @@ pub fn open_approval(
         options: Some(APPROVE_OPTIONS.map(String::from).to_vec()),
         requested_by: requested_by.into(),
         question_template: None,
-        source: None,
+        source: Some(steve_store::DecisionSource::MailDraft {
+            previous: d.decision_id.clone(),
+            content_hash: d.content_hash.clone(),
+        }),
     })?;
     repo::set_draft_decision(tx, &d.id, Some(&dec.id), &d.content_hash)?;
     repo::draft_transition(tx, &d.id, &["draft", "pending", "failed"], "pending", now)?;

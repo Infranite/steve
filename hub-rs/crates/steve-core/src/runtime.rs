@@ -249,6 +249,17 @@ pub trait AgentRuntime: Send + Sync {
         via: &str,
         files: &[FileRef],
     ) -> Result<Prompted>;
+    /// Queue an owner response in the decision's write transaction. The runtime plans delivery
+    /// from the committed queue.
+    fn stage_decision_prompt(
+        &self,
+        _w: &mut steve_store::W<'_>,
+        session_id: &str,
+        text: &str,
+    ) -> Result<()> {
+        self.prompt(session_id, text, "steve", &[])?;
+        Ok(())
+    }
     /// The turn running now (or its pending gateway retry), if any.
     fn running(&self, session_id: &str) -> Option<Running>;
     /// Interrupt that turn, only while it is still the one running; [`Stop::NotRunning`] otherwise.

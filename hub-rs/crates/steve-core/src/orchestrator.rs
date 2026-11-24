@@ -2124,7 +2124,10 @@ impl Tx<'_> {
             options: Some(vec!["pass".into(), "rework".into()]),
             requested_by: Self::by(s),
             question_template: None,
-            source: None,
+            source: Some(steve_store::DecisionSource::Delivery {
+                cycle: item.cycle,
+                revision: self.item(item_id)?.delivery_revision + 1,
+            }),
         })?;
         self.mark_deliver(&item.workspace_id, item_id, &Self::by(s), Some(&d.id)); // stats (ST3)
         self.request_delivery_close(
@@ -2902,6 +2905,75 @@ impl Tx<'_> {
         Ok(())
     }
 
+    fn settle_conversation_answer(
+        &mut self,
+        d: &Decision,
+        cx: &steve_modules::decisions::DecisionCx<'_>,
+        to: &To,
+        result: Value,
+        line: &str,
+        prompt: &str,
+    ) -> Result<()> {
+        let To::Decision { live, item } = to;
+        let store = self.db().store().clone();
+        let should_send = store.write::<_, CoreError>(|w| {
+            if let Some(steve_store::DecisionSource::TurnInput { attempt, .. }) = &d.source_revision
+                && let Some(session) = &d.session_id
+                && let Some(turn) = store.sessions().turn_of_attempt(attempt)?
+                && (live.as_ref() != Some(session)
+                    || store.sessions().latest_turn(session)?.as_ref() != Some(&turn))
+            {
+                settle_answer(
+                    w,
+                    d,
+                    cx,
+                    json!({"reason": "turn_scope_changed"}),
+                    DecisionChange::Expire,
+                    None,
+                )?;
+                return Ok(false);
+            }
+            settle_answer(w, d, cx, result, DecisionChange::Resolve, None)?;
+            if let Some(item) = item {
+                self.record_conversation_answer(item, d, cx.actor, line)?;
+                if d.kind == "accept" && cx.choice == "rework" {
+                    self.invalidate_delivery(
+                        item,
+                        crate::cycle::void::REWORK,
+                        "验收没有通过，返工",
+                    )?;
+                }
+            }
+            if let Some(session) = live {
+                if let Some(item) = item {
+                    supersede(self.db(), item, &["ask", "fail"], "你已经回复，会话继续")?;
+                    recover_quiet(self.db(), item);
+                }
+                self.rt().stage_decision_prompt(w, session, prompt)?;
+            }
+            Ok(live.is_none())
+        })?;
+        if should_send {
+            self.send(to, prompt)?;
+        }
+        Ok(())
+    }
+
+    fn record_conversation_answer(
+        &self,
+        item: &str,
+        decision: &Decision,
+        actor: &str,
+        line: &str,
+    ) -> Result<()> {
+        let session = decision.session_id.as_deref();
+        if actor == YOLO_ACTOR && decision.kind == "ask" {
+            self.db().timeline_add(item, "steve", "sys", line, session)
+        } else {
+            self.answer_line(item, actor, line, session)
+        }
+    }
+
     /// The timeline line of an answer: the user's own (`kind=me`), or for YOLO's a system line
     /// `YOLO：…` by Steve, so it never reads as something the user said.
     pub(crate) fn answer_line(
@@ -2967,6 +3039,23 @@ impl Tx<'_> {
         let settle = |result, status, undo| {
             store.write::<_, CoreError>(|w| settle_answer(w, &d, &cx, result, status, undo))
         };
+        if let Some(steve_store::DecisionSource::Delivery { cycle, revision }) = &d.source_revision
+            && let Some(item_id) = &d.item_id
+            && !db.item(item_id)?.is_some_and(|i| {
+                i.cycle == *cycle
+                    && i.delivery_revision == *revision
+                    && i.closing.as_ref().and_then(|c| c.decision.as_deref()) == Some(id)
+            })
+        {
+            settle(
+                json!({"reason": "delivery_scope_changed"}),
+                DecisionChange::Expire,
+                None,
+            )?;
+            return db
+                .decision(id)?
+                .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")));
+        }
         let item_id = d.item_id.clone();
         let s = match (&d.session_id, &item_id) {
             (Some(sid), _) => db.session(sid)?,
@@ -3158,16 +3247,12 @@ impl Tx<'_> {
                 return reget(self);
             }
             ("accept", _) => {
-                let i = iid()?;
-                settle(
-                    json!({"choice": "rework", "text": text}),
-                    DecisionChange::Resolve,
-                    None,
-                )?;
-                tl(self, &i, &format!("返工：{text}"))?;
-                self.invalidate_delivery(&i, crate::cycle::void::REWORK, "验收没有通过，返工")?;
-                self.send(
+                self.settle_conversation_answer(
+                    &d,
+                    &cx,
                     &to,
+                    json!({"choice": "rework", "text": text}),
+                    &format!("返工：{text}"),
                     &format!(
                         "验收没有通过，返工意见：{}\n改完再用 steve_deliver 交付。",
                         or(text, "请再检查一遍")
@@ -3184,18 +3269,6 @@ impl Tx<'_> {
                     or(text, choice)
                 }
                 .to_string();
-                settle(json!({"answer": answer}), DecisionChange::Resolve, None)?;
-                if yolo {
-                    self.db().timeline_add(
-                        &i,
-                        "steve",
-                        "sys",
-                        &format!("YOLO 代答：{answer}"),
-                        sid.as_deref(),
-                    )?;
-                } else {
-                    tl(self, &i, &format!("回答：{answer}"))?;
-                }
                 /* an item without a project that asked which project it belongs to: move it there, a new session continues in it */
                 let i0 = self.item(&i)?;
                 let attach = if i0.project_id.is_none() {
@@ -3206,7 +3279,19 @@ impl Tx<'_> {
                 } else {
                     None
                 };
+                let line = if yolo {
+                    format!("YOLO 代答：{answer}")
+                } else {
+                    format!("回答：{answer}")
+                };
+                let prompt = if yolo && !text.is_empty() {
+                    text.to_owned()
+                } else {
+                    format!("用户的回答：{answer}")
+                };
                 if let Some(p) = attach {
+                    settle(json!({"answer": answer}), DecisionChange::Resolve, None)?;
+                    self.record_conversation_answer(&i, &d, actor, &line)?;
                     self.db().item_patch(
                         &i,
                         patch![project_id: p.id.as_str(), cwd: Value::Null, branch: Value::Null],
@@ -3232,31 +3317,39 @@ impl Tx<'_> {
                     };
                     self.start_or_fail(&i, Some(&format!("{who}把这个事项关联到了项目 {}。上一个会话的最后进展：{last}\n在这个项目里继续。", p.name)), None)?;
                 } else {
-                    if yolo && !text.is_empty() {
-                        self.send(&to, text)?;
-                    } else {
-                        self.send(&to, &format!("用户的回答：{answer}"))?;
-                    }
+                    self.settle_conversation_answer(
+                        &d,
+                        &cx,
+                        &to,
+                        json!({"answer": answer}),
+                        &line,
+                        &prompt,
+                    )?;
                 }
             }
+
             ("approve", "release") => {
                 let i = iid()?;
                 let yes = choice == "yes";
-                settle(
-                    json!({"approved": yes, "text": text}),
-                    DecisionChange::Resolve,
-                    None,
-                )?;
-                /* the note goes into the conversation exactly when it goes to the agent: with a "no" */
-                tl(
-                    self,
-                    &i,
-                    &match (yes, text) {
-                        (true, _) => format!("批准发布 {}", d.subject_id),
-                        (false, "") => format!("不发布 {}", d.subject_id),
-                        (false, t) => format!("不发布 {}：{t}", d.subject_id),
-                    },
-                )?;
+                store.write::<_, CoreError>(|w| {
+                    settle_answer(
+                        w,
+                        &d,
+                        &cx,
+                        json!({"approved": yes, "text": text}),
+                        DecisionChange::Resolve,
+                        None,
+                    )?;
+                    tl(
+                        self,
+                        &i,
+                        &match (yes, text) {
+                            (true, _) => format!("批准发布 {}", d.subject_id),
+                            (false, "") => format!("不发布 {}", d.subject_id),
+                            (false, t) => format!("不发布 {}：{t}", d.subject_id),
+                        },
+                    )
+                })?;
                 if yes {
                     if self.rebase_for_release(&i, &d.subject_id, &to)? {
                         self.start_release(&d.subject_id, &i)?;
@@ -3266,30 +3359,26 @@ impl Tx<'_> {
                 }
             }
             ("approve", _) => {
-                let i = iid()?;
                 let yes = choice == "yes";
-                settle(
-                    json!({"approved": yes, "text": text}),
-                    DecisionChange::Resolve,
-                    None,
-                )?;
-                /* the conversation line is the agent's message minus its framing, note included */
                 let said = match (yes, text) {
                     (_, "") => d.question.clone(),
                     (true, t) => format!("{}。补充：{t}", d.question),
                     (false, t) => format!("{}。原因：{t}", d.question),
                 };
-                tl(
-                    self,
-                    &i,
-                    &format!("{}{said}", if yes { "批准：" } else { "拒绝：" }),
-                )?;
-                let m = if yes {
+                let line = format!("{}{said}", if yes { "批准：" } else { "拒绝：" });
+                let prompt = if yes {
                     format!("用户批准了：{said}")
                 } else {
                     format!("用户拒绝了：{said}。不要执行这个操作。")
                 };
-                self.send(&to, &m)?;
+                self.settle_conversation_answer(
+                    &d,
+                    &cx,
+                    &to,
+                    json!({"approved": yes, "text": text}),
+                    &line,
+                    &prompt,
+                )?;
             }
             ("propose", _) => {
                 let i = iid()?;
@@ -3608,8 +3697,8 @@ impl Tx<'_> {
             {
                 self.withdraw_acceptance(i)?;
             }
-            match d.undo.as_ref() {
-                Some(DecisionUndo::Domain) if self.module_undo(&d, actor)? => {}
+            let reopened = match d.undo.as_ref() {
+                Some(DecisionUndo::Domain) if self.module_undo(&d, actor)? => true,
                 Some(DecisionUndo::Resume { revision }) => {
                     if let Some(i) = &d.item_id {
                         let current = self.item(i)?;
@@ -3617,29 +3706,26 @@ impl Tx<'_> {
                             self.resume_item(&current)?;
                         }
                     }
-                    self.db().decision_reopen(id)?;
-                    self.db().audit(
-                        actor,
-                        "decision.undo",
-                        id,
-                        &json!({"revision": revision}),
-                        &d.workspace_id,
-                    )?;
+                    false
                 }
                 Some(DecisionUndo::RestorePlan { plan }) => {
+                    let reopened = self.module_undo(&d, actor)?;
                     if let Some(i) = &d.item_id {
                         self.db().item_patch(i, patch![plan: plan])?;
                     }
-                    self.db().decision_reopen(id)?;
-                    self.db().audit(
-                        actor,
-                        "decision.undo",
-                        id,
-                        &json!({"revision": d.revision}),
-                        &d.workspace_id,
-                    )?;
+                    reopened
                 }
                 _ => return Err(msg(steve_i18n::t!("core.decision.not_undoable"))),
+            };
+            if !reopened {
+                self.db().decision_reopen(id)?;
+                self.db().audit(
+                    actor,
+                    "decision.undo",
+                    id,
+                    &json!({"revision": d.revision}),
+                    &d.workspace_id,
+                )?;
             }
             if let Some(i) = &d.item_id {
                 self.db().timeline_add(i, actor, "me", "撤销了决定", None)?;
