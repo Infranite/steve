@@ -100,7 +100,7 @@ pub(super) fn of(
 /// Whether the projection keeps `v` (the same definition as the web client's `table.ts`).
 pub(super) fn is_hot(v: &View) -> bool {
     match v {
-        View::Decision(d) => d.status == "open",
+        View::Decision(d) => d.status == steve_types::DecisionStatus::Open,
         View::Item(i) => !i.archived,
         View::Session(s) => s.status != "ended",
         View::Message(_) => true,

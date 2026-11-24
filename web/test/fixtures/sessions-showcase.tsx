@@ -28,7 +28,7 @@ for (let n = 0; n < 46; n++) {
     used: n % 6 === 1 ? null : [54, 77, 70, 81, 12, 28, 70, 60, 71, 67, 30, 34, 78, 74, 91][n % 15] * 2000, size: 200000, cost: null, title: imported ? "本机 Codex：排查构建缓存" : title, device_id: "hub", source: imported ? "本机 Codex" : "Steve", readonly: imported, busy: status === "running", queued: [],
     created: now - (n * 3.1 + 1) * H, updated: now - n * 3.1 * H - 7 * 60_000 } as RSession)
 }
-const decisions: RDecision[] = [{ id: "d1", kind: "approve", subject_type: "tool_call", subject_id: "{}", item_id: "ST-56", session_id: "s1", question: "允许执行：npm run build", draft: "", options: ["允许一次", "拒绝"], status: "open", result: null, requested_by: "dev", created: now - H, resolved: null, undo: null } as unknown as RDecision]
+const decisions: RDecision[] = [{ id: "d1", kind: "approve", subject_type: "tool_call", subject_id: "{}", item_id: "ST-56", session_id: "s1", question: { kind: "raw", text: "允许执行：npm run build" }, draft: "", options: ["允许一次", "拒绝"], status: "open", result: null, requested_by: "dev", created: now - H, resolved: null, undo: null } as unknown as RDecision]
 const bot = (id: string, name: string, color: string) => ({ id, name, role: "", main: false, harness: "claude-code", model: "gpt-6.1-sol", rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: { color }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 })
 const state = { version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items, decisions, recent: [], allBots: [],
   bots: [bot("dev", "开发 Bot", "#e5484d"), bot("rev", "复核 Bot", "#3e63dd")],

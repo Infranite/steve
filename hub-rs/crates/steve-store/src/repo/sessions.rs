@@ -277,8 +277,8 @@ impl Sessions<'_> {
                 }))?;
             }
             let cards = self.0.read_conn(|c| all(c, "SELECT * FROM decisions WHERE session_id=?", [id], crate::Decision::from_row))?;
-            for d in cards.into_iter().filter(|d| d.status == "open" && d.subject_type == crate::SESSION_START_FAILURE) {
-                self.0.decisions().resolve(&d.id, &serde_json::json!({"superseded":"会话已结束"}), "expired", &Value::Null)?;
+            for d in cards.into_iter().filter(|d| d.status == steve_types::DecisionStatus::Open && d.subject_type == crate::SESSION_START_FAILURE) {
+                self.0.decisions().resolve(&d.id, &serde_json::json!({"superseded":"会话已结束"}), crate::decision_repo::DecisionChange::Expire, None)?;
             }
             Ok(())
         })

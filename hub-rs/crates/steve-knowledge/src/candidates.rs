@@ -7,20 +7,18 @@
 //! owner's own words in their conversation say to keep it (“记住…”, “以后…”) and it replaces nothing,
 //! Steve's at once (settled as a `yes` the owner can undo). An expired candidate can be restored.
 
-use std::time::Duration;
-
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::contacts::memory::{MAX_OPEN_CONFIRMS, confirm_question, record_name};
-use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
+use steve_modules::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules};
 use steve_store::base::mems::{Mem, MemPatch, NewMem};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
 use steve_store::knowledge::{CandidateInfo, CandidateOrigin, CandidateRows, Memories};
-use steve_store::{Decision, DecisionRows, Read, W, Workspaces};
+use steve_store::{Decision, DecisionRows, Read, W};
 
 use crate::extract::Names;
 use crate::service::{mem_json_for, prepare};
@@ -33,8 +31,6 @@ pub const SUBJECT: &str = "mem";
 pub const MAX_PER_ORIGIN: usize = 3;
 /// Unanswered candidates expire after this long.
 pub const EXPIRE_AFTER_MS: i64 = 30 * 24 * 3600 * 1000;
-/// How often the expiry job runs.
-pub const EXPIRE_EVERY: Duration = Duration::from_secs(3600);
 /// Quotes are cut to this many characters (`mem_candidates.evidence`).
 pub const EVIDENCE_MAX: usize = 300;
 const NOUN: &str = "记忆";
@@ -207,12 +203,16 @@ pub fn propose_in(tx: &mut W<'_>, o: &Origin, c: &NewCandidate) -> ApiResult<Mem
     if auto {
         // you said so yourself: kept now, the card settled as yours, undoable like your own yes
         answer(tx, &o.ws, "steve", &mem.id, "yes", "")?;
-        if let Some(d) = mem.decision_id.as_deref() {
-            DecisionRows(tx).settle(
-                d,
+        if let Some(id) = mem.decision_id.as_deref()
+            && let Some(d) = DecisionRows(tx).get(id)?
+        {
+            DecisionRows(tx).resolve_choice(
+                &d,
+                &o.user,
+                "yes",
+                "",
                 &json!({"choice": "yes", "auto": "owner_said"}),
-                "resolved",
-                &json!({"auto": true}),
+                Some(&steve_store::DecisionUndo::Domain),
             )?;
         }
         tx.audit(
@@ -267,6 +267,7 @@ fn open_candidate_confirmation(
     );
     nd.draft = Some(draft);
     nd.session_id = o.session_id.clone();
+    nd.source = Some(steve_store::DecisionSource::Record);
     let d = DecisionRows(tx).open(&nd)?;
     Memories(tx)
         .patch(
@@ -410,9 +411,9 @@ fn replaced(c: &mut impl Read, id: &str) -> ApiResult<Vec<String>> {
 pub struct MemDecisions;
 
 impl DecisionHandler for MemDecisions {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         answer(tx, cx.ws, cx.actor, &d.subject_id, cx.choice, cx.text)?;
-        Ok(decisions::choice_result(cx))
+        Ok(decisions::choice_result(cx).into())
     }
 
     /// Undoing a `yes` puts the candidate back and restores the memory it replaced; a `no` deleted
@@ -594,31 +595,14 @@ pub fn resolve_many(m: &Modules, who: &Caller, b: &ResolveBody) -> ApiResult<Val
         if mem.status != "candidate" {
             continue;
         }
-        let open = match &mem.decision_id {
-            Some(d) => m
-                .store
-                .read(|c| DecisionRows(c).get(d))?
-                .filter(|d| d.status == "open")
-                .map(|d| d.id),
-            None => None,
-        };
-        if let Some(dec) = open
-            && let Some(r) = decisions::dispatch(m, who, &dec, &b.choice, "")
-        {
-            r?;
-            done += 1;
-            continue;
-        }
-        // No open decision (or no handler registered): answer directly, settling any decision too.
         m.store.write(|tx| {
-            answer(tx, &who.ws, &who.me, &mem.id, &b.choice, "")?;
-            if let Some(d) = &mem.decision_id {
-                DecisionRows(tx).settle(
-                    d,
-                    &json!({"choice": b.choice}),
-                    "resolved",
-                    &Value::Null,
-                )?;
+            if let Some(id) = &mem.decision_id {
+                let d = DecisionRows(tx)
+                    .get(id)?
+                    .ok_or_else(|| ApiError::not_found("决定"))?;
+                decisions::resolve(m, who, id, d.revision, &b.choice, "")?;
+            } else {
+                answer(tx, &who.ws, &who.me, &mem.id, &b.choice, "")?;
             }
             Ok::<_, ApiError>(())
         })?;
@@ -658,19 +642,41 @@ pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
         .as_array()
         .is_some_and(|xs| xs.iter().any(|x| x["mem"]["id"] == id));
     m.store.write(|tx| {
-        if Memories(tx).visible(&viewer, id)?.is_none() {
-            return Err(ApiError::not_found(NOUN));
-        }
-        if !ok {
+        let mem = Memories(tx)
+            .visible(&viewer, id)?
+            .ok_or_else(|| ApiError::not_found(NOUN))?;
+        if !ok || mem.status != "stale" {
             return Err(ApiError::conflict(steve_i18n::t!(
                 "knowledge.mem.already_handled"
             )));
         }
+        let previous = mem
+            .decision_id
+            .as_deref()
+            .map(|id| DecisionRows(tx).get(id))
+            .transpose()?
+            .flatten()
+            .filter(|d| {
+                d.workspace_id == who.ws
+                    && d.subject_type == SUBJECT
+                    && d.subject_id == mem.id
+                    && d.status == steve_types::DecisionStatus::Expired
+            });
+        let decision_id = if let Some(d) = previous {
+            let mut spec = decisions::confirm(&who.ws, SUBJECT, id, &d.question, &d.requested_by);
+            spec.draft = Some(d.draft);
+            spec.session_id = d.session_id;
+            spec.source = Some(steve_store::DecisionSource::Revision { revision: d.id });
+            Some(DecisionRows(tx).open(&spec)?.id)
+        } else {
+            None
+        };
         let now = steve_store::now();
         Memories(tx).patch(
             id,
             &MemPatch {
                 status: Some("candidate".into()),
+                decision_id: Some(decision_id),
                 ..Default::default()
             },
         )?;
@@ -680,51 +686,26 @@ pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
     })
 }
 
-/// `kb.candidates_expire`: candidates older than 30 days at `now` become `stale`, their open
-/// decisions `expired`. Returns how many.
-pub fn expire(m: &Modules, now: i64) -> ApiResult<usize> {
-    let mut wss = m.store.read(|c| Workspaces(c).ids())?;
-    wss.sort();
-    let mut n = 0;
-    for ws in wss {
-        let old = m
-            .store
-            .read(|c| Memories(c).candidates_before(&ws, now - EXPIRE_AFTER_MS))?;
-        for (id, dec) in old {
-            if let Some(d) = dec {
-                decisions::expire(m, &d)?;
-            }
-            m.store.write(|tx| {
-                stale_candidate(tx, &id)?;
-                tx.audit(&ws, "steve", "mm.expire", &id, &json!({}))?;
-                Ok::<_, ApiError>(())
-            })?;
-            n += 1;
-        }
-    }
-    Ok(n)
+/// The first candidate deadline, including candidates without a confirmation card.
+pub fn next_expiry(r: &mut impl Read) -> steve_store::Result<Option<i64>> {
+    Ok(Memories(r)
+        .first_candidate_at()?
+        .map(|at| at + EXPIRE_AFTER_MS))
 }
 
-/// Starts the hourly expiry job.
-pub async fn expire_job(m: Modules) {
-    steve_runtime::every(
-        "kb.candidates_expire",
-        m.clock.clone(),
-        EXPIRE_EVERY,
-        steve_runtime::FirstRun::Immediate,
-        move || {
-            let m = m.clone();
-            async move {
-                let now = m.clock.now();
-                match m.blocking(move |m| expire(m, now)).await {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!("kb.candidates_expire: {n} expired"),
-                    Err(e) => tracing::warn!("kb.candidates_expire: {e}"),
-                }
+/// Settle a bounded transaction batch of candidates that have reached their deadline.
+pub fn expire(m: &Modules, now: i64) -> ApiResult<usize> {
+    m.store.write(|tx| {
+        let due = Memories(tx).due_candidates(now - EXPIRE_AFTER_MS, 64)?;
+        for (id, ws, decision) in &due {
+            if let Some(id) = decision {
+                decisions::expire(m, id)?;
             }
-        },
-    )
-    .await;
+            stale_candidate(tx, id)?;
+            tx.audit(ws, "steve", "mm.expire", id, &json!({}))?;
+        }
+        Ok(due.len())
+    })
 }
 
 // ---------------------------------------------------------------- steve_remember

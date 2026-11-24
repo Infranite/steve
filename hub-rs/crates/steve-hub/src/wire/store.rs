@@ -569,9 +569,6 @@ impl Repo for StoreBackend {
         obj(self.0.files().create(&n).map_err(err)?)
     }
 
-    fn decision_get(&self, id: &str) -> BResult<Option<Obj>> {
-        opt(self.0.decisions().get(id).map_err(err)?)
-    }
     fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.decisions().of_item(item).map_err(err)?)
     }

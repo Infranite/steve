@@ -1,6 +1,6 @@
 //! Durable startup failure and its decision card.
 
-use sea_query::{Expr, ExprTrait, OnConflict, Order, Query};
+use sea_query::{Expr, ExprTrait, OnConflict, Query};
 use steve_types::{DomainEvent, WorkEvent};
 
 use crate::{Decision, Read, Result, W};
@@ -71,37 +71,21 @@ pub fn record_stop(w: &mut W<'_>, session: &str, detail: &str, at: i64) -> Resul
     Ok(())
 }
 
-pub fn reopen_matching(
-    w: &mut W<'_>,
-    session: &str,
-    scope: &Scope,
-    question: &str,
-) -> Result<bool> {
+pub fn already_open(w: &mut W<'_>, session: &str, question: &str) -> Result<bool> {
     use crate::contract::Q;
-    let matching: Option<(String, String)> = w.one(
+
+    Ok(w.one(
         Query::select()
-            .columns(["id", "status"])
+            .column("id")
             .from("decisions")
             .and_where(Expr::col("session_id").eq(session))
             .and_where(Expr::col("subject_type").eq(REASON))
             .and_where(Expr::col("question").eq(question))
-            .order_by("created", Order::Asc)
+            .and_where(Expr::col("status").eq("open"))
             .limit(1),
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let Some((id, status)) = matching else {
-        return Ok(false);
-    };
-    if status == "open" {
-        w.emit(DomainEvent::from(WorkEvent::Decision {
-            ws: scope.workspace.clone().into(),
-            id: id.into(),
-            item_id: Some(scope.item.clone().map(Into::into)),
-        }));
-    } else {
-        crate::decision_repo::reopen(w, &id)?;
-    }
-    Ok(true)
+        |_| Ok(()),
+    )?
+    .is_some())
 }
 
 pub fn hold_item(w: &mut W<'_>, workspace: &str, item: &str, at: i64) -> Result<()> {

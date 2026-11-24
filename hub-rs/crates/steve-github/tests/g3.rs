@@ -296,6 +296,8 @@ fn item(h: &H, no: i64, branch: Option<&str>) -> String {
                 draft: Some("登录后回到原来的页面。\n✓ 单元测试".into()),
                 options: Some(vec!["pass".into(), "rework".into()]),
                 requested_by: "steve".into(),
+                question_template: None,
+                source: None,
             })
         })
         .expect("accept decision");
@@ -317,6 +319,8 @@ fn request_open(h: &H, id: &str) {
                 draft: Some("Return to the right page".into()),
                 options: Some(accept::OPTIONS.map(String::from).to_vec()),
                 requested_by: "bot".into(),
+                question_template: None,
+                source: None,
             })
         })
         .unwrap();

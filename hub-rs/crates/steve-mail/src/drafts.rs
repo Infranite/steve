@@ -497,8 +497,22 @@ pub fn open_approval(
     requested_by: &str,
     now: i64,
 ) -> MailResult<String> {
+    let hash = content_hash(d);
+    if let Some(id) = &d.decision_id
+        && let Some(current) = steve_store::DecisionRows(tx).get(id)?
+        && current.workspace_id == d.workspace_id
+        && current.subject_type == SUBJECT_TYPE
+        && current.subject_id == d.id
+        && current.status == steve_types::DecisionStatus::Open
+        && matches!(
+            current.source_revision.as_ref(),
+            Some(steve_store::DecisionSource::MailDraft { content_hash, .. }) if *content_hash == hash
+        )
+    {
+        return Ok(current.id);
+    }
     expire_open(tx, &d.workspace_id, &d.id)?;
-    d.content_hash = content_hash(d);
+    d.content_hash = hash;
     let dec = steve_store::DecisionRows(tx).open(&NewDecision {
         workspace_id: d.workspace_id.clone(),
         kind: "approve".into(),
@@ -510,6 +524,11 @@ pub fn open_approval(
         draft: Some(decision_text(d)),
         options: Some(APPROVE_OPTIONS.map(String::from).to_vec()),
         requested_by: requested_by.into(),
+        question_template: None,
+        source: Some(steve_store::DecisionSource::MailDraft {
+            previous: d.decision_id.clone(),
+            content_hash: d.content_hash.clone(),
+        }),
     })?;
     repo::set_draft_decision(tx, &d.id, Some(&dec.id), &d.content_hash)?;
     repo::draft_transition(tx, &d.id, &["draft", "pending", "failed"], "pending", now)?;
@@ -527,8 +546,8 @@ pub fn expire_open(tx: &mut steve_store::W<'_>, ws: &str, draft: &str) -> MailRe
         steve_store::DecisionRows(tx).settle(
             &id,
             &json!({"expired": true}),
-            "expired",
-            &Value::Null,
+            steve_store::decision_repo::DecisionChange::Expire,
+            None,
         )?;
     }
     Ok(())
@@ -846,27 +865,24 @@ impl Mail {
             return Err(ApiError::rule(steve_i18n::t!("mail.draft.no_recipients")).into());
         }
         let now = self.now();
-        let dec = self.0.m.store.write(|tx| -> MailResult<String> {
+        self.0.m.store.write(|tx| -> MailResult<()> {
             let mut d =
                 repo::draft(tx, id)?.ok_or_else(|| MailError::Api(ApiError::not_found("草稿")))?;
+            if d.workspace_id != who.ws {
+                return Err(ApiError::not_found("草稿").into());
+            }
             if !["draft", "pending", "failed"].contains(&d.status.as_str()) {
                 return Err(
                     ApiError::conflict(steve_i18n::t!("mail.draft.already_handled")).into(),
                 );
             }
-            open_approval(tx, &mut d, &who.me, now)
+            let id = open_approval(tx, &mut d, &who.me, now)?;
+            let decision = steve_store::DecisionRows(tx)
+                .get(&id)?
+                .ok_or_else(|| ApiError::not_found("决定"))?;
+            decisions::resolve(&self.0.m, who, &id, decision.revision, "send", "")?;
+            Ok(())
         })?;
-        match decisions::dispatch(&self.0.m, who, &dec, "send", "") {
-            Some(r) => {
-                r?;
-            }
-            None => {
-                return Err(ApiError::Internal(
-                    "mail_draft decision handler is not registered".into(),
-                )
-                .into());
-            }
-        }
         self.get_draft(who, id)
     }
 
@@ -874,15 +890,10 @@ impl Mail {
     /// and its approval reopens (the same as undoing the decision); otherwise 409.
     pub fn cancel_draft(&self, who: &Caller, id: &str) -> MailResult<DraftOut> {
         let d = self.own_draft(who, id)?;
-        let now = self.now();
         self.0.m.store.write(|tx| -> MailResult<()> {
-            let cur =
-                repo::draft(tx, id)?.ok_or_else(|| MailError::Api(ApiError::not_found("草稿")))?;
-            crate::send::undo_approval(tx, &cur, now)?;
-            if let Some(dec) = steve_store::decision_repo::send_approval(tx, &who.ws, id)? {
-                steve_store::decision_repo::reopen(tx, &dec.id)?;
-                tx.audit(&who.ws, &who.me, "decision.undo", &dec.id, &json!({}))?;
-            }
+            let dec = steve_store::decision_repo::send_approval(tx, &who.ws, id)?
+                .ok_or_else(|| ApiError::conflict(steve_i18n::t!("mail.draft.not_waiting")))?;
+            decisions::undo_in(&self.0.m, tx, who, &dec)?;
             tx.audit(&who.ws, &who.me, "mail_draft.cancel", id, &json!({}))?;
             emit_draft(tx, &d);
             Ok(())

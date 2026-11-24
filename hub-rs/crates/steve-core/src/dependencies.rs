@@ -194,12 +194,10 @@ impl Tx<'_> {
                 "协作工作仍在执行或停止尚未确认，请先暂停工作图并确认停止后再登记前置等待",
             ));
         }
-        if self
-            .db()
-            .decisions_of_item(&item.id)?
-            .iter()
-            .any(|d| d.status == "open" && !matches!(d.kind.as_str(), "ask" | "fail"))
-        {
+        if self.db().decisions_of_item(&item.id)?.iter().any(|d| {
+            d.status == steve_types::DecisionStatus::Open
+                && !matches!(d.kind.as_str(), "ask" | "fail")
+        }) {
             return Ok(Some("事项还有验收或授权待处理，不能改为前置等待"));
         }
         Ok(None)
@@ -371,7 +369,7 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(id)?
             .iter()
-            .any(|d| d.status == "open")
+            .any(|d| d.status == steve_types::DecisionStatus::Open)
         {
             self.diagnostic_session(
                 registration,

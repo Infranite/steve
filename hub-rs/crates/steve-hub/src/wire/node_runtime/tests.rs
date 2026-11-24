@@ -926,7 +926,16 @@ async fn a_turn_holds_within_one_tick_after_observed_progress_stops() {
     rt.observe_turns().unwrap();
     assert_eq!(cards(), 0);
     let decision = node_checks::decision_id_by_status(&rt.store, "open").unwrap();
-    assert!(rt.answer_permission(&decision, Some("allow_once")).unwrap());
+    assert!(
+        rt.answer_permission(steve_core::PermissionAnswer::resolve(
+            &decision,
+            1,
+            "owner",
+            "allow_once",
+            ""
+        ))
+        .unwrap()
+    );
     assert!(rt.send_one().await);
 
     rt.reconciled.store(false, Ordering::SeqCst);

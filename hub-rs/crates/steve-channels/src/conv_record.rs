@@ -273,7 +273,7 @@ fn decision_open(
 ) -> ChannelResult<Option<bool>> {
     Ok(steve_store::decision_repo::get(r, id)?
         .filter(|decision| decision.workspace_id == ws)
-        .map(|decision| decision.status == "open"))
+        .map(|decision| decision.status == steve_types::DecisionStatus::Open))
 }
 
 pub(crate) fn linked_decision(
@@ -306,7 +306,7 @@ pub(crate) fn out_error(
 
 fn open_fail(r: &mut impl steve_store::Read, ws: &str, id: &str) -> ChannelResult<Option<String>> {
     Ok(linked_decision(r, ws, id)?
-        .filter(|decision| decision.status == "open")
+        .filter(|decision| decision.status == steve_types::DecisionStatus::Open)
         .map(|decision| decision.id))
 }
 

@@ -589,8 +589,8 @@ async fn new_group_decision_open_mute_undo_and_expiry() {
         .await;
     assert_eq!(sp["muted"], false);
     assert_eq!(sp["configured"], true);
-    let bad = decisions::dispatch(h.ch.modules(), &me, &d2, "open", "").expect("ours");
-    assert!(bad.is_err(), "already answered");
+    let replay = decisions::dispatch(h.ch.modules(), &me, &d2, "open", "").expect("ours");
+    assert_eq!(replay.unwrap(), r);
 
     // the bot is removed / the group disbanded: an open card expires
     let c3 =

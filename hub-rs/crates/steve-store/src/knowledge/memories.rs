@@ -1,4 +1,6 @@
-use sea_query::{Condition, Expr, ExprTrait, JoinType, OnConflict, Order, Query, SelectStatement};
+use sea_query::{
+    Condition, Expr, ExprTrait, Func, JoinType, OnConflict, Order, Query, SelectStatement,
+};
 use steve_types::{ConfigEvent, DomainEvent};
 
 use crate::base::{
@@ -247,13 +249,17 @@ impl<C: Read> Memories<'_, C> {
         )
     }
 
-    pub fn candidates_before(
-        &mut self,
-        ws: &str,
-        before: i64,
-    ) -> Result<Vec<(String, Option<String>)>> {
-        let q = Query::select()
-            .columns([("m", "id"), ("m", "decision_id")])
+    fn candidate_age(&mut self) -> Expr {
+        let created = Expr::col(("m", "created"));
+        self.0.db().dialect().greatest(
+            created.clone(),
+            Func::coalesce([Expr::col(("c", "created")), created]).into(),
+        )
+    }
+
+    fn waiting_candidates(&mut self) -> SelectStatement {
+        let age = self.candidate_age();
+        Query::select()
             .from_as("mems", "m")
             .join_as(
                 JoinType::LeftJoin,
@@ -261,17 +267,32 @@ impl<C: Read> Memories<'_, C> {
                 "c",
                 Expr::col(("c", "mem_id")).equals(("m", "id")),
             )
-            .and_where(Expr::col(("m", "workspace_id")).eq(ws))
             .and_where(Expr::col(("m", "status")).eq("candidate"))
-            .and_where(Expr::col(("m", "created")).lt(before))
-            .and_where(
-                Expr::col(("c", "created"))
-                    .is_null()
-                    .or(Expr::col(("c", "created")).lt(before)),
-            )
-            .order_by(("m", "created"), Order::Asc)
+            .order_by_expr(age, Order::Asc)
+            .order_by(("m", "id"), Order::Asc)
+            .take()
+    }
+
+    pub fn first_candidate_at(&mut self) -> Result<Option<i64>> {
+        let age = self.candidate_age();
+        let q = self.waiting_candidates().expr(age).limit(1).take();
+        self.0.one(&q, |r| r.get(0))
+    }
+
+    pub fn due_candidates(
+        &mut self,
+        before: i64,
+        limit: u64,
+    ) -> Result<Vec<(String, String, Option<String>)>> {
+        let age = self.candidate_age();
+        let q = self
+            .waiting_candidates()
+            .columns([("m", "id"), ("m", "workspace_id"), ("m", "decision_id")])
+            .and_where(age.lte(before))
+            .limit(limit)
             .take();
-        self.0.all(&q, |row| Ok((row.get(0)?, row.get(1)?)))
+        self.0
+            .all(&q, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
     }
 }
 

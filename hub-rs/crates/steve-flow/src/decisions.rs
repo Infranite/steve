@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use serde_json::{Value, json};
-use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
+use serde_json::json;
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::base::ObjRef;
 use steve_store::base::links::{Links, NewLink};
@@ -41,7 +41,7 @@ impl FlowStepDecisions {
 }
 
 impl DecisionHandler for FlowStepDecisions {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let (run_id, node) = step_of(d)?;
         let mut run = steve_store::RunRows(tx)
             .get(run_id)?
@@ -79,7 +79,7 @@ impl DecisionHandler for FlowStepDecisions {
             decision_id: d.id.clone(),
         });
         self.wake.notify_one();
-        Ok(choice_result(cx))
+        Ok(choice_result(cx).into())
     }
 
     /// The run has moved on: an answer cannot be taken back.
@@ -110,7 +110,7 @@ impl SignalDecisions {
 }
 
 impl DecisionHandler for SignalDecisions {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         match cx.choice {
             c if c == NOTIFY_OPTIONS[0] => {}
             c if c == NOTIFY_OPTIONS[1] => {
@@ -127,7 +127,7 @@ impl DecisionHandler for SignalDecisions {
             }
             _ => return Err(ApiError::invalid("choice")),
         }
-        Ok(choice_result(cx))
+        Ok(choice_result(cx).into())
     }
 }
 
@@ -141,7 +141,7 @@ pub(crate) async fn committed(cx: &FlowCx, decision_id: &str) -> bool {
         .await
         .ok()
         .flatten()
-        .is_some_and(|d| d.status == "resolved")
+        .is_some_and(|d| d.status == steve_types::DecisionStatus::Resolved)
 }
 
 /// Runs one follow-up after its decision committed.

@@ -358,7 +358,7 @@ async fn draft_overwrites_reopens_and_hears_no() {
     assert!(first.to.iter().all(|r| !r.addr.eq_ignore_ascii_case(ADDR)));
     let dec1 = first.decision_id.clone().unwrap();
     let d1 = e.decision(&dec1);
-    assert_eq!(d1.status, "open");
+    assert_eq!(d1.status, steve_types::DecisionStatus::Open);
     assert_eq!(d1.item_id.as_deref(), Some(item.as_str()));
     assert_eq!(d1.session_id.as_deref(), Some("ses_d"));
     assert_eq!(d1.options, vec!["send".to_string(), "no".to_string()]);
@@ -381,8 +381,11 @@ async fn draft_overwrites_reopens_and_hears_no() {
     assert_ne!(second.content_hash, first.content_hash);
     let dec2 = second.decision_id.clone().unwrap();
     assert_ne!(dec2, dec1);
-    assert_eq!(e.decision(&dec1).status, "expired");
-    assert_eq!(e.decision(&dec2).status, "open");
+    assert_eq!(
+        e.decision(&dec1).status,
+        steve_types::DecisionStatus::Expired
+    );
+    assert_eq!(e.decision(&dec2).status, steve_types::DecisionStatus::Open);
     assert!(e.decision(&dec2).draft.contains("周四前提交"));
     // the stale card cannot approve anything
     assert!(

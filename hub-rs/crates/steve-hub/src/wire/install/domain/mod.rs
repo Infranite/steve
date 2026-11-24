@@ -84,6 +84,7 @@ ordered_installers! { MODULES: Install;
     calendar::jobs,
     extensions::start,
     mod handles; install,
+    mod decision_expiry; install,
     mail::watch,
     knowledge::start,
     digest::start,

@@ -269,7 +269,7 @@ impl Kit {
             .decisions_of_item(item)
             .unwrap()
             .iter()
-            .any(|d| d.status == "open")
+            .any(|d| d.status == steve_types::DecisionStatus::Open)
         {
             return "wait";
         }
@@ -291,7 +291,7 @@ impl Kit {
             .decisions_of_item(item)
             .unwrap()
             .into_iter()
-            .filter(|d| d.kind == "fail" && d.status == "open")
+            .filter(|d| d.kind == "fail" && d.status == steve_types::DecisionStatus::Open)
             .map(|d| d.question)
             .collect()
     }

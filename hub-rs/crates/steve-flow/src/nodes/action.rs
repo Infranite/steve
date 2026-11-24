@@ -879,6 +879,10 @@ impl Action for Notify {
             draft: None,
             options: Some(NOTIFY_OPTIONS.map(String::from).to_vec()),
             requested_by: "steve".into(),
+            question_template: None,
+            source: Some(steve_store::DecisionSource::Revision {
+                revision: format!("notify:{}:{}:{}", cx.run.id, cx.node.id, cx.run.attempts),
+            }),
         };
         let opened = cx
             .flow

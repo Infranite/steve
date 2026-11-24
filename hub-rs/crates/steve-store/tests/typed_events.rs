@@ -150,7 +150,12 @@ fn real_work_producers_keep_scope_through_mutation_and_deletion() {
                     ..Default::default()
                 },
             )?;
-            decision_resolve_in(tx, &decision.id, &json!("yes"), "resolved")?;
+            DecisionRows(tx).settle(
+                &decision.id,
+                &json!("yes"),
+                steve_store::decision_repo::DecisionChange::Resolve,
+                None,
+            )?;
             s.messages()
                 .patch_text_meta(&message, "revised", &json!({"done": true}))?;
             s.queued().add(&session.id, "next", "me", &[])?;

@@ -721,11 +721,16 @@ impl NodeRuntime {
             return Ok(None);
         }
         self.status_in(s, "error")?;
-        self.startup_failed_in(s, detail)?;
+        self.startup_failed_in(s, detail, rev)?;
         Ok(end)
     }
 
-    pub(super) fn startup_failed_in(&self, session: &str, detail: &str) -> Result<(), StoreError> {
+    pub(super) fn startup_failed_in(
+        &self,
+        session: &str,
+        detail: &str,
+        session_revision: i64,
+    ) -> Result<(), StoreError> {
         use node_sessions::startup;
         let reason = steve_store::SESSION_START_FAILURE;
         let question = format!("会话启动失败：{detail}");
@@ -741,18 +746,22 @@ impl NodeRuntime {
                     steve_store::DecisionRows(w).settle(
                         &d.id,
                         &json!({"superseded":"已保留当前会话启动失败的原因和重试入口"}),
-                        "expired",
-                        &Value::Null,
+                        steve_store::decision_repo::DecisionChange::Expire,
+                        None,
                     )?;
                 }
             }
             startup::record_stop(w, session, detail, now())?;
-            if !startup::reopen_matching(w, session, &scope, &question)? {
+            if !startup::already_open(w, session, &question)? {
                 steve_store::DecisionRows(w).open(&steve_store::NewDecision {
                     workspace_id: scope.workspace.clone(), kind: "fail".into(), subject_type: reason.into(),
                     subject_id: scope.bot.unwrap_or_default(), item_id: scope.item.clone(), session_id: Some(session.into()),
                     question: question.clone(), draft: Some("自动重试已停止。请先修正 Bot 的模型或思考强度，再点击重试；你修改执行器后，重试会创建新会话。".into()),
                     options: Some(vec!["retry".into()]), requested_by: "steve".into(),
+                    question_template: None,
+                    source: Some(steve_store::DecisionSource::Revision {
+                        revision: format!("startup:{session}:{session_revision}"),
+                    }),
                 })?;
             }
             if let Some(item) = scope.item {

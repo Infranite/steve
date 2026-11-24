@@ -7,7 +7,7 @@ use crate::testkit::Kit;
 use serde_json::json;
 use steve_modules::accounts::{self, Hints};
 use steve_modules::contacts::{self, merge};
-use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
+use steve_modules::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::{ApiError, ApiResult, Caller, Modules, Registry};
 
@@ -93,13 +93,13 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
     let r = decisions::dispatch(&m, &me(), &d, "merge", "")
         .expect("ours")
         .unwrap();
-    assert_eq!(r.undo, json!({ "module": "party_merge" }));
+    assert_eq!(r.undo, Some(steve_store::DecisionUndo::Domain));
     assert_eq!(party(), sarah);
 
     let back = k.core.undo_decision(&d, ME).unwrap();
-    assert_eq!(back.status, "open");
-    assert_eq!(back.undo, serde_json::Value::Null);
-    assert_eq!(decision(&k, &d).status, "open");
+    assert_eq!(back.status, steve_types::DecisionStatus::Open);
+    assert_eq!(back.undo, None);
+    assert_eq!(decision(&k, &d).status, steve_types::DecisionStatus::Open);
     assert_eq!(
         steve_store::core_fixture::work::merge_proposal(store, &mp).1,
         "open"
@@ -121,7 +121,7 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
     let r = decisions::dispatch(&m, &me(), &d, "merge", "")
         .expect("ours")
         .unwrap();
-    assert_eq!(r.status, "resolved");
+    assert_eq!(r.status, steve_types::DecisionStatus::Resolved);
     assert_eq!(party(), sarah);
 }
 
@@ -129,13 +129,8 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
 struct Refuses;
 
 impl DecisionHandler for Refuses {
-    fn resolve(
-        &self,
-        _: &mut W<'_>,
-        cx: &DecisionCx,
-        _: &Decision,
-    ) -> ApiResult<serde_json::Value> {
-        Ok(decisions::choice_result(cx))
+    fn resolve(&self, _: &mut W<'_>, cx: &DecisionCx, _: &Decision) -> ApiResult<DecisionOutcome> {
+        Ok(decisions::choice_result(cx).into())
     }
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         steve_store::audit_repo::record(
@@ -184,9 +179,9 @@ fn a_refused_module_undo_leaves_the_decision_answered() {
         "{e:?}"
     );
     let after = decision(&k, &d);
-    assert_eq!(after.status, "resolved");
+    assert_eq!(after.status, steve_types::DecisionStatus::Resolved);
     assert_eq!(after.result, json!({ "choice": "yes" }));
-    assert_eq!(after.undo, json!({ "module": "x_thing" }));
+    assert_eq!(after.undo, Some(steve_store::DecisionUndo::Domain));
     assert_eq!(
         steve_store::core_fixture::work::audit_count(
             k.db().store(),
@@ -217,7 +212,7 @@ fn a_refused_module_undo_leaves_the_decision_answered() {
         steve_store::core_fixture::DecisionState::ShiftResolved(86_400_001),
     );
     k.core.undo_decision(&d2, ME).unwrap();
-    assert_eq!(decision(&k, &d2).status, "open");
+    assert_eq!(decision(&k, &d2).status, steve_types::DecisionStatus::Open);
     assert_eq!(
         steve_store::core_fixture::work::audit_count(k.db().store(), &["x.before_undo"], None),
         1

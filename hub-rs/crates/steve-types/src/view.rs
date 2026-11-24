@@ -346,11 +346,10 @@ pub struct DecisionView {
     pub subject_id: String,
     pub item_id: Option<ItemId>,
     pub session_id: Option<SessionId>,
-    pub question: String,
+    pub question: Said,
     pub draft: String,
     pub options: Vec<String>,
-    /// `open` | `resolved` | `expired`
-    pub status: String,
+    pub status: DecisionStatus,
     /// What it was settled with, as recorded.
     pub result: Option<RawJson>,
     pub requested_by: String,
@@ -364,6 +363,62 @@ pub struct DecisionView {
     pub tier: DecisionTier,
     /// Why it is folded away (`tier` = `folded`).
     pub folded: Option<FoldReason>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub revision: i64,
+}
+
+/// The text shown on a decision card.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum Said {
+    Raw { text: String },
+    Key { template: DecisionPrompt },
+}
+
+/// Machine-authored prompts carry their arguments separately from the UI text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DecisionPrompt {
+    TurnRepeatedFailure,
+    TurnNoProgress,
+    MergePullRequest {
+        #[cfg_attr(test, ts(type = "number"))]
+        number: i64,
+        repo: String,
+    },
+}
+
+/// The current state of a decision. An answer receipt survives reopening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, strum::EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DecisionStatus {
+    Open,
+    Resolved,
+    Dismissed,
+    Expired,
+    Superseded,
+}
+
+impl DecisionStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Resolved => "resolved",
+            Self::Dismissed => "dismissed",
+            Self::Expired => "expired",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
+impl std::fmt::Display for DecisionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The tiers of 待处理, decided by the Hub in a fixed order of rules: an approved send that failed

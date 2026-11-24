@@ -23,7 +23,7 @@ const base = (id: string, title: string, status: RItem["status"], extra: Partial
   id, workspace_id: "default", no: +id.split("-")[1], title, status, stage: "", bot_id: "dev", project_id: "p1", cwd: null, branch: null, plan: [], now: "", accept_mode: null, priority: "中",
   archived: false, star: false, due: null, snooze: null, source: ["对话", "chat"], parent: null, created: m(1), updated: m(40), goal: title, goals: 1, tags: [], deps: [], sessionIds: [], open: [], queued: 0, live: false, ...extra,
 } as RItem)
-const dec = (id: string, item: string, kind: RDecision["kind"], question: string, options: string[], draft = ""): RDecision => ({ id, kind, subject_type: kind === "accept" ? "delivery" : "question", subject_id: "{}", item_id: item, session_id: null, question, draft, options, status: "open", result: null, requested_by: "dev", created: m(38), resolved: null, undo: null })
+const dec = (id: string, item: string, kind: RDecision["kind"], question: string, options: string[], draft = ""): RDecision => ({ id, kind, subject_type: kind === "accept" ? "delivery" : "question", subject_id: "{}", item_id: item, session_id: null, question: { kind: "raw", text: question }, draft, options, status: "open", result: null, requested_by: "dev", created: m(38), resolved: null, undo: null })
 const decisions = [
   dec("d1", "ST-9", "ask", "设置页的分组标题用中文还是英文？", ["中文", "英文", "跟随界面语言"], "我倾向跟随界面语言：标题和其余文案一起切换。"),
   dec("d2", "ST-9", "approve", "允许执行：npm run build:web", ["允许一次", "拒绝"]),

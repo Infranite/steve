@@ -25,7 +25,7 @@ use steve_store::{
 
 use super::repo::{NewParty, Party};
 use crate::changes::{self, ChangeOp, OpCx, Origin, Plan, Prepared};
-use crate::decisions::{self, DecisionCx, DecisionHandler};
+use crate::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use crate::{ApiError, ApiResult, Caller, Modules};
 
 /// `object_type` codes and how the pages name them.
@@ -939,14 +939,16 @@ impl ChangeOp for SetOp {
         if let Some(b) = &before {
             s.created = b.created;
             // a proposal confirmed by hand: its card is settled too
-            if let Some(d) = b.decision_id.as_deref().filter(|_| b.status == "proposed")
-                && DecisionRows(tx).get(d)?.is_some_and(|d| d.status == "open")
+            if let Some(id) = b.decision_id.as_deref().filter(|_| b.status == "proposed")
+                && let Some(d) = DecisionRows(tx).get(id)?
             {
-                DecisionRows(tx).settle(
-                    d,
+                DecisionRows(tx).resolve_choice(
+                    &d,
+                    cx.actor,
+                    "yes",
+                    "",
                     &json!({ "choice": "yes", "manual": true }),
-                    "resolved",
-                    &Value::Null,
+                    None,
                 )?;
             }
         }
@@ -1234,6 +1236,12 @@ pub fn propose(
     if !basis.is_empty() {
         d.draft = Some(basis.chars().take(500).collect());
     }
+    d.source = Some(match source_ref {
+        Some(reference) => steve_store::DecisionSource::Revision {
+            revision: format!("steward:{reference}"),
+        },
+        None => steve_store::DecisionSource::Record,
+    });
     let d = DecisionRows(tx).open(&d)?;
     let mut s = Steward::new(ws, &k.object_type, &k.object_id, &k.person_id, role, "chat");
     s.status = "proposed".into();
@@ -1248,7 +1256,7 @@ pub fn propose(
 pub struct StewardConfirm;
 
 impl DecisionHandler for StewardConfirm {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let s = Stewards(tx)
             .by_decision(&d.id)?
             .filter(|s| s.workspace_id == cx.ws)
@@ -1264,7 +1272,7 @@ impl DecisionHandler for StewardConfirm {
             delete(tx, &s.workspace_id, &s.key())?;
             result["steward"] = serde_json::to_value(&s)?;
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {

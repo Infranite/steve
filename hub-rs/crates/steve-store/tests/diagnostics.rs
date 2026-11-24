@@ -526,17 +526,22 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
         .resolve(
             &d.id,
             &json!({"answer":"private answer body"}),
-            "resolved",
-            &Value::Null,
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
         )
         .unwrap();
     s.decisions()
-        .resolve(&d.id, &json!({}), "resolved", &Value::Null)
+        .resolve(
+            &d.id,
+            &json!({}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     s.decisions().reopen(&d.id).unwrap();
     s.decisions().reopen(&d.id).unwrap();
     let rolled_back: Result<(), steve_store::StoreError> = s.write(|tx| {
-        steve_store::decision_create_in(tx, &spec)?;
+        steve_store::DecisionRows(tx).open(&spec)?;
         Err(steve_store::StoreError::Conflict("rollback fixture".into()))
     });
     assert!(rolled_back.is_err());
@@ -553,7 +558,10 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
     );
     assert!(!page.to_string().contains("private question body"));
     assert!(!page.to_string().contains("private answer body"));
-    assert_eq!(s.decisions().get(&d.id).unwrap().unwrap().status, "open");
+    assert_eq!(
+        s.decisions().get(&d.id).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
 
     // Refuse diagnostic persistence on the worker's writer connection, without
     // breaking the business table or requiring a full disk to reproduce the failure.
@@ -585,7 +593,10 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
     assert!(after_failure["gaps"].as_array().unwrap().iter().any(|gap| {
         gap["reason"] == "diagnostic_queue_or_write_loss" && gap["scope"] == "instance"
     }));
-    assert_eq!(s.decisions().get(&next.id).unwrap().unwrap().status, "open");
+    assert_eq!(
+        s.decisions().get(&next.id).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert!(
         !after_failure
             .to_string()
