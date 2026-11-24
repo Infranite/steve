@@ -1905,24 +1905,28 @@ async fn a_handoff_before_the_old_open_is_sent_never_opens_the_ended_session() {
 async fn a_command_that_waited_past_its_window_goes_issued_again() {
     let h = hub();
     h.rt.bind(&on_the_item(S)).unwrap();
-    h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    eventually_sync("active", || h.phase() == "active").await;
-    h.hand_off();
+    let exec = h.running("hello").await;
+    let release = h.hand_off();
+    let prepare = format!("prepare:{S2}:r0");
     let past = steve_store::now() - 1;
-    steve_store::testkit::hub::node_planning::expire_command_window(
-        &h.store,
-        &format!("prepare:{S2}:r0"),
-        past,
-    )
-    .unwrap();
-    h.node.set_now(steve_store::now());
-    let exec = h.attempts()[0].clone();
+    steve_store::testkit::hub::node_planning::expire_command_window(&h.store, &prepare, past)
+        .unwrap();
+    let accept_before =
+        || node_checks::command_accept_before_by_operation(&h.store, &prepare).unwrap();
+    assert_eq!(accept_before(), past);
+    h.node.set_now(past + 1);
     h.node.finish(&exec, build::done()).await.unwrap();
-    eventually_sync("the successor's turn", || h.count("start_turn") == 2).await;
-    let issued: i64 =
-        node_checks::command_accept_before_by_operation(&h.store, &format!("prepare:{}:r0", S2))
-            .unwrap();
-    assert!(issued > past);
+    let successor = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "the successor's turn (release: {}, prepare: {}, phase: {}, commands: {:?})",
+            h.state_of(&release),
+            h.state_of(&prepare),
+            h.phase_of(S2),
+            h.methods()
+        )
+    });
+    eventually_sync(successor, || h.count("start_turn") == 2).await;
+    assert!(accept_before() > past);
 }
 
 /// B4: a release receipt that is not the session's last release's (an earlier one, come late)

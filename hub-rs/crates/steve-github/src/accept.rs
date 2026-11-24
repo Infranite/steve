@@ -1,35 +1,21 @@
-//! The wrap-up through GitHub: after you accept an item, Steve asks whether
-//! to open a PR (`gh_pr_open`); with `finish_on=merged` it asks again when the checks are green
-//! (`gh_pr_merge`). Pushing, opening and merging are outward effects: they happen only after your
-//! `yes`, never from the hook or the sync.
-//!
-//! The one exception is yours to grant, per repository: `after_accept=open_pr` takes accepting the
-//! item as the `yes` to its PR, only for a private repository, only as a draft, only from the item's
-//! own branch, and only when its worktree is on this machine; the `gh_pr_open` decision is opened
-//! and answered in one transaction, so the push goes through the same effect queue and its history
-//! shows it. Anything else (a public repository, an item on a Node) gets the card. Merging always asks.
-//!
-//! Decision handlers run inside the answer's transaction and cannot reach GitHub, so they only
-//! check the answer and record the write ([`crate::effects`]); the runner does it after the commit,
-//! reconciling first when an earlier try may have happened.
+//! Explicit GitHub approvals and their durable effects.
+//! The runner performs writes after commit and reconciles uncertain results before retrying.
 
 use steve_store::W;
 
 use std::sync::{Arc, OnceLock, Weak};
 
-use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
-use steve_modules::hooks::{ItemHooks, Takeover};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::DecisionKind;
-use steve_store::{Decision, Item, NewDecision};
+use steve_store::{Decision, NewDecision};
 
 use crate::api::GhError;
 use crate::effects::{self, Fail, Ran};
 use crate::push::{self, PushSpec};
-use crate::repos::{Settings, check_state};
-use crate::sync::{Effects, latest_checks};
+use crate::repos::Settings;
+use crate::sync::Effects;
 use crate::{GitHub, Inner};
 use steve_store::github::PrRow;
 use steve_store::github::RepoRow;
@@ -39,15 +25,9 @@ pub const PR_OPEN: &str = "gh_pr_open";
 /// `subject_type` of “merge this PR” (subject = the `ghp_…`).
 pub const PR_MERGE: &str = "gh_pr_merge";
 pub const OPTIONS: [&str; 2] = ["yes", "no"];
-/// `requested_by` of the decisions Steve opens itself (agents' requests carry their bot id).
-pub const STEVE: &str = "steve";
-
 /// The message to an agent's session after you said no to its PR, verbatim.
 pub const PR_DENIED: &str =
     "用户没有批准开 PR。不要自己推送分支或开 PR；需要的话用 steve_ask 问用户。";
-
-/// Longest PR title Steve proposes (GitHub's list shows about this much).
-const TITLE_MAX: usize = 72;
 
 /// The [`GitHub`] service for things registered before it exists (decision handlers and item
 /// hooks go into the [`Registry`], which `Modules` needs, which the connections need, which
@@ -73,9 +53,6 @@ impl Slot {
     }
 }
 
-/// Registers the `gh_pr_open` / `gh_pr_merge` / `gh_comment` decision handlers, the item hooks
-/// (`on_accepted`) and the item panels (`github.pr:…`). Bind the returned slot to the service once
-/// it is built.
 pub fn register(r: &mut Registry) -> Slot {
     let slot = Slot::default();
     r.decision(PR_OPEN, Box::new(PrOpenDecisions(slot.clone())));
@@ -84,7 +61,6 @@ pub fn register(r: &mut Registry) -> Slot {
         crate::comment::COMMENT,
         Box::new(crate::comment::CommentDecisions(slot.clone())),
     );
-    r.item_hooks(Box::new(GhItemHooks(slot.clone())));
     r.item_panel(Box::new(crate::panel::GhPanels(slot.clone())));
     crate::config::register(r, slot.clone());
     slot
@@ -100,49 +76,12 @@ pub fn agent_question(full_name: &str, title: &str, draft: bool) -> String {
 const DRAFT_ASK: &str = "在验收前开一个草稿 PR";
 const PLAIN_ASK: &str = "在验收前开一个 PR";
 
-/// `auto` of a `gh_pr_open` answered by accepting the item (`after_accept=open_pr`).
-pub const AUTO: &str = "after_accept";
-
-/// The draft flag of a `gh_pr_open`: one opened without asking is a draft; Steve's own follow the
-/// repo's `draft_pr`; an agent's say it in the question.
-fn wants_draft(d: &Decision, settings: &Settings) -> bool {
-    if d.result["auto"] == AUTO {
-        true
-    } else if d.requested_by == STEVE {
-        settings.draft_pr
-    } else {
-        !d.question.starts_with(PLAIN_ASK)
-    }
-}
-
 /// What a card about a write through a PAT connection adds: it goes out as your own account.
 pub fn pat_note(login: &str) -> String {
     if login.is_empty() {
         "（以你的 GitHub 账号发出）".into()
     } else {
         format!("（以你的 GitHub 账号 {login} 发出）")
-    }
-}
-
-/// `Item` hooks of this module.
-struct GhItemHooks(Slot);
-
-#[async_trait]
-impl ItemHooks for GhItemHooks {
-    fn name(&self) -> &'static str {
-        "github"
-    }
-
-    async fn on_accepted(&self, item: &Item) -> Option<Takeover> {
-        let gh = self.0.get()?;
-        match gh.offer_pr(item).await {
-            Ok(true) => Some(Takeover { by: "github" }),
-            Ok(false) => None,
-            Err(e) => {
-                tracing::warn!(item = %item.id, error = %e, "github wrap-up not offered");
-                None
-            }
-        }
     }
 }
 
@@ -164,55 +103,7 @@ fn title_body(d: &Decision) -> (String, String) {
     (title, body)
 }
 
-fn cut(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
-}
-
-/// `✓ build` lines of a PR's latest checks.
-fn check_lines(
-    c: &mut impl steve_store::Read,
-    repo: &RepoRow,
-    pr: &PrRow,
-) -> steve_store::Result<String> {
-    let rows = steve_store::github::checks_for_sha(c, &repo.id, &pr.head_sha)?;
-    Ok(latest_checks(&rows)
-        .into_iter()
-        .map(|k| {
-            let icon = match check_state(k) {
-                "ok" => "✓",
-                "fail" => "✗",
-                "skipped" => "–",
-                _ => "…",
-            };
-            format!("{icon} {}", k.name)
-        })
-        .collect::<Vec<_>>()
-        .join("\n"))
-}
-
 impl GitHub {
-    /// `finish(item, now)` unless it is finished already (the merge, the webhook that reports it
-    /// and a repeated outbox delivery can all get here); `Err` when finishing failed (the outbox
-    /// tries again).
-    pub(crate) async fn finish_item_checked(
-        &self,
-        ws: &str,
-        item: &str,
-        now: &str,
-    ) -> Result<(), String> {
-        let status = self
-            .store()
-            .read(|c| steve_store::item_repo::item_status(c, ws, item).map_err(ApiError::from))
-            .map_err(|e| e.to_string())?;
-        if !matches!(status.as_deref(), Some(s) if s != "done" && s != "drop") {
-            return Ok(());
-        }
-        self.core()
-            .finish(ws, item, now)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
     fn timeline(&self, item: &str, text: &str) {
         let now = self.now();
         let r = self.store().write(|tx| {
@@ -235,236 +126,6 @@ impl GitHub {
         }
     }
 
-    /// `on_item_accepted`: offers a PR (and takes the wrap-up over) when the item's project is
-    /// linked, `after_accept` is `ask_pr` or `open_pr`, the item has a branch with commits the base
-    /// lacks, the project has no release action, and no PR from that branch is open. Opens the
-    /// `gh_pr_open` decision and pushes nothing; with `open_pr` and everything [`Self::auto_pr`]
-    /// asks for, answers it yes at once (a draft, through the effect queue).
-    pub async fn offer_pr(&self, item: &Item) -> Result<bool, String> {
-        let ws = item.workspace_id.clone();
-        let (Some(branch), Some(project)) = (
-            item.branch.clone().filter(|b| !b.is_empty()),
-            item.project_id.clone(),
-        ) else {
-            return Ok(false);
-        };
-        let pre = self
-            .store()
-            .read(|c| {
-                let Some(r) =
-                    steve_store::github::repo_of_project(c, &ws, &project)?.filter(|r| r.enabled)
-                else {
-                    return Ok(None);
-                };
-                if !matches!(
-                    Settings::of(&r.settings).after_accept.as_str(),
-                    "ask_pr" | "open_pr"
-                ) || steve_store::projects::project_release(c, &ws, &project)?.is_some()
-                    || steve_store::github::has_open_pr_from(c, &r.id, &branch)?
-                    || steve_store::decision_repo::open_for(c, &ws, PR_OPEN, &item.id)?.is_some()
-                {
-                    return Ok(None);
-                }
-                let path = steve_store::projects::project(c, &ws, &project)?.map(|p| p.path);
-                let summary = steve_store::decision_repo::delivery_summary(c, &item.id)?;
-                let (adapter, account, _) =
-                    steve_store::connections::connection_label(c, &r.connection_id)?
-                        .unwrap_or_default();
-                let pat = (adapter == crate::adapters::github_pat::ID).then_some(account);
-                Ok::<_, ApiError>(Some((r, path, summary, pat)))
-            })
-            .map_err(|e| e.to_string())?;
-        let Some((r, path, summary, pat)) = pre else {
-            return Ok(false);
-        };
-        let settings = Settings::of(&r.settings);
-        let on_node = match self.git_nodes() {
-            Some(n) => n.ahead(&item.id, &r.default_branch, &branch).await,
-            None => None,
-        };
-        let local = on_node.is_none();
-        let cwd = item
-            .cwd
-            .clone()
-            .filter(|c| !c.is_empty())
-            .or(path)
-            .filter(|c| !c.is_empty());
-        let ahead = match on_node {
-            Some(a) => a.map_err(|e| e.to_string())?,
-            None => {
-                let Some(cwd) = cwd.clone() else {
-                    return Ok(false);
-                };
-                let (base, b) = (r.default_branch.clone(), branch.clone());
-                tokio::task::spawn_blocking(move || {
-                    push::ahead(std::path::Path::new(&cwd), &base, &b)
-                })
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?
-                    > 0
-            }
-        };
-        if !ahead {
-            return Ok(false);
-        }
-        let title = cut(item.title.trim(), TITLE_MAX);
-        let mut body = summary.unwrap_or_default().trim().to_string();
-        if !body.is_empty() {
-            body.push_str("\n\n");
-        }
-        body.push_str(&format!("{} · 由 Steve 开出", item.id));
-        let mut question = format!("在 {} 开 PR：{title}", r.full_name);
-        let auto = if settings.after_accept == "open_pr" {
-            let cwd = cwd.filter(|_| local);
-            match self.auto_pr(&r, &branch, cwd.as_deref()).await {
-                Ok(head) => Some(head),
-                Err(why) => {
-                    question.push_str(&format!("（{why}）"));
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        // a PAT posts as you: the card says so
-        if let Some(login) = pat.filter(|_| auto.is_none()) {
-            question.push_str(&pat_note(&login));
-        }
-        let d = NewDecision {
-            workspace_id: ws.clone(),
-            kind: DecisionKind::Approve.code().into(),
-            subject_type: PR_OPEN.into(),
-            subject_id: item.id.clone(),
-            item_id: Some(item.id.clone()),
-            session_id: None,
-            question,
-            draft: Some(format!("{title}\n\n{body}")),
-            options: Some(OPTIONS.map(String::from).to_vec()),
-            requested_by: STEVE.into(),
-        };
-        if let Some(head) = auto {
-            // your grant answers it: opened and answered together, the push is the effect queue's,
-            // and only the commit that passed the check is pushed (a branch that moved is refused)
-            let now = self.now();
-            self.store()
-                .write(|tx| {
-                    let opened = steve_store::DecisionRows(tx).open(&d)?;
-                    steve_store::DecisionRows(tx).settle(
-                        &opened.id,
-                        &json!({"choice": "yes", "text": "", "auto": AUTO}),
-                        "resolved",
-                        &Value::Null,
-                    )?;
-                    effects::queue(tx, self, &ws, &opened.id, effects::OPEN)?;
-                    steve_store::github::effect_intent(
-                        tx,
-                        &opened.id,
-                        &json!({"sha": head, "branch": branch}),
-                    )?;
-                    steve_store::item_repo::add_timeline(
-                        tx,
-                        &item.id,
-                        &format!("验收后自动开草稿 PR（{}：私有仓库）", r.full_name),
-                        now,
-                    )?;
-                    tx.emit(steve_types::DomainEvent::from(
-                        steve_types::WorkEvent::Item {
-                            ws: item.workspace_id.clone().into(),
-                            id: {
-                                let value: String = item.id.clone();
-                                steve_types::ItemId::from(value)
-                            },
-                        },
-                    ));
-                    Ok::<_, ApiError>(())
-                })
-                .map_err(|e| e.to_string())?;
-            if let Err(e) = self
-                .core()
-                .progress(&ws, &item.id, "收尾", "验收通过，正在开草稿 PR")
-                .await
-            {
-                tracing::warn!(item = %item.id, error = %e, "github: item progress not set");
-            }
-            return Ok(true);
-        }
-        self.store()
-            .write(|tx| {
-                steve_store::DecisionRows(tx)
-                    .open(&d)
-                    .map_err(ApiError::from)
-            })
-            .map_err(|e| e.to_string())?;
-        if let Err(e) = self
-            .core()
-            .progress(&ws, &item.id, "收尾", "验收通过，等你确认开 PR")
-            .await
-        {
-            tracing::warn!(item = %item.id, error = %e, "github: item progress not set");
-        }
-        Ok(true)
-    }
-
-    /// Whether accepting the item may open its PR without asking (`after_accept=open_pr`): the
-    /// repository is private, the branch is the item's own (not the default one), its worktree is
-    /// here to look at. The commit to push, or why it asks instead (said on the card).
-    async fn auto_pr(
-        &self,
-        r: &RepoRow,
-        branch: &str,
-        cwd: Option<&str>,
-    ) -> Result<String, String> {
-        // the stored flag is from when the repo was linked: GitHub is asked now, and anything but
-        // a clear "private" asks
-        if !r.private || !self.still_private(r).await {
-            return Err("公开仓库：推送后收不回，开 PR 前要你确认".into());
-        }
-        if branch == r.default_branch || !push::branch_ok(branch) {
-            return Err(format!("{branch} 不是事项自己的分支"));
-        }
-        let Some(cwd) = cwd.map(str::to_string) else {
-            return Err("事项不在这台机器上，开 PR 前要你确认".into());
-        };
-        let b = branch.to_string();
-        tokio::task::spawn_blocking(move || push::head_of(std::path::Path::new(&cwd), &b))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("没读到分支的提交（{e}），开 PR 前要你确认"))
-    }
-
-    /// Whether GitHub says `r` is private right now (any error or missing flag is "no"). A change
-    /// is written back to the repo row.
-    async fn still_private(&self, r: &RepoRow) -> bool {
-        let path = format!("/repos/{}", r.full_name);
-        let now = match self.conn(&r.workspace_id, &r.connection_id) {
-            Ok(conn) => match conn.get(&path).await {
-                Ok(v) => v["private"].as_bool(),
-                Err(e) => {
-                    tracing::warn!(repo = %r.full_name, error = %e, "github: visibility not read");
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::warn!(repo = %r.full_name, error = %e, "github: no connection to read visibility");
-                None
-            }
-        };
-        if let Some(private) = now.filter(|p| *p != r.private) {
-            let at = self.now();
-            let w = self.store().write(|tx| {
-                steve_store::github::set_private(tx, &r.id, private, at)?;
-                Ok::<_, ApiError>(())
-            });
-            if let Err(e) = w {
-                tracing::warn!(repo = %r.full_name, error = %e, "github: visibility not written");
-            }
-        }
-        now == Some(true)
-    }
-
-    /// After a `gh_pr_open` answer: `yes` pushes the branch and opens the PR; `no` finishes the
-    /// item (when Steve asked on acceptance). A later run of `e` (after unknown) reconciles first.
     pub(crate) async fn open_pr(
         &self,
         d: &Decision,
@@ -475,43 +136,21 @@ impl GitHub {
         let Some(item_id) = d.item_id.clone() else {
             return Ran::Failed("决定没有事项".into());
         };
-        let by_steve = d.requested_by == STEVE;
         let session = d.session_id.as_deref();
         if d.result["choice"] != "yes" {
-            if by_steve {
-                if let Err(f) = self.finish_later(&ws, &item_id, "已验收，没有开 PR") {
-                    return Ran::Unknown(f.message);
-                }
-            } else {
-                self.tell_session(&ws, Some(&item_id), session, PR_DENIED)
-                    .await;
-            }
+            self.tell_session(&ws, Some(&item_id), session, PR_DENIED)
+                .await;
             return Ran::Done(json!({}));
         }
         match self.push_and_open(d, &item_id, e, reconcile).await {
-            Ok((pr, settings)) => {
-                let done = Ran::Done(effects::pr_result(pr.number));
-                if !by_steve {
-                    let kind = if pr.draft { "草稿 PR" } else { "PR" };
-                    let text = format!(
-                        "用户批准了开 PR。分支已推送，{kind} #{} 已开：{}",
-                        pr.number, pr.url
-                    );
-                    self.tell_session(&ws, Some(&item_id), session, &text).await;
-                    return done;
-                }
-                if settings.finish_on == "merged" {
-                    let now = format!("PR #{} 等检查", pr.number);
-                    if let Err(e) = self.core().progress(&ws, &item_id, "收尾", &now).await {
-                        tracing::warn!(item = %item_id, error = %e, "github: item progress not set");
-                    }
-                } else if let Err(f) =
-                    self.finish_later(&ws, &item_id, &format!("已验收，PR #{} 已开", pr.number))
-                {
-                    // the PR is open; finishing is what is left: the next run finds the PR
-                    return Ran::Unknown(f.message);
-                }
-                done
+            Ok(pr) => {
+                let kind = if pr.draft { "草稿 PR" } else { "PR" };
+                let text = format!(
+                    "用户批准了开 PR。分支已推送，{kind} #{} 已开：{}",
+                    pr.number, pr.url
+                );
+                self.tell_session(&ws, Some(&item_id), session, &text).await;
+                Ran::Done(effects::pr_result(pr.number))
             }
             Err(f) => {
                 if let Some(r) = f.ran() {
@@ -519,31 +158,24 @@ impl GitHub {
                 }
                 let text = format!("开 PR 失败：{f}");
                 tracing::warn!(item = %item_id, "{text}");
-                if by_steve {
-                    if let Err(e) = self.core().fail(&ws, &item_id, &text).await {
-                        tracing::warn!(item = %item_id, error = %e, "github: item not failed");
-                    }
-                } else {
-                    self.timeline(&item_id, &text);
-                    self.tell_session(&ws, Some(&item_id), session, &text).await;
-                }
+                self.timeline(&item_id, &text);
+                self.tell_session(&ws, Some(&item_id), session, &text).await;
                 Ran::Failed(f.message)
             }
         }
     }
 
-    /// Pushes the item's branch and opens the PR; the stored PR row (linked `steve`) and the
-    /// repo's settings. The commit is the branch's when the first run starts, written down
+    /// Pushes the item's branch and opens the PR. The commit is the branch's when the first run starts, written down
     /// before anything is sent ([`GitHub::effect_intent`]): a later run pushes that one or
     /// nothing (a branch that moved is a refusal), and first looks for a PR GitHub has from it
-    /// ([`GitHub::pr_from`]).
+    /// ([`GitHub::find_opened_pull_request`]).
     async fn push_and_open(
         &self,
         d: &Decision,
         item_id: &str,
         e: &steve_store::github::EffectRow,
         reconcile: bool,
-    ) -> Result<(PrRow, Settings), Fail> {
+    ) -> Result<PrRow, Fail> {
         let ws = d.workspace_id.clone();
         let item = self
             .store()
@@ -574,7 +206,6 @@ impl GitHub {
             .ok_or("项目没有关联可用的仓库".to_string())?;
         let nodes = self.git_nodes();
         let cwd = item.cwd.clone().filter(|c| !c.is_empty()).or(path);
-        let settings = Settings::of(&r.settings);
         let conn = self.effect_conn(&ws, &r.connection_id)?;
         let sha = match e.result["sha"].as_str() {
             Some(s) => s.to_string(),
@@ -601,7 +232,8 @@ impl GitHub {
             }
         };
         let existing = if reconcile {
-            self.pr_from(&conn, &r, &branch, &sha).await?
+            self.find_opened_pull_request(&conn, &r, &branch, &sha)
+                .await?
         } else {
             None
         };
@@ -615,6 +247,7 @@ impl GitHub {
                     branch.clone(),
                     sha.clone(),
                 );
+                self.mark_pull_write(d, false)?;
                 let on_node = match &nodes {
                     Some(n) => {
                         if !push::branch_ok(&b) {
@@ -639,7 +272,7 @@ impl GitHub {
                     Some(Ok(_)) => {}
                     // whether it landed is what the branch on GitHub says now; never pushed again
                     Some(Err(push::PushError::Lost)) => {
-                        self.landed(&conn, &r, &branch, &sha).await?;
+                        self.confirm_push(&conn, &r, &branch, &sha).await?;
                     }
                     // it may still land: this run's end is unknown, the next one asks again
                     Some(Err(e @ push::PushError::Running)) => {
@@ -665,8 +298,8 @@ impl GitHub {
                     }
                 }
                 let (title, body) = title_body(d);
-                let draft = wants_draft(d, &settings);
-                self.effect_sending(&d.id)?;
+                let draft = !d.question.starts_with(PLAIN_ASK);
+                self.mark_pull_write(d, true)?;
                 let opened = conn
                     .post(
                         &format!("/repos/{}/pulls", r.full_name),
@@ -680,7 +313,7 @@ impl GitHub {
                     // one is open from the branch (an earlier try's after all, or another): only
                     // the one from this commit is ours
                     Err(GhError::Status { status: 422, .. }) => self
-                        .pr_from(&conn, &r, &branch, &sha)
+                        .find_opened_pull_request(&conn, &r, &branch, &sha)
                         .await?
                         .ok_or_else(|| {
                             Fail::definite("GitHub 拒绝开 PR（422），这个提交也没有 PR")
@@ -706,18 +339,17 @@ impl GitHub {
                     &mut fx,
                 )?
                 .ok_or_else(|| ApiError::Internal("GitHub 没有给出 PR 编号".into()))?;
-            self.ask_merges(tx, &r, &fx)?;
             crate::after::emit(tx, &r.workspace_id, &r.connection_id, &mut fx)?;
             Ok::<_, ApiError>(pr)
         });
         let pr = res.map_err(|e| Fail::unknown(e.to_string()))?;
         tracing::info!(repo = %r.full_name, number = pr.number, item = %item_id, "github PR opened");
-        Ok((pr, settings))
+        Ok(pr)
     }
 
     /// After a push through a Node whose end is not known: `Ok` when GitHub's `branch` is at
     /// `sha` (it landed), else a refusal (it is not pushed a second time).
-    async fn landed(
+    async fn confirm_push(
         &self,
         conn: &crate::api::GhConn,
         r: &RepoRow,
@@ -743,7 +375,7 @@ impl GitHub {
 
     /// The PR GitHub has from `branch` at `sha` (any state: a PR can't be deleted, so none means
     /// none was opened). Several, or a list too long to read whole, is no evidence: stuck.
-    async fn pr_from(
+    async fn find_opened_pull_request(
         &self,
         conn: &crate::api::GhConn,
         r: &RepoRow,
@@ -773,78 +405,7 @@ impl GitHub {
         }
     }
 
-    /// Does the item wait for its PR to merge: `finish_on=merged`, Steve's PR was approved on
-    /// acceptance, and the item is not finished?
-    pub(crate) fn waits_for_merge(
-        &self,
-        c: &mut impl steve_store::Read,
-        repo: &RepoRow,
-        item: &str,
-    ) -> Result<bool, ApiError> {
-        if Settings::of(&repo.settings).finish_on != "merged" {
-            return Ok(false);
-        }
-        let open = steve_store::item_repo::item_status(c, &repo.workspace_id, item)?
-            .is_some_and(|s| s != "done" && s != "drop");
-        Ok(open && steve_store::decision_repo::wrap_up_by_pr(c, &repo.workspace_id, item)?)
-    }
-
-    /// For every PR this transaction touched, ask to merge when it is ready (checks green,
-    /// no changes requested, mergeable) and its item waits for it; once per head commit.
-    pub(crate) fn ask_merges(
-        &self,
-        tx: &mut steve_store::W<'_>,
-        repo: &RepoRow,
-        fx: &Effects,
-    ) -> Result<(), ApiError> {
-        for id in fx.gh.iter().filter(|i| i.starts_with("ghp_")) {
-            let Some(pr) = steve_store::github::pr_get(tx, id)? else {
-                continue;
-            };
-            let Some(item) = pr.item_id.clone() else {
-                continue;
-            };
-            let ready = pr.state == "open"
-                && pr.checks_state == "success"
-                && pr.review_state != "changes_requested"
-                && pr.mergeable.as_deref() == Some("clean");
-            if !ready
-                || !self.waits_for_merge(tx, repo, &item)?
-                || steve_store::decision_repo::merge_asked(
-                    tx,
-                    &repo.workspace_id,
-                    &pr.id,
-                    &pr.head_sha,
-                )?
-            {
-                continue;
-            }
-            let s = Settings::of(&repo.settings);
-            let mut draft = check_lines(tx, repo, &pr)?;
-            if !draft.is_empty() {
-                draft.push('\n');
-            }
-            draft.push_str(&format!("合并方式：{}", s.merge_method));
-            if s.delete_branch {
-                draft.push_str(&format!("，合并后删除分支 {}", pr.head_ref));
-            }
-            steve_store::DecisionRows(tx).open(&NewDecision {
-                workspace_id: repo.workspace_id.clone(),
-                kind: DecisionKind::Approve.code().into(),
-                subject_type: PR_MERGE.into(),
-                subject_id: pr.id.clone(),
-                item_id: Some(item),
-                session_id: None,
-                question: format!("合并 PR #{}（{}）？", pr.number, repo.full_name),
-                draft: Some(draft),
-                options: Some(OPTIONS.map(String::from).to_vec()),
-                requested_by: STEVE.into(),
-            })?;
-        }
-        Ok(())
-    }
-
-    /// After a `gh_pr_merge` `yes`: merge at the approved head, delete the branch, finish.
+    /// After a `gh_pr_merge` `yes`: merge at the approved head and apply the branch cleanup policy.
     /// `reconcile`: an earlier try may have merged it, so GitHub is asked first; only a merge of
     /// the approved head counts.
     pub(crate) async fn merge_pr(&self, d: &Decision, reconcile: bool) -> Ran {
@@ -901,7 +462,7 @@ impl GitHub {
             false
         };
         if !merged_before {
-            if let Err(f) = self.effect_sending(&d.id) {
+            if let Err(f) = self.mark_pull_write(d, true) {
                 return f.ran().unwrap_or(Ran::Unknown(f.message));
             }
             let res = conn
@@ -945,11 +506,6 @@ impl GitHub {
                 }
             }
         }
-        // the merged state now, rather than when the webhook comes; the item finishes through
-        // the outbox in the same transaction
-        let finish = item
-            .as_ref()
-            .map(|i| (i.clone(), format!("PR #{} 已合并", pr.number)));
         let fresh = conn.get_if_changed(&path, None).await.ok();
         let now = self.now();
         let fx = self.store().write(|tx| {
@@ -967,7 +523,6 @@ impl GitHub {
                     &mut fx,
                 )?;
             }
-            fx.finish.extend(finish.clone());
             crate::after::emit(tx, &r.workspace_id, &r.connection_id, &mut fx)?;
             Ok::<_, ApiError>(())
         });
@@ -990,8 +545,8 @@ impl DecisionHandler for PrOpenDecisions {
             .item_id
             .as_deref()
             .ok_or_else(|| ApiError::not_found("事项"))?;
-        if cx.choice == "yes" && steve_store::item_repo::item_status(tx, cx.ws, item)?.is_none() {
-            return Err(ApiError::not_found("事项"));
+        if cx.choice == "yes" && steve_store::item_repo::open_cycle(tx, cx.ws, item)?.is_none() {
+            return Err(ApiError::conflict("item cycle is closed"));
         }
         effects::queue(tx, &gh, cx.ws, &d.id, effects::OPEN)?;
         Ok(choice_result(cx))
@@ -1003,8 +558,77 @@ impl DecisionHandler for PrOpenDecisions {
     }
 }
 
-/// `gh_pr_merge`: `yes` merges at the head the checks passed on; `no` leaves the PR open (and is
-/// not asked again for that head).
+#[derive(serde::Deserialize)]
+pub(crate) struct MergeRequest {
+    head: String,
+}
+
+pub(crate) async fn request_merge(
+    axum::Extension(gh): axum::Extension<GitHub>,
+    who: steve_modules::Caller,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    steve_modules::Body(body): steve_modules::Body<MergeRequest>,
+) -> ApiResult<axum::Json<String>> {
+    gh.store().write(|tx| {
+        if steve_store::UserRows(tx).role(&who.me)?.as_deref() != Some("owner") {
+            return Err(ApiError::forbidden(
+                "only the owner can approve a pull request merge",
+            ));
+        }
+        let pr = steve_store::github::pr_get(tx, &id)?
+            .filter(|pr| pr.workspace_id == who.ws)
+            .ok_or_else(|| ApiError::not_found("PR"))?;
+        let repo = steve_store::github::repo_get(tx, &pr.repo_id)?
+            .filter(|repo| repo.enabled)
+            .ok_or_else(|| ApiError::not_found("repository"))?;
+        if let Some(item) = pr.item_id.as_deref()
+            && steve_store::item_repo::open_cycle(tx, &who.ws, item)?.is_none()
+        {
+            return Err(ApiError::conflict("item cycle is closed"));
+        }
+        if pr.head_sha != body.head || !merge_ready(&pr) {
+            return Err(ApiError::conflict(steve_i18n::t!("github.pr.new_commits")));
+        }
+        if let Some(existing) = steve_store::decision_repo::open_for(tx, &who.ws, PR_MERGE, &id)? {
+            if existing.draft == body.head {
+                return Ok(axum::Json(existing.id));
+            }
+            steve_store::DecisionRows(tx).settle(
+                &existing.id,
+                &json!({"reason": "pull_request_head_changed"}),
+                "expired",
+                &Value::Null,
+            )?;
+        }
+        let decision = steve_store::DecisionRows(tx).open(&NewDecision {
+            workspace_id: who.ws.clone(),
+            kind: DecisionKind::Approve.code().into(),
+            subject_type: PR_MERGE.into(),
+            subject_id: id.clone(),
+            item_id: pr.item_id,
+            session_id: None,
+            question: steve_i18n::t!(
+                "github.pr.approve_merge",
+                number = pr.number,
+                repo = repo.full_name
+            ),
+            draft: Some(body.head),
+            options: Some(OPTIONS.map(String::from).to_vec()),
+            requested_by: who.me.clone(),
+        })?;
+        Ok(axum::Json(decision.id))
+    })
+}
+
+fn merge_ready(pr: &PrRow) -> bool {
+    pr.state == "open"
+        && !pr.draft
+        && pr.checks_state == "success"
+        && pr.review_state != "changes_requested"
+        && pr.mergeable.as_deref() == Some("clean")
+}
+
+/// Merges only the head shown when the owner opened the approval.
 struct PrMergeDecisions(Slot);
 
 impl DecisionHandler for PrMergeDecisions {
@@ -1016,7 +640,17 @@ impl DecisionHandler for PrMergeDecisions {
         if pr.state != "open" {
             return Err(ApiError::conflict(steve_i18n::t!("github.pr.closed")));
         }
-        if cx.choice == "yes" && pr.checks_state != "success" {
+        if cx.choice == "yes"
+            && steve_store::UserRows(tx).role(cx.actor)?.as_deref() != Some("owner")
+        {
+            return Err(ApiError::forbidden(
+                "only the owner can approve a pull request merge",
+            ));
+        }
+        if pr.item_id != d.item_id {
+            return Err(ApiError::conflict("pull request association changed"));
+        }
+        if cx.choice == "yes" && (!merge_ready(&pr) || pr.head_sha != d.draft) {
             return Err(ApiError::conflict(steve_i18n::t!("github.pr.new_commits")));
         }
         let mut out = choice_result(cx);
@@ -1050,7 +684,7 @@ mod tests {
             options: OPTIONS.map(String::from).to_vec(),
             status: "resolved".into(),
             result,
-            requested_by: STEVE.into(),
+            requested_by: "owner".into(),
             created: 0,
             resolved: None,
             undo: Value::Null,

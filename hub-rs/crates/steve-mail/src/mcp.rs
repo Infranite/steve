@@ -323,6 +323,7 @@ struct Prepared {
     thread: ThreadRow,
     orig: MessageRow,
     existing: Option<DraftRow>,
+    delivery_version: Option<steve_types::DeliveryVersion>,
     reply_all: bool,
     to: Vec<Rcpt>,
     cc: Vec<Rcpt>,
@@ -534,6 +535,12 @@ impl Mail {
         let mailbox = self
             .own_mailbox(&who, &thread.connection_id)
             .map_err(|_| "The mailbox of this thread is not available.".to_string())?;
+        let delivery_version = self
+            .0
+            .m
+            .store
+            .read(|c| steve_store::item_delivery::open_version(c, &cx.ws, &item))
+            .map_err(internal)?;
         let (orig, existing, signature) = self.draft_context(&item, &thread)?;
         let reply_all = a
             .reply_all
@@ -581,6 +588,7 @@ impl Mail {
             thread,
             orig,
             existing,
+            delivery_version,
             reply_all,
             to,
             cc,
@@ -674,6 +682,7 @@ impl Mail {
                 created: now,
                 updated: now,
                 sent: None,
+                delivery_version: p.delivery_version,
             };
             return Ok(self.insert_pending(d, &check)?.id);
         };
@@ -697,6 +706,7 @@ impl Mail {
             d.basis = Some(basis);
             d.author = author.clone();
             d.session_id = cx.session_id.clone();
+            d.delivery_version = p.delivery_version;
             d.content_hash = drafts::content_hash(&d);
             repo::update_draft_content(tx, &d, now)?;
             repo::set_author(tx, &d.id, &author, d.session_id.as_deref())?;

@@ -1,12 +1,5 @@
-//! G3 acceptance: a PR is linked by branch name and by `ST-12` in its title;
-//! accepting an item opens a `gh_pr_open` decision and pushes / opens nothing until you say yes;
-//! after yes the fake remote has the branch, the fake GitHub has the PR, and the item has the PR
-//! artifact; `finish_on=merged` asks to merge only when the checks are green, a new head is a 409,
-//! the merge deletes the branch and finishes the item; a project with a release action gets no PR
-//! question; a failed check on a linked PR supplements the item through the template flow.
-//!
-//! Pushes go only to the fake's local bare repo (`git_base` = its temp dir). Nothing here talks
-//! to github.com.
+//! GitHub pull-request linking, explicit approvals and effect reconciliation.
+//! Pushes go only to the fake's local bare repository.
 
 use std::path::Path;
 use std::process::Command;
@@ -20,9 +13,8 @@ use axum::http::{Request, header};
 use serde_json::{Value, json};
 use steve_flow::testkit::{CoreCall as FlowCall, FakeCore};
 use steve_flow::{FlowCx, FlowSetup, GraphEngine};
-use steve_github::core::CoreCall;
 use steve_github::fake::{FakeGitHub, defaults};
-use steve_github::{GitHub, GitHubEnv, RecordingCore, accept, flow, hooks, manifest, repos};
+use steve_github::{GitHub, GitHubEnv, accept, flow, hooks, manifest, repos};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
 use steve_modules::vault::Vault;
@@ -43,7 +35,6 @@ struct H {
     gh: GitHub,
     api: Router,
     fake: FakeGitHub,
-    core: Arc<RecordingCore>,
     flow: Arc<FlowCx>,
     flow_core: Arc<FakeCore>,
     /// The project's working copy (and the item's worktree).
@@ -186,8 +177,6 @@ async fn setup() -> H {
         .connections(conns.clone())
         .build(env.modules.clone(), Arc::new(GraphEngine));
     slot.expect("slot").bind(&gh);
-    let core = RecordingCore::new(env.store().clone());
-    gh.set_core(core.clone());
     gh.set_flow(flow.clone());
     gh.set_event_sink(Arc::new(flow::FlowSink(Arc::new(flow.clone()))));
     let api = manifest::routes(gh.clone())
@@ -224,7 +213,6 @@ async fn setup() -> H {
         gh,
         api,
         fake,
-        core,
         flow,
         flow_core,
         work,
@@ -314,10 +302,24 @@ fn item(h: &H, no: i64, branch: Option<&str>) -> String {
     id
 }
 
-/// `on_accepted`, as steve-core calls it after `resolve(accept, pass)`.
-async fn accepted(h: &H, id: &str) -> bool {
-    let i = h.env.store().items().get(id).expect("get").expect("item");
-    h.env.modules.registry.hooks().accepted(&i).await.is_some()
+fn request_open(h: &H, id: &str) {
+    h.env
+        .store()
+        .write(|tx| {
+            steve_store::DecisionRows(tx).open(&NewDecision {
+                workspace_id: WS.into(),
+                kind: "approve".into(),
+                subject_type: accept::PR_OPEN.into(),
+                subject_id: id.into(),
+                item_id: Some(id.into()),
+                session_id: None,
+                question: accept::agent_question(REPO, "Return to the right page", false),
+                draft: Some("Return to the right page".into()),
+                options: Some(accept::OPTIONS.map(String::from).to_vec()),
+                requested_by: "bot".into(),
+            })
+        })
+        .unwrap();
 }
 
 fn open_decision(h: &H, subject_type: &str) -> Option<(String, String, String)> {
@@ -360,6 +362,74 @@ fn pull_posts(h: &H) -> usize {
 
 fn pushed(h: &H) -> Option<String> {
     h.fake.branches(REPO).get(BRANCH).cloned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_declares_multiple_pull_ranges_only_with_read_access() {
+    let h = setup().await;
+    let id = item(&h, 1, Some(BRANCH));
+    let base = git(h.work.path(), &["rev-parse", "main"]);
+    let head = git(h.work.path(), &["rev-parse", BRANCH]);
+    h.fake.set_branch(REPO, "main", &base);
+    h.fake.set_compare(
+        REPO,
+        &base,
+        &head,
+        json!({
+            "status": "ahead", "merge_base_commit": {"sha": base}
+        }),
+    );
+    let numbers = [BRANCH, "another-branch", BRANCH].map(|branch| {
+        h.fake
+            .open_pr(REPO, branch, &head, "Change", "", defaults::USER)
+            .unwrap()
+    });
+    h.gh.poll_repo(&h.repo).await.unwrap();
+    h.gh.settle().await;
+    let pulls: Vec<_> = numbers
+        .iter()
+        .map(|number| q(&h, Inspect::GhPrsId, &[&(*number as i64)]))
+        .collect();
+    let route = format!("/github/items/{id}/delivery");
+    let me = caller(WS, ME);
+    let body = || {
+        let item = h.env.store().items().get(&id).unwrap().unwrap();
+        json!({"cycle": item.cycle, "revision": item.cas_revision, "pulls": pulls})
+    };
+    let pinned = body();
+    let (status, refs) = call(&h.api, Some(&me), "PUT", &route, Some(&pinned)).await;
+    assert_eq!(status, 200, "{refs}");
+    let refs = refs.as_array().unwrap();
+    assert_eq!(refs.len(), numbers.len());
+    for (reference, number) in refs.iter().zip(numbers) {
+        assert_eq!(reference["number"], number);
+        assert_eq!(reference["base"], base);
+        assert_eq!(reference["head"], head);
+        assert_eq!(reference["required"], true);
+    }
+    assert_eq!(
+        call(&h.api, Some(&me), "PUT", &route, Some(&pinned))
+            .await
+            .0,
+        409
+    );
+
+    let connection = q(&h, Inspect::GhReposConnectionId, &[]);
+    h.env
+        .store()
+        .write::<_, steve_store::StoreError>(|w| {
+            Seed::UpdateConnectionsStatus.apply(w, &[&"paused", &connection.as_str().unwrap()])?;
+            Ok(())
+        })
+        .unwrap();
+    let current = body();
+    assert_eq!(
+        call(&h.api, Some(&me), "PUT", &route, Some(&current))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(body()["revision"], current["revision"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -458,63 +528,10 @@ async fn a_pr_is_linked_by_branch_and_by_reference() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn accepting_asks_first_and_no_pushes_or_opens_nothing() {
-    let h = setup().await;
-    let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await, "GitHub takes the wrap-up over");
-    let (dec, question, draft) = open_decision(&h, accept::PR_OPEN).expect("asked");
-    assert_eq!(question, format!("在 {REPO} 开 PR：保留 return_to 参数"));
-    assert_eq!(
-        draft,
-        "保留 return_to 参数\n\n登录后回到原来的页面。\n✓ 单元测试\n\nST-1 · 由 Steve 开出"
-    );
-    assert_eq!(
-        h.core.calls(),
-        [CoreCall::Progress {
-            item: id.clone(),
-            stage: "收尾".into(),
-            now: "验收通过，等你确认开 PR".into()
-        }]
-    );
-    // asked, not done: nothing on the remote, no PR
-    h.gh.settle().await;
-    assert_eq!(pushed(&h), None);
-    assert_eq!(pull_posts(&h), 0);
-    // a second acceptance does not ask twice
-    assert!(!accepted(&h, &id).await);
-
-    answer(&h, &dec, "no", "").await.expect("no");
-    assert_eq!(pushed(&h), None, "no → nothing pushed");
-    assert_eq!(pull_posts(&h), 0, "no → no PR");
-    assert_eq!(
-        h.core.calls().last(),
-        Some(&CoreCall::Finish {
-            item: id.clone(),
-            now: "已验收，没有开 PR".into()
-        })
-    );
-    // an answered decision cannot be undone
-    let d = h
-        .env
-        .store()
-        .read(|c| steve_store::decision_repo::get(c, &dec))
-        .expect("get")
-        .expect("decision");
-    let refused = h
-        .env
-        .store()
-        .write(|tx| {
-            Ok::<_, steve_modules::ApiError>(h.env.modules.registry.before_undo(tx, &d).is_err())
-        })
-        .expect("tx");
-    assert!(refused);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn yes_pushes_the_branch_and_opens_the_pr() {
     let h = setup().await;
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
         .await
@@ -551,13 +568,6 @@ async fn yes_pushes_the_branch_and_opens_the_pr() {
     assert_eq!(
         q(&h, Inspect::TimelineText, &[&id]),
         json!(format!("开了 PR #{n}"))
-    );
-    assert_eq!(
-        h.core.calls().last(),
-        Some(&CoreCall::Finish {
-            item: id.clone(),
-            now: format!("已验收，PR #{n} 已开")
-        })
     );
     // the token went to git through the environment, never in a call the fake saw as a URL
     assert!(
@@ -603,127 +613,64 @@ fn pr_url(h: &H) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn finish_on_merged_asks_to_merge_when_green_and_409s_a_new_head() {
+async fn merge_approval_pins_the_head_and_does_not_finish_the_item() {
     let h = setup().await;
-    let me = caller(WS, ME);
-    let (s, v) = call(
-        &h.api,
-        Some(&me),
-        "PATCH",
-        &format!("/github/repos/{}", h.repo),
-        Some(&json!({"settings": {"finish_on": "merged"}})),
-    )
-    .await;
-    assert_eq!(s, 200, "{v}");
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
-    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
-    answer(&h, &dec, "yes", "").await.expect("yes");
+    request_open(&h, &id);
+    let (dec, _, _) = open_decision(&h, accept::PR_OPEN).unwrap();
+    answer(&h, &dec, "yes", "").await.unwrap();
     let n = steve_pr(&h);
-    assert_eq!(
-        h.core.calls().last(),
-        Some(&CoreCall::Progress {
-            item: id.clone(),
-            stage: "收尾".into(),
-            now: format!("PR #{n} 等检查")
-        })
-    );
-    assert!(
-        open_decision(&h, accept::PR_MERGE).is_none(),
-        "no checks yet"
-    );
     let sha = git(h.work.path(), &["rev-parse", BRANCH]);
-
-    // pending, then failing: not asked
-    h.fake.set_check(REPO, &sha, "build", None);
-    h.gh.poll_repo(&h.repo).await.expect("poll");
-    h.gh.settle().await;
-    assert!(open_decision(&h, accept::PR_MERGE).is_none());
-    h.fake.set_check(REPO, &sha, "build", Some("failure"));
-    h.gh.poll_repo(&h.repo).await.expect("poll");
-    h.gh.settle().await;
-    h.gh.settle().await;
-    assert!(open_decision(&h, accept::PR_MERGE).is_none());
-    // green: asked, once
     h.fake.set_check(REPO, &sha, "build", Some("success"));
-    h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.gh.poll_repo(&h.repo).await.unwrap();
     h.gh.settle().await;
-    h.gh.poll_repo(&h.repo).await.expect("poll");
-    h.gh.settle().await;
-    let (merge, question, draft) = open_decision(&h, accept::PR_MERGE).expect("asked to merge");
-    assert_eq!(question, format!("合并 PR #{n}（{REPO}）？"));
-    assert_eq!(
-        draft,
-        format!("✓ build\n合并方式：squash，合并后删除分支 {BRANCH}")
-    );
-    assert_eq!(q(&h, Inspect::DecisionsCount2, &[]), json!(1));
+    assert!(open_decision(&h, accept::PR_MERGE).is_none());
+    let me = caller(WS, ME);
+    let (status, prs) = call(&h.api, Some(&me), "GET", "/github/prs", None).await;
+    assert_eq!(status, 200);
+    let path = format!("/github/prs/{}/merge", prs[0]["id"].as_str().unwrap());
+    let request = |head: String| {
+        let body = json!({"head": head});
+        let (me, path, api) = (me.clone(), path.clone(), h.api.clone());
+        async move { call(&api, Some(&me), "POST", &path, Some(&body)).await }
+    };
+    let (status, approval) = request(sha.clone()).await;
+    assert_eq!(status, 200, "{approval}");
+    assert_eq!(request(sha.clone()).await, (200, approval.clone()));
 
-    // a new commit lands on the PR: its checks are not green → 409, nothing merged
     let w = h.work.path();
     git(w, &["checkout", "-q", BRANCH]);
-    let new_sha = commit(w, "more.txt", "more\n");
-    git(w, &["checkout", "-q", "main"]);
-    let bare = h.fake.bare_remote(REPO).expect("bare");
+    let new_sha = commit(w, "more.txt", "more");
+    let bare = h.fake.bare_remote(REPO).unwrap();
     git(w, &["push", "-q", &bare.display().to_string(), BRANCH]);
-    let new_sha = new_sha.as_str();
-    h.fake.push_to_pr(REPO, n, new_sha);
+    h.fake.push_to_pr(REPO, n, &new_sha);
     pr_event(&h, n, "synchronize").await;
-    assert_eq!(
-        q(&h, Inspect::GhPrsHeadShaChecksState2, &[&(n as i64)]),
-        json!(format!("{new_sha}|none"))
-    );
-    let err = answer(&h, &merge, "yes", "").await.expect_err("409");
-    assert_eq!(err.0, 409);
-    assert!(err.1.contains("PR 有新的提交，等检查重新通过"), "{}", err.1);
-    assert!(!h.fake.pull(REPO, n).expect("pr").merged);
-    assert!(h.fake.calls_to("PUT", "/repos/").is_empty());
-
-    // green again on the new head: the same open question; yes merges and deletes the branch
-    h.fake.set_check(REPO, new_sha, "build", Some("success"));
-    h.gh.poll_repo(&h.repo).await.expect("poll");
+    h.fake.set_check(REPO, &new_sha, "build", Some("success"));
+    h.gh.poll_repo(&h.repo).await.unwrap();
     h.gh.settle().await;
-    assert_eq!(q(&h, Inspect::DecisionsCount2, &[]), json!(1));
-    let r = answer(&h, &merge, "yes", "").await.expect("yes");
-    assert_eq!(r["sha"], json!(new_sha));
-    let pr = h.fake.pull(REPO, n).expect("pr");
-    assert!(pr.merged);
-    assert_eq!(pushed(&h), None, "branch deleted after the merge");
-    assert_eq!(q(&h, Inspect::GhPrsState2, &[&(n as i64)]), json!("merged"));
-    let finishes: Vec<_> = h
-        .core
-        .calls()
-        .into_iter()
-        .filter(|c| matches!(c, CoreCall::Finish { .. }))
-        .collect();
     assert_eq!(
-        finishes,
-        [CoreCall::Finish {
-            item: id.clone(),
-            now: format!("PR #{n} 已合并")
-        }],
-        "finished once"
+        answer(&h, approval.as_str().unwrap(), "yes", "")
+            .await
+            .unwrap_err()
+            .0,
+        409
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn no_pr_question_for_a_release_project_or_without_new_commits() {
-    let h = setup().await;
-    // nothing ahead of main: an ordinary finish
-    git(h.work.path(), &["branch", "steve/st-2", "main"]);
-    let a = item(&h, 2, Some("steve/st-2"));
-    assert!(!accepted(&h, &a).await);
-    // a release action: the release path wraps up, not GitHub
-    h.env
-        .store()
-        .write::<_, steve_store::StoreError>(|c| {
-            Ok(Seed::UpdateProjectsRelease.apply(c, &[&PROJECT])?)
-        })
-        .expect("release");
-    let b = item(&h, 1, Some(BRANCH));
-    assert!(!accepted(&h, &b).await);
-    assert!(open_decision(&h, accept::PR_OPEN).is_none());
-    assert!(h.core.calls().is_empty());
+    assert!(!h.fake.pull(REPO, n).unwrap().merged);
+    assert_eq!(request(sha).await.0, 409);
+    let (status, approval) = request(new_sha.clone()).await;
+    assert_eq!(status, 200, "{approval}");
+    assert_eq!(
+        answer(&h, approval.as_str().unwrap(), "yes", "")
+            .await
+            .unwrap()["sha"],
+        new_sha
+    );
+    assert!(h.fake.pull(REPO, n).unwrap().merged);
     assert_eq!(pushed(&h), None);
+    assert_ne!(
+        h.env.store().items().get(&id).unwrap().unwrap().phase,
+        steve_types::ItemPhase::Closed
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -768,7 +715,7 @@ async fn a_failed_check_supplements_the_item_through_the_template() {
 async fn a_worktree_whose_origin_is_elsewhere_is_not_pushed() {
     let h = setup().await;
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     git(
         h.work.path(),
         &[
@@ -782,13 +729,7 @@ async fn a_worktree_whose_origin_is_elsewhere_is_not_pushed() {
     answer(&h, &dec, "yes", "").await.expect("yes");
     assert_eq!(pushed(&h), None);
     assert_eq!(pull_posts(&h), 0);
-    assert_eq!(
-        h.core.calls().last(),
-        Some(&CoreCall::Fail {
-            item: id,
-            why: format!("开 PR 失败：工作目录的 origin 不是 github.com/{REPO}")
-        })
-    );
+    assert_eq!(effect(&h, &dec).0, "failed");
 }
 
 fn effect(h: &H, dec: &str) -> (String, i64) {
@@ -805,7 +746,7 @@ fn effect(h: &H, dec: &str) -> (String, i64) {
 async fn an_opened_pr_whose_answer_was_lost_is_found_not_opened_twice() {
     let h = setup().await;
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     h.fake
         .fail_next_on("/pulls", steve_github::fake::Fault::LostAnswer);
@@ -813,26 +754,11 @@ async fn an_opened_pr_whose_answer_was_lost_is_found_not_opened_twice() {
         .await
         .expect("yes");
     assert_eq!(effect(&h, &dec), ("unknown".into(), 1));
-    assert!(
-        !h.core
-            .calls()
-            .iter()
-            .any(|c| matches!(c, CoreCall::Fail { .. })),
-        "not failed: it may have happened"
-    );
     assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1, "it did happen on GitHub");
     h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
     h.gh.settle().await;
     assert_eq!(effect(&h, &dec), ("done".into(), 2));
     assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1, "not opened twice");
-    let n = steve_pr(&h);
-    assert_eq!(
-        h.core.calls().last(),
-        Some(&CoreCall::Finish {
-            item: id.clone(),
-            now: format!("已验收，PR #{n} 已开")
-        })
-    );
 }
 
 /// Y2: a restart while the write was running: it is unknown, reconciled, done once.
@@ -840,7 +766,7 @@ async fn an_opened_pr_whose_answer_was_lost_is_found_not_opened_twice() {
 async fn a_write_a_restart_interrupted_is_reconciled() {
     let h = setup().await;
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
         .await
@@ -875,7 +801,7 @@ async fn a_write_a_restart_interrupted_is_reconciled() {
 async fn no_answer_no_write() {
     let h = setup().await;
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     h.gh.settle().await;
     assert_eq!(q(&h, Inspect::GhEffectsCount, &[&dec]), json!(0));
@@ -889,7 +815,7 @@ async fn no_answer_no_write() {
 async fn a_branch_that_moved_after_the_approval_is_not_pushed() {
     let h = setup().await;
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     h.fake.fail_next_on(
         "/pulls",
@@ -908,14 +834,6 @@ async fn a_branch_that_moved_after_the_approval_is_not_pushed() {
     h.gh.settle().await;
     assert_eq!(effect(&h, &dec).0, "failed");
     assert_eq!(h.fake.pulls_of(REPO, BRANCH), 0);
-    assert!(
-        h.core
-            .calls()
-            .iter()
-            .any(|c| matches!(c, CoreCall::Fail { why, .. } if why.contains("新的提交"))),
-        "{:?}",
-        h.core.calls()
-    );
 }
 
 /// A paused connection holds an approved write: nothing sent, it stays pending and goes out once
@@ -924,7 +842,7 @@ async fn a_branch_that_moved_after_the_approval_is_not_pushed() {
 async fn an_approved_write_waits_for_a_paused_connection() {
     let h = setup().await;
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     let conn = q(&h, Inspect::GhReposConnectionId, &[]);
     let conn = conn.as_str().expect("connection").to_string();
@@ -1015,7 +933,7 @@ async fn a_lost_push_that_landed_opens_the_pr() {
     });
     h.gh.set_git_nodes(nodes.clone());
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
         .await
@@ -1039,7 +957,7 @@ async fn a_lost_push_that_did_not_land_is_not_pushed_again() {
     });
     h.gh.set_git_nodes(nodes.clone());
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
         .await
@@ -1048,14 +966,6 @@ async fn a_lost_push_that_did_not_land_is_not_pushed_again() {
     assert_eq!(nodes.pushes.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(effect(&h, &dec).0, "failed");
     assert_eq!(h.fake.pulls_of(REPO, BRANCH), 0);
-    assert!(
-        h.core
-            .calls()
-            .iter()
-            .any(|c| matches!(c, CoreCall::Fail { why, .. } if why.contains("推送的结果未知"))),
-        "{:?}",
-        h.core.calls()
-    );
 }
 
 /// A push the Node has not ended when the Hub stops waiting ([`push::PushError::Running`]) is
@@ -1072,21 +982,13 @@ async fn a_push_still_running_is_asked_again_not_compared() {
     });
     h.gh.set_git_nodes(nodes.clone());
     let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
+    request_open(&h, &id);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     answer(&h, &dec, "yes", "fix: 保留 return_to\n登录后回到原页面。")
         .await
         .expect("yes");
     assert_eq!(effect(&h, &dec).0, "unknown");
     assert_eq!(h.fake.pulls_of(REPO, BRANCH), 0);
-    assert!(
-        !h.core
-            .calls()
-            .iter()
-            .any(|c| matches!(c, CoreCall::Fail { .. })),
-        "{:?}",
-        h.core.calls()
-    );
     h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
     h.gh.settle().await;
     let sha = git(h.work.path(), &["rev-parse", BRANCH]);
@@ -1096,131 +998,6 @@ async fn a_push_still_running_is_asked_again_not_compared() {
     assert_eq!(h.fake.pulls_of(REPO, BRANCH), 1);
 }
 
-/// `after_accept=open_pr` on the linked repo.
-async fn open_pr_on_accept(h: &H) {
-    let me = caller(WS, ME);
-    let (s, v) = call(
-        &h.api,
-        Some(&me),
-        "PATCH",
-        &format!("/github/repos/{}", h.repo),
-        Some(&json!({"settings": {"after_accept": "open_pr"}})),
-    )
-    .await;
-    assert_eq!(s, 200, "{v}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn open_pr_on_a_private_repo_opens_a_draft_without_a_card() {
-    let h = setup().await;
-    open_pr_on_accept(&h).await;
-    let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await, "GitHub takes the wrap-up over");
-    assert!(open_decision(&h, accept::PR_OPEN).is_none(), "no card");
-    h.gh.settle().await;
-    let sha = git(h.work.path(), &["rev-parse", BRANCH]);
-    assert_eq!(
-        pushed(&h).as_deref(),
-        Some(sha.as_str()),
-        "the checked commit"
-    );
-    let n = steve_pr(&h);
-    let pr = h.fake.pull(REPO, n).expect("PR on the fake GitHub");
-    assert!(pr.draft, "always a draft");
-    assert_eq!(pr.head_ref, BRANCH, "from the item's own branch");
-    assert!(pr.body.ends_with("ST-1 · 由 Steve 开出"), "{}", pr.body);
-    // the decision is in the history, answered by the grant
-    assert_eq!(
-        q(
-            &h,
-            Inspect::DecisionsStatusJsonExtractResultChoiceJsonExtractResult,
-            &[]
-        ),
-        json!("resolved yes after_accept")
-    );
-    assert_eq!(q(&h, Inspect::TimelineCount2, &[&id]), json!(1));
-    assert_eq!(
-        h.core.calls().last(),
-        Some(&CoreCall::Finish {
-            item: id.clone(),
-            now: format!("已验收，PR #{n} 已开")
-        })
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn open_pr_on_a_public_repo_still_asks() {
-    let h = setup().await;
-    open_pr_on_accept(&h).await;
-    h.env
-        .store()
-        .write::<_, steve_store::StoreError>(|c| Ok(Seed::UpdateGhReposPrivate.apply(c, &[])?))
-        .expect("public");
-    let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
-    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
-    assert!(question.contains("公开仓库"), "{question}");
-    h.gh.settle().await;
-    assert_eq!(pushed(&h), None);
-    assert_eq!(pull_posts(&h), 0);
-}
-
-/// A repo made public on GitHub after it was linked still says private in Steve's row: GitHub is
-/// asked at acceptance, the card comes back, and the row learns the new visibility.
-#[tokio::test(flavor = "multi_thread")]
-async fn open_pr_on_a_repo_made_public_since_linking_asks() {
-    let h = setup().await;
-    open_pr_on_accept(&h).await;
-    h.fake.set_private(REPO, false);
-    let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
-    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
-    assert!(question.contains("公开仓库"), "{question}");
-    h.gh.settle().await;
-    assert_eq!(pushed(&h), None);
-    assert_eq!(pull_posts(&h), 0);
-    assert_eq!(q(&h, Inspect::GhReposPrivate, &[]), json!(0));
-}
-
-/// GitHub not answering the visibility question is not "private": the card comes back.
-#[tokio::test(flavor = "multi_thread")]
-async fn open_pr_when_visibility_cannot_be_read_asks() {
-    let h = setup().await;
-    open_pr_on_accept(&h).await;
-    h.fake.fail_next_on(
-        &format!("/repos/{REPO}"),
-        steve_github::fake::Fault::Status {
-            status: 404,
-            message: "Not Found".into(),
-        },
-    );
-    let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
-    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
-    assert!(question.contains("公开仓库"), "{question}");
-    h.gh.settle().await;
-    assert_eq!(pushed(&h), None);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_pr_card_through_a_pat_says_it_posts_as_your_account() {
-    let h = setup().await;
-    h.env
-        .store()
-        .write::<_, steve_store::StoreError>(|c| Ok(Seed::UpdateConnectionsAdapter.apply(c, &[])?))
-        .expect("pat");
-    let id = item(&h, 1, Some(BRANCH));
-    assert!(accepted(&h, &id).await);
-    let (_, question, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
-    assert!(
-        question.starts_with(&format!(
-            "在 {REPO} 开 PR：保留 return_to 参数（以你的 GitHub 账号"
-        )),
-        "{question}"
-    );
-}
-
-/// The supplements the flow's core got, `(item, text)`.
 fn supplements(h: &H) -> Vec<(String, String)> {
     h.flow_core
         .calls()
@@ -1419,8 +1196,8 @@ async fn repo_analysis_has_independent_switches_dedupes_and_never_posts_without_
     let item = run["item_id"].as_str().expect("result item");
     assert_eq!(run["publication"]["state"], "available");
     let report = h.env.store().items().get(item).unwrap().unwrap();
-    assert_eq!(report.status, "done");
-    assert_eq!(report.phase, "closed");
+    assert!(report.is_completed());
+    assert_eq!(report.phase.as_str(), "closed");
     assert_analysis_category(&h, item);
     let prompt = h.env.gateway.last_prompt().unwrap();
     assert!(prompt.contains("Pretend to be the user"));

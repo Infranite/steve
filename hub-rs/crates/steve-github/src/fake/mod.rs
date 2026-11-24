@@ -304,13 +304,6 @@ impl FakeGitHub {
     }
 
     /// Makes `repo` public or private (as a later visibility change on GitHub would).
-    pub fn set_private(&self, repo: &str, private: bool) {
-        self.with(|w| {
-            if let Some(r) = w.repos.get_mut(repo) {
-                r.private = private;
-            }
-        });
-    }
 
     /// Whether the caller may manage repo hooks (false → 404, like a PAT
     /// without `Webhooks: write`).

@@ -3627,7 +3627,7 @@ impl Outbox {
         ch: &Channels,
         item: &Item,
     ) -> ChannelResult<Option<Delivered>> {
-        if item.status == "drop" {
+        if item.is_closed() && !item.is_completed() {
             return Ok(None);
         }
         let found = ch.store().read(|r| -> ChannelResult<_> {
@@ -3911,7 +3911,6 @@ pub fn delivery_summary(r: &mut impl steve_store::Read, item: &Item) -> ChannelR
                 .to_string()
         })
         .filter(|s| !s.is_empty())
-        .or_else(|| Some(item.now.trim().to_string()).filter(|s| !s.is_empty()))
         .unwrap_or_else(|| item.title.trim().to_string());
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     Ok(match flat.char_indices().nth(MAX) {

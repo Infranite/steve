@@ -111,14 +111,8 @@ fn item_numbers_are_global_per_prefix() {
     let s = &t.store;
     let a = new_item(s, WS, "a");
     assert_eq!(
-        (
-            a.id.as_str(),
-            a.no,
-            a.status.as_str(),
-            a.stage.as_str(),
-            a.kind.as_str()
-        ),
-        ("ST-1", 1, "run", "定义", "task")
+        (a.id.as_str(), a.no, a.phase.as_str(), a.kind.as_str()),
+        ("ST-1", 1, "ready", "task")
     );
     assert_eq!(
         t.events.take(),
@@ -178,8 +172,7 @@ fn item_json_shape() {
             session: Some(Some("ses_1".into())),
             at: Some(Some(12)),
         }),
-        status: Some("wait".into()),
-        stage: Some("规划".into()),
+        phase: Some(steve_types::ItemPhase::Paused),
         ..Default::default()
     };
     let i = s.items().create(WS, &fork).unwrap().unwrap();
@@ -187,11 +180,11 @@ fn item_json_shape() {
     assert_eq!(
         j,
         json!({
-            "id": "ST-1", "workspace_id": "default", "no": 1, "kind": "task", "title": "派生", "status": "wait", "stage": "规划",
-            "bot_id": "steve", "project_dir": null, "cwd": null, "branch": null, "plan": [], "now": "", "accept_mode": null,
+            "id": "ST-1", "workspace_id": "default", "no": 1, "kind": "task", "title": "派生",
+            "bot_id": "steve", "project_dir": null, "cwd": null, "branch": null, "plan": [], "accept_mode": null,
             "priority": "中", "archived": false, "created": i.created, "updated": i.updated, "project_id": null, "star": false,
             "due": null, "snooze": null, "source": ["派生", "fork"], "parent": {"item": null, "session": "ses_1", "at": 12},
-            "phase": "active", "cycle": 1, "revision": 0, "outcome": null, "acceptance": null, "closing": null,
+            "phase": "paused", "cycle": 1, "delivery_revision": 0, "cas_revision": i.cas_revision, "outcome": null, "acceptance": null, "closing": null,
             "closed_at": null, "closed_reason": null, "design_gate": false
         })
     );
@@ -268,12 +261,8 @@ fn item_patch() {
         )]
     );
     // a stored decision undo applies as a patch; explicit null clears
-    let undo: ItemPatch = serde_json::from_value(json!({"status": "wait", "now": "在等你回答", "stage": "交付与验收", "cwd": null, "snooze": null})).unwrap();
+    let undo: ItemPatch = serde_json::from_value(json!({"cwd": null, "snooze": null})).unwrap();
     let got = s.items().patch(&i.id, &undo).unwrap().unwrap();
-    assert_eq!(
-        (got.status.as_str(), got.now.as_str(), got.stage.as_str()),
-        ("wait", "在等你回答", "交付与验收")
-    );
     assert!(
         got.cwd.is_none() && got.snooze.is_none() && got.star,
         "omitted keys stay"
@@ -513,11 +502,6 @@ fn sessions() {
                 ws: steve_types::WorkspaceId::from(steve_store::WS)
             })
         )]
-    );
-    let got = s.sessions().get(&s1.id).unwrap().unwrap();
-    assert_eq!(
-        (got.status.as_str(), got.used, got.cost),
-        ("idle", Some(10), Some(1.5))
     );
     s.sessions()
         .patch(

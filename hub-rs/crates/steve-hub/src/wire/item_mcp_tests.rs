@@ -106,11 +106,21 @@ impl Fixture {
 
     fn private_progress(&self, item: &Item) {
         self.store
+            .write::<_, steve_store::StoreError>(|w| {
+                steve_store::item_repo::add_progress(
+                    w,
+                    &item.id,
+                    "fixture",
+                    "private-progress-marker",
+                    1,
+                )
+            })
+            .unwrap();
+        self.store
             .items()
             .patch(
                 &item.id,
                 &ItemPatch {
-                    now: Some("private-now-marker".into()),
                     plan: Some(vec![PlanStep {
                         step: "private-plan-marker".into(),
                         done: false,
@@ -154,7 +164,7 @@ fn main_origin_reads_current_workspace_but_not_another_workspace() {
     assert!(!result.contains(&foreign.id), "{result}");
     assert!(!result.contains(&foreign.title), "{result}");
     let detail = research_mcp::item_read(&f.store, "default", &view, &candidate.id).unwrap();
-    assert!(detail.contains("private-now-marker"), "{detail}");
+    assert!(detail.contains("private-progress-marker"), "{detail}");
     assert!(detail.contains("private-plan-marker"), "{detail}");
     assert!(detail.contains("private-delivery-marker"), "{detail}");
     let hidden = research_mcp::item_read(&f.store, "default", &view, &foreign.id);
@@ -220,7 +230,7 @@ fn unknown_origin_reveals_only_its_own_safe_projection() {
     let detail = research_mcp::item_read(&f.store, "default", &view, &own.id).unwrap();
     assert!(detail.contains("goal: P1 own"));
     for marker in [
-        "private-now-marker",
+        "private-progress-marker",
         "private-plan-marker",
         "private-delivery-marker",
     ] {
@@ -243,12 +253,12 @@ fn outside_conversation_reads_only_its_items_without_private_progress() {
     let result = research_mcp::items_search(&f.store, "default", &view, "P1").unwrap();
     assert!(result.contains(&same_chat.id), "{result}");
     assert!(!result.contains(&hidden.id), "{result}");
-    assert!(!result.contains("private-now-marker"), "{result}");
+    assert!(!result.contains("private-progress-marker"), "{result}");
     let detail = research_mcp::item_read(&f.store, "default", &view, &same_chat.id).unwrap();
     assert!(detail.contains(&same_chat.title));
     assert!(detail.contains("goal: P1 sibling"));
     for marker in [
-        "private-now-marker",
+        "private-progress-marker",
         "private-plan-marker",
         "private-delivery-marker",
     ] {

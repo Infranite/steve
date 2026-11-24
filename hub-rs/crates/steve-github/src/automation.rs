@@ -660,8 +660,7 @@ fn create_completed_report(
                 goal,
                 bot_id: bot.id.clone(),
                 project_id: current.project_id,
-                status: Some("done".into()),
-                stage: Some("完成".into()),
+                phase: None,
                 source: Some(("GitHub".into(), "sig".into())),
                 tags: vec![report_category(store, &ws)?],
                 ..Default::default()
@@ -676,9 +675,9 @@ fn create_completed_report(
         tx,
         &item.id,
         &steve_store::LifecycleWrite {
-            phase: "closed".into(),
+            phase: steve_types::ItemPhase::Closed,
             cycle: item.cycle,
-            revision: item.revision,
+            delivery_revision: item.delivery_revision,
             outcome: Some("completed".into()),
             closed_at: Some(now),
             closed_reason: Some(reason.into()),
@@ -689,11 +688,12 @@ fn create_completed_report(
         tx,
         &item.id,
         item.cycle,
-        item.revision,
+        item.delivery_revision,
         "completed",
         None,
         Some(reason),
         now,
+        None,
     )?;
     Ok(item)
 }

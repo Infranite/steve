@@ -1041,11 +1041,6 @@ impl Domain for CoreDomain {
         self.jobs.start("core.stalls", || {
             steve_runtime::spawn("core.stalls", self.core.clone().run_stall_watch())
         });
-        // the completion judge in shadow (#335): its own watch, so its model calls never hold up
-        // the stall, build and pull request checks
-        self.jobs.start("core.judge", || {
-            steve_runtime::spawn("core.judge", self.core.clone().run_judge_watch())
-        });
     }
 
     async fn create_item(&self, p: CreateItem) -> Result<Obj, crate::error::ApiError> {
@@ -1181,10 +1176,6 @@ impl Domain for CoreDomain {
     async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.lifecycle_view(&id).map(Some)).await
-    }
-    async fn derived_state(&self, id: &str) -> BResult<Option<Value>> {
-        let (c, id) = (self.core.clone(), id.to_string());
-        blocking(move || c.derived_state(&id)).await
     }
     async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
         let (c, id) = (self.core.clone(), id.to_string());

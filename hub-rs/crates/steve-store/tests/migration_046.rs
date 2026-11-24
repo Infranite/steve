@@ -40,7 +40,7 @@ fn release(c: &Connection, id: &str) -> Option<Value> {
 }
 
 #[test]
-fn the_seeded_steve_project_moves_to_the_lane_and_nothing_else_changes() {
+fn executable_release_scripts_survive_migrations_and_rules_without_scripts_are_removed() {
     let (_dir, c) = v45();
     project(&c, "seeded", Some(json!({"kind": "script", "cmd": SEEDED})));
     project(
@@ -61,16 +61,8 @@ fn the_seeded_steve_project_moves_to_the_lane_and_nothing_else_changes() {
 
     db::migrate(&c).unwrap();
 
-    let typed = |id: &str| -> steve_store::Release {
-        serde_json::from_value(release(&c, id).unwrap()).unwrap()
-    };
-    for (id, rule) in [("seeded", "tag"), ("tagged", "tag"), ("merged", "merge")] {
-        let r = typed(id);
-        assert_eq!(
-            (r.kind.as_str(), r.cmd.as_str(), r.done_when.as_deref()),
-            ("script", "", Some(rule)),
-            "{id}"
-        );
+    for id in ["seeded", "tagged", "merged"] {
+        assert_eq!(release(&c, id), None, "{id}");
     }
     assert_eq!(release(&c, "edited"), Some(edited));
     assert_eq!(release(&c, "other"), Some(other));

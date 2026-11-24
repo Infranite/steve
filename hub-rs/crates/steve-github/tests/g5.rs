@@ -16,7 +16,7 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, GraphEngine};
 use steve_github::config::{COMMENT_LABEL, CommentGrants, GrantCapability, KIND};
 use steve_github::fake::{FakeGitHub, defaults};
-use steve_github::{GitHub, GitHubEnv, RecordingCore, accept, issues, manifest, repos};
+use steve_github::{GitHub, GitHubEnv, accept, issues, manifest, repos};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::changes::{self, Origin};
 use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
@@ -105,7 +105,6 @@ async fn setup() -> H {
         std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())),
     );
     slot.expect("slot").bind(&gh);
-    gh.set_core(RecordingCore::new(env.store().clone()));
     gh.set_flow(flow);
     let api = manifest::routes(gh.clone())
         .merge(repos::routes(gh.clone()))
@@ -226,7 +225,6 @@ async fn repo_detail_has_the_section_8_shape() {
     assert_eq!(v["full_name"], defaults::REPO);
     assert_eq!(v["connection"]["kind"], "app");
     assert_eq!(v["project"], json!({"id": PROJECT, "name": "Demo"}));
-    assert_eq!(v["settings"]["finish_on"], "accepted");
     assert_eq!(v["open_issues"], 1);
     assert_eq!(v["enabled"], true);
     for k in [
@@ -277,9 +275,8 @@ async fn the_section_9_example_drafts_applies_and_undoes() {
 
     let p = draft(
         &h,
-        "demo 仓库的 PR 合并后再算完成，用 squash",
+        "demo 仓库的 PR 用 squash",
         json!({"ops": [
-            {"op": "set", "key": "finish_on", "value": "合并后才完成"},
             {"op": "set", "key": "merge_method", "value": "squash"},
             {"op": "set", "key": "delete_branch", "value": "是"},
             {"op": "set", "key": "colour", "value": "blue"},
@@ -291,7 +288,6 @@ async fn the_section_9_example_drafts_applies_and_undoes() {
         prompt.contains("the GitHub repository \"steve-test/demo\""),
         "{prompt}"
     );
-    assert!(prompt.contains("合并后才完成"), "{prompt}");
     assert!(prompt.contains("grant.add"), "{prompt}");
     assert_eq!(p.title, "仓库 steve-test/demo");
     assert_eq!(p.href, format!("#/github/{}", h.repo));
@@ -300,7 +296,6 @@ async fn the_section_9_example_drafts_applies_and_undoes() {
     assert_eq!(
         lines(&p.changes),
         vec![
-            l("什么时候算完成", "开了 PR 就完成", "合并后才完成"),
             l("合并方式", "rebase", "squash"),
             l("（没认出）", "—", "colour: blue"),
         ]
@@ -311,7 +306,6 @@ async fn the_section_9_example_drafts_applies_and_undoes() {
         .expect("apply");
     assert_eq!(r["ok"], true);
     let v = repo_json(&h).await;
-    assert_eq!(v["settings"]["finish_on"], "merged");
     assert_eq!(v["settings"]["merge_method"], "squash");
     assert_eq!(v["revision"], json!(rev.as_i64().unwrap() + 1));
     assert_eq!(
@@ -324,7 +318,6 @@ async fn the_section_9_example_drafts_applies_and_undoes() {
         .expect("stored")
         .expect("undo");
     let v = repo_json(&h).await;
-    assert_eq!(v["settings"]["finish_on"], "accepted");
     assert_eq!(v["settings"]["merge_method"], "rebase");
     let again = changes::undo(&h.env.modules, &me, &p.id).expect("stored");
     assert!(again.is_err(), "undone once");
@@ -349,7 +342,7 @@ async fn a_draft_goes_stale_when_the_repo_changes() {
         Some(&me),
         "PATCH",
         &format!("/github/repos/{}", h.repo),
-        Some(&json!({"settings": {"draft_pr": true}})),
+        Some(&json!({"settings": {"delete_branch": false}})),
     )
     .await;
     assert_eq!(s, 200);

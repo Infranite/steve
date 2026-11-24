@@ -159,19 +159,6 @@ impl GitHub {
         self.conn_for_write(ws, connection)
             .map_err(|e| Fail::definite(e.to_string()))
     }
-
-    /// Finishes `item` through the outbox (after the commit, at least once).
-    pub(crate) fn finish_later(&self, ws: &str, item: &str, now: &str) -> Result<(), Fail> {
-        self.store()
-            .write(|tx| {
-                let mut fx = crate::sync::Effects {
-                    finish: vec![(item.to_string(), now.to_string())],
-                    ..Default::default()
-                };
-                crate::after::emit(tx, ws, "", &mut fx)
-            })
-            .map_err(|e| Fail::unknown(e.to_string()))
-    }
 }
 
 /// What one run of an effect did.
@@ -356,6 +343,46 @@ impl GitHub {
                 steve_store::github::effect_intent(tx, decision, intent).map_err(ApiError::from)
             })
             .map_err(|e| Fail::new(e.to_string(), Why::Wait))
+    }
+
+    /// Claims the outbound step under the same writer that closes the item. A closed
+    /// cycle may still be reconciled by readback, but no PR step can be started for it.
+    pub(crate) fn mark_pull_write(
+        &self,
+        d: &steve_store::Decision,
+        github_api: bool,
+    ) -> Result<(), Fail> {
+        let recorded = self
+            .store()
+            .write(|tx| {
+                if let Some(item) = d.item_id.as_deref() {
+                    let Some(cycle) =
+                        steve_store::item_repo::open_cycle(tx, &d.workspace_id, item)?
+                    else {
+                        return Ok(false);
+                    };
+                    let scope = steve_store::item_delivery::scope(tx, item)?;
+                    let effect = steve_store::github::effect_of(tx, &d.id)?;
+                    if !effect.is_some_and(|effect| {
+                        effect.item_cycle == Some(cycle) && effect.item_scope == Some(scope)
+                    }) {
+                        return Ok(false);
+                    }
+                }
+                let intent = if github_api {
+                    json!({"tried": true})
+                } else {
+                    json!({"push_started": true})
+                };
+                steve_store::github::effect_intent(tx, &d.id, &intent)?;
+                Ok::<_, steve_store::StoreError>(true)
+            })
+            .map_err(|error| Fail::new(error.to_string(), Why::Wait))?;
+        if recorded {
+            Ok(())
+        } else {
+            Err(Fail::definite("pull request approval is no longer current"))
+        }
     }
 
     /// Right before the write goes to GitHub: from here on, a run that does not hear back

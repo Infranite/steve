@@ -79,7 +79,11 @@ impl Core {
         })?;
         metrics::counter!("steve_gateway_handoffs_total").increment(1);
         th.route_outcome(&j.origin, NEEDS_TOOLS_OUTCOME, Some(&item.id))?;
-        let text = handed_off(&item.id, &self.bot_name(&item), item.status == "propose");
+        let text = handed_off(
+            &item.id,
+            &self.bot_name(&item),
+            item.phase == crate::cycle::READY,
+        );
         let steps = Steps {
             route: j.route.clone(),
             ..Default::default()

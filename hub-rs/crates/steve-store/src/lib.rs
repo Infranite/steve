@@ -74,6 +74,7 @@ pub use contract::changesets as changeset_repo;
 pub use contract::core_fixture;
 pub use contract::core_queue;
 pub use contract::core_usage;
+pub use contract::item_delivery;
 pub use contract::message_sources::{
     Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
     MessageSelection,

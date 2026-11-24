@@ -29,7 +29,7 @@ impl DraftHooks for Hooks {
     fn rejected(&self, _: &str, session: &str, _: Option<&str>, message: &str) {
         self.0.lock().unwrap().push(format!("{session}|{message}"));
     }
-    fn sent(&self, _: &str, item: &str, subject: &str) {
+    fn sent(&self, _: &str, item: &str, subject: &str, _: Option<steve_types::DeliveryVersion>) {
         self.0
             .lock()
             .unwrap()

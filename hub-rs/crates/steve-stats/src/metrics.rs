@@ -25,7 +25,7 @@ use steve_store::statistics::{
 use steve_store::{ItemReads, Read};
 
 /// WIP statuses (T4).
-pub const WIP: &[&str] = &["wait", "run", "block", "pause", "ship"];
+pub const WIP: &[&str] = &["active", "paused", "closing"];
 /// Fail reasons (Q3), in display order.
 pub const FAIL_REASONS: &[&str] = &["stall", "error", "restart", "release", "other"];
 
@@ -800,8 +800,8 @@ pub fn summary(c: &mut impl Read, q: &Query) -> Result<Option<Summary>> {
         ids.dedup();
         ids.len() as i64
     };
-    th.done = distinct("done");
-    th.dropped = distinct("drop");
+    th.done = distinct("completed");
+    th.dropped = distinct("cancelled");
     th.drop_rate = ratio(th.dropped, th.done + th.dropped);
     th.net = th.created - th.done - th.dropped;
     th.wip = ItemHistory(c).open_tasks(scope, WIP)?;
@@ -908,7 +908,9 @@ pub fn summary(c: &mut impl Read, q: &Query) -> Result<Option<Summary>> {
     if !stalled.is_empty() {
         let mut finished = 0;
         for id in &stalled {
-            finished += i64::from(ItemReads(c).status(ws, id)?.as_deref() == Some("done"));
+            finished += i64::from(
+                ItemReads(c).item_outcome_or_phase(ws, id)?.as_deref() == Some("completed"),
+            );
         }
         qu.stalled_then_done = ratio(finished, stalled.len() as i64);
     }
@@ -918,8 +920,8 @@ pub fn summary(c: &mut impl Read, q: &Query) -> Result<Option<Summary>> {
     qu.reopened = status
         .iter()
         .filter(|m| {
-            matches!(m.2.as_deref(), Some("done") | Some("drop"))
-                && !matches!(m.3.as_deref(), Some("done") | Some("drop"))
+            matches!(m.2.as_deref(), Some("completed" | "cancelled" | "failed"))
+                && !matches!(m.3.as_deref(), Some("completed" | "cancelled" | "failed"))
         })
         .count() as i64;
 

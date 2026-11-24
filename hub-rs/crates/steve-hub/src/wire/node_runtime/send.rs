@@ -756,7 +756,7 @@ impl NodeRuntime {
                 })?;
             }
             if let Some(item) = scope.item {
-                startup::hold_item(w, &scope.workspace, &item, &question, now())?;
+                startup::hold_item(w, &scope.workspace, &item, now())?;
             }
             Ok(())
         })

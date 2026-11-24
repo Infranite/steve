@@ -248,7 +248,7 @@ text!(
 
 text!(
     items_status_by_id(id: &str),
-    "SELECT status FROM items WHERE id=?1"
+    "SELECT phase FROM items WHERE id=?1"
 );
 
 text!(

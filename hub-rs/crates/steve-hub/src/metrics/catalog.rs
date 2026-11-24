@@ -34,6 +34,11 @@ pub(super) fn describe() {
         "Agent question cards created for the owner."
     );
     describe_histogram!(
+        "steve_item_owner_finish_seconds",
+        Seconds,
+        "Time to commit an owner's explicit item finish."
+    );
+    describe_histogram!(
         "steve_bot_selection_seconds",
         Seconds,
         "Time to assess and rank one Bot dispatch request."
@@ -42,6 +47,16 @@ pub(super) fn describe() {
         "steve_bot_selection_blocked_total",
         Count,
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
+    );
+    describe_counter!(
+        "steve_item_automatic_delivery_total",
+        Count,
+        "Automatic delivery checks. Label: result (verified or unverified)."
+    );
+    describe_counter!(
+        "steve_item_stale_delivery_total",
+        Count,
+        "Delivery verification rejected because its item cycle or scope changed."
     );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(

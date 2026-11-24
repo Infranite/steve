@@ -464,6 +464,7 @@ impl GitHub {
             // first what a restart left accepted but unprocessed, then the poll
             gh.recover_deliveries();
             gh.poll_due().await;
+            gh.verify_deliveries().await;
             if n.is_multiple_of(120) {
                 gh.prune_deliveries();
             }

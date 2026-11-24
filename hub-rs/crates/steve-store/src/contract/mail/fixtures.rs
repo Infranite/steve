@@ -339,7 +339,7 @@ pub fn reset_mail_event_delivery(store: &Store) -> Result<()> {
 pub fn link_agent_thread(store: &Store, thread: &str) -> Result<()> {
     store.write_locked(|c| {
         c.execute_batch("INSERT INTO bots (id,workspace_id,name,harness,model,updated) VALUES ('mail','default','Mail','fixture','writer',1);
-            INSERT INTO items (id,workspace_id,no,kind,title,status,stage,created,updated,requested_by) VALUES ('ST-1','default',1,'task','Mail','open','',1,1,'usr_dev');
+            INSERT INTO items(id, workspace_id, no, kind, title, phase, created, updated, requested_by) VALUES ('ST-1','default',1,'task','Mail','active',1,1,'usr_dev');
             INSERT INTO sessions (id,workspace_id,item_id,bot_id,harness,model,cwd,status,created,updated) VALUES ('ses_mail','default','ST-1','mail','fixture','writer','','running',1,1);")?;
         c.execute("INSERT INTO links (workspace_id,subject_type,subject_id,predicate,object_type,object_id,source,created) VALUES ('default','item','ST-1','about','mail_thread',?,'fixture',1)", [thread])?;
         Ok(())
@@ -742,8 +742,7 @@ pub fn disable_flow(store: &Store, origin: &str) -> Result<()> {
 pub fn item(store: &Store, ws: &str, id: &str, no: i64, title: &str) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute(
-            "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated)
-            VALUES (?, ?, ?, 'task', ?, 'open', '', 1, 1)",
+            "INSERT INTO items(id, workspace_id, no, kind, title, phase, created, updated) VALUES (?, ?, ?, 'task', ?, 'active', 1, 1)",
             params![id, ws, no, title],
         )?;
         Ok(())

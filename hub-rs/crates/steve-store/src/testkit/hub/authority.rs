@@ -19,10 +19,7 @@ pub fn principals(store: &Store) -> Result<()> {
     workspaces(store)?;
     store.write(|tx| {
         tx.conn.execute_batch(
-            "INSERT INTO items(id,workspace_id,requested_by,no,title,status,stage,created,updated) VALUES
-               ('i1','solo',NULL,1,'i1','run','define',1,1),('i2','team','u2',2,'i2','run','define',1,1),
-               ('i3','team',NULL,3,'i3','run','define',1,1),('i4','team','u9',4,'i4','run','define',1,1),
-               ('i6','solo','u1',6,'i6','run','define',1,1);
+            "INSERT INTO items(id, workspace_id, requested_by, no, title, phase, created, updated) VALUES ('i1','solo',NULL,1,'i1','active',1,1),('i2','team','u2',2,'i2','active',1,1),('i3','team',NULL,3,'i3','active',1,1),('i4','team','u9',4,'i4','active',1,1),('i6','solo','u1',6,'i6','active',1,1);
              INSERT INTO sessions(id,workspace_id,item_id,cwd,harness,status,created,updated) VALUES
                ('s1','solo','i1','.','fixture','ready',1,1),('s2','team','i2','.','fixture','ready',1,1),
                ('s3','team','i3','.','fixture','ready',1,1),('s4','team','i4','.','fixture','ready',1,1),
@@ -41,9 +38,7 @@ pub fn views(store: &Store) -> Result<()> {
             "INSERT INTO projects(id,workspace_id,name,path,worktree,created,updated) VALUES
                ('pg','team','pg','/w/git-proj',1,1,1),('pd','team','pd','/w/dir-proj',0,1,1),
                ('po','other','po','/w/other-proj',1,1,1);
-             INSERT INTO items(id,workspace_id,requested_by,cwd,project_id,no,title,status,stage,created,updated) VALUES
-               ('i1','team','u2','/h/worktrees/ST-1','pg',1,'i1','run','define',1,1),
-               ('i2','team',NULL,'/w/dir-proj','pd',2,'i2','run','define',1,1);
+             INSERT INTO items(id, workspace_id, requested_by, cwd, project_id, no, title, phase, created, updated) VALUES ('i1','team','u2','/h/worktrees/ST-1','pg',1,'i1','active',1,1),('i2','team',NULL,'/w/dir-proj','pd',2,'i2','active',1,1);
              INSERT INTO sessions(id,workspace_id,item_id,cwd,harness,status,created,updated) VALUES
                ('s1','team','i1','/h/worktrees/ST-1','fixture','ready',1,1),
                ('s2','team','i2','/w/dir-proj/','fixture','ready',1,1);
@@ -239,7 +234,7 @@ pub fn violate_session_scope(
 pub fn seed_item_dependency(store: &Store, item: &str, upstream: &str) -> Result<()> {
     store.write(|tx| {
         tx.conn
-            .execute("UPDATE items SET status='run' WHERE id=?", [item])?;
+            .execute("UPDATE items SET phase='active' WHERE id=?", [item])?;
         tx.conn.execute(
             "INSERT INTO item_deps(item_id,dep_id,created) VALUES(?,?,1)",
             [item, upstream],
@@ -270,8 +265,8 @@ pub fn set_item_condition(
     store.write(|tx| {
         match condition {
             ItemCondition::Paused => tx.conn.execute(
-                "UPDATE items SET status=? WHERE id=?",
-                [if set { "pause" } else { "run" }, id],
+                "UPDATE items SET phase=? WHERE id=?",
+                [if set { "paused" } else { "active" }, id],
             )?,
             ItemCondition::Archived => tx.conn.execute(
                 "UPDATE items SET archived=? WHERE id=?",

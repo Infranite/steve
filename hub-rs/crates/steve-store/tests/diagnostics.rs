@@ -216,7 +216,7 @@ fn default_capture_does_not_restart_after_expiry_manual_stop_or_legacy_reads() {
         .patch(
             &item,
             &steve_store::ItemPatch {
-                stage: Some("执行".into()),
+                title: Some("Updated".into()),
                 ..Default::default()
             },
         )

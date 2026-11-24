@@ -9,19 +9,17 @@ import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { ItemDispatch } from "./bot-dispatch"
 import type { Workflow } from "./workflow"
 import type { Delivery, DeliveryShare } from "./delivery"
-export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
-export type { Closeout } from "./gen"
 export type DependencyWait = {
-  item_id: string; status: ItemStatus; phase: string; cycle: number
-  dependencies: { id: string; status: string | null; phase: string | null }[]; open_dependencies: string[]
+  item_id: string; phase: string; cycle: number
+  dependencies: { id: string; outcome: "completed" | "cancelled" | "failed" | null; phase: string | null }[]; open_dependencies: string[]
   resume_mode: "automatic" | "notify"; resume_source: "workspace" | "item" | "fallback"
   resume_override: "workspace" | "automatic" | "notify"; resume_enabled: boolean
   resume_blocker: string | null; resume_fallback_reason: string | null
   waiting: boolean; wait_state: string | null; reason: string | null; active_turn: boolean
   can_register: boolean; register_blocker: string | null
 }
-export type RItemDetail = { id: string; status: ItemStatus; now?: string; source?: [string, string]; cwd?: string | null; branch?: string | null; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id: string | null }[]; decisions: DecisionView[]; dependents: string[]
+export type RItemDetail = { id: string; source?: [string, string]; cwd?: string | null; branch?: string | null; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id: string | null }[]; decisions: DecisionView[]; dependents: string[]
   workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   dispatch?: ItemDispatch
@@ -39,8 +37,8 @@ export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason
 export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
-export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string; done_when?: "merge" | "tag" } | null; archived: boolean; created: number; updated: number }
-export type NewProjectInput = { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }
+export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string } | null; archived: boolean; created: number; updated: number }
+export type NewProjectInput = { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; node?: string }
 export type ProjectDestination = { parent: string; directory: string; node: "hub" }
 export type ProjectSetup = Omit<NewProjectInput, "path"> & ProjectDestination & { preview: string } & (
   { mode: "empty" } | { mode: "clone"; remote: string; branch?: string }
@@ -354,6 +352,8 @@ export const api = {
   /* one send per key: the same key again (a second click, a retry) is answered `again` and sends nothing */
   annSend: (id: string, ids: string[], key: string) => post<{ ok: boolean; again: boolean; pending?: boolean; sent: number; timeline_id?: number | null; warning?: string }>(`/items/${encodeURIComponent(id)}/annotations/send`, { ids, key }),
   newItem: (p: { goal: string; bot?: string; team?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string; required_specialties?: string[] }) => post<{ id: string }>("/items", p),
+  itemLifecycle: (id: string, command: "finish" | "new_cycle", cycle: number, revision: number) =>
+    post(`/items/${id}/lifecycle`, { command, expected_cycle: cycle, expected_revision: revision }),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),
@@ -389,7 +389,7 @@ export const api = {
   newProject: (p: NewProjectInput) => post<RProject>("/projects", p),
   projectDestination: (p: ProjectDestination, signal: AbortSignal) => req<{ path: string }>("POST", "/projects/setup/preview", p, undefined, signal),
   setupProject,
-   patchProject: (id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }) => patch<RProject>("/projects/" + id, p),
+   patchProject: (id: string, p: Partial<RProject>) => patch<RProject>("/projects/" + id, p),
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }),
   browse: (path: string, node = "hub") => get<RBrowse>(`/fs/browse?path=${encodeURIComponent(path)}&node=${encodeURIComponent(node)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),

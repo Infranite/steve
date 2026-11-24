@@ -302,7 +302,7 @@ fn linked_items(
         .map(|item| ItemRef {
             id: item.id,
             title: item.title,
-            status: item.status,
+            status: item.phase,
         })
         .collect())
 }

@@ -75,6 +75,30 @@ impl Consumer for WorkTidy {
                 d.item_id, ev.workspace_id
             )));
         }
+        if item.cycle != d.cycle || item.phase != crate::cycle::CLOSED {
+            return Ok(());
+        }
+        if d.acceptance.as_deref() == Some(crate::cycle::ClosePolicy::Owner.as_str()) {
+            let mut tx = self.core.tx();
+            let item = tx.item(&d.item_id).map_err(retry)?;
+            if item.cycle != d.cycle || item.phase != crate::cycle::CLOSED {
+                return Ok(());
+            }
+            let mut busy = false;
+            for session in tx.db().sessions_of_item(&d.item_id).map_err(retry)? {
+                if tx.busy(&session.id) {
+                    tx.stop_now(&session.id);
+                    busy = true;
+                }
+            }
+            if busy {
+                return Err(ConsumeError::Retry(
+                    "item sessions are still stopping".into(),
+                ));
+            }
+            tx.after_cycle_closed(&item, "completed", &d.acceptance, "owner_finished")
+                .map_err(retry)?;
+        }
         /* a process still running in the worktree (a dev server) keeps it; the workspace watcher looks
          * again. Listed before the lock: it takes about a second */
         if let Some(cwd) = item.cwd.as_deref().filter(|c| !c.is_empty())
@@ -92,6 +116,10 @@ impl Consumer for WorkTidy {
             Err(e) => Err(ConsumeError::Retry(e.to_string())),
         }
     }
+}
+
+fn retry(error: impl std::fmt::Display) -> ConsumeError {
+    ConsumeError::Retry(error.to_string())
 }
 
 impl Core {

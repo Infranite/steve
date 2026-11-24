@@ -124,10 +124,10 @@ fn dismissing_a_reminder_clears_it_and_undo_brings_it_back() {
     k.core.dismiss_decision(&d, "me").unwrap();
     assert!(k.open_kinds(&i).is_empty());
     /* nothing else open and the session is idle: parked, so 继续 picks it up */
-    assert_eq!(k.status(&i).0, "pause");
+    assert_eq!(k.item_label(&i), "pause");
     k.core.undo_decision(&d, "me").unwrap();
     assert_eq!(k.open_kinds(&i).len(), 1);
-    assert_eq!(k.status(&i).0, "wait");
+    assert_eq!(k.item_label(&i), "wait");
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn dismissing_a_permission_denies_it_and_cannot_be_undone() {
     assert_eq!(k.rt.st().answered.last().unwrap(), &(p.clone(), None));
     assert!(k.core.undo_decision(&p, "me").is_err());
     /* the question is still open, so the item still waits */
-    assert_eq!(k.status(&i).0, "wait");
+    assert_eq!(k.item_label(&i), "wait");
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn dropping_an_item_clears_all_its_reminders() {
     k.decision(&i, None, "ask", "question", &[]);
     k.core.item_action(&i, ItemAction::Drop, "me").unwrap();
     assert!(k.open_kinds(&i).is_empty());
-    assert_eq!(k.status(&i).0, "drop");
+    assert_eq!(k.item_label(&i), "drop");
 }
 
 #[test]
@@ -178,10 +178,10 @@ fn finishing_an_item_clears_reminders_still_open_on_it() {
     let acc = k.decision(&i, None, "accept", "item", &["pass", "rework"]);
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &i,
             "dev",
-            crate::cycle::Policy::Human,
+            crate::cycle::ClosePolicy::Human,
             false,
             "交付",
             Some(acc.clone()),
@@ -189,7 +189,7 @@ fn finishing_an_item_clears_reminders_still_open_on_it() {
         )
         .unwrap();
     k.core.resolve(&acc, "pass", "", "me").unwrap();
-    assert_eq!(k.status(&i).0, "done");
+    assert_eq!(k.item_label(&i), "done");
     assert!(k.open_kinds(&i).is_empty());
 }
 
@@ -201,8 +201,7 @@ fn on_boot_reminders_left_on_finished_or_dropped_items_are_cleared() {
     steve_store::core_fixture::item(
         k.db().store(),
         &i,
-        steve_store::core_fixture::ItemState::Finished {
-            status: "drop",
+        steve_store::core_fixture::ItemState::Closed {
             outcome: "cancelled",
         },
     );
@@ -292,12 +291,12 @@ fn a_paused_item_is_not_resumed() {
 #[test]
 fn boot_expires_open_tool_permissions() {
     let k = Kit::new();
-    let i = k.item("wait", "执行", None);
+    let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
     let p = k.decision(&i, Some(&s), "approve", "tool_call", &["a|允许|allow_once"]);
     k.core.recover().unwrap();
     assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "expired");
-    assert_eq!(k.status(&i).0, "run");
+    assert!(k.open_kinds(&i).is_empty());
     assert!(
         k.db()
             .events_after(&s, 0)

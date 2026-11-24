@@ -2,9 +2,7 @@ use super::{execute, scalar};
 use crate::{Result, Store};
 
 pub fn seed_items(store: &Store) -> Result<()> {
-    execute(store, "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES
-           ('ST-1', 'default', 1, 'task', '报价单', 'run', '定义', 1, 1),
-           ('ST-2', 'default', 2, 'task', '交付', 'run', '定义', 2, 2);
+    execute(store, "INSERT INTO items(id, workspace_id, no, kind, title, phase, created, updated) VALUES ('ST-1', 'default', 1, 'task', '报价单', 'active', 1, 1),('ST-2', 'default', 2, 'task', '交付', 'active', 2, 2);
          INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES
            ('tag_a', 'default', 'A', '客户', '', 'usr_dev', 1), ('tag_b', 'default', 'B', '客户', '', 'usr_dev', 1);")
 }

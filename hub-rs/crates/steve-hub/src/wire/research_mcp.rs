@@ -62,18 +62,6 @@ pub fn tools() -> Vec<Value> {
     v
 }
 
-fn status_label(s: &str) -> &str {
-    match s {
-        "run" => "进行中",
-        "wait" => "等用户",
-        "block" => "等前置",
-        "pause" => "暂停",
-        "done" => "已完成",
-        "drop" => "已放弃",
-        o => o,
-    }
-}
-
 /// Which items a run's item tools see. Only the owner reads the answer: the workspace's items, all of
 /// them. Anyone else reads it too: only the items this conversation itself produced (its `thread_items`),
 /// and of those only what came from it (title, status, goal); no plan, timeline, delivery or “now”.
@@ -106,7 +94,7 @@ impl ItemScope {
     }
 }
 
-/// `steve_items_search`: up to 20 items whose title, goal or “now” contain every word of the query
+/// `steve_items_search`: up to 20 items whose title or goal contain every word of the query
 /// (in a conversation scope: title and goal, among its own items).
 pub fn items_search(
     store: &Store,
@@ -116,24 +104,17 @@ pub fn items_search(
 ) -> Result<String, String> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let items = store.items().all(ws).map_err(|e| e.to_string())?;
-    let all = matches!(scope, ItemScope::All);
     let mut out = vec![];
     for i in items.into_iter().filter(|i| scope.sees(&i.id)) {
         let goal = store.items().goal(&i.id).unwrap_or_default();
-        let now = if all { i.now.as_str() } else { "" };
-        let hay = format!("{} {} {} {}", i.id, i.title, goal, now).to_lowercase();
+        let hay = format!("{} {} {}", i.id, i.title, goal).to_lowercase();
         if words.iter().all(|w| hay.contains(w)) {
-            out.push(if all {
-                format!(
-                    "{} · {} · {} · 现在：{}",
-                    i.id,
-                    i.title,
-                    status_label(&i.status),
-                    i.now
-                )
-            } else {
-                format!("{} · {} · {}", i.id, i.title, status_label(&i.status))
-            });
+            out.push(format!(
+                "{} · {} · {}",
+                i.id,
+                i.title,
+                i.outcome.as_deref().unwrap_or_else(|| i.phase.as_str())
+            ));
         }
         if out.len() >= 20 {
             break;
@@ -255,19 +236,22 @@ pub fn item_read(store: &Store, ws: &str, scope: &ItemScope, id: &str) -> Result
             "{} {}\n状态：{}\n目标：{goal}\n",
             i.id,
             i.title,
-            status_label(&i.status)
+            i.outcome.as_deref().unwrap_or_else(|| i.phase.as_str())
         ));
     }
     // Read both ends of the history in one query so a concurrent goal edit cannot
     // pair a version with another version's text. Only the owner sees the history.
     let goals = store.items().goals(&i.id).map_err(|e| e.to_string())?;
     let mut s = format!(
-        "{} {}\n状态：{}\n现在：{}\n",
+        "{} {}\n状态：{}\n",
         i.id,
         i.title,
-        status_label(&i.status),
-        i.now
+        i.outcome.as_deref().unwrap_or_else(|| i.phase.as_str()),
     );
+    let tl = store.timeline().list(&i.id).map_err(|e| e.to_string())?;
+    if let Some(progress) = tl.iter().rev().find(|entry| entry.kind == "progress") {
+        s.push_str(&format!("进展：{}\n", progress.text));
+    }
     if let Some(current) = goals.last() {
         s.push_str(&format!(
             "目标：{}\n当前目标版本：{}\n",
@@ -292,7 +276,6 @@ pub fn item_read(store: &Store, ws: &str, scope: &ItemScope, id: &str) -> Result
             ));
         }
     }
-    let tl = store.timeline().list(&i.id).map_err(|e| e.to_string())?;
     if !tl.is_empty() {
         s.push_str("时间线（最近 20 条）：\n");
         for t in tl.iter().rev().take(20).rev() {

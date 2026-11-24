@@ -28,8 +28,8 @@ pub fn set_workflow_gate(store: &Store, gate: WorkflowGate, enabled: bool) -> Re
         }
         (WorkflowGate::WorkflowPaused, true) => "UPDATE workflows SET paused=1",
         (WorkflowGate::WorkflowPaused, false) => "UPDATE workflows SET paused=0",
-        (WorkflowGate::ItemPaused, true) => "UPDATE items SET status='pause' WHERE id='parent'",
-        (WorkflowGate::ItemPaused, false) => "UPDATE items SET status='run' WHERE id='parent'",
+        (WorkflowGate::ItemPaused, true) => "UPDATE items SET phase='paused' WHERE id='parent'",
+        (WorkflowGate::ItemPaused, false) => "UPDATE items SET phase='active' WHERE id='parent'",
         (WorkflowGate::ItemClosed, true) => "UPDATE items SET phase='closed' WHERE id='parent'",
         (WorkflowGate::ItemClosed, false) => "UPDATE items SET phase='active' WHERE id='parent'",
         (WorkflowGate::ItemStopping, true) => {

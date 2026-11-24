@@ -1,23 +1,9 @@
-//! The item's result as git sees it, beyond the worktree: its own change (what the frozen-result check
-//! compares, so a rebase or a reset onto the merged commit is not a new result), and where it landed
-//! upstream (what a project's completion rule `Release::done_when` asks for: merged into the remote's
-//! default branch, and a pushed tag that contains it).
-//!
-//! [`own_change`] and [`describe_change`] are local and run inside the critical section like the rest of
-//! the git work (for an item on a Node, `node_git` asks its Node the same off the lock). [`probe`] talks to the remote (fetch, `ls-remote`) with a deadline and must never run
-//! under the core's lock: callers run it on a thread of its own and come back with the result.
+//! Local Git comparisons for frozen worktree results and safe cleanup.
 
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
 
 use crate::git::git;
-use crate::util::js_head;
-
-pub use steve_store::{DONE_MERGE, DONE_TAG};
-
-/// How long a fetch or `ls-remote` may take.
-const NET_DEADLINE: Duration = Duration::from_secs(60);
 
 /// The refs a branch of the item may have started from, most authoritative first.
 const BASES: &[&str] = &[
@@ -176,191 +162,6 @@ pub(crate) fn describe_with(
     }
 }
 
-/// Fetches `origin` with its tags, with the network deadline. Never under the core's lock.
-pub fn fetch(dir: &Path) -> Result<(), String> {
-    git_net(dir, &["fetch", "--quiet", "--tags", "origin"]).map(|_| ())
-}
-
-/// The `vX.Y.Z` tags on `origin` and the commits they point at (annotated tags peeled), with the network
-/// deadline: what was released, as the remote says (a tag only made locally is not a release).
-pub fn remote_tags(dir: &Path) -> Result<Vec<(String, String)>, String> {
-    let out = git_net(dir, &["ls-remote", "--tags", "origin", "v*"])?;
-    let mut tags: Vec<(String, String)> = vec![];
-    for line in out.lines() {
-        let Some((sha, r)) = line.split_once('\t') else {
-            continue;
-        };
-        let Some(name) = r.strip_prefix("refs/tags/") else {
-            continue;
-        };
-        match name.strip_suffix("^{}") {
-            // the commit an annotated tag points at replaces the tag object's own id
-            Some(n) => match tags.iter_mut().find(|(t, _)| t == n) {
-                Some(t) => t.1 = sha.to_string(),
-                None => tags.push((n.to_string(), sha.to_string())),
-            },
-            None if !tags.iter().any(|(t, _)| t == name) => {
-                tags.push((name.to_string(), sha.to_string()))
-            }
-            None => {}
-        }
-    }
-    Ok(tags)
-}
-
-/// Pushes `HEAD` of `dir` to `origin` as `branch`, fast-forward only (a target that moved meanwhile is a
-/// rejection, never overwritten), with the network deadline. Never under the core's lock.
-pub fn push_head(dir: &Path, branch: &str) -> Result<(), String> {
-    let refspec = format!("HEAD:refs/heads/{branch}");
-    git_net(dir, &["push", "--quiet", "origin", &refspec]).map(|_| ())
-}
-
-/// `git args…` with a deadline (network calls). The output is drained while the command runs, and at the
-/// deadline git goes with whatever it started (`ssh`, `git-remote-https`, a credential helper).
-fn git_net(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let mut cmd = crate::git::command();
-    cmd.arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0");
-    match crate::util::run_deadline(cmd, NET_DEADLINE) {
-        Ok((true, out, _)) => Ok(out.trim().to_string()),
-        Ok((false, _, err)) => Err(js_head(err.trim(), 300).to_string()),
-        Err(crate::util::RunError::Spawn(e)) => Err(e.to_string()),
-        Err(_) => Err(format!("git {} 超时", args.first().unwrap_or(&""))),
-    }
-}
-
-/// `owner/repo` of a GitHub remote URL.
-pub fn github_slug(url: &str) -> Option<String> {
-    let rest = url
-        .strip_prefix("git@github.com:")
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| url.split_once("github.com/").map(|(_, r)| r))?;
-    let rest = rest.trim_end_matches('/').trim_end_matches(".git");
-    let mut p = rest.split('/');
-    let (o, r) = (p.next()?, p.next()?);
-    (!o.is_empty() && !r.is_empty()).then(|| format!("{o}/{r}"))
-}
-
-/// What [`probe`] found out about the item's result upstream.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Probe {
-    /// The rule asked for holds.
-    pub met: bool,
-    /// The remote default branch looked at (`origin/main`).
-    pub branch: String,
-    /// The upstream commit that brought the item's change in.
-    pub landed: Option<String>,
-    /// The pushed tag that contains it, and the tag's commit.
-    pub tag: Option<(String, String)>,
-    /// `owner/repo` when the remote is on GitHub.
-    pub slug: Option<String>,
-    /// What is still missing, in words (empty when `met`).
-    pub missing: Vec<String>,
-    /// The worktree or the remote could not be read (no worktree any more, a fetch that failed):
-    /// `missing` says why, and nothing about the item's change is known. Not the agent's to fix by
-    /// pushing: a card for you (#347).
-    pub unread: bool,
-}
-
-impl Probe {
-    /// One line for the timeline: what holds, or what is missing.
-    pub fn summary(&self) -> String {
-        let short = |s: &str| s.chars().take(7).collect::<String>();
-        if !self.missing.is_empty() {
-            return self.missing.join("；");
-        }
-        let mut s = format!(
-            "提交已合并到 {}（{}）",
-            self.branch,
-            self.landed.as_deref().map(short).unwrap_or_default()
-        );
-        if let Some((t, c)) = &self.tag {
-            s.push_str(&format!("，tag {t} 已推送（{}）", short(c)));
-        }
-        s
-    }
-}
-
-fn missing(m: impl Into<String>) -> Probe {
-    Probe {
-        missing: vec![m.into()],
-        ..Default::default()
-    }
-}
-
-/// [`Probe::unread`], with why.
-pub(crate) fn unread(m: impl Into<String>) -> Probe {
-    Probe {
-        unread: true,
-        ..missing(m)
-    }
-}
-
-/// Where the commit `head` of the worktree `dir` stands against `rule` (`merge` or `tag`), after
-/// fetching the remote `origin`. Talks to the network: never under the core's lock.
-pub fn probe(dir: &Path, rule: &str) -> Probe {
-    if !dir.is_dir() {
-        return unread("事项的工作区不在了");
-    }
-    if git(dir, &["status", "--porcelain"]).is_ok_and(|s| !s.is_empty()) {
-        return missing("工作区还有没提交的改动");
-    }
-    /* the URL as configured (`get-url` would apply `insteadOf`): it names the repository */
-    let Ok(url) = git(dir, &["config", "--get", "remote.origin.url"]) else {
-        return missing("没有 origin 远端，核对不了是否已合并");
-    };
-    if let Err(e) = fetch(dir) {
-        return unread(format!("取不到远端的最新状态：{e}"));
-    }
-    let Some(up) = [
-        "refs/remotes/origin/HEAD",
-        "refs/remotes/origin/main",
-        "refs/remotes/origin/master",
-    ]
-    .into_iter()
-    .find(|r| git(dir, &["rev-parse", "--verify", "--quiet", r]).is_ok()) else {
-        return missing("远端没有默认分支");
-    };
-    let branch = git(dir, &["rev-parse", "--abbrev-ref", up])
-        .ok()
-        .filter(|b| !b.is_empty() && b != "origin/HEAD")
-        .unwrap_or_else(|| up.trim_start_matches("refs/remotes/").to_string());
-    let mut p = Probe {
-        branch: branch.clone(),
-        slug: github_slug(&url),
-        ..Default::default()
-    };
-    let Ok(head) = git(dir, &["rev-parse", "HEAD"]) else {
-        return unread("读不到 HEAD");
-    };
-    match presence(dir, &head, up) {
-        Presence::Landed { commit } => p.landed = Some(commit),
-        Presence::Absent => {
-            p.missing
-                .push(format!("提交还不在 {branch} 上（PR 还没合并）"));
-            return p;
-        }
-        Presence::Unknown(e) => {
-            p.missing
-                .push(format!("查不到提交是否已在 {branch} 上：{e}"));
-            return p;
-        }
-    }
-    if rule == DONE_TAG {
-        p.tag = pushed_tag(dir, p.landed.as_deref().unwrap_or(&head));
-        if p.tag.is_none() {
-            p.missing.push("还没有推送包含这些提交的 tag".into());
-            return p;
-        }
-    }
-    p.met = true;
-    p
-}
-
-/// Whether a change is on a target branch. Not finding it and not being able to look are kept apart:
-/// a failed git is [`Presence::Unknown`], never [`Presence::Absent`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Presence {
     Absent,
@@ -373,7 +174,7 @@ pub enum Presence {
 
 /// The commit on `up` that brought `head`'s change in: `head` itself when it is on `up`, the rebased
 /// copy of its last commit (every own commit has an equivalent upstream), or a squash of all of them.
-/// Local git only: fetch first ([`fetch`]).
+/// Compare local objects and refs.
 pub fn presence(dir: &Path, head: &str, up: &str) -> Presence {
     match landed(dir, head, up) {
         Ok(Some(commit)) => Presence::Landed { commit },
@@ -413,60 +214,9 @@ fn landed(dir: &Path, head: &str, up: &str) -> Result<Option<String>, String> {
     Ok(all.first().and_then(|(p, _)| find(p)))
 }
 
-/// The pushed tag closest after `commit` that contains it (`(name, tag commit)`).
-fn pushed_tag(dir: &Path, commit: &str) -> Option<(String, String)> {
-    let out = git_net(dir, &["ls-remote", "--tags", "origin"]).ok()?;
-    let mut tags: Vec<(String, String)> = vec![];
-    for l in out.lines() {
-        let Some((sha, r)) = l.split_once('\t') else {
-            continue;
-        };
-        let Some(name) = r.strip_prefix("refs/tags/") else {
-            continue;
-        };
-        /* the peeled line (`^{}`) of an annotated tag names its commit */
-        let (name, peeled) = match name.strip_suffix("^{}") {
-            Some(n) => (n, true),
-            None => (name, false),
-        };
-        match tags.iter_mut().find(|(n, _)| n == name) {
-            Some(t) if peeled => t.1 = sha.into(),
-            Some(_) => {}
-            None => tags.push((name.into(), sha.into())),
-        }
-    }
-    tags.into_iter()
-        .filter(|(_, c)| {
-            git(dir, &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok()
-                && git(dir, &["merge-base", "--is-ancestor", commit, c]).is_ok()
-        })
-        .filter_map(|(n, c)| {
-            let d = git(dir, &["rev-list", "--count", &format!("{commit}..{c}")])
-                .ok()?
-                .parse::<u64>()
-                .ok()?;
-            Some((d, n, c))
-        })
-        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
-        .map(|(_, n, c)| (n, c))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn github_slugs() {
-        assert_eq!(
-            github_slug("git@github.com:Infranite/steve.git").as_deref(),
-            Some("Infranite/steve")
-        );
-        assert_eq!(
-            github_slug("https://github.com/Infranite/steve").as_deref(),
-            Some("Infranite/steve")
-        );
-        assert_eq!(github_slug("/tmp/origin.git"), None);
-    }
 
     #[test]
     fn fingerprints_parse_in_both_forms() {

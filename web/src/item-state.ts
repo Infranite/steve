@@ -2,7 +2,7 @@
  * The item page used to say where an item stands in six places (lifecycle status, the root agent, the
  * collaboration header, the stage, the "now" line, the notices) and they disagreed. This is the one answer
  * they all read: what is happening, and whose move it is. Pure, so it is tested alone. */
-import type { Closeout } from "./api.ts"
+import type { ItemView } from "./gen/ItemView.ts"
 import type { Workflow } from "./workflow.ts"
 
 export type StateKind =
@@ -14,13 +14,13 @@ export type StateKind =
   | "blocked"       // waiting for its prerequisites
   | "working"       // a session is running
   | "queued"        // your message waits for a session to take it
-  | "closing"       // Hub is following the accepted result through a PR
+  | "closing"       // the cycle is waiting to close
   | "idle"          // open, nothing running, nothing asked
 export type Tone = "run" | "wait" | "pause" | "done" | "fail" | "neutral"
 export type ItemState = { kind: StateKind; tone: Tone; /** whose move: you, Steve, the agents, or nobody (closed) */ move: "you" | "steve" | "agents" | "none"; detail?: string }
 
 /** the fields of a store `Item` this reads */
-export type StateItem = { st: string; closeout?: Closeout; now?: string; waits?: { q: string }[]; queued?: number; q?: unknown[] | null }
+export type StateItem = { st: string; phase?: ItemView["state"]["kind"]; progress?: string; waits?: { q: string }[]; queued?: number; q?: unknown[] | null }
 
 const TONE: Record<StateKind, Tone> = {
   done: "done", dropped: "neutral", failed: "fail", proposed: "wait", asking: "wait", unavailable: "fail",
@@ -36,15 +36,11 @@ const make = (kind: StateKind, detail?: string): ItemState =>
 export function itemState(i: StateItem, workflow: Workflow | null | undefined, running: boolean): ItemState {
   if (i.st === "done") return make("done")
   if (i.st === "drop") return make("dropped")
-  if (i.st === "fail") return make("failed", i.now)
+  if (i.st === "fail") return make("failed", i.progress)
   if (i.st === "prop") return make("proposed")
   if (i.waits?.length) return make("asking", i.waits[0].q)
-  if (i.closeout && i.st !== "pause" && i.st !== "block") {
-    const owner = i.closeout.next_owner
-    return { kind: "closing", tone: owner === "user" || i.closeout.sync_error ? "wait" : "run",
-      move: owner === "user" ? "you" : owner === "agent" ? "agents" : "steve" }
-  }
-  if (running) return make("working", i.now)
+  if (i.phase === "closing") return { ...make("closing"), move: "steve" }
+  if (running) return make("working", i.progress)
   // a graph from an earlier cycle is history: the item goes on in the current cycle like any other
   if (workflow && workflow.acceptance_mode !== "single_session" && workflow.current_cycle !== false) {
     /* the Hub puts why the graph cannot run after the completion blockers */
@@ -52,7 +48,7 @@ export function itemState(i: StateItem, workflow: Workflow | null | undefined, r
     if (workflow.paused) return make("graphPaused", workflow.blockers[0])
   }
   if (i.st === "pause") return make("paused")
-  if (i.st === "block") return make("blocked", i.now)
+  if (i.st === "block") return make("blocked", i.progress)
   if (i.queued ?? i.q?.length) return make("queued")
-  return make("idle", i.now)
+  return make("idle", i.progress)
 }

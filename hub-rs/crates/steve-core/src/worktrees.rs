@@ -17,7 +17,7 @@
 use std::path::Path;
 
 use crate::error::Result;
-use crate::repo::{Item, ItemExt};
+use crate::repo::Item;
 use crate::{Core, Tx, git, patch};
 
 impl Core {
@@ -40,7 +40,7 @@ impl Core {
             let Some((s, i)) = tx.current(session)? else {
                 return Ok(());
             };
-            if i.is_settled() {
+            if i.is_closed() || i.is_paused() {
                 return Ok(());
             }
             tx.end_session(&s.id)?;
@@ -154,7 +154,7 @@ impl Tx<'_> {
         }
         let f = git::branch_facts(Path::new(&p.path), branch, "main");
         /* an archived item gives back a clean worktree even when its branch is not in main */
-        if i.status == "done" && !i.archived && !f.landed {
+        if i.is_completed() && !i.archived && !f.landed {
             return Ok(true);
         }
         self.rt().tidy(&s.id, !f.merged)
@@ -202,7 +202,7 @@ impl Tx<'_> {
         let Some((_, i)) = self.current(session)? else {
             return Ok(());
         };
-        if i.is_settled() {
+        if i.is_closed() || i.is_paused() {
             return Ok(());
         }
         let why = if disk_low {

@@ -5,7 +5,7 @@
 use crate::git::tests::{branch_with, g, repo};
 use crate::patch;
 use crate::repo::{PlanStep, WS};
-use crate::runtime::{Check, Output};
+use crate::runtime::{AgentRuntime, Check, Output};
 use crate::testkit::Kit;
 use crate::{ItemAction, SupplementMode};
 use serde_json::json;
@@ -49,53 +49,7 @@ fn accepted_without_a_release_is_done() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    assert_eq!(k.status(&x.id).0, "done");
-}
-
-#[test]
-fn accepted_with_a_release_stays_in_progress_until_it_lands() {
-    let k = Kit::new();
-    let x = k.delivered(true);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    let (status, stage, now) = k.status(&x.id);
-    assert_ne!(status, "done");
-    assert_eq!(stage, "收尾");
-    assert_eq!(now, "等待发布");
-    /* the agent is told to publish */
-    assert!(
-        k.rt.prompts_of(&x.session)
-            .last()
-            .unwrap()
-            .starts_with("验收通过。确认改动都已提交到 steve/x 后")
-    );
-    last_json(&k, json!({"ok": true, "version": "v1", "item": x.id}));
-    k.core.report_release().unwrap();
-    // the release is evidence; the close also waits for the turn that was asked to publish
-    assert_eq!(k.phase(&x.id), "closing");
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    assert_eq!(k.status(&x.id).0, "done");
-    let r: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(k.home().join("releases/last.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(r["reported"], true);
-    let ns = k.core.notifications(WS).unwrap();
-    assert_eq!(
-        (
-            ns[0].kind.as_str(),
-            ns[0].level.as_str(),
-            ns[0].text.as_str()
-        ),
-        ("release", "success", "已发布新版本 v1")
-    );
-    assert_eq!(ns[0].item_id.as_deref(), Some(x.id.as_str()));
-    assert!(
-        k.db().messages(WS).unwrap().is_empty(),
-        "a success stays out of the conversation"
-    );
-    /* reported once */
-    k.core.report_release().unwrap();
-    assert_eq!(k.core.notifications(WS).unwrap().len(), 1);
+    assert_eq!(k.item_label(&x.id), "done");
 }
 
 #[test]
@@ -139,215 +93,12 @@ fn release_texts_follow_the_kind() {
 }
 
 #[test]
-fn release_declined_without_a_reason_finishes() {
-    let k = Kit::new();
-    let x = k.delivered(true);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    let r = k.decision(
-        &x.id,
-        Some(&x.session),
-        "approve",
-        "release",
-        &["yes", "no"],
-    );
-    k.core.resolve(&r, "no", "", "me").unwrap();
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    let (status, _, now) = k.status(&x.id);
-    assert_eq!(status, "done");
-    assert_eq!(now, "已验收");
-    // the requirement it needed is recorded as waived by you, not as released
-    let ops = k.db().store().items().operations(&x.id, 1).unwrap();
-    assert!(
-        ops.iter()
-            .any(|o| o.kind == "release" && o.status == "waived")
-    );
-}
-
-#[test]
-fn release_declined_with_a_reason_goes_back_to_the_agent() {
-    let k = Kit::new();
-    let x = k.delivered(true);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    /* the agent asks for the release in its turn, then ends it */
-    let r = k.decision(
-        &x.id,
-        Some(&x.session),
-        "approve",
-        "release",
-        &["yes", "no"],
-    );
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    k.core
-        .resolve(&r, "no", "走 PR 合进去就行，不用发布", "me")
-        .unwrap();
-    assert!(
-        k.rt.prompts_of(&x.session)
-            .last()
-            .unwrap()
-            .starts_with("用户没有批准发布：走 PR 合进去就行，不用发布。这个周期不再发布")
-    );
-    /* the conversation shows the choice with the note the agent got (ST-32) */
-    assert!(
-        k.timeline_texts(&x.id)
-            .contains(&format!("不发布 {}：走 PR 合进去就行，不用发布", x.session))
-    );
-    // the agent does what you said instead first: the close waits for that turn
-    assert_ne!(k.status(&x.id).0, "done");
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    let i = k.db().item(&x.id).unwrap().unwrap();
-    assert_eq!((i.status.as_str(), i.phase.as_str()), ("done", "closed"));
-    let ops = k.db().store().items().operations(&x.id, 1).unwrap();
-    let rel = ops.iter().find(|o| o.kind == "release").unwrap();
-    assert_eq!(rel.status, "waived");
-    assert_eq!(rel.evidence["reason"], "走 PR 合进去就行，不用发布");
-    assert!(
-        k.timeline_texts(&x.id)
-            .contains(&"你选择了不发布，发布这一步不再等".to_string())
-    );
-}
-
-/// The user said no to the release; the agent's follow-up work (a PR merged) made a new result, and
-/// accepting it again — or the user marking it done — must not wait for a release again (ST-27).
-#[test]
-fn a_no_to_the_release_holds_for_every_later_result_of_the_cycle() {
-    for by_user in [false, true] {
-        let k = Kit::new();
-        let x = k.delivered(true);
-        k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-        let r = k.decision(
-            &x.id,
-            Some(&x.session),
-            "approve",
-            "release",
-            &["yes", "no"],
-        );
-        k.core
-            .resolve(&r, "no", "走 PR 合并，不用发布", "me")
-            .unwrap();
-        // the agent's follow-up (a new message to it) voids the frozen result
-        k.core
-            .tx()
-            .lc_invalidate(&x.id, crate::cycle::void::MESSAGE, "收到新的消息")
-            .unwrap();
-        k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-        assert_eq!(k.phase(&x.id), "active");
-        let before = k.rt.prompts_of(&x.session).len();
-        if by_user {
-            k.finish(&x.id).unwrap();
-            // marking done stops the turn still at work; its end commits the close
-            k.rt.end_turn(&k.core, &x.session, "cancelled", None);
-        } else {
-            let s = k.db().session(&x.session).unwrap().unwrap();
-            k.db()
-                .item_patch(&x.id, patch![accept_mode: "auto"])
-                .unwrap();
-            k.core
-                .tool_deliver(
-                    &s,
-                    "PR 已合并",
-                    &[],
-                    &[Check {
-                        name: "tests".into(),
-                        passed: true,
-                        operated: false,
-                        scope: None,
-                    }],
-                    &[],
-                )
-                .unwrap();
-            k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-        }
-        let i = k.db().item(&x.id).unwrap().unwrap();
-        assert_eq!(
-            (i.status.as_str(), i.phase.as_str(), i.revision),
-            ("done", "closed", 2),
-            "by_user={by_user}"
-        );
-        assert!(
-            k.rt.prompts_of(&x.session)[before..]
-                .iter()
-                .all(|p| !p.contains("steve_publish")),
-            "nobody is asked to publish again"
-        );
-        let ops = k.db().store().items().operations(&x.id, 1).unwrap();
-        let rel = ops
-            .iter()
-            .find(|o| o.kind == "release" && o.revision == 2)
-            .unwrap();
-        assert_eq!(rel.status, "waived");
-        assert_eq!(rel.evidence["reason"], "走 PR 合并，不用发布");
-    }
-}
-
-#[test]
-fn an_approval_after_the_no_takes_it_back() {
-    let k = Kit::new();
-    let x = k.delivered(true);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    /* the agent asks for the release in its turn, then ends it */
-    let no = k.decision(
-        &x.id,
-        Some(&x.session),
-        "approve",
-        "release",
-        &["yes", "no"],
-    );
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    k.db()
-        .decision_resolve(
-            &no,
-            json!({"approved": false, "text": "先别发"}),
-            "resolved",
-            None,
-        )
-        .unwrap();
-    let yes = k.decision(
-        &x.id,
-        Some(&x.session),
-        "approve",
-        "release",
-        &["yes", "no"],
-    );
-    k.db()
-        .decision_resolve(
-            &yes,
-            json!({"approved": true, "text": ""}),
-            "resolved",
-            None,
-        )
-        .unwrap();
-    // The approving answer is strictly newer than the real preceding refusal.
-    let no_at = k.db().decision(&no).unwrap().unwrap().resolved.unwrap();
-    let yes_row = k.db().decision(&yes).unwrap().unwrap();
-    let yes_at = yes_row
-        .created
-        .max(yes_row.resolved.unwrap())
-        .max(no_at + 1);
-    steve_store::core_fixture::decision(
-        k.db().store(),
-        &yes,
-        steve_store::core_fixture::DecisionState::CreatedAndResolved {
-            created: yes_at,
-            resolved: yes_at,
-        },
-    );
-    let i = k.db().item(&x.id).unwrap().unwrap();
-    assert_eq!(k.core.tx().release_declined(&i).unwrap(), None);
-    k.core.tx().lc_try_close(&x.id).unwrap();
-    assert_eq!(k.phase(&x.id), "closing", "it still waits for the release");
-}
-
-/// The agent asked about the release after the acceptance (instead of publishing); the answer is handled
-/// first, then the close is judged again: only the release is left and nobody requested it, so the item
-/// completes without one (2026-11-09: the agent's judgment stands, no card).
-#[test]
 fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again() {
     let k = Kit::new();
-    let x = k.delivered(true);
+    let x = k.delivered(false);
+    k.rt.prompt(&x.session, "in flight", "steve", &[]).unwrap();
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    let accepted_at = crate::cycle::closing_of(&k.db().item(&x.id).unwrap().unwrap())
-        .unwrap()
-        .at;
+    let accepted_at = k.db().item(&x.id).unwrap().unwrap().closing.unwrap().at;
     let q = k.decision(&x.id, Some(&x.session), "ask", "question", &[]);
     let question_at = k
         .db()
@@ -363,9 +114,9 @@ fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again(
     );
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     let i = k.db().item(&x.id).unwrap().unwrap();
-    let c = crate::cycle::closing_of(&i).unwrap();
+    let c = i.closing.clone().unwrap();
     assert!(
-        k.core.tx().lc_gate(&i, &c).unwrap().decision,
+        k.core.tx().delivery_blockers(&i, &c).unwrap().decision,
         "the open question holds the close"
     );
     assert!(
@@ -375,33 +126,9 @@ fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again(
     k.core
         .resolve(&q, "answer", "不发布，保持现状", "me")
         .unwrap();
-    assert_eq!(k.status(&x.id).2, "收到回答，继续");
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    assert_eq!(k.status(&x.id).0, "done");
+    assert_eq!(k.item_label(&x.id), "done");
     assert!(k.open_fails(&x.id).is_empty(), "no card asks");
-}
-
-#[test]
-fn only_the_release_left_and_not_requested_completes_without_it() {
-    let k = Kit::new();
-    let x = k.delivered(true);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    assert_eq!(k.status(&x.id).0, "done");
-    assert!(k.open_fails(&x.id).is_empty());
-    assert!(
-        k.db()
-            .store()
-            .items()
-            .operations(&x.id, k.db().item(&x.id).unwrap().unwrap().cycle)
-            .unwrap()
-            .iter()
-            .any(|o| o.kind == "release" && o.status == "waived")
-    );
-    assert!(
-        k.timeline_texts(&x.id)
-            .contains(&"验收已经通过，Agent 没有请求发布：不发布，按验收完成".to_string())
-    );
 }
 
 #[test]
@@ -409,26 +136,30 @@ fn a_new_message_on_a_closed_item_is_refused_until_a_new_cycle() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    assert_eq!(k.status(&x.id).0, "done");
+    assert_eq!(k.item_label(&x.id), "done");
     let e = k
         .core
         .session_message(&x.session, "再改一下", false, &[])
         .unwrap_err();
     assert!(e.to_string().contains("已经结束了"), "{e}");
-    assert_eq!(k.status(&x.id).0, "done", "nothing reopened it");
+    assert_eq!(k.item_label(&x.id), "done", "nothing reopened it");
     assert!(
         !k.timeline_texts(&x.id).contains(&"再改一下".to_string()),
         "nothing of it was written"
     );
     // an explicit new cycle: the first cycle stays as it closed
+    let expected = k.db().item(&x.id).unwrap().unwrap().cas_revision;
     k.core
-        .lifecycle_command(&x.id, "new_cycle", 1, 1, None, None, "me")
+        .lifecycle_command(&x.id, "new_cycle", 1, expected, None, None, "me")
         .unwrap();
     k.core
         .session_message(&x.session, "再改一下", false, &[])
         .unwrap();
     let i = k.db().item(&x.id).unwrap().unwrap();
-    assert_eq!((i.phase.as_str(), i.cycle, i.revision), ("active", 2, 0));
+    assert_eq!(
+        (i.phase.as_str(), i.cycle, i.delivery_revision),
+        ("active", 2, 0)
+    );
     let cycles = k.db().store().items().cycles(&x.id).unwrap();
     assert_eq!(cycles.len(), 1);
     assert_eq!(
@@ -455,68 +186,7 @@ fn supplementing_a_closed_item_is_refused() {
         before,
         "nothing reached the agent"
     );
-    assert_eq!(k.status(&x.id).0, "done");
-}
-
-#[test]
-fn a_failed_release_reopens_with_a_fail_card() {
-    let k = Kit::new();
-    let x = k.delivered(true);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    assert_eq!(k.status(&x.id).2, "等待发布");
-    last_json(
-        &k,
-        json!({"ok": false, "version": "v2", "prev": "v1", "item": x.id, "error": "构建失败"}),
-    );
-    k.core.report_release().unwrap();
-    let (status, stage, _) = k.status(&x.id);
-    assert_ne!(status, "done");
-    assert_eq!(stage, "收尾");
-    assert_eq!(
-        k.open_fails(&x.id),
-        vec!["发布 v2 失败，已回到 v1：构建失败"]
-    );
-    /* a failure is a notification; the fail card is what the user acts on, no copy in the conversation */
-    let n = &k.core.notifications(WS).unwrap()[0];
-    assert_eq!(n.level, "fail");
-    assert!(
-        !k.db()
-            .messages(WS)
-            .unwrap()
-            .iter()
-            .any(|m| m.text == n.text),
-        "not repeated in the conversation"
-    );
-}
-
-#[test]
-fn auto_accepted_with_a_release_pending_is_not_done_either() {
-    let k = Kit::new();
-    let x = k.delivered(true);
-    k.db()
-        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
-        .unwrap();
-    k.db()
-        .item_patch(&x.id, patch![accept_mode: "auto"])
-        .unwrap();
-    let s = k.db().session(&x.session).unwrap().unwrap();
-    k.core
-        .tool_deliver(
-            &s,
-            "ok",
-            &[],
-            &[Check {
-                name: "tests".into(),
-                passed: true,
-                operated: false,
-                scope: None,
-            }],
-            &[],
-        )
-        .unwrap();
-    let (status, _, now) = k.status(&x.id);
-    assert_ne!(status, "done");
-    assert_eq!(now, "等待发布");
+    assert_eq!(k.item_label(&x.id), "done");
 }
 
 /// Automatic acceptance closes clean deliveries (including reported unrelated baseline failures),
@@ -550,7 +220,7 @@ fn auto_accept_holds_failed_or_unfinished_delivery_and_closes_clean_or_baseline(
             &["待恢复外部上游".into()],
         )
         .unwrap();
-    assert_eq!(k.status(&x.id).0, "wait");
+    assert!(!k.open_kinds(&x.id).is_empty());
     assert_eq!(k.open_kinds(&x.id), vec!["accept"]);
     assert!(
         k.timeline_texts(&x.id)
@@ -583,7 +253,7 @@ fn auto_accept_holds_failed_or_unfinished_delivery_and_closes_clean_or_baseline(
         k.open_kinds(&x.id).is_empty(),
         "clean delivery closes automatically"
     );
-    assert_eq!(k.status(&x.id).0, "done");
+    assert_eq!(k.item_label(&x.id), "done");
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(i.acceptance.as_deref(), Some("automatic"));
 }
@@ -607,11 +277,11 @@ fn design_delivery_waits_for_the_users_implementation_decision() {
         .into_iter()
         .find(|d| d.status == "open" && d.subject_type == "design_implementation")
         .unwrap();
-    assert_eq!(k.status(&item).0, "wait");
+    assert!(!k.open_kinds(&item).is_empty());
     k.core
         .resolve(&decision.id, "只保留设计", "", "me")
         .unwrap();
-    assert_eq!(k.status(&item).0, "done");
+    assert_eq!(k.item_label(&item), "done");
 }
 
 /// Q1: the words of a goal no longer open the design gate. With the switch off (the default), a goal
@@ -640,7 +310,6 @@ fn design_goal_without_the_switch_is_an_ordinary_delivery() {
                 .all(|d| d.subject_type != "design_implementation"),
             "{goal}"
         );
-        assert_ne!(k.status(&item).1, "设计确认", "{goal}");
     }
 }
 
@@ -707,7 +376,6 @@ fn confirming_design_starts_implementation_without_reasking_the_design_question(
             .unwrap()
             .starts_with("按用户确认的设计报告实现")
     );
-    assert_eq!(k.status(&item).1, "执行");
     assert!(
         k.db()
             .decisions_of_item(&item)
@@ -730,7 +398,6 @@ fn confirming_design_starts_implementation_without_reasking_the_design_question(
             .count(),
         1
     );
-    assert_ne!(k.status(&item).1, "设计确认");
 }
 
 /// The approval covers the implementation goal it added; a goal set after it is a new scope whose
@@ -764,7 +431,6 @@ fn a_new_goal_after_the_approval_is_gated_again() {
         .tool_deliver(&session, "深色模式方案", &[report], &[], &[])
         .unwrap();
     assert!(open_design(&k).is_some());
-    assert_eq!(k.status(&item).1, "设计确认");
 }
 
 #[test]
@@ -793,7 +459,7 @@ fn changed_design_file_cannot_reuse_the_old_approval() {
             .resolve(&decision.id, "按方案实现", "", "me")
             .is_err()
     );
-    assert_eq!(k.status(&item).0, "wait");
+    assert!(!k.open_kinds(&item).is_empty());
 }
 
 #[test]
@@ -1000,7 +666,7 @@ fn finishing_never_ticks_steps_off() {
     let plan = vec![step("a", true), step("b", false)];
     k.db().item_patch(&x.id, patch![plan: plan]).unwrap();
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    assert_eq!(k.status(&x.id).0, "done");
+    assert_eq!(k.item_label(&x.id), "done");
     assert_eq!(
         plan_of(&k, &x.id),
         vec![("a".into(), true, false), ("b".into(), false, true)]
@@ -1056,13 +722,13 @@ fn a_plan_sent_after_the_close_is_noted_and_reopens_nothing() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    assert_eq!(k.status(&x.id).0, "done");
+    assert_eq!(k.item_label(&x.id), "done");
     let s = k.db().session(&x.session).unwrap().unwrap();
     k.core
         .tool_update(&s, "补一步", &[step("a", true), step("b", false)])
         .unwrap();
     assert_eq!(
-        k.status(&x.id).0,
+        k.item_label(&x.id),
         "done",
         "a closed cycle is not reopened by a plan"
     );
@@ -1085,7 +751,7 @@ fn open_steps_while_closing_are_recorded_and_keep_the_frozen_result() {
         .tool_update(&s, "补一步", &[step("a", true), step("b", false)])
         .unwrap();
     let i = k.db().item(&x.id).unwrap().unwrap();
-    assert_eq!(i.phase, "closing", "the delivery stands");
+    assert_eq!(i.phase.as_str(), "closing", "the delivery stands");
     assert_eq!(i.plan.len(), 2, "the plan is recorded");
     assert_eq!(
         k.open_kinds(&x.id),
@@ -1111,7 +777,7 @@ fn undoing_an_acceptance_before_the_close_takes_it_back() {
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     assert_eq!(k.phase(&x.id), "closing");
     assert_eq!(
-        k.status(&dep).0,
+        k.item_label(&dep),
         "block",
         "nothing unblocked before the close"
     );
@@ -1123,7 +789,7 @@ fn undoing_an_acceptance_before_the_close_takes_it_back() {
         "closing",
         "waiting for your acceptance again"
     );
-    assert_eq!(k.status(&dep).0, "block");
+    assert_eq!(k.item_label(&dep), "block");
 }
 
 #[test]
@@ -1134,11 +800,11 @@ fn undoing_an_acceptance_of_a_closed_cycle_is_refused_and_a_started_dependent_ru
     k.core.add_dep(&dep, &x.id).unwrap();
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     /* auto start: a session began on the dependent */
-    assert_eq!(k.status(&dep).0, "run");
+    assert_eq!(k.item_label(&dep), "run");
     let e = k.core.undo_decision(&x.decision, "me").unwrap_err();
     assert!(e.to_string().contains("已经结束了"), "{e}");
-    assert_eq!(k.status(&x.id).0, "done");
-    assert_eq!(k.status(&dep).0, "run");
+    assert_eq!(k.item_label(&x.id), "done");
+    assert_eq!(k.item_label(&dep), "run");
 }
 
 #[test]
@@ -1176,8 +842,9 @@ fn a_dropped_item_gives_back_its_clean_worktree_and_a_new_message_brings_it_back
             .supplement(&i, "还是要做", SupplementMode::Auto, &[])
             .is_err()
     );
+    let expected = k.db().item(&i).unwrap().unwrap().cas_revision;
     k.core
-        .lifecycle_command(&i, "new_cycle", 1, 0, None, Some("还是要做"), "me")
+        .lifecycle_command(&i, "new_cycle", 1, expected, None, Some("还是要做"), "me")
         .unwrap();
     assert_eq!(k.phase(&i), "active");
     assert!(
@@ -1229,7 +896,6 @@ pub(super) fn delivered_in_git(k: &Kit, commit: bool) -> (super::Delivered, std:
     let rel = crate::repo::Release {
         kind: "script".into(),
         cmd: k.home().join("release.sh").to_string_lossy().into(),
-        done_when: None,
     };
     let gp = k
         .db()
@@ -1281,95 +947,6 @@ pub(super) fn release_decisions(k: &Kit, item: &str) -> usize {
 }
 
 #[test]
-fn accepted_with_nothing_on_the_branch_asks_whether_it_is_live() {
-    let k = Kit::new();
-    let (x, wt) = delivered_in_git(&k, false);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    // nothing on the branch is no proof of a deployment: you are asked, it does not close by itself
-    assert_eq!(k.phase(&x.id), "closing");
-    assert_eq!(k.status(&x.id).2, "等你确认是否已上线");
-    assert!(
-        k.rt.prompts_of(&x.session)
-            .iter()
-            .all(|p| !p.contains("steve_publish")),
-        "the agent is not told to publish"
-    );
-    assert_eq!(release_decisions(&k, &x.id), 0);
-    let card = k
-        .db()
-        .decisions_of_item(&x.id)
-        .unwrap()
-        .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
-        .expect("a card asks");
-    k.core.resolve(&card.id, "release_waive", "", "me").unwrap();
-    let i = k.db().item(&x.id).unwrap().unwrap();
-    assert_eq!(
-        (i.status.as_str(), i.acceptance.as_deref()),
-        ("done", Some("human"))
-    );
-    let ops = k.db().store().items().operations(&x.id, 1).unwrap();
-    assert!(
-        ops.iter()
-            .any(|o| o.kind == "release" && o.status == "waived")
-    );
-    k.pump_outbox();
-    assert!(!wt.exists(), "the empty worktree is given back");
-}
-
-#[test]
-fn accepted_with_a_commit_on_the_branch_waits_for_the_release() {
-    let k = Kit::new();
-    let (x, _) = delivered_in_git(&k, true);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    let (status, stage, now) = k.status(&x.id);
-    assert_ne!(status, "done");
-    assert_eq!((stage.as_str(), now.as_str()), ("收尾", "等待发布"));
-    assert!(
-        k.rt.prompts_of(&x.session)
-            .last()
-            .unwrap()
-            .starts_with("验收通过。确认改动都已提交到 steve/")
-    );
-}
-
-#[test]
-fn accepted_with_uncommitted_files_waits_for_the_release_and_publishing_nothing_asks_you() {
-    let k = Kit::new();
-    let (x, wt) = delivered_in_git(&k, false);
-    std::fs::write(wt.join("note.md"), "x").unwrap();
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    assert_eq!(k.status(&x.id).2, "等待发布");
-    /* the agent finds nothing worth keeping and publishes anyway */
-    std::fs::remove_file(wt.join("note.md")).unwrap();
-    let s = k.db().session(&x.session).unwrap().unwrap();
-    let branch = k.db().item(&x.id).unwrap().unwrap().branch.unwrap();
-    let e = k.core.tool_publish(&s, &branch, "说明").unwrap_err();
-    assert!(
-        e.to_string()
-            .starts_with("没有需要发布的改动，不用发布；已请用户确认"),
-        "{e}"
-    );
-    assert_ne!(
-        k.status(&x.id).0,
-        "done",
-        "publishing nothing finishes nothing"
-    );
-    assert_eq!(release_decisions(&k, &x.id), 0);
-    // you checked: it is live
-    let card = k
-        .db()
-        .decisions_of_item(&x.id)
-        .unwrap()
-        .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
-        .expect("a card asks");
-    k.core.resolve(&card.id, "release_live", "", "me").unwrap();
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    assert_eq!(k.status(&x.id).0, "done");
-}
-
-#[test]
 fn publish_with_nothing_before_acceptance_refuses_and_leaves_the_item() {
     let k = Kit::new();
     let (x, _) = delivered_in_git(&k, false);
@@ -1377,213 +954,13 @@ fn publish_with_nothing_before_acceptance_refuses_and_leaves_the_item() {
     let branch = k.db().item(&x.id).unwrap().unwrap().branch.unwrap();
     let e = k.core.tool_publish(&s, &branch, "说明").unwrap_err();
     assert!(e.to_string().starts_with("没有需要发布的改动，不用发布"));
-    assert_ne!(k.status(&x.id).0, "done");
+    assert_ne!(k.item_label(&x.id), "done");
     assert_eq!(release_decisions(&k, &x.id), 0);
     assert_eq!(k.open_kinds(&x.id), vec!["accept".to_string()]);
 }
 
 /// Items left by the old code (ST-27, ST-30, ST-35): accepted, a release card answered no with a
 /// reason, the release still pending, the agent idle. The periodic check closes them by that no.
-#[test]
-fn a_closing_left_waiting_despite_a_recorded_no_closes_on_the_next_check() {
-    let k = Kit::new();
-    let x = k.delivered(true);
-    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    let r = k.decision(
-        &x.id,
-        Some(&x.session),
-        "approve",
-        "release",
-        &["yes", "no"],
-    );
-    // recorded the way the old code left it: the answer, nothing waived
-    k.db()
-        .decision_resolve(
-            &r,
-            json!({"approved": false, "text": "合pr到master"}),
-            "resolved",
-            None,
-        )
-        .unwrap();
-    k.rt.st().turning.clear();
-    k.db()
-        .session_patch(&x.session, patch![status: "idle"])
-        .unwrap();
-    assert_eq!(k.phase(&x.id), "closing");
-    assert_eq!(k.core.tx().lc_tick().unwrap(), 1);
-    let i = k.db().item(&x.id).unwrap().unwrap();
-    assert_eq!((i.status.as_str(), i.phase.as_str()), ("done", "closed"));
-}
-
-/// [`delivered_in_git`] delivered again with the worktree as it is, so the closing holds its frozen
-/// fingerprint (as `steve_deliver` leaves it); a release script that waits. Returns the acceptance.
-fn frozen_in_git(k: &Kit) -> (super::Delivered, std::path::PathBuf, String) {
-    let (x, wt) = delivered_in_git(k, true);
-    std::fs::write(
-        k.home().join("release.sh"),
-        super::fake_release_script("exit 0\n"),
-    )
-    .unwrap();
-    k.core
-        .tx()
-        .lc_invalidate(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
-        .unwrap();
-    let d = k.decision(
-        &x.id,
-        Some(&x.session),
-        "accept",
-        "item",
-        &["pass", "rework"],
-    );
-    k.core
-        .tx()
-        .lc_request_complete(
-            &x.id,
-            "dev",
-            crate::cycle::Policy::Human,
-            false,
-            "交付",
-            Some(d.clone()),
-            vec![],
-        )
-        .unwrap();
-    (x, wt, d)
-}
-
-fn release_cards(k: &Kit, item: &str) -> Vec<crate::repo::Decision> {
-    k.db()
-        .decisions_of_item(item)
-        .unwrap()
-        .into_iter()
-        .filter(|d| d.kind == "approve" && d.subject_type == "release")
-        .collect()
-}
-
-#[test]
-fn accept_and_release_starts_the_release_without_a_round_of_the_agent() {
-    let k = Kit::new();
-    let (x, _, d) = frozen_in_git(&k);
-    let prompts = k.rt.prompts_of(&x.session).len();
-    k.core
-        .resolve(&d, "pass", crate::orchestrator::ACCEPT_AND_RELEASE, "me")
-        .unwrap();
-    let cards = release_cards(&k, &x.id);
-    assert_eq!(cards.len(), 1);
-    let r = &cards[0];
-    assert_eq!(r.status, "resolved");
-    assert_eq!(r.result["approved"], true);
-    assert_eq!(r.result["with_accept"], true);
-    assert_eq!(r.result["outcome"], "releasing");
-    assert_eq!(
-        k.db().decision(&d).unwrap().unwrap().result["release"],
-        "started"
-    );
-    let frozen = crate::cycle::closing_of(&k.db().item(&x.id).unwrap().unwrap())
-        .unwrap()
-        .fingerprint;
-    assert_eq!(r.result["fingerprint"].as_str(), frozen.as_deref());
-    assert!(
-        k.core
-            .tx()
-            .st
-            .releasing
-            .as_ref()
-            .is_some_and(|r| r.item == x.id)
-    );
-    // the agent is not asked to publish: no new prompt, a note waits for its next message
-    assert_eq!(k.rt.prompts_of(&x.session).len(), prompts);
-    assert!(
-        k.core
-            .with_steve_note(&x.session, "")
-            .contains("已经开始发布")
-    );
-    assert_eq!(k.status(&x.id).2, "正在发布");
-    assert!(
-        k.timeline_texts(&x.id)
-            .iter()
-            .any(|t| t.starts_with("验收并发布 "))
-    );
-    k.core.tx().st.releasing = None;
-}
-
-#[test]
-fn accept_and_release_falls_back_to_the_agent_when_the_branch_moved_or_a_release_runs() {
-    // the worktree changed after the delivery was frozen: the agent's own request (a card) decides
-    let k = Kit::new();
-    let (x, wt, d) = frozen_in_git(&k);
-    std::fs::write(wt.join("x.txt"), "changed\n").unwrap();
-    k.core
-        .resolve(&d, "pass", crate::orchestrator::ACCEPT_AND_RELEASE, "me")
-        .unwrap();
-    assert!(release_cards(&k, &x.id).is_empty());
-    assert!(k.core.tx().st.releasing.is_none());
-
-    // another release is running
-    let k = Kit::new();
-    let (x, _, d) = frozen_in_git(&k);
-    k.core.tx().st.releasing = Some(crate::Releasing {
-        token: "t".into(),
-        item: "ST-99".into(),
-        generation: 1,
-        hold_since: None,
-    });
-    k.core
-        .resolve(&d, "pass", crate::orchestrator::ACCEPT_AND_RELEASE, "me")
-        .unwrap();
-    assert!(release_cards(&k, &x.id).is_empty());
-    assert!(
-        k.rt.prompts_of(&x.session)
-            .last()
-            .unwrap()
-            .starts_with("验收通过。确认改动都已提交到 steve/"),
-        "the agent is asked to request it"
-    );
-    k.core.tx().st.releasing = None;
-}
-
-#[test]
-fn accept_without_release_waives_it() {
-    let k = Kit::new();
-    let (x, _, d) = frozen_in_git(&k);
-    k.core.resolve(&d, "pass", "no-release", "me").unwrap();
-    assert!(release_cards(&k, &x.id).is_empty());
-    assert!(
-        k.db()
-            .store()
-            .items()
-            .operations(&x.id, k.db().item(&x.id).unwrap().unwrap().cycle)
-            .unwrap()
-            .iter()
-            .any(|o| o.kind == "release" && o.status == "waived")
-    );
-}
-
-#[test]
-fn accept_and_release_with_a_rebase_conflict_sends_the_agent_to_steve_publish_only() {
-    let k = Kit::new();
-    let (x, _, d) = frozen_in_git(&k);
-    // main moved under the branch's own file: the rebase before the release conflicts
-    let r = k.home().join("repo");
-    std::fs::write(r.join("x.txt"), "theirs\n").unwrap();
-    g(&r, &["add", "."]);
-    g(&r, &["commit", "-q", "-m", "main x"]);
-    k.core
-        .resolve(&d, "pass", crate::orchestrator::ACCEPT_AND_RELEASE, "me")
-        .unwrap();
-    assert!(k.core.tx().st.releasing.is_none());
-    let last = k.rt.prompts_of(&x.session).last().cloned().unwrap();
-    assert!(
-        last.contains("有冲突") && last.contains("再用 steve_publish 请求发布"),
-        "{last}"
-    );
-    assert!(!last.contains("已经开始发布"), "{last}");
-    // and nothing waits to tell it later that the release started
-    assert_eq!(k.core.with_steve_note(&x.session, "next"), "next");
-    assert_eq!(
-        release_cards(&k, &x.id)[0].result["outcome"],
-        "not_released"
-    );
-}
 
 /* ── only a person's input voids a completion; your Finish wins over Steve's automation (#347) ── */
 
@@ -1612,11 +989,6 @@ fn a_queued_steve_message_and_your_finish_complete_the_item() {
     assert_eq!(i.outcome.as_deref(), Some("completed"));
     let t = k.timeline_texts(&x.id);
     assert!(!t.iter().any(|l| l.contains("收到新的消息")), "{t:?}");
-    assert!(
-        t.iter()
-            .any(|l| l == "你标记了完成，Steve 排队给 Bot 的 1 条消息不再发送"),
-        "{t:?}"
-    );
     assert!(k.db().queued(&x.session).unwrap().is_empty());
 }
 

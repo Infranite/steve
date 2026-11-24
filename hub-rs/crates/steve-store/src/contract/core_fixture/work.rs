@@ -227,18 +227,6 @@ pub fn retire_as_cancelled(store: &Store, item: &str) {
     }).unwrap();
 }
 
-pub fn run_judges_now(store: &Store) {
-    store
-        .write(|w| {
-            w.exec(
-                Query::update()
-                    .table("item_judge_candidates")
-                    .value("next_check", 0_i64),
-            )
-        })
-        .unwrap();
-}
-
 pub struct Audit {
     pub actor: String,
     pub target: String,

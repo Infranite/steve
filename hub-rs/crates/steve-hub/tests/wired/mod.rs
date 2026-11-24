@@ -1065,11 +1065,10 @@ async fn plugin_identity_roundtrip(bot: bool) {
                     .collect();
                 if let [dir] = &dirs[..]
                     && let Ok(listen) = std::fs::read_to_string(dir.join("data/listen.txt"))
+                    && let Ok(address) = listen.trim().parse()
                     && let Ok(token) = std::fs::read_to_string(dir.join("token"))
                 {
-                    let fake = FakeExtWs::start_at(listen.trim().parse().expect("listen address"))
-                        .await
-                        .expect("fake");
+                    let fake = FakeExtWs::start_at(address).await.expect("fake");
                     fake.with(|w| {
                         w.token = token;
                         if bot {

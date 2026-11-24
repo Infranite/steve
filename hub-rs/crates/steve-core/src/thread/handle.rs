@@ -9,7 +9,7 @@ use super::{AT, Job, Steps, lock, route_step};
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{Route, Said};
-use crate::repo::{FileRef, ItemExt};
+use crate::repo::FileRef;
 use crate::util::{js_head, now};
 use regex::Regex;
 use serde_json::{Map, Value, json};
@@ -33,19 +33,6 @@ pub(super) static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
 
 /// How long a spoken “别建事项” reaches back.
 const REROUTE_WINDOW: i64 = 10 * 60 * 1000;
-
-fn status_label(s: &str) -> &str {
-    match s {
-        "run" => "进行中",
-        "wait" => "等你处理",
-        "block" => "等前置事项",
-        "pause" => "暂停了",
-        "done" => "已完成",
-        "drop" => "已放弃",
-        "propose" => "等你确认",
-        other => other,
-    }
-}
 
 /// The items the routing made or touched, for `route_log`.
 struct Logged {
@@ -225,7 +212,7 @@ impl Core {
         if let Some(id) = target.filter(|_| !guest)
             && db
                 .item(&id)?
-                .is_some_and(|i| i.workspace_id == ws && !i.is_finished())
+                .is_some_and(|i| i.workspace_id == ws && !i.is_closed())
         {
             if PROGRESS.is_match(text) {
                 self.log_fixed(ws, mid, "status", Some(&id))?;
@@ -340,7 +327,7 @@ impl Core {
         if !guest
             && (d.kind == "supplement" || d.for_item.is_some())
             && let Some(id) = r.item.as_deref()
-            && db.item(id)?.is_some_and(|i| i.is_finished())
+            && db.item(id)?.is_some_and(|i| i.is_closed())
         {
             d.kind = "suggest".into();
             d.guard = Some("closed");
@@ -512,10 +499,13 @@ impl Core {
         let Some(i) = self.store().item(id)? else {
             return Ok(format!("没找到 {id}。"));
         };
-        let mut s = format!("{}「{}」：{}。", i.id, i.title, status_label(&i.status));
-        if !i.now.trim().is_empty() {
-            s.push_str(&format!("现在：{}。", i.now.trim()));
-        }
+        let mut s = format!(
+            "{}「{}」：{}。",
+            i.id,
+            i.title,
+            i.outcome.as_deref().unwrap_or_else(|| i.phase.as_str())
+        );
+
         if !i.plan.is_empty() {
             let done = i.plan.iter().filter(|p| p.done).count();
             s.push_str(&format!("计划完成 {done}/{} 步。", i.plan.len()));
@@ -554,7 +544,7 @@ impl Core {
                         .item(&t.item_id)
                         .ok()
                         .flatten()
-                        .is_some_and(|i| !i.is_finished())
+                        .is_some_and(|i| !i.is_closed())
             });
             if let Some(t) = target
                 && let Some(rm) = t.reply_msg.clone()

@@ -1,7 +1,7 @@
 /* ST-50: history pages and the latest messages share one revisioned view table. */
 import { useSyncExternalStore } from "react"
 import { modReq, qs, type ConversationMessage } from "@/api"
-import { chatMessage, closedSt, msgOf, msgOfView, type Msg } from "@/store"
+import { chatMessage, msgOf, msgOfView, type Msg } from "@/store"
 import { itemView, loadMessagePage, messagePageState, messageViews, onViews, scopeKey, table, useMessagePage } from "@/data/sync"
 
 const empty: string[] = []
@@ -12,7 +12,7 @@ function threadIds() {
   lastTable = t
   const next = messageViews().filter((v) => {
     const m = msgOfView(v), meta = v.meta as { hidden?: boolean } | null
-    return !m.held && !meta?.hidden && !m.notice?.closed && !(m.notice && m.item && closedSt(itemView(m.item)?.status))
+    return !m.held && !meta?.hidden && !m.notice?.closed && !(m.notice && m.item && itemView(m.item)?.state.kind === "closed")
   }).sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : a.id === b.id ? 0 : 1)).map((v) => v.id)
   if (next.length !== ids.length || next.some((id, i) => id !== ids[i])) ids = next
   return ids

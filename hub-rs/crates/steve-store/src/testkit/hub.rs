@@ -59,8 +59,7 @@ pub fn snapshot_before_invalidations(path: &std::path::Path, at: i64) -> Result<
     }
     c.execute_batch(
         "INSERT INTO workspaces(id,name,created) VALUES ('w','w',1);
-         INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-         VALUES ('i1','w',1,'t','run','执行',1,1);",
+         INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','w',1,'t','run','执行',1,1);",
     )?;
     c.execute(
         "INSERT INTO timeline(item_id,ts,actor,kind,text)
@@ -107,10 +106,7 @@ pub fn node_env_fixture(store: &Store) -> Result<()> {
               ('u1','team','u1','One','owner',1),('u2','team','u2','Two','member',2);
              INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES
               ('team','u1','owner',1),('team','u2','member',2),('solo1','u1','owner',1),('solo2','u2','owner',1);
-             INSERT INTO items(id,workspace_id,no,title,status,stage,requested_by,created,updated) VALUES
-              ('i1','team',1,'One','run','执行','u2',1,1),('i2','team',2,'Two','run','执行',NULL,1,1),
-              ('i3','solo1',1,'Three','run','执行','u1',1,1),('i4','solo2',1,'Four','run','执行','u2',1,1),
-              ('i5','team',3,'Five','run','执行','u1',1,1);
+             INSERT INTO items(id, workspace_id, no, title, phase, requested_by, created, updated) VALUES ('i1','team',1,'One','active','u2',1,1),('i2','team',2,'Two','active',NULL,1,1),('i3','solo1',1,'Three','active','u1',1,1),('i4','solo2',1,'Four','active','u2',1,1),('i5','team',3,'Five','active','u1',1,1);
              INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES
               ('s1','team','i1','custom','.','running',1,1),('s2','team','i2','custom','.','running',1,1),
               ('s3','solo1','i3','custom','.','running',1,1),('s4','solo2','i4','custom','.','running',1,1),

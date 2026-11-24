@@ -195,7 +195,14 @@ pub fn claim_in(w: &mut crate::W<'_>, session: &str, turn: &str, now: i64) -> Re
             Queued::from_row,
         );
     }
-    let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND phase='ready' AND release_pending=0 AND active_attempt IS NULL)", [session], |r|r.get(0))?;
+    let ready: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_sessions r
+         JOIN sessions s ON s.id=r.session_id LEFT JOIN items i ON i.id=s.item_id
+         WHERE r.session_id=? AND r.phase='ready' AND r.release_pending=0 AND r.active_attempt IS NULL
+           AND i.phase IS NOT 'closed')",
+        [session],
+        |r| r.get(0),
+    )?;
     if !ready {
         return Err(conflict("session is not ready to claim"));
     }
@@ -730,7 +737,9 @@ pub fn lease_command_in(
     // the rest wait here, in order, and every other command passes them
     let full = session_room_on(tx, node)?.full();
     let row: Option<(String,String,String,String,String,i64,bool)>=tx.query_row(
-        &format!("SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation,c.maybe_sent FROM node_commands c WHERE c.node_id=? AND c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) AND NOT (?4 AND {WAITING}) ORDER BY c.created,c.rowid LIMIT 1"),
+        &format!("SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation,c.maybe_sent FROM node_commands c WHERE c.node_id=? AND c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) AND NOT (?4 AND {WAITING}) AND NOT (c.method='start_turn' AND c.maybe_sent=0
+         AND EXISTS(SELECT 1 FROM runtime_attempts a WHERE a.attempt_id=c.target_attempt AND a.cancel_requested=1))
+         ORDER BY c.created,c.rowid LIMIT 1"),
         params![node,now,now,full],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
     let Some((operation, node, method, request, digest, generation, maybe_sent)) = row else {
         return Ok(None);

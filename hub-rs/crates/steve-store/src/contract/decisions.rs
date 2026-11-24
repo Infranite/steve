@@ -21,47 +21,6 @@ pub fn delivery_summary(c: &mut impl Read, item: &str) -> Result<Option<String>>
     )
 }
 
-/// Did you approve the PR Steve offered when accepting this item (`gh_pr_open`, `yes`)? Then
-/// the item waits for its PR (`finish_on=merged`).
-pub fn wrap_up_by_pr(c: &mut impl Read, ws: &str, item: &str) -> Result<bool> {
-    let dialect = c.db().dialect();
-    c.one(
-        Query::select()
-            .expr(Expr::cust("1"))
-            .from("decisions")
-            .and_where(Expr::col("workspace_id").eq(ws))
-            .and_where(Expr::col("subject_type").eq("gh_pr_open"))
-            .and_where(Expr::col("item_id").eq(item))
-            .and_where(Expr::col("requested_by").eq("steve"))
-            .and_where(Expr::col("status").eq("resolved"))
-            .and_where(dialect.json_field(Expr::col("result"), "choice").eq("yes"))
-            .limit(1),
-        |_| Ok(()),
-    )
-    .map(|row| row.is_some())
-}
-
-/// Was merging this PR at `sha` already asked (open, or answered for that head)?
-pub fn merge_asked(c: &mut impl Read, ws: &str, pr: &str, sha: &str) -> Result<bool> {
-    let dialect = c.db().dialect();
-    c.one(
-        Query::select()
-            .expr(Expr::cust("1"))
-            .from("decisions")
-            .and_where(Expr::col("workspace_id").eq(ws))
-            .and_where(Expr::col("subject_type").eq("gh_pr_merge"))
-            .and_where(Expr::col("subject_id").eq(pr))
-            .and_where(
-                Expr::col("status")
-                    .eq("open")
-                    .or(dialect.json_field(Expr::col("result"), "sha").eq(sha)),
-            )
-            .limit(1),
-        |_| Ok(()),
-    )
-    .map(|row| row.is_some())
-}
-
 const COLUMNS: [&str; 16] = [
     "id",
     "workspace_id",
@@ -563,6 +522,17 @@ pub fn latest_approved_release(c: &mut impl Read, ws: &str) -> Result<Option<Str
             .order_by_expr(dialect.insertion_order(Some("decisions")), Order::Desc)
             .limit(1),
         |r| r.get(0),
+    )
+}
+
+pub fn open_item_decisions(c: &mut impl Read, item: &str) -> Result<Vec<Decision>> {
+    c.all(
+        Query::select()
+            .columns(COLUMNS)
+            .from("decisions")
+            .and_where(Expr::col("item_id").eq(item))
+            .and_where(Expr::col("status").eq("open")),
+        decode,
     )
 }
 

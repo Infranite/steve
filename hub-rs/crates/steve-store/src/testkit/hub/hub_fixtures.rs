@@ -102,8 +102,8 @@ pub fn seed_bots(store: &Store) -> Result<()> {
 pub fn seed_items_and_sessions(store: &Store) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute(
-            "INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) \
-                         VALUES ('i1','default',1,'test','run','执行',1,1)",
+            "INSERT INTO items(id,workspace_id,no,title,phase,created,updated) \
+                         VALUES ('i1','default',1,'test','active',1,1)",
             rusqlite::params![],
         )?;
         tx.conn.execute(
@@ -152,8 +152,7 @@ pub fn seed_projects_and_items(
 ) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute("INSERT INTO projects(id,workspace_id,name,path,kind,device_id,created,updated) VALUES ('p1','default','p1',?1,'git','hub',1,1)", rusqlite::params![w])?;
-        tx.conn.execute("INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, branch, project_id, created, updated)
-                         VALUES (?1, 'default', 1, 't', 'wait', 'x', ?2, ?3, 'p1', 1, 1)", rusqlite::params![row2_key1, row2_w, row2_key3])?;
+        tx.conn.execute("INSERT INTO items(id, workspace_id, no, title, phase, cwd, branch, project_id, created, updated) VALUES (?1, 'default', 1, 't', 'active', ?2, ?3, 'p1', 1, 1)", rusqlite::params![row2_key1, row2_w, row2_key3])?;
         Ok(())
     })
 }
@@ -176,7 +175,7 @@ pub fn seed_users_and_workspace_members(store: &Store, user: &str, row2_user: &s
 pub fn seed_workspaces_and_items(store: &Store) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute("INSERT INTO workspaces(id,name,created) VALUES('elsewhere','Other workspace',1)", rusqlite::params![])?;
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('foreign-item','elsewhere',1,'Private item','done','结束',1,1)", rusqlite::params![])?;
+        tx.conn.execute("INSERT INTO items(id, workspace_id, no, title, phase, created, updated, outcome) VALUES ('foreign-item','elsewhere',1,'Private item','closed',1,1, 'completed')", rusqlite::params![])?;
         Ok(())
     })
 }
@@ -204,7 +203,7 @@ pub fn set_diagnostic_events_at(store: &Store) -> Result<()> {
 pub fn set_items_now_effect(store: &Store) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute(
-            "UPDATE items SET now='effect committed' WHERE id='i1'",
+            "UPDATE items SET title='effect committed' WHERE id='i1'",
             rusqlite::params![],
         )?;
         Ok(())
@@ -213,7 +212,7 @@ pub fn set_items_now_effect(store: &Store) -> Result<()> {
 
 pub fn set_items_phase_closed(store: &Store, id: &str) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("UPDATE items SET phase='closed',status='fail',outcome='failed',closed_reason='old review failed' WHERE id=?", rusqlite::params![id])?;
+        tx.conn.execute("UPDATE items SET phase='closed',outcome='failed',closed_reason='old review failed' WHERE id=?", rusqlite::params![id])?;
         Ok(())
     })
 }

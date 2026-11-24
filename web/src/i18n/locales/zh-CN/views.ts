@@ -42,13 +42,6 @@ export default {
     "markRead": "标为已读"
 },
   debug: {
-    judge: "完成判定（影子）：{{state}}", judgeOld: "属于更早的一轮", judgeWaits: "暂不判定：{{why}}；{{time}} 再看", judgeFailures: "已失败 {{n}} 次：{{error}}", judgeVerdictLine: "结论：{{verdict}} · 将会：{{would}}（未执行）",
-    judgeState: { pending: "等待判定", judging: "正在判定", judged: "已判定", superseded: "已被新一轮取代", failed: "多次失败，已放弃" },
-    judgeVerdict: { done: "做完了", not_done: "没做完", waiting: "在等", needs_you: "要你处理", unknown: "看不出" },
-    judgeIndependent: { yes: "与干活的模型不同", no: "与干活的模型相同", unknown: "是否独立未知" },
-    shadow: "推算状态（影子）", shadowHint: "由事项的事实推算；尚不驱动任何动作。", shadowLane: "{{lane}} · 第 {{row}} 行", shadowNext: "下一步：{{step}}", shadowNoNext: "没有下一步", shadowPredicates: "可评审 {{review}} · 可合并 {{merge}} · 可结项 {{close}}", shadowSettled: "停稳：{{settled}}", yes: "是", no: "否",
-    wouldDo: "巡检会做什么", wouldDoHint: "只观察：已记录，未执行；现有的卡住检查仍照常处理。", wouldWake: "叫醒 Agent", wouldCard: "给你出卡", wouldRemind: "提醒你", wouldDue: "已到期", wouldAt: "{{time}} 到期", wouldNothing: "无需动作", wouldCleared: "{{time}} 已解除", wouldOpen: "进行中",
-    settledEvaluable: "可评估", settledBusy: "确知在忙", settledUnknown: "不明", laneNeedsYou: "要你处理", laneRunning: "进行中", laneDone: "已完成",
     open: "调试", title: "{{item}} · 调试", description: "查看当前阻塞与执行证据，新事项默认记录创建后 30 分钟的判断细节。",
     current: "当前状态", stateUnavailable: "暂时读不到当前状态。", refresh: "刷新", loading: "正在读取…",
     itemState: "事项状态：{{status}}", revision: "周期 {{cycle}} · 目标版本 {{revision}}", observed: "采样于 {{time}}",
@@ -89,24 +82,6 @@ export default {
     idleHint: "它停下了，没有在运行，也没有问你。需要继续就在下面说一声。",
     progress: "进度", details: "详情", moreProps: "更多属性",
     process_other: "过程记录 {{count}} 条",
-  },
-  closeout: {
-    timeline: "当前 PR 收尾",
-    status: {
-      syncing: "等待 GitHub 同步", sync_failed: "GitHub 同步中断 · 显示上次结果",
-      no_pr: "等待 Agent 提交 PR", waiting_checks: "收尾中 · 等 GitHub CI", checks_failed: "GitHub 检查失败",
-      conflict: "与默认分支有冲突", behind: "需要跟上默认分支", draft: "PR 仍是草稿",
-      head: "PR 提交与验收版本不同", uncommitted: "验收结果还有未提交的改动", accepted_unknown: "无法确认验收提交",
-      closed: "PR 已关闭，未合并", waiting_github: "等待 GitHub 确认能否合并", waiting_result: "正在核对验收版本",
-      ready: "等待 Steve 核对并合并", merge_retry: "合并失败 · 等 Steve 重试", merge_method: "仓库允许的合并方式均不可用",
-      awaiting_approval: "等你决定是否合并", manual_merge: "已拒绝自动合并 · 等你处理", merged: "PR 已合并",
-    },
-    owner: { steve: "Steve", agent: "Agent", user: "你", none: "无" },
-    nextOwner: "下一步：{{owner}}", lastSync: "上次成功同步：{{time}}", neverSynced: "尚未成功同步",
-    checks: "{{passed}} 通过 · {{pending}} 排队/运行 · {{failed}} 失败 · {{other}} 其他",
-    noChecks: "GitHub 尚未返回检查记录", unknownChecks: "没有这次提交的检查快照",
-    failures: "失败检查：{{names}}", lastFailures: "上次同步的失败检查：{{names}}",
-    syncError: "同步失败原因：{{reason}}", mergeError: "合并失败原因：{{reason}}",
   },
   /* the item page's agent tree: who started whom */
   agentTree: {
@@ -415,16 +390,6 @@ export default {
     designGateOwnerOnly: "只有主人能开关",
   },
   /* the item's lifecycle stages, shown as a breadcrumb */
-  stage: {
-    intake: "接收",
-    triage: "分流",
-    define: "定义",
-    plan: "规划",
-    prepare: "准备",
-    execute: "执行",
-    deliver: "交付与验收",
-    wrapUp: "收尾",
-  },
   /* the 会话 list */
   sessions: {
     title: "会话",
