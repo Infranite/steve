@@ -85,6 +85,26 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         .map(|t| cli(&path, &format!("SELECT count(*) FROM {t}")))
         .collect();
     let schema_before = schema_of(&path);
+    // Rows a migration removes on purpose; every other table keeps its count.
+    // 121 dropped Steve's own YOLO engine (#522) with its scope revisions.
+    let removed = |t: &str| -> usize {
+        match t {
+            "revisions" if v_at(&path) < 121 => cli(
+                &path,
+                "SELECT count(*) FROM revisions WHERE object_type = 'yolo_scope'",
+            )
+            .parse()
+            .unwrap(),
+            "settings" if v_at(&path) < 121 => cli(
+                &path,
+                "SELECT count(*) FROM settings WHERE key LIKE 'yolo.%' OR key IN ('yolo', 'models.yolo')",
+            )
+            .parse()
+            .unwrap(),
+            _ => 0,
+        }
+    };
+    let removed_before: Vec<usize> = TABLES.iter().map(|t| removed(t)).collect();
     let v_before: i64 = cli(&path, "SELECT v FROM schema_version").parse().unwrap();
     assert!(
         (2..=db::SCHEMA_VERSION).contains(&v_before),
@@ -100,8 +120,8 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         );
     }
     assert_eq!(
-        schema_of(&path),
-        schema_of(fresh().store.path()),
+        shape_of(&path),
+        shape_of(fresh().store.path()),
         "migrated prod schema equals a fresh schema"
     );
     s.fixture_write(|c| {
@@ -114,10 +134,10 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
             0,
             "foreign_key_check is empty after migrating"
         );
-        for (t, n) in TABLES.iter().zip(&counts_before) {
+        for ((t, n), gone) in TABLES.iter().zip(&counts_before).zip(&removed_before) {
             assert_eq!(
-                count(c, &format!("SELECT count(*) FROM {t}")).to_string(),
-                *n,
+                count(c, &format!("SELECT count(*) FROM {t}")) as usize + gone,
+                n.parse::<usize>().unwrap(),
                 "{t}"
             );
         }
@@ -190,4 +210,69 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         n("SELECT count(*) FROM items"),
         "all plan/source JSON valid"
     );
+}
+
+/// The schema with each table's columns compared as a set, not in declaration order: the production
+/// database gained `items.phase` and `sessions.reasoning_effort` through the rerunnable migrations
+/// that add a column only when it is missing (027), after later columns already existed, so its
+/// declaration order differs from a fresh database while every column, type, default and key is the
+/// same. Indexes, triggers and views are still compared by their exact SQL.
+fn shape_of(path: &Path) -> String {
+    let c = rusqlite::Connection::open(path).unwrap();
+    let mut out = Vec::new();
+    let mut st = c
+        .prepare("select type, name, sql from sqlite_master order by type, name")
+        .unwrap();
+    let rows: Vec<(String, String, Option<String>)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for (kind, name, sql) in rows {
+        if kind != "table" {
+            out.push(format!("{kind}|{name}|{}", sql.unwrap_or_default()));
+            continue;
+        }
+        let mut cols: Vec<String> = c
+            .prepare(&format!("PRAGMA table_xinfo(\"{name}\")"))
+            .unwrap()
+            .query_map([], |r| {
+                Ok(format!(
+                    "{}:{}:{}:{}:{}:{}",
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        cols.sort();
+        // Table-level constraints (UNIQUE, FOREIGN KEY, CHECK) follow the column list in the SQL.
+        let sql = sql.unwrap_or_default();
+        let constraints: Vec<&str> = sql
+            .split(',')
+            .map(str::trim)
+            .filter(|p| {
+                let p = p.to_ascii_uppercase();
+                p.starts_with("UNIQUE")
+                    || p.starts_with("FOREIGN KEY")
+                    || p.starts_with("CHECK")
+                    || p.starts_with("PRIMARY KEY")
+            })
+            .collect();
+        out.push(format!(
+            "table|{name}|{}|{}",
+            cols.join(","),
+            constraints.join(",")
+        ));
+    }
+    out.join("\n")
+}
+
+fn v_at(path: &Path) -> i64 {
+    cli(path, "SELECT v FROM schema_version").parse().unwrap()
 }
