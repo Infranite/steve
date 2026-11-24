@@ -4,6 +4,12 @@ export default {
     turnRepeatedFailure: "The same tool action failed five times. Steve requested a stop.",
     turnNoProgress: "There was no verified progress for fifteen minutes of observable work. Steve requested a stop.",
     mergePullRequest: "Merge PR #{{number}} ({{repo}})?",
+    workflowScriptFault: "Workflow script faulted ({{faultCode}}) and is paused for your decision.",
+    workflowNonDeterministicReplay: "Workflow replay detected non-deterministic drift and paused before dispatching.",
+    workflowBudgetExhausted: "Workflow cycle budget exhausted ({{scope}}: {{used}}/{{limit}}). Choose whether to add budget, cancel, or take over in a single session.",
+    workflowPlacementBlocked: "No eligible Bot is available for workflow step \"{{callTitle}}\" ({{reason}}). Assign a Bot, let Steve handle it, or defer.",
+    workflowReviewBlocked: "Workflow did not pass independent final review ({{reason}}). Run an independent review or decide how to proceed.",
+    workflowSingleSessionOverride: "Confirm skipping the workflow and switching to single-session delivery?",
   },
   feed: {
     viewItem: "View item",

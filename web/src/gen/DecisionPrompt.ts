@@ -4,4 +4,4 @@
 /**
  * Machine-authored prompts carry their arguments separately from the UI text.
  */
-export type DecisionPrompt = { "code": "turn_repeated_failure" } | { "code": "turn_no_progress" } | { "code": "merge_pull_request", number: number, repo: string, };
+export type DecisionPrompt = { "code": "turn_repeated_failure" } | { "code": "turn_no_progress" } | { "code": "merge_pull_request", number: number, repo: string, } | { "code": "workflow_script_fault", fault_code: string, } | { "code": "workflow_non_deterministic_replay" } | { "code": "workflow_budget_exhausted", scope: string, used: number, limit: number, } | { "code": "workflow_placement_blocked", call_title: string, reason: string, } | { "code": "workflow_review_blocked", reason: string, } | { "code": "workflow_single_session_override" };

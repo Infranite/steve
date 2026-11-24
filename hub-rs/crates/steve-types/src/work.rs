@@ -36,6 +36,12 @@ pub enum WorkEvent {
     },
     #[serde(rename = "thread.run")]
     ThreadRun { id: ThreadRunId, ws: WorkspaceId },
+    #[serde(rename = "workflow.run")]
+    WorkflowRun {
+        id: String,
+        item_id: ItemId,
+        ws: WorkspaceId,
+    },
 }
 
 impl Scoped for WorkEvent {
@@ -46,6 +52,7 @@ impl Scoped for WorkEvent {
             Self::Session { ws, .. } => Scope::Ws(ws.clone()),
             Self::Message { ws, .. } => Scope::Ws(ws.clone()),
             Self::ThreadRun { ws, .. } => Scope::Ws(ws.clone()),
+            Self::WorkflowRun { ws, .. } => Scope::Ws(ws.clone()),
         }
     }
 }
@@ -121,6 +128,7 @@ impl WorkEvent {
             Self::Session { .. } => "session",
             Self::Message { .. } => "message",
             Self::ThreadRun { .. } => "thread.run",
+            Self::WorkflowRun { .. } => "workflow.run",
         }
     }
 }
@@ -145,6 +153,7 @@ impl WorkEvent {
             Self::Session { id, .. } => Some(id.as_str()),
             Self::Message { id, .. } => Some(id.as_str()),
             Self::ThreadRun { id, .. } => Some(id.as_str()),
+            Self::WorkflowRun { id, .. } => Some(id.as_str()),
         }
     }
 }

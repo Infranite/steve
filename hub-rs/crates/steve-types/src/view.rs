@@ -388,6 +388,25 @@ pub enum DecisionPrompt {
         number: i64,
         repo: String,
     },
+    WorkflowScriptFault {
+        fault_code: String,
+    },
+    WorkflowNonDeterministicReplay,
+    WorkflowBudgetExhausted {
+        scope: String,
+        #[cfg_attr(test, ts(type = "number"))]
+        used: i64,
+        #[cfg_attr(test, ts(type = "number"))]
+        limit: i64,
+    },
+    WorkflowPlacementBlocked {
+        call_title: String,
+        reason: String,
+    },
+    WorkflowReviewBlocked {
+        reason: String,
+    },
+    WorkflowSingleSessionOverride,
 }
 
 /// The current state of a decision. An answer receipt survives reopening.

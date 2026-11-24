@@ -93,6 +93,11 @@ pub use contract::realtime_output;
 pub use contract::tags as tag_repo;
 pub use contract::thread_runs;
 pub use contract::vault_uses as vault_use_repo;
+pub use contract::workflow_runs::{
+    self, FinalizedAttempt, NewWfAttempt, NewWfCall, ReviewGateFailure, ReviewGateVerdict,
+    WfAttemptStatus, WfCall, WfCallAttempt, WfCallStatus, WfRun, WfRunStatus, WfScriptVersion,
+    WfVersionCall, WorkflowRuns,
+};
 pub use contract::{
     AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
     DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,

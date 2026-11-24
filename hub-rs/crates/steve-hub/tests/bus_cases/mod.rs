@@ -66,6 +66,12 @@ pub fn typed(ty: &str, ws: &str) -> BusEvent {
             ws: ws.into(),
         })
         .into(),
+        "workflow.run" => DomainEvent::from(WorkEvent::WorkflowRun {
+            id: "entity".into(),
+            item_id: "item-1".into(),
+            ws: ws.into(),
+        })
+        .into(),
         "release.hold" => DomainEvent::from(DevicesEvent::ReleaseHold { hold: None }).into(),
         "bot" => DomainEvent::from(ConfigEvent::Bot {
             id: "entity".into(),

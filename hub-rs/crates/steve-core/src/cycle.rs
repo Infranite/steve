@@ -532,6 +532,7 @@ impl Tx<'_> {
                     .workflows()
                     .get(item_id)?
                     .map(|g| g.revision),
+                wf_run_revision: None,
                 fingerprint: print,
                 print_pending,
                 policy: Some(policy),
@@ -747,6 +748,7 @@ impl Tx<'_> {
             frozen_revision: i.delivery_revision,
             scope_revision: self.scope_revision(item_id)?,
             workflow_revision: None,
+            wf_run_revision: None,
             fingerprint: None,
             print_pending: false,
             policy: None,
