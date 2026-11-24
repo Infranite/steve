@@ -144,6 +144,10 @@ impl Registry {
         self.handlers.contains_key(subject_type)
     }
 
+    pub fn decision_subjects(&self) -> Vec<&str> {
+        self.handlers.keys().map(String::as_str).collect()
+    }
+
     pub fn retain_on_completed_item_recovery(&self, d: &steve_store::Decision) -> bool {
         self.handlers
             .get(&d.subject_type)
