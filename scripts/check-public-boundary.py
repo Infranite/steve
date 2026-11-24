@@ -29,11 +29,12 @@ TOKENS = {
 # Design notes, plans, specs and runbooks are our own thinking and stay out of the public tree. Documents
 # a user reads are listed here; tests keep their fixtures. Anything else in Markdown is a process document.
 USER_DOCS = {"README.md", "README.zh-CN.md", "CONTRIBUTING.md", "AGENTS.md", "CLAUDE.md", "docs/deployment.md"}
-USER_DOC_DIRS = ("docs/releases/", "docs/assets/")
+USER_DOC_DIRS = ("docs/assets/",)
+RELEASE_NOTE_RE = re.compile(r"^docs/releases/\d+\.\d+\.\d+\.md$")
 
 
 def process_document(rel):
-    if rel in USER_DOCS or rel.startswith(USER_DOC_DIRS) or "/tests/" in "/" + rel:
+    if rel in USER_DOCS or rel.startswith(USER_DOC_DIRS) or RELEASE_NOTE_RE.match(rel) or "/tests/" in "/" + rel:
         return False
     return rel.startswith("docs/") or rel.endswith((".md", ".markdown"))
 

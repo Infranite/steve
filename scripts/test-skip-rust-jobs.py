@@ -14,8 +14,7 @@ skip = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(skip)
 
 BEFORE, SHA = "a" * 40, "b" * 40
-NOTES = [{"filename": "docs/releases/0.2.97.md", "status": "added"},
-         {"filename": "docs/releases/unreleased/ST-1.md", "status": "removed"}]
+NOTES = [{"filename": "docs/releases/0.2.97.md", "status": "added"}]
 
 
 def compare(files, status="ahead", behind=0):
