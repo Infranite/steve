@@ -140,17 +140,7 @@ pub(super) fn raw_builtin_catalog() -> Vec<ToolDescriptor> {
 impl ToolService {
     /// Every built-in tool, in the order the MCP endpoint lists them.
     pub fn catalog(&self) -> Vec<ToolDescriptor> {
-        let mut raw = raw_builtin_catalog();
-        if !self.mcp.core.config().dynamic_workflows {
-            for tool in &mut raw {
-                if tool.name == "steve_workflow" {
-                    tool.description = "Dynamic workflows are disabled. Read retained graphs and results with get; pause or cancel existing work, or report an existing unit's failure with fail. No planning, replanning, retrying or resuming is allowed. Existing acceptance requirements remain; only the user may explicitly choose single-session takeover after pausing and confirmed settlement. Do not ask to enable collaboration or raise attempt budgets.".into();
-                    tool.input_schema["properties"]["action"]["enum"] =
-                        json!(["get", "pause", "cancel", "fail"]);
-                }
-            }
-        }
-        super::tool_families::catalog(raw)
+        super::tool_families::catalog(raw_builtin_catalog())
     }
 
     /// Use the same recorded session principal and live membership check as ordinary module tools.
@@ -672,9 +662,9 @@ mod tests {
         );
         assert!(out.contains("call steve_event_get again for less"), "{out}");
         // multi-byte text is cut on a character boundary
-        let wide = "工作图".repeat(200_000);
-        let out = bound_result("steve_workflow", wide);
+        let wide = "事项记录".repeat(200_000);
+        let out = bound_result("steve_item_read", wide);
         assert!(serde_json::to_string(&out).unwrap().len() <= RESULT_CAP);
-        assert!(out.starts_with("工作图"));
+        assert!(out.starts_with("事项记录"));
     }
 }

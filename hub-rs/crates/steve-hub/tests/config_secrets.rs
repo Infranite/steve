@@ -217,7 +217,6 @@ fn invalid_values_are_errors_and_do_not_fall_back_to_defaults() {
         ("STEVE_BACKUP", "of"),
         ("STEVE_DEV_LOGIN", "true"),
         ("STEVE_NO_RESUME", "yes"),
-        ("STEVE_DYNAMIC_WORKFLOWS", "on"),
         ("STEVE_ALLOW_ANY_HOST", "true"),
         ("STEVE_DEBUG_ROUTE", "yes"),
         ("STEVE_DISK_FLOOR_GB", "NaN"),

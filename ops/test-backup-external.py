@@ -59,8 +59,8 @@ print(json.dumps(manifest))
                 INSERT INTO users VALUES('owner','original','owner',1);
                 CREATE TABLE artifacts(id TEXT,item_id TEXT,kind TEXT,title TEXT,location TEXT,created INTEGER);
                 INSERT INTO artifacts VALUES('artifact','ST-1','report','report','交付摘要',1);
-                CREATE TABLE workflow_units(item_id TEXT,summary TEXT);""")
-            c.execute("INSERT INTO workflow_units VALUES('ST-1',?)", ("saved full report " * 10,))
+                CREATE TABLE timeline(id INTEGER PRIMARY KEY,item_id TEXT,kind TEXT,text TEXT,ts INTEGER);""")
+            c.execute("INSERT INTO timeline(item_id,kind,text,ts) VALUES('ST-1','sys',?,1)", ("已交付，等待执行结束后交给下游\n" + "saved full report " * 10,))
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, {"STEVE_HOME": str(self.home), "HOME": str(self.root)}).start()
 

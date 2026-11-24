@@ -588,9 +588,6 @@ pub struct Quality {
     /// Q2: rework verdicts given in the range ("验收返工").
     pub reworks: i64,
     pub reworks_per_done: Option<f64>,
-    /// Q2 inside work graphs: unit attempts that were not the unit's first ("单元重试"), next to
-    /// `reworks` ([`crate::workflow::Workflow::retries`]).
-    pub unit_retries: i64,
     /// Q3 by reason.
     pub fails: BTreeMap<String, i64>,
     /// Q4: items with a stall in the range that are done now ÷ those items.
@@ -678,8 +675,8 @@ pub struct Summary {
     pub human: Human,
     pub agents: Agents,
     pub per_item: PerItem,
-    /// Work graphs, deliveries and replies ([`crate::workflow`]).
-    pub workflow: crate::workflow::Workflow,
+    /// Deliveries, merges, replies, and session starts ([`crate::delivery`]).
+    pub delivery: crate::delivery::Delivery,
     /// U8: sessions whose context is over 80 % full now.
     pub context_over_80: i64,
     pub since: Since,
@@ -886,9 +883,8 @@ pub fn summary(c: &mut impl Read, q: &Query) -> Result<Option<Summary>> {
     let decisions = DecisionReads(c).created(scope)?;
     qu.reworks = DecisionReads(c).reworks(scope)?;
     qu.reworks_per_done = ratio(qu.reworks, s.throughput.done);
-    s.workflow = crate::workflow::of(c, q, lo, hi)?;
+    s.delivery = crate::delivery::of(c, q, lo, hi)?;
     let qu = &mut s.quality;
-    qu.unit_retries = s.workflow.retries;
     let fails = MarkReads(c).changes(scope, "fail")?;
     for r in FAIL_REASONS {
         qu.fails.insert((*r).into(), 0);

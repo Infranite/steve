@@ -252,30 +252,6 @@ pub fn set_bots_enabled(store: &Store) -> Result<()> {
     })
 }
 
-pub fn set_items(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE items SET source='[\"work\",\"workflow\"]' WHERE id='i1'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
-pub fn set_items_and_clear_workflow_units(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE items SET source='[\"协作工作\",\"workflow\"]' WHERE id='child'",
-            rusqlite::params![],
-        )?;
-        tx.conn.execute(
-            "DELETE FROM workflow_units WHERE item_id='child'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
 pub fn assign_management_bot(store: &Store) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute(
@@ -307,16 +283,6 @@ pub fn assign_shared_bot(store: &Store) -> Result<()> {
         )?;
         tx.conn.execute(
             "UPDATE sessions SET bot_id='shared_bot' WHERE id='s1'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
-pub fn assign_foreign_session_scope(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE items SET source='[\"\",\"\"]' WHERE id='i1'",
             rusqlite::params![],
         )?;
         Ok(())
@@ -525,26 +491,6 @@ pub fn set_thread_runs_status_done(store: &Store) -> Result<()> {
     })
 }
 
-pub fn set_workflows_paused(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE workflows SET paused=1 WHERE item_id='parent'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
-pub fn resume_workflow(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE workflows SET paused=0 WHERE item_id='parent'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
 pub fn stream_fault_record(store: &Store, stream: &str) -> Result<(String, String, String)> {
     store.sqlite_read(|db| Ok(db.query_row("SELECT fault, session_id, fault_reason FROM node_streams WHERE stream=? AND fault_event IS NOT NULL", rusqlite::params![stream], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?))
 }
@@ -655,36 +601,6 @@ pub fn seed_principal_session(store: &Store, node_owner: &str) -> Result<()> {
     })
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum WorkflowPermissionChange {
-    Pause,
-    Cancel,
-    NewGoal,
-    RemoveUnit,
-}
-
-pub const WORKFLOW_PERMISSION_CHANGES: [WorkflowPermissionChange; 4] = [
-    WorkflowPermissionChange::Pause,
-    WorkflowPermissionChange::Cancel,
-    WorkflowPermissionChange::NewGoal,
-    WorkflowPermissionChange::RemoveUnit,
-];
-
-pub fn change_workflow_permission(store: &Store, change: WorkflowPermissionChange) -> Result<()> {
-    let sql = match change {
-        WorkflowPermissionChange::Pause => "UPDATE workflows SET paused=1",
-        WorkflowPermissionChange::Cancel => "UPDATE workflow_units SET status='cancelled'",
-        WorkflowPermissionChange::NewGoal => {
-            "UPDATE item_goals SET version=2 WHERE item_id='parent'"
-        }
-        WorkflowPermissionChange::RemoveUnit => "DELETE FROM workflow_units",
-    };
-    store.write(|tx| {
-        tx.conn.execute_batch(sql)?;
-        Ok(())
-    })
-}
-
 pub fn ordered_attempt_states(store: &Store) -> Result<Vec<String>> {
     store.sqlite_read(|db| {
         let mut q = db.prepare("SELECT state FROM runtime_attempts ORDER BY created, rowid")?;
@@ -787,16 +703,17 @@ pub fn midturn_event_count(store: &Store, session: &str) -> Result<i64> {
     })
 }
 
-pub fn block_tools_for_prerequisite(store: &Store, blocked: bool) -> Result<()> {
+pub fn block_tools_for_prerequisite(store: &Store, paused: bool) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute(
-            if blocked {
-                "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated) VALUES('i1',1,NULL,'workspace','','waiting',1,1)"
-            } else {
-                "UPDATE items SET phase='active',source='[\"item\",\"workflow\"]' WHERE id='i1'"
-            },
-            [],
-        )?;
+        if paused {
+            tx.conn.execute("DELETE FROM item_dependency_waits WHERE item_id='i1'", [])?;
+            tx.conn.execute("UPDATE items SET phase='paused' WHERE id='i1'", [])?;
+        } else {
+            tx.conn.execute(
+                "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated) VALUES('i1',1,NULL,'workspace','','waiting',1,1)",
+                [],
+            )?;
+        }
         Ok(())
     })
 }

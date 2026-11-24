@@ -33,10 +33,10 @@ try {
     assert.equal(await page.locator(".ui-rnc__row").count(), 0, "closed panels do not mount rows in either layout")
     await side.click()
     assert.deepEqual(await rows.evaluateAll((rs) => rs.map((r) => [r.dataset.id, r.dataset.state])), [["ST-53", "needs-you"], ["ST-48", "running"], ["ST-7", "paused"], ["ST-10", "paused"]], "what needs you, then what runs, then what is paused; nothing done")
-    // a paused graph is opened, not resumed here, and is announced as paused, not as waiting on you
-    const graph = pill.locator('.ui-rnc__row[data-id="ST-10"] .ui-rnc__act button')
-    assert.equal(await graph.innerText(), "打开")
-    assert.match(await graph.getAttribute("aria-label"), /已暂停$/)
+    // a blocked item is opened, not resumed here, and is announced as paused, not as waiting on you
+    const blocked = pill.locator('.ui-rnc__row[data-id="ST-10"] .ui-rnc__act button')
+    assert.equal(await blocked.innerText(), "打开")
+    assert.match(await blocked.getAttribute("aria-label"), /已暂停$/)
     // Pause and Resume post the item's action
     await pill.locator('.ui-rnc__row[data-id="ST-48"] .ui-rnc__act button').click()
     await pill.locator('.ui-rnc__row[data-id="ST-7"] .ui-rnc__act button').click()

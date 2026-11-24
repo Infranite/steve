@@ -179,16 +179,6 @@ pub struct TurnEnd {
 /// Where sessions run (the Hub routes them to their Nodes): per-session harnesses, the prompt
 /// queue, permissions, and the release hold.
 pub trait AgentRuntime: Send + Sync {
-    /// Check a graph or current work unit before creating a session or touching its workspace.
-    /// A runtime must positively establish a shared parent/child request principal and ordinary
-    /// Node authorization. Workflow is coordination, not an OS isolation guarantee. Default-deny
-    /// protects runtimes that have not implemented this admission contract.
-    fn check_workflow_execution(&self, item_id: &str) -> Result<()> {
-        let _ = item_id;
-        Err(crate::CoreError::Msg(
-            "协作运行器尚未实现同主体与 Node 授权检查，工作不会回退到 Hub 执行。".into(),
-        ))
-    }
     /// Assess one authorized binding against the current Node and its capability report.
     fn assess_placement_node(
         &self,
