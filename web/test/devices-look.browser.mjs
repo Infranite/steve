@@ -66,9 +66,11 @@ const screens = [
     assert.deepEqual(await page.locator("[data-hub-addresses]").evaluateAll((xs) => xs.map((x) => x.dataset.hubAddresses)), ["public", "lan"])
   } },
   { name: "nodes-list", scene: "normal", hash: "#/devices/nodes", ready: '[data-node-row="n-imac"]' },
-  { name: "node-local", scene: "normal", hash: "#/devices/nodes/local", ready: "[data-node-trends]" },
-  { name: "node-remote-mbp", scene: "normal", hash: "#/devices/nodes/n-mbp", ready: '[data-node-upgrade="current"]' },
-  { name: "node-limit-tip", scene: "normal", hash: "#/devices/nodes/n-mbp", ready: "[data-limit-how]", then: async (page) => {
+  { name: "node-local", scene: "normal", hash: "#/devices/nodes/local", ready: "[data-node-figures]" },
+  { name: "node-local-work", scene: "normal", hash: "#/devices/nodes/local/work", ready: "[data-node-trends]" },
+  { name: "node-remote-mbp", scene: "normal", hash: "#/devices/nodes/n-mbp", ready: '[data-node-panel="overview"]' },
+  { name: "node-remote-mbp-version", scene: "normal", hash: "#/devices/nodes/n-mbp/version", ready: '[data-node-upgrade="current"]' },
+  { name: "node-limit-tip", scene: "normal", hash: "#/devices/nodes/n-mbp/work", ready: "[data-limit-how]", then: async (page) => {
     /* what changing the limit does opens on a tap (390 px is a touch screen here) or a click, not only on hover or focus */
     const how = page.locator("[data-limit-how]")
     if (page.viewportSize().width < 600) await how.tap(); else await how.click()
@@ -77,10 +79,10 @@ const screens = [
     assert.match(await page.locator("[data-limit-semantics]").innerText(), /无需重启[\s\S]*不打断/)
     assert.equal(await page.locator("[data-limit-how]").getAttribute("aria-expanded"), "true")
   } },
-  { name: "node-outdated", scene: "normal", hash: "#/devices/nodes/n-build", ready: '[data-node-upgrade="outdated"]' },
+  { name: "node-outdated", scene: "normal", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="outdated"]' },
   { name: "node-offline", scene: "normal", hash: "#/devices/nodes/n-imac", ready: "[data-node-offline]" },
-  { name: "node-upgrading", scene: "upgrading", hash: "#/devices/nodes/n-build", ready: '[data-node-upgrade="running"]' },
-  { name: "node-upgrade-failed", scene: "failed", hash: "#/devices/nodes/n-build", ready: '[data-node-upgrade="failed"]' },
+  { name: "node-upgrading", scene: "upgrading", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="running"]' },
+  { name: "node-upgrade-failed", scene: "failed", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="failed"]' },
   { name: "clients", scene: "normal", hash: "#/devices/clients", ready: '[data-client="c4"]' },
   { name: "clients-revoke", scene: "normal", hash: "#/devices/clients", ready: '[data-client="c4"]', then: async (page) => { await page.locator('[data-client="c3"] [data-revoke-client]').click(); await page.locator("[data-revoke-dialog]").waitFor() } },
   { name: "pairing", scene: "normal", hash: "#/devices", ready: '[data-map-card="hub"]', then: async (page) => {
@@ -108,6 +110,8 @@ async function hub(page, scene, unknown) {
     if (path === "/auth/hello") return json(route, { name: "steve", api: 2, version: HUB })
     if (!path.startsWith("/api/")) return route.continue()
     if (path === "/api/nodes") return json(route, { nodes })
+    if (path === "/api/node-harnesses") return json(route, { nodes: {} })
+    if (path.startsWith("/api/node-harness-updates/")) return json(route, { report: { node: path.split("/")[3], checking: false, harnesses: [] }, runs: {}, at: NOW, error: null })
     if (path === "/api/vitals") return json(route, { nodes: vitals(nodes) })
     if (path === "/api/nodes/upgrade-default") return json(route, { policy: "notify", hub: { version: HUB, commit: "abc", target: "x" }, drain_secs: 1800, health_secs: 180 })
     if (path === "/api/nodes/pairings" && !get) return json(route, { code: "stv1-fixture-code", expires: NOW + 10 * MIN, pin: null, hub_id: "hub_example" })

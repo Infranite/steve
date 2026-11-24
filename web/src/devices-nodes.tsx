@@ -17,6 +17,7 @@ import { useDevices } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
 import { harnessSummary } from "@/node-harness-model"
 import { Alert, Chip, Spark, StatusBadge } from "@/devices-ui"
+import { nodeHref } from "@/node-detail-model"
 import { cn } from "cn"
 
 /** how many of the latest samples a card draws: the last hour at one a minute */
@@ -24,7 +25,7 @@ const SPARK_POINTS = 60
 const GIB = 2 ** 30
 
 export const hostIcon = (k: HostKind) => (k === "mac" ? <LaptopIcon /> : k === "linux" ? <ServerIcon /> : <MonitorIcon />)
-export const nodeHref = (id: string) => "#/devices/nodes/" + encodeURIComponent(id)
+export { nodeHref }
 /** a short reason a Node went offline: the first part of its last connection error */
 
 /** what its agents are doing, from the sessions the Hub tracks on it: none, or how many and how many at work */
