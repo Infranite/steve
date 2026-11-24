@@ -376,6 +376,177 @@ fn offline_replay_attributes_tokens_and_evaluates_selective_reopen_on_synthetic_
         summary.review_failed_pending_first_run_tokens.cache_read,
         3_000_000
     );
-    // Avoid unused warning on helper used in subsequent defect regression tests.
-    let _ = deliver_immutable;
+    assert_eq!(summary.review_failed_retry_stuck_failed_downstream, 0);
+    assert_eq!(summary.review_failed_retry_reopened_total, 2);
+}
+
+/// Defect A (observed in 19 review-failed + 2 integration-failed production resets):
+/// retrying an upstream work unit and delivering replacement output must reopen immediate
+/// dependents that previously failed against the old output, otherwise the graph deadlocks.
+#[test]
+fn retrying_upstream_reopens_failed_downstream_review_on_replacement_delivery() {
+    for with_git_project in [true, false] {
+        let t = fresh();
+        seed_bots(&t);
+        let parent = create_parent(&t, with_git_project);
+        let specs = vec![
+            unit("a", "writer", "work", &[]),
+            unit("b", "writer", "work", &[]),
+            unit("review", "reviewer", "review", &["a", "b"]),
+            unit("integrate", "integrator", "integrate", &["review"]),
+        ];
+        t.store
+            .workflows()
+            .replace(&parent, 0, "plan", &specs, 2, 3)
+            .unwrap();
+        let a1 = start_unit(&t, &parent, "a");
+        if with_git_project {
+            deliver_plain(&t, &a1, true);
+        } else {
+            deliver_immutable(&t, &a1, "v1", true);
+        }
+        let b1 = start_unit(&t, &parent, "b");
+        deliver_plain(&t, &b1, true);
+        let r1 = start_unit(&t, &parent, "review");
+        let failed = deliver_plain(&t, &r1, false);
+        assert_eq!(failed.units[2].status, "failed");
+
+        let retried = t
+            .store
+            .workflows()
+            .retry_unit(&parent, failed.revision, "a", "fix review finding")
+            .unwrap();
+        assert_eq!(retried.units[0].status, "pending");
+        assert_eq!(retried.units[1].status, "succeeded");
+        assert_eq!(retried.units[2].status, "failed");
+
+        let a2 = start_unit(&t, &parent, "a");
+        let after = if with_git_project {
+            deliver_plain(&t, &a2, true)
+        } else {
+            deliver_immutable(&t, &a2, "v2", true)
+        };
+        assert_eq!(after.units[0].status, "succeeded");
+        assert_eq!(after.units[1].status, "succeeded");
+        assert_eq!(
+            after.units[2].status, "pending",
+            "failed downstream review must reopen once upstream delivers replacement output (git={with_git_project})"
+        );
+        assert_eq!(
+            after.units[2].reason.as_deref(),
+            Some(if with_git_project {
+                "evidence_unverifiable"
+            } else {
+                "dependency_output_changed"
+            })
+        );
+    }
+}
+
+/// Defect B (transitive soundness bug):
+/// when `a` changes from v1 to v2 and intermediate `review` re-runs and publishes the exact same
+/// immutable approval artifact, `verified_output` must reflect `review`'s changed inputs so
+/// `integrate` (which depends only on `review`) is reopened instead of staying valid on stale v1.
+#[test]
+fn verified_output_includes_inputs_so_stale_transitive_integrate_reopens() {
+    let t = fresh();
+    seed_bots(&t);
+    let parent = create_parent(&t, false);
+    let specs = vec![
+        unit("a", "writer", "work", &[]),
+        unit("review", "reviewer", "review", &["a"]),
+        unit("integrate", "integrator", "integrate", &["review"]),
+    ];
+    t.store
+        .workflows()
+        .replace(&parent, 0, "plan", &specs, 2, 3)
+        .unwrap();
+    let a1 = start_unit(&t, &parent, "a");
+    deliver_immutable(&t, &a1, "code-v1", true);
+    let r1 = start_unit(&t, &parent, "review");
+    deliver_immutable(&t, &r1, "lgtm-report", true);
+    let i1 = start_unit(&t, &parent, "integrate");
+    let complete = deliver_immutable(&t, &i1, "integrated-v1", true);
+    assert!(complete.blockers().is_empty());
+
+    t.store
+        .workflows()
+        .retry_unit(&parent, complete.revision, "a", "update implementation")
+        .unwrap();
+    let a2 = start_unit(&t, &parent, "a");
+    let after_a2 = deliver_immutable(&t, &a2, "code-v2", true);
+    assert_eq!(after_a2.units[1].status, "pending");
+    assert_eq!(after_a2.units[2].status, "succeeded");
+
+    // Reviewer re-runs on code-v2 and uploads an identical immutable "lgtm-report" artifact.
+    let r2 = start_unit(&t, &parent, "review");
+    let after_r2 = deliver_immutable(&t, &r2, "lgtm-report", true);
+    assert_eq!(
+        after_r2.units[2].status, "pending",
+        "integrate must reopen because upstream a changed from code-v1 to code-v2"
+    );
+    assert_eq!(
+        after_r2.units[2].reason.as_deref(),
+        Some("dependency_output_changed")
+    );
+    assert!(!after_r2.dependency_ready("integrate"));
+}
+
+/// Defect C (observed in ST-27 and ST-8 transitive review graphs `work1 -> work2 -> review`):
+/// `validate()` treats review coverage transitively, so `review_scope` and `apply_review_findings`
+/// must include transitive upstream units rather than rejecting findings on indirect ancestors.
+#[test]
+fn review_scope_and_findings_cover_transitive_upstream_work() {
+    let t = fresh();
+    seed_bots(&t);
+    let parent = create_parent(&t, false);
+    let specs = vec![
+        unit("evidence", "writer", "work", &[]),
+        unit("design", "writer", "work", &["evidence"]),
+        unit("review", "reviewer", "review", &["design"]),
+        unit("integrate", "integrator", "integrate", &["review"]),
+    ];
+    t.store
+        .workflows()
+        .replace(&parent, 0, "plan", &specs, 2, 3)
+        .unwrap();
+    let ev = start_unit(&t, &parent, "evidence");
+    deliver_immutable(&t, &ev, "ev-v1", true);
+    let ds = start_unit(&t, &parent, "design");
+    deliver_immutable(&t, &ds, "ds-v1", true);
+    let rev = start_unit(&t, &parent, "review");
+    let proof = add_delivery(&t, &rev, "review-finding");
+    let failed = deliver_plain(&t, &rev, false);
+
+    let rev_unit = failed.units.iter().find(|u| u.spec.id == "review").unwrap();
+    let scope = failed.review_scope(rev_unit).expect("frozen review scope");
+    let scoped_ids: Vec<&str> = scope.units.iter().map(|u| u.unit.as_str()).collect();
+    assert_eq!(
+        scoped_ids,
+        vec!["evidence", "design"],
+        "review_scope must include transitive upstream work units"
+    );
+
+    let receipt = t
+        .store
+        .workflows()
+        .apply_review_findings(
+            &parent,
+            &scope,
+            &[Finding {
+                affected_unit: "evidence".into(),
+                criterion: "verified".into(),
+                evidence_ref: proof,
+            }],
+            "evidence gap found during review",
+        )
+        .unwrap();
+    assert_eq!(receipt, ReviewReceipt::Applied);
+    let after = t.store.workflows().get(&parent).unwrap().unwrap();
+    assert_eq!(after.units[0].status, "pending");
+    assert_eq!(
+        after.units[1].status, "succeeded",
+        "intermediate design waits for replacement evidence before reopening"
+    );
+    assert_eq!(after.units[2].status, "pending");
 }

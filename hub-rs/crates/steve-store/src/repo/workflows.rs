@@ -171,14 +171,12 @@ impl Workflow {
     }
 
     fn reviewed_units(&self, review: &WorkUnit) -> Option<Vec<ReviewedUnit>> {
-        review
-            .spec
-            .depends_on
+        self.units
             .iter()
-            .map(|id| {
-                let unit = self.units.iter().find(|u| &u.spec.id == id)?;
-                self.dependency_ready(id).then(|| ReviewedUnit {
-                    unit: id.clone(),
+            .filter(|unit| self.depends_on(review, &unit.spec.id))
+            .map(|unit| {
+                self.dependency_ready(&unit.spec.id).then(|| ReviewedUnit {
+                    unit: unit.spec.id.clone(),
                     attempt: unit.attempt,
                     input_digest: unit.verified_output.clone(),
                 })
@@ -822,6 +820,7 @@ fn retired(c: &Connection, child: &str) -> Result<Option<(String, WorkUnit)>> {
 fn verified_output(
     tx: &Connection,
     spec: &UnitSpec,
+    inputs: Option<&[ReviewedUnit]>,
     child: &str,
     session: &str,
     outputs: &Value,
@@ -865,7 +864,7 @@ fn verified_output(
     }
     measured.sort_unstable();
     Ok(Some(
-        steve_node_api::digest_of(&(spec, measured))
+        steve_node_api::digest_of(&(spec, inputs, measured))
             .map_err(|e| conflict(e.to_string()))?
             .to_string(),
     ))
@@ -903,7 +902,9 @@ fn propagate_output(
         (_, _) => ReworkReason::EvidenceUnverifiable,
     };
     for downstream in &graph.units {
-        if downstream.status == "succeeded" && downstream.spec.depends_on.contains(&unit.spec.id) {
+        if matches!(downstream.status.as_str(), "succeeded" | "failed")
+            && downstream.spec.depends_on.contains(&unit.spec.id)
+        {
             reopen_unit(w, graph, downstream, why)?;
         }
     }
@@ -970,15 +971,18 @@ pub fn deliver_in(
             "成功交付必须包含至少一项通过的单元检查，且本单元范围内的检查必须全部通过",
         ));
     }
-    if passed {
+    let inputs = if passed {
         let graph = must_graph(tx, &parent)?;
         let inputs = graph.reviewed_units(&unit);
         if inputs.is_none() || inputs != unit.inputs {
             return Err(conflict("work unit inputs changed during execution"));
         }
-    }
+        inputs
+    } else {
+        None
+    };
     let fingerprint = if passed {
-        verified_output(tx, &unit.spec, child, session, outputs)?
+        verified_output(tx, &unit.spec, inputs.as_deref(), child, session, outputs)?
     } else {
         None
     };
