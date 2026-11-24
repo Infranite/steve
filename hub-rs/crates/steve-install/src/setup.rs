@@ -883,6 +883,14 @@ impl<'a> Wizard<'a> {
                 self.record["signed_hub_sha256"]
                     .as_str()
                     .or_else(|| expected.get(name).and_then(Value::as_str))
+            } else if name == "bin/steve-node" && self.record["node_signing_started"] == true {
+                self.record["signed_node_sha256"]
+                    .as_str()
+                    .or_else(|| expected.get(name).and_then(Value::as_str))
+            } else if name == "bin/steve" && self.record["node_signing_started"] == true {
+                self.record["signed_cli_sha256"]
+                    .as_str()
+                    .or_else(|| expected.get(name).and_then(Value::as_str))
             } else {
                 expected.get(name).and_then(Value::as_str)
             };
@@ -1138,6 +1146,7 @@ fn underway(record: &Value, home: &Path) -> bool {
         .as_array()
         .is_some_and(|steps| !steps.is_empty())
         || record["keychain_started"] == true
+        || record["node_signing_started"] == true
         || [
             "current",
             "signing/identity.json",
@@ -2059,6 +2068,10 @@ fn register_setup(
 ) -> Result<crate::service::Service> {
     let mut service = crate::service::Service::new(&role, &home, label)?;
     progress("start");
+    if role == "node" && cfg!(target_os = "macos") {
+        wizard.record["node_signing_started"] = true.into();
+        wizard.save()?;
+    }
     ui::step(
         &t!("install.setup.step.registering", role = role),
         || service.dispatch("install", Some(&candidate), 30),
@@ -2069,6 +2082,12 @@ fn register_setup(
             )
         },
     )?;
+    if role == "node" && cfg!(target_os = "macos") {
+        wizard.record["signed_node_sha256"] = digest(&candidate.join("bin/steve-node"))?.into();
+        if candidate.join("bin/steve").is_file() {
+            wizard.record["signed_cli_sha256"] = digest(&candidate.join("bin/steve"))?.into();
+        }
+    }
     if !wizard.record["steps"]
         .as_array()
         .unwrap()

@@ -806,7 +806,7 @@ fn fresh_sets_aside_an_interrupted_setup_without_stopping_an_unregistered_servic
                 .env("STEVE_LANG", "zh-CN")
                 .env("HOME", &account)
                 .env("PATH", &bin);
-            if fresh && role == "node" {
+            if fresh && role == "node" && !cfg!(target_os = "macos") {
                 let mut child = command
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -832,8 +832,9 @@ fn fresh_sets_aside_an_interrupted_setup_without_stopping_an_unregistered_servic
             String::from_utf8_lossy(&fresh.stdout),
             String::from_utf8_lossy(&fresh.stderr)
         );
-        if role == "hub" {
-            // The Hub reached a new prompt after archiving; do not enter macOS signing in this fixture.
+        let stop_before_macos_signing = role == "hub" || cfg!(target_os = "macos");
+        if stop_before_macos_signing {
+            // Reached a new prompt after archiving; do not enter macOS signing in this fixture.
             assert_eq!(fresh.status.code(), Some(1), "{role}: {said}");
             assert!(said.contains("初始化已中断"), "{role}: {said}");
         } else {
@@ -864,7 +865,7 @@ fn fresh_sets_aside_an_interrupted_setup_without_stopping_an_unregistered_servic
         let started: Value =
             serde_json::from_slice(&fs::read(home.join("setup.json")).unwrap()).unwrap();
         assert_eq!(started["component"], role);
-        if role == "hub" {
+        if stop_before_macos_signing {
             assert_eq!(started["steps"], json!([]));
             assert!(!home.join("services").exists());
             assert!(!root.join("manager-calls").exists());
@@ -877,17 +878,10 @@ fn fresh_sets_aside_an_interrupted_setup_without_stopping_an_unregistered_servic
                     .any(|step| step == "installed")
             );
             assert!(home.join("services/node.json").is_file());
-            // macOS preparation doesn't contact launchd or install a definition.
-            // Linux only performs the new install's query/registration.
-            if cfg!(target_os = "macos") {
-                assert!(!root.join("manager-calls").exists());
-                assert!(!account.join("Library/LaunchAgents").exists());
-            } else {
-                assert_eq!(
-                    fs::read_to_string(root.join("manager-calls")).unwrap(),
-                    "read\ndaemon-reload\nenable\n"
-                );
-            }
+            assert_eq!(
+                fs::read_to_string(root.join("manager-calls")).unwrap(),
+                "read\ndaemon-reload\nenable\n"
+            );
         }
     }
 }
@@ -911,13 +905,19 @@ fn setup_node_passes_the_pairing_code_it_was_given_to_the_pairing() {
         "target":steve_install::build_info()["target"]
     });
     let seen = steve_install::common::shell_quote(root.join("seen").to_str().unwrap()).unwrap();
+    let macos_stub = if cfg!(target_os = "macos") {
+        // Stop before invoking real macOS signing/keychain tools once pairing has run.
+        "/bin/mkdir -p \"$STEVE_HOME/signing\" && printf '{}' > \"$STEVE_HOME/signing/identity.json\" && "
+    } else {
+        ""
+    };
     // records what pairing was given and pairs as the real one would: its file names the Hub
     executable(
         &root.join("installer/bin/steve-node"),
         &format!(
             "#!/bin/sh\ncase \"$1\" in\n --build-info) printf '%s\\n' '{info}' ;;\n \
              pair) printf 'env=%s\\n' \"$STEVE_PAIR_CODE\" > {seen}; printf 'stdin=%s\\n' \"$(/bin/cat)\" >> {seen}; \
-             /bin/mkdir -p \"$STEVE_HOME/node\" && printf '{{\"hub_url\":\"%s\"}}' \"$2\" > \"$STEVE_HOME/node/node.json\" ;;\n \
+             {macos_stub}/bin/mkdir -p \"$STEVE_HOME/node\" && printf '{{\"hub_url\":\"%s\"}}' \"$2\" > \"$STEVE_HOME/node/node.json\" ;;\n \
              status) exit 0 ;;\n *) exit 95 ;;\nesac\n"
         ),
     );
