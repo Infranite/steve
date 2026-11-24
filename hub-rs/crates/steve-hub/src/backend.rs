@@ -219,6 +219,10 @@ pub trait Repo {
     fn bot_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("bot_get")
     }
+    /// The stored `owner` column of `id`, including soft-deleted bots (`None` if no row exists).
+    fn bot_owner(&self, id: &str) -> BResult<Option<Option<String>>> {
+        todo_backend!("bot_owner")
+    }
     /// Workspace ids of the bot's memberships (`bot_workspaces` row order).
     fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
         todo_backend!("bot_workspaces")
@@ -284,6 +288,10 @@ pub trait Repo {
     /// `DELETE FROM bot_memories WHERE bot_id = ?` (bot deletion with `memory: delete`).
     fn memories_delete_of_bot(&self, bot: &str) -> BResult<()> {
         todo_backend!("memories_delete_of_bot")
+    }
+    /// `DELETE FROM bot_memories WHERE bot_id = ? AND workspace_id = ?`.
+    fn memories_delete_of_bot_in_workspace(&self, bot: &str, ws: &str) -> BResult<()> {
+        todo_backend!("memories_delete_of_bot_in_workspace")
     }
 
     // ── tags ──
@@ -859,9 +867,25 @@ pub trait Domain: Send + Sync + 'static {
     fn bot_prompt(&self, bot: &Obj, ws: &str) -> BResult<String> {
         todo_backend!("bot_prompt")
     }
-    /// `{moved: [itemIds]}`.
-    async fn delete_bot(&self, id: &str, to: &str, actor: &str) -> BResult<Obj> {
+    /// `{moved: [itemIds]}` for owner global deletion within `allowed_workspaces`.
+    async fn delete_bot(
+        &self,
+        id: &str,
+        to: &str,
+        actor: &str,
+        allowed_workspaces: Vec<String>,
+    ) -> BResult<Obj> {
         todo_backend!("delete_bot")
+    }
+    /// `{moved: [itemIds]}` for removing a bot from a single workspace `ws`.
+    async fn remove_bot_from_workspace(
+        &self,
+        ws: &str,
+        id: &str,
+        to: &str,
+        actor: &str,
+    ) -> BResult<Obj> {
+        todo_backend!("remove_bot_from_workspace")
     }
 
     // ── conversation (thread.ts) ──

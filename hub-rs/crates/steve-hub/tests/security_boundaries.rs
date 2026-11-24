@@ -19,6 +19,7 @@ struct TestHub {
     app: axum::Router,
     cookie: String,
     cfg: Arc<Config>,
+    store: steve_store::Store,
 }
 
 impl TestHub {
@@ -61,6 +62,7 @@ impl TestHub {
             Default::default(),
         )));
         let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+        let store = w.modules.as_ref().expect("modules").store.clone();
         let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
         st.runtimes.set_harnesses(w.harnesses.clone());
         steve_hub::app::boot(&st).await.expect("boot");
@@ -89,6 +91,7 @@ impl TestHub {
             app,
             cookie,
             cfg,
+            store,
         }
     }
 
@@ -111,6 +114,9 @@ impl TestHub {
             .header("cookie", cookie_hdr)
             .header("origin", "http://127.0.0.1:18701")
             .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 18701))));
+        if let Some(ws) = ws {
+            req = req.header("x-steve-ws", ws);
+        }
         let body = match body {
             Some(v) => {
                 req = req.header("content-type", "application/json");
@@ -597,4 +603,444 @@ async fn p0_03_extension_started_enforces_readonly_views_and_scoped_bus() {
             "missing metric {boundary}/{reason} in:\n{metrics_text}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p0_04_cross_workspace_bot_leak_and_unauthorized_mutations() {
+    let hub = TestHub::start().await;
+
+    // Alice (instance owner) creates two workspaces: `ws_secret` (Alice only) and `ws_shared` (Alice + Bob).
+    let (s, ws_secret) = hub
+        .call(
+            "POST",
+            "/api/workspaces",
+            Some(json!({ "name": "Secret WS" })),
+        )
+        .await;
+    assert_eq!(s, 200, "{ws_secret}");
+    let ws_secret_id = ws_secret["id"].as_str().unwrap().to_string();
+
+    let (s, ws_shared) = hub
+        .call(
+            "POST",
+            "/api/workspaces",
+            Some(json!({ "name": "Shared WS" })),
+        )
+        .await;
+    assert_eq!(s, 200, "{ws_shared}");
+    let ws_shared_id = ws_shared["id"].as_str().unwrap().to_string();
+
+    // Alice creates a project inside `ws_secret`.
+    let proj_dir = hub._home.path().join("secret-proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let (s, proj_secret) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_secret_id),
+            "POST",
+            "/api/projects",
+            Some(json!({
+                "name": "Secret Project",
+                "path": proj_dir.display().to_string(),
+            })),
+        )
+        .await;
+    assert_eq!(s, 200, "{proj_secret}");
+    let proj_secret_id = proj_secret["id"].as_str().unwrap().to_string();
+
+    // Alice creates `bot_secret` in `ws_secret` only, and `bot_shared` in both `ws_secret` and `ws_shared`.
+    let (s, bot_secret) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_secret_id),
+            "POST",
+            "/api/bots",
+            Some(json!({ "name": "SecretBot" })),
+        )
+        .await;
+    assert_eq!(s, 200, "{bot_secret}");
+    let bot_secret_id = bot_secret["id"].as_str().unwrap().to_string();
+
+    let (s, bot_shared) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_secret_id),
+            "POST",
+            "/api/bots",
+            Some(json!({ "name": "SharedBot" })),
+        )
+        .await;
+    assert_eq!(s, 200, "{bot_shared}");
+    let bot_shared_id = bot_shared["id"].as_str().unwrap().to_string();
+
+    let (s, v) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_secret_id),
+            "PUT",
+            &format!("/api/bots/{bot_shared_id}/workspaces"),
+            Some(json!({ "ids": [&ws_secret_id, &ws_shared_id] })),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+
+    // Seed memories in both workspaces for `bot_shared`.
+    let (s, v) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_secret_id),
+            "POST",
+            &format!("/api/bots/{bot_shared_id}/memories"),
+            Some(json!({ "text": "SECRET_MEM_ONLY_IN_WS_SECRET" })),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_shared_id),
+            "POST",
+            &format!("/api/bots/{bot_shared_id}/memories"),
+            Some(json!({ "text": "SHARED_MEM_IN_WS_SHARED" })),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+
+    // Seed a non-closed item assigned to `bot_shared` in `ws_secret` and one in `ws_shared`.
+    steve_store::testkit::hub::api::seed_bot_item(
+        &hub.store,
+        &ws_secret_id,
+        "item_secret_1",
+        &bot_shared_id,
+    )
+    .unwrap();
+    steve_store::testkit::hub::api::seed_bot_item(
+        &hub.store,
+        &ws_shared_id,
+        "item_shared_1",
+        &bot_shared_id,
+    )
+    .unwrap();
+
+    // Attach `proj_secret_id` as `bot_shared`'s default_project in `ws_secret` so we can also
+    // verify `duplicate` in `ws_shared` clears a foreign default_project.
+    let (s, v) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_secret_id),
+            "PATCH",
+            &format!("/api/bots/{bot_shared_id}"),
+            Some(json!({ "default_project": proj_secret_id })),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+
+    // Create Bob (non-owner member) belonging ONLY to `ws_shared`.
+    let bob_token = "tok_bob_security_boundary";
+    let _bob_id = steve_store::testkit::hub::api::seed_member_session(
+        &hub.store,
+        "sub_bob",
+        "Bob",
+        &[&ws_shared_id],
+        bob_token,
+    )
+    .unwrap();
+    let bob_cookie = format!("steve_session={bob_token}");
+
+    // 1) GET /api/shell as Bob must NOT leak `bot_secret` in `allBots` or `ws_secret` in `workspaces`.
+    let (s, shell) = hub
+        .call_as(&bob_cookie, Some(&ws_shared_id), "GET", "/api/shell", None)
+        .await;
+    assert_eq!(s, 200, "{shell}");
+    let all_bots = shell["allBots"].as_array().expect("allBots");
+    assert!(
+        !all_bots.iter().any(|b| b["id"] == bot_secret_id),
+        "allBots leaked bot from unauthorized workspace: {all_bots:?}"
+    );
+    let shared_all = all_bots
+        .iter()
+        .find(|b| b["id"] == bot_shared_id)
+        .expect("shared bot visible in allBots");
+    assert_eq!(
+        shared_all["workspaces"],
+        json!([ws_shared_id]),
+        "allBots leaked unauthorized workspace id: {shared_all}"
+    );
+    let shared_bot = shell["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == bot_shared_id)
+        .expect("shared bot visible in bots");
+    assert_eq!(
+        shared_bot["workspaces"],
+        json!([ws_shared_id]),
+        "bots leaked unauthorized workspace id: {shared_bot}"
+    );
+    let steve_all = all_bots
+        .iter()
+        .find(|b| b["id"] == "steve")
+        .expect("steve visible");
+    assert_eq!(
+        steve_all["workspaces"],
+        json!([ws_shared_id]),
+        "steve leaked unauthorized workspace ids: {steve_all}"
+    );
+
+    // 2) POST /api/bots with `default_project` from `ws_secret` must be refused with typed reason.
+    let (s, body) = hub
+        .call_as(
+            &bob_cookie,
+            Some(&ws_shared_id),
+            "POST",
+            "/api/bots",
+            Some(json!({
+                "name": "ForeignProjBot",
+                "default_project": proj_secret_id,
+            })),
+        )
+        .await;
+    assert_eq!(
+        s, 404,
+        "creating bot with foreign workspace default_project must be refused: {body}"
+    );
+    assert_eq!(
+        body["reason"], "config.bot_project_outside_workspace",
+        "{body}"
+    );
+
+    // Duplicating `bot_shared` in `ws_shared` must drop its foreign `default_project`.
+    let (s, dup) = hub
+        .call_as(
+            &bob_cookie,
+            Some(&ws_shared_id),
+            "POST",
+            &format!("/api/bots/{bot_shared_id}/duplicate"),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{dup}");
+    assert!(
+        dup["default_project"].is_null(),
+        "duplicating across workspaces must not carry foreign default_project: {dup}"
+    );
+    let bob_bot_id = dup["id"].as_str().unwrap().to_string();
+
+    // 3) PUT /api/bots/{bot_shared_id}/workspaces by non-owner Bob must be refused.
+    let (s, body) = hub
+        .call_as(
+            &bob_cookie,
+            Some(&ws_shared_id),
+            "PUT",
+            &format!("/api/bots/{bot_shared_id}/workspaces"),
+            Some(json!({ "ids": [&ws_shared_id] })),
+        )
+        .await;
+    assert_eq!(s, 403, "non-owner set_workspaces must be refused: {body}");
+    assert_eq!(body["reason"], "config.bot_owner_required", "{body}");
+    assert!(
+        hub.store
+            .bots()
+            .in_workspace(&bot_shared_id, &ws_secret_id)
+            .unwrap(),
+        "non-owner set_workspaces must not drop foreign workspace"
+    );
+
+    // 4) DELETE /api/bots/{bot_shared_id} by non-owner Bob must be refused (no global delete, no secret memory export).
+    let (s, body) = hub
+        .call_as(
+            &bob_cookie,
+            Some(&ws_shared_id),
+            "DELETE",
+            &format!("/api/bots/{bot_shared_id}"),
+            Some(json!({ "to": "steve", "memory": "export" })),
+        )
+        .await;
+    assert_eq!(
+        s, 403,
+        "non-owner global bot delete must be refused: {body}"
+    );
+    assert_eq!(body["reason"], "config.bot_owner_required", "{body}");
+    assert!(
+        !body.to_string().contains("SECRET_MEM_ONLY_IN_WS_SECRET"),
+        "secret workspace memory leaked in delete response: {body}"
+    );
+
+    // 5) Workspace-scoped removal (`DELETE /api/bots/{id}/workspace`) lets Bob detach `bot_shared`
+    // from `ws_shared` without leaking or mutating `ws_secret`.
+    // 5a) Heir outside `ws_shared` is refused.
+    let (s, body) = hub
+        .call_as(
+            &bob_cookie,
+            Some(&ws_shared_id),
+            "DELETE",
+            &format!("/api/bots/{bot_shared_id}/workspace"),
+            Some(json!({ "to": &bot_secret_id, "memory": "export" })),
+        )
+        .await;
+    assert_eq!(s, 400, "heir outside workspace must be refused: {body}");
+    assert_eq!(
+        body["reason"], "config.bot_heir_outside_workspace",
+        "{body}"
+    );
+
+    // 5b) Valid heir in `ws_shared` removes only `ws_shared` membership, hands over only
+    // `item_shared_1`, and exports ONLY `ws_shared` memories.
+    let (s, body) = hub
+        .call_as(
+            &bob_cookie,
+            Some(&ws_shared_id),
+            "DELETE",
+            &format!("/api/bots/{bot_shared_id}/workspace"),
+            Some(json!({ "to": "steve", "memory": "export" })),
+        )
+        .await;
+    assert_eq!(s, 200, "workspace removal should succeed: {body}");
+    assert_eq!(body["removed_workspace"], ws_shared_id);
+    assert_eq!(body["moved"], json!(["item_shared_1"]), "{body}");
+    let exported = body["memories"].as_array().expect("memories");
+    assert_eq!(exported.len(), 1, "{body}");
+    assert_eq!(exported[0]["text"], "SHARED_MEM_IN_WS_SHARED");
+    assert!(
+        !body.to_string().contains("SECRET_MEM_ONLY_IN_WS_SECRET"),
+        "workspace removal must not export other workspace memories: {body}"
+    );
+    // `bot_shared` is still alive in `ws_secret`, and `item_secret_1` & `ws_secret` memories are untouched.
+    assert!(hub.store.bots().get(&bot_shared_id).unwrap().is_some());
+    assert!(
+        !hub.store
+            .bots()
+            .in_workspace(&bot_shared_id, &ws_shared_id)
+            .unwrap()
+    );
+    assert!(
+        hub.store
+            .bots()
+            .in_workspace(&bot_shared_id, &ws_secret_id)
+            .unwrap()
+    );
+    assert_eq!(
+        hub.store
+            .items()
+            .get("item_secret_1")
+            .unwrap()
+            .unwrap()
+            .bot_id
+            .as_deref(),
+        Some(bot_shared_id.as_str())
+    );
+    assert_eq!(
+        hub.store
+            .memories()
+            .list(&bot_shared_id, &ws_secret_id)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // 6) Owner global deletion refuses if bot is in a workspace caller does not belong to, or if
+    // heir is missing from any affected workspace.
+    // Put Bob's own bot (`bob_bot_id`) in `[ws_shared, ws_secret]` at the store layer (e.g. Bob
+    // was removed from `ws_secret`): Bob owns `bob_bot_id` but cannot globally delete across `ws_secret`.
+    hub.store
+        .bots()
+        .set_workspaces(&bob_bot_id, &[ws_shared_id.clone(), ws_secret_id.clone()])
+        .unwrap();
+    let (s, body) = hub
+        .call_as(
+            &bob_cookie,
+            Some(&ws_shared_id),
+            "DELETE",
+            &format!("/api/bots/{bob_bot_id}"),
+            Some(json!({ "to": "steve", "memory": "delete" })),
+        )
+        .await;
+    assert_eq!(
+        s, 403,
+        "cross-workspace owner delete must be refused: {body}"
+    );
+    assert_eq!(body["reason"], "config.bot_foreign_workspaces", "{body}");
+
+    // Even instance owner Alice cannot globally delete Bob's owned bot (`bob_bot_id`).
+    let (s, body) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_shared_id),
+            "DELETE",
+            &format!("/api/bots/{bob_bot_id}"),
+            Some(json!({ "to": "steve", "memory": "delete" })),
+        )
+        .await;
+    assert_eq!(
+        s, 403,
+        "non-owner cannot globally delete another user's bot: {body}"
+    );
+    assert_eq!(body["reason"], "config.bot_owner_required", "{body}");
+
+    // Alice re-adds `bot_shared` to `ws_shared` and tries global delete with `bot_secret` (absent from `ws_shared`):
+    // must be refused explicitly instead of silently falling back to `steve`.
+    let (s, v) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_secret_id),
+            "PUT",
+            &format!("/api/bots/{bot_shared_id}/workspaces"),
+            Some(json!({ "ids": [&ws_secret_id, &ws_shared_id] })),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, body) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_secret_id),
+            "DELETE",
+            &format!("/api/bots/{bot_shared_id}"),
+            Some(json!({ "to": &bot_secret_id, "memory": "delete" })),
+        )
+        .await;
+    assert_eq!(
+        s, 400,
+        "heir absent from one workspace must be refused: {body}"
+    );
+    assert_eq!(
+        body["reason"], "config.bot_heir_outside_workspace",
+        "{body}"
+    );
+
+    // Owner Alice globally deletes `bot_shared` with heir `steve` (present in every workspace): succeeds.
+    let (s, body) = hub
+        .call_as(
+            &hub.cookie,
+            Some(&ws_secret_id),
+            "DELETE",
+            &format!("/api/bots/{bot_shared_id}"),
+            Some(json!({ "to": "steve", "memory": "delete" })),
+        )
+        .await;
+    assert_eq!(s, 200, "owner global delete should succeed: {body}");
+    assert_eq!(body["moved"], json!(["item_secret_1"]), "{body}");
+    assert!(hub.store.bots().get(&bot_shared_id).unwrap().is_none());
+    assert_eq!(
+        hub.store
+            .items()
+            .get("item_secret_1")
+            .unwrap()
+            .unwrap()
+            .bot_id
+            .as_deref(),
+        Some("steve")
+    );
+
+    // Non-owner Bob cannot restore Alice's soft-deleted bot.
+    let (s, body) = hub
+        .call_as(
+            &bob_cookie,
+            Some(&ws_shared_id),
+            "POST",
+            &format!("/api/bots/{bot_shared_id}/restore"),
+            None,
+        )
+        .await;
+    assert_eq!(s, 403, "non-owner restore must be refused: {body}");
+    assert_eq!(body["reason"], "config.bot_owner_required", "{body}");
 }

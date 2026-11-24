@@ -114,7 +114,13 @@ pub async fn shell(
         if let Some(w) = workspace.as_mut() {
             steve_store::seeded::show(w, steve_store::seeded::WORKSPACE);
         }
-        let (bots, all_bots) = super::bots_out(r, ws)?;
+        let my_workspaces = r.workspaces_of_user(&c.me)?;
+        let allowed_ws: std::collections::BTreeSet<String> = my_workspaces
+            .iter()
+            .map(|w| str_of(w, "id"))
+            .filter(|id| !id.is_empty())
+            .collect();
+        let (bots, all_bots) = super::bots_out(r, ws, &c.me, &allowed_ws)?;
         let mut projects = r.projects_list(ws)?;
         for p in &mut projects {
             steve_store::seeded::show(p, steve_store::seeded::PROJECT);
@@ -130,7 +136,7 @@ pub async fn shell(
                 owner,
                 me: c.user,
                 workspace,
-                workspaces: super::workspaces_out(r.workspaces_of_user(&c.me)?),
+                workspaces: super::workspaces_out(my_workspaces),
                 bots,
                 all_bots,
                 projects,

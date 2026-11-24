@@ -215,6 +215,7 @@ impl Project {
 pub struct Bot {
     pub id: String,
     pub workspace_id: String,
+    pub owner: Option<String>,
     pub name: String,
     pub role: String,
     pub main: bool,
@@ -242,6 +243,7 @@ impl Bot {
         Ok(Self {
             id: r.get("id")?,
             workspace_id: r.get("workspace_id")?,
+            owner: r.get("owner")?,
             name: r.get("name")?,
             role: r.get("role")?,
             main: bool_col(r, "main")?,

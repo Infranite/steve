@@ -61,7 +61,7 @@ export type Item = {
   placement?: PlacementExplanation
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
-export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
+export type Bot = { id: string; owner?: string | null; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
@@ -181,7 +181,7 @@ export const st = {
   bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
   tags: [] as Tag[],
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>,
-  localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
+  localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, me: null as { id: string; name?: string; role?: string } | null, prefix: "ST",
   noticeSeen: 0,
   quote: null as string | null, focus: null as { item: string; until: number } | null,
   /* modules that are not wired to a backend yet: always empty, never sample data */
@@ -267,7 +267,7 @@ const sessionCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("se
 /* ───────── mapping ───────── */
 function botOf(b: RBot): Bot {
   const proj = shell()?.projects.find((p) => p.id === b.default_project)
-  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
+  return { id: b.id, owner: b.owner ?? null, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
     on: b.enabled, acc: ACC[b.accept_mode] ?? ACC.inherit, ws: proj?.name ?? t("core:projectByItem"), project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
     routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
 }
@@ -632,6 +632,7 @@ function applyShell(s: Shell) {
   applyLook(s.settings)
   st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto }
   st.owner = !!s.owner
+  st.me = s.me ?? null
   /* the tour shows on an empty instance until this browser finished it, or the owner met Steve or said no (the Hub remembers that) */
   st.ready = true
   maybeOnboard()
@@ -1354,10 +1355,18 @@ export async function makeBot(n: string, role: string, harness = defaultHarness(
   return r?.id
 }
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
+export function ownsBot(owner: string | null | undefined): boolean {
+  return owner ? owner === st.me?.id : st.owner
+}
 export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
   const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
   if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
   toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+}
+export async function removeBotFromWorkspace(k: string, to: string, mem: "删除" | "导出") {
+  const b = st.bots[k]; const r = await shellCall(api.removeBotFromWorkspace(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
+  if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "导出" ? "core:toast.botRemovedFromWorkspaceExported" : "core:toast.botRemovedFromWorkspace", { name: b?.n, count: r.moved.length, to: botName(to) }))
 }
 export async function dupBot(k: string) { const r = await shellCall(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
 export function addMem(k: string, text: string) { void changeBotMemory(k, api.addMemory(k, text), t("core:toast.memoryAdded")) }

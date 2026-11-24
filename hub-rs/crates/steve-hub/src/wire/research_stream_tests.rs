@@ -147,6 +147,7 @@ impl Test {
                 specialties: vec![],
                 id: "main".into(),
                 workspace_id: steve_store::WS.into(),
+                owner: None,
                 name: "Steve".into(),
                 role: String::new(),
                 main: true,

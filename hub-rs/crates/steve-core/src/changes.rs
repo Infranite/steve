@@ -563,6 +563,7 @@ fn blank_bot(ws: &str, name: &str, m: &crate::models::Models) -> Bot {
     Bot {
         id: String::new(),
         workspace_id: ws.into(),
+        owner: None,
         name: name.into(),
         role: String::new(),
         specialties: vec![],
@@ -2375,7 +2376,7 @@ impl Core {
         if a.target.kind == "bot" && new_bot_name(&tid).is_some() {
             let made = a.before.get("created").map(jstr).unwrap_or_default();
             let main = t.db().main_bot()?.id;
-            t.delete_bot(&made, &main, actor)?;
+            t.delete_bot(&made, &main, actor, &[ws.to_string()])?;
         }
         let db = t.db().clone();
         let r = db.store().write(|_w| -> Result<Value> {

@@ -1,5 +1,9 @@
 // Domain-owned reason texts, grouped by the stable reason prefix.
 export default {
+  "config.bot_foreign_workspaces": "This bot still belongs to workspaces you are not a member of and cannot be deleted globally.",
+  "config.bot_heir_outside_workspace": "The handover bot must be a member of every affected workspace.",
+  "config.bot_owner_required": "Only the bot's owner can perform this action.",
+  "config.bot_project_outside_workspace": "The default project does not belong to the current workspace.",
   "config.diagnostic_model_disabled": "Model execution is disabled on this diagnostic Hub.",
   "config.harness_builtin_protected": "Built-in harness \"{{harness}}\" cannot be overridden or removed.",
   "config.harness_env_not_allowed": "Custom harness declarations do not accept environment variables.",

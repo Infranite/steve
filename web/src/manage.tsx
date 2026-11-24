@@ -25,7 +25,7 @@ import { Badge } from "@/components/affect/badge-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
-  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  st, botName, ownsBot, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, removeBotFromWorkspace, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, emit, closedSt,
 } from "@/store"
 import { api } from "@/api"
@@ -101,7 +101,7 @@ export function BotsView() {
           : <Empty title={Object.keys(st.bots).length > 1 ? t("manage:list.noMatch") : t("manage:list.onlySteve")} sub={t("manage:list.emptySub")} />}
       </Section>
       {others.length > 0 && <Section label={t("manage:list.elsewhere", { n: others.length })}>
-        <Panel>{others.map((b) => <Row key={b.id} title={t("manage:bot.name", { name: b.name })} sub={t("manage:list.inWorkspaces", { count: b.workspaces.length })}><Button size="xs" variant="outline" onClick={() => setBotWorkspaces(b.id, [...b.workspaces, st.workspace!.id])}><PlusIcon />{t("manage:list.joinHere")}</Button></Row>)}</Panel></Section>}
+        <Panel>{others.map((b) => <Row key={b.id} title={t("manage:bot.name", { name: b.name })} sub={t("manage:list.inWorkspaces", { count: b.workspaces.length })}>{ownsBot(b.owner) && <Button size="xs" variant="outline" onClick={() => setBotWorkspaces(b.id, [...b.workspaces, st.workspace!.id])}><PlusIcon />{t("manage:list.joinHere")}</Button>}</Row>)}</Panel></Section>}
       </div>
     </Page>
   )
@@ -143,21 +143,35 @@ export function DeleteBotDialog({ k }: { k: string }) {
   const memories = useBotMemories(k)
   const t = useT()
   const b = st.bots[k]
+  const canDeleteGlobally = b ? ownsBot(b.owner) : false
+  const multiWorkspace = (b?.workspaces.length ?? 0) > 1
+  const [scope, setScope] = useState<"workspace" | "global">(() => (canDeleteGlobally && !multiWorkspace ? "global" : "workspace"))
   const [to, setTo] = useState("steve"), [mem, setMem] = useState<"删除" | "导出">("导出")
   if (!b) return null
+  const effectiveScope: "workspace" | "global" = canDeleteGlobally ? scope : "workspace"
   const mine = getItems().filter((i) => i.b === k && !closedSt(i.st))
+  const confirm = () => {
+    closeSheet()
+    go("#/bots")
+    if (effectiveScope === "global") void deleteBot(k, to, mem)
+    else void removeBotFromWorkspace(k, to, mem)
+  }
   return (
     <AlertDialog open onOpenChange={(o) => !o && closeSheet()}>
       <AlertDialogContent className="sm:max-w-[480px]!">
-        <AlertDialogHeader><AlertDialogTitle>{t("manage:del.title", { name: b.n })}</AlertDialogTitle>
-          <AlertDialogDescription>{t("manage:del.desc", { count: mine.length })}</AlertDialogDescription></AlertDialogHeader>
+        <AlertDialogHeader><AlertDialogTitle>{effectiveScope === "global" ? t("manage:del.title", { name: b.n }) : t("manage:del.removeTitle", { name: b.n })}</AlertDialogTitle>
+          <AlertDialogDescription>{effectiveScope === "global" ? t("manage:del.desc", { count: mine.length }) : t("manage:del.removeDesc", { count: mine.length })}</AlertDialogDescription></AlertDialogHeader>
         <FieldGroup className="gap-4">
+          {canDeleteGlobally && (
+            <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.scope")}</FieldLabel>
+              <Segmented size="sm" value={effectiveScope} onChange={setScope} options={[["workspace", t("manage:del.scopeWorkspace")], ["global", t("manage:del.scopeGlobal")]] as const} /></Field>
+          )}
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.handTo")}</FieldLabel>
             <SetSelect testId="del-to" label={t("manage:del.handTo")} value={to} onChange={setTo} options={Object.keys(st.bots).filter((x) => x !== k && st.bots[x].on).map((x) => ({ v: x, l: botName(x) }))} /></Field>
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.itsMemories", { count: memories?.length ?? 0 })}</FieldLabel><Segmented size="sm" value={mem} onChange={setMem} options={[["导出", t("manage:del.export")], ["删除", t("common:action.delete")]] as const} /></Field>
         </FieldGroup>
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
-          <AlertDialogAction variant="destructive" data-del-bot-confirm onClick={() => { closeSheet(); go("#/bots"); void deleteBot(k, to, mem) }}>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogAction variant="destructive" data-del-bot-confirm onClick={confirm}>{effectiveScope === "global" ? t("common:action.delete") : t("manage:del.removeAction")}</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
   )

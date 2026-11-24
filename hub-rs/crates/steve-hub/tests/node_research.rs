@@ -384,6 +384,7 @@ fn bot() -> steve_core::repo::Bot {
         specialties: vec![],
         id: "steve".into(),
         workspace_id: "default".into(),
+        owner: None,
         name: "Steve".into(),
         role: "r".into(),
         main: true,

@@ -1,5 +1,9 @@
 // Domain-owned reason texts, grouped by the stable reason prefix.
 export default {
+  "config.bot_foreign_workspaces": "该 Bot 仍属于你未加入的工作区，不能执行全局删除。",
+  "config.bot_heir_outside_workspace": "接手事项的 Bot 必须属于所有受影响的工作区。",
+  "config.bot_owner_required": "只有该 Bot 的拥有者才能执行此操作。",
+  "config.bot_project_outside_workspace": "默认项目不属于当前工作区。",
   "config.diagnostic_model_disabled": "此诊断副本已禁用模型执行。",
   "config.harness_builtin_protected": "内置 harness「{{harness}}」不能通过自定义接口覆盖或移除。",
   "config.harness_env_not_allowed": "自定义 harness 声明不允许注入环境变量。",
