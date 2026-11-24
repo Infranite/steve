@@ -23,7 +23,8 @@ export function seedDecisions(waits: Wait[]) {
 }
 
 /** The typed lifecycle a fixture's display status stands for (a waiting item is active with an open decision). */
-function fixtureState(st: Item["st"]): ItemView["state"] {
+function fixtureState(st: Item["st"], phase?: Item["phase"]): ItemView["state"] {
+  if (phase === "closed" && st === "run") return { kind: "closed", outcome: "failed", by: "acceptance" }
   switch (st) {
     case "done": return { kind: "closed", outcome: "finished", by: "owner" }
     case "drop": return { kind: "closed", outcome: "cancelled", by: "owner" }
@@ -40,7 +41,7 @@ export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<
     const parent = typeof i.parent === "object" ? i.parent : null
     const view: ItemView = {
       id: i.id, ws: "default", no: Number(i.id.split("-")[1]) || 0, title: i.t, bot_id: i.b,
-      state: fixtureState(i.st), cycle: i.cycle ?? 1, revision: 1, delivery_revision: 0, delivery: [],
+      state: fixtureState(i.st, i.phase), cycle: i.cycle ?? 1, revision: 1, delivery_revision: 0, delivery: [],
       waits: i.st === "block" ? ["prerequisite"] : [],
       priority: i.pri ?? "中", star: !!i.star, archived: !!i.arch, design_gate: !!i.designGate,
       parent: parent ? { item: parent.item, session: parent.s, at: parent.at } : undefined,
@@ -66,9 +67,9 @@ export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<
         resolved: null, undo_until: null, space_id: null, tier: w.tier ?? "decide", folded: null, revision: 1,
       } })
     }
-    if (i.workflow || i.outs?.length) {
+    if (i.workflow || i.outs?.length || i.progress) {
       qc.setQueryData(["detail", scopeKey(), "item", i.id], {
-        workflow: i.workflow, decisions: [], timeline: [], dependents: [], goalsList: [], plan: [], planRounds: [],
+        workflow: i.workflow, decisions: [], timeline: i.progress ? [{ id: 1, ts: i.updated ?? 0, actor: i.b, kind: "progress", text: i.progress, session_id: null }] : [], dependents: [], goalsList: [], plan: [], planRounds: [],
         artifacts: (i.outs ?? []).map(([kind, title, location, id, created, , delivery_id]) => ({ kind, title, location, id, created, delivery_id })),
       })
     }

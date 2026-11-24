@@ -4,8 +4,9 @@ import { Toaster } from "@/components/ui/toaster"
 import { api, type RAnnotation, type RItem, type RItemDetail, type ROutPreview, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import "../../src/manage"
-import { refresh, useStore } from "../../src/store"
+import { refresh, useStore, type Wait } from "../../src/store"
 import { ItemView } from "../../src/views"
+import { seedItems } from "./view-data"
 
 /* the item page of ST-9 against a fake Hub kept in localStorage, so a reload finds the drafts and sent notes where the
  * real Hub keeps them. Raw files (pictures, Office files) are served by the test; every other /api call fails. */
@@ -70,6 +71,8 @@ api.annSend = async (_i, ids, key) => {
   h.keys.push(key); save(h)
   return { ok: true, again: false, sent: taken.length, timeline_id: line }
 }
+const designWait: Wait = { type: "ask", subject: "design_implementation", subjectId: "{}", q: "设计报告已交付，下一步？", draft: "请先查看产出。", since: "刚刚", decision: designDecision.id, session: null, options: ["按方案实现", "只保留设计", "修改设计"], by: "dev" }
+seedItems([{ id: ID, t: item.title, st: "wait", b: "dev", branch: item.branch, created: item.created, updated: item.updated, waits: design ? [designWait] : [] }])
 void refresh()
 function App() { useStore(); return <SidebarProvider><main className="w-full"><ItemView id={ID} /></main><Toaster /></SidebarProvider> }
 createRoot(document.getElementById("root")!).render(<App />)

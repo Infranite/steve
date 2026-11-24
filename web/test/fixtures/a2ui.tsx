@@ -118,11 +118,12 @@ api.a2ui = async (id: string, a: A2uiSubmit) => {
   const m = s.thread.find((x) => x.id === id)!, key = `${a.block}:${a.surfaceId}`
   m.meta.a2ui ??= {}
   const had = (m.meta.a2ui as Record<string, any>)[key]
-  if (had) { save(s); return { already: true, message_id: had.message, action: had } }
+  if (had) { save(s); seedMessages(s.thread); return { already: true, message_id: had.message, action: had } }
   const mid = `act${s.calls}`, rec = { name: a.name, label: a.label, sourceComponentId: a.sourceComponentId, context: a.context, data: a.data, at: Date.now(), message: mid }
   ;(m.meta.a2ui as Record<string, any>)[key] = rec
   s.thread.push(msg(mid, "me", `[A2UI action] 提交「${a.label}」\n${JSON.stringify({ version: V, action: a })}`, 10 + s.calls, { a2ui_action: { ...rec, data: undefined, ref: id } }))
   save(s)
+  seedMessages(s.thread)
   return { already: false, message_id: mid, action: rec }
 }
 await refresh()

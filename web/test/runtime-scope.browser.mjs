@@ -4,7 +4,7 @@ import http from 'node:http'
 import { mkdir, writeFile } from 'node:fs/promises'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const base = process.env.STEVE_TEST_WEB || 'http://127.0.0.1:19714'
-const port = Number(process.env.STEVE_TEST_API_PORT || 19715)
+const port = Number(process.env.STEVE_TEST_API_PORT || 0)
 const before = process.env.STEVE_SCOPE_BEFORE === '1'
 const shots = process.env.STEVE_TEST_SHOTS
 if (shots) await mkdir(shots, { recursive: true })
@@ -21,9 +21,11 @@ const view = () => ({ steve: { bot_id: 'scope-bot', name: 'scope-bot', harness: 
   harnesses: [{ id: 'registry-fixture', name: 'Registry fixture', efforts: [], default_models: [] }] })
 const state = () => ({ version: 'fixture', web_version: 'fixture', owner: false, workspace: ws, workspaces: [ws], items: f.items, decisions: [], recent: [], bots: f.bots, allBots: f.bots.map(b => ({ id: b.id, name: b.name, workspaces: b.workspaces })), projects: [], tags: [], tagUses: {}, thread: [], settings: { onboard: '1' }, sessions: [], devices: [device], runtimes: [f.runtime, { ...f.runtime, id: 'not-for-purpose', name: 'Excluded purpose' }] })
 const itemView = (i) => ({
-  id: i.id, ws: ws.id, no: i.no, title: i.title, status: i.status, bot_id: i.bot_id, project_id: i.project_id,
-  phase: "active", stage: "", cycle: 1, priority: i.priority, star: false, archived: false, design_gate: false,
-  source: "web", created: i.created, updated: i.updated, goals: 1, tags: [], deps: [], plan_total: 0, plan_done: 0,
+  id: i.id, ws: ws.id, no: i.no, title: i.title, bot_id: i.bot_id, project_id: i.project_id,
+  state: i.status === 'wait' ? { kind: 'ready' } : { kind: 'active' },
+  cycle: 1, revision: 1, delivery_revision: 0, delivery: [], waits: [],
+  priority: i.priority, star: false, archived: false, design_gate: false,
+  source: 'web', created: i.created, updated: i.updated, goals: 1, tags: [], deps: [], plan_total: 0, plan_done: 0,
   op_blockers: [], active_operations: 0, detail_stamp: 0, has_branch: false,
 })
 const server = http.createServer(async (req, res) => {
@@ -37,8 +39,9 @@ const server = http.createServer(async (req, res) => {
     else if (p === '/api/runtimes') data = state().runtimes
     else if (p === '/api/shell') data = state()
     else if (p === '/api/summary') data = { thinking: false, hold: null }
-    else if (p === '/api/snapshot') data = { epoch: 'fixture', rev: 1, cursor: 'fixture:1', views: { item: f.items.map(itemView), session: [], decision: [] } }
+    else if (p === '/api/snapshot') data = { epoch: 'fixture', rev: 1, cursor: 'fixture:1', views: { item: f.items.map(itemView), session: [], decision: [], message: { views: [], next: null } } }
     else if (p === '/api/views') data = { rev: 2, views: u.searchParams.get('kind') === 'item' ? f.items.map(itemView) : [], missing: [] }
+    else if (p === '/api/notifications') data = []
     else if (p === '/api/devices') data = { devices: [device], runtimes: [f.runtime] }
     else if (p === '/api/nodes') data = { nodes: [] } // No linked/name eligibility inference.
     else if (p === '/api/vitals') data = { nodes: {} }
@@ -65,6 +68,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); console.error(e) }
 })
 await new Promise(resolve => server.listen(port, '127.0.0.1', resolve))
+const apiBase = `http://127.0.0.1:${server.address().port}`
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const fits = async p => assert.ok(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'no horizontal overflow')
 const shot = async (p, name) => { if (shots) await p.screenshot({ path: `${shots}/${name}.png`, fullPage: true }) }
@@ -76,6 +80,14 @@ try {
     p.setDefaultTimeout(12000)
     const errors = []; p.on('pageerror', e => errors.push(e.message))
     await p.addInitScript(lang => { localStorage.setItem('steve-lang', lang); localStorage.setItem('steve-onboarded', '1') }, lang)
+    await p.route('**/*', async route => {
+      const u = new URL(route.request().url())
+      if (u.origin !== base) return route.abort('blockedbyclient')
+      if (u.pathname === '/auth/hello' || u.pathname.startsWith('/api/')) {
+        return route.fulfill({ response: await route.fetch({ url: apiBase + u.pathname + u.search }) })
+      }
+      return route.continue()
+    })
     const result = { local, lang, scope: 'Protocol/UI fixture only; no remote execution', errors }
     const open = async hash => { await p.goto(base + '/' + hash); await p.locator('[data-new-item], [data-slot=tabs-trigger], [data-models-default]').first().waitFor() }
     const newItem = async () => { await open('#/items'); await p.locator('[data-new-item]').click(); await p.locator('#new-goal').fill('Scope regression request') }
@@ -140,11 +152,12 @@ try {
       if (!before || f.runtime.modes.length) await p.locator('[data-select=new-bot-perm]').click()
       const full = p.getByRole('option', { name: lang === 'en' ? /Never ask/ : /不再询问/ })
       if (await full.count()) await full.click()
+      else await p.keyboard.press('Escape')
       result.newBotDisabled = await p.locator('[data-testid=bot-go]').isDisabled()
       if (!before) {
         assert.equal(result.newBotDisabled, false)
         await p.locator('[data-testid=bot-go]').click(); await p.locator('[data-save-bot]').waitFor()
-        assert.equal(mutations('/api/bots').at(-1).body.perm_mode, 'bypassPermissions')
+        assert.equal(mutations('/api/bots').at(-1).body.perm_mode, local === 'unavailable' ? 'default' : 'bypassPermissions')
       }
       await p.keyboard.press('Escape')
       await open('#/settings/models'); await p.locator('[data-models-advanced-toggle]').click(); if (!await p.locator('[data-purpose=chat]').isVisible()) await p.locator('[data-follows-toggle]').click(); await p.locator('[data-purpose=chat]').click(); await p.locator('[data-models-sheet]').waitFor()

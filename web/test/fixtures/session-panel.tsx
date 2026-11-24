@@ -40,7 +40,10 @@ const state = { version: "test", web_version: "test", workspace: { id: "default"
   bots: [{ id: "dev", name: "开发", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
   projects: [], tags: [], tagUses: {}, thread: [], settings: {}, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }],
   harnessNames: { "claude-code": "Claude Code", codex: "Codex" } } as unknown as Shell
-const usage = (input: number, output: number, cache_read: number, est: number) => ({ input, output, cache_read, cache_write: 0, total: input + output + cache_read, hit_rate: cache_read / (input + cache_read), est, reported: 0, unpriced_tokens: 0, rough: false })
+const usage = (input: number, output: number, cache_read: number, est: number, state: "complete" | "not_reported" = "complete") => ({ input, output, cache_read, cache_write: 0, total: input + output + cache_read, hit_rate: input + cache_read ? cache_read / (input + cache_read) : null, est, reported: 0, unpriced_tokens: 0, rough: false,
+  coverage: state === "not_reported"
+    ? { state: "not_reported" as const, expected: 0, reported: 0, complete: 0, pending: 0, unavailable: 0, total: null, input: null, output: null, cache_read: null, cache_write: null, cost_reported: null }
+    : { state: "complete" as const, expected: 2, reported: 2, complete: 2, pending: 0, unavailable: 0, total: input + output + cache_read, input, output, cache_read, cache_write: 0, cost_reported: null } })
 api.shell = async () => structuredClone(state)
 api.devices = async () => ({ devices: [{ id: "hub", node_id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] })
 api.transcript = async () => ({ events, next: null })
@@ -54,7 +57,7 @@ api.item = (async (id: string) => ({ ...items.find((x) => x.id === id), goalsLis
   artifacts: [{ id: "art1", kind: "报告", title: "数据契约核实摘要", location: "outputs/a.md", created: s(320) }, { id: "art2", kind: "报告", title: "别的会话的产出", location: null, created: s(500) }] })) as any
 api.resumeInfo = (async () => ({ harness: sess.harness, id: null, cwd: sess.cwd, cwd_exists: true, command: null, transcript: null })) as any
 /* the harness's own bill differs from Steve's estimate: the panel says both */
-stats.session = async () => ({ session_id: "s1", turns: codex ? 0 : 2, usage: codex ? usage(0, 0, 0, 0) : { ...usage(40_000, 5_000, 900_000, 0.42), reported: 1.2 } })
+stats.session = async () => ({ session_id: "s1", turns: codex ? 0 : 2, usage: codex ? usage(0, 0, 0, 0, "not_reported") : { ...usage(40_000, 5_000, 900_000, 0.42), reported: 1.2 } })
 stats.item = (async () => ({ turns: [{ id: "t1", session_id: "s1", started: s(10), ended: s(100), stop_reason: "end_turn", attempt: 0, transient: false, tools: 2, tool_errors: 0, usage: usage(30_000, 3_000, 600_000, 0.3) },
   { id: "t2", session_id: "s1", started: s(200), ended: s(320), stop_reason: "end_turn", attempt: 0, transient: false, tools: 1, tool_errors: 0, usage: usage(10_000, 2_000, 300_000, 0.12) }] })) as any
 kb.uses = (async () => ({ hits: codex ? [] : [

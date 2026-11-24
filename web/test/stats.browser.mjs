@@ -18,7 +18,8 @@ const created = [2, 1, 0, 3, 1, 1, 1], done = [1, 0, 1, 2, 0, 1, 1]
 const sum = (a) => a.reduce((x, y) => x + y, 0)
 const P = (p50, p85, n = 6) => ({ p50, p85, avg: p50 && p50 * 1.2, sum: (p50 ?? 0) * n, n })
 const H = 3600000
-const usage = { input: 1_200_000, output: 300_000, cache_read: 4_100_000, cache_write: 400_000, reasoning: 0, total: 6_000_000, hit_rate: 0.72, est: 18.4, reported: 0, unpriced_tokens: 0, saved_by_cache: 9.1, calls: 40, failed_calls: 1, turns: 120, turn_ms: 26 * 3600000, turn_errors: 2, retries: 1, interrupted: 0, tools: 900, tool_errors: 12 }
+const usage = { input: 1_200_000, output: 300_000, cache_read: 4_100_000, cache_write: 400_000, reasoning: 0, total: 6_000_000, hit_rate: 0.72, est: 18.4, reported: 0, unpriced_tokens: 0, saved_by_cache: 9.1, calls: 40, failed_calls: 1, turns: 120, turn_ms: 26 * 3600000, turn_errors: 2, retries: 1, interrupted: 0, tools: 900, tool_errors: 12,
+  coverage: { state: "complete", expected: 40, reported: 40, complete: 40, pending: 0, unavailable: 0, total: 6_000_000, input: 1_200_000, output: 300_000, cache_read: 4_100_000, cache_write: 400_000, cost_reported: null } }
 const core = {
   usage,
   spend: { est: 18.4, reported: 0, unpriced_tokens: 500, unpriced: { "mystery-1": 500 }, saved_by_cache: 9.1, by_source: { agent: 16, gateway: 2.4 }, gateway_by_purpose: {}, priced_by: { table: 4_000_000, models_dev: 1_999_500 }, catalog: { synced: Date.now() - 3600000, tried: Date.now() - 600000, error: "连接 Models.dev 超时", models: 8536 } },
@@ -69,7 +70,8 @@ const hourSeries = (metric) => {
   if (metric === "hit_rate") return one("命中率", measured({ 9: 0.7, 10: 0.8, 14: 0.6 }))
   return one("合计", hourly({ 1: 20000, 9: 300000, 10: 120000, 13: 50000, 14: 80000 }).map((v) => v && (metric === "cost" ? v / 400000 : v)))
 }
-const itemRow = (no, status) => ({ item_id: `ST-${no}`, no, title: `完成的事项 ${no}`, status, bot_id: "dev", project_id: "p1", created: Date.now() - no * H, done_at: Date.now() - H, lead_ms: no * H, cycle_ms: H, wait_ms: H / 2, agent_ms: H, turns: 4, reworks: 0, first_pass: true, tokens: 100000 * no, est: no * 0.4, unpriced_tokens: 0, reported: 0 })
+const itemRow = (no, status) => ({ item_id: `ST-${no}`, no, title: `完成的事项 ${no}`, status, bot_id: "dev", project_id: "p1", created: Date.now() - no * H, done_at: Date.now() - H, lead_ms: no * H, cycle_ms: H, wait_ms: H / 2, agent_ms: H, turns: 4, reworks: 0, first_pass: true, tokens: 100000 * no, est: no * 0.4, unpriced_tokens: 0, reported: 0,
+  coverage: { state: "complete", expected: 4, reported: 4, complete: 4, pending: 0, unavailable: 0, total: 100000 * no, input: 100000 * no, output: 0, cache_read: 0, cache_write: 0, cost_reported: null } })
 const usageRow = (key, label) => ({ ...usage, key, label, priced: true })
 /* a second Bot: fewer items, each dearer */
 const revSummary = { ...summary, throughput: { ...core.throughput, done: 2 }, quality: { ...core.quality, first_pass: 0.5, first_pass_n: 2, reworks: 1, reworks_per_done: 0.5, fails: { stall: 0, error: 0, restart: 0, release: 0, other: 0 } }, per_item: { ...core.per_item, est_avg: 5.5 } }
@@ -391,7 +393,8 @@ try {
   for (const theme of ["light", "dark"]) for (const width of [1440, 390]) {
     const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 1000 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", (e) => errors.push(e.message))
-    const t0 = Date.now() - 5 * H, U = (input, output, est, x = {}) => ({ input, output, cache_read: 0, cache_write: 0, total: input + output, hit_rate: null, est, reported: 0, unpriced_tokens: 0, rough: false, ...x })
+    const t0 = Date.now() - 5 * H, U = (input, output, est, x = {}) => ({ input, output, cache_read: 0, cache_write: 0, total: input + output, hit_rate: null, est, reported: 0, unpriced_tokens: 0, rough: false,
+      coverage: { state: "complete", expected: 1, reported: 1, complete: 1, pending: 0, unavailable: 0, total: input + output, input, output, cache_read: 0, cache_write: 0, cost_reported: null }, ...x })
     const turn = (id, at, min, usage, x = {}) => ({ id, session_id: "ses_" + id, started: t0 + at * 60000, ended: t0 + (at + min) * 60000, stop_reason: "end_turn", attempt: 0, transient: false, tools: 3, tool_errors: 0, usage, ...x })
     const facts = { created: t0, first_turn: t0, first_deliver: null, last_deliver: null, accepted: null, done_at: null, dropped_at: null, lead_ms: null, cycle_ms: null, wait_ms: 0, agent_ms: 60000, turns: 2, delivers: 0, reworks: 0, first_pass: null, fails: 0, stalls: 0, releases: 0, release_fails: 0, decisions: 0 }
     const detail = {
@@ -436,12 +439,12 @@ try {
     await page.close()
   }
 
-  /* A Hub without historical statistics still shows Now and only the history-specific fallback. */
+  /* When historical statistics fail to load, Now still shows alongside the error state. */
   const absent = await browser.newPage({ locale: "zh-CN" })
   await absent.route((u) => u.pathname.startsWith("/api/"), (route) => route.fulfill({ status: 404, contentType: "application/json", body: "{}" }))
   await absent.goto(base + "/test/fixtures/stats.html")
   await absent.locator("[data-now]").waitFor()
-  await absent.getByText("历史统计暂不可用", { exact: true }).waitFor()
+  await absent.getByText("读不到统计", { exact: true }).waitFor()
   assert.equal(await absent.getByText(/实时输出/).count(), 0)
   await absent.close()
   assert.deepEqual(errors, [])

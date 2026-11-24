@@ -11,7 +11,10 @@ if (shots) await mkdir(shots, { recursive: true })
 const NOW = new Date(2026, 10, 18, 10, 0)
 const at = (d, h = 0, m = 0) => new Date(2026, 10, d, h, m).getTime()
 const ws = { id: "ws_1", name: "Sample space", description: "", item_prefix: "ST", sort: 0, created: 0 }
+const itemState = (status) => status === "done" ? { kind: "closed", outcome: "finished", by: "owner" } : status === "prop" ? { kind: "ready" } : { kind: "active" }
+const itemView = (no, title, status) => ({ id: "ST-" + no, ws: "ws_1", no, title, state: itemState(status), cycle: 1, revision: 1, delivery_revision: 0, delivery: [], waits: [], priority: "中", star: false, archived: false, design_gate: false, source: "", created: 0, updated: 0, goals: 1, tags: [], deps: [], plan_done: 0, plan_total: 0, op_blockers: [], detail_stamp: 0, active_operations: 0, has_branch: false })
 const item = (no, title, status) => ({ id: "ST-" + no, workspace_id: "ws_1", no, title, status, stage: "", bot_id: null, project_id: null, cwd: null, branch: null, plan: [], now: "", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null, source: ["", ""], parent: null, created: 0, updated: 0, goal: title, goals: 1, tags: [], deps: [], sessionIds: [], open: [], queued: 0, live: false })
+const itemViews = [itemView(402, "Coordinator skeleton", "done"), itemView(427, "Node heartbeat and reconnect", "run"), itemView(433, "Sort the November receipts", "run"), itemView(440, "Load test for 100 Nodes", "prop")]
 const state = { version: "fixture", web_version: "fixture", owner: false, workspace: ws, workspaces: [ws], items: [item(402, "Coordinator skeleton", "done"), item(427, "Node heartbeat and reconnect", "run"), item(433, "Sort the November receipts", "run"), item(440, "Load test for 100 Nodes", "prop")], decisions: [], recent: [], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: { theme: "light" }, sessions: [], devices: [], runtimes: [], notifications: [], notifySeen: 0 }
 
 let seq = 0
@@ -62,6 +65,11 @@ async function open({ theme = "light", width = 1440, hash = "/#/todos", lang = "
     const json = (value, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) }).catch(() => {})
     if (path === "/auth/hello") return json({ name: "steve", api: 2, version: "fixture", login: { token: true, oidc: false } })
     if (path === "/api/shell") return json({ ...state, settings: { theme } })
+    if (path === "/api/summary") return json({ ws: ws.id, thinking: false, hold: null })
+    if (path === "/api/snapshot") return json({ epoch: "fixture", rev: 1, cursor: "fixture:1", views: { item: itemViews, session: [], decision: [], message: { views: [], next: null } } })
+    if (path === "/api/views") return json({ rev: 1, views: [], missing: [] })
+    if (path === "/api/notifications") return json([])
+    if (path === "/api/conversations/channels") return json({ channels: [] })
     if (path === "/api/me") return json({ user: { id: "reader", name: "Morgan", email: null, role: "member" }, version: "fixture", web_version: "fixture" })
     if (path === "/api/plugins/themes") return json({ themes: [] })
     if (path === "/api/onboard") return json({ state: "done" })

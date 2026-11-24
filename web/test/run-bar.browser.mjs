@@ -19,7 +19,9 @@ try {
     /* running: the step under way is the label, cut off with an ellipsis; one live region, not two */
     const bar = page.locator('[data-runbar="run"]')
     await bar.waitFor()
+    await page.waitForFunction((l) => document.documentElement.lang === l, lang)
     const label = bar.locator(".ui-tlc__label:not(.ui-tlc__label--out)")
+    await page.waitForFunction((re) => new RegExp(re, "i").test(document.querySelector('[data-runbar="run"] .ui-tlc__label:not(.ui-tlc__label--out)')?.textContent ?? ""), w.run.source)
     assert.match(await label.textContent(), w.run)
     const cut = await label.evaluate((x) => ({ over: x.scrollWidth > x.clientWidth, ellipsis: getComputedStyle(x).textOverflow, right: x.getBoundingClientRect().right }))
     assert.equal(cut.over, true, "a long command overflows its label")
