@@ -55,17 +55,24 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
-      # Fast browser tests (<= 30 s each, SMOKE in web/test/browser-smoke.mjs): they answer the API
-      # themselves and need no Hub. Slow browser tests (> 30 s) run in `browser-extended` below.
+      # Fast browser tests (<= CI_SMOKE_THRESHOLD_S = 30 s on CI, SMOKE in web/test/browser-smoke.mjs):
+      # they answer the API themselves and need no Hub. Slow browser tests (> 30 s on CI) run in `browser-extended` below.
       - name: Browser smoke tests
         timeout-minutes: 10
         run: |
           npx playwright install --only-shell chromium
           npm run test:web:browser-smoke
-  # Slow browser tests (> 30 s each, EXTENDED in web/test/browser-smoke.mjs): run only when web files change.
+  # Slow browser tests (> CI_SMOKE_THRESHOLD_S = 30 s on CI, EXTENDED in web/test/browser-smoke.mjs):
+  # sharded across parallel Linux runners by test count so each shard stays under 8 minutes; run only when web files change.
   browser-extended:
+    name: browser-extended (${{ matrix.shard }}/${{ matrix.shards }})
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' && needs.changes.outputs.web != 'false' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+        shards: [2]
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -75,11 +82,11 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - name: Extended browser tests
+      - name: Extended browser tests (${{ matrix.shard }}/${{ matrix.shards }})
         timeout-minutes: 10
         run: |
           npx playwright install --only-shell chromium
-          npm run test:web:browser-extended
+          npm run test:web:browser-extended -- --shard=${{ matrix.shard }}/${{ matrix.shards }}
   # A push or pull request that changed only release notes (cut-release.py's release pull request, and the
   # merge commit that brings it into main) repeats the Rust jobs of the commit it stands on. This job waits for CI on that commit
   # and, when it passed, lets them be skipped. Merge queue runs do not run it, and always run the Rust jobs.
