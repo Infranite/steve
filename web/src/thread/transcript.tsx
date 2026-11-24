@@ -26,7 +26,8 @@ import { steveToolIcon } from "@/tool-icons"
 import { BotAvatar, Segmented, Status, StatusDot, go, openSheet } from "@/ui"
 
 import { getTranscript, loadOlderTranscript, useTranscript } from "@/data/transcript"
-import { segmentsOf, type Seg } from "@/data/transcript-model"
+import { isActiveSubtaskStatus, partitionWork, segmentsOf, subtaskOf, subtaskTimes, toolDurationMs, type Seg } from "@/data/transcript-model"
+import { SubtaskList, type SubtaskEntry } from "@/components/subtask-list"
 import { recordTranscriptOpen } from "@/perf"
 import { VirtualList } from "@/components/virtual-list"
 import { ScrollArea } from "@/components/affect/scroll-area-clean"
@@ -66,7 +67,7 @@ export function StartingLine({ since, room }: { since?: number; room?: SessionWa
     {slow && <div className="mt-1 type-footnote text-attention" data-starting-slow>{t("core:transcript.startingSlow")}</div>}
   </div>
 }
-const TOOLN = ["ToolSearch", "TodoWrite", "Task", "Agent", "Skill"] as const
+const TOOLN = ["ToolSearch", "TodoWrite", "Skill"] as const
 const toolName = (tool: string) => ((TOOLN as readonly string[]).includes(tool) ? t(`core:transcript.tool.${tool as (typeof TOOLN)[number]}`) : undefined)
 type StepView = { I: any; verb: string; subj: string; mono: boolean; full?: string }
 /** icon, verb and subject of one tool call: the command (with the agent's own description), the file, the pattern */
@@ -82,11 +83,19 @@ function stepView(e: any[]): StepView {
 }
 /** "运行 14 条命令 · 读取 3 个文件 · 编辑 2 个文件 · 思考 1 次" */
 function workStats(evs: any[]) {
-  const n = { run: 0, read: 0, edit: 0, search: 0, other: 0, th: 0, fail: 0 }
+  const n = { run: 0, read: 0, edit: 0, search: 0, other: 0, sub: 0, th: 0, fail: 0 }
   const files = new Set<string>()
+  const { subtaskIds } = partitionWork(evs)
   for (const e of evs) {
-    if (e[0] === "th") n.th++
+    if (e[0] === "th") { n.th++; continue }
+    if (e[0] === "sub") {
+      const s = subtaskOf(e)
+      n.sub++
+      if (s?.status === "failed") n.fail++
+      continue
+    }
     if (e[0] !== "tool") continue
+    if (e[15] && subtaskIds.has(String(e[15]))) continue
     if (e[8] === 1) n.fail++
     const v = stepView(e)
     if (v.I === TerminalIcon) n.run++
@@ -95,7 +104,7 @@ function workStats(evs: any[]) {
     else if (e[1] === "search") n.search++
     else n.other++
   }
-  return [n.run && t("core:transcript.stats.run", { count: n.run }), n.read && t("core:transcript.stats.read", { count: n.read }), files.size && t("core:transcript.stats.changed", { count: files.size }), n.search && t("core:transcript.stats.search", { count: n.search }), n.other && t("core:transcript.stats.other", { count: n.other }), n.th && t("core:transcript.stats.thought", { count: n.th }), n.fail && t("core:transcript.stats.failed", { count: n.fail })].filter(Boolean) as string[]
+  return [n.sub && t("core:transcript.stats.subtask", { count: n.sub }), n.run && t("core:transcript.stats.run", { count: n.run }), n.read && t("core:transcript.stats.read", { count: n.read }), files.size && t("core:transcript.stats.changed", { count: files.size }), n.search && t("core:transcript.stats.search", { count: n.search }), n.other && t("core:transcript.stats.other", { count: n.other }), n.th && t("core:transcript.stats.thought", { count: n.th }), n.fail && t("core:transcript.stats.failed", { count: n.fail })].filter(Boolean) as string[]
 }
 function Detail({ text }: { text: string }) {
   const lines = String(text || "").split("\n").filter(Boolean)
@@ -105,48 +114,94 @@ function Detail({ text }: { text: string }) {
       marks={Object.fromEntries(lines.flatMap((l, n): [number, "added" | "removed" | "ok"][] => (l.startsWith("+") ? [[n + 1, "added"]] : l.startsWith("-") ? [[n + 1, "removed"]] : l.startsWith("✓") ? [[n + 1, "ok"]] : [])))} data-tool-detail />
   )
 }
-const DELEGATE = ["Task", "Agent"]
 /* Steve's tools that tell or ask you something: each stays its own line, never merged */
 const SAY = ["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish"]
-/** the turn's tuples as steps on the trail: thinking timed by the step after it, calls of one kind merged, the latest plan open */
-function trailOf(evs: any[], ts: number[], t1: number | undefined, live: boolean): TrailItem[] {
+/** convert one tool/thought/note tuple into a TrailItem */
+function stepItem(e: any[], j: number, evs: any[], ts: number[], t1: number | undefined, live: boolean, lastPlan: number): TrailItem {
+  const key = String(j)
+  if (e[0] === "a") return { t: "note", key, text: e[1] }
+  if (e[0] === "th") {
+    const at = ts[j] || 0, next = j + 1 < evs.length ? ts[j + 1] : t1
+    return { t: "think", key, text: String(e[1] ?? ""), live: live && j === evs.length - 1, t0: at || undefined, ms: at && next ? next - at : undefined }
+  }
+  const v = stepView(e), tool = String(e[9] ?? ""), state = e[5] === 1 ? "run" : e[8] === 1 ? "fail" : "done", web = /^Web/.test(tool)
+  const [verb, group, chip]: [[string, string], string | undefined, Chip | undefined] =
+    e[1] === "read" ? [[t("core:trail.live.read"), v.verb], "read", { label: v.subj, title: v.full, mono: true, icon: FileTextIcon }]
+    : e[1] === "edit" ? [[t(tool === "Write" ? "core:trail.live.write" : "core:trail.live.edit"), v.verb], "edit", { label: v.subj, title: v.full, mono: true, icon: v.I }]
+    : e[1] === "search" ? [[t(web ? "core:trail.live.webSearch" : "core:trail.live.search"), v.verb], "search", { label: v.subj, title: v.full, mono: v.mono, icon: v.I }]
+    : v.I === TerminalIcon ? [e[10] ? [v.verb, v.verb] : [t("core:trail.live.run"), v.verb], "run", { label: e[10] || v.subj, title: v.full, mono: !e[10], icon: TerminalIcon }]
+    : [[v.verb, v.verb], e[12]?.length || SAY.includes(tool.replace(/^mcp__steve__/, "")) ? undefined : "tool:" + tool, v.subj ? { label: v.subj, mono: v.mono } : undefined]
+  const g = group?.startsWith("tool:") ? "tool" : group
+  const merged = g ? (calls: number, distinct: number, running: boolean) => g === "tool" ? t("core:trail.group.tool", { name: v.verb, count: calls })
+    : t(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : undefined
+  const plan: [string, boolean][] | undefined = e[12]?.length ? e[12] : undefined
+  const diff = e[1] === "edit" && e[6] != null ? <span className="shrink-0 type-footnote font-mono tabular-nums"><span className="text-success">+{e[6]}</span>{e[7] ? <span className="ml-1 text-destructive">−{e[7]}</span> : null}</span> : undefined
+  /* the call as a Tool Call Card: the tool's own name, what Steve has of its input (the command, file, query or brief)
+   * and what came back, its time from adapter duration_ms or the update that settled it ([13]) */
+  const out = String(e[4] ?? "").trim().replace(/^```[a-z]*\n?/, "").replace(/\n?```$/, "").trim(), t0 = ts[j] || undefined
+  const observedMs = toolDurationMs(e) ?? (e[13] && t0 && e[13] > t0 ? e[13] - t0 : undefined)
+  const card = { name: (tool || String(e[2] ?? "")).replace(/^mcp__steve__/, "").replace(/^mcp__[^_]+__/, ""), icon: <v.I strokeWidth={1.5} aria-hidden />,
+    args: e[1] === "steve" ? e[14] ?? (e[10] || undefined) : v.I === TerminalIcon ? v.full ?? v.subj : e[11] ?? (e[3] && e[3] !== "Steve" ? e[3] : undefined),
+    result: state === "fail" ? undefined : plan ? (j === lastPlan ? undefined : plan.map(([x, d]) => (d ? "✓ " : "○ ") + x).join("\n")) : out || undefined,
+    resultView: plan && j !== lastPlan ? <SubSteps steps={plan} live={false} /> : e[1] === "edit" && out ? <Detail text={out} /> : undefined,
+    error: state === "fail" ? out || undefined : undefined, t0, ms: observedMs }
+  return { t: "tool", key, state, verb, subj: v.subj, mono: v.mono, full: v.full, group, merged, chip, extra: diff, card,
+    below: plan && j === lastPlan ? <SubSteps steps={plan} live={live} /> : undefined, attrs: { kind: e[1] } }
+}
+/** index-aligned TrailItems for TurnTrace (every event index `j` maps to its TrailItem; subtasks leave undefined) */
+function rawTrailOf(evs: any[], ts: number[], t1: number | undefined, live: boolean): (TrailItem | undefined)[] {
   const lastPlan = evs.findLastIndex((e) => e[0] === "tool" && e[12]?.length)
-  return evs.map((e, j): TrailItem => {
-    const key = String(j)
-    if (e[0] === "a") return { t: "note", key, text: e[1] }
-    if (e[0] === "th") {
-      const at = ts[j] || 0, next = j + 1 < evs.length ? ts[j + 1] : t1
-      return { t: "think", key, text: String(e[1] ?? ""), live: live && j === evs.length - 1, t0: at || undefined, ms: at && next ? next - at : undefined }
+  return evs.map((e, j) => (e[0] === "sub" ? undefined : stepItem(e, j, evs, ts, t1, live, lastPlan)))
+}
+/** the turn's tuples as steps on the trail: contiguous subtasks coalesce into one unified SubtaskList with nested child steps */
+function trailOf(k: string, evs: any[], ts: number[], t1: number | undefined, live: boolean, readOnly = false): TrailItem[] {
+  const { rootIndices, childrenBySubtask } = partitionWork(evs)
+  const raw = rawTrailOf(evs, ts, t1, live)
+  const out: TrailItem[] = []
+  let subBuf: SubtaskEntry[] = []
+  const flushSubs = () => {
+    if (!subBuf.length) return
+    const entries = subBuf
+    subBuf = []
+    const anyRun = live && entries.some((x) => isActiveSubtaskStatus(x.subtask.status))
+    const anyFail = entries.some((x) => x.subtask.status === "failed")
+    out.push({
+      t: "block",
+      key: "sub:" + entries.map((x) => x.subtask.id).join(","),
+      state: anyRun ? "run" : anyFail ? "fail" : "done",
+      body: <SubtaskList sessionId={k} entries={entries} live={live} readOnly={readOnly} />,
+      attrs: { kind: "subtask" },
+    })
+  }
+  for (const idx of rootIndices) {
+    const e = evs[idx]
+    const sub = subtaskOf(e)
+    if (sub) {
+      const childIndices = childrenBySubtask.get(sub.id) ?? []
+      const children = childIndices.map((ci) => raw[ci]).filter((x): x is TrailItem => !!x)
+      const lastChildEv = childIndices.length ? evs[childIndices.at(-1)!] : undefined
+      const latestChildLabel = lastChildEv && lastChildEv[0] === "tool" ? (() => { const v = stepView(lastChildEv); return v.subj ? `${v.verb} ${v.subj}` : v.verb })() : undefined
+      const { started, ended } = subtaskTimes(e)
+      subBuf.push({ subtask: sub, started: started ?? ts[idx], ended, children, latestChildLabel })
+      continue
     }
-    const v = stepView(e), tool = String(e[9] ?? ""), state = e[5] === 1 ? "run" : e[8] === 1 ? "fail" : "done", web = /^Web/.test(tool)
-    const [verb, group, chip]: [[string, string], string | undefined, Chip | undefined] =
-      DELEGATE.includes(tool) ? [[t("core:trail.live.delegate"), t("core:trail.delegated")], undefined, undefined]
-      : e[1] === "read" ? [[t("core:trail.live.read"), v.verb], "read", { label: v.subj, title: v.full, mono: true, icon: FileTextIcon }]
-      : e[1] === "edit" ? [[t(tool === "Write" ? "core:trail.live.write" : "core:trail.live.edit"), v.verb], "edit", { label: v.subj, title: v.full, mono: true, icon: v.I }]
-      : e[1] === "search" ? [[t(web ? "core:trail.live.webSearch" : "core:trail.live.search"), v.verb], "search", { label: v.subj, title: v.full, mono: v.mono, icon: v.I }]
-      : v.I === TerminalIcon ? [e[10] ? [v.verb, v.verb] : [t("core:trail.live.run"), v.verb], "run", { label: e[10] || v.subj, title: v.full, mono: !e[10], icon: TerminalIcon }]
-      : [[v.verb, v.verb], e[12]?.length || SAY.includes(tool.replace(/^mcp__steve__/, "")) ? undefined : "tool:" + tool, v.subj ? { label: v.subj, mono: v.mono } : undefined]
-    const g = group?.startsWith("tool:") ? "tool" : group
-    const merged = g ? (calls: number, distinct: number, running: boolean) => g === "tool" ? t("core:trail.group.tool", { name: v.verb, count: calls })
-      : t(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : undefined
-    const plan: [string, boolean][] | undefined = e[12]?.length ? e[12] : undefined
-    const diff = e[1] === "edit" && e[6] != null ? <span className="shrink-0 type-footnote font-mono tabular-nums"><span className="text-success">+{e[6]}</span>{e[7] ? <span className="ml-1 text-destructive">−{e[7]}</span> : null}</span> : undefined
-    /* the call as a Tool Call Card: the tool's own name, what Steve has of its input (the command, file, query or brief)
-     * and what came back, its time from the update that started it to the one that settled it ([13]) */
-    const out = String(e[4] ?? "").trim().replace(/^```[a-z]*\n?/, "").replace(/\n?```$/, "").trim(), t0 = ts[j] || undefined
-    const card = { name: (tool || String(e[2] ?? "")).replace(/^mcp__steve__/, "").replace(/^mcp__[^_]+__/, ""), icon: <v.I strokeWidth={1.5} aria-hidden />,
-      args: e[1] === "steve" ? e[14] ?? (e[10] || undefined) : v.I === TerminalIcon ? v.full ?? v.subj : DELEGATE.includes(tool) ? e[10] ?? e[11] : e[11] ?? (e[3] && e[3] !== "Steve" ? e[3] : undefined),
-      result: state === "fail" ? undefined : plan ? (j === lastPlan ? undefined : plan.map(([x, d]) => (d ? "✓ " : "○ ") + x).join("\n")) : out || undefined,
-      resultView: plan && j !== lastPlan ? <SubSteps steps={plan} live={false} /> : e[1] === "edit" && out ? <Detail text={out} /> : undefined,
-      error: state === "fail" ? out || undefined : undefined, t0, ms: e[13] && t0 && e[13] > t0 ? e[13] - t0 : undefined }
-    return { t: "tool", key, state, verb, subj: DELEGATE.includes(tool) ? e[10] ?? v.subj : v.subj, mono: v.mono, full: v.full, group, merged, chip, extra: diff, card,
-      below: plan && j === lastPlan ? <SubSteps steps={plan} live={live} /> : undefined, attrs: { kind: e[1] } }
-  })
+    flushSubs()
+    const item = raw[idx]
+    if (item) out.push(item)
+  }
+  flushSubs()
+  return out
 }
 /** what the agent is doing right now, in a few words: "运行 npm test", "正在思考" */
 function doing(evs: any[]) {
-  const run = evs.findLast((e) => e[0] === "tool" && e[5] === 1)
+  const runSub = evs.findLast((e) => { const s = subtaskOf(e); return s && isActiveSubtaskStatus(s.status) })
+  const run = evs.findLast((e) => e[0] === "tool" && e[5] === 1 && !e[16])
   if (run) { const v = stepView(run); return v.subj ? `${v.verb} ${v.subj}` : v.verb }
+  if (runSub) {
+    const s = subtaskOf(runSub)!
+    const origin = t(`core:subtask.origin.${s.origin}`)
+    return s.title ? `${origin} · ${s.title}` : origin
+  }
   const last = evs[evs.length - 1]
   return t(!last ? "core:transcript.preparing" : last[0] === "th" ? "core:transcript.thinking" : last[0] === "a" ? "core:transcript.replying" : last[0] === "ask" ? "core:transcript.awaitingApproval" : "core:transcript.processing")
 }
@@ -166,7 +221,9 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
   const stats = workStats(g.evs)
   const ms = live ? now - (g.t0 ?? now) : (g.t1 ?? 0) - (g.t0 ?? 0)
   const cancelled = g.end === "cancelled"
-  const items = trailOf(g.evs, g.at ?? [], g.t1, live)
+  const sess = getSession(k)
+  const items = trailOf(k, g.evs, g.at ?? [], g.t1, live, !!sess?.ro)
+  const traceItems = rawTrailOf(g.evs, g.at ?? [], g.t1, live)
   /* a finished turn of an item's session: its tokens and estimated cost, as the Hub's stats keep them */
   const usage = useTurnUsage(k, g.t0, g.t1, live || !g.end)
   return (
@@ -186,7 +243,7 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
           options={[["steps", t("core:trace.view.steps")], ["timeline", t("core:trace.view.timeline")]] as const} />}
         <div className="mt-1 flex flex-col">
           {view === "timeline"
-            ? <Suspense fallback={<div className="flex items-center gap-2 py-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><TurnTrace k={k} prompt={g.prompt} evs={g.evs} at={g.at ?? []} items={items} t0={g.t0} t1={g.t1} live={live} cancelled={cancelled} /></Suspense>
+            ? <Suspense fallback={<div className="flex items-center gap-2 py-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><TurnTrace k={k} prompt={g.prompt} evs={g.evs} at={g.at ?? []} items={traceItems} t0={g.t0} t1={g.t1} live={live} cancelled={cancelled} /></Suspense>
             : <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled ? { s: "cancel", label: t("core:transcript.interrupted") } : { s: "end", label: t("core:trail.finished") }} />}
         </div>
       </CollapsibleContent>
@@ -297,7 +354,7 @@ export function sessionWork(k: string) {
   if (!s || !data) return []
   return data.turns.flatMap((turn) => turn.rows.filter((g) => g.t === "work").map((g) => {
     const live = s.st === "run" && turn === data.turns.at(-1) && g === turn.rows.at(-1) && !g.end
-    return { prompt: g.prompt, evs: g.evs, at: g.at ?? [], items: trailOf(g.evs, g.at ?? [], g.t1, live),
+    return { prompt: g.prompt, evs: g.evs, at: g.at ?? [], items: rawTrailOf(g.evs, g.at ?? [], g.t1, live),
       t0: g.t0 || (g.at ?? []).find(Boolean) || 0, t1: g.t1, live, cancelled: g.end === "cancelled" }
   }))
 }
