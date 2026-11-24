@@ -278,7 +278,6 @@ export default {
     itemSupplement: "Add to an item or answer what it asked",
     itemDependencies: "Read or set an item's prerequisites and wait for them",
     sessionsList: "List the agent sessions running now and lately",
-    workflow: "Read or replan the work graph several bots share",
     debug: "Read an item's diagnostic snapshot and recorded events (read-only)",
     upgrade: "Check for new Steve releases and request an upgrade for you to approve",
     devices: "List the devices that can run work and choose the next one",

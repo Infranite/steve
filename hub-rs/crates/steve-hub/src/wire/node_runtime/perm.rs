@@ -414,8 +414,9 @@ impl NodeRuntime {
             if card.status != DecisionStatus::Open || row.state != "waiting" {
                 return Ok((false, false));
             }
-            if let Some(why) = steve_store::workflow_gate::session_blocker(tx, &row.session)? {
-                // A pause/cancel/replan can precede a late human answer. Commit the
+            if let Some(blocker) = steve_store::item_gate::session_blocker(tx, &row.session)? {
+                let why = super::super::item_gate_reason(blocker);
+                // A pause or prerequisite wait can precede a late human answer. Commit the
                 // expired card and a rejection together; never grant the old attempt new access.
                 return Ok((false, Self::expire_card_in(tx, &row, &why)?));
             }

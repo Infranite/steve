@@ -72,7 +72,7 @@ try {
     const rel = panel.locator("[data-session-relations]")
     assert.match(await text(rel.locator("[data-rel-group=item]")), /所属\s*ST-2\s*核实数据契约/)
     assert.deepEqual(await rel.locator("[data-rel-group=up] [data-rel-item]").evaluateAll((xs) => xs.map((x) => x.getAttribute("data-rel-item"))), ["ST-1"])
-    assert.match(await text(rel.locator("[data-rel-group=up]")), /协作的主事项/)
+    assert.match(await text(rel.locator("[data-rel-group=up]")), /从它分出/)
     assert.match(await text(rel.locator("[data-rel-down-toggle]")), /1 个后续事项/)
     assert.equal(await rel.locator("[data-rel-group=down] [data-rel-item]").count(), 0, "downstream is folded")
     await rel.locator("[data-rel-down-toggle]").click()

@@ -161,9 +161,7 @@ const DEP_WAIT_KEYS: &[&str] = &[
     "hub.dep_wait.holding",
     "hub.dep_wait.fallback",
     "hub.dep_wait.item_ending",
-    "hub.dep_wait.owner_only",
     "hub.dep_wait.no_session",
-    "hub.dep_wait.work_running",
 ];
 
 /// A dependency wait view with its fixed reasons in the request's language.
@@ -189,7 +187,6 @@ pub async fn get_one(
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
-    let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     let dispatch = super::bot_dispatch::store(&st).and_then(|s| {
         super::bot_dispatch::item_dispatch(s, &id, &c.ws)
@@ -209,7 +206,6 @@ pub async fn get_one(
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);
         }
-        out.insert("workflow".into(), workflow);
         out.insert("dependency_wait".into(), dependency_wait);
         out.insert("cycles".into(), objs(r.item_cycles(&id)?));
         out.insert("planRounds".into(), objs(r.item_plan_rounds(&id)?));
@@ -266,27 +262,6 @@ pub async fn dependency_wait(
         .domain
         .dependency_wait(&id, cycle, &resume, &reason)
         .await?)
-}
-
-pub async fn workflow_get(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    own_item(&st, &c.ws, &id).await?;
-    ok(st.domain.workflow_get(&id).await?)
-}
-
-pub async fn workflow_change(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path(id): Path<String>,
-    b: Bytes,
-) -> ApiResult {
-    own_item(&st, &c.ws, &id).await?;
-    let args = body(&b)?;
-    // Authenticated user boundary. single_session is deliberately unavailable to Bot/MCP calls.
-    ok(st.domain.workflow_change(&id, args, &c.me).await?)
 }
 
 pub async fn actions(
@@ -803,10 +778,6 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
                 .delete(items::delete_one),
         )
         .route("/items/{id}/actions", post(items::actions))
-        .route(
-            "/items/{id}/workflow",
-            get(items::workflow_get).post(items::workflow_change),
-        )
         .route("/items/{id}/lifecycle", post(items::lifecycle))
         .route(
             "/items/{id}/dependency-wait",

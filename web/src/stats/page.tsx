@@ -20,7 +20,6 @@ import { DrillPanel, NowLine, type Drill } from "@/stats/overview"
 import { DailyChart } from "@/stats/daily"
 import { WhereSection } from "@/stats/where"
 import { BotCompare, ModelCompare } from "@/stats/compare"
-import { WorkflowSection } from "@/stats/workflow"
 import { StatsItemView } from "@/stats/drill"
 import { NavUsageSection } from "@/stats/nav-usage"
 import { EventsSection } from "@/stats/events"
@@ -148,9 +147,6 @@ function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f:
           <WhereSection s={s} f={f} fkey={fkey} live={live} />
           <PriceNote spend={s.spend} />
         </Section>
-        {s.workflow && <Section k="workflow" title={t("stats:v2.workflow.section")} sub={t("stats:v2.workflow.sectionSub")}>
-          <WorkflowSection s={s} />
-        </Section>}
         <Section k="bots" title={t("stats:v2.bots.title")} sub={f.bot ? t("stats:v2.bots.subOne") : t("stats:v2.bots.sub")}
           right={f.bot ? <Button size="xs" variant="ghost" className="text-blue" onClick={() => setF({ ...f, bot: undefined })} data-bots-all>{t("stats:v2.bots.showAll")}</Button> : undefined}>
           <BotCompare f={f} fkey={fkey} live={live} onBot={(bot) => { setDrill(null); setF({ ...f, bot }) }} />

@@ -5,6 +5,7 @@ import { api, type REvent, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { refresh, useStore } from "../../src/store"
+import { languageReady } from "../../src/i18n"
 import { RunBar, Transcript } from "../../src/thread/transcript"
 
 /* The run bar of a turn that runs a very long command, and a turn that was interrupted after more than a minute:
@@ -18,15 +19,15 @@ const sessions = [sess("s1", 1, true), sess("s2", 2, false)]
 let seq = 0
 const ev = (n: number, kind: string, data: Record<string, unknown>): REvent => ({ seq: ++seq, ts: s(n), kind, data })
 const tool = (n: number, v: Record<string, unknown>, phase = "succeeded"): REvent => ev(n, "tool", { tool: { id: "t" + seq, origin: "harness", phase, ...v } })
-const long = "cargo test --workspace --all-features --no-fail-fast -- --test-threads=1 --nocapture workflows::cycle::replans_after_an_archived_result_without_losing_the_queue"
+const long = "cargo test --workspace --all-features --no-fail-fast -- --test-threads=1 --nocapture cycle::replans_after_an_archived_result_without_losing_the_queue"
 const events: Record<string, REvent[]> = {
   s1: [ev(250, "user", { text: "跑一遍全部测试", via: "me" }), tool(260, { name: "Bash", category: "exec", title: long, target: long, action: { type: "exec", command: long } }, "running")],
   s2: [
-    ev(10, "user", { text: "暂停这个工作流，先看看它卡在哪", via: "me" }),
-    ev(11, "text", { role: "thought", text: "先读工作流的状态。" }),
-    tool(14, { name: "mcp__steve__steve_workflow", origin: "steve", category: "steve", title: "workflow", action: { type: "tool", args: { action: "pause", reason: "先看看卡在哪", expected_revision: 37 } } }),
-    ev(16, "text", { role: "assistant", text: "已暂停，接着读代码。" }),
-    tool(20, { name: "Read", category: "read", title: "Read hub-rs/src/workflows.rs", target: "hub-rs/src/workflows.rs" }),
+    ev(10, "user", { text: "先更新计划，看看卡在哪", via: "me" }),
+    ev(11, "text", { role: "thought", text: "先更新计划状态。" }),
+    tool(14, { name: "mcp__steve__steve_update", origin: "steve", category: "steve", title: "update", action: { type: "tool", args: { action: "pause", reason: "先看看卡在哪", expected_revision: 37 } } }),
+    ev(16, "text", { role: "assistant", text: "已更新，接着读代码。" }),
+    tool(20, { name: "Read", category: "read", title: "Read hub-rs/src/cycle.rs", target: "hub-rs/src/cycle.rs" }),
     ev(95, "turn_end", { stopReason: "cancelled" }),
   ],
 }
@@ -48,4 +49,6 @@ function Fixture() {
     </SidebarProvider></TooltipProvider>
   )
 }
-createRoot(document.getElementById("root")!).render(<Fixture />)
+void languageReady.then(() => {
+  createRoot(document.getElementById("root")!).render(<Fixture />)
+})

@@ -370,20 +370,6 @@ impl NodeRuntime {
                         "turn retry expired or is no longer authorized",
                     ));
                 }
-                let blocked = if self.domain.dynamic_workflows() {
-                    None
-                } else {
-                    self.store
-                        .read(|r| {
-                            let a = node_turns::started_by(r, &l.operation)?
-                                .ok_or_else(|| conflict("missing turn attempt"))?;
-                            self.disabled_workflow_in(&a.session)
-                        })
-                        .map_err(|e| Error::new(Code::Unavailable, e.to_string()))?
-                };
-                if let Some(why) = blocked {
-                    return Err(Error::new(Code::Invalid, why));
-                }
                 let limit = self
                     .store
                     .read(|c| rt::session_limit(c, self.node_id.as_str()))
@@ -616,7 +602,7 @@ impl NodeRuntime {
         let waiting = self.store.read(|r| node_turns::waiting_to_open(r, s))?;
         if ok {
             if let Some(turn) = waiting {
-                if let Some(why) = self.workflow_blocker_in(s)? {
+                if let Some(why) = self.item_blocker_in(s)? {
                     return self.after_attempt_in(
                         tx,
                         s,
@@ -811,7 +797,7 @@ impl NodeRuntime {
             (a.id, a.revision, a.turn, a.session, a.cancelled);
         let reopened_before = self.store.read(|r| node_turns::was_released(r, &turn))?;
         let reopen =
-            gone && !reopened_before && !cancelled && self.workflow_blocker_in(&session)?.is_none();
+            gone && !reopened_before && !cancelled && self.item_blocker_in(&session)?.is_none();
         let completion = Completion {
             outcome: Outcome::Failed,
             stop_reason: if reopen { "released" } else { "error" }.into(),

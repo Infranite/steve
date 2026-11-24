@@ -39,9 +39,8 @@ export function eventLabel(e: StatEvent) {
   if (e.what === "deliver") return e.to === "auto" ? t("stats:drill.deliverAuto") : t("stats:drill.deliver")
   if (e.what === "release") return RELEASE()[e.to ?? ""] ?? t("stats:drill.releaseMark")
   if (e.what === "fail") return t("stats:events.fail", { why: FAIL()[e.to ?? ""] ?? e.to ?? "—" })
-  if (e.what === "wake") return t("stats:events.wake", { what: t(`stats:v2.workflow.unit.${e.to}`, { defaultValue: e.to ?? "—" }) })
-  if (e.what === "invalidate") return t("stats:events.invalidate", { why: t(`stats:v2.workflow.void.${e.to}`, { defaultValue: e.to ?? "—" }) })
-  if (e.what === "reject") return t("stats:events.reject", { why: t(`stats:v2.workflow.refuse.${e.to}`, { defaultValue: e.to ?? "—" }) })
+  if (e.what === "invalidate") return t("stats:events.invalidate", { why: t(`stats:events.void.${e.to}`, { defaultValue: e.to ?? "—" }) })
+  if (e.what === "reject") return t("stats:events.reject", { why: t(`stats:events.refuse.${e.to}`, { defaultValue: e.to ?? "—" }) })
   if (e.what === "merge") return t("stats:events.merge")
   return e.what
 }
