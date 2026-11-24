@@ -104,6 +104,17 @@ for raw in sys.stdin:
         elif "SCENARIO:CLI_CHECK" in text:
             update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "cli ok"}})
             send({"id": mid, "result": {"stopReason": "end_turn"}})
+        elif "SCENARIO:BUDGET_STOP_1M" in text:
+            # 1M-window model reporting size=1_000_000 must still be constrained by declared
+            # context_limit * context_budget_pct (10_000 * 80% = 8_000) by default.
+            update(sid, {"sessionUpdate": "usage_update", "used": 5000, "size": 1000000})
+            update(sid, {"sessionUpdate": "usage_update", "used": 8200, "size": 1000000})
+            cancelled = wait_for_cancel(5.0)
+            log({"budget_1m_cancelled": cancelled})
+            send({"id": mid, "result": {
+                "stopReason": "cancelled" if cancelled else "end_turn",
+                "usage": {"inputTokens": 500, "outputTokens": 100, "cachedReadTokens": 0, "cachedWriteTokens": 0, "totalTokens": 600},
+            }})
         elif "SCENARIO:BUDGET_STOP" in text:
             update(sid, {"sessionUpdate": "usage_update", "used": 5000, "size": 10000})
             update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "halfway"}})
@@ -491,14 +502,14 @@ async fn native_compaction_env_cli_and_observation_without_cutoff() {
         }
     );
 
-    // 2. Explicit operator env overrides declarative native compaction env, while an explicit
-    //    `max_tokens` ceiling populates `window_var`.
+    // 2. Explicit operator env overrides declarative native compaction env, while a raised
+    //    `max_tokens` (400k at declared 80%) scales `window_var` to 500k.
     h.open_session(
         "s_override",
         "native_env",
         Some(ContextBudget {
-            ratio_pct: Some(70),
-            max_tokens: Some(120_000),
+            ratio_pct: None,
+            max_tokens: Some(400_000),
         }),
         vec![("FAKE_COMPACT_PCT".into(), "55".into())],
     )
@@ -517,10 +528,11 @@ async fn native_compaction_env_cli_and_observation_without_cutoff() {
         .filter_map(|v| v.get("spawn").cloned())
         .collect();
     assert_eq!(spawns.len(), 3, "{spawns:?}");
+    // Default launch always injects window_var=context_limit so 1M models stay constrained.
     assert_eq!(spawns[0]["env"]["FAKE_COMPACT_PCT"], "70");
-    assert_eq!(spawns[0]["env"]["FAKE_COMPACT_WINDOW"], Value::Null);
+    assert_eq!(spawns[0]["env"]["FAKE_COMPACT_WINDOW"], "100000");
     assert_eq!(spawns[1]["env"]["FAKE_COMPACT_PCT"], "55");
-    assert_eq!(spawns[1]["env"]["FAKE_COMPACT_WINDOW"], "120000");
+    assert_eq!(spawns[1]["env"]["FAKE_COMPACT_WINDOW"], "500000");
     assert_eq!(
         spawns[2]["argv"],
         json!(["-c", "auto_compact_limit=150000"])
@@ -574,6 +586,38 @@ async fn non_native_harness_stops_deterministically_at_context_budget() {
             .iter()
             .any(|v| v.get("budget_cancelled") == Some(&json!(true))),
         "Node must send session/cancel to the harness once context hits budget"
+    );
+
+    // 1M-window model (size=1_000_000) is still constrained to declared context_limit * pct
+    // (10_000 * 80% = 8_000) by default.
+    h.open_session("s_plain_1m", "plain", None, vec![]).await;
+    let one_m = h
+        .run_turn(
+            "s_plain_1m",
+            "plain",
+            "a_plain_1m",
+            "SCENARIO:BUDGET_STOP_1M",
+            None,
+        )
+        .await;
+    assert_eq!(one_m.outcome, Outcome::Cancelled);
+    assert_eq!(one_m.stop_reason, CONTEXT_BUDGET);
+    assert_eq!(one_m.context_peak, Some(8_200));
+    assert_eq!(
+        h.compacted_events("a_plain_1m"),
+        vec![EventBody::ContextCompacted {
+            mode: CompactionMode::Handoff,
+            reason: CompactionReason::BudgetReached,
+            before_tokens: 8_200,
+            after_tokens: 0,
+            limit_tokens: Some(1_000_000),
+        }]
+    );
+    assert!(
+        h.log_lines()
+            .iter()
+            .any(|v| v.get("budget_1m_cancelled") == Some(&json!(true))),
+        "1M-window model must be stopped by declared budget"
     );
 
     h.node.shutdown().await;

@@ -459,6 +459,7 @@ function Pane({ id }: { id: string }) {
       {/* the personal agent config default is the Hub's (a Node serves every workspace): set on Devices · Hub */}
       <Row title={t("manage:items.ownerContext")} sub={t("manage:items.ownerContextSub")}><Button size="sm" variant="outline" onClick={() => go("#/devices/hub")} data-owner-context-link>{t("manage:items.ownerContextOpen")}</Button></Row></Panel>
     <Section label={t("manage:items.sessions")}><Panel>
+      <Row title={t("manage:items.contextBudget")} sub={t("manage:items.contextBudgetSub")}><Sel label={t("manage:items.contextBudget")} testId="context-budget" v={c.contextBudget ?? "default"} o={[["default", t("manage:items.contextBudgetDefault")], ["100000", "100k"], ["250000", "250k"], ["400000", "400k"], ["600000", "600k"], ["800000", "800k"]]} on={(v) => setSetting({ contextBudget: v })} /></Row>
       <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
   </div>
   if (id === "notify") return st.workspace ? <NotificationSettingsPane key={`${currentHub()}:${st.workspace.id}`} workspace={st.workspace.id} /> : null

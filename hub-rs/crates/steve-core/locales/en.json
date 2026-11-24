@@ -173,6 +173,7 @@
   "core.draft.setting.tz": "Time zone",
   "core.draft.setting.accDefault": "Default acceptance",
   "core.draft.setting.depsAfter": "When prerequisites finish",
+  "core.draft.setting.contextBudget": "Turn context budget",
   "core.draft.setting.handoff": "Handoff threshold",
   "core.draft.setting.archDays": "Archive automatically after finishing",
   "core.draft.setting.quiet": "Do not disturb",

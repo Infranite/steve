@@ -487,6 +487,41 @@ async fn native_compaction_observes_without_handoff_and_keeps_exact_usage() {
         prom.contains(r#"steve_turn_context_peak_tokens_sum{harness="native-bot"} 85000"#),
         "missing peak context histogram:\n{prom}"
     );
+
+    // Default launch must constrain 1M-window models via window_var=context_limit (100000).
+    let read_spawns = || -> Vec<Value> {
+        std::fs::read_to_string(e.ctrl.join("acp.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| v.get("spawn").cloned())
+            .collect()
+    };
+    let spawns = read_spawns();
+    assert_eq!(spawns.len(), 1, "{spawns:?}");
+    assert_eq!(spawns[0]["env"]["FAKE_COMPACT_PCT"], "80");
+    assert_eq!(spawns[0]["env"]["FAKE_COMPACT_WINDOW"], "100000");
+
+    // Raising the workspace `contextBudget` setting to 400k scales window_var to 500k (500k*80%=400k).
+    let (ps, pv) = e
+        .call(
+            "PATCH",
+            "/api/settings",
+            Some(json!({ "contextBudget": "400000" })),
+        )
+        .await;
+    assert_eq!(ps, 200, "patch workspace contextBudget failed: {pv}");
+    let (_iid2, sid2) = e.create_item(&bot, "Raised budget", "HUB:NATIVE").await;
+    eventually("second native session finished", || async {
+        fixtures::acp_turns(&e.db, &sid2)
+            .map(|t| t.len() == 1 && t[0].0.is_some())
+            .unwrap_or(false)
+    })
+    .await;
+    let spawns = read_spawns();
+    assert_eq!(spawns.len(), 2, "{spawns:?}");
+    assert_eq!(spawns[1]["env"]["FAKE_COMPACT_PCT"], "80");
+    assert_eq!(spawns[1]["env"]["FAKE_COMPACT_WINDOW"], "500000");
 }
 
 #[tokio::test(flavor = "multi_thread")]

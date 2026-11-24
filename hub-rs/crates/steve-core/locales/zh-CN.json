@@ -173,6 +173,7 @@
   "core.draft.setting.tz": "时区",
   "core.draft.setting.accDefault": "默认验收方式",
   "core.draft.setting.depsAfter": "前置完成后",
+  "core.draft.setting.contextBudget": "回合上下文预算",
   "core.draft.setting.handoff": "交接阈值",
   "core.draft.setting.archDays": "完成后自动归档",
   "core.draft.setting.quiet": "免打扰",

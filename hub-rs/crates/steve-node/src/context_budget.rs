@@ -134,7 +134,7 @@ impl ContextMonitor {
             && !self.budget_triggered
             && let Some(threshold) = self
                 .props
-                .turn_context_budget_tokens(self.budget, effective_limit)
+                .turn_context_budget_tokens(self.budget, self.last_limit)
             && used >= threshold
         {
             self.budget_triggered = true;
@@ -267,6 +267,35 @@ mod tests {
         let mut native = ContextMonitor::new(native_props(), None);
         let high = native.observe_usage(Some(95_000), Some(100_000));
         assert!(!high.stop_budget && high.compacted.is_none());
+
+        // 1M-window model on a non-native harness is constrained to declared context_limit * pct
+        // (100k * 80% = 80k) by default, and can be raised explicitly via budget.max_tokens.
+        let mut one_m_default = ContextMonitor::new(non_native_props(), None);
+        assert!(
+            !one_m_default
+                .observe_usage(Some(79_999), Some(1_000_000))
+                .stop_budget
+        );
+        let one_m_hit = one_m_default.observe_usage(Some(80_000), Some(1_000_000));
+        assert!(one_m_hit.stop_budget);
+
+        let mut one_m_raised = ContextMonitor::new(
+            non_native_props(),
+            Some(ContextBudget {
+                ratio_pct: None,
+                max_tokens: Some(400_000),
+            }),
+        );
+        assert!(
+            !one_m_raised
+                .observe_usage(Some(250_000), Some(1_000_000))
+                .stop_budget
+        );
+        assert!(
+            one_m_raised
+                .observe_usage(Some(400_000), Some(1_000_000))
+                .stop_budget
+        );
     }
 
     #[test]

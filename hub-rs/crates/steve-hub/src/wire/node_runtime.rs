@@ -463,35 +463,44 @@ impl NodeRuntime {
     }
 
     /// Global default turn context budget (`STEVE_TURN_CONTEXT_BUDGET_PCT`,
-    /// `STEVE_TURN_CONTEXT_BUDGET_TOKENS`). A workspace's `handoff` setting overrides `ratio_pct`.
+    /// `STEVE_TURN_CONTEXT_BUDGET_TOKENS`). Workspace `handoff` and `contextBudget` settings
+    /// override `ratio_pct` and `max_tokens` per session.
     pub fn set_context_budget(&self, budget: ContextBudget) {
         *self.context_budget.lock().unwrap() = budget;
     }
 
-    /// Resolve the turn context budget for `session` from its workspace's `handoff` setting and
-    /// the Hub's global default. Returns `None` when neither specifies a budget (the Node then
-    /// uses the harness's declared `context_budget_pct` and `context_limit`).
+    /// Resolve the turn context budget for `session` from its workspace's `handoff` and
+    /// `contextBudget` settings and the Hub's global default. Returns `None` when neither
+    /// specifies an override (the Node then enforces each harness's declared `context_limit`
+    /// and `context_budget_pct`).
     pub(super) fn session_context_budget(
         &self,
         session: &str,
     ) -> Result<Option<ContextBudget>, StoreError> {
         let default = *self.context_budget.lock().unwrap();
-        let ws_pct = if let Some(s) = self.store.sessions().get(session)? {
-            let raw: String =
+        let (ws_pct, ws_tokens) = if let Some(s) = self.store.sessions().get(session)? {
+            let raw_pct: String =
                 self.store
                     .settings()
                     .get(&s.workspace_id, "handoff", String::new())?;
-            raw.trim()
+            let pct = raw_pct
+                .trim()
                 .parse::<f64>()
                 .ok()
                 .filter(|v| v.is_finite() && *v >= 1.0 && *v < 100.0)
-                .map(|v| v.round() as u8)
+                .map(|v| v.round() as u8);
+            let raw_tokens: String =
+                self.store
+                    .settings()
+                    .get(&s.workspace_id, "contextBudget", String::new())?;
+            let tokens = raw_tokens.trim().parse::<u64>().ok().filter(|&n| n > 0);
+            (pct, tokens)
         } else {
-            None
+            (None, None)
         };
         let budget = ContextBudget {
             ratio_pct: ws_pct.or(default.ratio_pct),
-            max_tokens: default.max_tokens,
+            max_tokens: ws_tokens.or(default.max_tokens),
         };
         Ok((!budget.is_empty()).then_some(budget))
     }

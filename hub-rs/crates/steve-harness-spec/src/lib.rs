@@ -521,30 +521,39 @@ impl AdapterProperties {
             .filter(|&p| (1..=99).contains(&p))
     }
 
-    /// Deterministic token threshold at which a turn reaches its context budget, combining the
-    /// resolved percentage of the effective window and any absolute `max_tokens` ceiling.
+    /// Deterministic token threshold at which a turn reaches its context budget.
+    ///
+    /// - When `budget.max_tokens` is explicitly set (workspace `contextBudget` or Hub env), that
+    ///   value overrides the declared default (allowing operators to raise or lower it), clamped
+    ///   only to `reported_limit` when known so small-window models never overflow.
+    /// - Otherwise, the threshold is `effective_budget_pct` of `min(context_limit, reported_limit)`
+    ///   (or whichever bound is present), so 1M-window models stay constrained to the harness's
+    ///   declared `context_limit × context_budget_pct` by default.
     pub fn turn_context_budget_tokens(
         &self,
         budget: Option<ContextBudget>,
         reported_limit: Option<u64>,
     ) -> Option<u64> {
-        let window = self.effective_context_limit(reported_limit);
-        let pct = self.effective_budget_pct(budget);
-        let by_ratio = pct
-            .zip(window)
-            .map(|(p, w)| w.saturating_mul(u64::from(p)) / 100)
-            .filter(|&n| n > 0);
-        let by_cap = budget.and_then(|b| b.max_tokens).filter(|&n| n > 0);
-        match (by_ratio, by_cap) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        let reported = reported_limit.filter(|&n| n > 0);
+        if let Some(cap) = budget.and_then(|b| b.max_tokens).filter(|&n| n > 0) {
+            return Some(reported.map_or(cap, |r| cap.min(r)));
         }
+        let declared = self.context_limit.filter(|&n| n > 0);
+        let window = match (declared, reported) {
+            (Some(d), Some(r)) => Some(d.min(r)),
+            (a, b) => a.or(b),
+        };
+        let pct = self.effective_budget_pct(budget);
+        pct.zip(window)
+            .map(|(p, w)| w.saturating_mul(u64::from(p)) / 100)
+            .filter(|&n| n > 0)
     }
 
     /// Render declarative launch-time env/args for a harness that declares native compaction.
-    /// Returns empty when no native compaction is declared or no threshold is configured.
+    /// Harnesses with an absolute window variable (e.g. `CLAUDE_CODE_AUTO_COMPACT_WINDOW`) or
+    /// token limit CLI flag (e.g. Codex `model_auto_compact_token_limit`) always receive their
+    /// resolved absolute bound by default so large-window (e.g. 1M) models are constrained
+    /// consistently unless raised by workspace/Hub settings.
     pub fn native_compaction_launch(
         &self,
         budget: Option<ContextBudget>,
@@ -562,16 +571,22 @@ impl AdapterProperties {
         match compaction {
             NativeCompaction::Builtin => {}
             NativeCompaction::EnvPercent { var, window_var } => {
+                let effective_pct =
+                    pct.or_else(|| window_var.is_none().then_some(derived_pct).flatten());
                 if !var.is_empty()
-                    && let Some(p) =
-                        pct.or_else(|| window_var.is_none().then_some(derived_pct).flatten())
+                    && let Some(p) = effective_pct
                 {
                     out.env.push((var.clone(), p.to_string()));
                 }
-                if let Some(wvar) = window_var.as_deref().filter(|v| !v.is_empty())
-                    && let Some(c) = cap
-                {
-                    out.env.push((wvar.to_string(), c.to_string()));
+                if let Some(wvar) = window_var.as_deref().filter(|v| !v.is_empty()) {
+                    let window = match (cap, effective_pct) {
+                        (Some(m), Some(p)) => Some(m.saturating_mul(100).div_ceil(u64::from(p))),
+                        (Some(m), None) => Some(m),
+                        (None, _) => self.context_limit.filter(|&n| n > 0),
+                    };
+                    if let Some(w) = window {
+                        out.env.push((wvar.to_string(), w.to_string()));
+                    }
                 }
             }
             NativeCompaction::EnvRatio { var } => {
@@ -882,22 +897,27 @@ mod context_budget_tests {
         }
         let claude = builtin("claude-code").expect("claude-code");
         assert!(claude.properties.has_native_compaction());
+        // Default launch constrains 1M-window Claude models to context_limit (200k * 80% = 160k).
         let claude_default = claude.properties.native_compaction_launch(None);
         assert_eq!(
             claude_default.env,
-            vec![("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".into(), "80".into())]
+            vec![
+                ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".into(), "80".into()),
+                ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "200000".into()),
+            ]
         );
-        let claude_capped = claude
+        // Raising workspace budget to 400k scales window to 500k (500k * 80% = 400k).
+        let claude_raised = claude
             .properties
             .native_compaction_launch(Some(ContextBudget {
-                ratio_pct: Some(70),
-                max_tokens: Some(256_000),
+                ratio_pct: None,
+                max_tokens: Some(400_000),
             }));
         assert_eq!(
-            claude_capped.env,
+            claude_raised.env,
             vec![
-                ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".into(), "70".into()),
-                ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "256000".into()),
+                ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".into(), "80".into()),
+                ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "500000".into()),
             ]
         );
 
@@ -911,18 +931,43 @@ mod context_budget_tests {
                 "model_auto_compact_token_limit=206720".to_string()
             ]
         );
-        let codex_capped = codex
+        let codex_raised = codex
             .properties
             .native_compaction_launch(Some(ContextBudget {
-                ratio_pct: Some(90),
-                max_tokens: Some(180_000),
+                ratio_pct: None,
+                max_tokens: Some(400_000),
             }));
         assert_eq!(
-            codex_capped.args,
+            codex_raised.args,
             vec![
                 "-c".to_string(),
-                "model_auto_compact_token_limit=180000".to_string()
+                "model_auto_compact_token_limit=400000".to_string()
             ]
+        );
+
+        // Non-native harness constrains 1M reported windows to declared context_limit * pct by
+        // default, and honors raised workspace max_tokens up to the reported model window.
+        let kiro = builtin("kiro").expect("kiro");
+        assert!(!kiro.properties.has_native_compaction());
+        assert_eq!(
+            kiro.properties
+                .turn_context_budget_tokens(None, Some(1_000_000)),
+            Some(160_000)
+        );
+        assert_eq!(
+            kiro.properties.turn_context_budget_tokens(
+                Some(ContextBudget {
+                    ratio_pct: None,
+                    max_tokens: Some(400_000),
+                }),
+                Some(1_000_000)
+            ),
+            Some(400_000)
+        );
+        assert_eq!(
+            kiro.properties
+                .turn_context_budget_tokens(None, Some(32_000)),
+            Some(25_600)
         );
 
         let goose = builtin("goose").expect("goose");
