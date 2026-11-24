@@ -4,7 +4,7 @@ import assert from "node:assert/strict"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import { createServer } from "vite"
-import { deliveryFixture, longName, staticHtmlCsp } from "./fixtures/delivery-api.mjs"
+import { deliveryFixture, longName, staticHtmlCsp } from "./fixtures/delivery-api.ts"
 import { settle } from "./settle.mjs"
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")

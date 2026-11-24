@@ -738,3 +738,41 @@ model_fallback = false
 fast_models = ["flash", "turbo", "mini", "lite", "haiku", "small"]
 resume_cli = "qodercli --resume {id}"
 outer_sandbox_args = []
+
+[[adapters]]
+id = "antigravity"
+name = "Antigravity CLI"
+install_hint = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+cli_bin = "agy"
+detect_bins = []
+args = ["acp"]
+command_var = "STEVE_ADAPTER_ANTIGRAVITY"
+env = {}
+command = {"kind" = "path", "bin" = "agy"}
+local_transcript = false
+primary = false
+managed_by_default = false
+[adapters.properties]
+self_read_only = false
+nested_sandbox = true
+state = {"env" = "", "arg" = "--gemini-dir", "default" = ".gemini/antigravity-cli", "import" = ["settings.json"], "import_into" = "antigravity-cli", "extra_dirs" = [".gemini/config"]}
+native_approval = "ask_owner"
+modes = {"plan" = "plan", "ask" = "default", "accept_edits" = "accept-edits", "auto" = "auto", "full_access" = ""}
+blind_set_mode = false
+native_execution = false
+permission_policy = "acp"
+require_mcp_http = false
+mode_meta = {}
+mode_args = {"full_access" = ["--dangerously-skip-permissions"]}
+session_meta = "none"
+launch_extra = "none"
+probe_initialize = true
+usage_input_includes_cache = false
+usage_prompt_cumulative = false
+usage_fallback = "none"
+fallback_models = []
+fallback_efforts = []
+model_fallback = false
+fast_models = ["flash-lite", "flash"]
+resume_cli = "agy --resume {id}"
+outer_sandbox_args = []

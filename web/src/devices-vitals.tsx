@@ -1,51 +1,129 @@
-/* How a Node's machine is doing, from the Hub's samples (about one a minute, a day kept): the figures now (sessions, CPU
- * load, memory, the fullest project disk, the round trip to the Hub) and the day as three charts (affectUI KPI Chart).
- * Offline, the figures are its last data under a note that says so; a stale sample says when it stopped. */
+/* How a Node's machine is doing, from the Hub's samples (about one a minute, a day kept):
+ * - NodeFigures: the balanced snapshot on Overview (sessions, CPU load, memory, fullest disk, plus tokens & RTT)
+ * - NodeResources: the deeper resource breakdown on Work & Resources (token usage, network throughput, all disk roots)
+ * - NodeTrends: the last 24 hours as affectUI KPI Charts (CPU, memory, remote RTT). */
+import type { ReactNode } from "react"
+import { ActivityIcon, CpuIcon, HardDriveIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { date, num } from "@/i18n/format"
 import { KpiChart } from "@/components/affect/kpi-chart-clean"
 import { Tooltip } from "@/components/affect/tooltip-clean"
-import { ActivityIcon } from "lucide-react"
-import { agoText, disks, linkRoute, loadPct, memPct, nodeStatus, offlineReason, one, rttOf, statusText, type NodeView } from "@/device-model"
+import { Meter } from "@/panel"
+import { agoText, disks, fillTone, linkRoute, loadPct, memPct, one, rttOf, type NodeView } from "@/device-model"
 import { useNodeVitals } from "@/devices-data"
-import { Alert, DCard, Figure } from "@/devices-ui"
+import { DCard, Figure } from "@/devices-ui"
 
 const GIB = 2 ** 30
 
-/** the figures now: sessions against the limit, CPU load, memory, the fullest disk, the round trip */
-export function NodeFigures({ v }: { v: NodeView }) {
+function bytesPerSecond(bytes: number) {
+  const [unit, divisor] = bytes >= 1e6 ? ["MB/s", 1e6] : bytes >= 1e3 ? ["KB/s", 1e3] : ["B/s", 1]
+  return `${num(bytes / divisor, { maximumFractionDigits: 1 })} ${unit}`
+}
+
+const compactTokens = (n: number) => num(n, { notation: "compact", maximumFractionDigits: 1 })
+
+/** Instant health snapshot on Overview: sessions, CPU load, memory, fullest disk, plus compact tokens & RTT line. */
+export function NodeFigures({ v, action }: { v: NodeView; action?: ReactNode }) {
   const t = useT(), { value: vit, stale } = useNodeVitals(v.id)
-  const l = vit?.latest, lp = loadPct(l), mp = memPct(l), disk = disks(l)[0], rtt = rttOf(v, l), route = linkRoute(v)
   const offline = !v.linked && !v.local
+  const l = vit?.latest, lp = loadPct(l), mp = memPct(l), disk = disks(l)[0], rtt = offline ? null : rttOf(v, l), route = linkRoute(v)
+  const tokens = vit?.tokens
   const at = l ? l.sampled_at ?? l.at : null
+  const showFooter = (!v.local && rtt != null) || !!tokens || (stale && !!at && !offline) || vit === null
   return (
-    <DCard data-node-figures className="p-0">
-      <div className="flex flex-col gap-4 p-5">
-        {offline && <Alert tone="warn" data-node-offline>
-          <strong className="font-semibold">{statusText(nodeStatus(v))}</strong>
-          {v.node?.offline && <span className="block type-footnote" data-node-offline-reason={v.node.offline.reason}>{offlineReason(v)}</span>}
-          {v.linkError && v.node?.offline?.reason !== "protocol_mismatch" && <span className="block font-mono type-footnote text-muted-foreground [overflow-wrap:anywhere]" data-node-link-error>{t("devices:node.lastFailure", { ago: agoText(v.linkError.at) })} {v.linkError.error}</span>}
-          <span className="block type-footnote text-muted-foreground">{t("devices:node.offlineNote")}</span>
-        </Alert>}
+    <DCard icon={<CpuIcon />} title={t("devices:nodeOverview.metricsTitle")} sub={offline && l ? t("devices:vitals.offlineSub") : undefined} action={action} data-node-figures>
+      <div className="flex flex-col gap-4 px-5 pb-5">
         <div className="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-4">
-          {/* the round trip sits under the sessions: both say how the Hub reaches it and what it gives it */}
-          <div className="row-span-2 flex min-w-0 flex-col gap-4">
-            <Figure label={t("devices:stat.sessions")} value={v.running ?? "—"} unit={v.max != null ? ` / ${v.max}` : undefined} fill={v.max && v.running != null ? v.running / v.max : null} data-running={v.running} data-max={v.max} data-waiting={v.waiting}
-              sub={(v.waiting ?? 0) > 0 ? <span className="text-attention">{t("devices:stat.queued", { n: v.waiting })}</span> : t("devices:stat.noQueue")} />
-            {!v.local && <Figure label={t("devices:vitals.rtt")} value={rtt ?? "—"} unit={rtt != null ? " ms" : undefined} sub={route ? t(`devices:route.${route}`) : undefined} data-vital="rtt" />}
-          </div>
+          <Figure label={t("devices:stat.sessions")} value={v.running ?? "—"} unit={v.max != null ? ` / ${v.max}` : undefined}
+            fill={v.max && v.running != null ? v.running / v.max : null} data-running={v.running} data-max={v.max} data-waiting={v.waiting}
+            sub={(v.waiting ?? 0) > 0 ? <span className="text-attention">{t("devices:stat.queued", { n: v.waiting })}</span> : t("devices:stat.noQueue")} />
           <Tooltip content={l?.load ? t("devices:vitals.cpuTip", { values: l.load.map((x) => num(one(x))).join(" / ") }) : t("devices:vitals.none")}>
-            <div tabIndex={0} className="min-w-0 outline-none"><Figure label={t("devices:vitals.cpu")} value={lp != null ? `${lp}%` : "—"} fill={lp != null ? lp / 100 : null} data-vital="cpu"
-              sub={l?.load && l.cpus ? t("devices:vitals.cpuSub", { load: num(one(l.load[0])), cpus: l.cpus }) : offline ? t("devices:vitals.noData") : undefined} /></div>
+            <div tabIndex={0} className="min-w-0 outline-none">
+              <Figure label={t("devices:vitals.cpu")} value={lp != null ? `${lp}%` : "—"} fill={lp != null ? lp / 100 : null} data-vital="cpu"
+                sub={l?.load && l.cpus ? t("devices:vitals.cpuSub", { load: num(one(l.load[0])), cpus: l.cpus }) : offline ? t("devices:vitals.noData") : undefined} />
+            </div>
           </Tooltip>
           <Figure label={t("devices:vitals.mem")} value={mp != null ? `${mp}%` : "—"} fill={mp != null ? mp / 100 : null} data-vital="memory"
             sub={l?.mem_total && l.mem_available != null ? t("devices:vitals.memSub", { used: Math.round((l.mem_total - l.mem_available) / GIB), total: Math.round(l.mem_total / GIB) }) : undefined} />
-          {disk ? <Figure label={<>{t("devices:vitals.disk")} <span className="type-code text-tertiary">{disk.name}</span></>} value={t("devices:vitals.diskFree", { n: num(disk.free) })} fill={disk.used} data-vital="disk"
-            sub={t("devices:vitals.diskTotal", { n: num(disk.total) })} />
+          {disk
+            ? <Figure label={<>{t("devices:vitals.disk")} <span className="type-code text-tertiary">{disk.name}</span></>} value={t("devices:vitals.diskFree", { n: num(disk.free) })} fill={disk.used} data-vital="disk"
+                sub={t("devices:vitals.diskTotal", { n: num(disk.total) })} />
             : <Figure label={t("devices:vitals.disk")} value="—" data-vital="disk" />}
         </div>
-        {stale && at && !offline && <p className="type-footnote text-attention" title={date(at, { dateStyle: "medium", timeStyle: "medium" })} data-vitals-stale>{t("devices:vitals.stale", { ago: agoText(at) })}</p>}
-        {vit === null && <p className="type-footnote text-muted-foreground" data-sample-state="none">{t("devices:vitals.none")}</p>}
+        {showFooter && (
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-border/70 pt-3 type-footnote text-muted-foreground">
+            {!v.local && (
+              <span className="inline-flex items-center gap-1.5 tabular-nums" data-vital="rtt">
+                <span>{t("devices:vitals.rtt")}</span>
+                <strong className="font-medium text-foreground">{rtt != null ? `${rtt} ms` : "—"}</strong>
+                {route && <span className="text-tertiary">· {t(`devices:route.${route}`)}</span>}
+              </span>
+            )}
+            {tokens && (
+              <span className="inline-flex items-center gap-1.5 tabular-nums" data-vital="tokens">
+                <span>{t("devices:vitals.tokens")}</span>
+                <strong className="font-medium text-foreground">{t("devices:vitals.tokensMinute", { n: compactTokens(tokens.per_minute) })}</strong>
+                <span className="text-tertiary">· {t("devices:vitals.tokensToday", { n: compactTokens(tokens.today) })}</span>
+              </span>
+            )}
+            {stale && at && !offline && (
+              <span className="text-attention" title={date(at, { dateStyle: "medium", timeStyle: "medium" })} data-vitals-stale>
+                {t("devices:vitals.stale", { ago: agoText(at) })}
+              </span>
+            )}
+            {vit === null && <span data-sample-state="none">{t("devices:vitals.none")}</span>}
+          </div>
+        )}
+      </div>
+    </DCard>
+  )
+}
+
+/** Deeper resource breakdown on the Work & Resources tab: tokens, network throughput, and every reported disk volume. */
+export function NodeResources({ v }: { v: NodeView }) {
+  const t = useT(), { value: vit } = useNodeVitals(v.id)
+  const l = vit?.latest
+  const allDisks = disks(l)
+  const net = l?.network
+  const tokens = vit?.tokens
+  const rtt = v.linked ? rttOf(v, l) : null
+  const route = linkRoute(v)
+  return (
+    <DCard icon={<HardDriveIcon />} title={t("devices:resources.title")} sub={t("devices:resources.sub")} data-node-resources>
+      <div className="flex flex-col gap-5 px-5 pb-5">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
+          <Figure label={t("devices:resources.tokens")} data-resource="tokens"
+            value={tokens ? t("devices:vitals.tokensMinute", { n: compactTokens(tokens.per_minute) }) : "—"}
+            sub={tokens ? t("devices:vitals.tokensToday", { n: compactTokens(tokens.today) }) : t("devices:resources.noTokens")} />
+          <Figure label={t("devices:resources.network")} data-resource="network"
+            value={net ? <span title={t("devices:vitals.receive")}>↓ {bytesPerSecond(net.rx_bytes_per_second)}</span> : "—"}
+            sub={net ? <span title={t("devices:vitals.send")}>↑ {bytesPerSecond(net.tx_bytes_per_second)}</span> : t("devices:resources.noNetwork")} />
+          {!v.local && (
+            <Figure label={t("devices:vitals.rtt")} data-resource="rtt"
+              value={rtt ?? "—"} unit={rtt != null ? " ms" : undefined}
+              sub={route ? t(`devices:route.${route}`) : undefined} />
+          )}
+        </div>
+        <div className="flex flex-col gap-2.5 border-t border-border/70 pt-4">
+          <h3 className="type-footnote font-medium text-muted-foreground">{t("devices:resources.disks")}</h3>
+          {allDisks.length > 0 ? (
+            <ul className="grid gap-3 sm:grid-cols-2" data-resource-disks>
+              {allDisks.map((d) => (
+                <li key={d.root} className="flex min-w-0 flex-col gap-1.5 rounded-lg bg-muted/50 px-3.5 py-2.5">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="truncate type-code text-foreground" title={d.root}>{d.name}</span>
+                    <span className="shrink-0 type-footnote tabular-nums text-muted-foreground">
+                      {t("devices:vitals.diskFree", { n: num(d.free) })} / {t("devices:vitals.diskTotal", { n: num(d.total) })}
+                    </span>
+                  </div>
+                  <Meter value={d.used} tone={fillTone(d.used) ?? "run"} />
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="type-footnote text-muted-foreground">{t("devices:resources.noDisks")}</p>
+          )}
+        </div>
       </div>
     </DCard>
   )

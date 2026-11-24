@@ -2350,7 +2350,7 @@ async fn open_harness(
     let (program, args) = inner
         .cfg
         .acp
-        .adapter_command(&harness)
+        .adapter_command_for_mode(&harness, Some(row.open.policy.permissions))
         .map_err(|e| Error::new(Code::Unsupported, e))?;
     // the principal's own harness directory, when the Hub asks for one and the adapter can move it
     let declared_state = inner.cfg.acp.adapter_properties(&harness).state;
@@ -2446,6 +2446,9 @@ async fn open_harness(
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
     let adapter_props = inner.cfg.acp.adapter_properties(&harness);
     let mut args = args;
+    if let (Some((dir, _)), Some(sd)) = (&state, &declared_state) {
+        args.extend(sd.isolation_args(dir));
+    }
     if adapter_props.nested_sandbox
         && crate::confine::is_outer_sandbox_active(false, Some(&inner.confine))
     {

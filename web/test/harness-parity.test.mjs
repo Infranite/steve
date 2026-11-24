@@ -16,6 +16,7 @@ const NAMES = [
   "github-copilot-cli", "copilot", "opencode", "qwen-code", "qwen", "goose", "goose-acp",
   "kimi-code", "kimi", "grok-build", "grok", "kilo", "factory-droid", "droid", "codebuddy-code",
   "codebuddy", "cursor", "cursor-agent", "kiro", "kiro-cli", "mistral-vibe", "vibe", "vibe-acp", "qoder", "qodercli",
+  "antigravity", "agy",
 ]
 const PATTERNS = NAMES.flatMap((n) => [`"${n}"`, `'${n}'`, `\`${n}\``])
 const files = (d) => readdirSync(d).flatMap((n) => { const p = join(d, n); return statSync(p).isDirectory() ? files(p) : /\.(ts|tsx)$/.test(n) ? [p] : [] })
@@ -29,7 +30,7 @@ test("NAMES covers every built-in adapter id and binary in steve-harness-spec", 
   const ids = [...builtins.matchAll(/^id = "([^"]+)"/gm)].map((m) => m[1])
   const cliBins = [...builtins.matchAll(/^cli_bin = "([^"]+)"/gm)].map((m) => m[1])
   const detectBins = [...builtins.matchAll(/^detect_bins = \[([^\]]*)\]/gm)].flatMap((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]))
-  assert.ok(ids.length >= 17, `expected >= 17 built-in adapters, found ${ids.length}`)
+  assert.ok(ids.length >= 18, `expected >= 18 built-in adapters, found ${ids.length}`)
   for (const name of [...ids, ...cliBins, ...detectBins]) {
     assert.ok(NAMES.includes(name), `missing "${name}" in web/test/harness-parity.test.mjs NAMES`)
   }

@@ -57,6 +57,9 @@ try {
     await page.screenshot({ path: process.env.STEVE_TEST_SHOTS + "/node-harnesses-list.png", fullPage: true, animations: "disabled" })
   }
   await page.locator('[data-node-row="remote"]').click()
+  await page.locator('[data-node-action="harnessAuth"]').waitFor()
+  await page.locator('[data-node-tab="harness"]').click()
+  await page.waitForFunction(() => location.hash === "#/devices/nodes/remote/harness")
   const detail = page.locator('[data-node-harnesses="remote"]')
   await detail.locator('[data-node-harness-models]').getByText("remote/model", { exact: true }).waitFor()
   assert.doesNotMatch(await detail.innerText(), /local-cli|local\/model|Hub-only harness/)

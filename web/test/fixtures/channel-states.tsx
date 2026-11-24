@@ -5,7 +5,10 @@ import { ChanOutNote, ReactionChip } from "../../src/thread/conversations"
 
 const refusal = "ext_ws target_forbidden (-32016)"
 const reaction = (state: Reaction["state"], error: string | null): Reaction => ({ state, error, emoji: null, as_user: false, updated: 1 })
-const note = (status: string, reason?: string) => <ChanOutNote m={{ meta: { chan_out: { status, reason } } } as ConvMessage} />
+const note = (status: string, reason?: string) => {
+  const m: ConvMessage = { id: status, author: "steve", text: "", item_id: null, created: 0, meta: { chan_out: { status, reason } } }
+  return <ChanOutNote m={m} />
+}
 
 createRoot(document.getElementById("root")!).render(<main className="mx-auto max-w-xl space-y-4 p-4">
   <p data-summary>只读到了部分片段，无法覆盖最近两天。</p>

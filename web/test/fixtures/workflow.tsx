@@ -1,4 +1,4 @@
-import { seedItems, seedSessions } from "./view-data"
+import { fixtureCoverage, fixtureProject, fixtureWait, seedItems, seedSessions } from "./view-data"
 import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
@@ -6,7 +6,7 @@ import { DependencyWaitPanel } from "../../src/dependency-wait-panel"
 import { AgentDetailPanel, AgentTree, useAgentTree, useSelectedNode } from "../../src/agent-tree-view"
 import { stats } from "../../src/api/stats"
 import { RelationGraph } from "../../src/graph"
-import { st, useStore, type Item } from "../../src/store"
+import { st, useStore, type Item, type Out } from "../../src/store"
 import type { Workflow, WorkflowUnit } from "../../src/workflow"
 import { api, Unauthenticated, type DependencyWait } from "../../src/api"
 import { setLang } from "../../src/i18n"
@@ -19,7 +19,7 @@ const unit = (id: string, title: string, kind: WorkflowUnit["kind"], status: str
   attempt: status === "pending" ? 0 : 1, summary: "", outputs: [], checks: [], reason: "",
 })
 const initial: Workflow = {
-  item_id: "ST-60", revision: 7, paused: new URLSearchParams(location.search).has("unavailable"), execution_ready: !new URLSearchParams(location.search).has("unavailable"), max_parallel: 2, max_attempts: 3,
+  item_id: "ST-60", revision: 7, enabled: true, paused: new URLSearchParams(location.search).has("unavailable"), execution_ready: !new URLSearchParams(location.search).has("unavailable"), max_parallel: 2, max_attempts: 3,
   units: [
     unit("integrate", "集成并统一验收", "integrate", "pending", ["review", "api"]),
     { ...unit("api", "实现接口与主体检查", "work", "succeeded"), summary: "接口已实现，检查通过。", outputs: [{ kind: "文件", title: "工作图 API", location: "src/workflow.ts", role: "result" }, { kind: "日志", title: "构建记录", role: "record" }], checks: [{ name: "接口实际回读", passed: true, operated: true }] },
@@ -41,16 +41,16 @@ function Fixture() {
     history_attempts: query.has("archive") ? [{ item_id: "ST-old", unit_id: "api", created: 1, snapshot: { title: "旧接口尝试", status: "cancelled", attempt: 1, session_id: "old-session", reason: "已被返工替代" } }] : [],
     history_attempts_total: query.has("archive") ? 2 : 0 })
   const [wait, setWait] = useState<DependencyWait>({
-    item_id: "ST-60", status: "block", phase: "active", cycle: 11,
-    dependencies: [{ id: "ST-59", status: "run", phase: "active" }], open_dependencies: ["ST-59"],
+    item_id: "ST-60", phase: "active", cycle: 11,
+    dependencies: [{ id: "ST-59", outcome: null, phase: "active" }], open_dependencies: ["ST-59"],
     resume_mode: "automatic", resume_source: "workspace", resume_override: "workspace",
     resume_enabled: !query.has("held"), resume_blocker: query.has("held") ? "实例暂时暂停调度" : null,
     resume_fallback_reason: null, waiting: false, wait_state: null, reason: null, active_turn: false,
     can_register: true, register_blocker: null,
   })
   api.saveDependencyWait = async (_id, args) => {
-    ;(window as any).__waitChanges ??= []
-    ;(window as any).__waitChanges.push(args)
+    window.__waitChanges ??= []
+    window.__waitChanges.push(args)
     if (query.has("stale")) throw new Error("事项已进入另一轮，请刷新后再设置等待")
     const next: DependencyWait = { ...wait, waiting: true, wait_state: "waiting", reason: args.reason,
       resume_override: args.resume, resume_source: args.resume === "workspace" ? "workspace" : "item",
@@ -72,8 +72,8 @@ function Fixture() {
       paused: args.action === "pause" ? true : args.action === "resume" ? false : workflow.paused,
       units: workflow.units.map((u) => single && u.status !== "succeeded" ? { ...u, status: "cancelled" } : args.action === "retry" && u.id === args.unit_id ? { ...u, status: "pending", reason: "", attempt: u.attempt + 1 } : u),
     }
-    ;(window as any).__workflowChanges ??= []
-    ;(window as any).__workflowChanges.push(args)
+    window.__workflowChanges ??= []
+    window.__workflowChanges.push(args)
     setWorkflow(next)
     return next
   }
@@ -82,15 +82,15 @@ function Fixture() {
     seedItems([
       { id: "ST-60", t: "主事项", st: "run", b: "steve", project: "project", deps: ["ST-missing"], workflow },
       { id: "ST-61", t: "实现接口", st: "run", b: "steve", project: "project", deps: [], parent: { item: "ST-60", s: "session-old", at: 23 }, arch: true },
-    ] as Item[])
+    ])
     seedSessions({ "session-old": { title: "设计来源会话", st: "ended", b: "steve", n: 1 } })
-    st.projects = [{ id: "project", name: "示例项目" }] as typeof st.projects
+    st.projects = [fixtureProject({ id: "project", name: "示例项目" })]
     workflow.units[1].item_id = "ST-61"
   }, [workflow])
   useStore()
   if (query.has("wait")) return <main className="mx-auto max-w-3xl p-5"><DependencyWaitPanel item="ST-60" wait={wait} /></main>
   if (query.has("graph")) {
-    return <main className="mx-auto max-w-4xl p-5"><RelationGraph focus="ST-60" scope="comp" onOpen={(n) => { (window as any).__graphOpened = n.id }} /></main>
+    return <main className="mx-auto max-w-4xl p-5"><RelationGraph focus="ST-60" scope="comp" onOpen={(n) => { window.__graphOpened = n.id }} /></main>
   }
   return <TreeFixture workflow={workflow} fork={query.has("fork")} />
 }
@@ -99,23 +99,27 @@ function Fixture() {
  * full view's call tree and handoffs read the same */
 function TreeFixture({ workflow, fork }: { workflow: Workflow; fork: boolean }) {
   /* the api step's item keeps what it delivered, so the full view's detail can open it */
-  const child = (id: string, t: string, unit: string, st: Item["st"]) => ({ id, t, st, b: workflow.units.find((u) => u.id === unit)!.bot_id, src: ["Steve", "workflow"], parent: { item: "ST-60" }, waits: unit === "web" ? [{}] : [], ss: [],
-    outs: unit === "api" ? [["文件", "工作图 API", "src/workflow.ts", "art-api", 1, "result"]] : [], anns: [] })
+  const child = (id: string, t: string, unit: string, st: Item["st"]) => ({
+    id, t, st, b: workflow.units.find((u) => u.id === unit)!.bot_id,
+    src: ["Steve", "workflow"] as [string, string], parent: { item: "ST-60" },
+    waits: unit === "web" ? [fixtureWait({ decision: `fixture:${id}:0`, q: "", type: "ask" })] : [], ss: [],
+    outs: (unit === "api" ? [["文件", "工作图 API", "src/workflow.ts", "art-api", 1, "result"]] : []) as Out[], anns: [],
+  })
   useEffect(() => { seedItems([
     { id: "ST-60", t: "协作改造工作图", st: "run", b: "主控 Bot", src: ["Steve", "chat"], waits: [], ss: [] },
     child("ST-61", "实现接口与主体检查", "api", "done"), child("ST-62", "实现协作进度界面", "web", "run"), child("ST-63", "独立复核依赖门控与恢复", "review", "drop"),
     { id: "ST-old", t: "旧接口尝试", st: "drop", b: "开发 Bot", src: ["Steve", "workflow"], parent: { item: "ST-60" }, waits: [], ss: [], arch: true },
-    ...(fork ? [{ id: "ST-64", t: "把进度界面拆成独立组件", st: "run", b: "开发 Bot", src: ["Steve", "fork"], parent: { item: "ST-62", s: "s-62", at: 9 }, waits: [], ss: [] }] : []),
-  ] as unknown as Item[]) }, [workflow, fork])
+    ...(fork ? [{ id: "ST-64", t: "把进度界面拆成独立组件", st: "run" as const, b: "开发 Bot", src: ["Steve", "fork"] as [string, string], parent: { item: "ST-62", s: "s-62", at: 9 }, waits: [], ss: [] }] : []),
+  ]) }, [workflow, fork])
   useStore()
   const ids: Record<string, string> = { api: "ST-61", web: "ST-62", review: "ST-63" }
   const wf = { ...workflow, units: workflow.units.map((u) => ids[u.id] && u.status !== "pending" ? { ...u, item_id: ids[u.id] } : u) }
   const T = Date.now()
   stats.tree = async () => ({ truncated: false, nodes: [
-    { item_id: "ST-60", parent_id: null, depth: 0, tokens: 900, est: 0.42, reported: 0, agent_ms: 60_000, first_turn: T - 300_000, done_at: null, dropped_at: null },
-    { item_id: "ST-61", parent_id: "ST-60", depth: 1, tokens: 500, est: 0.29, reported: 0, agent_ms: 45_000, first_turn: T - 280_000, done_at: T - 235_000, dropped_at: null },
-    { item_id: "ST-62", parent_id: "ST-60", depth: 1, tokens: 400, est: 0.19, reported: 0, agent_ms: 30_000, first_turn: T - 69_000, done_at: null, dropped_at: null },
-    { item_id: "ST-old", parent_id: "ST-60", depth: 1, tokens: 100, est: 0.04, reported: 0, agent_ms: 27_000, first_turn: T - 400_000, done_at: null, dropped_at: T - 373_000 },
+    { item_id: "ST-60", parent_id: null, depth: 0, tokens: 900, est: 0.42, reported: 0, agent_ms: 60_000, first_turn: T - 300_000, done_at: null, dropped_at: null, coverage: fixtureCoverage({ total: 900 }) },
+    { item_id: "ST-61", parent_id: "ST-60", depth: 1, tokens: 500, est: 0.29, reported: 0, agent_ms: 45_000, first_turn: T - 280_000, done_at: T - 235_000, dropped_at: null, coverage: fixtureCoverage({ total: 500 }) },
+    { item_id: "ST-62", parent_id: "ST-60", depth: 1, tokens: 400, est: 0.19, reported: 0, agent_ms: 30_000, first_turn: T - 69_000, done_at: null, dropped_at: null, coverage: fixtureCoverage({ total: 400 }) },
+    { item_id: "ST-old", parent_id: "ST-60", depth: 1, tokens: 100, est: 0.04, reported: 0, agent_ms: 27_000, first_turn: T - 400_000, done_at: null, dropped_at: T - 373_000, coverage: fixtureCoverage({ total: 100 }) },
   ] })
   const at = useAgentTree("ST-60", wf)
   const [node, select] = useSelectedNode(at)

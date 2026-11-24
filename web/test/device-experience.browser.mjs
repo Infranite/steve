@@ -9,11 +9,11 @@ const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EX
 const context=await browser.newContext({locale:'zh-CN'}), page=await context.newPage(), checks=[], errors=[]
 page.on('pageerror',e=>errors.push(e.message))
 const check=(name, fn)=>Promise.resolve().then(fn).then(()=>checks.push({name,passed:true}))
-const goto=async(hash)=>{await page.goto(base+'/#'+hash);await page.reload();await page.locator(hash.startsWith('/devices/nodes/')?'[data-node-work]':'[data-nodes]').waitFor()}
+const goto=async(hash)=>{await page.goto(base+'/#'+hash);await page.reload();await page.locator(hash.endsWith('/work')?'[data-node-work]':hash.startsWith('/devices/nodes/')?'[data-node-detail]':'[data-nodes]').waitFor()}
 const scale=async(root='body')=>page.locator(root).evaluate(el=>{const els=[el,...el.querySelectorAll('*')].filter(e=>e instanceof HTMLElement); const sizes=els.map(e=>parseFloat(getComputedStyle(e).fontSize));els.forEach((e,i)=>e.style.fontSize=sizes[i]*2+'px')})
 try {
  await page.goto(base+'/auth/dev')
- await goto('/devices/nodes/local')
+ await goto('/devices/nodes/local/work')
  const get = async path => (await page.request.get(base + path)).json()
  const [{ devices }, { views: { session: sessions, decision: decisions } }] = await Promise.all([
   get('/api/devices'), get('/api/snapshot?kinds=session,decision'),
@@ -32,7 +32,7 @@ try {
   assert.equal(await page.locator('[data-work-session=case-unassigned]').count(),0)
  })
  for(const width of [1440,390,320]) for(const percent of [100,200]) {
-  await page.setViewportSize({width,height:1000});await goto('/devices/nodes/local')
+  await page.setViewportSize({width,height:1000});await goto('/devices/nodes/local/work')
   if(percent===200) await scale()
   for(const request of ['case-request-running','case-request-idle']) {
    await check(`${width}/${percent} request ${request} opens its decision and returns`,async()=>{
@@ -42,8 +42,6 @@ try {
    })
   }
   await check(`${width}/${percent} figures and the day's charts fit the viewport`,async()=>{
-   await page.locator('[data-vital=disk]').getByText('剩',{exact:false}).waitFor()
-   assert.equal(await page.locator('[data-vital=rtt]').count(),0,'local has no remote RTT')
    assert.equal(await page.locator('[data-node-trends] .ui-kpic').count(),2,'load and memory; no RTT for the Hub\'s own Node')
    const boxes=await page.locator('[data-node-trends] .ui-kpic').evaluateAll(cs=>cs.map(c=>{const r=c.getBoundingClientRect();return {left:r.left,right:r.right}}))
    assert.ok(boxes.every(b=>b.left>=0&&b.right<=width+1),JSON.stringify(boxes))
@@ -51,7 +49,7 @@ try {
    await page.screenshot({path:`${out}/device-${width}-${percent}.png`,fullPage:true})
   })
  }
- await page.setViewportSize({width:1440,height:1000});await goto('/devices/nodes/local')
+ await page.setViewportSize({width:1440,height:1000});await goto('/devices/nodes/local/work')
  await page.locator('[data-work-recent] > summary').click();await page.locator('[data-work-session=case-readonly]').waitFor();await page.locator('[data-work-session=case-ended]').waitFor()
  checks.push({name:'collapsed recent readonly/ended session entries open',passed:true})
  const limit=page.locator('[data-session-limit-input]'), original=Number(await limit.getAttribute('aria-valuenow'))
@@ -64,6 +62,7 @@ try {
  checks.push({name:'a change made elsewhere is said in place, never written over; "use the latest" reads it',passed:true})
  for(const width of [1440,390,320]) for(const percent of [100,200]) {
   await page.setViewportSize({width,height:1000});await goto('/devices/nodes');await page.locator('[data-node-row=case-remote]').click();await page.locator('[data-node-detail]').waitFor()
+  await page.locator('[data-node-tab=work]').click()
   if(percent===200) await scale('[data-node-detail]')
   await page.locator('[data-node-trends]').waitFor()
   assert.equal(await page.locator('[data-node-trends] .ui-kpic').count(),3,'a remote Node also charts its round trip')

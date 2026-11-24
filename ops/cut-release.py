@@ -1,85 +1,68 @@
 #!/usr/bin/env python3
-"""Cut a release: the version is chosen here, at release time, never ahead on a branch.
+"""Cut a release from Conventional Commits: version and release notes are derived at release time.
 
-  cut-release.py next [--minor]                    the version the next release gets
-  cut-release.py cut [--minor | --version X.Y.Z] [--branch B] [--dry-run] [--ci-wait S | --skip-ci]
-  cut-release.py lint [--base REF]                 a branch carries release-note fragments only
+  cut-release.py next [--branch B] [--range A..B] [--offline]
+  cut-release.py cut [--branch B] [--dry-run] [--range A..B] [--offline]
+                     [--version X.Y.Z --reason WHY] [--ci-wait S | --skip-ci]
+  cut-release.py lint [--base REF] [--head REF] [--range A..B]
+                      [--pr-title TITLE] [--pr-body FILE] [--github-event PATH]
 
-Versions are MAJOR.MINOR.PATCH (CONTRIBUTING.md, "Changes and releases"): PATCH for every ordinary
-release; --minor when an operator must act (Hub/Node or client protocol change, something removed or
-changed in meaning, manual configuration, an upgrade that reinstalling the previous release cannot
-undo), announced by a fragment whose first line is `Needs a minor release: <why>`; MAJOR stays 0 until
-the interfaces are declared stable.
+Versions are MAJOR.MINOR.PATCH (CONTRIBUTING.md, "Changes and releases"):
+  - MAJOR: stability generation of public contracts; 0 until contracts are frozen at 1.0.0;
+           after 1.0, incremented only on breaking changes (`!` or `BREAKING CHANGE:`).
+  - MINOR: new user-visible capability (`feat`), operator action required (`Upgrade:` trailer),
+           or breaking changes before 1.0. Resets PATCH to 0.
+  - PATCH: fixes, performance, docs, and internal refactors only; safe to roll back in place.
 
-Release notes are fragments: each change adds `docs/releases/unreleased/<name>.md` (its item, e.g.
-`ST-38.md`, or its branch), a few sentences or bullets, no version and no `# ` title. `cut` takes the
-target branch on `origin` (in a worktree of its own, so the caller's checkout does not matter),
-gives it the next free version (one more than the highest `vX.Y.Z` tag on `origin`), joins the fragments
-in the order they arrived on the branch into `docs/releases/X.Y.Z.md` and removes them.
+Release notes are generated automatically from `main`'s first-parent history since the last `vX.Y.Z`
+tag. Merged PRs use the PR title and optional `## Release note` section from the PR description;
+direct commits use their commit subject. `Upgrade:` trailers (and breaking notices) appear at the
+top under `## Before upgrading`, followed by Features, Fixes, Performance, and Other changes.
 
-The branch takes changes only through pull requests (it may be protected), so the notes go in as one. `cut`
-takes a tested commit as `base`, commits the notes on it (adding `docs/releases/X.Y.Z.md`, removing the
-fragments present at `base`, nothing else), pushes that commit to `release/vX.Y.Z`, opens a pull request into
-the branch, waits for its CI run, merges it with a merge commit (`--match-head-commit`, so exactly that commit
-goes in), and then tags the notes commit itself with the annotated tag `vX.Y.Z`: the tag is the tree that was
-tested, whatever landed on the branch meanwhile. Only the tag is pushed directly; branch rules do not cover tags.
-
-The branch keeps moving while a release waits for CI (other pull requests merge every few minutes), and that is
-no reason to start again: the merge commit joins the notes commit to whatever the branch has become. Fragments
-that arrived after `base` are not touched by the notes commit, so the merge keeps them for the next release.
-`cut` starts again from the new state, a few times at most, only on a real problem: the pull request does not
-merge cleanly (someone changed a fragment it removes), someone else released the version first, or the release
-branch was taken while pushing it. The pull request is then closed and its branch deleted. A release branch
-already on `origin` is someone else's release in progress (or one left behind: delete it once nobody is
-releasing); `cut` refuses it.
-
-The tag is pushed after the merge, never before: the tag starts the Release workflow, which publishes it, and a
-tag pushed first would publish a version the branch might never contain when the merge then fails. Before
-tagging, `cut` checks that the notes commit is on origin's branch. A release whose pull request merged but whose
-tag never landed is finished by the next `cut`: the branch then carries `docs/releases/X.Y.Z.md` of an untagged
-version, added by a notes commit of `cut`'s shape, and that commit is tagged as it is (after the same CI
-checks); fragments that arrived since wait for the release after it.
-
-Only a tested commit is released: `cut` first asks GitHub (`gh`: $STEVE_GH, else on PATH, else in
-/opt/homebrew/bin, /usr/local/bin or /usr/bin, as the Hub finds it) for the CI workflow's run
-(`.github/workflows/ci.yml`) pushed to the branch: it picks the newest first-parent commit since the last
-release whose own latest full push run completed successfully. Newer pending, cancelled or failed commits wait
-for the next release; cancellation never counts as success. With no eligible successful commit it checks the
-head: it waits while that run is queued or running (up to
-`--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and how to
-run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. The notes commit then needs
-its release pull request's run to pass: that run checks the notes (ci.yml skips its Rust and Apple jobs when the
-pull request changes release notes alone and stands right on a main commit whose run passed), so the tagged
-tree is `base`, tested on every platform, plus notes that passed their checks. `--skip-ci` releases without
-either check, on purpose (it says so; a protected branch that requires the run then refuses the merge).
-`--dry-run` previews the current head's notes without choosing a tested base, asking CI or pushing anything.
-
-Only `base`'s own push run counts for it. Pull requests run the Linux jobs only (macOS runs on main), so a pull
-request's green run is never taken for the commit it was merged as.
-
-A `docs/releases/X.Y.Z.md` for a version no tag has yet (written ahead the old way) is taken as the
-first fragment of that release.
-
-`lint` fails when the branch adds or changes `docs/releases/X.Y.Z.md` itself: such a file picks a
-version before the release does, and two branches picking the same one is how releases collided.
+`cut` takes the newest first-parent commit on `origin/<branch>` whose own full CI push run passed,
+commits `docs/releases/X.Y.Z.md` on top of it (`chore(release): vX.Y.Z`, changing nothing else),
+merges it through a release pull request (`--merge --match-head-commit`), and pushes the annotated
+tag `vX.Y.Z` on the notes commit itself after the merge lands.
 
 Talks to `origin`; "can't reach it" is an error, never "there are no tags".
 """
 import argparse
+from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
-from pathlib import Path
+import urllib.error
+import urllib.request
 
 NOTES = "docs/releases"
-FRAGMENTS = f"{NOTES}/unreleased"
 VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-NOTES_RE = re.compile(r"^docs/releases/\d+\.\d+\.\d+\.md$")
+NOTES_RE = re.compile(r"^docs/releases/(\d+)\.(\d+)\.(\d+)\.md$")
+RELEASE_TITLE_RE = re.compile(r"^chore\(release\): v(\d+\.\d+\.\d+)$")
+ALLOWED_TYPES = ("feat", "fix", "perf", "refactor", "docs", "test", "build", "ci", "chore", "revert")
+HEADER_RE = re.compile(
+    r"^(?P<type>feat|fix|perf|refactor|docs|test|build|ci|chore|revert)"
+    r"(?:\((?P<scope>[A-Za-z0-9][A-Za-z0-9._/-]*)\))?"
+    r"(?P<breaking>!)?"
+    r": (?P<desc>\S.*)$"
+)
+PR_MERGE_RE = re.compile(r"^Merge pull request #(\d+) from \S+")
+UPGRADE_RE = re.compile(r"^Upgrade:\s*(.*)$")
+BREAKING_RE = re.compile(r"^BREAKING[ -]CHANGE:\s*(.*)$")
+TRAILER_STOP_RE = re.compile(
+    r"^(?:#{1,6}\s|---|===|```|~~~|Upgrade:\s*$|BREAKING[ -]CHANGE:\s*$"
+    r"|[A-Za-z][A-Za-z0-9-]*:\s|BREAKING[ -]CHANGE:\s|(?i:Closes|Fixes|Resolves|Refs)\s+#\d+)"
+)
+RELEASE_NOTE_HEADING_RE = re.compile(r"^##\s+Release notes?\s*$", re.I)
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+
 ATTEMPTS = 3
 NET_TIMEOUT = 60
 CI_WORKFLOW = "ci.yml"
@@ -101,15 +84,239 @@ class Raced(Exception):
     """The push lost to someone else's: start again from the new state."""
 
 
+@dataclass(frozen=True)
+class ParsedHeader:
+    commit_type: str
+    scope: str | None
+    breaking: bool
+    description: str
+
+
+@dataclass(frozen=True)
+class ReleaseEntry:
+    sha: str
+    pr_number: int | None
+    raw_title: str
+    commit_type: str | None
+    scope: str | None
+    breaking: bool
+    description: str
+    release_note: str | None
+    upgrades: tuple[str, ...]
+    breaking_notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class VersionPlan:
+    version: str
+    bump: str  # initial | patch | minor | major
+    previous: str | None
+    triggers: tuple[tuple[ReleaseEntry, tuple[str, ...]], ...]
+
+
 def git(*args, cwd, check=True, timeout=None):
     try:
-        r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout,
-                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        r = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+        )
     except subprocess.TimeoutExpired:
         raise Refused(f"git {args[0]} timed out after {timeout}s")
     if check and r.returncode != 0:
         raise Refused(f"git {' '.join(args)}: {(r.stderr or r.stdout).strip()[:400]}")
     return r
+
+
+def parse_version(text):
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", text)
+    if not m:
+        return None
+    return tuple(int(x) for x in m.groups())
+
+
+def format_version(ver):
+    return f"{ver[0]}.{ver[1]}.{ver[2]}"
+
+
+def parse_header(title):
+    line = title.strip()
+    if "\n" in line or "\r" in line:
+        return None
+    m = HEADER_RE.match(line)
+    if not m:
+        return None
+    return ParsedHeader(
+        commit_type=m.group("type"),
+        scope=m.group("scope"),
+        breaking=bool(m.group("breaking")),
+        description=m.group("desc").strip(),
+    )
+
+
+def format_header_error(title, label):
+    allowed = "|".join(ALLOWED_TYPES)
+    return (
+        f"{label} {title!r} does not match Conventional Commits: "
+        f"`type[(scope)][!]: imperative summary` (type in {allowed})"
+    )
+
+
+def validate_header(title, label):
+    parsed = parse_header(title)
+    if parsed is None:
+        raise Refused(format_header_error(title, label))
+    return parsed
+
+
+def _fence_toggle(line, active_fence):
+    m = FENCE_RE.match(line)
+    if not m:
+        return active_fence, False
+    marker = m.group(1)
+    if active_fence is None:
+        return (marker[0], len(marker)), True
+    if marker[0] == active_fence[0] and len(marker) >= active_fence[1] and line.strip() == marker:
+        return None, True
+    return active_fence, False
+
+
+def _clean_trailer_value(first, continuation):
+    head = first.rstrip()
+    tail = textwrap.dedent("\n".join(continuation)).strip("\n") if continuation else ""
+    if head and tail:
+        return f"{head}\n{tail}".strip()
+    return (head or tail).strip()
+
+
+def parse_trailers(text, *, validate=False):
+    """Extract `Upgrade:` and `BREAKING CHANGE:` trailers outside fenced code blocks."""
+    upgrades, breaking = [], []
+    if not text:
+        return upgrades, breaking
+    lines = text.splitlines()
+    i, fence = 0, None
+    while i < len(lines):
+        line = lines[i]
+        fence, toggled = _fence_toggle(line, fence)
+        if toggled or fence is not None:
+            i += 1
+            continue
+        m_up = UPGRADE_RE.match(line)
+        m_br = None if m_up else BREAKING_RE.match(line)
+        if not (m_up or m_br):
+            i += 1
+            continue
+        kind = "Upgrade:" if m_up else "BREAKING CHANGE:"
+        first = (m_up or m_br).group(1)
+        i += 1
+        cont = []
+        while i < len(lines):
+            nxt = lines[i]
+            if not nxt.strip() or TRAILER_STOP_RE.match(nxt):
+                break
+            cont.append(nxt.rstrip())
+            i += 1
+        value = _clean_trailer_value(first, cont)
+        if not value:
+            if validate:
+                raise Refused(f"empty {kind} trailer; explain what operators must do or remove it")
+            continue
+        (upgrades if m_up else breaking).append(value)
+    return upgrades, breaking
+
+
+def _strip_trailers_outside_fences(lines):
+    out = []
+    i, fence = 0, None
+    while i < len(lines):
+        line = lines[i]
+        fence, toggled = _fence_toggle(line, fence)
+        if toggled or fence is not None:
+            out.append(line)
+            i += 1
+            continue
+        if UPGRADE_RE.match(line) or BREAKING_RE.match(line):
+            i += 1
+            while i < len(lines) and lines[i].strip() and not TRAILER_STOP_RE.match(lines[i]):
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    return out
+
+
+def extract_release_note(pr_body):
+    """Return the optional `## Release note` section from a PR description, or None."""
+    if not pr_body:
+        return None
+    lines = pr_body.splitlines()
+    collected, in_section, fence = [], False, None
+    for line in lines:
+        fence, toggled = _fence_toggle(line, fence)
+        if toggled or fence is not None:
+            if in_section:
+                collected.append(line)
+            continue
+        if not in_section:
+            if RELEASE_NOTE_HEADING_RE.match(line.strip()):
+                in_section = True
+            continue
+        if re.match(r"^#{1,2}\s+", line):
+            break
+        collected.append(line)
+    if not collected:
+        return None
+    cleaned = _strip_trailers_outside_fences(collected)
+    # Strip HTML comments only outside code fences.
+    out, fence = [], None
+    buf = []
+
+    def flush_buf():
+        if buf:
+            out.extend(HTML_COMMENT_RE.sub("", "\n".join(buf)).splitlines())
+            buf.clear()
+
+    for line in cleaned:
+        fence, toggled = _fence_toggle(line, fence)
+        if toggled or fence is not None:
+            flush_buf()
+            out.append(line)
+        else:
+            buf.append(line)
+    flush_buf()
+    result = "\n".join(out).strip()
+    return result or None
+
+
+def dedupe_texts(items):
+    seen, out = set(), []
+    for item in items:
+        key = " ".join(item.split())
+        if key and key not in seen:
+            seen.add(key)
+            out.append(item)
+    return tuple(out)
+
+
+def origin_web_url(repo):
+    """Best-effort repository web URL derived from origin or $GH_REPO, else None."""
+    if gh_repo := os.environ.get("GH_REPO", "").strip().strip("/"):
+        return f"https://github.com/{gh_repo}"
+    r = git("remote", "get-url", "origin", cwd=repo, check=False)
+    if r.returncode != 0:
+        return None
+    url = r.stdout.strip()
+    if m := re.match(r"^https?://(.+?)(?:\.git)?/?$", url):
+        scheme = "https" if url.startswith("https://") else "http"
+        return f"{scheme}://{m.group(1)}"
+    if m := re.match(r"^ssh://(?:[^@]+@)?([^/:]+)(?::\d+)?/(.+?)(?:\.git)?/?$", url):
+        return f"https://{m.group(1)}/{m.group(2)}"
+    if m := re.match(r"^(?:[^@]+@)?([^/:]+):(.+?)(?:\.git)?/?$", url):
+        return f"https://{m.group(1)}/{m.group(2)}"
+    return None
 
 
 def remote_versions(repo):
@@ -124,12 +331,18 @@ def remote_versions(repo):
     return out
 
 
-def next_version(repo, minor=False):
-    have = remote_versions(repo)
-    if not have:
-        return "0.1.0"
-    a, b, c = max(have)
-    return f"{a}.{b + 1}.0" if minor else f"{a}.{b}.{c + 1}"
+def local_versions(repo, ref=None):
+    args = ["tag", "--list", "v[0-9]*"]
+    if ref:
+        args += ["--merged", ref]
+    r = git(*args, cwd=repo, check=False)
+    if r.returncode != 0:
+        return set()
+    out = set()
+    for line in r.stdout.splitlines():
+        if m := VERSION_RE.match(line.strip()):
+            out.add(tuple(int(x) for x in m.groups()))
+    return out
 
 
 def default_branch(repo):
@@ -153,17 +366,25 @@ def gh(*args, cwd):
     """`gh` in the repository: `{owner}/{repo}` is its GitHub remote (or GH_REPO)."""
     exe = gh_path()
     if exe is None:
-        raise Refused(f"can't reach GitHub: no `gh` on PATH, in {', '.join(GH_PLACES)} or $STEVE_GH "
-                      f"(install it and log in)")
+        raise Refused(
+            f"can't reach GitHub: no `gh` on PATH, in {', '.join(GH_PLACES)} or $STEVE_GH "
+            f"(install it and log in)"
+        )
     try:
-        r = subprocess.run([exe, *args], cwd=str(cwd), capture_output=True, text=True, timeout=NET_TIMEOUT,
-                           env=dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1"))
+        r = subprocess.run(
+            [exe, *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=NET_TIMEOUT,
+            env=dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1"),
+        )
     except FileNotFoundError:
         raise Refused(f"can't reach GitHub: no `gh` at {exe} (install it and log in)")
     except subprocess.TimeoutExpired:
         raise Refused(f"gh {args[0]} timed out after {NET_TIMEOUT}s")
     if r.returncode != 0:
-        what = "read CI from GitHub" if args[:1] == ("api",) else "ask GitHub"
+        what = "read from GitHub" if args[:1] == ("api",) else "ask GitHub"
         raise Refused(f"can't {what}: gh {' '.join(args[:2])}: {(r.stderr or r.stdout).strip()[:300]}")
     return r.stdout
 
@@ -173,7 +394,292 @@ def api(repo, path):
     try:
         return json.loads(out)
     except ValueError:
-        raise Refused(f"can't read CI from GitHub: unexpected answer {out.strip()[:200]!r}")
+        raise Refused(f"can't read from GitHub: unexpected answer {out.strip()[:200]!r}")
+
+
+def pr_fetcher(repo, *, offline):
+    """Return a cached callable(number) -> (title, body) | None for live GitHub PR metadata.
+
+    Always reads live title and description from GitHub unless `--offline` is explicitly set,
+    so PR titles and descriptions edited after merge take effect immediately.
+    """
+    cache = {}
+    warned_offline = False
+
+    def fetch(number):
+        nonlocal warned_offline
+        if number in cache:
+            return cache[number]
+        if offline:
+            if not warned_offline:
+                print("note: --offline: using commit messages only (GitHub PR titles and descriptions skipped)", file=sys.stderr)
+                warned_offline = True
+            cache[number] = None
+            return None
+        try:
+            data = api(repo, f"pulls/{number}")
+        except Refused as e:
+            raise Refused(f"can't read PR #{number} from GitHub: {e}")
+        if not isinstance(data, dict) or not isinstance(data.get("title"), str):
+            raise Refused(f"can't read PR #{number} from GitHub: unexpected payload")
+        val = (data["title"], data.get("body") or "")
+        cache[number] = val
+        return val
+
+    return fetch
+
+
+def commit_meta(repo, sha):
+    raw = git("show", "-s", "--format=%P%x00%s%x00%b", sha, cwd=repo).stdout
+    parts = raw.split("\x00", 2)
+    parents = parts[0].split() if parts[0] else []
+    subject = parts[1].strip() if len(parts) > 1 else ""
+    body = parts[2] if len(parts) > 2 else ""
+    return parents, subject, body
+
+
+def commit_bodies_in_pr(repo, parent1, parent2):
+    raw = git("log", "--no-merges", "--reverse", "--format=%B%x00", f"{parent1}..{parent2}", cwd=repo).stdout
+    return [chunk for chunk in raw.split("\x00") if chunk.strip()]
+
+
+def _exclude_args(from_ref):
+    return ["--not", from_ref] if from_ref else ["--not", "--glob=refs/tags/v[0-9]*"]
+
+
+def _is_already_released_merge(repo, parents, exclude):
+    """True when a merge commit's second parent brings zero commits outside `exclude`
+    (for example, the merge commit of a prior `release/vX.Y.Z` pull request whose second parent is tagged)."""
+    if len(parents) < 2:
+        return False
+    return not git("rev-list", "-n", "1", parents[1], *exclude, cwd=repo).stdout.strip()
+
+
+def first_parent_commits(repo, to_ref, from_ref=None):
+    """Chronological first-parent commits in the release range, skipping already-released merges."""
+    exclude = _exclude_args(from_ref)
+    shas = git("rev-list", "--first-parent", "--reverse", to_ref, *exclude, cwd=repo).stdout.split()
+    kept = []
+    for sha in shas:
+        parents, _, _ = commit_meta(repo, sha)
+        if _is_already_released_merge(repo, parents, exclude):
+            continue
+        kept.append(sha)
+    return kept
+
+
+def collect_entries(repo, to_ref, from_ref=None, *, fetch_pr=None):
+    """Build ReleaseEntry items from `main`'s first-parent history in chronological order."""
+    entries = []
+    for sha in first_parent_commits(repo, to_ref, from_ref):
+        parents, subject, body = commit_meta(repo, sha)
+        m_pr = PR_MERGE_RE.match(subject) if len(parents) >= 2 else None
+        if m_pr:
+            pr_number = int(m_pr.group(1))
+            fallback_title = next((l.strip() for l in body.splitlines() if l.strip()), subject)
+            gh_pr = fetch_pr(pr_number) if fetch_pr else None
+            raw_title = gh_pr[0].strip() if gh_pr else fallback_title
+            pr_body = gh_pr[1] if gh_pr else ""
+            release_note = extract_release_note(pr_body)
+            upgrades, breaking_notes = parse_trailers(pr_body)
+            for msg in commit_bodies_in_pr(repo, parents[0], parents[1]):
+                u, b = parse_trailers(msg)
+                upgrades.extend(u)
+                breaking_notes.extend(b)
+        else:
+            pr_number = None
+            raw_title = subject
+            release_note = None
+            upgrades, breaking_notes = parse_trailers(body)
+        parsed = parse_header(raw_title)
+        upgrades_t = dedupe_texts(upgrades)
+        breaking_t = dedupe_texts(breaking_notes)
+        entries.append(
+            ReleaseEntry(
+                sha=sha,
+                pr_number=pr_number,
+                raw_title=raw_title,
+                commit_type=parsed.commit_type if parsed else None,
+                scope=parsed.scope if parsed else None,
+                breaking=bool((parsed and parsed.breaking) or breaking_t),
+                description=parsed.description if parsed else raw_title,
+                release_note=release_note,
+                upgrades=upgrades_t,
+                breaking_notes=breaking_t,
+            )
+        )
+    return entries
+
+
+def validate_entries(entries):
+    """Refuse to compute a version or generate notes when any entry fails Conventional Commits."""
+    bad = [e for e in entries if e.commit_type is None]
+    if not bad:
+        return
+    allowed = "|".join(ALLOWED_TYPES)
+    lines = [
+        f"{len(bad)} commit(s)/PR(s) do not follow Conventional Commits "
+        f"(`type[(scope)][!]: imperative summary`, type in {allowed}):"
+    ]
+    has_pr = False
+    for e in bad:
+        if e.pr_number is not None:
+            has_pr = True
+            lines.append(f"  - PR #{e.pr_number} ({e.sha[:7]}): {e.raw_title!r}")
+        else:
+            lines.append(f"  - commit {e.sha[:7]}: {e.raw_title!r}")
+    if has_pr:
+        lines.append(
+            "Update the PR title on GitHub (and add any `Upgrade:` trailer or `## Release note` section "
+            "to the PR description), then re-run."
+        )
+    else:
+        lines.append("Fix the commit message to follow Conventional Commits, then re-run.")
+    raise Refused("\n".join(lines))
+
+
+def compute_version(current, entries):
+    """Compute the next version and explain which entries triggered any MINOR or MAJOR bump."""
+    if current is None:
+        return VersionPlan("0.1.0", "initial", None, ())
+    major, minor, patch = current
+    prev = f"v{major}.{minor}.{patch}"
+    if any(e.breaking for e in entries):
+        if major >= 1:
+            triggers = tuple((e, ("breaking",)) for e in entries if e.breaking)
+            return VersionPlan(f"{major + 1}.0.0", "major", prev, triggers)
+        triggers = []
+        for e in entries:
+            reasons = []
+            if e.breaking:
+                reasons.append("breaking (pre-1.0 -> MINOR)")
+            if e.upgrades:
+                reasons.append("Upgrade:")
+            if e.commit_type == "feat":
+                reasons.append("feat")
+            if reasons:
+                triggers.append((e, tuple(reasons)))
+        return VersionPlan(f"0.{minor + 1}.0", "minor", prev, tuple(triggers))
+    triggers = []
+    for e in entries:
+        reasons = []
+        if e.commit_type == "feat":
+            reasons.append("feat")
+        if e.upgrades:
+            reasons.append("Upgrade:")
+        if reasons:
+            triggers.append((e, tuple(reasons)))
+    if triggers:
+        return VersionPlan(f"{major}.{minor + 1}.0", "minor", prev, tuple(triggers))
+    return VersionPlan(f"{major}.{minor}.{patch + 1}", "patch", prev, ())
+
+
+def _entry_ref(entry, web_url):
+    if entry.pr_number is not None:
+        return f"[#{entry.pr_number}]({web_url}/pull/{entry.pr_number})" if web_url else f"#{entry.pr_number}"
+    short = entry.sha[:7]
+    return f"[`{short}`]({web_url}/commit/{entry.sha})" if web_url else f"`{short}`"
+
+
+def _format_upgrade_bullet(text, ref):
+    lines = text.splitlines()
+    if len(lines) == 1:
+        return f"- {lines[0]} ({ref})"
+    if lines[0].lstrip().startswith(("- ", "* ")):
+        indented = "\n".join(f"  {l}" if l.strip() else "" for l in lines)
+        return f"- ({ref})\n{indented}"
+    rest = "\n".join(f"  {l}" if l.strip() else "" for l in lines[1:])
+    return f"- {lines[0]} ({ref})\n{rest}"
+
+
+def _format_entry_bullet(entry, web_url, *, include_type):
+    ref = _entry_ref(entry, web_url)
+    if include_type and entry.commit_type:
+        label = f"{entry.commit_type}({entry.scope})" if entry.scope else entry.commit_type
+        head = f"**{label}:** {entry.description} ({ref})"
+    elif entry.scope:
+        head = f"**{entry.scope}:** {entry.description} ({ref})"
+    else:
+        head = f"{entry.description} ({ref})"
+    if not entry.release_note:
+        return f"- {head}"
+    body_lines = "\n".join(f"  {l}" if l.strip() else "" for l in entry.release_note.splitlines())
+    return f"- {head}\n\n{body_lines}"
+
+
+def render_notes(version, entries, web_url, *, manual_reason=None):
+    """Render complete Markdown release notes covering every entry in the range."""
+    sections = [f"# Steve v{version}"]
+    if manual_reason:
+        sections.append(f"> Version set manually (`--version {version}`): {manual_reason}")
+
+    before_upgrading = []
+    for entry in entries:
+        ref = _entry_ref(entry, web_url)
+        seen_norm = set()
+        for up in entry.upgrades:
+            seen_norm.add(" ".join(up.split()))
+            before_upgrading.append(_format_upgrade_bullet(up, ref))
+        for br in entry.breaking_notes:
+            norm = " ".join(br.split())
+            if norm not in seen_norm:
+                seen_norm.add(norm)
+                before_upgrading.append(_format_upgrade_bullet(f"**Breaking:** {br}", ref))
+        if entry.breaking and not seen_norm:
+            before_upgrading.append(_format_upgrade_bullet(f"**Breaking:** {entry.description}", ref))
+
+    if before_upgrading:
+        sections.append("## Before upgrading\n\n" + "\n".join(before_upgrading))
+
+    buckets = {"feat": [], "fix": [], "perf": [], "other": []}
+    for entry in entries:
+        if entry.commit_type in ("feat", "fix", "perf"):
+            buckets[entry.commit_type].append(_format_entry_bullet(entry, web_url, include_type=False))
+        else:
+            buckets["other"].append(_format_entry_bullet(entry, web_url, include_type=True))
+
+    for key, heading in (
+        ("feat", "## Features"),
+        ("fix", "## Fixes"),
+        ("perf", "## Performance"),
+        ("other", "## Other changes"),
+    ):
+        if buckets[key]:
+            sections.append(f"{heading}\n\n" + "\n".join(buckets[key]))
+
+    return "\n\n".join(sections) + "\n"
+
+
+def format_next(plan, entry_count):
+    if plan.previous is None:
+        return f"{plan.version} (initial)\nNo previous version tag found.\n"
+    lines = [f"{plan.version} ({plan.bump}, from {plan.previous})"]
+    if entry_count == 0:
+        lines.append(f"No new commits since {plan.previous}.")
+    elif not plan.triggers:
+        lines.append(f"No feat, Upgrade: trailer, or breaking change in {entry_count} commit(s) since {plan.previous}.")
+    else:
+        lines.append("Triggered by:")
+        for entry, reasons in plan.triggers:
+            tag = f"#{entry.pr_number}" if entry.pr_number is not None else entry.sha[:7]
+            lines.append(f"- {tag} [{', '.join(reasons)}]: {entry.raw_title}")
+    return "\n".join(lines) + "\n"
+
+
+def parse_range(spec):
+    if ".." not in spec or "..." in spec:
+        raise Refused(f"--range {spec!r}: expected FROM..TO")
+    from_ref, to_ref = spec.split("..", 1)
+    if not from_ref.strip() or not to_ref.strip():
+        raise Refused(f"--range {spec!r}: expected FROM..TO")
+    return from_ref.strip(), to_ref.strip()
+
+
+def base_version_for_range(repo, from_ref):
+    if m := VERSION_RE.match(from_ref):
+        return tuple(int(x) for x in m.groups())
+    tags = local_versions(repo, from_ref)
+    return max(tags) if tags else None
 
 
 def ci_runs(repo, sha, event, more=""):
@@ -191,13 +697,17 @@ def newest(runs):
 
 def ci_run(repo, sha, branch):
     """The newest run of the CI workflow pushed to `branch` at `sha`, or None."""
-    return newest([r for r in ci_runs(repo, sha, "push", f"&branch={branch}")
-                   if r.get("head_branch") in (None, branch)])
+    return newest([
+        r for r in ci_runs(repo, sha, "push", f"&branch={branch}")
+        if r.get("head_branch") in (None, branch)
+    ])
 
 
 def rerun_hint(run):
-    return (f"If it was a flake, run its failed jobs again: gh run rerun {run.get('id')} --failed "
-            f"(then cut again once it passes); otherwise fix it on main.")
+    return (
+        f"If it was a flake, run its failed jobs again: gh run rerun {run.get('id')} --failed "
+        f"(then cut again once it passes); otherwise fix it on main."
+    )
 
 
 def ci_gate(repo, sha, branch, wait):
@@ -213,8 +723,10 @@ def ci_gate(repo, sha, branch, wait):
         waited = time.monotonic() - start
         if run is None:
             if waited >= min(wait, CI_APPEAR):
-                raise Refused(f"CI ({CI_WORKFLOW}) has no push run on {short}: only a tested commit is released "
-                              f"(push it to the branch and wait for CI, or --skip-ci to release untested)")
+                raise Refused(
+                    f"CI ({CI_WORKFLOW}) has no push run on {short}: only a tested commit is released "
+                    f"(push it to the branch and wait for CI, or --skip-ci to release untested)"
+                )
             state = "no run yet"
         elif run.get("status") == "completed":
             conclusion = run.get("conclusion")
@@ -222,16 +734,22 @@ def ci_gate(repo, sha, branch, wait):
                 print(f"CI passed on {short}: {run.get('html_url', run.get('id'))}", file=sys.stderr)
                 return run
             if conclusion == "cancelled":
-                raise Refused(f"CI ({CI_WORKFLOW}) cancelled on {short}: {run.get('html_url', run.get('id'))}. "
-                              "No successful push run verifies this commit; cut again once a tested commit is available.")
-            raise Refused(f"CI ({CI_WORKFLOW}) {conclusion} on {short}: {run.get('html_url', run.get('id'))}. "
-                          + rerun_hint(run))
+                raise Refused(
+                    f"CI ({CI_WORKFLOW}) cancelled on {short}: {run.get('html_url', run.get('id'))}. "
+                    "No successful push run verifies this commit; cut again once a tested commit is available."
+                )
+            raise Refused(
+                f"CI ({CI_WORKFLOW}) {conclusion} on {short}: {run.get('html_url', run.get('id'))}. "
+                + rerun_hint(run)
+            )
         else:
             state = run.get("status") or "pending"
         if waited >= wait:
             where = f": {run.get('html_url', run.get('id'))}" if run else ""
-            raise Refused(f"CI ({CI_WORKFLOW}) on {short} is still {state} after {int(waited)}s{where}; "
-                          f"cut again once it has passed")
+            raise Refused(
+                f"CI ({CI_WORKFLOW}) on {short} is still {state} after {int(waited)}s{where}; "
+                f"cut again once it has passed"
+            )
         if state != said:
             print(f"waiting for CI on {short} ({state})", file=sys.stderr)
             said = state
@@ -239,148 +757,65 @@ def ci_gate(repo, sha, branch, wait):
 
 
 def release_base(repo, head, branch, wait):
-    """The newest first-parent commit since the last release whose own push run passed, else the head once
-    its run passes. A cancelled run is never success, nor is a pull-request run."""
-    # Do not go back to code already released. Walk branch order, not run completion order: slow runs
-    # and reruns can finish out of order. First-parent excludes a feature branch's pre-merge SHA.
-    commits = git("rev-list", "--first-parent", head, "--not", "--glob=refs/tags/v[0-9]*", cwd=repo).stdout.split()
-    for sha in commits:
+    """The newest first-parent commit since the last release that has new changes and whose own
+    push run passed, else the head once its run passes. Cancelled and PR-only runs never count."""
+    exclude = _exclude_args(None)
+    # Chronological list of first-parent commits since the last tag, with a flag for non-release merges.
+    chron = git("rev-list", "--first-parent", "--reverse", head, *exclude, cwd=repo).stdout.split()
+    releasable = []
+    seen_real = False
+    for sha in chron:
+        parents, _, _ = commit_meta(repo, sha)
+        if not _is_already_released_merge(repo, parents, exclude):
+            seen_real = True
+        if seen_real:
+            releasable.append(sha)
+    # Walk newest-first in branch order (never completion order).
+    for sha in reversed(releasable):
         run = ci_run(repo, sha, branch)
         if run and run.get("status") == "completed" and run.get("conclusion") == "success":
             print(f"CI passed on {sha[:7]}: {run.get('html_url', run.get('id'))}", file=sys.stderr)
             if sha != head:
-                print(f"releasing tested commit {sha[:7]}; newer commits on {branch} wait for the next release",
-                      file=sys.stderr)
+                print(
+                    f"releasing tested commit {sha[:7]}; newer commits on {branch} wait for the next release",
+                    file=sys.stderr,
+                )
             return sha
-    # Nothing tested yet: retain the bounded wait and diagnostics on the head, including real failures.
     ci_gate(repo, head, branch, wait)
     return head
 
 
-def fragments(wt, version):
-    """(path, text) in the order they arrived on the branch, then by name."""
-    found = []
-    ahead = Path(wt, NOTES, f"{version}.md")
-    if ahead.is_file():
-        found.append((f"{NOTES}/{version}.md", 0))
-    d = Path(wt, FRAGMENTS)
-    if d.is_dir():
-        for f in sorted(d.iterdir()):
-            if f.suffix != ".md" or f.name.startswith(".") or not f.is_file():
-                continue
-            rel = f"{FRAGMENTS}/{f.name}"
-            t = git("log", "--diff-filter=A", "--format=%ct", "-1", "--", rel, cwd=wt).stdout.strip()
-            found.append((rel, int(t) if t else sys.maxsize))
-    found.sort(key=lambda x: (x[1], x[0]))
-    return [(p, Path(wt, p).read_text()) for p, _ in found]
-
-
-def body(text):
-    """A fragment without a `# ` title and the blank lines around it."""
-    lines = text.strip("\n").splitlines()
-    if lines and lines[0].startswith("# "):
-        lines = lines[1:]
-    return "\n".join(lines).strip("\n")
-
-
-def assemble(version, parts):
-    out = f"# Steve v{version}\n"
-    for _, text in parts:
-        b = body(text)
-        if b:
-            out += f"\n{b}\n"
-    return out
-
-
-def cut_once(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
-    if git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT).returncode != 0:
-        raise Refused("can't fetch origin")
-    base = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
-    version = version_arg or next_version(repo, minor)
-    taken(repo, version, version_arg)
-    with tempfile.TemporaryDirectory(prefix="steve-cut-") as tmp:
-        wt = Path(tmp, "wt")
-        git("worktree", "add", "--quiet", "--detach", str(wt), base, cwd=repo)
-        try:
-            notes_rel = f"{NOTES}/{version}.md"
-            if left := left_behind(wt, version):
-                # a release whose pull request merged but whose tag never landed: its notes commit is tagged as
-                # it is, once it passes the checks it had to pass before its merge. Fragments that arrived since
-                # wait for the release after it.
-                print(f"v{version}'s notes commit {left[:7]} is on {branch} without its tag: tagging it",
-                      file=sys.stderr)
-                if dry:
-                    print(git("show", f"{left}:{notes_rel}", cwd=wt).stdout, end="")
-                    return version
-                if ci_wait is not None:
-                    ci_gate(repo, git("rev-parse", f"{left}^", cwd=wt).stdout.strip(), branch, ci_wait)
-                    notes_ci(repo, left, f"notes commit {left[:7]}", ci_wait, branch)
-                tag(repo, wt, left, version, branch)
-                return fetched(repo, version)
-            if not fragments(wt, version):
-                raise Refused(f"no release notes: add {FRAGMENTS}/<item>.md on {branch} first")
-            if not dry and ci_wait is not None:
-                base = release_base(repo, base, branch, ci_wait)
-                git("checkout", "--quiet", "--detach", base, cwd=wt)
-            parts = fragments(wt, version)
-            if not parts:
-                raise Refused(f"no release notes at the newest tested commit {base[:7]}: its fragments are still untested")
-            # notes of this untagged version written ahead the old way, alone: `base` is tagged as it is
-            ready = [p for p, _ in parts] == [notes_rel]
-            text = parts[0][1] if ready else assemble(version, parts)
-            if dry:
-                print(text, end="")
-                return version
-            if ready:
-                target = base
-            else:
-                # The notes commit: the notes added, the fragments present at `base` removed, nothing else.
-                # Fragments that reach the branch after `base` are no part of it, so the merge keeps them.
-                for p, _ in parts:
-                    if p != notes_rel:
-                        git("rm", "--quiet", "--", p, cwd=wt)
-                Path(wt, notes_rel).write_text(text)
-                git("add", "--", notes_rel, cwd=wt)
-                git("commit", "--quiet", "-m", f"Release notes {version}", cwd=wt)
-                target = release_pr(repo, wt, branch, version, text, ci_wait)
-            tag(repo, wt, target, version, branch)
-        finally:
-            git("worktree", "remove", "--force", str(wt), cwd=repo, check=False)
-    return fetched(repo, version)
-
-
-def fetched(repo, version):
-    try:
-        git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT)
-    except Refused:
-        pass  # released; the next fetch brings it here
-    return version
-
-
-def left_behind(wt, version):
-    """The notes commit of a release of `version` that reached the branch (checked out in `wt`) without its
-    tag, or None. It is the commit that added `docs/releases/X.Y.Z.md`, in the shape `cut` makes it: titled
-    `Release notes X.Y.Z`, one parent, that file added and fragments removed, nothing else. A release pull
-    request goes in with a merge commit, so the notes commit is the merge's second parent; `git log` on the
-    file follows the parent it came from. Notes written ahead by hand (the old way) are not one: they are the
-    first fragment of their release."""
-    rel = f"{NOTES}/{version}.md"
-    if not Path(wt, rel).is_file():
+def left_behind(wt, have_versions):
+    """Return `(version, commit_sha)` for an untagged `chore(release): vX.Y.Z` notes commit already on
+    the branch checked out in `wt`, or None."""
+    notes_dir = Path(wt, NOTES)
+    if not notes_dir.is_dir():
         return None
-    c = git("log", "-1", "--format=%H", "--diff-filter=A", "--", rel, cwd=wt).stdout.strip()
-    if not c or git("log", "-1", "--format=%s", c, cwd=wt).stdout.strip() != f"Release notes {version}":
-        return None
-    if len(git("rev-list", "--parents", "-n", "1", c, cwd=wt).stdout.split()) != 2:
-        return None
-    changes = git("diff", "--name-status", "--no-renames", f"{c}^", c, cwd=wt).stdout.splitlines()
-    removed = re.compile(rf"D\t{re.escape(FRAGMENTS)}/[^/]+\.md")
-    if f"A\t{rel}" not in changes or any(l != f"A\t{rel}" and not removed.fullmatch(l) for l in changes):
-        return None
-    return c
+    candidates = []
+    for path in notes_dir.iterdir():
+        if not path.is_file():
+            continue
+        rel = f"{NOTES}/{path.name}"
+        m = NOTES_RE.match(rel)
+        if not m:
+            continue
+        ver_tuple = tuple(int(x) for x in m.groups())
+        if ver_tuple not in have_versions:
+            candidates.append((ver_tuple, format_version(ver_tuple), rel))
+    for _, version, rel in sorted(candidates):
+        c = git("log", "-1", "--format=%H", "--diff-filter=A", "--", rel, cwd=wt).stdout.strip()
+        if not c or git("log", "-1", "--format=%s", c, cwd=wt).stdout.strip() != f"chore(release): v{version}":
+            continue
+        if len(git("rev-list", "--parents", "-n", "1", c, cwd=wt).stdout.split()) != 2:
+            continue
+        changes = git("diff", "--name-status", "--no-renames", f"{c}^", c, cwd=wt).stdout.splitlines()
+        if changes == [f"A\t{rel}"]:
+            return version, c
+    return None
 
 
 def taken(repo, version, version_arg):
-    if tuple(int(x) for x in version.split(".")) in remote_versions(repo):
+    if parse_version(version) in remote_versions(repo):
         if not version_arg:
             raise Raced(f"v{version} was released meanwhile")
         raise Refused(f"v{version} is already on origin")
@@ -396,8 +831,13 @@ def remote_ref(repo, ref):
 
 def push(wt, *refspecs):
     try:
-        r = subprocess.run(["git", "-C", str(wt), "push", "--porcelain", "origin", *refspecs], capture_output=True,
-                           text=True, timeout=NET_TIMEOUT, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        r = subprocess.run(
+            ["git", "-C", str(wt), "push", "--porcelain", "origin", *refspecs],
+            capture_output=True,
+            text=True,
+            timeout=NET_TIMEOUT,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+        )
     except subprocess.TimeoutExpired:
         raise Refused(f"pushing {refspecs[-1]} timed out")
     if r.returncode != 0:
@@ -407,20 +847,36 @@ def push(wt, *refspecs):
 
 
 def release_pr(repo, wt, branch, version, text, ci_wait):
-    """Bring the release notes commit in `wt` into `branch` through a pull request merged with a merge commit,
-    and return the notes commit itself: what its pull request's run tested, now on the branch. Anything short
-    of the merge closes the pull request and deletes its branch."""
+    """Bring the release notes commit in `wt` into `branch` through a pull request merged with a merge
+    commit, and return the notes commit itself. Anything short of the merge closes the PR and deletes its branch."""
     rb = f"release/v{version}"
     sha = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
     if remote_ref(repo, f"refs/heads/{rb}"):
-        raise Refused(f"{rb} is already on origin: another release of v{version} is in progress, or one was "
-                      f"left behind (delete it with `git push origin --delete {rb}` once nobody is releasing)")
-    push(wt, f"HEAD:refs/heads/{rb}")  # rejected: someone took the release branch meanwhile, start again
+        raise Refused(
+            f"{rb} is already on origin: another release of v{version} is in progress, or one was "
+            f"left behind (delete it with `git push origin --delete {rb}` once nobody is releasing)"
+        )
+    push(wt, f"HEAD:refs/heads/{rb}")
     number = None
     try:
-        url = gh("pr", "create", "--base", branch, "--head", rb, "--title", f"Release notes {version}",
-                 "--body", f"Release notes of v{version}, opened by `ops/cut-release.py cut`, which merges it and "
-                           f"tags this pull request's commit.\n\n{text}", cwd=repo).strip().splitlines()[-1]
+        url = (
+            gh(
+                "pr",
+                "create",
+                "--base",
+                branch,
+                "--head",
+                rb,
+                "--title",
+                f"chore(release): v{version}",
+                "--body",
+                f"Release notes of v{version}, opened by `ops/cut-release.py cut`, which merges it and "
+                f"tags this pull request's commit.\n\n{text}",
+                cwd=repo,
+            )
+            .strip()
+            .splitlines()[-1]
+        )
         m = re.search(r"/pull/(\d+)$", url)
         if not m:
             raise Refused(f"can't tell the release pull request from {url!r}")
@@ -428,8 +884,6 @@ def release_pr(repo, wt, branch, version, text, ci_wait):
         print(f"release pull request #{number}: {url}", file=sys.stderr)
         if ci_wait is not None:
             notes_ci(repo, sha, f"release pull request #{number}", ci_wait)
-        # The branch may well have moved since `base`: that changes nothing about the notes commit, which is
-        # what is tagged. Only someone else's release of this version is a reason to start again.
         taken(repo, version, None)
         merge(repo, number, sha)
     except BaseException:
@@ -449,10 +903,7 @@ def gh_quiet(repo, *args):
 
 
 def notes_ci(repo, sha, what, wait, branch=None):
-    """Return once the CI workflow passed on the notes commit `sha`: its release pull request's run, or with
-    `branch` (a notes commit already on it) also a push run there. Either checks the same change of notes
-    on a tested `base`; a notes commit that was rebase-merged before merge commits were used has only the
-    push run."""
+    """Return once the CI workflow passed on the notes commit `sha`."""
     start, said = time.monotonic(), None
     open_pr = branch is None
     while True:
@@ -465,14 +916,21 @@ def notes_ci(repo, sha, what, wait, branch=None):
             if run.get("conclusion") == "success":
                 print(f"CI passed on {what}: {run.get('html_url', run.get('id'))}", file=sys.stderr)
                 return
-            raise Refused(f"CI ({CI_WORKFLOW}) {run.get('conclusion')} on {what}: "
-                          f"{run.get('html_url', run.get('id'))}. "
-                          + ("It is closed; cut again once the cause is fixed (a flake: just cut again)" if open_pr
-                             else rerun_hint(run)))
+            raise Refused(
+                f"CI ({CI_WORKFLOW}) {run.get('conclusion')} on {what}: "
+                f"{run.get('html_url', run.get('id'))}. "
+                + (
+                    "It is closed; cut again once the cause is fixed (a flake: just cut again)"
+                    if open_pr
+                    else rerun_hint(run)
+                )
+            )
         state = "no run yet" if run is None else run.get("status") or "pending"
         if waited >= (min(wait, CI_APPEAR) if run is None else wait):
-            raise Refused(f"CI ({CI_WORKFLOW}) on {what} is still {state} after {int(waited)}s; "
-                          + ("it is closed, cut again" if open_pr else "cut again once it has passed"))
+            raise Refused(
+                f"CI ({CI_WORKFLOW}) on {what} is still {state} after {int(waited)}s; "
+                + ("it is closed, cut again" if open_pr else "cut again once it has passed")
+            )
         if state != said:
             print(f"waiting for CI on {what} ({state})", file=sys.stderr)
             said = state
@@ -480,12 +938,7 @@ def notes_ci(repo, sha, what, wait, branch=None):
 
 
 def merge(repo, number, sha):
-    """Merge the release pull request at `sha` with a merge commit, and return that commit.
-
-    A merge commit, not a rebase: `sha` goes into the branch as it is, so the tag can name the very commit
-    whose run passed, however far the branch moved meanwhile. Its three-way merge applies only what `sha`
-    changed from `base` (the notes added, the fragments of `base` removed), so fragments that arrived on the
-    branch since stay for the next release. `--match-head-commit` merges nothing but `sha`."""
+    """Merge the release pull request at `sha` with a merge commit, and return that commit."""
     for attempt in range(1, MERGE_TRIES + 1):
         try:
             gh("pr", "merge", number, "--merge", "--match-head-commit", sha, cwd=repo)
@@ -493,7 +946,6 @@ def merge(repo, number, sha):
         except Refused as e:
             why = str(e)
             if re.search(r"base branch was modified", why, re.I) and attempt < MERGE_TRIES:
-                # another pull request merged at the same moment: the merge itself is tried again
                 print(f"{why}; merging again", file=sys.stderr)
                 time.sleep(MERGE_RETRY)
                 continue
@@ -504,9 +956,11 @@ def merge(repo, number, sha):
             if re.search(r"base branch was modified", why, re.I):
                 raise Raced(why)
             if re.search(r"not up to date", why, re.I):
-                raise Refused(f"merging release pull request #{number}: {why}. `cut` merges it with a merge commit "
-                              f"while the branch moves on, so the branch rules must not require pull requests to "
-                              f"be up to date before merging")
+                raise Refused(
+                    f"merging release pull request #{number}: {why}. `cut` merges it with a merge commit "
+                    f"while the branch moves on, so the branch rules must not require pull requests to "
+                    f"be up to date before merging"
+                )
             raise Refused(f"merging release pull request #{number}: {why}")
     for _ in range(10):
         out = gh("pr", "view", number, "--json", "state,mergeCommit", cwd=repo)
@@ -521,19 +975,16 @@ def merge(repo, number, sha):
 
 
 def tag(repo, wt, target, version, branch):
-    """Tag `target` `vX.Y.Z` and push only the tag, once origin's `branch` contains `target`.
-
-    The tag comes after the merge, never before it. A pushed tag starts the Release workflow, which publishes
-    the version; tagged first, a merge that then failed (a conflict, a branch rule) would leave a published
-    release that the branch does not contain, and its number taken. Merged first, a tag that then fails to
-    land leaves only notes on the branch, which the next `cut` finds and tags (`left_behind`)."""
+    """Tag `target` `vX.Y.Z` and push only the tag, once origin's `branch` contains `target`."""
     name = f"v{version}"
     for attempt in range(3):  # a merge GitHub reported may take a moment to show on the branch
         if attempt:
             time.sleep(3)
         git("fetch", "--quiet", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT)
-        if git("merge-base", "--is-ancestor", target, f"refs/remotes/origin/{branch}", cwd=repo,
-               check=False).returncode == 0:
+        if (
+            git("merge-base", "--is-ancestor", target, f"refs/remotes/origin/{branch}", cwd=repo, check=False).returncode
+            == 0
+        ):
             break
     else:
         raise Refused(f"{target[:7]} is not on origin's {branch}: v{version} is not tagged (cut again once it is)")
@@ -541,15 +992,12 @@ def tag(repo, wt, target, version, branch):
     try:
         push(wt, f"refs/tags/{name}")
     except BaseException:
-        # the tag stays only if origin has it: a push that timed out may have landed
         if not landed(repo, version):
             git("tag", "-d", name, cwd=repo, check=False)
             raise
 
 
 def landed(repo, version):
-    """origin has our tag. Unknown counts as no: the tag is then removed here, and the next run finds the
-    version taken if it did land."""
     try:
         theirs = remote_ref(repo, f"refs/tags/v{version}")
     except Refused:
@@ -557,65 +1005,390 @@ def landed(repo, version):
     return bool(theirs) and theirs == git("rev-parse", f"refs/tags/v{version}", cwd=repo, check=False).stdout.strip()
 
 
-def cut(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
+def fetched(repo, version):
+    try:
+        git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT)
+    except Refused:
+        pass
+    return version
+
+
+def cut_range_preview(repo, range_spec, version_arg, reason, offline):
+    from_ref, to_ref = parse_range(range_spec)
+    git("rev-parse", "--verify", f"{from_ref}^{{commit}}", cwd=repo)
+    to_sha = git("rev-parse", "--verify", f"{to_ref}^{{commit}}", cwd=repo).stdout.strip()
+    entries = collect_entries(repo, to_sha, from_ref, fetch_pr=pr_fetcher(repo, offline=offline))
+    if not entries:
+        raise Refused(f"nothing to release in {from_ref}..{to_ref}")
+    validate_entries(entries)
+    plan = compute_version(base_version_for_range(repo, from_ref), entries)
+    version = version_arg or plan.version
+    text = render_notes(version, entries, origin_web_url(repo), manual_reason=reason if version_arg else None)
+    print(text, end="")
+    return version
+
+
+def cut_once(repo, branch, version_arg, reason, dry, ci_wait=CI_WAIT, offline=False):
+    if not dry and offline:
+        raise Refused("--offline is only allowed with --dry-run")
+    if offline:
+        have = local_versions(repo)
+    else:
+        have = remote_versions(repo)
+        if git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT).returncode != 0:
+            raise Refused("can't fetch origin")
+    head = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
+    if version_arg and not offline:
+        taken(repo, version_arg, version_arg)
+    with tempfile.TemporaryDirectory(prefix="steve-cut-") as tmp:
+        wt = Path(tmp, "wt")
+        git("worktree", "add", "--quiet", "--detach", str(wt), head, cwd=repo)
+        try:
+            if recovered := left_behind(wt, have):
+                rec_version, left = recovered
+                notes_rel = f"{NOTES}/{rec_version}.md"
+                print(
+                    f"v{rec_version}'s notes commit {left[:7]} is on {branch} without its tag: tagging it",
+                    file=sys.stderr,
+                )
+                if dry:
+                    print(git("show", f"{left}:{notes_rel}", cwd=wt).stdout, end="")
+                    return rec_version
+                if ci_wait is not None:
+                    ci_gate(repo, git("rev-parse", f"{left}^", cwd=wt).stdout.strip(), branch, ci_wait)
+                    notes_ci(repo, left, f"notes commit {left[:7]}", ci_wait, branch)
+                tag(repo, wt, left, rec_version, branch)
+                return fetched(repo, rec_version)
+
+            if not first_parent_commits(wt, head):
+                prev = f"v{format_version(max(have))}" if have else "the start of history"
+                raise Refused(f"nothing to release: no commits on {branch} since {prev}")
+
+            base = head
+            if not dry and ci_wait is not None:
+                base = release_base(repo, head, branch, ci_wait)
+                if base != head:
+                    git("checkout", "--quiet", "--detach", base, cwd=wt)
+
+            entries = collect_entries(wt, base, fetch_pr=pr_fetcher(repo, offline=offline))
+            if not entries:
+                raise Refused(
+                    f"nothing to release at the newest tested commit {base[:7]}: newer commits on {branch} are still untested"
+                )
+            validate_entries(entries)
+
+            current = max(have) if have else None
+            plan = compute_version(current, entries)
+            version = version_arg or plan.version
+            if not offline:
+                taken(repo, version, version_arg)
+            text = render_notes(
+                version, entries, origin_web_url(repo), manual_reason=reason if version_arg else None
+            )
+            if dry:
+                print(text, end="")
+                return version
+
+            notes_rel = f"{NOTES}/{version}.md"
+            Path(wt, notes_rel).parent.mkdir(parents=True, exist_ok=True)
+            Path(wt, notes_rel).write_text(text)
+            git("add", "--", notes_rel, cwd=wt)
+            git("commit", "--quiet", "-m", f"chore(release): v{version}", cwd=wt)
+            target = release_pr(repo, wt, branch, version, text, ci_wait)
+            tag(repo, wt, target, version, branch)
+        finally:
+            git("worktree", "remove", "--force", str(wt), cwd=repo, check=False)
+    return fetched(repo, version)
+
+
+def cut(repo, branch, version_arg, reason, dry, ci_wait=CI_WAIT, offline=False):
     """`ci_wait` None: no CI check (--skip-ci)."""
     for attempt in range(1, ATTEMPTS + 1):
         try:
-            return cut_once(repo, branch, version_arg, minor, dry, ci_wait)
+            return cut_once(repo, branch, version_arg, reason, dry, ci_wait, offline=offline)
         except Raced as e:
             if version_arg or attempt == ATTEMPTS:
                 raise Refused(f"origin moved while releasing: {e}")
             print(f"origin moved while releasing ({e}); again from the new state", file=sys.stderr)
 
 
-def lint(repo, base):
-    if not base:
-        base = f"refs/remotes/origin/{default_branch(repo)}"
-    mb = git("merge-base", "HEAD", base, cwd=repo).stdout.strip()
-    changed = git("diff", "--name-only", "--no-renames", "--diff-filter=AM", mb, "HEAD", cwd=repo).stdout.split()
-    bad = [f for f in changed if NOTES_RE.match(f)]
-    if bad:
-        raise Refused(f"{', '.join(bad)}: the version is chosen when releasing. "
-                      f"Move the text to {FRAGMENTS}/<item>.md (no version, no title).")
+def cmd_next(repo, branch, range_spec, offline):
+    if range_spec:
+        from_ref, to_ref = parse_range(range_spec)
+        git("rev-parse", "--verify", f"{from_ref}^{{commit}}", cwd=repo)
+        to_sha = git("rev-parse", "--verify", f"{to_ref}^{{commit}}", cwd=repo).stdout.strip()
+        current = base_version_for_range(repo, from_ref)
+        entries = collect_entries(repo, to_sha, from_ref, fetch_pr=pr_fetcher(repo, offline=offline))
+    else:
+        if offline:
+            have = local_versions(repo)
+        else:
+            have = remote_versions(repo)
+            if git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT).returncode != 0:
+                raise Refused("can't fetch origin")
+        current = max(have) if have else None
+        branch = branch or default_branch(repo)
+        head = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
+        entries = collect_entries(repo, head, fetch_pr=pr_fetcher(repo, offline=offline))
+    validate_entries(entries)
+    plan = compute_version(current, entries)
+    print(format_next(plan, len(entries)), end="")
+    return plan
 
 
-def main():
+def _github_get_json(url, token):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        link = resp.headers.get("Link") or ""
+        return json.load(resp), link
+
+
+def _refresh_pr_from_github(repo_slug, number, token, api_base):
+    data, _ = _github_get_json(f"{api_base.rstrip('/')}/repos/{repo_slug}/pulls/{number}", token)
+    if isinstance(data, dict) and isinstance(data.get("title"), str):
+        return data["title"], data.get("body") or ""
+    return None
+
+
+def _fetch_pr_files_from_github(repo_slug, number, token, api_base):
+    url = f"{api_base.rstrip('/')}/repos/{repo_slug}/pulls/{number}/files?per_page=100"
+    files = []
+    while url:
+        page, link = _github_get_json(url, token)
+        if not isinstance(page, list):
+            raise Refused(f"unexpected GitHub PR files response for #{number}")
+        files.extend(page)
+        m = re.search(r'<([^>]+)>;\s*rel="next"', link)
+        url = m.group(1) if m else None
+    return files
+
+
+def validate_release_dir_files(all_files, added_or_modified, added_only, release_title):
+    """Files under `docs/releases/` may only be generated by `ops/cut-release.py cut`
+    (a `chore(release): vX.Y.Z` release PR adding `docs/releases/X.Y.Z.md` alone)."""
+    touched = [f for f in added_or_modified if f.startswith(f"{NOTES}/")]
+    if not touched:
+        return None
+    m = RELEASE_TITLE_RE.match((release_title or "").strip())
+    if m:
+        expected = f"{NOTES}/{m.group(1)}.md"
+        if added_only == [expected] and added_or_modified == [expected] and all_files == [expected]:
+            return None
+    return (
+        f"{', '.join(touched)}: files under {NOTES}/ may only be generated by `ops/cut-release.py cut` "
+        f"(a `chore(release): vX.Y.Z` release PR adding only `{NOTES}/X.Y.Z.md`)"
+    )
+
+
+def lint_pr(title, body="", files=None):
+    validate_header(title, label="PR title")
+    parse_trailers(body, validate=True)
+    if files is not None:
+        all_files, added_or_modified, added_only = [], [], []
+        for item in files:
+            name = item.get("filename") if isinstance(item, dict) else str(item)
+            status = item.get("status", "added") if isinstance(item, dict) else "added"
+            if not name:
+                continue
+            all_files.append(name)
+            if status != "removed":
+                added_or_modified.append(name)
+            if status == "added":
+                added_only.append(name)
+        if err := validate_release_dir_files(all_files, added_or_modified, added_only, title):
+            raise Refused(err)
+
+
+def lint_github_event(
+    event_path,
+    env=os.environ,
+    refresh=_refresh_pr_from_github,
+    fetch_files=_fetch_pr_files_from_github,
+):
+    try:
+        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise Refused(f"can't read GitHub event {event_path}: {e}")
+    pr = event.get("pull_request") if isinstance(event, dict) else None
+    if not isinstance(pr, dict):
+        return
+    title = pr.get("title") or ""
+    body = pr.get("body") or ""
+    files = pr.get("files") if isinstance(pr.get("files"), list) else None
+    token = env.get("GITHUB_TOKEN")
+    repo_slug = env.get("GITHUB_REPOSITORY") or (event.get("repository") or {}).get("full_name")
+    number = pr.get("number")
+    api_base = env.get("GITHUB_API_URL", "https://api.github.com")
+    if token and repo_slug and number:
+        try:
+            live = refresh(repo_slug, number, token, api_base)
+            if live is not None:
+                title, body = live
+        except (OSError, ValueError, urllib.error.URLError):
+            pass
+        if files is None:
+            try:
+                files = fetch_files(repo_slug, number, token, api_base)
+            except (OSError, ValueError, urllib.error.URLError) as e:
+                raise Refused(f"can't read PR #{number} files from GitHub: {e}")
+    lint_pr(title, body, files=files)
+
+
+def lint_commits(repo, base=None, head="HEAD", range_spec=None):
+    errors = []
+    if range_spec:
+        from_ref, to_ref = parse_range(range_spec)
+        git("rev-parse", "--verify", f"{from_ref}^{{commit}}", cwd=repo)
+        head_sha = git("rev-parse", "--verify", f"{to_ref}^{{commit}}", cwd=repo).stdout.strip()
+        base_ref = from_ref
+        check_files = False
+    else:
+        target_base = base or f"refs/remotes/origin/{default_branch(repo)}"
+        base_ref = git("merge-base", head, target_base, cwd=repo).stdout.strip()
+        head_sha = git("rev-parse", "--verify", f"{head}^{{commit}}", cwd=repo).stdout.strip()
+        check_files = True
+
+    exclude = ["--not", base_ref]
+    shas = git("rev-list", "--first-parent", "--reverse", head_sha, *exclude, cwd=repo).stdout.split()
+
+    if check_files:
+        raw_changes = git("diff", "--name-status", "--no-renames", base_ref, head_sha, cwd=repo).stdout.splitlines()
+        all_files, added_or_modified, added_only = [], [], []
+        for line in raw_changes:
+            if "\t" not in line:
+                continue
+            status, path = line.split("\t", 1)
+            all_files.append(path)
+            if not status.startswith("D"):
+                added_or_modified.append(path)
+            if status == "A":
+                added_only.append(path)
+        release_title = None
+        if len(shas) == 1:
+            p, subj, _ = commit_meta(repo, shas[0])
+            if len(p) == 1:
+                release_title = subj
+        if err := validate_release_dir_files(all_files, added_or_modified, added_only, release_title):
+            errors.append(err)
+
+    for sha in shas:
+        parents, subject, body = commit_meta(repo, sha)
+        if len(parents) >= 2:
+            if _is_already_released_merge(repo, parents, exclude):
+                continue
+            m_pr = PR_MERGE_RE.match(subject)
+            if not m_pr:
+                continue  # branch sync merge (e.g. Merge branch 'main' into ...)
+            pr_num = m_pr.group(1)
+            pr_title = next((l.strip() for l in body.splitlines() if l.strip()), "")
+            if parse_header(pr_title) is None:
+                errors.append(format_header_error(pr_title, f"PR #{pr_num} ({sha[:7]})"))
+            for msg in [body, *commit_bodies_in_pr(repo, parents[0], parents[1])]:
+                try:
+                    parse_trailers(msg, validate=True)
+                except Refused as e:
+                    errors.append(f"PR #{pr_num} ({sha[:7]}): {e}")
+        else:
+            if parse_header(subject) is None:
+                errors.append(format_header_error(subject, f"commit {sha[:7]}"))
+            try:
+                parse_trailers(body, validate=True)
+            except Refused as e:
+                errors.append(f"commit {sha[:7]}: {e}")
+
+    if errors:
+        raise Refused("\n".join(errors))
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=".", help="a checkout of the repository (default: here)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    n = sub.add_parser("next")
-    n.add_argument("--minor", action="store_true")
-    c = sub.add_parser("cut")
-    g = c.add_mutually_exclusive_group()
-    g.add_argument("--minor", action="store_true")
-    g.add_argument("--version")
+
+    n = sub.add_parser("next", help="compute the next version and show which commits triggered it")
+    n.add_argument("--branch")
+    n.add_argument("--range", dest="range_spec", metavar="FROM..TO", help="inspect a local commit range")
+    n.add_argument("--offline", action="store_true", help="use local git state only; skip origin and GitHub")
+
+    c = sub.add_parser("cut", help="generate release notes, open/merge the release PR, and tag")
     c.add_argument("--branch")
+    c.add_argument("--version", help="maintainer override (requires --reason)")
+    c.add_argument("--reason", help="why --version overrides the computed version (written into the notes)")
     c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--range", dest="range_spec", metavar="FROM..TO", help="preview a local range (--dry-run only)")
+    c.add_argument("--offline", action="store_true", help="skip origin and GitHub (--dry-run only)")
     ci = c.add_mutually_exclusive_group()
-    ci.add_argument("--ci-wait", type=int, default=CI_WAIT, metavar="S",
-                    help=f"how long to wait when no tested base is available (default {CI_WAIT}s)")
+    ci.add_argument(
+        "--ci-wait",
+        type=int,
+        default=CI_WAIT,
+        metavar="S",
+        help=f"how long to wait when no tested base is available (default {CI_WAIT}s)",
+    )
     ci.add_argument("--skip-ci", action="store_true", help="release without checking CI (untested)")
-    l = sub.add_parser("lint")
-    l.add_argument("--base")
-    a = ap.parse_args()
+
+    l = sub.add_parser("lint", help="check Conventional Commit / PR title format and release rules")
+    l.add_argument("--base", help="base ref for branch commit check")
+    l.add_argument("--head", default="HEAD", help="head ref for branch commit check (default: HEAD)")
+    l.add_argument("--range", dest="range_spec", metavar="FROM..TO", help="check commits/PRs in FROM..TO")
+    l.add_argument("--pr-title", help="validate a single PR title")
+    l.add_argument("--pr-body", help="optional file containing a PR description to validate trailers")
+    l.add_argument("--github-event", help="validate the pull_request payload from a GitHub Actions event JSON")
+
+    a = ap.parse_args(argv)
     repo = Path(a.repo).resolve()
     try:
         if a.cmd == "next":
-            print(next_version(repo, a.minor))
+            cmd_next(repo, a.branch, a.range_spec, a.offline)
         elif a.cmd == "cut":
-            if a.version and not re.fullmatch(r"\d+\.\d+\.\d+", a.version):
-                raise Refused(f"--version {a.version}: X.Y.Z")
-            if a.skip_ci and not a.dry_run:
-                print("warning: --skip-ci: releasing without checking CI", file=sys.stderr)
-            v = cut(repo, a.branch or default_branch(repo), a.version, a.minor, a.dry_run,
-                    None if a.skip_ci else max(a.ci_wait, 0))
-            if not a.dry_run:
-                print(f"released v{v}")
-                print(f"The Release build of v{v} runs on GitHub now. If it fails on a flake, do not cut another "
-                      f"version: gh run rerun <run id> --failed (gh run list --workflow release.yml --branch v{v}) "
-                      f"runs it again on the same tag.", file=sys.stderr)
+            if a.version and parse_version(a.version) is None:
+                raise Refused(f"--version {a.version}: expected X.Y.Z")
+            if a.version and not (a.reason and a.reason.strip()):
+                raise Refused("--version requires --reason explaining why the computed version is overridden")
+            if a.reason and not a.version:
+                raise Refused("--reason is only used with --version")
+            if a.range_spec and not a.dry_run:
+                raise Refused("--range is only allowed with --dry-run")
+            if a.offline and not a.dry_run:
+                raise Refused("--offline is only allowed with --dry-run")
+            reason = a.reason.strip() if a.reason else None
+            if a.range_spec:
+                cut_range_preview(repo, a.range_spec, a.version, reason, a.offline)
+            else:
+                if a.skip_ci and not a.dry_run:
+                    print("warning: --skip-ci: releasing without checking CI", file=sys.stderr)
+                v = cut(
+                    repo,
+                    a.branch or default_branch(repo),
+                    a.version,
+                    reason,
+                    a.dry_run,
+                    None if a.skip_ci else max(a.ci_wait, 0),
+                    offline=a.offline,
+                )
+                if not a.dry_run:
+                    print(f"released v{v}")
+                    print(
+                        f"The Release build of v{v} runs on GitHub now. If it fails on a flake, do not cut another "
+                        f"version: gh run rerun <run id> --failed (gh run list --workflow release.yml --branch v{v}) "
+                        f"runs it again on the same tag.",
+                        file=sys.stderr,
+                    )
         else:
-            lint(repo, a.base)
+            if a.github_event:
+                lint_github_event(a.github_event)
+            elif a.pr_title is not None:
+                body = Path(a.pr_body).read_text(encoding="utf-8") if a.pr_body else ""
+                lint_pr(a.pr_title, body)
+            else:
+                lint_commits(repo, a.base, a.head, a.range_spec)
     except Refused as e:
         print(f"✗ {e}", file=sys.stderr)
         return 1

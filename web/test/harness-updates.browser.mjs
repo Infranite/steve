@@ -42,7 +42,7 @@ await page.route("**/*", async route => {
 })
 const panel = () => page.locator("[data-harness-updates]")
 const open = async id => {
-  await page.goto(base + "/test/fixtures/devices.html?strict#/devices/nodes/" + id)
+  await page.goto(base + "/test/fixtures/devices.html?strict#/devices/nodes/" + id + "/harness")
   await panel().locator("[data-harness-update=fixture]").waitFor()
   await page.waitForFunction(id => document.querySelector(`[data-harness-updates="${id}"] [data-harness-update=fixture]`)?.textContent.includes(id === "local" ? "1.0.0" : "1.5.0"), id)
   await page.locator(`[data-node-harnesses="${id}"] [data-node-harness-models]`).getByText(id + "/model", { exact: true }).waitFor()
