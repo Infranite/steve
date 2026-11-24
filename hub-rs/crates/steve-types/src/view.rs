@@ -388,6 +388,17 @@ pub enum DecisionPrompt {
         number: i64,
         repo: String,
     },
+    NoExecutor {
+        items: Vec<NoExecutorItem>,
+        rejected: Vec<PlacementBlocker>,
+        reason: PlacementRejection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        team: Option<ProposalTeam>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        proposal: Option<BotProposal>,
+    },
 }
 
 /// The current state of a decision. An answer receipt survives reopening.

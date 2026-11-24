@@ -587,6 +587,27 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         }
         self.check_dispatch(item_id, item.bot_id.as_deref().unwrap_or("steve"))
     }
+    fn propose_bot(
+        &self,
+        req: &steve_core::CreateItem,
+        blocked: &steve_types::PlacementBlocked,
+    ) -> steve_core::Result<Option<steve_types::BotProposal>> {
+        Ok(RoutedRuntime::propose_bot(self, req, blocked)?)
+    }
+    fn confirm_bot_proposal(
+        &self,
+        ws: &str,
+        actor: &str,
+        id: &str,
+        edit: steve_types::ConfirmBotProposal,
+    ) -> steve_core::Result<String> {
+        RoutedRuntime::confirm_bot_proposal(self, ws, actor, id, edit).map_err(|err| match err {
+            crate::error::ApiError::Json(code, msg) | crate::error::ApiError::Text(code, msg) => {
+                CoreError::Status(code, msg)
+            }
+            other => CoreError::Msg(other.to_string()),
+        })
+    }
     fn makes_worktrees(&self) -> bool {
         self.node.is_some() && self.worktrees.is_some()
     }

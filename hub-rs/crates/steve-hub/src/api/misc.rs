@@ -858,6 +858,28 @@ pub async fn settings_patch(
             }
         }
     }
+    if values.contains_key(steve_store::bot_dispatch::NO_EXECUTOR_SETTING)
+        && let Some(store) = super::bot_dispatch::store(&st).cloned()
+    {
+        let ws = c.ws.clone();
+        let me = c.me.clone();
+        let owner = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                Ok::<_, steve_store::StoreError>(
+                    steve_store::Members::new(r).role(&ws, &me)?.as_deref() == Some("owner"),
+                )
+            })
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+        if !owner {
+            return Err(ApiError::Json(
+                403,
+                steve_i18n::t!("hub.dispatch.owner_only"),
+            ));
+        }
+    }
     st.write(move |r| {
         r.settings_set(&c.ws, &values, &c.me)?;
         ok_true()

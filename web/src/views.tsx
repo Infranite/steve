@@ -2,8 +2,8 @@ import { ApprovalSwitch, SessionApproval } from "@/approval"
 import type { BotPlacementError } from "@/api"
 import { useTranscript } from "@/data/transcript"
 import { SessionIdentity } from "@/components/session-identity"
-import { useItemState } from "@/data/sync"
-import { useItemDetail, useNotices, useSessionQueue } from "@/store"
+import { useItemState, decisionView, useOpenDecisions } from "@/data/sync"
+import { decideCards, useItemDetail, useNotices, useSessionQueue } from "@/store"
 import { getItem, getItems, getSession } from "@/store"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
@@ -102,7 +102,8 @@ export function NewItemDialog({ project: pre, bot: preBot }: { project?: string;
   const [team, setTeam] = useState("")
   useEffect(() => setPlacementError(undefined), [g, bot, proj, mode, team, specialties])
   const activeTeam = teams?.teams.find(v => v.id === (team || teams.default))
-  const allowed = Object.keys(st.bots).filter(k => st.bots[k].on && (!activeTeam || activeTeam.members.some(m => m.bot === k)))
+  const teamMembers = Object.keys(st.bots).filter(k => !st.bots[k].main && st.bots[k].on && (!activeTeam || activeTeam.members.some(m => m.bot === k)))
+  const allowed = Object.keys(st.bots).filter(k => st.bots[k].on && (st.bots[k].main || !activeTeam || activeTeam.members.some(m => m.bot === k)))
   const target = bot
   const selected = st.bots[target]
   // The execution target is resolved by the backend. Hub-local probes cannot admit or reject it.
@@ -126,9 +127,9 @@ export function NewItemDialog({ project: pre, bot: preBot }: { project?: string;
         {!!teams?.teams.length && <Field><FieldLabel>{t("manage:dispatch.teams")}</FieldLabel><SetSelect wide testId="new-item-team" label={t("manage:dispatch.teams")} value={team || "default"}
           options={[{ v: "default", l: t("manage:dispatch.useDefault", { name: teams.teams.find(v => v.id === teams.default)?.name ?? t("manage:dispatch.noTeam") }) }, { v: NO_TEAM, l: t("manage:dispatch.noTeam") }, ...teams.teams.map(v => ({ v: v.id, l: v.name }))]}
           onChange={v => { setTeam(v === "default" ? "" : v); setBot("auto") }} /></Field>}
-        {activeTeam && !allowed.length && <p role="status" className="type-footnote text-attention">{t("manage:dispatch.noMembers")}</p>}
+        {activeTeam && !teamMembers.length && <p role="status" className="type-footnote text-attention">{t("manage:dispatch.noMembers")}</p>}
         <div className="grid grid-cols-2 gap-3">
-          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={target} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...[...new Set([...allowed, ...(selected ? [target] : [])])].map((k) => ({ v: k, l: <span><BotName k={k} /> · {runtimeName(st.bots[k].harness) ?? st.bots[k].harness}</span> }))]} /></Field>
+          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={target} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...[...new Set([...allowed, ...(selected ? [target] : [])])].map((k) => ({ v: k, l: <span><BotName k={k} />{st.bots[k].main ? ` · ${t("manage:dispatch.coordinator")}` : ""} · {runtimeName(st.bots[k].harness) ?? st.bots[k].harness}</span> }))]} /></Field>
           <Field><FieldLabel>{t("views:newItem.project")}</FieldLabel><Select testId="new-project" value={proj} onChange={setProj} options={[{ v: "auto", l: t("views:newItem.auto") }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: t("views:newItem.noProject") }]} /></Field>
         </div>
         <Field><FieldLabel htmlFor="new-specialties">{t("manage:dispatch.requiredSpecialties")}</FieldLabel><Input id="new-specialties" value={specialties} onChange={e => setSpecialties(e.target.value)} placeholder={t("manage:dispatch.specialtyPlaceholder")} /></Field>
@@ -325,6 +326,7 @@ export function ItemView({ id }: { id: string }) {
   const i = useItemDetail(id)
   useNotices(i?.rel?.tone === "fail")
   const work = useItemState(id)
+  const openDecs = useOpenDecisions()
   useSessionQueue(i?.qs)
   /* the collaboration area: the tree of everything this item started; a selected agent's detail replaces the
    * properties in the side column (a sheet on narrow pages) */
@@ -465,7 +467,18 @@ export function ItemView({ id }: { id: string }) {
             </div>
             {(i.dispatch || i.placement) && <DispatchDetails dispatch={i.dispatch} placement={i.placement} unassigned={!i.b} />}
             {at.dialogs}
-            {i.waits.length > 0 && <div className="mt-5 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
+            {(() => {
+              const noExec = !i.b ? decideCards(openDecs).filter((c) => {
+                if (c.w.subject !== "no_executor") return false
+                const dv = decisionView(c.w.decision)
+                return dv?.question.kind === "key" && dv.question.template.code === "no_executor" && dv.question.template.items.some((it) => it.id === i.id)
+              }) : []
+              const hasCards = i.waits.length > 0 || noExec.length > 0
+              return hasCards ? <div className="mt-5 flex flex-col gap-3">
+                {i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}
+                {noExec.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} showItem={false} />)}
+              </div> : null
+            })()}
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
             {i.dependencyWait && !!i.deps?.length && <div className="mt-4"><DependencyWaitPanel key={`${i.id}:${i.dependencyWait.cycle}`} item={i.id} wait={i.dependencyWait} /></div>}
           </section>
@@ -498,7 +511,7 @@ export function ItemView({ id }: { id: string }) {
           <section data-details>
             <h3 className="mb-2 type-label text-tertiary">{t("views:itemState.details")}</h3>
             <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
-            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} placeholder={!i.b ? t("manage:dispatch.chooseBot") : undefined} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => (st.bots[k].on && (i.b || !i.dispatch?.team || !st.bots[k].main)) || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} /></Prop>
+            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} placeholder={!i.b ? t("manage:dispatch.chooseBot") : undefined} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: st.bots[k].main ? <span><BotName k={k} /> · {t("manage:dispatch.coordinator")}</span> : <BotName k={k} /> }))} /></Prop>
             <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.length ? i.ss.map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
               <a href={"#/sessions/" + k} className="flex min-w-0 flex-wrap items-center gap-2 hover:underline"><span>#{getSession(k)?.n}</span>{getSession(k) && <SessionIdentity session={getSession(k)!} />}</a>
               <SessionApproval id={k} />

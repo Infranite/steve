@@ -351,6 +351,29 @@ impl DecisionRows<'_, W<'_>> {
         Ok((d, true))
     }
 
+    /// Updates the structured prompt template and options of an open decision in place.
+    pub fn update_template(
+        &mut self,
+        id: &str,
+        template: &steve_types::DecisionPrompt,
+        options: &[String],
+    ) -> Result<bool> {
+        let updated = self.0.exec(
+            Query::update()
+                .table("decisions")
+                .value("question", "")
+                .value("question_template", serde_json::to_string(template)?)
+                .value("options", serde_json::to_string(options)?)
+                .and_where(Expr::col("id").eq(id))
+                .and_where(Expr::col("status").eq("open")),
+        )?;
+        if updated != 0 {
+            let d = crate::repo::must(self.get(id)?)?;
+            emit(self.0, &d);
+        }
+        Ok(updated != 0)
+    }
+
     /// Writes the card shown to the user in the same transaction as the checked draft.
     pub fn edit_card(
         &mut self,

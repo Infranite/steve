@@ -590,6 +590,7 @@ async fn describe_shows_settings_as_the_user_sees_them() {
     assert_eq!(
         now,
         [
+            ("无人可接时", "问我"),
             ("默认验收方式", "自动验收"),
             ("前置完成后", "自动开始"),
             ("交接阈值", "不换会话"),

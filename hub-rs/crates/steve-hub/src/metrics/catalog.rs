@@ -49,6 +49,26 @@ pub(super) fn describe() {
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
     );
     describe_counter!(
+        "steve_dispatch_no_executor_total",
+        Count,
+        "Automatic dispatch requests where no eligible non-main Bot could execute. Labels: policy (ask, steve), reason."
+    );
+    describe_counter!(
+        "steve_no_executor_decisions_opened_total",
+        Count,
+        "Workspace-scoped no-executor AskOwner decision cards opened."
+    );
+    describe_counter!(
+        "steve_no_executor_decisions_settled_total",
+        Count,
+        "Workspace-scoped no-executor decision cards settled. Label: choice (assign_bot, confirm_proposal, later, dismiss, supersede)."
+    );
+    describe_counter!(
+        "steve_coordinator_self_executions_total",
+        Count,
+        "Items taken over by the coordinator (Steve) when no executor Bot was eligible. Label: source (card, setting)."
+    );
+    describe_counter!(
         "steve_item_automatic_delivery_total",
         Count,
         "Automatic delivery checks. Label: result (verified or unverified)."

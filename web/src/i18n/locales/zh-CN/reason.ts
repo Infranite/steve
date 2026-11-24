@@ -1,6 +1,7 @@
 // Domain-owned reason texts, grouped by the stable reason prefix.
 export default {
   "config.diagnostic_model_disabled": "此诊断副本已禁用模型执行。",
+  "config.team_member_main_bot": "Steve 是工作空间协调者，不能加入 Team 成员列表。",
   "node.downgrade": "Node 拒绝安装较旧的版本。",
   "node.operation_not_found": "Node 没有这项操作的回执。",
   "node.session_not_open": "会话在 Node 上已关闭。",

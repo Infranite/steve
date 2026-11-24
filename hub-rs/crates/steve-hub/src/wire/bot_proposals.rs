@@ -26,7 +26,7 @@ impl RoutedRuntime {
         n: &CreateItem,
         blocked: &PlacementBlocked,
     ) -> steve_store::Result<Option<BotProposal>> {
-        let Some(actor) = n.actor.as_deref() else {
+        let Some(actor) = n.actor.as_deref().or(n.requester.as_deref()) else {
             return Ok(None);
         };
         if n.bot.as_deref().is_some_and(|id| !id.is_empty())

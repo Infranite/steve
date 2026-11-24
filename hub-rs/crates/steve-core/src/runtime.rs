@@ -201,6 +201,26 @@ pub trait AgentRuntime: Send + Sync {
         Ok(None)
     }
 
+    /// Propose a new Bot on a verified route when automatic placement found no eligible executor.
+    fn propose_bot(
+        &self,
+        _req: &crate::CreateItem,
+        _blocked: &steve_types::PlacementBlocked,
+    ) -> Result<Option<steve_types::BotProposal>> {
+        Ok(None)
+    }
+
+    /// Confirm a previously proposed Bot as the workspace owner and return its created Bot ID.
+    fn confirm_bot_proposal(
+        &self,
+        _ws: &str,
+        _actor: &str,
+        _id: &str,
+        _edit: steve_types::ConfirmBotProposal,
+    ) -> Result<String> {
+        Err(crate::error::msg("当前运行环境不支持确认新建 Bot 提案。"))
+    }
+
     /// Whether `bot` (of `harness`) could run `item_id`'s work at all, before a session is made
     /// for it or the item is given to the Bot: its harness installed, ready and signed in on the
     /// Nodes. `Err` says why and where to fix it (stored text, zh-CN); nothing is made then, and

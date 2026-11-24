@@ -110,6 +110,7 @@ export function BotsView() {
  *  and what it runs on underneath; the switch and the menu stay their own buttons above the card's target */
 function BotCard({ k, teams, title, sub, meta, action, off, size = 36, as }: { k: string; teams: ReturnType<typeof useBotTeams>; title: ReactNode; sub: string; meta: (string | false | null | undefined)[]; action: ReactNode; off?: boolean; size?: number; as?: "li" }) {
   const t = useT()
+  const isMain = !!st.bots[k]?.main
   const joined = teams.value?.teams.filter(team => team.members.some(member => member.bot === k)) ?? []
   return (
     <ACard as={as} interactive className="anim-in" data-bot-card={k} data-off={off || undefined}>
@@ -118,9 +119,13 @@ function BotCard({ k, teams, title, sub, meta, action, off, size = 36, as }: { k
         description={<span className="line-clamp-2">{sub || t("manage:detail.noRole")}</span>} />
       <Meta>{meta.filter(Boolean).map((x, i) => <span key={i}>{x}</span>)}</Meta>
       <div className="flex min-w-0 flex-wrap items-center gap-1.5 type-footnote text-muted-foreground" data-bot-teams>
-        <span>{t("manage:list.joinedTeams")}</span>
-        {teams.error ? <span>{t("manage:list.teamsLoadFailed")}</span> : !teams.value ? <span>{t("manage:list.teamsLoading")}</span>
-          : joined.length ? joined.map(team => <Badge key={team.id} title={team.name}>{team.name}</Badge>) : <span>{t("manage:list.noTeams")}</span>}
+        {isMain
+          ? <Badge tone="info">{t("manage:dispatch.coordinatorAlwaysOn")}</Badge>
+          : <>
+              <span>{t("manage:list.joinedTeams")}</span>
+              {teams.error ? <span>{t("manage:list.teamsLoadFailed")}</span> : !teams.value ? <span>{t("manage:list.teamsLoading")}</span>
+                : joined.length ? joined.map(team => <Badge key={team.id} title={team.name}>{team.name}</Badge>) : <span>{t("manage:list.noTeams")}</span>}
+            </>}
       </div>
     </ACard>
   )
@@ -453,6 +458,7 @@ function Pane({ id }: { id: string }) {
   if (id === "items") return <div className="flex flex-col gap-8">
     {/* the pane's title already says 事项: the first group goes without a label; the number prefix lives in 工作空间 */}
     <Panel>
+      <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.noExecutor")} sub={t("manage:items.noExecutorSub")}><SetSelect testId="settings-no-executor" label={t("manage:items.noExecutor")} value={c.noExecutor === "steve" ? "steve" : "ask"} disabled={!st.owner} options={[{ v: "ask", l: t("manage:items.noExecutorAsk") }, { v: "steve", l: t("manage:items.noExecutorSteve") }]} onChange={(v) => setSetting({ noExecutor: v })} /></Row>
       <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : "auto"} onChange={(v) => setSetting({ accDefault: v })} options={[["manual", t("manage:acc.manual")], ["auto", t("manage:acc.auto")]] as const} /></Row>
       <Row title={t("manage:items.depsAfter")} sub={t("manage:items.depsAfterSub")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row>
       <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={[...[7, 30, 90].map((d): [string, string] => [String(d), t("common:dur.days", { count: d })]), ["0", t("manage:items.archNever")]]} on={(v) => setSetting({ archDays: v })} /></Row>

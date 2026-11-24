@@ -33,7 +33,16 @@ fn last_session(k: &Kit, item: &str) -> crate::repo::Session {
 #[test]
 fn create_item_starts_a_session_in_a_scratch_dir_with_the_protocol() {
     let k = Kit::new();
-    let i = new_item(&k, "写一首诗");
+    let i = k
+        .core
+        .create_item(CreateItem {
+            ws: WS.into(),
+            goal: "写一首诗".into(),
+            title: "标题".into(),
+            bot: Some("steve".into()),
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(i.id, "ST-1");
     assert_eq!(i.phase, steve_types::ItemPhase::Active);
     assert_eq!(i.bot_id.as_deref(), Some("steve"));
@@ -253,6 +262,7 @@ fn a_git_project_gets_a_worktree_on_the_item_branch() {
             ws: WS.into(),
             goal: "g".into(),
             title: "x".into(),
+            bot: Some("steve".into()),
             project: Some(Some(p.id)),
             ..Default::default()
         })
@@ -292,6 +302,7 @@ fn a_missing_project_dir_is_a_fail_card() {
             ws: WS.into(),
             goal: "g".into(),
             title: "x".into(),
+            bot: Some("steve".into()),
             project: Some(Some(p.id)),
             ..Default::default()
         })
@@ -1243,7 +1254,7 @@ fn reassign_checks_the_workspace() {
             .to_string(),
         "这个 Bot 不在当前工作空间"
     );
-    let same = k.core.reassign(&i.id, "steve", "me").unwrap();
+    let same = k.core.reassign(&i.id, "dev", "me").unwrap();
     assert_eq!(
         k.db().sessions_of_item(&same.id).unwrap().len(),
         1,
@@ -1251,12 +1262,12 @@ fn reassign_checks_the_workspace() {
     );
     let s = only_session(&k, &i.id);
     let d = k.decision(&i.id, Some(&s.id), "ask", "question", &[]);
-    k.core.reassign(&i.id, "dev", "me").unwrap();
+    k.core.reassign(&i.id, "steve", "me").unwrap();
     assert_eq!(
         k.db().decision(&d).unwrap().unwrap().result,
         json!({"reassigned": true})
     );
-    assert_eq!(last_session(&k, &i.id).bot_id.as_deref(), Some("dev"));
+    assert_eq!(last_session(&k, &i.id).bot_id.as_deref(), Some("steve"));
 }
 
 /// B4 / D2: a reassign mid-turn is a handoff into the same worktree. The old turn is stopped and
@@ -1272,14 +1283,14 @@ fn a_reassign_mid_turn_waits_for_the_old_release() {
         s.id.clone(),
         crate::Released::Pending("op_release_1".into()),
     );
-    k.core.reassign(&i.id, "dev", "me").unwrap();
+    k.core.reassign(&i.id, "steve", "me").unwrap();
     assert!(
         k.rt.st().cancelled.contains(&s.id),
         "the old turn is stopped"
     );
     let s2 = last_session(&k, &i.id);
     assert_ne!(s2.id, s.id);
-    assert_eq!(s2.bot_id.as_deref(), Some("dev"));
+    assert_eq!(s2.bot_id.as_deref(), Some("steve"));
     assert_eq!(
         k.rt.st().created.last().unwrap(),
         &(s2.id.clone(), Some("op_release_1".to_string()))

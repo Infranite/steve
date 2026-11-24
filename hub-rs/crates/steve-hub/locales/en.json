@@ -7,6 +7,7 @@
   "hub.dispatch.not_candidate": "Only Nodes with a current compatible report can be newly bound.",
   "hub.dispatch.not_bound": "A Team can only narrow the Nodes already bound to its Bot.",
   "hub.dispatch.owner_only": "Only this workspace’s owner can change Bot dispatch settings.",
+  "hub.dispatch.team_member_main_bot": "Steve is the workspace coordinator and cannot be added to a Team’s member list.",
   "hub.dispatch.invalid": "Invalid Bot Team or Node list.",
   "hub.dispatch.outside_team": "This Bot is not an enabled member of the selected Team.",
   "hub.dispatch.no_bindings": "No bound execution Node is allowed by this Bot and Team.",

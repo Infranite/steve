@@ -636,14 +636,30 @@ async fn confirming_a_bot_proposal_twice_creates_one_bot_and_one_reviewed_grant(
         goal: "Collect and verify release evidence".into(),
         project: Some(None),
         required_specialties: vec!["release evidence".into()],
-        propose: true,
+        propose: false,
         ..Default::default()
     };
-    let Err(steve_core::CoreError::Placement(blocked)) = f.core.create_item(request.clone()) else {
-        panic!("the Team has no Bot with the required specialty");
-    };
     let count = f.store.bots().list(Some(WS)).unwrap().len();
-    let draft = f.routed.propose_bot(&request, &blocked).unwrap().unwrap();
+    let unassigned = f.core.create_item(request.clone()).unwrap();
+    assert_eq!(unassigned.bot_id, None);
+    let card = f
+        .store
+        .decisions()
+        .open(WS)
+        .unwrap()
+        .into_iter()
+        .find(|d| {
+            d.subject_type == steve_types::NO_EXECUTOR
+                && d.status == steve_types::DecisionStatus::Open
+        })
+        .expect("no_executor card opened with Bot proposal");
+    let Some(steve_types::DecisionPrompt::NoExecutor {
+        proposal: Some(draft),
+        ..
+    }) = card.question_template.clone()
+    else {
+        panic!("expected proposal on no_executor card: {card:?}");
+    };
     assert_eq!(
         draft.team.as_ref().map(|t| t.id.as_str()),
         Some(team.as_str())
@@ -687,6 +703,33 @@ async fn confirming_a_bot_proposal_twice_creates_one_bot_and_one_reviewed_grant(
         .unwrap();
     assert_eq!(active.id, team);
     assert_eq!(active.members.iter().filter(|m| m.bot == opened).count(), 1);
+    // Settling the open no_executor card via confirm_proposal reuses the confirmed Bot and starts the waiting item.
+    let resolved = f
+        .core
+        .decision_command(
+            &steve_modules::Caller {
+                ws: WS.into(),
+                me: "u".into(),
+            },
+            &card.id,
+            Some(card.revision),
+            steve_core::DecisionCommand::Resolve {
+                choice: "confirm_proposal".into(),
+                text: String::new(),
+            },
+        )
+        .unwrap();
+    assert_eq!(resolved.status, steve_types::DecisionStatus::Resolved);
+    assert_eq!(
+        f.store
+            .items()
+            .get(&unassigned.id)
+            .unwrap()
+            .unwrap()
+            .bot_id
+            .as_deref(),
+        Some(opened.as_str())
+    );
     assert_eq!(
         f.core.create_item(request).unwrap().bot_id.as_deref(),
         Some(opened.as_str())

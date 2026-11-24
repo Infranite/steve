@@ -4,6 +4,8 @@ export default {
     turnRepeatedFailure: "The same tool action failed five times. Steve requested a stop.",
     turnNoProgress: "There was no verified progress for fifteen minutes of observable work. Steve requested a stop.",
     mergePullRequest: "Merge PR #{{number}} ({{repo}})?",
+    noExecutor_one: "{{count}} item has no eligible executor Bot. How should Steve proceed?",
+    noExecutor_other: "{{count}} items have no eligible executor Bot. How should Steve proceed?",
   },
   feed: {
     viewItem: "View item",

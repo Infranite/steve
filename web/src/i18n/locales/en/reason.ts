@@ -1,6 +1,7 @@
 // Domain-owned reason texts, grouped by the stable reason prefix.
 export default {
   "config.diagnostic_model_disabled": "Model execution is disabled on this diagnostic Hub.",
+  "config.team_member_main_bot": "Steve is the workspace coordinator and cannot be added to a Team’s member list.",
   "node.downgrade": "The Node refused to install an older version.",
   "node.operation_not_found": "The Node has no receipt for this operation.",
   "node.session_not_open": "The session is closed on the Node.",

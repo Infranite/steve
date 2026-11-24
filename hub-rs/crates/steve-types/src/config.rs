@@ -7,6 +7,7 @@ use serde::Serialize;
 reasons! {
     pub enum ConfigReason = "config" {
         DiagnosticModelDisabled = diagnostic_model_disabled [Forbidden] (),
+        TeamMemberMainBot = team_member_main_bot [Invalid] (),
     }
     retired {}
 }

@@ -4,6 +4,7 @@ export default {
     turnRepeatedFailure: "同一工具操作连续累计失败五次，Steve 已请求停止。",
     turnNoProgress: "可观察的执行时间累计十五分钟仍无可核实的进展，Steve 已请求停止。",
     mergePullRequest: "合并 PR #{{number}}（{{repo}}）？",
+    noExecutor_other: "有 {{count}} 件事项暂无合格的执行 Bot，怎么处理？",
   },
   feed: {
     viewItem: "查看事项",

@@ -7,6 +7,7 @@
   "hub.dispatch.not_candidate": "只能新绑定有当前兼容报告的 Node。",
   "hub.dispatch.not_bound": "Team 只能从该 Bot 已绑定的 Node 中收窄范围。",
   "hub.dispatch.owner_only": "只有工作空间所有者能修改 Bot 派发设置。",
+  "hub.dispatch.team_member_main_bot": "Steve 是工作空间协调者，不能加入 Team 成员列表。",
   "hub.dispatch.invalid": "Bot Team 或节点列表无效。",
   "hub.dispatch.outside_team": "这个 Bot 不在所选 Team 的启用成员中。",
   "hub.dispatch.no_bindings": "该 Bot 和 Team 的范围内没有已绑定的执行节点。",

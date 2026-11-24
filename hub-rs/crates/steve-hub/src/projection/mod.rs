@@ -616,6 +616,7 @@ mod tests {
                 matched: vec!["code review".into()],
                 rejected: vec![],
                 fallback: None,
+                deferred_by: None,
             },
         };
         f.store

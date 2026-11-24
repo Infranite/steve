@@ -22,6 +22,7 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
         { "key": "tz", "label": "时区", "values": ["system", "Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"], "def": "system", "live": true, "labels": {"system": "跟随系统"} },
       ],
       "items": [
+        { "key": "noExecutor", "label": "无人可接时", "values": ["ask", "steve"], "def": "ask", "live": true, "labels": { "ask": "问我", "steve": "Steve 自己做" } },
         { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "auto", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
         { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
         { "key": "handoff", "label": "交接阈值", "values": ["0", "70", "80", "90"], "def": "0", "live": true, "labels": { "0": "不换会话", "70": "70%", "80": "80%", "90": "90%" } },
@@ -647,6 +648,7 @@ fn setting_label_shown(key: &str) -> Option<String> {
         "home" => steve_i18n::t!("core.draft.setting.home"),
         "awayH" => steve_i18n::t!("core.draft.setting.awayH"),
         "tz" => steve_i18n::t!("core.draft.setting.tz"),
+        "noExecutor" => steve_i18n::t!("core.draft.setting.noExecutor"),
         "accDefault" => steve_i18n::t!("core.draft.setting.accDefault"),
         "depsAfter" => steve_i18n::t!("core.draft.setting.depsAfter"),
         "handoff" => steve_i18n::t!("core.draft.setting.handoff"),
@@ -1105,6 +1107,19 @@ fn setting_shown(specs: &[Value], k: &str, v: &Value) -> Value {
         .unwrap_or_else(|| json!(jstr(v)))
 }
 
+/// A setting's value as the UI shows it, in the request's language. New settings match their code
+/// value directly instead of round-tripping through a Chinese label.
+fn setting_value_shown(specs: &[Value], key: &str, v: &Value) -> String {
+    if key == "noExecutor" {
+        return match jstr(v).as_str() {
+            "ask" => steve_i18n::t!("core.draft.value.no_executor_ask"),
+            "steve" => steve_i18n::t!("core.draft.value.no_executor_steve"),
+            _ => value_shown("settings", key, show(v)),
+        };
+    }
+    value_shown("settings", key, show(&setting_shown(specs, key, v)))
+}
+
 /// What a configuration request in the conversation is about (see [`Core::pick_targets`]).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Picked {
@@ -1297,11 +1312,7 @@ impl Core {
                                 &short_label(&f.label),
                                 &harnesses,
                             ),
-                            value_shown(
-                                "settings",
-                                &f.key,
-                                show(&setting_shown(&specs, &f.key, &f.current)),
-                            ),
+                            setting_value_shown(&specs, &f.key, &f.current),
                         )
                     })
                     .collect();
@@ -1603,16 +1614,8 @@ impl Core {
                             &plain_label(&f.label),
                             &harnesses,
                         ),
-                        from: value_shown(
-                            "settings",
-                            &k,
-                            show(&setting_shown(&specs, &k, &f.current)),
-                        ),
-                        to: value_shown(
-                            "settings",
-                            &k,
-                            show(&setting_shown(&specs, &k, &json!(v))),
-                        ),
+                        from: setting_value_shown(&specs, &k, &f.current),
+                        to: setting_value_shown(&specs, &k, &json!(v)),
                     });
                     patch.insert(k, json!(v));
                 }
@@ -2494,9 +2497,10 @@ mod tests {
     #[test]
     fn schema_and_defaults() {
         let d = setting_defaults();
+        assert_eq!(d["noExecutor"], "ask");
         assert_eq!(d["accDefault"], "auto");
         assert_eq!(d["archDays"], "30");
-        assert_eq!(d.len(), 14);
+        assert_eq!(d.len(), 15);
         assert_eq!(d["tz"], "system");
         assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
         assert!(

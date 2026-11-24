@@ -446,6 +446,11 @@ function choiceLabel(d: DecisionView) {
   if (d.kind === "accept") return r.choice === "pass" ? t("core:choice.pass") : t("core:choice.rework", { text: r.text ?? "" })
   if (d.subject_type === "space") return (r.choice ?? r.answer) === "mute" ? t("core:choice.mute") : t("core:choice.setup")
   if (optionKey(d.subject_type, r.choice)) return optionLabel(d.subject_type, r.choice)
+  if (d.subject_type === "no_executor") {
+    if (r.choice === "later") return t("core:choice.noExecutorLater")
+    if (r.choice === "confirm_proposal") return t("core:choice.noExecutorProposal", { bot: botName(r.bot ?? null) })
+    if (r.choice === "assign_bot") return t("core:choice.noExecutorAssign", { bot: botName(r.bot ?? null) })
+  }
   if (d.kind === "ask") return String(r.answer ?? "")
   if (d.subject_type === "party_merge") return r.choice === "merge" ? t("core:choice.merge") : t("core:choice.notSame")
   if (d.kind === "confirm") return r.choice === "yes" ? t("core:choice.confirmYes") : t("core:choice.confirmNo")
@@ -1128,6 +1133,7 @@ const DECIDED_BY_SUBJECT: Record<string, readonly string[] | ((c: string) => str
   mem: ["yes", "no"],
   party_merge: ["merge", "not_same"],
   release: ["no"],
+  no_executor: ["assign_bot", "confirm_proposal", "later"],
   chan_message: OPTION_IDS.chan_message,
 }
 const DECIDED_ANY = ["pass", "rework", "yes", "no", "continue", "delivered", "look", "tosteve", "drop", "deny"]
@@ -1190,6 +1196,7 @@ export async function decide(id: string, c: string, text?: string, decision?: st
     }
     const result = await decisionCall(answer(w.decision, c, text), decidedText(w, c, i?.b ?? null))
     if (result && c === "pass") cue("success")
+    if (result && w.subject === "no_executor" && (c === "later" || c === "confirm_proposal")) void refresh()
   } finally { st.pendingActions.delete(key); emit() }
 }
 /** a reply drafted in an IM conversation, closed in that conversation: not sent, for good (undo from 已处理);
