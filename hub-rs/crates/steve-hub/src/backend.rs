@@ -545,6 +545,26 @@ pub trait Repo {
     fn setting_put_raw(&self, ws: &str, key: &str, value: &str) -> BResult<()> {
         todo_backend!("setting_put_raw")
     }
+    fn notices_post(
+        &self,
+        ws: &str,
+        kind: &str,
+        level: &str,
+        text: &str,
+        item: Option<&str>,
+        post_host_line: bool,
+    ) -> BResult<String> {
+        todo_backend!("notices_post")
+    }
+    fn notices_dismiss(&self, ws: &str, id_or_host_msg: &str, by: Option<&str>) -> BResult<bool> {
+        todo_backend!("notices_dismiss")
+    }
+    fn notices_list(&self, ws: &str, limit: i64) -> BResult<Vec<steve_store::ThreadNotice>> {
+        todo_backend!("notices_list")
+    }
+    fn notices_dismissed(&self, ws: &str) -> BResult<Vec<String>> {
+        todo_backend!("notices_dismissed")
+    }
     fn summary_facts(&self, ws: &str) -> BResult<SummaryFacts> {
         Ok(SummaryFacts::default())
     }
@@ -892,8 +912,9 @@ pub trait Domain: Send + Sync + 'static {
         mentions: Vec<steve_modules::contacts::item_people::Mention>,
         item: Option<String>,
         reply_to: Option<String>,
+        client_id: Option<String>,
     ) -> BResult<()> {
-        if item.is_some() || reply_to.is_some() {
+        if item.is_some() || reply_to.is_some() || client_id.is_some() {
             return Err(BackendError::unimplemented("say_to"));
         }
         self.say(ws, user, text, files, mentions).await

@@ -9,7 +9,7 @@
 use serde_json::{Value, json};
 use steve_core::Core;
 use steve_modules::contacts::{memory, service, stewards};
-use steve_store::{NewBot, ThreadRun};
+use steve_store::{NewBot, ThreadTask};
 
 use super::mcp_extra::Extra;
 
@@ -30,9 +30,13 @@ pub fn is(name: &str) -> bool {
 }
 
 /// The meeting is on for the run: the owner, in Steve's own conversation.
-pub fn open(core: &Core, run: &ThreadRun) -> bool {
-    core.onboard_allows(&run.workspace_id, &run.message_id, run.user_id.as_deref())
-        .unwrap_or(false)
+pub fn open(core: &Core, run: &ThreadTask) -> bool {
+    core.onboard_allows(
+        &run.workspace_id,
+        &run.origin_message_id,
+        run.user_id.as_deref(),
+    )
+    .unwrap_or(false)
 }
 
 fn schema(props: Value, required: &[&str]) -> Value {
@@ -112,7 +116,7 @@ pub fn descriptors() -> Vec<steve_node_api::ToolDescriptor> {
 /// user of its own stands for.
 pub async fn call(
     x: &Extra,
-    run: &ThreadRun,
+    run: &ThreadTask,
     name: &str,
     args: &Value,
     owner: &str,

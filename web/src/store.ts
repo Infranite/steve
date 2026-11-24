@@ -188,6 +188,7 @@ export const st = {
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>,
   localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
   noticeSeen: 0,
+  dismissedAlerts: [] as string[],
   quote: null as string | null, focus: null as { item: string; until: number } | null,
   /* modules that are not wired to a backend yet: always empty, never sample data */
   SIG: [] as any[], rules: [] as any[], schedules: [] as any[], sources: [] as any[], plugins: [] as any[],
@@ -404,12 +405,11 @@ const isRelease = (d: DecisionView) => d.kind === "approve" && d.subject_type ==
 let releaseHistory: DecisionView[] | undefined, releases = new Map<string, DecisionView>()
 /* ── alerts that are over ──
  * a failure asks for attention only while it is current: a later release took its place (only the newest counts), the item
- * went on or finished, or you closed it. Closed ones are remembered by the Hub with the closed notifications (setting
- * noticeDismissed: notification ids and decision ids), so a refresh or another device does not bring them back.
+ * went on or finished, or you closed it. Closed ones are remembered by the Hub in `thread_notices` (returned in
+ * `shell.dismissedAlerts`), so a refresh or another device does not bring them back.
  * The failure itself stays in the item's timeline and in the notifications. */
 export function alertClosed(key?: string) {
-  const xs = st.settings.noticeDismissed as unknown
-  return !!key && Array.isArray(xs) && xs.includes(key)
+  return !!key && st.dismissedAlerts.includes(key)
 }
 /** the failed release still worth showing on the item, or undefined */
 function liveRel(i: ItemView, r?: Rel): Rel | undefined {
@@ -422,10 +422,10 @@ function liveRel(i: ItemView, r?: Rel): Rel | undefined {
 /** close alerts by hand: decision ids, notification ids or their lines in the conversation */
 export function closeAlerts(keys: string[]) {
   const s = shell(), xs = keys.filter(Boolean); if (!s || !xs.length) return
-  const was = Array.isArray(s.settings.noticeDismissed as unknown) ? (s.settings.noticeDismissed as unknown as string[]) : []
-  const settings = { ...s.settings, noticeDismissed: [...was, ...xs] as unknown as string }
-  qc.setQueryData(shellKey(), { ...s, settings })
-  applyShell({ ...s, settings })
+  const was = s.dismissedAlerts ?? []
+  const dismissedAlerts = [...new Set([...was, ...xs])]
+  qc.setQueryData(shellKey(), { ...s, dismissedAlerts })
+  applyShell({ ...s, dismissedAlerts })
   qc.setQueryData(noticeKey(), noticeList().map((n) => xs.includes(n.id) ? { ...n, closed: true } : n))
   emit()
   void call(Promise.all(xs.map((x) => api.dismissNotice(x))))
@@ -634,6 +634,7 @@ function applyShell(s: Shell) {
   st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
   st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
+  st.dismissedAlerts = s.dismissedAlerts ?? []
   st.settings = s.settings
   st.modules = s.modules
   applyLook(s.settings)
@@ -823,7 +824,6 @@ function onHub(e: HubEvent) {
       updateChat({ live: researchEvent(chatLive().live, e) }, "frame")
     return
   }
-  if (e.type === "thread.run") return
   if (e.type === "steve.thinking") {
     if (e.on && !chatLive().thinking) nextDraft = true
     updateChat({ thinking: e.on, phase: e.on ? e.phase ?? "" : "" })
@@ -842,7 +842,10 @@ function onHub(e: HubEvent) {
     appendTranscript(e.session_id, { seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data })
     return
   }
-  if (e.type === "message" && e.space === "notify") void qc.invalidateQueries({ queryKey: noticeKey() })
+  if (e.type === "message" && e.space === "notify") {
+    void qc.invalidateQueries({ queryKey: noticeKey() })
+    void refresh()
+  }
 }
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
 let closeStream = () => {}

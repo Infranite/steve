@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_store::attention;
-use steve_store::{NewThreadRun, NewWorkspace, RunPatch, core_queue, thread_runs};
+use steve_store::{CommitOutcome, CommitReplyInput, NewRevisionTask, NewWorkspace, thread};
 use tokio::sync::{Barrier, Notify};
 
 use crate::error::{CoreError, Result, msg};
@@ -405,13 +405,35 @@ async fn w34_thread_replay_core() {
 // =========================================================================
 
 async fn run_submit(report: &mut Report) {
-    // 01: Duplicate logical submit via Core::say (no durable client_msg_id in Core)
+    // 01: Duplicate logical submit via Core::say_to_with_key with durable client_msg_id
     {
         let k = replay_kit(true);
         set_scripted_gateway(&k, json!({"kind": "answer", "confidence": 0.9}), "收到");
-        let m1 = k.core.say(WS, "你好呀", &[]).unwrap();
-        let m2 = k.core.say(WS, "你好呀", &[]).unwrap();
-        settle_space(&k, WS, MAIN, 4).await;
+        let m1 = k
+            .core
+            .say_to_with_key(
+                WS,
+                None,
+                "你好呀",
+                &[],
+                &[],
+                SayTo::default(),
+                Some("cid_s01"),
+            )
+            .unwrap();
+        let m2 = k
+            .core
+            .say_to_with_key(
+                WS,
+                None,
+                "你好呀",
+                &[],
+                &[],
+                SayTo::default(),
+                Some("cid_s01"),
+            )
+            .unwrap();
+        settle_space(&k, WS, MAIN, 2).await;
         wait_idle_main(&k, WS).await;
         let replies = steve_messages(&k, WS, MAIN).len();
         report.case(
@@ -420,14 +442,11 @@ async fn run_submit(report: &mut Report) {
                 ("submit_idempotent_key_deduped", m1 == m2),
                 ("le1_final_reply_per_intent", replies <= 1),
             ],
-            &[
-                "submit_idempotent_key_deduped",
-                "le1_final_reply_per_intent",
-            ],
+            &[],
         );
     }
 
-    // 02: Duplicate Core::say for an item request creates 2 items without submit key
+    // 02: Duplicate Core::say_to_with_key for an item request creates <=1 item
     {
         let k = replay_kit(true);
         set_scripted_gateway(
@@ -435,8 +454,30 @@ async fn run_submit(report: &mut Report) {
             json!({"kind": "item", "confidence": 0.95, "signals": ["change"], "title": "修按钮", "goal": "改颜色"}),
             "ok",
         );
-        let m1 = k.core.say(WS, "帮我把登录按钮改成蓝色", &[]).unwrap();
-        let m2 = k.core.say(WS, "帮我把登录按钮改成蓝色", &[]).unwrap();
+        let m1 = k
+            .core
+            .say_to_with_key(
+                WS,
+                None,
+                "帮我把登录按钮改成蓝色",
+                &[],
+                &[],
+                SayTo::default(),
+                Some("cid_s02"),
+            )
+            .unwrap();
+        let m2 = k
+            .core
+            .say_to_with_key(
+                WS,
+                None,
+                "帮我把登录按钮改成蓝色",
+                &[],
+                &[],
+                SayTo::default(),
+                Some("cid_s02"),
+            )
+            .unwrap();
         settle_replies(&k, WS, MAIN, &m1, 1).await;
         settle_replies(&k, WS, MAIN, &m2, 1).await;
         wait_idle_main(&k, WS).await;
@@ -444,7 +485,7 @@ async fn run_submit(report: &mut Report) {
         report.case(
             "core.submit.02_duplicate_core_say_item_dispatch",
             &[("le1_dispatch_per_intent", items <= 1)],
-            &["le1_dispatch_per_intent"],
+            &[],
         );
     }
 
@@ -463,7 +504,7 @@ async fn run_submit(report: &mut Report) {
                 ("empty_message_rejected", res.is_err()),
                 ("explicit_route_zero_router_calls", router_calls(&k) == 0),
             ],
-            &["empty_message_rejected", "explicit_route_zero_router_calls"],
+            &[],
         );
     }
 
@@ -482,38 +523,44 @@ async fn run_submit(report: &mut Report) {
                 ("empty_message_rejected", res.is_err()),
                 ("explicit_route_zero_router_calls", router_calls(&k) == 0),
             ],
-            &["empty_message_rejected", "explicit_route_zero_router_calls"],
+            &[],
         );
     }
 
-    // 05: Message + pending task durability gap (say_with writes message and core_queue in 2 txs)
+    // 05: Single-tx SubmitMessage writes message + queued task atomically (no orphan gap)
     {
         let k = replay_kit(false);
-        // Simulate crash between message_add and core_queue::enqueue (non-atomic 2-tx submit)
-        let orphan_mid = k
-            .db()
-            .message_add(WS, "me", "断电测试消息", None, None)
+        k.db().store().maintenance_set(true).unwrap();
+        let mid = k
+            .core
+            .say_to_with_key(
+                WS,
+                None,
+                "断电测试消息",
+                &[],
+                &[],
+                SayTo::default(),
+                Some("cid_atomic_05"),
+            )
             .unwrap();
         let k2 = k.reopened();
         k2.thread_recover().unwrap();
-        let ready = k2.thread_ready().unwrap();
         let queued_pending = k
             .db()
             .store()
-            .read(|r| core_queue::pending(r, WS, &orphan_mid))
+            .read(|r| thread::tasks_of_origin(r, &mid))
             .unwrap()
-            .is_some();
-        let replies = steve_replies_for(&k, WS, MAIN, &orphan_mid);
-        // In current 2-tx design, the message is unqueued (lost from queue) and gets a rerun notice
-        // instead of being impossible due to single-tx SubmitMessage.
-        let atomic_submit_guarantee = queued_pending && ready.resumed == 0 && replies.is_empty();
+            .iter()
+            .any(|t| t.status == "queued");
+        let replies = steve_replies_for(&k, WS, MAIN, &mid);
+        let atomic_submit_guarantee = queued_pending && replies.is_empty();
         report.case(
             "core.submit.05_say_atomic_message_and_task",
             &[
                 ("unconfirmed_start_zero_auto_replay", router_calls(&k) == 0),
                 ("submit_atomic_message_and_task", atomic_submit_guarantee),
             ],
-            &["submit_atomic_message_and_task"],
+            &[],
         );
     }
 
@@ -530,8 +577,6 @@ async fn run_submit(report: &mut Report) {
                     title: "异空间事项".into(),
                     goal: "秘密目标".into(),
                     bot_id: "dev".into(),
-                    status: Some("run".into()),
-                    stage: Some("执行".into()),
                     ..Default::default()
                 },
             )
@@ -560,7 +605,7 @@ async fn run_submit(report: &mut Report) {
                 ("cross_scope_ref_no_foreign_write", foreign_tl.is_empty()),
                 ("cross_scope_ref_rejected", res.is_err()),
             ],
-            &["cross_scope_ref_rejected"],
+            &[],
         );
     }
 
@@ -591,7 +636,7 @@ async fn run_submit(report: &mut Report) {
         report.case(
             "core.submit.07_cross_ws_reply_to_rejected",
             &[("cross_scope_ref_rejected", res.is_err())],
-            &["cross_scope_ref_rejected"],
+            &[],
         );
     }
 
@@ -628,11 +673,11 @@ async fn run_submit(report: &mut Report) {
         report.case(
             "core.submit.08_cross_space_reply_to_rejected",
             &[("cross_scope_ref_rejected", res.is_err())],
-            &["cross_scope_ref_rejected"],
+            &[],
         );
     }
 
-    // 09: Duplicate guest say_in with identical provider origin creates 2 messages & 2 replies
+    // 09: Duplicate guest say_in with identical provider origin creates 1 message & 1 reply
     {
         let k = replay_kit(true);
         let host = ReplayHost::new();
@@ -658,10 +703,7 @@ async fn run_submit(report: &mut Report) {
                 ("submit_idempotent_key_deduped", m1 == m2),
                 ("le1_final_reply_per_intent", total_replies <= 1),
             ],
-            &[
-                "submit_idempotent_key_deduped",
-                "le1_final_reply_per_intent",
-            ],
+            &[],
         );
     }
 
@@ -1017,10 +1059,6 @@ async fn run_queued(report: &mut Report) {
             }
         });
         let q = k.core.say(WS, "接着刚才那个说", &[]).unwrap();
-        wait_until("deferred onto after_lane", || {
-            !routed_texts.lock().unwrap().is_empty()
-        })
-        .await;
         let edited = k.core.thread_queued_edit(WS, &q, "改为问候").unwrap();
         fr.open(1);
         settle_replies(&k, WS, MAIN, &first, 1).await;
@@ -1061,7 +1099,7 @@ async fn run_queued(report: &mut Report) {
                 ("withdraw_ok", wd.is_some()),
                 ("withdrawn_tombstone_no_resurrect", tombstone_retained),
             ],
-            &["withdrawn_tombstone_no_resurrect"],
+            &[],
         );
     }
 }
@@ -1070,20 +1108,90 @@ async fn run_queued(report: &mut Report) {
 // 3. Double Claim, Stale Worker Fencing & Concurrent Dispatch (12 cases)
 // =========================================================================
 
+fn seed_queued_task(
+    k: &Kit,
+    ws: &str,
+    space: &str,
+    origin: &str,
+    conv_json: Option<&str>,
+) -> thread::ThreadTask {
+    k.db()
+        .store()
+        .write(|w| {
+            thread::enqueue_revision(
+                w,
+                &NewRevisionTask {
+                    ws,
+                    space,
+                    origin_message_id: origin,
+                    user_id: None,
+                    project_id: None,
+                    conv_json,
+                    to_item: None,
+                    to_reply_to: None,
+                    files_json: None,
+                    mentions_json: None,
+                    reply_to_message_id: None,
+                    forced_kind: None,
+                    route_json: None,
+                    offer_json: None,
+                    prev_receipt_id: None,
+                    read_task_intent_key: None,
+                },
+            )
+        })
+        .unwrap()
+}
+
+fn seed_claimed_task(
+    k: &Kit,
+    ws: &str,
+    space: &str,
+    origin: &str,
+    conv_json: Option<&str>,
+) -> (thread::ThreadTask, String) {
+    let lease = steve_store::uid("lease");
+    let task = k
+        .db()
+        .store()
+        .write(|w| {
+            let _ = thread::enqueue_revision(
+                w,
+                &NewRevisionTask {
+                    ws,
+                    space,
+                    origin_message_id: origin,
+                    user_id: None,
+                    project_id: None,
+                    conv_json,
+                    to_item: None,
+                    to_reply_to: None,
+                    files_json: None,
+                    mentions_json: None,
+                    reply_to_message_id: None,
+                    forced_kind: None,
+                    route_json: None,
+                    offer_json: None,
+                    prev_receipt_id: None,
+                    read_task_intent_key: None,
+                },
+            )?;
+            Ok::<_, steve_store::StoreError>(
+                thread::claim_head(w, ws, space, &lease, 100)?.expect("claimed task"),
+            )
+        })
+        .unwrap();
+    (task, lease)
+}
+
 async fn run_claim(report: &mut Report) {
-    // 01: Two Core instances racing core_queue claim on same pending message -> 1 wins
+    let main_conv = serde_json::to_string(&Conv::main()).unwrap();
+
+    // 01: Two Core instances racing queued task claim on same pending message -> 1 wins
     {
         let k = replay_kit(false);
         let mid = k.db().message_add(WS, "me", "/汇报", None, None).unwrap();
-        let job = json!({
-            "mid": mid, "text": "/汇报", "files": [], "user": null,
-            "mentions": [], "to": {"item": null, "reply_to": null},
-            "conv": {"space": "steve", "research": true, "items": true, "owner_only": false, "start": true, "hands_on": false}
-        });
-        k.db()
-            .store()
-            .write(|w| core_queue::enqueue(w, WS, &mid, &job.to_string(), 100))
-            .unwrap();
+        let _ = seed_queued_task(&k, WS, MAIN, &mid, Some(&main_conv));
         let c1 = k.reopened();
         let c2 = k.reopened();
         let r1 = c1.thread_ready().unwrap();
@@ -1105,15 +1213,7 @@ async fn run_claim(report: &mut Report) {
     {
         let k = replay_kit(false);
         let mid = k.db().message_add(WS, "me", "/汇报", None, None).unwrap();
-        let job = json!({
-            "mid": mid, "text": "/汇报", "files": [], "user": null,
-            "mentions": [], "to": {"item": null, "reply_to": null},
-            "conv": {"space": "steve", "research": true, "items": true, "owner_only": false, "start": true, "hands_on": false}
-        });
-        k.db()
-            .store()
-            .write(|w| core_queue::enqueue(w, WS, &mid, &job.to_string(), 100))
-            .unwrap();
+        let _ = seed_queued_task(&k, WS, MAIN, &mid, Some(&main_conv));
         let c = k.reopened();
         let _ = c.thread_ready().unwrap();
         let _ = c.thread_ready().unwrap();
@@ -1127,7 +1227,7 @@ async fn run_claim(report: &mut Report) {
         );
     }
 
-    // 03: Two Core instances concurrently calling thread_ready on same interrupted run
+    // 03: Two Core instances concurrently calling thread_ready on same queued task -> 1 wins
     {
         let k = replay_kit(false);
         set_scripted_gateway(&k, json!({"kind": "answer", "confidence": 0.9}), "恢复回答");
@@ -1135,20 +1235,7 @@ async fn run_claim(report: &mut Report) {
             .db()
             .message_add(WS, "me", "为什么慢？", None, None)
             .unwrap();
-        let run = k
-            .db()
-            .store()
-            .write(|w| {
-                thread_runs::add(
-                    w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: mid.clone(),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
+        let _ = seed_queued_task(&k, WS, MAIN, &mid, Some(&main_conv));
         let c1 = k.reopened();
         let c2 = k.reopened();
         let fr1 = ScriptedResearcher::new(RunEnd::Done, "worker1");
@@ -1156,7 +1243,6 @@ async fn run_claim(report: &mut Report) {
         c1.set_researcher(fr1.clone());
         c2.set_researcher(fr2.clone());
         c1.thread_recover().unwrap();
-        // Both cores race thread_ready on the same interrupted run (no CAS on status/attempts!)
         let b = Arc::new(Barrier::new(2));
         let (b1, b2) = (b.clone(), b.clone());
         let (c1c, c2c) = (c1.clone(), c2.clone());
@@ -1168,16 +1254,11 @@ async fn run_claim(report: &mut Report) {
             tokio::runtime::Handle::current().block_on(b2.wait());
             c2c.thread_ready().unwrap()
         });
-        let (r1, r2) = (h1.await.unwrap(), h2.await.unwrap());
+        let _ = (h1.await.unwrap(), h2.await.unwrap());
         fr1.open();
         fr2.open();
-        wait_until("resumed replies written", || {
-            let total_seen = fr1.seen.lock().unwrap().len() + fr2.seen.lock().unwrap().len();
-            total_seen >= (r1.resumed + r2.resumed)
-                && steve_replies_for(&k, WS, MAIN, &mid).len() >= 1 + total_seen
-        })
-        .await;
-        let _ = run;
+        settle_replies(&k, WS, MAIN, &mid, 1).await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
         let execs = fr1.seen.lock().unwrap().len() + fr2.seen.lock().unwrap().len();
         let replies = steve_replies_for(&k, WS, MAIN, &mid).len();
         report.case(
@@ -1186,10 +1267,7 @@ async fn run_claim(report: &mut Report) {
                 ("double_claim_single_execution", execs <= 1),
                 ("le1_final_reply_per_intent", replies <= 1),
             ],
-            &[
-                "double_claim_single_execution",
-                "le1_final_reply_per_intent",
-            ],
+            &[],
         );
     }
 
@@ -1200,20 +1278,11 @@ async fn run_claim(report: &mut Report) {
         k.core.set_researcher(r1.clone());
         let mid = k.core.say(WS, "旧worker测试为什么？", &[]).unwrap();
         r1.wait_entered().await;
-        // Simulate Hub restart while old worker is still alive in-flight
+        // Simulate Hub restart while old worker is still alive in-flight:
+        // thread_recover settles claimed task to unknown and bumps generation (no auto-replay).
         let k2 = k.reopened();
-        let r2 = ScriptedResearcher::new(RunEnd::Done, "新worker答案");
-        k2.set_researcher(r2.clone());
         k2.thread_recover().unwrap();
         k2.thread_ready().unwrap();
-        r2.wait_entered().await;
-        r2.open();
-        wait_until("new worker committed", || {
-            steve_replies_for(&k, WS, MAIN, &mid)
-                .iter()
-                .any(|m| m.text.contains("新worker答案"))
-        })
-        .await;
         // Now release stale worker 1; it must NOT write a second final reply!
         r1.open();
         wait_until("stale worker exited", || {
@@ -1229,7 +1298,7 @@ async fn run_claim(report: &mut Report) {
                 ("stale_worker_fenced", !stale_wrote),
                 ("le1_final_reply_per_intent", replies.len() <= 1),
             ],
-            &["stale_worker_fenced", "le1_final_reply_per_intent"],
+            &[],
         );
     }
 
@@ -1302,7 +1371,7 @@ async fn run_claim(report: &mut Report) {
         report.case(
             "core.claim.06_two_offers_same_origin_single_dispatch",
             &[("le1_dispatch_per_intent", items <= 1)],
-            &["le1_dispatch_per_intent"],
+            &[],
         );
     }
 
@@ -1421,7 +1490,7 @@ async fn run_claim(report: &mut Report) {
         report.case(
             "core.claim.09_concurrent_promote_two_cores",
             &[("le1_dispatch_per_intent", items <= 1)],
-            &["le1_dispatch_per_intent"],
+            &[],
         );
     }
 
@@ -1455,7 +1524,7 @@ async fn run_claim(report: &mut Report) {
         report.case(
             "core.claim.10_promote_then_reroute_item_same_origin",
             &[("le1_dispatch_per_intent", items <= 1)],
-            &["le1_dispatch_per_intent"],
+            &[],
         );
     }
 
@@ -1562,8 +1631,13 @@ async fn run_acl(report: &mut Report) {
                 .say_in(WS, conv.clone(), "执行操作", &json!({}))
                 .unwrap();
             settle_replies(&k, WS, &conv.space, &mid, 1).await;
-            let rl = k.db().store().thread().route_of(&mid).unwrap().unwrap();
-            if rl.kind != "answer" || rl.guard.as_deref() != Some("guest") {
+            let rl = k
+                .db()
+                .store()
+                .read(|r| thread::receipt_by_origin(r, &mid))
+                .unwrap()
+                .unwrap();
+            if rl.route_kind != "answer" || rl.route_guard.as_deref() != Some("guest") {
                 all_answer = false;
             }
         }
@@ -1693,7 +1767,12 @@ async fn run_acl(report: &mut Report) {
             .unwrap();
         settle_replies(&k, WS, "chan:sp_prop", &mid, 1).await;
         let items = k.db().items(WS).unwrap();
-        let is_propose = items.len() == 1 && items[0].status == "wait" && items[0].stage == "规划";
+        let is_propose =
+            items.len() == 1
+                && items[0].phase == crate::cycle::READY
+                && k.db().decisions_open(WS).unwrap().iter().any(|d| {
+                    d.item_id.as_deref() == Some(items[0].id.as_str()) && d.kind == "propose"
+                });
         let not_started = k.rt.st().prompts.is_empty();
         report.case(
             "core.acl.05_guest_non_owner_item_stays_proposal",
@@ -1821,7 +1900,7 @@ async fn run_acl(report: &mut Report) {
         report.case(
             "core.acl.08_missing_origin_no_main_space_fallback",
             &[("missing_origin_no_main_fallback", !leaked)],
-            &["missing_origin_no_main_fallback"],
+            &[],
         );
     }
 
@@ -1883,7 +1962,12 @@ async fn run_acl(report: &mut Report) {
         settle_replies(&k, WS, MAIN, &origin, 1).await;
         wait_idle_main(&k, WS).await;
         let req_user = fr.seen.lock().unwrap()[0].user.clone();
-        let run_user = k.db().store().thread().runs_of_message(&origin).unwrap()[0]
+        let run_user = k
+            .db()
+            .store()
+            .read(|r| thread::receipt_by_origin(r, &origin))
+            .unwrap()
+            .unwrap()
             .user_id
             .clone();
         report.case(
@@ -1893,7 +1977,7 @@ async fn run_acl(report: &mut Report) {
                 req_user.as_deref() == Some(member.as_str())
                     && run_user.as_deref() == Some(member.as_str()),
             )],
-            &["caller_identity_preserved"],
+            &[],
         );
     }
 
@@ -1916,7 +2000,12 @@ async fn run_acl(report: &mut Report) {
         settle_replies(&k, WS, MAIN, &origin, 1).await;
         wait_idle_main(&k, WS).await;
         let req_user = fr.seen.lock().unwrap()[0].user.clone();
-        let run_user = k.db().store().thread().runs_of_message(&origin).unwrap()[0]
+        let run_user = k
+            .db()
+            .store()
+            .read(|r| thread::receipt_by_origin(r, &origin))
+            .unwrap()
+            .unwrap()
             .user_id
             .clone();
         report.case(
@@ -1926,7 +2015,7 @@ async fn run_acl(report: &mut Report) {
                 req_user.as_deref() == Some(member.as_str())
                     && run_user.as_deref() == Some(member.as_str()),
             )],
-            &["caller_identity_preserved"],
+            &[],
         );
     }
 
@@ -2040,10 +2129,7 @@ async fn run_cancel(report: &mut Report) {
                 ("stop_idempotent_single_receipt", !s2 && replies.len() == 1),
                 ("le1_final_reply_per_intent", replies.len() <= 1),
             ],
-            &[
-                "stop_idempotent_single_receipt",
-                "le1_final_reply_per_intent",
-            ],
+            &[],
         );
     }
 
@@ -2072,12 +2158,16 @@ async fn run_cancel(report: &mut Report) {
             )
             .unwrap();
         k.core.suggest(WS, &card, "here", None).unwrap();
-        // Wait until m2 enters inline queue (thread_runs row queued)
+        // Wait until m2 enters queued reply task
         let mut run2 = String::new();
-        wait_until("m2 queued as thread_run", || {
-            let runs = k.db().store().thread().runs_of_message(&m2).unwrap();
-            if let Some(r) = runs.first() {
-                run2 = r.id.clone();
+        wait_until("m2 queued as task", || {
+            let tasks = k
+                .db()
+                .store()
+                .read(|r| thread::tasks_of_origin(r, &m2))
+                .unwrap();
+            if let Some(t) = tasks.first() {
+                run2 = t.id.clone();
                 true
             } else {
                 false
@@ -2091,7 +2181,13 @@ async fn run_cancel(report: &mut Report) {
         settle_replies(&k, WS, MAIN, &m2, 2).await;
         wait_idle_main(&k, WS).await;
         let ran_m2 = fr.seen.lock().unwrap().iter().any(|r| r.mid == m2);
-        let r2_status = k.db().store().thread().run(&run2).unwrap().unwrap().status;
+        let r2_outcome = k
+            .db()
+            .store()
+            .read(|r| thread::receipt_by_origin(r, &m2))
+            .unwrap()
+            .unwrap()
+            .outcome;
         let stop_replies = steve_replies_for(&k, WS, MAIN, &m2)
             .into_iter()
             .filter(|m| m.id != card)
@@ -2101,7 +2197,7 @@ async fn run_cancel(report: &mut Report) {
             &[
                 ("stop_run_ok", stopped),
                 ("queued_zero_execution", !ran_m2),
-                ("status_stopped", r2_status == "stopped"),
+                ("status_stopped", r2_outcome == "stopped"),
                 ("le1_final_reply_per_intent", stop_replies == 1),
             ],
             &[],
@@ -2134,10 +2230,14 @@ async fn run_cancel(report: &mut Report) {
             .unwrap();
         k.core.suggest(WS, &card, "here", None).unwrap();
         let mut run2 = String::new();
-        wait_until("m2 run queued", || {
-            let runs = k.db().store().thread().runs_of_message(&m2).unwrap();
-            runs.first().is_some_and(|r| {
-                run2 = r.id.clone();
+        wait_until("m2 task queued", || {
+            let tasks = k
+                .db()
+                .store()
+                .read(|r| thread::tasks_of_origin(r, &m2))
+                .unwrap();
+            tasks.first().is_some_and(|t| {
+                run2 = t.id.clone();
                 true
             })
         })
@@ -2220,19 +2320,17 @@ async fn run_cancel(report: &mut Report) {
         r.open();
         let replies = settle_replies(&k, WS, MAIN, &mid, 1).await;
         wait_idle_main(&k, WS).await;
-        let run = k
+        let receipt = k
             .db()
             .store()
-            .thread()
-            .runs_of_message(&mid)
+            .read(|r| thread::receipt_by_origin(r, &mid))
             .unwrap()
-            .pop()
             .unwrap();
         report.case(
             "core.cancel.06_stop_during_research_drops_late_done",
             &[
                 ("stop_ok", stopped),
-                ("run_status_stopped", run.status == "stopped"),
+                ("run_status_stopped", receipt.outcome == "stopped"),
                 ("reply_marked_stopped", replies[0].text.contains("已停下")),
                 ("le1_final_reply_per_intent", replies.len() == 1),
             ],
@@ -2270,7 +2368,7 @@ async fn run_cancel(report: &mut Report) {
         report.case(
             "core.cancel.07_stop_during_research_drops_late_offer",
             &[("stopped_no_late_offer", !has_late_offer)],
-            &["stopped_no_late_offer"],
+            &[],
         );
     }
 
@@ -2312,7 +2410,11 @@ async fn run_cancel(report: &mut Report) {
             )
             .unwrap();
         r.wait_entered().await;
-        let run_id = k.db().store().thread().runs_of_message(&mid).unwrap()[0]
+        let run_id = k
+            .db()
+            .store()
+            .read(|r| thread::tasks_of_origin(r, &mid))
+            .unwrap()[0]
             .id
             .clone();
         k.core.stop_run(WS, &run_id).unwrap();
@@ -2352,7 +2454,11 @@ async fn run_cancel(report: &mut Report) {
         };
         let mid = k.core.say_in(WS, conv, "为什么慢？", &json!({})).unwrap();
         entered.notified().await;
-        let run_id = k.db().store().thread().runs_of_message(&mid).unwrap()[0]
+        let run_id = k
+            .db()
+            .store()
+            .read(|r| thread::tasks_of_origin(r, &mid))
+            .unwrap()[0]
             .id
             .clone();
         let stopped = k.core.stop_run(WS, &run_id).unwrap();
@@ -2375,7 +2481,7 @@ async fn run_cancel(report: &mut Report) {
                     replies[0].meta["stopped"] == json!(true),
                 ),
             ],
-            &["guest_stop_cancels_in_flight"],
+            &[],
         );
     }
 
@@ -2389,18 +2495,16 @@ async fn run_cancel(report: &mut Report) {
         k.core.stop(WS).unwrap();
         let replies = settle_replies(&k, WS, MAIN, &mid, 1).await;
         wait_idle_main(&k, WS).await;
-        let run = k
+        let receipt = k
             .db()
             .store()
-            .thread()
-            .runs_of_message(&mid)
+            .read(|r| thread::receipt_by_origin(r, &mid))
             .unwrap()
-            .pop()
             .unwrap();
         report.case(
             "core.cancel.10_stop_during_research_commits_single_stopped_receipt",
             &[
-                ("run_stopped", run.status == "stopped"),
+                ("run_stopped", receipt.outcome == "stopped"),
                 ("le1_final_reply_per_intent", replies.len() == 1),
             ],
             &[],
@@ -2436,7 +2540,7 @@ async fn run_cancel(report: &mut Report) {
                 ("reroute_fences_stale_reply", !stale_research_committed),
                 ("le1_final_reply_per_intent", replies.len() <= 1),
             ],
-            &["reroute_fences_stale_reply", "le1_final_reply_per_intent"],
+            &[],
         );
     }
 
@@ -2517,12 +2621,10 @@ async fn run_stream(report: &mut Report) {
             !replies.is_empty()
         })
         .await;
-        let run = store
+        let receipt = store
             .store()
-            .thread()
-            .runs_of_message(&mid)
+            .read(|r| thread::receipt_by_origin(r, &mid))
             .unwrap()
-            .pop()
             .unwrap();
         let unread = store
             .store()
@@ -2537,7 +2639,8 @@ async fn run_stream(report: &mut Report) {
                 ("le1_final_reply_per_intent", replies.len() == 1),
                 (
                     "single_unread_on_commit",
-                    unread.len() == 1 && run.reply_id.as_deref() == Some(replies[0].id.as_str()),
+                    unread.len() == 1
+                        && receipt.reply_message_id.as_deref() == Some(replies[0].id.as_str()),
                 ),
             ],
             &[],
@@ -2575,7 +2678,7 @@ async fn run_stream(report: &mut Report) {
                 ("stream_failed_explicit_error", explicit_error),
                 ("le1_final_reply_per_intent", replies.len() == 1),
             ],
-            &["stream_failed_explicit_error"],
+            &[],
         );
     }
 
@@ -2729,7 +2832,7 @@ async fn run_stream(report: &mut Report) {
         );
     }
 
-    // 10: Router failure fallback never creates an item (even with explicit item wording)
+    // 10: Router failure fallback never creates an item (ambiguous change request goes to router)
     {
         let k = replay_kit(true);
         k.gw.set(|p, _| {
@@ -2739,7 +2842,7 @@ async fn run_stream(report: &mut Report) {
                 Ok(json!({"thought": "", "answer": "降级回答", "offer": null}).to_string())
             }
         });
-        let mid = k.core.say(WS, "帮我建个事项：修按钮", &[]).unwrap();
+        let mid = k.core.say(WS, "把登录页按钮改成蓝色", &[]).unwrap();
         let replies = settle_replies(&k, WS, MAIN, &mid, 1).await;
         wait_idle_main(&k, WS).await;
         report.case(
@@ -2758,19 +2861,13 @@ async fn run_stream(report: &mut Report) {
 // =========================================================================
 
 async fn run_restart(report: &mut Report) {
-    // 01: Crash before claim (message + core_queue pending) -> resumes cleanly once
+    let main_conv = serde_json::to_string(&Conv::main()).unwrap();
+
+    // 01: Crash before claim (message + queued task) -> resumes cleanly once
     {
         let k = replay_kit(false);
         let mid = k.db().message_add(WS, "me", "/汇报", None, None).unwrap();
-        let job = json!({
-            "mid": mid, "text": "/汇报", "files": [], "user": null,
-            "mentions": [], "to": {"item": null, "reply_to": null},
-            "conv": {"space": "steve", "research": true, "items": true, "owner_only": false, "start": true, "hands_on": false}
-        });
-        k.db()
-            .store()
-            .write(|w| core_queue::enqueue(w, WS, &mid, &job.to_string(), 100))
-            .unwrap();
+        let _ = seed_queued_task(&k, WS, MAIN, &mid, Some(&main_conv));
         let c = k.reopened();
         c.thread_recover().unwrap();
         let ready = c.thread_ready().unwrap();
@@ -2793,6 +2890,7 @@ async fn run_restart(report: &mut Report) {
             .db()
             .message_add(WS, "me", "刚领完就崩了", None, None)
             .unwrap();
+        let _ = seed_claimed_task(&k, WS, MAIN, &mid, Some(&main_conv));
         let c = k.reopened();
         c.thread_recover().unwrap();
         c.thread_ready().unwrap();
@@ -2814,7 +2912,7 @@ async fn run_restart(report: &mut Report) {
         );
     }
 
-    // 03: Crash during RUNNING main run (unconfirmed start / unknown outcome) -> must NOT auto-replay!
+    // 03: Crash during CLAIMED main run (unconfirmed start / unknown outcome) -> must NOT auto-replay!
     {
         let k = replay_kit(false);
         let fr = FakeResearch::new(vec![Step::Text("自动重算出的第二份回复")]);
@@ -2822,39 +2920,12 @@ async fn run_restart(report: &mut Report) {
             .db()
             .message_add(WS, "me", "为什么慢？", None, None)
             .unwrap();
-        let run = k
-            .db()
-            .store()
-            .write(|w| {
-                let r = thread_runs::add(
-                    w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: mid.clone(),
-                        ..Default::default()
-                    },
-                )?;
-                thread_runs::patch(
-                    w,
-                    &r.id,
-                    &RunPatch {
-                        status: Some("running".into()),
-                        started: Some(100),
-                        ..Default::default()
-                    },
-                )?;
-                Ok::<_, steve_store::StoreError>(r)
-            })
-            .unwrap();
-        let _ = run;
+        let _ = seed_claimed_task(&k, WS, MAIN, &mid, Some(&main_conv));
         let c = k.reopened();
         c.set_researcher(fr.clone());
         c.thread_recover().unwrap();
         let ready = c.thread_ready().unwrap();
-        if ready.resumed > 0 {
-            wait_until("resumed finished", || !fr.seen.lock().unwrap().is_empty()).await;
-            settle_replies(&k, WS, MAIN, &mid, 2).await;
-        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
         let replies = steve_replies_for(&k, WS, MAIN, &mid);
         report.case(
             "core.restart.03_crash_during_running_main_run_no_auto_replay",
@@ -2863,72 +2934,47 @@ async fn run_restart(report: &mut Report) {
                     "unconfirmed_start_zero_auto_replay",
                     fr.seen.lock().unwrap().is_empty() && ready.resumed == 0,
                 ),
-                ("le1_final_reply_per_intent", replies.len() <= 1),
+                ("le1_final_reply_per_intent", replies.len() == 1),
             ],
-            &[
-                "unconfirmed_start_zero_auto_replay",
-                "le1_final_reply_per_intent",
-            ],
+            &[],
         );
     }
 
-    // 04: Crash TWICE during running main run -> bounded to <=1 final reply and 0 auto-replay
+    // 04: Crash TWICE during claimed main run -> bounded to 1 explicit unknown receipt and 0 auto-replay
     {
         let k = replay_kit(false);
         let mid = k
             .db()
             .message_add(WS, "me", "两次崩溃为什么？", None, None)
             .unwrap();
-        let _run = k
-            .db()
-            .store()
-            .write(|w| {
-                let r = thread_runs::add(
-                    w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: mid.clone(),
-                        ..Default::default()
-                    },
-                )?;
-                thread_runs::patch(
-                    w,
-                    &r.id,
-                    &RunPatch {
-                        status: Some("running".into()),
-                        started: Some(100),
-                        ..Default::default()
-                    },
-                )?;
-                Ok::<_, steve_store::StoreError>(r)
-            })
-            .unwrap();
-        // Boot 1: auto-resumes into gated researcher and crashes again before reply
+        let _ = seed_claimed_task(&k, WS, MAIN, &mid, Some(&main_conv));
+        // Boot 1: settles claimed task to unknown receipt (0 auto-replay)
         let c1 = k.reopened();
         let r1 = ScriptedResearcher::new(RunEnd::Done, "never");
         c1.set_researcher(r1.clone());
         c1.thread_recover().unwrap();
         let ready1 = c1.thread_ready().unwrap();
-        r1.wait_entered().await;
-        // Boot 2: second crash while running
+        // Boot 2: idempotent, writes nothing new
         let c2 = k.reopened();
         c2.thread_recover().unwrap();
-        let _ready2 = c2.thread_ready().unwrap();
+        let ready2 = c2.thread_ready().unwrap();
         let replies = steve_replies_for(&k, WS, MAIN, &mid);
         report.case(
             "core.restart.04_crash_twice_during_running_main_run",
             &[
-                ("unconfirmed_start_zero_auto_replay", ready1.resumed == 0),
-                ("le1_final_reply_per_intent", replies.len() <= 1),
+                (
+                    "unconfirmed_start_zero_auto_replay",
+                    ready1.resumed == 0
+                        && ready2.resumed == 0
+                        && r1.seen.lock().unwrap().is_empty(),
+                ),
+                ("le1_final_reply_per_intent", replies.len() == 1),
             ],
-            &[
-                "unconfirmed_start_zero_auto_replay",
-                "le1_final_reply_per_intent",
-            ],
+            &[],
         );
     }
 
-    // 05: Crash during QUEUED (proven unstarted) main run -> must produce <=1 Steve reply (no extra resume_pending msg!)
+    // 05: Crash during QUEUED (proven unstarted) main task -> resumes cleanly with exactly 1 Steve reply
     {
         let k = replay_kit(false);
         let fr = FakeResearch::new(vec![Step::Text("正常补答")]);
@@ -2936,34 +2982,23 @@ async fn run_restart(report: &mut Report) {
             .db()
             .message_add(WS, "me", "排队未起为什么？", None, None)
             .unwrap();
-        k.db()
-            .store()
-            .write(|w| {
-                thread_runs::add(
-                    w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: mid.clone(),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
+        let _ = seed_queued_task(&k, WS, MAIN, &mid, Some(&main_conv));
         let c = k.reopened();
         c.set_researcher(fr.clone());
         c.thread_recover().unwrap();
         c.thread_ready().unwrap();
         wait_until("queued resumed", || !fr.seen.lock().unwrap().is_empty()).await;
-        settle_replies(&k, WS, MAIN, &mid, 2).await;
+        settle_replies(&k, WS, MAIN, &mid, 1).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
         let replies = steve_replies_for(&k, WS, MAIN, &mid);
         report.case(
             "core.restart.05_crash_during_queued_main_run_single_reply",
-            &[("le1_final_reply_per_intent", replies.len() <= 1)],
-            &["le1_final_reply_per_intent"],
+            &[("le1_final_reply_per_intent", replies.len() == 1)],
+            &[],
         );
     }
 
-    // 06: Crash AFTER reply with run_receipt persisted, BEFORE thread_runs patched to done -> 0 recompute
+    // 06: Committed reply + receipt survives restart with 0 recompute
     {
         let k = replay_kit(false);
         let fr = FakeResearch::new(vec![Step::Text("绝不能重算")]);
@@ -2971,40 +3006,52 @@ async fn run_restart(report: &mut Report) {
             .db()
             .message_add(WS, "me", "已落盘回复为什么？", None, None)
             .unwrap();
-        let run = k
+        let (task, lease) = seed_claimed_task(&k, WS, MAIN, &mid, Some(&main_conv));
+        let committed = k
             .db()
             .store()
             .write(|w| {
-                let r = thread_runs::add(
+                thread::commit_reply(
                     w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: mid.clone(),
-                        ..Default::default()
+                    &CommitReplyInput {
+                        task_id: &task.id,
+                        lease_token: &lease,
+                        expected_generation: task.generation,
+                        allow_cancelled_stop: false,
+                        outcome: "answered",
+                        reply_text: Some("已提交的答案"),
+                        existing_reply_id: None,
+                        reply_item_id: None,
+                        reply_meta: &json!({"origin": mid, "run_receipt": true}),
+                        error_code: None,
+                        route_kind: "research",
+                        model_kind: "research",
+                        route_guard: None,
+                        route_model: None,
+                        route_confidence: None,
+                        route_signals: &[],
+                        route_fallback: false,
+                        route_ms: 1,
+                        route_outcome: None,
+                        item_id: None,
+                        dispatch_ref_id: None,
+                        delivery_ref_id: None,
+                        model_call_id: None,
+                        user_id: None,
+                        project_id: None,
+                        answer_model: None,
+                        harness: None,
+                        harness_session: None,
+                        tools: 0,
+                        turns: 1,
+                        first_text_ms: Some(1),
+                        error_detail: None,
+                        record_attention_commit: false,
                     },
-                )?;
-                thread_runs::patch(
-                    w,
-                    &r.id,
-                    &RunPatch {
-                        status: Some("running".into()),
-                        started: Some(100),
-                        ..Default::default()
-                    },
-                )?;
-                Ok::<_, steve_store::StoreError>(r)
+                )
             })
             .unwrap();
-        let _reply_id = k
-            .db()
-            .message_add(
-                WS,
-                "steve",
-                "已提交的答案",
-                None,
-                Some(&json!({"origin": mid, "run": run.id, "run_receipt": true})),
-            )
-            .unwrap();
+        assert!(matches!(committed, CommitOutcome::Committed { .. }));
         let c = k.reopened();
         c.set_researcher(fr.clone());
         c.thread_recover().unwrap();
@@ -3013,8 +3060,7 @@ async fn run_restart(report: &mut Report) {
         let final_status = k
             .db()
             .store()
-            .thread()
-            .run(&run.id)
+            .read(|r| thread::task_by_id(r, &task.id))
             .unwrap()
             .unwrap()
             .status;
@@ -3025,7 +3071,7 @@ async fn run_restart(report: &mut Report) {
                     "committed_reply_zero_recompute",
                     fr.seen.lock().unwrap().is_empty() && ready.resumed == 0,
                 ),
-                ("reconciled_done", final_status == "done"),
+                ("reconciled_done", final_status == "settled"),
                 ("le1_final_reply_per_intent", replies.len() == 1),
             ],
             &[],
@@ -3089,7 +3135,7 @@ async fn run_restart(report: &mut Report) {
         );
     }
 
-    // 08: Crash during running guest run -> 0 auto-replay, 0 host.said callback
+    // 08: Crash during claimed guest task -> 0 auto-replay, 0 host.said callback
     {
         let k = replay_kit(false);
         let fr = FakeResearch::new(vec![Step::Text("不应重算")]);
@@ -3098,29 +3144,7 @@ async fn run_restart(report: &mut Report) {
             .db()
             .message_add_in(WS, "chan:sp_rc", "me", "访客崩了", None, &json!({}))
             .unwrap();
-        k.db()
-            .store()
-            .write(|w| {
-                let r = thread_runs::add(
-                    w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: mid.clone(),
-                        ..Default::default()
-                    },
-                )?;
-                thread_runs::patch(
-                    w,
-                    &r.id,
-                    &RunPatch {
-                        status: Some("running".into()),
-                        started: Some(100),
-                        ..Default::default()
-                    },
-                )?;
-                Ok::<_, steve_store::StoreError>(r)
-            })
-            .unwrap();
+        let _ = seed_claimed_task(&k, WS, "chan:sp_rc", &mid, None);
         let c = k.reopened();
         c.set_researcher(fr.clone());
         c.set_conv_host(host.clone());
@@ -3152,29 +3176,7 @@ async fn run_restart(report: &mut Report) {
             .db()
             .message_add(WS, "me", "禁恢复测试", None, None)
             .unwrap();
-        k.db()
-            .store()
-            .write(|w| {
-                let r = thread_runs::add(
-                    w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: mid.clone(),
-                        ..Default::default()
-                    },
-                )?;
-                thread_runs::patch(
-                    w,
-                    &r.id,
-                    &RunPatch {
-                        status: Some("running".into()),
-                        started: Some(100),
-                        ..Default::default()
-                    },
-                )?;
-                Ok::<_, steve_store::StoreError>(r)
-            })
-            .unwrap();
+        let _ = seed_claimed_task(&k, WS, MAIN, &mid, Some(&main_conv));
         let c = k.reopened();
         c.set_researcher(fr.clone());
         c.thread_recover().unwrap();
@@ -3195,55 +3197,70 @@ async fn run_restart(report: &mut Report) {
         );
     }
 
-    // 10: Corrupt JSON in core_queue fails closed and posts rerun notice
+    // 10: Corrupt JSON in task payload fails closed and posts explicit error/rerun receipt
     {
         let k = replay_kit(false);
         let mid = k
             .db()
             .message_add(WS, "me", "坏队列数据", None, None)
             .unwrap();
-        k.db()
-            .store()
-            .write(|w| core_queue::enqueue(w, WS, &mid, "{corrupt json", 100))
-            .unwrap();
+        let _ = seed_queued_task(&k, WS, MAIN, &mid, Some("{corrupt json"));
         let c = k.reopened();
         c.thread_recover().unwrap();
-        let ready = c.thread_ready().unwrap();
+        let _ready = c.thread_ready().unwrap();
+        let replies = settle_replies(&k, WS, MAIN, &mid, 1).await;
+        let receipt = k
+            .db()
+            .store()
+            .read(|r| thread::receipt_by_origin(r, &mid))
+            .unwrap()
+            .unwrap();
         report.case(
             "core.restart.10_corrupt_core_queue_json_fails_closed",
             &[
-                ("failed_counted", ready.failed == 1),
+                (
+                    "failed_counted",
+                    receipt.outcome == "failed"
+                        && receipt.error_code.as_deref() == Some("corrupt_task"),
+                ),
                 ("unconfirmed_start_zero_auto_replay", router_calls(&k) == 0),
                 (
                     "explicit_rerun_posted",
-                    steve_replies_for(&k, WS, MAIN, &mid).len() == 1,
+                    replies.len() == 1 && replies[0].meta["rerun"].as_str() == Some(mid.as_str()),
                 ),
             ],
             &[],
         );
     }
 
-    // 11: Mismatched mid in core_queue payload fails closed with 0 cross-message routing
+    // 11: Mismatched space in task conv_json fails closed with 0 cross-message routing
     {
         let k = replay_kit(false);
         let m1 = k.db().message_add(WS, "me", "消息1", None, None).unwrap();
         let m2 = k.db().message_add(WS, "me", "/汇报", None, None).unwrap();
         let mismatched = json!({
-            "mid": m2, "text": "/汇报", "files": [], "user": null,
-            "mentions": [], "to": {"item": null, "reply_to": null},
-            "conv": {"space": "steve", "research": true, "items": true, "owner_only": false, "start": true, "hands_on": false}
+            "space": "chan:other", "research": true, "items": true,
+            "owner_only": false, "start": true, "hands_on": false
         });
-        k.db()
-            .store()
-            .write(|w| core_queue::enqueue(w, WS, &m1, &mismatched.to_string(), 100))
-            .unwrap();
+        let _ = seed_queued_task(&k, WS, MAIN, &m1, Some(&mismatched.to_string()));
         let c = k.reopened();
-        let ready = c.thread_ready().unwrap();
+        let _ready = c.thread_ready().unwrap();
+        settle_replies(&k, WS, MAIN, &m1, 1).await;
         tokio::time::sleep(Duration::from_millis(40)).await;
+        let receipt = k
+            .db()
+            .store()
+            .read(|r| thread::receipt_by_origin(r, &m1))
+            .unwrap()
+            .unwrap();
         report.case(
             "core.restart.11_mismatched_core_queue_mid_fails_closed",
             &[
-                ("failed_counted", ready.failed == 1),
+                (
+                    "failed_counted",
+                    receipt.outcome == "failed"
+                        && receipt.error_code.as_deref() == Some("corrupt_task"),
+                ),
                 (
                     "zero_cross_execution",
                     steve_replies_for(&k, WS, MAIN, &m2).is_empty(),
@@ -3301,7 +3318,7 @@ async fn run_restart(report: &mut Report) {
         );
     }
 
-    // 13: Duplicate reply committed after stale/restart resume adds extra unread for same origin!
+    // 13: Stale worker finishes late after crash recovery -> fenced, adds 0 extra unread
     {
         let k = replay_kit(false);
         let user = k
@@ -3312,7 +3329,7 @@ async fn run_restart(report: &mut Report) {
             .unwrap();
         let r1 = ScriptedResearcher::new(RunEnd::Done, "第一次答");
         k.core.set_researcher(r1.clone());
-        let mid = k
+        let _mid = k
             .core
             .say_as(WS, Some(&user), "未读重复测试为什么？", &[], &[])
             .unwrap();
@@ -3322,14 +3339,6 @@ async fn run_restart(report: &mut Report) {
         c2.set_researcher(r2.clone());
         c2.thread_recover().unwrap();
         c2.thread_ready().unwrap();
-        r2.wait_entered().await;
-        r2.open();
-        wait_until("second committed", || {
-            steve_replies_for(&k, WS, MAIN, &mid)
-                .iter()
-                .any(|m| m.text.contains("第二次答"))
-        })
-        .await;
         r1.open();
         wait_until("first exited", || r1.in_flight.load(Ordering::SeqCst) == 0).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3342,11 +3351,11 @@ async fn run_restart(report: &mut Report) {
         report.case(
             "core.restart.13_duplicate_resumed_reply_adds_zero_extra_unread",
             &[("duplicate_reply_zero_new_unread", unread.len() <= 1)],
-            &["duplicate_reply_zero_new_unread"],
+            &[],
         );
     }
 
-    // 14: Boot thread_recover must NOT post unsolicited hardcoded ST-20 postback messages!
+    // 14: Boot thread_recover/thread_ready must NOT post unsolicited ST-20 postback messages!
     {
         let k = replay_kit(true);
         let item_id = k
@@ -3380,11 +3389,13 @@ async fn run_restart(report: &mut Report) {
                 ..Default::default()
             })
             .unwrap();
-        let posted = k.core.postback(&[item_id.as_str()]).unwrap();
+        k.core.thread_recover().unwrap();
+        k.core.thread_ready().unwrap();
+        let steve_count = steve_messages(&k, WS, MAIN).len();
         report.case(
             "core.restart.14_boot_postback_no_unsolicited_message",
-            &[("no_boot_postback_mutation", posted.is_empty())],
-            &["no_boot_postback_mutation"],
+            &[("no_boot_postback_mutation", steve_count == 1)],
+            &[],
         );
     }
 }
@@ -3510,7 +3521,7 @@ async fn run_spaces(report: &mut Report) {
         report.case(
             "core.spaces.04_same_space_direct_does_not_overtake_head",
             &[("same_space_serial_order", !overtook)],
-            &["same_space_serial_order"],
+            &[],
         );
     }
 
@@ -3534,7 +3545,7 @@ async fn run_spaces(report: &mut Report) {
         report.case(
             "core.spaces.05_same_space_ahead_does_not_overtake_head",
             &[("same_space_serial_order", !overtook)],
-            &["same_space_serial_order"],
+            &[],
         );
     }
 
@@ -3604,7 +3615,7 @@ async fn run_spaces(report: &mut Report) {
         report.case(
             "core.spaces.07_guest_completion_preserves_main_resume_session",
             &[("per_space_resume_isolation", m2_resumed)],
-            &["per_space_resume_isolation"],
+            &[],
         );
     }
 
@@ -3678,19 +3689,17 @@ async fn run_spaces(report: &mut Report) {
         settle_replies(&k, WS, MAIN, &main_m, 1).await;
         fr.open(1);
         let guest_replies = settle_replies(&k, WS, "chan:sp_keep", &guest_m, 1).await;
-        let guest_run = k
+        let guest_receipt = k
             .db()
             .store()
-            .thread()
-            .runs_of_message(&guest_m)
+            .read(|r| thread::receipt_by_origin(r, &guest_m))
             .unwrap()
-            .pop()
             .unwrap();
         report.case(
             "core.spaces.09_stop_main_does_not_stop_guest_space",
             &[(
                 "guest_completed_done",
-                guest_run.status == "done" && guest_replies.len() == 1,
+                guest_receipt.outcome == "answered" && guest_replies.len() == 1,
             )],
             &[],
         );
@@ -3734,11 +3743,10 @@ async fn run_spaces(report: &mut Report) {
         for (sp, m) in &mids {
             settle_replies(&k, WS, sp, m, 1).await;
         }
-        // Global budget cap expected <= 4 in W3.4; currently unbounded (all 6 enter at once!)
         report.case(
             "core.spaces.10_parallel_spaces_respect_global_concurrency_budget",
             &[("parallel_spaces_global_budget", peak <= 4)],
-            &["parallel_spaces_global_budget"],
+            &[],
         );
     }
 }
@@ -3947,7 +3955,7 @@ async fn run_routing(report: &mut Report) {
                 ),
                 ("le1_final_reply_per_intent", replies.len() == 1),
             ],
-            &["explicit_route_zero_router_calls"],
+            &[],
         );
     }
 
@@ -3973,7 +3981,7 @@ async fn run_routing(report: &mut Report) {
                 ("le1_dispatch_per_intent", items.len() == 1),
                 ("le1_final_reply_per_intent", replies.len() == 1),
             ],
-            &["explicit_route_zero_router_calls"],
+            &[],
         );
     }
 
@@ -3995,7 +4003,7 @@ async fn run_routing(report: &mut Report) {
                 ("obvious_answer_single_generation", total_llm == 1),
                 ("le1_final_reply_per_intent", replies.len() == 1),
             ],
-            &["obvious_answer_single_generation"],
+            &[],
         );
     }
 
@@ -4040,7 +4048,7 @@ async fn run_routing(report: &mut Report) {
                 ),
                 ("le1_final_reply_per_intent", replies.len() == 1),
             ],
-            &["tool_preflight_zero_probe_calls"],
+            &[],
         );
     }
 

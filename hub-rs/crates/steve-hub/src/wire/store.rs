@@ -424,10 +424,9 @@ impl Repo for StoreBackend {
     fn thread_item(&self, item: &str) -> BResult<Option<Value>> {
         Ok(self
             .0
-            .thread()
-            .item(item)
+            .read(|r| s::thread::dispatch_by_item(r, item))
             .map_err(err)?
-            .map(|t| serde_json::json!({"follow": t.follow, "origin_msg": t.origin_msg})))
+            .map(|t| serde_json::json!({"follow": t.follow, "origin_msg": t.origin_message_id})))
     }
     fn timeline_add(
         &self,
@@ -681,6 +680,46 @@ impl Repo for StoreBackend {
             .write(|w| steve_store::WorkspaceSettings(w).set(ws, key, value, steve_store::now()))
             .map_err(err)
     }
+    fn notices_post(
+        &self,
+        ws: &str,
+        kind: &str,
+        level: &str,
+        text: &str,
+        item: Option<&str>,
+        post_host_line: bool,
+    ) -> BResult<String> {
+        self.0
+            .write(|w| {
+                s::thread::post_notice(
+                    w,
+                    ws,
+                    kind,
+                    level,
+                    text,
+                    item,
+                    post_host_line,
+                    steve_store::now(),
+                )
+            })
+            .map(|n| n.id)
+            .map_err(err)
+    }
+    fn notices_dismiss(&self, ws: &str, id_or_host_msg: &str, by: Option<&str>) -> BResult<bool> {
+        self.0
+            .write(|w| s::thread::close_notice(w, ws, id_or_host_msg, by, steve_store::now()))
+            .map_err(err)
+    }
+    fn notices_list(&self, ws: &str, limit: i64) -> BResult<Vec<s::ThreadNotice>> {
+        self.0
+            .read(|r| s::thread::list_notices(r, ws, limit))
+            .map_err(err)
+    }
+    fn notices_dismissed(&self, ws: &str) -> BResult<Vec<String>> {
+        self.0
+            .read(|r| s::thread::dismissed_alert_ids(r, ws))
+            .map_err(err)
+    }
     fn summary_facts(&self, ws: &str) -> BResult<crate::backend::SummaryFacts> {
         self.0
             .read(|r| -> steve_store::Result<_> {
@@ -688,7 +727,7 @@ impl Repo for StoreBackend {
                 let (devices_online, devices_total) = s::state_batches::device_counts(r)?;
                 Ok(crate::backend::SummaryFacts {
                     workspace_name,
-                    pending: s::core_queue::has_pending_in_space(r, ws, steve_core::thread::MAIN)?,
+                    pending: s::thread::has_active_or_queued(r, ws, steve_core::thread::MAIN)?,
                     devices_online: devices_online as usize,
                     devices_total: devices_total as usize,
                 })

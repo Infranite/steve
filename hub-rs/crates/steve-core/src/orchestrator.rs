@@ -32,9 +32,6 @@ const INTERRUPTED: &str = "Hub 重启时这个会话正在运行，这一回合�
 /// The `text` of an acceptance's `pass` that also starts the release (验收并发布); `no-release`
 /// accepts it without one (验收，先不发布).
 
-/// An interruption older than this is not continued by itself (it is reported, the intent dropped).
-pub const RESUME_MAX_AGE_MS: i64 = 24 * 3_600_000;
-
 /// What a turn a restart cut continues with.
 pub const RESUME: &str =
     "Hub 刚重启，上一回合被中断了，请从中断处继续；中断前做到一半的操作，先确认结果再往下。";

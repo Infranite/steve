@@ -86,6 +86,7 @@ struct Shell {
     harness_names: std::collections::BTreeMap<String, String>,
     modules: steve_types::integrations::OptionalModules,
     notify_seen: i64,
+    dismissed_alerts: Vec<String>,
 }
 
 /// Workspace configuration and the shell's navigation catalogue.
@@ -139,6 +140,7 @@ pub async fn shell(
                 harness_names,
                 modules,
                 notify_seen: crate::notify::seen(r, ws)?,
+                dismissed_alerts: crate::notify::dismissed(r, ws)?,
             },
         )
     })
@@ -390,21 +392,13 @@ pub async fn thread_say(
         }
         checked = ms;
     }
-    // a retry of the same draft (`client_id`) answers like the first send and sends nothing; the
-    // send runs on even if this request goes away, so it needs its own state
-    let (st2, c2) = (st.clone(), c.clone());
-    let v = st
-        .dedupe
-        .once(&c.ws, &c.me, "thread", client_id, move || async move {
-            let (st, c) = (st2, c2);
-            let refs = super::files::refs(&st, &c.ws, files).await?;
-            st.domain
-                .say_to(&c.ws, &c.me, &text, refs, checked, item, reply_to)
-                .await?;
-            Ok::<_, ApiError>(json!({ "ok": true }))
-        })
+    let refs = super::files::refs(&st, &c.ws, files).await?;
+    st.domain
+        .say_to(
+            &c.ws, &c.me, &text, refs, checked, item, reply_to, client_id,
+        )
         .await?;
-    ok(v)
+    ok(json!({ "ok": true }))
 }
 
 pub async fn thread_stop(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {

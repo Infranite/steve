@@ -212,7 +212,12 @@ pub fn seed_starting_session(store: &Store, key1: &str) -> Result<()> {
 
 pub fn seed_thread_runs(store: &Store, run: &str, ws: &str) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO thread_runs (id, workspace_id, message_id, status, created) VALUES (?, ?, 'msg_1', 'running', 1)", rusqlite::params![run, ws])?;
+        let space = format!("test:{run}");
+        let origin = format!("msg_{run}");
+        tx.conn.execute(
+            "INSERT INTO thread_reply_tasks (id, workspace_id, space, origin_message_id, reply_revision, origin_version, input_seq, status, generation, lease_token, created, claimed_at, updated) VALUES (?, ?, ?, ?, 0, 1, 1, 'claimed', 1, 'lease', 1, 1, 1)",
+            rusqlite::params![run, ws, space, origin],
+        )?;
         Ok(())
     })
 }
@@ -518,7 +523,7 @@ pub fn set_sessions_workspace_id_foreign(store: &Store) -> Result<()> {
 pub fn set_thread_runs_status_done(store: &Store) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute(
-            "UPDATE thread_runs SET status='done' WHERE id='tr_t'",
+            "UPDATE thread_reply_tasks SET status='settled', lease_token=NULL WHERE id='tr_t'",
             rusqlite::params![],
         )?;
         Ok(())

@@ -134,11 +134,11 @@ async fn an_explicit_target_supplements_the_item() {
 #[tokio::test]
 async fn chat_is_answered_with_history_and_can_be_promoted() {
     let k = Kit::new();
-    router(&k, json!({"kind": "answer", "title": "问候"}), "你好呀");
-    k.core.say(WS, "你好", &[]).unwrap();
+    router(&k, json!({"kind": "answer", "title": "闲聊"}), "今天挺暖和");
+    k.core.say(WS, "聊聊今天的天气", &[]).unwrap();
     let ms = settle(&k, 2).await;
-    assert_eq!(ms[1].text, "你好呀");
-    assert_eq!(ms[1].meta["chat"], "你好");
+    assert_eq!(ms[1].text, "今天挺暖和");
+    assert_eq!(ms[1].meta["chat"], "聊聊今天的天气");
     let st = &ms[1].meta["steps"];
     assert_eq!(st["route"]["kind"], "answer");
     assert_eq!(
@@ -164,7 +164,7 @@ async fn chat_is_answered_with_history_and_can_be_promoted() {
                         steve_types::MessageId::from(value)
                     },
                     thought: String::new(),
-                    text: "你好呀  ".into()
+                    text: "今天挺暖和  ".into()
                 }
             )))
     );
@@ -175,17 +175,16 @@ async fn chat_is_answered_with_history_and_can_be_promoted() {
         .iter()
         .rfind(|p| p.starts_with("You are Steve"))
         .unwrap();
-    assert!(
-        answer_prompt.contains("Recent conversation:\nUser: 你好\nSteve: 你好呀\n\nUser: 再说一句")
-    );
+    assert!(answer_prompt.contains(
+        "Recent conversation:\nUser: 聊聊今天的天气\nSteve: 今天挺暖和\n\nUser: 再说一句"
+    ));
     let route_prompt = calls
         .iter()
         .rfind(|p| p.starts_with("You are the router"))
         .unwrap();
-    assert!(
-        route_prompt
-            .contains("Recent conversation, oldest first:\n  User: \"你好\"\n  Steve: \"你好呀\"")
-    );
+    assert!(route_prompt.contains(
+        "Recent conversation, oldest first:\n  User: \"聊聊今天的天气\"\n  Steve: \"今天挺暖和\""
+    ));
     /* promote: the router sees the question and Steve's answer */
     router(
         &k,
@@ -198,7 +197,7 @@ async fn chat_is_answered_with_history_and_can_be_promoted() {
     assert_eq!(item.bot_id.as_deref(), Some("steve"));
     let last = k.gw.calls.lock().unwrap().last().unwrap().clone();
     assert!(last.contains("The user pressed “做成事项”"));
-    assert!(last.contains("  Steve: \"你好呀\"\nUser message: \"你好\""));
+    assert!(last.contains("  Steve: \"今天挺暖和\"\nUser message: \"聊聊今天的天气\""));
 }
 
 #[tokio::test]
@@ -496,7 +495,7 @@ async fn stop_ends_an_answer_at_once_and_the_queue_goes_next() {
         "You are Steve, the user's assistant.",
         Duration::from_secs(30),
     ));
-    k.core.say(WS, "慢慢答", &[]).unwrap();
+    let asked = k.core.say(WS, "慢慢答", &[]).unwrap();
     /* the answer is being written, not merely queued; only this one is slow */
     steve_runtime::testkit::eventually_sync(
         "The answer prompt reaches the fake model gateway.",
@@ -508,17 +507,30 @@ async fn stop_ends_an_answer_at_once_and_the_queue_goes_next() {
     .await;
     *k.gw.slow.lock().unwrap() = None;
     let next = k.core.say(WS, "然后呢", &[]).unwrap();
-    assert_eq!(k.db().message(&next).unwrap().unwrap().meta["held"], true);
+    let view = k
+        .db()
+        .store()
+        .read(|r| {
+            use steve_store::Views;
+            r.message_views().of(WS, std::slice::from_ref(&next))
+        })
+        .unwrap();
+    assert_eq!(serde_json::to_value(&view[0].meta).unwrap()["held"], true);
     let t0 = std::time::Instant::now();
     assert!(k.core.stop(WS).unwrap());
     let ms = settle(&k, 4).await;
     assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
-    assert_eq!(ms[1].text, "好，停下了。要我换个方式就直接说。");
-    assert_eq!(ms[1].meta["stopped"], true);
-    assert_eq!(
-        (ms[2].id.as_str(), ms[3].text.as_str()),
-        (next.as_str(), "答好了")
-    );
+    let stopped_reply = ms
+        .iter()
+        .find(|m| m.author == "steve" && m.meta["origin"] == asked)
+        .expect("stopped reply for first message");
+    assert_eq!(stopped_reply.text, "好，停下了。要我换个方式就直接说。");
+    assert_eq!(stopped_reply.meta["stopped"], true);
+    let next_reply = ms
+        .iter()
+        .find(|m| m.author == "steve" && m.meta["origin"] == next)
+        .expect("answer for queued message");
+    assert_eq!(next_reply.text, "答好了");
     // the answer is written before its turn lets go of the thread
     steve_runtime::testkit::eventually_sync("The main conversation is no longer busy.", || {
         !k.core.main_busy(WS).unwrap()
@@ -526,85 +538,54 @@ async fn stop_ends_an_answer_at_once_and_the_queue_goes_next() {
     .await;
 }
 
-/// Stop reaches an answer its lane has not started: here new work is held for maintenance.
+/// Stop reaches a queued task its worker has not claimed yet: here new work is held for maintenance.
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_takes_an_answer_not_started_yet_off_the_queue() {
     let k = Kit::new();
     let store = k.db().store().clone();
-    let (hold, once) = (store.clone(), std::sync::Once::new());
-    k.gw.set(move |p, _| {
-        if p.starts_with("You are the router of Steve") {
-            /* held from here on: the first answer is queued, and its lane cannot start it */
-            once.call_once(|| hold.maintenance_set(true).unwrap());
-            Ok(r#"{"kind":"answer","confidence":0.9}"#.into())
-        } else {
-            Ok("答好了".into())
-        }
-    });
+    router(&k, json!({"kind": "answer", "confidence": 0.9}), "答好了");
+    store.maintenance_set(true).unwrap();
     let asked = k.core.say(WS, "慢慢答", &[]).unwrap();
-    steve_runtime::testkit::eventually_sync(
-        "The router has finished and the inline answer is in progress.",
-        || k.core.inline_busy(WS) && !k.core.routing(WS),
-    )
-    .await;
     let next = k.core.say(WS, "这个要答", &[]).unwrap();
-    assert_eq!(k.db().message(&next).unwrap().unwrap().meta["held"], true);
-    assert!(k.core.stop(WS).unwrap());
-    /* off the queue at once, not when its lane gets to it */
-    assert!(!k.core.inline_busy(WS));
+    let view = store
+        .read(|r| {
+            use steve_store::Views;
+            r.message_views().of(WS, std::slice::from_ref(&next))
+        })
+        .unwrap();
+    assert_eq!(serde_json::to_value(&view[0].meta).unwrap()["held"], true);
+    let task = store
+        .read(|r| steve_store::thread::tasks_of_origin(r, &asked))
+        .unwrap()
+        .remove(0);
+    assert!(k.core.stop_run(WS, &task.id).unwrap());
     let ms = k.db().messages(WS).unwrap();
     assert_eq!(ms.last().unwrap().meta["stopped"], true);
-    let run = |status| {
-        steve_store::core_fixture::thread::thread_run_count(&store, Some((&asked, status)))
-    };
-    assert_eq!((run("stopped"), run("queued")), (1, 0));
+    let stopped_receipt = store
+        .read(|r| steve_store::thread::receipt_by_origin(r, &asked))
+        .unwrap()
+        .expect("stopped receipt");
+    assert_eq!(stopped_receipt.outcome, "stopped");
+    assert_eq!(
+        steve_store::core_fixture::thread::thread_task_count(&store, Some((&asked, "queued"))),
+        0
+    );
     store.maintenance_set(false).unwrap();
-    /* its lane drops it and goes on: the question that waited comes after the stop note, and the one
-    answer written is to it */
+    k.core.thread_ready().unwrap();
     let ms = settle(&k, 4).await;
-    assert_eq!(
-        (ms[1].meta["stopped"].as_bool(), ms[2].id.as_str()),
-        (Some(true), next.as_str())
-    );
-    assert_eq!(
-        (ms[3].text.as_str(), &ms[3].meta["origin"]),
-        ("答好了", &json!(next))
-    );
     assert_eq!(ms.iter().filter(|m| m.meta["stopped"] == true).count(), 1);
-    assert_eq!(run("stopped"), 1);
-}
-
-/// Stop can land after a message's route is decided and before its answer is queued: the answer
-/// carries the routing's stop, and is not queued.
-#[tokio::test]
-async fn an_answer_stopped_while_its_message_was_routed_is_not_queued() {
-    use crate::thread::research::{Inline, InlineJob};
-    let k = Kit::new();
-    let asked = k.db().message_add(WS, "me", "问一下", None, None).unwrap();
-    let stop = crate::thread::Stop::default();
-    stop.stop();
-    let job = InlineJob {
-        kind: Inline::Answer,
-        origin: asked,
-        question: "问一下".into(),
-        files: vec![],
-        earlier: vec![],
-        user: None,
-        project: None,
-        route: None,
-        offer: None,
-        reply_to: None,
-        run: None,
-        stop,
-        t0: crate::util::now(),
-        resume: None,
-        space: crate::thread::MAIN.into(),
-        to_item: None,
-    };
-    assert!(k.core.enqueue_inline(WS, job).unwrap());
-    assert!(!k.core.inline_busy(WS));
-    let runs = steve_store::core_fixture::thread::thread_run_count(k.db().store(), None);
-    assert_eq!(runs, 0);
+    assert!(
+        ms.iter()
+            .any(|m| m.author == "steve" && m.text == "答好了" && m.meta["origin"] == json!(next))
+    );
+    assert_eq!(
+        store
+            .read(|r| steve_store::thread::receipt_by_origin(r, &asked))
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "stopped"
+    );
 }
 
 #[tokio::test]
@@ -847,8 +828,11 @@ async fn a_routing_that_panics_does_not_take_the_conversation_down() {
     .await;
     k.gw.script.clear_poison();
     k.core.say(WS, "/汇报", &[]).unwrap();
-    let ms = settle(&k, 3).await;
-    assert_eq!(ms[2].text, "现在：0 件等你，0 件在进行，今天完成 0 件。");
+    let ms = settle(&k, 4).await;
+    assert_eq!(
+        ms.last().unwrap().text,
+        "现在：0 件等你，0 件在进行，今天完成 0 件。"
+    );
 }
 
 /// An answer that panics ends its turn: the message waiting behind it is routed and answered.
@@ -870,32 +854,11 @@ async fn an_answer_that_panics_ends_its_turn() {
     .await;
     k.gw.script.clear_poison();
     k.core.say(WS, "/汇报", &[]).unwrap();
-    let ms = settle(&k, 3).await;
+    let ms = settle(&k, 4).await;
     assert_eq!(
         ms.last().unwrap().text,
         "现在：0 件等你，0 件在进行，今天完成 0 件。"
     );
-}
-
-/// A conversation's lanes go when idle, and the next message starts them again.
-#[tokio::test(flavor = "multi_thread")]
-async fn idle_lanes_go_and_come_back() {
-    let k = Kit::new();
-    router(&k, json!({"kind": "answer", "confidence": 0.9}), "答好了");
-    k.core.say(WS, "问一下", &[]).unwrap();
-    settle(&k, 2).await;
-    steve_runtime::testkit::eventually_sync("The main conversation is no longer busy.", || {
-        !k.core.main_busy(WS).unwrap()
-    })
-    .await;
-    assert_eq!(k.core.lanes_open(), (1, 1));
-    steve_runtime::testkit::eventually_sync("Both idle runtime lanes are released.", || {
-        k.core.lanes_open() == (0, 0)
-    })
-    .await;
-    k.core.say(WS, "再问", &[]).unwrap();
-    let ms = settle(&k, 4).await;
-    assert_eq!(ms[3].text, "答好了");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -929,79 +892,7 @@ async fn a_contact_field_said_in_the_conversation_is_applied_at_once() {
     assert!(important);
 }
 
-/// #51: a message whose way is fixed (to an open item, `/汇报`) does not wait behind the answer in
-/// progress: it is not held, and its acknowledgement comes while the answer still runs.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_message_to_an_item_passes_the_answer_in_progress() {
-    let k = Kit::new();
-    router(&k, json!({"kind": "answer", "confidence": 0.9}), "答好了");
-    *k.gw.slow.lock().unwrap() = Some((
-        "You are Steve, the user's assistant.",
-        Duration::from_secs(30),
-    ));
-    let i = k.item("run", "执行", None);
-    let s = k.session(&i, "idle");
-    k.core.say(WS, "慢慢答", &[]).unwrap();
-    steve_runtime::testkit::eventually_sync("The inline answer has started executing.", || {
-        k.core.inline_busy(WS)
-    })
-    .await;
-    let to = k
-        .core
-        .say_to(
-            WS,
-            None,
-            "记得加测试",
-            &[],
-            &[],
-            crate::thread::SayTo {
-                item: Some(i.clone()),
-                reply_to: None,
-            },
-        )
-        .unwrap();
-    assert!(
-        k.db()
-            .message(&to)
-            .unwrap()
-            .unwrap()
-            .meta
-            .get("held")
-            .is_none()
-    );
-    let report = k.core.say(WS, "/汇报", &[]).unwrap();
-    /* the question, both messages and both replies */
-    let ms = settle(&k, 5).await;
-    assert!(k.core.inline_busy(WS), "the answer still runs");
-    let acks: Vec<&str> = ms
-        .iter()
-        .filter(|m| m.author == "steve")
-        .map(|m| m.text.as_str())
-        .collect();
-    assert!(
-        acks.contains(&format!("已作为补充送到 {i}。").as_str()),
-        "{acks:?}"
-    );
-    assert!(acks.iter().any(|t| t.starts_with("现在：")), "{acks:?}");
-    assert_eq!(k.rt.prompts_of(&s), vec!["补充信息：记得加测试"]);
-    assert!(
-        k.db()
-            .message(&report)
-            .unwrap()
-            .unwrap()
-            .meta
-            .get("held")
-            .is_none()
-    );
-    // a message the router has to see still waits for the turn
-    let next = k.core.say(WS, "然后呢", &[]).unwrap();
-    assert_eq!(k.db().message(&next).unwrap().unwrap().meta["held"], true);
-    assert!(k.core.stop(WS).unwrap());
-    *k.gw.slow.lock().unwrap() = None;
-    settle(&k, 7).await;
-}
-
-/// #52: a plain question is researched without asking the router (route_log `guard = "q"`); one that
+/// #52: a plain question is researched without asking the router (`route_guard = "q"`); one that
 /// names an item or asks for work still goes to the router.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plain_question_skips_the_router() {
@@ -1026,14 +917,11 @@ async fn a_plain_question_skips_the_router() {
     let log = k
         .db()
         .store()
-        .thread()
-        .route_of(&q)
+        .read(|r| steve_store::thread::receipt_by_origin(r, &q))
         .unwrap()
-        .expect("route log");
-    assert_eq!(log.guard.as_deref(), Some("q"));
-    assert_eq!(log.model, None);
-    // the answer is written before its turn lets go of the thread: said before that, the next
-    // message is routed once ahead of its turn and once more after the answer (#394)
+        .expect("reply receipt");
+    assert_eq!(log.route_guard.as_deref(), Some("q"));
+    assert_eq!(log.route_model, None);
     steve_runtime::testkit::eventually_sync("The main conversation is no longer busy.", || {
         !k.core.main_busy(WS).unwrap()
     })

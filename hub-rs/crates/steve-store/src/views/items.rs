@@ -39,7 +39,7 @@ fn select() -> SelectStatement {
             (SELECT json_array(count(*), max(rowid)) FROM artifacts WHERE item_id=items.id),
             (SELECT json_array(count(*), max(updated)) FROM annotations WHERE item_id=items.id),
             (SELECT json_array(revision, updated) FROM workflows WHERE item_id=items.id),
-            (SELECT follow FROM thread_items WHERE item_id=items.id)
+            (SELECT follow FROM thread_dispatch_refs WHERE target_item_id=items.id AND effect_kind='create_item' LIMIT 1)
         )"))
         .expr(Expr::cust("(SELECT fact FROM bot_placements WHERE item_id=items.id AND fact IS NOT NULL ORDER BY seq DESC LIMIT 1)"))
         .expr(Expr::cust("(SELECT json_group_array(json_object('repository',repository,'number',number,'target',target,'head',head,'base',base,'required',json(CASE required WHEN 1 THEN 'true' ELSE 'false' END))) FROM (SELECT repository,number,target,head,base,required FROM item_delivery_refs WHERE item_id=items.id AND cycle=items.cycle AND scope=COALESCE((SELECT MAX(version) FROM item_goals WHERE item_id=items.id),0) ORDER BY repository,number))"))

@@ -98,8 +98,19 @@ impl Fixture {
             )
             .unwrap();
         self.store
-            .thread()
-            .item_add(&item.id, &item.workspace_id, &message, None, false)
+            .write(|w| {
+                steve_store::thread::record_dispatch(
+                    w,
+                    &item.workspace_id,
+                    space,
+                    &message,
+                    &item.id,
+                    None,
+                    false,
+                    true,
+                    steve_store::now(),
+                )
+            })
             .unwrap();
         message
     }
@@ -275,8 +286,19 @@ fn source_message_workspace_cannot_grant_another_workspaces_main_scope() {
     let foreign = f.item("other", "foreign main origin");
     let message = f.origin(&foreign, steve_core::thread::MAIN);
     f.store
-        .thread()
-        .item_add(&own.id, "default", &message, None, false)
+        .write(|w| {
+            steve_store::thread::record_dispatch(
+                w,
+                "default",
+                steve_core::thread::MAIN,
+                &message,
+                &own.id,
+                None,
+                false,
+                true,
+                steve_store::now(),
+            )
+        })
         .unwrap();
     let (_, view) = scope(&f.store, &f.session(&own)).unwrap();
     assert!(view.sees(&own.id));

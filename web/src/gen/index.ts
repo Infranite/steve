@@ -107,7 +107,6 @@ export type { StatsEvent } from "./StatsEvent";
 export type { SteveError } from "./SteveError";
 export type { StreamControl } from "./StreamControl";
 export type { TagId } from "./TagId";
-export type { ThreadRunId } from "./ThreadRunId";
 export type { TimeoutPhase } from "./TimeoutPhase";
 export type { UserId } from "./UserId";
 export type { VaultEvent } from "./VaultEvent";

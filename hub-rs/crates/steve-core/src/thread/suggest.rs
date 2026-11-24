@@ -1,21 +1,19 @@
 //! Suggestion cards: when the router is unsure whether a message is work, Steve asks
-//! with a card — “在这里出方案 / 建成事项：<标题>” — instead of quietly making an item. Only in the
-//! conversation (not in the inbox), never taken by YOLO, greyed out after 24 hours but still clickable.
+//! with a card instead of quietly making an item.
 
 use super::offer::{Handled, ThreadItem, not_found};
-use super::research::{Inline, InlineJob};
-use super::{decide::Decision, lock, meta_of};
+use super::{Conv, decide::Decision, lock, meta_of};
 use crate::Core;
 use crate::error::{CoreError, Result};
 use crate::gateway::Route;
 use crate::repo::{FileRef, Item};
 use crate::util::now;
 use serde_json::{Value, json};
+use steve_store::{NewRevisionTask, thread};
 
 /// After this long an unanswered card is `expired`.
 const EXPIRES: i64 = 24 * 3600 * 1000;
 
-/// The request stays on the same card, with choices that do not reopen the finished item.
 fn closed_card(name: &str, work: Value) -> (String, Value) {
     let q = format!("{name} 已经结束了。这条请求要单独建一个事项，还是在这里讨论？");
     (
@@ -28,10 +26,6 @@ fn closed_card(name: &str, work: Value) -> (String, Value) {
     )
 }
 
-/// The card's text and `meta.suggest` for a route the guards turned into a suggestion. About an existing
-/// item (`item`, the one the model named): why the message belongs there, the recommendation, and the
-/// decision that is actually open — append it to that item, or make an item of its own (decided by the
-/// user on 2026-11-05, ST-44; no longer “这是给 ST-n 的吗？ 送到 ST-n / 在这里回答”).
 pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Value) {
     if let Some(id) = &d.for_item {
         let name = item
@@ -49,7 +43,6 @@ pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Val
         let q = format!(
             "{because}，可以和它一起实现和验收。建议追加到 {name}，你想追加进去，还是单独建一个事项？"
         );
-        /* an item of its own goes where the item it was close to went, unless the router said otherwise */
         let title = Some(r.title.trim()).filter(|t| !t.is_empty());
         let goal = Some(r.goal.trim()).filter(|g| !g.is_empty());
         let project = r
@@ -95,7 +88,6 @@ pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Val
     )
 }
 
-/// The loaded suggestion and its original request, held under the caller's acting lock.
 struct Suggestion<'a> {
     ws: &'a str,
     msg_id: &'a str,
@@ -104,13 +96,11 @@ struct Suggestion<'a> {
     origin: String,
     files: Vec<FileRef>,
     meta: serde_json::Map<String, Value>,
-    th: steve_store::Thread<'a>,
 }
 
 impl Core {
-    /// Cards nobody answered for 24 hours turn `expired` (`route_log.outcome = suggest_expired`).
+    /// Cards nobody answered for 24 hours turn `expired`.
     pub(crate) fn expire_suggestions(&self, ws: &str, space: &str) -> Result<()> {
-        let th = self.store().store().thread();
         for m in self.conv_messages(ws, space)? {
             if m.meta["suggest"]["state"] == "open" && now() - m.created >= EXPIRES {
                 let mut meta = meta_of(&m);
@@ -118,18 +108,17 @@ impl Core {
                 self.store()
                     .message_patch_meta(&m.id, &Value::Object(meta))?;
                 if let Some(o) = m.meta.get("origin").and_then(Value::as_str) {
-                    th.route_outcome(o, "suggest_expired", None)?;
+                    self.store()
+                        .store()
+                        .write(|w| thread::update_receipt_outcome(w, o, "suggest_expired", None))?;
                 }
             }
         }
         Ok(())
     }
 
-    /// The user picked on a suggestion card (`POST /api/thread/:id/suggest`): `here` answers the original
-    /// message in place (the answer continues this card), `item` makes the item, or appends the message to
-    /// the item a card about an existing item recommends; `new` (that card's other choice) makes an item
-    /// of its own.
-    /// `by`: the member who picked, whose access an item made here runs with.
+    /// The user picked on a suggestion card (`POST /api/thread/:id/suggest`).
+    /// Preserves caller `by` identity for inline research and item creation alike.
     pub fn suggest(
         &self,
         ws: &str,
@@ -173,7 +162,6 @@ impl Core {
             .cloned()
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
-        let th = self.store().store().thread();
         let pick = card["choices"]
             .as_array()
             .and_then(|cs| cs.iter().find(|c| c["id"] == choice))
@@ -190,12 +178,10 @@ impl Core {
             origin,
             files,
             meta,
-            th,
         };
         if choice == "here" {
-            return self.answer_suggestion_here(suggestion);
+            return self.answer_suggestion_here(suggestion, by);
         }
-        /* a card asking whether the message was for an existing item */
         if let Some(target) = pick["item"]
             .as_str()
             .filter(|_| pick.get("title").is_none())
@@ -205,47 +191,71 @@ impl Core {
         self.create_suggested_item(suggestion, &pick, by)
     }
 
-    /// Queue the original question on the existing card; only mark the choice once admitted.
-    fn answer_suggestion_here(&self, suggestion: Suggestion<'_>) -> Result<Handled> {
+    /// Queue a durable research revision for the original question, preserving caller `by`.
+    fn answer_suggestion_here(
+        &self,
+        suggestion: Suggestion<'_>,
+        by: Option<&str>,
+    ) -> Result<Handled> {
         let Suggestion {
             ws,
             msg_id,
             m,
-            om,
             origin,
             files,
             meta,
-            th,
+            ..
         } = suggestion;
-        let job = InlineJob {
-            kind: Inline::Research,
-            origin: origin.clone(),
-            question: om.text.clone(),
-            files,
-            earlier: vec![],
-            user: None,
-            project: m.meta["steps"]["route"]["project"]
-                .as_str()
-                .map(String::from),
-            route: m.meta["steps"].get("route").cloned(),
-            offer: None,
-            reply_to: Some(msg_id.into()),
-            run: None,
-            stop: super::Stop::default(),
-            t0: now(),
-            resume: None,
-            space: m.space.clone(),
-            to_item: None,
+        let project = m.meta["steps"]["route"]["project"]
+            .as_str()
+            .map(String::from);
+        let route_json = m.meta["steps"]
+            .get("route")
+            .and_then(|v| serde_json::to_string(v).ok());
+        let files_json = (!files.is_empty())
+            .then(|| serde_json::to_string(&files).ok())
+            .flatten();
+        let conv = if m.space == super::MAIN {
+            Conv::main()
+        } else {
+            Conv {
+                space: m.space.clone(),
+                research: true,
+                items: false,
+                owner_only: false,
+                start: false,
+                hands_on: false,
+            }
         };
-        if !self.enqueue_inline(ws, job)? {
-            return Err(CoreError::Status(
-                409,
-                steve_i18n::t!("core.thread.queue_full"),
-            ));
-        }
+        let conv_json = serde_json::to_string(&conv)?;
+        self.store().store().write(|w| {
+            thread::enqueue_revision(
+                w,
+                &NewRevisionTask {
+                    ws,
+                    space: &m.space,
+                    origin_message_id: &origin,
+                    user_id: by,
+                    project_id: project.as_deref(),
+                    conv_json: Some(&conv_json),
+                    to_item: None,
+                    to_reply_to: None,
+                    files_json: files_json.as_deref(),
+                    mentions_json: None,
+                    reply_to_message_id: Some(msg_id),
+                    forced_kind: Some("research"),
+                    route_json: route_json.as_deref(),
+                    offer_json: None,
+                    prev_receipt_id: None,
+                    read_task_intent_key: None,
+                },
+            )?;
+            thread::update_receipt_outcome(w, &origin, "suggest_here", None)?;
+            Ok::<_, steve_store::StoreError>(())
+        })?;
         self.store()
             .message_patch_meta(msg_id, &Value::Object(meta))?;
-        th.route_outcome(&origin, "suggest_here", None)?;
+        self.wake_space(ws, &m.space);
         Ok(Handled {
             message_id: msg_id.into(),
             item: None,
@@ -253,7 +263,6 @@ impl Core {
         })
     }
 
-    /// Forward to open work, or replace a closed target's choices on the same card.
     fn append_suggestion_to_item(
         &self,
         suggestion: Suggestion<'_>,
@@ -268,7 +277,6 @@ impl Core {
             origin,
             files,
             mut meta,
-            th,
         } = suggestion;
         if !self.forward_open(target, &om.text, &files, &origin)? {
             let work = card["choices"]
@@ -282,7 +290,9 @@ impl Core {
                 .store()
                 .messages()
                 .patch_text_meta(msg_id, &q, &Value::Object(meta))?;
-            th.route_outcome(&origin, "suggest_closed", None)?;
+            self.store()
+                .store()
+                .write(|w| thread::update_receipt_outcome(w, &origin, "suggest_closed", None))?;
             return Ok(Handled {
                 message_id: msg_id.into(),
                 item: None,
@@ -292,7 +302,9 @@ impl Core {
         meta["suggest"]["item"] = json!(target);
         self.store()
             .message_patch_meta(msg_id, &Value::Object(meta))?;
-        th.route_outcome(&origin, "suggest_item", Some(target))?;
+        self.store()
+            .store()
+            .write(|w| thread::update_receipt_outcome(w, &origin, "suggest_item", Some(target)))?;
         let id = self.store().message_add_in(
             ws,
             &m.space,
@@ -309,7 +321,6 @@ impl Core {
         })
     }
 
-    /// Create the chosen work, then persist its link and announce the living card.
     fn create_suggested_item(
         &self,
         suggestion: Suggestion<'_>,
@@ -324,10 +335,9 @@ impl Core {
             origin,
             files,
             mut meta,
-            th,
         } = suggestion;
         let s = |k: &str| pick[k].as_str().map(String::from);
-        let item = self.thread_item(ThreadItem {
+        let (item, already, _) = self.thread_item_once(ThreadItem {
             ws,
             origin: &origin,
             title: s("title").unwrap_or_else(|| crate::util::js_head(&om.text, 24).into()),
@@ -346,12 +356,21 @@ impl Core {
             from_question: super::decide::pure_question(&om.text),
             by: by.map(String::from),
             answer: Some(m),
-            start: true, // your action in the web
+            start: true,
         })?;
         meta["suggest"]["item"] = json!(item.id);
         self.store()
             .message_patch_meta(msg_id, &Value::Object(meta))?;
-        th.route_outcome(&origin, "suggest_item", Some(&item.id))?;
+        if already {
+            return Ok(Handled {
+                message_id: msg_id.into(),
+                item: Some(item),
+                already: true,
+            });
+        }
+        self.store().store().write(|w| {
+            thread::update_receipt_outcome(w, &origin, "suggest_item", Some(&item.id))
+        })?;
         let text = format!("好，建了 {}，交给 {} 了。", item.id, self.bot_name(&item));
         let id = self.announce(
             ws,

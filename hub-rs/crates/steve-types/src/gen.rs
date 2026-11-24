@@ -30,7 +30,6 @@ fn bindings_match() {
         SessionId,
         DecisionId,
         MessageId,
-        ThreadRunId,
         BotId,
         ProjectId,
         TagId,

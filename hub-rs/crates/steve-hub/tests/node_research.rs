@@ -46,12 +46,12 @@ impl Service for Tools {
     async fn call(&self, _: steve_store::Session, _: &str, _: Value) -> Result<String, String> {
         Ok("session tool".into())
     }
-    async fn research_catalog(&self, _: &steve_store::ThreadRun) -> Vec<ToolDescriptor> {
+    async fn research_catalog(&self, _: &steve_store::ThreadTask) -> Vec<ToolDescriptor> {
         steve_hub::wire::research_mcp::descriptors()
     }
     async fn research_call(
         &self,
-        run: steve_store::ThreadRun,
+        run: steve_store::ThreadTask,
         name: &str,
         _: Value,
     ) -> Result<String, String> {

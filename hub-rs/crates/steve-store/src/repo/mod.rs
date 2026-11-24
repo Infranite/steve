@@ -20,7 +20,6 @@ pub mod nodes;
 pub use crate::contract::node_write::runtime;
 mod sessions;
 mod stats;
-mod thread;
 mod usage_ledger;
 pub mod workflows;
 
@@ -34,7 +33,6 @@ pub use self::files::*;
 pub use self::items::*;
 pub use self::sessions::*;
 pub use self::stats::*;
-pub use self::thread::*;
 pub use self::workflows::{
     NOTE_CLAIMED, NOTE_SESSION_BOUND, PAUSED_BY_AGENT, PAUSED_BY_ITEM, PAUSED_BY_USER, UnitSpec,
     WorkUnit, Workflow, WorkflowHistory, Workflows, claim_in,

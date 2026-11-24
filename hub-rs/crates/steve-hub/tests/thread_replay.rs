@@ -29,8 +29,7 @@ use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 use steve_hub::projection::Projection;
 use steve_store::{
-    NewDecision, NewItem, NewThreadRun, NewWorkspace, RunPatch, Store, Views, WS, core_queue,
-    thread_runs,
+    CommitOutcome, CommitReplyInput, NewDecision, NewItem, NewWorkspace, Store, Views, WS, thread,
 };
 use tower::ServiceExt;
 
@@ -258,20 +257,132 @@ impl Env {
     }
 
     fn seed_pending_message(&self, ws: &str, text: &str) -> String {
-        let mid = self
+        let now = steve_store::now();
+        let outcome = self
+            .store
+            .write(|w| {
+                thread::submit_message(
+                    w,
+                    &steve_store::SubmitInput {
+                        ws,
+                        space: "steve",
+                        actor_key: &self.owner_id,
+                        submit_key: &steve_store::uid("seed"),
+                        payload_digest: &steve_store::sha(text),
+                        text,
+                        item_id: None,
+                        meta: &Value::Null,
+                        user_id: Some(&self.owner_id),
+                        project_id: None,
+                        conv_json: Some(r#"{"space":"steve","research":true,"items":true,"owner_only":false,"start":true,"hands_on":false}"#),
+                        to_item: None,
+                        to_reply_to: None,
+                        file_ids: &[],
+                        files_json: None,
+                        mentions_json: None,
+                        enqueue_task: true,
+                        validate_refs: false,
+                    },
+                )
+            })
+            .unwrap();
+        let _ = now;
+        match outcome {
+            steve_store::SubmitOutcome::Accepted { message_id, .. } => message_id,
+            other => panic!("unexpected seed submit outcome: {other:?}"),
+        }
+    }
+
+    fn seed_committed_reply(
+        &self,
+        ws: &str,
+        space: &str,
+        user_id: Option<&str>,
+        q: &str,
+        a: &str,
+    ) -> (String, String, String, String, i64) {
+        let now = steve_store::now();
+        let origin = self
             .store
             .messages()
-            .add(ws, "me", text, None, &json!({"held": true}), "steve")
+            .add(ws, "me", q, None, &json!({}), space)
             .unwrap();
-        let job = json!({
-            "mid": mid, "text": text, "files": [], "user": self.owner_id,
-            "mentions": [], "to": {"item": null, "reply_to": null},
-            "conv": {"space": "steve", "research": true, "items": true, "owner_only": false, "start": true, "hands_on": false}
-        });
-        self.store
-            .write(|w| core_queue::enqueue(w, ws, &mid, &job.to_string(), steve_store::now()))
+        let lease = steve_store::uid("lease");
+        let (task_id, generation, reply_id) = self
+            .store
+            .write(|w| {
+                let _ = thread::enqueue_revision(
+                    w,
+                    &steve_store::NewRevisionTask {
+                        ws,
+                        space,
+                        origin_message_id: &origin,
+                        user_id,
+                        project_id: None,
+                        conv_json: None,
+                        to_item: None,
+                        to_reply_to: None,
+                        files_json: None,
+                        mentions_json: None,
+                        reply_to_message_id: None,
+                        forced_kind: Some("answer"),
+                        route_json: None,
+                        offer_json: None,
+                        prev_receipt_id: None,
+                        read_task_intent_key: None,
+                    },
+                )?;
+                let claimed =
+                    thread::claim_head(w, ws, space, &lease, now)?.expect("claimed reply task");
+                let commit = thread::commit_reply(
+                    w,
+                    &CommitReplyInput {
+                        task_id: &claimed.id,
+                        lease_token: &lease,
+                        expected_generation: claimed.generation,
+                        allow_cancelled_stop: false,
+                        outcome: "answered",
+                        reply_text: Some(a),
+                        existing_reply_id: None,
+                        reply_item_id: None,
+                        reply_meta: &json!({"origin": origin, "run_receipt": true}),
+                        error_code: None,
+                        route_kind: "answer",
+                        model_kind: "answer",
+                        route_guard: None,
+                        route_model: None,
+                        route_confidence: None,
+                        route_signals: &[],
+                        route_fallback: false,
+                        route_ms: 1,
+                        route_outcome: None,
+                        item_id: None,
+                        dispatch_ref_id: None,
+                        delivery_ref_id: None,
+                        model_call_id: None,
+                        user_id,
+                        project_id: None,
+                        answer_model: None,
+                        harness: None,
+                        harness_session: None,
+                        tools: 0,
+                        turns: 1,
+                        first_text_ms: Some(1),
+                        error_detail: None,
+                        record_attention_commit: space == "steve" && user_id.is_some(),
+                    },
+                )?;
+                let reply_id = match commit {
+                    CommitOutcome::Committed {
+                        reply_message_id: Some(r),
+                        ..
+                    } => r,
+                    other => panic!("expected committed reply: {other:?}"),
+                };
+                Ok::<_, steve_store::StoreError>((claimed.id, claimed.generation, reply_id))
+            })
             .unwrap();
-        mid
+        (origin, reply_id, task_id, lease, generation)
     }
 
     async fn snapshot_messages_match_store(&self, ws: &str) -> bool {
@@ -369,7 +480,7 @@ async fn w34_thread_replay_hub() {
                 ("first_ok", s1 == 200),
                 ("submit_payload_conflict_rejected", s2 == 409),
             ],
-            &["submit_payload_conflict_rejected"],
+            &[],
         );
     }
 
@@ -402,29 +513,15 @@ async fn w34_thread_replay_hub() {
                 ("submit_idempotent_across_restart", user_msgs == 1),
                 ("le1_final_reply_per_intent", steve_msgs <= 1),
             ],
-            &[
-                "submit_idempotent_across_restart",
-                "le1_final_reply_per_intent",
-            ],
+            &[],
         );
     }
 
     // 04: Withdraw queued message, restart Hub, retry old client_id -> tombstone must prevent resurrection!
     {
         let mut e = Env::start().await;
-        // Seed a queued message via HTTP (using an open item/busy lane or direct pending + withdraw)
-        // First submit with client_id, wait for message, seed pending so withdraw succeeds, then restart & retry client_id
-        let mid = e.seed_pending_message(WS, "/汇报");
-        let (s_wd, _, _) = e
-            .req(
-                "DELETE",
-                &format!("/api/thread/queued/{mid}"),
-                Some(&e.owner_cookie),
-                WS,
-                None,
-            )
-            .await;
-        // Also simulate submit with client_id followed by withdraw before claim across restart:
+        // Hold execution in maintenance so the submitted message stays queued until withdrawn.
+        e.store.maintenance_set(true).unwrap();
         let body = json!({"text": "/汇报", "client_id": "cid_withdrawn_1"});
         let (s1, _, _) = e
             .req(
@@ -435,8 +532,18 @@ async fn w34_thread_replay_hub() {
                 Some(body.clone()),
             )
             .await;
-        e.wait_messages(WS, 2).await;
-        // Manually delete as withdraw did (no tombstone in DB), restart Hub, replay client_id
+        let ms = e.store.messages().list(WS, "steve", 200).unwrap();
+        let mid = ms.last().expect("queued msg").id.clone();
+        let (s_wd, _, _) = e
+            .req(
+                "DELETE",
+                &format!("/api/thread/queued/{mid}"),
+                Some(&e.owner_cookie),
+                WS,
+                None,
+            )
+            .await;
+        e.store.maintenance_set(false).unwrap();
         e.restart().await;
         let before = e.store.messages().list(WS, "steve", 200).unwrap().len();
         let (s2, _, _) = e
@@ -444,13 +551,17 @@ async fn w34_thread_replay_hub() {
             .await;
         tokio::time::sleep(Duration::from_millis(80)).await;
         let after = e.store.messages().list(WS, "steve", 200).unwrap().len();
+        let tomb = e.store.messages().get(&mid).unwrap().unwrap();
         report.case(
             "hub.submit.04_withdrawn_client_id_retry_after_restart_no_resurrect",
             &[
-                ("withdraw_ok", s_wd == 200 && s1 == 200 && s2 == 200),
-                ("withdrawn_tombstone_no_resurrect", after == before),
+                ("withdraw_ok", s1 == 200 && s_wd == 200 && s2 == 409),
+                (
+                    "withdrawn_tombstone_no_resurrect",
+                    after == before && tomb.meta["withdrawn"] == json!(true),
+                ),
             ],
-            &["withdrawn_tombstone_no_resurrect"],
+            &[],
         );
     }
 
@@ -667,147 +778,13 @@ async fn w34_thread_replay_hub() {
         let e = Env::start().await;
         let (u2_id, _) = e.make_user_cookie("local:u2_att", "member");
         // Seed committed main reply for owner
-        let m_own = e
-            .store
-            .messages()
-            .add(WS, "me", "owner q", None, &json!({}), "steve")
-            .unwrap();
-        let run_own = e
-            .store
-            .write(|w| {
-                thread_runs::add(
-                    w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: m_own.clone(),
-                        user_id: Some(e.owner_id.clone()),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
-        let r_own = e
-            .store
-            .messages()
-            .add(
-                WS,
-                "steve",
-                "owner ans",
-                None,
-                &json!({"origin": m_own, "run": run_own.id, "run_receipt": true}),
-                "steve",
-            )
-            .unwrap();
-        e.store
-            .write(|w| {
-                thread_runs::patch(
-                    w,
-                    &run_own.id,
-                    &RunPatch {
-                        status: Some("done".into()),
-                        reply_id: Some(r_own.clone()),
-                        ended: Some(steve_store::now()),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
-
+        let (_, r_own, _, _, _) =
+            e.seed_committed_reply(WS, "steve", Some(&e.owner_id), "owner q", "owner ans");
         // Seed committed main reply for u2 (must NOT appear for owner)
-        let m_u2 = e
-            .store
-            .messages()
-            .add(WS, "me", "u2 q", None, &json!({}), "steve")
-            .unwrap();
-        let run_u2 = e
-            .store
-            .write(|w| {
-                thread_runs::add(
-                    w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: m_u2.clone(),
-                        user_id: Some(u2_id.clone()),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
-        let r_u2 = e
-            .store
-            .messages()
-            .add(
-                WS,
-                "steve",
-                "u2 ans",
-                None,
-                &json!({"origin": m_u2, "run": run_u2.id, "run_receipt": true}),
-                "steve",
-            )
-            .unwrap();
-        e.store
-            .write(|w| {
-                thread_runs::patch(
-                    w,
-                    &run_u2.id,
-                    &RunPatch {
-                        status: Some("done".into()),
-                        reply_id: Some(r_u2),
-                        ended: Some(steve_store::now()),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
-
+        let _ = e.seed_committed_reply(WS, "steve", Some(&u2_id), "u2 q", "u2 ans");
         // Seed guest reply (must NOT appear in MAIN replies attention)
-        let m_g = e
-            .store
-            .messages()
-            .add(WS, "me", "guest q", None, &json!({}), "chan:sp1")
-            .unwrap();
-        let run_g = e
-            .store
-            .write(|w| {
-                thread_runs::add(
-                    w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: m_g.clone(),
-                        user_id: Some(e.owner_id.clone()),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
-        let r_g = e
-            .store
-            .messages()
-            .add(
-                WS,
-                "steve",
-                "guest ans",
-                None,
-                &json!({"origin": m_g, "run": run_g.id, "run_receipt": true}),
-                "chan:sp1",
-            )
-            .unwrap();
-        e.store
-            .write(|w| {
-                thread_runs::patch(
-                    w,
-                    &run_g.id,
-                    &RunPatch {
-                        status: Some("done".into()),
-                        reply_id: Some(r_g),
-                        ended: Some(steve_store::now()),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
-
-        // Seed uncommitted running run + notice (neither may appear)
+        let _ = e.seed_committed_reply(WS, "chan:sp1", Some(&e.owner_id), "guest q", "guest ans");
+        // Seed uncommitted active task + notice (neither may appear)
         let m_run = e
             .store
             .messages()
@@ -816,28 +793,43 @@ async fn w34_thread_replay_hub() {
         let _ = e
             .store
             .write(|w| {
-                thread_runs::add(
+                thread::enqueue_revision(
                     w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: m_run,
-                        user_id: Some(e.owner_id.clone()),
-                        ..Default::default()
+                    &steve_store::NewRevisionTask {
+                        ws: WS,
+                        space: "steve",
+                        origin_message_id: &m_run,
+                        user_id: Some(&e.owner_id),
+                        project_id: None,
+                        conv_json: None,
+                        to_item: None,
+                        to_reply_to: None,
+                        files_json: None,
+                        mentions_json: None,
+                        reply_to_message_id: None,
+                        forced_kind: Some("research"),
+                        route_json: None,
+                        offer_json: None,
+                        prev_receipt_id: None,
+                        read_task_intent_key: None,
                     },
                 )
             })
             .unwrap();
         let _ = e
             .store
-            .messages()
-            .add(
-                WS,
-                "steve",
-                "notice",
-                None,
-                &json!({"notice": {"kind": "system", "level": "fail"}}),
-                "steve",
-            )
+            .write(|w| {
+                thread::post_notice(
+                    w,
+                    WS,
+                    "system",
+                    "fail",
+                    "notice",
+                    None,
+                    true,
+                    steve_store::now(),
+                )
+            })
             .unwrap();
 
         let (st, _, att) = e
@@ -864,69 +856,56 @@ async fn w34_thread_replay_hub() {
         );
     }
 
-    // 11: Attention read_replies is monotonic and re-patching same terminal reply adds 0 unread
+    // 11: Attention read_replies is monotonic and stale/duplicate commit on same task adds 0 unread
     {
         let e = Env::start().await;
-        let m1 = e
-            .store
-            .messages()
-            .add(WS, "me", "q1", None, &json!({}), "steve")
-            .unwrap();
-        let run = e
+        let (m1, r1, task_id, lease, generation) =
+            e.seed_committed_reply(WS, "steve", Some(&e.owner_id), "q1", "ans1");
+        // Re-attempt commit with the same lease/generation -> fenced out (0 duplicate unread)
+        let second = e
             .store
             .write(|w| {
-                thread_runs::add(
+                thread::commit_reply(
                     w,
-                    &NewThreadRun {
-                        workspace_id: WS.into(),
-                        message_id: m1.clone(),
-                        user_id: Some(e.owner_id.clone()),
-                        ..Default::default()
+                    &CommitReplyInput {
+                        task_id: &task_id,
+                        lease_token: &lease,
+                        expected_generation: generation,
+                        allow_cancelled_stop: false,
+                        outcome: "answered",
+                        reply_text: Some("ans1 dup"),
+                        existing_reply_id: None,
+                        reply_item_id: None,
+                        reply_meta: &json!({"origin": m1, "run_receipt": true}),
+                        error_code: None,
+                        route_kind: "answer",
+                        model_kind: "answer",
+                        route_guard: None,
+                        route_model: None,
+                        route_confidence: None,
+                        route_signals: &[],
+                        route_fallback: false,
+                        route_ms: 1,
+                        route_outcome: None,
+                        item_id: None,
+                        dispatch_ref_id: None,
+                        delivery_ref_id: None,
+                        model_call_id: None,
+                        user_id: Some(&e.owner_id),
+                        project_id: None,
+                        answer_model: None,
+                        harness: None,
+                        harness_session: None,
+                        tools: 0,
+                        turns: 1,
+                        first_text_ms: Some(1),
+                        error_detail: None,
+                        record_attention_commit: true,
                     },
                 )
             })
             .unwrap();
-        let r1 = e
-            .store
-            .messages()
-            .add(
-                WS,
-                "steve",
-                "ans1",
-                None,
-                &json!({"origin": m1, "run": run.id, "run_receipt": true}),
-                "steve",
-            )
-            .unwrap();
-        e.store
-            .write(|w| {
-                thread_runs::patch(
-                    w,
-                    &run.id,
-                    &RunPatch {
-                        status: Some("done".into()),
-                        reply_id: Some(r1.clone()),
-                        ended: Some(steve_store::now()),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
-        // Re-patch same run status/reply -> trigger must ignore duplicate message_id
-        e.store
-            .write(|w| {
-                thread_runs::patch(
-                    w,
-                    &run.id,
-                    &RunPatch {
-                        status: Some("done".into()),
-                        reply_id: Some(r1.clone()),
-                        ended: Some(steve_store::now() + 1),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
+        assert!(matches!(second, CommitOutcome::Fenced));
         let (_, _, att1) = e
             .req(
                 "GET",
@@ -1195,30 +1174,22 @@ async fn w34_thread_replay_hub() {
     // 16: Notice post + dismiss invalidates MessageView host projection (0 diffs!)
     {
         let e = Env::start().await;
-        let nid = e
+        let notice = e
             .store
-            .messages()
-            .add(
-                WS,
-                "steve",
-                "发布失败：冲突",
-                None,
-                &json!({"notice": {"kind": "release", "level": "fail"}}),
-                "notify",
-            )
+            .write(|w| {
+                thread::post_notice(
+                    w,
+                    WS,
+                    "release",
+                    "fail",
+                    "发布失败：冲突",
+                    None,
+                    true,
+                    steve_store::now(),
+                )
+            })
             .unwrap();
-        let line_id = e
-            .store
-            .messages()
-            .add(
-                WS,
-                "steve",
-                "发布失败：冲突",
-                None,
-                &json!({"notice": {"kind": "release", "level": "fail", "ref": nid}}),
-                "steve",
-            )
-            .unwrap();
+        let line_id = notice.host_message_id.expect("host notice message");
         // Prime snapshot so projection holds the unclosed notice line
         let (_, _, snap_before) = e
             .req(
@@ -1250,7 +1221,7 @@ async fn w34_thread_replay_hub() {
                     diffs == 0 && snap_eq_before_reconcile,
                 ),
             ],
-            &["s2_projection_zero_diff"],
+            &[],
         );
     }
 
@@ -1290,8 +1261,19 @@ async fn w34_thread_replay_hub() {
             )
             .unwrap();
         e.store
-            .thread()
-            .item_add(&item.id, WS, &origin, Some(&announce), false)
+            .write(|w| {
+                thread::record_dispatch(
+                    w,
+                    WS,
+                    "steve",
+                    &origin,
+                    &item.id,
+                    Some(&announce),
+                    false,
+                    true,
+                    steve_store::now(),
+                )
+            })
             .unwrap();
         // Add 4 messages below so flowback moves card to a new card_only message
         for i in 0..4 {

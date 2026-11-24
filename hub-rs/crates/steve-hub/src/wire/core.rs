@@ -1432,6 +1432,7 @@ impl Domain for CoreDomain {
         mentions: Vec<steve_modules::contacts::item_people::Mention>,
         item: Option<String>,
         reply_to: Option<String>,
+        client_id: Option<String>,
     ) -> BResult<()> {
         let files = refs(files)?;
         let (c, ws, user, text) = (
@@ -1445,8 +1446,16 @@ impl Domain for CoreDomain {
             reply_to,
         };
         blocking(move || {
-            c.say_to(&ws, Some(&user), &text, &files, &mentions, to)
-                .map(|_| ())
+            c.say_to_with_key(
+                &ws,
+                Some(&user),
+                &text,
+                &files,
+                &mentions,
+                to,
+                client_id.as_deref(),
+            )
+            .map(|_| ())
         })
         .await
     }
@@ -1455,7 +1464,7 @@ impl Domain for CoreDomain {
         blocking(move || c.stop(&ws)).await
     }
     fn thread_active(&self, ws: &str) -> bool {
-        self.core.main_busy_besides(ws)
+        self.core.thread_active(ws)
     }
     async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
         let (c, ws, m, t) = (
@@ -1544,7 +1553,9 @@ impl Domain for CoreDomain {
             if c.store().item(&i)?.is_none_or(|x| x.workspace_id != ws) {
                 return Ok(false);
             }
-            Ok(c.store().store().thread().item_follow(&i, follow)?)
+            Ok(c.store()
+                .store()
+                .write(|w| steve_store::thread::set_dispatch_follow(w, &i, follow))?)
         })
         .await
     }

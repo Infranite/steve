@@ -1,10 +1,6 @@
-//! The main conversation with Steve (thread.ts), one per workspace: every message goes through the router.
-//!
-//! Thread routing: the conversation is the default. A message is routed on the
-//! workspace lane (a few seconds, one at a time, in order); [`decide`] puts the code's guards over the
-//! model's choice; answers and read-only research then run on the workspace's inline queue
-//! ([`research`]), so the lane is free for the next message. Items are made only for real work, a
-//! suggestion card asks when it is unclear, and the user can correct the routing both ways ([`reroute`]).
+//! Thread runtime: durable per-space serial reply tasks (`thread_reply_tasks`), immutable reply
+//! receipts (`thread_reply_receipts`), durable submit idempotency (`thread_submit_keys`),
+//! origin-scoped item dispatch (`thread_dispatch_refs`), and bounded global concurrency.
 
 mod a2ui;
 pub mod decide;
@@ -21,7 +17,6 @@ mod suggest;
 
 pub use a2ui::{A2uiActed, A2uiAction};
 pub use offer::Handled;
-
 pub use reroute::RerouteTo;
 pub use research::{
     RESUME_WINDOW, ResearchOutcome, ResearchRequest, ResearchSink, Researcher, ResumeFrom, RunEnd,
@@ -29,7 +24,7 @@ pub use research::{
 };
 
 use crate::Core;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::gateway::{self, FocusItem, Route, RouteCtx, Said};
 use crate::repo::{FileRef, Message};
 use crate::util::{js_head, now};
@@ -39,14 +34,32 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use steve_modules::contacts::item_people::{self, Mention};
-use steve_store::{W, core_queue};
-use tokio::sync::mpsc;
+use steve_store::{
+    EditQueuedOutcome, StopTaskOutcome, SubmitInput, SubmitOutcome, WithdrawOutcome, thread,
+};
+use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 static AT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@(\S+)\s*").expect("valid regex"));
 
-/// Whether “@`at`” names the bot called `name`: “名字” or “名字Bot”, spaces ignored (the composer
-/// writes “@Steve开发” for “Steve 开发”).
+/// Maximum number of spaces executing thread tasks concurrently across the Hub.
+pub const MAX_CONCURRENT_SPACES: usize = 4;
+
+/// The web conversation's `messages.space`.
+pub const MAIN: &str = thread::MAIN_SPACE;
+
+/// How often a chat answer being written goes out (`steve.draft`), in ms.
+const DRAFT_EVERY: i64 = 50;
+
+/// What `thread_ready` woke on startup.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ThreadReady {
+    pub resumed: usize,
+    pub held: usize,
+    pub failed: usize,
+}
+
+/// Whether “@`at`” names the bot called `name`: “名字” or “名字Bot”, spaces ignored.
 fn names_bot(name: &str, at: &str) -> bool {
     let squash = |s: &str| s.split_whitespace().collect::<String>();
     let n = squash(name);
@@ -54,90 +67,7 @@ fn names_bot(name: &str, at: &str) -> bool {
     a == n || a == n.clone() + "Bot"
 }
 
-/// A message waiting on its workspace lane.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Job {
-    mid: String,
-    text: String,
-    files: Vec<FileRef>,
-    /// The sending user, if known.
-    user: Option<String>,
-    /// `@` mentions sent with it (contacts P3).
-    mentions: Vec<Mention>,
-    /// where the user sent it: an item (focus bar) or a quoted message
-    to: SayTo,
-    /// the conversation it was said in
-    conv: Conv,
-    /// Its way is fixed without the router (`/汇报`, sent to an open item, quoting one): it goes on
-    /// its own lane and does not wait for the turn in progress. Worked out again whenever it is queued.
-    #[serde(skip)]
-    direct: bool,
-    /// Said while Steve was still answering, and it needs those answers: it waits for them on the
-    /// conversation's [`after_lane`], so the messages behind it are not held up.
-    #[serde(skip)]
-    after: bool,
-    /// Routed while Steve was still answering, and sure to stand on its own
-    /// ([`decide::now_while_answering`]): handled with this route (and how long it took) at once.
-    #[serde(skip)]
-    ahead: Option<(Route, i64)>,
-}
-
-/// The lane of a conversation's messages whose way is fixed ([`Job::direct`]).
-pub(crate) fn direct_lane(ws: &str, space: &str) -> String {
-    format!("{}\u{1f}direct", lane_key(ws, space))
-}
-
-/// A message taken off the [`after_lane`]: no longer waiting once this goes ([`Core::undefer`]).
-struct Deferred {
-    core: Core,
-    ws: String,
-    mid: String,
-}
-
-impl Drop for Deferred {
-    fn drop(&mut self) {
-        self.core.undefer(&self.ws, &self.mid);
-    }
-}
-
-/// The most messages of a lane routed in one call ([`Core::route_batch`]).
-const BATCH_MAX: usize = 8;
-
-/// A message routed with others before its turn ([`Core::route_batch`]).
-struct Prerouted {
-    /// the text it was routed as: edited since, it is routed again
-    text: String,
-    route: Route,
-    /// its share of the call's time
-    ms: i64,
-    /// the router knew what Steve was still answering ([`RouteCtx::pending`])
-    pending: bool,
-}
-
-/// Why a waiting message could not be taken off its lane's queue ([`Core::claim`]).
-enum Claim {
-    /// edited after it was routed ahead: its text now
-    Changed(String),
-    Failed(crate::error::CoreError),
-}
-
-fn emit_message(w: &mut W<'_>, ws: &str, mid: &str, space: &str) {
-    w.emit(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Message {
-            space: space.into(),
-            ws: ws.into(),
-            id: steve_types::MessageId::from(mid.to_owned()),
-        },
-    ));
-}
-
-/// The lane of a conversation's messages that wait for the answers Steve is still giving ([`Job::after`]).
-pub(crate) fn after_lane(ws: &str, space: &str) -> String {
-    format!("{}\u{1f}after", lane_key(ws, space))
-}
-
-/// A message as the router reads it: it only sees that there are attachments; the bot that does the
-/// work gets the files themselves.
+/// A message as the router reads it: attachments are noted; the bot gets the files themselves.
 fn routed_text(text: &str, files: &[FileRef]) -> String {
     if files.is_empty() {
         return text.to_string();
@@ -150,25 +80,7 @@ fn routed_text(text: &str, files: &[FileRef]) -> String {
     format!("{text}\n（附带 {} 个附件：{list}）", files.len())
 }
 
-/// The web conversation's `messages.space`.
-pub const MAIN: &str = "steve";
-/// Automatic re-answers of one interrupted main-conversation run; past it, an explicit rerun.
-pub const MAX_RESUME_ATTEMPTS: i64 = 1;
-
-/// What the listener-ready resume of the main conversation did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct ThreadReady {
-    pub resumed: usize,
-    /// Handed back to an explicit rerun (re-answered once already, no longer local).
-    pub held: usize,
-    /// Could not be resumed now (logged; the intent stays for the next boot).
-    pub failed: usize,
-}
-
-/// A conversation: the web's (`steve`) or a guest one — an IM space's (`chan:<space>`),
-/// whose turns come from people in that space. A guest conversation is routed like the web's,
-/// but never changes configuration, never talks to items (“送到事项”, progress questions)
-/// and never answers `/汇报`; research and items are allowed only when the host says so.
+/// A conversation: the web's (`steve`) or a guest one — an IM space's (`chan:<space>`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Conv {
     pub space: String,
@@ -178,12 +90,9 @@ pub struct Conv {
     pub items: bool,
     /// only the workspace's owner reads it (their private chat with Steve)
     pub owner_only: bool,
-    /// the person speaking may start work: the workspace's owner. What anyone else asks for becomes an
-    /// item that waits for the owner's yes (a proposal), never work that runs on its own
+    /// the person speaking may start work: the workspace's owner
     pub start: bool,
-    /// an answer that needs tools it does not have is handed on to an item (`Core::hand_off`),
-    /// where `items` allows one: the owner's own trigger word on their account. Elsewhere (the web
-    /// conversation, a Bot's chat) such an answer says why and points at “做成事项”, as before
+    /// tool-needing requests preflight directly to an item where `items` allows one
     #[serde(default)]
     pub hands_on: bool,
 }
@@ -211,25 +120,18 @@ impl Conv {
     }
 }
 
-/// What owns the guest conversations (the channel module, through the hub): it answers in its own
-/// voice and takes what Steve says there back out to where the turn came from.
+/// What owns guest conversations (the channel module, through the hub).
 #[async_trait::async_trait]
 pub trait ConvHost: Send + Sync {
-    /// The inline answer to turn `origin` (instead of the main bot's chat answer).
     async fn answer(
         &self,
         ws: &str,
         space: &str,
         origin: &str,
     ) -> std::result::Result<String, steve_modules::gateway::GatewayError>;
-    /// What research in this conversation must know about its audience.
-    /// What research answering message `origin` in `space` is told about where it answers (the
-    /// conversation card and the rules of the place).
+
     fn research_context(&self, ws: &str, space: &str, origin: &str) -> String;
-    /// Prepare a completed read-only research result in this conversation's voice before it is
-    /// stored and `said` is called. Channel hosts must run their normal reply classification and
-    /// retain its provenance; a research run alone is not authority to speak as the owner.
-    /// An error keeps the original result readable, marked ineligible for external delivery.
+
     async fn research_answer(
         &self,
         _ws: &str,
@@ -239,36 +141,28 @@ pub trait ConvHost: Send + Sync {
     ) -> std::result::Result<String, String> {
         Ok(text.to_string())
     }
-    /// Steve stored message `id` in guest conversation `space`, or answered a main-conversation
-    /// turn carrying `meta.chan`. The latter only reports its outcome; it grants no channel send.
+
     fn said(&self, ws: &str, space: &str, id: &str);
 }
 
-/// Where a message goes besides the router: straight to an item (the focus bar “正在跟 ST-n 说”), or
-/// as a reply quoting a message (a message of an unfinished item goes to that item).
+/// Where a message goes besides the router: straight to an item, or quoting a message.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SayTo {
     pub item: Option<String>,
     pub reply_to: Option<String>,
 }
 
-/// How often a chat answer being written goes out (`steve.draft`), in ms.
-const DRAFT_EVERY: i64 = 50;
-
-type Promotion = Arc<tokio::sync::OnceCell<std::result::Result<crate::repo::Item, String>>>;
-
-/// `meta.steps` on a Steve reply: the routing decision, the reasoning behind a direct answer, the
-/// research run, the tools Steve used.
+/// `meta.steps` on a Steve reply.
 #[derive(Default)]
 pub(crate) struct Steps {
-    route: Option<Value>,
-    answer: Option<Value>,
-    research: Option<Value>,
-    tools: Vec<Value>,
+    pub(crate) route: Option<Value>,
+    pub(crate) answer: Option<Value>,
+    pub(crate) research: Option<Value>,
+    pub(crate) tools: Vec<Value>,
 }
 
 impl Steps {
-    fn json(&self, ms: i64) -> Value {
+    pub(crate) fn json(&self, ms: i64) -> Value {
         let mut m = Map::new();
         if let Some(r) = &self.route {
             m.insert("route".into(), r.clone());
@@ -283,15 +177,15 @@ impl Steps {
         m.insert("ms".into(), json!(ms));
         Value::Object(m)
     }
-    /// A tool starts: recorded right away, so a failing one still shows. Returns (index, start).
-    fn begin(steps: &Mutex<Steps>, name: &str, args: Value) -> (usize, i64) {
+
+    pub(crate) fn begin(steps: &Mutex<Steps>, name: &str, args: Value) -> (usize, i64) {
         let mut s = lock(steps);
         s.tools
             .push(json!({"name": name, "args": args, "status": "ok", "ms": 0}));
         (s.tools.len() - 1, now())
     }
-    /// A tool ended: its result, or `failed` with the error (≤200 chars).
-    fn end<T>(
+
+    pub(crate) fn end<T>(
         steps: &Mutex<Steps>,
         (i, t0): (usize, i64),
         r: Result<T>,
@@ -312,7 +206,7 @@ impl Steps {
 }
 
 /// `meta.steps.route`: the model's choice and what the guards made of it.
-fn route_step(r: &Route, d: Option<&decide::Decision>, ms: i64) -> Value {
+pub(crate) fn route_step(r: &Route, d: Option<&decide::Decision>, ms: i64) -> Value {
     json!({
         "kind": d.map(|d| d.kind.as_str()).unwrap_or(r.kind.as_str()),
         "modelKind": r.kind,
@@ -325,38 +219,14 @@ fn route_step(r: &Route, d: Option<&decide::Decision>, ms: i64) -> Value {
     })
 }
 
-/// The lane of conversation `space` in workspace `ws`: the main conversation's is the workspace id.
-pub(crate) fn lane_key(ws: &str, space: &str) -> String {
-    if space == MAIN {
-        ws.to_string()
-    } else {
-        format!("{ws}\u{1f}{space}")
-    }
-}
-
-/// How long a conversation's lane waits for its next message before it goes (a new message starts
-/// it again). Short in tests, so they go through it.
-const LANE_IDLE: std::time::Duration =
-    std::time::Duration::from_millis(if cfg!(test) { 300 } else { 600_000 });
-
-/// The user's stop of a reply or an answer being prepared: set once, never cleared.
+/// In-memory cancellation signal for a running task (paired with durable `cancel_requested_at`).
 #[derive(Clone, Default)]
 pub(crate) struct Stop {
-    /// what a research executor reads ([`research::ResearchRequest::stop`])
     flag: Arc<AtomicBool>,
     token: CancellationToken,
-    /// The turn being routed, so a stop before an inline job exists still names its source.
-    origin: Option<String>,
 }
 
 impl Stop {
-    pub(crate) fn for_origin(origin: &str) -> Self {
-        Self {
-            origin: Some(origin.into()),
-            ..Default::default()
-        }
-    }
-
     pub(crate) fn stop(&self) {
         self.flag.store(true, Ordering::SeqCst);
         self.token.cancel();
@@ -364,77 +234,76 @@ impl Stop {
     pub(crate) fn is_stopped(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
     }
-    /// Resolves once stopped: raced against a model call, the user's stop ends it at once (the
-    /// harness process is killed with the dropped call) instead of after the whole reply is written.
     pub(crate) async fn stopped(&self) {
         self.token.cancelled().await
     }
-    /// The flag a research executor reads.
     pub(crate) fn flag(&self) -> Arc<AtomicBool> {
         self.flag.clone()
     }
-    /// The same stop (the same job), not just an equal one.
-    pub(crate) fn same(&self, other: &Stop) -> bool {
-        Arc::ptr_eq(&self.flag, &other.flag)
-    }
 }
 
-/// Per-conversation lanes, the reply being prepared, inline queues and promotions in flight.
-/// A conversation message forwarded to an item: `mid`, and whether it `asked` something (a
-/// follow-up question, not an instruction), so the turn answering it ends on purpose.
+/// A conversation message forwarded to an item (stored durably in `thread_forwarded`).
 pub(crate) struct Forwarded {
     pub(crate) mid: String,
     pub(crate) asked: bool,
 }
 
-#[derive(Default)]
-pub(crate) struct Lanes {
-    /// routing, one message at a time per conversation ([`lane_key`])
-    lanes: Mutex<HashMap<String, mpsc::UnboundedSender<Job>>>,
-    admitted: Mutex<HashSet<String>>,
-    /// the message being routed, per [`lane_key`]; its flag stops it
-    inflight: Mutex<HashMap<String, Stop>>,
-    /// per workspace, the main conversation's messages on the [`after_lane`] (id, text), in order
-    deferred: Mutex<HashMap<String, Vec<(String, String)>>>,
-    promoting: Mutex<HashMap<String, Promotion>>,
-    /// answers and research runs, one at a time per workspace
-    inline: Mutex<HashMap<String, research::InlineLane>>,
-    /// the read-only research executor (R2); without one, research falls back to a direct answer
+/// Ephemeral execution runtime; all durable state lives in `steve-store` (`thread_*` tables).
+pub(crate) struct ThreadRuntime {
+    workers: Mutex<HashMap<(String, String), Arc<Notify>>>,
+    budget: Arc<Semaphore>,
+    stops: Mutex<HashMap<String, Stop>>,
+    running_phase: Mutex<HashMap<(String, String), &'static str>>,
     researcher: OnceLock<Arc<dyn Researcher>>,
-    /// item → the conversation message last forwarded to it, until its turn ends
-    forwarded: Mutex<HashMap<String, Forwarded>>,
-    /// offers, suggestion cards and corrections are handled one at a time (a double click is one click)
-    acting: Mutex<()>,
-    /// the owner of guest conversations (IM spaces)
     host: OnceLock<Arc<dyn ConvHost>>,
+    acting: Mutex<()>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+impl Default for ThreadRuntime {
+    fn default() -> Self {
+        Self {
+            workers: Mutex::default(),
+            budget: Arc::new(Semaphore::new(MAX_CONCURRENT_SPACES)),
+            stops: Mutex::default(),
+            running_phase: Mutex::default(),
+            researcher: OnceLock::new(),
+            host: OnceLock::new(),
+            acting: Mutex::new(()),
+        }
+    }
+}
+
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A message the conversation no longer shows (flow-back folded into its item's card, a release
-/// notice that belongs to the notifications): kept, not deleted.
+/// A message hidden from conversation views (folded flow-back, withdrawn tombstone).
 pub fn hidden(m: &Message) -> bool {
     m.meta.get("hidden").is_some_and(gateway::truthy)
 }
 
-/// The object form of a message's `meta`.
-fn meta_of(m: &Message) -> Map<String, Value> {
+pub(crate) fn meta_of(m: &Message) -> Map<String, Value> {
     m.meta.as_object().cloned().unwrap_or_default()
 }
 
+fn submit_digest(text: &str, to: &SayTo, files: &[FileRef], mentions: &[Mention]) -> String {
+    let file_ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+    let payload = json!({
+        "text": text,
+        "item": to.item,
+        "reply_to": to.reply_to,
+        "files": file_ids,
+        "mentions": mentions,
+    });
+    steve_store::sha(&payload.to_string())
+}
+
 impl Core {
-    /// Post the user's message (returns its id) and queue it on the workspace's lane. Needs a tokio runtime.
+    /// Post the user's message and enqueue a durable reply task for its space.
     pub fn say(&self, ws: &str, text: &str, files: &[FileRef]) -> Result<String> {
         self.say_as(ws, None, text, files, &[])
     }
 
-    /// [`Core::say`] from a known user: module context for the answer (B1 `PromptContext::chat`) is
-    /// what this user may see; without one, only what the whole workspace may see.
-    ///
-    /// `mentions` (contacts P3): `party` mentions are linked to the item the message becomes and named
-    /// in the reply; without mentions the people the text names are inferred. Both need a known user.
     pub fn say_as(
         &self,
         ws: &str,
@@ -446,14 +315,38 @@ impl Core {
         self.say_to(ws, user, text, files, mentions, SayTo::default())
     }
 
-    /// A turn in conversation `conv` from someone who is not a workspace user (an IM space's
-    /// sender): stored with `meta`, routed on the workspace lane like web chat. Needs a tokio runtime.
+    pub fn say_to(
+        &self,
+        ws: &str,
+        user: Option<&str>,
+        text: &str,
+        files: &[FileRef],
+        mentions: &[Mention],
+        to: SayTo,
+    ) -> Result<String> {
+        self.say_with_key(ws, user, text, files, mentions, to, Map::new(), None)
+    }
+
+    /// [`Core::say_to`] with an explicit durable idempotency key (`client_msg_id`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn say_to_with_key(
+        &self,
+        ws: &str,
+        user: Option<&str>,
+        text: &str,
+        files: &[FileRef],
+        mentions: &[Mention],
+        to: SayTo,
+        client_key: Option<&str>,
+    ) -> Result<String> {
+        self.say_with_key(ws, user, text, files, mentions, to, Map::new(), client_key)
+    }
+
+    /// A turn in conversation `conv` (guest / channel space).
     pub fn say_in(&self, ws: &str, conv: Conv, text: &str, meta: &Value) -> Result<String> {
         self.say_in_as(ws, conv, text, meta, None)
     }
 
-    /// [`Thread::say_in`] for a workspace user (`user`: the owner on their own trigger word in a
-    /// chat): an item the turn makes is requested by them and runs as them.
     pub fn say_in_as(
         &self,
         ws: &str,
@@ -462,28 +355,140 @@ impl Core {
         meta: &Value,
         user: Option<&str>,
     ) -> Result<String> {
-        let mid = self
-            .store()
-            .message_add_in(ws, &conv.space, "me", text, None, meta)?;
-        self.enqueue(
-            ws,
-            Job {
-                mid: mid.clone(),
-                text: text.to_string(),
-                files: vec![],
-                user: user.map(str::to_string),
-                mentions: vec![],
-                to: SayTo::default(),
-                conv,
-                direct: false,
-                after: false,
-                ahead: None,
-            },
-        );
-        Ok(mid)
+        if text.trim().is_empty() {
+            return Err(CoreError::Status(
+                400,
+                steve_i18n::t!("core.error.invalid", fields = "text"),
+            ));
+        }
+        let provider_key = meta
+            .get("chan")
+            .and_then(|c| c.get("message"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(|id| format!("chan:{id}"));
+        let submit_key = provider_key.unwrap_or_else(|| steve_store::uid("sub"));
+        let to = SayTo::default();
+        let digest = submit_digest(text, &to, &[], &[]);
+        let conv_json = serde_json::to_string(&conv)?;
+        let actor_key = user.unwrap_or("");
+        let outcome = self.store().store().write(|w| {
+            thread::submit_message(
+                w,
+                &SubmitInput {
+                    ws,
+                    space: &conv.space,
+                    actor_key,
+                    submit_key: &submit_key,
+                    payload_digest: &digest,
+                    text,
+                    item_id: None,
+                    meta,
+                    user_id: user,
+                    project_id: None,
+                    conv_json: Some(&conv_json),
+                    to_item: None,
+                    to_reply_to: None,
+                    file_ids: &[],
+                    files_json: None,
+                    mentions_json: None,
+                    enqueue_task: true,
+                    validate_refs: true,
+                },
+            )
+        })?;
+        match outcome {
+            SubmitOutcome::Accepted { message_id, .. } => {
+                self.wake_space(ws, &conv.space);
+                Ok(message_id)
+            }
+            SubmitOutcome::Duplicate { message_id, .. } => Ok(message_id),
+            SubmitOutcome::Conflict { reason } => Err(conflict_err(reason)),
+        }
     }
 
-    /// Sets the owner of guest conversations (once; `false` if one was set already).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn say_with_key(
+        &self,
+        ws: &str,
+        user: Option<&str>,
+        text: &str,
+        files: &[FileRef],
+        mentions: &[Mention],
+        to: SayTo,
+        mut meta: Map<String, Value>,
+        client_key: Option<&str>,
+    ) -> Result<String> {
+        if text.trim().is_empty() {
+            return Err(CoreError::Status(
+                400,
+                steve_i18n::t!("core.error.invalid", fields = "text"),
+            ));
+        }
+        if !files.is_empty() {
+            meta.insert("files".into(), json!(files));
+        }
+        if let Some(r) = &to.reply_to {
+            meta.insert("reply_to".into(), json!(r));
+        }
+        if let Some(i) = &to.item {
+            meta.insert("to".into(), json!(i));
+        }
+        let meta_val = if meta.is_empty() {
+            Value::Null
+        } else {
+            Value::Object(meta)
+        };
+        let submit_key = client_key
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| steve_store::uid("sub"));
+        let digest = submit_digest(text, &to, files, mentions);
+        let conv = Conv::main();
+        let conv_json = serde_json::to_string(&conv)?;
+        let file_ids: Vec<String> = files.iter().map(|f| f.id.clone()).collect();
+        let files_json = (!files.is_empty())
+            .then(|| serde_json::to_string(files))
+            .transpose()?;
+        let mentions_json = (!mentions.is_empty())
+            .then(|| serde_json::to_string(mentions))
+            .transpose()?;
+        let actor_key = user.unwrap_or("");
+        let outcome = self.store().store().write(|w| {
+            thread::submit_message(
+                w,
+                &SubmitInput {
+                    ws,
+                    space: MAIN,
+                    actor_key,
+                    submit_key: &submit_key,
+                    payload_digest: &digest,
+                    text,
+                    item_id: None,
+                    meta: &meta_val,
+                    user_id: user,
+                    project_id: None,
+                    conv_json: Some(&conv_json),
+                    to_item: to.item.as_deref(),
+                    to_reply_to: to.reply_to.as_deref(),
+                    file_ids: &file_ids,
+                    files_json: files_json.as_deref(),
+                    mentions_json: mentions_json.as_deref(),
+                    enqueue_task: true,
+                    validate_refs: true,
+                },
+            )
+        })?;
+        match outcome {
+            SubmitOutcome::Accepted { message_id, .. } => {
+                self.wake_space(ws, MAIN);
+                Ok(message_id)
+            }
+            SubmitOutcome::Duplicate { message_id, .. } => Ok(message_id),
+            SubmitOutcome::Conflict { reason } => Err(conflict_err(reason)),
+        }
+    }
+
     pub fn set_conv_host(&self, h: Arc<dyn ConvHost>) -> bool {
         self.0.thread.host.set(h).is_ok()
     }
@@ -492,18 +497,21 @@ impl Core {
         self.0.thread.host.get().cloned()
     }
 
-    /// The conversation of message `id` (`steve` when it is gone).
+    /// The conversation space of message `id`. Fails closed (empty string, never MAIN) when gone.
     pub(crate) fn conv_of(&self, id: &str) -> String {
         self.store()
             .message(id)
             .ok()
             .flatten()
             .map(|m| m.space)
-            .unwrap_or_else(|| MAIN.into())
+            .unwrap_or_default()
     }
 
     /// The last 200 messages of conversation `space`, oldest first.
     pub(crate) fn conv_messages(&self, ws: &str, space: &str) -> Result<Vec<Message>> {
+        if space.is_empty() {
+            return Ok(vec![]);
+        }
         self.store().messages_in(ws, space, 200)
     }
 
@@ -554,220 +562,33 @@ impl Core {
         h.said(ws, space, id);
     }
 
-    /// [`Core::say_as`] sent to an item or quoting a message.
-    pub fn say_to(
-        &self,
-        ws: &str,
-        user: Option<&str>,
-        text: &str,
-        files: &[FileRef],
-        mentions: &[Mention],
-        to: SayTo,
-    ) -> Result<String> {
-        self.say_with(ws, user, text, files, mentions, to, Map::new())
-    }
-
-    /// [`Core::say_to`] with more on the message's meta (an A2UI action says what it was).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn say_with(
-        &self,
-        ws: &str,
-        user: Option<&str>,
-        text: &str,
-        files: &[FileRef],
-        mentions: &[Mention],
-        to: SayTo,
-        mut meta: Map<String, Value>,
-    ) -> Result<String> {
-        if !files.is_empty() {
-            meta.insert("files".into(), json!(files));
-        }
-        if let Some(r) = &to.reply_to {
-            meta.insert("reply_to".into(), json!(r));
-        }
-        if let Some(i) = &to.item {
-            meta.insert("to".into(), json!(i));
-        }
-        /* said while Steve is still on a turn: it waits, visibly, and can be edited or withdrawn until then;
-        one whose way is fixed (to an item, `/汇报`) does not wait */
-        if !self.direct_way(ws, text, &to, false)? && self.main_busy(ws)? {
-            meta.insert("held".into(), json!(true));
-        }
-        let meta = (!meta.is_empty()).then_some(Value::Object(meta));
-        let mid = self
-            .store()
-            .message_add(ws, "me", text, None, meta.as_ref())?;
-        self.enqueue(
-            ws,
-            Job {
-                mid: mid.clone(),
-                text: text.to_string(),
-                files: files.to_vec(),
-                user: user.map(String::from),
-                mentions: mentions.to_vec(),
-                to,
-                conv: Conv::main(),
-                direct: false,
-                after: false,
-                ahead: None,
-            },
-        );
-        Ok(mid)
-    }
-
-    /// Whether the main conversation is on a turn: a message being routed, an answer or research
-    /// running or waiting, or messages still waiting their turn on the lane.
+    /// Whether the main conversation has any queued or claimed reply task.
     pub fn main_busy(&self, ws: &str) -> Result<bool> {
-        if self.main_busy_besides(ws) {
-            return Ok(true);
-        }
         Ok(self
             .store()
             .store()
-            .read(|r| core_queue::has_pending_in_space(r, ws, MAIN))?)
+            .read(|r| thread::has_active_or_queued(r, ws, MAIN))?)
     }
 
-    /// Whether the main lane is routing or answering a turn in memory.
-    pub fn main_busy_besides(&self, ws: &str) -> bool {
-        {
-            let inflight = lock(&self.0.thread.inflight);
-            if inflight.contains_key(ws) || inflight.contains_key(&after_lane(ws, MAIN)) {
-                return true;
-            }
-        }
-        self.answering(ws)
+    /// Whether the main conversation has an active (claimed) reply task right now.
+    pub fn thread_active(&self, ws: &str) -> bool {
+        self.store()
+            .store()
+            .read(|r| thread::has_claimed(r, ws, MAIN))
+            .unwrap_or(false)
     }
 
-    /// A message of the main conversation is being routed right now.
     #[cfg(test)]
     pub(crate) fn routing(&self, ws: &str) -> bool {
-        let inflight = lock(&self.0.thread.inflight);
-        inflight.contains_key(ws) || inflight.contains_key(&after_lane(ws, MAIN))
+        lock(&self.0.thread.running_phase)
+            .get(&(ws.to_string(), MAIN.to_string()))
+            .is_some_and(|p| *p == "route")
     }
 
-    /// Steve is still answering in the main conversation: an answer or research running or waiting,
-    /// or messages waiting for them on the [`after_lane`].
-    fn answering(&self, ws: &str) -> bool {
-        self.inline_busy(ws)
-            || lock(&self.0.thread.deferred)
-                .get(ws)
-                .is_some_and(|d| !d.is_empty())
-    }
-
-    /// While Steve is still answering: routes a message of the main conversation ahead of its turn,
-    /// the router told what is being answered. The route when the message is handled at once
-    /// ([`decide::now_while_answering`]); `None` when it waits for the answers, as do a plain question
-    /// (research, no router asked) and a message the router failed on.
-    async fn ahead(
-        &self,
-        ws: &str,
-        mid: &str,
-        text: &str,
-        files: &[FileRef],
-    ) -> Option<(Route, i64)> {
-        if decide::without_router(text, !files.is_empty(), false, &[]).is_some() {
-            return None;
-        }
-        let history = self.history_before(ws, mid).ok()?;
-        let mut c = self.route_ctx_for_team(ws, false, None).ok()?;
-        c.pending = self.inline_questions(ws);
-        if let Some(d) = lock(&self.0.thread.deferred).get(ws) {
-            c.pending.extend(d.iter().map(|(_, t)| t.clone()));
-        }
-        if c.pending.is_empty() {
-            /* the answers came out meanwhile: it is routed in its turn, with them */
-            return None;
-        }
-        let r0 = now();
-        let r = crate::stats::tagged(
-            "route",
-            ws,
-            gateway::route(self.gw(), &c, &routed_text(text, files), &history, false),
-        )
-        .await;
-        self.goes_ahead(ws, text, r, now() - r0)
-    }
-
-    /// A route made while Steve is still answering ([`Core::ahead`], or a burst's): kept when the
-    /// message goes now ([`decide::now_while_answering`]), `None` when it waits.
-    fn goes_ahead(&self, ws: &str, text: &str, r: Route, ms: i64) -> Option<(Route, i64)> {
-        let named = self.named_bot(ws, text).ok()?;
-        let d = decide::decide(
-            &r,
-            text,
-            decide::DecideCtx {
-                named_bot: named.is_some(),
-            },
-        );
-        let d = decide::for_main(d, &r);
-        decide::now_while_answering(&r, &d).then_some((r, ms))
-    }
-
-    /// Routes `first` and the messages waiting behind it on the same lane in one call, at most
-    /// [`BATCH_MAX`] (2026-11-09: a burst costs one routing, not one per message). Plain questions,
-    /// which need no router, and messages with a fixed way are left out; with fewer than two left,
-    /// or when the call fails, nothing is routed here and each goes alone as before. While Steve is
-    /// still answering in the main conversation, the router is told what, as for one message.
-    async fn route_batch(
-        &self,
-        ws: &str,
-        first: &Job,
-        rest: &std::collections::VecDeque<Job>,
-        out: &mut HashMap<String, Prerouted>,
-    ) {
-        let guest = first.conv.guest();
-        let mut picked: Vec<(String, String, Vec<FileRef>)> = vec![];
-        for j in std::iter::once(first).chain(rest.iter()) {
-            if picked.len() >= BATCH_MAX {
-                break;
-            }
-            if j.after || j.direct || j.conv != first.conv || out.contains_key(&j.mid) {
-                continue;
-            }
-            let Ok(Some(text)) = self.waiting_text(ws, &j.mid) else {
-                continue;
-            };
-            if decide::without_router(&text, !j.files.is_empty(), guest, &[]).is_some() {
-                continue;
-            }
-            picked.push((j.mid.clone(), text, j.files.clone()));
-        }
-        if picked.len() < 2 {
-            return;
-        }
-        let (Ok(history), Ok(mut c)) = (
-            self.history_before(ws, &picked[0].0),
-            self.route_ctx_for_team(ws, guest, None),
-        ) else {
-            return;
-        };
-        if !guest && self.answering(ws) {
-            c.pending = self.inline_questions(ws);
-            if let Some(d) = lock(&self.0.thread.deferred).get(ws) {
-                c.pending.extend(d.iter().map(|(_, t)| t.clone()));
-            }
-        }
-        let texts: Vec<String> = picked.iter().map(|(_, t, f)| routed_text(t, f)).collect();
-        let r0 = now();
-        let rs = crate::stats::tagged(
-            "route",
-            ws,
-            gateway::route_many(self.gw(), &c, &texts, &history),
-        )
-        .await;
-        let ms = (now() - r0) / picked.len() as i64;
-        let pending = !c.pending.is_empty();
-        for ((mid, text, _), route) in picked.into_iter().zip(rs) {
-            out.insert(
-                mid,
-                Prerouted {
-                    text,
-                    route,
-                    ms,
-                    pending,
-                },
-            );
-        }
+    pub(crate) fn researching(&self, ws: &str) -> bool {
+        lock(&self.0.thread.running_phase)
+            .get(&(ws.to_string(), MAIN.to_string()))
+            .is_some_and(|p| *p == "research")
     }
 
     /// The bot a message's “@名字 …” names.
@@ -782,370 +603,222 @@ impl Core {
             .find(|b| names_bot(&b.name, &a)))
     }
 
-    /// Moves a message of the main conversation to its [`after_lane`]: it waits for the answers Steve is
-    /// still giving and is routed after them, with them in the history.
-    fn defer(&self, ws: &str, mut job: Job) {
-        lock(&self.0.thread.deferred)
-            .entry(ws.to_string())
-            .or_default()
-            .push((job.mid.clone(), job.text.clone()));
-        job.after = true;
-        job.ahead = None;
-        let key = after_lane(ws, &job.conv.space);
-        let mut lanes = lock(&self.0.thread.lanes);
-        let tx = lanes
-            .entry(key.clone())
-            .or_insert_with(|| self.routing_lane(ws, &key));
-        if let Err(mpsc::error::SendError(job)) = tx.send(job) {
-            tracing::error!("after lane of {ws} was gone; starting it again");
-            let tx = self.routing_lane(ws, &key);
-            let _ = tx.send(job);
-            lanes.insert(key, tx);
-        }
-    }
-
-    /// A message off the [`after_lane`]: Steve no longer waits on it.
-    fn undefer(&self, ws: &str, mid: &str) {
-        let mut d = lock(&self.0.thread.deferred);
-        if let Some(v) = d.get_mut(ws) {
-            v.retain(|(m, _)| m != mid);
-            if v.is_empty() {
-                d.remove(ws);
-            }
-        }
-    }
-
-    /// The text of a message still waiting on its lane, as it is now (edited while it waited); `None`
-    /// once it was withdrawn or taken.
-    fn waiting_text(&self, ws: &str, mid: &str) -> Result<Option<String>> {
-        let raw = self
-            .store()
-            .store()
-            .read(|r| core_queue::pending(r, ws, mid))?;
-        Ok(raw
-            .and_then(|r| serde_json::from_str::<Job>(&r).ok())
-            .map(|j| j.text))
-    }
-
-    /// How many routing and inline lanes are running.
-    #[cfg(test)]
-    pub(crate) fn lanes_open(&self) -> (usize, usize) {
-        (
-            lock(&self.0.thread.lanes).len(),
-            lock(&self.0.thread.inline).len(),
-        )
-    }
-
-    /// Waits until the main conversation's answer or research (and those queued behind it) is done:
-    /// a message said meanwhile is routed after the turn, with its reply in the history.
-    async fn turn_done(&self, ws: &str) {
-        loop {
-            /* listen before looking, so an end in between is not missed */
-            let Some(idle) = self.inline_idle(ws) else {
-                return;
-            };
-            let ended = idle.notified();
-            tokio::pin!(ended);
-            ended.as_mut().enable();
-            if !self.inline_busy(ws) {
-                return;
-            }
-            ended.await;
-        }
-    }
-
-    /// Takes a waiting message off the lane's durable queue, as it is now (edited while it waited);
-    /// `None` when it was withdrawn. A held message moves to now: it comes after the turn it waited on.
-    /// With `routed_as`, the text it was routed ahead as: edited since, it stays on the queue
-    /// ([`Claim::Changed`]).
-    fn claim(
-        &self,
-        ws: &str,
-        mid: &str,
-        routed_as: Option<&str>,
-    ) -> std::result::Result<Option<Job>, Claim> {
-        let job = self
-            .store()
-            .store()
-            .write::<_, steve_store::StoreError>(|w| {
-                let Some(raw) = core_queue::pending(w, ws, mid)? else {
-                    return Ok(None);
-                };
-                if let Some(was) = routed_as
-                    && let Ok(now) = serde_json::from_str::<Job>(&raw)
-                    && now.text != was
-                {
-                    return Ok(Some(Err(now.text)));
-                }
-                core_queue::remove_pending(w, ws, mid)?;
-                // Put the held message strictly after the turn's last word, even in the same ms.
-                if let Some(space) = core_queue::release_held(w, ws, mid, now())? {
-                    emit_message(w, ws, mid, &space);
-                }
-                Ok(Some(Ok(raw)))
-            })
-            .map_err(|e| Claim::Failed(e.into()))?;
-        let raw = match job {
-            None => return Ok(None),
-            Some(Err(text)) => return Err(Claim::Changed(text)),
-            Some(Ok(raw)) => raw,
-        };
-        serde_json::from_str(&raw)
-            .map(Some)
-            .map_err(|e| Claim::Failed(e.into()))
-    }
-
-    /// Rewrites a message still waiting its turn (`PATCH /api/thread/queued/:id`); `false` once it is
-    /// being handled (or gone).
+    /// Rewrites a main-conversation message still waiting (`status = 'queued'`).
     pub fn thread_queued_edit(&self, ws: &str, mid: &str, text: &str) -> Result<bool> {
-        self.store().store().write(|w| {
-            let raw = core_queue::pending(w, ws, mid)?;
-            let Some(mut job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
-                return Ok(false);
-            };
-            if job.conv.space != MAIN {
-                return Ok(false);
-            }
-            job.text = text.to_string();
-            // Keep the original queue position across restart.
-            core_queue::replace_pending(w, ws, mid, &serde_json::to_string(&job)?)?;
-            core_queue::edit_message(w, ws, mid, text, None)?;
-            emit_message(w, ws, mid, &job.conv.space);
-            Ok(true)
-        })
+        if text.trim().is_empty() {
+            return Err(CoreError::Status(
+                400,
+                steve_i18n::t!("core.error.invalid", fields = "text"),
+            ));
+        }
+        let Some(m) = self.store().message(mid)? else {
+            return Ok(false);
+        };
+        if m.workspace_id != ws || m.space != MAIN {
+            return Ok(false);
+        }
+        let files: Vec<FileRef> = m
+            .meta
+            .get("files")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let to = SayTo {
+            item: m.meta.get("to").and_then(Value::as_str).map(String::from),
+            reply_to: m
+                .meta
+                .get("reply_to")
+                .and_then(Value::as_str)
+                .map(String::from),
+        };
+        let new_digest = submit_digest(text, &to, &files, &[]);
+        let outcome = self
+            .store()
+            .store()
+            .write(|w| thread::edit_queued(w, ws, mid, text, &new_digest))?;
+        Ok(outcome == EditQueuedOutcome::Updated)
     }
 
-    /// Withdraws a message still waiting its turn (`DELETE /api/thread/queued/:id`): it is deleted and
-    /// never routed. Its text and files, to put back in the composer; `None` once it is being handled.
+    /// Withdraws a main-conversation message still waiting (`status = 'queued'`), retaining its
+    /// durable tombstone so retrying its `client_msg_id` never resurrects it.
     pub fn thread_queued_withdraw(
         &self,
         ws: &str,
         mid: &str,
     ) -> Result<Option<(String, Vec<FileRef>)>> {
-        self.store().store().write(|w| {
-            let raw = core_queue::pending(w, ws, mid)?;
-            let Some(job) = raw.and_then(|r| serde_json::from_str::<Job>(&r).ok()) else {
-                return Ok(None);
-            };
-            if job.conv.space != MAIN {
-                return Ok(None);
-            }
-            core_queue::remove_pending(w, ws, mid)?;
-            core_queue::remove_message(w, ws, mid)?;
-            emit_message(w, ws, mid, &job.conv.space);
-            Ok(Some((job.text, job.files)))
-        })
-    }
-
-    /// Whether a message's way is fixed without the router, as [`Core::handle`] takes it: `/汇报`, sent to an
-    /// open item of this workspace (focus bar) or quoting one of its messages. Textual references
-    /// are context for the router, including `#ST-n`. Never in a guest conversation.
-    fn direct_way(&self, ws: &str, text: &str, to: &SayTo, guest: bool) -> Result<bool> {
-        if guest {
-            return Ok(false);
-        }
-        if text.trim() == "/汇报" {
-            return Ok(true);
-        }
-        let db = self.store();
-        let target = match (&to.item, &to.reply_to) {
-            (Some(i), _) => Some(i.clone()),
-            (None, Some(r)) => db.message(r)?.and_then(|m| m.item_id),
-            _ => None,
+        let Some(m) = self.store().message(mid)? else {
+            return Ok(None);
         };
-        Ok(match target {
-            Some(id) => db
-                .item(&id)?
-                .is_some_and(|i| i.workspace_id == ws && !i.is_closed()),
-            None => false,
-        })
-    }
-
-    /// Queues a stored message on its conversation's routing lane (its own lane when its way is fixed).
-    fn enqueue(&self, ws: &str, job: Job) {
-        // Persist only the waiting routing work. Once routing starts, its outcome can be
-        // effectful; a crash must not blindly replay it. Planned drain waits for that permit.
-        let payload = serde_json::to_string(&job).expect("serializable thread job");
-        if let Err(e) = self
+        if m.workspace_id != ws || m.space != MAIN {
+            return Ok(None);
+        }
+        let files: Vec<FileRef> = m
+            .meta
+            .get("files")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let outcome = self
             .store()
             .store()
-            .write(|w| core_queue::enqueue(w, ws, &job.mid, &payload, now()))
-        {
-            tracing::error!("persist thread queue: {e}");
-            return;
+            .write(|w| thread::withdraw_queued(w, ws, mid))?;
+        match outcome {
+            WithdrawOutcome::Withdrawn { .. } => Ok(Some((m.text, files))),
+            WithdrawOutcome::NotQueued => Ok(None),
         }
-        self.admit(ws, job);
     }
 
-    /// Puts a persisted job on its lane. It never writes the job back: one a lane has claimed (and so
-    /// deleted) since it was read is found gone at its own claim and dropped, so a message read for
-    /// resuming while its lane takes it is still routed once.
-    fn admit(&self, ws: &str, mut job: Job) {
-        if !lock(&self.0.thread.admitted).insert(job.mid.clone()) {
+    /// Wake (or start) the per-space serial worker for `(ws, space)`.
+    pub(crate) fn wake_space(&self, ws: &str, space: &str) {
+        if self.store().store().maintenance() {
             return;
         }
-        job.direct = self
-            .direct_way(ws, &job.text, &job.to, job.conv.guest())
-            .unwrap_or_else(|e| {
-                tracing::warn!("thread lane of {}: {e}", job.mid);
-                false
-            });
-        /* sent under the map's lock: an idle lane only goes under it too, and only with nothing queued */
-        let mut lanes = lock(&self.0.thread.lanes);
-        let key = if job.direct {
-            direct_lane(ws, &job.conv.space)
-        } else {
-            lane_key(ws, &job.conv.space)
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
         };
-        let tx = lanes
-            .entry(key.clone())
-            .or_insert_with(|| self.routing_lane(ws, &key));
-        if let Err(mpsc::error::SendError(job)) = tx.send(job) {
-            /* its worker is gone: a new lane takes the message, so the conversation is not stuck */
-            tracing::error!("thread lane of {ws} was gone; starting it again");
-            let tx = self.routing_lane(ws, &key);
-            let _ = tx.send(job);
-            lanes.insert(key, tx);
+        let key = (ws.to_string(), space.to_string());
+        let mut workers = lock(&self.0.thread.workers);
+        if let Some(notify) = workers.get(&key) {
+            notify.notify_one();
+            return;
         }
-    }
-
-    /// A routing lane `key` of workspace `ws`: one message at a time, each on a task of its own so a
-    /// panic loses that message only. It goes after [`LANE_IDLE`] without messages.
-    fn routing_lane(&self, ws: &str, key: &str) -> mpsc::UnboundedSender<Job> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
-        let me = tx.downgrade();
+        let notify = Arc::new(Notify::new());
+        workers.insert(key.clone(), notify.clone());
         let core = self.clone();
-        let (w, key) = (ws.to_string(), key.to_string());
-        tokio::spawn(async move {
-            /* messages taken off the channel to be routed together, and the routes they got */
-            let mut backlog: std::collections::VecDeque<Job> = Default::default();
-            let mut routed: HashMap<String, Prerouted> = HashMap::new();
-            loop {
-                let next = match backlog.pop_front() {
-                    Some(j) => Ok(Some(j)),
-                    None => tokio::time::timeout(LANE_IDLE, rx.recv()).await,
-                };
-                let j = match next {
-                    Ok(Some(j)) => j,
-                    Ok(None) => return,
-                    Err(_) => {
-                        let mut lanes = lock(&core.0.thread.lanes);
-                        if !rx.is_empty() {
-                            continue;
-                        }
-                        if me
-                            .upgrade()
-                            .is_some_and(|me| lanes.get(&key).is_some_and(|t| t.same_channel(&me)))
-                        {
-                            lanes.remove(&key);
-                        }
-                        return;
-                    }
-                };
-                /* the messages said meanwhile are routed together with this one: one call for a burst */
-                while let Ok(more) = rx.try_recv() {
-                    backlog.push_back(more);
-                }
-                if !j.after && !j.direct && !routed.contains_key(&j.mid) && !backlog.is_empty() {
-                    core.route_batch(&w, &j, &backlog, &mut routed).await;
-                }
-                let mut pre = routed.remove(&j.mid);
-                let mut ahead = None;
-                /* a message off the after lane counts as waiting until it is handled, so one said
-                meanwhile is still asked whether it needs this one's answer */
-                let _waited = j.after.then(|| Deferred {
-                    core: core.clone(),
-                    ws: w.clone(),
-                    mid: j.mid.clone(),
-                });
-                if j.after {
-                    core.turn_done(&w).await;
-                } else if !j.conv.guest() && !j.direct && core.answering(&w) {
-                    /* Steve is still answering: what stands on its own goes now, the rest waits for the
-                    answers on the after lane, so it does not hold up the messages behind it */
-                    let text = match core.waiting_text(&w, &j.mid) {
-                        Ok(Some(t)) => t,
-                        Ok(None) => {
-                            lock(&core.0.thread.admitted).remove(&j.mid);
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::error!("thread queue peek: {e}");
-                            j.text.clone()
-                        }
-                    };
-                    /* routed in a burst with what is being answered in view: decided as one alone would be */
-                    let r = match pre.take().filter(|p| p.pending && p.text == text) {
-                        Some(p) => core.goes_ahead(&w, &text, p.route, p.ms),
-                        None => core.ahead(&w, &j.mid, &text, &j.files).await,
-                    };
-                    match r {
-                        Some(r) => ahead = Some((text, r)),
-                        None => {
-                            core.defer(&w, Job { text, ..j });
-                            continue;
-                        }
-                    }
-                }
-                if let Some(p) = pre.filter(|p| !p.pending && !j.after && ahead.is_none()) {
-                    ahead = Some((p.text, (p.route, p.ms)));
-                }
-                let _activity = core.store().store().activity("thread_router").await;
-                let (direct, after) = (j.direct, j.after);
-                let routed_as = ahead.as_ref().map(|(t, _)| t.as_str());
-                let j = match core.claim(&w, &j.mid, routed_as) {
-                    /* edited after it was routed: the route was for other words, so it is routed again
-                    as it is now (and waits, if Steve is still answering and it needs that) */
-                    Err(Claim::Changed(text)) => {
-                        backlog.push_front(Job { text, ..j });
-                        continue;
-                    }
-                    Err(Claim::Failed(e)) => {
-                        tracing::error!("thread queue claim: {e}");
-                        lock(&core.0.thread.admitted).remove(&j.mid);
-                        continue;
-                    }
-                    Ok(Some(job)) => Job {
-                        direct,
-                        after,
-                        ahead: ahead.map(|(_, r)| r),
-                        ..job
-                    },
-                    Ok(None) => {
-                        /* withdrawn while it waited */
-                        lock(&core.0.thread.admitted).remove(&j.mid);
-                        continue;
-                    }
-                };
-                let (mid, guest) = (j.mid.clone(), j.conv.guest());
-                let (c, w2) = (core.clone(), w.clone());
-                let run = tokio::spawn(async move {
-                    c.store().store().admitted(c.handle(&w2, &j)).await;
-                });
-                if let Err(e) = run.await {
-                    /* what `handle` would have cleared on its way out */
-                    tracing::error!(message = %mid, "routing a message in {w} failed: {e}");
-                    lock(&core.0.thread.inflight).remove(&key);
-                    if !guest {
-                        core.store().store().publish(steve_types::LiveEvent::from(
-                            steve_types::WorkLiveEvent::SteveThinking {
-                                on: false,
-                                ws: {
-                                    let value: String = w.clone();
-                                    value.into()
-                                },
-                                phase: None,
-                            },
-                        ));
-                    }
-                }
-                lock(&core.0.thread.admitted).remove(&mid);
-            }
+        let (w, s) = key;
+        handle.spawn(async move {
+            core.space_worker(w, s, notify).await;
         });
-        tx
     }
 
-    /// Send a conversation message to an item: its reply flows back when that turn ends.
+    async fn space_worker(&self, ws: String, space: String, notify: Arc<Notify>) {
+        let key = (ws.clone(), space.clone());
+        loop {
+            if self.store().store().maintenance() {
+                lock(&self.0.thread.workers).remove(&key);
+                return;
+            }
+            // Acquire one global concurrency budget slot before claiming head work.
+            let Ok(_permit) = self.0.thread.budget.clone().acquire_owned().await else {
+                lock(&self.0.thread.workers).remove(&key);
+                return;
+            };
+            let lease = steve_store::uid("lease");
+            let claimed = match self
+                .store()
+                .store()
+                .write(|w| thread::claim_head(w, &ws, &space, &lease, now()))
+            {
+                Ok(task) => task,
+                Err(e) => {
+                    tracing::error!(workspace = %ws, space = %space, "thread claim_head: {e}");
+                    lock(&self.0.thread.workers).remove(&key);
+                    return;
+                }
+            };
+            let Some(task) = claimed else {
+                drop(_permit);
+                // Re-check under workers lock so a concurrent wake_space is never lost.
+                let mut workers = lock(&self.0.thread.workers);
+                let still_queued = self
+                    .store()
+                    .store()
+                    .read(|r| thread::has_active_or_queued(r, &ws, &space))
+                    .unwrap_or(false);
+                if !still_queued {
+                    workers.remove(&key);
+                    return;
+                }
+                drop(workers);
+                // Another worker currently owns the head claimed row (or a new row arrived);
+                // wait briefly for a wake notification before rechecking.
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_millis(25), notify.notified())
+                        .await;
+                continue;
+            };
+
+            let _activity = self.store().store().activity("thread_task").await;
+            let stop = Stop::default();
+            lock(&self.0.thread.stops).insert(task.id.clone(), stop.clone());
+            let c = self.clone();
+            let t_clone = task.clone();
+            let l_clone = lease.clone();
+            let s_clone = stop.clone();
+            let run = tokio::spawn(async move {
+                c.store()
+                    .store()
+                    .admitted(c.execute_task(&t_clone, &l_clone, &s_clone))
+                    .await;
+            });
+            if let Err(e) = run.await {
+                tracing::error!(task = %task.id, "thread task panicked: {e}");
+                let _ = self.store().store().write(|w| {
+                    thread::commit_reply(
+                        w,
+                        &steve_store::CommitReplyInput {
+                            task_id: &task.id,
+                            lease_token: &lease,
+                            expected_generation: task.generation,
+                            allow_cancelled_stop: true,
+                            outcome: "failed",
+                            reply_text: Some("（处理异常中断）"),
+                            existing_reply_id: None,
+                            reply_item_id: None,
+                            reply_meta: &json!({
+                                "origin": task.origin_message_id,
+                                "error": true,
+                                research::SYSTEM: true,
+                            }),
+                            error_code: Some("panic"),
+                            route_kind: "unknown",
+                            model_kind: "unknown",
+                            route_guard: None,
+                            route_model: None,
+                            route_confidence: None,
+                            route_signals: &[],
+                            route_fallback: false,
+                            route_ms: 0,
+                            route_outcome: None,
+                            item_id: None,
+                            dispatch_ref_id: None,
+                            delivery_ref_id: None,
+                            model_call_id: None,
+                            user_id: task.user_id.as_deref(),
+                            project_id: task.project_id.as_deref(),
+                            answer_model: None,
+                            harness: None,
+                            harness_session: None,
+                            tools: 0,
+                            turns: 0,
+                            first_text_ms: None,
+                            error_detail: Some(&e.to_string()),
+                            record_attention_commit: task.space == MAIN && task.user_id.is_some(),
+                        },
+                    )
+                });
+            }
+            lock(&self.0.thread.stops).remove(&task.id);
+            lock(&self.0.thread.running_phase).remove(&key);
+        }
+    }
+
+    /// Fence all active/queued tasks for `(ws, origin)` and trigger their in-memory stop signals.
+    pub(crate) fn fence_origin(&self, ws: &str, origin: &str, reason: &str) -> Result<()> {
+        let fenced = self
+            .store()
+            .store()
+            .write(|w| thread::fence_origin_tasks(w, ws, origin, reason, now()))?;
+        let stops = lock(&self.0.thread.stops);
+        for id in fenced {
+            if let Some(s) = stops.get(&id) {
+                s.stop();
+            }
+        }
+        Ok(())
+    }
+
+    /// Send a conversation message to an item; durable `thread_forwarded` remembers it until the turn ends.
     pub(crate) fn forward(
         &self,
         item: &str,
@@ -1154,21 +827,29 @@ impl Core {
         mid: &str,
     ) -> Result<()> {
         self.supplement(item, text, crate::orchestrator::SupplementMode::Auto, files)?;
-        let asked = decide::pure_question(text);
-        lock(&self.0.thread.forwarded).insert(
-            item.into(),
-            Forwarded {
-                mid: mid.into(),
-                asked,
-            },
-        );
+        let ws = self
+            .store()
+            .item(item)?
+            .map(|i| i.workspace_id)
+            .unwrap_or_else(|| crate::repo::WS.to_string());
+        let asked = if decide::pure_question(text) {
+            "1"
+        } else {
+            "0"
+        };
+        self.store()
+            .store()
+            .write(|w| thread::set_forwarded(w, item, &ws, mid, asked, now()))?;
         Ok(())
     }
 
-    /// A main-conversation message must stay actionable when its target closes, even between the
-    /// router's decision and the transaction's lifecycle guard. `false` asks the caller to route it
-    /// normally or offer separate work. Other forwarding failures remain errors.
-    fn forward_open(&self, item: &str, text: &str, files: &[FileRef], mid: &str) -> Result<bool> {
+    pub(crate) fn forward_open(
+        &self,
+        item: &str,
+        text: &str,
+        files: &[FileRef],
+        mid: &str,
+    ) -> Result<bool> {
         match self.forward(item, text, files, mid) {
             Ok(()) => Ok(true),
             Err(_) if self.store().item(item)?.is_some_and(|i| i.is_closed()) => Ok(false),
@@ -1178,20 +859,25 @@ impl Core {
 
     /// The forwarded message an item's turn answered, once.
     pub(crate) fn forwarded_take(&self, item: &str) -> Option<Forwarded> {
-        lock(&self.0.thread.forwarded).remove(item)
+        self.store()
+            .store()
+            .write(|w| thread::take_forwarded(w, item))
+            .ok()
+            .flatten()
+            .map(|(mid, asked)| Forwarded {
+                mid,
+                asked: asked == "1",
+            })
     }
 
-    /// Sets the research executor (once; `false` if one was set already).
     pub fn set_researcher(&self, r: Arc<dyn Researcher>) -> bool {
         self.0.thread.researcher.set(r).is_ok()
     }
 
-    /// What the router may pick from in this workspace.
     pub fn route_ctx(&self, ws: &str) -> Result<RouteCtx> {
         self.route_ctx_in(ws, false)
     }
 
-    /// [`Core::route_ctx`]; a guest conversation sees no items to talk to.
     pub(crate) fn route_ctx_in(&self, ws: &str, guest: bool) -> Result<RouteCtx> {
         let db = self.store();
         let projects = db.projects(ws)?;
@@ -1241,13 +927,18 @@ impl Core {
         Ok(c)
     }
 
-    /// The conversation's open items with something going on in the last 24 hours, latest first (≤3).
     fn focus(&self, ws: &str, items: &[crate::repo::Item]) -> Result<Vec<FocusItem>> {
         let since = now() - 24 * 3600 * 1000;
-        let th = self.store().store().thread();
+        let dispatches = self
+            .store()
+            .store()
+            .read(|r| thread::dispatches_of_workspace(r, ws))?;
         let mut out: Vec<(i64, FocusItem)> = vec![];
-        for t in th.items(ws)? {
-            let Some(i) = items.iter().find(|i| i.id == t.item_id) else {
+        for t in dispatches {
+            let Some(ref item_id) = t.target_item_id else {
+                continue;
+            };
+            let Some(i) = items.iter().find(|i| &i.id == item_id) else {
                 continue;
             };
             if i.is_closed() || i.updated < since {
@@ -1255,7 +946,7 @@ impl Core {
             }
             let origin = self
                 .store()
-                .message(&t.origin_msg)?
+                .message(&t.origin_message_id)?
                 .map(|m| m.text)
                 .unwrap_or_default();
             out.push((
@@ -1272,7 +963,6 @@ impl Core {
         Ok(out.into_iter().take(3).map(|(_, f)| f).collect())
     }
 
-    /// Route a message (also used by `POST /api/items` when bot, title or project are missing).
     pub async fn route(
         &self,
         ws: &str,
@@ -1314,15 +1004,11 @@ impl Core {
         Ok(route)
     }
 
-    /// The model gateway, for the API's one-off drafts (`bots/draft`, `projects/describe`).
     pub fn gateway(&self) -> &dyn crate::ModelGateway {
         self.gw()
     }
 
-    /// A chat message's attachments for Steve's own print-mode answer (files.ts `forAgent`): images that
-    /// fit go into the message itself; everything (images too) is copied next to the run and named, so
-    /// the rest can be read with the Read tool. `earlier` are the files of the message it follows up on.
-    fn chat_files(&self, files: &[FileRef], earlier: &[FileRef]) -> gateway::ChatFiles {
+    pub(crate) fn chat_files(&self, files: &[FileRef], earlier: &[FileRef]) -> gateway::ChatFiles {
         if files.is_empty() && earlier.is_empty() {
             return gateway::ChatFiles::default();
         }
@@ -1348,7 +1034,6 @@ impl Core {
                     out.note.push_str(&note);
                     out.images
                         .extend(a.images.iter().map(crate::attachments::message_image));
-                    /* only files that are not inline images need the Read tool */
                     out.readable.extend(a.readable);
                 }
                 Err(e) => out.note.push_str(&format!("\n（附件没能读取：{e}）")),
@@ -1357,12 +1042,10 @@ impl Core {
         out
     }
 
-    /// The attachments of the message `mid` follows up on, when it has none of its own: the latest user
-    /// message with files among the few before it, within half an hour (“这样你也看不出来吗？” right after
-    /// a screenshot). Empty when a research session that already saw them is resumed.
     pub(crate) fn earlier_files(
         &self,
         ws: &str,
+        space: &str,
         mid: &str,
         files: &[FileRef],
         resume: Option<&research::ResumeFrom>,
@@ -1370,8 +1053,7 @@ impl Core {
         if !files.is_empty() {
             return Ok(vec![]);
         }
-        let db = self.store();
-        let msgs = self.conv_messages(ws, &self.conv_of(mid))?;
+        let msgs = self.conv_messages(ws, space)?;
         let Some(at) = msgs.iter().position(|m| m.id == mid) else {
             return Ok(vec![]);
         };
@@ -1392,38 +1074,35 @@ impl Core {
             return Ok(vec![]);
         };
         if let Some(r) = resume
-            && db
+            && self
                 .store()
-                .thread()
-                .run(&r.run)?
-                .is_some_and(|run| run.message_id == m.id)
+                .store()
+                .read(|rd| thread::receipt_by_id(rd, &r.run))?
+                .is_some_and(|rcpt| rcpt.origin_message_id == m.id)
         {
             return Ok(vec![]);
         }
         Ok(serde_json::from_value(m.meta["files"].clone()).unwrap_or_default())
     }
 
-    /// `steve.thinking` with the phase of the message being handled; `on: true` repeats per phase like TS.
-    fn phase(&self, ws: &str, phase: &str) {
+    pub(crate) fn phase(&self, ws: &str, phase: &str) {
         self.store().store().publish(steve_types::LiveEvent::from(
             steve_types::WorkLiveEvent::SteveThinking {
                 on: true,
-                ws: {
-                    let value: String = ws.into();
-                    value.into()
-                },
+                ws: ws.to_owned().into(),
                 phase: Some(phase.into()),
             },
         ));
     }
 
-    /// The conversation before message `mid`, as the router and answers see it. An open offer on a
-    /// Steve message is shown after its text, so “好，改吧” can be read as taking it.
-    fn history_before(&self, ws: &str, mid: &str) -> Result<Vec<Said>> {
+    pub(crate) fn history_before(&self, ws: &str, mid: &str) -> Result<Vec<Said>> {
         let db = self.store();
-        let at0 = db.message(mid)?.map(|m| m.created).unwrap_or(i64::MAX);
+        let Some(origin) = db.message(mid)? else {
+            return Ok(vec![]);
+        };
+        let at0 = origin.created;
         Ok(self
-            .conv_messages(ws, &self.conv_of(mid))?
+            .conv_messages(ws, &origin.space)?
             .into_iter()
             .filter(|m| m.id != mid && m.created <= at0 && !hidden(m))
             .map(|m| {
@@ -1433,7 +1112,6 @@ impl Core {
                     .filter(|o| o["state"] == "open")
                     .map(|o| format!("\n（提议：{}）", gateway::jstr(&o["goal"])))
                     .unwrap_or_default();
-                /* the router and the answer know a message came with files, and which */
                 let files = m
                     .meta
                     .get("files")
@@ -1453,10 +1131,7 @@ impl Core {
             .collect())
     }
 
-    /// The people of a new item from its message: `party` mentions are linked and
-    /// returned as the reply's note (“关联了 A、B”); without mentions the names in the text are inferred
-    /// (no note). Failures are logged: the item stands either way.
-    fn item_people(
+    pub(crate) fn item_people(
         &self,
         ws: &str,
         user: Option<&str>,
@@ -1484,257 +1159,85 @@ impl Core {
         }
     }
 
-    /// Stop what Steve is preparing in this workspace: the reply being routed and the answer or research
-    /// being written (its partial text is kept). Messages waiting their turn stay, and go next.
+    /// Atomically request cancellation of the active main-conversation task (idempotent).
+    /// Waiting queued tasks remain queued and run next.
     pub fn stop(&self, ws: &str) -> Result<bool> {
-        /* the message being routed in its turn: on the lane, or after the answers it waited for */
-        let routing = {
-            let inflight = lock(&self.0.thread.inflight);
-            inflight
-                .get(ws)
-                .or_else(|| inflight.get(&after_lane(ws, MAIN)))
-                .cloned()
+        let Some(task_id) = self
+            .store()
+            .store()
+            .write(|w| thread::request_stop_space(w, ws, MAIN, "user", now()))?
+        else {
+            return Ok(false);
         };
-        self.stop_turn(ws, routing.as_ref())
+        if let Some(s) = lock(&self.0.thread.stops).get(&task_id) {
+            s.stop();
+        }
+        Ok(true)
     }
 
-    /// At boot: interrupt unfinished inline work and persist safe local resume intents.
-    /// External guest replies retain explicit rerun; local answers wait for `thread_ready`.
-    pub fn thread_recover(&self) -> Result<()> {
-        let th = self.store().store().thread();
-        let resume = !self.config().no_resume;
-        for r in th.runs_interrupt(resume)? {
-            let space = self.conv_of(&r.message_id);
-            // a run interrupted again after its automatic re-answer gets no second “will continue”
-            let again = th.resume_attempts(&r.id)? > 0;
-            let (text, meta) = if space == MAIN && resume && !again {
-                (
-                    "（Hub 重启，服务就绪后会继续回答）",
-                    json!({"resume_pending": true, "origin": r.message_id, "run": r.id}),
-                )
-            } else {
-                (
-                    "（Hub 重启，没答完）",
-                    json!({"rerun": r.message_id, "origin": r.message_id, "run": r.id}),
-                )
-            };
-            self.store()
-                .message_add_in(&r.workspace_id, &space, "steve", text, None, &meta)?;
-        }
-        // stopped before routing (the lane is in memory): no route, no run, no reply. Say so, with
-        // a rerun, instead of leaving the message silently unanswered; never answered by itself.
-        for (ws, mid) in th.unrouted_since(now() - crate::orchestrator::RESUME_MAX_AGE_MS)? {
-            let pending = self
-                .store()
-                .store()
-                .read(|r| core_queue::pending(r, &ws, &mid))?;
-            // Only a complete job for this message and conversation will be routed by ready.
-            // Malformed JSON, incomplete jobs and mismatched identities still need a rerun card.
-            if pending
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<Job>(raw).ok())
-                .is_some_and(|job| job.mid == mid && job.conv.space == MAIN)
-            {
-                continue;
+    /// Stop a specific task by id: cancels an active claimed task or settles a queued task directly
+    /// with 0 execution (idempotent).
+    pub fn stop_run(&self, ws: &str, task_id: &str) -> Result<bool> {
+        let outcome = self.store().store().write(|w| {
+            thread::request_stop_task(
+                w,
+                ws,
+                task_id,
+                "user",
+                "好，停下了。要我换个方式就直接说。",
+                now(),
+            )
+        })?;
+        match outcome {
+            StopTaskOutcome::CancelClaimed { task_id, .. } => {
+                if let Some(s) = lock(&self.0.thread.stops).get(&task_id) {
+                    s.stop();
+                }
+                Ok(true)
             }
-            self.store().message_add_in(
-                &ws,
-                MAIN,
-                "steve",
-                "（Hub 重启，这条消息还没来得及处理，需要时点“重新回答”）",
-                None,
-                &json!({"rerun": mid, "origin": mid, "interrupted": "route"}),
-            )?;
+            StopTaskOutcome::StoppedQueued {
+                reply_message_id,
+                space,
+                ..
+            } => {
+                self.said(ws, &space, &reply_message_id);
+                Ok(true)
+            }
+            StopTaskOutcome::AlreadyStopped => Ok(false),
         }
-        self.thread_postback()?;
+    }
+
+    /// At boot: settle any crashed `claimed` tasks to an explicit `unknown` receipt (never
+    /// auto-replaying side effects or calling `host.said`). Proven `queued` tasks stay queued.
+    pub fn thread_recover(&self) -> Result<()> {
+        self.store().store().write(|w| {
+            thread::recover_claimed_tasks(
+                w,
+                "（Hub 重启，本次处理状态未知，未自动重跑，需要时请显式重试）",
+                now(),
+            )
+        })?;
         Ok(())
     }
 
-    /// Listener-ready phase. These runs use the existing read-only researcher, never the router:
-    /// recovering an answer therefore cannot create a new item or replay an external message.
-    /// Reuse the durable run id so another restart can recover the same hand-off.
+    /// Listener-ready phase: wake per-space workers for any proven `queued` tasks.
     pub fn thread_ready(&self) -> Result<ThreadReady> {
         let mut out = ThreadReady::default();
         if self.config().no_resume || self.store().store().maintenance() {
             return Ok(out);
         }
-        /* interrupted answers first: messages that waited on them are routed after, as before the restart */
-        let th = self.store().store().thread();
-        for (r, attempts) in th.runs_to_resume(now() - crate::orchestrator::RESUME_MAX_AGE_MS)? {
-            // one run's trouble never stops the others, nor the Hub: its intent stays for later
-            match self.resume_run(&r, attempts) {
-                Ok(true) => out.resumed += 1,
-                Ok(false) => out.held += 1,
-                Err(e) => {
-                    tracing::error!(run = %r.id, "main conversation resume: {e}");
-                    out.failed += 1;
-                }
-            }
-        }
-        let pending = self.store().store().read(|r| core_queue::pending_jobs(r))?;
-        for core_queue::PendingJob {
-            workspace: ws,
-            key,
-            payload: data,
-        } in pending
-        {
-            match serde_json::from_str::<Job>(&data) {
-                Ok(job) => {
-                    let matches_message = self
-                        .store()
-                        .message(&job.mid)?
-                        .is_some_and(|m| m.workspace_id == ws && m.space == job.conv.space);
-                    if key != core_queue::pending_key(&job.mid) || !matches_message {
-                        // Keep the original record for diagnosis; never route a different message.
-                        tracing::error!(workspace = %ws, pending_key = %key, "persisted thread job identity mismatch");
-                        out.failed += 1;
-                        continue;
-                    }
-                    self.admit(&ws, job);
-                }
-                Err(e) => {
-                    tracing::error!("invalid persisted thread job: {e}");
-                    out.failed += 1;
-                }
-            }
+        let spaces = self
+            .store()
+            .store()
+            .read(|r| thread::list_queued_spaces(r))?;
+        for (ws, space) in spaces {
+            self.wake_space(&ws, &space);
+            out.resumed += 1;
         }
         Ok(out)
     }
 
-    /// Re-answers one interrupted local run (`attempts` already made): `false` when it is handed
-    /// back to an explicit rerun instead (already re-answered once, or no longer local).
-    fn resume_run(&self, r: &steve_store::ThreadRun, attempts: i64) -> Result<bool> {
-        let th = self.store().store().thread();
-        let Some(m) = self.store().message(&r.message_id)? else {
-            th.resume_drop(&r.id)?;
-            return Ok(false);
-        };
-        if m.space != MAIN {
-            th.resume_drop(&r.id)?;
-            return Ok(false);
-        }
-        if attempts >= MAX_RESUME_ATTEMPTS {
-            // it was re-answered and the Hub stopped again: no loop, a rerun for you
-            th.resume_drop(&r.id)?;
-            self.store().message_add_in(
-                &r.workspace_id,
-                MAIN,
-                "steve",
-                "（Hub 又一次在回答时重启，不再自动继续，需要时点“重新回答”）",
-                None,
-                &json!({"rerun": r.message_id, "origin": r.message_id, "run": r.id}),
-            )?;
-            return Ok(false);
-        }
-        // counted before it starts: a crash during it counts too
-        th.resume_attempt(&r.id)?;
-        let files = m
-            .meta
-            .get("files")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
-        let job = research::InlineJob {
-            kind: if th.route_of(&m.id)?.is_some_and(|x| x.kind == "answer") {
-                research::Inline::Answer
-            } else {
-                research::Inline::Research
-            },
-            origin: m.id.clone(),
-            question: m.text,
-            files,
-            earlier: vec![],
-            user: r.user_id.clone(),
-            project: r.project_id.clone(),
-            route: None,
-            offer: None,
-            reply_to: r.reply_id.clone(),
-            run: Some(r.id.clone()),
-            stop: Stop::default(),
-            t0: now(),
-            resume: None,
-            space: m.space,
-            to_item: None,
-        };
-        if !self.enqueue_inline(&r.workspace_id, job)? {
-            // Still interrupted in the database; next ready/restart can retry.
-            tracing::warn!(run = %r.id, "recovery queue full; durable intent retained");
-        }
-        Ok(true)
-    }
-
-    /// Items whose delivered explanation goes back into the conversation once, at the first boot of
-    /// this build (thread-routing “决定” 6: ST-20 answered a question, but only inside the item).
-    const POSTBACK: [&'static str; 1] = ["ST-20"];
-
-    /// Posts each [`Self::POSTBACK`] item's longest delivery summary into the conversation, quoting the
-    /// message it came from. Once per item (settings `thread.postback.<id>`); items not made from the
-    /// conversation, or without a delivery, are left alone. Returns the messages posted.
-    pub fn thread_postback(&self) -> Result<Vec<String>> {
-        self.postback(&Self::POSTBACK)
-    }
-
-    pub(crate) fn postback(&self, items: &[&str]) -> Result<Vec<String>> {
-        let db = self.store();
-        let mut posted = vec![];
-        for &id in items {
-            let Some(item) = db.item(id)? else { continue };
-            let ws = item.workspace_id.clone();
-            let key = format!("thread.postback.{id}");
-            if !db.setting(&ws, &key, "").unwrap_or_default().is_empty() {
-                continue;
-            }
-            if item.source != ("对话".to_string(), "chat".to_string()) {
-                continue;
-            }
-            let Some(draft) = db
-                .decisions_of_item(id)?
-                .into_iter()
-                .filter(|d| d.kind == "accept")
-                .map(|d| d.draft)
-                .filter(|t| !t.trim().is_empty())
-                .max_by_key(|t| t.chars().count())
-            else {
-                continue;
-            };
-            let msgs = db.messages_in(&ws, "steve", 100_000)?;
-            let Some(announce) = msgs
-                .iter()
-                .find(|m| m.author == "steve" && m.item_id.as_deref() == Some(id))
-            else {
-                continue;
-            };
-            let origin = msgs
-                .iter()
-                .rfind(|m| m.author == "me" && m.created <= announce.created)
-                .map(|m| m.id.clone())
-                .unwrap_or_else(|| announce.id.clone());
-            let mid = db.message_add(
-                &ws,
-                "steve",
-                draft.trim(),
-                Some(id),
-                Some(&json!({
-                    "update": {"kind": "deliver", "item": id, "text": draft.trim(), "full": true, "at": now()},
-                    "reply_to": origin,
-                    "postback": true,
-                })),
-            )?;
-            let mut set = Map::new();
-            set.insert(key, json!(mid));
-            db.settings_set(&ws, &set, "steve")?;
-            tracing::info!(
-                item = id,
-                message = mid,
-                "posted the delivery back into the conversation"
-            );
-            posted.push(mid);
-        }
-        Ok(posted)
-    }
-
-    /// `/汇报`: open decisions, running items, items finished today (since midnight on the workspace
-    /// owner's clock, [`steve_modules::zone`]).
+    /// `/汇报`: open decisions, running items, items finished today.
     pub fn digest_text(&self, ws: &str) -> Result<String> {
         let all = self.store().items(ws)?;
         let open = self.store().decisions_open(ws)?;
@@ -1756,6 +1259,19 @@ impl Core {
             "现在：{} 件等你，{run} 件在进行，今天完成 {done} 件。",
             waiting.len()
         ))
+    }
+}
+
+fn conflict_err(reason: &'static str) -> CoreError {
+    match reason {
+        "withdrawn" => CoreError::Status(409, "message was withdrawn".into()),
+        "payload_mismatch" => {
+            CoreError::Status(409, "client_id reused with a different payload".into())
+        }
+        "invalid_file" | "invalid_item" | "invalid_reply_to" => {
+            CoreError::Status(404, steve_i18n::t!("core.message.not_found"))
+        }
+        _ => CoreError::Status(409, reason.into()),
     }
 }
 

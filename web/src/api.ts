@@ -133,6 +133,7 @@ export type Shell = {
   projects: RProject[]; tags: RTag[]; settings: Record<string, string>
   harnessNames?: Record<string, string>
   notifySeen?: number
+  dismissedAlerts?: string[]
 }
 export type Summary = { ws: string; workspace_name: string; thinking: boolean; hold: RHold | null }
 export type RHold = { item: string; running: number; since: number }

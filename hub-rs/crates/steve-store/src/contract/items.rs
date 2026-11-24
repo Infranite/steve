@@ -388,17 +388,19 @@ pub fn in_conversation(
     use sea_query::{Expr, ExprTrait, JoinType, Query};
     c.all(
         Query::select()
-            .column(("ti", "item_id"))
-            .from_as("thread_items", "ti")
+            .column(("ti", "target_item_id"))
+            .from_as("thread_dispatch_refs", "ti")
             .join_as(
                 JoinType::InnerJoin,
                 "messages",
                 "m",
-                Expr::col(("m", "id")).eq(Expr::col(("ti", "origin_msg"))),
+                Expr::col(("m", "id")).eq(Expr::col(("ti", "origin_message_id"))),
             )
             .and_where(Expr::col(("m", "space")).eq(space))
             .and_where(Expr::col(("m", "workspace_id")).eq(ws))
-            .and_where(Expr::col(("ti", "workspace_id")).eq(ws)),
+            .and_where(Expr::col(("ti", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("ti", "effect_kind")).eq("create_item"))
+            .and_where(Expr::col(("ti", "target_item_id")).is_not_null()),
         |r| r.get(0),
     )
 }

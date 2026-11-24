@@ -340,7 +340,7 @@ pub fn seed_thread_group(store: &Store, item: &str) -> Result<()> {
                    ('msg_grp_2', 'default', 'chan:spc_t', 'u', '进展如何', 2)",
         )?;
         tx.conn.execute(
-            "                 UPDATE thread_items SET origin_msg = 'msg_grp_1' WHERE item_id = ?;",
+            "UPDATE thread_dispatch_refs SET origin_message_id = 'msg_grp_1' WHERE target_item_id = ? AND effect_kind = 'create_item';",
             [item],
         )?;
         Ok(())

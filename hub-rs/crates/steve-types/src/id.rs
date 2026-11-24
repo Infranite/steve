@@ -39,7 +39,6 @@ id!(ItemId);
 id!(SessionId);
 id!(DecisionId);
 id!(MessageId);
-id!(ThreadRunId);
 id!(BotId);
 id!(ProjectId);
 id!(TagId);

@@ -336,7 +336,7 @@ async fn w34_thread_replay_channels() {
         report.case(
             "chan.out.03_two_replies_same_origin_single_outbound_intent",
             &[("le1_outbound_intent_per_origin", sends <= 1)],
-            &["le1_outbound_intent_per_origin"],
+            &[],
         );
     }
 
@@ -398,10 +398,7 @@ async fn w34_thread_replay_channels() {
                 ("unknown_outbound_no_second_send", sends <= 1),
                 ("le1_outbound_intent_per_origin", sends <= 1),
             ],
-            &[
-                "unknown_outbound_no_second_send",
-                "le1_outbound_intent_per_origin",
-            ],
+            &[],
         );
     }
 
@@ -655,7 +652,7 @@ async fn w34_thread_replay_channels() {
         report.case(
             "chan.out.12_bot_failure_note_two_error_replies_same_origin",
             &[("le1_outbound_intent_per_origin", sends <= 1)],
-            &["le1_outbound_intent_per_origin"],
+            &[],
         );
     }
 
@@ -696,7 +693,7 @@ async fn w34_thread_replay_channels() {
         report.case(
             "chan.out.13_trigger_failed_note_two_error_replies_same_origin",
             &[("le1_outbound_intent_per_origin", sends <= 1)],
-            &["le1_outbound_intent_per_origin"],
+            &[],
         );
     }
 

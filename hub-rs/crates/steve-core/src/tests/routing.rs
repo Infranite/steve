@@ -76,12 +76,15 @@ async fn settle(k: &Kit, n: usize) -> Vec<Message> {
     panic!("waited for {n}: {:#?}", k.db().messages(WS).unwrap());
 }
 
-fn route_log(k: &Kit, mid: &str) -> steve_store::RouteLog {
-    route_opt(k, mid).expect("a route_log row")
+fn route_log(k: &Kit, mid: &str) -> steve_store::ReplyReceipt {
+    route_opt(k, mid).expect("a reply receipt row")
 }
 
-fn route_opt(k: &Kit, mid: &str) -> Option<steve_store::RouteLog> {
-    k.db().store().thread().route_of(mid).unwrap()
+fn route_opt(k: &Kit, mid: &str) -> Option<steve_store::ReplyReceipt> {
+    k.db()
+        .store()
+        .read(|r| steve_store::thread::receipt_by_origin(r, mid))
+        .unwrap()
 }
 
 #[tokio::test]
@@ -174,20 +177,24 @@ async fn a1_a_question_is_researched_in_the_conversation() {
         (req.question.as_str(), req.mid.as_str()),
         (A1, mid.as_str())
     );
-    /* route_log and thread_runs */
+    /* durable reply receipt and task */
     let l = route_log(&k, &mid);
     assert_eq!(
-        (l.model_kind.as_str(), l.kind.as_str()),
+        (l.model_kind.as_str(), l.route_kind.as_str()),
         ("item", "research")
     );
-    assert_eq!(l.guard.as_deref(), Some("4"));
-    assert_eq!(l.reply_id.as_deref(), Some(a.id.as_str()));
-    let runs = k.db().store().thread().runs_of_message(&mid).unwrap();
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].status, "done");
-    assert_eq!(runs[0].tools, 4);
-    assert_eq!(runs[0].reply_id.as_deref(), Some(a.id.as_str()));
-    assert!(runs[0].first_text_ms.is_some());
+    assert_eq!(l.route_guard.as_deref(), Some("4"));
+    assert_eq!(l.reply_message_id.as_deref(), Some(a.id.as_str()));
+    assert_eq!(l.outcome, "answered");
+    assert_eq!(l.tools, 4);
+    assert!(l.first_text_ms.is_some());
+    let tasks = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::tasks_of_origin(r, &mid))
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].status, "settled");
 
     /* taking the offer is not a correction; who took it asked for the item (a member only) */
     steve_store::core_fixture::thread::owner(k.db().store(), WS, "usr_dev", "dev", "Dev");
@@ -197,14 +204,19 @@ async fn a1_a_question_is_researched_in_the_conversation() {
     assert_eq!(by.as_deref(), Some("usr_dev"));
     assert_eq!(item.title, "讲解知识系统");
     let l = route_log(&k, &mid);
-    assert_eq!(l.override_, None);
-    assert_eq!(l.outcome.as_deref(), Some("offer_taken"));
+    assert_eq!(l.route_override, None);
+    assert_eq!(l.route_outcome.as_deref(), Some("offer_taken"));
     assert_eq!(
         k.db().message(&a.id).unwrap().unwrap().meta["offer"]["state"],
         "taken"
     );
-    let ti = k.db().store().thread().item(&item.id).unwrap().unwrap();
-    assert_eq!(ti.origin_msg, mid);
+    let ti = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_item(r, &item.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(ti.origin_message_id, mid);
     assert!(ti.from_question);
     /* a second click: 409 with the same result */
     let again = k.core.offer(WS, &a.id, true, None).unwrap();
@@ -239,7 +251,7 @@ async fn a4b_making_an_answer_an_item_is_a_correction_with_the_answer_as_context
         "读过的文件：hub-rs/crates/steve-knowledge/src/lib.rs、hub-rs/crates/steve-knowledge/src/retrieve.rs、hub-rs/crates/steve-knowledge/src/context.rs"
     ));
     let l = route_log(&k, &mid);
-    assert_eq!(l.override_.as_deref(), Some("to_item"));
+    assert_eq!(l.route_override.as_deref(), Some("to_item"));
     assert_eq!(l.item_id.as_deref(), Some(item.id.as_str()));
     /* reroute {to: item} is the same button */
     let h = k
@@ -269,12 +281,17 @@ async fn a2_a_clear_change_becomes_an_item() {
         ms[1].text, "好，交给 Steve 了，做完请你验收。 标签：feat。",
         "the router's tag note is dropped; the code adds the item's own, its category first"
     );
-    let ti = k.db().store().thread().item(&id).unwrap().unwrap();
-    assert_eq!(ti.origin_msg, mid);
-    assert_eq!(ti.reply_msg.as_deref(), Some(ms[1].id.as_str()));
+    let ti = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_item(r, &id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(ti.origin_message_id, mid);
+    assert_eq!(ti.reply_message_id.as_deref(), Some(ms[1].id.as_str()));
     let l = route_log(&k, &mid);
     assert_eq!(
-        (l.kind.as_str(), l.item_id.as_deref()),
+        (l.route_kind.as_str(), l.item_id.as_deref()),
         ("item", Some(id.as_str()))
     );
 }
@@ -300,7 +317,7 @@ async fn a3_an_unclear_request_is_planned_here_and_offered() {
     assert_eq!(a.meta["offer"]["state"], "open");
     let l = route_log(&k, &mid);
     assert_eq!(
-        (l.kind.as_str(), l.guard.as_deref()),
+        (l.route_kind.as_str(), l.route_guard.as_deref()),
         ("research", Some("plan"))
     );
     /* the offer makes the item in one click */
@@ -345,10 +362,14 @@ async fn a4a_an_item_goes_back_into_the_conversation() {
     assert_eq!(ans.meta["reply_to"], json!(ms[1].id));
     assert!(ans.text.starts_with("知识系统分三层"));
     let l = route_log(&k, &mid);
-    assert_eq!(l.override_.as_deref(), Some("to_inline"));
+    assert_eq!(l.route_override.as_deref(), Some("to_inline"));
     assert_eq!(
-        k.db().store().thread().runs_of_message(&mid).unwrap().len(),
-        1
+        k.db()
+            .store()
+            .read(|r| steve_store::thread::tasks_of_origin(r, &mid))
+            .unwrap()
+            .len(),
+        2
     );
     /* an accepted item can't go back */
     let done = k.item("done", "完成", None);
@@ -382,16 +403,20 @@ async fn a_failing_router_never_makes_an_item() {
         }
     });
     let before = items(&k);
-    for t in ["帮我把 X 改成 Y", "建个事项吧", A1] {
+    for t in ["帮我把 X 改成 Y", "把登录页改成深色模式", A1] {
         let mid = k.core.say(WS, t, &[]).unwrap();
         eventually_sync("The conversation route is bound to a reply.", || {
-            route_opt(&k, &mid).is_some_and(|l| l.reply_id.is_some())
+            route_opt(&k, &mid).is_some_and(|l| l.reply_message_id.is_some())
         })
         .await;
         let l = route_log(&k, &mid);
-        assert!(l.fallback);
-        assert!(l.kind == "answer" || l.kind == "research", "{}", l.kind);
-        assert_eq!(l.guard.as_deref(), Some("6"));
+        assert!(l.route_fallback);
+        assert!(
+            l.route_kind == "answer" || l.route_kind == "research",
+            "{}",
+            l.route_kind
+        );
+        assert_eq!(l.route_guard.as_deref(), Some("6"));
     }
     assert_eq!(items(&k), before);
     /* unusable JSON too */
@@ -404,17 +429,18 @@ async fn a_failing_router_never_makes_an_item() {
     });
     let mid = k.core.say(WS, "随便", &[]).unwrap();
     eventually_sync("The conversation route is bound to a reply.", || {
-        route_opt(&k, &mid).is_some_and(|l| l.reply_id.is_some())
+        route_opt(&k, &mid).is_some_and(|l| l.reply_message_id.is_some())
     })
     .await;
     assert_eq!(items(&k), before);
 }
 
-/// What is said while Steve is on a turn waits for it (ST-33): held, visible, editable and withdrawable until
-/// the turn ends; a stop ends the turn at once with the partial answer, and the queue goes next, in order,
-/// after the reply it waited on — each message once.
+/// What is said while Steve is on a turn waits for it: held in view, editable and withdrawable until
+/// the turn ends; a stop ends the turn at once with the partial answer, and the queue goes next,
+/// in strict FIFO order — each message once.
 #[tokio::test(flavor = "multi_thread")]
 async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
+    use steve_store::Views;
     let k = Kit::new();
     let fr = FakeResearch::new(vec![Step::Text("部分"), Step::Gate, Step::Text("回答")]);
     k.core.set_researcher(fr.clone());
@@ -437,8 +463,16 @@ async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
     let q2 = k.core.say(WS, "问题二？", &[]).unwrap();
     let q3 = k.core.say(WS, "问题三？", &[]).unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
+    let is_held = |id: &str| {
+        k.db()
+            .store()
+            .read(|r| r.message_views().of(WS, &[id.to_string()]))
+            .unwrap()
+            .first()
+            .is_some_and(|v| serde_json::to_value(&v.meta).unwrap()["held"] == true)
+    };
     for m in [&fix, &q2, &q3] {
-        assert_eq!(k.db().message(m).unwrap().unwrap().meta["held"], true);
+        assert!(is_held(m), "{m} should be held in view");
         assert!(route_opt(&k, m).is_none(), "not routed while the turn runs");
     }
     assert_eq!(items(&k), before, "work waits too");
@@ -449,27 +483,28 @@ async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
             .unwrap()
     );
     assert_eq!(k.db().message(&q2).unwrap().unwrap().text, "问题二改过了？");
-    /* withdrawn: gone, with its words back */
+    /* withdrawn: hidden tombstone retained so retries cannot resurrect it, and absent from views */
     let (t, _) = k.core.thread_queued_withdraw(WS, &q3).unwrap().unwrap();
     assert_eq!(t, "问题三？");
-    assert!(k.db().message(&q3).unwrap().is_none());
+    let tomb = k.db().message(&q3).unwrap().expect("tombstone retained");
+    assert_eq!(tomb.meta["hidden"], true);
+    assert_eq!(tomb.meta["withdrawn"], true);
+    assert!(
+        k.db()
+            .store()
+            .read(|r| r.message_views().of(WS, std::slice::from_ref(&q3)))
+            .unwrap()
+            .is_empty()
+    );
     assert!(k.core.thread_queued_withdraw(WS, &q3).unwrap().is_none());
     /* stop the running one: its partial answer stays, marked; the queue goes next */
     assert!(k.core.stop(WS).unwrap());
     eventually_sync(
         "The interrupted conversation turn stores its stopped receipt.",
-        || {
-            k.db()
-                .store()
-                .thread()
-                .runs_of_message(&q1)
-                .unwrap()
-                .first()
-                .is_some_and(|r| r.status == "stopped")
-        },
+        || route_opt(&k, &q1).is_some_and(|r| r.outcome == "stopped"),
     )
     .await;
-    let r1 = route_log(&k, &q1).reply_id.unwrap();
+    let r1 = route_log(&k, &q1).reply_message_id.unwrap();
     assert_eq!(
         k.db().message(&r1).unwrap().unwrap().text,
         "部分\n\n（已停下）"
@@ -480,28 +515,14 @@ async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
     })
     .await;
     eventually_sync("The conversation route is bound to a reply.", || {
-        route_opt(&k, &q2).is_some_and(|l| l.reply_id.is_some())
+        route_opt(&k, &q2).is_some_and(|l| l.reply_message_id.is_some())
     })
     .await;
     /* gone once it went: no more changes */
     assert!(!k.core.thread_queued_edit(WS, &q2, "太晚了").unwrap());
     assert!(k.core.thread_queued_withdraw(WS, &q2).unwrap().is_none());
-    let ms = k.db().messages(WS).unwrap();
-    let at = |id: &str| ms.iter().position(|m| m.id == id).unwrap();
-    assert!(
-        at(&r1) < at(&fix) && at(&fix) < at(&q2),
-        "after the reply they waited on, in order"
-    );
     for m in [&fix, &q2] {
-        assert!(
-            k.db()
-                .message(m)
-                .unwrap()
-                .unwrap()
-                .meta
-                .get("held")
-                .is_none()
-        );
+        assert!(!is_held(m), "{m} no longer held");
     }
     let calls: Vec<String> =
         k.gw.calls
@@ -520,86 +541,15 @@ async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
         })
         .collect();
     /* a plain question needs no router (#52, guard q) */
-    assert_eq!(route_log(&k, &q1).guard.as_deref(), Some("q"));
-    /* the work was asked ahead whether it needs the answer; the router did not say it doesn't, so it
-    waited and was routed again in its turn; a plain question waits without asking */
+    assert_eq!(route_log(&k, &q1).route_guard.as_deref(), Some("q"));
+    /* serial routing: fix routed once (no ahead), edited q2 routed with new words, withdrawn q3 never routed */
     assert_eq!(
         routed,
         vec![
             "User message: \"修登录页\"",
-            "User message: \"修登录页\"",
             "User message: \"问题二改过了？\"",
         ],
-        "as changed, the withdrawn one never"
-    );
-    assert!(calls[0].contains("Steve is still answering these earlier messages"));
-    assert!(calls[0].contains("  \"问题一是什么？\""));
-    assert!(!calls[1].contains("Steve is still answering"));
-}
-
-/// 2026-11-09: while Steve is still answering, work that stands on its own and an instruction for an
-/// item go at once; what needs the answer waits for it, without holding up the messages behind it.
-/// A current-thread runtime keeps the two synchronous sends together, so routing always sees a batch.
-#[tokio::test]
-async fn while_research_runs_standalone_work_goes_ahead() {
-    let k = Kit::new();
-    let fr = FakeResearch::new(vec![Step::Text("部分"), Step::Gate, Step::Text("回答")]);
-    k.core.set_researcher(fr.clone());
-    router(&k, |m| match m {
-        "修登录页" => {
-            json!({"kind": "item", "confidence": 0.9, "signals": ["change"], "title": m, "after": false})
-        }
-        "就按你说的改" => {
-            json!({"kind": "item", "confidence": 0.9, "signals": ["explicit"], "title": "改", "after": true})
-        }
-        _ => json!({"kind": "research", "confidence": 0.9, "signals": ["question"]}),
-    });
-    let q1 = k.core.say(WS, "问题一是什么？", &[]).unwrap();
-    eventually_sync(
-        "The research turn starts before another message is submitted.",
-        || k.core.researching(WS),
-    )
-    .await;
-    let before = items(&k);
-    let follow = k.core.say(WS, "就按你说的改", &[]).unwrap();
-    let fix = k.core.say(WS, "修登录页", &[]).unwrap();
-    /* the work behind the follow-up is not held up by it */
-    eventually_sync("Routing creates exactly one new work item.", || {
-        items(&k) == before + 1
-    })
-    .await;
-    assert_eq!(
-        k.gw.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|p| p.contains("a JSON array of 2 objects"))
-            .count(),
-        1,
-        "the dependent and standalone messages were routed together"
-    );
-    assert!(
-        k.core.researching(WS),
-        "while the answer is still being read"
-    );
-    assert_eq!(route_log(&k, &fix).kind, "item");
-    let m = k.db().message(&fix).unwrap().unwrap();
-    assert!(m.meta.get("held").is_none(), "no longer waiting");
-    assert_eq!(k.db().message(&follow).unwrap().unwrap().meta["held"], true);
-    assert!(route_opt(&k, &follow).is_none(), "waits for the answer");
-    fr.open(10);
-    eventually_sync(
-        "The follow-up message receives a durable conversation route.",
-        || route_opt(&k, &follow).is_some(),
-    )
-    .await;
-    let r1 = route_log(&k, &q1).reply_id.unwrap();
-    let ms = k.db().messages(WS).unwrap();
-    let at = |id: &str| ms.iter().position(|m| m.id == id).unwrap();
-    assert!(at(&fix) < at(&r1), "the work went before the answer");
-    assert!(
-        at(&r1) < at(&follow),
-        "the follow-up after the answer it needs"
+        "fix once, edited q2 routed once with new text, withdrawn never"
     );
 }
 
@@ -630,10 +580,10 @@ async fn an_answer_with_an_offer_is_taken_by_a_confirmation() {
         "taken"
     );
     let first = route_log(&k, &ms[0].id);
-    assert_eq!(first.outcome.as_deref(), Some("offer_taken"));
-    assert_eq!(first.override_, None);
+    assert_eq!(first.route_outcome.as_deref(), Some("offer_taken"));
+    assert_eq!(first.route_override, None);
     assert_eq!(
-        route_log(&k, &mid).reply_id.as_deref(),
+        route_log(&k, &mid).reply_message_id.as_deref(),
         Some(ms[3].id.as_str())
     );
 }
@@ -680,7 +630,7 @@ async fn item_references_are_context_for_new_work() {
                     .next(),
                 Some(text.as_str())
             );
-            assert_eq!(route_log(&k, &mid).kind, "item");
+            assert_eq!(route_log(&k, &mid).route_kind, "item");
             assert_eq!(items(&k), 2);
             assert_eq!(k.db().timeline(&old).unwrap().len(), before);
             assert!(k.rt.prompts_of(&session).is_empty());
@@ -708,7 +658,7 @@ async fn explicit_new_work_overrides_a_mistaken_supplement() {
         let ms = settle(&k, 2).await;
         assert_ne!(ms[1].item_id.as_deref().expect("new work"), old);
         assert!(!ms[1].text.contains("已送到旧事项"));
-        assert_eq!(route_log(&k, &mid).guard.as_deref(), Some("2"));
+        assert_eq!(route_log(&k, &mid).route_guard.as_deref(), Some("2"));
         assert_eq!(items(&k), 2);
     }
 }
@@ -773,7 +723,7 @@ async fn a_named_but_unsure_supplement_asks_once_and_the_choice_is_idempotent() 
     let text = format!("#{old} 那个统计也处理一下");
     let mid = k.core.say(WS, &text, &[]).unwrap();
     let ms = settle(&k, 2).await;
-    assert_eq!(route_log(&k, &mid).kind, "suggest");
+    assert_eq!(route_log(&k, &mid).route_kind, "suggest");
     assert_eq!(ms[1].meta["suggest"]["state"], "open");
     assert!(k.rt.prompts_of(&session).is_empty());
     let first = k.core.suggest(WS, &ms[1].id, "item", None).unwrap();
@@ -816,7 +766,7 @@ async fn a_closed_supplement_offers_separate_work_without_losing_the_request() {
             let mid = k.core.say(WS, &text, std::slice::from_ref(&file)).unwrap();
             let ms = settle(&k, 2).await;
             let card = &ms[1];
-            assert_eq!(route_log(&k, &mid).guard.as_deref(), Some("closed"));
+            assert_eq!(route_log(&k, &mid).route_guard.as_deref(), Some("closed"));
             assert!(card.text.contains("已经结束"));
             assert!(card.meta.get("error").is_none());
             assert_eq!(card.meta["suggest"]["choices"][0]["id"], "new");
@@ -1024,7 +974,7 @@ async fn status_and_supplement_and_unsure_supplement() {
         .unwrap();
     assert_eq!(h.item.unwrap().id, i);
     assert_eq!(
-        route_log(&k, &ms[4].id).override_.as_deref(),
+        route_log(&k, &ms[4].id).route_override.as_deref(),
         Some("to_supplement")
     );
 }
@@ -1107,26 +1057,54 @@ async fn an_unsure_supplement_explains_and_asks_append_or_new() {
 #[tokio::test]
 async fn hub_restart_interrupts_research() {
     let k = Kit::new();
-    let th = k.db().store().thread();
     let mid = k.db().message_add(WS, "me", "问", None, None).unwrap();
-    k.db()
+    let task_id = k
+        .db()
         .store()
         .write(|w| {
-            steve_store::thread_runs::add(
+            let now = steve_store::now();
+            let _ = steve_store::thread::enqueue_revision(
                 w,
-                &steve_store::NewThreadRun {
-                    workspace_id: WS.into(),
-                    message_id: mid.clone(),
-                    ..Default::default()
+                &steve_store::NewRevisionTask {
+                    ws: WS,
+                    space: crate::thread::MAIN,
+                    origin_message_id: &mid,
+                    user_id: None,
+                    project_id: None,
+                    conv_json: None,
+                    to_item: None,
+                    to_reply_to: None,
+                    files_json: None,
+                    mentions_json: None,
+                    reply_to_message_id: None,
+                    forced_kind: Some("research"),
+                    route_json: None,
+                    offer_json: None,
+                    prev_receipt_id: None,
+                    read_task_intent_key: None,
                 },
-            )
+            )?;
+            let lease = steve_store::uid("lease");
+            let claimed = steve_store::thread::claim_head(w, WS, crate::thread::MAIN, &lease, now)?
+                .expect("claimed task");
+            Ok::<_, steve_store::StoreError>(claimed.id)
         })
         .unwrap();
     k.core.thread_recover().unwrap();
-    assert_eq!(th.runs_of_message(&mid).unwrap()[0].status, "interrupted");
+    assert_eq!(
+        k.db()
+            .store()
+            .read(|r| steve_store::thread::task_by_id(r, &task_id))
+            .unwrap()
+            .unwrap()
+            .status,
+        "settled"
+    );
+    let receipt = route_log(&k, &mid);
+    assert_eq!(receipt.outcome, "unknown");
     let last = k.db().messages(WS).unwrap().pop().unwrap();
-    assert_eq!(last.text, "（Hub 重启，服务就绪后会继续回答）");
-    assert_eq!(last.meta["resume_pending"], json!(true));
+    assert_eq!(last.meta["unknown"], json!(true));
+    assert!(!last.text.contains("继续回答"));
 }
 
 /// A2 + R4: an item from the conversation reports back there, at the right place, and the user can talk
@@ -1151,8 +1129,13 @@ async fn r4_an_item_from_the_conversation_reports_back() {
     let ms = settle(&k, 4).await;
     let announce = ms[3].clone();
     let id = announce.item_id.clone().unwrap();
-    let ti = k.db().store().thread().item(&id).unwrap().unwrap();
-    assert_eq!(ti.origin_msg, origin);
+    let ti = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_item(r, &id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(ti.origin_message_id, origin);
     let s = k.db().sessions_of_item(&id).unwrap().pop().unwrap();
     let opening = &k.rt.prompts_of(&s.id)[0];
     assert!(
@@ -1381,8 +1364,8 @@ async fn a_follow_up_resumes_the_research_session() {
     );
     let q1 = k.core.say(WS, A1, &[]).unwrap();
     settle(&k, 2).await;
-    let run1 = k.db().store().thread().runs_of_message(&q1).unwrap()[0].clone();
-    assert_eq!(run1.session.as_deref(), Some("cs_1"));
+    let run1 = route_log(&k, &q1);
+    assert_eq!(run1.harness_session.as_deref(), Some("cs_1"));
     assert_eq!(run1.harness.as_deref(), Some("claude-code"));
     let q2 = k.core.say(WS, "重点讲检索那块", &[]).unwrap();
     settle(&k, 4).await;
@@ -1400,17 +1383,21 @@ async fn a_follow_up_resumes_the_research_session() {
             .iter()
             .any(|h| h.author == "steve" && h.text.starts_with("知识系统分三层"))
     );
-    let run2 = k.db().store().thread().runs_of_message(&q2).unwrap()[0].clone();
-    assert_eq!(run2.prev_run.as_deref(), Some(run1.id.as_str()));
+    let run2 = route_log(&k, &q2);
+    assert_eq!(run2.harness_session.as_deref(), Some("cs_1"));
     /* the run had its own MCP token while it ran, cleared at the end */
     let mcp = seen[1].mcp.clone().unwrap();
     assert!(mcp.url.ends_with("/mcp"));
-    assert_eq!(run2.token_hash, None);
+    let t2 = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::tasks_of_origin(r, &q2))
+        .unwrap();
+    assert_eq!(t2[0].token_hash, None);
     assert!(
         k.db()
             .store()
-            .thread()
-            .run_by_token(&mcp.token)
+            .read(|r| steve_store::thread::active_task_by_token(r, &mcp.token))
             .unwrap()
             .is_none()
     );
@@ -1421,31 +1408,6 @@ async fn a_follow_up_resumes_the_research_session() {
     k.core.say(WS, "再问一个", &[]).unwrap();
     settle(&k, 7).await;
     assert!(fr.seen.lock().unwrap()[2].resume.is_none());
-}
-
-#[tokio::test]
-async fn an_explanation_is_posted_back_once() {
-    let k = Kit::new();
-    k.manual_acceptance();
-    router(
-        &k,
-        |_| json!({"kind": "item", "confidence": 0.95, "signals": ["explicit"], "title": "讲解", "bot": "steve"}),
-    );
-    let origin = k.core.say(WS, "建个事项讲讲知识系统", &[]).unwrap();
-    let ms = settle(&k, 2).await;
-    let id = ms[1].item_id.clone().unwrap();
-    let s = k.db().sessions_of_item(&id).unwrap().pop().unwrap();
-    k.core
-        .tool_deliver(&s, "## 知识系统\n\n分两种：记忆和文档。", &[], &[], &[])
-        .unwrap();
-    let ids = [id.as_str()];
-    let posted = k.core.postback(&ids).unwrap();
-    assert_eq!(posted.len(), 1);
-    let m = k.db().message(&posted[0]).unwrap().unwrap();
-    assert_eq!(m.text, "## 知识系统\n\n分两种：记忆和文档。");
-    assert_eq!(m.meta["reply_to"], json!(origin));
-    assert_eq!(m.meta["update"]["full"], true);
-    assert!(k.core.postback(&ids).unwrap().is_empty(), "once");
 }
 
 /// Screenshots (prod 11-02 12:00, “我看不到你指的那块内容”): research gets the question's files, a
@@ -1563,20 +1525,12 @@ async fn personal_attention_tracks_only_final_owned_inline_run_receipts() {
         .unwrap();
     eventually_sync(
         "The inline conversation run records its final completion receipt.",
-        || {
-            k.db()
-                .store()
-                .thread()
-                .runs_of_message(&mid)
-                .unwrap()
-                .iter()
-                .any(|r| r.status == "done")
-        },
+        || route_opt(&k, &mid).is_some_and(|r| r.outcome == "answered"),
     )
     .await;
-    let runs = k.db().store().thread().runs_of_message(&mid).unwrap();
-    let reply = runs[0]
-        .reply_id
+    let receipt = route_log(&k, &mid);
+    let reply = receipt
+        .reply_message_id
         .as_ref()
         .expect("short answer names its persisted final receipt");
     let (entries, upper) =
@@ -1589,15 +1543,7 @@ async fn personal_attention_tracks_only_final_owned_inline_run_receipts() {
     let unowned = k.core.say(WS, "再解释一下", &[]).unwrap();
     eventually_sync(
         "The inline conversation run records its final completion receipt.",
-        || {
-            k.db()
-                .store()
-                .thread()
-                .runs_of_message(&unowned)
-                .unwrap()
-                .iter()
-                .any(|r| r.status == "done")
-        },
+        || route_opt(&k, &unowned).is_some_and(|r| r.outcome == "answered"),
     )
     .await;
     assert_eq!(
@@ -1636,20 +1582,12 @@ async fn personal_attention_tracks_actual_stopped_short_answer_receipt() {
     assert!(k.core.stop(WS).unwrap());
     eventually_sync(
         "The interrupted conversation turn stores its stopped receipt.",
-        || {
-            k.db()
-                .store()
-                .thread()
-                .runs_of_message(&mid)
-                .unwrap()
-                .iter()
-                .any(|r| r.status == "stopped")
-        },
+        || route_opt(&k, &mid).is_some_and(|r| r.outcome == "stopped"),
     )
     .await;
-    let runs = k.db().store().thread().runs_of_message(&mid).unwrap();
-    let id = runs[0]
-        .reply_id
+    let receipt = route_log(&k, &mid);
+    let id = receipt
+        .reply_message_id
         .as_ref()
         .expect("stopped answer names persisted receipt");
     let reply = k.db().message(id).unwrap().unwrap();
@@ -1674,172 +1612,6 @@ async fn personal_attention_tracks_actual_stopped_short_answer_receipt() {
         .unwrap()
         .0,
         *id
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn interrupted_local_answer_recovers_after_ready_once_across_two_boots() {
-    let k = Kit::new();
-    router(&k, |_| json!({"kind":"answer"}));
-    k.core
-        .set_researcher(FakeResearch::new(vec![Step::Text("安全续答")]));
-    let th = k.db().store().thread();
-    let mid = k
-        .db()
-        .message_add(WS, "me", "继续解释", None, None)
-        .unwrap();
-    let run = k
-        .db()
-        .store()
-        .write(|w| {
-            steve_store::thread_runs::add(
-                w,
-                &steve_store::NewThreadRun {
-                    workspace_id: WS.into(),
-                    message_id: mid.clone(),
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
-    k.core.thread_recover().unwrap();
-    k.core.thread_recover().unwrap();
-    assert_eq!(th.run(&run.id).unwrap().unwrap().status, "interrupted");
-    assert_eq!(th.runs_to_resume(0).unwrap().len(), 1);
-    k.core.thread_ready().unwrap();
-    k.core.thread_ready().unwrap();
-    steve_runtime::testkit::eventually_sync(
-        "The recovered local answer completes its stored run.",
-        || th.run(&run.id).unwrap().unwrap().status == "done",
-    )
-    .await;
-    let answers = k
-        .db()
-        .messages(WS)
-        .unwrap()
-        .into_iter()
-        .filter(|m| m.meta["run_receipt"] == true)
-        .collect::<Vec<_>>();
-    assert_eq!(answers.len(), 1);
-    // Simulate the tiny crash window after answer persistence but before the final run receipt.
-    k.db()
-        .store()
-        .write(|w| {
-            steve_store::thread_runs::patch(
-                w,
-                &run.id,
-                &steve_store::RunPatch {
-                    status: Some("running".into()),
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
-    k.core.thread_recover().unwrap();
-    assert_eq!(th.run(&run.id).unwrap().unwrap().status, "done");
-    assert!(th.runs_to_resume(0).unwrap().is_empty());
-    assert_eq!(th.runs_of_message(&mid).unwrap().len(), 1);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_main_answer_that_keeps_taking_the_hub_down_is_re_answered_once() {
-    let k = Kit::new();
-    router(&k, |_| json!({"kind":"answer"}));
-    let th = k.db().store().thread();
-    let mid = k
-        .db()
-        .message_add(WS, "me", "解释一下", None, None)
-        .unwrap();
-    let run = k
-        .db()
-        .store()
-        .write(|w| {
-            steve_store::thread_runs::add(
-                w,
-                &steve_store::NewThreadRun {
-                    workspace_id: WS.into(),
-                    message_id: mid.clone(),
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
-    k.core.thread_recover().unwrap();
-    // a re-answer already started once and the Hub stopped during it (counted before it starts)
-    steve_store::core_fixture::thread::resume_attempts(k.db().store(), &run.id, 1);
-    k.core.thread_recover().unwrap();
-    let r = k.core.thread_ready().unwrap();
-    assert_eq!((r.resumed, r.held), (0, 1), "no second automatic re-answer");
-    let msgs = k.db().messages(WS).unwrap();
-    assert!(
-        msgs.iter()
-            .any(|m| m.meta["rerun"] == json!(mid) && m.text.contains("不再自动继续")),
-        "handed to an explicit rerun"
-    );
-    assert_eq!(
-        msgs.iter()
-            .filter(|m| m.text.contains("服务就绪后会继续回答"))
-            .count(),
-        1,
-        "“will continue” said once"
-    );
-    assert!(th.runs_to_resume(0).unwrap().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_re_answer_is_counted_before_it_starts() {
-    let k = Kit::new();
-    router(&k, |_| json!({"kind":"answer"}));
-    let th = k.db().store().thread();
-    let mid = k
-        .db()
-        .message_add(WS, "me", "解释一下", None, None)
-        .unwrap();
-    let run = k
-        .db()
-        .store()
-        .write(|w| {
-            steve_store::thread_runs::add(
-                w,
-                &steve_store::NewThreadRun {
-                    workspace_id: WS.into(),
-                    message_id: mid,
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
-    k.core.thread_recover().unwrap();
-    assert_eq!(th.resume_attempts(&run.id).unwrap(), 0);
-    assert_eq!(k.core.thread_ready().unwrap().resumed, 1);
-    assert_eq!(th.resume_attempts(&run.id).unwrap(), 1);
-}
-
-#[test]
-fn a_boot_without_resuming_records_no_main_conversation_intent() {
-    let k = Kit::with(|c| c.no_resume = true);
-    let th = k.db().store().thread();
-    let mid = k
-        .db()
-        .message_add(WS, "me", "解释一下", None, None)
-        .unwrap();
-    k.db()
-        .store()
-        .write(|w| {
-            steve_store::thread_runs::add(
-                w,
-                &steve_store::NewThreadRun {
-                    workspace_id: WS.into(),
-                    message_id: mid,
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
-    k.core.thread_recover().unwrap();
-    assert!(
-        th.runs_to_resume(0).unwrap().is_empty(),
-        "nothing a later boot could revive"
     );
 }
 
@@ -1872,24 +1644,6 @@ fn a_notice_written_in_a_transaction_stays_or_goes_with_it() {
     );
 }
 
-#[test]
-fn a_message_lost_before_routing_gets_a_rerun_notice_once() {
-    let k = Kit::new();
-    let lost = k
-        .db()
-        .message_add(WS, "me", "这条还没路由", None, None)
-        .unwrap();
-    k.core.thread_recover().unwrap();
-    k.core.thread_recover().unwrap();
-    let msgs = k.db().messages(WS).unwrap();
-    let notes: Vec<_> = msgs
-        .iter()
-        .filter(|m| m.meta["interrupted"] == "route")
-        .collect();
-    assert_eq!(notes.len(), 1, "{notes:?}");
-    assert_eq!(notes[0].meta["rerun"], json!(lost));
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn maintenance_keeps_incoming_chat_durable_and_resumes_it_once() {
     let k = Kit::new();
@@ -1901,9 +1655,12 @@ async fn maintenance_keeps_incoming_chat_durable_and_resumes_it_once() {
     let mid = k.core.say(WS, "维护中排队", &[]).unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(k.db().store().activities().is_empty());
-    assert!(k.db().store().thread().route_of(&mid).unwrap().is_none());
+    assert!(route_opt(&k, &mid).is_none());
     assert_eq!(
-        steve_store::core_fixture::thread::pending_count(k.db().store(), &mid),
+        steve_store::core_fixture::thread::thread_task_count(
+            k.db().store(),
+            Some((&mid, "queued"))
+        ),
         1
     );
     k.core.thread_ready().unwrap();
@@ -1921,151 +1678,13 @@ async fn maintenance_keeps_incoming_chat_durable_and_resumes_it_once() {
     )
     .await;
     assert_eq!(
-        k.db().store().thread().runs_of_message(&mid).unwrap().len(),
+        k.db()
+            .store()
+            .read(|r| steve_store::thread::tasks_of_origin(r, &mid))
+            .unwrap()
+            .len(),
         1
     );
-}
-
-#[tokio::test]
-async fn only_a_complete_matching_durable_job_suppresses_the_rerun_notice() {
-    let k = Kit::new();
-    k.db().store().maintenance_set(true).unwrap();
-    // Exercise the production serializer: these are real, complete Jobs waiting behind drain.
-    let queued = k.core.say(WS, "维护期间排队的消息", &[]).unwrap();
-    let invalid_json = k.core.say(WS, "JSON坏了", &[]).unwrap();
-    let missing_fields = k.core.say(WS, "缺少结构字段", &[]).unwrap();
-    let wrong_mid = k.core.say(WS, "消息不匹配", &[]).unwrap();
-    let wrong_conv = k.core.say(WS, "对话不匹配", &[]).unwrap();
-    for (mid, kind) in [
-        (&invalid_json, "json"),
-        (&missing_fields, "fields"),
-        (&wrong_mid, "mid"),
-        (&wrong_conv, "conv"),
-    ] {
-        let raw =
-            steve_store::core_fixture::thread::pending_payload(k.db().store(), WS, mid).unwrap();
-        let mut job: Value = serde_json::from_str(&raw).unwrap();
-        let damaged = match kind {
-            "json" => "not json".to_string(),
-            "fields" => json!({"mid":mid,"text":"缺少files/mentions/to/conv"}).to_string(),
-            "mid" => {
-                job["mid"] = json!(queued);
-                job.to_string()
-            }
-            "conv" => {
-                job["conv"]["space"] = json!("chan:another");
-                job.to_string()
-            }
-            _ => unreachable!(),
-        };
-        steve_store::core_fixture::thread::replace_pending(k.db().store(), WS, mid, &damaged);
-    }
-    assert_eq!(
-        k.db().store().thread().unrouted_since(0).unwrap().len(),
-        5,
-        "Store returns candidates; only Core knows the Job schema"
-    );
-    k.core.thread_recover().unwrap();
-    k.core.thread_recover().unwrap();
-    let mut notes: Vec<String> = k
-        .db()
-        .messages(WS)
-        .unwrap()
-        .into_iter()
-        .filter(|m| m.meta["interrupted"] == "route")
-        .map(|m| m.meta["rerun"].as_str().unwrap().to_string())
-        .collect();
-    notes.sort();
-    let mut expected = vec![invalid_json, missing_fields, wrong_mid, wrong_conv];
-    expected.sort();
-    assert_eq!(
-        notes, expected,
-        "each unusable job gets one rerun card; the real matching Job gets none"
-    );
-    assert!(!notes.contains(&queued));
-}
-
-#[tokio::test]
-async fn ready_routes_only_pending_jobs_matching_the_stored_message_identity() {
-    // Obtain the full production Job shape without letting the source queue execute.
-    let source = Kit::new();
-    source.db().store().maintenance_set(true).unwrap();
-    let source_mid = source.core.say(WS, "恢复测试", &[]).unwrap();
-    let raw =
-        steve_store::core_fixture::thread::pending_payload(source.db().store(), WS, &source_mid)
-            .unwrap();
-    let template: Value = serde_json::from_str(&raw).unwrap();
-    let k = Kit::new();
-    router(&k, |_| json!({"kind":"answer"}));
-    k.core
-        .set_researcher(FakeResearch::new(vec![Step::Text("恢复完成")]));
-    let mut rejected = Vec::new();
-    let mut accepted = Vec::new();
-    for kind in ["mid", "conv", "missing", "workspace", "main", "guest"] {
-        let space = if kind == "guest" {
-            "chan:valid"
-        } else {
-            "steve"
-        };
-        let mid = k
-            .db()
-            .message_add_in(WS, space, "me", "恢复测试", None, &json!({}))
-            .unwrap();
-        let mut job = template.clone();
-        job["mid"] = json!(mid);
-        job["conv"]["space"] = json!(space);
-        let ws = if kind == "workspace" {
-            "other-workspace"
-        } else {
-            WS
-        };
-        let mut queued_message = mid.clone();
-        match kind {
-            "mid" => queued_message = "some-other-message".into(),
-            "conv" => job["conv"]["space"] = json!("chan:wrong"),
-            "missing" => {
-                job["mid"] = json!("missing-message");
-                queued_message = "missing-message".into();
-            }
-            _ => {}
-        }
-        let payload = job.to_string();
-        steve_store::core_fixture::thread::set_pending(
-            k.db().store(),
-            ws,
-            &queued_message,
-            &payload,
-        );
-        if matches!(kind, "main" | "guest") {
-            accepted.push(mid);
-        } else {
-            rejected.push((ws.to_string(), queued_message, payload, mid));
-        }
-    }
-    assert_eq!(k.core.thread_ready().unwrap().failed, 4);
-    eventually_sync(
-        "Every accepted message is assigned its matching saved route.",
-        || accepted.iter().all(|mid| route_opt(&k, mid).is_some()),
-    )
-    .await;
-    assert_eq!(k.core.thread_ready().unwrap().failed, 4);
-    for (ws, queued_message, payload, mid) in rejected {
-        assert!(
-            route_opt(&k, &mid).is_none(),
-            "invalid Job must never be routed"
-        );
-        let retained = steve_store::core_fixture::thread::pending_payload(
-            k.db().store(),
-            &ws,
-            &queued_message,
-        )
-        .unwrap();
-        assert_eq!(
-            retained, payload,
-            "retain the original evidence across ready calls"
-        );
-    }
-    assert!(route_opt(&k, "missing-message").is_none());
 }
 
 #[tokio::test]
@@ -2104,12 +1723,12 @@ async fn a_research_guard_stop_keeps_one_neutral_note_in_the_saved_reply() {
         );
         let mid = k.core.say(WS, "查询 ST-23 的进展", &[]).unwrap();
         eventually_sync("The conversation route is bound to a reply.", || {
-            route_opt(&k, &mid).is_some_and(|l| l.reply_id.is_some())
+            route_opt(&k, &mid).is_some_and(|l| l.reply_message_id.is_some())
         })
         .await;
         let reply = k
             .db()
-            .message(&route_log(&k, &mid).reply_id.unwrap())
+            .message(&route_log(&k, &mid).reply_message_id.unwrap())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -2117,8 +1736,7 @@ async fn a_research_guard_stop_keeps_one_neutral_note_in_the_saved_reply() {
             "已有部分结果。\n\n（本次查询在工具检查时停止，尚未完成。）"
         );
         assert_eq!(reply.meta["steps"]["research"]["stopped"], "violation");
-        let runs = k.db().store().thread().runs_of_message(&mid).unwrap();
-        assert_eq!(runs[0].status, "violated");
+        assert_eq!(route_log(&k, &mid).outcome, "failed");
     }
 }
 
@@ -2219,48 +1837,6 @@ async fn a_failure_on_the_card_clears_when_the_item_goes_on() {
             .count(),
         3
     );
-}
-
-/// 2026-11-09: messages said in a burst are routed in one call, each decided on its own and handled
-/// in order; a plain question among them needs no router and goes alone.
-#[tokio::test]
-async fn a_burst_is_routed_in_one_call() {
-    let k = Kit::new();
-    k.gw.set(|p, _| {
-        if p.starts_with("You are the router") {
-            assert!(p.contains("a JSON array of 2 objects"), "{p}");
-            Ok(
-                r#"[{"kind":"item","confidence":0.9,"signals":["change"],"title":"改按钮"},
-                   {"kind":"config","confidence":0.9,"title":"标签"}]"#
-                    .into(),
-            )
-        } else {
-            Ok(r#"{"changes":[]}"#.into())
-        }
-    });
-    let before = items(&k);
-    /* said before the lane runs: they wait together */
-    let a = k.core.say(WS, "把发送按钮改成蓝色", &[]).unwrap();
-    let b = k.core.say(WS, "加一个叫财务的标签", &[]).unwrap();
-    eventually_sync(
-        "Both messages in the burst receive a durable route.",
-        || route_opt(&k, &a).is_some() && route_opt(&k, &b).is_some(),
-    )
-    .await;
-    let calls =
-        k.gw.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|p| p.starts_with("You are the router"))
-            .count();
-    assert_eq!(calls, 1, "one routing for the burst");
-    assert_eq!(route_log(&k, &a).kind, "item");
-    assert_eq!(route_log(&k, &b).kind, "config");
-    eventually_sync("Routing creates exactly one new work item.", || {
-        items(&k) == before + 1
-    })
-    .await;
 }
 
 /// A tool call is on the live line from the moment it begins: `steve.tool` with `running` and the

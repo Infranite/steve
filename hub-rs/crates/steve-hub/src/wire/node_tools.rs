@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use steve_node_api::*;
 use steve_store::{
-    Session, Store, ThreadRun, tool_admission,
+    Session, Store, ThreadTask, tool_admission,
     tool_journal::{Intent, Journal},
 };
 
@@ -170,7 +170,7 @@ pub(crate) fn authorize_research(
     node: &NodeId,
     exec: &ExecutionRef,
     active: bool,
-) -> ApiResult<ThreadRun> {
+) -> ApiResult<ThreadTask> {
     let ExecutionRef::Job { job, attempt } = exec else {
         return Err(denied());
     };
@@ -196,12 +196,14 @@ pub(crate) fn authorize_research(
     {
         return Err(denied());
     }
+    let task_id = row.run.as_deref().ok_or_else(denied)?;
     let run = store
-        .thread()
-        .run(row.run.as_deref().ok_or_else(denied)?)
+        .read(|r| steve_store::thread::task_by_id(r, task_id))
         .map_err(internal)?
         .ok_or_else(denied)?;
-    if run.workspace_id != row.workspace || (active && run.status != "running") {
+    if run.workspace_id != row.workspace
+        || (active && (run.status != "claimed" || run.cancel_requested_at.is_some()))
+    {
         return Err(denied());
     }
     Ok(run)
@@ -212,7 +214,7 @@ pub(crate) fn authorize_research(
 pub enum Caller {
     Session(Session),
     DependencyManagement(Session),
-    Research(ThreadRun),
+    Research(ThreadTask),
 }
 
 impl Caller {
@@ -254,14 +256,14 @@ pub trait Service: Send + Sync {
     ) -> Result<String, String>;
     /// The tools the research job of `run` sees: the read-only ones, and the first meeting's
     /// while that is on for it.
-    async fn research_catalog(&self, run: &ThreadRun) -> Vec<ToolDescriptor> {
+    async fn research_catalog(&self, run: &ThreadTask) -> Vec<ToolDescriptor> {
         let _ = run;
         vec![]
     }
     /// Runs research tool `name` for thread run `run`; anything else is refused.
     async fn research_call(
         &self,
-        run: ThreadRun,
+        run: ThreadTask,
         name: &str,
         args: serde_json::Value,
     ) -> Result<String, String> {
@@ -288,12 +290,12 @@ impl Service for ToolService {
     ) -> Result<String, String> {
         self.call(session, name, args).await
     }
-    async fn research_catalog(&self, run: &ThreadRun) -> Vec<ToolDescriptor> {
+    async fn research_catalog(&self, run: &ThreadTask) -> Vec<ToolDescriptor> {
         super::research_mcp::catalog(&self.extra, run).await
     }
     async fn research_call(
         &self,
-        run: ThreadRun,
+        run: ThreadTask,
         name: &str,
         args: serde_json::Value,
     ) -> Result<String, String> {
@@ -1582,8 +1584,19 @@ pub(crate) mod tests {
             )
             .unwrap();
         store
-            .thread()
-            .item_add("i1", "default", &origin, None, false)
+            .write(|w| {
+                steve_store::thread::record_dispatch(
+                    w,
+                    "default",
+                    steve_core::thread::MAIN,
+                    &origin,
+                    "i1",
+                    None,
+                    false,
+                    true,
+                    steve_store::now(),
+                )
+            })
             .unwrap();
         steve_store::testkit::hub::node_fixtures::seed_items_and_item_deps(&store).unwrap();
         let restricted = tools.catalog(host.exec.clone()).await.unwrap();

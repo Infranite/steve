@@ -20,7 +20,7 @@ use steve_modules::{ApiError, ApiResult, Modules, Tier};
 use steve_store::base::mems::Mem;
 use steve_store::base::{Level, ObjRef, Viewer};
 use steve_store::knowledge::{CandidateRows, Memories};
-use steve_store::{Contacts, ItemEvidence, Members, MessageEvidence, Read, References, W};
+use steve_store::{Contacts, ItemEvidence, Members, Read, References, W};
 use tokio::sync::Semaphore;
 
 use crate::candidates::{self, MAX_PER_ORIGIN, NewCandidate, Origin, OriginKind};
@@ -668,8 +668,16 @@ fn kept_notice(tx: &mut W<'_>, ws: &str, made: &[Mem]) -> ApiResult<()> {
         kept.len(),
         kept.join("；")
     );
-    let meta = serde_json::json!({"notice": {"kind": "memory", "level": "info"}});
-    MessageEvidence(tx).add(ws, "steve", &text, None, &meta, "notify")?;
+    steve_store::thread::post_notice(
+        tx,
+        ws,
+        "memory",
+        "info",
+        &text,
+        None,
+        false,
+        steve_store::now(),
+    )?;
     Ok(())
 }
 

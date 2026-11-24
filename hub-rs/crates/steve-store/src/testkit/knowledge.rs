@@ -115,7 +115,7 @@ pub fn seed_day_messages(s: &Store, start: i64) -> Result<()> {
 
 pub fn notice_text(s: &Store) -> Result<Vec<String>> {
     s.sqlite_read(|c| {
-        let mut q = c.prepare_cached("SELECT text FROM messages WHERE space='notify'")?;
+        let mut q = c.prepare_cached("SELECT text FROM thread_notices ORDER BY created ASC")?;
         Ok(q.query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     })
