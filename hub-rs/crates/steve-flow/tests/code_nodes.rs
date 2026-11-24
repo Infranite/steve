@@ -896,6 +896,7 @@ mod on_node {
                         max_output_bytes: 64 * 1024,
                         max_tokens: None,
                         max_cost: None,
+                        context_budget: None,
                     },
                     env: vec![],
                     secrets: vec![],

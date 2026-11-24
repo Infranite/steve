@@ -696,6 +696,7 @@ fn completion(
         continuation,
         transient: false,
         acted: false,
+        context_peak: None,
         job: Some(job),
     }
 }

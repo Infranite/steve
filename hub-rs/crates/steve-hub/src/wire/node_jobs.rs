@@ -113,6 +113,7 @@ fn ended(outcome: Outcome, stop_reason: &str, error: Option<Error>) -> Completio
         continuation: None,
         transient: false,
         acted: false,
+        context_peak: None,
         job: None,
     }
 }
@@ -164,6 +165,7 @@ impl NodeRuntime {
                     max_output_bytes: 256 << 20,
                     max_tokens: None,
                     max_cost: None,
+                    context_budget: None,
                 },
                 continuation: None,
             },
@@ -1131,6 +1133,7 @@ impl NodeRuntime {
                     max_output_bytes: 256 << 20,
                     max_tokens: None,
                     max_cost: None,
+                    context_budget: None,
                 },
                 continuation: a
                     .resume

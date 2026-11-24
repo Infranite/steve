@@ -23,15 +23,58 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
     let actual: Vec<_> = builtins()
         .iter()
         .map(|b| {
+            // #502 adds declarative context limits and native compaction properties after the
+            // historical pre-extraction snapshot; verify those explicitly in
+            // `every_builtin_declares_context_budget_and_native_compaction`.
+            let mut props = serde_json::to_value(&b.properties).unwrap();
+            if let Some(map) = props.as_object_mut() {
+                map.remove("context_limit");
+                map.remove("context_budget_pct");
+                map.remove("native_compaction");
+            }
             json!({
                 "id": b.id, "name": b.name, "install_hint": b.install_hint,
                 "npm_package": b.npm_package, "cli_bin": b.cli_bin, "detect_bins": b.detect_bins,
                 "args": b.args, "env": b.env, "command_var": b.command_var,
-                "properties": b.properties, "components": components(b.id),
+                "properties": props, "components": components(b.id),
             })
         })
         .collect();
     assert_eq!(json!(actual), expected);
+}
+
+#[test]
+fn every_builtin_declares_context_budget_and_native_compaction() {
+    let mut non_native = vec![];
+    for b in builtins() {
+        assert!(
+            b.properties.context_limit.is_some_and(|l| l > 0),
+            "{} must declare context_limit",
+            b.id
+        );
+        if !b.properties.has_native_compaction()
+            || !matches!(
+                b.properties.native_compaction,
+                Some(NativeCompaction::Builtin)
+            )
+        {
+            assert!(
+                b.properties
+                    .context_budget_pct
+                    .is_some_and(|p| (1..=99).contains(&p)),
+                "{} must declare context_budget_pct",
+                b.id
+            );
+        }
+        if !b.properties.has_native_compaction() {
+            non_native.push(b.id);
+        }
+    }
+    non_native.sort_unstable();
+    assert_eq!(
+        non_native,
+        vec!["codebuddy-code", "grok-build", "kiro", "qoder"]
+    );
 }
 
 #[test]

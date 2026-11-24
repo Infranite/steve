@@ -7,6 +7,7 @@ export default {
   "node.tool_refused": "Node 拒绝了工具调用。",
   "node.workspace_binding_conflict": "此资源已绑定到另一个工作区。",
   "node_stop.adapter_exited": "适配器在启动时退出了。",
+  "node_stop.context_budget": "回合达到上下文预算上限，Node 已停止以便交接续跑。",
   "node_stop.deadline": "运行达到时限，Node 已停止运行。",
   "node_stop.frame_too_large": "harness 发来一条超过 16 MiB 的消息，Node 已停止运行。",
   "node_stop.harness_gone": "harness 进程已退出。",

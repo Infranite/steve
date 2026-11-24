@@ -50,6 +50,7 @@ pub struct NodeFleet {
     /// [`NodeRuntime::set_principal_state`] for every coordinator.
     principal_state: std::sync::atomic::AtomicBool,
     cost_caps: Mutex<crate::wire::node_runtime::CostCaps>,
+    context_budget: Mutex<ContextBudget>,
 }
 
 /// Events of a Node no coordinator runs for yet: refused `offline`, so they stay in its journal.
@@ -107,6 +108,7 @@ impl NodeFleet {
             idle_release: AtomicI64::new(-1),
             principal_state: std::sync::atomic::AtomicBool::new(false),
             cost_caps: Mutex::new(Default::default()),
+            context_budget: Mutex::new(ContextBudget::default()),
         });
         if let Some(s) = service {
             fleet.set_service(s);
@@ -142,6 +144,14 @@ impl NodeFleet {
         *self.cost_caps.lock().unwrap() = caps;
         for rt in self.runtimes() {
             rt.set_cost_caps(caps);
+        }
+    }
+
+    /// Global default turn context budget for every coordinator ([`NodeRuntime::set_context_budget`]).
+    pub fn set_context_budget(&self, budget: ContextBudget) {
+        *self.context_budget.lock().unwrap() = budget;
+        for rt in self.runtimes() {
+            rt.set_context_budget(budget);
         }
     }
 
@@ -253,6 +263,7 @@ impl NodeFleet {
                     rt.set_idle_release(idle);
                 }
                 rt.set_cost_caps(*self.cost_caps.lock().unwrap());
+                rt.set_context_budget(*self.context_budget.lock().unwrap());
                 rt.set_principal_state(self.principal_state.load(Ordering::Relaxed));
                 rt.hold(self.holding.load(Ordering::SeqCst));
                 e.runtime = Some(rt.clone());

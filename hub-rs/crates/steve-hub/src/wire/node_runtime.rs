@@ -126,6 +126,7 @@ fn stop_text(stop: NodeStop) -> String {
         NodeStop::StoppedByNode => t!("hub.node.stop.stopped_by_node"),
         NodeStop::HarnessIdle => t!("hub.node.stop.harness_idle"),
         NodeStop::ResearchBudget => t!("hub.node.stop.research_budget"),
+        NodeStop::ContextBudget => t!("hub.node.stop.context_budget"),
     }
 }
 
@@ -255,6 +256,9 @@ pub struct NodeRuntime {
     replay_check: OnceLock<ReplayCheck>,
     /// What the Node's usage reports may add to a session's cost ([`Self::set_cost_caps`]).
     cost_caps: Mutex<CostCaps>,
+    /// Global default turn context budget ([`Self::set_context_budget`]); workspace `handoff`
+    /// setting overrides `ratio_pct` per session when set.
+    context_budget: Mutex<ContextBudget>,
     /// The largest replay page the Node's transport carries (unbounded in process).
     largest_replay: AtomicU32,
     /// What the business side is told of committed transactions, in commit order, by the upkeep
@@ -354,6 +358,7 @@ impl NodeRuntime {
             held: Mutex::new(HashSet::new()),
             replay_check: OnceLock::new(),
             cost_caps: Mutex::new(CostCaps::default()),
+            context_budget: Mutex::new(ContextBudget::default()),
             largest_replay: AtomicU32::new(u32::MAX),
             later: Mutex::new(vec![]),
             staged: Mutex::new(vec![]),
@@ -455,6 +460,40 @@ impl NodeRuntime {
     /// nothing.
     pub fn set_cost_caps(&self, caps: CostCaps) {
         *self.cost_caps.lock().unwrap() = caps;
+    }
+
+    /// Global default turn context budget (`STEVE_TURN_CONTEXT_BUDGET_PCT`,
+    /// `STEVE_TURN_CONTEXT_BUDGET_TOKENS`). A workspace's `handoff` setting overrides `ratio_pct`.
+    pub fn set_context_budget(&self, budget: ContextBudget) {
+        *self.context_budget.lock().unwrap() = budget;
+    }
+
+    /// Resolve the turn context budget for `session` from its workspace's `handoff` setting and
+    /// the Hub's global default. Returns `None` when neither specifies a budget (the Node then
+    /// uses the harness's declared `context_budget_pct` and `context_limit`).
+    pub(super) fn session_context_budget(
+        &self,
+        session: &str,
+    ) -> Result<Option<ContextBudget>, StoreError> {
+        let default = *self.context_budget.lock().unwrap();
+        let ws_pct = if let Some(s) = self.store.sessions().get(session)? {
+            let raw: String =
+                self.store
+                    .settings()
+                    .get(&s.workspace_id, "handoff", String::new())?;
+            raw.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v >= 1.0 && *v < 100.0)
+                .map(|v| v.round() as u8)
+        } else {
+            None
+        };
+        let budget = ContextBudget {
+            ratio_pct: ws_pct.or(default.ratio_pct),
+            max_tokens: default.max_tokens,
+        };
+        Ok((!budget.is_empty()).then_some(budget))
     }
 
     /// An open session idle for `ms` (nothing running, queued or waiting on a card) is let go;
@@ -758,6 +797,13 @@ enum Tell {
     StalledAttemptStopped(steve_types::orchestration::StallReason, i64),
     /// A diagnostic record of an applied event.
     Diagnostic(Box<steve_store::diagnostics::Record>),
+    /// Native context compaction observed by the Node during an attempt.
+    ContextCompacted {
+        harness: String,
+        mode: CompactionMode,
+        reason: CompactionReason,
+        saved_tokens: u64,
+    },
 }
 
 /// What the business side hears after a commit.

@@ -206,6 +206,7 @@
   "hub.node.stop.stopped_by_node": "Node 停止了这次运行",
   "hub.node.stop.harness_idle": "harness 太久没有输出，已停止",
   "hub.node.stop.research_budget": "研究用完了轮次或工具调用的额度",
+  "hub.node.stop.context_budget": "回合达到上下文预算上限，Node 已停止以便交接续跑",
   "hub.node.stop.reopen_failed": "Node 没能重新打开会话：%{detail}",
   "hub.node.unbound.read_only": "它是导入的只读会话",
   "hub.node.unbound.not_here": "它不是本机上的 Steve 会话",

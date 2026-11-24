@@ -692,6 +692,8 @@ pub mod instrumentation {
         pub result: &'static str,
         pub seconds: f64,
         pub usage: Vec<crate::ModelUsage>,
+        /// Peak prompt context tokens observed during an agent turn, when reported.
+        pub context_peak: Option<u64>,
     }
 
     impl ModelCall {
@@ -701,6 +703,12 @@ pub mod instrumentation {
                 .increment(1);
             metrics::histogram!("steve_model_call_seconds", "source" => source, "harness" => harness.clone())
                 .record(self.seconds);
+            if source == "agent"
+                && let Some(peak) = self.context_peak.filter(|&n| n > 0)
+            {
+                metrics::histogram!("steve_turn_context_peak_tokens", "harness" => harness.clone())
+                    .record(peak as f64);
+            }
             for u in &self.usage {
                 let model = if u.model.is_empty() {
                     &self.model

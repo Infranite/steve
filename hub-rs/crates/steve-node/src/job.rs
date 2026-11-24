@@ -739,6 +739,7 @@ fn ended_with(outcome: Outcome, stop_reason: &str) -> Completion {
         continuation: None,
         transient: false,
         acted: false,
+        context_peak: None,
         job: None,
     }
 }

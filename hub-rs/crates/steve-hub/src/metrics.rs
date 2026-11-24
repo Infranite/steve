@@ -92,6 +92,20 @@ fn recorder() -> PrometheusRecorder {
         0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0, 21600.0,
         86400.0, 604800.0,
     ];
+    let tokens = [
+        4_000.0,
+        16_000.0,
+        32_000.0,
+        64_000.0,
+        128_000.0,
+        160_000.0,
+        200_000.0,
+        256_000.0,
+        384_000.0,
+        512_000.0,
+        768_000.0,
+        1_000_000.0,
+    ];
     let mut b = PrometheusBuilder::new()
         .set_buckets(&[
             0.00001, 0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025,
@@ -107,6 +121,11 @@ fn recorder() -> PrometheusRecorder {
         b = b
             .set_buckets_for_metric(Matcher::Full((*name).into()), &long)
             .expect("static long buckets");
+    }
+    for name in catalog::TOKENS {
+        b = b
+            .set_buckets_for_metric(Matcher::Full((*name).into()), &tokens)
+            .expect("static token buckets");
     }
     b.build_recorder()
 }

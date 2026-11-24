@@ -148,6 +148,7 @@ impl CallAccount {
             },
             seconds: a.duration_ms as f64 / 1000.0,
             usage: a.usage.clone(),
+            context_peak: None,
         }
         .record();
         Ok(())

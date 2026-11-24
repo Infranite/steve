@@ -204,6 +204,28 @@ impl NodeRuntime {
                     )
                     .record(elapsed_ms as f64 / 1000.0);
                 }
+                Tell::ContextCompacted {
+                    harness,
+                    mode,
+                    reason,
+                    saved_tokens,
+                } => {
+                    metrics::counter!(
+                        "steve_turn_context_compactions_total",
+                        "harness" => harness.clone(),
+                        "mode" => mode.as_str(),
+                        "reason" => reason.as_str(),
+                    )
+                    .increment(1);
+                    if saved_tokens > 0 {
+                        metrics::counter!(
+                            "steve_turn_context_saved_tokens_total",
+                            "harness" => harness,
+                            "mode" => mode.as_str(),
+                        )
+                        .increment(saved_tokens);
+                    }
+                }
             }
         }
     }
@@ -393,6 +415,56 @@ impl NodeRuntime {
                         measure,
                     });
                 }
+            }
+            (
+                EventBody::ContextCompacted {
+                    mode,
+                    reason,
+                    before_tokens,
+                    after_tokens,
+                    limit_tokens,
+                },
+                attempt,
+            ) if *mode == CompactionMode::Native => {
+                // Handoff compactions are recorded by Core once the handoff session commits, so
+                // neither mode is ever double-counted.
+                let saved_tokens = before_tokens.saturating_sub(*after_tokens);
+                let harness = self
+                    .store
+                    .sessions()
+                    .get(&session)?
+                    .map(|s| s.harness)
+                    .unwrap_or_default();
+                let mut staged = self.staged.lock().unwrap();
+                if !harness.is_empty() {
+                    staged.push(Tell::ContextCompacted {
+                        harness,
+                        mode: *mode,
+                        reason: *reason,
+                        saved_tokens,
+                    });
+                }
+                staged.push(Tell::Diagnostic(Box::new(
+                    steve_store::diagnostics::Record {
+                        session_id: Some(session),
+                        attempt_id: attempt.map(str::to_owned),
+                        cause_id: Some(ev.id.to_string()),
+                        kind: "context.compacted".into(),
+                        reason_code: reason.as_str().into(),
+                        severity: steve_store::diagnostics::Severity::Info,
+                        details: steve_store::diagnostics::Details {
+                            context_before: Some(*before_tokens),
+                            context_after: Some(*after_tokens),
+                            context_saved: Some(saved_tokens),
+                            limit: *limit_tokens,
+                            source_at: Some(ev.at.0),
+                            source_node: Some(self.node_id.to_string()),
+                            source_epoch: Some(ev.cursor.epoch.to_string()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )));
             }
             _ => {}
         }
@@ -709,24 +781,32 @@ impl NodeRuntime {
             }
         }
         self.turn_over_in(tx, session, turn, c)?;
-        // what is queued meanwhile goes next; only when nothing does is the turn over for the item
-        if self.plan_after_in(tx, session)? == Planned::Created {
+        let context_budget = c.stop_reason == CONTEXT_BUDGET
+            || c.error.as_ref().and_then(NodeStop::of) == Some(NodeStop::ContextBudget);
+        // what is queued meanwhile goes next; only when nothing does is the turn over for the item.
+        // When the turn stopped for context budget, leave queued messages for the handoff session
+        // instead of starting another turn on the over-budget session.
+        if !context_budget && self.plan_after_in(tx, session)? == Planned::Created {
             return Ok(None);
         }
         // a session the business side ended is let go once its last turn is over (the release it
         // asked for while the turn ran waited for this)
         self.release_if_ended_in(tx, session)?;
-        self.status_in(session, settled_status(&c.stop_reason))?;
-        let stop = match &c.error {
-            Some(Error {
-                code: Code::Unavailable,
-                retry: Retry::Later { .. },
-                ..
-            }) if c.outcome == Outcome::Failed => {
-                steve_core::runtime::MODEL_SERVICE_UNAVAILABLE.to_owned()
+        let stop = if context_budget {
+            CONTEXT_BUDGET.to_owned()
+        } else {
+            match &c.error {
+                Some(Error {
+                    code: Code::Unavailable,
+                    retry: Retry::Later { .. },
+                    ..
+                }) if c.outcome == Outcome::Failed => {
+                    steve_core::runtime::MODEL_SERVICE_UNAVAILABLE.to_owned()
+                }
+                _ => c.stop_reason.clone(),
             }
-            _ => c.stop_reason.clone(),
         };
+        self.status_in(session, settled_status(&stop))?;
         Ok(Some(End {
             session: session.to_string(),
             attempt: Some(self.last_attempt_in(turn)?),

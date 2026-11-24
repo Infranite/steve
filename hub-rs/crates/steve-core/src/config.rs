@@ -8,6 +8,8 @@ use std::time::Duration;
 /// The default of [`CoreConfig::takeover_same_refusals`]: the second refusal for the same reason is
 /// the user's (decided by the user on 2026-11-17).
 pub const TAKEOVER_SAME_REFUSALS: u32 = 2;
+/// Default cap on consecutive context-budget session handoffs before handing back to the owner.
+pub const CONTEXT_HANDOFF_LIMIT: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
@@ -48,6 +50,8 @@ pub struct CoreConfig {
     /// How many refusals of `steve_deliver` in a row for the same reason hand the item to the user
     /// instead of another continue (`takeover`); 0: never.
     pub takeover_same_refusals: u32,
+    /// Consecutive context-budget session handoffs allowed without user intervention (`0`: disabled).
+    pub context_handoff_limit: u32,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds.
     pub gh: PathBuf,
     /// The version this Hub runs (`dev` when unknown): what an item whose goal asks for its result to
@@ -116,6 +120,7 @@ impl CoreConfig {
             dynamic_workflows: false,
             takeover_continues: 2,
             takeover_same_refusals: TAKEOVER_SAME_REFUSALS,
+            context_handoff_limit: CONTEXT_HANDOFF_LIMIT,
             gh: gh_cli(),
             version: "dev".into(),
             commit: None,

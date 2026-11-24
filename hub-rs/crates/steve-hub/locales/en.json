@@ -206,6 +206,7 @@
   "hub.node.stop.stopped_by_node": "The Node stopped the run",
   "hub.node.stop.harness_idle": "The harness said nothing for too long and was stopped",
   "hub.node.stop.research_budget": "The research used up its turns or tool calls",
+  "hub.node.stop.context_budget": "The turn reached its context budget; the Node stopped it for handoff",
   "hub.node.stop.reopen_failed": "The Node could not open the session again: %{detail}",
   "hub.node.unbound.read_only": "it is a read-only imported session",
   "hub.node.unbound.not_here": "it is not a Steve session on this machine",

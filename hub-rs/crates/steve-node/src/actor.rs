@@ -338,6 +338,7 @@ struct Run {
     unknown: Option<String>,
     images: crate::inline_images::Images,
     image_scope: crate::inline_images::Scope,
+    context: crate::context_budget::ContextMonitor,
 }
 
 /// What a harness start is for.
@@ -1067,6 +1068,10 @@ impl Actor {
                 .unwrap_or((0, 0, 0, 0, 0));
             norm = norm.prompt_cumulative_baseline(baseline);
         }
+        let context = crate::context_budget::ContextMonitor::new(
+            props.clone(),
+            spec.run.limits.context_budget,
+        );
         self.run = Some(Run {
             token,
             budget_epoch: self.inner.j.budget_epoch(),
@@ -1087,6 +1092,7 @@ impl Actor {
             unknown: None,
             images: crate::inline_images::Images::for_replies(),
             image_scope,
+            context,
         });
         self.inner.reset_output(&self.session);
         if self.persisted_cancel() {
@@ -1335,6 +1341,7 @@ impl Actor {
         let session = self.session.clone();
         let mut evs: Vec<(Subject, EventBody)> = vec![];
         let mut config: Vec<Fact> = vec![];
+        let mut stop_context_budget = false;
         if self.attributed(generation, token) {
             if u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
                 && let Some(t) = Normalizer::cumulative_tokens_from_usage_update(u)
@@ -1357,6 +1364,9 @@ impl Actor {
                         ));
                     }
                     Fact::Event(EventBody::Usage { mut report }) => {
+                        let obs = run
+                            .context
+                            .observe_usage(report.context_used, report.context_limit);
                         // ACP's context notification carries a process total. Publish the increment
                         // of this attempt so it can be booked independently of earlier turns.
                         report.measurement = Measurement::Delta;
@@ -1370,10 +1380,17 @@ impl Actor {
                             Subject::Execution(run.exec.clone()),
                             EventBody::Usage { report },
                         ));
+                        if let Some(compacted) = obs.compacted {
+                            evs.push((Subject::Execution(run.exec.clone()), compacted));
+                        }
+                        if obs.stop_budget {
+                            stop_context_budget = true;
+                        }
                     }
                     Fact::Event(mut e) => {
                         if let EventBody::ToolChanged { tool } = &mut e {
                             run.acted = true;
+                            run.context.on_tool(tool);
                             if let RunDirectory::Workspace { workspace } = &run.spec.run.directory
                                 && let Some(fact) = u
                                     .get("toolCallId")
@@ -1430,6 +1447,9 @@ impl Actor {
         let streamed = config.is_empty();
         if let Err(error) = self.record_update(&session, &mut evs, &config) {
             self.update_failed(error, evs, streamed);
+        }
+        if stop_context_budget {
+            self.stopping(token, Outcome::Cancelled, NodeStop::ContextBudget.error());
         }
     }
 
@@ -1798,6 +1818,7 @@ impl Actor {
                         continuation: None,
                         transient: false,
                         acted,
+                        context_peak: None,
                         job: None,
                     },
                 }
@@ -1839,6 +1860,7 @@ impl Actor {
                             }),
                             result: vec![],
                             continuation: None,
+                            context_peak: None,
                             job: None,
                         }
                     }
@@ -1846,6 +1868,22 @@ impl Actor {
             }
         };
         if let Some(run) = self.run.as_mut() {
+            let mut extra_compacted = vec![];
+            for (_, body) in &run.final_usage {
+                if let EventBody::Usage { report } = body
+                    && report.scope != UsageScope::Background
+                {
+                    let obs = run
+                        .context
+                        .observe_usage(report.context_used, report.context_limit);
+                    if let Some(compacted) = obs.compacted {
+                        extra_compacted.push(compacted);
+                    }
+                }
+            }
+            if let Some(compacted) = run.context.finish() {
+                extra_compacted.push(compacted);
+            }
             let closing = run
                 .norm
                 .finish()
@@ -1865,6 +1903,7 @@ impl Actor {
                 .capture(&run.image_scope, &run.exec, files, true)
                 .await;
             closing.splice(0..0, tail);
+            closing.extend(extra_compacted);
             run.closing = Some(closing);
         }
         self.end(completion);
@@ -1872,9 +1911,12 @@ impl Actor {
 
     /// Ends the running attempt: its waits expire, its last events, its final state,
     /// `attempt_ended`, and the session free again, in one transaction; only then is it gone here.
-    fn end(&mut self, completion: Completion) {
+    fn end(&mut self, mut completion: Completion) {
         let Some(run) = self.run.as_mut() else { return };
         if run.ending.is_none() {
+            if completion.context_peak.is_none() {
+                completion.context_peak = run.context.peak_used();
+            }
             run.ending = Some(completion);
             if let Some(stop) = run.usage_stop.take() {
                 let native = run
@@ -1914,6 +1956,9 @@ impl Actor {
                         })
                         .collect::<Vec<_>>(),
                 );
+                if let Some(compacted) = run.context.finish() {
+                    closing.push(compacted);
+                }
                 closing
             })
             .clone();
@@ -2455,6 +2500,11 @@ async fn open_harness(
             }
         }
     }
+    crate::context_budget::apply_native_compaction_args(
+        &adapter_props,
+        row.open.context_budget,
+        &mut args,
+    );
     let hide_cli_creds = row.open.state.as_ref().is_some_and(|st| !st.import_owner);
     // Even reading Pi's linked auth.json takes a lock beside its real target. Allow the
     // declared names where the Node keeps its sign-in, not the whole harness directory.
@@ -2522,6 +2572,11 @@ async fn open_harness(
         if let Some(home) = &adapter_home {
             env.push(("HOME".into(), home.clone().into_os_string()));
         }
+        crate::context_budget::apply_native_compaction_env(
+            &adapter_props,
+            row.open.context_budget,
+            &mut env,
+        );
         // level 2: the login environment first, everything above over it
         if let Some(f) = &fresh {
             let mut all = f.clone();
@@ -2798,19 +2853,26 @@ fn cancelled() -> Completion {
         continuation: None,
         transient: false,
         acted: false,
+        context_peak: None,
         job: None,
     }
 }
 
 fn failure(outcome: Outcome, e: Error, acted: bool) -> Completion {
+    let stop_reason = if NodeStop::of(&e) == Some(NodeStop::ContextBudget) {
+        CONTEXT_BUDGET.into()
+    } else {
+        "error".into()
+    };
     Completion {
         outcome,
-        stop_reason: "error".into(),
+        stop_reason,
         transient: matches!(e.retry, Retry::Later { .. }),
         acted,
         error: Some(e),
         result: vec![],
         continuation: None,
+        context_peak: None,
         job: None,
     }
 }
@@ -2930,6 +2992,7 @@ mod journal_regressions {
             unknown: None,
             images: crate::inline_images::Images::for_replies(),
             image_scope: crate::inline_images::Scope::new(dir.into(), vec![dir.into()], vec![]),
+            context: crate::context_budget::ContextMonitor::new(Default::default(), None),
         });
         actor
     }

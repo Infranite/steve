@@ -2351,6 +2351,7 @@ impl Tx<'_> {
          * A question you asked it there (not an instruction) is answered on purpose, not continued */
         let mut answered_you = false;
         if t.stop_reason != "cancelled"
+            && t.stop_reason != steve_node_api::CONTEXT_BUDGET
             && let Some(f) = self.c.forwarded_take(item_id)
         {
             answered_you = f.asked;
@@ -2473,6 +2474,12 @@ impl Tx<'_> {
                 Default::default(),
             );
             return Ok(());
+        }
+        if t.stop_reason == steve_node_api::CONTEXT_BUDGET {
+            if asked_yours || receipt.is_some() {
+                return Ok(());
+            }
+            return self.continue_after_context_budget(&item, &session, t.attempt.as_deref());
         }
         let why = match error {
             Some(e) => {
@@ -3753,10 +3760,11 @@ impl Tx<'_> {
         /* past the handoff threshold, when the workspace set one, the next message starts a fresh session
          * with a handoff summary. By default none: the harness compacts its own context, and Steve does
          * not replace a working session (decided by the user on 2026-11-09). */
-        let ws = self.item(item_id)?.workspace_id;
+        let item = self.item(item_id)?;
+        let ws = &item.workspace_id;
         let limit: f64 = self
             .db()
-            .setting(&ws, "handoff", "0")?
+            .setting(ws, "handoff", "0")?
             .parse::<f64>()
             .ok()
             .filter(|l| *l > 0.0)
@@ -3765,22 +3773,7 @@ impl Tx<'_> {
             let ratio = used as f64 / size as f64 * 100.0;
             if ratio >= limit && !self.busy(&s.id) {
                 let pct = ratio.round() as i64;
-                let last = self.last_agent_text(&s.id)?;
-                let last = js_head(&last, 800);
-                self.db().event_add(
-                    &s.id,
-                    "system",
-                    json!({"text": format!("上下文已用 {pct}%，带交接摘要转到新会话")}),
-                )?;
-                self.hand_off(item_id, &s.id)?;
-                self.db().timeline_add(
-                    item_id,
-                    "steve",
-                    "sys",
-                    &format!("上下文已用 {pct}%：开新会话"),
-                    None,
-                )?;
-                self.start_session_files(item_id, Some(&format!("交接：上一个会话的上下文用到了 {pct}%。它的最后进展：{last}\n\n补充信息：{text}")), None, files)?;
+                self.handoff_on_supplement(&item, &s, pct, text, files)?;
                 return Ok(());
             }
         }

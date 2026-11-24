@@ -21,7 +21,8 @@ pub(crate) fn needs_budget(body: &EventBody) -> bool {
         | EventBody::PermissionExpired { .. }
         | EventBody::PermissionResolved { .. }
         | EventBody::SessionChanged { .. }
-        | EventBody::MessageCompleted { .. } => false,
+        | EventBody::MessageCompleted { .. }
+        | EventBody::ContextCompacted { .. } => false,
         EventBody::Usage { report } => report.measurement != Measurement::Final,
         _ => true,
     }

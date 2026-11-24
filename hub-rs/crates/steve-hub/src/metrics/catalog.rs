@@ -13,6 +13,8 @@ pub(super) const COUNTS: &[&str] = &[
 ];
 /// Histograms of durations up to days.
 pub(super) const LONG: &[&str] = &["steve_node_link_uptime_seconds", "steve_model_call_seconds"];
+/// Histograms of token counts across a turn's context window.
+pub(super) const TOKENS: &[&str] = &["steve_turn_context_peak_tokens"];
 
 pub(super) fn describe() {
     // Session approval: applied-mode gauge and post-commit request/turn counts.
@@ -520,6 +522,21 @@ pub(super) fn describe() {
         "steve_model_cost_micro_usd_total",
         Count,
         "Reported cost in millionths of a dollar. Labels: source, harness, model."
+    );
+    describe_histogram!(
+        "steve_turn_context_peak_tokens",
+        Count,
+        "Peak prompt context tokens observed during an agent turn. Labels: harness."
+    );
+    describe_counter!(
+        "steve_turn_context_compactions_total",
+        Count,
+        "Turn context compactions and handoffs. Labels: harness, mode (native, handoff), reason (native_compaction, budget_reached, handoff_threshold)."
+    );
+    describe_counter!(
+        "steve_turn_context_saved_tokens_total",
+        Count,
+        "Estimated prompt context tokens reclaimed by native compaction or session handoff. Labels: harness, mode (native, handoff)."
     );
     // This process (sampled when read)
     describe_gauge!(

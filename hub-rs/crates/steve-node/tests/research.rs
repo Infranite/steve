@@ -343,6 +343,7 @@ fn job(attempt: &str, model: &str, text: &str) -> JobSpec {
                 max_output_bytes: 1 << 20,
                 max_tokens: None,
                 max_cost: None,
+                context_budget: None,
             },
             continuation: None,
         },

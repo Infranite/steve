@@ -30,6 +30,7 @@ reasons! {
         StoppedByNode = stopped_by_node [Internal] (),
         HarnessIdle = harness_idle [Stale] (),
         ResearchBudget = research_budget [Exhausted] (),
+        ContextBudget = context_budget [Exhausted] (),
     }
     retired { }
 }

@@ -205,6 +205,7 @@ pub(crate) fn try_node_attempt_finished(
         result: turn_result(c),
         seconds: at.saturating_sub(started).max(0) as f64 / 1000.0,
         usage: store.read(|r| statistics::usage(r, &turn_id))?,
+        context_peak: c.context_peak,
     };
     store.stats().turn_finish(&steve_store::TurnFinish {
         turn_id,
@@ -225,7 +226,12 @@ pub(crate) fn try_node_attempt_finished(
 
 /// `ok`, or why the attempt did not succeed: its error's code, else its outcome.
 fn turn_result(c: &steve_node_api::Completion) -> &'static str {
-    use steve_node_api::Outcome;
+    use steve_node_api::{CONTEXT_BUDGET, NodeStop, Outcome};
+    if c.stop_reason == CONTEXT_BUDGET
+        || c.error.as_ref().and_then(NodeStop::of) == Some(NodeStop::ContextBudget)
+    {
+        return CONTEXT_BUDGET;
+    }
     match (&c.outcome, &c.error) {
         (Outcome::Succeeded, _) => "ok",
         (_, Some(e)) => e.code.as_str(),

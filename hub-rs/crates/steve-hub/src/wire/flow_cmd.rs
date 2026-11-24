@@ -223,6 +223,7 @@ impl CmdNode for FlowCmd {
                 max_output_bytes: OUTPUT_CAP,
                 max_tokens: None,
                 max_cost: None,
+                context_budget: None,
             },
             env: vec![],
             secrets: vec![],

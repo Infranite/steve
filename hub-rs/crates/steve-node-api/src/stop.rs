@@ -33,6 +33,8 @@ pub enum NodeStop {
     HarnessIdle,
     /// A research job used up its turns or tool calls.
     ResearchBudget,
+    /// A turn on a harness without declared native compaction reached its context budget.
+    ContextBudget,
 }
 
 /// Maximum single NDJSON message size accepted from a harness adapter on stdio.
@@ -60,6 +62,7 @@ impl NodeStop {
             StoppedByNode => "stopped by the node",
             HarnessIdle => "the harness said nothing for too long",
             ResearchBudget => "research budget reached",
+            ContextBudget => "turn context budget reached",
         };
         fixed.to_string()
     }
@@ -83,6 +86,7 @@ impl NodeStop {
             Self::StoppedByNode => NodeStopReason::stopped_by_node(detail),
             Self::HarnessIdle => NodeStopReason::harness_idle(detail),
             Self::ResearchBudget => NodeStopReason::research_budget(detail),
+            Self::ContextBudget => NodeStopReason::context_budget(detail),
         };
         error.retry(Retry::Never)
     }
@@ -112,6 +116,7 @@ impl NodeStop {
             NodeStopReason::StoppedByNode => Self::StoppedByNode,
             NodeStopReason::HarnessIdle => Self::HarnessIdle,
             NodeStopReason::ResearchBudget => Self::ResearchBudget,
+            NodeStopReason::ContextBudget => Self::ContextBudget,
         })
     }
 }
@@ -138,6 +143,7 @@ mod tests {
             NodeStop::StoppedByNode,
             NodeStop::HarnessIdle,
             NodeStop::ResearchBudget,
+            NodeStop::ContextBudget,
         ];
         for s in all {
             assert_eq!(NodeStop::of(&s.error()), Some(s), "{s:?}");
