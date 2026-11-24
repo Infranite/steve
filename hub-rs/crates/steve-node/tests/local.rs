@@ -5332,24 +5332,20 @@ async fn an_adapter_with_home_state_keeps_its_session_map_inside_each_principal(
     std::fs::write(&t.adapter,original.replace("exec node", "mkdir -p \"$HOME/.pi/pi-acp\" || exit 21\necho map > \"$HOME/.pi/pi-acp/session-map.json\" || exit 22\nexec node")).unwrap();
     let mut cfg = t.config();
     cfg.acp.adapters = HashMap::from([("pi".into(), t.adapter.clone())]);
-    // Keep the shared-state case in this fixture even when the developer's process has a Pi
-    // configuration. A real process startup gets this value from its operator configuration.
+    // Keep the shared-state case in this fixture under `t.root` even when the developer's process
+    // sets `PI_CODING_AGENT_DIR`.
     cfg.acp.declared.insert(
         "pi".into(),
         steve_harness_spec::Declaration {
             properties: steve_harness_spec::PropertiesPatch {
                 state: Some(steve_harness_spec::StateDir {
-                    env: "PI_CODING_AGENT_DIR".into(),
-                    default: ".pi/agent".into(),
+                    env: "STEVE_TEST_PI_AGENT_DIR".into(),
+                    default: "shared-pi".into(),
                     home: Some("adapter-home".into()),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
-            env: std::collections::BTreeMap::from([(
-                "PI_CODING_AGENT_DIR".into(),
-                t.root.join("shared-pi").display().to_string(),
-            )]),
             ..Default::default()
         },
     );

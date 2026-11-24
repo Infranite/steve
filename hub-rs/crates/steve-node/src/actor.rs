@@ -2367,14 +2367,8 @@ async fn open_harness(
             Some((dir, env))
         }
         (None, Some(sd)) if sd.home.is_some() => {
-            let dir = inner
-                .cfg
-                .acp
-                .declared
-                .get(&harness)
-                .and_then(|d| d.env.get(&sd.env))
-                .map(std::path::PathBuf::from)
-                .or_else(|| sd.owner_source(&inner.cfg.acp.user_home))
+            let dir = sd
+                .owner_source(&inner.cfg.acp.user_home)
                 .unwrap_or_else(|| inner.cfg.acp.user_home.join(&sd.default));
             std::fs::create_dir_all(&dir).map_err(internal)?;
             crate::attachments::private_dir(&dir).map_err(internal)?;

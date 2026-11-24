@@ -1125,22 +1125,23 @@ pub async fn system_models(
     ok(crate::catalog::with_usage(list, &used))
 }
 
-/// `POST /api/system/harnesses` `{id, name?, command, args?, env?, properties?}`: declares a
+/// `POST /api/system/harnesses` `{id, name?, command, args?, properties?}`: declares a custom
 /// harness adapter in the Hub's manifest (the instance's owner only); in force once the Hub
-/// restarts, when its Node asks the adapter what it supports.
+/// restarts, when its Node asks the adapter what it supports. Built-in harness ids and `env`
+/// injection are refused.
 pub async fn system_harness_add(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
     instance_owner(&c)?;
-    let h: crate::harnesses::NewHarness =
-        serde_json::from_value(body(&b)?).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let h = crate::harnesses::parse_new_harness(body(&b)?)
+        .map_err(crate::harnesses::HarnessError::into_api_error)?;
     let path = st.cfg.harness_manifest.clone();
     tokio::task::spawn_blocking(move || crate::harnesses::declare(&path, h))
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?
-        .map_err(ApiError::bad_request)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(crate::harnesses::HarnessError::into_api_error)?;
     ok(json!({"saved": true, "restart": true}))
 }
 
@@ -1176,8 +1177,8 @@ pub async fn system_harness_install(
     ok(json!({"accepted": true, "restart": false}))
 }
 
-/// `DELETE /api/system/harnesses/:id`: removes an adapter from the Hub's manifest (the
-/// instance's owner only); in force once the Hub restarts.
+/// `DELETE /api/system/harnesses/:id`: removes a custom adapter from the Hub's manifest (the
+/// instance's owner only); in force once the Hub restarts. Built-in harness ids are refused.
 pub async fn system_harness_remove(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -1187,8 +1188,8 @@ pub async fn system_harness_remove(
     let path = st.cfg.harness_manifest.clone();
     let removed = tokio::task::spawn_blocking(move || crate::harnesses::undeclare(&path, &id))
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?
-        .map_err(ApiError::bad_request)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(crate::harnesses::HarnessError::into_api_error)?;
     ok(json!({"removed": removed, "restart": true}))
 }
 
