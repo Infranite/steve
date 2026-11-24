@@ -87,7 +87,7 @@ const vitals = {
         network: { rx_bytes_per_second: 520_000, tx_bytes_per_second: 110_000 },
         roots: [
           { root: "/work", display: "~/Code", free: 212 * GIB, total: 994 * GIB },
-          { root: "/data", display: "/Volumes/Data", free: 40 * GIB, total: 500 * GIB },
+          { root: "/data", display: "/mnt/data", free: 40 * GIB, total: 500 * GIB },
         ],
         sessions: 1,
         rtt_ms: 14,

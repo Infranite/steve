@@ -1,12 +1,18 @@
 //! The evaluation corpus through the real index and [`retrieve`]: documents
 //! written with `index::replace`, memories through `mems` + `sync_mem`, queries as `Purpose::Search`
-//! with ranking boosts and the relaxed fallback. Phase-1 bar: recall@5 ≥ 0.8.
+//! with ranking boosts and the relaxed fallback. Minimum bar: recall@5 ≥ 0.8.
 //!
 //! `cargo test -p steve-knowledge --test eval -- --nocapture` prints recall@k, MRR and misses.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
+
+/// Minimum indexed rows expected from the synthetic corpus (80 docs; currently 156 rows after
+/// replacing the oversized internal wiki proposals with compact neutral fixtures).
+const MIN_CORPUS_CHUNKS: usize = 140;
+const MIN_EVAL_CASES: usize = 40;
+const MIN_RECALL_AT_5: f64 = 0.8;
 
 use serde_json::json;
 use steve_knowledge::eval::{evaluate, load_cases, load_corpus};
@@ -108,7 +114,11 @@ fn retrieve_on_eval_corpus() {
         docs.len(),
         cases.len()
     );
-    assert!(chunks >= 180 && cases.len() >= 40);
+    assert!(
+        chunks >= MIN_CORPUS_CHUNKS && cases.len() >= MIN_EVAL_CASES,
+        "expected at least {MIN_CORPUS_CHUNKS} chunks and {MIN_EVAL_CASES} cases, got {chunks} and {}",
+        cases.len()
+    );
 
     let refs: HashMap<String, String> = env
         .store()
@@ -163,8 +173,8 @@ fn retrieve_on_eval_corpus() {
     let p95 = took[(took.len() * 95 / 100).min(took.len() - 1)];
     eprintln!("latency: p50={}µs p95={p95}µs", took[took.len() / 2]);
     assert!(
-        r5.recall >= 0.8,
-        "recall@5 {:.3} below the phase-1 bar 0.8",
+        r5.recall >= MIN_RECALL_AT_5,
+        "recall@5 {:.3} below the bar {MIN_RECALL_AT_5}",
         r5.recall
     );
 }

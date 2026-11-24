@@ -523,9 +523,9 @@ mod tests {
         }
     }
 
-    /// What ST-45 gives back on a full disk stays exactly what it was.
+    /// Disposable cache directory names reclaimed on a full disk remain stable.
     #[test]
-    fn the_disposable_names_are_st45s() {
+    fn disposable_cache_names_remain_stable() {
         assert_eq!(
             Toolchains::builtin().disposable_names(),
             [

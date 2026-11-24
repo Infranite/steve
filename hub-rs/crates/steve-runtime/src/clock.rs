@@ -1,4 +1,4 @@
-//! Replaces modules::clock and node_runtime::clock (W2b §1.6).
+//! Shared domain clock abstraction for Hub modules and Node runtime.
 use futures::future::BoxFuture;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

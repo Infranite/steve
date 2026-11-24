@@ -74,8 +74,8 @@ export type RNode = { node_id: string; name: string; fingerprint: string; state:
 /** A Node's latest sample and day of vitals. Network rates are bytes per second. */
 export type RVitals = import("./gen/NodeVitalsDay").NodeVitalsDay
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
-/** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
-/** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */
+/** remote Nodes over tailcat: `hub_url` is `tailcat:<address>:<port>` once it runs */
+/** a remote install over tailcat's SSH: the command for the target, then its steps */
 export type RInstall = { id: string; state: "waiting" | "running" | "done" | "failed"; command: string; steps: RInstallStep[]; node_id: string | null; error: string | null; failed_step?: RInstallKind | null; address?: string | null; created?: number; transfer_route?: "direct_observed" | "derp_observed" | null }
 export type RInstallKind = "probe" | "fetch" | "send" | "setup" | "done"
 /** fetch: download, cached (a copy fetched before, checked again) or verify; send: send; setup: install, pair, adapters, start */
@@ -83,7 +83,7 @@ export type RInstallProgress = { phase: string; done: number; total: number | nu
 /** a step of a remote install: `elapsed_ms` is up to now while it runs */
 export type RInstallStep = { kind: RInstallKind; at: number; text: string; ended?: number | null; elapsed_ms?: number; progress?: RInstallProgress | null; transfer_ms?: number; unpack_ms?: number }
 export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
-/* `custom`: an adapter the Hub's harness manifest adds (harness parity S1), with `error` and `install_hint` when it has them */
+/* `custom`: an adapter declared by the Hub's harness manifest, with `error` and `install_hint` when it has them */
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null

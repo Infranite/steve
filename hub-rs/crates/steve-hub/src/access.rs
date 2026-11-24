@@ -2116,7 +2116,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
     }
 }
 
-/* ───────── single sign-on in the settings (A4b) ───────── */
+/* ───────── single sign-on in the settings ───────── */
 
 /// Puts an OIDC configuration in force without a restart (steve-auth's `Auth`).
 pub trait OidcSwitch: Send + Sync {
