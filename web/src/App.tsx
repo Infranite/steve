@@ -18,6 +18,8 @@ import { getItem, st, useSession, useStoreSelector, start, type Sess } from "@/s
 import { lang, useT } from "@/i18n"
 import { useCommandShortcut, useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
+import { navItemOf } from "@/nav"
+import { recordNavOpen } from "@/perf"
 const CommandPalette = lazyView(() => import("@/command-palette").then((m) => ({ default: m.CommandPalette })))
 const FeedView = lazyView(() => import("@/feed").then((m) => ({ default: m.FeedView })))
 const InboxView = lazyView(() => import("@/inbox").then((m) => ({ default: m.InboxView })))
@@ -266,6 +268,9 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
 function WorkspacePage({ a, b, c, d, workspace, session }: { a: string; b?: string; c?: string; d?: string; workspace: string; session?: Sess }) {
   const sh = useStoreSelector(getSheet)
   useStoreSelector(() => a === "" || a === "c" ? (sh ? st.ver : 0) : st.ver)
+  const navPath = a === "contacts" && b === "me" ? "#/contacts/me" : "#/" + a
+  const navKey = navItemOf(navPath)
+  useEffect(() => { if (navKey) recordNavOpen(navPath) }, [navKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const view =
     a.split("?")[0] === "feed" ? <FeedView workspace={workspace} filter={new URLSearchParams(a.split("?")[1]).get("kind") ?? ""} /> :
     a === "inbox" ? <InboxView /> :

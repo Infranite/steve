@@ -1,11 +1,11 @@
 /* en strings for the "todos" namespace: todos and goals.
  * Same keys as zh-CN/todos.ts. Conventions: web/src/i18n/index.ts */
 export default {
-  title: "Todos",
+  title: "My todos",
   sub: "What you do yourself · hand one to a Bot and it becomes an item",
-  tabs: { label: "Todo view", today: "Today", all: "All", goals: "Goals" },
+  tabs: { label: "My todos view", today: "Today", all: "All", goals: "Goals" },
   list: {
-    failed: "Todos did not load",
+    failed: "My todos did not load",
     clearToday: "Nothing to do today",
     none: "No todos yet",
     noneSub: "Write one line above to note it; a date, a time or #goal in it is recognised.",
@@ -14,7 +14,7 @@ export default {
   goals: {
     head: "Goals",
     all: "All goals",
-    note: "Todos carry no alert color: they do not chase you. Cards waiting for your decision are in Inbox; the calendar reminds you when it is time.",
+    note: "My todos carry no alert color: they do not chase you. Cards waiting for your decision are in Decisions; the calendar reminds you when it is time.",
     none: "No goals yet",
     noneSub: "A goal is a result you set, with a date and progress; todos and items go under it.",
     closed: "Closed goals",
@@ -26,7 +26,7 @@ export default {
     project: "Project: code and its folder, where items do their work.",
   },
   detail: {
-    title: "Todo",
+    title: "My todos",
     missing: "No such todo",
     missingSub: "It may have been undone, or it is not yours.",
     rename: "Rename",
