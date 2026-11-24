@@ -9,8 +9,8 @@ export function linkedHubDevice(devices: readonly { id: string; name: string; no
   const local = devices.filter(device => device.node_id === "local")
   return local.length === 1 ? local[0] : undefined
 }
-/** Where harnesses are set up: the Hub's own Node when the binding is known, else the Node list. */
-export const runtimeSetupHrefFor = (devices: Parameters<typeof linkedHubDevice>[0]) => (linkedHubDevice(devices) ? "#/devices/nodes/local" : "#/devices/nodes")
+/** Where harnesses are set up: the Hub's own Node Harness tab when the binding is known, else the Node list. */
+export const runtimeSetupHrefFor = (devices: Parameters<typeof linkedHubDevice>[0]) => (linkedHubDevice(devices) ? "#/devices/nodes/local/harness" : "#/devices/nodes")
 export function normalizeHubDraft(d: HubDraft): HubDraft {
   return { display_name: d.display_name.trim(), purpose_note: d.purpose_note.replace(/\r\n?/g, "\n") }
 }

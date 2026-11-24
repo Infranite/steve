@@ -2,8 +2,10 @@
 .device-page h1, .device-page h2 { white-space: normal; overflow: visible; text-overflow: clip; }
 .device-page [data-meta-part] { white-space: normal; overflow-wrap: anywhere; }
 
-/* the Nodes tab's count turns amber while a Node wants you */
-[data-devices-tabs] .ui-segc__opt[data-warn] .ui-segc__count { background: color-mix(in srgb, var(--attention) 16%, transparent); color: var(--attention); box-shadow: none; }
+/* the Nodes and Node detail tab counts tint with status when something wants attention */
+:is([data-devices-tabs], [data-node-tabs]) .ui-segc__opt[data-warn] .ui-segc__count { background: color-mix(in srgb, var(--attention) 16%, transparent); color: var(--attention); box-shadow: none; }
+[data-node-tabs] .ui-segc__opt[data-bad] .ui-segc__count { background: color-mix(in srgb, var(--destructive) 16%, transparent); color: var(--destructive); box-shadow: none; }
+[data-node-tabs] .ui-segc__opt[data-info] .ui-segc__count { background: color-mix(in srgb, var(--blue) 16%, transparent); color: var(--blue); box-shadow: none; }
 
 /* the step of a Node upgrade it is on: a slow light moving along its segment (still when motion is reduced) */
 .device-step-live { background-image: linear-gradient(90deg, transparent 0%, color-mix(in srgb, white 45%, transparent) 50%, transparent 100%); background-size: 200% 100%; animation: device-step 1.6s linear infinite; }

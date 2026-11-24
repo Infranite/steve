@@ -2,6 +2,15 @@
  * the stateful fixture models edits, approvals and undo, and never sends to a Hub or messaging provider. */
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
+import {
+  channelReplyRefreshContext,
+  channelReplyRefreshDecision,
+  decisionSnapshot,
+  decisionViews,
+  emptyMessagePage,
+  reopenChannelReplyDecision,
+  settleChannelReplyDecision,
+} from "./fixtures/channel-reply-data.ts"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5193"
@@ -17,7 +26,7 @@ const newer = "刚刚同步的第二版正式稿。\n请以此稿为准。"
 const local = "我尚未提交的修改。\n需要保留并对照。"
 
 function scenario(name) {
-  let decision = { id: "dc_reply", ws: "ws_fixture", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: { kind: "raw", text: "审批渠道回复" }, draft: initial, options: ["yes", "no", "to_item"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null, revision: 1 }
+  let decision = channelReplyRefreshDecision(initial)
   let rev = 1
   let failNext = false
   const pages = [], errors = [], writes = [], events = []
@@ -46,20 +55,20 @@ function scenario(name) {
             return route.fulfill({ status: 503, json: { error: "fixture: submission unavailable" } })
           }
           if (u.pathname === "/api/decisions/dc_reply/undo") {
-            decision = { ...decision, status: "open", result: null, resolved: null }
+            decision = reopenChannelReplyDecision(decision)
           } else {
             eq(u.pathname, "/api/decisions/dc_reply", "every approval targets the same decision ID")
-            decision = { ...decision, draft: body.text ?? decision.draft, status: "resolved", result: { choice: body.choice, send_at: 2000 }, resolved: Date.now() }
+            decision = settleChannelReplyDecision(decision, body, Date.now())
           }
           return route.fulfill({ headers: { "x-steve-rev": String(++rev) }, json: decision })
         }
         if (u.pathname === "/api/snapshot") {
           events.push({ action: "snapshot-read", client, id: decision.id, status: decision.status, draft: decision.draft })
-          return route.fulfill({ json: { rev, cursor: String(rev), views: { decision: decision.status === "open" ? [decision] : [] } } })
+          return route.fulfill({ json: decisionSnapshot(decision.status === "open" ? [decision] : [], rev) })
         }
-        if (u.pathname === "/api/views") return route.fulfill({ json: { rev, views: [decision], missing: [] } })
-        if (u.pathname === "/api/views/page") return route.fulfill({ json: { rev, views: [], next: null } })
-        if (u.pathname.endsWith("/context")) return route.fulfill({ json: { space: { id: "sp_product", name: "产品讨论群", kind: "group", external: true }, as_you: false, persona: "值班助手", text: decision.draft, reply_to: { id: "cm_in", sender: "陈同学", text: "你是谁啊？", at: 1 }, before: [] } })
+        if (u.pathname === "/api/views") return route.fulfill({ json: decisionViews([decision], rev) })
+        if (u.pathname === "/api/views/page") return route.fulfill({ json: emptyMessagePage(rev) })
+        if (u.pathname.endsWith("/context")) return route.fulfill({ json: channelReplyRefreshContext(decision.draft) })
         return route.fulfill({ status: 404, json: { error: "fixture: unavailable" } })
       })
       await page.goto(`${base}/test/fixtures/channel-reply.html?case=${kind}`)
@@ -128,7 +137,7 @@ try {
   await sent(first)
   eq(peer.writes.map(({ client, path, body }) => ({ client, path, body })), [
     { client: 2, path: "/api/decisions/dc_reply", body: { revision: 1, choice: "yes", text: updated } },
-    { client: 2, path: "/api/decisions/dc_reply/undo", body: {} },
+    { client: 2, path: "/api/decisions/dc_reply/undo", body: { revision: 1 } },
     { client: 1, path: "/api/decisions/dc_reply", body: { revision: 1, choice: "yes", text: updated } },
   ], "both browser clients and the undo helper post the intended payloads")
   await peer.close()
