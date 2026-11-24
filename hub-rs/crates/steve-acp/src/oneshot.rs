@@ -655,7 +655,10 @@ fn spawn_job(
     on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),
     admitted_limit: Arc<AtomicBool>,
 ) -> Result<SpawnedJob, OneShotError> {
-    let (mut program, mut args) = req.cfg.adapter_command(req.harness).map_err(failed)?;
+    let (mut program, mut args) = req
+        .cfg
+        .adapter_command_for_mode(req.harness, Some(req.mode))
+        .map_err(failed)?;
     let mut env = req.cfg.adapter_env(req.harness);
     if let Some(wrap) = req.wrap {
         (program, args) = wrap((program, args), &mut env);

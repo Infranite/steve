@@ -754,7 +754,7 @@ fn command_line(c: &CommandFact) -> String {
 }
 
 fn command_of(input: &Value) -> Option<CommandFact> {
-    match input.get("command")? {
+    match input.get("command").or_else(|| input.get("CommandLine"))? {
         Value::String(s) => Some(CommandFact::Shell(s.clone())),
         Value::Array(a) => a
             .iter()
@@ -766,7 +766,7 @@ fn command_of(input: &Value) -> Option<CommandFact> {
 }
 
 fn path_of(input: &Value) -> Option<String> {
-    ["file_path", "path", "notebook_path"]
+    ["file_path", "path", "Path", "notebook_path"]
         .iter()
         .find_map(|k| input.get(*k).and_then(Value::as_str))
         .map(String::from)
@@ -1070,6 +1070,7 @@ fn tool_paths(raw: &Value, input: &Value) -> Vec<String> {
     for key in [
         "file_path",
         "path",
+        "Path",
         "notebook_path",
         "old_path",
         "new_path",
@@ -1463,5 +1464,43 @@ mod tests {
         };
         assert_eq!(text.chars().count(), TEXT_MAX + 1);
         assert!(tool.error.as_ref().unwrap().chars().count() <= 501);
+    }
+
+    #[test]
+    fn pascal_case_command_line_and_path_normalize() {
+        let mut n = n();
+        let exec = events(n.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_1",
+            "name": "run_command",
+            "kind": "execute",
+            "status": "pending",
+            "title": "git status",
+            "rawInput": {"CommandLine": "git status", "WaitMsBeforeAsync": 5000}
+        })));
+        let EventBody::ToolChanged { tool } = &exec[0] else {
+            panic!("{exec:?}")
+        };
+        assert_eq!(tool.name, "run_command");
+        assert!(
+            matches!(&tool.action, Some(Action::Exec { command, .. }) if command == "git status")
+        );
+        let read = events(n.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_2",
+            "name": "read_file",
+            "kind": "read",
+            "status": "pending",
+            "title": "Read file",
+            "rawInput": {"Path": "/work/proj/Cargo.toml"}
+        })));
+        let EventBody::ToolChanged { tool } = &read[0] else {
+            panic!("{read:?}")
+        };
+        assert_eq!(tool.target.as_deref(), Some("Cargo.toml"));
+        assert_eq!(
+            n.fact("call_2").unwrap().paths,
+            vec!["/work/proj/Cargo.toml"]
+        );
     }
 }
