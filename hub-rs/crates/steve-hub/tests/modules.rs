@@ -1370,6 +1370,17 @@ async fn ownership_routes_and_tools() {
         .await;
     assert_eq!(v["stewards"][0]["person_id"], me["id"], "{v}");
 
+    let (s, dup) = c
+        .call("POST", &format!("/api/bots/{bid}/duplicate"), None, None)
+        .await;
+    assert_eq!(s, 200, "{dup}");
+    let dup_id = dup["id"].as_str().expect("duplicate bot id");
+    assert_eq!(dup["enabled"], false);
+    let (_, v) = c
+        .call("GET", &format!("/api/stewards/bot/{dup_id}"), None, None)
+        .await;
+    assert_eq!(v["stewards"][0]["person_id"], me["id"], "{v}");
+
     let (_, zhang) = c
         .call(
             "POST",

@@ -40,6 +40,7 @@ struct Env {
     store: steve_store::Store,
     app: Router,
     catalogue: Arc<Catalogue>,
+    me: String,
 }
 
 fn reported(id: &str, models: &[&str], efforts: &[&str]) -> Harness {
@@ -75,6 +76,10 @@ impl Env {
         )
         .unwrap();
         store.ensure_workspace().unwrap();
+        let me = store
+            .users()
+            .create("test-owner", "Owner", None, "owner")
+            .unwrap();
         let catalogue = Arc::new(Catalogue(RwLock::new(vec![
             reported(
                 "claude-code",
@@ -98,7 +103,7 @@ impl Env {
         let ctx = Ctx {
             user: Obj::new(),
             ws: "default".into(),
-            me: "me".into(),
+            me: me.clone(),
             client: None,
         };
         let app = Router::new()
@@ -113,6 +118,7 @@ impl Env {
             store,
             app,
             catalogue,
+            me,
         }
     }
 
@@ -399,4 +405,42 @@ async fn a_partially_unknown_target_set_does_not_certify_an_accepted_save() {
         status, 400,
         "unknown targets do not erase another target's known incompatibility"
     );
+}
+
+#[tokio::test]
+async fn create_draft_and_duplicate_all_adopt_creator_as_steward() {
+    let e = Env::new();
+    let mut owner = steve_modules::contacts::repo::NewParty::new("contact", "Owner", &e.me);
+    owner.user_id = Some(e.me.clone());
+    let me = e
+        .store
+        .write(|w| steve_modules::contacts::repo::insert(w, "default", &owner))
+        .unwrap();
+    let created = e.create(json!({"name": "Created"})).await;
+    let (s, dup) = e
+        .call("POST", &format!("/bots/{created}/duplicate"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{dup}");
+    let duplicated = dup["id"].as_str().unwrap().to_string();
+    let (s, dr) = e
+        .call("POST", "/bots/draft", json!({"desc": "create a helper"}))
+        .await;
+    assert_eq!(s, 200, "{dr}");
+    let drafted = dr["id"].as_str().unwrap().to_string();
+
+    for (kind, id) in [
+        ("create", created),
+        ("duplicate", duplicated),
+        ("draft", drafted),
+    ] {
+        let stewards = e
+            .store
+            .read(|r| steve_store::Stewards(r).of_object("default", "bot", &id))
+            .unwrap();
+        assert_eq!(
+            stewards.first().map(|s| s.person_id.as_str()),
+            Some(me.id.as_str()),
+            "{kind} ({id}) did not adopt creator as steward: {stewards:?}"
+        );
+    }
 }

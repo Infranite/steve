@@ -167,23 +167,21 @@ impl RoutedRuntime {
                         steve_i18n::t!("hub.dispatch.not_candidate"),
                     )));
                 }
-                let bot = self
-                    .store
-                    .bots()
-                    .create(
-                        ws,
-                        &NewBot {
-                            name: edit.name.trim().to_owned(),
-                            role: Some(edit.role),
-                            specialties: Some(bot_dispatch::specialties(edit.specialties)),
-                            harness: choice.harness,
-                            model: choice.model,
-                            perm_mode: Some("default".into()),
-                            ..Default::default()
-                        },
-                        actor,
-                    )?
-                    .ok_or(StoreError::NotFound("Created Bot"))?;
+                let bot = steve_modules::contacts::stewards::create_bot(
+                    w,
+                    ws,
+                    &NewBot {
+                        name: edit.name.trim().to_owned(),
+                        role: Some(edit.role),
+                        specialties: Some(bot_dispatch::specialties(edit.specialties)),
+                        harness: choice.harness,
+                        model: choice.model,
+                        perm_mode: Some("default".into()),
+                        ..Default::default()
+                    },
+                    actor,
+                )
+                .map_err(|e| ConfirmError::Api(ApiError::internal(e.to_string())))?;
                 bot_admin::set_bindings(w, ws, &bot.id, &[node.into()])?;
                 if let Some(team) = &mut team {
                     team.members.push(bot_dispatch::Member {

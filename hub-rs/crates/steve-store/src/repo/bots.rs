@@ -36,6 +36,8 @@ pub struct NewBot {
     pub perm_mode: Option<String>,
     pub avatar: Option<Avatar>,
     pub default_project: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 /// The patchable bot fields, in the order repo.ts lists them (this is also the key order of the revision).
@@ -196,21 +198,9 @@ impl Bots<'_> {
 
     /// A new (non-main) bot in `ws`; audited as `bot.create`.
     pub fn create(&self, ws: &str, b: &NewBot, author: &str) -> Result<Option<Bot>> {
-        self.0.write_conn(|w| {
-            let id = uid("bot");
-            seed(w.c, &id, false, b, ws)?;
-            w.c.run(
-                "INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)",
-                params![ws, now(), author, "bot.create", id, json!({"name": b.name}).to_string()],
-            )?;
-            w.publish(steve_types::DomainEvent::from(
-                steve_types::ConfigEvent::Bot {
-                    ws: ws.into(),
-                    id: id.clone().into(),
-                },
-            ));
-            one(w.c, BOT, [&id], Bot::from_row)
-        })
+        self.0
+            .write(|w| crate::bots::create(w, ws, b, author))
+            .map(Some)
     }
 
     /// Fails with `没有这个 Bot`. Bumps `revision` when something changed and always records
@@ -323,7 +313,7 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
     let avatar = to_json(b.avatar.as_ref().unwrap_or(&Avatar::default()))?;
     c.prepare_cached(
         "INSERT INTO bots (id, workspace_id, name, role, main, harness, model, reasoning_effort, rules, persona, proactive, accept_mode, perm_mode, avatar, default_project, specialties, enabled, revision, updated)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?) ON CONFLICT(id) DO NOTHING",
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(id) DO NOTHING",
     )?
     .execute(params![
         id,
@@ -342,6 +332,7 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
         avatar,
         b.default_project,
         to_json(&b.specialties.as_deref().unwrap_or_default())?,
+        b.enabled.unwrap_or(true) as i64,
         now(),
     ])?;
     c.run(

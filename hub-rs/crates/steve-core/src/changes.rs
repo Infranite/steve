@@ -2145,7 +2145,7 @@ impl Core {
         let db = t.db().clone();
         let (before, after) =
             db.store()
-                .write(|_w| -> Result<(Map<String, Value>, Map<String, Value>)> {
+                .write(|w| -> Result<(Map<String, Value>, Map<String, Value>)> {
                     let db = &db;
                     let mut before = Map::new();
                     let mut after = Map::new();
@@ -2170,7 +2170,12 @@ impl Core {
                                 nb.insert("perm_mode".into(), json!(pm));
                             }
                             self.models().validate_bot_patch(None, &nb).map_err(msg)?;
-                            let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
+                            let new_bot: steve_store::NewBot =
+                                serde_json::from_value(Value::Object(nb))?;
+                            let b = steve_modules::contacts::stewards::create_bot(
+                                w, &p.ws, &new_bot, actor,
+                            )
+                            .map_err(|e| msg(e.to_string()))?;
                             before.insert("created".into(), json!(b.id));
                         }
                         "bot" => {

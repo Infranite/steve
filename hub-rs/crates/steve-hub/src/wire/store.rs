@@ -269,13 +269,13 @@ impl Repo for StoreBackend {
                 .transpose()
                 .map_err(|e| BackendError::msg(e.to_string()))?,
             default_project: str_field(f, "default_project"),
+            enabled: f.get("enabled").and_then(Value::as_bool),
         };
-        self.0
-            .bots()
-            .create(ws, &nb, author)
-            .map_err(err)?
-            .map(obj)
-            .unwrap_or_else(|| Err(gone("bot")))
+        let bot = self
+            .0
+            .write(|tx| steve_modules::contacts::stewards::create_bot(tx, ws, &nb, author))
+            .map_err(|e| BackendError::msg(e.to_string()))?;
+        obj(bot)
     }
     fn bot_patch(&self, id: &str, p: &Obj, author: &str) -> BResult<Obj> {
         self.0

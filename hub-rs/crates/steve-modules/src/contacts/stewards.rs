@@ -1047,6 +1047,18 @@ pub fn link(
     Ok(true)
 }
 
+/// Creates a Bot and assigns `author`'s `"me"` party as its 负责人 in the same transaction.
+pub fn create_bot(
+    tx: &mut W<'_>,
+    ws: &str,
+    bot: &steve_store::NewBot,
+    author: &str,
+) -> ApiResult<steve_store::Bot> {
+    let created = steve_store::bots::create(tx, ws, bot, author)?;
+    adopt(tx, ws, "bot", &created.id, Some(author), "seed")?;
+    Ok(created)
+}
+
 /// A new object gets “我” of `user` (or of the workspace's owner) as 负责人, unless it has stewards
 /// already. Nothing happens while that “我” does not exist yet: [`seed_defaults`] links it when it is
 /// created.

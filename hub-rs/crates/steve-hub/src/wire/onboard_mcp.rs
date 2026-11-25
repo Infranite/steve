@@ -432,20 +432,9 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
             skipped.push(b.name);
             continue;
         }
-        let bot = x
-            .store
-            .bots()
-            .create(ws, &b, user)
-            .map_err(|e| e.to_string())?
-            .ok_or("The Bot was not created.")?;
-        /* whoever creates a Bot is its 负责人, as on the Bots page (best effort: the Bot exists either way) */
-        if let Err(e) = x
-            .modules
-            .store
-            .write(|tx| stewards::adopt(tx, ws, "bot", &bot.id, Some(user), "seed"))
-        {
-            tracing::warn!("first meeting: steward of {}: {e}", bot.id);
-        }
+        x.store
+            .write(|tx| stewards::create_bot(tx, ws, &b, user))
+            .map_err(|e| e.to_string())?;
         created.push(b.name);
     }
     let mut out = vec![];

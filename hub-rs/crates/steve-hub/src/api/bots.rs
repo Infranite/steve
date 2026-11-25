@@ -230,6 +230,31 @@ fn fill_new_bot_defaults(
     }
 }
 
+/// Validates `fields` against `harnesses`, creates the Bot (with steward adoption in the same
+/// transaction via [`Repo::bot_create`]), and returns its API representation.
+fn create_bot_in(
+    r: &dyn crate::backend::Repo,
+    ws: &str,
+    author: &str,
+    fields: &Obj,
+    harnesses: &[steve_core::harnesses::Harness],
+) -> ApiResult {
+    let target_id = fields
+        .get("harness")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
+        && let Some(pm) = fields.get("perm_mode").and_then(Value::as_str)
+        && perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m))
+    {
+        return Err(ApiError::Invalid(vec!["perm_mode".into()]));
+    }
+    steve_core::models::validate_bot_patch(None, fields, harnesses)
+        .map_err(ApiError::bad_request)?;
+    let b = r.bot_create(ws, fields, author)?;
+    ok(Value::Object(selection_out(bot_out(r, b, ws)?, harnesses)))
+}
+
 pub async fn create(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -238,38 +263,11 @@ pub async fn create(
     let harnesses = st.domain.bot_harnesses(None).await?;
     let allowed = known_harness_ids(&st.cfg, &harnesses);
     let mut p = bot_in(&body(&b)?, true, &allowed)?;
-    let (ws, me) = (c.ws.clone(), c.me.clone());
-    let (out, id) = st
-        .write(move |r| {
-            fill_new_bot_defaults(r, &c.ws, &harnesses, &mut p);
-            let target_id = p.get("harness").and_then(Value::as_str).unwrap_or_default();
-            if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
-                && let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
-                && perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m))
-            {
-                return Err(ApiError::Invalid(vec!["perm_mode".into()]));
-            }
-            steve_core::models::validate_bot_patch(None, &p, &harnesses)
-                .map_err(ApiError::bad_request)?;
-            let b = r.bot_create(&c.ws, &p, &c.me)?;
-            let out = selection_out(bot_out(r, b, &c.ws)?, &harnesses);
-            let id = out.get("id").and_then(Value::as_str).map(str::to_string);
-            Ok((Value::Object(out), id))
-        })
-        .await?;
-    // the user who creates a Bot is its 负责人 (best effort: the Bot exists either way)
-    if let (Some(m), Some(id)) = (st.modules.clone(), id) {
-        let done = tokio::task::spawn_blocking(move || {
-            m.store.write(|tx| {
-                steve_modules::contacts::stewards::adopt(tx, &ws, "bot", &id, Some(&me), "seed")
-            })
-        })
-        .await;
-        if let Ok(Err(e)) = done {
-            tracing::warn!(error = %e, "bot create: no default 负责人");
-        }
-    }
-    ok(out)
+    st.write(move |r| {
+        fill_new_bot_defaults(r, &c.ws, &harnesses, &mut p);
+        create_bot_in(r, &c.ws, &c.me, &p, &harnesses)
+    })
+    .await
 }
 
 /// “描述给 Steve，让它起草”: the model fills the bot's fields from one sentence.
@@ -351,16 +349,8 @@ pub async fn draft(
     f.insert("harness".into(), json!(harness_id));
     f.insert("perm_mode".into(), json!(perm_mode));
     let harnesses = st.domain.bot_harnesses(None).await?;
-    st.write(move |w| {
-        steve_core::models::validate_bot_patch(None, &f, &harnesses)
-            .map_err(ApiError::bad_request)?;
-        let b = w.bot_create(&c.ws, &f, &c.me)?;
-        ok(Value::Object(selection_out(
-            bot_out(w, b, &c.ws)?,
-            &harnesses,
-        )))
-    })
-    .await
+    st.write(move |w| create_bot_in(w, &c.ws, &c.me, &f, &harnesses))
+        .await
 }
 
 pub async fn patch_one(
@@ -458,18 +448,7 @@ pub async fn duplicate(
         b.insert("name".into(), json!(name));
         b.insert("enabled".into(), json!(false));
         b.insert("main".into(), json!(false));
-        steve_core::models::validate_bot_patch(None, &b, &harnesses)
-            .map_err(ApiError::bad_request)?;
-        let n = r.bot_create(&c.ws, &b, &c.me)?;
-        let nid = str_of(&n, "id");
-        let mut off = Obj::new();
-        off.insert("enabled".into(), json!(false));
-        r.bot_patch(&nid, &off, &c.me)?;
-        let got = r.bot_get(&nid)?.unwrap_or_default();
-        ok(Value::Object(selection_out(
-            bot_out(r, got, &c.ws)?,
-            &harnesses,
-        )))
+        create_bot_in(r, &c.ws, &c.me, &b, &harnesses)
     })
     .await
 }
