@@ -65,8 +65,8 @@ pub use stream::StreamControl;
 pub use view::{
     ById, CloseKind, ClosedBy, DecisionPrompt, DecisionStatus, DecisionTier, DecisionView,
     FoldReason, ItemOutcome, ItemParent, ItemPhase, ItemSnooze, ItemState, ItemView, ItemWait,
-    ItemWorkflow, MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, Said,
-    SessionView, SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
+    MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, Said, SessionView,
+    SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
 };
 
 #[cfg(test)]

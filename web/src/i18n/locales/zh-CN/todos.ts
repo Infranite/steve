@@ -1,11 +1,11 @@
 /* zh-CN strings for the "todos" namespace: 待办 (todos and goals).
  * The source text. Conventions: web/src/i18n/index.ts */
 export default {
-  title: "待办",
+  title: "我的待办",
   sub: "你自己要做的事 · 交给 Bot 就变成事项",
-  tabs: { label: "待办视图", today: "今天", all: "全部", goals: "目标" },
+  tabs: { label: "我的待办视图", today: "今天", all: "全部", goals: "目标" },
   list: {
-    failed: "待办没加载出来",
+    failed: "我的待办没加载出来",
     clearToday: "今天没有要做的事",
     none: "还没有待办",
     noneSub: "在上面写一句就能记下；写上日期、时间或 #目标 会自动识别。",
@@ -14,7 +14,7 @@ export default {
   goals: {
     head: "目标",
     all: "全部目标",
-    note: "待办没有提醒色：它不催你。等你拍板的卡片在待处理；到时间了由日历提醒。",
+    note: "我的待办没有提醒色：它不催你。等你拍板的卡片在待我决定；到时间了由日历提醒。",
     none: "还没有目标",
     noneSub: "目标是你定下的结果，有日期、有进度，下面挂待办和事项。",
     closed: "已结束的目标",
@@ -26,7 +26,7 @@ export default {
     project: "项目：代码和目录，事项在里面干活。",
   },
   detail: {
-    title: "待办",
+    title: "我的待办",
     missing: "没有这条待办",
     missingSub: "它可能已经撤销，或者不是你的待办。",
     rename: "改名",

@@ -56,6 +56,7 @@ pub mod diagnostics;
 pub mod digest;
 mod event_payload;
 mod ingest;
+pub mod item_gate;
 pub mod knowledge;
 pub mod maintenance;
 pub mod outbox;
@@ -65,7 +66,6 @@ pub mod statistics;
 mod tx;
 mod types;
 pub mod views;
-pub mod workflow_gate;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};

@@ -150,13 +150,6 @@ impl DependencyWaits<'_> {
             if i.phase != steve_types::ItemPhase::Active || i.archived {
                 return Err(refuse("事项正在结束或已结束，不能登记等待"));
             }
-            let child:bool=tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM workflow_units WHERE item_id=?
-                 UNION ALL SELECT 1 FROM workflow_attempts WHERE item_id=?)",
-                [item,item],|r|r.get(0))?;
-            if child || i.source.1=="workflow" {
-                return Err(refuse("工作单元不能登记事项依赖，请向主事项负责人报告阻塞"));
-            }
             let authorized: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sessions s WHERE s.id=? AND s.item_id=? AND
                  s.workspace_id=? AND s.bot_id IS ? AND s.readonly=0 AND s.status<>'ended'
@@ -183,10 +176,7 @@ impl DependencyWaits<'_> {
             let mut added = false;
             for dep in deps {
                 let valid: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM items p WHERE p.id=? AND p.workspace_id=? AND p.id<>? AND p.kind='task'
-                       AND COALESCE(json_extract(p.source,'$[1]'),'')<>'workflow'
-                       AND NOT EXISTS(SELECT 1 FROM workflow_units u WHERE u.item_id=p.id)
-                       AND NOT EXISTS(SELECT 1 FROM workflow_attempts a WHERE a.item_id=p.id))",
+                    "SELECT EXISTS(SELECT 1 FROM items p WHERE p.id=? AND p.workspace_id=? AND p.id<>? AND p.kind='task')",
                     params![dep,i.workspace_id,item], |r| r.get(0))?;
                 if !valid {
                     return Err(refuse("前置事项不存在、不可用或不属于当前工作空间"));

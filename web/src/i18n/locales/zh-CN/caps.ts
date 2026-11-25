@@ -269,7 +269,6 @@ export default {
     itemSupplement: "给一个事项补充说明或回答它的问题",
     itemDependencies: "查看或设置事项的前置事项，等它们完成再继续",
     sessionsList: "查看正在运行和最近的智能体会话",
-    workflow: "查看或重新安排几个 Bot 一起做的工作图",
     debug: "读取事项的诊断快照和事件记录（只读）",
     upgrade: "检查 Steve 的新版本，申请升级，由你批准",
     devices: "查看能干活的设备，指定接下来用哪台",

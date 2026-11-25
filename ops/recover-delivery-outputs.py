@@ -23,7 +23,6 @@ def summary_reference(location):
     value = location.strip()
     return (value.startswith(("本次交付摘要", "交付摘要", "本次交付正文"))
             or "steve_deliver summary" in value
-            or ("steve_workflow" in value and "summary" in value)
             or (value.startswith("ST-") and "交付摘要" in value))
 
 
@@ -35,10 +34,6 @@ def recoverable(kind, title, location):
 
 
 def source(c, item, created):
-    row = c.execute("""SELECT summary FROM workflow_units
-        WHERE item_id=? AND length(summary)>80 ORDER BY length(summary) DESC LIMIT 1""", (item,)).fetchone()
-    if row:
-        return row[0]
     row = c.execute("""SELECT text FROM timeline WHERE item_id=? AND kind='sys'
         AND text LIKE '%已交付，等待执行结束后交给下游%' AND ts<=?
         ORDER BY ts DESC,id DESC LIMIT 1""", (item, created)).fetchone()

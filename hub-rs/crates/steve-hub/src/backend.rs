@@ -333,6 +333,10 @@ pub trait Repo {
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("item_get")
     }
+    /// One task item's read view (`steve_types::ItemView`) in `ws`.
+    fn item_view(&self, ws: &str, id: &str) -> BResult<Option<steve_types::ItemView>> {
+        todo_backend!("item_view")
+    }
     /// `items.patch`: present keys only (booleans → 0/1, `plan`/`snooze` JSON-encoded), bumps `updated` and
     /// publishes `item` unless `patch` is empty. Returns the item as read back.
     fn item_patch(&self, id: &str, patch: &Obj) -> BResult<Option<Obj>> {
@@ -658,6 +662,11 @@ pub trait Domain: Send + Sync + 'static {
     async fn seed(&self) -> BResult<()> {
         todo_backend!("seed")
     }
+    /// One-time boot pass between `seed` and `recover` that cancels non-terminal child items
+    /// left behind by the retired dynamic work-graph engine.
+    async fn retire_legacy_workflow_children(&self) -> BResult<usize> {
+        Ok(0)
+    }
     async fn recover(&self) -> BResult<()> {
         todo_backend!("recover")
     }
@@ -706,10 +715,6 @@ pub trait Domain: Send + Sync + 'static {
     async fn item_action(&self, id: &str, action: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("item_action")
     }
-    /// The durable work graph beneath one item; `null` when no graph has been planned.
-    async fn workflow_get(&self, id: &str) -> BResult<Value> {
-        Ok(Value::Null)
-    }
     async fn dependency_get(&self, id: &str) -> BResult<Value> {
         Ok(Value::Null)
     }
@@ -721,10 +726,6 @@ pub trait Domain: Send + Sync + 'static {
         reason: &str,
     ) -> BResult<Value> {
         todo_backend!("dependency_wait")
-    }
-    /// Plan, pause, resume or change a work unit under an optimistic revision check.
-    async fn workflow_change(&self, id: &str, args: Value, actor: &str) -> BResult<Value> {
-        todo_backend!("workflow_change")
     }
     /// The lifecycle commands (`accept` | `cancel` | `fail` | `new_cycle`), checked against the cycle
     /// and revision the caller saw; returns the item.

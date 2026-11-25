@@ -549,7 +549,7 @@ async fn a_remote_agent_is_added_by_its_card_and_sent_a_task() {
 #[tokio::test]
 async fn bot_tool_pins_are_scoped_bounded_and_follow_enabled_capabilities() {
     let h = setup();
-    let path = "/bots/dev/tool-pins/tool/steve_workflow";
+    let path = "/bots/dev/tool-pins/tool/steve_item_read";
     assert_eq!(req(&h, "PUT", path, None).await.0, 200);
     assert_eq!(req(&h, "PUT", path, None).await.0, 200, "idempotent");
     assert_eq!(
@@ -563,7 +563,7 @@ async fn bot_tool_pins_are_scoped_bounded_and_follow_enabled_capabilities() {
     assert_eq!(value["core"].as_array().unwrap().len(), 8);
     assert_eq!(
         value["pins"],
-        json!([{"kind":"tool", "target":"steve_workflow"}])
+        json!([{"kind":"tool", "target":"steve_item_read"}])
     );
     assert_eq!(value["days"], 30);
     assert_eq!(
@@ -666,7 +666,7 @@ async fn bot_tool_pins_are_scoped_bounded_and_follow_enabled_capabilities() {
     );
     assert_eq!(req(&h, "DELETE", path, None).await.0, 200);
     assert_eq!(
-        vault_fixtures::audit_count(h.env.store(), "bot_tool.pin", "steve_workflow").unwrap(),
+        vault_fixtures::audit_count(h.env.store(), "bot_tool.pin", "steve_item_read").unwrap(),
         1
     );
 }

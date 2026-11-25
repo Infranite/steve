@@ -417,9 +417,6 @@ steve-core/src/thread/offer.rs	"^(好|好的|好啊|行|可以|嗯|对|改吧|�
 steve-core/src/turn_receipts.rs	"Agent 停下来了，没有交付也没有提问"	1
 steve-core/src/turn_receipts.rs	"它停下了：上一回合结束后没有交付、提问"	1
 steve-core/src/turn_receipts.rs	"它停下了：会话空闲：没有回合在运行、没有排队输入，也没有交付或提问"	1
-steve-core/src/workflow.rs	"上游使用策略拒绝了请求"	1
-steve-core/src/workflow.rs	"交付正文"	1
-steve-core/src/workflow.rs	"模型服务拒绝了本次请求"	1
 steve-digest/src/alerts.rs	"告警解除"	1
 steve-digest/src/alerts.rs	"已恢复"	1
 steve-digest/src/alerts.rs	"已消除"	1
