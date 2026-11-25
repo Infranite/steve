@@ -717,7 +717,7 @@ async fn child_job_node_process() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_killed_node_leaves_its_job_group_until_it_is_abandoned() {
     let t = T::new();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_job_node_process", "--nocapture"])
         .env("STEVE_NODE_JOB_CHILD_ROOT", &t.root)
         .stdout(std::process::Stdio::null())
@@ -734,9 +734,9 @@ async fn a_killed_node_leaves_its_job_group_until_it_is_abandoned() {
         },
     )
     .await;
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.simulate_crash().unwrap();
     let pid: i64 = t.read("pid").trim().parse().unwrap();
+    let _job_guard = steve_runtime::testkit::GroupGuard::for_pid(pid as i32);
     assert!(!gone(pid), "the harness outlived the Node");
     let n = t.node().await;
     assert!(n.incarnation() >= 2);

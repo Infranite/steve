@@ -153,3 +153,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     reply(m.id, {})
   }
 }
+if (child) {
+  try { child.kill("SIGKILL") } catch {}
+}
+process.exit(0)

@@ -567,25 +567,39 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_command_lost_in_a_crash_is_stopped_and_never_run_again() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "wire::flow_cmd::tests::child_flow_cmd_crash",
-                "--nocapture",
-            ])
-            .env("STEVE_FLOW_CMD_CHILD_ROOT", tmp.path())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child =
+            steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "wire::flow_cmd::tests::child_flow_cmd_crash",
+                    "--nocapture",
+                ])
+                .env("STEVE_FLOW_CMD_CHILD_ROOT", tmp.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
         let ready = tmp.path().join("ready");
         eventually("the child never got ready", Duration::from_secs(60), || {
             ready.exists()
         })
         .await;
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child.simulate_crash().unwrap();
         let (a_pid, b_pid) = (tmp.path().join("a.pid"), tmp.path().join("b.pid"));
+        let _a_guard = steve_runtime::testkit::GroupGuard::for_pid(
+            std::fs::read_to_string(&a_pid)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        );
+        let _b_guard = steve_runtime::testkit::GroupGuard::for_pid(
+            std::fs::read_to_string(&b_pid)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        );
         assert!(
             alive(&a_pid) && alive(&b_pid),
             "the groups outlived the Hub"

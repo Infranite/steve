@@ -298,8 +298,10 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/141.sql"),
     // 142: one-time retirement of non-terminal legacy dynamic work-graph child items (`source[1] = "workflow"`).
     include_str!("../migrations/142.sql"),
-    // 143: file-as-truth memory architecture (source role/write_mode, sidecar memory_entries, evidence, observations, tombstones, revisions, SKILL.md proposals).
+    // 143: rebind work.tidy consumer to work.item.lifecycle so all close kinds clean worktrees.
     include_str!("../migrations/143.sql"),
+    // 144: file-as-truth memory architecture (source role/write_mode, sidecar memory_entries, evidence, observations, tombstones, revisions, SKILL.md proposals).
+    include_str!("../migrations/144.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
