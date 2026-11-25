@@ -744,7 +744,6 @@ async fn single_user_reads_other_accounts_spaces_with_fixed_bindings() {
                 context.user, OTHER,
                 "reply identity still follows the connected account"
             );
-            assert!(context.scopes.is_empty());
             use steve_store::channel_spaces::rows;
             assert!(rows::get_in_workspace(db, &viewer.ws, &r.space_id)?.is_some());
             assert!(rows::get_in_workspace(db, WS2, &r.space_id)?.is_none());

@@ -1,15 +1,120 @@
-//! One retention slice, shared by legacy tables and domain entity adapters.
+//! Bounded SQLite retention slices.
 //! The caller owns the write grant. Cursors always name the last inspected candidate,
 //! including protected/non-selected rows; a time-limited slice never skips prefetched rows.
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, time::Instant};
-pub use steve_storage_api::{
-    entity::{Cell, Row},
-    retention::{Action, Budget, KeepFrom, RetentionPolicy, Select},
-};
 
 pub mod policies;
+
+/// Scalar value carried across a bounded retention row window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cell {
+    Null,
+    Int(i64),
+    Text(String),
+    Millis(i64),
+}
+
+/// Ordered column values for one retention candidate row.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Row(pub Vec<(String, Cell)>);
+
+/// Slice inspection ceiling and soft target time; overruns are reported, not hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Budget {
+    pub rows: u32,
+    pub target_ms: u32,
+}
+impl Default for Budget {
+    fn default() -> Self {
+        Self {
+            rows: 5_000,
+            target_ms: 20,
+        }
+    }
+}
+
+/// Sort direction used by `Select::MaxRows` policy declarations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Order {
+    Asc,
+    Desc,
+}
+
+/// Candidate selection, evaluated before protection and actions. Durations are milliseconds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Select {
+    MaxAge {
+        field: String,
+        keep_ms: u64,
+    },
+    Terminal {
+        state: String,
+        done: Vec<Cell>,
+        since: String,
+        keep_ms: u64,
+    },
+    MaxRows {
+        group: Vec<String>,
+        keep: u64,
+        order: Vec<(String, Order)>,
+    },
+    Bytes {
+        group: Vec<String>,
+        max: u64,
+    },
+}
+
+/// Scope of an operator retention setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingScope {
+    Workspace,
+}
+
+/// Retention interval source; settings are resolved per workspace by the caller.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepFrom {
+    Fixed {
+        millis: u64,
+    },
+    Setting {
+        key: String,
+        per: SettingScope,
+        default_ms: u64,
+    },
+}
+
+/// Stable domain hook name used for protection and pre-action preparation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpName(pub String);
+
+/// Selected-row action. Purge retains identity/routing while clearing the listed fields.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    Delete,
+    Purge { fields: Vec<String> },
+    Custom(OpName),
+}
+
+/// Owned bounded retention policy declaration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionPolicy {
+    pub entity: String,
+    pub select: Select,
+    pub keep_from: KeepFrom,
+    pub before: Option<OpName>,
+    pub action: Action,
+    pub protect: Option<OpName>,
+    pub budget: Budget,
+}
 
 pub const MAX_SLICE_ROWS: u32 = 500;
 pub const SLICE_TARGET_MS: u32 = 20;

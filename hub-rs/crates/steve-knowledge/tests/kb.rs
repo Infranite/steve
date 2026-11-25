@@ -894,22 +894,12 @@ fn single_user_mail_reference_reads_do_not_need_membership_scopes() {
         .store()
         .read(|c| {
             let bare = Viewer::bare(WS, ME);
-            let scoped = Viewer {
-                scopes: vec!["team:team1".into(), "space:s1".into()],
-                ..bare.clone()
-            };
             for id in ["team_mail", "space_mail"] {
                 let r = ObjRef::new("mail_thread", id);
                 assert!(steve_store::References(c).exists(&bare, &r)?);
-                assert!(steve_store::References(c).exists(&scoped, &r)?);
                 assert!(
                     steve_store::References(c)
                         .in_workspace(&bare, &r)?
-                        .is_some()
-                );
-                assert!(
-                    steve_store::References(c)
-                        .in_workspace(&scoped, &r)?
                         .is_some()
                 );
                 // A viewer-free persistent index must not copy source-private subjects.

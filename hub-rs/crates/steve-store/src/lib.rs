@@ -303,7 +303,7 @@ impl Store {
     /// Opens an existing database at exactly this build's schema head for offline administration.
     /// The caller must hold the Hub instance lock. Repository writes remain available, but opening
     /// never migrates, optimizes, initializes workspaces or starts diagnostic recording. One lazy
-    /// read connection is enough for a CLI. Transitional adapter, replaced by the storage engine.
+    /// read connection is enough for a CLI.
     pub fn open_admin(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_observed(path.as_ref(), NoPublisher, None, true)
     }
@@ -897,7 +897,7 @@ impl Drop for WriteGuard<'_> {
     }
 }
 
-/// Legacy storage grants; scheduling belongs to the Hub assembly root.
+/// Bounded retention slices on the store's writer connection; scheduling belongs to the Hub.
 pub mod retention {
     use super::{Result, Store};
     pub use steve_store_sqlite::retention::{

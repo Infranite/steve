@@ -1,7 +1,6 @@
 //! Teams: virtual teams you
 //! build and edit, org-chart teams that follow the directory sync (only `purpose`, `space_id` and tags are
-//! local), headcounts over the sub-tree, and `team:<id>` as a visibility scope (the scope itself is
-//! [`steve_store::base::Viewer::load`]).
+//! local), headcounts over the sub-tree, and `team:<id>` as a visibility code.
 //!
 //! Other modules plug in through [`super::Ports`]: [`SpacePort`] (the channels module checks `space_id`)
 //! and [`TeamSync`] (the directory sync of slice P6 queues `POST /teams/sync` and names its connection).
