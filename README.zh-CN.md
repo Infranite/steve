@@ -2,278 +2,197 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/banner-zh-dark.svg">
-  <img src="docs/assets/art/banner-zh.svg" alt="Steve：一句话交代，交付回来" width="100%">
+  <img src="docs/assets/art/banner-zh.svg" alt="Steve — 自托管的多智能体工作台" width="100%">
 </picture>
 
-[![Release](https://img.shields.io/github/v/release/Infranite/steve?sort=semver&style=for-the-badge&label=release&color=7aa7c7)](https://github.com/Infranite/steve/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-8c7ae6?style=for-the-badge)](LICENSE) [![Rust](https://img.shields.io/badge/hub-Rust-5fb39a?style=for-the-badge&logo=rust&logoColor=white)](hub-rs) [![React](https://img.shields.io/badge/web-React-7aa7c7?style=for-the-badge&logo=react&logoColor=white)](web) [![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux-self--hosted-8c7ae6?style=for-the-badge)](#环境要求)
+<p><strong>自托管的智能体协作工作台：跨 worktree、工具与多台机器协调编码智能体，所有需要人拍板的决定统一收口在一处。</strong></p>
+
+[![Release](https://img.shields.io/github/v/release/Infranite/steve?sort=semver&style=for-the-badge&label=release&color=7aa7c7)](https://github.com/Infranite/steve/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-8c7ae6?style=for-the-badge)](LICENSE) [![Rust](https://img.shields.io/badge/hub-Rust-5fb39a?style=for-the-badge&logo=rust&logoColor=white)](hub-rs) [![React](https://img.shields.io/badge/web-React-7aa7c7?style=for-the-badge&logo=react&logoColor=white)](web) [![Platforms](https://img.shields.io/badge/macOS%20arm64%20%7C%20Linux%20x86__64-self--hosted-8c7ae6?style=for-the-badge)](#环境要求)
 
 [English](README.md) · 简体中文
 
-[设计原则](#设计原则) · [功能](#功能) · [扩展](#扩展-steve) · [工作原理](#工作原理) · [快速开始](#快速开始) · [部署](docs/deployment.md) · [参与贡献](CONTRIBUTING.md)
-
-<br>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/chat-dark.webp">
-  <img src="docs/assets/screenshots/chat.webp" alt="Steve 主线对话：一条调研回答附带建议事项，右侧是等你处理的事项" width="100%">
-</picture>
+[为什么用 Steve](#为什么用-steve) · [架构与工作原理](#架构与工作原理) · [核心能力](#核心能力) · [支持的执行器](#支持的执行器harness) · [快速开始](#快速开始) · [概念速览](#概念速览) · [安全与隐私](#安全与隐私模型) · [部署文档](docs/deployment.md)
 
 </div>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/zh/chat-dark.webp">
+  <img src="docs/assets/screenshots/zh/chat.webp" alt="Steve 主线对话：只读代码调研附带位置引用、事项状态卡片与右侧待处理栏" width="100%">
+</picture>
+
+- **一个协调者统管 18 种 ACP 编码 CLI** — Claude Code、Codex、Antigravity CLI（`agy`）、Gemini CLI、GitHub Copilot CLI、OpenCode、Cursor、Pi 等均在独立 `steve/<id>` git worktree 中运行，并结构化展示子代理与后台任务。
+- **单一决定入口，自主权限有硬边界** — 交付验收、绑定精确提交的 PR 合并、智能体提问、保险箱授权与外发草稿全部汇入**待我决定**；原生免批（YOLO）只启用执行器自身模式，绝不绕过 Steve 工具、密钥、个人外发或合并确认。
+- **抗重启、可跨机扩展** — 单个 Rust Hub 结合 SQLite WAL、内存读侧投影 SSE 流、内置加密 `restic` v2 备份与独立进程本机 Node（并支持实验性的多机远程 `steve-node` 配对）。
+- **本地优先的安全模型，不动你的执行器配置** — 每个工作空间独立 XChaCha20-Poly1305 保险箱（主密钥存系统密钥库、Passkey 验证查看）、Seatbelt/Bubblewrap 系统沙箱、按主体隔离的执行器状态目录与分受众外发披露检查。
+
+```sh
+brew install infranite/tap/steve
+steve setup
+```
 
 ---
 
-## 为什么是 Steve
+## 为什么用 Steve
 
-编码智能体干活很快，难的是同时开好几个之后怎么管：十几个终端标签来回切，上下文在会话之间丢掉，权限确认没人回，最后到底交付了什么、检查过没过，也没有记录。
+单个编码智能体干活很快，同时跑三四个之后真正耗精力的是管理开销：十几个终端标签来回切换、上下文在会话间丢失、权限弹窗无人回应，最后到底交付了什么、检查通没通过，也无据可查。
 
-Steve 架在 Claude Code、Codex、Gemini CLI、GitHub Copilot CLI、OpenCode、Cursor、Antigravity CLI 等 18 种主流 ACP 编码 CLI 之上，负责把这些记下来、管起来。它是跑在你自己机器上的一个 Rust 程序，数据存在 SQLite 里，密钥放在加密保险箱里。你只需要在一个对话里交代，每条消息由它判断怎么处理：直接回答、只读查代码和文档、新建一个要跟踪的事项，或者转给正在进行的事项。事项交给 Bot 去做，每个事项都在自己的 git worktree 里跑。
+Steve 在你已有的编码 CLI 之上建立一层强类型的控制面。你只需在一个主线对话里交代，由 Steve 决定直接回答、做三层只读约束的代码调研（附 `path:line` 引用），还是建一个可追踪事项派给独立 worktree 里的工作 Bot。
 
-| | 😵 终端里直接跑智能体 | ✨ 用 Steve |
+| | 在终端标签页里直接跑智能体 | 使用 Steve |
 |---|---|---|
-| **进度** | 靠标签页、滚动记录和脑子记 | 每个事项有目标、计划、阶段和交付记录 |
-| **隔离** | 几个智能体挤在同一个目录 | 每个事项一个 git worktree、一个 `steve/<id>` 分支 |
-| **权限确认** | 刚好看到哪个标签页就答哪个 | 统一进“待处理”，或交给执行器的原生审批模式 |
-| **算不算完成** | 智能体说完成就算 | 检查通过、计划走完、拿出目标要求的证据 |
-| **合并** | 手动一个个合 | 每个事项从最新的默认分支开一个 PR，由托管方的 CI 和自动合并合入 |
-| **密钥** | 直接贴进提示词 | 放在保险箱里，注入到命令中 |
+| **进度与交付** | 靠标签页、滚动日志和人脑记忆 | 事项具备版本化目标、多轮计划、交付标签与检查证据 |
+| **执行隔离** | 多个智能体挤在同一个工作目录 | 每事项独立 git worktree（`steve/<id>`）、23 种构建工具链缓存隔离与系统沙箱 |
+| **权限审批** | 看到哪个标签页才处理哪个 | 统一收口到**待我决定**，或交给执行器自己的原生审批模式 |
+| **子代理与后台任务** | 淹没在原始终端输出里 | 结构化 `subtask` 追踪，嵌套展示子工具、用量并支持按子代理取消 |
+| **代码合并** | 人工逐个分支处理 | 每事项一个 PR；验收、CI 通过且人工确认精确提交后由 `gh pr merge --match-head-commit` 合并 |
+| **密钥使用** | 复制粘贴进提示词或环境变量 | 存入系统密钥库加密保险箱，仅在执行节点注入命令，智能体不可读取保险箱 |
 
-<div align="center">
+---
+
+## 架构与工作原理
+
+Steve 将**状态与决策（Hub）**、**执行运行时（Node）**和**交互界面（客户端）**彻底解耦，边界全部以强类型 Rust 契约约束。
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/flow-zh-dark.svg">
-  <img src="docs/assets/art/flow-zh.svg" alt="你说一句话，Steve 判断，建成事项，Bot 开工，带检查记录交付，验收，经合并通道合并，发布" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/arch-zh-dark.svg">
+  <img src="docs/assets/art/arch-zh.svg" alt="Steve 架构图：Web/Apple 客户端与内置扩展经 REST+SSE 连接单体 Rust Steve Hub，Hub 通过主动外连 WebSocket Protocol 14 协调本机与远程 steve-node 执行节点" width="100%">
 </picture>
 
-</div>
+- **Hub（`steve-hub`）**：唯一事实来源与唯一决策点——负责路由、容量队列、模型选择、权限裁定、保险箱、渠道、读侧投影、加密备份与指标统计。生产存储使用基于 `sea-query` 契约的 SQLite WAL；内存投影任务以零数据库查询响应 `GET /api/snapshot`，并通过 SSE 每 150 ms 合并推送增量 `Patch` 帧。
+- **Node（`steve-node`）**：按 Hub 指令对每个会话一次只执行一个回合，维护本地持久执行日志，将 ACP/MCP/CLI 协议终结在驱动层内，并实施系统沙箱。默认 `STEVE_NODE_MODE=service` 在独立进程运行本机 Node，Hub 重启或升级不会打断正在执行的回合；远程 Node 始终主动向外连接 Hub（`PROTOCOL = 14`）。
+- **客户端（`web/`、`apple/`）**：支持多 Hub 切换的 React Web 端，以及封装同一界面的原生 macOS 14+（含菜单栏实时状态）与 iOS 17+ 客户端，凭据存系统钥匙串，所有线协议类型由 `steve-types` 自动生成。
 
-验收、审批和智能体的提问都汇到“待处理”里。工作区所有者打开免批后，支持的执行器用自己的原生模式处理本地工具授权。提问和 Steve 的决定卡仍由你处理。飞书、邮件、GitHub、联系人和知识库都接在同一个工作区里，智能体干活时拿得到真实的上下文。每条知识都标了披露级别，不该说的场合不会被说出去。
+完整协议、存储契约、读侧投影与 32 个 crate 的分层结构见 **[docs/architecture.md](docs/architecture.md)**（英文）。
 
-## 设计原则
+---
 
-<table>
-<tr>
-<td width="33%" valign="top">
+## 核心能力
 
-#### ⚖️ 模型提议，代码拍板
+### 协调者与对话路由
 
-路由护栏防止一个问题被悄悄做成事项。Steve 负责协调，不替智能体做判断：计划步骤没走完或缺少证据的交付，会照实标给你看，而不是被拒绝；harness 自己的权限设置也照常生效。
+主线中的 **Steve** 定位为**协调者**，不会被静默派去当执行 Bot。每条消息都走按空间串行、带租约防重与幂等键的持久回复管线：
 
-</td>
-<td width="33%" valign="top">
+- **确定性规则优先**：`/汇报`、`@Bot` 点名、引用某事项、确认建议事项以及日常寒暄直接处理，不消耗路由模型调用。
+- **九类路由与代码护栏**：`answer`、`research`、`item`、`suggest`、`ask`、`supplement`、`status`、`config`、`reroute`。代码级护栏可以推翻模型提议，例如防止普通提问被误建成事项、禁止把新消息静默塞进已关闭的事项。
+- **三层只读就地调研**：非主人场景严格执行三道只读约束——适配器 `plan` 模式、拦截敏感目录（`.ssh`、`.steve`、`.aws`、`.config/gh`、`Library/Keychains`）的 ACP 类型/路径守卫、以及系统只读沙箱。仅在实例所有者本人的主线私聊中，当要求查看或修复 Hub 所在机器的问题时，以该系统用户权限执行，同时 Steve 自身的密钥、数据库和程序仍受沙箱隔离保护。
+- **对话式配置与 A2UI**：直接用自然语言调整 Bot、项目、模型、标签、流程和联系人，通过 `steve-modules` 事务变更集落盘并支持 24 小时撤销；回复内可渲染声明式 A2UI 表单、选项、标签页与图表，不执行智能体代码且跨标签页防重复提交。
 
-#### 🔁 同一件事不做两遍
+### 事项与交付语义
 
-智能体工具是“发出即结束本回合”，内存里没有挂着等的东西。外部操作带稳定 id，流程每一步先落库再往下走。崩溃之后，结果不确定的操作标记为待对账，不会盲目重跑。
-
-</td>
-<td width="33%" valign="top">
-
-#### 🛑 自主有硬边界
-
-免批不会改变 Steve 工具、凭据、发布、资金或保险箱授权。以你本人身份发送仍需你确认。
-
-</td>
-</tr>
-<tr>
-<td width="33%" valign="top">
-
-#### 🗝️ 用密钥，但不读保险箱
-
-Steve 把密钥放进命令的环境变量、标准输入或临时文件来执行，命令的输出原样交给智能体。Steve 不对你输入的内容或模型说的话做任何打码或过滤。
-
-</td>
-<td width="33%" valign="top">
-
-#### 🙊 知识分披露级别
-
-公开、只能转述、只用于推理、不可使用。只有你和 Steve 的私聊、Bot 对工作区成员的回复不经模型审查。以你的名义发给其他任何人的内容，都要过规则检查和另一个模型的披露检查，任何一项不通过就拦下。
-
-</td>
-<td width="33%" valign="top">
-
-#### ↩️ 改动都能撤销
-
-对话里改的配置、对自动化的纠正、联系人合并，都存成变更集，随时可以撤回。
-
-</td>
-</tr>
-</table>
-
-## 功能
-
-### 💬 对话与路由
-
-每条消息会被归到九类之一：回答、调研、事项、建议、追问、补充、进度、配置、改判。代码护栏可以推翻模型的判断，CI 里会跑一套用真实消息做的路由评测。拿不准一条消息是新工作还是属于已有事项时，Steve 会先问你。
-
-- **就地调研**：在对话里直接回答关于代码和文档的问题，并标出 `path:line`。只读有三道保证：工具白名单（Read、Grep、Glob）、碰到第一个非只读工具就终止的 Hub 守卫，以及系统只读沙箱（macOS 用 `sandbox-exec`，Linux 用 bubblewrap）。
-- 回答末尾可以附一句“要我改吗？→ 做成事项：…”，点一下或回一句“改吧”就行。
-- 每个事项在对话里只有一张卡片，状态（进行中、等你、已交付、已发布）原地更新，只有需要你时才挪到最下面。
-- 配置可以直接说：“前端 Bot 改用 Opus。”Steve 会起草字段级的改动，范围包括 Bot、项目、模型、标签、流程和联系人。一键应用，24 小时内可以撤销。
-- 回复里可以渲染 A2UI 组件：表单、选项、标签页和图表。智能体写的东西不会被当成代码执行，表单只会提交一次，换标签页、刷新页面都一样。
-
-### 📋 事项
-
-事项依次经过“就绪 → 进行 → 收尾 → 关闭”。收尾是一道闸：先冻结结果，等进行中的回合和外部操作结束，期间没有任何变化才真正关单。再来一轮就开一个新周期，之前的周期都保留。目标小改会直接告诉正在跑的会话；大改则带着交接摘要开新会话，被替换的计划仍然看得到。
-
-验收默认自动，也可以选手动或免验收。自动验收照收智能体的交付，没通过的检查和没做完的步骤写在卡片上，你随时可以打回。什么算完成，从目标里读：目标写了“部署”，就要等运行中的 Hub 确实包含这个提交才关单。智能体没交付就停下时，Steve 先去远端对一下完成规则（已合并，或已合并并打 tag），再提醒智能体它的工具仍然可用，让它交付或提问；harness 出错中断的回合也会先续一次，之后才来问你。
-
-**预览链接。** Bot 的 `steve_deliver_file`（事项、对话或定时运行里都能用）和你自己的 `steve publish <文件或文件夹>` 会在 Hub 上保存不可变的副本，给出一个任何设备都能通过 Hub 公网地址打开的链接：HTML 页面、带图片的 Markdown、PDF、图片、音频、视频和代码。HTML 默认是静态预览；交互原型可以切换为在隔离沙箱里运行脚本，碰不到 Steve，也连不了网。你发布过的在 **我的发布** 里。详见[文件交付与分享](docs/deployment.md#file-delivery-and-independent-sharing)。
-
-- **依赖**：添加时检查是否成环。被阻塞的事项在依赖完成后自动开始，并带上依赖做了什么的摘要。会话的任意位置都能**派生**出新会话或子事项，关系图里能看到运行、交接、依赖和派生。
-- **产出**有版本，各用各的查看器：渲染后的文档、高亮代码、CSV 表格、PDF、媒体、文件夹和分支 diff。可以对一块区域、一段文字或整个文件做批注，攒好后一次发出。
-- **每个会话一个消息队列**：智能体干活时，不带附件的消息会随它下一次调用 Steve 工具的结果送到，不打断当前回合。排队的消息可以编辑、撤回，可以“立即发送”打断当前回合，也可以发到新会话。重启前刚送达的消息回来时会标上“先核对，别重做”。
-- **Worktree**：每个事项在自己的 worktree 里，分支是 `steve/<id>`。事项关闭或闲置时归还构建缓存，剩余空间低于下限就不再新建 worktree，删除过程不怕崩溃。
-- 列表和看板视图，支持筛选、批量操作、标签、暂缓、星标、截止日期和自动归档。分类由路由或关键词判断，拿不准的进复核列表。
-
-<table>
-<tr>
-<td width="50%"><img src="docs/assets/screenshots/item.webp" alt="事项：目标、阶段、计划，以及带检查记录的交付"><br><sub><b>事项</b>：目标、阶段、计划，以及带检查记录的交付</sub></td>
-<td width="50%"><img src="docs/assets/screenshots/graph.webp" alt="关系图：运行、交接、依赖和派生"><br><sub><b>关系图</b>：运行、交接、依赖和派生</sub></td>
-</tr>
-</table>
-
-### 🤖 Bot
-
-一个 Bot 由 harness（内置 18 种 ACP 编码 CLI，或 `harness.json` 中声明的任意自定义 ACP 适配器）、模型和思考强度、职责、人设、规范、权限模式、验收方式和默认项目组成。用一句话描述，Steve 就能起草出来。`@Bot` 把活交给它。改派事项时旧会话会停掉，最后的进展交给新 Bot。一个 Bot 可以在多个工作区里担任不同职责，但只看得到当前工作区的数据。
-
-侧栏的「能力」是这个工作空间的能力库：MCP 服务器（本地命令，或者 HTTP / SSE 地址，带环境变量或请求头）、技能（`SKILL.md` 做事说明，写到 harness 读技能的地方）和通过 A2A 协作的远程 Agent（Bot 拿到的是一个 Steve 工具），在这里定义一次，再到每个 Bot 的「能力」里选用。哪种 harness 都一样拿到它们：MCP 服务器经 ACP 和 Steve 自己的工具并列，技能写到 harness 适配器声明的位置。机密的值存在保险箱里，只在 harness 打开时交给会话所在的 Node。Steve 自己也是一个 MCP 服务器：Claude Desktop、Cursor 或别的 Agent 可以用访问令牌连上来，查事项、交代工作、查知识库；别的 Agent 也可以照 Steve 的 Agent Card 通过 A2A 把任务交给它。见 [能力](docs/deployment.md#capabilities-mcp-servers-skills-and-remote-agents)。
-
-Steve 不动你的 harness 设置。权限提示只答这一次，从不写“始终允许”，也从不改你的 harness 配置。每个会话都给出在 harness 里接着跑（及派生）的命令，本机已有的 Claude Code 和 Codex 历史也能导进来。
-
-- **记忆**：Steve 从完成的事项、每天的对话、邮件和智能体那里提出候选记忆，附上出处原话和要替换的旧记忆。你确认之前都不生效。
-- **按用途选模型**：路由、对话、调研、标题、提取、起草、流程和邮件各配各的模型和思考强度。网关的短调用只使用配置中的首选模型。价格每天从 Models.dev 同步，历史估算按当天的价格算。
-
-<p align="center"><img src="docs/assets/screenshots/session.webp" alt="智能体会话：改动的文件、工具、花费和上下文，以及在 harness 里恢复的命令" width="85%"><br><sub><b>智能体会话</b>：改动的文件、工具、花费和上下文，以及在 harness 里恢复的命令</sub></p>
-
-### 🟢 YOLO：执行器原生免批
-
-工作区所有者可以在 **更多 → 原生免批（YOLO）** 开启，默认关闭、不设时限。本轮继续使用已经应用的模式，空闲时或下次打开会话时切换；不支持的执行器不会模拟免批。事项和会话页同时显示开关状态和 Node 已确认的模式。详见[执行器映射和配置](docs/deployment.md#native-harness-approval)。
-
-<p align="center"><img src="docs/assets/screenshots/inbox.webp" alt="待处理：验收、审批和提问都在一处" width="85%"><br><sub><b>待处理</b>：验收、审批和提问都在一处</sub></p>
-
-### 🚚 合并与发布
-
-完成规则是“已合并”（或“已合并并打 tag”）的 git 项目，每个改动都像贡献者那样合入。事项分支从远端最新的默认分支开始（建 worktree 时拉取）。智能体在上面提交，交付前推送分支并开 PR；修 bug 先建 issue 再关联。它从不推送默认分支，也不自己合并。你验收并确认合并卡片之后，Steve 在所有检查通过后按验收时的精确提交合并 PR 并跟进：检查失败、冲突或托管方要求先追上默认分支，都交回智能体在同一分支上修；没合并就被关掉的 PR 会出卡片给你。远端默认分支包含这个改动（“已合并并打 tag”还要有推送的 tag 包含它）时事项才算完成。合并、CI 和分支保护都留在托管方，你的机器上不排队。
-
-事项列表、详情和动态显示 Hub 的收尾快照：PR 提交、该提交的检查结果、GitHub 上次成功同步的时间和下一步责任人。同步失败时把旧数据标为上次结果；普通轮询原地刷新卡片，检查失败、需要决定或确认合并时才去重同步到来源对话。
-
-在 GitHub 上，你验收之后 Steve 先问你要不要开 PR，合并前再问一次。私有仓库可以设成验收即开草稿 PR：只推事项自己的分支，提交先过泄露检查。外部操作走持久队列，重试前先和 GitHub 对账。Hub 所在机器上的项目（包括 Steve 自己）可以用脚本发布：构建、排空进行中的工作、重启，起来后报告结果。旧版本读不了当前数据库时，拒绝回滚。
-
-### 🔌 连接
-
-所有发出去的消息走同一条路：披露检查、授权、发送、记录用了哪些知识及其级别、写审计。你自己的账号不经批准不会发消息，代你发的消息会注明。你和 Steve 的私聊不做审查；Bot 回复工作区成员时，用到的知识对他们都可公开就不过模型检查；以你的名义发给第三方的内容，规则检查和另一个模型的检查一样不少，不通过就拦下。你自己的账号上，除你以外的人用触发词时，先由快模型筛一遍再回答。详见[外发检查](docs/deployment.md#outbound-checks)。
-
-- **飞书 / Lark**：扫一次码就能建好机器人。Steve 可以以机器人身份工作，也可以通过 OAuth 以你的身份工作，消息走长连接接收。每个会话是一个空间，有关注级别（实时 / 不提醒 / 屏蔽）和响应规则（@、私聊、关键词、意图……），规则可以转成流程。人设决定回复透露多少：名字、职责、是不是 AI、是不是 Steve、主人是谁。一条消息做成事项以后，它所在话题里发起人和你的回复会直接送进这个事项。
-- **邮件**：IMAP/SMTP，内置常见服务预设。IDLE 推送同步，有“需要处理”“等对方”和草稿几个视图。HTML 在沙箱里渲染，远程图片默认拦截。发信一律要过和内容绑定的审批卡片，收件人由服务端计算，智能体加不进去。接入第一个邮箱时会装上分诊流程，通知类邮件在调用任何模型之前就被分走。
-- **GitHub**：用 GitHub App（manifest 流程）或细粒度 token 接入。Webhook 做 HMAC 校验和去重，轮询兜底。PR 自动关联事项，issue 可以转成事项，“PR 检查失败”流程会把失败回灌给事项。关联 PR 下仓库 owner、成员和协作者的评论与 review（包括行内评论）也会送进事项。智能体能查状态和 CI 日志、发评论（需要有时限的授权）、开 PR。
-- **断开连接**前先给演练预览，备份数据库，再在一个事务里清理干净。
-
-### 📚 知识与联系人
-
-知识库的来源有笔记、文件、事项、对话、记忆，以及 wiki、Obsidian 库这类只读文件夹。按标题切块，中英文都能搜。`[K1]` 这样的引用能高亮到具体段落，没有真正给到模型的引用会被删掉。每条知识的披露级别决定它能被引用、转述、只用于推理，还是完全不用。密钥和“不可使用”的条目不进索引。
-
-Steve 管理联系人、组织和团队。身份依次按账号、邮箱、姓名匹配。只是姓名相同时只会**提议**合并，合并后也能精确拆回。团队可以是虚拟的，也可以从飞书组织架构同步，还能当作可见范围用。“名下”和“负责人”记录谁拥有哪个 Bot、邮箱或设备。
-
-### 🔐 保险箱
-
-每个工作区一把主密钥，放在系统密钥库里（macOS 钥匙串、Linux Secret Service，或受保护的目录）。每个条目有自己的数据密钥，字段用 XChaCha20-Poly1305 加密。模板覆盖登录、银行卡、API 凭据、SSH 密钥等，哪些字段是密文由模板决定，不由客户端决定。查看密文要用通行密钥（Touch ID / Face ID），挑战一次有效，且绑定到具体字段。
-
-Bot 通过 `steve_secret_use` 使用密钥，但读不到它。每次使用都要审批或有时限的授权，会留记录，拿回来的是命令的退出码和输出。银行卡和高敏感条目永远不能授权。Steve 不扫描、不打码、不拦截内容：你输入的内容原样交给模型；模型复述了密钥，就该换一个 harness 或模型。
-
-### ⚡ 自动化
-
-流程是由 11 种节点组成的图：触发、过滤、决策表、子流程、等待、审批、动作、脚本、命令、HTTP、Bot。每一步先落库再往下走，重启后从断点接着跑。
-
-- 有副作用的操作，上游必须有审批节点或已有授权。脚本跑在 QuickJS 沙箱里，没有网络也碰不到文件。HTTP 防 SSRF，重定向和 DNS 都算在内，密钥只能放进请求头和请求体。命令参数会做 shell 转义。每次运行都有花费预算。
-- 可以一句话起草流程，在画布上让 Steve 改，或者在对话里改。每次保存都留版本，演练不产生任何副作用。画布会点亮一次运行实际走过的路径。
-- 进来的事件会去重、归组成信号。点一下（提醒我 / 忽略 / 建事项），纠正就生效：流程里加一个例外过滤，规则也记下来，整个改动可以撤销。
-- 定时用中文写就行（“每个工作日 9 点”），处理夏令时，可以设补跑策略和防重叠。
-
-<p align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/flow-dark.webp">
-  <img src="docs/assets/screenshots/flow.webp" alt="画布上的邮件分诊流程：通知类在调用模型之前就被过滤掉，剩下的由 Bot 节点分流" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/zh/item-dark.webp">
+  <img src="docs/assets/screenshots/zh/item.webp" alt="Steve 事项详情页：版本化目标、多轮计划、身份头像、原生免批状态与精确提交合并确认" width="100%">
 </picture>
-<br><sub>画布上的<b>邮件分诊</b>流程：通知类在调用模型之前就被过滤掉，剩下的由 Bot 节点分流</sub>
-</p>
 
-### 📊 统计及其他
+- **五道收尾闸门**：事项经历 `ready → active → closing → closed`（及 `paused`）。进入 `closing` 会冻结 git worktree 的内容指纹，并核验五项条件：无运行中回合或排队消息、无未完成的必需操作、冻结结果未漂移或已合入默认分支、验收已落定（默认自动验收，可选手动或免验收）、收尾期间无新决策卡。重新打开会开启新周期，保留全部历史轮次。
+- **类型与交付标签 + 方案门禁**：每个事项带单个**类型**标签（修复、功能、文档、重构、运维、杂项）与多选**交付**标签（方案、代码、报告、内容、数据、操作）。当目标只要求出方案或延后实现时，交付后会停在人工**方案决策门禁**（继续实现 / 仅保留方案 / 打回修改），免批模式无法绕过。
+- **非 Git 产出、预览链接与精确 SHA 合并**：非代码产出持久保存在 `<STEVE_HOME>/workspaces/<item>/outputs`。Bot（`steve_deliver_file`）和用户（`steve publish <文件或文件夹>`）均可生成不可变的 Hub 预览链接（HTML 默认静态预览，交互原型可按需切到无网络隔离沙箱）及可撤销的分享链接。GitHub PR 在验收、CI 全部通过且人工批准与仓库/PR 号/完整提交 SHA/周期绑定的合并卡后，由 Steve 执行 `gh pr merge --match-head-commit`，绝不开启托管方自动合并。
+- **依赖、派生与目标修改**：前置依赖写入时查环并受持久 `WaitContract` 超时策略约束；会话任意节点均可派生新会话或子事项；修改目标直接将新版本 `vN` 发给运行中的会话，不背着智能体强行换会话。
 
-统计页记录 token（含缓存和推理）、缓存命中率、估算花费和 harness 自报花费的对比、缓存省下的钱、事项开始与完成数、前置 / 周期 / 等待时间、一次通过率和返工。可以按项目、Bot、模型和来源筛选。
+### 单一决定入口与执行器原生免批（YOLO）
 
-登录支持 Hub 签发的用户名 + 访问 token、在网页或 Mac 端生成的扫码配对二维码，或选配 OIDC（PKCE）。原生 **macOS** 与 **iOS** 客户端（`apple/`）打开默认连接本机 Hub，支持接入并切换多个 Hub；手机扫码配对时，Hub 配置了公网地址默认走公网（不可达时自动回退局域网），未配置公网则直接走局域网；macOS 端提供菜单栏状态图标，实时显示 Hub 连接状态、运行中会话、待处理事项与在线设备并支持快捷切换。每个客户端的类型和连接路径都有记录。工作区是数据边界，各有自己的事项前缀。界面靠一条可续传的 SSE 流保持实时，手机页面回到前台就立刻重连。另外还有：带备份和回滚的原地升级、macOS 源码部署的每日备份、重建后仍能读取保险箱密钥的签名版 macOS 程序、<kbd>⌘</kbd> <kbd>K</kbd> 命令面板、浅色 / 深色主题，以及中英文界面。
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/zh/inbox-dark.webp">
+  <img src="docs/assets/screenshots/zh/inbox.webp" alt="Steve 待我决定页：集中呈现交付验收、精确提交 PR 合并审批、智能体提问与外发草稿" width="100%">
+</picture>
 
-<sub>截图来自一个演示工作区：真实的 Hub 和 Web 界面，智能体按脚本运行。</sub>
+- **所有人工决策汇于一处**：**待我决定**（`#/inbox`）按六类决策（验收、审批、问题、提议、异常、确认）与三档层级（需决定、草稿、已收起）收纳交付验收、绑定提交的 PR 合并、ACP 工具权限、智能体提问、无可用执行器协调卡（`no_executor`）、交接不可用提示（`handoff_unavailable`）、保险箱密钥授权、邮件审批和项目 `AGENTS.md` 提议。已处理记录保留 7 天，可逆操作支持 24 小时撤销。
+- **执行器原生免批（YOLO）**：开启**原生免批（YOLO）**后，仅对声明了原生审批模式的执行器（`claude-code`、`codex`、`goose`、`mistral-vibe`、`antigravity`）请求 `PermissionMode::Auto`，在下一空闲边界或新会话生效。不支持的执行器保持 `ask`（绝不模拟免批），Pi 等仅支持完全访问的执行器不纳入此开关；智能体提问、Steve 工具、保险箱密钥、个人身份外发、方案门禁与 PR 合并始终需要人工确认。
 
-## 扩展 Steve
+### 会话、子代理追踪与确定性交接
 
-Steve 还没有运行时插件商店，“插件”页面目前只是占位。现在能用的是 Hub 里这些带类型的扩展点：
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/zh/session-dark.webp">
+  <img src="docs/assets/screenshots/zh/session.webp" alt="Steve 会话页：展示嵌套子代理、后台任务、独立取消按钮、上下文进度、花费统计与 CLI 恢复命令" width="100%">
+</picture>
 
-| 扩展点 | 可以加什么 |
-|---|---|
-| **Hub Extension API**（`steve-hub/src/extension.rs`） | 连接提供方、渠道适配器、邮件适配器、流程事件源、API 路由和后台任务。用 `Assembly::builtin().with(MyExt)` 构建自己的二进制。有冲突时 Hub 直接启动失败，并指出是哪个扩展。飞书、IMAP 邮件和 GitHub 都是这么接进来的。 |
-| **流程扩展点**（`FlowSetup`） | 自定义节点类型、动作、事项查找器和事件适配器。 |
-| **模块扩展点**（`steve-modules`） | 事项生命周期钩子、侧栏里声明式的**事项面板**（GitHub 的“PR 与检查”和邮件面板就是用它做的）、提示词上下文和外发检查。 |
-| **给智能体的 MCP 工具** | 一个只监听回环地址的 `steve` MCP 服务，token 只对一个事项有效。覆盖进度、提问、审批、交付、发布，以及知识、邮件、GitHub、联系人和密钥。 |
-| **Webhook** | `POST /hooks/:connection_id`，写入任何东西之前先校验签名。 |
-| **知识存储端口** | 默认 SQLite FTS。[OpenViking](ops/openviking) 是可选的向量后端（`STEVE_KB_STORE=openviking`）。每条命中都会按 Hub 自己的权限规则再核对一遍。 |
+- **子代理与后台任务**：各执行器上报的子代理、后台任务和原生工作流统一进入 `steve.v1` 会话记录的 `subtask` 结构化事件，不再靠硬编码工具名猜测。子工具调用嵌套在对应子代理下，活跃子任务显示在顶栏运行胶囊中；支持单子代理取消的适配器（Claude Code、Codex）直接提供**取消**按钮。
+- **确定性会话交接**：遇到额度耗尽、连续模型服务错误或主人主动发起交接时，Steve 保留**同一个 Bot**（身份、权限、记忆与团队不变），只切换到该 Bot 配置的备选执行面（`harness + model + effort`）；若额度预计在 `quotaWaitMinutes`（默认 10 分钟）内恢复则等待恢复。若所有备选执行面均不可用，Steve 弹出 `handoff_unavailable` 协调卡，绝不静默更换 Bot。远程 Node 离线超过 `STEVE_NODE_HANDOFF_MIN` 分钟（默认 30）且有消息等待时，自动转至其他可用节点继续。
+- **透明可控**：右侧信息栏展示上下文占用、估算花费与执行器自报花费、改动文件、引用的知识片段、消息队列（`Enter` 插话、`⌥Enter` 排队）及在原执行器中恢复会话的 CLI 命令。Steve 从不修改你的 harness 配置文件，也不写“始终允许”。
 
-## 实验中与计划中
+### 多机 Node 与设备管理
 
-- **会话在 Node 上运行**：会话默认由 Hub 自带的 Node 执行。打开诊断副本时设置 `STEVE_NO_RESUME=1`，禁用 Node 连接和模型执行。
-- **多设备**（实验中）：另一台机器上的 `steve-node` 可以和 Hub 配对，在那台机器上跑 harness。监听默认开启，可用 `STEVE_NODE_LISTEN=0` 关闭，诊断模式也会关闭监听。Node 总是主动向外连，配对用一次性码加指纹确认，每个 Node 都有执行日志用来对账。配对后的 Node 只有被工作区所有者加进某个 Bot 的执行节点后才会接工作。在“设备”页生成配对码，按页面上的命令在目标机器上完成配对（[docs/deployment.md](docs/deployment.md)）。
-- **信息流**：Steve 不只是用来工作的。生活、兴趣和工作中的定时汇报有独立阅读入口，不再把新报告全文塞进对话；历史对话保持原样。报告对工作空间成员共享，每人已读独立；已授权的个人事项完成通知只对本人可见。支持未读与来源筛选、阅读全文、勾选已读、按快照全部已读和持续加载，不限于最近 100 条。阅读不等于处理“待处理”中的决策，也不会调用模型或重新外发通知，详见[信息流](docs/deployment.md#feed)。
-- **个人通知**：在“设置 → 通知”配置事项完成通知，在“信息流”集中阅读，默认关闭。保存并启用只从此刻开始，不补发旧事件；即时发送须明确选择已校验可达的本人 Bot 私聊，免打扰按 IANA 时区的当地时间计算。摘要和记录模式目前只积累，不生成或定时发送摘要。本人已读不影响其他成员或外部平台已读，详见[接口与限制](docs/deployment.md#personal-work-completion-notifications)。
-- **还没做的**：RSS 抓取、个人报告订阅、定时摘要生成、其他个人通知事件、Gmail 和 Outlook API 邮件适配器、飞书文档 / 日历 / 审批，以及外部保险箱后端（1Password、Bitwarden）。
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/zh/node-dark.webp">
+  <img src="docs/assets/screenshots/zh/node.webp" alt="Steve Node 分标签详情页：概览、Harness、会话与资源、权限与访问、版本与升级、诊断" width="100%">
+</picture>
 
-## 工作原理
+- **六标签页任务化管理**：单台 Node 拆为**概览**、**Harness**、**会话与资源**、**权限与访问**、**版本与升级**、**诊断**六个标签页，顶部置顶需处理的告警与动作，实时呈现 CPU/内存/网络/磁盘/Token 指标与 24 小时趋势、节点级执行器探测结果，以及一键复制的脱敏诊断快照。
+- **并发队列与执行绑定**：每台 Node 默认支持 **32 个并发会话回合**（可在**设备**页 1–256 热调整，无需重启），超出部分持久化排队等待。工作空间所有者可显式将工作 Bot 或团队绑定到兼容的已配对 Node。
+- **组件升级与 macOS 开机自启 Node**：在**设备**页直接检查并升级托管的 npm ACP 适配器，以及经过验证的外部 CLI（`claude-code`、`codex`、`antigravity`、`pi`、`kimi-code`）。在 macOS 上执行 `steve node enable-boot` 即可注册为原普通用户运行的已签名 LaunchDaemon，无需桌面登录即可开机在线，并在**设备**页免 `sudo` 完成升级。
 
-```mermaid
-flowchart LR
-    subgraph Clients["客户端"]
-        W[Web 界面<br/>React]
-    end
-    subgraph Channels["渠道"]
-        F[飞书 / Lark]
-        M[邮件]
-        G[GitHub]
-    end
-    subgraph Hub["Steve Hub · Rust"]
-        C[对话路由<br/>事项 · 决策]
-        A[自动化<br/>知识 · 联系人]
-        S[(SQLite)]
-        V[(保险箱)]
-    end
-    subgraph Node["智能体运行时 · 本机，或已配对的 Node（实验中）"]
-        CC[Claude Code · Codex]
-        CX[Gemini · Copilot · +12 ACP CLI]
-        WT[[git worktrees]]
-    end
-    W <-->|REST + SSE| C
-    F & M & G <--> C
-    C --- A
-    C --- S
-    C --- V
-    C <-->|Steve 协议| Node
-    CC & CX --- WT
-```
+### 导航信息架构、身份头像与工作区连接
 
-- **Hub**：唯一的事实来源，也是唯一做决定的地方：跑不跑、用哪个模型、批不批权限、队列里下一个是谁。认证、保险箱、渠道和统计也在这里。
-- **运行时驱动**：智能体协议（ACP、MCP、stream-json）到驱动这一层为止。Steve 的其他部分只认会话、回合、事件、工具调用和审批，所以接一个新的 harness，按设计只需要再写一个驱动。
-- **模块**：渠道、邮件、GitHub、知识、流程和保险箱通过[上面的扩展点](#扩展-steve)注册，模块之间的事件走持久化的 outbox。
-- **客户端**：同一工作区的所有人、所有设备，实时看到的是同一份状态。
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/zh/menu-dark.webp">
+  <img src="docs/assets/screenshots/zh/menu.webp" alt="Steve 侧栏导航分组、左下角账号菜单、统一身份头像与分组事项列表" width="100%">
+</picture>
+
+- **头像即身份与分组菜单**：所有主体（`人`、`Bot`、`系统`、`组织`、`团队`）通过统一 `ActorAvatar` 呈现，执行器与模型厂商使用独立徽标。桌面侧栏分为五组——主导航、日程（含下场会议时间与到期个人待办计数）、消息与人、资料、Bot 与自动化；底部固定**统计**入口、账号菜单（我、设备、账号、设置、退出登录）与 `<kbd>⌘K</kbd>` 命令面板。
+- **多源连接**：内置**飞书 / Lark**（扫码建机器人 + OAuth 本人身份、空间规则、人设与话题回流）、**邮件**（IMAP/SMTP + IDLE 推送、沙箱 HTML、服务端计算收件人、绑定内容的审批与外发披露检查）、**GitHub**（App 或细粒度 PAT、HMAC Webhook、PR/Issue 关联、协作者评论与 CI 失败回灌），以及只读**日历**（`steve-calendar`：ICS 订阅/上传、`calendar.v1` 连接器插件、跨日历会议去重及 4 个只读 MCP 工具）。
+- **重新定义的知识库与持久自动化**：个人知识库只沉淀联系人、组织、项目、主人偏好/规则、承诺与主人提供的资料（历史事项与对话分离到 `scope=records` 检索）；代码库工程结论沉淀为项目页的 `AGENTS.md` 提议，经确认后供后续 PR 合入而不直接改仓库。`steve-digest` 面向已存消息为可选 Digest Bot 提供确定性切窗与提取；`steve-flow` 提供 11 种节点的持久化流程图（QuickJS 沙箱脚本、防 SSRF HTTP、转义命令、Bot 节点）与自然语言定时；**信息流**承接定时汇报与按时区静默的个人完成通知；**统计**维护跨会话/事项的持久用量账本（每日同步 Models.dev 价格）与交付效率指标。
+
+---
+
+## 支持的执行器（Harness）
+
+Steve 在 [`hub-rs/crates/steve-harness-spec/src/builtins.toml`](hub-rs/crates/steve-harness-spec/src/builtins.toml) 中内置了 **18 种 ACP 编码执行器**，并支持通过 `<STEVE_HOME>/harness.json`（`STEVE_HARNESS_MANIFEST`）声明自定义 ACP 适配器。
+
+| 执行器 | ID | 安装方式 | 原生免批（YOLO） | 运行时适配层（`steve-acp`） |
+|---|---|---|---|---|
+| **Claude Code** | `claude-code` | npm 托管（`@agentclientprotocol/claude-agent-acp`） | 支持（`auto`） | 已验证 — RFD 子代理（取消 + 子工具嵌套）、后台任务、托管与外部 CLI 升级 |
+| **Codex** | `codex` | npm 托管（`@agentclientprotocol/codex-acp`） | 支持（`agent`） | 已验证 — RFD 子代理（取消 + 子工具嵌套）、rollout 用量、托管与外部 CLI 升级 |
+| **Antigravity CLI** | `antigravity` | `PATH` 发现（`agy`） | 支持（`auto`） | 已验证 — 工具回退子代理、后台任务、原生工作流、外部 `agy update` |
+| **Kimi Code** | `kimi-code` | npm 托管（`@moonshot-ai/kimi-code`） | — | 已验证 — 工具回退子代理与后台任务、上下文用量、外部 CLI 升级 |
+| **Pi** | `pi` | npm 托管（`@openma/pi-acp` + `@earendil-works/pi-coding-agent`） | 仅完全访问 | 已验证 — 可选 `pi-subagents` 子任务级用量、托管与外部 CLI 升级 |
+| **Gemini CLI** | `gemini` | npm 托管（`@google/gemini-cli`） | — | 通用 ACP |
+| **GitHub Copilot CLI** | `github-copilot-cli` | npm 托管（`@github/copilot`） | — | 通用 ACP |
+| **OpenCode** | `opencode` | npm 托管（`@opencode/cli`） | — | 通用 ACP |
+| **Qwen Code** | `qwen-code` | npm 托管（`@qwen-code/qwen-code`） | — | 通用 ACP |
+| **goose** | `goose` | npm 托管（`@aaif/goose-acp`） | 支持（`smart_approve`） | 通用 ACP |
+| **Grok Build** | `grok-build` | npm 托管（`@xai-official/grok`） | — | 通用 ACP |
+| **Kilo Code** | `kilo` | npm 托管（`@kilocode/cli`） | — | 通用 ACP |
+| **Factory Droid** | `factory-droid` | npm 托管（`droid`） | — | 通用 ACP |
+| **CodeBuddy Code** | `codebuddy-code` | npm 托管（`@tencent-ai/codebuddy-code`） | — | 通用 ACP |
+| **Cursor** | `cursor` | `PATH` 发现（`cursor-agent`） | — | 通用 ACP |
+| **Kiro CLI** | `kiro` | `PATH` 发现（`kiro-cli`） | — | 通用 ACP |
+| **Mistral Vibe** | `mistral-vibe` | `PATH` 发现（`vibe-acp`） | 支持（`smart-approve`） | 通用 ACP |
+| **Qoder CLI** | `qoder` | `PATH` 发现（`qodercli`） | — | 通用 ACP |
+
+- **13 种 npm 托管适配器**安装于 `<STEVE_HOME>/adapters`（可通过 `steve setup` 或 `steve adapters install <id>` 管理）；**5 种 `PATH` 发现型 CLI** 通过各自官方安装器安装后自动识别。
+- 自定义 `harness.json` 不能覆盖或移除内置 ID，也不允许注入环境变量（执行器凭据始终留在执行节点本机）。
+
+---
 
 ## 快速开始
 
+### 通过 Homebrew 安装 *（推荐）*
+
+```sh
+brew install infranite/tap/steve
+steve setup
+```
+
+`steve setup` 会启动交互式向导（可通过 `--lang zh-CN|en` 或 `STEVE_LANG` 切换中英文）：选择本机角色（**Hub** 或 **Node**）、配置监听地址（默认 `0.0.0.0:8440`，Web 端位于 `8441`）、勾选要安装的 npm 托管 ACP 适配器、在 macOS 上生成本机签名身份、签发所有者首个访问 token、注册系统服务并启动。非终端环境会以纯文本提示并不自动启动服务，配置完成后按角色启动即可：
+
+```sh
+steve hub start         # 启动 Hub 服务
+steve node start        # 在“设备”页确认指纹后，启动 Linux 节点
+steve node enable-boot  # 在“设备”页确认指纹后，注册并启动 macOS 开机自启节点（仅需一次 sudo）
+```
+
+随时可用 `steve hub status`、`steve hub doctor` 或 `steve node doctor` 检查运行状态。完整参数、`--reconfigure` 与同机双实例部署见 **[docs/deployment.md#homebrew-installation](docs/deployment.md#homebrew-installation)**（英文）。
+
 ### 环境要求
 
-| | |
+| | 要求 |
 |---|---|
-| **构建** | Git、稳定版 Rust/Cargo、Node.js 24 LTS 和 npm |
-| **运行** | Apple Silicon macOS 14+，或 glibc 2.35+ 的 Linux x86_64（Ubuntu 22.04+、Debian 12+）。不支持 Windows。 |
-| **智能体**（可选） | 在执行节点的机器上已安装并完成认证的任意内置 ACP 编码 CLI（共 18 种）或 `harness.json` 中的自定义适配器 |
+| **预编译安装（Homebrew / 发布包）** | Apple Silicon macOS 14+（`aarch64-apple-darwin`），或 glibc 2.35+ 的 Linux `x86_64`（Ubuntu 22.04+ / Debian 12+）且启用 `systemd --user`。不支持 Windows。运行时无需 Python；Homebrew 会安装 Node.js 以运行 npm 托管的 ACP 适配器。 |
+| **运行智能体任务** | 在执行任务的 Node 机器上安装并登录对应的编码 CLI。未安装任何 CLI 时，Hub 服务与诊断功能仍可正常使用。 |
+| **源码构建 *（开发用）*** | Git、Rust（`edition = 2024`，CI 固定 `1.99.1`）、Node.js 24 LTS + npm、`/bin/zsh`（源码发布测试夹具需要）、Python 3.11+（边界与发布脚本需要）。 |
 
-### 1. 构建
+<details>
+<summary>从源码构建并试运行（开发环境）</summary>
 
 ```sh
 git clone https://github.com/Infranite/steve.git
@@ -281,21 +200,11 @@ cd steve
 npm ci
 npm run build:web
 cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
-```
 
-### 2. 安装适配器
-
-Steve 通过 ACP 协议调用编码 CLI。18 个内置 harness 中，13 个（`claude-code`、`codex`、`pi`、`gemini`、`github-copilot-cli`、`opencode`、`qwen-code`、`goose`、`kimi-code`、`grok-build`、`kilo`、`factory-droid`、`codebuddy-code`）可由 npm 安装到数据目录下的 `adapters` 并由 Node 自动保鲜；其余 5 个（`cursor`、`kiro`、`mistral-vibe`、`qoder`、`antigravity`）通过各自安装器装好后直接从 `PATH` 发现。`steve setup` 会默认勾选本机 `PATH` 上已检测到的 CLI；开发用的 Hub 也可按需安装：
-
-```sh
+# 在独立开发数据目录安装需要的 ACP 适配器
 STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install claude-code codex
-```
 
-数据目录里没有时，也会自动使用 `PATH` 上的 CLI 或 npm 全局安装的包。`claude` 不在 `/opt/homebrew/bin/claude` 时设置 `CLAUDE_CODE_EXECUTABLE`；适配器装在别处时设置对应的 `STEVE_ADAPTER_*` 变量（完整列表见 [docs/deployment.md](docs/deployment.md#harness-setup)）或在 `harness.json` 中声明。
-
-### 3. 运行
-
-```sh
+# 启动开发 Hub（仅回环允许一键免密登录）
 STEVE_HOME="$HOME/.steve-dev" \
 STEVE_DEV_LOGIN=1 \
 STEVE_HOST=127.0.0.1 STEVE_PORT=8440 \
@@ -303,81 +212,101 @@ STEVE_WEB_DIR="$PWD/web/dist" \
   hub-rs/target/debug/steve-hub
 ```
 
-打开 **http://127.0.0.1:8440** 登录。`STEVE_DEV_LOGIN=1` 会加一个一键以所有者身份登录的入口，**只接受回环地址**，用来试用。要长期使用，请用 `steve-hub --access token create` 签发访问 token，用用户名和 token 登录；OIDC 是可选项（见下文）。
+打开 **http://127.0.0.1:8440**。日常源码开发可使用 `python3 ops/dev.py up`，默认在 `127.0.0.1:18440` 启动增量 debug Hub、在 `127.0.0.1:18441` 启动 Vite 热更新界面（数据隔离在 `~/.steve-dev`）。在没有桌面 Secret Service 的无头 Linux 上，请设置 `STEVE_VAULT_KEYSTORE=dir` 并将 `STEVE_VAULT_KEY_DIR` 指向 `STEVE_HOME` 之外、权限为 `0700` 的目录。
 
-> [!TIP]
-> `STEVE_HOME` 让这个实例的数据和默认的 `~/.steve` 分开。在没有桌面密钥环（Secret Service）的 Linux 上，保险箱会拒绝启动：设置 `STEVE_VAULT_KEYSTORE=dir`，再把 `STEVE_VAULT_KEY_DIR` 指向 `STEVE_HOME` 之外、权限为 `0700` 的目录。
+</details>
 
-## 配置
+---
 
-Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/steve.env` 里（模板：[`ops/steve.env.example`](ops/steve.env.example)）。密钥不要放在仓库目录里，用 `*_FILE` 变量引用。
+## 概念速览
 
-| 变量 | 作用 |
+| 概念 | 一句话说明 |
 |---|---|
-| `STEVE_HOME` | 数据目录（默认 `~/.steve`） |
-| `STEVE_HOST`、`STEVE_PORT` | 监听地址，可用逗号分隔多个，共用一个端口（默认 `127.0.0.1:8440`）；反向代理在另一台机器上时，加上它访问的地址，例如 `127.0.0.1,100.64.0.2`。`0.0.0.0`/`::` 会被拒绝，除非设置 `STEVE_ALLOW_ANY_HOST=1` |
-| `LISTEN_FDS`、`LISTEN_PID`、`LISTEN_FDNAMES` | 可选的套接字激活（与 systemd 设置的方式相同）：Hub 启动时交给它的监听套接字直接用来服务，不再自己绑定端口。每个 `STEVE_HOST` 地址一个，都在 `STEVE_PORT` 上；名为 `local-node` 的那个代替 `STEVE_LOCAL_NODE_PORT`，用作本机 Node 的连接端口。持有这些套接字的一方在 Hub 重启期间一直占着端口。Hub 启动的进程不会继承它们 |
-| `STEVE_WEB_DIR` | Hub 提供的 Web 构建产物 |
-| `STEVE_WEB_PORT` | 网页单独使用的端口；设置后 Hub 自己的端口只提供 API（新安装默认是 Hub 端口 + 1） |
-| `STEVE_CLIENT_ORIGINS` | 额外允许跨域调用 Hub 的网页来源（已登录过的网页来源默认允许） |
-| `STEVE_PUBLIC_URL` | 集成回调能访问到的地址，只在需要回调时设置。不提供共享的托管地址。 |
-| `STEVE_OIDC_ISSUER`、`STEVE_OIDC_CLIENT_ID`、`STEVE_OIDC_CLIENT_SECRET_FILE` | 可选：通过你的 OIDC 服务单点登录 |
-| `STEVE_DISK_FLOOR_GB`、`STEVE_DISK_LOW_GB`、`STEVE_WORKTREE_IDLE_HOURS` | 事项 worktree 的磁盘保护 |
-| `STEVE_UPDATE_CHECK` | 设为 `0` 关闭定期检查新版本。debug 构建默认不检查，设为 `1` 才会检查 |
-| `STEVE_KB_STORE` | 设为 `openviking` 使用可选的向量后端（默认 SQLite FTS） |
-| `STEVE_VAULT_KEYSTORE` | `auto`（钥匙串 / Secret Service）、`dir`（配合 `STEVE_VAULT_KEY_DIR`），或测试用的 `file` |
-| `STEVE_NODE_MODE` | `service`（默认）让 Hub 自己的 Node 在单独的进程里运行，Hub 重启或升级时正在跑的回合不受影响（见 [docs/deployment.md](docs/deployment.md#the-hubs-own-node-in-a-process-of-its-own)）；`local` 在 Hub 进程内运行 |
-| `STEVE_LOCAL_NODE_PORT` | `STEVE_NODE_MODE=service` 时本机 Node 连接 Hub 使用的本机回环端口（默认 Hub 端口 + 3） |
-| `STEVE_CONFINE` | Node 启动的运行进程所在的系统沙箱（macOS 用 seatbelt；Linux 用 bubblewrap）。分级：<br>`0`/`off`：不隔离。<br>`1`/`on`（默认）：Steve 的密钥、数据库和程序不可访问；在工作目录里运行的进程只能写自己的工作目录及其所属仓库、harness 和工具链目录、临时目录、常用的工具缓存和 harness 自己的主目录；读取不受限制，只是 Node 主人以外的人的会话看不到主人的 harness 主目录（登录、令牌、历史，以适配器声明的为准）；环境变量保持用户系统原样。<br>`2`：在 1 的基础上，运行进程从用户全新的登录环境启动，再加上 Steve 为它设置的变量。<br>Codex 等自带 seatbelt 沙箱的 harness 继续使用自己的沙箱 |
-| `STEVE_CONFINE_WRITABLE` | 1、2 级下额外允许写入的位置（绝对路径，用 `:` 分隔） |
-| `STEVE_NODE_LISTEN` | 实验中的多设备 Node 监听，默认开启；`0` 关闭 |
-| `STEVE_NODE_HANDOFF_MIN` | 设备离线、又有消息在等它的会话时，过多少分钟后 Steve 在别处开新会话继续事项（默认 30；`0` 表示不转移） |
-| `STEVE_TAILCAT`、`STEVE_TAILCAT_PORT` | 经 tailcat 接入远程 Node（可选，在“设备”页开启）：`tailcat` 不在 `PATH` 上时指定程序位置，以及只提供 Node 接口的本机端口（默认 Hub 端口 + 2） |
-| `STEVE_NODE_INSTALLERS` | 远程安装 Node 时使用的本地目录，里面放发布的 `steve-installer.json` 和安装包，供访问不了 GitHub 的 Hub 使用 |
-| `STEVE_ADAPTER_*`、`STEVE_DEFAULT_MODEL_*` | 覆盖内置 harness 的适配器路径（`STEVE_ADAPTER_CLAUDE`、`STEVE_ADAPTER_CODEX`、`STEVE_ADAPTER_GEMINI` 等）或默认模型（`STEVE_DEFAULT_MODEL_CLAUDE` 等）；完整对照表见 [docs/deployment.md](docs/deployment.md#harness-setup) |
-| `STEVE_ADAPTER_UPDATES` | Node 怎么对待 Steve 安装的 ACP 适配器的新版本：`auto`（默认：每天检查，没有会话运行时升级）、`check`（只显示）、`off` |
+| **Hub / Node / 客户端** | Hub 管状态与决策，Node 带本地执行日志跑执行器，Web 与 Apple 客户端订阅同步投影。 |
+| **协调者与工作 Bot** | Steve 负责路由、调研与协调，具体事项派给工作 Bot 或团队；无可用执行者时弹出单一 `no_executor` 卡片。 |
+| **事项与收尾闸门** | 可追踪工作单元（`ready → active → closing → closed`），带单选**类型**、多选**交付**标签、独立 worktree 与五道收尾检查。 |
+| **待我决定（`#/inbox`）** | 验收、绑定提交的 PR 合并、工具审批、提问、密钥授权、提议与渠道草稿的唯一人工入口。 |
+| **执行器原生免批（YOLO）** | 仅向支持原生自动审批的执行器下发原生模式，绝不模拟免批，也不放宽 Steve 层门禁。 |
+| **确定性会话交接** | 额度或服务异常及主人要求时，保留同一 Bot 身份并切换其备选执行面（`harness + model + effort`）。 |
+| **重新定义的知识库** | 只存人、组织、项目、偏好规则、承诺与主人资料；事项/对话走独立 `records` 检索；代码库规则走项目 `AGENTS.md` 提议。 |
+
+各概念的完整规则见 **[docs/concepts.md](docs/concepts.md)**（英文）。
+
+---
+
+## 安全与隐私模型
+
+- **认证与接入**：支持用户名 + 访问 token（`steve-hub --access token create`）、一次性扫码配对二维码，以及可选 OIDC（Authorization Code + PKCE，30 天 SHA-256 会话 Cookie）。`STEVE_DEV_LOGIN=1` 通过 `ConnectInfo<SocketAddr>` 严格限制回环地址。直接运行 `steve-hub` 默认绑定 `127.0.0.1:8440`，未设置 `STEVE_ALLOW_ANY_HOST=1` 时拒绝 `0.0.0.0`/`::`。
+- **加密保险箱**：每个工作空间独立 256 位主密钥存于系统密钥库（macOS 通过签名稳定的 `steve-keyhelper` 存钥匙串，Linux 走 Secret Service 或外部 `0700` 目录）。每条密钥用独立数据密钥和 XChaCha20-Poly1305 加密；明文查看需与具体字段绑定的一次性 WebAuthn Passkey 挑战。`steve_secret_use` 将密钥注入环境变量、标准输入或临时文件，并**严格在会话所在的执行 Node 上执行**（无 Hub 本地兜底 shell）；银行卡和高敏感条目永不允许长期授权。
+- **系统沙箱（`STEVE_CONFINE`）**：默认 1 级使用 macOS Seatbelt（`sandbox-exec`）或 Linux Bubblewrap（`bwrap`）阻断对 Steve 密钥、数据库和程序的访问，将写入限定在工作区与工具缓存内，并对非节点所有者会话隐藏主人的执行器主目录；2 级额外以全新登录环境启动。自带沙箱的执行器（如 Codex）保留自身沙箱。
+- **按主体隔离状态与工具链**：默认 `STEVE_PRINCIPAL_STATE=on` 为不同主体分配独立执行器状态目录，并链接节点既有登录凭据而不复制密钥；`STEVE_TOOLCHAINS=on` 隔离 23 种内置构建工具链的产物与下载缓存。
+- **披露级别与跨模型外发审查**：知识条目标注 `public`、`conclusion`、`reasoning` 或 `never`（不入索引）。发往外部受众的消息同时经过确定性规则与跨模型审计（`exclude_model` 避开起草模型），审查失败、超时或不可读时一律拦截。
 
 > [!IMPORTANT]
-> 把监听地址暴露到本机以外之前，请先检查认证配置。Steve 下运行的智能体拥有你本机用户的权限。
+> 将监听地址暴露到本机之外前，请先核查认证配置。在 Steve 下运行的编码智能体拥有执行节点对应系统用户的权限（受 `STEVE_CONFINE` 保护的文件除外）。
 
-## 部署
+---
 
-| 方式 | 适用场景 | 自动升级 |
+## 部署与运维
+
+| 部署方式 | 适用场景 | 升级机制 |
 |---|---|---|
-| **本地构建**（上文） | 试用、开发 | 仅检查 |
-| **基于源码的 macOS 服务**：`zsh ops/install.sh` | 常开的个人 Mac，使用钥匙串保险箱 | 通过 `ops/local-release.py` |
-| **托管发布包**：`steve-hub --supervise` | 由 launchd/systemd 管理的 macOS 或 Linux 服务器 | ✅ 在 设置 → 关于 中升级 |
+| **Homebrew 托管服务（`brew install infranite/tap/steve && steve setup`）** | Apple Silicon macOS 14+ 与 Linux `x86_64` 服务器 | `steve upgrade`（签名 macOS Hub）或**设置 → 关于**（`steve-hub --supervise`）；Node 在**设备**页远程升级 |
+| **独立 macOS 开机自启 Node（`steve setup node && steve node enable-boot`）** | 常开辅助 Mac，无需桌面登录 | 在**设备**页直接完成签名原地升级，无需 `sudo` |
+| **源码检出（`ops/dev.py` / `ops/local-release.py`）** | 贡献者与本地开发 | 本地重新构建 |
 
-安装步骤、保险箱后端、服务管理器配置和升级流程见 **[docs/deployment.md](docs/deployment.md)**（英文）。
+- **默认目录与端口**：
+  - 数据目录：Hub 默认 `~/.steve`，独立 Node 默认 `~/.steve-node`（均可通过 `STEVE_HOME` / `--home` 覆盖）。
+  - 端口：Hub API `8440`（`STEVE_PORT`）、独立 Web 界面 `8441`（`STEVE_WEB_PORT`，`steve setup` 默认 Hub + 1）、可选 tailcat 节点入口 `8442`（`STEVE_TAILCAT_PORT`，Hub + 2）、本机独立进程 Node `8443`（`STEVE_LOCAL_NODE_PORT`，Hub + 3）、可选 Prometheus 指标 `127.0.0.1:9464`（`STEVE_METRICS=prometheus`）。
+- **加密备份（内置 `restic` v2）**：每个发布包都在 `steve-hub` 同级捆绑经 SHA-256 校验的上游 `restic` 0.19.1。每日备份（当地时间 03:30 后，默认保留 7 天）、升级前备份（始终执行）、破坏性操作前备份、手动备份与诊断备份共用 `<STEVE_HOME>/backups/restic` 加密仓库，密码存于系统 KeyStore，并做 SQLite `quick_check` 与 SHA-256 校验。离线运维：`steve-hub --admin backup|backup-list|restore <id> (--database-only | --to <目录>)`。
+- **常用运维手册入口（[docs/deployment.md](docs/deployment.md)，英文）**：
+  - [Homebrew 安装与初始化](docs/deployment.md#homebrew-installation) · [重新配置已安装的 Hub](docs/deployment.md#reconfiguring-an-installed-hub)
+  - [备份与恢复](docs/deployment.md#backups) · [发布包与自动升级](docs/deployment.md#managed-release-bundles-and-automatic-upgrades)
+  - [配对独立远程 Node](docs/deployment.md#pairing-a-separate-node) · [macOS 开机自启 Node 服务](docs/deployment.md#macos-node-boot-service)
+  - [执行器配置与组件升级](docs/deployment.md#harness-setup) · [能力库（MCP、技能、A2A）](docs/deployment.md#capabilities-mcp-servers-skills-and-remote-agents)
+  - [访问令牌、OIDC 与 Apple 客户端](docs/deployment.md#access-tokens-and-clients) · [指标与健康检查](docs/deployment.md#metrics-and-health)
 
-## 目录结构
+---
 
-```text
-hub-rs/          Rust workspace：Hub 可执行文件和各 crate
-  crates/steve-hub        HTTP 服务（axum）、REST + SSE、扩展、升级、后台任务
-  crates/steve-core       事项、生命周期、对话路由、合并通道、模型网关
-  crates/steve-modules    模块扩展点（钩子、面板、变更集）、联系人、账号、保险箱
-  crates/steve-acp        通过 ACP 运行各编码 CLI 会话与一次性调用，及适配器注册表
-  crates/steve-research   只读的就地调研（白名单、守卫、沙箱）
-  crates/steve-mcp        智能体对接的 `steve` MCP 服务
-  crates/steve-channels   飞书 / Lark、空间、人设、披露检查
-  crates/steve-mail       IMAP/SMTP 账户、同步、草稿、分诊
-  crates/steve-github     GitHub App / token、webhook、PR、检查、外部操作
-  crates/steve-knowledge  知识库、检索、引用、记忆
-  crates/steve-flow       信号、流程、定时
-  crates/steve-vault      启动的 harness 不能读取的内容；steve-keyhelper 持有 macOS 密钥
-  crates/steve-stats      用量、花费和交付指标
-  crates/steve-node*      Hub–Node 协议和运行所有会话的 Node 运行时
-  crates/steve-store      SQLite 表结构和迁移
-web/             React + Vite + Tailwind 界面
-ops/             安装、发布、备份、服务和 OpenViking 脚本
-docs/            架构、协议和发布说明
-```
+## 扩展 Steve
+
+- **运行时插件**：Hub 运行时可直接从插件库（`steve-store.json`，官方库为 [`Infranite/steve-extensions`](https://github.com/Infranite/steve-extensions)，可用 `STEVE_PLUGIN_LIBRARY` 覆写）安装经 SHA-256 校验的预编译包，作为独立受管进程运行。契约 1 支持三种插件：**`connector`**（外部服务与可选 `calendar.v1` 日历源）、**`channel`**（基于 `ext_ws` / `ext_ws.bot` 的消息渠道）和 **`theme`**（纯数据 Web 主题）。详见 [docs/deployment.md#plugins](docs/deployment.md#plugins)。
+- **统一 MCP 服务与能力库**：所有 Bot 会话连接 Hub 的单个 `/mcp` 端点，默认暴露 **8 个核心工具**并支持每个 Bot 固定最多 **32 个工具**，其余能力（工作空间 MCP 服务器、A2A 远程 Agent、连接器操作）通过 `steve_tools_search` 发现并经模式校验的 `steve_tool_call` 调用。Claude Desktop、Cursor 等外部 MCP 客户端也可用访问令牌（`Bearer stt_…`）连接 `/mcp` 调用受限子集。
+- **A2A 服务端**：提供 `GET /.well-known/agent-card.json` 与 JSON-RPC 2.0 `POST /a2a`（`protocolVersion: "0.3.0"`，支持 `message/send`、`tasks/get`、`tasks/cancel`）。
+- **编译期扩展点**：
+  - **Hub Extension API**（`steve-hub/src/extension.rs`，`EXTENSION_API = 2`）：通过 `Assembly::builtin().with(...)` 注册连接提供方、渠道/邮件适配器、事件源、路由与后台任务（`Assembly::builtin()` 内置 `feishu.bot`、`feishu.self`、`ext_ws`、`mail.imap`、`github`、`calendar` 六个扩展）。
+  - **流程与模块扩展点**：`FlowSetup` 扩展流程节点与动作；`steve-modules` 提供事项生命周期钩子、侧栏声明式面板、提示词上下文、外发审查和可撤销变更集。
+  - **Webhook 与知识存储端口**：签名校验的 `POST /hooks/{id}` 与 `POST /hooks/github`；知识检索默认 SQLite FTS，可选 OpenViking 向量后端（`STEVE_KB_STORE=openviking`），命中结果均由 Hub 按权限复核。
+
+---
+
+## 当前状态与路线
+
+Steve 当前处于 **`1.0` 之前（`0.x`）**阶段。公开契约（Hub HTTP API、Hub–Node 协议、插件 SDK 与落盘格式）仍在演进，`1.0.0` 冻结契约前的 `MINOR` 版本可能包含破坏性变更（详见 [版本与发布规范](CONTRIBUTING.md#changes-and-releases)）。
+
+- **实验中**：
+  - **多设备远程 Node**：`steve-node` 配对与跨机执行默认开启（`STEVE_NODE_LISTEN=1`），仍在持续加固中。
+- **规划中 *（尚未实现）***：
+  - **可插拔的存储、缓存、导出与备份目的地驱动**（包括远程 `restic` REST 备份目的地，以及超越当前 `#[cfg(test)]` 契约测试的生产 PostgreSQL 支持）。
+  - **信息流与个人通知扩展**：RSS 抓取、个人报告订阅、定时摘要生成，以及除 `work.item.done` 与 `briefing.ready` 之外的个人通知事件。
+  - **更多集成与外部保险箱**：Gmail / Outlook API 邮件适配器（当前支持 IMAP/SMTP）、飞书文档 / 日历 / 审批，以及 1Password / Bitwarden 外部保险箱后端。
+  - **默认拒绝的视图级系统沙箱**（目前与 `STEVE_CONFINE` 并行处于影子模式）。
+  - **A2A 流式输出与推送通知**，以及来自执行器的实测定时输出 token 遥测（当前实时 TPS 仅通过 API 提供流式文本估算）。
+
+---
 
 ## 参与贡献
 
-欢迎提 Issue 和 Pull Request。提 PR 前请阅读 **[CONTRIBUTING.md](CONTRIBUTING.md)**，里面有开发检查项、用于自动生成发布说明的提交与 PR 规范，以及版本号和迁移编号如何在发布时分配。
+欢迎提交 Issue 和 Pull Request。提 PR 前请先阅读 **[CONTRIBUTING.md](CONTRIBUTING.md)**，了解：
+
+- 本地开发检查（`cargo nextest`、`npm run check`、`npm run test:web`、浏览器冒烟测试、边界与架构守卫）。
+- Conventional Commits 提交与 PR 标题规范（`type(scope): imperative summary`，需要运维操作时附 `Upgrade:` 尾注）。
+- 自动版本号计算与发布说明生成（由 `ops/cut-release.py` 统一完成，切勿手选版本或手写 `docs/releases/`）。
+
+---
 
 ## 许可证
 
-[MIT](LICENSE)。外部智能体、模型服务和集成是各自独立的产品，适用各自的条款，需要你自行安装和配置。
+基于 **[MIT 许可证](LICENSE)** 开源。外部编码 CLI、模型服务商和第三方集成均为独立产品，适用各自条款。`web/src/components/affect/` 下的 affectUI Pro 组件保留文件头注明的 affectUI 许可条款。
+
+<sub>截图均由真实的 Steve Web 界面配合确定性合成夹具渲染，不包含任何生产数据。可在“设置 → 外观”随时切换中英文与深浅色主题。</sub>
