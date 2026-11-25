@@ -2210,13 +2210,22 @@ impl Channels {
 
         // 6. the rules: the space's, else the voice's account's
         let rules = rules::load(set.rules.as_ref().unwrap_or(&account_rules), mode);
-        let context: Vec<ContextLine> = store
-            .read(|r| {
-                messages::context_before(r, &space.id, &inbound.message_id, rules::INTENT_CONTEXT)
-            })?
-            .into_iter()
-            .map(|(who, text)| ContextLine { who, text })
-            .collect();
+        let context: Vec<ContextLine> = if rules::needs_intent_judge(&rules, &facts) {
+            store
+                .read(|r| {
+                    messages::context_before(
+                        r,
+                        &space.id,
+                        &inbound.message_id,
+                        rules::INTENT_CONTEXT,
+                    )
+                })?
+                .into_iter()
+                .map(|(who, text)| ContextLine { who, text })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let judge = GatewayJudge {
             gateway: self.modules().gateway.as_ref(),
             message: &m.text,
@@ -2227,6 +2236,7 @@ impl Channels {
             },
             space: &plan.space_name,
             context: &context,
+            cache: Some(self.intent_cache()),
         };
         let verdict = rules::evaluate(&rules, &facts, set.muted, &judge).await;
         plan.act = verdict.act;
