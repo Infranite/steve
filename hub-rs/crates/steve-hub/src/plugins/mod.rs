@@ -639,7 +639,15 @@ impl Plugins {
                 steve_channels::adapters::ext_ws::BOT_ADAPTER
             }
         };
-        let conn = match conns.create(who, adapter, &fields, json!({})).await {
+        let conn = match conns
+            .create(
+                who,
+                adapter,
+                &fields,
+                json!({ steve_channels::adapters::ext_ws::PLUGIN_ID: plugin }),
+            )
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
                 self.drop_instance(&inst.id).await;
@@ -660,6 +668,11 @@ impl Plugins {
         Ok(json!({"instance": inst.id, "connection": conn.id}))
     }
 
+    /// Running `(plugin_id, pid)` pairs across all supervised plugin instances, for process metrics.
+    pub fn running_pids(&self) -> Vec<(String, u32)> {
+        self.0.runner.running_pids()
+    }
+
     /// Brings the processes in line with the instances on disk: every instance whose connection
     /// still exists runs, one whose connection was disconnected is removed with its data, and
     /// so is one a connect left behind unfinished.
@@ -678,6 +691,13 @@ impl Plugins {
             if gone {
                 tracing::info!(instance = %i.id, plugin = %i.plugin, "plugin instance removed");
                 self.drop_instance(&i.id).await;
+                if !self
+                    .instances()
+                    .iter()
+                    .any(|other| other.plugin == i.plugin)
+                {
+                    crate::metrics::remove_plugin(&i.plugin);
+                }
             } else if i.connection.is_some() {
                 self.0.runner.ensure(self.spec(&i));
             }
@@ -700,7 +720,7 @@ impl Plugins {
         let _scope = Scope(self.0.runner.clone());
         let mut open = true;
         loop {
-            self.reconcile(&modules).await;
+            steve_runtime::round("plugins.supervise", self.reconcile(&modules)).await;
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(20)) => {}
                 ev = events.recv(), if open => open = ev.is_some(),

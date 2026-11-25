@@ -264,20 +264,58 @@ pub trait DocLoader: Send + Sync {
 /// Connects [`Knowledge::enqueue`] during assembly and returns the worker to start after boot.
 /// A second preparation returns `None`; queued documents wait until the worker starts.
 pub fn worker(m: Modules, kb: Knowledge) -> Option<impl std::future::Future<Output = ()> + Send> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, rx) = mpsc::unbounded_channel::<String>();
     kb.queue.set(tx).ok()?;
     Some(async move {
-        while let Some(first) = rx.recv().await {
-            let mut ids = vec![first];
-            while ids.len() < BATCH {
-                match rx.try_recv() {
-                    Ok(id) if !ids.contains(&id) => ids.push(id),
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-            if let Err(e) = run_batch(&m, &kb, &ids).await {
-                tracing::warn!("kb.index: batch failed: {e}");
+        worker_task_with(m, kb, rx).await;
+    })
+}
+
+/// Connects [`Knowledge::enqueue`] during assembly and returns a factory that starts the
+/// panic-supervised [`steve_runtime::Task`] after boot.
+pub fn prepare_worker(
+    m: Modules,
+    kb: Knowledge,
+) -> Option<impl FnOnce() -> steve_runtime::Task + Send> {
+    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    kb.queue.set(tx).ok()?;
+    Some(move || worker_task_with(m, kb, rx))
+}
+
+fn worker_task_with(
+    m: Modules,
+    kb: Knowledge,
+    rx: mpsc::UnboundedReceiver<String>,
+) -> steve_runtime::Task {
+    let clock = m.clock.clone();
+    let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
+    steve_runtime::supervise("kb.index", clock, move || {
+        let m = m.clone();
+        let kb = kb.clone();
+        let rx = rx.clone();
+        async move {
+            loop {
+                let ids = {
+                    let mut rx = rx.lock().await;
+                    let Some(first) = rx.recv().await else {
+                        return;
+                    };
+                    let mut ids = vec![first];
+                    while ids.len() < BATCH {
+                        match rx.try_recv() {
+                            Ok(id) if !ids.contains(&id) => ids.push(id),
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
+                    }
+                    ids
+                };
+                steve_runtime::round("kb.index", async {
+                    if let Err(e) = run_batch(&m, &kb, &ids).await {
+                        tracing::warn!("kb.index: batch failed: {e}");
+                    }
+                })
+                .await;
             }
         }
     })

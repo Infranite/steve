@@ -17,5 +17,6 @@ install! { routes(reg, _cx) [calendar, mut module_routes] => [calendar, module_r
 }}
 
 install! { jobs(reg, _cx) [calendar, mut jobs] => [calendar, jobs] {
-    jobs.push(Job::new("calendar.sync", calendar.clone().run()));
+    let cal = calendar.clone();
+    jobs.push(Job::task("calendar.sync", move || cal.task()));
 }}

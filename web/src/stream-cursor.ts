@@ -16,6 +16,7 @@ export type SourceLike = {
   close(): void
 }
 type Target = { addEventListener(type: string, f: () => void): void; removeEventListener(type: string, f: () => void): void }
+export type ReconnectReason = "error" | "stale" | "wake"
 export type StreamDeps = {
   /** the stream URL, resuming after `after` when set */
   url: (after: string | null) => string
@@ -26,6 +27,8 @@ export type StreamDeps = {
   onOpen: (resumed: boolean) => void
   /** the stream broke, or an attempt to open it failed; a retry is scheduled */
   onDown?: () => void
+  /** a reconnect is being triggered (bounded reason for telemetry) */
+  onReconnect?: (reason: ReconnectReason) => void
   /** the snapshot cursor, used until a frame id is seen */
   cursor: () => string | null
   setTimeout: (f: () => void, ms: number) => unknown
@@ -54,7 +57,7 @@ export function resumableStream(d: StreamDeps) {
     src.onerror = () => {
       src.close(); if (es !== src) return
       es = null
-      if (!closed) { timer = d.setTimeout(open, retry = Math.min(retry * 2, MAX_RETRY)); d.onDown?.() }
+      if (!closed) { timer = d.setTimeout(open, retry = Math.min(retry * 2, MAX_RETRY)); d.onDown?.(); d.onReconnect?.("error") }
     }
   }
   /* back in front: don't wait for the backoff; a failed attempt now retries after 2 s, not 15 */
@@ -62,8 +65,10 @@ export function resumableStream(d: StreamDeps) {
     if (closed || d.doc?.visibilityState === "hidden") return
     // a source the browser closed without an error (frozen, bfcache) is dead however recent its last frame
     if (es && es.readyState !== CLOSED && d.now() - alive < STALE_MS) return
+    const reason: ReconnectReason = es ? "stale" : "wake"
     if (es) { const old = es; es = null; old.close() }
     if (timer !== null) { d.clearTimeout(timer); timer = null }
+    d.onReconnect?.(reason)
     retry = FIRST_RETRY; open()
   }
   d.doc?.addEventListener("visibilitychange", wake)

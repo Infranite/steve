@@ -339,15 +339,14 @@ impl DecisionRows<'_, W<'_>> {
                 decode,
             )?;
             let existing = crate::repo::must(existing)?;
-            metrics::counter!("steve_decision_duplicate_prompts_total").increment(1);
+            record_duplicate_prompt();
             return Ok((existing, false));
         }
         let d = crate::repo::must(self.get(&id)?)?;
         emit(self.0, &d);
         self.0
             .diagnostic(crate::diagnostics::decision_event(&d, "created", None));
-        metrics::histogram!("steve_decision_transition_seconds", "operation" => "created")
-            .record(started.elapsed());
+        record_transition("created", started.elapsed().as_secs_f64());
         Ok((d, true))
     }
 
@@ -458,8 +457,7 @@ impl DecisionRows<'_, W<'_>> {
                 Some(decision.status.as_str()),
             ));
             emit(self.0, &d);
-            metrics::histogram!("steve_decision_transition_seconds", "operation" => operation)
-                .record(started.elapsed());
+            record_transition(operation, started.elapsed().as_secs_f64());
         }
         Ok(n > 0)
     }
@@ -858,4 +856,30 @@ pub fn expire_unapplied(w: &mut W<'_>, id: &str, result: &Value) -> Result<bool>
         crate::decision_repo::DecisionChange::Expire,
         None,
     )
+}
+
+fn record_duplicate_prompt() {
+    thread_local! {
+        static COUNTER: std::cell::OnceCell<metrics::Counter> = const { std::cell::OnceCell::new() };
+    }
+    COUNTER.with(|c| {
+        c.get_or_init(|| metrics::counter!("steve_decision_duplicate_prompts_total"))
+            .increment(1);
+    });
+}
+
+fn record_transition(operation: &'static str, seconds: f64) {
+    thread_local! {
+        static HANDLES: std::cell::RefCell<std::collections::HashMap<&'static str, metrics::Histogram>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    HANDLES.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry(operation)
+            .or_insert_with(|| {
+                metrics::histogram!("steve_decision_transition_seconds", "operation" => operation)
+            })
+            .record(seconds);
+    });
 }

@@ -41,6 +41,7 @@ pub(crate) struct SavepointTx<'a> {
     c: &'a Connection,
     name: String,
     committed: bool,
+    meter: Option<crate::instrumentation::TxMeter>,
 }
 
 impl Drop for SavepointTx<'_> {
@@ -51,22 +52,30 @@ impl Drop for SavepointTx<'_> {
                 self.name
             ));
         }
+        drop(self.meter.take());
     }
 }
 
 /// Either an outer `BEGIN IMMEDIATE` transaction or a nested SQLite `SAVEPOINT` when `c` is
 /// already inside an open transaction on this connection.
 pub(crate) enum WriteTx<'a> {
-    Root(rusqlite::Transaction<'a>),
+    Root {
+        tx: rusqlite::Transaction<'a>,
+        meter: Option<crate::instrumentation::TxMeter>,
+    },
     Savepoint(SavepointTx<'a>),
 }
 
 impl<'a> WriteTx<'a> {
     pub(crate) fn begin(c: &'a Connection) -> rusqlite::Result<Self> {
-        crate::instrumentation::transaction_started();
         if c.is_autocommit() {
-            Ok(Self::Root(crate::immediate(c)?))
+            let meter =
+                crate::instrumentation::TxMeter::start(crate::instrumentation::TxKind::Root);
+            let tx = crate::immediate(c)?;
+            Ok(Self::Root { tx, meter })
         } else {
+            let meter =
+                crate::instrumentation::TxMeter::start(crate::instrumentation::TxKind::Savepoint);
             let id = NEXT_SAVEPOINT_ID.fetch_add(1, Ordering::Relaxed);
             let name = format!("steve_sp_{id}");
             c.execute_batch(&format!("SAVEPOINT {name}"))?;
@@ -74,16 +83,26 @@ impl<'a> WriteTx<'a> {
                 c,
                 name,
                 committed: false,
+                meter,
             }))
         }
     }
 
     pub(crate) fn commit(self) -> rusqlite::Result<()> {
         match self {
-            Self::Root(tx) => tx.commit(),
+            Self::Root { tx, meter } => {
+                tx.commit()?;
+                if let Some(m) = meter {
+                    m.commit();
+                }
+                Ok(())
+            }
             Self::Savepoint(mut sp) => {
                 sp.c.execute_batch(&format!("RELEASE SAVEPOINT {}", sp.name))?;
                 sp.committed = true;
+                if let Some(m) = sp.meter.take() {
+                    m.commit();
+                }
                 Ok(())
             }
         }
@@ -93,7 +112,7 @@ impl<'a> WriteTx<'a> {
 impl WriteTx<'_> {
     pub(crate) fn connection(&self) -> &Connection {
         match self {
-            Self::Root(tx) => tx,
+            Self::Root { tx, .. } => tx,
             Self::Savepoint(sp) => sp.c,
         }
     }
@@ -102,6 +121,7 @@ impl WriteTx<'_> {
 struct BackendWrite<'a> {
     db: &'a mut dyn Backend,
     committed: bool,
+    meter: Option<crate::instrumentation::TxMeter>,
 }
 
 impl Drop for BackendWrite<'_> {
@@ -109,6 +129,7 @@ impl Drop for BackendWrite<'_> {
         if !self.committed {
             let _ = self.db.batch("ROLLBACK");
         }
+        drop(self.meter.take());
     }
 }
 
@@ -132,6 +153,7 @@ impl Drop for RootScopeGuard {
 pub(crate) struct Scope {
     name: String,
     frame: NestedFrameGuard,
+    meter: Option<crate::instrumentation::TxMeter>,
 }
 
 struct NestedFrameGuard {
@@ -263,7 +285,8 @@ impl Store {
 
     /// Opens a nested scope on the active write: a `SAVEPOINT` and a staging frame of its own.
     pub(crate) fn open_scope(&self, db: &mut dyn Backend) -> Result<Scope, StoreError> {
-        crate::instrumentation::transaction_started();
+        let meter =
+            crate::instrumentation::TxMeter::start(crate::instrumentation::TxKind::Savepoint);
         let name = format!(
             "steve_sp_{}",
             NEXT_SAVEPOINT_ID.fetch_add(1, Ordering::Relaxed)
@@ -284,6 +307,7 @@ impl Store {
                 store_id,
                 armed: true,
             },
+            meter,
         })
     }
 
@@ -296,13 +320,17 @@ impl Store {
         scope: Scope,
         out: Result<T, E>,
     ) -> Result<T, E> {
-        let Scope { name, frame } = scope;
+        let Scope { name, frame, meter } = scope;
         if out.is_ok() {
             if let Err(e) = db.batch(&format!("RELEASE SAVEPOINT {name}")) {
                 let _ = db.batch(&format!(
                     "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
                 ));
+                drop(meter);
                 return Err(e.into());
+            }
+            if let Some(m) = meter {
+                m.commit();
             }
             let child = frame.take();
             let store_id = self.inner_id();
@@ -321,10 +349,13 @@ impl Store {
             return out;
         }
         drop(frame);
-        db.batch(&format!(
-            "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
-        ))
-        .map_err(|e| StoreError::Storage(format!("rolling back a scope: {e}")))?;
+        let rollback = db
+            .batch(&format!(
+                "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
+            ))
+            .map_err(|e| StoreError::Storage(format!("rolling back a scope: {e}")));
+        drop(meter);
+        rollback?;
         out
     }
 
@@ -348,7 +379,7 @@ impl Store {
         f: impl FnOnce(&Connection, &mut dyn Backend) -> Result<T, E>,
     ) -> Result<T, E> {
         let store_id = self.inner_id();
-        crate::instrumentation::transaction_started();
+        let meter = crate::instrumentation::TxMeter::start(crate::instrumentation::TxKind::Root);
         db.begin_write()?;
         ACTIVE_WRITES.with(|cell| {
             cell.borrow_mut().push((
@@ -363,10 +394,14 @@ impl Store {
         let mut write = BackendWrite {
             db,
             committed: false,
+            meter,
         };
         let out = f(c, write.db)?;
         write.db.batch("COMMIT")?;
         write.committed = true;
+        if let Some(m) = write.meter.take() {
+            m.commit();
+        }
         let staged = ACTIVE_WRITES.with(|cell| {
             let mut list = cell.borrow_mut();
             let pos = list
@@ -401,10 +436,9 @@ impl Store {
             return f(c);
         }
         if let Some(c) = self.active_snapshot() {
-            return f(&c);
+            return f(c.conn());
         }
-        let c = self.inner.readers.get().map_err(StoreError::from)?;
-        crate::instrumentation::store_acquired();
-        f(&c)
+        let c = self.acquire_reader()?;
+        f(c.conn())
     }
 }

@@ -20,7 +20,7 @@ pub mod session;
 pub mod wire;
 
 pub use feed::{CURSOR, ExtWsHook};
-pub use provider::{ExtWs, ME, Me, PIN, REALM, TOKEN, URL};
+pub use provider::{ExtWs, ME, Me, PIN, PLUGIN_ID, REALM, TOKEN, URL};
 pub use session::Timing;
 
 use crate::channel::ChannelFeatures;

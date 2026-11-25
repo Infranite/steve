@@ -53,6 +53,7 @@ function client(status, body) {
     if (id === "@/i18n") return ui
     if (id === "./i18n/reason.ts") return { reasonText }
     if (id === "./stream-cursor") return {}
+    if (id === "./perf") return { recordSseReconnect: () => {} }
     if (id === "./hub") return { hubUrl: path => path }
     throw new Error(id)
   }, fetch: async () => ({ ok: false, status, headers: { get: k => k === "content-type" ? "application/json" : null }, json: async () => body }) })

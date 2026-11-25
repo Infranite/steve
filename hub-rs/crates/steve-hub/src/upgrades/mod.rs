@@ -234,20 +234,31 @@ pub fn available(cfg: &Config) -> Option<String> {
 /// Checks for a newer release shortly after start and then every six hours, so the page can say so
 /// without anyone opening Settings. Off in debug builds unless STEVE_UPDATE_CHECK=1; STEVE_UPDATE_CHECK=0
 /// turns it off. Uses the same cache and lock as a check from the page.
-pub async fn run_auto_check(cfg: Config) {
+pub fn auto_check_task(cfg: Config) -> steve_runtime::Task {
     let on = match std::env::var("STEVE_UPDATE_CHECK").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
         _ => !cfg!(debug_assertions),
     };
     if !on {
-        return;
+        return steve_runtime::spawn("upgrades.check", async {});
     }
-    tokio::time::sleep(Duration::from_secs(30)).await;
-    loop {
-        check_release(&cfg).await;
-        tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
-    }
+    steve_runtime::every_after(
+        "upgrades.check",
+        std::sync::Arc::new(steve_runtime::SystemClock),
+        Duration::from_secs(6 * 3600),
+        steve_runtime::FirstRun::After(Duration::from_secs(30)),
+        move || {
+            let cfg = cfg.clone();
+            async move {
+                check_release(&cfg).await;
+            }
+        },
+    )
+}
+
+pub async fn run_auto_check(cfg: Config) {
+    auto_check_task(cfg).await;
 }
 
 async fn check_release(cfg: &Config) {

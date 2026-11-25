@@ -522,6 +522,21 @@ enum Exit {
     Failed(WsError),
 }
 
+fn record_feishu_ws(result: &'static str) {
+    thread_local! {
+        static CONNS: std::cell::RefCell<HashMap<&'static str, metrics::Counter>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    CONNS.with(|c| {
+        c.borrow_mut()
+            .entry(result)
+            .or_insert_with(
+                || metrics::counter!("steve_feishu_ws_connections_total", "result" => result),
+            )
+            .increment(1);
+    });
+}
+
 impl<H: WsHandler> Inner<H> {
     fn config(&self) -> ClientConfig {
         *self.config.lock().unwrap_or_else(|e| e.into_inner())
@@ -534,11 +549,18 @@ impl<H: WsHandler> Inner<H> {
     /// `runCoordinator`.
     async fn run(self: Arc<Self>, stop: CancellationToken) -> Result<(), WsError> {
         let mut conn = match self.establish().await {
-            Ok(c) => c,
+            Ok(c) => {
+                record_feishu_ws("connected");
+                c
+            }
             Err(e) => {
+                record_feishu_ws("failed");
                 tracing::warn!(error = %e, "feishu ws: initial connection failed");
                 match self.reconnect(e, &stop).await? {
-                    Some(c) => c,
+                    Some(c) => {
+                        record_feishu_ws("reconnected");
+                        c
+                    }
                     None => return Ok(()),
                 }
             }
@@ -547,9 +569,13 @@ impl<H: WsHandler> Inner<H> {
             match self.serve(conn, &stop).await {
                 Exit::Stopped => return Ok(()),
                 Exit::Failed(e) => {
+                    record_feishu_ws("disconnected");
                     tracing::warn!(error = %e, "feishu ws: connection failed");
                     conn = match self.reconnect(e, &stop).await? {
-                        Some(c) => c,
+                        Some(c) => {
+                            record_feishu_ws("reconnected");
+                            c
+                        }
                         None => return Ok(()),
                     };
                 }

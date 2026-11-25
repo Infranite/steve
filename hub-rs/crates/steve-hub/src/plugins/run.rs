@@ -49,6 +49,7 @@ pub struct Spec {
 }
 
 struct Proc {
+    plugin: String,
     stop: CancellationToken,
     status: Arc<Mutex<Status>>,
     task: tokio::task::JoinHandle<()>,
@@ -206,8 +207,28 @@ impl Runner {
         let stop = CancellationToken::new();
         let status = Arc::new(Mutex::new(Status::Starting));
         let id = spec.id.clone();
+        let plugin = spec.plugin.clone();
         let task = tokio::spawn(supervise(spec, stop.clone(), status.clone()));
-        procs.insert(id, Proc { stop, status, task });
+        procs.insert(
+            id,
+            Proc {
+                plugin,
+                stop,
+                status,
+                task,
+            },
+        );
+    }
+
+    /// Running `(plugin_id, pid)` pairs for process resource sampling.
+    pub fn running_pids(&self) -> Vec<(String, u32)> {
+        lock(&self.procs)
+            .values()
+            .filter_map(|p| match *lock(&p.status) {
+                Status::Running { pid } if pid > 0 => Some((p.plugin.clone(), pid)),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn status(&self, id: &str) -> Status {

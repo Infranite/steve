@@ -522,25 +522,120 @@ impl FeishuClient {
         query: &[(&str, &str)],
         body: Option<&Value>,
     ) -> Result<Value, FeishuError> {
+        let started = std::time::Instant::now();
+        let endpoint = feishu_endpoint_label(path);
         let url = format!("{}{path}", self.base);
-        guard_url(&url).map_err(|e| FeishuError::HostForbidden(e.to_string()))?;
-        let mut req = self
-            .http
-            .request(method.clone(), url)
-            .header(reqwest::header::AUTHORIZATION, bearer)
-            .timeout(TIMEOUT);
-        if !query.is_empty() {
-            req = req.query(query);
-        }
-        if let Some(b) = body {
-            req = req.json(b);
-        }
-        let res = req
-            .send()
-            .await
-            .map_err(|e| FeishuError::Network(short(&e)))?;
-        read_answer(res).await
+        let outcome = match guard_url(&url) {
+            Err(e) => Err(FeishuError::HostForbidden(e.to_string())),
+            Ok(()) => {
+                let mut req = self
+                    .http
+                    .request(method.clone(), url)
+                    .header(reqwest::header::AUTHORIZATION, bearer)
+                    .timeout(TIMEOUT);
+                if !query.is_empty() {
+                    req = req.query(query);
+                }
+                if let Some(b) = body {
+                    req = req.json(b);
+                }
+                match req.send().await {
+                    Ok(res) => read_answer(res).await,
+                    Err(e) => Err(FeishuError::Network(short(&e))),
+                }
+            }
+        };
+        record_feishu_api(
+            endpoint,
+            feishu_result_label(&outcome),
+            started.elapsed().as_secs_f64(),
+        );
+        outcome
     }
+}
+
+/// Maps a Feishu Open API path to a bounded endpoint label (never entity IDs).
+pub(crate) fn feishu_endpoint_label(path: &str) -> &'static str {
+    let p = path.split('?').next().unwrap_or(path);
+    if p.starts_with("/open-apis/im/v1/messages") {
+        if p.ends_with("/reply") {
+            "messages.reply"
+        } else if p.contains("/reactions") {
+            "messages.reactions"
+        } else if p.contains("/resources") {
+            "messages.resources"
+        } else {
+            "messages"
+        }
+    } else if p.starts_with("/open-apis/im/v1/chats") {
+        "chats"
+    } else if p.starts_with("/open-apis/im/v1/images") || p.starts_with("/open-apis/im/v1/files") {
+        "media"
+    } else if p.starts_with("/open-apis/contact/") {
+        "contact"
+    } else if p.starts_with("/open-apis/auth/") {
+        "auth"
+    } else if p.starts_with("/open-apis/authen/") {
+        "authen"
+    } else if p.starts_with("/open-apis/calendar/") {
+        "calendar"
+    } else if p.starts_with("/open-apis/drive/") || p.starts_with("/open-apis/docx/") {
+        "drive"
+    } else if p.starts_with("/open-apis/bot/") {
+        "bot"
+    } else {
+        "other"
+    }
+}
+
+pub(crate) fn feishu_error_label(e: &FeishuError) -> &'static str {
+    match e {
+        FeishuError::TokenInvalid { .. } => "token_invalid",
+        FeishuError::NoScope { .. } => "no_scope",
+        FeishuError::RateLimited { .. } => "rate_limited",
+        FeishuError::Server(_) => "server",
+        FeishuError::Network(_) => "network",
+        FeishuError::Decode => "decode",
+        FeishuError::HostForbidden(_) => "forbidden",
+        FeishuError::Api { .. } => "api",
+        FeishuError::Token(_) => "token",
+    }
+}
+
+fn feishu_result_label<T>(r: &Result<T, FeishuError>) -> &'static str {
+    match r {
+        Ok(_) => "ok",
+        Err(e) => feishu_error_label(e),
+    }
+}
+
+fn record_feishu_api(endpoint: &'static str, result: &'static str, elapsed_secs: f64) {
+    thread_local! {
+        static REQS: std::cell::RefCell<std::collections::HashMap<(&'static str, &'static str), metrics::Counter>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+        static DURS: std::cell::RefCell<std::collections::HashMap<&'static str, metrics::Histogram>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    REQS.with(|c| {
+        c.borrow_mut()
+            .entry((endpoint, result))
+            .or_insert_with(|| {
+                metrics::counter!(
+                    "steve_feishu_api_requests_total",
+                    "endpoint" => endpoint,
+                    "result" => result
+                )
+            })
+            .increment(1);
+    });
+    DURS.with(|c| {
+        c.borrow_mut()
+            .entry(endpoint)
+            .or_insert_with(
+                || metrics::histogram!("steve_feishu_api_duration_seconds", "endpoint" => endpoint),
+            )
+            .record(elapsed_secs);
+    });
 }
 
 /// Classifies an answer: `code == 0` and 2xx → the object; errors by code, then by status.
@@ -859,5 +954,31 @@ mod tests {
             }),
             ProviderError::Rejected(_)
         ));
+    }
+
+    #[test]
+    fn endpoint_labels_are_bounded() {
+        assert_eq!(
+            feishu_endpoint_label("/open-apis/im/v1/messages/om_123/reply?x=1"),
+            "messages.reply"
+        );
+        assert_eq!(
+            feishu_endpoint_label("/open-apis/im/v1/messages/om_123/reactions"),
+            "messages.reactions"
+        );
+        assert_eq!(
+            feishu_endpoint_label("/open-apis/im/v1/messages/om_123/resources/img_1"),
+            "messages.resources"
+        );
+        assert_eq!(
+            feishu_endpoint_label("/open-apis/im/v1/messages?receive_id_type=chat_id"),
+            "messages"
+        );
+        assert_eq!(
+            feishu_endpoint_label("/open-apis/im/v1/chats/oc_1"),
+            "chats"
+        );
+        assert_eq!(feishu_endpoint_label("/open-apis/bot/v3/info"), "bot");
+        assert_eq!(feishu_endpoint_label("/open-apis/unknown/v1/foo"), "other");
     }
 }

@@ -36,6 +36,81 @@ use steve_store::{
     Read, StoreError, accounts::Accounts, connections::Connections, parties::Parties,
 };
 
+/// Bounded calendar source label for metrics.
+fn calendar_source_label(adapter: &str) -> &'static str {
+    match adapter {
+        "ics" => "ics",
+        "demo" => "demo",
+        "ext_ws" => "ext_ws",
+        "ext_ws.bot" => "ext_ws.bot",
+        _ => "other",
+    }
+}
+
+fn record_calendar_sync(
+    source: &'static str,
+    result: &'static str,
+    elapsed_secs: f64,
+    changed: usize,
+    deleted: usize,
+) {
+    thread_local! {
+        static SYNC_TOTAL: std::cell::RefCell<HashMap<(&'static str, &'static str), metrics::Counter>> =
+            std::cell::RefCell::new(HashMap::new());
+        static SYNC_DURATION: std::cell::RefCell<HashMap<&'static str, metrics::Histogram>> =
+            std::cell::RefCell::new(HashMap::new());
+        static EVENTS_SYNCED: std::cell::RefCell<HashMap<(&'static str, &'static str), metrics::Counter>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    SYNC_TOTAL.with(|c| {
+        c.borrow_mut()
+            .entry((source, result))
+            .or_insert_with(|| {
+                metrics::counter!(
+                    "steve_calendar_sync_total",
+                    "source" => source,
+                    "result" => result
+                )
+            })
+            .increment(1);
+    });
+    SYNC_DURATION.with(|c| {
+        c.borrow_mut()
+            .entry(source)
+            .or_insert_with(
+                || metrics::histogram!("steve_calendar_sync_duration_seconds", "source" => source),
+            )
+            .record(elapsed_secs);
+    });
+    if changed > 0 || deleted > 0 {
+        EVENTS_SYNCED.with(|c| {
+            let mut c = c.borrow_mut();
+            if changed > 0 {
+                c.entry((source, "changed"))
+                    .or_insert_with(|| {
+                        metrics::counter!(
+                            "steve_calendar_events_synced_total",
+                            "source" => source,
+                            "op" => "changed"
+                        )
+                    })
+                    .increment(changed as u64);
+            }
+            if deleted > 0 {
+                c.entry((source, "deleted"))
+                    .or_insert_with(|| {
+                        metrics::counter!(
+                            "steve_calendar_events_synced_total",
+                            "source" => source,
+                            "op" => "deleted"
+                        )
+                    })
+                    .increment(deleted as u64);
+            }
+        });
+    }
+}
+
 /// Text kept of an event: title and place, the description's start.
 const TITLE_MAX: usize = 500;
 const EXCERPT_MAX: usize = 500;
@@ -454,6 +529,8 @@ impl Calendar {
         let src = self
             .source(cx.adapter())
             .expect("is_source checked the adapter");
+        let source_label = calendar_source_label(cx.adapter());
+        let started = std::time::Instant::now();
         let mut report = SyncReport {
             source: true,
             ..Default::default()
@@ -474,6 +551,7 @@ impl Calendar {
                 })?;
                 cx.report(health(&e)).await;
                 report.errors.push((String::new(), msg));
+                record_calendar_sync(source_label, "error", started.elapsed().as_secs_f64(), 0, 0);
                 return Ok(report);
             }
         };
@@ -542,6 +620,18 @@ impl Calendar {
         if let Err(e) = self.connections().touch_sync(ws, conn) {
             tracing::debug!(connection = conn, "last sync not recorded: {e}");
         }
+        let result = if report.errors.is_empty() {
+            "ok"
+        } else {
+            "partial"
+        };
+        record_calendar_sync(
+            source_label,
+            result,
+            started.elapsed().as_secs_f64(),
+            report.changed,
+            report.deleted,
+        );
         Ok(report)
     }
 
@@ -821,12 +911,24 @@ impl Calendar {
     /// The background job: every connection of a source adapter, each when it is due; failures
     /// wait longer each time, up to [`crate::Settings::backoff_max_ms`].
     pub async fn run(self) {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            self.tick().await;
-        }
+        self.task().await;
+    }
+
+    /// The background job as a supervised periodic [`steve_runtime::Task`].
+    pub fn task(self) -> steve_runtime::Task {
+        let clock = self.0.m.clock.clone();
+        steve_runtime::every(
+            "calendar.sync",
+            clock,
+            std::time::Duration::from_secs(60),
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let cal = self.clone();
+                async move {
+                    cal.tick().await;
+                }
+            },
+        )
     }
 
     /// One round of [`Calendar::run`]: syncs the connections that are due.

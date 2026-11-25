@@ -16,30 +16,50 @@ use crate::metrics::{
     nodes::{ASK, EVERY, Observation},
 };
 
+pub fn task(
+    store: Store,
+    local: Option<Arc<dyn Node>>,
+    svc: Option<Arc<NodeService>>,
+    low: u64,
+) -> steve_runtime::Task {
+    let warned = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+    steve_runtime::every(
+        "nodes.vitals",
+        Arc::new(steve_runtime::SystemClock),
+        EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let store = store.clone();
+            let local = local.clone();
+            let svc = svc.clone();
+            let warned = warned.clone();
+            async move {
+                let sample_store = store.clone();
+                let approval = tokio::task::spawn_blocking(move || {
+                    sample_store.read(|r| steve_store::statistics::approval::applied_sessions(r))
+                })
+                .await;
+                if let Ok(Ok(n)) = approval {
+                    ::metrics::gauge!("steve_approval_auto_sessions").set(n as f64);
+                }
+                sample_once(local.as_ref(), svc.as_ref()).await;
+                if svc.is_some() {
+                    let mut guard = warned.lock().await;
+                    let prev = std::mem::take(&mut *guard);
+                    *guard = warn_low_disks(store, prev, low).await;
+                }
+            }
+        },
+    )
+}
+
 pub async fn sample(
     store: Store,
     local: Option<Arc<dyn Node>>,
     svc: Option<Arc<NodeService>>,
     low: u64,
 ) {
-    let mut warned = HashSet::new();
-    let mut tick = tokio::time::interval(EVERY);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tick.tick().await;
-        let sample_store = store.clone();
-        let approval = tokio::task::spawn_blocking(move || {
-            sample_store.read(|r| steve_store::statistics::approval::applied_sessions(r))
-        })
-        .await;
-        if let Ok(Ok(n)) = approval {
-            ::metrics::gauge!("steve_approval_auto_sessions").set(n as f64);
-        }
-        sample_once(local.as_ref(), svc.as_ref()).await;
-        if svc.is_some() {
-            warned = warn_low_disks(store.clone(), warned, low).await;
-        }
-    }
+    task(store, local, svc, low).await;
 }
 
 /// Ask in parallel, then capture the recorder's minute snapshot.

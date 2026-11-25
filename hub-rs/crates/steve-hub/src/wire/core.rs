@@ -902,12 +902,10 @@ impl Domain for CoreDomain {
                 .clone()
                 .run_housekeeping(Arc::new(steve_runtime::SystemClock))
         });
-        self.jobs.start("core.workspaces", || {
-            steve_runtime::spawn("core.workspaces", self.core.clone().run_workspace_watch())
-        });
-        self.jobs.start("core.stalls", || {
-            steve_runtime::spawn("core.stalls", self.core.clone().run_stall_watch())
-        });
+        self.jobs
+            .start("core.workspaces", || self.core.clone().watch_workspaces());
+        self.jobs
+            .start("core.stalls", || self.core.clone().watch_stalls());
     }
 
     async fn create_item(&self, p: CreateItem) -> Result<Obj, crate::error::ApiError> {

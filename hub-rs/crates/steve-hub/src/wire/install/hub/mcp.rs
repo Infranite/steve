@@ -39,33 +39,37 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
     }
     // work waiting for a device that stays away goes on elsewhere (B5)
     if let Some(svc) = &nodes {
-        jobs.push(Job::new("nodes.handover", crate::nodes::handover::run(
-            svc.clone(),
-            core.clone(),
-            crate::nodes::handover::minutes(|k| vars(k)),
-        )));
+        let svc = svc.clone();
+        let core = core.clone();
+        let mins = crate::nodes::handover::minutes(|k| vars(k));
+        jobs.push(Job::task("nodes.handover", move || {
+            crate::nodes::handover::task(svc, core, mins)
+        }));
     }
     let local_node = model_node.as_ref().map(|h| h.node.clone());
     // how each machine is doing, for the devices page (B3)
-    jobs.push(Job::new("nodes.vitals", crate::nodes::vitals::sample(
-        db.clone(),
-        local_node
+    {
+        let db = db.clone();
+        let local_for_vitals = local_node
             .clone()
-            .map(|n| n as Arc<dyn steve_node_api::Node>),
-        nodes.clone(),
-        cfg.disk.low,
-    )));
-    jobs.push(Job::new(
-        "nodes.harness_auto_upgrade",
-        crate::api::harness_updates::run_auto_upgrade_loop(
-            db.clone(),
-            local_node
-                .clone()
-                .map(|n| n as Arc<dyn steve_node_api::Node>),
-            nodes.clone(),
-            cx.bus.clone(),
-        ),
-    ));
+            .map(|n| n as Arc<dyn steve_node_api::Node>);
+        let nodes = nodes.clone();
+        let low = cfg.disk.low;
+        jobs.push(Job::task("nodes.vitals", move || {
+            crate::nodes::vitals::task(db, local_for_vitals, nodes, low)
+        }));
+    }
+    {
+        let db = db.clone();
+        let local_for_upgrades = local_node
+            .clone()
+            .map(|n| n as Arc<dyn steve_node_api::Node>);
+        let nodes = nodes.clone();
+        let bus = cx.bus.clone();
+        jobs.push(Job::task("nodes.harness_auto_upgrade", move || {
+            crate::api::harness_updates::auto_upgrade_task(db, local_for_upgrades, nodes, bus)
+        }));
+    }
     // Health's Node rollout switch describes agent-session routing, including its rollback.
     // The model-job host still participates in domain shutdown regardless of that switch.
     let local_runtime = node_host.as_ref().map(|h| h.runtime.clone());

@@ -166,6 +166,7 @@ impl NodeService {
         if let Some(rt) = self.fleet.runtime_for(id) {
             rt.set_paused(true);
         }
+        crate::metrics::remove_node(id);
     }
 
     pub fn new(

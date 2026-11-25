@@ -176,9 +176,12 @@ pub(crate) fn host(
         "node.service.runtime",
         async move { rt.start() },
     ));
-    jobs.push(crate::wire::modules::Job::new(
+    let svc_for_supervise = svc.clone();
+    let rt_for_supervise = runtime.clone();
+    let cfg_version = cfg.version.clone();
+    jobs.push(crate::wire::modules::Job::task(
         "node.service.supervise",
-        keep_running(home, svc.clone(), runtime.clone(), cfg.version.clone()),
+        move || keep_running_task(home, svc_for_supervise, rt_for_supervise, cfg_version),
     ));
     Ok(ServiceHost {
         runtime,
@@ -215,51 +218,64 @@ fn read_service(home: &Path) -> (Option<u32>, Option<String>) {
 }
 
 /// Starts the Node's process when none runs, and replaces one of another build once it is idle.
-async fn keep_running(
+fn keep_running_task(
     home: PathBuf,
     svc: Arc<crate::nodes::NodeService>,
     runtime: Arc<NodeRuntime>,
     version: String,
-) {
-    // a moment for a Node still running from before this Hub to link again
-    tokio::time::sleep(Duration::from_secs(3)).await;
+) -> steve_runtime::Task {
     let node_id = NodeId::new(NODE_ID).expect("constant node id");
-    loop {
-        let linked = svc.registry.current(NODE_ID).is_some();
-        let (pid, built) = read_service(&home);
-        let pid = pid.filter(|p| pid_alive(*p));
-        if !linked && pid.is_none() {
-            if let Err(e) = spawn(&home) {
-                tracing::error!("starting the local Node: {e}");
+    // a moment for a Node still running from before this Hub to link again
+    steve_runtime::every_after(
+        "node.service.supervise",
+        Arc::new(steve_runtime::SystemClock),
+        Duration::from_secs(10),
+        steve_runtime::FirstRun::After(Duration::from_secs(3)),
+        move || {
+            let (home, svc, runtime, version, node_id) = (
+                home.clone(),
+                svc.clone(),
+                runtime.clone(),
+                version.clone(),
+                node_id.clone(),
+            );
+            async move {
+                let linked = svc.registry.current(NODE_ID).is_some();
+                let (pid, built) = read_service(&home);
+                let pid = pid.filter(|p| pid_alive(*p));
+                if !linked && pid.is_none() {
+                    if let Err(e) = spawn(&home) {
+                        tracing::error!("starting the local Node: {e}");
+                    }
+                } else if !linked
+                    && let Some(pid) = pid
+                    && built.as_deref() != Some(version.as_str())
+                {
+                    // A Node of another build cannot link to this Hub once their protocols differ, so
+                    // waiting for it to link first would leave it running forever.
+                    tracing::info!(
+                        "the local Node runs {}, this Hub {version}, and it is not linked: restarting it",
+                        built.as_deref().unwrap_or("an unknown build")
+                    );
+                    // SAFETY: a plain signal to the Node's process, which shuts down as on Ctrl-C
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                } else if linked
+                    && runtime.running_turns() == 0
+                    && let Some(pid) = pid
+                    && let Ok(caps) = svc.fleet.remote(&node_id).probe(false).await
+                    && !caps.version.is_empty()
+                    && caps.version != version
+                {
+                    tracing::info!(
+                        "the local Node runs {}, this Hub {version}: restarting it while it is idle",
+                        caps.version
+                    );
+                    // SAFETY: a plain signal to the Node's process, which shuts down as on Ctrl-C
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                }
             }
-        } else if !linked
-            && let Some(pid) = pid
-            && built.as_deref() != Some(version.as_str())
-        {
-            // A Node of another build cannot link to this Hub once their protocols differ, so
-            // waiting for it to link first would leave it running forever.
-            tracing::info!(
-                "the local Node runs {}, this Hub {version}, and it is not linked: restarting it",
-                built.as_deref().unwrap_or("an unknown build")
-            );
-            // SAFETY: a plain signal to the Node's process, which shuts down as on Ctrl-C
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-        } else if linked
-            && runtime.running_turns() == 0
-            && let Some(pid) = pid
-            && let Ok(caps) = svc.fleet.remote(&node_id).probe(false).await
-            && !caps.version.is_empty()
-            && caps.version != version
-        {
-            tracing::info!(
-                "the local Node runs {}, this Hub {version}: restarting it while it is idle",
-                caps.version
-            );
-            // SAFETY: a plain signal to the Node's process, which shuts down as on Ctrl-C
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-        }
-        tokio::time::sleep(Duration::from_secs(10)).await;
-    }
+        },
+    )
 }
 
 /// `steve-hub --local-node`, detached from the Hub: its own session, and its own systemd scope

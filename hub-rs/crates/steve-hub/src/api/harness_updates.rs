@@ -935,21 +935,29 @@ pub fn select_auto_upgrades(
     out
 }
 
-/// Periodic Hub background loop: evaluates Nodes that have auto-upgrade enabled (Node-level or
+/// Periodic Hub background task: evaluates Nodes that have auto-upgrade enabled (Node-level or
 /// per-harness) and triggers idle upgrades through the exact same durable operation path.
-pub async fn run_auto_upgrade_loop(
+pub fn auto_upgrade_task(
     store: Store,
     local: Option<Arc<dyn na::Node>>,
     svc: Option<Arc<NodeService>>,
     bus: Bus,
-) {
-    tokio::time::sleep(AUTO_UPGRADE_INITIAL_DELAY).await;
-    let mut tick = tokio::time::interval(AUTO_UPGRADE_POLL_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tick.tick().await;
-        run_auto_upgrade_pass(&store, local.as_ref(), svc.as_ref(), Some(&bus)).await;
-    }
+) -> steve_runtime::Task {
+    steve_runtime::every(
+        "nodes.harness_auto_upgrade",
+        Arc::new(steve_runtime::SystemClock),
+        AUTO_UPGRADE_POLL_INTERVAL,
+        steve_runtime::FirstRun::After(AUTO_UPGRADE_INITIAL_DELAY),
+        move || {
+            let store = store.clone();
+            let local = local.clone();
+            let svc = svc.clone();
+            let bus = bus.clone();
+            async move {
+                run_auto_upgrade_pass(&store, local.as_ref(), svc.as_ref(), Some(&bus)).await;
+            }
+        },
+    )
 }
 
 /// Execute one auto-upgrade evaluation pass across all reachable owner Nodes.
