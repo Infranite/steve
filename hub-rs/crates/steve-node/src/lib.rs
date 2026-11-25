@@ -308,8 +308,9 @@ impl HomeLock {
     }
 
     fn take_retry(home: &Path, mut again: impl FnMut() -> bool) -> ApiResult<HomeLock> {
+        use std::io::{Seek, SeekFrom, Write};
         use std::os::fd::AsRawFd;
-        let f = std::fs::OpenOptions::new()
+        let mut f = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
@@ -326,6 +327,12 @@ impl HomeLock {
                 return Err(Error::new(Code::Conflict, "another node runs on this home"));
             }
         }
+        // Record the lock owner's PID while holding the exclusive lock so diagnostics
+        // (such as `steve node enable-boot`) can identify the holder even without `lsof`.
+        if f.set_len(0).is_ok() && f.seek(SeekFrom::Start(0)).is_ok() {
+            let _ = writeln!(f, "{}", std::process::id());
+            let _ = f.flush();
+        }
         Ok(HomeLock(f))
     }
 }
@@ -333,6 +340,8 @@ impl HomeLock {
 impl Drop for HomeLock {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;
+        // Clear the PID while still holding the exclusive lock so clean exits never leave a stale PID.
+        let _ = self.0.set_len(0);
         // CLOEXEC prevents inheritance after exec, but another thread may currently be
         // between fork and exec. Closing only our descriptor would leave that child holding
         // the same flock. The last Node owner has quiesced: release its lock explicitly,
@@ -349,6 +358,12 @@ mod home_lock_tests {
     fn a_live_holder_is_refused_and_a_short_inherited_descriptor_does_not_break_restart() {
         let dir = tempfile::tempdir().unwrap();
         let lease = HomeLock::take(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("node.lock"))
+                .unwrap()
+                .trim(),
+            std::process::id().to_string()
+        );
         assert!(matches!(
             HomeLock::take(dir.path()),
             Err(Error {
@@ -360,6 +375,11 @@ mod home_lock_tests {
         // boundary (exec's CLOEXEC), without relying on a child being scheduled within 200 ms.
         let mut inherited = Some(lease.0.try_clone().unwrap());
         drop(lease);
+        assert!(
+            std::fs::read_to_string(dir.path().join("node.lock"))
+                .unwrap()
+                .is_empty()
+        );
         let until = std::time::Instant::now() + Duration::from_secs(5);
         let next = HomeLock::take_retry(dir.path(), || {
             drop(inherited.take());

@@ -10,6 +10,51 @@ use steve_types::devices::NODE_BOOT_SERVICE_ENV;
 // attribute the Node and its ordinary children to the same responsible code.
 pub(super) const RUNNER: &str = "services/node-boot-runner";
 const RUNNER_ARG: &str = "__node-boot-run";
+const LOCK_PID_READ_LIMIT: usize = 64;
+#[cfg(target_os = "macos")]
+const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
+
+fn parse_lock_pid(raw: &str) -> Option<u32> {
+    let pid = raw.trim().parse::<u32>().ok()?;
+    (pid > 1 && pid != std::process::id()).then_some(pid)
+}
+
+#[cfg(target_os = "macos")]
+fn native_process_binary_path(pid: u32) -> Option<String> {
+    unsafe extern "C" {
+        fn proc_pidpath(
+            pid: libc::c_int,
+            buffer: *mut libc::c_void,
+            buffersize: u32,
+        ) -> libc::c_int;
+    }
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut buf = vec![0u8; PROC_PIDPATHINFO_MAXSIZE];
+    let len = unsafe {
+        proc_pidpath(
+            pid,
+            buf.as_mut_ptr().cast::<libc::c_void>(),
+            buf.len() as u32,
+        )
+    };
+    if len <= 0 {
+        return None;
+    }
+    let path = std::str::from_utf8(&buf[..len as usize]).ok()?.trim();
+    (!path.is_empty()).then(|| path.to_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn native_process_binary_path(pid: u32) -> Option<String> {
+    let path = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let text = path.to_str()?.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn native_process_binary_path(_pid: u32) -> Option<String> {
+    None
+}
 
 pub(super) trait NodeSigner: Send + Sync {
     fn ensure_identity(&self, home: &Path, label: &str) -> Result<NodeSigningIdentity>;
@@ -408,7 +453,22 @@ impl Service {
                 "finish uninstall before changing the registered Node"
             );
         }
-        let (release, info) = self.bundle(&release)?;
+        let (source, info) = self.bundle(&release)?;
+        let was_running = if installed {
+            self.check_owner()?;
+            if update {
+                self.state()?["running"] == true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let (release, info) = if update {
+            self.ensure_managed_release(&source, &info)?
+        } else {
+            (source, info)
+        };
         let identity = self.node_signing_identity()?;
         let requirement = identity.node_requirement();
         let runner = self.home.join(RUNNER);
@@ -472,14 +532,15 @@ impl Service {
             };
             self.write_boot_record(&release, &info, previous, requirement)?;
         }
+        let started = update && installed && was_running;
         Ok(
-            json!({"installed":installed,"prepared":true,"changed":!same,"started":false,
+            json!({"installed":installed,"prepared":true,"changed":!same,"started":started,
             "boot":if installed {"registered"} else {"enable_required"},
             "release":text(&release)?,"build":info}),
         )
     }
 
-    fn node_signing_identity(&self) -> Result<NodeSigningIdentity> {
+    pub(super) fn node_signing_identity(&self) -> Result<NodeSigningIdentity> {
         if let Some(pinned) = self.record["code_requirement"].as_str() {
             let identity = self.node_signer.load_identity(&self.home, &self.label)?;
             ensure!(
@@ -508,7 +569,7 @@ impl Service {
         Ok(())
     }
 
-    fn verify_release_signatures(
+    pub(super) fn verify_release_signatures(
         &self,
         release: &Path,
         identity: &NodeSigningIdentity,
@@ -729,7 +790,7 @@ impl Service {
             let register = self.boot_registrar.clone();
             register(&args, &mut || {
                 self.retire_agent(legacy.definition.as_deref())?;
-                self.wait_node_exit(15)?;
+                self.wait_node_exit(self.node_exit_wait)?;
                 if self.record["boot_release"].is_null()
                     || self.record["code_requirement"].as_str() != Some(requirement.as_str())
                 {
@@ -911,12 +972,14 @@ impl Service {
 
     // Bootout may finish before the old process has released the runtime lock.
     // Check the existing lock (never create, truncate or remove it).
-    fn wait_node_exit(&self, seconds: u64) -> Result<()> {
+    fn wait_node_exit(&self, timeout: Duration) -> Result<()> {
+        let lock_path = self.home.join("node/local/node.lock");
         let lock = OpenOptions::new()
+            .read(true)
             .write(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.home.join("node/local/node.lock"));
-        let lock = match lock {
+            .open(&lock_path);
+        let mut lock = match lock {
             Ok(lock) => lock,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e).context("inspect existing Node runtime lock"),
@@ -926,16 +989,28 @@ impl Service {
             meta.is_file() && meta.uid() == unsafe { libc::getuid() },
             "invalid Node runtime lock"
         );
-        let until = Instant::now() + Duration::from_secs(seconds);
+        let until = Instant::now() + timeout;
         loop {
             match lock.try_lock() {
                 Ok(()) => return lock.unlock().context("release existing Node runtime lock"),
                 Err(std::fs::TryLockError::WouldBlock) if Instant::now() < until => {
-                    std::thread::sleep(Duration::from_millis(200));
+                    std::thread::sleep(
+                        Duration::from_millis(200)
+                            .min(until.saturating_duration_since(Instant::now())),
+                    );
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
+                    let mut raw = [0u8; LOCK_PID_READ_LIMIT];
+                    let recorded_pid = lock
+                        .read(&mut raw)
+                        .ok()
+                        .and_then(|n| std::str::from_utf8(&raw[..n]).ok())
+                        .and_then(parse_lock_pid);
+                    // Close our descriptor before probing open-file holders so our own PID does not appear.
+                    drop(lock);
+                    let detail = self.describe_lock_holders(&lock_path, recorded_pid);
                     bail!(
-                        "a Node process still owns the runtime lock; stop it before starting the boot service"
+                        "a Node process still owns the runtime lock{detail}; stop it before starting the boot service"
                     );
                 }
                 Err(std::fs::TryLockError::Error(e)) => {
@@ -943,6 +1018,97 @@ impl Service {
                 }
             }
         }
+    }
+
+    fn describe_lock_holders(&self, lock_path: &Path, recorded_pid: Option<u32>) -> String {
+        let mut pids = self.lock_holder_pids_via_lsof(lock_path);
+        if pids.is_empty()
+            && let Some(pid) = recorded_pid
+        {
+            pids.push(pid);
+        }
+        if pids.is_empty() {
+            return String::new();
+        }
+        let holders: Vec<(u32, String)> = pids
+            .into_iter()
+            .map(|pid| {
+                let binary = self
+                    .process_binary_path(pid)
+                    .unwrap_or_else(|| "unknown".into());
+                (pid, binary)
+            })
+            .collect();
+        if holders.len() == 1 {
+            let (pid, binary) = &holders[0];
+            format!(" (pid {pid}, binary {binary})")
+        } else {
+            let items = holders
+                .iter()
+                .map(|(pid, binary)| format!("pid {pid} (binary {binary})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" ({items})")
+        }
+    }
+
+    fn lock_holder_pids_via_lsof(&self, lock_path: &Path) -> Vec<u32> {
+        let Ok(lock_text) = text(lock_path) else {
+            return Vec::new();
+        };
+        let lsof = if self.system == System::Darwin {
+            "/usr/sbin/lsof"
+        } else {
+            "lsof"
+        };
+        let Ok(out) = self.command(
+            vec![lsof.into(), "-t".into(), "--".into(), lock_text],
+            false,
+        ) else {
+            return Vec::new();
+        };
+        if out.code != 0 {
+            return Vec::new();
+        }
+        let self_pid = std::process::id();
+        let mut pids = Vec::new();
+        for line in out.stdout.lines() {
+            if let Ok(pid) = line.trim().parse::<u32>()
+                && pid > 1
+                && pid != self_pid
+                && !pids.contains(&pid)
+            {
+                pids.push(pid);
+            }
+        }
+        pids
+    }
+
+    fn process_binary_path(&self, pid: u32) -> Option<String> {
+        if let Some(path) = native_process_binary_path(pid) {
+            return Some(path);
+        }
+        let ps = if self.system == System::Darwin {
+            "/bin/ps"
+        } else {
+            "ps"
+        };
+        let out = self
+            .command(
+                vec![
+                    ps.into(),
+                    "-p".into(),
+                    pid.to_string(),
+                    "-o".into(),
+                    "comm=".into(),
+                ],
+                false,
+            )
+            .ok()?;
+        (out.code == 0)
+            .then(|| out.stdout.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
     }
 
     fn boot_action(&self, action: &str) -> Result<Value> {
@@ -975,11 +1141,11 @@ impl Service {
                 self.system_launchctl(&["bootout", &target])?;
             }
             self.wait_unloaded("system", &self.config, 15)?;
-            self.wait_node_exit(15)?;
+            self.wait_node_exit(self.node_exit_wait)?;
         }
         if matches!(action, "start" | "restart") {
             if action == "start" && state["loaded"] == false {
-                self.wait_node_exit(15)?;
+                self.wait_node_exit(self.node_exit_wait)?;
             }
             self.system_launchctl(&["enable", &target])?;
             if action == "restart" || state["loaded"] == false {

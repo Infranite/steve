@@ -175,6 +175,12 @@ impl Summary<'_> {
                 &t!("install.status.start"),
                 &t!("install.status.not_started"),
             );
+        } else if report["started"] == true {
+            line(
+                out,
+                &t!("install.status.label.process"),
+                &t!("install.status.running"),
+            );
         }
     }
 
@@ -322,7 +328,9 @@ impl Summary<'_> {
         } else if state["running"].is_null() && !matches!(action, "install" | "update") {
             NextStep::ReadLogs
         } else {
-            let next = if matches!(action, "install" | "update") || state["running"] == false {
+            let next = if (matches!(action, "install" | "update") && self.report["started"] != true)
+                || state["running"] == false
+            {
                 "start"
             } else {
                 "doctor"
@@ -500,8 +508,20 @@ mod tests {
                 "node",
                 "update",
                 json!({"installed":true,"changed":false,"started":false,"build":{"version":"1.2.4"}}),
-                vec!["已是目标配置", "已配置版本：1.2.4"],
+                vec!["已是目标配置", "已配置版本：1.2.4", "steve node start"],
                 vec!["运行版本：1.2.4"],
+            ),
+            (
+                "node",
+                "update",
+                json!({"installed":true,"changed":true,"started":true,"build":{"version":"1.2.5"}}),
+                vec![
+                    "服务配置：已更新",
+                    "服务进程：运行中",
+                    "已配置版本：1.2.5",
+                    "steve node doctor",
+                ],
+                vec!["本次操作未启动服务", "steve node start"],
             ),
             (
                 "hub",

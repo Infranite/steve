@@ -38,6 +38,10 @@ type Runner = Arc<dyn Fn(&[String]) -> Result<Output> + Send + Sync>;
 type BootRegistrar =
     Arc<dyn Fn(&[String], &mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync>;
 
+const MANAGED_RELEASE_COMMIT_PREFIX_LEN: usize = 8;
+const NODE_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+const LINUX_UPDATE_STOP_WAIT_MIN_SECS: u64 = 15;
+
 /// Manages only one OS user's registered Hub or Node service.
 pub struct Service {
     component: String,
@@ -53,6 +57,7 @@ pub struct Service {
     runner: Runner,
     boot_registrar: BootRegistrar,
     node_signer: Arc<dyn boot::NodeSigner>,
+    node_exit_wait: Duration,
 }
 
 /// An existing Hub installation that may have its configuration edited without
@@ -572,6 +577,7 @@ impl Service {
             runner,
             boot_registrar: Arc::new(boot::execute_register),
             node_signer: Arc::new(boot::LocalNodeSigner(crate::signing::Tools::default())),
+            node_exit_wait: NODE_EXIT_WAIT_TIMEOUT,
         })
     }
 
@@ -876,6 +882,192 @@ impl Service {
         Ok((release, info))
     }
 
+    fn managed_release_dir_name(info: &Value) -> Result<String> {
+        let version = info["version"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .context("release build metadata missing version")?;
+        let commit = info["commit"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .context("release build metadata missing commit")?;
+        let valid_token = |s: &str| {
+            !s.is_empty()
+                && s != "."
+                && s != ".."
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+'))
+        };
+        let short_commit: String = commit
+            .chars()
+            .take(MANAGED_RELEASE_COMMIT_PREFIX_LEN)
+            .collect();
+        ensure!(
+            valid_token(version) && valid_token(&short_commit),
+            "release version/commit contains unsafe path characters"
+        );
+        Ok(format!("{version}-{short_commit}"))
+    }
+
+    fn managed_release_matches_source(
+        &self,
+        dest: &Path,
+        expected_info: &Value,
+        source_files: &[(PathBuf, String)],
+    ) -> bool {
+        let Ok((dest_canon, dest_info)) = self.bundle(dest) else {
+            return false;
+        };
+        if dest_info != *expected_info {
+            return false;
+        }
+        let Ok(dest_paths) = crate::common::regular_tree(&dest_canon) else {
+            return false;
+        };
+        if dest_paths.len() != source_files.len() {
+            return false;
+        }
+        let signed_ok = self.boot_node()
+            && self.node_signing_identity().ok().is_some_and(|identity| {
+                self.verify_release_signatures(&dest_canon, &identity)
+                    .is_ok()
+            });
+        for (rel, expected_hash) in source_files {
+            let candidate = dest_canon.join(rel);
+            let Ok(actual_hash) = crate::common::digest(&candidate) else {
+                return false;
+            };
+            if actual_hash != *expected_hash {
+                let signed_binary = signed_ok
+                    && (rel == Path::new("bin/steve-node") || rel == Path::new("bin/steve"));
+                if !signed_binary {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Ensure an update release lives under `<home>/releases/<version>-<commit8>`, copying and
+    /// verifying external bundles before switching so deleting the extracted installer directory
+    /// cannot break the running service.
+    pub(super) fn ensure_managed_release(
+        &self,
+        source: &Path,
+        info: &Value,
+    ) -> Result<(PathBuf, Value)> {
+        let releases = self.home.join("releases");
+        fs::create_dir_all(&self.home)?;
+        directory(&releases)?;
+        let releases_canon = fs::canonicalize(&releases)?;
+        if source.parent() == Some(releases_canon.as_path()) {
+            return Ok((source.to_path_buf(), info.clone()));
+        }
+        let source_files = crate::common::regular_tree(source)?
+            .into_iter()
+            .map(|path| -> Result<(PathBuf, String)> {
+                let rel = path.strip_prefix(source)?.to_path_buf();
+                let hash = crate::common::digest(&path)?;
+                Ok((rel, hash))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let dir_name = Self::managed_release_dir_name(info)?;
+        let dest = releases_canon.join(&dir_name);
+        if exists(&dest) {
+            ensure!(
+                !fs::symlink_metadata(&dest)?.file_type().is_symlink(),
+                "managed release path cannot be a symlink: {}",
+                dest.display()
+            );
+            if self.managed_release_matches_source(&dest, info, &source_files) {
+                return self.bundle(&dest);
+            }
+        }
+
+        let staging = releases_canon.join(format!(".update-{}", Uuid::new_v4().simple()));
+        directory(&staging)?;
+        let copy_result = (|| -> Result<PathBuf> {
+            for (rel, expected_hash) in &source_files {
+                let src_file = source.join(rel);
+                let dst_file = staging.join(rel);
+                if let Some(parent) = dst_file.parent() {
+                    crate::common::private_dir(parent)?;
+                }
+                let mut input = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&src_file)?;
+                let meta = input.metadata()?;
+                ensure!(
+                    meta.is_file(),
+                    "release source changed during copy: {}",
+                    src_file.display()
+                );
+                let mode = if meta.permissions().mode() & 0o111 != 0 {
+                    0o755
+                } else {
+                    0o644
+                };
+                let mut output = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(mode)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&dst_file)?;
+                std::io::copy(&mut input, &mut output)?;
+                output.set_permissions(fs::Permissions::from_mode(mode))?;
+                output.sync_all()?;
+                ensure!(
+                    crate::common::digest(&dst_file)? == *expected_hash,
+                    "copied release file digest mismatch: {}",
+                    rel.display()
+                );
+            }
+            let (_, verified_info) = self
+                .bundle(&staging)
+                .context("copied release failed verification before switch")?;
+            ensure!(
+                verified_info == *info,
+                "copied release build identity differs from source"
+            );
+
+            let active_release = configured_release(&self.record).map(PathBuf::from);
+            let previous_release = self.record["previous"].as_str().map(PathBuf::from);
+            let dest_in_use = active_release.as_deref() == Some(dest.as_path())
+                || previous_release.as_deref() == Some(dest.as_path());
+            let final_dest = if !exists(&dest) {
+                fs::rename(&staging, &dest)?;
+                File::open(&releases_canon)?.sync_all()?;
+                dest
+            } else if dest_in_use {
+                let unique = releases_canon.join(format!(
+                    "{dir_name}-{}",
+                    &Uuid::new_v4().simple().to_string()[..MANAGED_RELEASE_COMMIT_PREFIX_LEN]
+                ));
+                fs::rename(&staging, &unique)?;
+                File::open(&releases_canon)?.sync_all()?;
+                unique
+            } else {
+                let retired = releases_canon.join(format!(".replace-{}", Uuid::new_v4().simple()));
+                fs::rename(&dest, &retired)?;
+                if let Err(err) = fs::rename(&staging, &dest) {
+                    let _ = fs::rename(&retired, &dest);
+                    return Err(err.into());
+                }
+                File::open(&releases_canon)?.sync_all()?;
+                let _ = fs::remove_dir_all(&retired);
+                dest
+            };
+            Ok(final_dest)
+        })();
+        if exists(&staging) {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        let managed = copy_result?;
+        self.bundle(&managed)
+    }
+
     fn definition(&self, release: &Path) -> Result<Vec<u8>> {
         let mut env = BTreeMap::from([
             ("STEVE_HOME", text(&self.home)?),
@@ -953,26 +1145,51 @@ impl Service {
     }
 
     fn install(&mut self, release: &Path, update: bool, wait: u64) -> Result<Value> {
-        let (release, info) = self.bundle(release)?;
+        let (source, info) = self.bundle(release)?;
         ensure!(
             !(update && self.component == "hub"),
             "Hub updates use Settings > About or steve upgrade for task drain, backup and schema checks"
         );
         let current = self.home.join("current");
         ensure!(
-            self.component != "hub" || !current.exists() || resolve(&current)? == release,
+            self.component != "hub" || !current.exists() || resolve(&current)? == source,
             "current Hub already exists; use Settings > About or steve upgrade to update it"
         );
         ensure!(
             self.component != "hub" || self.system != System::Darwin || self.signed,
             "new macOS Hub needs explicit Keychain setup: run steve setup first"
         );
+        let mut state = self.state()?;
+        let was_running = update && self.component == "node" && state["running"] == true;
+        if update && self.component == "node" {
+            ensure!(
+                state["running"].is_boolean(),
+                "service is running or its state is unknown{}; no files changed. Finish Node sessions, verify Devices, then stop the service before update; --wait only waits for a stopped service",
+                state["diagnostic"]
+                    .as_str()
+                    .map(|d| format!(" ({d})"))
+                    .unwrap_or_default()
+            );
+        }
+        let (release, info) = if update && self.component == "node" {
+            self.ensure_managed_release(&source, &info)?
+        } else {
+            (source, info)
+        };
         let data = self.definition(&release)?;
         let same = self.config.is_file() && fs::read(&self.config)? == data;
-        let mut state = self.state()?;
         if !same {
+            if was_running {
+                self.systemctl(&["stop", &self.unit()], true)?;
+                state = self.state()?;
+            }
+            let stop_wait = if was_running {
+                wait.max(LINUX_UPDATE_STOP_WAIT_MIN_SECS)
+            } else {
+                wait
+            };
             let deadline = Instant::now()
-                .checked_add(Duration::from_secs(wait))
+                .checked_add(Duration::from_secs(stop_wait))
                 .context("wait is too large")?;
             while (state["running"] == true
                 || (self.system == System::Darwin && state["loaded"] == true))
@@ -1035,9 +1252,12 @@ impl Service {
         if self.system == System::Linux {
             self.systemctl(&["daemon-reload"], true)?;
             self.systemctl(&["enable", &self.unit()], true)?;
+            if !same && was_running {
+                self.systemctl(&["start", &self.unit()], true)?;
+            }
         }
         Ok(
-            json!({"installed":true,"changed":!same,"started":false,"release":text(&release)?,"build":info}),
+            json!({"installed":true,"changed":!same,"started":was_running,"release":text(&release)?,"build":info}),
         )
     }
 
@@ -1437,6 +1657,8 @@ mod tests {
         node_signatures: BTreeMap<PathBuf, String>,
         cert_sha1: Option<String>,
         signing_failure: bool,
+        lsof_pids: Option<Vec<u32>>,
+        ps_commands: BTreeMap<u32, String>,
     }
 
     struct FakeNodeSigner(Arc<Mutex<Manager>>);
@@ -1594,6 +1816,24 @@ mod tests {
             } else if args[0] == "/usr/bin/id" {
                 assert_eq!(args, &["/usr/bin/id", "-un"]);
                 result.stdout = "fixture-node\n".into();
+            } else if args[0] == "/usr/sbin/lsof" || args[0] == "lsof" {
+                if let Some(pids) = &self.lsof_pids {
+                    result.stdout = pids
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        + "\n";
+                } else {
+                    result.code = 1;
+                }
+            } else if args[0] == "/bin/ps" || args[0] == "ps" {
+                let pid = args.get(2).and_then(|s| s.parse::<u32>().ok());
+                if let Some(cmd) = pid.and_then(|p| self.ps_commands.get(&p)) {
+                    result.stdout = format!("{cmd}\n");
+                } else {
+                    result.code = 1;
+                }
             } else if args.starts_with(&["/usr/bin/sudo".into(), "/bin/rm".into()]) {
                 assert_eq!(Path::new(&args[3]), self.config);
                 fs::remove_file(&self.config)?;
@@ -2236,12 +2476,22 @@ esac
                     m.calls.clear();
                 }
                 if system == System::Linux {
-                    assert!(
-                        s.dispatch("update", Some(&f.next), 0)
-                            .unwrap_err()
-                            .to_string()
-                            .contains("no files changed")
-                    );
+                    if condition == "unknown" {
+                        assert!(
+                            s.dispatch("update", Some(&f.next), 0)
+                                .unwrap_err()
+                                .to_string()
+                                .contains("no files changed")
+                        );
+                        assert!(!s.home.join("releases").exists());
+                    } else {
+                        assert!(
+                            s.dispatch("install", Some(&f.next), 0)
+                                .unwrap_err()
+                                .to_string()
+                                .contains("no files changed")
+                        );
+                    }
                 }
                 assert!(
                     s.dispatch("uninstall", None, 0)
@@ -2342,10 +2592,13 @@ esac
         s.dispatch("enable-boot", None, 0).unwrap();
         assert!(mutations(&manager).is_empty());
 
-        // Running update stages the receipt without sudo, bootout or plist replacement.
-        s.dispatch("update", Some(&f.next), 0).unwrap();
+        // Running update copies external bundles into <home>/releases/<ver>-<commit8> and
+        // stages the receipt without sudo, bootout or plist replacement.
+        let updated = s.dispatch("update", Some(&f.next), 0).unwrap();
+        let managed_next = f.home.join("releases/0.2.1-bbbbbbbb");
+        assert_eq!(updated["started"], true);
         assert_eq!(s.record["previous"], text(&f.release).unwrap());
-        assert_eq!(s.record["boot_release"], text(&f.next).unwrap());
+        assert_eq!(s.record["boot_release"], text(&managed_next).unwrap());
         assert_eq!(
             fs::read(&s.config).unwrap(),
             original,
@@ -2526,16 +2779,20 @@ printf 'headless fixture ran\n'
                 .get(&f.home.join(boot::RUNNER)),
             Some(&cli_requirement)
         );
+        // Remote upgrades stage the candidate under <home>/releases before signing and switching.
+        let releases = f.home.join("releases");
+        fs::create_dir_all(&releases).unwrap();
+        let staged_next = Fixture::bundle(&releases, "0.2.1", "b");
         // An unsigned candidate or one signed by another certificate fails verification.
-        assert!(s.verify_boot_upgrade(&f.next).is_err());
+        assert!(s.verify_boot_upgrade(&staged_next).is_err());
         manager.lock().unwrap().node_signatures.insert(
-            f.next.join("bin/steve-node"),
+            staged_next.join("bin/steve-node"),
             crate::signing::self_signed_requirement(
                 crate::signing::NODE_RUNTIME_IDENTIFIER,
                 &"99".repeat(20),
             ),
         );
-        assert!(s.verify_boot_upgrade(&f.next).is_err());
+        assert!(s.verify_boot_upgrade(&staged_next).is_err());
         let supervisor = fs::read(f.home.join(boot::RUNNER)).unwrap();
         let definition = fs::read(&s.config).unwrap();
         // Bundle verification uses the fake manager's own metadata, not these shell fixtures.
@@ -2550,7 +2807,7 @@ while :; do sleep 0.1; done
         )
         .unwrap();
         fs::write(
-            f.next.join("bin/steve-node"),
+            staged_next.join("bin/steve-node"),
             br#"#!/bin/sh
 cd "${0%/*}"
 [ "$STEVE_NODE_LOOPBACK_PLAINTEXT" = 1 ] && echo next > ran
@@ -2581,15 +2838,15 @@ cd "${0%/*}"
             }
             // A failed local sign leaves the receipt and running release unchanged.
             manager.lock().unwrap().signing_failure = true;
-            assert!(s.dispatch("update", Some(&f.next), 0).is_err());
+            assert!(s.dispatch("update", Some(&staged_next), 0).is_err());
             assert_eq!(s.record["boot_release"], text(&f.release)?);
             assert_eq!(s.record["code_requirement"], requirement);
             manager.lock().unwrap().signing_failure = false;
 
             // Signing the candidate with the same local self-signed identity satisfies both requirements.
-            s.prepare_boot_upgrade(&f.next)?;
-            s.verify_boot_upgrade(&f.next)?;
-            s.dispatch("update", Some(&f.next), 0)?;
+            s.prepare_boot_upgrade(&staged_next)?;
+            s.verify_boot_upgrade(&staged_next)?;
+            s.dispatch("update", Some(&staged_next), 0)?;
             done_rx.recv_timeout(Duration::from_secs(5))??;
             Ok(())
         })();
@@ -2604,7 +2861,7 @@ cd "${0%/*}"
                 .lock()
                 .unwrap()
                 .node_signatures
-                .get(&f.next.join("bin/steve-node")),
+                .get(&staged_next.join("bin/steve-node")),
             Some(&requirement)
         );
         assert_eq!(
@@ -2612,21 +2869,17 @@ cd "${0%/*}"
                 .lock()
                 .unwrap()
                 .node_signatures
-                .get(&f.next.join("bin/steve")),
+                .get(&staged_next.join("bin/steve")),
             Some(&cli_requirement)
         );
         assert!(f.release.join("bin/stopped").exists());
-        assert!(
-            !manager
-                .lock()
-                .unwrap()
-                .calls
-                .iter()
-                .any(|call| matches!(call[0].as_str(), "/usr/bin/sudo" | "launchctl"))
-        );
+        assert!(!manager.lock().unwrap().calls.iter().any(|call| {
+            call[0] == "/usr/bin/sudo"
+                || (call[0] == "launchctl" && call.get(1).map(String::as_str) != Some("print"))
+        }));
         boot::supervise(&f.home, || false).unwrap();
         assert_eq!(
-            fs::read_to_string(f.next.join("bin/ran")).unwrap(),
+            fs::read_to_string(staged_next.join("bin/ran")).unwrap(),
             "next\n"
         );
         f.preserved();
@@ -2695,7 +2948,9 @@ cd "${0%/*}"
         fs::write(home.join("node/node.json"), r#"{"node_id":"test"}"#).unwrap();
         fs::write(home.join("node/identity.key"), "private identity").unwrap();
         let v1 = Fixture::bundle(&root, "0.10.1", "a");
-        let v2 = Fixture::bundle(&root, "0.10.2", "b");
+        let releases = home.join("releases");
+        fs::create_dir_all(&releases).unwrap();
+        let v2 = Fixture::bundle(&releases, "0.10.2", "b");
         let state = root.join("state");
         fs::create_dir(&state).unwrap();
         let sha1 = "abcdef0123456789abcdef0123456789abcdef01";
@@ -2849,12 +3104,15 @@ esac
                 .unwrap()
                 .starts_with("steve node update")
         );
-        s.dispatch("update", Some(&f.next), 0).unwrap();
+        let updated = s.dispatch("update", Some(&f.next), 0).unwrap();
+        let managed_next = f.home.join("releases/0.2.1-bbbbbbbb");
+        assert_eq!(updated["started"], false);
+        assert_eq!(updated["release"], text(&managed_next).unwrap());
         assert_eq!(s.record["previous"], text(&f.release).unwrap());
         assert!(
             fs::read_to_string(&s.config)
                 .unwrap()
-                .contains("0.2.1/bin/steve-node")
+                .contains("releases/0.2.1-bbbbbbbb/bin/steve-node")
         );
         for action in ["start", "restart", "stop"] {
             s.dispatch(action, None, 0).unwrap();
@@ -3242,5 +3500,242 @@ esac
             err.contains("Could not print service: 150: Operation not permitted"),
             "unrecognized launchctl output must be preserved verbatim: {err}"
         );
+    }
+
+    #[test]
+    fn node_update_copies_external_release_into_managed_dir_and_survives_source_removal() {
+        for system in [System::Darwin, System::Linux] {
+            let f = Fixture::new();
+            let (mut s, manager) = f.service(system, "node");
+            s.dispatch("install", Some(&f.release), 0).unwrap();
+            if s.boot_node() {
+                s.dispatch("enable-boot", None, 0).unwrap();
+            }
+
+            let external_parent = f.root.join("downloaded-installer");
+            fs::create_dir(&external_parent).unwrap();
+            let external = Fixture::bundle(&external_parent, "0.11.1", "7c25c5c5");
+            // Fix commit to a realistic 40-char git SHA starting with 7c25c5c5.
+            let commit = "7c25c5c5deadbeef0123456789abcdef01234567";
+            let manifest = json!({"format_version":1,"version":"0.11.1","commit":commit});
+            fs::write(
+                external.join("release.json"),
+                json_bytes(&manifest).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                external.join("web/dist/release.json"),
+                json_bytes(&manifest).unwrap(),
+            )
+            .unwrap();
+
+            let report = s.dispatch("update", Some(&external), 0).unwrap();
+            let managed = f.home.join("releases/0.11.1-7c25c5c5");
+            assert_eq!(report["changed"], true, "{system:?}");
+            assert_eq!(report["release"], text(&managed).unwrap(), "{system:?}");
+            assert_eq!(
+                configured_release(&s.record),
+                Some(managed.to_str().unwrap()),
+                "{system:?}"
+            );
+
+            // Idempotent re-run against the same external directory reuses the verified managed copy.
+            let again = s.dispatch("update", Some(&external), 0).unwrap();
+            assert_eq!(again["changed"], false, "{system:?}");
+            assert_eq!(again["release"], text(&managed).unwrap(), "{system:?}");
+
+            // Deleting the downloaded installer directory must NOT affect the managed release.
+            fs::remove_dir_all(&external_parent).unwrap();
+            assert!(!external.exists());
+            let (verified_path, verified_info) = s.bundle(&managed).unwrap();
+            assert_eq!(verified_path, managed);
+            assert_eq!(verified_info["version"], "0.11.1");
+            assert_eq!(verified_info["commit"], commit);
+
+            if s.boot_node() {
+                let sigs = &manager.lock().unwrap().node_signatures;
+                assert!(
+                    sigs.contains_key(&managed.join("bin/steve-node")),
+                    "managed binary must be signed"
+                );
+                assert!(
+                    !sigs.contains_key(&external.join("bin/steve-node")),
+                    "external installer binary must never be signed in place"
+                );
+            } else {
+                let unit = fs::read_to_string(&s.config).unwrap();
+                assert!(
+                    unit.contains("releases/0.11.1-7c25c5c5/bin/steve-node"),
+                    "unit must point to managed release: {unit}"
+                );
+                assert!(
+                    !unit.contains("downloaded-installer"),
+                    "unit must not reference deleted source dir: {unit}"
+                );
+            }
+            f.preserved();
+        }
+    }
+
+    #[test]
+    fn node_update_auto_restarts_running_service_and_leaves_stopped_service_stopped() {
+        for system in [System::Darwin, System::Linux] {
+            let f = Fixture::new();
+            let third = Fixture::bundle(&f.root, "0.2.2", "c");
+            let (mut s, manager) = f.service(system, "node");
+            s.dispatch("install", Some(&f.release), 0).unwrap();
+            if s.boot_node() {
+                s.dispatch("enable-boot", None, 0).unwrap();
+            } else {
+                s.dispatch("start", None, 0).unwrap();
+            }
+            assert!(manager.lock().unwrap().running, "{system:?}");
+
+            // Running before update -> update keeps/restarts the service and reports started=true.
+            manager.lock().unwrap().calls.clear();
+            let report = s.dispatch("update", Some(&f.next), 0).unwrap();
+            assert_eq!(report["changed"], true, "{system:?}");
+            assert_eq!(report["started"], true, "{system:?}");
+            assert!(manager.lock().unwrap().running, "{system:?}");
+            if system == System::Linux {
+                let ops: Vec<String> = manager
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .filter(|c| c.first().map(String::as_str) == Some("systemctl"))
+                    .filter_map(|c| c.get(2).cloned())
+                    .collect();
+                let stop_at = ops.iter().position(|op| op == "stop").expect("linux stop");
+                let reload_at = ops
+                    .iter()
+                    .position(|op| op == "daemon-reload")
+                    .expect("linux reload");
+                let start_at = ops
+                    .iter()
+                    .position(|op| op == "start")
+                    .expect("linux start");
+                assert!(stop_at < reload_at && reload_at < start_at, "{ops:?}");
+            } else {
+                assert!(
+                    !manager.lock().unwrap().calls.iter().any(|c| {
+                        c[0] == "/usr/bin/sudo"
+                            || (c[0] == "launchctl"
+                                && c.get(1).map(String::as_str) != Some("print"))
+                    }),
+                    "macOS supervised boot update must not require sudo or mutating launchctl"
+                );
+            }
+
+            // Stopped before update -> update leaves the service stopped and reports started=false.
+            s.dispatch("stop", None, 0).unwrap();
+            assert!(!manager.lock().unwrap().running, "{system:?}");
+            manager.lock().unwrap().calls.clear();
+            let stopped_report = s.dispatch("update", Some(&third), 0).unwrap();
+            assert_eq!(stopped_report["changed"], true, "{system:?}");
+            assert_eq!(stopped_report["started"], false, "{system:?}");
+            assert!(!manager.lock().unwrap().running, "{system:?}");
+            assert!(
+                !manager
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .flatten()
+                    .any(|arg| { matches!(arg.as_str(), "start" | "bootstrap" | "kickstart") }),
+                "{system:?} stopped service must not be started by update"
+            );
+            f.preserved();
+        }
+    }
+
+    #[test]
+    fn enable_boot_runtime_lock_error_reports_holder_pid_and_binary_path() {
+        // Case 1: Legacy Node holding node.lock without writing its PID -> discovered via lsof + ps.
+        {
+            let f = Fixture::new();
+            let (mut s, manager) = f.service(System::Darwin, "node");
+            s.node_exit_wait = Duration::ZERO;
+            s.dispatch("install", Some(&f.release), 0).unwrap();
+            let lock_path = f.home.join("node/local/node.lock");
+            fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+            let holder = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            holder.try_lock().unwrap();
+            let sentinel_pid = 999_999u32;
+            let expected_binary =
+                "/Users/example/.steve-node/releases/0.9.0-7c25c5c5/bin/steve-node";
+            {
+                let mut m = manager.lock().unwrap();
+                m.lsof_pids = Some(vec![sentinel_pid]);
+                m.ps_commands
+                    .insert(sentinel_pid, expected_binary.to_owned());
+            }
+            let err = s.dispatch("enable-boot", None, 0).unwrap_err().to_string();
+            assert!(
+                err.contains("a Node process still owns the runtime lock"),
+                "{err}"
+            );
+            assert!(err.contains("pid 999999"), "{err}");
+            assert!(err.contains(expected_binary), "{err}");
+            drop(holder);
+        }
+
+        // Case 2: Real child process holding flock and recording its PID in node.lock (lsof unavailable)
+        // -> discovered via lock file PID + native OS binary path lookup.
+        {
+            use std::io::{BufRead, BufReader};
+            struct ChildGuard(std::process::Child);
+            impl Drop for ChildGuard {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let f = Fixture::new();
+            let (mut s, _manager) = f.service(System::Darwin, "node");
+            s.node_exit_wait = Duration::ZERO;
+            s.dispatch("install", Some(&f.release), 0).unwrap();
+            let lock_path = f.home.join("node/local/node.lock");
+            fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+            fs::write(&lock_path, b"").unwrap();
+            let mut child = Command::new("python3")
+                .args([
+                    "-c",
+                    "import fcntl, os, sys, time; \
+                     f = open(sys.argv[1], 'r+b'); \
+                     fcntl.flock(f.fileno(), fcntl.LOCK_EX); \
+                     f.seek(0); f.truncate(0); f.write(f'{os.getpid()}\\n'.encode()); f.flush(); \
+                     print('locked', flush=True); \
+                     time.sleep(30)",
+                ])
+                .arg(&lock_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn lock holder child");
+            let child_pid = child.id();
+            let mut ready = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            assert_eq!(ready.trim(), "locked");
+            let _guard = ChildGuard(child);
+
+            let err = s.dispatch("enable-boot", None, 0).unwrap_err().to_string();
+            assert!(
+                err.contains("a Node process still owns the runtime lock"),
+                "{err}"
+            );
+            assert!(err.contains(&format!("pid {child_pid}")), "{err}");
+            assert!(
+                err.contains("binary /") && !err.contains("binary unknown"),
+                "expected resolved binary path, got: {err}"
+            );
+        }
     }
 }
