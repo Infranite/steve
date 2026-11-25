@@ -74,13 +74,13 @@ pub use runtime::{
     AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, PermissionAction,
     PermissionAnswer, Prompted, Released, Running, Stop, TurnEnd,
 };
-pub use worktrees::{CLOSED_WORKTREE_BACKFILL_KEY, WorktreeBackfillReport};
 pub use workflow_run::{
     ChildResultError, MAX_BUDGET_ALLOWANCE_DELTA, MAX_CONCURRENT_WORKFLOW_STEPS,
     MAX_STEP_CAS_RETRIES, MAX_STEP_INFRA_RETRIES, WF_RUN_SUBJECT, WfBudget, WfDecisionChoice,
     WfDeliveryBlocker, WfRunAction, WfRunSnapshot, WfToolOutput, WorkflowStepExecutor,
     validate_child_result,
 };
+pub use worktrees::{CLOSED_WORKTREE_BACKFILL_KEY, WorktreeBackfillReport};
 
 use repo::Db;
 use std::collections::HashMap;
