@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use steve_runtime::testkit::eventually;
+use steve_runtime::testkit::{eventually, eventually_sync};
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -409,8 +409,24 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
         .unwrap()
         .unwrap();
     steve_store::testkit::hub::hub_fixtures::set_items_phase_closed(&store, &child.id).unwrap();
+    let before_tidy = steve_store::testkit::hub::outbox_checks::outbox_receipts_count_by_consumer(
+        &e.db,
+        steve_core::outbox_work::WorkTidy::ID,
+    )
+    .unwrap();
     let (status, result) = finish(&e, &parent.id).await;
     assert_eq!(status, 200, "{result}");
+    // Owner finish closes the parent in one transaction; child retirement runs as durable
+    // outbox follow-up work under `work.tidy`, so wait for its receipt before reading the child.
+    eventually_sync("work.tidy outbox receipt after finishing parent", || {
+        steve_store::testkit::hub::outbox_checks::outbox_receipts_count_by_consumer(
+            &e.db,
+            steve_core::outbox_work::WorkTidy::ID,
+        )
+        .unwrap()
+            > before_tidy
+    })
+    .await;
     let (status, read) = e
         .call("GET", &format!("/api/items/{}", child.id), None)
         .await;
