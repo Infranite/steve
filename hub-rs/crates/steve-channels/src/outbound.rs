@@ -3220,6 +3220,9 @@ impl Outbox {
         self.queue_chosen_drafts(ch);
         self.queue_disclosure_checks(ch);
         self.queue_rewrites(ch);
+        if let Err(e) = crate::draft_escalation::escalate_due(ch) {
+            tracing::warn!("draft escalation sweep: {e}");
+        }
     }
 
     fn queue_instructed_drafts(&self, ch: &Channels) {
@@ -4079,6 +4082,15 @@ impl MessageDecisions {
         if d.result["recovery_review"] == true {
             result["recovery_review"] = json!(true);
         }
+        if d.result["escalated"] == true {
+            result["escalated"] = json!(true);
+            if let Some(at) = d.result.get("escalated_at") {
+                result["escalated_at"] = at.clone();
+            }
+            if let Some(reason) = d.result.get("escalated_reason") {
+                result["escalated_reason"] = reason.clone();
+            }
+        }
         match cx.choice {
             "yes" => {
                 let edited = !cx.text.trim().is_empty();
@@ -4120,6 +4132,7 @@ impl MessageDecisions {
             }
             "no" => {
                 set_status(w, &row.id, &["draft"], DISCARDED)?;
+                result["ignored_at"] = json!(now);
                 self.0.push(After::Discarded {
                     message_id: row.id.clone(),
                 });
@@ -4130,6 +4143,14 @@ impl MessageDecisions {
                     "chan_message.reject",
                     &row.id,
                     &json!({"decision": d.id}),
+                )?;
+                let _ = crate::rule_suggestions::on_message_ignored(
+                    w,
+                    cx.ws,
+                    &row.space_id,
+                    &row.id,
+                    &d.id,
+                    now,
                 )?;
             }
             "to_item" if d.options.iter().any(|o| o == "to_item") => {
@@ -4221,6 +4242,15 @@ impl MessageDecisions {
         if let Some(recovery) = d.result.get("recovery") {
             result["recovery"] = recovery.clone();
         }
+        if d.result["escalated"] == true {
+            result["escalated"] = json!(true);
+            if let Some(at) = d.result.get("escalated_at") {
+                result["escalated_at"] = at.clone();
+            }
+            if let Some(reason) = d.result.get("escalated_reason") {
+                result["escalated_reason"] = reason.clone();
+            }
+        }
         steve_store::audit_repo::record(
             w,
             cx.ws,
@@ -4298,7 +4328,19 @@ impl MessageDecisions {
                 plan_in(w, cx.ws, &d.subject_id)?;
                 result["source_message"] = json!(d.subject_id);
             }
-            "done" => {}
+            "done" => {
+                result["ignored_at"] = json!(now);
+                if let Some(space_id) = channel_message_repo::space_of(w, cx.ws, &d.subject_id)? {
+                    let _ = crate::rule_suggestions::on_message_ignored(
+                        w,
+                        cx.ws,
+                        &space_id,
+                        &d.subject_id,
+                        &d.id,
+                        now,
+                    )?;
+                }
+            }
             _ => return Err(ApiError::invalid("choice")),
         }
         Ok(result)
@@ -4344,6 +4386,15 @@ impl DecisionHandler for MessageDecisions {
         }
         if let Some(recovery) = d.result.get("recovery") {
             result["recovery"] = recovery.clone();
+        }
+        if d.result["escalated"] == true {
+            result["escalated"] = json!(true);
+            if let Some(at) = d.result.get("escalated_at") {
+                result["escalated_at"] = at.clone();
+            }
+            if let Some(reason) = d.result.get("escalated_reason") {
+                result["escalated_reason"] = reason.clone();
+            }
         }
         if result == json!({}) {
             Value::Null

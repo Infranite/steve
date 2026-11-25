@@ -1093,4 +1093,19 @@ pub(super) fn describe() {
         Count,
         "Image-bearing gateway calls rerouted to a multimodal-capable harness. Labels: from, to."
     );
+    describe_counter!(
+        "steve_channel_draft_escalated_total",
+        Count,
+        "Unhandled @-mention or DM drafts escalated to Inbox after working-hour timeout. Labels: kind (dm, mention)."
+    );
+    describe_counter!(
+        "steve_channel_ignore_rule_suggestion_total",
+        Count,
+        "Record-only rule suggestions opened after repeated ignores of similar messages. Labels: category (dm, bot, mention, group)."
+    );
+    describe_counter!(
+        "steve_channel_new_group_silent_total",
+        Count,
+        "Newly discovered bot groups initialized in default silent-record mode instead of opening an inbox ask card."
+    );
 }

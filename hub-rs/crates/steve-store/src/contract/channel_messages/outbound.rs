@@ -420,3 +420,300 @@ pub fn sent_connection(r: &mut impl Read, id: &str) -> Result<Option<String>> {
     )?
     .flatten())
 }
+
+/// An open outbound draft decision replying to an @-mention or DM, evaluated for working-hour
+/// escalation (#213).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAddressedDraft {
+    pub decision_id: String,
+    pub ws: String,
+    pub space_id: String,
+    pub message_id: String,
+    pub created: i64,
+    pub is_dm: bool,
+    pub is_mention: bool,
+    pub result_json: Option<String>,
+}
+
+/// Lists open `chan_message` approval drafts whose inbound source is a DM or @-mention of the
+/// speaking account (not yet marked escalated).
+pub fn open_addressed_drafts(r: &mut impl Read) -> Result<Vec<OpenAddressedDraft>> {
+    use sea_query::{Alias, JoinType};
+    let source_subquery = Expr::cust(
+        "(SELECT t.id FROM (
+            SELECT source_message_id AS id FROM chan_reply_sources WHERE out_message_id = m.id
+            UNION ALL SELECT m.answer_to AS id WHERE m.answer_to IS NOT NULL
+            UNION ALL SELECT parent.id FROM chan_messages parent
+              WHERE parent.space_id = m.space_id AND parent.external_id = m.reply_to
+            UNION ALL SELECT source_message_id FROM output_deliveries WHERE message_id = m.id
+          ) matches
+          CROSS JOIN chan_messages t ON t.id = matches.id
+          WHERE t.workspace_id = d.workspace_id AND t.space_id = m.space_id AND t.direction = 'in'
+          ORDER BY t.created DESC, t.id LIMIT 1)",
+    );
+    let is_mention = Expr::cust(
+        "EXISTS (SELECT 1 FROM ext_events e WHERE e.message_id = src.id AND e.type = 'im.mention')
+         OR (src.mentions IS NOT NULL AND c.account_id IS NOT NULL AND instr(src.mentions, c.account_id) > 0)",
+    );
+    let mut q = Query::select();
+    q.column((Alias::new("d"), Alias::new("id")))
+        .column((Alias::new("d"), Alias::new("workspace_id")))
+        .column((Alias::new("m"), Alias::new("space_id")))
+        .column((Alias::new("m"), Alias::new("id")))
+        .column((Alias::new("m"), Alias::new("created")))
+        .expr(Expr::cust("s.kind = 'dm'"))
+        .expr(is_mention.clone())
+        .column((Alias::new("d"), Alias::new("result")))
+        .from_as("decisions", "d")
+        .join_as(
+            JoinType::InnerJoin,
+            "chan_messages",
+            "m",
+            Expr::cust("m.id = d.subject_id AND m.workspace_id = d.workspace_id"),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            "spaces",
+            "s",
+            Expr::cust("s.id = m.space_id AND s.workspace_id = d.workspace_id"),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            "connections",
+            "c",
+            Expr::cust("c.id = s.connection_id"),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            "chan_messages",
+            "src",
+            Expr::col((Alias::new("src"), Alias::new("id"))).eq(source_subquery),
+        )
+        .and_where(Expr::col((Alias::new("d"), Alias::new("status"))).eq("open"))
+        .and_where(Expr::col((Alias::new("d"), Alias::new("subject_type"))).eq("chan_message"))
+        .and_where(Expr::col((Alias::new("d"), Alias::new("kind"))).eq("approve"))
+        .and_where(Expr::col((Alias::new("m"), Alias::new("direction"))).eq("out"))
+        .and_where(Expr::col((Alias::new("m"), Alias::new("status"))).eq("draft"))
+        .and_where(
+            Expr::col((Alias::new("m"), Alias::new("decision_id")))
+                .equals((Alias::new("d"), Alias::new("id"))),
+        )
+        .and_where(Expr::cust("s.kind = 'dm'").or(is_mention))
+        .order_by((Alias::new("d"), Alias::new("created")), Order::Asc);
+    r.all(&q, |row| {
+        Ok(OpenAddressedDraft {
+            decision_id: row.get(0)?,
+            ws: row.get(1)?,
+            space_id: row.get(2)?,
+            message_id: row.get(3)?,
+            created: row.get(4)?,
+            is_dm: row.get::<i64>(5)? != 0,
+            is_mention: row.get::<i64>(6)? != 0,
+            result_json: row.get(7)?,
+        })
+    })
+}
+
+/// Deterministic structural facts used to group similar ignored messages (#213).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageCategoryFact {
+    pub space_kind: String,
+    pub sender_is_bot: bool,
+    pub is_mention: bool,
+}
+
+/// One resolved channel decision in a space within the ignore-suggestion lookback window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredMessageFact {
+    pub decision_id: String,
+    pub kind: String,
+    pub resolved: i64,
+    pub result_json: Option<String>,
+    pub category: MessageCategoryFact,
+}
+
+/// Reads the deterministic category facts of an inbound message (or the inbound source of an
+/// outbound draft) for ignore-pattern grouping.
+pub fn message_category_fact(
+    r: &mut impl Read,
+    ws: &str,
+    message_id: &str,
+) -> Result<Option<MessageCategoryFact>> {
+    use sea_query::{Alias, JoinType};
+    let source_expr = Expr::cust(
+        "CASE m.direction
+           WHEN 'in' THEN m.id
+           WHEN 'out' THEN COALESCE(
+             (SELECT t.id FROM (
+                SELECT source_message_id AS id FROM chan_reply_sources WHERE out_message_id = m.id
+                UNION ALL SELECT m.answer_to AS id WHERE m.answer_to IS NOT NULL
+                UNION ALL SELECT parent.id FROM chan_messages parent
+                  WHERE parent.space_id = m.space_id AND parent.external_id = m.reply_to
+                UNION ALL SELECT source_message_id FROM output_deliveries WHERE message_id = m.id
+              ) matches
+              CROSS JOIN chan_messages t ON t.id = matches.id
+              WHERE t.workspace_id = m.workspace_id AND t.space_id = m.space_id AND t.direction = 'in'
+              ORDER BY t.created DESC, t.id LIMIT 1),
+             m.id)
+         END",
+    );
+    let sender_is_bot = Expr::cust(
+        "EXISTS (
+           SELECT 1 FROM accounts a
+             LEFT JOIN parties p ON p.id = a.party_id
+            WHERE a.id = src.sender_account_id
+              AND (a.kind IN ('bot', 'app_bot') OR p.type = 'bot' OR coalesce(p.contact_kind, '') = 'bot')
+         ) OR EXISTS (
+           SELECT 1 FROM parties p
+            WHERE p.id = src.sender_party_id
+              AND (p.type = 'bot' OR coalesce(p.contact_kind, '') = 'bot')
+         )",
+    );
+    let is_mention = Expr::cust(
+        "EXISTS (SELECT 1 FROM ext_events e WHERE e.message_id = src.id AND e.type = 'im.mention')
+         OR (src.mentions IS NOT NULL AND src.mentions <> '' AND src.mentions <> '[]')",
+    );
+    let mut q = Query::select();
+    q.column((Alias::new("s"), Alias::new("kind")))
+        .expr(sender_is_bot)
+        .expr(is_mention)
+        .from_as("chan_messages", "m")
+        .join_as(
+            JoinType::InnerJoin,
+            "spaces",
+            "s",
+            Expr::cust("s.id = m.space_id AND s.workspace_id = m.workspace_id"),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            "chan_messages",
+            "src",
+            Expr::col((Alias::new("src"), Alias::new("id"))).eq(source_expr),
+        )
+        .and_where(Expr::col((Alias::new("m"), Alias::new("id"))).eq(message_id))
+        .and_where(Expr::col((Alias::new("m"), Alias::new("workspace_id"))).eq(ws));
+    r.one(&q, |row| {
+        Ok(MessageCategoryFact {
+            space_kind: row.get(0)?,
+            sender_is_bot: row.get::<i64>(1)? != 0,
+            is_mention: row.get::<i64>(2)? != 0,
+        })
+    })
+}
+
+/// Maximum recent resolved channel decisions scanned per space when counting ignores within the
+/// rolling rule-suggestion window.
+const RECENT_RESOLVED_SCAN_LIMIT: u64 = 200;
+
+/// Lists recent resolved `chan_message` decisions in `space` together with the deterministic
+/// category facts of their underlying inbound messages.
+pub fn recent_resolved_in_space(
+    r: &mut impl Read,
+    ws: &str,
+    space: &str,
+) -> Result<Vec<IgnoredMessageFact>> {
+    use sea_query::{Alias, JoinType};
+    let source_expr = Expr::cust(
+        "CASE m.direction
+           WHEN 'in' THEN m.id
+           WHEN 'out' THEN COALESCE(
+             (SELECT t.id FROM (
+                SELECT source_message_id AS id FROM chan_reply_sources WHERE out_message_id = m.id
+                UNION ALL SELECT m.answer_to AS id WHERE m.answer_to IS NOT NULL
+                UNION ALL SELECT parent.id FROM chan_messages parent
+                  WHERE parent.space_id = m.space_id AND parent.external_id = m.reply_to
+                UNION ALL SELECT source_message_id FROM output_deliveries WHERE message_id = m.id
+              ) matches
+              CROSS JOIN chan_messages t ON t.id = matches.id
+              WHERE t.workspace_id = m.workspace_id AND t.space_id = m.space_id AND t.direction = 'in'
+              ORDER BY t.created DESC, t.id LIMIT 1),
+             m.id)
+         END",
+    );
+    let sender_is_bot = Expr::cust(
+        "EXISTS (
+           SELECT 1 FROM accounts a
+             LEFT JOIN parties p ON p.id = a.party_id
+            WHERE a.id = src.sender_account_id
+              AND (a.kind IN ('bot', 'app_bot') OR p.type = 'bot' OR coalesce(p.contact_kind, '') = 'bot')
+         ) OR EXISTS (
+           SELECT 1 FROM parties p
+            WHERE p.id = src.sender_party_id
+              AND (p.type = 'bot' OR coalesce(p.contact_kind, '') = 'bot')
+         )",
+    );
+    let is_mention = Expr::cust(
+        "EXISTS (SELECT 1 FROM ext_events e WHERE e.message_id = src.id AND e.type = 'im.mention')
+         OR (src.mentions IS NOT NULL AND src.mentions <> '' AND src.mentions <> '[]')",
+    );
+    let mut q = Query::select();
+    q.column((Alias::new("d"), Alias::new("id")))
+        .column((Alias::new("d"), Alias::new("kind")))
+        .column((Alias::new("d"), Alias::new("resolved")))
+        .column((Alias::new("d"), Alias::new("result")))
+        .column((Alias::new("s"), Alias::new("kind")))
+        .expr(sender_is_bot)
+        .expr(is_mention)
+        .from_as("decisions", "d")
+        .join_as(
+            JoinType::InnerJoin,
+            "chan_messages",
+            "m",
+            Expr::cust("m.id = d.subject_id AND m.workspace_id = d.workspace_id"),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            "spaces",
+            "s",
+            Expr::cust("s.id = m.space_id AND s.workspace_id = d.workspace_id"),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            "chan_messages",
+            "src",
+            Expr::col((Alias::new("src"), Alias::new("id"))).eq(source_expr),
+        )
+        .and_where(Expr::col((Alias::new("d"), Alias::new("workspace_id"))).eq(ws))
+        .and_where(Expr::col((Alias::new("d"), Alias::new("subject_type"))).eq("chan_message"))
+        .and_where(Expr::col((Alias::new("d"), Alias::new("status"))).eq("resolved"))
+        .and_where(Expr::col((Alias::new("d"), Alias::new("kind"))).is_in(["approve", "ask"]))
+        .and_where(Expr::col((Alias::new("d"), Alias::new("resolved"))).is_not_null())
+        .and_where(Expr::col((Alias::new("m"), Alias::new("space_id"))).eq(space))
+        .order_by((Alias::new("d"), Alias::new("resolved")), Order::Desc)
+        .limit(RECENT_RESOLVED_SCAN_LIMIT);
+    r.all(&q, |row| {
+        Ok(IgnoredMessageFact {
+            decision_id: row.get(0)?,
+            kind: row.get(1)?,
+            resolved: row.get(2)?,
+            result_json: row.get(3)?,
+            category: MessageCategoryFact {
+                space_kind: row.get(4)?,
+                sender_is_bot: row.get::<i64>(5)? != 0,
+                is_mention: row.get::<i64>(6)? != 0,
+            },
+        })
+    })
+}
+
+/// Resolved timestamps and result payloads of prior `space` rule-suggestion proposals for `space`.
+pub fn resolved_space_suggestions(
+    r: &mut impl Read,
+    ws: &str,
+    space: &str,
+) -> Result<Vec<(i64, Option<String>)>> {
+    r.all(
+        Query::select()
+            .columns(["resolved", "result"])
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("space"))
+            .and_where(Expr::col("subject_id").eq(space))
+            .and_where(Expr::col("kind").eq("propose"))
+            .and_where(Expr::col("status").eq("resolved"))
+            .and_where(Expr::col("resolved").is_not_null())
+            .order_by("resolved", Order::Desc)
+            .limit(20),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}

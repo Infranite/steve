@@ -66,6 +66,7 @@ fn tier(
     replied: bool,
     unsendable: bool,
     recovery: bool,
+    escalated: bool,
 ) -> (DecisionTier, Option<FoldReason>) {
     let chat = d.subject_type == ABOUT_CHAT_MESSAGE;
     let draft = chat && d.kind == "approve";
@@ -80,7 +81,7 @@ fn tier(
         (DecisionTier::Folded, Some(FoldReason::Replied))
     } else if draft && unsendable {
         (DecisionTier::Folded, Some(FoldReason::Unsendable))
-    } else if draft && d.status == DecisionStatus::Open {
+    } else if draft && d.status == DecisionStatus::Open && !escalated {
         (DecisionTier::Draft, None)
     } else {
         (DecisionTier::Decide, None)
@@ -189,6 +190,7 @@ fn select() -> SelectStatement {
 struct Candidate {
     view: DecisionView,
     recovery: bool,
+    escalated: bool,
     starred: bool,
     unsendable: bool,
 }
@@ -205,16 +207,21 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
     let undo_until = crate::decision_repo::undo_until(status, resolved, undo.as_ref());
     let options: Option<Json<Vec<String>>> = r.get(9).ok();
     let (kind, subject_type): (String, String) = (r.get(2)?, r.get(3)?);
-    let recovery = subject_type == ABOUT_CHAT_MESSAGE
-        && kind == "approve"
-        && result
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .and_then(|r| {
-                r.get("recovery_review")
-                    .and_then(serde_json::Value::as_bool)
-            })
-            == Some(true);
+    let parsed_result = (subject_type == ABOUT_CHAT_MESSAGE && kind == "approve")
+        .then(|| {
+            result
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        })
+        .flatten();
+    let recovery = parsed_result.as_ref().and_then(|r| {
+        r.get("recovery_review")
+            .and_then(serde_json::Value::as_bool)
+    }) == Some(true);
+    let escalated = parsed_result
+        .as_ref()
+        .and_then(|r| r.get("escalated").and_then(serde_json::Value::as_bool))
+        == Some(true);
     let wait =
         crate::wait_repo::decode_contract(r.get(21)?, r.get(22)?, r.get(23)?, r.get(24)?).ok();
     let view = DecisionView {
@@ -247,6 +254,7 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
     Ok(Candidate {
         view,
         recovery,
+        escalated,
         starred: r.get(17)?,
         unsendable: r.get::<Option<bool>>(18)?.unwrap_or(false),
     })
@@ -278,6 +286,7 @@ impl<C: Read> DecisionViews<'_, C> {
                     replied.contains(view.id.as_str()),
                     r.unsendable,
                     r.recovery,
+                    r.escalated,
                 );
                 view
             })

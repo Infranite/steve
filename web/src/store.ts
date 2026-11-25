@@ -33,6 +33,8 @@ export type Sess = { id: string; n: number; item: string | null; b: string | nul
   starting?: boolean; since?: number; placement?: PlacementExplanation }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
   recovery?: SendRecoveryInfo
+  /** True when an unhandled @-mention or DM draft escalated to Inbox after 4 working hours (#213). */
+  escalated?: boolean
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
   tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; revision: number; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
@@ -345,7 +347,8 @@ function waitOf(d: DecisionView): Wait {
   const cached = waitsByView.get(d)
   if (cached) return cached
   const w: Wait = { type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, draft: d.draft, opts: d.kind === "ask" ? d.options : undefined, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, get busy() { return agentBusy(d) }, tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
-    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined }
+    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined,
+    escalated: d.subject_type === "chan_message" && d.kind === "approve" ? resultOf(d).escalated === true : undefined }
   waitsByView.set(d, w)
   return w
 }

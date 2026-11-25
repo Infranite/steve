@@ -269,6 +269,16 @@ async fn space_example_rules_disclosure_and_duty() {
 async fn a_stale_draft_is_409() {
     let h = setup();
     let g1 = space_of(&h, &h.con, "G1", "m1").await;
+    // New bot groups default to silent record (#213); enable it before drafting a mute change.
+    let (s, _) = call(
+        &h.api,
+        Some(&me()),
+        "PATCH",
+        &format!("/spaces/{g1}"),
+        Some(&json!({"muted": false})),
+    )
+    .await;
+    assert_eq!(s, 200);
     let p = draft(
         &h,
         "space",

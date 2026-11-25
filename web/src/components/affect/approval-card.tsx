@@ -74,6 +74,8 @@ export type ApprovalCardProps = {
   denyAttrs?: Record<string, string | undefined>;
   /** Steve: attributes on the card's root (test hooks, the decision's ids) */
   attrs?: Record<string, string | undefined>;
+  /** Steve: custom action footer (replaces default Approve/Deny row while keeping ApprovalCard chrome) */
+  footer?: ReactNode;
   className?: string;
 };
 
@@ -108,6 +110,7 @@ export function ApprovalCard({
   approveAttrs,
   denyAttrs,
   attrs,
+  footer,
   className,
 }: ApprovalCardProps) {
   useT(); // Steve: the default words follow a change of language
@@ -186,7 +189,7 @@ export function ApprovalCard({
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (resolved || busy || e.defaultPrevented) return;
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && footer === undefined) {
       e.preventDefault();
       void approve();
     } else if (e.key === "Escape") {
@@ -387,6 +390,7 @@ export function ApprovalCard({
       data-busy={busy || undefined}
       data-label={label ? "" : undefined}
       data-actions={actions}
+      data-card-kind="approval"
       {...attrs}
       onKeyDown={onKeyDown}
       onPointerEnter={() => setHover(true)}
@@ -466,11 +470,17 @@ export function ApprovalCard({
               </div>
             )}
 
-            {actions === "tray" && alwaysBox}
-            {actions === "card" && foot}
+            {footer !== undefined ? (
+              <div className="ui-apc__foot">{footer}</div>
+            ) : (
+              <>
+                {actions === "tray" && alwaysBox}
+                {actions === "card" && foot}
+              </>
+            )}
           </div>
 
-          {actions === "tray" && foot}
+          {footer === undefined && actions === "tray" && foot}
 
           {total > 0 && (
             <span className="ui-apc__sr" id={leaving ? undefined : timerId}>

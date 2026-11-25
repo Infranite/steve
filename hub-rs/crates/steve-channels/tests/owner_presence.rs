@@ -724,6 +724,18 @@ async fn the_setting_does_not_apply_where_a_bot_speaks() {
     let space = push(&h, &oncall, msg(&h, "C_BOT", "b0", "uhan", "早", -3600))
         .await
         .space_id;
+    assert_eq!(
+        call(
+            &h.api,
+            Some(&caller(WS, ME)),
+            "PATCH",
+            &format!("/spaces/{space}"),
+            Some(&json!({"muted": false})),
+        )
+        .await
+        .0,
+        200
+    );
     assert_eq!(set_reply(&h, &space, "off").await.0, 200);
     let s = call(
         &h.api,

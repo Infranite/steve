@@ -7,22 +7,27 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
-use steve_store::base::{DecisionKind, Viewer};
+use steve_store::W;
+use steve_store::base::Viewer;
 use steve_store::channel_spaces::{
     account_settings::{self, SettingsPatch},
     preferences::{self as prefs, Preference},
     registration::{self, MAX_IDENTITIES},
 };
-use steve_store::{NewDecision, W};
 
 use crate::ChannelResult;
 use crate::channel::SpaceKind;
 
-/// `subject_type` of the “新群” decision (C6 registers its handler).
+/// `subject_type` of space rule-suggestion decisions (`space_decisions`).
 pub const SUBJECT_SPACE: &str = "space";
-/// Its options: `open` jumps to the space page, `mute` silences it, `quiet` (不提醒) records it
-/// without ever asking you, `block` (屏蔽) stops processing it.
-pub const NEW_SPACE_OPTIONS: [&str; 4] = ["open", "mute", "quiet", "block"];
+/// Newly discovered bot groups default to silent record (`muted = true`) instead of pushing a
+/// 4-choice ask card into Inbox (#213). Users can change the rule with one click on the space page.
+pub const NEW_GROUP_DEFAULT_MUTED: bool = true;
+
+/// Whether a newly discovered space defaults to silent record (`muted = true`).
+pub fn default_new_space_muted(mode: Mode, kind: SpaceKind) -> bool {
+    NEW_GROUP_DEFAULT_MUTED && mode == Mode::Bot && kind.is_group()
+}
 
 /// Your attention to a space (migration 019 `space_prefs.attention`): whether
 /// its messages may disturb you. Independent of Steve's role there (静默 = `muted` = role 只记录).
@@ -525,13 +530,15 @@ pub struct NewSpace<'a> {
     pub name: &'a str,
     pub member_count: i64,
     pub has_external: bool,
+    pub muted: bool,
     pub now: i64,
     /// The platform of the connection's chats (`Channels::chat_platform`).
     pub platform: Option<&'a str>,
 }
 
-/// Finds or creates the space and, when new, its settings (`configured=0`). Returns the row and
-/// whether it was created now. Two deliveries racing for the same space create it once.
+/// Finds or creates the space and, when new, its settings (`configured=0`, `muted=n.muted`).
+/// Returns the row and whether it was created now. Two deliveries racing for the same space create
+/// it once.
 pub fn locate_or_create(
     w: &mut steve_store::W<'_>,
     n: &NewSpace,
@@ -557,54 +564,17 @@ pub fn locate_or_create(
             member_count: n.member_count,
             has_external: n.has_external,
             disclosure: default_disclosure(n.kind, n.has_external),
+            muted: n.muted,
             platform: n.platform,
             now: n.now,
         },
     )?;
+    if created && n.muted {
+        metrics::counter!("steve_channel_new_group_silent_total").increment(1);
+    }
     let space = find_as(w, n.ws, n.connection_id, n.external_id, n.platform)?
         .ok_or_else(|| ApiError::not_found("空间"))?;
     Ok((space, created))
-}
-
-/// Opens the “新群” decision for a space a bot account just found itself in.
-pub fn open_new_space_decision(
-    w: &mut W<'_>,
-    ws: &str,
-    space: &SpaceRow,
-    account_name: &str,
-) -> ChannelResult<String> {
-    let settled = steve_store::decision_repo::settled_count(
-        w,
-        ws,
-        SUBJECT_SPACE,
-        &space.id,
-        DecisionKind::Ask.code(),
-    )?;
-    let mut decisions = steve_store::DecisionRows(w);
-    if let Some(d) = decisions.open_for(ws, SUBJECT_SPACE, &space.id)? {
-        return Ok(d.id);
-    }
-    let d = decisions.open(&NewDecision {
-        workspace_id: ws.into(),
-        kind: DecisionKind::Ask.code().into(),
-        subject_type: SUBJECT_SPACE.into(),
-        subject_id: space.id.clone(),
-        item_id: None,
-        session_id: None,
-        question: format!(
-            "{account_name}被拉进了「{}」，要设置它在这里做什么吗？",
-            space.name
-        ),
-        draft: None,
-        options: Some(NEW_SPACE_OPTIONS.map(String::from).to_vec()),
-        requested_by: "steve".into(),
-        question_template: None,
-        source: Some(steve_store::DecisionSource::Revision {
-            revision: format!("space:{settled}"),
-        }),
-        wait: None,
-    })?;
-    Ok(d.id)
 }
 
 /// SSE `{type:"space", id, ws}`.
@@ -1421,10 +1391,12 @@ pub fn patch(
     {
         set_voice(w, ws, id, v.as_deref(), now)?;
     }
+    if after.muted && !before.muted {
+        crate::space_decisions::expire_for_space(w, ws, id, "已设为只记录")?;
+    }
     if after.attention != before.attention {
         write_attention(w, ws, id, after.attention, now)?;
         if after.attention >= Attention::Quiet {
-            // 不提醒 / 屏蔽: no “新群” prompt left waiting for this space
             crate::space_decisions::expire_for_space(
                 w,
                 ws,
@@ -1435,6 +1407,9 @@ pub fn patch(
     }
     if after.reply_as_you != before.reply_as_you {
         write_reply_as_you(w, ws, id, after.reply_as_you, now)?;
+        if after.reply_as_you != ReplyAsYou::Draft {
+            crate::space_decisions::expire_for_space(w, ws, id, "已调整替你回复设置")?;
+        }
         // no longer replying for you here: what is still waiting to be said as you closes
         if before.reply_as_you == ReplyAsYou::Draft && speaks_as_you(w, ws, id, None)? {
             crate::presence::supersede(

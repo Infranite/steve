@@ -4,31 +4,35 @@ import { useOpenDecisions } from "@/data/sync"
  * Hub's choice, used in three places: in the conversation, in 待处理 / an item's page, and above the chat composer.
  * Decisions whose subject has a body of its own (mail drafts, flows, contacts, vault, memory) keep that body; above
  * the composer they offer one row that opens them. */
-import { ApprovalCard } from "@/components/affect/approval-card"
+import { ApprovalCard, type ApprovalRisk } from "@/components/affect/approval-card"
 import { DecisionCard as AuDecisionCard, type Decision, type DecisionAnswer, type DecisionCardLabels, type DecisionOption } from "@/components/affect/decision-card"
 import { Markdown } from "@/components/markdown"
 import { PermissionDetails } from "@/components/permission"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { TextArea } from "@/components/affect/text-area-clean"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { OutContext } from "@/channels/out-context"
 import { handoffContent } from "@/channels/handoff-content"
 import { HandoffPreview, ReplyDraft } from "@/channels/reply-preview"
-import { MessageOpenInFeishu } from "@/channels/open-in-app"
+import { MessageOpenInSourceApp } from "@/channels/open-in-app"
 import { SendRecovery } from "@/channels/send-recovery"
+import { outContext, type ROutContext } from "@/api/channels"
 import { t as tr, useT } from "@/i18n"
 import { FLOW_SUBJECTS, hasOptionIds, isModuleCard, isPeopleDecision, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
 import { botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, decideCards, GITHUB_PR_MERGE, actOnItem, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
-import { permissionCommand } from "@/ui"
-import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react"
-import { useRef, useState, type ReactNode } from "react"
+import { permissionCommand, Pill } from "@/ui"
+import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon, SendIcon } from "lucide-react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 
 /** the order of a failure card's choices; "continue" is the own-words field (a note to go on with) */
 const FAIL_ORDER = ["wait", "retry", "release_live", "release_retry", "release_waive", "delivered", "tosteve", "drop", "look", "continue"]
 
-/** a decision whose subject draws its own body (Steve's card keeps it); a tool call is an Approval Card */
+/** a decision whose subject draws its own body (Steve's card keeps it); every `approve` decision uses affectUI's Approval Card */
 export const hasOwnBody = (w: Wait) => FLOW_SUBJECTS.includes(w.subject) || isPeopleDecision(w) || w.subject === "mail_draft" || w.subject === "no_executor" || isModuleCard(w.subject)
 export const isToolCall = (w: Wait) => w.type === "approve" && w.subject === "tool_call"
+export const isChannelApproval = (w: Wait) => w.type === "approve" && w.subject === "chan_message"
+export const isPlainApproval = (w: Wait) => w.type === "approve" && !isToolCall(w) && !isChannelApproval(w)
 
 const toolOptions = (w: Wait) => {
   const opts = w.options.map((o) => { const [id, name, kind] = o.split("|"); return { id, name, kind } })
@@ -80,7 +84,7 @@ function Detail({ w, extra, reply = false }: { w: Wait; extra?: ReactNode; reply
   const t = useT()
   return <>
     {w.subject === "chan_message" && (w.type === "approve" || w.type === "fail") && <OutContext id={w.subjectId} />}
-    {w.subject === "chan_message" && <MessageOpenInFeishu message={w.subjectId} className="-ml-2 self-start" />}
+    {w.subject === "chan_message" && <MessageOpenInSourceApp message={w.subjectId} className="-ml-2 self-start" />}
     {w.subject === "session_start" && w.subjectId && <Button variant="outline" size="sm" data-session-config={w.subjectId} onClick={() => { const id = w.subjectId; if (id) void import("@/manage").then(({ editBot }) => editBot(id)) }}>{t("core:card.fixBotConfig")}</Button>}
     {/* the draft's headings are text: a "## 交付" never outranks the question above it */}
     {w.draft && !isToolCall(w) && !reply && (w.subject === "chan_message" ? <ReplyDraft text={w.draft} /> : <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>)}
@@ -298,7 +302,70 @@ export function ToolApproval({ i, w, showItem }: { i: Item; w: Wait; showItem: b
     resolvedLabels={{ approved: t("core:card.allowed"), denied: t("core:card.denied"), expired: t("core:card.expired") }}
     onApprove={busy ? undefined : answer} onDeny={() => { if (!busy) void decide(i.id, "deny", undefined, w.decision) }}
     approveAttrs={{ "data-allow": "" }} denyAttrs={{ "data-deny": "" }}
-    attrs={{ "data-decision": w.type, "data-decision-wrap": i.id || w.decision, "data-decision-id": w.decision }}
+    attrs={{ "data-decision": w.type, "data-decision-wrap": i.id || w.decision, "data-decision-id": w.decision, "aria-busy": busy ? "true" : undefined }}
+  />
+}
+
+/** Outbound channel-message approval: uses affectUI ApprovalCard so send approvals are visually distinct from ordinary DecisionCards (#213). */
+export function ChannelApproval({ i, w, showItem }: { i: Item; w: Wait; showItem: boolean }) {
+  const t = useT()
+  const [ctx, setCtx] = useState<ROutContext | null | undefined>(undefined)
+  useEffect(() => {
+    if (!w.subjectId) { setCtx(null); return }
+    let live = true
+    setCtx(undefined)
+    outContext(w.subjectId).then((x) => { if (live) setCtx(x) }, () => { if (live) setCtx(null) })
+    return () => { live = false }
+  }, [w.subjectId])
+  const busy = busyOf(w) && !channelAnswer(w)
+  const risk: ApprovalRisk = ctx?.space.external ? "high" : ctx?.as_you ? "medium" : "low"
+  return <ApprovalCard
+    className="steve-ap anim-in"
+    icon={<SendIcon className="size-4" />}
+    risk={ctx ? risk : undefined}
+    title={w.q}
+    description={showItem ? <TaskLink i={i} w={w} /> : botName(w.by === "steve" ? "steve" : w.by)}
+    label={<span className="flex w-full min-w-0 items-center justify-between gap-2"><span className="truncate">{kindLabel(w)}</span><CardTools i={i} w={w} /></span>}
+    preview={<div className="flex min-w-0 flex-col gap-2">
+      {w.escalated && <div><Pill tone="attention" data-draft-escalated>{t("channels:reply.escalated")}</Pill></div>}
+      <OutContext id={w.subjectId} context={ctx === undefined ? undefined : ctx} />
+      <MessageOpenInSourceApp message={w.subjectId} provider={ctx?.open_provider} className="-ml-2 self-start" />
+      {w.busy && <div role="status" className="flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><span className="size-1.5 rounded-full bg-blue dot-running" aria-hidden />{t("core:card.agentBusy")}</div>}
+      {st.pendingActions.has("decision:" + w.decision) && !channelAnswer(w) && <div role="status" className="type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}
+    </div>}
+    status="pending"
+    footer={<div className="w-full min-w-0"><ChannelReply key={w.decision} i={i} w={w} /></div>}
+    attrs={{ "data-decision": w.type, "data-decision-wrap": i.id || w.decision, "data-decision-id": w.decision, "aria-busy": busy ? "true" : undefined }}
+  />
+}
+
+/** Non-tool, non-channel approval (release, PR merge, external access): rendered as an ApprovalCard with optional reject reason (#213). */
+export function PlainApproval({ i, w, showItem }: { i: Item; w: Wait; showItem: boolean }) {
+  const t = useT()
+  const [reason, setReason] = useState("")
+  const busy = busyOf(w)
+  const risk: ApprovalRisk = w.subject === "release" || w.subject === GITHUB_PR_MERGE ? "high" : "medium"
+  const approveText = t(w.subject === "release" ? "core:card.approveRelease" : w.subject === GITHUB_PR_MERGE ? "core:card.approveMerge" : "core:card.approve")
+  const submit = (choice: string, text?: string) => { if (!busy) void decide(i.id, choice, text, w.decision) }
+  return <ApprovalCard
+    className="steve-ap anim-in"
+    risk={risk}
+    title={w.q}
+    description={showItem ? <TaskLink i={i} w={w} /> : botName(w.by === "steve" ? "steve" : w.by)}
+    label={<span className="flex w-full min-w-0 items-center justify-between gap-2"><span className="truncate">{kindLabel(w)}</span><CardTools i={i} w={w} /></span>}
+    preview={<div className="flex min-w-0 flex-col gap-2 empty:hidden [&>:empty]:hidden"><Detail w={w} /></div>}
+    status="pending"
+    footer={<div className="flex w-full min-w-0 flex-col gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <Input className="min-w-40 flex-1" value={reason} disabled={busy} placeholder={t("core:card.rejectPlaceholder")}
+          onChange={(e) => setReason(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit("no", reason.trim() || undefined) } }}
+          data-reject-reason />
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => submit("no", reason.trim() || undefined)} data-reject>{t("core:card.reject")}</Button>
+        <Button size="sm" disabled={busy} onClick={() => submit("yes")} data-approve>{approveText}</Button>
+      </div>
+    </div>}
+    attrs={{ "data-decision": w.type, "data-decision-wrap": i.id || w.decision, "data-decision-id": w.decision, "aria-busy": busy ? "true" : undefined }}
   />
 }
 

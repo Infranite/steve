@@ -117,6 +117,7 @@ pub mod cross_context;
 pub mod decide;
 pub mod deliver;
 pub mod disclosure;
+pub mod draft_escalation;
 pub mod drafts;
 pub mod ext;
 #[cfg(feature = "fake")]
@@ -149,6 +150,7 @@ pub mod recovery;
 pub mod replies;
 pub mod reply_eval;
 pub mod respond;
+pub mod rule_suggestions;
 pub mod rules;
 pub mod seen;
 pub use steve_store::channel_sends as send_state;

@@ -13,10 +13,11 @@ import { cn } from "cn"
 import { ArrowLeftIcon, BotIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon, MessagesSquareIcon } from "lucide-react"
 import { conversationsApi, type ChannelEntry, type ConvBadge, type ConvMessage, type ConvRecord, type ConvRow, type ConvState, type Handling, type Reaction, type RecordPage } from "@/api/conversations"
 import { HANDLING_TONE, handlingDetail, shownUpTo } from "@/thread/channel-record"
-import { st, msgOf, discardOut, decide, editReplyDraft, tm, useHubEvents, useShellSelector, type Msg } from "@/store"
+import { st, msgOf, discardOut, decide, editReplyDraft, optionLabel, tm, useHubEvents, useShellSelector, type Msg } from "@/store"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { Badge } from "@/components/ui/badge"
 import { ChannelMessageBody } from "@/channels/message-body"
+import { OutContext } from "@/channels/out-context"
 import { matchesSpace } from "@/live-utils"
 import { Empty, go, SearchField, Segmented } from "@/ui"
 import { Button } from "@/components/ui/button"
@@ -25,7 +26,7 @@ import { t as tr, useT } from "@/i18n"
 import { HubError } from "@/api"
 import { hubBase } from "@/hub"
 import { MessageActions } from "@/components/affect/message-actions"
-import { OpenInFeishu, openable, openInApp, openInFeishuLabel } from "@/channels/open-in-app"
+import { MessageOpenInSourceApp, OpenInSourceApp, openable, openInApp, openInSourceAppLabel } from "@/channels/open-in-app"
 import { partyActor } from "@/actor"
 import { ActorAvatar } from "@/components/actor-avatar"
 
@@ -237,7 +238,7 @@ export function ConvSwitcher({ channels, current, badge }: { channels?: ChannelE
         <span className="truncate type-callout font-medium" title={badge?.name}>{badge?.name || t("thread:conv.current")}</span>
         <Button variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground" aria-label={t("thread:conv.closeCurrent")} disabled={busy !== null} onClick={() => void change(current, true)}><XIcon /></Button>
       </div>
-      <OpenInFeishu url={badge?.open_url} compact />
+      <OpenInSourceApp url={badge?.open_url} provider={badge?.open_provider ?? badge?.provider} compact />
       <Button variant="ghost" size="sm" className="ml-auto shrink-0 text-muted-foreground" onClick={() => setOpen(true)}><ListIcon />{t("thread:conv.list")}</Button>
     </nav>}
     {!open && error && <p role="alert" className="mx-auto px-4 type-callout text-destructive">{error}</p>}
@@ -332,31 +333,54 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   )
 }
 
-/** The decision tier owns the single draft shown on your side of this conversation. */
-export function ConversationDraft({ conv, decisionIds }: { conv: string; decisionIds: ReadonlySet<string> }) {
+/** Open channel reply drafts living directly inside the conversation (#213, #268 multi-topic splits).
+ *  Shows every open `tier === "draft"` decision for this space with recipient/speaker/why/disclosure context,
+ *  in-place editing, send, rewrite, and discard controls. */
+export function ConversationDraft({ conv, decisionIds, provider }: { conv: string; decisionIds: ReadonlySet<string>; provider?: string | null }) {
   const decisions = useOpenDecisions()
-  const draft = decisions.findLast((d) => d.tier === "draft" &&
-    (d.space_id === conv.replace(/^chan:/, "") || decisionIds.has(d.id)))
-  return draft ? <DraftBubble key={draft.id} id={draft.id} text={draft.draft} /> : null
+  const spaceId = conv.replace(/^chan:/, "")
+  const drafts = decisions.filter((d) => d.tier === "draft" && (d.space_id === spaceId || decisionIds.has(d.id)))
+  if (!drafts.length) return null
+  return <div className="flex flex-col gap-3" data-conversation-drafts>
+    {drafts.map((d, idx) => (
+      <DraftBubble key={d.id} id={d.id} subjectId={d.subject_id} text={d.draft} options={d.options}
+        index={drafts.length > 1 ? idx + 1 : undefined} total={drafts.length > 1 ? drafts.length : undefined} provider={provider} />
+    ))}
+  </div>
 }
 
-function DraftBubble({ id, text }: { id: string; text: string }) {
+function DraftBubble({ id, subjectId, text, options, index, total, provider }: {
+  id: string; subjectId: string; text: string; options: string[]
+  index?: number; total?: number; provider?: string | null
+}) {
   const t = useT(), [edit, setEdit] = useState<{ previous: string; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true)
     try { if (await action()) setEdit(null) } finally { setBusy(false) }
   }
-  return <section className="w-fit max-w-[85%] self-end rounded-xl border border-dashed border-blue/50 bg-blue/5 p-3" data-conversation-draft={id}>
-    <div className="mb-2 type-footnote font-semibold text-blue">{t("thread:chanOut.draftBubble")}</div>
+  const extraOpts = options.filter((o) => o !== "yes" && o !== "no")
+  return <section className="flex w-full max-w-[600px] flex-col gap-2.5 self-end rounded-2xl border border-dashed border-blue/50 bg-blue/5 p-3.5" data-conversation-draft={id}>
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex items-center gap-2 type-footnote font-semibold text-blue">
+        <span>{t("thread:chanOut.draftBubble")}</span>
+        {index !== undefined && total !== undefined && <span className="rounded-md bg-blue/10 px-1.5 py-0.5 tabular-nums">{t("thread:chanOut.draftPart", { index, total })}</span>}
+      </div>
+      <MessageOpenInSourceApp message={subjectId} provider={provider} />
+    </div>
+    <OutContext id={subjectId} />
     {edit ? <Textarea autoFocus aria-label={t("thread:chanOut.draftBubble")} value={edit.text} maxLength={4000}
-      onChange={(e) => setEdit({ ...edit, text: e.target.value })} /> : <Markdown text={text} />}
-    <div className="mt-2 flex flex-wrap justify-end gap-2">
+      onChange={(e) => setEdit({ ...edit, text: e.target.value })} />
+      : <div className="rounded-xl bg-card/80 px-3 py-2"><Markdown text={text} /></div>}
+    <div className="flex flex-wrap justify-end gap-2">
       {edit ? <>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEdit(null)}>{t("common:action.cancel")}</Button>
         <Button size="sm" disabled={busy || !edit.text.trim()} onClick={() => void run(() => editReplyDraft(id, edit.previous, edit.text))}>{t("common:action.save")}</Button>
       </> : <>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run(() => discardOut(id))} data-draft-skip>{t("thread:chanOut.discard")}</Button>
+        {extraOpts.map((o) => (
+          <Button key={o} size="sm" variant="ghost" disabled={busy} onClick={() => void run(() => decide("", o, undefined, id))} data-draft-choice={o}>{optionLabel("chan_message", o)}</Button>
+        ))}
         <Button size="sm" variant="outline" disabled={busy} onClick={() => setEdit({ previous: text, text })} data-draft-edit>{t("common:action.edit")}</Button>
         <Button size="sm" disabled={busy || !text.trim()} onClick={() => void run(() => decide("", "yes", text, id))} data-draft-send>{t("thread:chanOut.send")}</Button>
       </>}
@@ -397,7 +421,7 @@ export function ImReadOnly({ b }: { b: ConvBadge }) {
 
 /** the actions under a turn of an IM conversation (affectUI Message Actions): open it in its platform's client. `side`:
  *  where the turn sits (someone in the chat on the right, Steve on the left); on a touch screen only the latest shows */
-export function ImMsgActions({ url, side, last }: { url?: string | null; side: "start" | "end"; last?: boolean }) {
+export function ImMsgActions({ url, provider, side, last }: { url?: string | null; provider?: string | null; side: "start" | "end"; last?: boolean }) {
   const t = useT()
   const href = openable(url)
   if (!href) return null
@@ -405,7 +429,7 @@ export function ImMsgActions({ url, side, last }: { url?: string | null; side: "
     <div className={cn("pointer-events-none absolute -bottom-8 left-0 right-0 opacity-0 transition-opacity [&_button]:pointer-events-auto focus-within:opacity-100",
       side === "end" ? "group-hover/me:opacity-100 group-focus-within/me:opacity-100" : "group-hover/sm:opacity-100 group-focus-within/sm:opacity-100",
       last && "[@media(hover:none)]:opacity-100")} data-im-msg-actions>
-      <MessageActions actions={[]} align={side} quiet={false} label={t("pages:chat.msgActions")} more={[{ key: "open-in-app", label: openInFeishuLabel(), icon: <ExternalLinkIcon strokeWidth={1.75} />, onClick: () => openInApp(href), attrs: { "data-open-in-app": "" } }]} />
+      <MessageActions actions={[]} align={side} quiet={false} label={t("pages:chat.msgActions")} more={[{ key: "open-in-app", label: openInSourceAppLabel(provider, href), icon: <ExternalLinkIcon strokeWidth={1.75} />, onClick: () => openInApp(href), attrs: { "data-open-in-app": "" } }]} />
     </div>
   )
 }
@@ -440,7 +464,7 @@ const OUT_LABEL = { ...CHAN_OUT, recalled: "thread:chanOut.recalled" } as const
 
 /** one message of the chat that has no turn in the conversation (#243): who said it and when, what it said, and what
  *  became of it — received ones on the right like the turns, sent ones on the left like Steve's */
-export function RecordRow({ r, last }: { r: ConvRecord; last?: boolean }) {
+export function RecordRow({ r, provider, last }: { r: ConvRecord; provider?: string | null; last?: boolean }) {
   const t = useT()
   const mine = r.direction === "out", side = mine ? "start" : "end"
   const out = r.out, outKey = out && out.status in OUT_LABEL ? OUT_LABEL[out.status as keyof typeof OUT_LABEL] : undefined
@@ -455,14 +479,14 @@ export function RecordRow({ r, last }: { r: ConvRecord; last?: boolean }) {
         <time className="shrink-0 tabular-nums" dateTime={new Date(r.created).toISOString()}>{tm(r.created)}</time>
         {r.history && <span className="shrink-0">{t("thread:record.history")}</span>}
       </div>
-      <div className={cn("w-full min-w-0 max-w-[600px] rounded-2xl px-3.5 py-2.5", mine ? "self-start bg-card shadow-[var(--lift)]" : "self-end bg-muted/70")}><ChannelMessageBody message={r} /></div>
+      <div className={cn("w-full min-w-0 max-w-[600px] rounded-2xl px-3.5 py-2.5", mine ? "self-start bg-card shadow-[var(--lift)]" : "self-end bg-muted/70")}><ChannelMessageBody message={r} provider={r.open_provider ?? provider} /></div>
       {r.handling && <HandlingLine h={r.handling} side={side} />}
       {out && out.status !== "sent" && <div className={cn("flex min-w-0 flex-wrap items-center gap-2 type-footnote", failed ? "text-destructive" : "text-muted-foreground")} data-chan-out={out.status}>
         <span>{outKey ? t(outKey) : out.status}</span>
         {out.error && <span className="min-w-0 break-words">{out.error}</span>}
         {out.decision && <Button size="xs" variant="outline" onClick={() => go("#/inbox")} data-record-decision={out.decision}>{t("thread:record.open")}</Button>}
       </div>}
-      <ImMsgActions url={r.open_url} side={side} last={last} />
+      <ImMsgActions url={r.open_url} provider={r.open_provider ?? provider} side={side} last={last} />
     </div>
   )
 }

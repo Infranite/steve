@@ -109,6 +109,7 @@ async fn setup_with(composed: &str) -> H {
         connections::register(r);
         r.outbound_check(Box::new(reg_disclosure.clone()));
         r.decision(SUBJECT_MESSAGE, reg_link.handler());
+        steve_channels::space_decisions::register(r);
     });
     disclosure.bind(env.store().clone(), env.gateway.clone());
     link.bind_clock(env.clock.clone());
@@ -181,7 +182,24 @@ async fn setup_with(composed: &str) -> H {
                 &h.bot,
                 &json!([{"when": {"kind": "mention_or_dm"}, "act": "reply"}]),
                 now,
-            )
+            )?;
+            spaces::locate_or_create(
+                tx,
+                &spaces::NewSpace {
+                    ws: WS,
+                    system_id: FakeChannel::SYSTEM,
+                    connection_id: &h.bot,
+                    kind: SpaceKind::Group,
+                    external_id: "C_OPS",
+                    name: "运维群",
+                    member_count: 0,
+                    has_external: false,
+                    muted: false,
+                    now,
+                    platform: None,
+                },
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
         })
         .unwrap();
     h.env.gateway.script(CHECK_HEAD, PASS);
@@ -1225,5 +1243,123 @@ async fn w34_thread_replay_channels() {
         );
     }
 
-    report.finish(22);
+    // 23 (#213): Quiet-inbox rules — new bot group defaults to silent record (no inbox ask card),
+    // unhandled @/DM draft escalates after 4 working hours, and 3 ignores in 7d propose record-only
+    {
+        use steve_store::views::Views;
+        use steve_types::DecisionTier;
+        let h = setup_with(REPLY_OK).await;
+        h.fake.space(
+            "C_FRESH",
+            "新拉进的群",
+            SpaceKind::Group,
+            false,
+            &[("ulilei", "李雷")],
+        );
+        let fresh = push(
+            &h,
+            &h.bot.clone(),
+            msg("C_FRESH", "f1", "ulilei", "@值班小运 你好", true),
+        )
+        .await;
+        let fresh_set = h
+            .env
+            .store()
+            .read(|r| spaces::settings(r, &fresh.space_id))
+            .unwrap();
+        let fresh_silent = fresh.decision_id.is_none()
+            && fresh_set.muted
+            && !fresh_set.configured
+            && fresh.response.as_ref().is_some_and(|r| r.muted);
+
+        // 4 working-hour escalation on unhandled DM draft (Thu 2027-01-07 16:00 -> Fri 11:00 = 4h)
+        let tz = chrono_tz::Asia::Shanghai;
+        let zone = steve_modules::zone::Zone::new(tz);
+        let thu_16 = zone
+            .instant(
+                chrono::NaiveDate::from_ymd_opt(2027, 1, 7)
+                    .unwrap()
+                    .and_hms_opt(16, 0, 0)
+                    .unwrap(),
+            )
+            .unwrap();
+        let fri_11 = zone
+            .instant(
+                chrono::NaiveDate::from_ymd_opt(2027, 1, 8)
+                    .unwrap()
+                    .and_hms_opt(11, 0, 0)
+                    .unwrap(),
+            )
+            .unwrap();
+        h.env.clock.advance_to(thu_16);
+        h.env
+            .store()
+            .settings()
+            .set(WS, json!({"tz": "Asia/Shanghai"}).as_object().unwrap(), ME)
+            .unwrap();
+        let mut dm_esc = msg("D_LI", "esc_1", "ulilei", "紧急问下进展", false);
+        dm_esc.created = thu_16;
+        let dm_res = push(&h, &h.me.clone(), dm_esc).await;
+        let dm_dec = dm_res.response.unwrap().decision_id.unwrap();
+        let tier_before = h
+            .env
+            .store()
+            .read(|r| r.decision_views().of(WS, &[dm_dec.clone()]))
+            .unwrap()
+            .pop()
+            .unwrap()
+            .tier;
+        h.env.clock.advance_to(fri_11);
+        let escalated_n = steve_channels::draft_escalation::escalate_due(&h.ch).unwrap();
+        let tier_after = h
+            .env
+            .store()
+            .read(|r| r.decision_views().of(WS, &[dm_dec.clone()]))
+            .unwrap()
+            .pop()
+            .unwrap()
+            .tier;
+
+        // 3 ignores within 7 days trigger a "record_only" proposal on the space.
+        steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, ME), &dm_dec, "no", "")
+            .unwrap()
+            .unwrap();
+        for n in 2..=3 {
+            h.env.clock.advance(86_400_000);
+            let mut m = msg("D_LI", &format!("esc_{n}"), "ulilei", "再问一次", false);
+            m.created = h.ch.now();
+            let r = push(&h, &h.me.clone(), m).await;
+            let d = r.response.unwrap().decision_id.unwrap();
+            steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, ME), &d, "no", "")
+                .unwrap()
+                .unwrap();
+        }
+        let sug = h
+            .env
+            .store()
+            .read(|r| {
+                steve_store::DecisionRows(r).open_for(WS, spaces::SUBJECT_SPACE, &dm_res.space_id)
+            })
+            .unwrap();
+        let suggested = sug
+            .as_ref()
+            .is_some_and(|d| d.kind == "propose" && d.options == vec!["record_only", "keep"]);
+
+        report.case(
+            "chan.reply.23_issue213_silent_new_group_escalation_and_ignore_rule_suggestion",
+            &[
+                ("new_bot_group_silent_no_inbox_card", fresh_silent),
+                (
+                    "dm_draft_escalates_after_4_work_hours",
+                    tier_before == DecisionTier::Draft
+                        && escalated_n == 1
+                        && tier_after == DecisionTier::Decide,
+                ),
+                ("three_ignores_in_7d_opens_record_only_proposal", suggested),
+            ],
+            &[],
+        );
+    }
+
+    report.finish(23);
 }

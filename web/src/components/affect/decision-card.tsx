@@ -254,7 +254,7 @@ export function DecisionCard({ decisions, onDecide, onLater, defaultFolded = fal
   };
 
   return (
-    <div ref={root} className={["ui-dcc", className].filter(Boolean).join(" ")} data-mode={mode}>
+    <div ref={root} className={["ui-dcc", className].filter(Boolean).join(" ")} data-mode={mode} data-card-kind="decision">
       <style href="ui-decision-card-clean" precedence="default">
         {css}
       </style>

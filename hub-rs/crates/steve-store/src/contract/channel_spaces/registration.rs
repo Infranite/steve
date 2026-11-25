@@ -54,6 +54,7 @@ pub struct Space<'a> {
     pub member_count: i64,
     pub has_external: bool,
     pub disclosure: &'a str,
+    pub muted: bool,
     pub platform: Option<&'a str>,
     pub now: i64,
 }
@@ -106,6 +107,7 @@ pub fn create(w: &mut W<'_>, n: &Space<'_>) -> Result<bool> {
                 "space_id",
                 "workspace_id",
                 "disclosure",
+                "muted",
                 "item_defaults",
                 "updated",
             ])
@@ -113,6 +115,7 @@ pub fn create(w: &mut W<'_>, n: &Space<'_>) -> Result<bool> {
                 id.as_str().into(),
                 n.ws.into(),
                 n.disclosure.into(),
+                i64::from(n.muted).into(),
                 json!({"tags": [], "project_id": null, "bot_id": null})
                     .to_string()
                     .into(),

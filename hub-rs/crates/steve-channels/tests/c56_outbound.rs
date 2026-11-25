@@ -286,6 +286,35 @@ async fn setup_full(as_user: Option<Arc<dyn ActAsUser>>, decl: Option<ChannelDec
         &h.pm.clone(),
         json!([{"when": {"kind": "all"}, "act": "record"}]),
     );
+    // Pre-configure active bot groups for outbound tests (new bot groups default to silent record
+    // until enabled; #213).
+    let now = h.ch.now();
+    for (conn, ext, name) in [
+        (&h.oncall, "C_OPS", "运维群"),
+        (&h.pm, "C_REQ", "产品需求群"),
+    ] {
+        h.env
+            .store()
+            .write(|tx| {
+                spaces::locate_or_create(
+                    tx,
+                    &spaces::NewSpace {
+                        ws: WS,
+                        system_id: FakeChannel::SYSTEM,
+                        connection_id: conn,
+                        kind: SpaceKind::Group,
+                        external_id: ext,
+                        name,
+                        member_count: 0,
+                        has_external: false,
+                        muted: false,
+                        now,
+                        platform: None,
+                    },
+                )
+            })
+            .expect("activate bot group");
+    }
     h
 }
 
