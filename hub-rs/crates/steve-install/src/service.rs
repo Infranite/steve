@@ -670,7 +670,84 @@ impl Service {
         );
         Ok(())
     }
+}
 
+/// Deterministic launchd error codes from `launchctl print <domain>/<label>`:
+/// - `3` (`ESRCH`): no such process / job not present
+/// - `113`: service or domain not found in launchd
+/// - `125`: domain does not support specified action (returned for `gui/<uid>` when no desktop
+///   session is logged in, e.g. `/dev/console` owned by `root`)
+const LAUNCHCTL_ERR_NO_SUCH_PROCESS: i32 = 3;
+const LAUNCHCTL_ERR_NOT_FOUND: i32 = 113;
+const LAUNCHCTL_ERR_DOMAIN_UNSUPPORTED: i32 = 125;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LaunchQuery {
+    Loaded,
+    Absent,
+    Unknown(String),
+}
+
+/// Extracts launchctl's structured `<prefix>: <code>: <message>` numeric code (for example
+/// `Could not print domain: 125: Domain does not support specified action`), or uses the process
+/// exit code when it directly carries one of the known launchd status codes.
+fn launchctl_error_code(result: &Output) -> Option<i32> {
+    for stream in [&result.stderr, &result.stdout] {
+        for line in stream.lines() {
+            let mut parts = line.splitn(3, ':');
+            if parts.next().is_none() {
+                continue;
+            }
+            let Some(code_part) = parts.next() else {
+                continue;
+            };
+            if parts.next().is_some()
+                && let Ok(code) = code_part.trim().parse::<i32>()
+            {
+                return Some(code);
+            }
+        }
+    }
+    matches!(
+        result.code,
+        LAUNCHCTL_ERR_NO_SUCH_PROCESS | LAUNCHCTL_ERR_NOT_FOUND | LAUNCHCTL_ERR_DOMAIN_UNSUPPORTED
+    )
+    .then_some(result.code)
+}
+
+fn launchctl_raw_output(result: &Output) -> String {
+    let mut parts = Vec::new();
+    let stderr = result.stderr.trim();
+    let stdout = result.stdout.trim();
+    if !stderr.is_empty() {
+        parts.push(stderr);
+    }
+    if !stdout.is_empty() {
+        parts.push(stdout);
+    }
+    if parts.is_empty() {
+        format!("launchctl exited with status {}", result.code)
+    } else {
+        format!(
+            "launchctl exited with status {}: {}",
+            result.code,
+            parts.join(" | ")
+        )
+    }
+}
+
+fn classify_launchctl_print(domain: &str, result: &Output) -> LaunchQuery {
+    if result.code == 0 {
+        return LaunchQuery::Loaded;
+    }
+    match launchctl_error_code(result) {
+        Some(LAUNCHCTL_ERR_NOT_FOUND | LAUNCHCTL_ERR_NO_SUCH_PROCESS) => LaunchQuery::Absent,
+        Some(LAUNCHCTL_ERR_DOMAIN_UNSUPPORTED) if domain.starts_with("gui/") => LaunchQuery::Absent,
+        _ => LaunchQuery::Unknown(launchctl_raw_output(result)),
+    }
+}
+
+impl Service {
     fn launch_state(&self, domain: &str, config: &Path, exact: bool) -> Result<Value> {
         let result = self.command(
             vec![
@@ -699,23 +776,24 @@ impl Service {
             );
         }
         let pid = fields.get("pid").and_then(|s| s.parse::<u64>().ok());
-        let failure = format!("{}{}", result.stderr, result.stdout).to_lowercase();
-        let absent = result.code != 0
-            && (failure.contains("could not find service")
-                || failure.contains("could not find domain")
-                || failure.contains("no such process"));
-        let running = if result.code == 0 {
-            Some(pid.is_some())
-        } else if absent {
-            Some(false)
-        } else {
-            None
+        let query = classify_launchctl_print(domain, &result);
+        let (running, default_state, diagnostic) = match query {
+            LaunchQuery::Loaded => (Some(pid.is_some()), "unknown", None),
+            LaunchQuery::Absent => (Some(false), "stopped", None),
+            LaunchQuery::Unknown(raw) => (None, "unknown", Some(raw)),
         };
-        Ok(
-            json!({"installed": config.is_file(), "loaded":result.code == 0,"running":running,"pid":pid,
-            "program":fields.get("program"),
-            "state":fields.get("state").copied().unwrap_or(if absent {"stopped"} else {"unknown"})}),
-        )
+        let mut out = json!({
+            "installed": config.is_file(),
+            "loaded": result.code == 0,
+            "running": running,
+            "pid": pid,
+            "program": fields.get("program"),
+            "state": fields.get("state").copied().unwrap_or(default_state),
+        });
+        if let Some(diagnostic) = diagnostic {
+            out["diagnostic"] = json!(diagnostic);
+        }
+        Ok(out)
     }
 
     fn state(&self) -> Result<Value> {
@@ -908,7 +986,11 @@ impl Service {
             ensure!(
                 state["running"] == false
                     && (self.system != System::Darwin || state["loaded"] == false),
-                "service is running or its state is unknown; no files changed. Finish Node sessions, verify Devices, then stop the service before update; --wait only waits for a stopped service"
+                "service is running or its state is unknown{}; no files changed. Finish Node sessions, verify Devices, then stop the service before update; --wait only waits for a stopped service",
+                state["diagnostic"]
+                    .as_str()
+                    .map(|d| format!(" ({d})"))
+                    .unwrap_or_default()
             );
         }
         fs::create_dir_all(&self.home)?;
@@ -1103,7 +1185,11 @@ impl Service {
         ensure!(
             state["running"] == false
                 && (self.system != System::Darwin || state["loaded"] == false),
-            "service is running, loaded, or its state is unknown; no service was stopped. Finish sessions, verify Hub Devices, then explicitly stop before uninstall"
+            "service is running, loaded, or its state is unknown{}; no service was stopped. Finish sessions, verify Hub Devices, then explicitly stop before uninstall",
+            state["diagnostic"]
+                .as_str()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default()
         );
         Ok(())
     }
@@ -1346,6 +1432,8 @@ mod tests {
         stale: Option<String>,
         legacy: BTreeMap<String, PathBuf>,
         legacy_programs: BTreeMap<String, PathBuf>,
+        gui_domain_unsupported: bool,
+        legacy_print_error: Option<(i32, String)>,
         node_signatures: BTreeMap<PathBuf, String>,
         cert_sha1: Option<String>,
         signing_failure: bool,
@@ -1536,12 +1624,22 @@ mod tests {
                         }
                     }
                     ("print", None) => {
-                        result.code = 113;
-                        result.stderr = if args[2].starts_with("gui/") {
-                            "Could not find domain for".into()
+                        if let Some((code, stderr)) = &self.legacy_print_error {
+                            result.code = *code;
+                            result.stderr = stderr.clone();
+                        } else if args[2].starts_with("gui/") && self.gui_domain_unsupported {
+                            result.code = LAUNCHCTL_ERR_DOMAIN_UNSUPPORTED;
+                            result.stderr =
+                                "Could not print domain: 125: Domain does not support specified action"
+                                    .into();
                         } else {
-                            "Could not find service in domain".into()
-                        };
+                            result.code = LAUNCHCTL_ERR_NOT_FOUND;
+                            result.stderr = if args[2].starts_with("gui/") {
+                                "Could not find domain for".into()
+                            } else {
+                                "Could not find service in domain".into()
+                            };
+                        }
                     }
                     ("bootout", Some(_)) => {
                         self.legacy.remove(&args[2]);
@@ -3054,5 +3152,95 @@ esac
         assert_eq!(report["pairing"]["configured"], false);
         assert_eq!(report["pairing"]["identity_present"], false);
         assert!(!f.home.join("node/node.json").exists());
+    }
+
+    #[test]
+    fn launchctl_print_classifier_handles_missing_gui_domain_125_and_preserves_unknown_output() {
+        let verbatim = "Could not print domain: 125: Domain does not support specified action\n";
+        // Missing desktop session on gui/<uid>: exit code 125 or exit code 1 with structured 125.
+        for code in [125, 1] {
+            let out = Output {
+                code,
+                stdout: String::new(),
+                stderr: verbatim.into(),
+            };
+            assert_eq!(
+                classify_launchctl_print("gui/501", &out),
+                LaunchQuery::Absent,
+                "gui/501 with code={code} must be treated as absent"
+            );
+        }
+        // Code 125 on the system domain must NEVER be treated as absent.
+        let sys_out = Output {
+            code: 125,
+            stdout: String::new(),
+            stderr: verbatim.into(),
+        };
+        match classify_launchctl_print("system", &sys_out) {
+            LaunchQuery::Unknown(msg) => assert!(msg.contains(verbatim.trim()), "{msg}"),
+            other => panic!("expected Unknown for system domain 125, got {other:?}"),
+        }
+        // Standard launchd absent codes (113 not found, 3 ESRCH).
+        for code in [113, 3] {
+            assert_eq!(
+                classify_launchctl_print(
+                    "user/501",
+                    &Output {
+                        code,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }
+                ),
+                LaunchQuery::Absent
+            );
+        }
+        // Unrecognized launchctl failure output is preserved verbatim.
+        let unknown_stderr = "Could not print service: 150: Operation not permitted";
+        match classify_launchctl_print(
+            "gui/501",
+            &Output {
+                code: 150,
+                stdout: String::new(),
+                stderr: format!("{unknown_stderr}\n"),
+            },
+        ) {
+            LaunchQuery::Unknown(msg) => assert!(msg.contains(unknown_stderr), "{msg}"),
+            other => panic!("expected Unknown for code 150, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fresh_macos_node_completes_enable_boot_without_desktop_gui_session() {
+        let f = Fixture::new();
+        let (mut s, m) = f.service(System::Darwin, "node");
+        m.lock().unwrap().gui_domain_unsupported = true;
+
+        let prepared = s.dispatch("install", Some(&f.release), 0).unwrap();
+        assert_eq!(prepared["prepared"], true);
+        assert_eq!(prepared["boot"], "enable_required");
+
+        let enabled = s.dispatch("enable-boot", None, 0).unwrap();
+        assert_eq!(enabled["registered_now"], true);
+        assert_eq!(enabled["service"]["installed"], true);
+        assert_eq!(enabled["service"]["running"], true);
+        assert!(s.config.is_file());
+        assert_eq!(
+            s.record["boot_release"].as_str(),
+            Some(f.release.canonicalize().unwrap().to_str().unwrap())
+        );
+
+        // An unrecognized launchctl error on legacy inspection must still fail and carry verbatim output.
+        let f2 = Fixture::new();
+        let (mut s2, m2) = f2.service(System::Darwin, "node");
+        s2.dispatch("install", Some(&f2.release), 0).unwrap();
+        m2.lock().unwrap().legacy_print_error = Some((
+            150,
+            "Could not print service: 150: Operation not permitted".into(),
+        ));
+        let err = s2.dispatch("enable-boot", None, 0).unwrap_err().to_string();
+        assert!(
+            err.contains("Could not print service: 150: Operation not permitted"),
+            "unrecognized launchctl output must be preserved verbatim: {err}"
+        );
     }
 }

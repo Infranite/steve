@@ -117,10 +117,23 @@ shift 3
 for legacy; do
     if ! /bin/launchctl bootout "$legacy" >&2; then
         # gui/ and user/ may name the same job; the first bootout can remove both.
-        state=$(/bin/launchctl print "$legacy" 2>&1) && exit 1
-        case "$state" in
-            *"Could not find service"*|*"Could not find domain"*|*"No such process"*) ;;
-            *) exit 1 ;;
+        rc=0
+        state=$(/bin/launchctl print "$legacy" 2>&1) || rc=$?
+        [ "$rc" -ne 0 ] || exit 1
+        case "$rc" in
+            3|113) ;;
+            125)
+                case "$legacy" in
+                    gui/*) ;;
+                    *) printf '%s\n' "$state" >&2; exit 1 ;;
+                esac
+                ;;
+            *)
+                case "$legacy:$state" in
+                    gui/*:*": 125:"*) ;;
+                    *) printf '%s\n' "$state" >&2; exit 1 ;;
+                esac
+                ;;
         esac
     fi
 done
@@ -772,7 +785,11 @@ impl Service {
             let state = self.launch_state(&domain, &agent, true)?;
             ensure!(
                 state["running"].is_boolean(),
-                "cannot determine legacy launchd state"
+                "cannot determine legacy launchd state for {domain}/{}: {}",
+                self.label,
+                state["diagnostic"]
+                    .as_str()
+                    .unwrap_or("unknown launchctl failure")
             );
             if state["loaded"] == true {
                 ensure!(
@@ -872,7 +889,16 @@ impl Service {
             if state["loaded"] == false && state["running"] == false {
                 return Ok(());
             }
-            if state["running"].is_null() || Instant::now() >= deadline {
+            if state["running"].is_null() {
+                bail!(
+                    "service is loaded or its state is unknown ({domain}/{}: {}); no files changed by the stopped-state check. Stop it and try again",
+                    self.label,
+                    state["diagnostic"]
+                        .as_str()
+                        .unwrap_or("unknown launchctl failure")
+                );
+            }
+            if Instant::now() >= deadline {
                 bail!(
                     "service is loaded or its state is unknown; no files changed by the stopped-state check. Stop it and try again"
                 );
@@ -923,7 +949,10 @@ impl Service {
         let state = self.state()?;
         ensure!(
             state["running"].is_boolean(),
-            "cannot determine macOS Node service state"
+            "cannot determine macOS Node service state: {}",
+            state["diagnostic"]
+                .as_str()
+                .unwrap_or("unknown launchctl failure")
         );
         if state["installed"] != true {
             ensure!(
