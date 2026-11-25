@@ -129,7 +129,7 @@ test("componentReasonI18n maps every typed reason code and mergeNodeHarnesses un
       refreshing: false,
       error: null,
       harnesses: [
-        { id: "h1", name: "Harness One", available: true, version: "1.0.0", adapter_version: "0.9.0", degraded_reason: null, models: ["m1"], error: null, setup: null },
+        { id: "h1", name: "Harness One", available: true, version: "1.0.0", adapter_version: "0.9.0", degraded_reason: null, installed: true, models: ["m1"], error: null, setup: null },
       ],
     },
     {
@@ -150,8 +150,8 @@ test("componentReasonI18n maps every typed reason code and mergeNodeHarnesses un
       code: null,
     },
   )
-  assert.deepEqual(merged.shown.map((x) => x.id), ["h1", "h2"])
-  assert.equal(merged.shown[0].probe?.models[0], "m1")
-  assert.equal(merged.shown[0].update?.harness, "h1")
-  assert.deepEqual(merged.other.map((x) => x.id), ["h3"])
+  assert.deepEqual(merged.map((x) => x.id), ["h1", "h2", "h3"])
+  assert.equal(merged[0].probe?.models[0], "m1")
+  assert.equal(merged[0].update?.harness, "h1")
+  assert.equal(merged[2].probe, null)
 })

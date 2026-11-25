@@ -16,9 +16,9 @@ export function DCard({ icon, title, sub, action, children, className, id, ...re
   return (
     <Card as="section" id={id} className={cn("steve-card min-w-0 overflow-hidden p-0", className)} {...rest}>
       {title != null && (
-        <header className="flex items-start gap-3 px-5 pt-4 pb-3">
+        <header className="flex flex-wrap items-start gap-3 px-5 pt-4 pb-3">
           {icon && <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground [&_svg]:size-4 [&_svg]:stroke-[1.75]" aria-hidden>{icon}</span>}
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 basis-44">
             <h2 className="type-headline text-foreground [overflow-wrap:anywhere]">{title}</h2>
             {sub && <div className="type-footnote text-pretty text-muted-foreground">{sub}</div>}
           </div>

@@ -137,3 +137,42 @@
   [data-hub-management] .ui-fldc__foot { flex-direction: column; gap: 4px; }
   [data-hub-management] .ui-fldc__count { align-self: flex-end; }
 }
+
+/* Node Harness tab: collapsible section headers, compact cards, and structured model chips */
+.harness-sec-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
+  padding: 6px 10px; border: 0; border-radius: 8px; background: color-mix(in srgb, var(--muted) 55%, transparent);
+  text-align: left; cursor: pointer; transition: background-color 140ms var(--ease-out);
+}
+.harness-sec-toggle:hover { background: color-mix(in srgb, var(--muted) 90%, transparent); }
+.harness-sec-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.harness-card--compact .ui-isc__head { padding: 12px 14px; }
+.harness-card--compact .ui-isc__logo { width: 34px; height: 34px; }
+.harness-card--compact .ui-isc__section { padding: 10px 14px; }
+.harness-card--attention {
+  box-shadow: var(--aui-shadow-card), inset 3px 0 0 var(--attention);
+}
+.harness-card--attention .ui-isc__head { padding: 12px 14px; }
+.harness-card--attention .ui-isc__logo { width: 34px; height: 34px; }
+.harness-card--attention .ui-isc__section { padding: 10px 14px; }
+
+.harness-model-chip {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0;
+  padding: 2px 8px; border-radius: 6px; font-size: 11.5px; line-height: 18px;
+  color: var(--foreground); background: color-mix(in srgb, var(--muted) 75%, transparent);
+  box-shadow: inset 0 0 0 0.5px var(--border);
+}
+.harness-chip-source {
+  flex: none; padding: 0 4px; border-radius: 4px; font-size: 10px; line-height: 15px; font-weight: 500;
+  color: var(--muted-foreground); background: color-mix(in srgb, var(--foreground) 7%, transparent);
+}
+.harness-chip-count {
+  flex: none; font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--muted-foreground);
+}
+.harness-snap-toggle {
+  flex: none; padding: 0 6px; border: 0; border-radius: 4px; cursor: pointer;
+  font-size: 11px; line-height: 18px; color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--muted) 85%, transparent);
+}
+.harness-snap-toggle:hover { color: var(--foreground); }

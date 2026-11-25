@@ -9,13 +9,17 @@ import { Spinner } from "@/components/ui/spinner"
 import { Panel } from "@/panel"
 import { RuntimeBadge } from "@/runtime-access"
 import { canInstallRuntime, supportsPermission } from "@/runtime-status"
-import { setRuntimes, st, toast, useRuntimes } from "@/store"
+import { setRuntimes, st, toast, useRuntimesQuery } from "@/store"
 import { go, openSheet } from "@/ui"
 import { useT } from "@/i18n"
 
+const EMPTY_RUNTIMES: RRuntime[] = []
+
 /** This inventory belongs to the Hub's local Node. It does not describe another device's capabilities. */
 export function RuntimeSetupPanel({ children }: { children?: ReactNode }) {
-  const runtimes = useRuntimes()
+  const { data: loadedRuntimes, isPending: loadingRuntimes, error: queryError } = useRuntimesQuery()
+  const runtimes = loadedRuntimes ?? EMPTY_RUNTIMES
+  const initialLoading = loadedRuntimes === undefined && loadingRuntimes
   const t = useT()
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
   const [pending, setPending] = useState<string[]>([])
@@ -89,14 +93,16 @@ export function RuntimeSetupPanel({ children }: { children?: ReactNode }) {
     <Button key="unavailable-toggle" variant="ghost" className="min-h-11 w-full justify-start" aria-expanded={expanded} aria-controls={unavailable.map(entryId).join(" ")} onClick={() => setExpanded(v => !v)} data-runtime-unavailable-toggle>
       <ChevronDownIcon className={expanded ? "rotate-180" : undefined} />{t("shell:runtimeSetup.unavailableCount", { count: unavailable.length })}
     </Button>)
-  return <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: runtimes.filter(r => r.ok).length, count: runtimes.length })}
+  const displayError = error || (queryError instanceof Error ? queryError.message : "")
+  return <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={initialLoading ? undefined : t("shell:devices.runtimesSub", { ok: runtimes.filter(r => r.ok).length, count: runtimes.length })}
     right={<Button size="sm" variant="ghost" disabled={busy} onClick={() => void reload().then(() => toast(t("shell:devices.rechecked"))).catch(() => {})} data-runtime-refresh>{busy ? <Spinner /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>
-    {error && <details className="break-words px-5 pb-3 type-callout text-attention">
+    {displayError && <details className="break-words px-5 pb-3 type-callout text-attention">
       <summary className="cursor-pointer"><span role="alert" data-runtime-refresh-error>{t("shell:runtimeSetup.refreshFailed")}</span></summary>
-      <p className="mt-2 whitespace-pre-wrap break-all" data-runtime-refresh-error-detail>{error}</p>
+      <p className="mt-2 whitespace-pre-wrap break-all" data-runtime-refresh-error-detail>{displayError}</p>
     </details>}
-    {runtimes.length ? <div className="flex flex-col gap-3 px-3 pb-3" data-runtime-inventory>{cards}</div>
-      : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noRuntimes")}</div>}
+    {initialLoading ? <div className="flex justify-center px-5 py-6" data-runtime-loading><Spinner className="size-4 text-muted-foreground" /></div>
+      : runtimes.length ? <div className="flex flex-col gap-3 px-3 pb-3" data-runtime-inventory>{cards}</div>
+      : <div className="px-5 py-4 type-callout text-muted-foreground" data-runtime-empty>{t("shell:devices.noRuntimes")}</div>}
     {children && <div className="px-5 pt-1 pb-4">{children}</div>}
   </Panel>
 }

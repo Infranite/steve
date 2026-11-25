@@ -77,6 +77,7 @@ pub struct NodeOffline {
     pub duration_ms: i64,
 }
 
+/// Strongly-typed reason explaining why an installed or configured harness is unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -86,6 +87,254 @@ pub enum HarnessDegradedReason {
     CommandNotInServicePath,
     InitializeFailed,
     SessionUnavailable,
+    /// One or more installed components are below the required minimum version.
+    VersionOutdated,
+    /// Host runtime prerequisite (e.g. Node.js) is missing or incompatible with managed components.
+    RuntimeIncompatible,
+    /// Last managed installation attempt failed on this Node.
+    InstallFailed,
+    /// Installation or upgrade is currently running on this Node.
+    Installing,
+    /// Availability has not been confirmed yet (unprobed or interrupted installer).
+    ProbeUnknown,
+}
+
+/// How a harness exposes subagents over ACP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum SubagentCapability {
+    /// No subagent delegation protocol or tool surface observed.
+    #[default]
+    None,
+    /// Subagents observed via harness-specific tool calls (e.g. `Agent`, `invoke_subagent`, `subagent`).
+    ToolFallback,
+    /// Standard ACP RFD #1992 subagent child sessions (`subagent_update` + routed child `sessionId`).
+    AcpRfd,
+}
+
+/// How a harness exposes background tasks over ACP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum BackgroundTaskCapability {
+    /// No background task observation over ACP.
+    #[default]
+    None,
+    /// Background tasks observed via harness-specific tool calls (e.g. `Bash(run_in_background)`, `run_command`/`manage_task`).
+    ToolFallback,
+    /// Native ACP async task updates (`async_task_*`).
+    AcpAsyncTasks,
+}
+
+/// Token / usage attribution granularity reported by a harness.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum UsageAttribution {
+    /// Only context window usage (`used`/`size`), no per-turn token accounting.
+    ContextOnly,
+    /// Turn-level `Main` usage without per-subtask attribution.
+    #[default]
+    TurnLevel,
+    /// Turn-level `Main` plus model-level `All` aggregate covering subagents.
+    TurnAndModelAll,
+    /// Separate per-subtask token attribution (`UsageScope::Subtask`) additive to `Main`.
+    SubtaskScoped,
+}
+
+/// How a harness resumes an existing session over ACP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ResumeCapability {
+    #[default]
+    None,
+    SessionLoad,
+}
+
+/// How a harness's CLI and/or ACP adapter can be upgraded on a Node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum UpgradeCapability {
+    /// Steve manages and upgrades npm-distributed CLI and/or ACP adapter packages.
+    ManagedNpm,
+    /// Installed/upgraded via an external package manager or vendor updater (e.g. `uv`, app bundle).
+    ExternalManaged,
+    /// No automated upgrade path is declared or verified.
+    #[default]
+    Manual,
+}
+
+/// Runtime capabilities of a harness adapter, owned by `steve-acp::adapter`.
+/// Hub business logic and Web inspect these capability flags rather than branching on harness names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct AdapterCapabilities {
+    pub subagents: SubagentCapability,
+    /// Individual subagent cancellation is supported natively over ACP (e.g. `session/cancel(childId)`).
+    #[serde(default)]
+    pub subagent_cancel: bool,
+    pub background_tasks: BackgroundTaskCapability,
+    /// Individual background task cancellation is supported natively over ACP.
+    #[serde(default)]
+    pub background_task_cancel: bool,
+    /// Child tool calls carry parent linkage (child `sessionId` or `parentToolUseId`) for nested UI rendering.
+    #[serde(default)]
+    pub child_tool_nesting: bool,
+    pub usage_attribution: UsageAttribution,
+    pub resume: ResumeCapability,
+    /// Reserved upgrade strategy capability for Node-side harness upgrades.
+    #[serde(default)]
+    pub upgrade: UpgradeCapability,
+    /// How this harness adapter maps Steve's canonical [`crate::ReasoningEffort`].
+    #[serde(default)]
+    pub effort_mode: crate::EffortMode,
+    /// True only for harnesses verified empirically against real local runs.
+    #[serde(default)]
+    pub verified: bool,
+}
+
+/// Observation status of one Node's harness probe report (`GET /api/node-harnesses`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum NodeHarnessReportState {
+    Reported,
+    #[default]
+    Unreported,
+    Offline,
+    Unsupported,
+    Failed,
+    UpgradeRequired,
+}
+
+/// Managed setup state mirrored on a Node's harness probe view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum NodeHarnessSetupState {
+    NotInstalled,
+    Installing,
+    Ready,
+    Unavailable,
+    Unknown,
+}
+
+/// Integrity evidence for one expected managed harness component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum NodeHarnessComponentStatus {
+    Installed,
+    Missing,
+    Unknown,
+}
+
+/// Another executable discovered outside the managed prefix (read-only evidence).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeHarnessDetectedView {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub version: Option<String>,
+}
+
+/// One expected managed component inside [`NodeHarnessSetupView`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeHarnessComponentView {
+    pub id: String,
+    pub name: String,
+    pub package: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
+    pub status: NodeHarnessComponentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub detected: Option<NodeHarnessDetectedView>,
+}
+
+/// Component discovery and controlled setup view on [`NodeHarnessView`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeHarnessSetupView {
+    pub state: NodeHarnessSetupState,
+    pub components: Vec<NodeHarnessComponentView>,
+    pub can_install: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub help: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub error: Option<String>,
+}
+
+/// Read-only HTTP view of one harness observed on a single Node (`GET /api/node-harnesses`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeHarnessView {
+    pub id: String,
+    pub name: String,
+    pub available: Option<bool>,
+    pub version: String,
+    pub adapter_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub default_model: Option<String>,
+    pub models: Vec<String>,
+    pub degraded_reason: Option<HarnessDegradedReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub install_hint: Option<String>,
+    /// True when the harness is installed, partially installed, or explicitly configured on the Node.
+    #[serde(default)]
+    pub installed: bool,
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub missing_command: Option<MissingCommandDiagnostic>,
+    pub setup: Option<NodeHarnessSetupView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub capabilities: Option<AdapterCapabilities>,
+}
+
+/// Read-only HTTP view of one Node's harness probe report.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeHarnessReportView {
+    pub state: NodeHarnessReportState,
+    pub checked_at: Option<i64>,
+    pub attempted_at: Option<i64>,
+    pub stale: bool,
+    pub refreshing: bool,
+    pub error: Option<String>,
+    pub harnesses: Vec<NodeHarnessView>,
+}
+
+/// Response body of `GET /api/node-harnesses`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeHarnessesResponse {
+    pub nodes: std::collections::BTreeMap<String, NodeHarnessReportView>,
+}
+
+/// Response body of `GET /api/node-harnesses/{id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeHarnessRefreshResponse {
+    pub node_id: String,
+    pub report: NodeHarnessReportView,
 }
 
 /// Where a service definition's `PATH` was captured from.
