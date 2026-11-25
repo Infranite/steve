@@ -73,6 +73,7 @@ pub use runtime::{
     AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, PermissionAction,
     PermissionAnswer, Prompted, Released, Running, Stop, TurnEnd,
 };
+pub use worktrees::{CLOSED_WORKTREE_BACKFILL_KEY, WorktreeBackfillReport};
 
 use repo::Db;
 use std::collections::HashMap;

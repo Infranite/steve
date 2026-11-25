@@ -259,9 +259,11 @@ impl super::node_runtime::NodeDomain for HubHost {
                         )
                     }
                 }
-                WorkspaceFact::Tidied { item, removed, .. } => {
-                    core.workspace_tidied(&item, removed)
-                }
+                WorkspaceFact::Tidied {
+                    item,
+                    removed,
+                    note,
+                } => core.workspace_tidied(&item, removed, note.as_deref()),
             };
             if let Err(e) = r {
                 tracing::error!("workspace fact: {e}");
@@ -1311,6 +1313,10 @@ impl CoreDomain {
     pub async fn retire_legacy_workflow_children(&self) -> BResult<usize> {
         let c = self.core.clone();
         blocking(move || c.retire_legacy_workflow_children()).await
+    }
+    pub async fn backfill_closed_worktrees(&self) -> BResult<steve_core::WorktreeBackfillReport> {
+        let c = self.core.clone();
+        blocking(move || c.backfill_closed_worktrees()).await
     }
     pub async fn lifecycle_tick(&self) -> BResult<usize> {
         let c = self.core.clone();

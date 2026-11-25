@@ -526,6 +526,19 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("recover: {e}"))?;
     st.domain.spawn_background();
+    if !st.cfg.diagnostic() {
+        match st.domain.backfill_closed_worktrees().await {
+            Ok(report) if report.skipped => {}
+            Ok(report) => tracing::info!(
+                scanned = report.scanned,
+                cleaned = report.cleaned,
+                enqueued = report.enqueued,
+                failed = report.failed,
+                "one-time closed worktree backfill finished at boot"
+            ),
+            Err(e) => tracing::error!("one-time closed worktree backfill failed: {e}"),
+        }
+    }
     // closings waiting for something the turn-end callback may never report (queued turns, the hold)
     st.jobs.start("hub.lifecycle", || {
         crate::jobs::spawn_lifecycle_tick(st.clone())

@@ -47,6 +47,21 @@ pub(super) fn describe() {
         Seconds,
         "Time to commit an owner's explicit item finish."
     );
+    describe_counter!(
+        "steve_worktree_cleanup_total",
+        Count,
+        "Closed-item worktree cleanup outcomes. Labels: backend (core, node), outcome (removed, dispatched, partial, dirty, deferred, failed), branch (deleted, preserved, delete_failed, kept, none)."
+    );
+    describe_histogram!(
+        "steve_worktree_cleanup_duration_seconds",
+        Seconds,
+        "Time spent cleaning or dispatching cleanup for one closed item's worktree. Label: backend (core, node)."
+    );
+    describe_counter!(
+        "steve_worktree_backfill_items_total",
+        Count,
+        "Items processed by the one-time closed-worktree backfill maintenance pass. Label: result (cleaned, enqueued, failed)."
+    );
     describe_histogram!(
         "steve_bot_selection_seconds",
         Seconds,

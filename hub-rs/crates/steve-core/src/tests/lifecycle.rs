@@ -859,6 +859,7 @@ fn a_dropped_item_gives_back_its_clean_worktree_and_a_new_message_brings_it_back
         .unwrap();
     k.core.item_action(&i, ItemAction::Drop, "me").unwrap();
     assert_eq!(k.phase(&i), "closed");
+    assert!(k.pump_outbox().done >= 1);
     assert!(!wt.exists());
     g(&r, &["rev-parse", "--verify", &name]);
     // a message does not bring it back; an explicit new cycle with a goal does
@@ -903,7 +904,10 @@ fn a_finished_merged_item_gives_back_worktree_and_branch() {
         .resolve(&x.decision, "pass", "no-release", "me")
         .unwrap();
     assert!(wt.exists(), "the tidy is not part of finishing any more");
-    assert_eq!(k.pump_outbox().done, 1, "work.tidy, after the commit");
+    assert!(
+        k.pump_outbox().done >= 1,
+        "work.tidy runs after the closing commit"
+    );
     assert!(!wt.exists());
     assert!(g(&r, &["branch", "--list", &name]).is_empty());
     assert!(

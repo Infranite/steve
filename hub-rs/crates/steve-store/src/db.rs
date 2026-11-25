@@ -292,6 +292,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/138.sql"),
     // 139: add mems.pinned for priority-and-budget personal context assembly.
     include_str!("../migrations/139.sql"),
+    // 140: rebind work.tidy consumer to work.item.lifecycle so all close kinds clean worktrees.
+    include_str!("../migrations/140.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

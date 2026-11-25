@@ -183,7 +183,8 @@ fn a_session_left_with_the_core_gets_its_worktree_from_the_core() {
 }
 
 #[test]
-fn a_finished_items_worktree_goes_back_through_its_backend_and_unmerged_work_stays() {
+fn a_finished_items_worktree_goes_back_through_its_backend_preserving_unmerged_branches_and_reporting_failures()
+ {
     let k = kit(true);
     let (r, p) = project(&k);
     // done, its work merged: given back by the backend, the merged branch with it
@@ -204,7 +205,7 @@ fn a_finished_items_worktree_goes_back_through_its_backend_and_unmerged_work_sta
     // what the backend did is written when it says so
     g(&r, &["worktree", "remove", &wt.to_string_lossy()]);
     g(&r, &["branch", "-d", &branch]);
-    k.core.workspace_tidied(&done, true).unwrap();
+    k.core.workspace_tidied(&done, true, None).unwrap();
     let tl = k.timeline_texts(&done);
     assert!(
         tl.iter()
@@ -212,7 +213,7 @@ fn a_finished_items_worktree_goes_back_through_its_backend_and_unmerged_work_sta
         "{tl:?}"
     );
 
-    // done, not merged: kept, nothing asked
+    // done, not merged: worktree is still cleaned right away while its unmerged branch stays
     let open = k.item("done", "收尾", Some(&p));
     let (b2, wt2) = branch_with(&r, &k.core.config().worktrees, &open, "y.txt", "y\n");
     k.db()
@@ -224,29 +225,37 @@ fn a_finished_items_worktree_goes_back_through_its_backend_and_unmerged_work_sta
     let s2 = k.session(&open, "ended");
     k.rt.st().node_made.insert(s2.clone());
     assert!(k.core.tx().tidy_branch_now(&open).unwrap());
-    assert!(k.rt.st().tidies.iter().all(|(s, _)| s != &s2));
-    assert!(wt2.exists());
-    // archived: a clean worktree goes back, its unmerged branch stays
-    k.db().item_patch(&open, patch![archived: true]).unwrap();
-    assert!(k.core.tx().tidy_branch_now(&open).unwrap());
     assert!(k.rt.st().tidies.contains(&(s2.clone(), true)));
     g(&r, &["worktree", "remove", &wt2.to_string_lossy()]);
-    k.core.workspace_tidied(&open, true).unwrap();
+    k.core.workspace_tidied(&open, true, None).unwrap();
     let tl = k.timeline_texts(&open);
     assert!(
         tl.iter()
-            .any(|t| t.starts_with(&format!("删除了工作区 {}（分支 {b2} 保留在", wt2.display()))),
+            .any(|t| t.contains(&format!("删除了工作区 {}", wt2.display()))
+                && t.contains(&format!("未合并分支 {b2} 已保留"))),
         "{tl:?}"
     );
-    // a refused or failed tidy says nothing
-    k.core.workspace_tidied(&done, false).unwrap();
-    assert_eq!(
-        k.timeline_texts(&done)
-            .iter()
-            .filter(|t| t.starts_with("删除了工作区"))
-            .count(),
-        1
-    );
+    // a refused or failed tidy is displayed on the item (never swallowed) and deduplicated
+    k.core
+        .workspace_tidied(
+            &done,
+            false,
+            Some("worktree contains modified or untracked files"),
+        )
+        .unwrap();
+    k.core
+        .workspace_tidied(
+            &done,
+            false,
+            Some("worktree contains modified or untracked files"),
+        )
+        .unwrap();
+    let failed_notes: Vec<_> = k
+        .timeline_texts(&done)
+        .into_iter()
+        .filter(|t| t.contains("工作区清理失败") && t.contains("modified or untracked"))
+        .collect();
+    assert_eq!(failed_notes.len(), 1, "{failed_notes:?}");
 }
 
 #[test]
@@ -405,4 +414,273 @@ fn a_worktree_in_a_unicode_directory_keeps_its_own_branch() {
     let branch = i.branch.clone().unwrap();
     node_makes(&r, &target, &branch);
     assert_eq!(crate::worktrees::worktree_branch(&i, &r, &target), branch);
+}
+
+fn attach_merged_worktree(
+    k: &Kit,
+    r: &Path,
+    project_id: &str,
+    item_id: &str,
+    file: &str,
+) -> (String, PathBuf) {
+    let (branch, wt) = branch_with(r, &k.core.config().worktrees, item_id, file, "ok\n");
+    g(r, &["merge", "-q", "--ff-only", &branch]);
+    k.db()
+        .item_patch(
+            item_id,
+            patch![
+                project_id: project_id,
+                cwd: wt.to_string_lossy().to_string(),
+                branch: branch.as_str()
+            ],
+        )
+        .unwrap();
+    (branch, wt)
+}
+
+#[test]
+fn every_close_path_stops_sessions_and_cleans_worktree_and_merged_branch() {
+    let k = Kit::new();
+    let (r, p) = project(&k);
+
+    // 1. Owner finish (with an active idle session whose release starts pending)
+    let owner_id = k.item("run", "执行", Some(&p));
+    let (owner_br, owner_wt) = attach_merged_worktree(&k, &r, &p, &owner_id, "owner.txt");
+    let owner_sess = k.session(&owner_id, "idle");
+    k.rt.st().release_answers.insert(
+        owner_sess.clone(),
+        crate::Released::Pending("op_rel_owner".into()),
+    );
+    k.finish(&owner_id).unwrap();
+    assert_eq!(k.phase(&owner_id), "closed");
+    assert_eq!(
+        k.pump_outbox().retried,
+        1,
+        "waits until session is released"
+    );
+    assert!(owner_wt.exists());
+    assert!(k.rt.st().released.contains(&owner_sess));
+    k.rt.st().release_answers.remove(&owner_sess);
+    assert!(k.pump_outbox_at(steve_store::now() + 60_000).done >= 1);
+    assert!(!owner_wt.exists(), "owner finish cleaned worktree");
+    assert!(g(&r, &["branch", "--list", &owner_br]).is_empty());
+
+    // 2. Cancel / Drop
+    let drop_id = k.item("run", "执行", Some(&p));
+    let (drop_br, drop_wt) = attach_merged_worktree(&k, &r, &p, &drop_id, "drop.txt");
+    let drop_sess = k.session(&drop_id, "idle");
+    k.core
+        .item_action(&drop_id, crate::ItemAction::Drop, "me")
+        .unwrap();
+    assert_eq!(k.phase(&drop_id), "closed");
+    assert!(k.pump_outbox().done >= 1);
+    assert!(!drop_wt.exists(), "drop cleaned worktree");
+    assert!(g(&r, &["branch", "--list", &drop_br]).is_empty());
+    assert!(k.rt.st().released.contains(&drop_sess));
+
+    // 3. Fail
+    let fail_id = k.item("run", "执行", Some(&p));
+    let (fail_br, fail_wt) = attach_merged_worktree(&k, &r, &p, &fail_id, "fail.txt");
+    let _fail_sess = k.session(&fail_id, "idle");
+    let expected = k.db().item(&fail_id).unwrap().unwrap().cas_revision;
+    k.core
+        .lifecycle_command(
+            &fail_id,
+            "fail",
+            1,
+            expected,
+            Some("out of scope"),
+            None,
+            "me",
+        )
+        .unwrap();
+    assert_eq!(k.phase(&fail_id), "closed");
+    assert!(k.pump_outbox().done >= 1);
+    assert!(!fail_wt.exists(), "fail cleaned worktree");
+    assert!(g(&r, &["branch", "--list", &fail_br]).is_empty());
+
+    // 4. Automatic completion
+    let auto_id = k.item("run", "执行", Some(&p));
+    let (auto_br, auto_wt) = attach_merged_worktree(&k, &r, &p, &auto_id, "auto.txt");
+    let auto_sess = k.session(&auto_id, "idle");
+    k.core
+        .tx()
+        .request_delivery_close(
+            &auto_id,
+            "steve",
+            crate::cycle::ClosePolicy::Automatic,
+            true,
+            "automatic",
+            None,
+            vec![],
+        )
+        .unwrap();
+    assert_eq!(k.phase(&auto_id), "closed");
+    assert!(k.pump_outbox().done >= 1);
+    assert!(!auto_wt.exists(), "automatic completion cleaned worktree");
+    assert!(g(&r, &["branch", "--list", &auto_br]).is_empty());
+    assert!(k.rt.st().released.contains(&auto_sess));
+}
+
+#[test]
+fn closed_item_removes_clean_worktree_and_preserves_and_marks_unmerged_branch() {
+    let k = Kit::new();
+    let (r, p) = project(&k);
+    let id = k.item("run", "执行", Some(&p));
+    let (branch, wt) = branch_with(
+        &r,
+        &k.core.config().worktrees,
+        &id,
+        "unmerged.txt",
+        "work\n",
+    );
+    let sha = g(
+        &r,
+        &["rev-parse", "--short", &format!("refs/heads/{branch}")],
+    );
+    k.db()
+        .item_patch(
+            &id,
+            patch![cwd: wt.to_string_lossy().to_string(), branch: branch.as_str()],
+        )
+        .unwrap();
+    k.finish(&id).unwrap();
+    assert!(k.pump_outbox().done >= 1);
+    assert!(!wt.exists(), "clean worktree is removed even when unmerged");
+    assert_eq!(
+        g(
+            &r,
+            &["rev-parse", "--short", &format!("refs/heads/{branch}")]
+        ),
+        sha,
+        "unmerged branch stays intact"
+    );
+    let tl = k.timeline_texts(&id);
+    assert!(
+        tl.iter()
+            .any(|t| t.contains("未合并分支") && t.contains(&branch) && t.contains(&sha)),
+        "preserved unmerged branch must be noted on item: {tl:?}"
+    );
+    // Reopening via a new cycle recreates the worktree from the preserved branch.
+    let rev = k.db().item(&id).unwrap().unwrap().cas_revision;
+    k.core
+        .lifecycle_command(&id, "new_cycle", 1, rev, None, Some("继续"), "me")
+        .unwrap();
+    assert!(wt.join("unmerged.txt").exists());
+}
+
+#[test]
+fn worktree_cleanup_failure_is_displayed_on_item_and_not_swallowed() {
+    let k = Kit::new();
+    let (r, p) = project(&k);
+    let id = k.item("run", "执行", Some(&p));
+    let (branch, wt) = branch_with(&r, &k.core.config().worktrees, &id, "dirty.txt", "a\n");
+    fs::write(wt.join("uncommitted.txt"), "keep me").unwrap();
+    k.db()
+        .item_patch(
+            &id,
+            patch![cwd: wt.to_string_lossy().to_string(), branch: branch.as_str()],
+        )
+        .unwrap();
+    k.finish(&id).unwrap();
+    assert!(k.pump_outbox().done >= 1);
+    assert!(wt.join("uncommitted.txt").exists(), "dirty worktree stays");
+    let tl = k.timeline_texts(&id);
+    assert!(
+        tl.iter().any(|t| t.contains("工作区清理失败")),
+        "cleanup failure must be shown on item: {tl:?}"
+    );
+    // Running tidy again does not spam duplicate identical failure lines.
+    assert!(k.core.tx().tidy_branch_now(&id).unwrap());
+    let fail_count = k
+        .timeline_texts(&id)
+        .iter()
+        .filter(|t| t.contains("工作区清理失败"))
+        .count();
+    assert_eq!(fail_count, 1);
+}
+
+#[test]
+fn backfill_closed_worktrees_cleans_leftovers_enqueues_busy_and_is_idempotent() {
+    let k = Kit::new();
+    let (r, p) = project(&k);
+
+    // 1. Closed + merged leftover
+    let merged = k.item("done", "收尾", Some(&p));
+    let (m_br, m_wt) = attach_merged_worktree(&k, &r, &p, &merged, "m.txt");
+
+    // 2. Closed (dropped) + unmerged leftover
+    let unmerged = k.item("drop", "收尾", Some(&p));
+    let (u_br, u_wt) = branch_with(&r, &k.core.config().worktrees, &unmerged, "u.txt", "u\n");
+    k.db()
+        .item_patch(
+            &unmerged,
+            patch![cwd: u_wt.to_string_lossy().to_string(), branch: u_br.as_str()],
+        )
+        .unwrap();
+
+    // 3. Closed + dirty leftover
+    let dirty = k.item("done", "收尾", Some(&p));
+    let (d_br, d_wt) = branch_with(&r, &k.core.config().worktrees, &dirty, "d.txt", "d\n");
+    fs::write(d_wt.join("scratch.tmp"), "uncommitted").unwrap();
+    k.db()
+        .item_patch(
+            &dirty,
+            patch![cwd: d_wt.to_string_lossy().to_string(), branch: d_br.as_str()],
+        )
+        .unwrap();
+
+    // 4. Closed + pending-release session (must be enqueued to WorkTidy outbox)
+    let pending = k.item("done", "收尾", Some(&p));
+    let (p_br, p_wt) = attach_merged_worktree(&k, &r, &p, &pending, "p.txt");
+    let p_sess = k.session(&pending, "idle");
+    k.rt.st()
+        .release_answers
+        .insert(p_sess.clone(), crate::Released::Pending("op_rel_bf".into()));
+
+    // 5. Open item must NOT be touched by backfill
+    let open = k.item("run", "执行", Some(&p));
+    let (_, open_wt) = branch_with(&r, &k.core.config().worktrees, &open, "open.txt", "open\n");
+    k.db()
+        .item_patch(&open, patch![cwd: open_wt.to_string_lossy().to_string()])
+        .unwrap();
+
+    let first = k.core.backfill_closed_worktrees().unwrap();
+    assert!(!first.skipped);
+    assert_eq!(first.scanned, 4, "{first:?}");
+    assert_eq!(first.cleaned, 2, "{first:?}");
+    assert_eq!(first.enqueued, 1, "{first:?}");
+    assert_eq!(first.failed, 1, "{first:?}");
+
+    assert!(!m_wt.exists());
+    assert!(g(&r, &["branch", "--list", &m_br]).is_empty());
+    assert!(!u_wt.exists());
+    g(&r, &["rev-parse", "--verify", &u_br]);
+    assert!(
+        k.timeline_texts(&unmerged)
+            .iter()
+            .any(|t| t.contains("未合并分支") && t.contains(&u_br))
+    );
+    assert!(d_wt.exists());
+    assert!(
+        k.timeline_texts(&dirty)
+            .iter()
+            .any(|t| t.contains("工作区清理失败"))
+    );
+    assert!(open_wt.exists());
+    assert!(p_wt.exists());
+
+    // Once the pending session releases, WorkTidy completes the enqueued backfill item.
+    k.rt.st().release_answers.remove(&p_sess);
+    assert!(k.pump_outbox().done >= 1);
+    assert!(!p_wt.exists());
+    assert!(g(&r, &["branch", "--list", &p_br]).is_empty());
+
+    // Second invocation is a strict no-op (does not rescan even if a new closed leftover is seeded).
+    let later = k.item("done", "收尾", Some(&p));
+    let (_, later_wt) = attach_merged_worktree(&k, &r, &p, &later, "later.txt");
+    let second = k.core.backfill_closed_worktrees().unwrap();
+    assert!(second.skipped, "marker makes backfill strictly one-time");
+    assert_eq!(second.scanned, 0);
+    assert!(later_wt.exists(), "no rescan occurred on second boot");
 }
