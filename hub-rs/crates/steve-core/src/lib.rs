@@ -80,6 +80,7 @@ pub use workflow_run::{
     WfDeliveryBlocker, WfRunAction, WfRunSnapshot, WfToolOutput, WorkflowStepExecutor,
     validate_child_result,
 };
+pub use worktrees::{CLOSED_WORKTREE_BACKFILL_KEY, WorktreeBackfillReport};
 
 use repo::Db;
 use std::collections::HashMap;

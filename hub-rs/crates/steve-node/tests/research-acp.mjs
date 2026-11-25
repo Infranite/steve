@@ -149,3 +149,4 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     reply(req.id, {});
   }
 }
+process.exit(0);

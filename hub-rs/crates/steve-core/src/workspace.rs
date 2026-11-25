@@ -615,8 +615,25 @@ impl Core {
             }
         }
 
-        /* closed items: their caches, and their worktree where nothing is lost */
+        /* closed items: release any idle harness first, then reclaim caches and clean worktrees */
         for c in candidates.iter().filter(|c| c.finished) {
+            let releasing = {
+                let t = self.tx();
+                let mut pending = false;
+                for s in t.db().sessions_of_item(&c.item)? {
+                    if t.busy(&s.id) || t.rt().release(&s.id)? != crate::Released::Gone {
+                        pending = true;
+                    }
+                }
+                pending
+            };
+            if releasing {
+                r.kept.push(Kept {
+                    item: c.item.clone(),
+                    reason: "会话正在释放，稍后清理工作区".into(),
+                });
+                continue;
+            }
             if procs.as_deref().is_some_and(|p| in_use(&c.wt, p)) {
                 r.kept.push(Kept {
                     item: c.item.clone(),
@@ -626,14 +643,14 @@ impl Core {
             }
             /* the slow part of the tidy's decision, outside the lock (it is remembered) */
             if let Some((repo, branch)) = &c.repo {
-                git::landed(repo, branch, "main");
+                git::landed(repo, branch, git::default_base(repo));
             }
             let mut t = self.tx();
             t.tidy_branch_now(&c.item)?;
             if Path::new(&c.wt).exists() {
                 r.kept.push(Kept {
                     item: c.item.clone(),
-                    reason: t.why_kept(&c.item, &c.wt),
+                    reason: t.why_kept(&c.wt),
                 });
             } else {
                 r.removed.push(c.item.clone());
@@ -841,8 +858,7 @@ impl Core {
 
 impl Tx<'_> {
     fn under_root(&self, cwd: &str) -> bool {
-        let prefix = format!("{}/", self.cfg().worktrees.to_string_lossy());
-        cwd.starts_with(&prefix)
+        self.under_worktrees(cwd)
     }
 
     /// Whether `cwd` is an item's own scratch directory (`STEVE_HOME/scratch/<id>`).
@@ -1049,17 +1065,10 @@ impl Tx<'_> {
     }
 
     /// Why a closed item's worktree stays.
-    fn why_kept(&self, item: &str, wt: &Path) -> String {
+    fn why_kept(&self, wt: &Path) -> String {
         let dirty = git::git_read(wt, &["status", "--porcelain"]).map(|s| !s.is_empty());
-        let archived = self
-            .db()
-            .item(item)
-            .ok()
-            .flatten()
-            .is_some_and(|i| i.archived);
         match dirty {
             Ok(true) => "有未提交的改动，保留工作区".into(),
-            Ok(false) if !archived => "分支还没合入主线，归档后回收工作区（分支保留）".into(),
             Ok(false) => "工作区未能删除，下次再试".into(),
             Err(_) => "看不出工作区的状态，保留".into(),
         }
