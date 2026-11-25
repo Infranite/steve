@@ -49,7 +49,7 @@ pub trait Fleet: Send + Sync {
     fn upgrade_only(&self, _node: &str) -> bool {
         false
     }
-    fn protocol_status(&self, _node: &str) -> Option<(&'static str, &'static str)> {
+    fn protocol_older(&self, _node: &str) -> Option<steve_types::devices::NodeProtocolOlder> {
         None
     }
     /// Stop (or start again) giving the Node new turns.
@@ -68,8 +68,8 @@ impl Fleet for LiveFleet {
             .conn(node)
             .is_some_and(|connection| !connection.is_closed() && connection.is_upgrade())
     }
-    fn protocol_status(&self, node: &str) -> Option<(&'static str, &'static str)> {
-        self.fleet.protocol_status(node)
+    fn protocol_older(&self, node: &str) -> Option<steve_types::devices::NodeProtocolOlder> {
+        self.fleet.protocol_older(node)
     }
     fn discovery(&self, node: &NodeId) -> Arc<dyn Discovery> {
         self.fleet.remote(node)
@@ -202,20 +202,61 @@ impl Upgrades {
         if !self.fleet.linked(node) {
             return self.seen(node);
         }
-        let probe = tokio::time::timeout(
+        let probe = match tokio::time::timeout(
             Duration::from_secs(10),
             self.fleet.discovery(&id).probe_build(),
         )
         .await
-        .ok()?
-        .ok()?;
+        {
+            Ok(Ok(probe)) => probe,
+            Ok(Err(e)) => {
+                tracing::warn!(node, error = %e, "node build probe failed");
+                return None;
+            }
+            Err(_) => {
+                tracing::warn!(node, "node build probe timed out");
+                return None;
+            }
+        };
         let s = Seen {
             upgradable: probe.upgradable,
             build: probe.build.map(Into::into),
             at: now(),
         };
         self.seen.lock().unwrap().insert(node.into(), s.clone());
+        if let Some(build) = &s.build {
+            self.reconcile_observed(node, build).await;
+        }
         Some(s)
+    }
+
+    /// Corrects a stale settled failure/unknown upgrade record when the Node reports running that
+    /// exact target version.
+    async fn reconcile_observed(&self, node: &str, build: &BuildIdentity) {
+        let (store, node_id, version, at) = (
+            self.store.clone(),
+            node.to_string(),
+            build.version.clone(),
+            now(),
+        );
+        let reconciled = tokio::task::spawn_blocking(move || {
+            store.write(|tx| store_nodes::upgrade_reconcile_observed(tx, &node_id, &version, at))
+        })
+        .await;
+        match reconciled {
+            Ok(Ok(Some(prev))) => {
+                tracing::info!(
+                    node,
+                    op = prev.operation_id,
+                    previous_phase = prev.phase,
+                    version = build.version,
+                    "reconciled stale node upgrade record from reported build"
+                );
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => tracing::warn!(node, error = %e, "reconciling node upgrade record"),
+            Err(e) => tracing::warn!(node, error = %e, "reconciling node upgrade record"),
+        }
     }
 
     /// Whether the Hub could upgrade `node` now, and why not.
@@ -623,7 +664,13 @@ impl Upgrades {
         let d = self.fleet.discovery(&node);
         let limit = self.timing.health + Duration::from_secs(10 * 60);
         let s = self.wait(&*d, &operation, limit, |_| true).await;
+        let observed = self
+            .look(&row.node_id)
+            .await
+            .and_then(|seen| seen.build)
+            .is_some_and(|b| b.version == row.version);
         let (phase, error) = match s {
+            _ if observed => ("succeeded".to_string(), None),
             None => (
                 "unknown".to_string(),
                 Some("the hub restarted; the node never said".to_string()),
@@ -727,10 +774,14 @@ impl Upgrades {
     ) -> Value {
         let seen = self.seen(&node.node_id);
         let (can, why) = self.assess(seen.as_ref());
-        let protocol_status = self
-            .fleet
-            .upgrade_only(&node.node_id)
-            .then(|| self.fleet.protocol_status(&node.node_id))
+        let upgrade_only = self.fleet.upgrade_only(&node.node_id);
+        let link_mode = if upgrade_only {
+            steve_types::devices::NodeLinkMode::UpgradeOnly
+        } else {
+            steve_types::devices::NodeLinkMode::Normal
+        };
+        let protocol_older = upgrade_only
+            .then(|| self.fleet.protocol_older(&node.node_id))
             .flatten();
         json!({
             "build": seen.as_ref().and_then(|s| s.build.clone()),
@@ -738,8 +789,8 @@ impl Upgrades {
             "own_policy": node.upgrade_policy,
             "can": can,
             "reason": why,
-            "protocol_status": protocol_status.map(|(_, text)| text),
-            "protocol_older": protocol_status.map(|(older, _)| older),
+            "link_mode": link_mode,
+            "protocol_older": protocol_older,
             "latest": latest,
         })
     }
@@ -993,7 +1044,7 @@ mod tests {
         node: Arc<FakeNode>,
         remote: Mutex<Option<Arc<steve_node_wire::RemoteNode>>>,
         holds: Mutex<Vec<bool>>,
-        protocol_older: Mutex<Option<&'static str>>,
+        protocol_older: Mutex<Option<steve_types::devices::NodeProtocolOlder>>,
     }
 
     impl Fleet for TestFleet {
@@ -1013,11 +1064,11 @@ mod tests {
                 .as_ref()
                 .is_some_and(|r| r.is_upgrade())
         }
-        fn protocol_status(&self, _: &str) -> Option<(&'static str, &'static str)> {
-            match *self.protocol_older.lock().unwrap() {
-                Some("hub") => Some(("hub", "版本不一致，需要升级 Hub")),
-                _ => Some(("node", "版本不一致，需要升级 Node")),
-            }
+        fn protocol_older(&self, _: &str) -> Option<steve_types::devices::NodeProtocolOlder> {
+            Some(
+                (*self.protocol_older.lock().unwrap())
+                    .unwrap_or(steve_types::devices::NodeProtocolOlder::Node),
+            )
         }
         fn linked(&self, _: &str) -> bool {
             true
@@ -1221,7 +1272,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let view = f.up.view(&row, "notify", None);
-        assert_eq!(view["protocol_status"], "版本不一致，需要升级 Node");
+        assert_eq!(view["link_mode"], "upgrade_only");
+        assert_eq!(view["protocol_older"], "node");
         assert_eq!(view["reason"], "outdated");
         assert_eq!(view["can"], true);
         let operation = f.up.start("n_a", "u", false).await.unwrap();
@@ -1246,6 +1298,338 @@ mod tests {
         node.link.set(None);
         node_connection.close(None, steve_node_wire::close::GOODBYE, "fixture ended");
         hub_connection.close(None, steve_node_wire::close::GOODBYE, "fixture ended");
+    }
+
+    /// Wire-level compatibility proof against frozen v0.9.0 (PROTOCOL=12) JSON frames:
+    /// no shared peer Rust upgrade types are used to encode or decode the peer side.
+    #[tokio::test]
+    async fn v090_wire_peer_completes_handshake_look_stage_fetch_and_switch_in_upgrade_mode() {
+        use futures::{SinkExt, StreamExt};
+        use steve_node_wire::envelope::Frame;
+        use steve_node_wire::handshake::{self, Admission, Admitted, Hello};
+        use steve_node_wire::{Conn, ConnOptions, Identity, RemoteNode};
+
+        const V090_PROTOCOL: u32 = 12;
+        assert_ne!(V090_PROTOCOL, PROTOCOL);
+
+        let f = fixture(true, Some(build("0.11.1", 'b')), 1000);
+        let node_id_str = "n_a";
+        let hub_id = "hub_v011";
+        let node_identity = Identity::from_seed([9; 32]);
+        let hub_identity = Identity::from_seed([3; 32]);
+
+        struct StaticAdmit([u8; 32]);
+        #[async_trait::async_trait]
+        impl Admission for StaticAdmit {
+            async fn key(&self, _: &NodeId) -> Result<Option<[u8; 32]>, String> {
+                Ok(Some(self.0))
+            }
+            async fn admit(&self, _: &Hello) -> Result<Option<Admitted>, String> {
+                Ok(Some(Admitted { generation: 7 }))
+            }
+        }
+
+        let (mut hub_wire, mut peer_wire) = steve_node_wire::testkit::pair();
+        let admit = StaticAdmit(node_identity.public());
+        let hub_id_copy = hub_id.to_string();
+        let hub_accept = tokio::spawn(async move {
+            let (hello, admitted) = handshake::accept_as(
+                &mut hub_wire.sink,
+                &mut hub_wire.stream,
+                &hub_id_copy,
+                &admit,
+                Some(&hub_identity),
+                &[],
+            )
+            .await
+            .expect("v0.11 Hub accepts v0.9.0 hello");
+            (hub_wire, hello, admitted)
+        });
+
+        // 1. Frozen v0.9.0 handshake: receive Hub challenge, send raw v0.9.0 hello (proto=12), receive welcome.
+        let Some(Ok(Frame::Text(challenge_raw))) = peer_wire.stream.next().await else {
+            panic!("expected Hub challenge frame");
+        };
+        let challenge_json: Value = serde_json::from_str(&challenge_raw).unwrap();
+        assert_eq!(challenge_json["v"], 1);
+        assert_eq!(challenge_json["t"], "ctl");
+        assert_eq!(challenge_json["m"], "challenge");
+        let challenge_p = &challenge_json["p"];
+        let nonce = challenge_p["nonce"].as_str().unwrap();
+        let conn_id = challenge_p["conn_id"].as_str().unwrap();
+        assert_eq!(challenge_p["hub_id"], hub_id);
+        assert_eq!(challenge_p["upgrade_protocol"], 1);
+
+        // Compute the frozen v0.9.0 Ed25519 signature over canonical unsigned hello JSON.
+        let unsigned_hello = format!(
+            r#"{{"node_id":"{node_id_str}","proto":{V090_PROTOCOL},"sig":"","upgrade_protocol":1}}"#
+        );
+        let mut sign_input = Vec::new();
+        sign_input.extend_from_slice(b"steve-node-hello-v1");
+        for binding in [hub_id, conn_id, nonce] {
+            sign_input.push(0);
+            sign_input.extend_from_slice(binding.as_bytes());
+        }
+        sign_input.push(0);
+        sign_input.extend_from_slice(&Sha256::digest(unsigned_hello.as_bytes()));
+        let sig_hex = hex::encode(node_identity.sign(&sign_input));
+
+        let v090_hello_frame = format!(
+            r#"{{"v":1,"t":"ctl","id":"hs_hello","m":"hello","gen":0,"p":{{"node_id":"{node_id_str}","proto":{V090_PROTOCOL},"upgrade_protocol":1,"sig":"{sig_hex}"}}}}"#
+        );
+        peer_wire
+            .sink
+            .send(Frame::Text(v090_hello_frame))
+            .await
+            .unwrap();
+
+        let Some(Ok(Frame::Text(welcome_raw))) = peer_wire.stream.next().await else {
+            panic!("expected Hub welcome frame");
+        };
+        let welcome_json: Value = serde_json::from_str(&welcome_raw).unwrap();
+        assert_eq!(welcome_json["v"], 1);
+        assert_eq!(welcome_json["t"], "ctl");
+        assert_eq!(welcome_json["m"], "welcome");
+        assert_eq!(welcome_json["p"]["gen"], 7);
+        assert_eq!(welcome_json["p"]["proto"], PROTOCOL);
+
+        let (hub_wire, hello, admitted) = hub_accept.await.unwrap();
+        assert_eq!(hello.proto, V090_PROTOCOL);
+        assert_eq!(admitted.generation, 7);
+        let mode = upgrade_v1::Mode::between(PROTOCOL, hello.proto);
+        assert_eq!(mode, upgrade_v1::Mode::Upgrade);
+
+        let archive_server = Arc::new(ArchiveServer {
+            store: f.store.clone(),
+            data: f.data.clone(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let hub_conn = Conn::spawn(
+            hub_wire.sink,
+            hub_wire.stream,
+            admitted.generation,
+            archive_server.clone(),
+            ConnOptions {
+                side: "h",
+                mode,
+                heartbeat: Duration::from_secs(600),
+                dead_after: Duration::from_secs(600),
+            },
+        );
+        let remote = RemoteNode::new(NodeId::new(node_id_str).unwrap());
+        remote.attach(hub_conn.clone(), false);
+        *f.fleet.remote.lock().unwrap() = Some(remote);
+
+        // 2. Frozen v0.9.0 peer loop answering raw JSON frames for probe_build, upgrade_stage
+        //    (including upgrade_fetch of the archive), upgrade_status, and upgrade_switch.
+        let v090_commit = "a".repeat(40);
+        let target_triple = TARGET.to_string();
+        let peer_task = tokio::spawn(async move {
+            let mut phase = String::new();
+            let mut current_op = String::new();
+            let mut target_version = String::new();
+            let mut downloaded = Vec::new();
+            let mut methods_seen = Vec::new();
+            let mut switched = false;
+
+            while let Some(Ok(frame)) = peer_wire.stream.next().await {
+                let Frame::Text(text) = frame else { continue };
+                let msg: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(
+                    msg["v"], 1,
+                    "v0.9.0 peer only expects upgrade v1 frames: {text}"
+                );
+                if msg["t"] != "req" {
+                    continue;
+                }
+                let req_id = msg["id"].as_str().unwrap().to_string();
+                let method = msg["m"].as_str().unwrap().to_string();
+                methods_seen.push(method.clone());
+                let resp_payload = match method.as_str() {
+                    "probe_build" => {
+                        assert_eq!(msg["p"], json!({}));
+                        json!({
+                            "ok": {
+                                "build": {
+                                    "version": "0.9.0",
+                                    "commit": v090_commit,
+                                    "target": target_triple,
+                                },
+                                "upgradable": true,
+                                "running": 0
+                            }
+                        })
+                    }
+                    "upgrade_stage" => {
+                        current_op = msg["p"]["operation"].as_str().unwrap().to_string();
+                        target_version = msg["p"]["build"]["version"].as_str().unwrap().to_string();
+                        let want_size = msg["p"]["size"].as_u64().unwrap();
+                        let want_sha = msg["p"]["sha256"].as_str().unwrap().to_string();
+                        assert!(msg["p"]["health_secs"].as_u64().unwrap() > 0);
+
+                        // Fetch the offered archive using raw v0.9.0 upgrade_fetch JSON frames.
+                        let mut offset = 0u64;
+                        let mut fetch_seq = 0u32;
+                        loop {
+                            fetch_seq += 1;
+                            let fetch_id = format!("n_fetch_{fetch_seq}");
+                            let fetch_frame = json!({
+                                "v": 1,
+                                "t": "req",
+                                "id": fetch_id,
+                                "m": "upgrade_fetch",
+                                "gen": 7,
+                                "p": {
+                                    "operation": current_op,
+                                    "offset": offset,
+                                    "max": 32768
+                                }
+                            });
+                            peer_wire
+                                .sink
+                                .send(Frame::Text(fetch_frame.to_string()))
+                                .await
+                                .unwrap();
+                            let Some(Ok(Frame::Text(chunk_raw))) = peer_wire.stream.next().await
+                            else {
+                                panic!("expected upgrade_fetch response");
+                            };
+                            let chunk_msg: Value = serde_json::from_str(&chunk_raw).unwrap();
+                            assert_eq!(chunk_msg["v"], 1);
+                            assert_eq!(chunk_msg["t"], "res");
+                            assert_eq!(chunk_msg["re"], fetch_id);
+                            let ok = &chunk_msg["p"]["ok"];
+                            assert_eq!(ok["offset"].as_u64().unwrap(), offset);
+                            let bytes = hex::decode(ok["bytes"].as_str().unwrap()).unwrap();
+                            offset += bytes.len() as u64;
+                            downloaded.extend_from_slice(&bytes);
+                            if ok["eof"].as_bool().unwrap() {
+                                break;
+                            }
+                        }
+                        assert_eq!(downloaded.len() as u64, want_size);
+                        assert_eq!(hex::encode(Sha256::digest(&downloaded)), want_sha);
+
+                        // Verify the archive meets v0.9.0 ServiceUpgrader::verify expectations.
+                        let mut archive =
+                            tar::Archive::new(flate2::read::GzDecoder::new(downloaded.as_slice()));
+                        let mut entries = std::collections::HashMap::new();
+                        for entry in archive.entries().unwrap() {
+                            let mut entry = entry.unwrap();
+                            let path = entry.path().unwrap().to_string_lossy().into_owned();
+                            let mut buf = Vec::new();
+                            std::io::Read::read_to_end(&mut entry, &mut buf).unwrap();
+                            entries.insert(path, buf);
+                        }
+                        let manifest: Value =
+                            serde_json::from_slice(entries.get("release.json").unwrap()).unwrap();
+                        assert_eq!(manifest["format_version"], 1);
+                        assert_eq!(manifest["version"], target_version);
+                        assert!(entries.contains_key("bin/steve-node"));
+                        assert!(entries.contains_key("bin/steve"));
+
+                        phase = "staged".into();
+                        json!({
+                            "ok": {
+                                "operation": current_op,
+                                "phase": "staging",
+                                "version": target_version,
+                                "previous": "0.9.0",
+                                "error": null,
+                                "updated": 100
+                            }
+                        })
+                    }
+                    "upgrade_switch" => {
+                        assert_eq!(msg["p"]["operation"], current_op);
+                        assert_eq!(msg["p"]["action"], "switch");
+                        phase = "switching".into();
+                        switched = true;
+                        json!({
+                            "ok": {
+                                "operation": current_op,
+                                "phase": "switching",
+                                "version": target_version,
+                                "previous": "0.9.0",
+                                "error": null,
+                                "updated": 200
+                            }
+                        })
+                    }
+                    "upgrade_status" => {
+                        assert_eq!(msg["p"]["operation"], current_op);
+                        if switched && phase == "switching" {
+                            phase = "succeeded".into();
+                        }
+                        json!({
+                            "ok": {
+                                "operation": current_op,
+                                "phase": phase,
+                                "version": target_version,
+                                "previous": "0.9.0",
+                                "error": null,
+                                "updated": 300
+                            }
+                        })
+                    }
+                    other => panic!("unexpected method sent to v0.9.0 peer: {other}"),
+                };
+
+                let response = json!({
+                    "v": 1,
+                    "t": "res",
+                    "id": format!("n_res_{}", methods_seen.len()),
+                    "re": req_id,
+                    "gen": 7,
+                    "p": resp_payload
+                });
+                peer_wire
+                    .sink
+                    .send(Frame::Text(response.to_string()))
+                    .await
+                    .unwrap();
+                if phase == "succeeded" {
+                    break;
+                }
+            }
+            (methods_seen, downloaded.len())
+        });
+
+        // 3. Drive Hub Upgrades::look -> start -> switch end-to-end.
+        let seen =
+            f.up.look(node_id_str)
+                .await
+                .expect("look succeeds on v0.9.0");
+        assert!(seen.upgradable);
+        assert_eq!(seen.build.as_ref().unwrap().version, "0.9.0");
+
+        let op =
+            f.up.start(node_id_str, "u1", false)
+                .await
+                .expect("start succeeds on v0.9.0");
+        let completed = ended(&f, &op).await;
+        assert_eq!(completed.phase, "succeeded", "{:?}", completed.error);
+        assert!(
+            archive_server
+                .reads
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0
+        );
+
+        let (methods_seen, fetched_len) = peer_task.await.unwrap();
+        assert_eq!(fetched_len as i64, completed.size);
+        for required in [
+            "probe_build",
+            "upgrade_stage",
+            "upgrade_status",
+            "upgrade_switch",
+        ] {
+            assert!(
+                methods_seen.iter().any(|m| m == required),
+                "missing {required} in {methods_seen:?}"
+            );
+        }
+        hub_conn.close(None, steve_node_wire::close::GOODBYE, "done");
     }
 
     #[tokio::test]
@@ -1419,7 +1803,8 @@ mod tests {
     async fn devices_keep_the_upgrade_assessment_when_the_hub_is_older() {
         let f = fixture(true, Some(build("2.0.0", 'b')), 1000);
         f.node.set_build(Some(build("3.0.0", 'c')));
-        *f.fleet.protocol_older.lock().unwrap() = Some("hub");
+        *f.fleet.protocol_older.lock().unwrap() =
+            Some(steve_types::devices::NodeProtocolOlder::Hub);
         f.up.look("n_a").await.unwrap();
         let row = f
             .store
@@ -1429,8 +1814,8 @@ mod tests {
         let view = f.up.view(&row, "notify", None);
         assert_eq!(view["reason"], "manual");
         assert_eq!(view["can"], false);
+        assert_eq!(view["link_mode"], "upgrade_only");
         assert_eq!(view["protocol_older"], "hub");
-        assert_eq!(view["protocol_status"], "版本不一致，需要升级 Hub");
         assert_eq!(f.up.start("n_a", "u", true).await.unwrap_err(), "manual");
         assert!(f.node.staged_upgrades().is_empty());
     }
@@ -1548,5 +1933,79 @@ mod tests {
             Code::Forbidden,
             "not after it staged"
         );
+    }
+
+    #[tokio::test]
+    async fn look_reconciles_stale_failed_upgrade_record_when_node_reports_target_version() {
+        let f = fixture(true, Some(build("0.11.1", 'b')), 1000);
+        // Seed a stale failed 0.6.0 -> 0.9.0 record while the Node is actually running 0.9.0.
+        let stale_row = UpgradeRow {
+            operation_id: "nup_stale_090".into(),
+            node_id: "n_a".into(),
+            version: "0.9.0".into(),
+            commit_sha: "a".repeat(40),
+            target: TARGET.into(),
+            from_version: Some("0.6.0".into()),
+            artifact: format!("{ARTIFACT_PREFIX}nup_stale_090"),
+            file: String::new(),
+            sha256: String::new(),
+            size: 0,
+            requested_by: "u".into(),
+            force: false,
+            phase: "failed".into(),
+            error: Some("the hub restarted during the upgrade".into()),
+            created: 100,
+            updated: 200,
+        };
+        f.store
+            .write(|tx| store_nodes::upgrade_insert(tx, &stale_row))
+            .unwrap();
+        f.fleet.node.set_build(Some(build("0.9.0", 'c')));
+
+        let seen = f.up.look("n_a").await.expect("probe succeeds");
+        assert_eq!(
+            seen.build.as_ref().map(|b| b.version.as_str()),
+            Some("0.9.0")
+        );
+        let latest = f
+            .store
+            .read(|c| store_nodes::upgrade_latest(c, "n_a"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.phase, "succeeded");
+        assert_eq!(latest.error, None);
+
+        // A failed record targeting a DIFFERENT version (0.10.0) must NOT be falsely reconciled
+        // when the Node still reports 0.9.0.
+        let other_row = UpgradeRow {
+            operation_id: "nup_failed_010".into(),
+            node_id: "n_a".into(),
+            version: "0.10.0".into(),
+            commit_sha: "d".repeat(40),
+            target: TARGET.into(),
+            from_version: Some("0.9.0".into()),
+            artifact: format!("{ARTIFACT_PREFIX}nup_failed_010"),
+            file: String::new(),
+            sha256: String::new(),
+            size: 0,
+            requested_by: "u".into(),
+            force: false,
+            phase: "failed".into(),
+            error: Some("switch timed out".into()),
+            created: 300,
+            updated: 400,
+        };
+        f.store
+            .write(|tx| store_nodes::upgrade_insert(tx, &other_row))
+            .unwrap();
+        let _ = f.up.look("n_a").await.expect("probe succeeds");
+        let latest = f
+            .store
+            .read(|c| store_nodes::upgrade_latest(c, "n_a"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.operation_id, "nup_failed_010");
+        assert_eq!(latest.phase, "failed");
+        assert_eq!(latest.error.as_deref(), Some("switch timed out"));
     }
 }

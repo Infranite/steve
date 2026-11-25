@@ -415,22 +415,3 @@ pub fn dependency_management(r: &mut impl Read, item: Option<&str>) -> Result<bo
     )?;
     Ok(allowed)
 }
-
-/// Non-terminal items created by the retired dynamic work-graph engine (`source[1] = "workflow"`).
-/// Used once during Hub startup before recovery to cancel leftover active child items cleanly.
-pub fn legacy_workflow_children_open(r: &mut impl Read) -> Result<Vec<String>> {
-    let dialect = r.db().dialect();
-    r.all(
-        Query::select()
-            .column("id")
-            .from("items")
-            .and_where(
-                dialect
-                    .json_path(Expr::col("source"), "$[1]")
-                    .eq("workflow"),
-            )
-            .and_where(Expr::col("phase").ne("closed"))
-            .order_by("id", Order::Asc),
-        |row| row.get(0),
-    )
-}

@@ -1307,10 +1307,6 @@ impl CoreDomain {
         );
         blocking(move || c.dependency_wait(&id, expected_cycle, &resume, &reason)).await
     }
-    pub async fn retire_legacy_workflow_children(&self) -> BResult<usize> {
-        let c = self.core.clone();
-        blocking(move || c.retire_legacy_workflow_children()).await
-    }
     pub async fn lifecycle_tick(&self) -> BResult<usize> {
         let c = self.core.clone();
         blocking(move || c.lifecycle_tick()).await

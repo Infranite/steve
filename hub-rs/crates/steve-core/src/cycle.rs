@@ -833,41 +833,6 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// One-time startup retirement for non-terminal child items created by the retired dynamic
-    /// work-graph engine (`source[1] = "workflow"`). Already-closed history and artifacts stay intact.
-    pub(crate) fn retire_legacy_workflow_children(&mut self) -> Result<usize> {
-        let ids = self
-            .db()
-            .store()
-            .read(|r| steve_store::item_repo::legacy_workflow_children_open(r))?;
-        let mut retired = 0;
-        for id in ids {
-            let Some(i) = self.db().item(&id)? else {
-                continue;
-            };
-            if i.phase == CLOSED {
-                continue;
-            }
-            if i.phase == CLOSING
-                && i.closing
-                    .as_ref()
-                    .is_some_and(|c| c.kind != CloseKind::Complete)
-            {
-                self.evaluate_cycle_close(&id)?;
-                continue;
-            }
-            self.request_cycle_stop(
-                &id,
-                CloseKind::Cancel,
-                "steve",
-                "legacy_workflow_retired",
-                None,
-            )?;
-            retired += 1;
-        }
-        Ok(retired)
-    }
-
     /* ── the gate ── */
 
     /// What still holds the item's closing.

@@ -5,15 +5,150 @@
 //! because of it. Adapters that declare `probe_initialize: false` are not asked.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use steve_acp::AcpConfig;
 use steve_acp::adapters::{Probe, ProbeStatus};
-use steve_node_api::{AdapterAuth, AdapterInfo, AdapterStatus, HarnessCapability};
+use steve_node_api::{
+    AdapterAuth, AdapterInfo, AdapterStatus, HarnessCapability, MissingCommandDiagnostic,
+    extract_login_shell_path, login_shell_path_script,
+};
 
 const TTL: Duration = Duration::from_secs(1800);
 const INITIALIZE: Duration = Duration::from_secs(20);
+const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoginShellEnv {
+    pub shell: String,
+    pub path: String,
+}
+
+fn resolve_user_login_shell() -> String {
+    if let Some(shell) = std::env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && steve_acp::is_executable_file(p))
+        && let Some(text) = shell.to_str()
+    {
+        return text.to_owned();
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `getpwuid` is queried once for the current UID and the string is copied immediately.
+        let pw = unsafe { libc::getpwuid(libc::getuid()) };
+        if !pw.is_null() && !unsafe { (*pw).pw_shell }.is_null() {
+            let cstr = unsafe { std::ffi::CStr::from_ptr((*pw).pw_shell) };
+            if let Ok(text) = cstr.to_str() {
+                let p = Path::new(text);
+                if p.is_absolute() && steve_acp::is_executable_file(p) {
+                    return text.to_owned();
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if steve_acp::is_executable_file(Path::new("/bin/zsh")) {
+        return "/bin/zsh".to_owned();
+    }
+    "/bin/sh".to_owned()
+}
+
+/// Probes the Node account's login shell (`$SHELL -l -c`) once to see whether a command missing
+/// from the service's own `PATH` is actually installed in the user's interactive/login `PATH`.
+pub(crate) async fn probe_login_shell_env() -> Option<LoginShellEnv> {
+    let shell = resolve_user_login_shell();
+    let script = login_shell_path_script(Path::new(&shell));
+    let output = tokio::time::timeout(
+        LOGIN_SHELL_PROBE_TIMEOUT,
+        tokio::process::Command::new(&shell)
+            .args(["-l", "-c", &script])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = extract_login_shell_path(&stdout)?;
+    Some(LoginShellEnv { shell, path })
+}
+
+fn missing_command_diagnostic(
+    cfg: &AcpConfig,
+    id: &str,
+    service_path: &str,
+    login_env: Option<&LoginShellEnv>,
+    refresh_command: &str,
+) -> MissingCommandDiagnostic {
+    let service_os = OsStr::new(service_path);
+    let login_os = login_env.map(|e| OsStr::new(e.path.as_str()));
+
+    let mut candidates: Vec<String> = Vec::new();
+    let mut primary = None;
+    if let Ok((program, _)) = cfg.adapter_command(id) {
+        if program.components().count() == 1 && !program.is_absolute() {
+            if let Some(name) = program.to_str() {
+                primary = Some(name.to_owned());
+                candidates.push(name.to_owned());
+            }
+        } else if cfg.adapters.get(id).is_some_and(|own| own.is_file())
+            && steve_acp::is_node_script(cfg.adapters.get(id).unwrap())
+            && cfg.node.components().count() == 1
+            && !cfg.node.is_absolute()
+            && cfg
+                .node
+                .to_str()
+                .is_some_and(|n| steve_acp::which_in(n, Some(service_os)).is_none())
+        {
+            if let Some(node_bin) = cfg.node.to_str() {
+                primary = Some(node_bin.to_owned());
+                candidates.push(node_bin.to_owned());
+            }
+        } else if let Some(name) = program.to_str() {
+            primary = Some(name.to_owned());
+        }
+    }
+    if let Some(b) = steve_harness_spec::builtin(id) {
+        if !candidates.iter().any(|c| c == b.cli_bin) {
+            candidates.push(b.cli_bin.to_owned());
+        }
+        for alt in &b.detect_bins {
+            if !candidates.iter().any(|c| c == *alt) {
+                candidates.push((*alt).to_owned());
+            }
+        }
+        if primary.is_none() {
+            primary = Some(b.cli_bin.to_owned());
+        }
+    }
+
+    let mut found_in_login = None;
+    let mut found_command = None;
+    if let Some(login_path) = login_os {
+        for candidate in &candidates {
+            if let Some(resolved) = steve_acp::which_in(candidate, Some(login_path)) {
+                found_in_login = Some(resolved.to_string_lossy().into_owned());
+                found_command = Some(candidate.clone());
+                break;
+            }
+        }
+    }
+
+    MissingCommandDiagnostic {
+        command: found_command.or(primary).unwrap_or_else(|| id.to_owned()),
+        service_path: service_path.to_owned(),
+        login_shell_path: found_in_login,
+        login_shell: login_env.map(|e| e.shell.clone()),
+        refresh_command: refresh_command.to_owned(),
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct AdapterProbes(tokio::sync::Mutex<Option<(Instant, HashMap<String, Probe>)>>);
@@ -74,7 +209,14 @@ impl AdapterProbes {
 }
 
 /// The adapter part of `id`'s capability record.
-pub(crate) fn info(cfg: &AcpConfig, id: &str, p: &Probe) -> AdapterInfo {
+pub(crate) fn info(
+    cfg: &AcpConfig,
+    id: &str,
+    p: &Probe,
+    service_path: &str,
+    login_env: Option<&LoginShellEnv>,
+    refresh_command: &str,
+) -> AdapterInfo {
     let spec = cfg.adapter_spec(id);
     // a name the manifest declared wins over the adapter's own title
     let declared = cfg
@@ -85,6 +227,8 @@ pub(crate) fn info(cfg: &AcpConfig, id: &str, p: &Probe) -> AdapterInfo {
     let title = declared
         .or_else(|| (!spec.builtin).then(|| p.title.clone()).flatten())
         .unwrap_or(spec.name);
+    let missing_command = (p.status == ProbeStatus::AdapterMissing)
+        .then(|| missing_command_diagnostic(cfg, id, service_path, login_env, refresh_command));
     AdapterInfo {
         title,
         builtin: spec.builtin,
@@ -130,12 +274,20 @@ pub(crate) fn info(cfg: &AcpConfig, id: &str, p: &Probe) -> AdapterInfo {
         resume_command: spec.properties.resume_cli,
         fork_command: spec.properties.fork_cli,
         capabilities: Some(steve_acp::adapter::capabilities_for(id)),
+        missing_command,
     }
 }
 
 /// Fills `h` from what its adapter said. What `initialize` reported replaces the defaults only
 /// when it answered: an adapter that is not there keeps today's record, now with its status.
-pub(crate) fn apply(cfg: &AcpConfig, h: &mut HarnessCapability, p: Option<&Probe>) {
+pub(crate) fn apply(
+    cfg: &AcpConfig,
+    h: &mut HarnessCapability,
+    p: Option<&Probe>,
+    service_path: &str,
+    login_env: Option<&LoginShellEnv>,
+    refresh_command: &str,
+) {
     let Some(p) = p else { return };
     if p.status == ProbeStatus::Ready {
         h.images = p.image;
@@ -149,7 +301,14 @@ pub(crate) fn apply(cfg: &AcpConfig, h: &mut HarnessCapability, p: Option<&Probe
             h.models = o.models.iter().map(|m| m.id.clone()).collect();
         }
     }
-    h.adapter = Some(info(cfg, &h.name, p));
+    h.adapter = Some(info(
+        cfg,
+        &h.name,
+        p,
+        service_path,
+        login_env,
+        refresh_command,
+    ));
 }
 
 #[cfg(test)]
@@ -177,10 +336,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let probes = AdapterProbes::default();
 
-        // Missing binary: AdapterMissing
+        // Missing binary: AdapterMissing with login-shell diagnostic evidence
+        let login_bin = dir.path().join("login-bin");
+        std::fs::create_dir(&login_bin).unwrap();
+        let login_agy = login_bin.join("agy");
+        std::fs::write(&login_agy, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&login_agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let login_env = LoginShellEnv {
+            shell: "/bin/zsh".into(),
+            path: format!("{}:/usr/bin:/bin", login_bin.display()),
+        };
+
         let missing_cfg = cfg_with_antigravity(dir.path(), dir.path().join("no-such-agy"));
         let got = probes.get(&missing_cfg, dir.path(), true).await;
-        let info_missing = info(&missing_cfg, "antigravity", &got["antigravity"]);
+        let info_missing = info(
+            &missing_cfg,
+            "antigravity",
+            &got["antigravity"],
+            "/usr/bin:/bin:/usr/sbin:/sbin",
+            Some(&login_env),
+            "steve node refresh-env",
+        );
         assert_eq!(info_missing.status, AdapterStatus::AdapterMissing);
         assert_eq!(info_missing.title, "Antigravity CLI");
         assert!(info_missing.builtin);
@@ -188,6 +364,32 @@ mod tests {
             info_missing.resume_command.as_deref(),
             Some("agy --resume {id}")
         );
+        let diag = info_missing
+            .missing_command
+            .expect("missing command diagnostic");
+        assert_eq!(diag.command, "agy");
+        assert_eq!(diag.service_path, "/usr/bin:/bin:/usr/sbin:/sbin");
+        assert_eq!(
+            diag.login_shell_path.as_deref(),
+            Some(login_agy.to_str().unwrap())
+        );
+        assert_eq!(diag.login_shell.as_deref(), Some("/bin/zsh"));
+        assert_eq!(diag.refresh_command, "steve node refresh-env");
+
+        let info_truly_missing = info(
+            &missing_cfg,
+            "antigravity",
+            &got["antigravity"],
+            "/usr/bin:/bin",
+            Some(&LoginShellEnv {
+                shell: "/bin/zsh".into(),
+                path: "/usr/bin:/bin".into(),
+            }),
+            "steve node refresh-env",
+        );
+        let truly_diag = info_truly_missing.missing_command.unwrap();
+        assert_eq!(truly_diag.login_shell_path, None);
+        assert_eq!(truly_diag.service_path, "/usr/bin:/bin");
 
         // Installed ACP binary: Ready with modes, models, efforts
         let fake = dir.path().join("agy");
@@ -238,12 +440,20 @@ rl.on("line", (line) => {
             adapter: None,
             setup: None,
         };
-        apply(&ready_cfg, &mut cap, got.get("antigravity"));
+        apply(
+            &ready_cfg,
+            &mut cap,
+            got.get("antigravity"),
+            "/usr/bin:/bin",
+            None,
+            "steve node refresh-env",
+        );
         assert!(cap.images && cap.resume);
         assert_eq!(cap.version, "1.5.16");
         assert_eq!(cap.models, ["gemini-4-neon", "gemini-3.8-flash"]);
         let ad = cap.adapter.expect("adapter info");
         assert_eq!(ad.status, AdapterStatus::Ready);
+        assert!(ad.missing_command.is_none());
         let offer = ad.session.expect("session offer");
         assert_eq!(
             offer.modes,

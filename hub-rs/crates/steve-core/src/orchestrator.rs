@@ -858,10 +858,6 @@ impl Core {
         };
         Ok(n)
     }
-    /// One-time startup retirement for non-terminal legacy dynamic workflow child items.
-    pub fn retire_legacy_workflow_children(&self) -> Result<usize> {
-        self.tx().retire_legacy_workflow_children()
-    }
     /// The lifecycle projection of an item.
     pub fn lifecycle_view(&self, item: &str) -> Result<Value> {
         let t = self.tx();

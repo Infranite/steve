@@ -12,12 +12,12 @@ use axum::{
     extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
-use steve_node_api as na;
+use steve_node_api::{self as na, Discovery as _};
 use steve_store::{Read, Store, StoreError, UserRows, W, WS, WorkspaceSettings, node_directory};
 use steve_types::devices::{
     ComponentUpdateState, DevicesEvent, HarnessAutoUpgradePolicy, HarnessComponentUpdateView,
     HarnessUpdateReportView, HarnessUpdateView, HarnessUpdatesResponse, HarnessUpgradeError,
-    HarnessUpgradeReceipt, HarnessUpgradeReceiptState, HarnessUpgradeTrigger,
+    HarnessUpgradeReceipt, HarnessUpgradeReceiptState, HarnessUpgradeTrigger, NodeReason,
     SetHarnessAutoUpgrade, UpgradeHarnessResponse,
 };
 
@@ -41,7 +41,7 @@ const MAX_ID_LEN: usize = 120;
 const MAX_VERSION_LEN: usize = 128;
 const MAX_COMPONENTS_PER_REQUEST: usize = 16;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Saved {
     report: Option<na::HarnessUpdateReport>,
     at: i64,
@@ -54,7 +54,7 @@ struct Saved {
     auto_failed: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Run {
     command: na::Command<na::UpgradeHarness>,
     receipt: na::Receipt,
@@ -66,14 +66,94 @@ struct Run {
     notified: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum HarnessUpdatesError {
+    #[error("invalid saved harness update state: {0}")]
+    InvalidSavedState(String),
+    #[error("Only the instance owner may maintain their active Nodes")]
+    OwnerRequired,
+    #[error("no store")]
+    NoStore,
+    #[error("local Node is disabled")]
+    LocalDisabled,
+    #[error("remote Nodes are disabled")]
+    RemoteDisabled,
+    #[error("Node requires upgrade before checking or updating harnesses")]
+    UpgradeRequired,
+    #[error("{0}")]
+    InvalidRequest(&'static str),
+    #[error("{0}")]
+    Conflict(&'static str),
+    #[error("{0}")]
+    Node(na::Error),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("{0}")]
+    Task(String),
+}
+
+impl From<HarnessUpdatesError> for ApiError {
+    fn from(err: HarnessUpdatesError) -> Self {
+        match err {
+            HarnessUpdatesError::InvalidSavedState(detail) => {
+                tracing::warn!(detail = %detail, "invalid saved harness update state");
+                ApiError::Contract(NodeReason::invalid_harness_update_state(
+                    "invalid saved harness update state",
+                ))
+            }
+            HarnessUpdatesError::OwnerRequired => ApiError::Contract(steve_types::Error::new(
+                steve_types::Code::Forbidden,
+                "Only the instance owner may maintain their active Nodes",
+            )),
+            HarnessUpdatesError::NoStore => ApiError::Contract(steve_types::Error::new(
+                steve_types::Code::Unavailable,
+                "no store",
+            )),
+            HarnessUpdatesError::LocalDisabled => ApiError::Contract(steve_types::Error::new(
+                steve_types::Code::Conflict,
+                "local Node is disabled",
+            )),
+            HarnessUpdatesError::RemoteDisabled => ApiError::Contract(steve_types::Error::new(
+                steve_types::Code::Conflict,
+                "remote Nodes are disabled",
+            )),
+            HarnessUpdatesError::UpgradeRequired => {
+                ApiError::Contract(NodeReason::upgrade_required(
+                    "Node requires upgrade before checking or updating harnesses",
+                ))
+            }
+            HarnessUpdatesError::InvalidRequest(msg) => {
+                ApiError::Contract(steve_types::Error::new(steve_types::Code::Invalid, msg))
+            }
+            HarnessUpdatesError::Conflict(msg) => {
+                ApiError::Contract(steve_types::Error::new(steve_types::Code::Conflict, msg))
+            }
+            HarnessUpdatesError::Node(e) => {
+                let code = match e.code {
+                    na::Code::Forbidden => steve_types::Code::Forbidden,
+                    na::Code::Invalid => steve_types::Code::Invalid,
+                    na::Code::Unavailable => steve_types::Code::Unavailable,
+                    _ => steve_types::Code::Conflict,
+                };
+                let mut contract = steve_types::Error::new(code, e.safe_detail);
+                contract.reason = e.reason;
+                contract.params = e.params;
+                ApiError::Contract(contract)
+            }
+            HarnessUpdatesError::Store(e) => ApiError::internal(e.to_string()),
+            HarnessUpdatesError::Task(msg) => ApiError::internal(msg),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoUpgradeCandidate {
     pub harness: String,
     pub versions: BTreeMap<String, String>,
 }
 
-fn internal(e: impl std::fmt::Display) -> ApiError {
-    ApiError::internal(e.to_string())
+fn task_err(e: impl std::fmt::Display) -> HarnessUpdatesError {
+    HarnessUpdatesError::Task(e.to_string())
 }
 
 fn key(node: &str) -> String {
@@ -165,19 +245,19 @@ fn authorized(db: &mut impl Read, me: &str, node: &str, write: bool) -> Result<b
     Ok(!write || node_directory::link_state(db, node)?.is_some_and(|(_, state)| state == "active"))
 }
 
-fn load(c: &mut impl Read, node: &str) -> Result<Saved, StoreError> {
+fn load(c: &mut impl Read, node: &str) -> Result<Saved, HarnessUpdatesError> {
     let v = WorkspaceSettings(c).get(WS, &key(node))?;
     v.map(|v| {
-        serde_json::from_str(&v)
-            .map_err(|_| StoreError::Conflict("invalid saved harness update state".into()))
+        serde_json::from_str(&v).map_err(|e| HarnessUpdatesError::InvalidSavedState(e.to_string()))
     })
     .transpose()
     .map(Option::unwrap_or_default)
 }
 
-fn save(w: &mut W<'_>, node: &str, s: &Saved) -> Result<(), StoreError> {
-    let v = serde_json::to_string(s).map_err(|e| StoreError::Conflict(e.to_string()))?;
-    WorkspaceSettings(w).set(WS, &key(node), &v, crate::nodes::now())
+fn save(w: &mut W<'_>, node: &str, s: &Saved) -> Result<(), HarnessUpdatesError> {
+    let v = serde_json::to_string(s).map_err(|e| HarnessUpdatesError::Task(e.to_string()))?;
+    WorkspaceSettings(w).set(WS, &key(node), &v, crate::nodes::now())?;
+    Ok(())
 }
 
 async fn target(
@@ -185,52 +265,37 @@ async fn target(
     c: &Ctx,
     id: &str,
     write: bool,
-) -> Result<(Store, Arc<dyn na::Node>), ApiError> {
+) -> Result<(Store, Arc<dyn na::Node>), HarnessUpdatesError> {
     let store = st
         .modules
         .as_ref()
         .map(|m| m.store.clone())
-        .ok_or_else(|| ApiError::Json(503, "no store".into()))?;
+        .ok_or(HarnessUpdatesError::NoStore)?;
     let (s, me, node) = (store.clone(), c.me.clone(), id.to_string());
     let local = id == "local";
-    let allowed = tokio::task::spawn_blocking(move || -> Result<bool, StoreError> {
-        s.read(|db| authorized(db, &me, &node, write))
+    let allowed = tokio::task::spawn_blocking(move || -> Result<bool, HarnessUpdatesError> {
+        s.read(|db| Ok(authorized(db, &me, &node, write)?))
     })
     .await
-    .map_err(internal)?
-    .map_err(internal)?;
+    .map_err(task_err)??;
     if !allowed {
-        return Err(ApiError::Json(
-            403,
-            "Only the instance owner may maintain their active Nodes".into(),
-        ));
+        return Err(HarnessUpdatesError::OwnerRequired);
     }
     if local {
         let node = st
             .node
             .as_ref()
             .filter(|n| n.node_id().as_str() == id)
-            .ok_or_else(|| ApiError::Json(409, "local Node is disabled".into()))?
+            .ok_or(HarnessUpdatesError::LocalDisabled)?
             .node();
         return Ok((store, node));
     }
-    let node = na::NodeId::new(id).map_err(internal)?;
+    let node = na::NodeId::new(id).map_err(task_err)?;
     let svc = st
         .nodes
         .as_ref()
-        .ok_or_else(|| ApiError::Json(409, "remote Nodes are disabled".into()))?;
+        .ok_or(HarnessUpdatesError::RemoteDisabled)?;
     Ok((store, svc.fleet.remote(&node)))
-}
-
-fn node_error(e: na::Error) -> ApiError {
-    let status = match e.code {
-        na::Code::Forbidden => 403,
-        na::Code::Invalid => 400,
-        na::Code::Unavailable => 503,
-        na::Code::Unsupported => 409,
-        _ => 409,
-    };
-    ApiError::Json(status, e.safe_detail)
 }
 
 struct FinishedNotice {
@@ -247,77 +312,78 @@ async fn persist_receipt(
     harness: &str,
     receipt: na::Receipt,
     reconciled: bool,
-) -> Result<Option<FinishedNotice>, ApiError> {
+) -> Result<Option<FinishedNotice>, HarnessUpdatesError> {
     let (store_c, node_s, harness_s) = (store.clone(), node.to_string(), harness.to_string());
     let notice = tokio::task::spawn_blocking(move || {
-        store_c.write(|tx| -> Result<Option<FinishedNotice>, StoreError> {
-            let mut s = load(tx, &node_s)?;
-            let mut finished_notice = None;
-            let harness_name = s
-                .report
-                .as_ref()
-                .and_then(|rep| rep.harnesses.iter().find(|h| harness_s == h.harness))
-                .map(|h| h.name.clone())
-                .unwrap_or_else(|| harness_s.clone());
-            let mut failed_auto_versions: Option<BTreeMap<String, String>> = None;
-            let mut clear_auto_failed = false;
+        store_c.write(
+            |tx| -> Result<Option<FinishedNotice>, HarnessUpdatesError> {
+                let mut s = load(tx, &node_s)?;
+                let mut finished_notice = None;
+                let harness_name = s
+                    .report
+                    .as_ref()
+                    .and_then(|rep| rep.harnesses.iter().find(|h| harness_s == h.harness))
+                    .map(|h| h.name.clone())
+                    .unwrap_or_else(|| harness_s.clone());
+                let mut failed_auto_versions: Option<BTreeMap<String, String>> = None;
+                let mut clear_auto_failed = false;
 
-            if let Some(run) = s.runs.get_mut(&harness_s) {
-                // A late poll of an earlier retry must not replace the newer command.
-                if run.command.id == receipt.operation {
-                    if run.receipt.state.is_finished() {
-                        return Ok(None);
-                    }
-                    let just_finished = receipt.state.is_finished();
-                    run.receipt = receipt.clone();
-                    run.reconciled = reconciled;
-                    if just_finished && !run.notified {
-                        run.notified = true;
-                        if let na::Observed::Finished { outcome, error, .. } = &receipt.state {
-                            let versions = if run.command.body.versions.is_empty() {
-                                "latest".to_string()
-                            } else {
-                                run.command
-                                    .body
-                                    .versions
-                                    .values()
-                                    .cloned()
-                                    .collect::<Vec<_>>()
-                                    .join(" / ")
-                            };
-                            if *outcome == na::Outcome::Succeeded {
-                                clear_auto_failed = true;
-                            } else if run.trigger == HarnessUpgradeTrigger::Auto
-                                && !run.command.body.versions.is_empty()
-                            {
-                                failed_auto_versions = Some(run.command.body.versions.clone());
+                if let Some(run) = s.runs.get_mut(&harness_s) {
+                    // A late poll of an earlier retry must not replace the newer command.
+                    if run.command.id == receipt.operation {
+                        if run.receipt.state.is_finished() {
+                            return Ok(None);
+                        }
+                        let just_finished = receipt.state.is_finished();
+                        run.receipt = receipt.clone();
+                        run.reconciled = reconciled;
+                        if just_finished && !run.notified {
+                            run.notified = true;
+                            if let na::Observed::Finished { outcome, error, .. } = &receipt.state {
+                                let versions = if run.command.body.versions.is_empty() {
+                                    "latest".to_string()
+                                } else {
+                                    run.command
+                                        .body
+                                        .versions
+                                        .values()
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join(" / ")
+                                };
+                                if *outcome == na::Outcome::Succeeded {
+                                    clear_auto_failed = true;
+                                } else if run.trigger == HarnessUpgradeTrigger::Auto
+                                    && !run.command.body.versions.is_empty()
+                                {
+                                    failed_auto_versions = Some(run.command.body.versions.clone());
+                                }
+                                finished_notice = Some(FinishedNotice {
+                                    trigger: run.trigger,
+                                    outcome: *outcome,
+                                    harness_name,
+                                    versions,
+                                    error: error
+                                        .as_ref()
+                                        .map(|e| e.safe_detail.clone())
+                                        .unwrap_or_else(|| outcome_string(*outcome)),
+                                });
                             }
-                            finished_notice = Some(FinishedNotice {
-                                trigger: run.trigger,
-                                outcome: *outcome,
-                                harness_name,
-                                versions,
-                                error: error
-                                    .as_ref()
-                                    .map(|e| e.safe_detail.clone())
-                                    .unwrap_or_else(|| outcome_string(*outcome)),
-                            });
                         }
                     }
                 }
-            }
-            if clear_auto_failed {
-                s.auto_failed.remove(&harness_s);
-            } else if let Some(vers) = failed_auto_versions {
-                s.auto_failed.insert(harness_s.clone(), vers);
-            }
-            save(tx, &node_s, &s)?;
-            Ok(finished_notice)
-        })
+                if clear_auto_failed {
+                    s.auto_failed.remove(&harness_s);
+                } else if let Some(vers) = failed_auto_versions {
+                    s.auto_failed.insert(harness_s.clone(), vers);
+                }
+                save(tx, &node_s, &s)?;
+                Ok(finished_notice)
+            },
+        )
     })
     .await
-    .map_err(internal)?
-    .map_err(internal)?;
+    .map_err(task_err)??;
 
     if let Some(ref info) = notice {
         record_finished_outcome(store, node, info).await;
@@ -475,53 +541,56 @@ pub async fn get(
     let (s, n) = (store.clone(), id.clone());
     let mut saved = tokio::task::spawn_blocking(move || s.read(|db| load(db, &n)))
         .await
-        .map_err(internal)?
-        .map_err(internal)?;
-    let result = tokio::time::timeout(
-        NODE_RPC_TIMEOUT,
-        node.harness_updates(q.fresh.as_deref() == Some("1")),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        Err(na::Error::new(
-            na::Code::Unavailable,
-            "Node update inventory timed out",
-        ))
-    });
+        .map_err(task_err)??;
     let mut error = None;
     let mut code = None;
-    match result {
-        Ok(report) if report.node.as_str() == id => {
-            saved.report = Some(report.clone());
-            saved.at = crate::nodes::now();
-            let (s, n, at) = (store.clone(), id.clone(), saved.at);
-            tokio::task::spawn_blocking(move || {
-                s.write(|tx| {
-                    let mut current = load(tx, &n)?;
-                    current.report = Some(report);
-                    current.at = at;
-                    save(tx, &n, &current)
+    if node.is_upgrade_only() {
+        error = Some("Node requires upgrade before checking or updating harnesses".into());
+        code = Some("upgrade_required".into());
+    } else {
+        let result = tokio::time::timeout(
+            NODE_RPC_TIMEOUT,
+            node.harness_updates(q.fresh.as_deref() == Some("1")),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(na::Error::new(
+                na::Code::Unavailable,
+                "Node update inventory timed out",
+            ))
+        });
+        match result {
+            Ok(report) if report.node.as_str() == id => {
+                saved.report = Some(report.clone());
+                saved.at = crate::nodes::now();
+                let (s, n, at) = (store.clone(), id.clone(), saved.at);
+                tokio::task::spawn_blocking(move || {
+                    s.write(|tx| {
+                        let mut current = load(tx, &n)?;
+                        current.report = Some(report);
+                        current.at = at;
+                        save(tx, &n, &current)
+                    })
                 })
-            })
-            .await
-            .map_err(internal)?
-            .map_err(internal)?;
-            let succeeded = reconcile_runs(&store, &id, node.as_ref(), &mut saved).await?;
-            if succeeded {
-                let (st_c, store_c, id_c, node_c) =
-                    (st.clone(), store.clone(), id.clone(), node.clone());
-                tokio::spawn(async move {
-                    reprobe_after_upgrade(Some(&st_c), &store_c, &id_c, &node_c).await;
-                });
+                .await
+                .map_err(task_err)??;
+                let succeeded = reconcile_runs(&store, &id, node.as_ref(), &mut saved).await?;
+                if succeeded {
+                    let (st_c, store_c, id_c, node_c) =
+                        (st.clone(), store.clone(), id.clone(), node.clone());
+                    tokio::spawn(async move {
+                        reprobe_after_upgrade(Some(&st_c), &store_c, &id_c, &node_c).await;
+                    });
+                }
             }
-        }
-        Ok(_) => {
-            error = Some("Node returned another Node's update inventory".into());
-            code = Some(code_string(na::Code::Invalid));
-        }
-        Err(e) => {
-            error = Some(e.safe_detail);
-            code = Some(code_string(e.code));
+            Ok(_) => {
+                error = Some("Node returned another Node's update inventory".into());
+                code = Some(code_string(na::Code::Invalid));
+            }
+            Err(e) => {
+                error = Some(e.safe_detail);
+                code = Some(code_string(e.code));
+            }
         }
     }
     if let Some(why) = &error {
@@ -565,7 +634,7 @@ async fn reconcile_runs(
     id: &str,
     node: &dyn na::Node,
     saved: &mut Saved,
-) -> Result<bool, ApiError> {
+) -> Result<bool, HarnessUpdatesError> {
     let mut any_succeeded = false;
     for (h, run) in &mut saved.runs {
         if run.receipt.state.is_finished() {
@@ -625,18 +694,18 @@ fn admit_upgrade(
     cmd: na::Command<na::UpgradeHarness>,
     retry_unknown: bool,
     trigger: HarnessUpgradeTrigger,
-) -> Result<Run, StoreError> {
+) -> Result<Run, HarnessUpdatesError> {
     // Re-read authority under the writer lock: a stale Ctx or a concurrent pause,
     // revocation or role change cannot admit a new intent.
     if !authorized(tx, me, node, true)? {
-        return Err(StoreError::Conflict("harness_owner_required".into()));
+        return Err(HarnessUpdatesError::OwnerRequired);
     }
     let mut saved = load(tx, node)?;
     if let Some(prior) = saved.runs.get(&h) {
         if prior.command.id == cmd.id {
             if prior.command.body != cmd.body {
-                return Err(StoreError::Conflict(
-                    "same operation, other component versions".into(),
+                return Err(HarnessUpdatesError::Conflict(
+                    "same operation, other component versions",
                 ));
             }
             return Ok(prior.clone());
@@ -649,8 +718,8 @@ fn admit_upgrade(
                 && prior.reconciled
                 && matches!(prior.receipt.state, na::Observed::Unknown { .. }))
         {
-            return Err(StoreError::Conflict(
-                "Previous upgrade is running or unknown; read its receipt before retrying".into(),
+            return Err(HarnessUpdatesError::Conflict(
+                "Previous upgrade is running or unknown; read its receipt before retrying",
             ));
         }
     }
@@ -701,7 +770,7 @@ async fn submit_and_watch(
     id: String,
     harness: String,
     run: Run,
-) -> Result<na::Receipt, ApiError> {
+) -> Result<na::Receipt, HarnessUpdatesError> {
     if run.receipt.state.is_finished() {
         return Ok(run.receipt);
     }
@@ -719,7 +788,7 @@ async fn submit_and_watch(
                 },
             };
             let _ = persist_receipt(&store, &id, &harness, receipt, true).await?;
-            return Err(node_error(e));
+            return Err(HarnessUpdatesError::Node(e));
         }
         Err(e) => na::Receipt {
             operation: run.command.id.clone(),
@@ -775,6 +844,9 @@ pub async fn start(
     Json(body): Json<Start>,
 ) -> Result<Json<UpgradeHarnessResponse>, ApiError> {
     let (store, node) = target(&st, &c, &id, true).await?;
+    if node.is_upgrade_only() {
+        return Err(HarnessUpdatesError::UpgradeRequired.into());
+    }
     let total = body.versions.len().saturating_add(body.self_update.len());
     if harness.len() > MAX_ID_LEN
         || total == 0
@@ -785,7 +857,7 @@ pub async fn start(
             .any(|(k, v)| k.len() > MAX_ID_LEN || v.len() > MAX_VERSION_LEN)
         || body.self_update.iter().any(|k| k.len() > MAX_ID_LEN)
     {
-        return Err(ApiError::bad_request("Invalid component versions"));
+        return Err(HarnessUpdatesError::InvalidRequest("Invalid component versions").into());
     }
     let now = crate::nodes::now();
     let retry_unknown = body.retry_unknown;
@@ -818,17 +890,7 @@ pub async fn start(
         })
     })
     .await
-    .map_err(internal)?
-    .map_err(|e| {
-        ApiError::Json(
-            if matches!(&e, StoreError::Conflict(s) if s == "harness_owner_required") {
-                403
-            } else {
-                409
-            },
-            e.to_string(),
-        )
-    })?;
+    .map_err(task_err)??;
     let receipt = submit_and_watch(Some(st), store, node, id, harness, run).await?;
     Ok(Json(UpgradeHarnessResponse {
         receipt: receipt_view(&receipt),
@@ -844,23 +906,27 @@ pub async fn set_auto_upgrade(
     Json(body): Json<SetHarnessAutoUpgrade>,
 ) -> Result<Json<HarnessAutoUpgradePolicy>, ApiError> {
     if body.enabled.is_none() && body.harness.is_none() {
-        return Err(ApiError::bad_request(
-            "Provide enabled and/or harness + mode",
-        ));
+        return Err(
+            HarnessUpdatesError::InvalidRequest("Provide enabled and/or harness + mode").into(),
+        );
     }
     if let Some(ref h) = body.harness {
         if h.is_empty() || h.len() > MAX_ID_LEN || body.mode.is_none() {
-            return Err(ApiError::bad_request("Invalid harness auto-upgrade mode"));
+            return Err(
+                HarnessUpdatesError::InvalidRequest("Invalid harness auto-upgrade mode").into(),
+            );
         }
     } else if body.mode.is_some() {
-        return Err(ApiError::bad_request("mode requires a target harness id"));
+        return Err(
+            HarnessUpdatesError::InvalidRequest("mode requires a target harness id").into(),
+        );
     }
     let (store, _node) = target(&st, &c, &id, true).await?;
     let (s, me, node_id) = (store.clone(), c.me.clone(), id.clone());
     let policy = tokio::task::spawn_blocking(move || {
         s.write(|tx| {
             if !authorized(tx, &me, &node_id, true)? {
-                return Err(StoreError::Conflict("harness_owner_required".into()));
+                return Err(HarnessUpdatesError::OwnerRequired);
             }
             let mut saved = load(tx, &node_id)?;
             if let Some(enabled) = body.enabled {
@@ -874,17 +940,7 @@ pub async fn set_auto_upgrade(
         })
     })
     .await
-    .map_err(internal)?
-    .map_err(|e| {
-        ApiError::Json(
-            if matches!(&e, StoreError::Conflict(s) if s == "harness_owner_required") {
-                403
-            } else {
-                409
-            },
-            e.to_string(),
-        )
-    })?;
+    .map_err(task_err)??;
     ::metrics::counter!("steve_hub_harness_auto_upgrade_policy_changes_total").increment(1);
     publish_node_changed(&st.bus, &store, &id).await;
     Ok(Json(policy))
@@ -982,7 +1038,9 @@ pub async fn run_auto_upgrade_pass(
     };
 
     let mut targets: Vec<(String, Arc<dyn na::Node>)> = Vec::new();
-    if let Some(local) = local {
+    if let Some(local) = local
+        && !local.is_upgrade_only()
+    {
         targets.push(("local".into(), local.clone()));
     }
     if let Some(svc) = svc {
@@ -990,7 +1048,10 @@ pub async fn run_auto_upgrade_pass(
             if svc.registry.current(&row.node_id).is_some()
                 && let Ok(nid) = na::NodeId::new(row.node_id.clone())
             {
-                targets.push((row.node_id, svc.fleet.remote(&nid)));
+                let remote = svc.fleet.remote(&nid);
+                if !remote.is_upgrade_only() {
+                    targets.push((row.node_id, remote));
+                }
             }
         }
     }
@@ -1288,5 +1349,144 @@ mod tests {
             },
         )]);
         assert!(select_auto_upgrades(&rep, &on, &runs, &BTreeMap::new()).is_empty());
+    }
+
+    /// Frozen on-disk schema of `Saved` in `settings` (`harness.updates.<node>`).
+    /// Any serialized shape change MUST break this test and ship with a store migration.
+    #[test]
+    fn saved_json_shape_is_frozen() {
+        let frozen = serde_json::json!({
+            "report": {
+                "node": "local",
+                "checking": false,
+                "harnesses": [
+                    {
+                        "harness": "claude-code",
+                        "name": "Claude Code",
+                        "components": [
+                            {
+                                "id": "cli",
+                                "name": "CLI",
+                                "package": "@anthropic-ai/claude-code",
+                                "managed": true,
+                                "source": "steve_managed",
+                                "upgrade_method": "steve_managed",
+                                "upgrade_command": "npm install -g @anthropic-ai/claude-code",
+                                "can_upgrade": true,
+                                "state": "available",
+                                "installed": "1.0.0",
+                                "latest": "1.1.0",
+                                "checked": 1700000000000i64,
+                                "reason": { "code": "tool_missing", "tool": "npm" }
+                            },
+                            {
+                                "id": "adapter",
+                                "name": "Adapter",
+                                "managed": false,
+                                "source": "external",
+                                "upgrade_method": "unsupported",
+                                "can_upgrade": false,
+                                "state": "unsupported",
+                                "reason": { "code": "package_manager_unsupported", "manager": "pnpm" }
+                            }
+                        ],
+                        "can_upgrade": false,
+                        "active_sessions": 1,
+                        "blocked_reason": "node_upgrade_in_progress",
+                        "operation": {
+                            "operation": "hup_op_1",
+                            "state": { "state": "running" }
+                        }
+                    }
+                ]
+            },
+            "at": 1700000000123i64,
+            "runs": {
+                "claude-code": {
+                    "command": {
+                        "id": "hup_op_1",
+                        "issued_at": 1700000000000i64,
+                        "accept_before": 1700000030000i64,
+                        "grant": "instance_owner",
+                        "body": {
+                            "harness": "claude-code",
+                            "versions": { "cli": "1.1.0" },
+                            "self_update": ["cli"]
+                        }
+                    },
+                    "receipt": {
+                        "operation": "hup_op_1",
+                        "state": {
+                            "state": "finished",
+                            "outcome": "failed",
+                            "error": {
+                                "code": "unavailable",
+                                "retry": { "kind": "later", "after_ms": null },
+                                "reason": null,
+                                "params": {},
+                                "safe_detail": "registry unreachable"
+                            }
+                        }
+                    },
+                    "reconciled": true,
+                    "trigger": "auto",
+                    "notified": true
+                }
+            },
+            "auto_upgrade": {
+                "enabled": false,
+                "harnesses": { "claude-code": true }
+            },
+            "auto_failed": {
+                "claude-code": { "cli": "1.1.0" }
+            }
+        });
+
+        let parsed: Saved =
+            serde_json::from_value(frozen.clone()).expect("frozen Saved fixture must deserialize");
+        assert_eq!(parsed.at, 1_700_000_000_123);
+        assert_eq!(
+            parsed.report.as_ref().unwrap().harnesses[0].blocked_reason,
+            Some(steve_types::devices::HarnessUpgradeBlockReason::NodeUpgradeInProgress)
+        );
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("Saved must serialize"),
+            frozen,
+            "Saved serialized shape drifted; add a migration and update the frozen fixture intentionally"
+        );
+    }
+
+    #[test]
+    fn corrupt_saved_state_returns_typed_conflict_without_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .write(|tx| {
+                WorkspaceSettings(tx).set(
+                    WS,
+                    &key("local"),
+                    r#"{"report":{"node":"local","checking":false,"harnesses":[{"harness":"pi","name":"Pi","components":[],"can_upgrade":false,"blocked_reason":"legacy free-form text"}]},"at":1,"runs":{}}"#,
+                    1,
+                )
+            })
+            .unwrap();
+        let err = store
+            .read(|db| load(db, "local"))
+            .expect_err("corrupt saved state must not fall back to default");
+        assert!(matches!(err, HarnessUpdatesError::InvalidSavedState(_)));
+        let api: ApiError = err.into();
+        match api {
+            ApiError::Contract(contract) => {
+                assert_eq!(contract.code, steve_types::Code::Conflict);
+                assert!(
+                    contract
+                        .reason
+                        .is_some_and(|r| r.is(NodeReason::InvalidHarnessUpdateState))
+                );
+            }
+            other => panic!("expected typed contract error, got {other:?}"),
+        }
     }
 }

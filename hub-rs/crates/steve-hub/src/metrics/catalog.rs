@@ -557,6 +557,16 @@ pub(super) fn describe() {
         Count,
         "Whether a remote Node's link is up (1) or not (0). Labels: node."
     );
+    describe_gauge!(
+        "steve_node_link_mode",
+        Count,
+        "Current link mode of a Node (1 for active mode, 0 otherwise). Labels: node, mode (normal, upgrade_only)."
+    );
+    describe_gauge!(
+        "steve_node_link_protocol_delta",
+        Count,
+        "Protocol version difference between Hub and linked Node (hub_proto - node_proto; 0 when matching or offline). Labels: node."
+    );
     describe_counter!(
         "steve_node_link_connects_total",
         Count,
