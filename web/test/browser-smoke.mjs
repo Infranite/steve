@@ -87,7 +87,6 @@ export const SMOKE = [
   "sign-in",
   "stats-prices",
   "stream-resume",
-  "suggest-card",
   "tool-approval",
   "tool-pins",
   "usage-ledger",

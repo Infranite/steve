@@ -64,6 +64,8 @@ export type RunningNowProps = {
   onOpenChange?: (open: boolean) => void;
   /** Which edge of the trigger the popover lines up with */
   align?: "start" | "end";
+  /** Steve: hide the waiting count on the trigger button (sidebar Inbox badge owns the single waiting count) */
+  hideWaitingTrigger?: boolean;
   labels?: Partial<RunningNowLabels>;
   className?: string;
 };
@@ -113,6 +115,7 @@ export function RunningNow({
   open: openProp,
   onOpenChange,
   align = "end",
+  hideWaitingTrigger = false,
   labels: labelsProp,
   className,
 }: RunningNowProps) {
@@ -242,9 +245,10 @@ export function RunningNow({
     (same ?? all[Math.min(f.index, all.length - 1)] ?? panelRef.current?.querySelector<HTMLButtonElement>("button") ?? panelRef.current)?.focus();
   });
 
+  const triggerWaiting = hideWaitingTrigger ? 0 : waiting;
   const summary =
-    running || waiting
-      ? [running ? `${num.format(running)} ${labels.running}` : "", waiting ? `${num.format(waiting)} ${waitingWord}` : ""].filter(Boolean).join(", ")
+    running || triggerWaiting
+      ? [running ? `${num.format(running)} ${labels.running}` : "", triggerWaiting ? `${num.format(triggerWaiting)} ${waitingWord}` : ""].filter(Boolean).join(", ")
       : paused
         ? `${num.format(paused)} ${labels.pausedCount}`
         : labels.idle;
@@ -259,8 +263,8 @@ export function RunningNow({
         className={["ui-rnc", className].filter(Boolean).join(" ")}
         data-open={open || undefined}
         data-align={align}
-        data-both={(running > 0 && waiting > 0) || undefined}
-        data-long={num.format(running).length + num.format(waiting).length > 4 || undefined}
+        data-both={(running > 0 && triggerWaiting > 0) || undefined}
+        data-long={num.format(running).length + num.format(triggerWaiting).length > 4 || undefined}
         onKeyDown={(e) => {
           if (e.key === "Escape" && open && e.target === triggerRef.current) setOpen(false);
         }}
@@ -283,7 +287,7 @@ export function RunningNow({
           }}
           onKeyDown={onTriggerKey}
         >
-          {running || waiting ? (
+          {running || triggerWaiting ? (
             <>
               {running > 0 && (
                 <span className="ui-rnc__part">
@@ -292,15 +296,15 @@ export function RunningNow({
                   <span className="ui-rnc__word">{labels.running}</span>
                 </span>
               )}
-              {running > 0 && waiting > 0 && (
+              {running > 0 && triggerWaiting > 0 && (
                 <span className="ui-rnc__sep" aria-hidden="true">
                   ·
                 </span>
               )}
-              {waiting > 0 && (
+              {triggerWaiting > 0 && (
                 <span className="ui-rnc__part">
                   <span className="ui-rnc__dot" aria-hidden="true" />
-                  <Swap className="ui-rnc__n" value={num.format(waiting)} />
+                  <Swap className="ui-rnc__n" value={num.format(triggerWaiting)} />
                   <span className="ui-rnc__word">{waitingWord}</span>
                 </span>
               )}

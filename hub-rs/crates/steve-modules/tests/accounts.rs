@@ -392,7 +392,7 @@ async fn same_name_and_signature_org_gives_a_proposal() {
         proposal.reason,
         proposal.confidence,
         proposal.status,
-        proposal.decision.unwrap(),
+        proposal.decision,
     );
     assert_eq!(
         (from.as_str(), into.as_str(), acc.as_str()),
@@ -407,19 +407,19 @@ async fn same_name_and_signature_org_gives_a_proposal() {
         "邮件签名写着 Sarah Chen · Acme，和 Sarah Chen 同名同组织"
     );
     assert_eq!((conf, status.as_str()), (0.6, "open"));
-
-    let d = t
+    assert!(
+        dec.is_none(),
+        "low-confidence merge proposal stays silent on contact detail with 0 decisions opened"
+    );
+    let open_merge_decisions = t
         .store()
-        .read(|r| steve_store::DecisionRows(r).get(&dec))
+        .decisions()
+        .open(WS)
         .unwrap()
-        .unwrap();
-    assert_eq!(d.kind, "propose");
-    assert_eq!(d.subject_type, "party_merge");
-    assert_eq!(d.subject_id, mp);
-    assert_eq!(d.question, "sarah.c.design@gmail.com 可能是 Sarah Chen");
-    assert_eq!(d.options, vec!["merge".to_string(), "not_same".to_string()]);
-    assert_eq!(d.status, steve_types::DecisionStatus::Open);
-    assert!(d.item_id.is_none());
+        .into_iter()
+        .filter(|d| d.subject_type == "party_merge")
+        .count();
+    assert_eq!(open_merge_decisions, 0);
 
     // the new contact is unconfirmed; the account is not verified yet
     let p = party(&t, &got.party_id).contact_kind.unwrap();

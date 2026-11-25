@@ -479,7 +479,7 @@ async fn merge_rejections() {
     assert_eq!((s, b), (404, err("没有这个合并记录")));
 }
 
-fn propose(t: &TestEnv) -> (String, String, String) {
+fn propose_silent(t: &TestEnv) -> (String, String) {
     let got = t
         .store()
         .write(|tx| {
@@ -498,8 +498,39 @@ fn propose(t: &TestEnv) -> (String, String, String) {
         })
         .unwrap();
     let mp = got.proposal.expect("proposal");
-    let d: String = fixture::proposal_decision(t.store(), &mp).unwrap();
-    (mp, d, got.party_id)
+    assert!(
+        t.store()
+            .read(|r| steve_store::MergeProposals(r).get(&mp))
+            .unwrap()
+            .unwrap()
+            .decision
+            .is_none(),
+        "low-confidence identify proposal opens zero decisions"
+    );
+    (mp, got.party_id)
+}
+
+fn propose(t: &TestEnv) -> (String, String, String) {
+    let (mp, from) = propose_silent(t);
+    let d = t
+        .store()
+        .write(|tx| {
+            let d = steve_store::DecisionRows(tx).open(&NewDecision {
+                workspace_id: WS.into(),
+                kind: "propose".into(),
+                subject_type: "party_merge".into(),
+                subject_id: mp.clone(),
+                question: "sarah.c.design@gmail.com 可能是 Sarah Chen".into(),
+                options: Some(vec!["merge".into(), "not_same".into()]),
+                requested_by: "steve".into(),
+                source: Some(steve_store::DecisionSource::Record),
+                ..Default::default()
+            })?;
+            steve_store::MergeProposals(tx).set_decision(&mp, &d.id)?;
+            Ok::<_, steve_store::StoreError>(d.id)
+        })
+        .unwrap();
+    (mp, d, from)
 }
 
 fn resolve(t: &TestEnv, d: &str, choice: &str) -> Result<Decision, steve_modules::ApiError> {
@@ -622,6 +653,72 @@ async fn not_same_is_never_proposed_again() {
     assert!(again.proposal.is_none());
     assert_eq!(fixture::proposal_count(t.store()).unwrap(), n);
     assert_eq!(fixture::open_proposal_count(t.store()).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn high_confidence_me_match_auto_merges_with_24h_undo_and_zero_decisions() {
+    let t = env();
+    let r = app(&t);
+    let me_party = ok(&r, "GET", "/me/contact", Value::Null).await;
+    let me_id = id(&me_party);
+    ok(
+        &r,
+        "PATCH",
+        &format!("/contacts/{me_id}"),
+        json!({ "aliases": ["owner@corp.example"] }),
+    )
+    .await;
+    let seen = t
+        .store()
+        .write(|tx| {
+            identify(
+                tx,
+                WS,
+                ME,
+                "mail",
+                "owner@corp.example",
+                &Hints {
+                    display_name: Some("Owner Alt".into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    assert_ne!(seen.party_id, me_id);
+    let undo_id = t
+        .store()
+        .write(|tx| {
+            steve_modules::accounts::identify::propose_if_me(
+                tx,
+                WS,
+                &me_id,
+                &seen.party_id,
+                &seen.account_id,
+                Some("Owner Alt"),
+                &["owner@corp.example"],
+            )
+        })
+        .unwrap()
+        .expect("24h undo changeset id");
+    assert!(undo_id.starts_with("chs_"), "{undo_id}");
+    assert_eq!(
+        fixture::party_status(t.store(), &seen.party_id).unwrap(),
+        "merged"
+    );
+    let open_count = t.store().decisions().open(WS).unwrap().len();
+    assert_eq!(open_count, 0, "auto-merge opens zero decisions");
+    let notices = steve_store::notify::list_recent(t.store(), WS, 10).unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.kind == "contact_merge" && n.text.contains(&undo_id)),
+        "passive change-record notification includes undo token: {notices:?}"
+    );
+    steve_modules::changes::undo(&t.modules, &me(), &undo_id).unwrap();
+    assert_eq!(
+        fixture::party_status(t.store(), &seen.party_id).unwrap(),
+        "active"
+    );
 }
 
 #[tokio::test]

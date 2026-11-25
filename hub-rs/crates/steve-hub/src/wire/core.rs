@@ -1741,22 +1741,6 @@ impl CoreDomain {
         );
         handled(blocking(move || c.offer(&ws, &m, take, Some(&by))).await?)
     }
-    pub async fn suggest(
-        &self,
-        ws: &str,
-        message: &str,
-        choice: &str,
-        by: &str,
-    ) -> BResult<(Obj, bool)> {
-        let (c, ws, m, ch, by) = (
-            self.core.clone(),
-            ws.to_string(),
-            message.to_string(),
-            choice.to_string(),
-            by.to_string(),
-        );
-        handled(blocking(move || c.suggest(&ws, &m, &ch, Some(&by))).await?)
-    }
     pub async fn a2ui_action(
         &self,
         ws: &str,
