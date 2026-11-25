@@ -595,6 +595,8 @@ pub async fn run_cancellable(
     };
     let over_limit = limit_hit.load(Ordering::Relaxed);
     let keep_billing_tail = progress.started() && (result.is_err() || over_limit);
+    let keep_draft_tail =
+        keep_billing_tail && !over_limit && !matches!(result, Err(OneShotError::ToolRefused));
     let stop_before_settlement =
         over_limit || !matches!(result, Ok(_) | Err(OneShotError::Harness { .. }));
     if stop_before_settlement && let Some(owned) = &mut owned {
@@ -605,7 +607,7 @@ pub async fn run_cancellable(
     }
     if let Some(sampler) = &mut sampler {
         if keep_billing_tail && let Some(rx) = &mut inbox {
-            drain_usage(rx, &mut norm, &mut out, on_event);
+            drain_tail(rx, &mut norm, &mut out, on_event, keep_draft_tail);
         }
         let native = result
             .as_ref()
@@ -619,30 +621,58 @@ pub async fn run_cancellable(
         stop_adapter(owned).await;
     }
     if keep_billing_tail && let Some(rx) = &mut inbox {
-        drain_usage(rx, &mut norm, &mut out, on_event);
+        drain_tail(rx, &mut norm, &mut out, on_event, false);
     }
     job_outcome(result, out, &limit_hit)
 }
 
-/// Keep buffered accounting after failure, without advancing the phase or granting tools.
-fn drain_usage(
+/// Keep buffered accounting after failure, and already-emitted assistant draft text after an
+/// external stop or timeout, without advancing the phase, granting tools, or emitting text that
+/// follows an unchecked tool or permission event.
+fn drain_tail(
     rx: &mut mpsc::UnboundedReceiver<Incoming>,
     norm: &mut Normalizer,
     out: &mut Output,
     on_event: &(dyn Fn(EventBody) + Send + Sync),
+    mut keep_draft: bool,
 ) {
     while let Ok(inc) = rx.try_recv() {
-        if let Incoming::Notification { method, params } = inc
-            && method == "session/update"
-            && out.session.as_deref() == params.get("sessionId").and_then(Value::as_str)
-            && let Some(update) = params.get("update")
-        {
-            let reports = norm
-                .update(update)
-                .into_iter()
-                .filter(|fact| matches!(fact, Fact::Event(EventBody::Usage { .. })))
-                .collect();
-            out.events(reports, on_event);
+        match inc {
+            Incoming::Request { .. } => {
+                keep_draft = false;
+            }
+            Incoming::Notification { method, params }
+                if method == "session/update"
+                    && out.session.as_deref()
+                        == params.get("sessionId").and_then(Value::as_str) =>
+            {
+                let Some(update) = params.get("update") else {
+                    continue;
+                };
+                let is_tool = matches!(
+                    update.get("sessionUpdate").and_then(Value::as_str),
+                    Some("tool_call" | "tool_call_update")
+                );
+                let allow_draft = keep_draft && !is_tool;
+                let close_draft = keep_draft;
+                if is_tool {
+                    keep_draft = false;
+                }
+                let facts = norm
+                    .update(update)
+                    .into_iter()
+                    .filter(|fact| match fact {
+                        Fact::Event(EventBody::Usage { .. }) => true,
+                        Fact::Event(
+                            EventBody::MessageStarted { .. } | EventBody::TextDelta { .. },
+                        ) => allow_draft,
+                        Fact::Event(EventBody::MessageCompleted { .. }) => close_draft,
+                        _ => false,
+                    })
+                    .collect();
+                out.events(facts, on_event);
+            }
+            _ => {}
         }
     }
 }
@@ -1581,5 +1611,75 @@ for line in sys.stdin:
             Err(OneShotError::OutputLimit)
         ));
         assert!(final_seen.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancellation_delivers_buffered_text_before_any_unchecked_tool_or_permission() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(
+            temp.path(),
+            r#"        lines = [
+            {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session","update":{"sessionUpdate":"agent_message_chunk","messageId":"m1","content":{"type":"text","text":"先"}}}},
+            {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session","update":{"sessionUpdate":"agent_message_chunk","messageId":"m2","content":{"type":"text","text":"写到一半"}}}},
+            {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session","update":{"sessionUpdate":"tool_call","toolCallId":"t1","kind":"edit","title":"write","rawInput":{"path":"file"}}}},
+            {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session","update":{"sessionUpdate":"agent_message_chunk","messageId":"m3","content":{"type":"text","text":"must-not-leak-after-tool"}}}},
+            {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-session","update":{"sessionUpdate":"usage_update","used":4,"size":100,"cost":{"amount":0.02,"currency":"USD"}}}},
+        ]
+        sys.stdout.write("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in lines))
+        sys.stdout.flush()
+        time.sleep(60)"#,
+            true,
+        );
+        let stop = tokio::sync::Notify::new();
+        let started = Mutex::new(Vec::<String>::new());
+        let deltas = Mutex::new(Vec::<(String, String)>::new());
+        let completed = Mutex::new(Vec::<String>::new());
+        let costs = Mutex::new(Vec::<String>::new());
+        let allow = |_: &ToolFact| -> bool {
+            panic!("unchecked tool queued after cancellation must not invoke allow_tool")
+        };
+        let event = |ev: EventBody| match ev {
+            EventBody::MessageStarted { message, .. } => {
+                started.lock().unwrap().push(message);
+            }
+            EventBody::TextDelta {
+                message,
+                text: delta,
+                ..
+            } => {
+                if delta == "先" {
+                    stop.notify_one();
+                }
+                deltas.lock().unwrap().push((message, delta));
+            }
+            EventBody::MessageCompleted { message } => {
+                completed.lock().unwrap().push(message);
+            }
+            EventBody::Usage { report } => {
+                if let Some(cost) = report.cost {
+                    costs.lock().unwrap().push(cost.decimal);
+                }
+            }
+            _ => {}
+        };
+        let result = run_cancellable(
+            request(&cfg, temp.path(), &allow),
+            &|_| true,
+            &event,
+            stop.notified(),
+        )
+        .await;
+        assert!(matches!(result, Err(OneShotError::Failed(_))));
+        let started = started.lock().unwrap();
+        assert_eq!(started.len(), 2, "only m1 and m2 should start: {started:?}");
+        assert_eq!(
+            *deltas.lock().unwrap(),
+            vec![
+                (started[0].clone(), "先".to_string()),
+                (started[1].clone(), "写到一半".to_string()),
+            ]
+        );
+        assert_eq!(*completed.lock().unwrap(), *started);
+        assert_eq!(*costs.lock().unwrap(), vec!["0.02".to_string()]);
     }
 }
