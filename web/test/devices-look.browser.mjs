@@ -124,6 +124,8 @@ async function hub(page, scene, unknown) {
     if (path.startsWith("/api/access/pairings/")) return json(route, { id: "cp1", status: "pending", expires: NOW + 10 * MIN, client: null })
     if (path === "/api/hub-metadata") return json(route, metadata)
     if (path === "/api/devices") return json(route, { devices: [{ id: "hub", name: "Studio Mac", roles: ["Hub"], node_id: "local", os: "macOS 26.1", version: HUB, status: "正常", max_sessions: 32, seen: NOW, created: 0 }], runtimes })
+    if (path === "/api/runtimes") return json(route, runtimes)
+    if (path.startsWith("/api/stewards/")) return json(route, {}, 404)
     /* the owner chip asks for the people module, which this Hub (like any without it) does not have */
     if (path === "/api/me/contact") return json(route, {}, 404)
     /* the page header's account button asks who is signed in */

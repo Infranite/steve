@@ -1,6 +1,6 @@
 import { updateChat } from "../../src/data/live"
 import { fixtureItem, fixtureWorkspace, seedItems, seedMessages } from "./view-data"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ChatView } from "../../src/chat-view"
@@ -41,8 +41,14 @@ window.addEventListener("fixture-thinking", () => { seedMessages(short); updateC
 function Fixture() {
   useStore()
   const [conv, setConv] = useState(new URLSearchParams(location.search).get("conv") ?? undefined)
+  const convRef = useRef(conv)
+  convRef.current = conv
   useEffect(() => {
-    const refresh = () => hubSubs.forEach(f => f({ rev: 1, type: "chan_message", id: "fixture", space_id: "sp1", ws: "default" }))
+    const refresh = () => hubSubs.forEach(f => f({
+      rev: 1, type: "chan_message", id: "fixture",
+      space_id: convRef.current?.replace(/^chan:/, "") || "sp1",
+      ws: st.workspace?.id ?? "default",
+    }))
     const switchScope = (e: Event) => {
       st.workspace = fixtureWorkspace({ ...st.workspace, id: (e as CustomEvent<string>).detail })
       emit()

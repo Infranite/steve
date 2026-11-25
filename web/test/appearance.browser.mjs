@@ -39,6 +39,11 @@ try {
     assert.equal(await css(page, "--primary"), "#6e56cf", `${theme}: violet's primary`)
     assert.equal(await css(page, "--blue"), theme === "dark" ? "#9b8af0" : "#6e56cf", `${theme}: and its blue for this mode`)
     assert.equal(await page.evaluate(() => document.documentElement.dataset.themeAccent), "violet")
+    await page.waitForFunction(() => {
+      const els = document.querySelectorAll("[data-appearance-preview] [data-slot=button]")
+      const el = els[els.length - 1]
+      return !!el && getComputedStyle(el).backgroundColor === "rgb(110, 86, 207)"
+    })
     const btn = await page.locator("[data-appearance-preview] [data-slot=button]").last().evaluate((el) => getComputedStyle(el).backgroundColor)
     assert.equal(btn, "rgb(110, 86, 207)", `${theme}: the preview's primary button takes it`)
 
@@ -55,6 +60,10 @@ try {
     assert.match(await page.evaluate(() => getComputedStyle(document.body).fontFamily), /^-apple-system/)
     await page.locator('[data-appearance="radius"] [data-seg="rounded"]').click()
     assert.equal(await css(page, "--radius-xl"), "16px")
+    await page.waitForFunction(() => {
+      const el = document.querySelector("[data-appearance-preview] .shadow-\\[var\\(--lift\\)\\]")
+      return !!el && getComputedStyle(el).borderTopLeftRadius === "16px"
+    })
     const card = await page.locator("[data-appearance-preview] .shadow-\\[var\\(--lift\\)\\]").evaluate((el) => getComputedStyle(el).borderTopLeftRadius)
     assert.equal(card, "16px", "rounded-xl reads the variable")
     if (shots) await page.screenshot({ path: `${shots}/appearance-${theme}.png`, fullPage: true })

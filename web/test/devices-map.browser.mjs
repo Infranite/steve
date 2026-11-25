@@ -15,8 +15,8 @@ const three = () => [local,
   node("n-mbp", "Studio MacBook Pro", { running: 2, link: link("loopback", "tailcat") }),
   node("n-imac", "studio-imac", { linked: false, last_seen: NOW - 3 * 3600_000, link_error: { at: NOW - 3 * 3600_000, error: "connection refused: tcp connect" } }),
 ]
-const client = (id, name, kind, extra = {}) => ({ id, kind, name, platform: "macOS", version: "0.2.112", origin: null, created: NOW - 90 * 86400_000, last_seen: NOW - 60_000, last_route: "lan", last_ip: null, revoked: null, ...extra })
-const clients = [client("c1", "This browser", "web"), client("c2", "Phone", "ios", { online: true }), client("c3", "Old laptop", "mac", { last_seen: NOW - 20 * 86400_000 }),
+const client = (id, name, kind, extra = {}) => ({ id, kind, name, platform: "macOS", version: "0.2.112", origin: null, created: NOW - 90 * 86400_000, last_seen: NOW - 60_000, last_route: "lan", last_ip: null, revoked: null, online: false, streams: 0, connected_since: null, ...extra })
+const clients = [client("c1", "This browser", "web", { online: true, streams: 1 }), client("c2", "Phone", "ios", { online: true, streams: 1 }), client("c3", "Old laptop", "mac", { last_seen: NOW - 20 * 86400_000 }),
   client("c4", "ci-bot", "cli", { last_seen: NOW - 40 * 86400_000 }), client("c5", "Tablet", "ios", { last_seen: NOW - 2 * 86400_000 }), client("c6", "Signed out", "web", { revoked: NOW })]
 
 let nodes = three(), late = [], paired = 0
@@ -65,7 +65,7 @@ try {
   await map.locator('[data-map-node="n-build"]').waitFor()
 
   // what wants you: the failed link first words, an outdated Node with its upgrade; the four numbers
-  await page.locator('[data-attention-row="n-imac"]').getByText(/studio-imac 离线 · 3 小时前/).waitFor()
+  await page.locator('[data-attention-row="n-imac"]').getByText(/studio-imac · 离线 · 3 小时前/).waitFor()
   await page.locator('[data-attention-row="n-imac"]').getByText("（connection refused）", { exact: true }).waitFor()
   await page.locator('[data-attention-upgrade="n-build"]').click()
   for (let i = 0; i < 60 && !writes.includes("POST /api/nodes/n-build/upgrade"); i++) await page.waitForTimeout(50)

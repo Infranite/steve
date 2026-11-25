@@ -40,6 +40,7 @@ try {
   }
   {
     const { page, v } = await open({ locale: "en", colorScheme: "light" })
+    await page.waitForFunction(() => document.documentElement.lang === "en")
     assert.equal((await v.innerText()).trim(), "Frontend 4d419d6a · Backend 0.2.53")
     await page.close()
   }
@@ -72,7 +73,7 @@ try {
     await account.click()
     const menu = page.locator("[data-account-menu]")
     await menu.waitFor()
-    assert.deepEqual(await menu.locator("[role=menuitem]").evaluateAll((xs) => xs.map((x) => x.dataset.nav ?? (x.hasAttribute("data-account-sign-out") ? "sign-out" : ""))), ["devices", "accounts", "settings", "sign-out"])
+    assert.deepEqual(await menu.locator("[role=menuitem]").evaluateAll((xs) => xs.map((x) => x.dataset.nav ?? (x.hasAttribute("data-account-sign-out") ? "sign-out" : ""))), ["contacts/me", "devices", "accounts", "settings", "sign-out"])
     await menu.locator('[data-nav="settings"]').click()
     await page.waitForFunction(() => location.hash === "#/settings")
     await menu.waitFor({ state: "detached" })
