@@ -51,8 +51,6 @@ pub const HISTORY: usize = 20;
 pub const HISTORY_WIDE: usize = 80;
 /// The sender's items in progress shown in layer 6.
 pub const ITEMS: usize = 5;
-/// The space's rules and preferences shown in layer 6 (K4 `anchor_mems`).
-pub const ANCHOR_MEMS: usize = 5;
 /// The message replied to, in characters.
 const MESSAGE_MAX: usize = 4000;
 /// The smart tier's time limit (like a config draft).
@@ -768,7 +766,7 @@ fn gather_anchors(
         .into_iter()
         .filter(|m| m.kind == "summary")
         .max_by_key(|m| m.updated);
-    if let Some(m) = summary {
+    if let Some(ref m) = summary {
         anchors.push(format!(
             "这个空间的摘要（{}）：{}",
             level_label(m.level),
@@ -790,11 +788,18 @@ fn gather_anchors(
         }
     }
     let space_ref = [ObjRef::new("space", &space.id)];
-    let rules = steve_knowledge::anchor_mems(r, &viewer, &space_ref, ANCHOR_MEMS, now)
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .into_iter()
-        .filter(|h| !anchor_ids.contains(&format!("{}:{}", h.obj_type, h.obj_id)))
-        .collect::<Vec<_>>();
+    let rules = steve_knowledge::anchor_mems(
+        r,
+        &viewer,
+        &space_ref,
+        steve_knowledge::context::L1_ENTITY_MAX_CHARS,
+        false,
+        now,
+    )
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .into_iter()
+    .filter(|h| !anchor_ids.contains(&format!("{}:{}", h.obj_type, h.obj_id)))
+    .collect::<Vec<_>>();
     if !rules.is_empty() {
         let lines: Vec<String> = rules
             .iter()
@@ -803,6 +808,12 @@ fn gather_anchors(
         anchors.push(format!("这个空间的规则与偏好：\n{}", lines.join("\n")));
         anchor_ids.extend(rules.iter().map(|h| format!("{}:{}", h.obj_type, h.obj_id)));
     }
+    let injected_mems = u64::from(summary.is_some()) + rules.len() as u64;
+    steve_knowledge::uses::record_memory_uses(
+        "reply",
+        steve_knowledge::uses::MemoryUseStage::Injected,
+        injected_mems,
+    );
 
     Ok(GatheredAnchors {
         lines: anchors,

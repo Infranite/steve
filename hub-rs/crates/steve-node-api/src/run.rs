@@ -233,6 +233,40 @@ pub struct OpenSession {
     /// adapter that reads none and when the session has no state directory of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<Skill>,
+    /// Fixed personal user context to append via the harness's declared native
+    /// `append_system_context` channel (never modifying the user's own `CLAUDE.md` / `AGENTS.md`).
+    /// Bounded by [`SYSTEM_CONTEXT_MAX_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_context: Option<String>,
+}
+
+/// Upper bound in bytes on [`OpenSession::system_context`] accepted by a Node.
+pub const SYSTEM_CONTEXT_MAX_BYTES: usize = 32 * 1024;
+
+/// Validates [`OpenSession::system_context`]: within [`SYSTEM_CONTEXT_MAX_BYTES`] and free of NUL.
+pub fn check_system_context(ctx: Option<&str>) -> crate::common::ApiResult<()> {
+    let Some(s) = ctx else { return Ok(()) };
+    if s.len() > SYSTEM_CONTEXT_MAX_BYTES || s.contains('\0') {
+        return Err(crate::common::Error::new(
+            crate::common::Code::Invalid,
+            "system_context is too large or contains NUL",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod system_context_tests {
+    use super::*;
+
+    #[test]
+    fn system_context_validation_enforces_size_and_nul_bounds() {
+        assert!(check_system_context(None).is_ok());
+        assert!(check_system_context(Some("valid context")).is_ok());
+        assert!(check_system_context(Some(&"a".repeat(SYSTEM_CONTEXT_MAX_BYTES))).is_ok());
+        assert!(check_system_context(Some(&"a".repeat(SYSTEM_CONTEXT_MAX_BYTES + 1))).is_err());
+        assert!(check_system_context(Some("bad\0ctx")).is_err());
+    }
 }
 
 /// One skill: written as `<name>/SKILL.md`, its front matter `name` and `description`, then

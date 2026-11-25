@@ -762,7 +762,11 @@ async fn open_job_session(
             effort: req.effort,
             system_prompt: req.head.map(|text| session::SystemPrompt {
                 text,
-                replace: req.tools_off,
+                mode: if req.tools_off {
+                    session::SystemPromptMode::AcpOverride
+                } else {
+                    session::SystemPromptMode::AcpAppend
+                },
             }),
         },
         req.cfg
@@ -1207,6 +1211,111 @@ for line in sys.stdin:
             json!([{"mode": "override", "content": [{"type": "text", "text": "rules"}]}, "answer"])
         );
         assert_eq!(said(false).await[0]["mode"], "append");
+    }
+
+    #[tokio::test]
+    async fn system_prompt_append_accepts_object_cap_and_meta_append() {
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("cap-adapter.py");
+        let script = r#"#!/usr/bin/env python3
+import json, os, sys
+mode = os.environ["CAP_MODE"]
+opened = None
+for line in sys.stdin:
+    msg = json.loads(line)
+    m = msg.get("method")
+    if m == "initialize":
+        if mode == "claude_shape":
+            caps = {"sessionCapabilities": {"systemPrompt": {"mode": {"override": {}}}}}
+        elif mode == "codex_shape":
+            caps = {"sessionCapabilities": {"systemPrompt": {}}}
+        elif mode == "agy_meta":
+            caps = {"_meta": {"antigravity": {"systemPrompt": {"append": True}}}}
+        else:
+            caps = {}
+        res = {"protocolVersion": 1, "agentCapabilities": caps}
+    elif m == "session/new":
+        opened = msg["params"]
+        res = {"sessionId": "s1"}
+    elif m == "session/prompt":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": json.dumps(opened)}
+                }
+            }
+        }), flush=True)
+        res = {"stopReason": "end_turn"}
+    else:
+        res = {}
+    if "id" in msg:
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+"#;
+        std::fs::write(&script_path, script).unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        struct NoopReports;
+        impl session::Reports for NoopReports {}
+
+        for (cap_mode, sp_mode, expect_delivered) in [
+            ("claude_shape", session::SystemPromptMode::AcpAppend, true),
+            ("codex_shape", session::SystemPromptMode::AcpAppend, true),
+            (
+                "agy_meta",
+                session::SystemPromptMode::MetaAppend("antigravity"),
+                true,
+            ),
+            ("none", session::SystemPromptMode::AcpAppend, false),
+            (
+                "none",
+                session::SystemPromptMode::MetaAppend("antigravity"),
+                false,
+            ),
+        ] {
+            let conn = Conn::spawn_registered(
+                Spawn {
+                    program: script_path.clone(),
+                    args: vec![],
+                    cwd: temp.path().into(),
+                    env: vec![("CAP_MODE".into(), cap_mode.into())],
+                    log_tag: format!("[test {cap_mode}]"),
+                    clean_env: false,
+                    prefix: None,
+                },
+                1 << 20,
+                |_| true,
+                |_| Ok(()),
+                |_, _| None,
+                || {},
+            )
+            .unwrap();
+            let opened = session::open(
+                &conn,
+                session::OpenConfig {
+                    harness: "neutral-test",
+                    client_version: "test",
+                    cwd: temp.path().to_str().unwrap(),
+                    resume: None,
+                    mcp_servers: json!([]),
+                    mode: None,
+                    model: None,
+                    effort: None,
+                    system_prompt: Some(session::SystemPrompt {
+                        text: "Personal rule",
+                        mode: sp_mode,
+                    }),
+                },
+                Some(json!({"existing": 1})),
+                &NoopReports,
+            )
+            .await
+            .unwrap();
+            assert_eq!(opened.system_prompt, expect_delivered, "{cap_mode}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

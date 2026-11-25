@@ -128,7 +128,7 @@ async fn nothing_registered_is_a_no_op() {
     r.hooks().created(&i).await;
     r.hooks().finished(&i).await;
     r.hooks().dropped(&i).await;
-    assert_eq!(r.contexts().session(t.store(), WS, &i), "");
+    assert!(r.contexts().session(t.store(), WS, &i).is_empty());
     assert!(
         r.contexts()
             .chat(t.store(), WS, &Viewer::bare(WS, ME), "hi")
@@ -175,8 +175,16 @@ fn hooks_with_the_same_name_panic() {
 struct Ctx(&'static str);
 
 impl PromptContext for Ctx {
-    fn session(&self, _: &steve_store::Store, _: &str, item: &Item) -> Option<String> {
-        (!self.0.is_empty()).then(|| format!("{} · {}", self.0, item.title))
+    fn session(
+        &self,
+        _: &steve_store::Store,
+        _: &str,
+        item: &Item,
+    ) -> Option<steve_modules::context::SessionPrompt> {
+        (!self.0.is_empty()).then(|| steve_modules::context::SessionPrompt {
+            user_context: String::new(),
+            task_context: format!("{} · {}", self.0, item.title),
+        })
     }
     fn chat(&self, _: &steve_store::Store, _: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
         (!self.0.is_empty()).then(|| ChatCtx {
@@ -217,7 +225,7 @@ fn prompt_contexts_join_sessions_and_take_the_first_chat() {
     let i = item(&t);
     let cx = t.modules.registry.contexts();
     assert_eq!(
-        cx.session(t.store(), WS, &i),
+        cx.session(t.store(), WS, &i).into_protocol_text(),
         "知识 · 修 bug\n\n卡片 · 修 bug"
     );
     let (n, chat) = cx

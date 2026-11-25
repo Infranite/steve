@@ -43,6 +43,7 @@ skills = "skills"
 resume_cli = "claude --resume {id}"
 fork_cli = "claude --resume {id} --fork-session"
 outer_sandbox_args = []
+append_system_context = {"kind" = "acp_system_prompt"}
 [[adapters.components]]
 id = "adapter"
 name = "Claude Code"
@@ -91,6 +92,7 @@ skills = "skills"
 resume_cli = "codex resume {id}"
 fork_cli = "codex fork {id}"
 outer_sandbox_args = []
+append_system_context = {"kind" = "acp_system_prompt"}
 [[adapters.components]]
 id = "adapter"
 name = "Codex"
@@ -776,3 +778,4 @@ model_fallback = false
 fast_models = ["flash-lite", "flash"]
 resume_cli = "agy --resume {id}"
 outer_sandbox_args = []
+append_system_context = {"kind" = "meta_append", "namespace" = "antigravity"}

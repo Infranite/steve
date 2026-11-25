@@ -148,7 +148,15 @@ process.stdin.on("data", (d) => {
     const m = JSON.parse(line)
     log(m)
     if (m.id != null && !m.method) { const w = waiting.get(m.id); waiting.delete(m.id); w?.(m.error ? { error: m.error } : m.result); continue }
-    if (m.method === "initialize") send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, ...(process.env.FAKE_ACP_IMAGE ? { promptCapabilities: { image: true } } : {}) } } })
+    if (m.method === "initialize") {
+      const sp = process.env.FAKE_ACP_SYSTEM_PROMPT || ""
+      const sysCaps = sp === "acp"
+        ? { sessionCapabilities: { systemPrompt: { mode: { override: {} } } } }
+        : sp.startsWith("meta:")
+          ? { _meta: { [sp.slice(5)]: { systemPrompt: { append: true } } } }
+          : {}
+      send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, ...(process.env.FAKE_ACP_IMAGE ? { promptCapabilities: { image: true } } : {}), ...sysCaps } } })
+    }
     else if (m.method === "session/new") { sid = "fake-" + Math.random().toString(36).slice(2); const opened = () => setTimeout(() => send({ id: m.id, result: { sessionId: sid, ...session() } }), Number(process.env.FAKE_ACP_OPEN_DELAY || 0)); if (process.env.FAKE_ACP_OPEN_PERMISSION) ask("session/request_permission", {toolCall: {toolCallId:"opening", kind:"execute"}, options:[]}).then(opened); else opened() }
     else if (m.method === "session/load") { sid = m.params.sessionId; say("replayed history"); send({ id: m.id, result: session() }) }
     else if (m.method === "session/prompt") turn(m.params.prompt.map((p) => p.text).join("\n")).then((result) => send({ id: m.id, result }), (e) => send({ id: m.id, error: { code: -32000, message: e.message } }))

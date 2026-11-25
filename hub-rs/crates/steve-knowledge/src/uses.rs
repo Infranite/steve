@@ -12,6 +12,44 @@ use steve_store::{Read, References, Result};
 
 pub const CONSUMERS: [&str; 5] = ["session", "chat", "draft", "flow", "search"];
 
+/// Lifecycle stage of a memory use recorded in `steve_memory_uses_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryUseStage {
+    Injected,
+    Cited,
+}
+
+impl MemoryUseStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Injected => "injected",
+            Self::Cited => "cited",
+        }
+    }
+}
+
+/// Emits `steve_memory_uses_total{consumer, stage}` with bounded low-cardinality labels.
+pub fn record_memory_uses(consumer: &str, stage: MemoryUseStage, count: u64) {
+    if count == 0 {
+        return;
+    }
+    let consumer_label = match consumer {
+        "session" => "session",
+        "chat" => "chat",
+        "draft" => "draft",
+        "reply" => "reply",
+        "search" => "search",
+        "flow" => "flow",
+        _ => "other",
+    };
+    metrics::counter!(
+        "steve_memory_uses_total",
+        "consumer" => consumer_label,
+        "stage" => stage.as_str(),
+    )
+    .increment(count);
+}
+
 /// The uses of one consumer, oldest first.
 pub fn uses_of(c: &mut impl Read, ws: &str, ctype: &str, cid: &str) -> Result<Vec<UseRow>> {
     KnowledgeUses(c).by_consumer(ws, ctype, cid)

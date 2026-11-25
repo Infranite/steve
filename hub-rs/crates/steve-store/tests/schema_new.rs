@@ -1215,6 +1215,95 @@ fn migration_137_drops_legacy_project_dir_and_worktree_columns() {
 }
 
 #[test]
+fn migration_138_adds_mems_pinned_and_orders_anchors_by_pin_and_kind_priority() {
+    let before_138 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("ALTER TABLE mems ADD COLUMN pinned"))
+        .unwrap();
+    let (_dir, path) = at_version(before_138);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO mems(id,workspace_id,kind,text,source_type,source_label,visibility,level,status,writer,created_by,created,updated)
+             VALUES ('mm_pre','default','fact','pre-existing fact','me','','private','conclusion','confirmed','me','u1',10,10);
+           INSERT INTO mem_about(mem_id,workspace_id,object_type,object_id)
+             VALUES ('mm_pre','default','party','ct_me');"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    let viewer = steve_store::base::Viewer::bare("default", "u1");
+    let me = [steve_store::base::ObjRef::new("party", "ct_me")];
+
+    let pre = store
+        .read(|r| steve_store::knowledge::Memories(r).get("mm_pre"))
+        .unwrap()
+        .unwrap();
+    assert!(!pre.pinned);
+
+    store
+        .write(|w| {
+            let mut mems = steve_store::knowledge::Memories(w);
+            mems.create(
+                "default",
+                &steve_store::base::mems::NewMem {
+                    kind: "event".into(),
+                    text: "pinned event".into(),
+                    pinned: true,
+                    created_by: "u1".into(),
+                    about: me.to_vec(),
+                    ..Default::default()
+                },
+            )?;
+            mems.create(
+                "default",
+                &steve_store::base::mems::NewMem {
+                    kind: "rule".into(),
+                    text: "unpinned rule".into(),
+                    pinned: false,
+                    created_by: "u1".into(),
+                    about: me.to_vec(),
+                    ..Default::default()
+                },
+            )?;
+            mems.create(
+                "default",
+                &steve_store::base::mems::NewMem {
+                    kind: "preference".into(),
+                    text: "unpinned pref".into(),
+                    pinned: false,
+                    created_by: "u1".into(),
+                    about: me.to_vec(),
+                    ..Default::default()
+                },
+            )?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+
+    let ordered = store
+        .read(|r| {
+            steve_store::knowledge::Memories(r).anchors(
+                &viewer,
+                &me,
+                steve_store::now(),
+                steve_store::knowledge::AnchorQuery::default(),
+            )
+        })
+        .unwrap();
+    let texts: Vec<&str> = ordered.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "pinned event",
+            "unpinned rule",
+            "unpinned pref",
+            "pre-existing fact"
+        ]
+    );
+}
+
+#[test]
 fn migration_130_preserves_history_commits_seq_and_notices() {
     let before_130 = db::MIGRATIONS
         .iter()

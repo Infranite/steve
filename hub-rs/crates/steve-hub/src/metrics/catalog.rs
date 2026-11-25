@@ -1018,6 +1018,11 @@ pub(super) fn describe() {
         "Knowledge steward schedule trigger evaluations. Labels: outcome (triggered, skipped), reason (threshold, manual, nothing_to_tidy, below_threshold)."
     );
     describe_counter!(
+        "steve_memory_uses_total",
+        Count,
+        "Memory hits injected into or cited by a consumer. Labels: consumer (session, chat, draft, reply, search, flow, other), stage (injected, cited)."
+    );
+    describe_counter!(
         "steve_security_refusals_total",
         Count,
         "Actions refused at a security or tenant boundary. Labels: boundary, reason."
