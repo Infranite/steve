@@ -186,8 +186,6 @@ export default {
   perm: {
     plan: "Read-only: proposes a plan, doesn't change files",
     default: "Asks you before every file change or command",
-    acceptEdits: "Can edit files in the project folder; asks before running commands",
-    auto: "Can edit files and run commands; external actions still need your approval",
     bypassPermissions: "Never asks: tools run directly, contained by the OS sandbox",
   },
   effort: {
@@ -330,15 +328,11 @@ export default {
     permName: {
       plan: "Read-only",
       default: "Always ask",
-      acceptEdits: "Edit files",
-      auto: "Auto",
       bypassPermissions: "Never ask",
     },
     permText: {
       plan: "Proposes a plan, doesn't change files",
       default: "Asks you before every file change or command",
-      acceptEdits: "Can edit files in the project folder; asks before running commands",
-      auto: "Can edit files and run commands; external actions still need your approval",
       bypassPermissions: "Tools run directly, contained by the OS sandbox",
     },
     accText: {

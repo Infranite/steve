@@ -307,12 +307,7 @@ impl Core {
                 if !unavailable {
                     continue;
                 }
-                let perm =
-                    if id == "dev" && target.offers_mode(steve_node_api::PermissionMode::Auto) {
-                        "auto"
-                    } else {
-                        target.default_perm_mode()
-                    };
+                let perm = target.default_perm_mode();
                 if bots::move_pristine_harness(w, id, &target.id, perm, steve_store::now())? {
                     w.emit(steve_types::DomainEvent::from(
                         steve_types::ConfigEvent::Bot {

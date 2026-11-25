@@ -190,6 +190,16 @@ impl Harness {
     }
 }
 
+/// Maps an active stored Bot `perm_mode` key to its `PermissionMode`.
+pub fn perm_mode_of_key(k: &str) -> Option<PermissionMode> {
+    Some(match k {
+        "plan" => PermissionMode::Plan,
+        "default" => PermissionMode::Ask,
+        "bypassPermissions" => PermissionMode::FullAccess,
+        _ => return None,
+    })
+}
+
 /// Default `(harness_id, perm_mode)` for a new bot: `preferred` (e.g. the main bot's harness) when
 /// it is in `list` and not proven unavailable (`ready != Some(false)`), else the first `ready ==
 /// Some(true)` harness, else the first `ready != Some(false)`, else the first in `list` or the

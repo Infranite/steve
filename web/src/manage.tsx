@@ -8,7 +8,7 @@ import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, FilePenIcon, ZapIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon } from "lucide-react"
+import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -66,11 +66,11 @@ const proLabel = (t: T, i: number) => (PRO_KEYS[i] ? t(`manage:pro.${PRO_KEYS[i]
 const ACC_KEYS = ["inherit", "manual", "auto"] as const
 /** an accept mode by backend key as shown; unknown keys fall back to the store's label */
 const accLabel = (t: T, k: string) => ((ACC_KEYS as readonly string[]).includes(k) ? t(`manage:acc.${k as (typeof ACC_KEYS)[number]}`) : ACC[k] ?? k)
-const PERM_KEYS = ["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const
+const PERM_KEYS = ["plan", "default", "bypassPermissions"] as const
 const permLabel = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:perm.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
 /** a permission mode in a word or two (the tile's name); its sentence is permLabel */
 const permName = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:form.permName.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
-const PERM_ICON: Record<string, ReactNode> = { plan: <EyeIcon />, default: <HandIcon />, acceptEdits: <FilePenIcon />, auto: <ZapIcon />, bypassPermissions: <ShieldOffIcon /> }
+const PERM_ICON: Record<string, ReactNode> = { plan: <EyeIcon />, default: <HandIcon />, bypassPermissions: <ShieldOffIcon /> }
 const ACC_ICON: Record<string, ReactNode> = { inherit: <SlidersHorizontalIcon />, manual: <UserCheckIcon />, auto: <CheckCheckIcon /> }
 /* tag categories are stored as Chinese words (store TAG_CATS); only the label is translated */
 const TAG_CAT_KEYS: Record<string, "all" | "project" | "kind" | "delivery" | "domain" | "client" | "topic"> = { 全部: "all", 项目: "project", 类型: "kind", 交付: "delivery", 领域: "domain", 客户: "client", 主题: "topic" }

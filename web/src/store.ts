@@ -157,7 +157,7 @@ export const harnessEfforts = (harness: string): string[] => runtimes().find((r)
 export const harnessSkills = (harness: string): boolean | undefined => runtimes().find((r) => r.id === harness)?.skills
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
-export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))
+export const PERM: Record<string, string> = live(["plan", "default", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))
 /* a label in the current language, or the Hub value itself */
 export const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? (label in ACC ? label : "inherit")
 

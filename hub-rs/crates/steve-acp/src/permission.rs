@@ -24,8 +24,6 @@ pub struct Asked {
     /// For display only, not an authorization payload. Bind fact's paths/cwd/argv and
     /// resource versions in the Node before constructing PermissionRequest.action/digest.
     pub action: Action,
-    /// Steve's own tool the request is for (`steve_deliver`), if it is one.
-    pub steve_tool: Option<String>,
     /// The choices it offers and the option each answers with.
     pub choices: Vec<(PermissionDecision, String)>,
 }
@@ -67,14 +65,6 @@ pub fn asked(norm: &mut Normalizer, rpc_id: &Value, params: &Value) -> Asked {
     } else {
         view.title.clone()
     };
-    /* a call to Steve's own server, named or not: some harnesses ask about the server with no tool
-     * name. The Hub authorizes each Steve tool call itself, so the request needs no one's answer */
-    let steve_tool = (fact.origin == steve_node_api::ToolOrigin::Steve).then(|| {
-        fact.name
-            .strip_prefix("mcp__steve__")
-            .unwrap_or(&fact.name)
-            .to_string()
-    });
     let choices = choices_of(params);
     Asked {
         fact,
@@ -85,7 +75,6 @@ pub fn asked(norm: &mut Normalizer, rpc_id: &Value, params: &Value) -> Asked {
         action: view.action.unwrap_or(Action::Unknown {
             summary: String::new(),
         }),
-        steve_tool,
         choices,
     }
 }
@@ -147,7 +136,6 @@ fn norm_fallback(tool_call: &str) -> Asked {
         action: Action::Unknown {
             summary: String::new(),
         },
-        steve_tool: None,
         choices: vec![],
     }
 }
@@ -219,26 +207,5 @@ mod tests {
             answer(&a, Some(PermissionDecision::AllowOnce)),
             json!({"outcome": {"outcome": "cancelled"}})
         );
-    }
-
-    #[test]
-    fn steve_tools_are_recognized() {
-        let p = params(
-            json!({"toolCallId": "t", "title": "mcp__steve__steve_deliver",
-            "_meta": {"claudeCode": {"toolName": "mcp__steve__steve_deliver"}}}),
-        );
-        assert_eq!(
-            asked(&mut norm(), &json!(1), &p).steve_tool.as_deref(),
-            Some("steve_deliver")
-        );
-        /* a harness asking about Steve's server with no tool name (Codex's MCP approval) */
-        let p = params(json!({"toolCallId": "t2", "title": "Approve MCP tool call",
-            "rawInput": {"server_name": "steve", "id": "mcp_tool_call_approval_call_x",
-                "request": {"mode": "form", "_meta": {"codex_approval_kind": "mcp_tool_call"}}}}));
-        assert!(asked(&mut norm(), &json!(2), &p).steve_tool.is_some());
-        /* another server's is not Steve's */
-        let p = params(json!({"toolCallId": "t3", "title": "Approve MCP tool call",
-            "rawInput": {"server_name": "github", "id": "x"}}));
-        assert!(asked(&mut norm(), &json!(3), &p).steve_tool.is_none());
     }
 }

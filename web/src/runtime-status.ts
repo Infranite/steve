@@ -14,7 +14,7 @@ export const canInstallRuntime = (r: RRuntime, requestError?: string): boolean =
 }
 
 /** Stored Bot modes and the registry's public permission modes are different vocabularies. */
-export const permissionModes = { plan: "plan", default: "ask", acceptEdits: "accept_edits", auto: "auto", bypassPermissions: "full_access" } as const
+export const permissionModes = { plan: "plan", default: "ask", bypassPermissions: "full_access" } as const
 export const supportsPermission = (r: RRuntime | undefined, mode: string): boolean => {
   if (!r) return false
   // No session offer yet (`modes` null) declares no restriction; an explicit [] supports none.

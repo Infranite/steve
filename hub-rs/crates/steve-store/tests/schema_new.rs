@@ -1007,3 +1007,46 @@ fn migration_128_retires_yolo_rows_and_backfills_node_bindings() {
         })
         .unwrap();
 }
+
+#[test]
+fn migration_129_normalizes_retired_bot_perm_modes() {
+    let (_dir, path) = at_version(128);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO bots(id,workspace_id,name,harness,perm_mode,updated)
+             VALUES ('b_auto','default','Auto','claude-code','auto',1),
+                    ('b_edit','default','Edit','claude-code','acceptEdits',1),
+                    ('b_plan','default','Plan','claude-code','plan',1),
+                    ('b_full','default','Full','claude-code','bypassPermissions',1);"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    store
+        .fixture_write(|c| {
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id IN ('b_auto','b_edit') AND perm_mode='default'"
+                ),
+                2
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id='b_plan' AND perm_mode='plan'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id='b_full' AND perm_mode='bypassPermissions'"
+                ),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}

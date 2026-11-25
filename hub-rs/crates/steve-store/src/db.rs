@@ -269,6 +269,8 @@ pub const MIGRATIONS: &[&str] = &[
     // 127: remove legacy raw ACP event rows and backfill sessions.first_tool_at from steve.v1 tool events.
     include_str!("../migrations/127.sql"),
     include_str!("../migrations/128.sql"),
+    // 129: normalize lingering retired Bot perm_mode values to default.
+    include_str!("../migrations/129.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

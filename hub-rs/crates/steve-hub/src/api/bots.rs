@@ -86,17 +86,7 @@ fn valid_skin(s: &str) -> bool {
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
 const PERM: &[&str] = &["default", "plan", "bypassPermissions"];
 
-fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
-    use steve_node_api::PermissionMode as P;
-    Some(match k {
-        "plan" => P::Plan,
-        "default" => P::Ask,
-        "acceptEdits" => P::AcceptEdits,
-        "auto" => P::Auto,
-        "bypassPermissions" => P::FullAccess,
-        _ => return None,
-    })
-}
+use steve_core::harnesses::perm_mode_of_key;
 
 fn known_harness_ids(
     cfg: &crate::config::Config,

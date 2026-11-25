@@ -38,7 +38,8 @@ test("permission support is registry driven, with explicit empty modes and an ab
   assert.equal(supportsPermission({ modes: null }, "default"), true)
   assert.equal(supportsPermission({}, "default"), true)
   assert.equal(supportsPermission(undefined, "default"), false)
-  assert.equal(supportsPermission({ modes: ["accept_edits"] }, "acceptEdits"), true)
+  assert.equal(supportsPermission({ modes: ["plan", "ask"] }, "plan"), true)
+  assert.equal(supportsPermission({ modes: ["accept_edits"] }, "acceptEdits"), false)
 })
 
 

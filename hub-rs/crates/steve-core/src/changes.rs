@@ -201,17 +201,7 @@ fn text_field(key: &str, label: &str, current: &str) -> BotField {
     }
 }
 
-fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
-    use steve_node_api::PermissionMode as P;
-    Some(match k {
-        "plan" => P::Plan,
-        "default" => P::Ask,
-        "acceptEdits" => P::AcceptEdits,
-        "auto" => P::Auto,
-        "bypassPermissions" => P::FullAccess,
-        _ => return None,
-    })
-}
+use crate::harnesses::perm_mode_of_key;
 
 const STANDARD_EFFORTS: &[&str] = &[
     "none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
