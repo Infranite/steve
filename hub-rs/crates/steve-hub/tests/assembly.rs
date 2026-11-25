@@ -637,7 +637,7 @@ async fn an_assembly_registers_only_its_extensions() {
     );
     assert_eq!(w.tools.outbox.as_user_ids(), ["ext_ws"]);
     // Built-in jobs with this extension set, plus the probe's.
-    assert_eq!(w.jobs.len(), 23 + 17);
+    assert_eq!(w.jobs.len(), 24 + 17);
     // the device flow and the OAuth start of you on Feishu went with it; the bot's stayed, and
     // another extension's routes are under its own prefix
     let paths: BTreeSet<String> = [
