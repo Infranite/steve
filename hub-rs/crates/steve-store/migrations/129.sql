@@ -1,65 +1,132 @@
--- Migrate bots.perm_mode from harness-specific (Claude Code) mode names to Steve's canonical
--- PermissionMode vocabulary (`plan`, `ask`, `accept_edits`, `auto`, `full_access`), and change
--- the column default from `'default'` to `'ask'`.
+-- 129: unify person identity across login accounts, timeline actors, and settled decisions.
 --
--- Mapping:
---   'plan'                              -> 'plan'
---   'default' | 'ask'                   -> 'ask'
---   'acceptEdits' | 'accept_edits'      -> 'accept_edits'
---   'auto'                              -> 'auto'
---   'bypassPermissions' | 'full_access' -> 'full_access'
---   any other retired/unknown value     -> 'ask'
-CREATE TABLE bots_new (
-  id TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL,
-  name TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT '',
-  main INTEGER NOT NULL DEFAULT 0,
-  harness TEXT NOT NULL,
-  model TEXT,
-  rules TEXT NOT NULL DEFAULT '',
-  accept_mode TEXT NOT NULL DEFAULT 'manual',
-  perm_mode TEXT NOT NULL DEFAULT 'ask',
-  project_dir TEXT,
-  worktree INTEGER NOT NULL DEFAULT 0,
-  enabled INTEGER NOT NULL DEFAULT 1,
-  revision INTEGER NOT NULL DEFAULT 1,
-  updated INTEGER NOT NULL,
-  persona TEXT NOT NULL DEFAULT '',
-  proactive INTEGER NOT NULL DEFAULT 1,
-  avatar TEXT NOT NULL DEFAULT '{}',
-  default_project TEXT,
-  prompt TEXT,
-  device TEXT,
-  deleted INTEGER NOT NULL DEFAULT 0,
-  owner TEXT,
-  reasoning_effort TEXT,
-  specialties TEXT NOT NULL DEFAULT '[]'
-);
+-- 1. Link every workspace member without an existing party to a contact in that workspace:
+--    first reuse a unique unlinked active contact matching the user's name, then create one.
+UPDATE parties
+SET user_id = (
+    SELECT wm.user_id
+    FROM workspace_members wm
+    JOIN users u ON u.id = wm.user_id
+    WHERE wm.workspace_id = parties.workspace_id
+      AND NOT EXISTS (
+          SELECT 1 FROM parties p2
+          WHERE p2.workspace_id = wm.workspace_id AND p2.user_id = wm.user_id
+      )
+      AND lower(trim(u.name)) = lower(trim(parties.name))
+      AND (
+          SELECT count(*) FROM workspace_members wm2
+          JOIN users u2 ON u2.id = wm2.user_id
+          WHERE wm2.workspace_id = parties.workspace_id
+            AND NOT EXISTS (
+                SELECT 1 FROM parties p3
+                WHERE p3.workspace_id = wm2.workspace_id AND p3.user_id = wm2.user_id
+            )
+            AND lower(trim(u2.name)) = lower(trim(parties.name))
+      ) = 1
+    LIMIT 1
+)
+WHERE type = 'contact'
+  AND status = 'active'
+  AND user_id IS NULL
+  AND (
+      SELECT count(*) FROM parties p_same
+      WHERE p_same.workspace_id = parties.workspace_id
+        AND p_same.type = 'contact'
+        AND p_same.status = 'active'
+        AND p_same.user_id IS NULL
+        AND lower(trim(p_same.name)) = lower(trim(parties.name))
+  ) = 1
+  AND EXISTS (
+      SELECT 1
+      FROM workspace_members wm
+      JOIN users u ON u.id = wm.user_id
+      WHERE wm.workspace_id = parties.workspace_id
+        AND NOT EXISTS (
+            SELECT 1 FROM parties p2
+            WHERE p2.workspace_id = wm.workspace_id AND p2.user_id = wm.user_id
+        )
+        AND lower(trim(u.name)) = lower(trim(parties.name))
+        AND (
+            SELECT count(*) FROM workspace_members wm2
+            JOIN users u2 ON u2.id = wm2.user_id
+            WHERE wm2.workspace_id = parties.workspace_id
+              AND NOT EXISTS (
+                  SELECT 1 FROM parties p3
+                  WHERE p3.workspace_id = wm2.workspace_id AND p3.user_id = wm2.user_id
+              )
+              AND lower(trim(u2.name)) = lower(trim(parties.name))
+        ) = 1
+  );
 
-INSERT INTO bots_new (
-  id, workspace_id, name, role, main, harness, model, rules, accept_mode, perm_mode,
-  project_dir, worktree, enabled, revision, updated, persona, proactive, avatar,
-  default_project, prompt, device, deleted, owner, reasoning_effort, specialties
+INSERT INTO parties (
+    id, workspace_id, type, name, aliases, avatar, rels, important, note,
+    contact_kind, org_kind, user_id, visibility, status, merged_into,
+    source, source_ref, revision, created_by, created, updated
 )
 SELECT
-  id, workspace_id, name, role, main, harness, model, rules, accept_mode,
-  CASE perm_mode
-    WHEN 'plan' THEN 'plan'
-    WHEN 'default' THEN 'ask'
-    WHEN 'ask' THEN 'ask'
-    WHEN 'acceptEdits' THEN 'accept_edits'
-    WHEN 'accept_edits' THEN 'accept_edits'
-    WHEN 'auto' THEN 'auto'
-    WHEN 'bypassPermissions' THEN 'full_access'
-    WHEN 'full_access' THEN 'full_access'
-    ELSE 'ask'
-  END,
-  project_dir, worktree, enabled, revision, updated, persona, proactive, avatar,
-  default_project, prompt, device, deleted, owner, reasoning_effort, specialties
-FROM bots;
+    'ct_' || lower(hex(randomblob(8))),
+    wm.workspace_id,
+    'contact',
+    coalesce(nullif(trim(u.name), ''), '我'),
+    '[]',
+    '{}',
+    '["me"]',
+    0,
+    '',
+    'real',
+    NULL,
+    wm.user_id,
+    'workspace',
+    'active',
+    NULL,
+    'manual',
+    NULL,
+    1,
+    wm.user_id,
+    wm.created,
+    wm.created
+FROM workspace_members wm
+JOIN users u ON u.id = wm.user_id
+WHERE NOT EXISTS (
+    SELECT 1 FROM parties p
+    WHERE p.workspace_id = wm.workspace_id AND p.user_id = wm.user_id
+);
 
-DROP TABLE bots;
-PRAGMA legacy_alter_table=ON;
-ALTER TABLE bots_new RENAME TO bots;
-PRAGMA legacy_alter_table=OFF;
+-- 2. Strongly typed actor column on decisions (replaces untyped inference in settled lists).
+ALTER TABLE decisions ADD COLUMN resolved_by TEXT;
+
+UPDATE decisions
+SET resolved_by = json_extract(result, '$.decided_by')
+WHERE status = 'resolved'
+  AND typeof(json_extract(result, '$.decided_by')) = 'text'
+  AND json_extract(result, '$.decided_by') <> '';
+
+UPDATE decisions
+SET resolved_by = (
+    SELECT wm.user_id FROM workspace_members wm
+    WHERE wm.workspace_id = decisions.workspace_id
+    LIMIT 1
+)
+WHERE status = 'resolved'
+  AND resolved_by IS NULL
+  AND (
+      SELECT count(*) FROM workspace_members wm
+      WHERE wm.workspace_id = decisions.workspace_id
+  ) = 1;
+
+-- 3. Backfill legacy literal 'me' timeline actors in single-member workspaces.
+UPDATE timeline
+SET actor = (
+    SELECT wm.user_id
+    FROM workspace_members wm
+    JOIN items i ON i.workspace_id = wm.workspace_id
+    WHERE i.id = timeline.item_id
+    LIMIT 1
+)
+WHERE actor = 'me'
+  AND (
+      SELECT count(*)
+      FROM workspace_members wm
+      JOIN items i ON i.workspace_id = wm.workspace_id
+      WHERE i.id = timeline.item_id
+  ) = 1;

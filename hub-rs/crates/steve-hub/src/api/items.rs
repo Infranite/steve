@@ -414,39 +414,88 @@ pub async fn actions(
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BulkOp {
+    Pause,
+    Resume,
+    Drop,
+    Archive,
+}
+
+impl BulkOp {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pause" => Some(Self::Pause),
+            "resume" => Some(Self::Resume),
+            "drop" => Some(Self::Drop),
+            "archive" => Some(Self::Archive),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Drop => "drop",
+            Self::Archive => "archive",
+        }
+    }
+
+    /// Whether `state` (and `archived`) allows this bulk operation under the W3.2 lifecycle.
+    fn applies(self, state: &steve_types::ItemState, archived: bool) -> bool {
+        use steve_types::{CloseKind, ItemState};
+        match self {
+            Self::Pause => matches!(
+                state,
+                ItemState::Ready
+                    | ItemState::Active
+                    | ItemState::Closing {
+                        request: CloseKind::Complete,
+                        ..
+                    }
+            ),
+            Self::Resume => matches!(state, ItemState::Paused),
+            Self::Drop => matches!(
+                state,
+                ItemState::Ready
+                    | ItemState::Active
+                    | ItemState::Paused
+                    | ItemState::Closing {
+                        request: CloseKind::Complete,
+                        ..
+                    }
+            ),
+            Self::Archive => !archived,
+        }
+    }
+}
+
 pub async fn bulk(State(st): State<AppState>, Extension(c): Extension<Ctx>, b: Bytes) -> ApiResult {
     let req: BulkBody = json_body(&b)?;
     let mut bad = Vec::new();
     if !(1..=200).contains(&req.ids.len()) {
         bad.push("ids".into());
     }
-    if !matches!(req.op.as_str(), "pause" | "resume" | "drop" | "archive") {
+    let op = BulkOp::parse(&req.op);
+    if op.is_none() {
         bad.push("op".into());
     }
     if !bad.is_empty() {
         return Err(ApiError::Invalid(bad));
     }
-    let BulkBody { ids, op } = req;
+    let ids = req.ids;
+    let op = op.unwrap();
     let mut n = 0;
     for id in ids {
-        let i = id.clone();
-        let Some(item) = st.read(move |r| Ok(r.item_get(&i)?)).await? else {
+        let (ws, i) = (c.ws.clone(), id.clone());
+        let Some(item) = st.read(move |r| Ok(r.item_view(&ws, &i)?)).await? else {
             continue;
         };
-        if item.get("workspace_id").and_then(Value::as_str) != Some(c.ws.as_str()) {
+        if !op.applies(&item.state, item.archived) {
             continue;
         }
-        let status = str_of(&item, "status");
-        let skip = match op.as_str() {
-            "pause" => status != "run",
-            "resume" => status != "pause",
-            "drop" => status == "done" || status == "drop",
-            _ => false,
-        };
-        if skip {
-            continue;
-        }
-        st.domain.item_action(&id, &op, &c.me).await?;
+        st.domain.item_action(&id, op.as_str(), &c.me).await?;
         n += 1;
     }
     ok(json!({ "n": n }))
@@ -463,7 +512,7 @@ pub async fn goal(
     if req.text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
-    st.domain.revise_goal(&id, &req.text).await?;
+    st.domain.revise_goal(&id, &req.text, &c.me).await?;
     ok_true()
 }
 
@@ -703,7 +752,9 @@ pub async fn supplement(
     }
     check_file_ids(&req.files)?;
     let refs = super::files::refs(&st, &c.ws, req.files).await?;
-    st.domain.supplement(&id, &req.text, &mode, refs).await?;
+    st.domain
+        .supplement(&id, &req.text, &mode, refs, &c.me)
+        .await?;
     ok_true()
 }
 
@@ -730,6 +781,58 @@ pub async fn reassign(
     ))
 }
 
+pub async fn handoff(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    own_item(&st, &c.ws, &id).await?;
+    let target = parse_handoff_body(&b)?;
+    ok(st.domain.handoff_item(&id, target, &c.me).await?)
+}
+
+#[derive(serde::Deserialize)]
+struct HandoffBody {
+    bot: Option<String>,
+    harness: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    #[serde(default)]
+    make_bot_default: bool,
+}
+
+pub(super) fn parse_handoff_body(b: &Bytes) -> Result<steve_core::HandoffTarget, ApiError> {
+    if b.iter().all(|c| c.is_ascii_whitespace()) {
+        return Ok(steve_core::HandoffTarget::default());
+    }
+    let req: HandoffBody = json_body(b)?;
+    let mut bad = Vec::new();
+    if req.bot.as_deref().is_some_and(|s| !check_len(s, 0, 128)) {
+        bad.push("bot".into());
+    }
+    if req.harness.as_deref().is_some_and(|s| !check_len(s, 0, 64)) {
+        bad.push("harness".into());
+    }
+    if req.model.as_deref().is_some_and(|s| !check_len(s, 0, 200)) {
+        bad.push("model".into());
+    }
+    if req.effort.as_deref().is_some_and(|s| !check_len(s, 0, 32)) {
+        bad.push("effort".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    let clean = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    Ok(steve_core::HandoffTarget {
+        bot: clean(req.bot),
+        harness: clean(req.harness),
+        model: clean(req.model),
+        effort: clean(req.effort),
+        make_bot_default: req.make_bot_default,
+    })
+}
+
 pub async fn add_dep(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -739,7 +842,7 @@ pub async fn add_dep(
     own_item(&st, &c.ws, &id).await?;
     let req: AddDepBody = json_body(&b)?;
     own_item(&st, &c.ws, &req.dep).await?;
-    st.domain.add_dep(&id, &req.dep).await?;
+    st.domain.add_dep(&id, &req.dep, &c.me).await?;
     ok_true()
 }
 
@@ -749,7 +852,7 @@ pub async fn rm_dep(
     Path((id, dep)): Path<(String, String)>,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    st.domain.rm_dep(&id, &dep).await?;
+    st.domain.rm_dep(&id, &dep, &c.me).await?;
     ok_true()
 }
 
@@ -912,6 +1015,66 @@ mod dependency_text_tests {
             v
         );
     }
+
+    #[test]
+    fn bulk_op_matches_typed_item_state() {
+        use steve_types::{CloseKind, ClosedBy, ItemOutcome, ItemState};
+
+        let cases = [
+            (ItemState::Ready, (true, false, true)),
+            (ItemState::Active, (true, false, true)),
+            (ItemState::Paused, (false, true, true)),
+            (
+                ItemState::Closing {
+                    request: CloseKind::Complete,
+                    waits: vec![],
+                },
+                (true, false, true),
+            ),
+            (
+                ItemState::Closing {
+                    request: CloseKind::Cancel,
+                    waits: vec![],
+                },
+                (false, false, false),
+            ),
+            (
+                ItemState::Closing {
+                    request: CloseKind::Fail,
+                    waits: vec![],
+                },
+                (false, false, false),
+            ),
+            (
+                ItemState::Closed {
+                    outcome: ItemOutcome::Finished,
+                    by: ClosedBy::Owner,
+                },
+                (false, false, false),
+            ),
+            (
+                ItemState::Closed {
+                    outcome: ItemOutcome::Cancelled,
+                    by: ClosedBy::Owner,
+                },
+                (false, false, false),
+            ),
+            (
+                ItemState::Closed {
+                    outcome: ItemOutcome::Failed,
+                    by: ClosedBy::Rule,
+                },
+                (false, false, false),
+            ),
+        ];
+        for (state, (pause, resume, drop)) in cases {
+            assert_eq!(BulkOp::Pause.applies(&state, false), pause, "{state:?}");
+            assert_eq!(BulkOp::Resume.applies(&state, false), resume, "{state:?}");
+            assert_eq!(BulkOp::Drop.applies(&state, false), drop, "{state:?}");
+            assert!(BulkOp::Archive.applies(&state, false));
+            assert!(!BulkOp::Archive.applies(&state, true));
+        }
+    }
 }
 
 /// Routes mounted behind the shared API login and body-limit layers.
@@ -937,6 +1100,7 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         .route("/items/{id}/supplement", post(items::supplement))
         .route("/items/{id}/deliver", post(items::deliver))
         .route("/items/{id}/reassign", post(items::reassign))
+        .route("/items/{id}/handoff", post(items::handoff))
         .route("/items/{id}/deps", post(items::add_dep))
         .route("/items/{id}/deps/{dep}", delete(items::rm_dep))
         .route("/items/{id}/snooze", post(items::snooze))

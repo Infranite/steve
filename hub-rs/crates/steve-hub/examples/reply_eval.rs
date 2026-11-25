@@ -481,11 +481,11 @@ fn baseline(a: &Args) {
     write_jsonl(need(a, "out"), &outs);
 }
 
-/// This crate's system texts and the router's.
+/// This crate's system texts plus historical queue-full phrase for offline eval fixtures.
 fn system_texts() -> Vec<String> {
     steve_channels::deliver::SYSTEM_TEXTS
         .iter()
-        .chain([steve_core::thread::research::QUEUE_FULL].iter())
+        .chain(["前面还有 3 个问题在排队，先等等或停掉当前的"].iter())
         .map(|s| s.to_string())
         .collect()
 }

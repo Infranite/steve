@@ -51,7 +51,6 @@ w4	g0	edge steve-core steve-toolchains	1
 w4	g0	edge steve-core steve-transcript	1
 w4	g0	edge steve-hub steve-core	1
 w4	g0	edge steve-hub steve-transcript	1
-w4	g2	edge steve-hub steve-store-sqlite	1
 w4	g2	edge steve-store steve-i18n	1
 w4	g2	edge steve-store steve-node-api	1
 w4	g2	edge steve-store steve-store-sqlite	1

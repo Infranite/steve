@@ -9,7 +9,8 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
-import { BotAvatar, Chips, Empty, KindTag, Page, Row, Segmented, Status, Tags, ThemeSwitch, Blank, Card, Chevron, EASE, LIFT, Notice, Panel, Pill, Section, Tile } from "@/ui"
+import { Chips, Empty, KindTag, Page, Row, Segmented, Status, Tags, ThemeSwitch, Blank, Card, Chevron, EASE, LIFT, Notice, Panel, Pill, Section, Tile } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { Composer } from "@/composer"
 import { Select } from "@/view-shared"
 import { st, toast, kindTags, isKind } from "@/store"
@@ -263,7 +264,7 @@ export function DesignView() {
 
           <Section label={t("views:design.rows")} note={t("views:design.rowsNote")}>
             <Panel>
-              <Row icon={<BotAvatar k="steve" size={36} />} title={<span className="type-headline">{st.bots.steve?.n ?? "Steve"}</span>} sub={t("views:design.sampleFootnote")} onClick={() => {}}><Chevron /></Row>
+              <Row icon={<ActorAvatar actorId="steve" size={36} />} title={<span className="type-headline">{st.bots.steve?.n ?? "Steve"}</span>} sub={t("views:design.sampleFootnote")} onClick={() => {}}><Chevron /></Row>
               <Row icon={<Tile I={FolderIcon} />} title={t("views:design.rowOpen")} sub={t("views:design.rowOpenSub")}><Select align="end" testId="design-row-select" value={sel} onChange={setSel} options={[{ v: "chat", l: t("views:design.viewList") }, { v: "board", l: t("views:design.viewBoard") }, { v: "graph", l: t("views:design.viewGraph") }]} /></Row>
               <Row icon={<Tile I={BellIcon} />} title={t("views:design.rowSwitch")} sub={t("views:design.rowSwitchSub")}><Switch checked={on} onCheckedChange={setOn} /></Row>
               <Row icon={<Tile I={WorkflowIcon} />} title={t("views:design.rowHarness")}><span className="type-callout text-muted-foreground">Claude Code · <span className="type-code">gpt-6.1-sol</span></span></Row>
@@ -305,7 +306,7 @@ export function DesignView() {
             <Do ok note={t("views:design.doStatus")}><div className="flex flex-col items-center gap-3"><div className="flex gap-4"><Status s="run" className="type-callout" /><Status s="wait" className="type-callout" /><Status s="done" className="type-callout" /></div><div className="flex gap-2"><Status s="wait" pill /><Pill tone="attention">{t("views:design.toneAttention")}</Pill></div></div></Do>
             {/* the counter-examples keep their loud colours on purpose: they show what not to do */}
             <Do ok={false} note={t("views:design.dontStatus")}><div className="flex flex-wrap gap-2">{[[t("views:design.tagRun"), "#0071e3"], [t("views:design.tagWait"), "#ff9500"], [t("views:design.tagDone"), "#28a745"], [t("views:design.tagProp"), "#9a5cff"]].map(([l, c]) => <span key={l} className="rounded-md px-2 py-0.5 type-label text-white" style={{ background: c }}>{l}</span>)}</div></Do>
-            <Do ok note={t("views:design.doAvatar")}><div className="flex gap-2">{Object.keys(st.bots).slice(0, 5).map((k) => <BotAvatar key={k} k={k} size={32} />)}</div></Do>
+            <Do ok note={t("views:design.doAvatar")}><div className="flex gap-2">{Object.keys(st.bots).slice(0, 5).map((k) => <ActorAvatar key={k} actorId={k} size={32} />)}</div></Do>
             <Do ok={false} note={t("views:design.dontAvatar")}><div className="flex gap-2">{["#5b8def", "#e0703a", "#2fa36b", "#9a5cff", "#d6a23a"].map((c, n) => <span key={c} className="flex size-8 items-center justify-center rounded-lg type-callout font-semibold text-white" style={{ background: c }}>{[...t("views:design.botInitials")][n]}</span>)}</div></Do>
             <Do ok note={t("views:design.doButtons")}><div className="flex gap-2"><Button variant="ghost">{t("views:design.noReply")}</Button><Button variant="outline">{t("views:design.moreFormal")}</Button><Button>{t("views:design.send")}</Button></div></Do>
             <Do ok={false} note={t("views:design.dontButtons")}><div className="flex gap-2">{[[t("views:design.noReply"), "#e5352b"], [t("views:design.rewrite"), "#ff9500"], [t("views:design.send"), "#28a745"]].map(([l, c]) => <span key={l} className="rounded-lg px-3 py-1.5 type-callout font-medium text-white" style={{ background: c }}>{l}</span>)}</div></Do>

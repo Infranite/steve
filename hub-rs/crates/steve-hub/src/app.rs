@@ -139,11 +139,10 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
                                 })
                                 || modules
                                     .store
-                                    .thread()
-                                    .run_by_token(token)
+                                    .read(|r| steve_store::thread::active_task_by_token(r, token))
                                     .ok()
                                     .flatten()
-                                    .is_some_and(|r| r.status == "running")
+                                    .is_some()
                         })
                 })
             });

@@ -100,6 +100,7 @@ api GET /kb/changes
 api GET /kb/docs
 api GET /kb/docs/x
 api GET /kb/mems
+api GET /kb/proposals
 api GET /kb/providers
 api GET /kb/search
 api GET /kb/sources
@@ -265,6 +266,7 @@ api POST /kb/changes/x/undo
 api POST /kb/files
 api POST /kb/mems
 api POST /kb/notes
+api POST /kb/proposals/x/resolve
 api POST /kb/sources
 api POST /kb/sources/x/sync
 api POST /mail/accounts/x/sync
@@ -339,7 +341,7 @@ decl feishu_app platform 1ms
 decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
-jobs 39
+jobs 40
 lifecycle ext_ws
 lifecycle ext_ws.bot
 lifecycle feishu_app

@@ -363,9 +363,10 @@ pub struct EffectRow {
     pub result: Value,
     pub item_cycle: Option<i64>,
     pub item_scope: Option<i64>,
+    pub wait: steve_types::WaitContract,
 }
 
-const EFFECT_COLS: [&str; 11] = [
+const EFFECT_COLS: [&str; 15] = [
     "id",
     "workspace_id",
     "decision_id",
@@ -377,9 +378,14 @@ const EFFECT_COLS: [&str; 11] = [
     "result",
     "item_cycle",
     "item_scope",
+    "wait_owner",
+    "wait_started_at",
+    "wait_deadline",
+    "wait_on_timeout",
 ];
 
 fn effect_row(r: &Row<'_>) -> Result<EffectRow> {
+    let wait = crate::wait_repo::decode_contract(r.get(11)?, r.get(12)?, r.get(13)?, r.get(14)?)?;
     Ok(EffectRow {
         id: r.get(0)?,
         workspace_id: r.get(1)?,
@@ -392,6 +398,7 @@ fn effect_row(r: &Row<'_>) -> Result<EffectRow> {
         result: serde_json::from_str(&r.get::<String>(8)?).unwrap_or(Value::Null),
         item_cycle: r.get(9)?,
         item_scope: r.get(10)?,
+        wait,
     })
 }
 
@@ -970,6 +977,15 @@ pub fn insert_effect(c: &mut W<'_>, ws: &str, decision: &str, kind: &str, now: i
         )),
         None => None,
     };
+    let wait = crate::wait_repo::contract_for(
+        c,
+        ws,
+        steve_types::WaitKind::ExternalEffect,
+        steve_types::WaitOwner::system("github"),
+        now,
+        steve_types::WaitTimeoutAction::EscalateToOwner,
+    )?;
+    let wait_owner = wait.owner.to_code();
     c.exec(
         Query::insert()
             .into_table("gh_effects")
@@ -984,6 +1000,10 @@ pub fn insert_effect(c: &mut W<'_>, ws: &str, decision: &str, kind: &str, now: i
                 "updated",
                 "item_cycle",
                 "item_scope",
+                "wait_owner",
+                "wait_started_at",
+                "wait_deadline",
+                "wait_on_timeout",
             ])
             .values_panic([
                 Expr::val(crate::uid("ghe")),
@@ -996,6 +1016,10 @@ pub fn insert_effect(c: &mut W<'_>, ws: &str, decision: &str, kind: &str, now: i
                 Expr::val(now),
                 Expr::val(scope.map(|(cycle, _)| cycle)),
                 Expr::val(scope.map(|(_, scope)| scope)),
+                Expr::val(wait_owner),
+                Expr::val(wait.started_at.0),
+                Expr::val(wait.deadline.0),
+                Expr::val(wait.on_timeout.as_str()),
             ])
             .on_conflict(OnConflict::columns(["decision_id"]).do_nothing().to_owned()),
     )?;

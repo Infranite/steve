@@ -1,7 +1,8 @@
-//! Subjects: what Steve knows about one person, project, bot or item, and where it learned it.
-//! A subject is an `about` object of a memory or document; a project also gathers what came from its
-//! items (their records, and the memories their deliveries left). `GET /kb/subjects` lists them,
-//! `GET /kb/subjects/{type}/{id}` gives one subject's memories, documents and recent uses.
+//! Subjects: what Steve knows about one person, organization, project or bot, and where it learned
+//! it. A subject is an `about` object of a memory or document; a project also gathers memories its
+//! items left and pending `AGENTS.md` proposals. `GET /kb/subjects` lists them with their category
+//! (`person` | `org` | `project` | `bot` | `other`), and `GET /kb/subjects/{type}/{id}` gives one
+//! subject's memories, documents, project proposals and recent uses.
 
 use std::collections::HashMap;
 
@@ -12,12 +13,12 @@ use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
 use steve_store::base::mems::{Mem, MemFilter};
 use steve_store::base::{ObjRef, Viewer};
-use steve_store::knowledge::{Documents, Memories};
+use steve_store::knowledge::{DocFilter, DocRow, Documents, Memories, ProjectProposals, SourceRow};
 use steve_store::{ItemEvidence, Read, References, StoreError};
 
+use crate::proposals::proposal_out;
 use crate::provenance::{self, add_used, use_counts};
 use crate::service::{doc_brief, mem_json_for, prepare};
-use steve_store::knowledge::{DocFilter, DocRow, SourceRow};
 
 /// How many recent uses a subject shows.
 const USES_SHOWN: usize = 12;
@@ -52,6 +53,28 @@ pub fn subject_href(r: &ObjRef) -> String {
         "persona" => format!("#/channels/personas/{}", r.id),
         "me" => "#/contacts/me".into(),
         _ => String::new(),
+    }
+}
+
+/// Classifies a subject into the knowledge page sections: `person`, `org`, `project`, `bot`, `other`.
+fn subject_category(
+    c: &mut impl Read,
+    ws: &str,
+    r: &ObjRef,
+) -> Result<(&'static str, Option<String>), StoreError> {
+    match r.kind.as_str() {
+        "project" => Ok(("project", None)),
+        "party" => {
+            let pk = References(c).party_kind(ws, &r.id)?;
+            let cat = match pk.as_deref() {
+                Some("org" | "team") => "org",
+                _ => "person",
+            };
+            Ok((cat, pk))
+        }
+        "me" => Ok(("person", Some("contact".into()))),
+        "bot" => Ok(("bot", None)),
+        _ => Ok(("other", None)),
     }
 }
 
@@ -112,23 +135,9 @@ fn mem_subjects(m: &Mem, s: &Seen) -> Vec<ObjRef> {
     out
 }
 
-/// The subjects a document is about: its `about` rows, and for an item's record the item's project.
-fn doc_subjects(
-    c: &mut impl Read,
-    d: &DocRow,
-    src: &SourceRow,
-    s: &Seen,
-) -> Result<Vec<ObjRef>, StoreError> {
-    let mut out = Documents(c).doc_about(&d.id)?;
-    if src.kind == "items"
-        && let Some(p) = s.project_of.get(&d.r#ref)
-    {
-        let r = ObjRef::new("project", p);
-        if !out.contains(&r) {
-            out.push(r);
-        }
-    }
-    Ok(out)
+/// The subjects a document is about: its `about` rows.
+fn doc_subjects(c: &mut impl Read, d: &DocRow) -> Result<Vec<ObjRef>, StoreError> {
+    Documents(c).doc_about(&d.id)
 }
 
 #[derive(Default)]
@@ -136,14 +145,16 @@ struct Tally {
     mems: i64,
     candidates: i64,
     docs: i64,
+    proposals: i64,
     last: i64,
 }
 
-/// `GET /kb/subjects`: `[{type, id, name, href, mems, candidates, docs, last}]`, most known first.
+/// `GET /kb/subjects`: `[{type, id, name, category, party_kind, href, mems, candidates, docs,
+/// proposals, last}]`, most known first.
 pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
-    Ok(crate::read_api(&m.store, |c| {
+    crate::read_api(&m.store, |c| {
         let s = seen(c, &viewer)?;
         let mut order: Vec<ObjRef> = Vec::new();
         let mut tally: HashMap<ObjRef, Tally> = HashMap::new();
@@ -163,8 +174,8 @@ pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
                 });
             }
         }
-        for (d, src) in &s.docs {
-            for r in doc_subjects(c, d, src, &s)? {
+        for (d, _) in &s.docs {
+            for r in doc_subjects(c, d)? {
                 let at = d.updated;
                 bump(r, &|t| {
                     t.docs += 1;
@@ -172,26 +183,46 @@ pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
                 });
             }
         }
+        for p in ProjectProposals(c).list(&viewer.ws, None, Some("pending"))? {
+            let at = p.updated;
+            bump(ObjRef::new("project", &p.project_id), &|t| {
+                t.proposals += 1;
+                t.last = t.last.max(at);
+            });
+        }
         let mut out = Vec::new();
         for r in order {
             let t = &tally[&r];
+            let (category, party_kind) = subject_category(c, &viewer.ws, &r)?;
             out.push(json!({
-                "type": r.kind, "id": r.id, "name": References(c).in_workspace(&viewer, &r)?.unwrap_or_default(),
-                "href": subject_href(&r), "mems": t.mems, "candidates": t.candidates, "docs": t.docs, "last": t.last,
+                "type": r.kind,
+                "id": r.id,
+                "name": References(c).in_workspace(&viewer, &r)?.unwrap_or_default(),
+                "category": category,
+                "party_kind": party_kind,
+                "href": subject_href(&r),
+                "mems": t.mems,
+                "candidates": t.candidates,
+                "docs": t.docs,
+                "proposals": t.proposals,
+                "last": t.last,
             }));
         }
         out.sort_by(|a, b| {
-            let n = |v: &Value| v["mems"].as_i64().unwrap_or(0) + v["docs"].as_i64().unwrap_or(0);
+            let n = |v: &Value| {
+                v["mems"].as_i64().unwrap_or(0)
+                    + v["docs"].as_i64().unwrap_or(0)
+                    + v["proposals"].as_i64().unwrap_or(0)
+            };
             n(b).cmp(&n(a))
                 .then_with(|| b["last"].as_i64().cmp(&a["last"].as_i64()))
         });
         Ok(Value::Array(out))
-    })?)
+    })
 }
 
-/// `GET /kb/subjects/{type}/{id}`: `{type, id, name, href, mems: [Mem…], docs: [DocBrief…],
-/// uses: […]}` — its memories (each with where it came from and how often it was used), the
-/// documents about it, and where any of them was used lately.
+/// `GET /kb/subjects/{type}/{id}`: `{type, id, name, category, party_kind, href, mems: [Mem…],
+/// docs: [DocBrief…], proposals: [ProposalOut…], uses: […]}`.
 pub fn one(m: &Modules, who: &Caller, r: &ObjRef) -> ApiResult<Value> {
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
@@ -200,6 +231,7 @@ pub fn one(m: &Modules, who: &Caller, r: &ObjRef) -> ApiResult<Value> {
         if name.is_none() && r.kind != "me" {
             return Err(ApiError::not_found("对象"));
         }
+        let (category, party_kind) = subject_category(c, &viewer.ws, r)?;
         let s = seen(c, &viewer)?;
         let mem_uses = use_counts(c, &who.ws, "mem")?;
         let doc_uses = use_counts(c, &who.ws, "chunk")?;
@@ -213,17 +245,34 @@ pub fn one(m: &Modules, who: &Caller, r: &ObjRef) -> ApiResult<Value> {
         }
         let mut docs_out = Vec::new();
         for (d, src) in &s.docs {
-            if doc_subjects(c, d, src, &s)?.contains(r) {
+            if doc_subjects(c, d)?.contains(r) {
                 let mut v = doc_brief(d, src);
                 add_used(&mut v, &doc_uses);
                 objs.push(("chunk".to_string(), d.id.clone()));
                 docs_out.push(v);
             }
         }
+        let proposals_out = if r.kind == "project" {
+            ProjectProposals(c)
+                .list(&viewer.ws, Some(&r.id), None)?
+                .iter()
+                .map(|p| proposal_out(c, p))
+                .collect::<ApiResult<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         let uses = provenance::recent_uses(c, &who.ws, &objs, USES_SHOWN)?;
         Ok(json!({
-            "type": r.kind, "id": r.id, "name": name.unwrap_or_default(), "href": subject_href(r),
-            "mems": mems_out, "docs": docs_out, "uses": uses,
+            "type": r.kind,
+            "id": r.id,
+            "name": name.unwrap_or_default(),
+            "category": category,
+            "party_kind": party_kind,
+            "href": subject_href(r),
+            "mems": mems_out,
+            "docs": docs_out,
+            "proposals": proposals_out,
+            "uses": uses,
         }))
     })
 }

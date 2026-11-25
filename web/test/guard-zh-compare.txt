@@ -15,12 +15,6 @@ src/composer.tsx	"汇报"	4
 src/decision-notes.ts	"/^(回答|返工|批准|拒绝)：/"	1
 src/decision-notes.ts	"批准"	1
 src/device-model.ts	"暂停接活"	1
-src/knowledge/index.tsx	"待确认"	1
-src/knowledge/index.tsx	"搜索"	2
-src/knowledge/index.tsx	"来源"	1
-src/knowledge/index.tsx	"知识条目"	2
-src/knowledge/index.tsx	"笔记与文档"	1
-src/knowledge/index.tsx	"长期记忆"	2
 src/knowledge/steward.tsx	"每周日 03:00"	3
 src/knowledge/steward.tsx	"每天 03:00"	3
 src/knowledge/steward.tsx	"每月 1 日 03:00"	3
@@ -49,9 +43,7 @@ src/store.ts	"不"	1
 src/store.ts	"主题"	1
 src/store.ts	"交付"	3
 src/store.ts	"你"	1
-src/store.ts	"删除"	1
 src/store.ts	"客户"	1
-src/store.ts	"导出"	2
 src/store.ts	"开始会话"	1
 src/store.ts	"类型"	1
 src/store.ts	"项目"	1

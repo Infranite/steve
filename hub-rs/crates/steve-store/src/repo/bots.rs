@@ -7,7 +7,9 @@ use serde_json::{Map, Value, json};
 
 use super::{Sets, all, exists, one, revision, to_json};
 use crate::types::double;
-use crate::{Avatar, Bot, BotWorkspace, Memory, Result, Store, StoreError, now, uid};
+use crate::{
+    Avatar, Bot, BotWorkspace, ExecutionSurface, Memory, Result, Store, StoreError, now, uid,
+};
 
 impl Store {
     pub fn bots(&self) -> Bots<'_> {
@@ -36,6 +38,7 @@ pub struct NewBot {
     pub perm_mode: Option<String>,
     pub avatar: Option<Avatar>,
     pub default_project: Option<String>,
+    pub fallback_surfaces: Option<Vec<ExecutionSurface>>,
 }
 
 /// The patchable bot fields, in the order repo.ts lists them (this is also the key order of the revision).
@@ -93,6 +96,8 @@ pub struct BotPatch {
     pub device: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_surfaces: Option<Vec<ExecutionSurface>>,
 }
 
 pub struct Bots<'a>(&'a Store);
@@ -116,6 +121,15 @@ impl Bots<'_> {
     /// A non-deleted bot.
     pub fn get(&self, id: &str) -> Result<Option<Bot>> {
         self.0.read_conn(|c| one(c, BOT, [id], Bot::from_row))
+    }
+
+    /// The stored `owner` column for `id`, including soft-deleted bots (`None` if no row exists).
+    pub fn owner(&self, id: &str) -> Result<Option<Option<String>>> {
+        self.0.read_conn(|c| {
+            one(c, "SELECT owner FROM bots WHERE id = ?", [id], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+        })
     }
 
     /// The main bot (Steve).
@@ -154,6 +168,27 @@ impl Bots<'_> {
                 [id, ws],
             )
         })
+    }
+
+    /// Ordered fallback execution surfaces configured for Bot `id`.
+    pub fn fallback_surfaces(&self, id: &str) -> Result<Vec<ExecutionSurface>> {
+        self.0.read_conn(|c| fallback_surfaces_on(c, id))
+    }
+
+    /// Ordered execution-surface candidates for `bot`: primary surface first, followed by
+    /// configured fallbacks without duplicates.
+    pub fn execution_surfaces(&self, bot: &Bot) -> Result<Vec<ExecutionSurface>> {
+        let mut out = vec![ExecutionSurface {
+            harness: bot.harness.clone(),
+            model: bot.model.clone(),
+            reasoning_effort: bot.reasoning_effort.clone(),
+        }];
+        for surface in self.fallback_surfaces(&bot.id)? {
+            if !surface.harness.trim().is_empty() && !out.contains(&surface) {
+                out.push(surface);
+            }
+        }
+        Ok(out)
     }
 
     /// Makes the bot a member of exactly `wss` (existing duties are kept).
@@ -198,11 +233,17 @@ impl Bots<'_> {
         self.0.write_conn(|w| seed(w.c, id, main, b, ws))
     }
 
-    /// A new (non-main) bot in `ws`; audited as `bot.create`.
+    /// A new (non-main) bot in `ws`; owned by `author` and audited as `bot.create`.
     pub fn create(&self, ws: &str, b: &NewBot, author: &str) -> Result<Option<Bot>> {
         self.0.write_conn(|w| {
             let id = uid("bot");
             seed(w.c, &id, false, b, ws)?;
+            if !author.is_empty() {
+                w.c.run(
+                    "UPDATE bots SET owner = ? WHERE id = ? AND main = 0",
+                    params![author, id],
+                )?;
+            }
             w.c.run(
                 "INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)",
                 params![ws, now(), author, "bot.create", id, json!({"name": b.name}).to_string()],
@@ -244,6 +285,14 @@ impl Bots<'_> {
                 .null("prompt", p.prompt.clone())
                 .null("device", p.device.clone())
                 .val("enabled", p.enabled);
+            let cur_fallbacks = if p.fallback_surfaces.is_some() {
+                Some(fallback_surfaces_on(w.c, id)?)
+            } else {
+                None
+            };
+            if let Some(fallbacks) = &p.fallback_surfaces {
+                write_fallback_surfaces(w.c, id, fallbacks)?;
+            }
             if !s.is_empty() {
                 w.c.run(
                     &format!(
@@ -252,12 +301,20 @@ impl Bots<'_> {
                     ),
                     rusqlite::params_from_iter(s.params([now().into(), id.to_string().into()])),
                 )?;
+            } else if p.fallback_surfaces.is_some() {
+                w.c.run(
+                    "UPDATE bots SET revision = revision + 1, updated = ? WHERE id = ?",
+                    params![now(), id],
+                )?;
             }
             let after = match serde_json::to_value(p)? {
                 Value::Object(m) => m,
                 _ => Map::new(),
             };
-            let cur_json = serde_json::to_value(&cur)?;
+            let mut cur_json = serde_json::to_value(&cur)?;
+            if let (Some(prev_fs), Value::Object(obj)) = (cur_fallbacks, &mut cur_json) {
+                obj.insert("fallback_surfaces".into(), serde_json::to_value(prev_fs)?);
+            }
             let before: Map<String, Value> = after
                 .keys()
                 .map(|k| (k.clone(), cur_json.get(k).cloned().unwrap_or(Value::Null)))
@@ -323,31 +380,74 @@ impl Bots<'_> {
     }
 }
 
+fn fallback_surfaces_on(c: &rusqlite::Connection, id: &str) -> Result<Vec<ExecutionSurface>> {
+    all(
+        c,
+        "SELECT harness, model, reasoning_effort FROM bot_fallback_surfaces WHERE bot_id = ? ORDER BY ordinal ASC",
+        [id],
+        |r| {
+            Ok(ExecutionSurface {
+                harness: r.get(0)?,
+                model: r.get(1)?,
+                reasoning_effort: r.get(2)?,
+            })
+        },
+    )
+}
+
+fn write_fallback_surfaces(
+    c: &rusqlite::Connection,
+    id: &str,
+    surfaces: &[ExecutionSurface],
+) -> Result<()> {
+    c.run("DELETE FROM bot_fallback_surfaces WHERE bot_id = ?", [id])?;
+    for (ordinal, surface) in surfaces.iter().enumerate() {
+        c.run(
+            "INSERT INTO bot_fallback_surfaces (bot_id, ordinal, harness, model, reasoning_effort) VALUES (?, ?, ?, ?, ?)",
+            params![
+                id,
+                ordinal as i64,
+                surface.harness,
+                surface.model,
+                surface.reasoning_effort,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) -> Result<()> {
     let avatar = to_json(b.avatar.as_ref().unwrap_or(&Avatar::default()))?;
-    c.prepare_cached(
-        "INSERT INTO bots (id, workspace_id, name, role, main, harness, model, reasoning_effort, rules, persona, proactive, accept_mode, perm_mode, avatar, default_project, specialties, enabled, revision, updated)
+    let inserted = c
+        .prepare_cached(
+            "INSERT INTO bots (id, workspace_id, name, role, main, harness, model, reasoning_effort, rules, persona, proactive, accept_mode, perm_mode, avatar, default_project, specialties, enabled, revision, updated)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?) ON CONFLICT(id) DO NOTHING",
-    )?
-    .execute(params![
-        id,
-        ws,
-        b.name,
-        b.role.as_deref().unwrap_or(""),
-        main as i64,
-        b.harness,
-        b.model,
-        b.reasoning_effort,
-        b.rules.as_deref().unwrap_or(""),
-        b.persona.as_deref().unwrap_or(""),
-        b.proactive.unwrap_or(1),
-        b.accept_mode.as_deref().unwrap_or("inherit"),
-        b.perm_mode.as_deref().unwrap_or("ask"),
-        avatar,
-        b.default_project,
-        to_json(&b.specialties.as_deref().unwrap_or_default())?,
-        now(),
-    ])?;
+        )?
+        .execute(params![
+            id,
+            ws,
+            b.name,
+            b.role.as_deref().unwrap_or(""),
+            main as i64,
+            b.harness,
+            b.model,
+            b.reasoning_effort,
+            b.rules.as_deref().unwrap_or(""),
+            b.persona.as_deref().unwrap_or(""),
+            b.proactive.unwrap_or(1),
+            b.accept_mode.as_deref().unwrap_or("inherit"),
+            b.perm_mode.as_deref().unwrap_or("ask"),
+            avatar,
+            b.default_project,
+            to_json(&b.specialties.as_deref().unwrap_or_default())?,
+            now(),
+        ])?;
+    if inserted > 0
+        && let Some(fallbacks) = b.fallback_surfaces.as_deref()
+        && !fallbacks.is_empty()
+    {
+        write_fallback_surfaces(c, id, fallbacks)?;
+    }
     c.run(
         "INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, ?)",
         params![id, ws, now()],
@@ -474,6 +574,17 @@ impl Memories<'_> {
     pub fn remove_of_bot(&self, bot: &str) -> Result<()> {
         self.0.write_conn(|w| {
             w.c.run("DELETE FROM bot_memories WHERE bot_id = ?", [bot])?;
+            Ok(())
+        })
+    }
+
+    /// Memories of one bot scoped strictly to `ws` (workspace removal or scoped global delete).
+    pub fn remove_of_bot_in_workspace(&self, bot: &str, ws: &str) -> Result<()> {
+        self.0.write_conn(|w| {
+            w.c.run(
+                "DELETE FROM bot_memories WHERE bot_id = ? AND workspace_id = ?",
+                params![bot, ws],
+            )?;
             Ok(())
         })
     }

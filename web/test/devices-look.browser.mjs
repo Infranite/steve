@@ -16,7 +16,7 @@ import assert from "node:assert/strict"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
-const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
+const browser = await chromium.launch({ headless: true, args: ["--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"], ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5198"
 const SHOTS = process.env.STEVE_TEST_SHOTS, BASELINE = process.env.STEVE_TEST_BASELINE, ONLY = process.env.STEVE_TEST_ONLY
 const TOLERANCE = Number(process.env.STEVE_TEST_SHOT_TOLERANCE ?? 0)
@@ -56,20 +56,24 @@ const metadata = { contract: 1, capabilities: { shared_metadata: 1, addresses: 1
   addresses: [{ url: "https://hub.example.net", page: "https://hub.example.net", kind: "public" }, { url: "http://192.168.1.10:8080", page: "http://192.168.1.10:8080", kind: "lan" }] }
 
 /** the screens: a name, a set of Nodes, where to go, what shows it is drawn, what to do before the picture (`then`)
- *  and what it must show (`check`) */
+ *  and what it must show (`check`). Read-only screens of the same scene are grouped so one loaded page can walk their
+ *  routes without reloading the Vite module graph every time; any screen with `then` leaves a fresh page for the next. */
 const screens = [
   { name: "overview", scene: "normal", hash: "#/devices", ready: '[data-map-card="hub"]' },
-  { name: "overview-10-nodes", scene: "many", hash: "#/devices", ready: '[data-map-node="r9"]' },
-  { name: "overview-empty", scene: "empty", hash: "#/devices", ready: '[data-map-card="add"]' },
+  { name: "nodes-list", scene: "normal", hash: "#/devices/nodes", ready: '[data-node-row="n-imac"]' },
+  { name: "node-local", scene: "normal", hash: "#/devices/nodes/local", ready: "[data-node-figures]" },
+  { name: "node-remote-mbp", scene: "normal", hash: "#/devices/nodes/n-mbp", ready: '[data-node-panel="overview"]' },
+  { name: "node-local-work", scene: "normal", hash: "#/devices/nodes/local/work", ready: "[data-node-trends]" },
+  { name: "node-remote-mbp-version", scene: "normal", hash: "#/devices/nodes/n-mbp/version", ready: '[data-node-upgrade="current"]' },
+  { name: "node-outdated", scene: "normal", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="outdated"]' },
+  { name: "node-offline", scene: "normal", hash: "#/devices/nodes/n-imac", ready: "[data-node-offline]" },
+  { name: "clients", scene: "normal", hash: "#/devices/clients", ready: '[data-client="c4"]' },
+  /* hub reads /api/hub-metadata which updates the shared Hub display name in useHubs(); run it after the other
+   * DevicesPage tabs and right before node-limit-tip (which is a NodePage and closes the page after its `then`). */
   { name: "hub", scene: "normal", hash: "#/devices/hub", ready: "[data-hub-edit]:not([disabled])", check: async (page) => {
     /* the Hub's own addresses, each with its kind, not only the one this client uses */
     assert.deepEqual(await page.locator("[data-hub-addresses]").evaluateAll((xs) => xs.map((x) => x.dataset.hubAddresses)), ["public", "lan"])
   } },
-  { name: "nodes-list", scene: "normal", hash: "#/devices/nodes", ready: '[data-node-row="n-imac"]' },
-  { name: "node-local", scene: "normal", hash: "#/devices/nodes/local", ready: "[data-node-figures]" },
-  { name: "node-local-work", scene: "normal", hash: "#/devices/nodes/local/work", ready: "[data-node-trends]" },
-  { name: "node-remote-mbp", scene: "normal", hash: "#/devices/nodes/n-mbp", ready: '[data-node-panel="overview"]' },
-  { name: "node-remote-mbp-version", scene: "normal", hash: "#/devices/nodes/n-mbp/version", ready: '[data-node-upgrade="current"]' },
   { name: "node-limit-tip", scene: "normal", hash: "#/devices/nodes/n-mbp/work", ready: "[data-limit-how]", then: async (page) => {
     /* what changing the limit does opens on a tap (390 px is a touch screen here) or a click, not only on hover or focus */
     const how = page.locator("[data-limit-how]")
@@ -79,36 +83,50 @@ const screens = [
     assert.match(await page.locator("[data-limit-semantics]").innerText(), /无需重启[\s\S]*不打断/)
     assert.equal(await page.locator("[data-limit-how]").getAttribute("aria-expanded"), "true")
   } },
-  { name: "node-outdated", scene: "normal", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="outdated"]' },
-  { name: "node-offline", scene: "normal", hash: "#/devices/nodes/n-imac", ready: "[data-node-offline]" },
-  { name: "node-upgrading", scene: "upgrading", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="running"]' },
-  { name: "node-upgrade-failed", scene: "failed", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="failed"]' },
-  { name: "clients", scene: "normal", hash: "#/devices/clients", ready: '[data-client="c4"]' },
   { name: "clients-revoke", scene: "normal", hash: "#/devices/clients", ready: '[data-client="c4"]', then: async (page) => { await page.locator('[data-client="c3"] [data-revoke-client]').click(); await page.locator("[data-revoke-dialog]").waitFor() } },
   { name: "pairing", scene: "normal", hash: "#/devices", ready: '[data-map-card="hub"]', then: async (page) => {
     await page.locator("[data-add-device-open]").click(); await page.locator("[data-add-kind=node]").click(); await page.locator(".ui-stpc__btn-primary").click()
     await page.locator('[data-add-via="direct"]').waitFor(); await page.locator(".ui-stpc__btn-primary").click(); await page.locator("[data-pair-code]").getByText("stv1-fixture-code").waitFor()
   } },
+  { name: "pairing-client", scene: "normal", hash: "#/devices", ready: '[data-map-card="hub"]', then: async (page) => {
+    await page.locator("[data-add-device-open]").click(); await page.locator("[data-add-kind=client]").click(); await page.locator(".ui-stpc__btn-primary").click()
+    await page.locator('[data-add-device][data-add-step="scan"] svg').first().waitFor()
+  } },
+  { name: "overview-10-nodes", scene: "many", hash: "#/devices", ready: '[data-map-node="r9"]' },
+  { name: "overview-empty", scene: "empty", hash: "#/devices", ready: '[data-map-card="add"]' },
+  { name: "node-upgrading", scene: "upgrading", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="running"]' },
+  { name: "node-upgrade-failed", scene: "failed", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="failed"]' },
   { name: "pairing-connect", scene: "pairing", hash: "#/devices", ready: '[data-attention-confirm="n-new"]', then: async (page) => {
     await page.locator('[data-attention-confirm="n-new"]').click(); await page.locator('[data-add-confirm="n-new"]').waitFor()
     await page.locator('[data-fp-group="0"] input').evaluate((el) => { const dt = new DataTransfer(); dt.setData("text", "9e3f 5a07 c21b 84d6"); el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true })) })
     await page.locator('[data-fp-group="3"][data-fp-state="match"]').waitFor()
   } },
-  { name: "pairing-client", scene: "normal", hash: "#/devices", ready: '[data-map-card="hub"]', then: async (page) => {
-    await page.locator("[data-add-device-open]").click(); await page.locator("[data-add-kind=client]").click(); await page.locator(".ui-stpc__btn-primary").click()
-    await page.locator('[data-add-device][data-add-step="scan"] svg').first().waitFor()
-  } },
 ].filter((s) => !ONLY || s.name.includes(ONLY))
 
 const json = (route, body, code = 200) => route.fulfill({ status: code, contentType: "application/json", body: JSON.stringify(body) })
-/** the owner's Hub for one screen: what it answers, and every path it was asked that it does not know */
-async function hub(page, scene, unknown) {
+/** the owner's Hub for one scene: what it answers, every path it was asked that it does not know, and in-flight API count */
+async function hub(page, scene, state) {
   const nodes = scenes[scene]()
-  await page.route("**/*", async (route) => {
+  const isApi = (u) => u.origin === base && (u.pathname.startsWith("/api/") || u.pathname.startsWith("/auth/"))
+  const trackDone = (req) => {
+    const u = new URL(req.url())
+    if (isApi(u)) state.inFlight = Math.max(0, state.inFlight - 1)
+  }
+  page.on("request", (request) => {
+    const url = new URL(request.url())
+    if (url.origin !== base) state.unknown.add(request.method() + " " + request.url())
+    else if (isApi(url)) { state.inFlight++; state.seq++ }
+  })
+  page.on("requestfinished", trackDone)
+  page.on("requestfailed", trackDone)
+  await page.route(`${base}/auth/**`, async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === "/auth/hello") return json(route, { name: "steve", api: 2, version: HUB })
+    state.unknown.add(route.request().method() + " " + url.pathname)
+    return json(route, { error: "fixture" }, 404)
+  })
+  await page.route(`${base}/api/**`, async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, get = request.method() === "GET"
-    if (url.origin !== base) return route.abort("blockedbyclient")
-    if (path === "/auth/hello") return json(route, { name: "steve", api: 2, version: HUB })
-    if (!path.startsWith("/api/")) return route.continue()
     if (path === "/api/nodes") return json(route, { nodes })
     if (path === "/api/node-harnesses") return json(route, { nodes: {} })
     if (path.startsWith("/api/node-harness-updates/")) return json(route, { report: { node: path.split("/")[3], checking: false, harnesses: [] }, runs: {}, at: NOW, error: null })
@@ -124,13 +142,28 @@ async function hub(page, scene, unknown) {
     if (path.startsWith("/api/access/pairings/")) return json(route, { id: "cp1", status: "pending", expires: NOW + 10 * MIN, client: null })
     if (path === "/api/hub-metadata") return json(route, metadata)
     if (path === "/api/devices") return json(route, { devices: [{ id: "hub", name: "Studio Mac", roles: ["Hub"], node_id: "local", os: "macOS 26.1", version: HUB, status: "正常", max_sessions: 32, seen: NOW, created: 0 }], runtimes })
+    if (path === "/api/runtimes") return json(route, runtimes)
+    if (path.startsWith("/api/stewards/")) return json(route, {}, 404)
     /* the owner chip asks for the people module, which this Hub (like any without it) does not have */
     if (path === "/api/me/contact") return json(route, {}, 404)
     /* the page header's account button asks who is signed in */
     if (path === "/api/me") return json(route, { user: { id: "u1", name: "Owner", email: null, role: "owner" }, version: HUB, web_version: HUB })
-    unknown.add(request.method() + " " + path)
+    state.unknown.add(request.method() + " " + path)
     return json(route, { error: "fixture" }, 404)
   })
+}
+
+/** waits until all mocked API fetches triggered by this route have settled, fonts are ready, finite animations finished,
+ *  and two paint frames passed with no new API fetches (so ResizeObserver SVG edges commit on final card boxes). */
+async function waitSettled(page, state) {
+  await page.evaluate(() => document.fonts.ready)
+  for (let pass = 0; pass < 8; pass++) {
+    const seqBefore = state.seq
+    while (state.inFlight > 0) await new Promise((r) => setTimeout(r, 5))
+    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))))
+    if (state.inFlight === 0 && state.seq === seqBefore) break
+  }
 }
 
 /** what a drawn screen must hold: nothing past the window or cut at the side of the page's scroller, no scroller that
@@ -185,27 +218,34 @@ try {
     const ctx = await browser.newContext({ locale: "zh-CN", timezoneId: "UTC", colorScheme: theme, reducedMotion: "reduce", viewport: { width, height }, deviceScaleFactor: 1, hasTouch: width < 600 })
     await ctx.clock.setFixedTime(NOW)
     await ctx.addInitScript(() => { localStorage.setItem("steve-lang", "zh-CN"); localStorage.setItem("steve-onboarded", "1") })
+    let page = null, pageScene = null, state = null
     for (const s of screens) {
-      const tag = `${s.name}-${width}-${theme}`, page = await ctx.newPage(), errors = [], unknown = new Set()
-      page.on("pageerror", (e) => errors.push(e.message))
-      await hub(page, s.scene, unknown)
-      await page.goto(base + "/test/fixtures/devices.html" + s.hash)
-      try { await page.locator(s.ready).first().waitFor({ timeout: 15_000 }) } catch (e) { if (SHOTS) await page.screenshot({ path: `${SHOTS}/${tag}.failed.png`, fullPage: true }); throw new Error(`${tag}: ${s.ready} never showed; unanswered: ${[...unknown].join(", ") || "none"}; errors: ${errors.join("; ") || "none"}`) }
+      const tag = `${s.name}-${width}-${theme}`
+      if (!page || pageScene !== s.scene) {
+        if (page) await page.close()
+        page = await ctx.newPage()
+        pageScene = s.scene
+        state = { errors: [], unknown: new Set(), inFlight: 0, seq: 0 }
+        page.on("pageerror", (e) => state.errors.push(e.message))
+        await hub(page, s.scene, state)
+        await page.goto(base + "/test/fixtures/devices.html" + s.hash)
+      } else {
+        state.errors.length = 0
+        state.unknown.clear()
+        await page.evaluate((h) => { if (location.hash !== h) location.hash = h }, s.hash)
+      }
+      try { await page.locator(s.ready).first().waitFor({ timeout: 15_000 }) } catch (e) { if (SHOTS) await page.screenshot({ path: `${SHOTS}/${tag}.failed.png`, fullPage: true }); throw new Error(`${tag}: ${s.ready} never showed; unanswered: ${[...state.unknown].join(", ") || "none"}; errors: ${state.errors.join("; ") || "none"}`) }
       if (s.then) await s.then(page)
       if (s.check) await s.check(page)
-      /* drawn and still: fonts in, finite animations over, the map's edges laid out on the cards' final boxes */
-      await page.evaluate(() => document.fonts.ready)
-      await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getTiming().iterations === Infinity))
-      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))))
-      await page.waitForTimeout(150)
+      await waitSettled(page, state)
       const seen = await inspect(page)
       if (seen.page > 0) problems.push(`${tag}: the page is ${seen.page} px wider than the window`)
       if (seen.cut.length) problems.push(`${tag}: cut off at the window's edge: ${seen.cut.slice(0, 4).join("; ")}${seen.cut.length > 4 ? ` and ${seen.cut.length - 4} more` : ""}`)
       if (seen.wide.length) problems.push(`${tag}: scrolls sideways: ${seen.wide.slice(0, 4).join("; ")}`)
       if (seen.keys.length) problems.push(`${tag}: text keys shown instead of words: ${seen.keys.join(", ")}`)
       if (seen.dark !== (theme === "dark")) problems.push(`${tag}: the ${theme} theme is not on`)
-      if (errors.length) problems.push(`${tag}: page errors: ${errors.join("; ")}`)
-      if (unknown.size) problems.push(`${tag}: asked the Hub for what this fixture does not answer: ${[...unknown].join(", ")}`)
+      if (state.errors.length) problems.push(`${tag}: page errors: ${state.errors.join("; ")}`)
+      if (state.unknown.size) problems.push(`${tag}: asked the Hub for what this fixture does not answer: ${[...state.unknown].join(", ")}`)
       if (SHOTS) {
         const file = `${SHOTS}/${tag}.png`
         /* a page is drawn whole; a dialog's screen as the window shows it */
@@ -223,8 +263,10 @@ try {
         }
       }
       drawn++
-      await page.close()
+      /* interactive screens leave a dialog, sheet or popover open; start the next screen on a clean page */
+      if (s.then) { await page.close(); page = null; pageScene = null; state = null }
     }
+    if (page) await page.close()
     await ctx.close()
   }
   assert.deepEqual(problems, [], "every devices screen drawn whole at 1440 and 390 px in both themes")

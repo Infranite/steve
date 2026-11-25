@@ -7,12 +7,16 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
 use steve_node_api::{
     Action, CallId, Digest, EventBody, Measurement, Money, NetworkScope, Part, PlanEntry, Role,
-    Severity, Tokens, ToolCategory, ToolOrigin, ToolPhase, ToolView, UsageReport, UsageScope,
+    Severity, SubtaskView, Tokens, ToolCategory, ToolOrigin, ToolPhase, ToolView, UsageReport,
+    UsageScope,
 };
+
+use crate::adapter::{AdapterContext, AdapterOutcome, HarnessAdapter, SubtaskState};
 
 /// Text kept of a tool's output or input preview (characters).
 pub const TEXT_MAX: usize = 4000;
@@ -110,6 +114,12 @@ pub struct Normalizer {
     prefix: String,
     /// The harness process generation: a restarted adapter counts its cost from zero again.
     meter: steve_node_api::Epoch,
+    /// Per-harness runtime adapter responsible for harness-specific normalization & subtask state.
+    adapter: Arc<dyn HarnessAdapter>,
+    /// The root ACP session id once opened, used to distinguish child subagent session updates.
+    root_session_id: Option<String>,
+    /// Tracked subagents, background tasks, and per-tool monotonic timing.
+    subtasks: SubtaskState,
     messages: u64,
     open: Option<Open>,
     tools: HashMap<String, ToolFact>,
@@ -131,6 +141,9 @@ impl Normalizer {
             root: root.into(),
             prefix: prefix.to_string(),
             meter,
+            adapter: crate::adapter::for_harness("generic"),
+            root_session_id: None,
+            subtasks: SubtaskState::default(),
             messages: 0,
             open: None,
             tools: HashMap::new(),
@@ -139,6 +152,40 @@ impl Normalizer {
             last_prompt_tokens: None,
             streamed_turn_tokens: (0, 0, 0, 0, 0),
         }
+    }
+
+    /// Select the per-harness runtime [`HarnessAdapter`] for this attempt.
+    pub fn for_harness(mut self, harness: &str) -> Self {
+        self.adapter = crate::adapter::for_harness(harness);
+        self
+    }
+
+    /// Record the root ACP session id so updates arriving on child sessions are routed cleanly.
+    pub fn root_session(mut self, session_id: impl Into<String>) -> Self {
+        self.root_session_id = Some(session_id.into());
+        self
+    }
+
+    /// Update the root ACP session id in place once `session/new` or `session/load` settles.
+    pub fn set_root_session(&mut self, session_id: impl Into<String>) {
+        self.root_session_id = Some(session_id.into());
+    }
+
+    /// The active per-harness runtime adapter.
+    pub fn adapter(&self) -> &dyn HarnessAdapter {
+        self.adapter.as_ref()
+    }
+
+    /// Current view of a tracked subtask by its Steve [`CallId`].
+    pub fn subtask(&self, id: &CallId) -> Option<&SubtaskView> {
+        self.subtasks.lookup_by_call_id(id)
+    }
+
+    /// Encode a native JSON-RPC notification to cancel one active subtask without cancelling the
+    /// parent turn, when supported by the harness adapter and subtask.
+    pub fn cancel_subtask_request(&self, id: &CallId) -> Option<(&'static str, Value)> {
+        let subtask = self.subtasks.lookup_by_call_id(id)?;
+        self.adapter.cancel_subtask_request(subtask)
     }
 
     /// The adapter counts cache reads inside `inputTokens` (OpenAI's convention, declared as
@@ -218,19 +265,50 @@ impl Normalizer {
         ))
     }
 
-    /// The events and facts of one `session/update` (the `update` object).
+    /// The events and facts of one `session/update` (the `update` object) on the root session.
     pub fn update(&mut self, u: &Value) -> Vec<Fact> {
+        self.update_for_session(None, u)
+    }
+
+    /// The events and facts of one `session/update` carrying its ACP `sessionId` (which may be a
+    /// registered child subagent session).
+    pub fn update_for_session(&mut self, session_id: Option<&str>, u: &Value) -> Vec<Fact> {
+        let adapter = self.adapter.clone();
+        {
+            let mut ctx = AdapterContext {
+                state: &mut self.subtasks,
+                root_session_id: self.root_session_id.as_deref(),
+                prefix: &self.prefix,
+                meter: &self.meter,
+                input_includes_cache: self.input_includes_cache,
+            };
+            if let AdapterOutcome::Handled(facts) =
+                adapter.normalize_update(&mut ctx, session_id, u)
+            {
+                return facts;
+            }
+        }
         let kind = u.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
         match kind {
             "agent_message_chunk" => self.text(u, Role::Assistant),
             "agent_thought_chunk" => self.text(u, Role::Thought),
             "user_message_chunk" => vec![Fact::Nothing],
             "tool_call" | "tool_call_update" => {
-                let mut out = self.close();
-                if let Some((t, diagnostics)) = self.merge_tool(u) {
-                    out.push(Fact::Event(EventBody::ToolChanged { tool: t }));
-                    out.extend(diagnostics);
-                }
+                let Some((t, diagnostics, adapter_facts)) =
+                    self.merge_tool_for_session(session_id, u)
+                else {
+                    return vec![];
+                };
+                // Only root-session tool calls end an open root assistant/thought message; child
+                // subagent tool calls interleave concurrently without splitting the parent reply.
+                let mut out = if t.parent.is_none() {
+                    self.close()
+                } else {
+                    vec![]
+                };
+                out.push(Fact::Event(EventBody::ToolChanged { tool: t }));
+                out.extend(diagnostics);
+                out.extend(adapter_facts);
                 out
             }
             "plan" => {
@@ -565,7 +643,21 @@ impl Normalizer {
     /// old content/locations. rawInput/rawOutput are opaque values and replace, never deep-merge.
     /// Returns a display projection and diagnostics, which a permission handler must also emit.
     pub fn merge_tool(&mut self, u: &Value) -> Option<(ToolView, Vec<Fact>)> {
+        let (view, mut diagnostics, adapter_facts) = self.merge_tool_for_session(None, u)?;
+        diagnostics.extend(adapter_facts);
+        Some((view, diagnostics))
+    }
+
+    fn merge_tool_for_session(
+        &mut self,
+        session_id: Option<&str>,
+        u: &Value,
+    ) -> Option<(ToolView, Vec<Fact>, Vec<Fact>)> {
         let raw_id = u.get("toolCallId")?.as_str()?.to_string();
+        let initial_title = self
+            .subtasks
+            .record_initial_title(&raw_id, u.get("title").and_then(Value::as_str))
+            .map(String::from);
         let mut merged = self
             .tools
             .get(&raw_id)
@@ -579,10 +671,29 @@ impl Normalizer {
                 fields.insert(key.clone(), value.clone());
             }
         }
-        let (fact, diagnostics) = tool_fact(&raw_id, merged, &self.root);
-        let view = fact.view(&self.root);
+        let adapter = self.adapter.clone();
+        let (fact, diagnostics) = tool_fact(
+            &raw_id,
+            merged,
+            &self.root,
+            adapter.as_ref(),
+            initial_title.as_deref(),
+        );
+        let mut view = fact.view(&self.root);
+        let settled = matches!(fact.phase, ToolPhase::Succeeded | ToolPhase::Failed);
+        view.duration_ms = self.subtasks.record_tool_timing(&raw_id, settled);
+        let adapter_facts = {
+            let mut ctx = AdapterContext {
+                state: &mut self.subtasks,
+                root_session_id: self.root_session_id.as_deref(),
+                prefix: &self.prefix,
+                meter: &self.meter,
+                input_includes_cache: self.input_includes_cache,
+            };
+            adapter.observe_tool(&mut ctx, session_id, &raw_id, &fact, &mut view)
+        };
         self.tools.insert(raw_id, fact);
-        Some((view, diagnostics))
+        Some((view, diagnostics, adapter_facts))
     }
 }
 
@@ -974,8 +1085,19 @@ impl ToolFact {
     }
 }
 
-fn tool_fact(raw_id: &str, raw: Value, root: &Path) -> (ToolFact, Vec<Fact>) {
-    let name = tool_name(&raw);
+fn tool_fact(
+    raw_id: &str,
+    raw: Value,
+    root: &Path,
+    adapter: &dyn HarnessAdapter,
+    initial_title: Option<&str>,
+) -> (ToolFact, Vec<Fact>) {
+    let mut name = tool_name(&raw);
+    if name.is_empty()
+        && let Some(inferred) = adapter.infer_tool_name(&raw, initial_title)
+    {
+        name = inferred;
+    }
     let input = &raw["rawInput"];
     // server_name is programmatic routing metadata, unlike a title or a command's text.
     let server = input
@@ -1003,7 +1125,8 @@ fn tool_fact(raw_id: &str, raw: Value, root: &Path) -> (ToolFact, Vec<Fact>) {
     };
     let paths = tool_paths(&raw, input);
     let mut diagnostics = vec![];
-    let result = tool_result(&raw, input, root, &mut diagnostics);
+    let mut result = tool_result(&raw, input, root, &mut diagnostics);
+    adapter.enrich_tool_result(&raw, &mut result);
     let diffs: Vec<&Value> = raw
         .get("content")
         .and_then(Value::as_array)

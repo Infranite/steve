@@ -8,7 +8,8 @@ import { Spinner } from "@/components/ui/spinner"
 import { Page, Group, Segmented, Empty, ItemNo, StatusDot, go, SearchField, ConnectPrompt } from "@/ui"
 import { Select } from "@/view-shared"
 import { tm } from "@/store"
-import { ContactAvatar } from "@/people/avatar"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { useLoad } from "@/accounts/load"
 import { mailApi, VIEWS, DRAFT_STATUS, type MailView, type ThreadBrief, type MailAccount } from "@/api/mail"
 import { useT } from "@/i18n"
@@ -71,7 +72,7 @@ function ThreadRow({ t, showAccount }: { t: ThreadBrief; showAccount: boolean })
   const name = t.from?.name || t.from?.addr || tr("mail:list.noSender")
   return (
     <button type="button" onClick={() => go("#/mail/t/" + t.id)} role="listitem" className="flex w-full items-start gap-3 rounded-lg px-2 py-3 text-left transition-colors hover:bg-accent" data-thread-row={t.id} data-unread={t.unread > 0 || undefined}>
-      <ContactAvatar name={name} size={32} className="mt-0.5" />
+      <ActorAvatar actor={partyActor({ id: t.from?.party_id ?? t.from?.addr, name, subtitle: t.from?.org ?? t.from?.addr })} size={32} className="mt-0.5" tooltip={false} />
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-baseline gap-1.5">
           <span className={cn("min-w-0 truncate type-body", t.unread > 0 && "font-semibold")}>{name}</span>

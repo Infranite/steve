@@ -455,7 +455,11 @@ async fn take_offer_with_team_worker(enabled: bool) {
     let assigned = || store.items().get(item).unwrap().unwrap().bot_id;
     assert_eq!(assigned().as_deref(), enabled.then_some(bot));
     assert_eq!(
-        store.thread().item(item).unwrap().unwrap().origin_msg,
+        store
+            .read(|r| steve_store::thread::dispatch_by_item(r, item))
+            .unwrap()
+            .unwrap()
+            .origin_message_id,
         messages[0]["id"].as_str().unwrap()
     );
 
@@ -469,20 +473,102 @@ async fn take_offer_with_team_worker(enabled: bool) {
     } else {
         assert_eq!(detail["dispatch"]["blocked"]["reason"], "bot", "{detail}");
         assert!(store.sessions().of_item(item).unwrap().is_empty());
+        // Steve opened one workspace-scoped AskOwner no_executor decision card covering this item.
+        let (s, snap) = e.call("GET", "/api/snapshot?kinds=decision", None).await;
+        assert_eq!(s, 200, "{snap}");
+        let no_exec: Vec<&Value> = snap["views"]["decision"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["subject_type"] == "no_executor" && d["status"] == "open")
+            .collect();
+        assert_eq!(no_exec.len(), 1, "{snap}");
+        assert_eq!(no_exec[0]["question"]["template"]["code"], "no_executor");
+        assert_eq!(no_exec[0]["question"]["template"]["items"][0]["id"], item);
+
+        // Hub rejects adding main bot ("steve") into Team members with a typed reason.
+        let (s, bad_team) = e
+            .call(
+                "POST",
+                "/api/bot-teams",
+                Some(json!({
+                    "name":"Bad Team", "members":[{"bot":"steve","nodes":null}]
+                })),
+            )
+            .await;
+        assert_eq!(s, 400, "{bad_team}");
+        assert_eq!(
+            bad_team["reason"], "config.team_member_main_bot",
+            "{bad_team}"
+        );
+        let (s, bad_update) = e
+            .call(
+                "PUT",
+                &format!("/api/bot-teams/{}", team["id"].as_str().unwrap()),
+                Some(json!({
+                    "name":"Team", "members":[{"bot":bot,"nodes":null},{"bot":"steve","nodes":null}]
+                })),
+            )
+            .await;
+        assert_eq!(s, 400, "{bad_update}");
+        assert_eq!(
+            bad_update["reason"], "config.team_member_main_bot",
+            "{bad_update}"
+        );
+
         let (s, again) = e.call("POST", &path, Some(json!({"take":true}))).await;
         assert_eq!(s, 409, "{again}");
         assert_eq!(again["item"]["id"], item);
+
+        // Explicit selection of Steve remains allowed even when a default Team is active,
+        // while an ordinary Bot outside the Team is still refused with outside_team.
+        let (s, explicit_steve) = e
+            .call(
+                "POST",
+                "/api/items",
+                Some(json!({
+                    "title":"Explicit Steve", "goal":"Coordinate", "project":null, "bot":"steve"
+                })),
+            )
+            .await;
+        assert_eq!(s, 200, "{explicit_steve}");
+        assert_eq!(explicit_steve["bot_id"], "steve");
+        let (s, outsider_bot) = e
+            .call(
+                "POST",
+                "/api/bots",
+                Some(json!({
+                    "name":"Outsider", "harness":"claude-code", "perm_mode":"plan"
+                })),
+            )
+            .await;
+        assert_eq!(s, 200, "{outsider_bot}");
         let (s, strict) = e
             .call(
                 "POST",
                 "/api/items",
                 Some(json!({
-                    "title":"Explicit Bot", "goal":"Work", "project":null, "bot":"steve"
+                    "title":"Explicit Outsider", "goal":"Work", "project":null,
+                    "bot": outsider_bot["id"].as_str().unwrap()
                 })),
             )
             .await;
         assert_eq!(s, 409, "{strict}");
         assert_eq!(strict["placement"]["reason"], "outside_team", "{strict}");
+
+        // Workspace setting noExecutor can be toggled by owner via PATCH /api/settings.
+        let (s, v) = e
+            .call(
+                "PATCH",
+                "/api/settings",
+                Some(json!({"noExecutor":"steve"})),
+            )
+            .await;
+        assert_eq!(s, 200, "{v}");
+        let (s, v) = e
+            .call("PATCH", "/api/settings", Some(json!({"noExecutor":"ask"})))
+            .await;
+        assert_eq!(s, 200, "{v}");
 
         let (s, v) = e
             .call("PATCH", &bot_path, Some(json!({"enabled":true})))
@@ -609,58 +695,49 @@ async fn research_runs_get_read_only_mcp() {
     let t = e.settle(2).await;
     let item = t[1]["item_id"].as_str().unwrap().to_string();
     let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
-    let run = store
-        .write(|w| {
-            steve_store::thread_runs::add(
-                w,
-                &steve_store::NewThreadRun {
-                    workspace_id: "default".into(),
-                    message_id: t[0]["id"].as_str().unwrap().into(),
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
+    let seed_task = |space: &str, origin_id: &str, tok: &str| {
+        store
+            .write(|w| {
+                let now = steve_store::now();
+                let _ = steve_store::thread::enqueue_revision(
+                    w,
+                    &steve_store::NewRevisionTask {
+                        ws: "default",
+                        space,
+                        origin_message_id: origin_id,
+                        user_id: None,
+                        project_id: None,
+                        conv_json: None,
+                        to_item: None,
+                        to_reply_to: None,
+                        files_json: None,
+                        mentions_json: None,
+                        reply_to_message_id: None,
+                        forced_kind: Some("research"),
+                        route_json: None,
+                        offer_json: None,
+                        prev_receipt_id: None,
+                        read_task_intent_key: None,
+                    },
+                )?;
+                let lease = steve_store::uid("lease");
+                let claimed = steve_store::thread::claim_head(w, "default", space, &lease, now)?
+                    .expect("claimed research task");
+                steve_store::thread::set_task_token(
+                    w,
+                    &claimed.id,
+                    &lease,
+                    claimed.generation,
+                    Some(&steve_store::sha(tok)),
+                )?;
+                Ok::<_, steve_store::StoreError>((claimed.id, lease, claimed.generation))
+            })
+            .unwrap()
+    };
     let token = "research-token-1";
+    let (run_id, run_lease, run_gen) = seed_task("steve", t[0]["id"].as_str().unwrap(), token);
     // a run answering a message that is not the owner's own (unknown here) gets no sessions
-    let other = store
-        .write(|w| {
-            steve_store::thread_runs::add(
-                w,
-                &steve_store::NewThreadRun {
-                    workspace_id: "default".into(),
-                    message_id: "msg_elsewhere".into(),
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
-    store
-        .write(|w| {
-            steve_store::thread_runs::patch(
-                w,
-                &other.id,
-                &steve_store::RunPatch {
-                    status: Some("running".into()),
-                    token_hash: Some(Some(steve_store::sha("research-token-2"))),
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
-    store
-        .write(|w| {
-            steve_store::thread_runs::patch(
-                w,
-                &run.id,
-                &steve_store::RunPatch {
-                    status: Some("running".into()),
-                    token_hash: Some(Some(steve_store::sha(token))),
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
+    let _other = seed_task("chan:elsewhere", "msg_elsewhere", "research-token-2");
     let rpc = |body: Value, tok: &'static str| {
         let http = e.http.clone();
         let url = format!("{}/mcp", e.base);
@@ -936,31 +1013,7 @@ async fn research_runs_get_read_only_mcp() {
     assert_eq!(v["result"]["isError"], true, "{v}");
     // the item came from a group chat; a run answering in that chat sees it, title, status and goal only
     steve_store::testkit::hub::authority::seed_thread_group(&store, &item).unwrap();
-    let grp = store
-        .write(|w| {
-            steve_store::thread_runs::add(
-                w,
-                &steve_store::NewThreadRun {
-                    workspace_id: "default".into(),
-                    message_id: "msg_grp_2".into(),
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
-    store
-        .write(|w| {
-            steve_store::thread_runs::patch(
-                w,
-                &grp.id,
-                &steve_store::RunPatch {
-                    status: Some("running".into()),
-                    token_hash: Some(Some(steve_store::sha("research-token-3"))),
-                    ..Default::default()
-                },
-            )
-        })
-        .unwrap();
+    let _grp = seed_task("chan:grp", "msg_grp_2", "research-token-3");
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-3").await;
     assert!(
         text(&v).contains(&item) && !text(&v).contains("现在："),
@@ -1003,15 +1056,16 @@ async fn research_runs_get_read_only_mcp() {
     /* the run ended: the token is dead */
     store
         .write(|w| {
-            steve_store::thread_runs::patch(
+            steve_store::thread::set_task_token(w, &run_id, &run_lease, run_gen, None)?;
+            let _ = steve_store::thread::request_stop_task(
                 w,
-                &run.id,
-                &steve_store::RunPatch {
-                    status: Some("done".into()),
-                    token_hash: Some(None),
-                    ..Default::default()
-                },
-            )
+                "default",
+                &run_id,
+                "test",
+                "stopped",
+                steve_store::now(),
+            )?;
+            Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();
     let (s, _) = rpc(
@@ -1118,33 +1172,45 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     assert_eq!(e.thread().await.len(), 1);
 
     let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
-    for (message, token) in [
-        (hello.as_str(), "meet-token-1"),
-        ("msg_elsewhere", "meet-token-2"),
+    for (space, message, token) in [
+        ("steve", hello.as_str(), "meet-token-1"),
+        ("chan:elsewhere", "msg_elsewhere", "meet-token-2"),
     ] {
-        let run = store
-            .write(|w| {
-                steve_store::thread_runs::add(
-                    w,
-                    &steve_store::NewThreadRun {
-                        workspace_id: "default".into(),
-                        message_id: message.into(),
-                        ..Default::default()
-                    },
-                )
-            })
-            .unwrap();
         store
             .write(|w| {
-                steve_store::thread_runs::patch(
+                let now = steve_store::now();
+                let _ = steve_store::thread::enqueue_revision(
                     w,
-                    &run.id,
-                    &steve_store::RunPatch {
-                        status: Some("running".into()),
-                        token_hash: Some(Some(steve_store::sha(token))),
-                        ..Default::default()
+                    &steve_store::NewRevisionTask {
+                        ws: "default",
+                        space,
+                        origin_message_id: message,
+                        user_id: None,
+                        project_id: None,
+                        conv_json: None,
+                        to_item: None,
+                        to_reply_to: None,
+                        files_json: None,
+                        mentions_json: None,
+                        reply_to_message_id: None,
+                        forced_kind: Some("research"),
+                        route_json: None,
+                        offer_json: None,
+                        prev_receipt_id: None,
+                        read_task_intent_key: None,
                     },
-                )
+                )?;
+                let lease = steve_store::uid("lease");
+                let claimed = steve_store::thread::claim_head(w, "default", space, &lease, now)?
+                    .expect("claimed meeting task");
+                steve_store::thread::set_task_token(
+                    w,
+                    &claimed.id,
+                    &lease,
+                    claimed.generation,
+                    Some(&steve_store::sha(token)),
+                )?;
+                Ok::<_, steve_store::StoreError>(())
             })
             .unwrap();
     }

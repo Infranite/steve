@@ -1,4 +1,5 @@
 use super::*;
+use steve_node_api::{CallId, Money, SubtaskOrigin, SubtaskStatus, SubtaskUsage, SubtaskView};
 
 #[test]
 fn node_events_map_onto_the_same_entries() {
@@ -53,4 +54,45 @@ fn assistant_text_only_reads_assistant_transcript_entries() {
         assistant_text("agent_message_chunk", &json!({"content":{"text":"old"}})),
         None
     );
+}
+
+#[test]
+fn subtask_changed_maps_to_subtask_transcript_entry() {
+    let body = EventBody::SubtaskChanged {
+        subtask: SubtaskView {
+            id: CallId::new("sub-1").unwrap(),
+            parent: None,
+            external_id: Some("sub-1".into()),
+            origin: SubtaskOrigin::Subagent,
+            status: SubtaskStatus::Running,
+            title: "Audit auth".into(),
+            actor: Some("Explore".into()),
+            model: Some("claude-haiku-4-5".into()),
+            progress: Some("Reading auth.rs".into()),
+            summary: None,
+            error: None,
+            can_cancel: true,
+            duration_ms: Some(420),
+            usage: Some(SubtaskUsage {
+                input: Some(1200),
+                output: Some(300),
+                cache_read: None,
+                cache_write: None,
+                reasoning: None,
+                total_tokens: None,
+                context_used: None,
+                context_limit: None,
+                cost: Some(Money {
+                    decimal: "0.005".into(),
+                    currency: "USD".into(),
+                }),
+            }),
+        },
+    };
+    let entry = of_node(&body, None).unwrap();
+    assert_eq!(entry.kind, SUBTASK);
+    assert_eq!(entry.data["subtask"]["id"], "sub-1");
+    assert_eq!(entry.data["subtask"]["origin"], "subagent");
+    assert_eq!(entry.data["subtask"]["can_cancel"], true);
+    assert_eq!(entry.data["subtask"]["usage"]["output"], 300);
 }

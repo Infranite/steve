@@ -1,41 +1,33 @@
-//! The `items` source: one document per finished item — latest goal, delivery
-//! summary, outputs, and the text of text outputs inside the item's `cwd` — plus the candidate
-//! extraction each completion triggers (once per completion: `kb_marks extract:item:<id>`).
+//! Extraction on item completion: work items are no longer indexed into `kb_docs` / `kb_chunks`
+//! (they remain searchable as records), but finishing an item still runs candidate memory and
+//! project `AGENTS.md` proposal extraction once per completion (`kb_marks extract:item:<id>`).
 //!
 //! steve-core calls [`KnowledgeHooks`] after `finish` (B1 `item_hooks`); a reopened and finished
-//! again item is rebuilt and extracted again. Deleting an item: [`item_deleted`].
+//! again item is extracted again.
 
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde_json::Value;
 use steve_modules::hooks::ItemHooks;
 use steve_modules::{ApiError, ApiResult, Modules};
-use steve_store::base::Level;
 use steve_store::base::mems::Mem;
+use steve_store::base::{Level, ObjRef};
 use steve_store::knowledge::Documents;
-use steve_store::{Item, ItemEvidence, Members, Read, W, uid};
+use steve_store::{Item, ItemEvidence, Members, Read, References};
 
 use crate::candidates::{Origin, OriginKind};
 use crate::extract::{self, MAX_INPUT, clip};
-use crate::extract_text::markdown;
-use crate::index::{self, BoxFuture, DocLoader, Loaded};
-use crate::sources;
 use crate::state::Knowledge;
-use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
 
-pub const KIND: &str = "items";
-/// Text outputs larger than this are listed, not read.
-pub const MAX_OUTPUT_BYTES: u64 = 200 * 1024;
-
-/// What the item document and the extraction are built from.
+/// What item completion extraction reads from the store.
 #[derive(Debug, Clone, Default)]
 pub struct ItemFacts {
     pub id: String,
     pub ws: String,
     pub title: String,
-    pub cwd: Option<String>,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
     /// Goal versions, oldest first.
     pub goals: Vec<String>,
     /// What you wrote on the timeline (supplements), oldest first.
@@ -46,8 +38,6 @@ pub struct ItemFacts {
     pub reviews: Vec<String>,
     /// The summary of the latest delivery.
     pub summary: String,
-    /// `(kind, title, location)`.
-    pub outputs: Vec<(String, String, Option<String>)>,
     /// The user who started the item (else the workspace owner).
     pub user: String,
     /// Changes whenever the item is finished again (`items.updated`).
@@ -57,8 +47,13 @@ pub struct ItemFacts {
 /// Reads an item's facts; `None` if there is no such item.
 pub fn facts(c: &mut impl Read, id: &str) -> ApiResult<Option<ItemFacts>> {
     let head = ItemEvidence(c).header(id)?;
-    let Some((ws, title, cwd, stamp)) = head else {
+    let Some((ws, title, _cwd, stamp)) = head else {
         return Ok(None);
+    };
+    let project_id = ItemEvidence(c).project_id(id)?;
+    let project_name = match project_id.as_deref() {
+        Some(pid) => References(c).name(&ObjRef::new("project", pid))?,
+        None => None,
     };
     let goals = ItemEvidence(c).goals(id)?;
     let said: Vec<String> = ItemEvidence(c)
@@ -86,7 +81,8 @@ pub fn facts(c: &mut impl Read, id: &str) -> ApiResult<Option<ItemFacts>> {
         id: id.into(),
         ws: ws.clone(),
         title,
-        cwd,
+        project_id,
+        project_name,
         goals,
         said,
         stamp,
@@ -122,7 +118,6 @@ pub fn facts(c: &mut impl Read, id: &str) -> ApiResult<Option<ItemFacts>> {
             _ => {}
         }
     }
-    f.outputs = ItemEvidence(c).outputs(id)?;
     f.user = initiator(c, &ws, id)?;
     Ok(Some(f))
 }
@@ -137,60 +132,14 @@ pub fn initiator(c: &mut impl Read, ws: &str, item: &str) -> ApiResult<String> {
     })
 }
 
-/// Is `loc` a text file inside `cwd`, small enough to read? Then its text.
-fn read_output(cwd: &Path, loc: &str) -> Option<String> {
-    let root = cwd.canonicalize().ok()?;
-    let p = PathBuf::from(loc);
-    let p = if p.is_absolute() { p } else { root.join(p) };
-    let p = p.canonicalize().ok()?;
-    if !p.starts_with(&root) {
-        return None;
-    }
-    let meta = std::fs::metadata(&p).ok()?;
-    if !meta.is_file() || meta.len() > MAX_OUTPUT_BYTES {
-        return None;
-    }
-    let bytes = std::fs::read(&p).ok()?;
-    // the attachments sniff in short: text is valid UTF-8 without NUL bytes
-    if bytes.contains(&0) {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
-}
-
-/// The document text (Markdown). Reads text outputs from disk: call it off the runtime.
-pub fn doc_text(f: &ItemFacts) -> String {
-    let mut s = format!("# {} {}\n", f.id, f.title);
-    if let Some(g) = f.goals.last() {
-        s.push_str(&format!("\n## 目标\n\n{g}\n"));
-    }
-    if !f.summary.trim().is_empty() {
-        s.push_str(&format!("\n## 交付摘要\n\n{}\n", f.summary.trim()));
-    }
-    if !f.outputs.is_empty() {
-        s.push_str("\n## 产出\n\n");
-        for (_, title, loc) in &f.outputs {
-            match loc {
-                Some(l) if !l.is_empty() => s.push_str(&format!("- {title}：{l}\n")),
-                _ => s.push_str(&format!("- {title}\n")),
-            }
-        }
-        if let Some(cwd) = f.cwd.as_deref().filter(|c| !c.is_empty()) {
-            for (_, title, loc) in &f.outputs {
-                if let Some(body) = loc.as_deref().and_then(|l| read_output(Path::new(cwd), l)) {
-                    s.push_str(&format!("\n## {title}\n\n{}\n", body.trim()));
-                }
-            }
-        }
-    }
-    s
-}
-
-/// The extraction input: goal versions, what you said, answered questions, review notes and the
-/// delivery summary; at most 12000 characters. The goals are marked as this item's own business: the
-/// model is told restating them is no memory, and [`extract::check`] drops what does.
+/// The extraction input: project, goal versions, what you said, answered questions, review notes and
+/// the delivery summary; at most 12000 characters. The goals are marked as this item's own business:
+/// the model is told restating them is no memory, and [`extract::check`] drops what does.
 pub fn extract_text(f: &ItemFacts) -> String {
     let mut s = format!("事项 {}：{}\n", f.id, f.title);
+    if let Some(project) = f.project_name.as_deref().filter(|p| !p.is_empty()) {
+        s.push_str(&format!("所属项目：{project}\n"));
+    }
     if !f.goals.is_empty() {
         s.push_str("\n（下面的目标是这件事要做的事，属于事项记录）\n");
     }
@@ -212,78 +161,28 @@ pub fn extract_text(f: &ItemFacts) -> String {
     clip(&s, MAX_INPUT)
 }
 
-/// Writes (or rewrites) the item's document and indexes it, in one transaction. Returns its id.
-fn write_doc(tx: &mut W<'_>, f: &ItemFacts, text: &str, now: i64) -> ApiResult<String> {
-    let src = sources::builtin(tx, &f.ws, KIND, &f.user, now)?;
-    let title = format!("{} {}", f.id, f.title);
-    let id = match Documents(tx).doc_by_ref(&src.id, &f.id)? {
-        Some(d) => {
-            Documents(tx).reactivate_doc(&d.id, &title, text.len() as i64, now)?;
-            d.id
-        }
-        None => {
-            let id = uid("kd");
-            Documents(tx).insert_doc(
-                &f.ws,
-                &NewDoc {
-                    id: id.clone(),
-                    source_id: src.id.clone(),
-                    r#ref: f.id.clone(),
-                    title,
-                    size: text.len() as i64,
-                    created_by: f.user.clone(),
-                    ..Default::default()
-                },
-                now,
-            )?;
-            id
-        }
-    };
-    let doc = Documents(tx)
-        .doc(&id)?
-        .ok_or_else(|| ApiError::not_found("文档"))?;
-    index::index_document(tx, &doc, &src, &markdown(text), now, false)?;
-    Ok(id)
-}
-
-/// Reads the facts and the outputs off the runtime.
-async fn load(m: &Modules, id: &str) -> ApiResult<Option<(ItemFacts, String)>> {
-    let id = id.to_string();
-    m.blocking(move |m| {
-        let Some(f) = crate::read_api(&m.store, |c| facts(c, &id))? else {
-            return Ok(None);
-        };
-        let text = doc_text(&f);
-        Ok(Some((f, text)))
-    })
-    .await
-}
-
-/// After `finish`: (re)builds the item's document, then extracts candidates once for this completion.
-/// Returns the candidates written (none if this completion was already extracted).
+/// After `finish`: extracts knowledge candidates and project `AGENTS.md` proposals once for this
+/// completion. Does not index the item as a knowledge document.
 pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<Vec<Mem>> {
-    let Some((f, text)) = load(m, item_id).await? else {
+    let id = item_id.to_string();
+    let f = m
+        .blocking(move |m| crate::read_api(&m.store, |c| facts(c, &id)))
+        .await?;
+    let Some(f) = f else {
         return Ok(Vec::new());
     };
-    let now = m.clock.now();
     let mark = format!("extract:item:{}", f.id);
     let stamp = f.stamp.to_string();
-    // chunking the document happens inside the write: off the runtime
-    let (f, fresh) = m
+    let (ws_check, mark_check, stamp_check) = (f.ws.clone(), mark.clone(), stamp.clone());
+    let already = m
         .blocking(move |m| {
-            let fresh = m.store.write(|tx| {
-                let doc = write_doc(tx, &f, &text, now)?;
-                let fresh = Documents(tx).mark(&f.ws, &mark)?.as_deref() != Some(stamp.as_str());
-                if fresh {
-                    Documents(tx).set_mark(&f.ws, &mark, &stamp, now)?;
-                }
-                crate::state::emit_change(tx, &f.ws, &doc);
-                Ok::<_, ApiError>(fresh)
-            })?;
-            Ok((f, fresh))
+            Ok(m.store
+                .read(|c| Documents(c).mark(&ws_check, &mark_check))?
+                .as_deref()
+                == Some(stamp_check.as_str()))
         })
         .await?;
-    if !fresh {
+    if already {
         return Ok(Vec::new());
     }
     let origin = Origin {
@@ -300,48 +199,24 @@ pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<V
     let task = extract::Task {
         goals: &f.goals,
         events: false,
+        project: f.project_id.as_deref(),
     };
-    extract::run(m, kb, &origin, &extract_text(&f), Some(&f.id), task).await
-}
-
-/// The item was deleted: its document and index rows go.
-pub fn item_deleted(tx: &mut W<'_>, ws: &str, item_id: &str) -> ApiResult<bool> {
-    let Some(src) = Documents(tx).source_of_kind(ws, KIND)? else {
-        return Ok(false);
-    };
-    match Documents(tx).doc_by_ref(&src.id, item_id)? {
-        Some(d) => {
-            index::delete_doc(tx, &d.id)?;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
-}
-
-/// Re-reads an item document for the index queue (reindexing, scope changes).
-pub struct ItemsLoader;
-
-impl DocLoader for ItemsLoader {
-    fn kinds(&self) -> &[&str] {
-        &[KIND]
-    }
-    fn load<'a>(
-        &'a self,
-        m: &'a Modules,
-        doc: &'a DocRow,
-        _: &'a SourceRow,
-    ) -> BoxFuture<'a, Loaded> {
-        Box::pin(async move {
-            match load(m, &doc.r#ref).await {
-                Ok(Some((_, text))) => Loaded::Text(markdown(&text)),
-                Ok(None) => Loaded::Gone,
-                Err(e) => Loaded::Failed(format!("读不到这个事项：{e}")),
+    let prepared = extract::prepare(m, kb, &origin, &extract_text(&f), Some(&f.id), task).await?;
+    let now = m.clock.now();
+    m.blocking(move |m| {
+        m.store.write(|tx| {
+            if Documents(tx).mark(&origin.ws, &mark)?.as_deref() == Some(stamp.as_str()) {
+                return Ok(Vec::new());
             }
+            let made = extract::commit_in(tx, &origin, &prepared)?;
+            Documents(tx).set_mark(&origin.ws, &mark, &stamp, now)?;
+            Ok(made)
         })
-    }
+    })
+    .await
 }
 
-/// The knowledge module's item hooks: `on_finished` builds the document and extracts candidates in a
+/// The knowledge module's item hooks: `on_finished` extracts candidates and project proposals in a
 /// spawned task. Register with `registry.item_hooks(Box::new(hooks.clone()))` and call
 /// [`KnowledgeHooks::bind`] once the `Modules` exist (the registry is built before them).
 #[derive(Clone)]
@@ -382,45 +257,5 @@ impl ItemHooks for KnowledgeHooks {
                 tracing::warn!(item = %id, "kb items: {e}");
             }
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_only_small_text_outputs_inside_cwd() {
-        let root = tempfile::tempdir().unwrap();
-        let cwd = root.path().join("work");
-        std::fs::create_dir(&cwd).unwrap();
-        std::fs::write(cwd.join("notes.md"), "交付的说明文字").unwrap();
-        std::fs::write(cwd.join("bin.dat"), [0u8, 1, 2]).unwrap();
-        std::fs::write(
-            cwd.join("big.txt"),
-            "x".repeat(MAX_OUTPUT_BYTES as usize + 1),
-        )
-        .unwrap();
-        std::fs::write(root.path().join("outside.md"), "不该读到").unwrap();
-        let f = ItemFacts {
-            id: "ST-1".into(),
-            title: "测试".into(),
-            cwd: Some(cwd.to_string_lossy().into()),
-            goals: vec!["旧目标".into(), "新目标".into()],
-            summary: "做完了".into(),
-            outputs: ["notes.md", "bin.dat", "big.txt", "../outside.md"]
-                .iter()
-                .map(|l| ("doc".to_string(), format!("产出 {l}"), Some(l.to_string())))
-                .collect(),
-            ..Default::default()
-        };
-        let t = doc_text(&f);
-        assert!(t.starts_with("# ST-1 测试\n"));
-        assert!(t.contains("## 目标\n\n新目标") && !t.contains("旧目标"));
-        assert!(t.contains("## 交付摘要\n\n做完了"));
-        assert!(t.contains("- 产出 ../outside.md：../outside.md"));
-        assert!(t.contains("## 产出 notes.md\n\n交付的说明文字"));
-        assert!(!t.contains("## 产出 bin.dat") && !t.contains("## 产出 big.txt"));
-        assert!(!t.contains("不该读到"));
     }
 }

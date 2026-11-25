@@ -36,6 +36,10 @@ impl FlowWaits<'_, W<'_>> {
     }
 
     pub fn put(&mut self, row: &NewWait<'_>) -> Result<()> {
+        let wait = crate::wait_repo::default_flow_wait_contract(
+            self.0, row.ws, row.mode, row.now, row.until,
+        )?;
+        let wait_owner = wait.owner.to_code();
         self.0.exec(
             Query::insert()
                 .into_table("flow_waits")
@@ -48,16 +52,24 @@ impl FlowWaits<'_, W<'_>> {
                     "match",
                     "decision_id",
                     "created",
+                    "wait_owner",
+                    "wait_started_at",
+                    "wait_deadline",
+                    "wait_on_timeout",
                 ])
                 .values_panic([
                     row.run.into(),
                     row.node.into(),
                     row.ws.into(),
                     row.mode.into(),
-                    row.until.into(),
+                    Some(wait.deadline.0).into(),
                     row.matcher.to_string().into(),
                     row.decision.into(),
                     row.now.into(),
+                    wait_owner.as_str().into(),
+                    wait.started_at.0.into(),
+                    wait.deadline.0.into(),
+                    wait.on_timeout.as_str().into(),
                 ])
                 .on_conflict(
                     OnConflict::columns(["run_id", "node_id"])
@@ -68,6 +80,10 @@ impl FlowWaits<'_, W<'_>> {
                             "match",
                             "decision_id",
                             "created",
+                            "wait_owner",
+                            "wait_started_at",
+                            "wait_deadline",
+                            "wait_on_timeout",
                         ])
                         .to_owned(),
                 ),
@@ -86,6 +102,7 @@ pub struct WaitRow {
     pub mode: String,
     pub matcher: Value,
     pub decision: Option<String>,
+    pub wait: steve_types::WaitContract,
 }
 
 pub struct DueWait {
@@ -93,6 +110,7 @@ pub struct DueWait {
     pub node: String,
     pub mode: String,
     pub matcher: Option<String>,
+    pub decision: Option<String>,
 }
 
 fn deadlines() -> SelectStatement {
@@ -105,7 +123,7 @@ fn deadlines() -> SelectStatement {
             Expr::col(("r", "id")).equals(("w", "run_id")),
         )
         .and_where(Expr::col(("w", "until")).is_not_null())
-        .and_where(Expr::col(("w", "mode")).is_in(["delay", "until", "event"]))
+        .and_where(Expr::col(("w", "mode")).is_in(["delay", "until", "event", "decision", "flow"]))
         .and_where(Expr::col(("r", "status")).eq("waiting"))
         .take()
 }
@@ -151,6 +169,7 @@ impl<C: crate::Read> FlowWaits<'_, C> {
                     ("w", "mode"),
                     ("w", "match"),
                     ("w", "until"),
+                    ("w", "decision_id"),
                 ])
                 .and_where(dialect.insertion_order(Some("w")).eq(locator)),
             |row| {
@@ -161,6 +180,7 @@ impl<C: crate::Read> FlowWaits<'_, C> {
                     node: row.get(1)?,
                     mode: row.get(2)?,
                     matcher: row.get(3)?,
+                    decision: row.get(5)?,
                 })
             },
         )
@@ -180,11 +200,25 @@ impl<C: crate::Read> FlowWaits<'_, C> {
     pub fn get(&mut self, run: &str, node: &str) -> Result<Option<WaitRow>> {
         self.0.one(
             Query::select()
-                .columns(["mode", "match", "decision_id"])
+                .columns([
+                    "mode",
+                    "match",
+                    "decision_id",
+                    "wait_owner",
+                    "wait_started_at",
+                    "wait_deadline",
+                    "wait_on_timeout",
+                ])
                 .from("flow_waits")
                 .and_where(Expr::col("run_id").eq(run))
                 .and_where(Expr::col("node_id").eq(node)),
             |row| {
+                let wait = crate::wait_repo::decode_contract(
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                )?;
                 Ok(WaitRow {
                     mode: row.get(0)?,
                     matcher: row
@@ -192,6 +226,7 @@ impl<C: crate::Read> FlowWaits<'_, C> {
                         .and_then(|raw| serde_json::from_str(&raw).ok())
                         .unwrap_or(Value::Null),
                     decision: row.get(2)?,
+                    wait,
                 })
             },
         )

@@ -589,6 +589,6 @@ pub fn seed_held_message(path: &Path, session: &str, text: &str) -> Result<()> {
 
 pub fn break_thread_recovery(path: &Path) -> Result<()> {
     super::api::writable(path)?
-        .execute_batch("ALTER TABLE thread_resume RENAME TO thread_resume_gone")?;
+        .execute_batch("ALTER TABLE thread_reply_tasks RENAME TO thread_reply_tasks_gone")?;
     Ok(())
 }

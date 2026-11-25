@@ -289,7 +289,7 @@ pub struct Config {
     pub dev_login: bool,
     /// Normal operation or a diagnostic copy (`STEVE_NO_RESUME=1`).
     pub mode: RuntimeMode,
-    /// The daily copy under `<home>/backups` (`STEVE_BACKUP=off` turns it off): see `daily_backup`.
+    /// The daily snapshot in `<home>/backups/restic` (`STEVE_BACKUP=off` turns it off): see `daily_backup`.
     pub backup: bool,
     /// `STEVE_TAKEOVER_CONTINUES`: how often Steve continues a stopped agent before the user hears of it
     /// (`None`: the core's default).
@@ -297,6 +297,8 @@ pub struct Config {
     /// `STEVE_TAKEOVER_SAME_REFUSALS`: how many refusals of a delivery in a row for the same reason
     /// hand the item to the user instead of another continue; 0: never (`None`: the core's default).
     pub takeover_same_refusals: Option<u32>,
+    /// `STEVE_PROVIDER_ERROR_HANDOFF_THRESHOLD`: consecutive errors on one surface before switching fallback (`None`: core default).
+    pub provider_error_handoff_threshold: Option<u32>,
     /// `STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`, `STEVE_WORKTREE_IDLE_HOURS` (task workspaces).
     pub disk: steve_core::workspace::DiskPolicy,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds (`None`: looked up by the core).
@@ -321,6 +323,7 @@ pub struct Config {
     /// Steve's own repository (`STEVE_REPO`): seed project, items about Steve itself, release repo.
     pub steve_repo: PathBuf,
     pub debug_route: bool,
+    pub claude_config_dir: Option<PathBuf>,
     pub codex_home: PathBuf,
     /// Node used to run `.js` adapters (TS used its own `process.execPath`).
     pub node: String,
@@ -833,6 +836,10 @@ impl Config {
             backup,
             takeover_continues: count(&get, "STEVE_TAKEOVER_CONTINUES")?,
             takeover_same_refusals: count(&get, "STEVE_TAKEOVER_SAME_REFUSALS")?,
+            provider_error_handoff_threshold: count(
+                &get,
+                "STEVE_PROVIDER_ERROR_HANDOFF_THRESHOLD",
+            )?,
             disk,
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
             claude_executable: env("CLAUDE_CODE_EXECUTABLE", "/opt/homebrew/bin/claude"),
@@ -872,6 +879,9 @@ impl Config {
                 .or_else(steve_core::config::steve_checkout_of_exe)
                 .unwrap_or_default(),
             debug_route: steve_auth::flag(&get, "STEVE_DEBUG_ROUTE")?,
+            claude_config_dir: get("CLAUDE_CONFIG_DIR")
+                .filter(|v| !v.trim().is_empty())
+                .map(PathBuf::from),
             codex_home: get("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join(".codex")),

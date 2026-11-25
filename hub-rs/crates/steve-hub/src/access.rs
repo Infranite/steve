@@ -515,6 +515,31 @@ pub use crate::admin::socket_path as admin_socket_path;
 /// an error: their writes may already have committed. Offline access takes the instance lock
 /// and validates the existing schema without migrations or background recording.
 pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
+    match args.first().map(String::as_str) {
+        Some("backup-list") if args.len() == 1 => {
+            return CliOutput::result(
+                crate::backup::list(&cfg.home)
+                    .and_then(|list| Ok(serde_json::to_string_pretty(&list)?)),
+            );
+        }
+        Some("restore") => {
+            return CliOutput::result((|| {
+                let _lock = if args.get(2).is_some_and(|arg| arg == "--database-only") {
+                    Some(crate::upgrades::instance_lock(cfg)?)
+                } else {
+                    None
+                };
+                crate::admin::client::backup::restore(&cfg.home, &cfg.db_path(), args)
+            })());
+        }
+        Some("backup") if args.iter().any(|a| a == "--offline") => {
+            return CliOutput::result((|| {
+                let _lock = crate::upgrades::instance_lock(cfg)?;
+                crate::admin::client::backup::command(&cfg.home, &cfg.db_path(), args)
+            })());
+        }
+        _ => {}
+    }
     match crate::admin::client::try_command(&cfg.home, args) {
         Ok(Some(output)) => output,
         Err(e) => CliOutput::result(Err(e)),
@@ -546,7 +571,9 @@ const USAGE: &str =
        steve-hub --access token revoke ID
        steve-hub --access client list [--json]
        steve-hub --access client revoke ID
-       steve-hub --admin backup [--reason pre-upgrade|pre-destructive|diagnostic]";
+       steve-hub --admin backup [--offline] [--reason daily|manual|pre-upgrade|pre-destructive|diagnostic]
+       steve-hub --admin backup-list
+       steve-hub --admin restore SNAPSHOT_ID (--database-only | --to PARENT_DIRECTORY)";
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()
@@ -1203,6 +1230,7 @@ pub async fn overview(
 ) -> Result<axum::response::Response, crate::error::ApiError> {
     let store = store_of(&st)?;
     let me = c.me.clone();
+    let ws = c.ws.clone();
     let all = q.all.as_deref() == Some("1") && is_owner(&c);
     let (tokens, clients, users) = tokio::task::spawn_blocking(move || {
         let tokens = store.access().tokens(Some(&me))?;
@@ -1211,9 +1239,9 @@ pub async fn overview(
         if all {
             for c in &clients {
                 if !users.contains_key(&c.user_id)
-                    && let Some(u) = store.users().get(&c.user_id)?
+                    && let Some(name) = store.users().display_name(&ws, &c.user_id)?
                 {
-                    users.insert(c.user_id.clone(), json!(u.name));
+                    users.insert(c.user_id.clone(), json!(name));
                 }
             }
         }
@@ -2116,7 +2144,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
     }
 }
 
-/* ───────── single sign-on in the settings (A4b) ───────── */
+/* ───────── single sign-on in the settings ───────── */
 
 /// Puts an OIDC configuration in force without a restart (steve-auth's `Auth`).
 pub trait OidcSwitch: Send + Sync {

@@ -114,7 +114,17 @@ impl Core {
         said.as_object_mut().map(|o| o.remove("data"));
         let mut extra = Map::new();
         extra.insert("a2ui_action".into(), said);
-        let mid = self.say_with(ws, user, &text, &[], &[], SayTo::default(), extra)?;
+        let key_id = format!("a2ui:{msg_id}:{key}");
+        let mid = self.say_with_key(
+            ws,
+            user,
+            &text,
+            &[],
+            &[],
+            SayTo::default(),
+            extra,
+            Some(&key_id),
+        )?;
         record["message"] = json!(mid);
         let mut meta = meta_of(&m);
         let slot = meta.entry("a2ui").or_insert_with(|| json!({}));

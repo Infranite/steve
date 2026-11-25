@@ -1,4 +1,4 @@
-// Sustained main-chat workload (#525). Use a private release Hub serving a production Web build;
+// Sustained main-chat workload. Use a private release Hub serving a production Web build;
 // see CONTRIBUTING's development checks. The browser can read only that loopback Hub and this SSE fixture.
 import assert from "node:assert/strict"
 import { open, writeFile } from "node:fs/promises"
@@ -82,7 +82,7 @@ function instrument({ origin, sse, profile, trace }) {
         if (!e.data.startsWith('{"type":"steve.draft",')) return
         if (!bench.start) {
           bench.start = performance.now()
-          if (trace) performance.mark("w525-start")
+          if (trace) performance.mark("chat-bench-start")
         }
         bench.received++
       })
@@ -249,7 +249,7 @@ try {
       const key = e.target.closest("[data-steps-toggle]") ? "process" : e.target.closest("[data-card-row] button[aria-controls]") ? "card" : null
       if (!key || chatBench[key + "Opened"] !== undefined) return
       chatBench[key + "Opened"] = performance.now()
-      if (trace) performance.mark("w525-open-" + key)
+      if (trace) performance.mark("chat-bench-open-" + key)
     }, { passive: true, capture: true })
     chatBench.follow = true
   }, !!tracePath)
@@ -356,7 +356,7 @@ try {
   const data = await page.evaluate((trace) => {
     const b = chatBench
     b.end = performance.now()
-    if (trace) performance.mark("w525-end")
+    if (trace) performance.mark("chat-bench-end")
     return { ...b, anchor: null, scroller: null, event_timing: PerformanceObserver.supportedEntryTypes.includes("event") }
   }, !!tracePath)
   if (cdp) await writeTrace(cdp, tracePath, data)

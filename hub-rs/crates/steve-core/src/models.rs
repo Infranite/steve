@@ -390,52 +390,96 @@ pub fn validate_bot_patch(
     patch: &Map<String, Value>,
     harnesses: &[Harness],
 ) -> Result<(), String> {
-    let selection = ["harness", "model", "reasoning_effort"];
+    let selection = ["harness", "model", "reasoning_effort", "fallback_surfaces"];
     if current.is_some() && !selection.iter().any(|k| patch.contains_key(*k)) {
         return Ok(());
     }
-    let get = |key: &str| patch.get(key).or_else(|| current.and_then(|b| b.get(key)));
-    let harness = get("harness")
-        .and_then(Value::as_str)
-        .unwrap_or(steve_harness_spec::DEFAULT_ADAPTER.0);
-    let h = harnesses
-        .iter()
-        .find(|h| h.id == harness)
-        .ok_or_else(|| steve_i18n::t!("core.models.invalid.no_harness", harness = harness))?;
-    let switched =
-        current.is_none_or(|b| b.get("harness").and_then(Value::as_str) != Some(harness));
-    for key in ["model", "reasoning_effort"] {
-        if !switched && !patch.contains_key(key) {
-            continue;
-        }
-        let Some(value) = get(key).filter(|v| !v.is_null()) else {
-            continue;
-        };
-        let Some(value) = value.as_str().filter(|v| {
-            if key == "model" {
-                valid_model(v)
-            } else {
-                !v.trim().is_empty() && v.len() <= 100
+    let primary_changed = current.is_none()
+        || ["harness", "model", "reasoning_effort"]
+            .iter()
+            .any(|k| patch.contains_key(*k));
+    if primary_changed {
+        let get = |key: &str| patch.get(key).or_else(|| current.and_then(|b| b.get(key)));
+        let harness = get("harness")
+            .and_then(Value::as_str)
+            .unwrap_or(steve_harness_spec::DEFAULT_ADAPTER.0);
+        let h = harnesses
+            .iter()
+            .find(|h| h.id == harness)
+            .ok_or_else(|| steve_i18n::t!("core.models.invalid.no_harness", harness = harness))?;
+        let switched =
+            current.is_none_or(|b| b.get("harness").and_then(Value::as_str) != Some(harness));
+        for key in ["model", "reasoning_effort"] {
+            if !switched && !patch.contains_key(key) {
+                continue;
             }
-        }) else {
-            return Err(steve_i18n::t!("core.bot.invalid_selection", field = key));
-        };
-        if h.ready != Some(true) {
-            continue;
+            let Some(value) = get(key).filter(|v| !v.is_null()) else {
+                continue;
+            };
+            validate_surface_field(h, key, value)?;
         }
-        let supported = if key == "model" {
-            h.models.iter().any(|m| m.id == value)
-        } else {
-            h.takes_effort(value)
-        };
-        if !supported {
+    }
+    if let Some(raw) = patch.get("fallback_surfaces") {
+        let arr = raw.as_array().ok_or_else(|| {
+            steve_i18n::t!("core.bot.invalid_selection", field = "fallback_surfaces")
+        })?;
+        if arr.len() > 8 {
             return Err(steve_i18n::t!(
-                "core.bot.unsupported_selection",
-                harness = h.name,
-                field = key,
-                value = value
+                "core.bot.invalid_selection",
+                field = "fallback_surfaces"
             ));
         }
+        for entry in arr {
+            let obj = entry.as_object().ok_or_else(|| {
+                steve_i18n::t!("core.bot.invalid_selection", field = "fallback_surfaces")
+            })?;
+            let rt_id = obj
+                .get("harness")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    steve_i18n::t!("core.bot.invalid_selection", field = "fallback_surfaces")
+                })?;
+            let h = harnesses
+                .iter()
+                .find(|h| h.id == rt_id)
+                .ok_or_else(|| steve_i18n::t!("core.models.invalid.no_harness", harness = rt_id))?;
+            for key in ["model", "reasoning_effort"] {
+                if let Some(value) = obj.get(key).filter(|v| !v.is_null()) {
+                    validate_surface_field(h, key, value)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_field(h: &Harness, key: &str, value: &Value) -> Result<(), String> {
+    let Some(value) = value.as_str().filter(|v| {
+        if key == "model" {
+            valid_model(v)
+        } else {
+            !v.trim().is_empty() && v.len() <= 100
+        }
+    }) else {
+        return Err(steve_i18n::t!("core.bot.invalid_selection", field = key));
+    };
+    if h.ready != Some(true) {
+        return Ok(());
+    }
+    let supported = if key == "model" {
+        h.models.iter().any(|m| m.id == value)
+    } else {
+        h.takes_effort(value)
+    };
+    if !supported {
+        return Err(steve_i18n::t!(
+            "core.bot.unsupported_selection",
+            harness = h.name,
+            field = key,
+            value = value
+        ));
     }
     Ok(())
 }

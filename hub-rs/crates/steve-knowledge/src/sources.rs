@@ -1,4 +1,4 @@
-//! Sources: the six built-in ones every workspace gets on first use, and
+//! Sources: the four built-in knowledge sources every workspace gets on first use, and
 //! the `Source` JSON shape. Folder sources, source writes and uploads are in [`folder`] and [`files`].
 
 pub mod files;
@@ -7,22 +7,18 @@ pub mod folder_node;
 
 use serde_json::{Value, json};
 use steve_store::base::{Level, Visibility};
-use steve_store::knowledge::Documents;
+use steve_store::knowledge::{Documents, SourceRow};
 use steve_store::{Read, Result, W, uid};
 
-use steve_store::knowledge::SourceRow;
-
-// K3
+// Extraction origins (no longer indexed as knowledge documents)
 pub mod chat;
 pub mod items;
 
 /// `(kind, name, visibility, level)` of the built-in sources. The `mems` defaults are unused:
 /// every memory carries its own scope and level.
-pub const BUILTIN: [(&str, &str, &str, &str); 6] = [
+pub const BUILTIN: [(&str, &str, &str, &str); 4] = [
     ("notes", "我的笔记", "private", "conclusion"),
     ("files", "上传的文件", "private", "conclusion"),
-    ("items", "事项交付", "workspace", "conclusion"),
-    ("chat", "主线对话", "workspace", "conclusion"),
     ("mems", "记忆", "private", "conclusion"),
     ("bot_mems", "Bot 记忆", "workspace", "conclusion"),
 ];
@@ -37,16 +33,14 @@ pub fn name_shown(kind: &str, stored: &str) -> String {
     match kind {
         "notes" => steve_i18n::t!("knowledge.builtin.notes"),
         "files" => steve_i18n::t!("knowledge.builtin.files"),
-        "items" => steve_i18n::t!("knowledge.builtin.items"),
-        "chat" => steve_i18n::t!("knowledge.builtin.chat"),
         "mems" => steve_i18n::t!("knowledge.builtin.mems"),
         "bot_mems" => steve_i18n::t!("knowledge.builtin.bot_mems"),
         _ => stored.to_owned(),
     }
 }
 
-/// A day of the main conversation as stored (`2026-10-31 的对话`, `10-31 的对话`: a document's title,
-/// a label of what came from it) in the request's language; anything else as written.
+/// A day of the main conversation as stored (`2026-10-31 的对话`, `10-31 的对话`: a label of what
+/// came from it) in the request's language; anything else as written.
 pub fn chat_day_shown(stored: &str) -> String {
     steve_i18n::reword!(stored, &["knowledge.chat.day"]).unwrap_or_else(|| stored.to_owned())
 }
@@ -146,18 +140,15 @@ mod shown_tests {
 
     #[test]
     fn built_in_names_and_chat_days_by_language() {
-        assert_eq!(
-            with(EN, || name_shown("chat", "主线对话")),
-            "Main conversation"
-        );
+        assert_eq!(with(EN, || name_shown("notes", "我的笔记")), "My notes");
         assert_eq!(
             with(EN, || name_shown("bot_mems", "Bot 记忆")),
             "Bot memories"
         );
         // renamed, or not a built-in one: as named
-        assert_eq!(with(EN, || name_shown("chat", "聊天")), "聊天");
-        assert_eq!(with(EN, || name_shown("folder", "主线对话")), "主线对话");
-        assert_eq!(with(ZH_CN, || name_shown("chat", "主线对话")), "主线对话");
+        assert_eq!(with(EN, || name_shown("notes", "随笔")), "随笔");
+        assert_eq!(with(EN, || name_shown("folder", "我的笔记")), "我的笔记");
+        assert_eq!(with(ZH_CN, || name_shown("notes", "我的笔记")), "我的笔记");
         assert_eq!(
             with(EN, || chat_day_shown("2026-11-12 的对话")),
             "Conversation on 2026-11-12"

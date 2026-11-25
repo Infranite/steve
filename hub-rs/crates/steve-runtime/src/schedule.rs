@@ -1,4 +1,4 @@
-//! Copies flow::cron parsing/calculation (W2b §2), using tz's RFC 5545 rule.
+//! Cron parsing and next-run calculation using `tz`'s RFC 5545 wall-clock rule.
 //! Descriptions and setting defaults remain in flow.
 use crate::tz::Zone;
 use chrono::{DateTime, Duration, Utc};

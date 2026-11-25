@@ -596,6 +596,7 @@ pub fn model_usage(r: UsageReport) -> ModelUsage {
         UsageScope::All => "all",
         UsageScope::Main => "main",
         UsageScope::Background => "background",
+        UsageScope::Subtask => "subtask",
     };
     ModelUsage {
         model: r.model.unwrap_or_default(),

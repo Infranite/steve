@@ -5,6 +5,7 @@
 //! metric is described in [`catalog`]; labels take bounded values only (route templates, methods,
 //! results, reason codes, harnesses, plugin and Node ids), never a session, item or message id.
 //! Hot paths use static keys or handles registered once; nothing here writes to the database.
+pub(crate) mod backup;
 mod catalog;
 pub(crate) mod health;
 pub(crate) mod nodes;
@@ -92,6 +93,20 @@ fn recorder() -> PrometheusRecorder {
         0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0, 21600.0,
         86400.0, 604800.0,
     ];
+    let tokens = [
+        4_000.0,
+        16_000.0,
+        32_000.0,
+        64_000.0,
+        128_000.0,
+        160_000.0,
+        200_000.0,
+        256_000.0,
+        384_000.0,
+        512_000.0,
+        768_000.0,
+        1_000_000.0,
+    ];
     let mut b = PrometheusBuilder::new()
         .set_buckets(&[
             0.00001, 0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025,
@@ -108,6 +123,11 @@ fn recorder() -> PrometheusRecorder {
             .set_buckets_for_metric(Matcher::Full((*name).into()), &long)
             .expect("static long buckets");
     }
+    for name in catalog::TOKENS {
+        b = b
+            .set_buckets_for_metric(Matcher::Full((*name).into()), &tokens)
+            .expect("static token buckets");
+    }
     b.build_recorder()
 }
 
@@ -115,6 +135,7 @@ struct Installed {
     handle: PrometheusHandle,
     started: Instant,
     history: Mutex<History>,
+    backup_paths: Option<(PathBuf, PathBuf)>,
 }
 
 #[derive(Default)]
@@ -143,6 +164,14 @@ pub fn connect_export(export: Box<dyn Export>) -> bool {
 /// Installs the in-memory recorder, before anything that records starts. Collection is always on;
 /// a second call (or another recorder already in place) changes nothing.
 pub fn install() {
+    install_recorder(None);
+}
+
+pub(crate) fn install_with_backup(home: PathBuf, database: PathBuf) {
+    install_recorder(Some((home, database)));
+}
+
+fn install_recorder(backup_paths: Option<(PathBuf, PathBuf)>) {
     let recorder = recorder();
     let handle = recorder.handle();
     if let Err(e) = metrics::set_global_recorder(recorder) {
@@ -155,6 +184,7 @@ pub fn install() {
         handle,
         started: Instant::now(),
         history: Mutex::default(),
+        backup_paths,
     });
     // build_recorder starts no exporter upkeep: fold buffered histogram samples here.
     tokio::spawn(async move {
@@ -169,8 +199,11 @@ pub fn install() {
 
 /// Capture one interval. The Node readings already carry their Hub receipt timestamps. Both the
 /// typed history and exported gauges are updated from the same observations in this pass.
-pub(crate) fn record_minute(observations: Vec<nodes::Observation>) {
+pub(crate) async fn record_minute(observations: Vec<nodes::Observation>) {
     let Some(i) = INSTALLED.get() else { return };
+    if let Some((home, database)) = &i.backup_paths {
+        backup::collect(home, database).await;
+    }
     let text = {
         let mut history = i.history.lock().unwrap_or_else(|e| e.into_inner());
         history.nodes.record(observations, crate::nodes::now());
@@ -1299,6 +1332,47 @@ mod tests {
         assert!(
             !text.contains("unknown_page"),
             "unknown nav keys are never exported as labels: {text}"
+        );
+    }
+
+    #[test]
+    fn periodic_task_gating_and_token_metrics_are_described_and_recorded() {
+        use steve_runtime::jobs::{
+            AvoidReason, SkipReason, record_model_calls_avoided, record_periodic_skipped,
+            record_periodic_token_counts, record_periodic_triggered,
+        };
+        let recorder = recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            catalog::describe();
+            record_periodic_triggered("flow.report");
+            record_periodic_skipped("flow.report", SkipReason::NoChange);
+            record_periodic_skipped("digest.cron", SkipReason::QueueDriven);
+            record_periodic_token_counts("flow.report", 1200, 300, 400, 0);
+            record_model_calls_avoided("channels.intent", AvoidReason::Batched, 2);
+            record_model_calls_avoided("channels.intent", AvoidReason::Cached, 1);
+            record_model_calls_avoided("channels.intent", AvoidReason::Deduplicated, 1);
+        });
+        let text = handle.render();
+        for line in [
+            "# HELP steve_periodic_task_evaluations_total ",
+            "# HELP steve_periodic_task_tokens_total ",
+            "# HELP steve_model_calls_avoided_total ",
+            "steve_periodic_task_evaluations_total{task=\"flow.report\",outcome=\"triggered\",reason=\"changed\"} 1",
+            "steve_periodic_task_evaluations_total{task=\"flow.report\",outcome=\"skipped\",reason=\"no_change\"} 1",
+            "steve_periodic_task_evaluations_total{task=\"digest.cron\",outcome=\"skipped\",reason=\"queue_driven\"} 1",
+            "steve_periodic_task_tokens_total{task=\"flow.report\",kind=\"input\"} 1200",
+            "steve_periodic_task_tokens_total{task=\"flow.report\",kind=\"output\"} 300",
+            "steve_periodic_task_tokens_total{task=\"flow.report\",kind=\"cache_read\"} 400",
+            "steve_model_calls_avoided_total{purpose=\"channels.intent\",reason=\"batched\"} 2",
+            "steve_model_calls_avoided_total{purpose=\"channels.intent\",reason=\"cached\"} 1",
+            "steve_model_calls_avoided_total{purpose=\"channels.intent\",reason=\"deduplicated\"} 1",
+        ] {
+            assert!(text.contains(line), "missing `{line}` in:\n{text}");
+        }
+        assert!(
+            !text.contains("kind=\"cache_write\""),
+            "zero token counts must not emit empty series:\n{text}"
         );
     }
 }

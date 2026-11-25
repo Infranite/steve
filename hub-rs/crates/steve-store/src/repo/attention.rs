@@ -77,9 +77,9 @@ pub(crate) fn replies_on(c: &Connection, ws: &str, user: &str) -> Result<(Vec<En
         |r| r.get(0),
     )?;
     let mut st = c.prepare_cached("SELECT q.message_id,q.seq,m.created FROM thread_reply_commits q
-      JOIN messages m ON m.id=q.message_id JOIN thread_runs r ON r.id=q.run_id
+      JOIN messages m ON m.id=q.message_id JOIN thread_reply_receipts r ON r.id=q.receipt_id
       WHERE q.workspace_id=?1 AND q.user_id=?2 AND r.workspace_id=?1 AND r.user_id=?2
-        AND r.status IN ('done','stopped','budget','violated','failed') AND m.workspace_id=?1 AND m.space='steve' AND m.author='steve'
+        AND r.outcome IN ('answered','handed_off','stopped','failed','unknown') AND m.workspace_id=?1 AND m.space='steve' AND m.author='steve'
         AND q.seq>coalesce((SELECT through_seq FROM thread_reply_reads WHERE workspace_id=?1 AND user_id=?2 AND space='steve'),0)
       ORDER BY q.seq DESC")?;
     let entries = st
@@ -99,9 +99,9 @@ pub(crate) fn reply_on(c: &Connection, ws: &str, user: &str, id: &str) -> Result
     feed::member_on(c, ws, user)?;
     c.query_row(
         "SELECT m.id,m.created FROM thread_reply_commits q
-      JOIN messages m ON m.id=q.message_id JOIN thread_runs r ON r.id=q.run_id
+      JOIN messages m ON m.id=q.message_id JOIN thread_reply_receipts r ON r.id=q.receipt_id
       WHERE q.message_id=?1 AND q.workspace_id=?2 AND q.user_id=?3
-        AND r.workspace_id=?2 AND r.user_id=?3 AND r.status IN ('done','stopped','budget','violated','failed')
+        AND r.workspace_id=?2 AND r.user_id=?3 AND r.outcome IN ('answered','handed_off','stopped','failed','unknown')
         AND m.workspace_id=?2 AND m.space='steve' AND m.author='steve'",
         params![id, ws, user],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -387,9 +387,9 @@ pub fn read_replies(
         return Err(StoreError::Conflict("Expected replies snapshot".into()));
     }
     let seq: Option<i64> = tx.conn.query_row("SELECT q.seq FROM thread_reply_commits q
-        JOIN thread_runs r ON r.id=q.run_id JOIN messages m ON m.id=q.message_id
+        JOIN thread_reply_receipts r ON r.id=q.receipt_id JOIN messages m ON m.id=q.message_id
         WHERE q.message_id=?1 AND q.workspace_id=?2 AND q.user_id=?3 AND q.seq<=?4
-          AND r.workspace_id=?2 AND r.user_id=?3 AND r.status IN ('done','stopped','budget','violated','failed') AND m.space='steve' AND m.author='steve'",
+          AND r.workspace_id=?2 AND r.user_id=?3 AND r.outcome IN ('answered','handed_off','stopped','failed','unknown') AND m.space='steve' AND m.author='steve'",
         params![through_id,ws,user,w.upper], |r| r.get(0)).optional()?;
     let seq =
         seq.ok_or_else(|| StoreError::Conflict("Reply is not in this caller's snapshot".into()))?;

@@ -7,6 +7,7 @@
   "hub.dispatch.not_candidate": "只能新绑定有当前兼容报告的 Node。",
   "hub.dispatch.not_bound": "Team 只能从该 Bot 已绑定的 Node 中收窄范围。",
   "hub.dispatch.owner_only": "只有工作空间所有者能修改 Bot 派发设置。",
+  "hub.dispatch.team_member_main_bot": "Steve 是工作空间协调者，不能加入 Team 成员列表。",
   "hub.dispatch.invalid": "Bot Team 或节点列表无效。",
   "hub.dispatch.outside_team": "这个 Bot 不在所选 Team 的启用成员中。",
   "hub.dispatch.no_bindings": "该 Bot 和 Team 的范围内没有已绑定的执行节点。",
@@ -220,6 +221,10 @@
   "hub.node.unbound.unreadable": "它的记录暂时读不出来",
   "hub.node.unbound.bind_failed": "没能把它绑定到 Node 上",
   "hub.node.disk_low": "设备「%{name}」的项目磁盘只剩 %{free}，快满了。可以在那台机器上清理一下，或在设备页查看状态。",
+  "hub.node.harness_auto_upgraded": "「%{node}」上的 %{harness} 已自动升级至 %{versions}。",
+  "hub.node.harness_auto_upgrade_failed": "「%{node}」上的 %{harness} 自动升级失败：%{error}",
+  "hub.node.harness_upgraded": "「%{node}」上的 %{harness} 已升级至 %{versions}。",
+  "hub.node.harness_upgrade_failed": "「%{node}」上的 %{harness} 升级失败：%{error}",
   "hub.node.tags_owner_only": "仅实例管理员可以修改设备标签",
   "hub.node.context_owner_only": "仅实例管理员可以修改 Hub 的个人 agent 配置默认值",
   "hub.node.context_bad": "只能选择加载或不加载",
@@ -343,5 +348,9 @@
   "hub.models.invalid_selection": "模型选择参数不正确。",
   "hub.node.workspace_conflict": "工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
   "hub.node.workspace_conflict_question": "开不了会话：工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
-  "hub.preflight.harness_not_ready": "%{harness} 在所有设备上都还没装好、没就绪或没登录，现在不能运行。请在设备上安装它，或在那台设备上让它自己登录（Steve 用的就是 harness 在那台设备上的登录），再到「设备」页面查看。"
+  "hub.preflight.harness_not_ready": "%{harness} 在所有设备上都还没装好、没就绪或没登录，现在不能运行。请在设备上安装它，或在那台设备上让它自己登录（Steve 用的就是 harness 在那台设备上的登录），再到「设备」页面查看。",
+  "hub.handoff.no_eligible_session": "当前事项还没有可交接的会话",
+  "hub.handoff.readonly_session": "只读或外部导入的会话不能交接",
+  "hub.handoff.session_not_bound_to_item": "只有关联事项的会话才能交接",
+  "hub.handoff.auto_bot_switch_forbidden": "自动交接不更换 Bot，只切换当前 Bot 的执行面"
 }

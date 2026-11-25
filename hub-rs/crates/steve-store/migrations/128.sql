@@ -1,68 +1,40 @@
--- Migrate retired YOLO approval records without rewriting historical outcomes, and backfill
--- explicit bot_node_bindings so runtime paths need no read-time legacy fallback.
+-- Steve is the workspace coordinator, never a Team member. Strip any main bot rows from
+-- bot_teams.members, rewrite historical steve_fallback placement facts to coordinator_deferred,
+-- and track items waiting for an executor so one workspace decision card covers them all.
+UPDATE bot_teams
+   SET members = COALESCE(
+     (SELECT json_group_array(json(m.value))
+        FROM json_each(bot_teams.members) AS m
+       WHERE NOT EXISTS (
+         SELECT 1 FROM bots b
+          WHERE b.id = json_extract(m.value, '$.bot')
+            AND b.main = 1
+       )),
+     '[]'
+   )
+ WHERE json_valid(members)
+   AND EXISTS (
+     SELECT 1
+       FROM json_each(bot_teams.members) AS m
+       JOIN bots b ON b.id = json_extract(m.value, '$.bot')
+      WHERE b.main = 1
+   );
 
--- Only discard outbound channel messages that are still pending and have not been sent
--- (`status = 'pending' AND sent IS NULL`); sent or in-flight messages are left untouched.
-UPDATE chan_messages SET status = 'discarded'
- WHERE status = 'pending' AND sent IS NULL
-   AND decision_id IN (SELECT id FROM decisions WHERE json_extract(result, '$.decided_by') = 'yolo');
+UPDATE bot_placements
+   SET fact = json_set(
+     fact,
+     '$.explanation.reason', 'coordinator_deferred',
+     '$.explanation.deferred_by', 'setting'
+   )
+ WHERE fact IS NOT NULL
+   AND json_valid(fact)
+   AND json_extract(fact, '$.explanation.reason') = 'steve_fallback';
 
--- Only discard queued mail drafts that have not been sent (`status = 'approved' AND sent IS NULL`);
--- already-sending (`status = 'sending'`) and already-sent (`status = 'sent'` / `sent IS NOT NULL`)
--- drafts are left untouched.
-UPDATE mail_drafts SET status = 'discarded', send_at = NULL
- WHERE status = 'approved' AND sent IS NULL
-   AND decision_id IN (SELECT id FROM decisions WHERE json_extract(result, '$.decided_by') = 'yolo');
-
--- Keep historical decision `status` unchanged (already-settled rows stay `resolved`). Strip
--- retired YOLO engine keys from `result` and attribute automatic settlement to Steve
--- (`$.decided_by = 'steve'`, matching `audit.actor: 'yolo' -> 'steve'`; `decisions` has no
--- `resolved_by` column).
-UPDATE decisions
-   SET result = json_set(
-         json_remove(
-           result,
-           '$.yolo_action',
-           '$.yolo_reason',
-           '$.yolo_rule',
-           '$.hash',
-           '$.send_at',
-           '$.content_hash'
-         ),
-         '$.decided_by',
-         'steve'
-       )
- WHERE json_extract(result, '$.decided_by') = 'yolo';
-
-DELETE FROM audit WHERE action LIKE 'yolo.%';
-UPDATE audit SET actor = 'steve' WHERE actor = 'yolo';
-
--- Backfill explicit bot_node_bindings for every (workspace_id, bot_id) without one.
--- Preserves the post-116 default (`DEFAULT_NODES = ["local"]`) first, and appends any distinct
--- active, non-revoked remote Node that this Bot actually ran sessions on in that workspace so
--- existing remote-capable Bots are not locked to local-only.
-INSERT OR IGNORE INTO bot_node_bindings (workspace_id, bot_id, nodes)
-SELECT w.workspace_id,
-       w.bot_id,
-       (
-         SELECT json_group_array(node_id)
-           FROM (
-             SELECT node_id
-               FROM (
-                 SELECT 'local' AS node_id, 0 AS ord
-                 UNION ALL
-                 SELECT DISTINCT r.node_id AS node_id, 1 AS ord
-                   FROM sessions s
-                   JOIN runtime_sessions r ON r.session_id = s.id
-                   JOIN nodes n ON n.node_id = r.node_id
-                  WHERE s.workspace_id = w.workspace_id
-                    AND s.bot_id = w.bot_id
-                    AND r.node_id <> 'local'
-                    AND n.local = 0
-                    AND n.state = 'active'
-                    AND n.revoked_at IS NULL
-               )
-              ORDER BY ord, node_id
-           )
-       )
-  FROM bot_workspaces w;
+CREATE TABLE item_placement_waits (
+    item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    blocked TEXT NOT NULL,
+    proposal_id TEXT REFERENCES bot_proposals(id) ON DELETE SET NULL,
+    created INTEGER NOT NULL
+);
+CREATE INDEX item_placement_waits_ws ON item_placement_waits(workspace_id, created);

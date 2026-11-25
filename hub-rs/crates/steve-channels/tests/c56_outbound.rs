@@ -1260,6 +1260,7 @@ async fn a_finished_item_answers_in_its_thread_as_a_draft() {
                 requested_by: "ops".into(),
                 question_template: None,
                 source: None,
+                wait: None,
             })
         })
         .unwrap();

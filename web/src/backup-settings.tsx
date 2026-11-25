@@ -24,7 +24,7 @@ export function HubData() {
     setSaving(true); setErr(null)
     try {
       const settings = await saveBackupSettings({ ...s.settings, ...patch }, (method, path, body) => modReq<BackupSettings>(method, path, body))
-      setS({ ...s, settings, daily: s.available && settings.enabled, keep_days: settings.keep_days })
+      setS({ ...s, settings })
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
     finally { setSaving(false) }
   }
@@ -33,7 +33,7 @@ export function HubData() {
   return <Section data-hub-data label={t("manage:data.hub")}><Panel>
     <Row title={t("manage:data.location")} sub={<span className="type-code break-all" data-hub-database>{s?.database ?? err ?? "…"}</span>} />
     {s && <fieldset disabled={saving} className="min-w-0" data-backup-settings>
-      <Row title={t("manage:data.backup")} sub={<span data-hub-backup={s.daily ? "daily" : "off"}>{t(`manage:data.${planKey(s)}`, { days: s.keep_days })}{!s.available && ` ${t("manage:data.backupUnavailable")}`}</span>}>
+      <Row title={t("manage:data.backup")} sub={<span data-hub-backup={s.available && s.settings.enabled ? "daily" : "off"}>{t(`manage:data.${planKey(s)}`, { days: s.settings.keep_days })}{!s.available && ` ${t("manage:data.backupUnavailable")}`}</span>}>
         <SetSwitch label={t("manage:data.backup")} testId="backup-daily" checked={s.settings.enabled} onChange={(enabled) => void save({ enabled })} />
       </Row>
       <Row title={t("manage:data.backupKeepDays")} sub={t("manage:data.backupKeepDaysSub")}>
@@ -44,6 +44,8 @@ export function HubData() {
     </fieldset>}
     {err && <Row title={<span role="alert">{err}</span>} />}
     {s && <Row title={t("manage:data.backupDir")} sub={<span className="type-code break-all" data-hub-backup-dir>{s.dir}</span>} />}
-    {s && last && <Row title={t("manage:data.backupLatest")} sub={<span data-hub-backup-last>{t(`manage:data.${last}`, s.last ? { when: monthDayTime(s.last.at), size: bytes(s.last.bytes) } : {})}</span>} />}
+    {s?.repository && <Row title={t("manage:data.backupCapacity")} sub={t("manage:data.backupCapacityValue", { used: bytes(s.repository.bytes), free: bytes(s.repository.available_bytes) })} />}
+    {s?.error && <Row title={<span role="alert">{t(s.error === "locked" ? "manage:data.backupLocked" : "manage:data.backupStatusFailed")}</span>} />}
+    {s && last && !s.error && <Row title={t("manage:data.backupLatest")} sub={<span data-hub-backup-last>{t(`manage:data.${last}`, s.last ? { when: monthDayTime(s.last.at) } : {})}</span>} />}
   </Panel></Section>
 }

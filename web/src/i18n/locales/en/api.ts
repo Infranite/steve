@@ -164,9 +164,7 @@ export default {
     notes: "Notes",
     files: "Files",
     folder: "Folder",
-    items: "Item records",
-    chat: "Conversation records",
-    mems: "Long-term memory and knowledge entries",
+    mems: "Preferences, rules & facts",
     botMems: "Bot memory",
   },
   preset: {

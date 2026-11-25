@@ -27,7 +27,7 @@
 //! `space_identities`, migration 019): a space another live identity still sees is left alone, and
 //! deleting one removes its identities, attention and voice (`space_prefs`) with it.
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -39,13 +39,14 @@ use steve_store::channel_spaces::cleanup as repo;
 pub use steve_store::channel_spaces::cleanup::selection::Leftover;
 use steve_store::channel_spaces::cleanup::selection::{self, Keep};
 use steve_store::{Accounts, Read};
+use steve_types::backup::SnapshotId;
 
 use crate::{ChannelResult, Channels};
 
 /// The host must finish a durable backup before cleanup is allowed to mutate data.
-/// The returned location is opaque to channels and is echoed in the response/audit.
+/// The returned snapshot ID is opaque to channels and is echoed in the response/audit.
 pub trait PreDestructiveBackup: Send + Sync {
-    fn backup(&self, what: &str) -> ChannelResult<PathBuf>;
+    fn backup(&self) -> ChannelResult<SnapshotId>;
 }
 
 /// What to clean.
@@ -105,9 +106,9 @@ pub struct Summary {
     /// At most 200 of the kept things; `kept_count` is all of them.
     pub kept: Vec<Kept>,
     pub kept_count: usize,
-    /// The backup file name taken before a real cleanup (`pre-purge-<UTC>-<id>/<database>`).
+    /// The snapshot taken before a real cleanup.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub backup: Option<String>,
+    pub backup: Option<SnapshotId>,
 }
 
 /// The routes, relative to `/api`, behind the `Caller` layer.
@@ -384,7 +385,7 @@ pub async fn run(
         ch.store().read(|r| plan(r, &v, &t, level).map(|_| ()))?;
         let now = ch.now();
         let backup = backup.ok_or_else(|| ApiError::Internal("清理前备份能力未配置".into()))?;
-        let file = backup.backup("purge")?.to_string_lossy().into_owned();
+        let snapshot = backup.backup()?;
         let mut out = ch.store().write(|tx| -> ApiResult<Summary> {
             let p = plan(tx, &v, &t, level)?;
             let mut expected = decision_ids.clone(); expected.sort(); expected.dedup();
@@ -410,7 +411,7 @@ pub async fn run(
                     "level": level, "account": t.account_id, "spaces": s.spaces,
                     "messages": s.messages, "messages_purged": s.messages_purged,
                     "decisions": s.decisions, "contacts": s.contacts, "accounts": s.accounts, "kept": s.kept_count,
-                    "backup": file,
+                    "backup": snapshot,
                 }),
             )?;
             for id in p.spaces.iter().chain(p.kept.iter().filter(|k| k.kind == "space").map(|k| &k.id)) {
@@ -418,7 +419,7 @@ pub async fn run(
             }
             Ok(s)
         })?;
-        out.backup = Some(file);
+        out.backup = Some(snapshot);
         tracing::info!(level = ?level, spaces = out.spaces, messages = out.messages, contacts = out.contacts, "channels: cleanup done");
         Ok(out)
     }))

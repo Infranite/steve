@@ -251,5 +251,6 @@
   "flow.startup.metadata_invalid": "Startup failure tracking is damaged. Edit the schedule or Bot to recover; this old run remains available for diagnosis.",
   "flow.startup.metadata_recovered": "This historical startup record is damaged. The configuration has changed, so this record no longer blocks current startup. It remains available for diagnosis.",
   "flow.startup.metadata_unattributed": "This damaged run cannot be attributed to a startup source or configuration. It is preserved for diagnosis; it does not replace a known source budget.",
-  "flow.startup.metadata_damaged": "Startup failure tracking for this run is damaged. The record remains available for diagnosis."
+  "flow.startup.metadata_damaged": "Startup failure tracking for this run is damaged. The record remains available for diagnosis.",
+  "flow.report.no_change": "No changes since last report, skipped"
 }

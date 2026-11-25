@@ -64,6 +64,10 @@ struct BuiltinDeclaration {
     managed_by_default: bool,
     #[serde(default)]
     components: Vec<ComponentDeclaration>,
+    /// Trusted launch flags owned by the compile-time built-in catalog (never accepted from
+    /// operator or API manifests).
+    #[serde(default)]
+    env: BTreeMap<String, String>,
     // The very same serde structure used by AdapterEntry::Declared in harness.json.
     #[serde(flatten)]
     declaration: Declaration,
@@ -126,7 +130,6 @@ impl From<BuiltinDeclaration> for Builtin {
             detect_bins: intern_list(b.detect_bins),
             args: intern_list(b.declaration.args.unwrap_or_default()),
             env: b
-                .declaration
                 .env
                 .into_iter()
                 .map(|(k, v)| (intern(k), intern(v)))

@@ -683,6 +683,7 @@ impl Mail {
                 updated: now,
                 sent: None,
                 delivery_version: p.delivery_version,
+                wait: None,
             };
             return Ok(self.insert_pending(d, &check)?.id);
         };

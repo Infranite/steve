@@ -159,7 +159,23 @@ pub async fn me(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> Api
     let web_version = crate::web::web_version(&st.cfg);
     st.read(move |r| {
         let ws = super::workspaces_out(r.workspaces_of_user(&c.me)?);
-        ok(json!({ "user": c.user, "version": version, "web_version": web_version, "workspaces": objs(ws), "workspace": c.ws, "client": c.client }))
+        let person = r.member_identity(&c.ws, &c.me)?;
+        let mut user = c.user;
+        if let Some(ref p) = person {
+            user.insert("login".into(), json!(p.login));
+            user.insert("name".into(), json!(p.name));
+            if let Some(ref pid) = p.party_id {
+                user.insert("party_id".into(), json!(pid));
+            }
+            user.insert(
+                "avatar".into(),
+                serde_json::to_value(&p.avatar).unwrap_or(Value::Null),
+            );
+            if let Some(ref sub) = p.subtitle {
+                user.insert("subtitle".into(), json!(sub));
+            }
+        }
+        ok(json!({ "user": user, "person": person, "version": version, "web_version": web_version, "workspaces": objs(ws), "workspace": c.ws, "client": c.client }))
     })
     .await
 }
@@ -204,7 +220,8 @@ struct Shell {
     #[serde(skip_serializing_if = "Option::is_none")]
     update: Option<UpdateNotice>,
     owner: bool,
-    me: Obj,
+    me: Option<steve_types::MemberIdentity>,
+    members: Vec<steve_types::MemberIdentity>,
     workspace: Option<Obj>,
     workspaces: Vec<Obj>,
     bots: Vec<Obj>,
@@ -215,6 +232,7 @@ struct Shell {
     harness_names: std::collections::BTreeMap<String, String>,
     modules: steve_types::integrations::OptionalModules,
     notify_seen: i64,
+    dismissed_alerts: Vec<String>,
 }
 
 /// Workspace configuration and the shell's navigation catalogue.
@@ -243,13 +261,25 @@ pub async fn shell(
         if let Some(w) = workspace.as_mut() {
             steve_store::seeded::show(w, steve_store::seeded::WORKSPACE);
         }
-        let (bots, all_bots) = super::bots_out(r, ws)?;
+        let my_workspaces = r.workspaces_of_user(&c.me)?;
+        let allowed_ws: std::collections::BTreeSet<String> = my_workspaces
+            .iter()
+            .map(|w| str_of(w, "id"))
+            .filter(|id| !id.is_empty())
+            .collect();
+        let (bots, all_bots) = super::bots_out(r, ws, &c.me, &allowed_ws)?;
         let mut projects = r.projects_list(ws)?;
         for p in &mut projects {
             steve_store::seeded::show(p, steve_store::seeded::PROJECT);
         }
         let mut settings = crate::settings::defaults();
         settings.extend(r.settings_all(ws)?);
+        let members = r.member_identities(ws)?;
+        let me = members
+            .iter()
+            .find(|m| m.user_id.as_str() == c.me)
+            .cloned()
+            .or(r.member_identity(ws, &c.me)?);
         conditional_json(
             &headers,
             &Shell {
@@ -257,9 +287,10 @@ pub async fn shell(
                 web_version,
                 update,
                 owner,
-                me: c.user,
+                me,
+                members,
                 workspace,
-                workspaces: super::workspaces_out(r.workspaces_of_user(&c.me)?),
+                workspaces: super::workspaces_out(my_workspaces),
                 bots,
                 all_bots,
                 projects,
@@ -268,6 +299,7 @@ pub async fn shell(
                 harness_names,
                 modules,
                 notify_seen: crate::notify::seen(r, ws)?,
+                dismissed_alerts: crate::notify::dismissed(r, ws)?,
             },
         )
     })
@@ -555,21 +587,13 @@ pub async fn thread_say(
         }
         checked = ms;
     }
-    // a retry of the same draft (`client_id`) answers like the first send and sends nothing; the
-    // send runs on even if this request goes away, so it needs its own state
-    let (st2, c2) = (st.clone(), c.clone());
-    let v = st
-        .dedupe
-        .once(&c.ws, &c.me, "thread", client_id, move || async move {
-            let (st, c) = (st2, c2);
-            let refs = super::files::refs(&st, &c.ws, files).await?;
-            st.domain
-                .say_to(&c.ws, &c.me, &text, refs, checked, item, reply_to)
-                .await?;
-            Ok::<_, ApiError>(json!({ "ok": true }))
-        })
+    let refs = super::files::refs(&st, &c.ws, files).await?;
+    st.domain
+        .say_to(
+            &c.ws, &c.me, &text, refs, checked, item, reply_to, client_id,
+        )
         .await?;
-    ok(v)
+    ok(json!({ "ok": true }))
 }
 
 pub async fn thread_stop(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
@@ -1013,6 +1037,28 @@ pub async fn settings_patch(
             }
         }
     }
+    if values.contains_key(steve_store::bot_dispatch::NO_EXECUTOR_SETTING)
+        && let Some(store) = super::bot_dispatch::store(&st).cloned()
+    {
+        let ws = c.ws.clone();
+        let me = c.me.clone();
+        let owner = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                Ok::<_, steve_store::StoreError>(
+                    steve_store::Members::new(r).role(&ws, &me)?.as_deref() == Some("owner"),
+                )
+            })
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+        if !owner {
+            return Err(ApiError::Json(
+                403,
+                steve_i18n::t!("hub.dispatch.owner_only"),
+            ));
+        }
+    }
     st.write(move |r| {
         r.settings_set(&c.ws, &values, &c.me)?;
         ok_true()
@@ -1290,22 +1336,23 @@ pub async fn system_models(
     ok(crate::catalog::with_usage(list, &used))
 }
 
-/// `POST /api/system/harnesses` `{id, name?, command, args?, env?, properties?}`: declares a
+/// `POST /api/system/harnesses` `{id, name?, command, args?, properties?}`: declares a custom
 /// harness adapter in the Hub's manifest (the instance's owner only); in force once the Hub
-/// restarts, when its Node asks the adapter what it supports.
+/// restarts, when its Node asks the adapter what it supports. Built-in harness ids and `env`
+/// injection are refused.
 pub async fn system_harness_add(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
     instance_owner(&c)?;
-    let h: crate::harnesses::NewHarness =
-        serde_json::from_value(body(&b)?).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let h = crate::harnesses::parse_new_harness(body(&b)?)
+        .map_err(crate::harnesses::HarnessError::into_api_error)?;
     let path = st.cfg.harness_manifest.clone();
     tokio::task::spawn_blocking(move || crate::harnesses::declare(&path, h))
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?
-        .map_err(ApiError::bad_request)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(crate::harnesses::HarnessError::into_api_error)?;
     ok(json!({"saved": true, "restart": true}))
 }
 
@@ -1341,8 +1388,8 @@ pub async fn system_harness_install(
     ok(json!({"accepted": true, "restart": false}))
 }
 
-/// `DELETE /api/system/harnesses/:id`: removes an adapter from the Hub's manifest (the
-/// instance's owner only); in force once the Hub restarts.
+/// `DELETE /api/system/harnesses/:id`: removes a custom adapter from the Hub's manifest (the
+/// instance's owner only); in force once the Hub restarts. Built-in harness ids are refused.
 pub async fn system_harness_remove(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -1352,12 +1399,12 @@ pub async fn system_harness_remove(
     let path = st.cfg.harness_manifest.clone();
     let removed = tokio::task::spawn_blocking(move || crate::harnesses::undeclare(&path, &id))
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?
-        .map_err(ApiError::bad_request)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(crate::harnesses::HarnessError::into_api_error)?;
     ok(json!({"removed": removed, "restart": true}))
 }
 
-// ── task workspaces (ST-45) ──
+// ── task workspaces ──
 
 /// Paths and sizes on this machine are the instance manager's.
 fn instance_owner(c: &Ctx) -> Result<(), ApiError> {
@@ -1391,6 +1438,16 @@ pub async fn system_workspaces_reclaim(
     ok(st.domain.reclaim_workspaces().await?)
 }
 
+#[derive(serde::Serialize)]
+struct BackupStatus {
+    settings: crate::backup::DailySettings,
+    available: bool,
+    database: std::path::PathBuf,
+    dir: std::path::PathBuf,
+    #[serde(flatten)]
+    inventory: crate::backup::Inventory,
+}
+
 /// `GET /api/system/backup`: where the database and its copies are on the Hub's machine, whether the
 /// daily copy is on, and the newest one.
 pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
@@ -1402,22 +1459,20 @@ pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<C
         .ok_or_else(|| ApiError::internal("storage unavailable"))?
         .store
         .clone();
-    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<BackupStatus> {
         let settings = crate::backup::daily_settings(&store)?;
-        let mut status = crate::daily_backup::status(
-            &cfg.home,
-            &cfg.db_path(),
-            cfg.backup && !cfg.diagnostic() && settings.enabled,
-            settings.keep_days,
-        );
-        status["settings"] = serde_json::to_value(settings)?;
-        status["available"] = json!(cfg.backup && !cfg.diagnostic());
-        Ok(status)
+        Ok(BackupStatus {
+            settings,
+            available: cfg.backup && !cfg.diagnostic(),
+            database: cfg.db_path(),
+            dir: crate::backup::root(&cfg.home),
+            inventory: crate::backup::inventory(&cfg.home),
+        })
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?
     .map_err(|e| ApiError::internal(e.to_string()))?;
-    ok(v)
+    ok(serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))?)
 }
 
 /// Installation owner settings; stored atomically through the existing Settings repository.
@@ -1455,11 +1510,7 @@ pub async fn system_backup_now(
     instance_owner(&c)?;
     let cfg = st.cfg.clone();
     let manifest = tokio::task::spawn_blocking(move || {
-        crate::admin::client::backup::run(
-            &cfg.home,
-            &cfg.db_path(),
-            steve_store_sqlite::backup::Reason::Manual,
-        )
+        crate::backup::create(&cfg.home, &cfg.db_path(), crate::backup::Purpose::Manual)
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?

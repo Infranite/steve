@@ -270,6 +270,14 @@ async fn save(st: AppState, cx: Ctx, id: Option<String>, b: Preset) -> ApiResult
         let result: Result<Value, DispatchWriteError> = s.write(|tx| {
             require_owner(tx, &cx)?;
             for m in &members {
+                if bot_admin::is_main_bot(tx, &cx.ws, &m.bot)? {
+                    return Err(ApiError::Contract(
+                        steve_types::ConfigReason::team_member_main_bot(steve_i18n::t!(
+                            "hub.dispatch.team_member_main_bot"
+                        )),
+                    )
+                    .into());
+                }
                 if !is_bot(tx, &cx.ws, &m.bot)? {
                     return Err(StoreError::NotFound("Bot").into());
                 }

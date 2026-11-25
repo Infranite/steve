@@ -309,7 +309,7 @@ pub async fn send(
     }
     // a send runs to its end even when the request goes away (a reload, a dropped connection), so its
     // drafts are never left taken but unsettled
-    tokio::spawn(steve_i18n::bind(send_now(st, id, req.ids, req.key)))
+    tokio::spawn(steve_i18n::bind(send_now(st, id, req.ids, req.key, c.me)))
         .await
         .map_err(|e| {
             ApiError::Json(
@@ -323,7 +323,13 @@ fn line_id(t: &Obj) -> i64 {
     t.get("id").and_then(Value::as_i64).unwrap_or(0)
 }
 
-async fn send_now(st: AppState, id: String, ids: Vec<String>, key: String) -> ApiResult {
+async fn send_now(
+    st: AppState,
+    id: String,
+    ids: Vec<String>,
+    key: String,
+    actor: String,
+) -> ApiResult {
     let (iid, ikey) = (id.clone(), key.clone());
     let (again, taken, arts, before) = st
         .write(move |r| {
@@ -345,7 +351,10 @@ async fn send_now(st: AppState, id: String, ids: Vec<String>, key: String) -> Ap
         ));
     }
     let text = message(&taken, &arts);
-    let res = st.domain.supplement(&id, &text, "auto", Vec::new()).await;
+    let res = st
+        .domain
+        .supplement(&id, &text, "auto", Vec::new(), &actor)
+        .await;
     st.write(move |r| {
         // the line the supplement wrote, if it got that far: the user's, with this text, after the send began
         let line = r

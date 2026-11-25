@@ -529,6 +529,7 @@ pub fn open_approval(
             previous: d.decision_id.clone(),
             content_hash: d.content_hash.clone(),
         }),
+        wait: None,
     })?;
     repo::set_draft_decision(tx, &d.id, Some(&dec.id), &d.content_hash)?;
     repo::draft_transition(tx, &d.id, &["draft", "pending", "failed"], "pending", now)?;
@@ -727,6 +728,7 @@ impl Mail {
             updated: now,
             sent: None,
             delivery_version: None,
+            wait: None,
         };
         validate(&d)?;
         if d.reply_to_message.is_some() && d.thread_id.is_none() {

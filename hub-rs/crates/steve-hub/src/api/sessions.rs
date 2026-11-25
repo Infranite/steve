@@ -226,7 +226,7 @@ pub async fn message(
     check_file_ids(&req.files)?;
     let mode = req.mode.unwrap_or(MessageMode::Queue).wire();
     let refs = super::files::refs(&st, &c.ws, req.files).await?;
-    ok(json!({ "result": st.domain.session_message(&id, &req.text, mode, refs).await? }))
+    ok(json!({ "result": st.domain.session_message(&id, &req.text, mode, refs, &c.me).await? }))
 }
 
 pub async fn cancel(
@@ -236,6 +236,62 @@ pub async fn cancel(
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
     ok(json!({ "ok": st.domain.cancel(&id).await? }))
+}
+
+/// `POST /api/sessions/{id}/subtasks/{subtask_id}/cancel`: cancel one active subtask (e.g. an
+/// ACP RFD child subagent) without cancelling the parent turn.
+pub async fn cancel_subtask(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path((id, subtask_id)): Path<(String, String)>,
+) -> ApiResult {
+    own_session(&st, &c.ws, &id).await?;
+    let runtime = session_node_runtime(&st, &id).await?;
+    let Some(runtime) = runtime else {
+        return ok(json!({ "ok": false }));
+    };
+    let cancelled = runtime
+        .cancel_subtask(&id, &subtask_id)
+        .await
+        .map_err(|e| match e.code {
+            steve_node_api::Code::Invalid => ApiError::bad_request(e.safe_detail),
+            steve_node_api::Code::Unsupported => ApiError::Json(400, e.safe_detail),
+            steve_node_api::Code::Unavailable => ApiError::Json(503, e.safe_detail),
+            _ => ApiError::internal(e.safe_detail),
+        })?;
+    ok(json!({ "ok": cancelled }))
+}
+
+async fn session_node_runtime(
+    st: &AppState,
+    session_id: &str,
+) -> Result<Option<std::sync::Arc<crate::wire::node_runtime::NodeRuntime>>, ApiError> {
+    let node_id = if let Some(store) = st.modules.as_ref().map(|m| m.store.clone()) {
+        let sid = session_id.to_string();
+        blocking(move || {
+            store
+                .read(|r| steve_store::node_sessions::principal_state(r, &sid))
+                .map(|row| row.map(|r| r.node))
+                .map_err(|e| ApiError::internal(e.to_string()))
+        })
+        .await?
+    } else {
+        None
+    };
+    if let Some(nid) = node_id {
+        if let Some(svc) = &st.nodes
+            && let Some(rt) = svc.fleet.runtime_for(&nid)
+        {
+            return Ok(Some(rt));
+        }
+        if let Some(rt) = &st.node
+            && rt.node_id().as_str() == nid
+        {
+            return Ok(Some(rt.clone()));
+        }
+        return Ok(None);
+    }
+    Ok(st.node.clone())
 }
 
 pub async fn end(
@@ -257,6 +313,19 @@ pub async fn continue_new(
     own_session(&st, &c.ws, &id).await?;
     let ns = st.domain.continue_in_new_session(&id, &c.me).await?;
     ok(json!({ "session": ns }))
+}
+
+/// `POST /sessions/{id}/handoff`: hand off an item session to a fresh session (same or different
+/// Bot, harness, and/or model) carrying deterministic working memory through W3.1 placement.
+pub async fn handoff(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    own_session(&st, &c.ws, &id).await?;
+    let target = super::items::parse_handoff_body(&b)?;
+    ok(st.domain.handoff_session(&id, target, &c.me).await?)
 }
 
 pub async fn patch_one(
@@ -351,7 +420,7 @@ pub async fn queued_edit(
     if text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
-    ok(json!(st.domain.queued_edit(&id, &qid, &text).await?))
+    ok(json!(st.domain.queued_edit(&id, &qid, &text, &c.me).await?))
 }
 
 /// `DELETE /api/sessions/:id/queued/:qid` → the row as it was (the composer takes it back).
@@ -361,7 +430,7 @@ pub async fn queued_remove(
     Path((id, qid)): Path<(String, String)>,
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
-    ok(json!(st.domain.queued_remove(&id, &qid).await?))
+    ok(json!(st.domain.queued_remove(&id, &qid, &c.me).await?))
 }
 
 /// `POST /api/sessions/:id/queued/:qid/send-now` → `{result: interrupted | sent | waiting, reason?}`.
@@ -601,8 +670,13 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         .route("/sessions/{id}/events/marks", get(sessions::marks))
         .route("/sessions/{id}/messages", post(sessions::message))
         .route("/sessions/{id}/cancel", post(sessions::cancel))
+        .route(
+            "/sessions/{id}/subtasks/{subtask_id}/cancel",
+            post(sessions::cancel_subtask),
+        )
         .route("/sessions/{id}/end", post(sessions::end))
         .route("/sessions/{id}/continue", post(sessions::continue_new))
+        .route("/sessions/{id}/handoff", post(sessions::handoff))
         .route("/sessions/{id}/fork", post(sessions::fork))
         .route("/sessions/{id}/link", post(sessions::link))
         .route("/sessions/{id}/queued", get(sessions::queued_list))
