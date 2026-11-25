@@ -238,6 +238,8 @@ pub struct NodeRuntime {
     /// Shared with the workers, which wait on them without keeping the runtime alive.
     wake_send: Arc<tokio::sync::Notify>,
     wake_upkeep: Arc<tokio::sync::Notify>,
+    /// Bumped after every committed runtime write so ledger waiters wake immediately instead of polling SQLite.
+    ledger_rev: tokio::sync::watch::Sender<u64>,
     holding: AtomicBool,
     /// The owner paused the Node ([`Self::set_paused`]).
     paused: AtomicBool,
@@ -347,6 +349,7 @@ impl NodeRuntime {
             owner: uid("hub"),
             wake_send: Arc::new(tokio::sync::Notify::new()),
             wake_upkeep: Arc::new(tokio::sync::Notify::new()),
+            ledger_rev: tokio::sync::watch::channel(0).0,
             holding: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
@@ -634,6 +637,8 @@ impl NodeRuntime {
             self.notify_job(&attempt, &body);
         }
         drop(commit);
+        self.ledger_rev
+            .send_modify(|rev| *rev = rev.wrapping_add(1));
         for f in facts {
             self.domain.workspace_changed(f);
         }

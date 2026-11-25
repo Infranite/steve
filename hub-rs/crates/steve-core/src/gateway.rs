@@ -649,25 +649,11 @@ pub fn jstr(v: &Value) -> String {
     }
 }
 
-/// JS truthiness of a JSON value.
-pub fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0 && !f.is_nan()),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
-
-static BRACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{[\s\S]*\}").expect("valid regex"));
+pub use steve_runtime::json::truthy;
 
 /// The greedy first `{…}` of a model reply, parsed; `None` without braces, an error for bad JSON.
 pub fn first_json(t: &str) -> Result<Option<Value>> {
-    match BRACES.find(t) {
-        None => Ok(None),
-        Some(m) => Ok(Some(serde_json::from_str(m.as_str())?)),
-    }
+    Ok(steve_runtime::json::first_json(t)?)
 }
 
 /// The string value of `"key": "…` in a reply still being written, as far as it has got (escapes decoded,

@@ -560,6 +560,9 @@ async fn unusable_model_reply_gives_an_empty_draft() {
         .status(),
         500
     );
-    assert_eq!(changes::first_json("x {\"a\":1} y"), Some(json!({"a": 1})));
-    assert_eq!(changes::first_json("none"), None);
+    assert_eq!(
+        steve_runtime::json::first_json_opt("x {\"a\":1} y"),
+        Some(json!({"a": 1}))
+    );
+    assert_eq!(steve_runtime::json::first_json_opt("none"), None);
 }

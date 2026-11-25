@@ -229,7 +229,7 @@ const GUARD: &str = "你是一道隐私关卡。有人在聊天里用触发词�
 
 /// Reads the guard's answer; anything unreadable is [`Guard::Unsure`].
 pub(crate) fn parse_guard(answer: &str) -> Guard {
-    let Some(v) = steve_modules::changes::first_json(answer) else {
+    let Some(v) = steve_runtime::json::first_json_opt(answer) else {
         return Guard::Unsure("判断结果读不出".into());
     };
     let why = v["why"].as_str().unwrap_or("").trim().to_string();

@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use steve_modules::Tier;
-use steve_modules::changes::first_json;
+use steve_runtime::json::first_json_opt as first_json;
 
 use super::{NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, req_str, str_list};
 use steve_store::{BotRows, FlowSources, Read};

@@ -603,7 +603,7 @@ fn basis_label(b: &Value, knowledge: &[KnowledgeUse]) -> Option<String> {
 /// basis, or a `leak` without spans, still counts — marked [`R_NO_BASIS`] — so an unexplained leak
 /// never passes. `None` when it is not an answer.
 pub fn judge_check(answer: &str, knowledge: &[KnowledgeUse]) -> Option<(bool, Vec<Span>)> {
-    let v = steve_modules::changes::first_json(answer)?;
+    let v = steve_runtime::json::first_json_opt(answer)?;
     let leak = match v["verdict"].as_str()? {
         "pass" => false,
         "leak" => true,
@@ -633,7 +633,7 @@ pub fn judge_check(answer: &str, knowledge: &[KnowledgeUse]) -> Option<(bool, Ve
 
 /// Reads the check model's answer; `None` when it is not one.
 pub fn parse_check(answer: &str) -> Option<(bool, Vec<Span>)> {
-    let v = steve_modules::changes::first_json(answer)?;
+    let v = steve_runtime::json::first_json_opt(answer)?;
     let leak = match v["verdict"].as_str()? {
         "pass" => false,
         "leak" => true,
@@ -670,7 +670,7 @@ pub fn rewrite_prompt(a: &Audience, reply: &str, spans: &[Span]) -> String {
 
 /// Reads the rewrite: `Some("")` when it says nothing is left, `None` when it is not an answer.
 pub fn parse_rewrite(answer: &str) -> Option<String> {
-    if let Some(v) = steve_modules::changes::first_json(answer)
+    if let Some(v) = steve_runtime::json::first_json_opt(answer)
         && v.is_object()
     {
         return v["text"].as_str().map(|t| t.trim().to_string());

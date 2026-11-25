@@ -6,6 +6,7 @@ pub use clock::{Clock, FakeClock, SystemClock};
 pub mod due;
 #[cfg(feature = "policy")]
 mod jitter;
+pub mod json;
 #[cfg(feature = "machine")]
 pub mod machine;
 #[cfg(feature = "policy")]

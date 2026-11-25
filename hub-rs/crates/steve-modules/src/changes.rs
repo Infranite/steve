@@ -326,13 +326,6 @@ pub fn prompt(p: &Prepared, request: &str) -> String {
     lines.join("\n")
 }
 
-/// The first `{…}` in a model reply (changes.ts `firstJson`), or `None`.
-pub fn first_json(raw: &str) -> Option<Value> {
-    let start = raw.find('{')?;
-    let end = raw.rfind('}')?;
-    serde_json::from_str(raw.get(start..=end)?).ok()
-}
-
 /// `POST /api/config/draft` for a module target: prepare → model → plan → stored draft. A model reply
 /// without usable JSON gives a draft with `changes: []`, like the old drafts.
 pub async fn draft(
@@ -366,7 +359,7 @@ pub async fn draft(
     )
     .await
     .map_err(|e| ApiError::Internal(format!("draft model call: {e}")))?;
-    let raw = first_json(&reply)
+    let raw = steve_runtime::json::first_json_opt(&reply)
         .and_then(|v| v.get("ops").and_then(Value::as_array).cloned())
         .unwrap_or_default();
     let (kind_s, request, caller_c) = (kind.to_string(), request.to_string(), caller.clone());

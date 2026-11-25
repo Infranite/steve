@@ -944,7 +944,7 @@ fn conversation(
 /// Reads the composer's answer ([`OUTPUT`]; anywhere in the text; no `outcome` = a reply). A plain
 /// non-empty answer is taken as the text, with approval required. `None`: nothing to say.
 pub fn parse_answer(answer: &str) -> Option<Answer> {
-    if let Some(v) = steve_modules::changes::first_json(answer)
+    if let Some(v) = steve_runtime::json::first_json_opt(answer)
         && v.is_object()
     {
         let s = |k: &str| v[k].as_str().unwrap_or("").trim().to_string();
@@ -1027,7 +1027,7 @@ pub const DESCRIBE: &str = "如果你实际读到了图片，在 JSON 里再加�
 
 /// The answer's `described` ([`DESCRIBE`]), when it has one.
 pub fn described(answer: &str) -> Option<String> {
-    let v = steve_modules::changes::first_json(answer)?;
+    let v = steve_runtime::json::first_json_opt(answer)?;
     v["described"]
         .as_str()
         .map(str::trim)

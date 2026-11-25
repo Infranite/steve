@@ -4,7 +4,7 @@
 //! instead of doing it again.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use steve_core::node_git::{Applied, Ask, NodeGit};
@@ -87,18 +87,14 @@ impl NodeGit for ItemGit {
         if let Err(e) = p.runtime.submit(operation, subject, "git_apply", &body) {
             return Applied::Failed(Error::new(Code::Internal, e.to_string()));
         }
-        let t0 = Instant::now();
-        loop {
-            match p.runtime.ledger(operation) {
-                Ok(Some(e)) if e.is_settled() => return settled(e),
-                Ok(_) => {}
-                Err(e) => return Applied::Unknown(e.to_string()),
-            }
-            if t0.elapsed() > APPLY_WAIT {
-                return Applied::Unknown("still running on its Node".into());
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        p.runtime
+            .wait_ledger_until(operation, APPLY_WAIT, |res| match res {
+                Ok(Some(e)) if e.is_settled() => std::ops::ControlFlow::Break(settled(e)),
+                Ok(_) => std::ops::ControlFlow::Continue(()),
+                Err(e) => std::ops::ControlFlow::Break(Applied::Unknown(e.to_string())),
+            })
+            .await
+            .unwrap_or_else(|| Applied::Unknown("still running on its Node".into()))
     }
 }
 
