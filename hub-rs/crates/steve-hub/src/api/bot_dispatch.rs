@@ -12,8 +12,8 @@ use steve_store::{
 };
 
 use super::{ApiResult, AppState, Ctx, ok};
-use crate::backend::{BotNodeCandidates, BotNodeState};
 use crate::error::ApiError;
+use crate::wire::core::{BotNodeCandidates, BotNodeState};
 
 pub(super) fn store(st: &AppState) -> Option<&Store> {
     st.modules.as_ref().map(|m| &m.store)

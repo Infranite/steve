@@ -50,7 +50,6 @@ const run = async ({ width, height, scheme }) => {
     else if (p === '/api/shell') data = state()
     else if (p === '/api/snapshot') data = emptySnapshot()
     else if (p === '/api/summary') data = { ws: 'default', workspace_name: '默认', thinking: false, hold: null }
-    else if (p === '/api/yolo') data = { on: false, active: false, forced_off: null, forced_reason: null, paused: null, window: null, scopes: [], counts: { decided: 0, declined: 0, scheduled: 0 } }
     else if (p === '/api/bot-teams' && method === 'GET') {
       await teamReady
       if (teamFailure) return route.fulfill({ status: 503, json: { error: 'Team fixture unavailable' } })

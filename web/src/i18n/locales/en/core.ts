@@ -304,9 +304,6 @@ export default {
   composer: {
     botName: "{{name}} Bot",
     handTo: "Hand to it · {{role}}",
-    relate: "Link · {{info}}",
-    team_one: "Link team · {{count}} person",
-    team_other: "Link team · {{count}} people",
     headItem: "Reference an item",
     headMention: "Bots (hand off) · Contacts and teams (link to this)",
     headCommand: "Commands",

@@ -36,8 +36,6 @@ export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
   tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; revision: number; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
-  /** Historical reason when the retired automatic resolver made this decision. */
-  yolo?: string
   /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
   via?: string }
 /** what became of an approved release (hub decision.result.outcome): the card says this, never a bare "approved" */
@@ -184,10 +182,6 @@ export const st = {
   localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
   noticeSeen: 0,
   quote: null as string | null, focus: null as { item: string; until: number } | null,
-  /* modules that are not wired to a backend yet: always empty, never sample data */
-  SIG: [] as any[], rules: [] as any[], schedules: [] as any[], sources: [] as any[], plugins: [] as any[],
-  ch: { personas: [] as any[], spaces: [] as any[], accounts: [] as any[], providers: [] as any[], notify: { acc: "" }, disclosureDefaults: [] as any[] },
-  pp: { contacts: [] as any[], orgs: [] as any[], teams: [] as any[], vault: [] as any[], itemPeople: [] as any[], accounts: [] as any[] },
   pendingActions: new Set<string>(),
   /** An accepted channel recovery must not be submitted again while state readback is stale or unavailable. */
   submittedChannelDecisions: new Set<string>(),
@@ -1213,7 +1207,7 @@ export function done(): Done[] {
   let out = doneLists.get(xs)
   if (!out) {
     out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
-      how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose", yolo: r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
+      how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose",
       via: typeof r.via?.name === "string" ? r.via.name : undefined } satisfies Done })
     doneLists.set(xs, out)
   }
@@ -1459,36 +1453,6 @@ export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
   }
   return { N, E }
 }
-export function gBuild() {
-  const N: Record<string, GNode> = {}, E: GEdge[] = []
-  getItems().filter((i) => !i.arch).forEach((i) => {
-    N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project }
-    let prev: string | null = null
-    i.ss.forEach((k) => {
-      const s = getSession(k); if (!s) return
-      N[k] = { id: k, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b }
-      E.push(prev ? [prev, k, "交接"] : [i.id, k, ""]); prev = k
-    })
-    ;(i.deps || []).forEach((d) => E.push([d, i.id, "依赖"]))
-    if (i.parent) {
-      const origin = i.parent.s && getSession(i.parent.s) ? i.parent.s : i.parent.item
-      if (origin) E.push([origin, i.id, "派生"])
-    }
-  })
-  getSessions().forEach((s) => { if (!s.item) N[s.id] = { id: s.id, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b } })
-  return { N, E: E.filter((e) => N[e[0]] && N[e[1]]) }
-}
-/** the projects of the shown items, as extra roots; kept out of gBuild so a project doesn't merge all its items into one component */
-export function gProjects(ids: string[], N: Record<string, GNode>) {
-  const P: Record<string, GNode> = {}, E: GEdge[] = []
-  for (const k of ids) {
-    const n = N[k], p = n?.k === "item" && n.project ? st.projects.find((x) => x.id === n.project) : undefined
-    if (!p) continue
-    P[p.id] ??= { id: p.id, k: "proj", title: p.name, st: "", n: getItems().filter((i) => i.project === p.id && !i.arch).length }
-    E.push([p.id, k, "项目"])
-  }
-  return { P, E }
-}
 export function gComps(N: Record<string, GNode>, E: GEdge[]) {
   const p: Record<string, string> = {}; const f = (x: string): string => (p[x] === x ? x : (p[x] = f(p[x])))
   Object.keys(N).forEach((k) => (p[k] = k)); E.forEach(([a, b]) => { p[f(a)] = f(b) })
@@ -1498,16 +1462,4 @@ export function gNear(f: string, E: GEdge[]) {
   const up = new Set([f]); let ch = true
   while (ch) { ch = false; E.forEach(([a, b]) => { if (up.has(b) && !up.has(a)) { up.add(a); ch = true } }) }
   E.forEach(([a, b]) => { if (a === f) up.add(b) }); return [...up]
-}
-export function gRank(ids: string[], E: GEdge[]) {
-  const set = new Set(ids), es = E.filter((e) => set.has(e[0]) && set.has(e[1])), r: Record<string, number> = {}
-  ids.forEach((k) => (r[k] = 0))
-  for (let n = 0; n < ids.length; n++) es.forEach(([a, b]) => { if (r[b] < r[a] + 1) r[b] = r[a] + 1 })
-  const rows: string[][] = []; ids.forEach((k) => (rows[r[k]] = rows[r[k]] || []).push(k))
-  const ord: Record<string, number> = {}
-  rows.forEach((c, ri) => {
-    if (ri > 0) { const bc = (k: string) => { const ps = es.filter((e) => e[1] === k).map((e) => ord[e[0]]); return ps.length ? ps.reduce((a, b) => a + b) / ps.length : 99 }; c.sort((a, b) => bc(a) - bc(b)) }
-    c.forEach((k, o) => (ord[k] = o))
-  })
-  return { rows, es, ord }
 }

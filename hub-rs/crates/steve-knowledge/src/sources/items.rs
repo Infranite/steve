@@ -110,9 +110,8 @@ pub fn facts(c: &mut impl Read, id: &str) -> ApiResult<Option<ItemFacts>> {
             }
             "accept" => {
                 f.summary = card.draft;
-                // a rework Steve sent back on its own (YOLO) is its check, not something you said
-                if s("choice").as_deref() == Some("rework")
-                    && s("decided_by").as_deref() != Some("yolo")
+                if card.status == "resolved"
+                    && s("choice").as_deref() == Some("rework")
                     && let Some(t) = s("text")
                 {
                     f.reviews.push(t);

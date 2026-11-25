@@ -105,18 +105,13 @@ impl MarkRow {
 }
 
 impl DecisionRow {
-    /// Decided by YOLO on the user's behalf: not time the user spent.
-    pub fn by_yolo(&self) -> bool {
-        self.result.get("decided_by").and_then(Value::as_str) == Some("yolo")
-    }
-
     pub fn choice(&self) -> Option<&str> {
         self.result.get("choice").and_then(Value::as_str)
     }
 
     /// A card that waited for a person.
     pub fn human(&self) -> bool {
-        HUMAN_KINDS.contains(&self.kind.as_str()) && !self.by_yolo()
+        HUMAN_KINDS.contains(&self.kind.as_str())
     }
 }
 

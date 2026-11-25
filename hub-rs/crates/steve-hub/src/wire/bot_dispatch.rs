@@ -10,7 +10,7 @@ use steve_store::{
 };
 
 use super::{core::RoutedRuntime, node_binding};
-use crate::backend::{BotNodeCandidate, BotNodeCandidates, BotNodeState};
+use crate::wire::core::{BotNodeCandidate, BotNodeCandidates, BotNodeState};
 
 use steve_types::{
     BotPlacement, Millis, PlacementBlocked, PlacementBlocker, PlacementExplanation,

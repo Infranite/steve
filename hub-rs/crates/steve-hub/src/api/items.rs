@@ -6,12 +6,113 @@ use axum::extract::{Path, State};
 use serde_json::{Value, json};
 
 use super::{
-    ApiResult, AppState, Ctx, Noun, body, objs, ok, ok_true, opt_obj, own, str_of, summary,
+    ApiResult, AppState, Ctx, Noun, Patch, check_file_ids, check_len, json_body, objs, ok, ok_true,
+    opt_obj, own, str_of, summary,
 };
-use crate::backend::{CreateItem, Obj};
 use crate::error::ApiError;
 use crate::js;
-use crate::validate::{Check, Num, Str};
+use crate::wire::core::CreateItem;
+use crate::wire::store::{Obj, StoreBackend};
+
+#[derive(serde::Deserialize)]
+struct CreateBody {
+    goal: String,
+    title: Option<String>,
+    bot: Option<String>,
+    team: Option<String>,
+    node: Option<String>,
+    #[serde(default)]
+    required_specialties: Vec<String>,
+    #[serde(default)]
+    deps: Vec<String>,
+    #[serde(default)]
+    project: Patch<String>,
+    mode: Option<String>,
+    client_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct DepWaitBody {
+    expected_cycle: i64,
+    resume: String,
+    reason: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ActionBody {
+    action: String,
+}
+
+#[derive(serde::Deserialize)]
+struct BulkBody {
+    ids: Vec<String>,
+    op: String,
+}
+
+#[derive(serde::Deserialize)]
+struct TextBody {
+    text: String,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+enum Priority {
+    #[serde(rename = "高")]
+    High,
+    #[serde(rename = "中")]
+    Medium,
+    #[serde(rename = "低")]
+    Low,
+}
+
+#[derive(serde::Deserialize)]
+struct PatchBody {
+    title: Option<String>,
+    priority: Option<Priority>,
+    #[serde(default)]
+    due: Patch<String>,
+    star: Option<bool>,
+    accept_mode: Option<String>,
+    #[serde(default)]
+    project_id: Patch<String>,
+    tags: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct DesignGateBody {
+    on: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct SupplementBody {
+    text: String,
+    mode: Option<String>,
+    files: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct ReassignBody {
+    bot: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AddDepBody {
+    dep: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SnoozeBody {
+    label: Patch<String>,
+    until: Patch<f64>,
+}
+
+#[derive(serde::Deserialize)]
+struct LifecycleBody {
+    command: String,
+    expected_cycle: i64,
+    expected_revision: i64,
+    reason: Option<String>,
+    goal: Option<String>,
+}
 
 /// `own(c, items.get(id), Noun::Item)` on the read pool.
 async fn own_item(st: &AppState, ws: &str, id: &str) -> Result<Obj, ApiError> {
@@ -25,25 +126,55 @@ pub async fn create(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let goal = k.str("goal", Str::min(1));
-    let title = k.opt_str("title", Str::ANY);
-    let bot = k.opt_str("bot", Str::ANY);
-    let team = k.opt_str("team", Str::len(1, 64));
-    let node = k.opt_str("node", Str::len(1, 80));
-    let required_specialties = k
-        .opt_str_array_of("required_specialties", Str::len(1, 48), None, Some(12))
-        .unwrap_or_default();
-    let deps = k
-        .opt_str_array_of("deps", Str::len(1, 80), None, Some(200))
-        .unwrap_or_default();
-    let project = k.opt_nullable_str("project", Str::ANY);
-    let mode = k
-        .opt_enum("mode", &["start", "propose"])
-        .unwrap_or_else(|| "start".into());
-    let client_id = k.opt_str("client_id", Str::len(1, 80));
-    k.finish()?;
+    let req: CreateBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if req.goal.is_empty() {
+        bad.push("goal".into());
+    }
+    if req.team.as_deref().is_some_and(|t| !check_len(t, 1, 64)) {
+        bad.push("team".into());
+    }
+    if req.node.as_deref().is_some_and(|n| !check_len(n, 1, 80)) {
+        bad.push("node".into());
+    }
+    if req.required_specialties.len() > 12
+        || req
+            .required_specialties
+            .iter()
+            .any(|s| !check_len(s, 1, 48))
+    {
+        bad.push("required_specialties".into());
+    }
+    if req.deps.len() > 200 || req.deps.iter().any(|s| !check_len(s, 1, 80)) {
+        bad.push("deps".into());
+    }
+    let mode = req.mode.unwrap_or_else(|| "start".into());
+    if !matches!(mode.as_str(), "start" | "propose") {
+        bad.push("mode".into());
+    }
+    if req
+        .client_id
+        .as_deref()
+        .is_some_and(|id| !check_len(id, 1, 80))
+    {
+        bad.push("client_id".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    let CreateBody {
+        goal,
+        title,
+        bot,
+        team,
+        node,
+        required_specialties,
+        deps,
+        project,
+        client_id,
+        ..
+    } = req;
+    let project = project.into_option();
     // a retry of the same form (`client_id`) gets the item the first request made; the creation
     // runs on even if this request goes away, so it needs its own state
     let (st2, c2) = (st.clone(), c.clone());
@@ -244,23 +375,23 @@ pub async fn dependency_wait(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let cycle = k.num(
-        "expected_cycle",
-        Num {
-            int: true,
-            min: Some(1.0),
-            max: None,
-            gt: None,
-        },
-    ) as i64;
-    let resume = k.enum_("resume", &["automatic", "notify", "workspace"]);
-    let reason = k.str("reason", Str::len(1, 2000));
-    k.finish()?;
+    let req: DepWaitBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if req.expected_cycle < 1 {
+        bad.push("expected_cycle".into());
+    }
+    if !matches!(req.resume.as_str(), "automatic" | "notify" | "workspace") {
+        bad.push("resume".into());
+    }
+    if !check_len(&req.reason, 1, 2000) {
+        bad.push("reason".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
     ok(st
         .domain
-        .dependency_wait(&id, cycle, &resume, &reason)
+        .dependency_wait(&id, req.expected_cycle, &req.resume, &req.reason)
         .await?)
 }
 
@@ -271,24 +402,31 @@ pub async fn actions(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let action = k.enum_(
-        "action",
-        &["pause", "resume", "drop", "archive", "unarchive"],
-    );
-    k.finish()?;
+    let req: ActionBody = json_body(&b)?;
+    if !matches!(
+        req.action.as_str(),
+        "pause" | "resume" | "drop" | "archive" | "unarchive"
+    ) {
+        return Err(ApiError::Invalid(vec!["action".into()]));
+    }
     ok(Value::Object(
-        st.domain.item_action(&id, &action, &c.me).await?,
+        st.domain.item_action(&id, &req.action, &c.me).await?,
     ))
 }
 
 pub async fn bulk(State(st): State<AppState>, Extension(c): Extension<Ctx>, b: Bytes) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let ids = k.str_array("ids", Some(1), Some(200));
-    let op = k.enum_("op", &["pause", "resume", "drop", "archive"]);
-    k.finish()?;
+    let req: BulkBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if !(1..=200).contains(&req.ids.len()) {
+        bad.push("ids".into());
+    }
+    if !matches!(req.op.as_str(), "pause" | "resume" | "drop" | "archive") {
+        bad.push("op".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    let BulkBody { ids, op } = req;
     let mut n = 0;
     for id in ids {
         let i = id.clone();
@@ -321,11 +459,11 @@ pub async fn goal(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let text = k.str("text", Str::min(1));
-    k.finish()?;
-    st.domain.revise_goal(&id, &text).await?;
+    let req: TextBody = json_body(&b)?;
+    if req.text.is_empty() {
+        return Err(ApiError::Invalid(vec!["text".into()]));
+    }
+    st.domain.revise_goal(&id, &req.text).await?;
     ok_true()
 }
 
@@ -336,29 +474,39 @@ pub async fn patch_one(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
+    let req: PatchBody = json_body(&b)?;
+    let mut bad = Vec::new();
     let mut rest = Obj::new();
-    if let Some(t) = k.opt_str("title", Str::min(1)) {
-        rest.insert("title".into(), json!(t));
+    if let Some(t) = req.title {
+        if t.is_empty() {
+            bad.push("title".into());
+        } else {
+            rest.insert("title".into(), json!(t));
+        }
     }
-    if let Some(p) = k.opt_enum("priority", &["高", "中", "低"]) {
+    if let Some(p) = req.priority {
         rest.insert("priority".into(), json!(p));
     }
-    if let Some(d) = k.opt_nullable_str("due", Str::ANY) {
+    if let Some(d) = req.due.into_option() {
         rest.insert("due".into(), json!(d));
     }
-    if let Some(s) = k.opt_bool("star") {
+    if let Some(s) = req.star {
         rest.insert("star".into(), json!(s));
     }
-    if let Some(a) = k.opt_enum("accept_mode", &["inherit", "manual", "auto", "waived"]) {
-        rest.insert("accept_mode".into(), json!(a));
+    if let Some(a) = req.accept_mode {
+        if matches!(a.as_str(), "inherit" | "manual" | "auto" | "waived") {
+            rest.insert("accept_mode".into(), json!(a));
+        } else {
+            bad.push("accept_mode".into());
+        }
     }
-    if let Some(p) = k.opt_nullable_str("project_id", Str::ANY) {
+    if let Some(p) = req.project_id.into_option() {
         rest.insert("project_id".into(), json!(p));
     }
-    let tags = k.opt_str_array("tags", None, None);
-    k.finish()?;
+    let tags = req.tags;
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
 
     st.write(move |r| {
         // re-read under the lock: the TS handler ran all of this synchronously
@@ -428,7 +576,7 @@ pub async fn patch_one(
 
 /// Describe the validated tag delta after the field/project change notes, in its original order.
 fn note_tag_changes(
-    r: &dyn crate::backend::Repo,
+    r: &StoreBackend,
     id: &str,
     me: &str,
     before: &[String],
@@ -492,13 +640,8 @@ pub async fn design_gate(
             steve_i18n::t!("hub.item.design_gate_owner_only"),
         ));
     }
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let on = k.opt_bool("on");
-    k.finish()?;
-    let Some(on) = on else {
-        return Err(ApiError::Invalid(vec!["on".into()]));
-    };
+    let req: DesignGateBody = json_body(&b)?;
+    let on = req.on;
     st.write(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         if i.get("design_gate").and_then(Value::as_bool) != Some(on) {
@@ -546,16 +689,21 @@ pub async fn supplement(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let text = k.str("text", Str::min(1));
-    let mode = k
-        .opt_enum("mode", &["auto", "steer", "new"])
-        .unwrap_or_else(|| "auto".into());
-    let files = super::files::file_ids(&mut k);
-    k.finish()?;
-    let refs = super::files::refs(&st, &c.ws, files).await?;
-    st.domain.supplement(&id, &text, &mode, refs).await?;
+    let req: SupplementBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if req.text.is_empty() {
+        bad.push("text".into());
+    }
+    let mode = req.mode.unwrap_or_else(|| "auto".into());
+    if !matches!(mode.as_str(), "auto" | "steer" | "new") {
+        bad.push("mode".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    check_file_ids(&req.files)?;
+    let refs = super::files::refs(&st, &c.ws, req.files).await?;
+    st.domain.supplement(&id, &req.text, &mode, refs).await?;
     ok_true()
 }
 
@@ -576,11 +724,10 @@ pub async fn reassign(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let bot = k.str("bot", Str::ANY);
-    k.finish()?;
-    ok(Value::Object(st.domain.reassign(&id, &bot, &c.me).await?))
+    let req: ReassignBody = json_body(&b)?;
+    ok(Value::Object(
+        st.domain.reassign(&id, &req.bot, &c.me).await?,
+    ))
 }
 
 pub async fn add_dep(
@@ -590,12 +737,9 @@ pub async fn add_dep(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let dep = k.str("dep", Str::ANY);
-    k.finish()?;
-    own_item(&st, &c.ws, &dep).await?;
-    st.domain.add_dep(&id, &dep).await?;
+    let req: AddDepBody = json_body(&b)?;
+    own_item(&st, &c.ws, &req.dep).await?;
+    st.domain.add_dep(&id, &req.dep).await?;
     ok_true()
 }
 
@@ -616,11 +760,9 @@ pub async fn snooze(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let label = k.nullable_str("label", Str::ANY);
-    let until = k.nullable_num("until", Num::ANY);
-    k.finish()?;
+    let req: SnoozeBody = json_body(&b)?;
+    let label = req.label.into_option().flatten();
+    let until = req.until.into_option().flatten();
     st.write(move |r| {
         let snooze = match (&label, until) {
             (Some(l), Some(u)) if !l.is_empty() && u != 0.0 => {
@@ -694,23 +836,30 @@ pub async fn lifecycle(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let command = k.enum_(
-        "command",
-        &["accept", "finish", "cancel", "fail", "new_cycle"],
-    );
-    let int = |min: f64| Num {
-        int: true,
-        min: Some(min),
-        max: None,
-        gt: None,
-    };
-    let cycle = k.num("expected_cycle", int(1.0)) as i64;
-    let revision = k.num("expected_revision", int(0.0)) as i64;
-    let reason = k.opt_str("reason", Str::ANY);
-    let goal = k.opt_str("goal", Str::ANY);
-    k.finish()?;
+    let req: LifecycleBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if !matches!(
+        req.command.as_str(),
+        "accept" | "finish" | "cancel" | "fail" | "new_cycle"
+    ) {
+        bad.push("command".into());
+    }
+    if req.expected_cycle < 1 {
+        bad.push("expected_cycle".into());
+    }
+    if req.expected_revision < 0 {
+        bad.push("expected_revision".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    let LifecycleBody {
+        command,
+        expected_cycle: cycle,
+        expected_revision: revision,
+        reason,
+        goal,
+    } = req;
     if command == "finish" && c.user.get("role").and_then(Value::as_str) != Some("owner") {
         return Err(ApiError::Json(
             403,

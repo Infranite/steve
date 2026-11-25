@@ -170,6 +170,10 @@ impl Bots<'_> {
             )?;
             for ws in wss {
                 tx.run("INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, ?)", params![id, ws, now()])?;
+                tx.run(
+                    "INSERT OR IGNORE INTO bot_node_bindings (workspace_id, bot_id, nodes) VALUES (?, ?, ?)",
+                    params![ws, id, serde_json::to_string(crate::bot_dispatch::DEFAULT_NODES)?],
+                )?;
             }
             transaction.commit()?;
             if let Some(ws) = crate::repo::one(
@@ -347,6 +351,14 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
     c.run(
         "INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, ?)",
         params![id, ws, now()],
+    )?;
+    c.run(
+        "INSERT OR IGNORE INTO bot_node_bindings (workspace_id, bot_id, nodes) VALUES (?, ?, ?)",
+        params![
+            ws,
+            id,
+            serde_json::to_string(crate::bot_dispatch::DEFAULT_NODES)?
+        ],
     )?;
     // who edits it (migration 050): its workspace's owner; the main bot's is the instance admin
     c.run(

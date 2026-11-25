@@ -8,12 +8,80 @@ use steve_store::seeded;
 
 use super::misc::{SMART, js_num};
 use super::{
-    ApiResult, AppState, Ctx, Noun, body, bot_out, objs, ok, ok_true, own, own_bot, str_of,
+    ApiResult, AppState, Ctx, Noun, Patch, body, bot_out, check_len, from_body, json_body, objs,
+    ok, ok_true, own, own_bot, str_of,
 };
-use crate::backend::Obj;
 use crate::error::ApiError;
 use crate::js;
-use crate::validate::{Check, Num, Str};
+use crate::wire::store::{Obj, StoreBackend};
+
+#[derive(serde::Deserialize)]
+struct AvatarIn {
+    color: Option<String>,
+    #[serde(default)]
+    skin: Patch<String>,
+    round: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+struct BotIn {
+    name: Option<String>,
+    role: Option<String>,
+    specialties: Option<Vec<String>>,
+    harness: Option<String>,
+    #[serde(default)]
+    model: Patch<String>,
+    #[serde(default)]
+    reasoning_effort: Patch<String>,
+    rules: Option<String>,
+    persona: Option<String>,
+    proactive: Option<i64>,
+    accept_mode: Option<String>,
+    perm_mode: Option<String>,
+    avatar: Option<AvatarIn>,
+    #[serde(default)]
+    default_project: Patch<String>,
+    #[serde(default)]
+    prompt: Patch<String>,
+    #[serde(default)]
+    device: Patch<String>,
+    enabled: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+struct DraftBody {
+    desc: String,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspacesBody {
+    ids: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct DeleteBody {
+    to: String,
+    memory: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct TextBody {
+    text: String,
+}
+
+fn valid_effort(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
+}
+
+fn valid_hex_color(s: &str) -> bool {
+    s.len() == 7 && s.as_bytes()[0] == b'#' && s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn valid_skin(s: &str) -> bool {
+    (3..=4).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
+}
 
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
 const PERM: &[&str] = &["default", "plan", "bypassPermissions"];
@@ -70,98 +138,130 @@ fn selection_out(mut bot: Obj, harnesses: &[steve_core::harnesses::Harness]) -> 
 #[path = "bot_selection_tests.rs"]
 mod selection_tests;
 fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError> {
-    let mut c = Check::object(v);
+    let req: BotIn = from_body(v.clone())?;
+    let mut bad = Vec::new();
     let mut p = Obj::new();
-    let mut put = |k: &str, x: Option<Value>| {
-        if let Some(x) = x {
-            p.insert(k.into(), x);
+    match req.name {
+        Some(n) if check_len(&n, 1, 40) => {
+            p.insert("name".into(), json!(n));
         }
-    };
-    let name = if create {
-        Some(c.str("name", Str::len(1, 40)))
-    } else {
-        c.opt_str("name", Str::len(1, 40))
-    };
-    put("name", name.map(Value::from));
-    put("role", c.opt_str("role", Str::max(200)).map(Value::from));
-    put(
-        "specialties",
-        c.opt_str_array_of("specialties", Str::len(1, 48), None, Some(12))
-            .map(|tags| json!(steve_store::bot_dispatch::specialties(tags))),
-    );
-    let allowed: Vec<&str> = harnesses.iter().map(String::as_str).collect();
-    let harness = c.opt_enum("harness", &allowed);
-    put("harness", harness.map(Value::from));
-    put(
-        "model",
-        c.opt_nullable_str("model", Str::ANY).map(|m| json!(m)),
-    );
-    put(
-        "reasoning_effort",
-        c.opt_nullable_str("reasoning_effort", Str::pattern("^[A-Za-z0-9_.:-]{1,64}$"))
-            .map(|m| json!(m)),
-    );
-    put("rules", c.opt_str("rules", Str::max(8000)).map(Value::from));
-    put(
-        "persona",
-        c.opt_str("persona", Str::max(400)).map(Value::from),
-    );
-    put(
-        "proactive",
-        c.opt_num(
-            "proactive",
-            Num {
-                int: true,
-                min: Some(0.0),
-                max: Some(2.0),
-                gt: None,
-            },
-        )
-        .map(js_num),
-    );
-    put(
-        "accept_mode",
-        c.opt_enum("accept_mode", ACCEPT).map(Value::from),
-    );
-    put("perm_mode", c.opt_enum("perm_mode", PERM).map(Value::from));
-    if let Some(mut a) = c.sub("avatar", true) {
-        let mut av = Obj::new();
-        if let Some(x) = a.opt_str("color", Str::pattern(r"^#[0-9a-fA-F]{6}$")) {
-            av.insert("color".into(), json!(x));
-        }
-        if let Some(x) = a.opt_nullable_str("skin", Str::pattern(r"^\d{3,4}$")) {
-            av.insert("skin".into(), json!(x));
-        }
-        if let Some(x) = a.opt_num(
-            "round",
-            Num {
-                int: false,
-                min: Some(0.0),
-                max: Some(100.0),
-                gt: None,
-            },
-        ) {
-            av.insert("round".into(), js_num(x));
-        }
-        c.absorb(a);
-        put("avatar", Some(Value::Object(av)));
+        Some(_) => bad.push("name".into()),
+        None if create => bad.push("name".into()),
+        None => {}
     }
-    put(
-        "default_project",
-        c.opt_nullable_str("default_project", Str::ANY)
-            .map(|x| json!(x)),
-    );
-    put(
-        "prompt",
-        c.opt_nullable_str("prompt", Str::max(20000))
-            .map(|x| json!(x)),
-    );
-    put(
-        "device",
-        c.opt_nullable_str("device", Str::ANY).map(|x| json!(x)),
-    );
-    put("enabled", c.opt_bool("enabled").map(Value::from));
-    c.finish()?;
+    if let Some(r) = req.role {
+        if check_len(&r, 0, 200) {
+            p.insert("role".into(), json!(r));
+        } else {
+            bad.push("role".into());
+        }
+    }
+    if let Some(tags) = req.specialties {
+        if tags.len() > 12 || tags.iter().any(|t| !check_len(t, 1, 48)) {
+            bad.push("specialties".into());
+        } else {
+            p.insert(
+                "specialties".into(),
+                json!(steve_store::bot_dispatch::specialties(tags)),
+            );
+        }
+    }
+    if let Some(h) = req.harness {
+        if harnesses.iter().any(|id| id == &h) {
+            p.insert("harness".into(), json!(h));
+        } else {
+            bad.push("harness".into());
+        }
+    }
+    if let Some(m) = req.model.into_option() {
+        p.insert("model".into(), json!(m));
+    }
+    if let Some(m) = req.reasoning_effort.into_option() {
+        if m.as_deref().is_some_and(|s| !valid_effort(s)) {
+            bad.push("reasoning_effort".into());
+        } else {
+            p.insert("reasoning_effort".into(), json!(m));
+        }
+    }
+    if let Some(r) = req.rules {
+        if check_len(&r, 0, 8000) {
+            p.insert("rules".into(), json!(r));
+        } else {
+            bad.push("rules".into());
+        }
+    }
+    if let Some(x) = req.persona {
+        if check_len(&x, 0, 400) {
+            p.insert("persona".into(), json!(x));
+        } else {
+            bad.push("persona".into());
+        }
+    }
+    if let Some(n) = req.proactive {
+        if (0..=2).contains(&n) {
+            p.insert("proactive".into(), json!(n));
+        } else {
+            bad.push("proactive".into());
+        }
+    }
+    if let Some(a) = req.accept_mode {
+        if ACCEPT.contains(&a.as_str()) {
+            p.insert("accept_mode".into(), json!(a));
+        } else {
+            bad.push("accept_mode".into());
+        }
+    }
+    if let Some(pm) = req.perm_mode {
+        if PERM.contains(&pm.as_str()) {
+            p.insert("perm_mode".into(), json!(pm));
+        } else {
+            bad.push("perm_mode".into());
+        }
+    }
+    if let Some(a) = req.avatar {
+        let mut av = Obj::new();
+        if let Some(x) = a.color {
+            if valid_hex_color(&x) {
+                av.insert("color".into(), json!(x));
+            } else {
+                bad.push("avatar.color".into());
+            }
+        }
+        if let Some(x) = a.skin.into_option() {
+            if x.as_deref().is_some_and(|s| !valid_skin(s)) {
+                bad.push("avatar.skin".into());
+            } else {
+                av.insert("skin".into(), json!(x));
+            }
+        }
+        if let Some(x) = a.round {
+            if (0.0..=100.0).contains(&x) {
+                av.insert("round".into(), js_num(x));
+            } else {
+                bad.push("avatar.round".into());
+            }
+        }
+        p.insert("avatar".into(), Value::Object(av));
+    }
+    if let Some(x) = req.default_project.into_option() {
+        p.insert("default_project".into(), json!(x));
+    }
+    if let Some(x) = req.prompt.into_option() {
+        if x.as_deref().is_some_and(|s| !check_len(s, 0, 20000)) {
+            bad.push("prompt".into());
+        } else {
+            p.insert("prompt".into(), json!(x));
+        }
+    }
+    if let Some(x) = req.device.into_option() {
+        p.insert("device".into(), json!(x));
+    }
+    if let Some(e) = req.enabled {
+        p.insert("enabled".into(), json!(e));
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
     // a seeded text the page showed in its reader's language and sent back unchanged stays the seed
     seeded::store(&mut p, seeded::BOT);
     Ok(p)
@@ -194,7 +294,7 @@ pub async fn prompt(
 /// Picks `(harness, perm_mode)` for a newly created bot when omitted: prefers `ws`'s main bot's
 /// harness if ready/unknown, else the first ready harness, and picks a compatible `perm_mode`.
 fn fill_new_bot_defaults(
-    r: &dyn crate::backend::Repo,
+    r: &StoreBackend,
     ws: &str,
     harnesses: &[steve_core::harnesses::Harness],
     p: &mut Obj,
@@ -278,10 +378,11 @@ pub async fn draft(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let desc = k.str("desc", Str::len(2, 2000));
-    k.finish()?;
+    let req: DraftBody = json_body(&b)?;
+    if !check_len(&req.desc, 2, 2000) {
+        return Err(ApiError::Invalid(vec!["desc".into()]));
+    }
+    let desc = req.desc;
     let harnesses = st.domain.bot_harnesses(None).await?;
     let ws_pref = c.ws.clone();
     let preferred = st
@@ -421,10 +522,11 @@ pub async fn set_workspaces(
     b: Bytes,
 ) -> ApiResult {
     check_bot(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let ids = k.str_array("ids", Some(1), None);
-    k.finish()?;
+    let req: WorkspacesBody = json_body(&b)?;
+    if req.ids.is_empty() {
+        return Err(ApiError::Invalid(vec!["ids".into()]));
+    }
+    let ids = req.ids;
     st.write(move |r| {
         let mine: Vec<String> = r
             .workspaces_of_user(&c.me)?
@@ -480,13 +582,12 @@ pub async fn delete_one(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let to = k.str("to", Str::ANY);
-    let memory = k
-        .opt_enum("memory", &["delete", "export"])
-        .unwrap_or_else(|| "export".into());
-    k.finish()?;
+    let req: DeleteBody = json_body(&b)?;
+    let memory = req.memory.unwrap_or_else(|| "export".into());
+    if !matches!(memory.as_str(), "delete" | "export") {
+        return Err(ApiError::Invalid(vec!["memory".into()]));
+    }
+    let to = req.to;
     let (i, t, ws) = (id.clone(), to.clone(), c.ws.clone());
     let mem = st
         .read(move |r| {
@@ -541,10 +642,11 @@ pub async fn memories(
 }
 
 fn memory_text(v: &Value) -> Result<String, ApiError> {
-    let mut k = Check::object(v);
-    let text = k.str("text", Str::len(1, 2000));
-    k.finish()?;
-    Ok(text)
+    let req: TextBody = from_body(v.clone())?;
+    if !check_len(&req.text, 1, 2000) {
+        return Err(ApiError::Invalid(vec!["text".into()]));
+    }
+    Ok(req.text)
 }
 
 pub async fn memory_add(

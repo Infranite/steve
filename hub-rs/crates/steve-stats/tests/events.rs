@@ -68,7 +68,7 @@ fn the_span_counts_every_kind_and_lists_the_newest_first() {
     assert_eq!(tn1.tokens, Some(1120));
     assert_eq!(tn1.no, Some(1));
     let d1 = e.rows.iter().find(|x| x.id == "d1").unwrap();
-    assert_eq!((d1.by.as_deref(), d1.dur_ms), (Some("yolo"), Some(2 * MIN)));
+    assert_eq!((d1.by.as_deref(), d1.dur_ms), (Some("me"), Some(2 * MIN)));
     let release = e.rows.iter().find(|x| x.what == "release").unwrap();
     assert!(release.bad);
 }

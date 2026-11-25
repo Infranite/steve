@@ -8,13 +8,32 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use serde_json::{Map, Value, json};
 
-use super::{ApiResult, AppState, Ctx, Noun, body, ok, ok_true, own, str_of};
-use crate::backend::Obj;
+use super::{ApiResult, AppState, Ctx, Noun, check_len, json_body, ok, ok_true, own, str_of};
 use crate::error::ApiError;
-use crate::validate::{Check, Str};
+use crate::wire::store::Obj;
 
 const NOTE_MAX: usize = 4000;
 const QUOTE_MAX: usize = 2000;
+
+#[derive(serde::Deserialize)]
+struct AddBody {
+    art: String,
+    #[serde(default)]
+    path: String,
+    note: String,
+    anchor: Option<Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct EditBody {
+    note: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SendBody {
+    ids: Vec<String>,
+    key: String,
+}
 
 async fn own_item(st: &AppState, ws: &str, id: &str) -> Result<Obj, ApiError> {
     let (id, ws) = (id.to_string(), ws.to_string());
@@ -79,17 +98,26 @@ pub async fn add(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let art = k.str("art", Str::min(1));
-    let path = k.opt_str("path", Str::max(1000)).unwrap_or_default();
-    let note = k.str("note", Str::len(1, NOTE_MAX));
-    k.finish()?;
-    let anchor = v
-        .get("anchor")
+    let req: AddBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if req.art.is_empty() {
+        bad.push("art".into());
+    }
+    if !check_len(&req.path, 0, 1000) {
+        bad.push("path".into());
+    }
+    if !check_len(&req.note, 1, NOTE_MAX) {
+        bad.push("note".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    let anchor = req
+        .anchor
+        .as_ref()
         .and_then(anchor_of)
         .ok_or_else(|| ApiError::Invalid(vec!["anchor".into()]))?;
-    if note.trim().is_empty() {
+    if req.note.trim().is_empty() {
         return Err(ApiError::bad_request(steve_i18n::t!(
             "hub.annotation.empty"
         )));
@@ -98,16 +126,16 @@ pub async fn add(
         if !r
             .artifacts_list(&id)?
             .iter()
-            .any(|a| str_of(a, "id") == art)
+            .any(|a| str_of(a, "id") == req.art)
         {
             return Err(ApiError::not_found(steve_i18n::t!("hub.not_found.output")));
         }
         ok(Value::Object(r.annotation_add(
             &id,
-            &art,
-            &path,
+            &req.art,
+            &req.path,
             &anchor,
-            note.trim(),
+            req.note.trim(),
         )?))
     })
     .await
@@ -120,22 +148,24 @@ pub async fn edit(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let note = k.str("note", Str::len(1, NOTE_MAX));
-    k.finish()?;
-    if note.trim().is_empty() {
+    let req: EditBody = json_body(&b)?;
+    if !check_len(&req.note, 1, NOTE_MAX) {
+        return Err(ApiError::Invalid(vec!["note".into()]));
+    }
+    if req.note.trim().is_empty() {
         return Err(ApiError::bad_request(steve_i18n::t!(
             "hub.annotation.empty"
         )));
     }
-    st.write(move |r| match r.annotation_edit(&id, &ann, note.trim())? {
-        Some(a) => ok(Value::Object(a)),
-        None => Err(ApiError::Json(
-            409,
-            steve_i18n::t!("hub.annotation.sent_no_edit"),
-        )),
-    })
+    st.write(
+        move |r| match r.annotation_edit(&id, &ann, req.note.trim())? {
+            Some(a) => ok(Value::Object(a)),
+            None => Err(ApiError::Json(
+                409,
+                steve_i18n::t!("hub.annotation.sent_no_edit"),
+            )),
+        },
+    )
     .await
 }
 
@@ -266,14 +296,20 @@ pub async fn send(
     b: Bytes,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let ids = k.str_array("ids", Some(1), Some(200));
-    let key = k.str("key", Str::len(8, 100));
-    k.finish()?;
+    let req: SendBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if !(1..=200).contains(&req.ids.len()) {
+        bad.push("ids".into());
+    }
+    if !check_len(&req.key, 8, 100) {
+        bad.push("key".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
     // a send runs to its end even when the request goes away (a reload, a dropped connection), so its
     // drafts are never left taken but unsettled
-    tokio::spawn(steve_i18n::bind(send_now(st, id, ids, key)))
+    tokio::spawn(steve_i18n::bind(send_now(st, id, req.ids, req.key)))
         .await
         .map_err(|e| {
             ApiError::Json(

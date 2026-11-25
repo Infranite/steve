@@ -15,8 +15,8 @@ import { Chips, Empty, go, Group, ItemNo, permissionQuestion, RelNote, SectionLa
  * decision with its question and, while it can still be taken back, an undo. Decisions that lapsed on their own
  * (the item started again, was dropped) are their own filter: they needed nothing from you. */
 
-type Who = "you" | "steve" | "lapsed"
-const whoOf = (d: Done): Who => (d.how === "expired" ? "lapsed" : d.yolo !== undefined ? "steve" : "you")
+type Who = "you" | "lapsed"
+const whoOf = (d: Done): Who => (d.how === "expired" ? "lapsed" : "you")
 type Entry = { d: Done; who: Who }
 
 let filter: "all" | Who = "all"
@@ -25,7 +25,6 @@ function Outcome({ d, who, line }: { d: Done; who: Who; line?: boolean }) {
   const t = useT()
   if (d.rel) return <RelNote rel={d.rel} className="inline-flex" />
   const text = who === "lapsed" ? t("views:inbox.expired", { choice: d.choice })
-    : who === "steve" ? t("views:inbox.steveChose", { choice: d.choice })
     : d.how === "dismissed" ? t("views:inbox.dismissed") : t("views:inbox.chose", { choice: d.choice })
   return <span className={cn("inline-flex min-w-0 items-center gap-1", who === "lapsed" && "text-tertiary")}><span className={line ? "min-w-0 truncate" : "min-w-0 [overflow-wrap:anywhere] line-clamp-3"}>{text}{d.undone ? ` · ${t("views:inbox.undone")}` : ""}</span></span>
 }
@@ -57,7 +56,6 @@ function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
               <div className="type-callout text-foreground/85 [overflow-wrap:anywhere] line-clamp-3">{permissionQuestion(d.q)}</div>
               <div className="flex min-w-0 flex-wrap items-center gap-x-1 type-footnote text-muted-foreground">
                 <Outcome d={d} who={who} />
-                {who === "steve" && d.yolo && <span className="min-w-0 text-tertiary">· {d.yolo}</span>}
                 {d.via && <span className="text-tertiary">· {t("views:inbox.via", { client: d.via })}</span>}
                 <span className="tabular-nums text-tertiary">· {d.at ? hm(d.at) : d.tm}</span>
               </div>
@@ -82,7 +80,7 @@ export function InboxDone() {
     finally { setLoading(false) }
   }
   const count = (w: Who) => all.filter((x) => x.who === w).length
-  const keys = (["all", "you", "steve", "lapsed"] as const).filter((k) => k === "all" || count(k) > 0)
+  const keys = (["all", "you", "lapsed"] as const).filter((k) => k === "all" || count(k) > 0)
   const label = (k: (typeof keys)[number]) => (k === "all" ? t("views:inbox.all") : t(`views:inbox.who.${k}`, { count: count(k) }))
   const cur = keys.includes(filter) ? filter : "all"
   const xs = all.filter((x) => cur === "all" || x.who === cur)

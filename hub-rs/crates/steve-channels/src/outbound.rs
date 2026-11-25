@@ -1611,9 +1611,8 @@ pub fn verify(
                     && d.subject_id == row.id
                     && d.status == steve_types::DecisionStatus::Resolved
                     && row.decision_id.as_deref() == Some(d.id.as_str())
-                    && ((d.kind == "approve" && choice == "yes") || (d.kind == "fail" && choice == "retry"))
-                    // Also fence approvals scheduled by older YOLO engines before this fix.
-                    && !b1::legacy_automatic_decision(&d.result)
+                    && ((d.kind == "approve" && choice == "yes")
+                        || (d.kind == "fail" && choice == "retry"))
                     && d.result["hash"].as_str() == Some(text_hash(&row.text).as_str())
                     && d.result["send_at"].as_i64().is_some_and(|t| t <= now)
             })
@@ -4016,16 +4015,13 @@ fn approve_message_text(
     Ok(())
 }
 
-/// The authorization is your own approval (a decision a person answered, not a legacy auto-approval): what you
-/// approved goes out even after you spoke, it is yours.
+/// The authorization is your own approval: what you approved goes out even after you spoke.
 fn approved_by_you(r: &mut impl steve_store::Read, auth: &Auth) -> ChannelResult<bool> {
     let Auth::Decision { id } = auth else {
         return Ok(false);
     };
-    Ok(steve_store::decision_repo::get(r, id)?.is_some_and(|d| {
-        d.status == steve_types::DecisionStatus::Resolved
-            && !b1::legacy_automatic_decision(&d.result)
-    }))
+    Ok(steve_store::decision_repo::get(r, id)?
+        .is_some_and(|d| d.status == steve_types::DecisionStatus::Resolved))
 }
 
 // ---------------------------------------------------------------- decisions

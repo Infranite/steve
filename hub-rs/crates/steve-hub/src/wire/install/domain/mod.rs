@@ -1,5 +1,5 @@
 //! Ordered domain installation. Slots are concrete startup dependencies, not runtime services.
-use crate::backend::BackendError;
+use crate::error::BackendError;
 use crate::wire::modules::*;
 use crate::wire::modules::{Env, knowledge};
 use crate::wire::ports as hp;

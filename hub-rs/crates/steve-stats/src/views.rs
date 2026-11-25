@@ -119,7 +119,6 @@ fn source_label(key: &str) -> Option<String> {
         "disclosure" => steve_i18n::t!("stats.label.disclosure"),
         "intent" => steve_i18n::t!("stats.label.intent"),
         "flow" => steve_i18n::t!("stats.label.flow"),
-        "yolo" => steve_i18n::t!("stats.label.yolo"),
         "digest" => steve_i18n::t!("stats.label.digest"),
         "other" => steve_i18n::t!("stats.label.other"),
         _ => return None,
@@ -1298,8 +1297,7 @@ fn populate_item_details(
     let decisions = items::decisions_of(c, item_id)?
         .into_iter()
         .map(|x| DecisionOut {
-            by: (x.status == "resolved")
-                .then(|| if x.by_yolo() { "yolo" } else { "me" }.to_string()),
+            by: (x.status == "resolved").then(|| "me".to_string()),
             choice: x.choice().map(str::to_string),
             id: x.id,
             kind: x.kind,

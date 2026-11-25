@@ -315,8 +315,6 @@ export default {
   composer: {
     botName: "{{name}} Bot",
     handTo: "交给它 · {{role}}",
-    relate: "关联 · {{info}}",
-    team_other: "关联团队 · {{count}} 人",
     headItem: "引用事项",
     headMention: "Bot（交给它）· 联系人和团队（关联到这件事）",
     headCommand: "命令",

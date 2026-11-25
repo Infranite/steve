@@ -1081,13 +1081,15 @@ mod tests {
             _ => None,
         })
         .unwrap();
+        let cfg = Arc::new(cfg);
+        let bus = crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let st = crate::api::AppState::new(
-            Arc::new(cfg),
-            Arc::new(crate::wire::store::StoreBackend(store.clone())),
-            Arc::new(crate::backend::NoDomain),
-            crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-                Default::default(),
-            ))),
+            cfg.clone(),
+            crate::wire::store::StoreBackend(store.clone()),
+            crate::wire::core::CoreDomain::for_test(&cfg, store.clone(), &bus, None),
+            bus,
         );
         let recorder = recorder();
         let handle = recorder.handle();

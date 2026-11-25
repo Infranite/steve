@@ -889,8 +889,6 @@ steve-store/src/repo/stats.rs	"会话出错"	1
 steve-store/src/repo/stats.rs	"发布"	1
 steve-store/src/repo/stats.rs	"它停下了"	1
 steve-store/src/repo/stats.rs	"开不了会话"	1
-steve-store/src/seeded.rs	" 的 AI 助手，帮他接收和分派事情。"	1
-steve-store/src/seeded.rs	"我是 Steve，"	1
 steve-store/src/views/decision_chat.rs	"AI 代答"	1
 steve-store/src/views/decision_chat.rs	"AI代答"	1
 steve-store/src/views/decision_chat.rs	"仅供参考"	1

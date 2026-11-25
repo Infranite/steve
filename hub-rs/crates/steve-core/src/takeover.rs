@@ -130,16 +130,13 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// When you last answered a card of the item (not YOLO for you); 0 when never.
+    /// When you last answered a card of the item; 0 when never.
     fn last_answered(&self, item_id: &str) -> Result<i64> {
         Ok(self
             .db()
             .decisions_of_item(item_id)?
             .iter()
-            .filter(|d| {
-                d.status == steve_types::DecisionStatus::Resolved
-                    && d.result["decided_by"] != "yolo"
-            })
+            .filter(|d| d.status == steve_types::DecisionStatus::Resolved)
             .filter_map(|d| d.resolved)
             .max()
             .unwrap_or(0))

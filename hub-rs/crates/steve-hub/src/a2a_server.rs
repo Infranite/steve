@@ -25,7 +25,7 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use crate::api::AppState;
-use crate::backend::CreateItem;
+use crate::wire::core::CreateItem;
 
 pub const PATH: &str = "/a2a";
 pub const CARD_PATHS: &[&str] = &["/.well-known/agent-card.json", "/.well-known/agent.json"];

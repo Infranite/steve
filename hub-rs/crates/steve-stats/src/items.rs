@@ -274,22 +274,13 @@ mod tests {
             decisions: vec![
                 dec("a", "ask", "resolved", 100, Some(400), json!({})),
                 dec("b", "fail", "resolved", 300, Some(500), json!({})),
-                // decided by YOLO: not the user's time
-                dec(
-                    "c",
-                    "approve",
-                    "resolved",
-                    600,
-                    Some(900),
-                    json!({"decided_by": "yolo"}),
-                ),
             ],
             ..Default::default()
         };
         let f = compute(&i, 5000);
         assert_eq!(f.wait_ms, Some(400));
         assert_eq!(f.lead_ms, Some(1000));
-        assert_eq!(f.decisions, 3);
+        assert_eq!(f.decisions, 2);
     }
 
     #[test]

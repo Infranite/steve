@@ -11,7 +11,6 @@ src/chat-view.tsx	"（附件）"	1
 src/composer.tsx	"新 Bot"	4
 src/composer.tsx	"新事项"	4
 src/composer.tsx	"新项目"	4
-src/composer.tsx	"未确认"	1
 src/composer.tsx	"汇报"	4
 src/decision-notes.ts	"/^(回答|返工|批准|拒绝)：/"	1
 src/decision-notes.ts	"批准"	1

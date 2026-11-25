@@ -54,9 +54,9 @@ use std::sync::Arc;
 
 use axum::Router;
 
-use crate::backend::{Backend, BackendError, Domain};
 use crate::bus::Bus;
 use crate::config::Config;
+use crate::error::BackendError;
 
 /// Localize a persisted item-gate blocker at the Hub edge.
 pub(crate) fn item_gate_reason(b: steve_store::item_gate::GateBlocker) -> String {
@@ -75,8 +75,8 @@ pub(crate) fn item_gate_reason(b: steve_store::item_gate::GateBlocker) -> String
 
 /// Everything the binary needs from the sibling crates.
 pub struct Wired {
-    pub backend: Arc<dyn Backend>,
-    pub domain: Arc<dyn Domain>,
+    pub backend: store::StoreBackend,
+    pub domain: Arc<core::CoreDomain>,
     /// steve-auth's `/auth` router (login, callback, logout, dev).
     pub auth: Router,
     /// Single sign-on's switch: the settings put a configuration in force through it (A4b).

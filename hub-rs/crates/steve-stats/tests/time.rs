@@ -121,7 +121,6 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
             "approve",
             d1 + 22 * HOUR,
             Some(d1 + 26 * HOUR),
-            false,
         ),
         (
             "b",
@@ -129,7 +128,6 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
             "ask",
             d1 + 23 * HOUR,
             Some(d1 + 25 * HOUR),
-            false,
         ),
         // ST-2 waits at the same time: a person is waited on for each item
         (
@@ -138,16 +136,6 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
             "accept",
             d1 + 23 * HOUR,
             Some(d1 + 24 * HOUR),
-            false,
-        ),
-        // answered by YOLO: no one was waited on
-        (
-            "d",
-            Some("ST-1"),
-            "approve",
-            d1 + 10 * HOUR,
-            Some(d1 + 12 * HOUR),
-            true,
         ),
         // a card with no item counts on its own
         (
@@ -156,10 +144,9 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
             "confirm",
             d1 + 8 * HOUR,
             Some(d1 + 8 * HOUR + 30 * MIN),
-            false,
         ),
         // before the range, still open long after it: the whole of 11-07
-        ("f", Some("ST-2"), "ask", d1 - 72 * HOUR, None, false),
+        ("f", Some("ST-2"), "ask", d1 - 72 * HOUR, None),
     ]);
     let w = series(
         &s,
@@ -189,11 +176,7 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
     );
     assert_eq!(h.series[0].values[23], Some((2 * HOUR) as f64));
     assert_eq!(h.series[0].values[8], Some((HOUR + 30 * MIN) as f64));
-    assert_eq!(
-        h.series[0].values[11],
-        Some(HOUR as f64),
-        "YOLO's card adds nothing"
-    );
+    assert_eq!(h.series[0].values[11], Some(HOUR as f64));
 
     let m = Metric::parse("wait_ms").expect("wait_ms");
     assert!(m.allows("none") && m.allows("bot") && m.allows("project") && !m.allows("model"));

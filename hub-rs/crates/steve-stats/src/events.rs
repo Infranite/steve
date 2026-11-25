@@ -135,8 +135,7 @@ fn decisions(c: &mut impl Read, scope: ReportScope<'_>, item: Option<&str>) -> R
         .into_iter()
         .map(|r| {
             let d = r.decision;
-            let by =
-                (d.status == "resolved").then(|| if d.by_yolo() { "yolo" } else { "me" }.into());
+            let by = (d.status == "resolved").then(|| "me".into());
             Event {
                 id: d.id,
                 ts: d.created,

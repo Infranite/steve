@@ -7,7 +7,7 @@ use std::io::Cursor;
 
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
-use crate::backend::{BResult, BackendError};
+use crate::error::{BResult, BackendError};
 use crate::files;
 
 /// The largest upload taken (the stored picture is far smaller).

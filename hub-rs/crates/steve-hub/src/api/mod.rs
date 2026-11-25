@@ -41,11 +41,12 @@ use axum::response::Response;
 use axum::routing::{delete, get, patch, post, put};
 use serde_json::{Value, json};
 
-use crate::backend::{BResult, Backend, BackendError, Domain, ItemExtras, Obj, Repo};
 use crate::bus::Bus;
 use crate::config::Config;
-use crate::error::{ApiError, json_response, text_response};
+use crate::error::{ApiError, BResult, BackendError, json_response, text_response};
 use crate::system::Runtimes;
+use crate::wire::core::CoreDomain;
+use crate::wire::store::{BotExtras, ItemExtras, Obj, StoreBackend};
 
 /// Shared state of every handler.
 #[derive(Clone)]
@@ -56,8 +57,8 @@ pub struct Inner {
     pub caches: Arc<steve_runtime::cache::Caches>,
     pub origins: steve_runtime::cache::Cached<String, bool>,
     pub deliveries: Option<crate::deliveries::Service>,
-    pub backend: Arc<dyn Backend>,
-    pub domain: Arc<dyn Domain>,
+    pub backend: StoreBackend,
+    pub domain: Arc<CoreDomain>,
     pub bus: Bus,
     pub runtimes: Runtimes,
     /// Device observations stay separate from the merged model/dispatch catalogue.
@@ -101,12 +102,7 @@ impl std::ops::Deref for AppState {
 }
 
 impl AppState {
-    pub fn new(
-        cfg: Arc<Config>,
-        backend: Arc<dyn Backend>,
-        domain: Arc<dyn Domain>,
-        bus: Bus,
-    ) -> Self {
+    pub fn new(cfg: Arc<Config>, backend: StoreBackend, domain: Arc<CoreDomain>, bus: Bus) -> Self {
         let caches = bus.caches().clone();
         let origins = caches.space(&crate::access::ORIGIN_SPACE);
         let runtimes = Runtimes::from_reports(cfg.clone(), bus.reports());
@@ -117,7 +113,7 @@ impl AppState {
             deliveries: None,
             cfg,
             backend,
-            jobs: domain.background_tasks().unwrap_or_default(),
+            jobs: domain.jobs.clone(),
             domain,
             bus,
             runtimes,
@@ -269,22 +265,22 @@ impl AppState {
         }
     }
 
-    /// Runs `f` on a read-pool connection off the async runtime.
+    /// Runs `f` on the store off the async runtime.
     pub async fn read<R: Send + 'static>(
         &self,
-        f: impl FnOnce(&dyn Repo) -> Result<R, ApiError> + Send + 'static,
+        f: impl FnOnce(&StoreBackend) -> Result<R, ApiError> + Send + 'static,
     ) -> Result<R, ApiError> {
         let b = self.backend.clone();
-        blocking(move || f(b.reader()?.as_ref())).await
+        blocking(move || f(&b)).await
     }
 
-    /// Runs `f` under the core write lock off the async runtime; the lock is never held across an await.
+    /// Runs `f` on the store off the async runtime.
     pub async fn write<R: Send + 'static>(
         &self,
-        f: impl FnOnce(&dyn Repo) -> Result<R, ApiError> + Send + 'static,
+        f: impl FnOnce(&StoreBackend) -> Result<R, ApiError> + Send + 'static,
     ) -> Result<R, ApiError> {
         let b = self.backend.clone();
-        blocking(move || f(b.writer()?.as_ref())).await
+        blocking(move || f(&b)).await
     }
 }
 
@@ -660,9 +656,67 @@ pub(crate) fn ok_true() -> ApiResult {
     ok(json!({ "ok": true }))
 }
 
-/// Parses a request body like Hono's `c.req.json()` (invalid JSON → 500 SyntaxError message).
+/// Parses a request body as JSON (invalid JSON → 400).
 pub(crate) fn body(b: &Bytes) -> Result<Value, ApiError> {
     crate::js::parse_json(&String::from_utf8_lossy(b))
+}
+
+/// Tri-state JSON field: absent (`Missing`), explicit `null` (`Value(None)`), or a value.
+#[derive(Debug, Default)]
+pub(crate) enum Patch<T> {
+    #[default]
+    Missing,
+    Value(Option<T>),
+}
+
+impl<T> Patch<T> {
+    pub(crate) fn into_option(self) -> Option<Option<T>> {
+        match self {
+            Patch::Missing => None,
+            Patch::Value(v) => Some(v),
+        }
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Patch<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Option::<T>::deserialize(d).map(Patch::Value)
+    }
+}
+
+/// Parses a JSON object body into a typed request struct, turning structural errors into `400`.
+pub(crate) fn json_body<T: serde::de::DeserializeOwned>(b: &Bytes) -> Result<T, ApiError> {
+    from_body(body(b)?)
+}
+
+pub(crate) fn from_body<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ApiError> {
+    if !v.is_object() {
+        return Err(ApiError::Invalid(vec![String::new()]));
+    }
+    serde_json::from_value(v).map_err(|e| {
+        let msg = e.to_string();
+        let field = msg
+            .strip_prefix("missing field `")
+            .and_then(|s| s.split('`').next())
+            .map(str::to_string)
+            .unwrap_or_else(|| "body".into());
+        ApiError::Invalid(vec![field])
+    })
+}
+
+pub(crate) fn check_len(s: &str, min: usize, max: usize) -> bool {
+    let n = crate::js::utf16_len(s);
+    n >= min && n <= max
+}
+
+pub(crate) fn check_file_ids(files: &Option<Vec<String>>) -> Result<(), ApiError> {
+    let Some(list) = files else {
+        return Ok(());
+    };
+    if list.len() > crate::files::MAX_FILES || list.iter().any(|s| crate::js::utf16_len(s) > 64) {
+        return Err(ApiError::Invalid(vec!["files".into()]));
+    }
+    Ok(())
 }
 
 pub(crate) fn str_of(o: &Obj, k: &str) -> String {
@@ -708,7 +762,7 @@ pub(crate) fn own(x: Option<Obj>, ws: &str, what: Noun) -> BResult<Obj> {
 }
 
 /// `ownBot(id)`: the bot must be a member of the current workspace (deleted bots too).
-pub(crate) fn own_bot(r: &dyn Repo, id: &str, ws: &str) -> BResult<()> {
+pub(crate) fn own_bot(r: &StoreBackend, id: &str, ws: &str) -> BResult<()> {
     if r.bot_in_workspace(id, ws)? {
         Ok(())
     } else {
@@ -717,7 +771,7 @@ pub(crate) fn own_bot(r: &dyn Repo, id: &str, ws: &str) -> BResult<()> {
 }
 
 /// The `summary()` extras of one item, the per-row way.
-pub(crate) fn extras_one(r: &dyn Repo, id: &str) -> BResult<ItemExtras> {
+pub(crate) fn extras_one(r: &StoreBackend, id: &str) -> BResult<ItemExtras> {
     let status = |s: &Obj| {
         s.get("status")
             .and_then(Value::as_str)
@@ -775,12 +829,12 @@ pub(crate) fn summary_with(mut i: Obj, x: ItemExtras) -> Obj {
     i
 }
 
-pub(crate) fn summary(r: &dyn Repo, i: Obj) -> BResult<Obj> {
+pub(crate) fn summary(r: &StoreBackend, i: Obj) -> BResult<Obj> {
     let x = extras_one(r, &str_of(&i, "id"))?;
     Ok(summary_with(i, x))
 }
 
-pub(crate) fn sess_out(r: &dyn Repo, d: &dyn Domain, s: Obj) -> BResult<Obj> {
+pub(crate) fn sess_out(r: &StoreBackend, d: &CoreDomain, s: Obj) -> BResult<Obj> {
     let id = str_of(&s, "id");
     let q = r.queued_list(&id)?;
     let room = r.waiting_for_room()?.remove(&id);
@@ -788,7 +842,7 @@ pub(crate) fn sess_out(r: &dyn Repo, d: &dyn Domain, s: Obj) -> BResult<Obj> {
 }
 
 pub(crate) fn sess_out_with(
-    d: &dyn Domain,
+    d: &CoreDomain,
     mut s: Obj,
     queued: Vec<Obj>,
     room: Option<Value>,
@@ -816,7 +870,7 @@ pub(crate) fn workspaces_out(mut ws: Vec<Obj>) -> Vec<Obj> {
 }
 
 /// `botOut`: the bot plus its workspace ids and its memory count in `ws`.
-pub(crate) fn bot_out(r: &dyn Repo, mut b: Obj, ws: &str) -> BResult<Obj> {
+pub(crate) fn bot_out(r: &StoreBackend, mut b: Obj, ws: &str) -> BResult<Obj> {
     let id = str_of(&b, "id");
     steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
     b.insert("workspaces".into(), json!(r.bot_workspaces(&id)?));
@@ -825,33 +879,26 @@ pub(crate) fn bot_out(r: &dyn Repo, mut b: Obj, ws: &str) -> BResult<Obj> {
     Ok(b)
 }
 
-/// The workspace ids of a bot, from the batch when there is one.
-fn bot_ws(r: &dyn Repo, x: Option<&crate::backend::BotExtras>, id: &str) -> BResult<Vec<String>> {
-    match x {
-        Some(x) => Ok(x.workspaces.get(id).cloned().unwrap_or_default()),
-        None => r.bot_workspaces(id),
-    }
+fn bot_ws(x: &BotExtras, id: &str) -> Vec<String> {
+    x.workspaces.get(id).cloned().unwrap_or_default()
 }
 
-/// `bots.list(ws).map(botOut)` and `allBots`, batched when the backend can.
-pub(crate) fn bots_out(r: &dyn Repo, ws: &str) -> BResult<(Vec<Obj>, Vec<Value>)> {
+/// `bots.list(ws).map(botOut)` and `allBots`, batched in one store read.
+pub(crate) fn bots_out(r: &StoreBackend, ws: &str) -> BResult<(Vec<Obj>, Vec<Value>)> {
     let x = r.bot_extras()?;
     let mut bots = vec![];
     for mut b in r.bots_list(Some(ws))? {
         let id = str_of(&b, "id");
         steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
-        b.insert("workspaces".into(), json!(bot_ws(r, x.as_ref(), &id)?));
-        let mcp = match &x {
-            Some(x) => x.mcp.get(&id).cloned().unwrap_or_default(),
-            None => r.bot_mcp_servers(&id)?,
-        };
+        b.insert("workspaces".into(), json!(bot_ws(&x, &id)));
+        let mcp = x.mcp.get(&id).cloned().unwrap_or_default();
         b.insert("mcp_servers".into(), json!(mcp));
         bots.push(b);
     }
     let mut all = vec![];
     for b in r.bots_list(None)? {
         let id = str_of(&b, "id");
-        all.push(json!({ "id": id, "name": b.get("name").cloned().unwrap_or(Value::Null), "workspaces": bot_ws(r, x.as_ref(), &id)? }));
+        all.push(json!({ "id": id, "name": b.get("name").cloned().unwrap_or(Value::Null), "workspaces": bot_ws(&x, &id) }));
     }
     Ok((bots, all))
 }

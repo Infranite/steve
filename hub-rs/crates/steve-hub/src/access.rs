@@ -434,9 +434,9 @@ async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::respo
     ) {
         let b = st.backend.clone();
         let uid = tokio::task::spawn_blocking(move || {
-            b.reader()
+            b.user_by_session(&tok)
                 .ok()
-                .and_then(|r| r.user_by_session(&tok).ok().flatten())
+                .flatten()
                 .and_then(|u| u.get("id").and_then(Value::as_str).map(str::to_string))
         })
         .await

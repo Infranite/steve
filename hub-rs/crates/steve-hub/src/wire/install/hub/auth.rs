@@ -4,7 +4,7 @@ install! { prepare(reg, cx) [db] => [auth_cfg, backend, db] {
     let HubEnv { vars, .. } = *cx;
     let auth_cfg = steve_auth::AuthConfig::from_vars(|k| vars(k))
         .map_err(|e| BackendError::msg(format!("auth config: {e}")))?;
-    let backend: Arc<dyn Backend> = Arc::new(store::StoreBackend(db.clone()));
+    let backend = store::StoreBackend(db.clone());
 }}
 
 install! { install(reg, cx) [auth_cfg, db] => [auth, db] {

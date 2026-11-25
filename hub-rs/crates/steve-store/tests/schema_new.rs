@@ -56,7 +56,27 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
     let c = Connection::open(&path).unwrap();
     c.execute_batch("CREATE TABLE schema_version (v INTEGER NOT NULL)")
         .unwrap();
-    for m in &db::MIGRATIONS[..v] {
+    for (i, m) in db::MIGRATIONS[..v].iter().enumerate() {
+        if i == 119 {
+            for table in ["bots", "sessions"] {
+                let present: bool = c
+                    .query_row(
+                        &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'reasoning_effort')"),
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                if !present {
+                    c.execute_batch(&format!(
+                        "ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT"
+                    ))
+                    .unwrap();
+                }
+            }
+        }
+        if i == 121 {
+            c.execute_batch(db::ITEM_LIFECYCLE).unwrap();
+        }
         c.execute_batch(m).unwrap();
     }
     c.execute("INSERT INTO schema_version (v) VALUES (?)", [v as i64])
@@ -846,7 +866,8 @@ fn replacing_legacy_approval_preserves_human_and_external_facts() {
         steve_types::ApprovalPolicy::default(),
     );
     store.fixture_write(|c| {
-        assert_eq!(count(c, "SELECT COUNT(*) FROM decisions WHERE status='resolved'"), 2);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM decisions WHERE id='human' AND status='resolved'"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM decisions WHERE id='old' AND status='expired'"), 1);
         assert_eq!(count(c, "SELECT COUNT(*) FROM settings WHERE key IN ('yolo.policy','models.yolo')"), 0);
         assert_eq!(count(c, "SELECT COUNT(*) FROM settings WHERE key='models.draft'"), 1);
         assert_eq!(count(c, "SELECT COUNT(*) FROM mail_drafts WHERE id='queued' AND status='discarded' AND send_at IS NULL"), 1);
@@ -914,4 +935,75 @@ fn approval_policy_is_an_owner_cas_and_only_emits_changes() {
         }
     }
     assert_eq!(emitted, [1, 2]);
+}
+
+#[test]
+fn migration_128_retires_yolo_rows_and_backfills_node_bindings() {
+    let (_dir, path) = at_version(127);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO bots(id,workspace_id,name,harness,updated)
+             VALUES ('b1','default','Bot1','claude-code',1),
+                    ('b2','default','Bot2','claude-code',1);
+           INSERT INTO bot_workspaces(bot_id,workspace_id,created)
+             VALUES ('b1','default',1), ('b2','default',1);
+           INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes)
+             VALUES ('default','b2','["remote-1"]');
+           INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,question,status,result,requested_by,created)
+             VALUES ('d_yolo','default','approve','mail_draft','m1','q','resolved','{"decided_by":"yolo","choice":"approve","yolo_reason":"auto"}','steve',1),
+                    ('d_human','default','approve','mail_draft','m2','q','resolved','{"decided_by":"owner","choice":"approve"}','steve',1);
+           INSERT INTO audit(ts,actor,action,target,detail,workspace_id)
+             VALUES (1,'yolo','decision.resolve','d_yolo','{}','default'),
+                    (2,'owner','yolo.window.start','w1','{}','default'),
+                    (3,'owner','bot.update','b1','{}','default');"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    store
+        .fixture_write(|c| {
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM decisions WHERE id='d_yolo' AND status='expired' AND json_extract(result,'$.decided_by') IS NULL AND json_extract(result,'$.yolo_reason') IS NULL"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM decisions WHERE id='d_human' AND status='resolved' AND json_extract(result,'$.decided_by')='owner'"
+                ),
+                1
+            );
+            assert_eq!(count(c, "SELECT COUNT(*) FROM audit WHERE actor='yolo'"), 0);
+            assert_eq!(
+                count(c, "SELECT COUNT(*) FROM audit WHERE action LIKE 'yolo.%'"),
+                0
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM audit WHERE actor='steve' AND target='d_yolo'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bot_node_bindings WHERE bot_id='b1' AND nodes='[\"local\"]'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bot_node_bindings WHERE bot_id='b2' AND nodes='[\"remote-1\"]'"
+                ),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
 }

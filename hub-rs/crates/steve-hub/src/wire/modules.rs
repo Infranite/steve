@@ -12,7 +12,7 @@ use steve_core::{Core, ItemAction};
 use steve_modules::Modules;
 use steve_store::Store;
 
-use crate::backend::BackendError;
+use crate::error::BackendError;
 
 /// A named background task prepared during assembly, started after boot.
 pub struct Job {
@@ -274,7 +274,7 @@ pub(crate) fn knowledge(
 pub struct Env<'a> {
     pub store: &'a Store,
     pub core: &'a Core,
-    pub backend: Arc<dyn crate::backend::Backend>,
+    pub backend: crate::wire::store::StoreBackend,
     pub steve_home: &'a Path,
     pub data_dir: &'a Path,
     pub public_urls: &'a [String],

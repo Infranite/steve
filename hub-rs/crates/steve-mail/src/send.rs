@@ -23,7 +23,7 @@ use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
 use steve_modules::contacts::people_repo;
 use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::outbound::Verdict;
-use steve_modules::outbound::{legacy_automatic_decision, strip_ai_prefix};
+use steve_modules::outbound::strip_ai_prefix;
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
 use steve_store::{Decision, NewDecision, uid};
 
@@ -518,7 +518,7 @@ impl Mail {
             let approval = steve_store::decision_repo::send_approval(tx, &d.workspace_id, id)?;
             let current = content_hash(&d);
             let ok = approval.as_ref().is_some_and(|a| {
-                !legacy_automatic_decision(&a.result) && a.result.get("content_hash").and_then(Value::as_str)
+                a.result.get("content_hash").and_then(Value::as_str)
                     == Some(d.content_hash.as_str())
             }) && current == d.content_hash;
             let Some(a) = approval.filter(|_| ok) else {

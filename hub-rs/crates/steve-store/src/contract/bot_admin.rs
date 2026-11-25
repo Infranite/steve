@@ -134,10 +134,7 @@ pub fn wrong_node(
     Ok(r.one(&q, |_| Ok(()))?.is_some())
 }
 
-pub fn harness_nodes(
-    r: &mut impl Read,
-    bot: Option<&str>,
-) -> Result<(std::collections::BTreeSet<String>, bool)> {
+pub fn harness_nodes(r: &mut impl Read, bot: &str) -> Result<std::collections::BTreeSet<String>> {
     let mut nodes = std::collections::BTreeSet::new();
     let parameter = sea_query::Values(vec![bot.into()]);
     r.db().query(
@@ -153,13 +150,5 @@ pub fn harness_nodes(
             Ok(())
         },
     )?;
-    let mut legacy = false;
-    r.db().query(
-        "SELECT NOT EXISTS(SELECT 1 FROM bot_node_bindings WHERE bot_id=?1)
-           OR EXISTS(SELECT 1 FROM bot_workspaces w WHERE w.bot_id=?1 AND NOT EXISTS
-             (SELECT 1 FROM bot_node_bindings b WHERE b.bot_id=w.bot_id AND b.workspace_id=w.workspace_id))",
-        &parameter,
-        &mut |row| { legacy = row.get(0)?; Ok(()) },
-    )?;
-    Ok((nodes, legacy))
+    Ok(nodes)
 }
