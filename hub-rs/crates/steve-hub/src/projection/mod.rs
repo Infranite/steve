@@ -624,7 +624,7 @@ mod tests {
             node_priority: 0,
             harness: session.harness.clone(),
             model: session.model.clone(),
-            reasoning_effort: None,
+            reasoning_effort: Default::default(),
             explanation: PlacementExplanation {
                 bot: bot.id.as_str().into(),
                 reason: PlacementReason::Specialty,

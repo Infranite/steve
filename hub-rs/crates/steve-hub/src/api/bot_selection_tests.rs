@@ -51,6 +51,7 @@ fn reported(id: &str, models: &[&str], efforts: &[&str]) -> Harness {
             id: id.to_string(),
             name: None,
             description: None,
+            efforts: None,
         })
         .collect();
     h.efforts = efforts.iter().map(|s| s.to_string()).collect();
@@ -170,16 +171,14 @@ async fn create_rejects_wrong_harness_model_and_effort_without_writing() {
 }
 
 #[tokio::test]
-async fn real_ids_reported_efforts_and_null_defaults_can_be_saved() {
+async fn real_ids_canonical_efforts_and_null_defaults_can_be_saved() {
     let e = Env::new();
     for model in ["gpt-6.1-sol", "route/gpt-6.1-sol[1m]"] {
         let id = e
-            .create(
-                json!({"name":model,"harness":"codex","model":model,"reasoning_effort":"ultra"}),
-            )
+            .create(json!({"name":model,"harness":"codex","model":model,"reasoning_effort":"max"}))
             .await;
         assert_eq!(e.bot(&id)["model"], model);
-        assert_eq!(e.bot(&id)["reasoning_effort"], "ultra");
+        assert_eq!(e.bot(&id)["reasoning_effort"], "max");
         let (status, out) = e
             .call(
                 "PATCH",
@@ -189,7 +188,7 @@ async fn real_ids_reported_efforts_and_null_defaults_can_be_saved() {
             .await;
         assert_eq!(status, 200, "{out}");
         assert!(e.bot(&id)["model"].is_null());
-        assert!(e.bot(&id)["reasoning_effort"].is_null());
+        assert_eq!(e.bot(&id)["reasoning_effort"], "default");
     }
     e.create(json!({"name":"default","model":null,"reasoning_effort":null}))
         .await;
@@ -198,36 +197,51 @@ async fn real_ids_reported_efforts_and_null_defaults_can_be_saved() {
 }
 
 #[tokio::test]
-async fn harness_only_patch_rechecks_inherited_model_and_effort_atomically() {
+async fn harness_only_patch_rechecks_inherited_model_and_keeps_canonical_effort() {
     let e = Env::new();
-    for fields in [
-        json!({"name":"model","model":"claude-opus-5-5","role":"keep"}),
-        json!({"name":"effort","model":null,"reasoning_effort":"max","role":"keep"}),
-    ] {
-        let id = e.create(fields).await;
-        let before = e.bot(&id);
-        let (status, out) = e
-            .call(
-                "PATCH",
-                &format!("/bots/{id}"),
-                json!({"harness":"codex","role":"must not write"}),
-            )
-            .await;
-        assert_eq!(status, 400, "{out}");
-        assert_eq!(e.bot(&id), before);
-        let (status, out) = e
-            .call(
-                "PATCH",
-                &format!("/bots/{id}"),
-                json!({"harness":"codex","model":null,"reasoning_effort":null}),
-            )
-            .await;
-        assert_eq!(status, 200, "{out}");
-        let after = e.bot(&id);
-        assert_eq!(after["harness"], "codex");
-        assert_eq!(after["role"], "keep");
-        assert!(after["model"].is_null() && after["reasoning_effort"].is_null());
-    }
+    // Inherited model incompatible with codex is rejected atomically.
+    let id = e
+        .create(json!({"name":"model","model":"claude-opus-5-5","role":"keep"}))
+        .await;
+    let before = e.bot(&id);
+    let (status, out) = e
+        .call(
+            "PATCH",
+            &format!("/bots/{id}"),
+            json!({"harness":"codex","role":"must not write"}),
+        )
+        .await;
+    assert_eq!(status, 400, "{out}");
+    assert_eq!(e.bot(&id), before);
+    let (status, out) = e
+        .call(
+            "PATCH",
+            &format!("/bots/{id}"),
+            json!({"harness":"codex","model":null,"reasoning_effort":null}),
+        )
+        .await;
+    assert_eq!(status, 200, "{out}");
+    let after = e.bot(&id);
+    assert_eq!(after["harness"], "codex");
+    assert_eq!(after["role"], "keep");
+    assert!(after["model"].is_null());
+    assert_eq!(after["reasoning_effort"], "default");
+
+    // Inherited canonical effort (`max`) transfers cleanly across harnesses (adapter maps it).
+    let id_eff = e
+        .create(json!({"name":"effort","model":null,"reasoning_effort":"max","role":"keep"}))
+        .await;
+    let (status, out) = e
+        .call(
+            "PATCH",
+            &format!("/bots/{id_eff}"),
+            json!({"harness":"codex"}),
+        )
+        .await;
+    assert_eq!(status, 200, "{out}");
+    let after_eff = e.bot(&id_eff);
+    assert_eq!(after_eff["harness"], "codex");
+    assert_eq!(after_eff["reasoning_effort"], "max");
 }
 
 #[tokio::test]
@@ -240,7 +254,7 @@ async fn partial_edits_preserve_legacy_values_and_other_bot_fields() {
             &id,
             &steve_store::BotPatch {
                 model: Some(Some("claude-opus-5-5".into())),
-                reasoning_effort: Some(Some("max".into())),
+                reasoning_effort: Some(steve_types::ReasoningEffort::Max),
                 ..Default::default()
             },
             "me",
@@ -261,10 +275,10 @@ async fn partial_edits_preserve_legacy_values_and_other_bot_fields() {
     ] {
         assert_eq!(e.bot(&id)[key], before[key], "{key}");
     }
-    // Explicitly resaving an invalid value is refused; fixing one field need not rewrite another.
+    // Explicitly resaving an invalid model or non-canonical effort is refused.
     for bad in [
         json!({"model":"claude-opus-5-5"}),
-        json!({"reasoning_effort":"max"}),
+        json!({"reasoning_effort":"ultra"}),
     ] {
         let before = e.bot(&id);
         let (status, out) = e.call("PATCH", &path, bad).await;
@@ -285,29 +299,32 @@ async fn unknown_or_failed_probe_is_not_an_empty_supported_list() {
             h.models.clear();
             h.efforts.clear();
         }
-        let (status, saved) = e.call("POST", "/bots", json!({"name":format!("unknown-{ready:?}"),"harness":"codex","model":"future-model","reasoning_effort":"future-effort"})).await;
+        let (status, saved) = e.call("POST", "/bots", json!({"name":format!("unknown-{ready:?}"),"harness":"codex","model":"future-model","reasoning_effort":"high"})).await;
         assert_eq!(status, 200);
         assert_eq!(saved["selection_validation"], "unknown");
-        let (status, out) = e
-            .call(
-                "POST",
-                "/bots",
-                json!({"name":"bad-format","model":"not an id"}),
-            )
-            .await;
-        assert_eq!(status, 400, "{out}");
+        for bad in [
+            json!({"name":"bad-format","model":"not an id"}),
+            json!({"name":"bad-effort","reasoning_effort":"future-effort"}),
+        ] {
+            let (status, out) = e.call("POST", "/bots", bad).await;
+            assert_eq!(status, 400, "{out}");
+        }
     }
-    // A successful probe with no choices is different: only defaults can be selected.
+    // A successful probe with empty models still rejects unlisted models, while canonical effort
+    // stays accepted (adapter falls back cleanly to model default).
     for h in e.catalogue.0.write().unwrap().iter_mut() {
         h.ready = Some(true);
     }
-    for bad in [
-        json!({"name":"empty-models","model":"future-model"}),
-        json!({"name":"empty-efforts","reasoning_effort":"high"}),
-    ] {
-        let (status, out) = e.call("POST", "/bots", bad).await;
-        assert_eq!(status, 400, "{out}");
-    }
+    let (status, out) = e
+        .call(
+            "POST",
+            "/bots",
+            json!({"name":"empty-models","model":"future-model"}),
+        )
+        .await;
+    assert_eq!(status, 400, "{out}");
+    e.create(json!({"name":"empty-efforts","model":null,"reasoning_effort":"high"}))
+        .await;
     e.create(json!({"name":"empty-default","model":null,"reasoning_effort":null}))
         .await;
 }
@@ -347,6 +364,7 @@ async fn concurrent_harness_and_model_edits_never_commit_an_invalid_pair() {
             id: "shared-model".into(),
             name: None,
             description: None,
+            efforts: None,
         });
     }
     for i in 0..8 {

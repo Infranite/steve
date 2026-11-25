@@ -1,6 +1,8 @@
 //! Session views, including recorded execution identity and the queue's count.
 use sea_query::{Alias, Expr, ExprTrait, Order, Query, SelectStatement};
-use steve_types::{BotPlacement, Millis, SessionView, SessionWaiting};
+use steve_types::{
+    BotPlacement, EffortMapping, Millis, ReasoningEffort, SessionView, SessionWaiting,
+};
 
 use super::{Page, page, read_ids};
 use crate::contract::{Json, Row};
@@ -26,7 +28,7 @@ fn select() -> SelectStatement {
         .columns([
             "id", "workspace_id", "item_id", "no", "bot_id", "harness", "model", "reasoning_effort",
             "cwd", "device_id", "title", "source", "readonly", "status", "acp_session_id",
-            "used", "size", "cost", "created", "updated", "import_key",
+            "used", "size", "cost", "created", "updated", "import_key", "effort_mapping",
         ].map(Alias::new))
         .expr(Expr::cust("(SELECT node_id FROM runtime_sessions WHERE session_id=sessions.id)"))
         .expr(Expr::cust("(SELECT count(*) FROM queued WHERE session_id=sessions.id)"))
@@ -45,18 +47,24 @@ fn nonempty(v: Option<String>) -> Option<String> {
 fn row(r: &Row<'_>) -> Result<SessionView> {
     let native: Option<String> = r.get(14)?;
     let imported: Option<String> = r.get(20)?;
+    let effort_mapping = r.get::<Option<Json<EffortMapping>>>(21)?.map(|Json(m)| m);
     let waiting = r
-        .get::<Option<String>>(24)?
+        .get::<Option<String>>(25)?
         .map(|reason| -> Result<_> {
             Ok(SessionWaiting {
                 reason,
-                detail: r.get(25)?,
+                detail: r.get(26)?,
             })
         })
         .transpose()?;
+    let reasoning_effort = r
+        .get::<Option<String>>(7)?
+        .as_deref()
+        .and_then(ReasoningEffort::parse)
+        .unwrap_or_default();
     Ok(SessionView {
         placement: r
-            .get::<Option<Json<BotPlacement>>>(26)?
+            .get::<Option<Json<BotPlacement>>>(27)?
             .map(|Json(f)| f.explanation),
         id: r.get::<String>(0)?.into(),
         ws: r.get::<String>(1)?.into(),
@@ -65,7 +73,8 @@ fn row(r: &Row<'_>) -> Result<SessionView> {
         bot_id: r.get::<Option<String>>(4)?.map(Into::into),
         harness: nonempty(r.get(5)?),
         model: nonempty(r.get(6)?),
-        reasoning_effort: nonempty(r.get(7)?),
+        reasoning_effort,
+        effort_mapping,
         cwd: r.get(8)?,
         device_id: nonempty(r.get(9)?).map(Into::into),
         title: r.get(10)?,
@@ -80,9 +89,9 @@ fn row(r: &Row<'_>) -> Result<SessionView> {
             .and_then(serde_json::Number::from_f64),
         created: Millis(r.get(18)?),
         updated: Millis(r.get(19)?),
-        node_id: nonempty(r.get(21)?).map(Into::into),
-        queued: r.get::<i64>(22)? as u32,
-        busy: r.get(23)?,
+        node_id: nonempty(r.get(22)?).map(Into::into),
+        queued: r.get::<i64>(23)? as u32,
+        busy: r.get(24)?,
         waiting,
     })
 }

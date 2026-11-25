@@ -221,7 +221,7 @@ pub fn plan(
         choice: HarnessChoice {
             harness: s.harness,
             model: s.model,
-            effort: s.reasoning_effort,
+            effort: s.reasoning_effort.non_default(),
         },
         policy: ExecutionPolicy {
             revision: Revision::new(format!("host-{}", bot.as_ref().map_or(0, |b| b.revision)))

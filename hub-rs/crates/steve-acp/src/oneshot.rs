@@ -132,7 +132,7 @@ pub struct Request<'a> {
     pub harness: &'a str,
     pub cwd: &'a Path,
     pub model: Option<&'a str>,
-    pub effort: Option<&'a str>,
+    pub effort: steve_harness_spec::ReasoningEffort,
     pub resume: Option<&'a str>,
     /// The call's stable instructions: the session's system prompt where the adapter takes one
     /// (`sessionCapabilities.systemPrompt`), else the start of the prompt.
@@ -760,6 +760,7 @@ async fn open_job_session(
             mode: Some(req.cfg.mode_choice(req.harness, req.mode)),
             model: req.model,
             effort: req.effort,
+            effort_mode: req.cfg.adapter_properties(req.harness).effort_mode,
             system_prompt: req.head.map(|text| session::SystemPrompt {
                 text,
                 mode: if req.tools_off {
@@ -880,7 +881,7 @@ for line in sys.stdin:
             harness: "neutral-test",
             cwd: root,
             model: None,
-            effort: None,
+            effort: steve_harness_spec::ReasoningEffort::Default,
             resume: None,
             head: None,
             tools_off: true,
@@ -1303,7 +1304,8 @@ for line in sys.stdin:
                     mcp_servers: json!([]),
                     mode: None,
                     model: None,
-                    effort: None,
+                    effort: steve_node_api::ReasoningEffort::Default,
+                    effort_mode: steve_node_api::EffortMode::AcpOption,
                     system_prompt: Some(session::SystemPrompt {
                         text: "Personal rule",
                         mode: sp_mode,

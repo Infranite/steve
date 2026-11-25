@@ -45,14 +45,17 @@ pub use steve_types::devices::{
     login_shell_path_script,
 };
 pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};
-pub use steve_types::{Code, Error, Retry, devices::NodeReason};
+pub use steve_types::{
+    Code, EffortMapping, EffortMode, EffortStrategy, Error, ReasoningEffort, Retry,
+    devices::NodeReason,
+};
 pub use stop::*;
 pub use tools::*;
 pub use workspace::*;
 
 /// Exact ordinary wire contract. Every wire-format change increments this in the same commit.
 /// A different value permits only the independent, permanent upgrade protocol.
-pub const PROTOCOL: u32 = 15;
+pub const PROTOCOL: u32 = 16;
 
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness
 /// with it, is gone): what the Hub gives up and continues on its own (B6), unlike other unknowns.

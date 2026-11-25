@@ -717,8 +717,8 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
         );
     }
 
-    // 136 & 137: Normalize `bots.perm_mode` and drop legacy `project_dir`/`worktree` columns
-    // (no table/row count change).
+    // 136..=138: Normalize `bots.perm_mode`, drop legacy `project_dir`/`worktree` columns, and
+    // canonicalize `reasoning_effort` + add `sessions.effort_mapping` (no table/row count change).
 
     changes
 }

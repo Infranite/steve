@@ -5,6 +5,7 @@
 //! the handler adds what the statistics saw this week (last success, last failure per model).
 
 use serde_json::{Value, json};
+use steve_types::EffortMapping;
 
 /// One model a harness offers.
 #[derive(Debug, Clone, PartialEq)]
@@ -16,8 +17,10 @@ pub struct Entry {
     pub via: Option<String>,
     /// A short note from the catalogue (an audit warning).
     pub note: Option<String>,
-    /// Reasoning efforts the model takes, when its adapter says per model.
+    /// Native reasoning efforts the model takes, when its adapter says per model.
     pub efforts: Vec<String>,
+    /// Deterministic mapping of Steve's five canonical effort levels on this model.
+    pub effort_map: Vec<EffortMapping>,
 }
 
 impl Entry {
@@ -33,6 +36,7 @@ impl Entry {
             via: via.map(String::from),
             note: None,
             efforts: vec![],
+            effort_map: vec![],
         }
     }
 
@@ -41,6 +45,7 @@ impl Entry {
             "id": self.id, "label": self.label, "family": self.family,
             "via": self.via, "note": self.note,
             "efforts": self.efforts,
+            "effort_map": self.effort_map,
         })
     }
 }
@@ -137,7 +142,7 @@ impl Catalog {
         }
     }
 
-    /// `{harness, name, source, default, efforts, families, models}` of `h`.
+    /// `{harness, name, source, default, efforts, effort_mode, effort_map, families, models}` of `h`.
     pub fn list(&self, h: &steve_core::harnesses::Harness) -> Value {
         let probed = h.ready == Some(true);
         let models: Vec<Entry> = h
@@ -147,6 +152,8 @@ impl Catalog {
             .map(|m| {
                 let mut e = Entry::new(&m.id, m.name.as_deref());
                 e.note = m.description.as_deref().and_then(note_of);
+                e.efforts = h.acp_efforts_for(Some(&m.id)).to_vec();
+                e.effort_map = h.effort_map(Some(&m.id));
                 e
             })
             .collect();
@@ -155,12 +162,18 @@ impl Catalog {
             .copied()
             .filter(|f| models.iter().any(|m| m.family == *f))
             .collect();
+        let default_model = h
+            .default_model
+            .clone()
+            .or_else(|| self.agent_defaults.get(&h.id).cloned());
         json!({
             "harness": h.id,
             "name": h.name,
             "source": if probed && !models.is_empty() { ADAPTER } else { BUILTIN },
-            "default": h.default_model.clone().or_else(|| self.agent_defaults.get(&h.id).cloned()),
+            "default": default_model,
             "efforts": h.efforts,
+            "effort_mode": h.effort_mode,
+            "effort_map": h.effort_map(default_model.as_deref()),
             "families": families,
             "models": models.iter().map(Entry::json).collect::<Vec<_>>(),
         })
@@ -274,16 +287,19 @@ mod tests {
                 id: "gpt-6-sol".into(),
                 name: Some("GPT 6 Sol".into()),
                 description: Some("Served here. [warning: slow]".into()),
+                efforts: None,
             },
             HarnessModel {
                 id: "kiro/claude-sonnet-5-5".into(),
                 name: None,
                 description: None,
+                efforts: None,
             },
             HarnessModel {
                 id: "not a model".into(),
                 name: None,
                 description: None,
+                efforts: None,
             },
         ];
         probed.default_model = Some("gpt-6-sol".into());

@@ -398,7 +398,7 @@ async fn acp_think(
         harness: &spec.run.choice.harness,
         cwd: dir,
         model: spec.run.choice.model.as_deref(),
-        effort: spec.run.choice.effort.as_deref(),
+        effort: spec.run.choice.effective_effort(),
         resume: None,
         head: think.instructions.as_deref(),
         tools_off: think.tools == ThinkToolMode::None,

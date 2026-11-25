@@ -71,12 +71,6 @@ struct TextBody {
     text: String,
 }
 
-fn valid_effort(s: &str) -> bool {
-    (1..=64).contains(&s.len())
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
-}
-
 fn valid_hex_color(s: &str) -> bool {
     s.len() == 7 && s.as_bytes()[0] == b'#' && s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
 }
@@ -138,9 +132,11 @@ fn known_harness_ids(
 }
 
 fn selection_out(mut bot: Obj, harnesses: &[steve_core::harnesses::Harness]) -> Obj {
-    let explicit = ["model", "reasoning_effort"]
-        .iter()
-        .any(|k| bot.get(*k).is_some_and(|v| !v.is_null()));
+    let explicit = bot.get("model").is_some_and(|v| !v.is_null())
+        || bot
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .is_some_and(|v| v != steve_types::ReasoningEffort::Default.as_str());
     let known = harnesses
         .iter()
         .find(|h| Some(h.id.as_str()) == bot.get("harness").and_then(Value::as_str))
@@ -203,10 +199,19 @@ fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError
         p.insert("model".into(), json!(m));
     }
     if let Some(m) = req.reasoning_effort.into_option() {
-        if m.as_deref().is_some_and(|s| !valid_effort(s)) {
-            bad.push("reasoning_effort".into());
-        } else {
-            p.insert("reasoning_effort".into(), json!(m));
+        match m.as_deref() {
+            None | Some("") => {
+                p.insert(
+                    "reasoning_effort".into(),
+                    json!(steve_types::ReasoningEffort::Default),
+                );
+            }
+            Some(s) => match steve_types::ReasoningEffort::parse(s) {
+                Some(e) => {
+                    p.insert("reasoning_effort".into(), json!(e));
+                }
+                None => bad.push("reasoning_effort".into()),
+            },
         }
     }
     if let Some(r) = req.rules {
@@ -317,14 +322,20 @@ fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError
                 }
             };
             let e = match obj.get("reasoning_effort") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(s)) if valid_effort(s) => {
-                    let trimmed = s.trim();
-                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                None | Some(Value::Null) => steve_types::ReasoningEffort::Default,
+                Some(Value::String(s)) if s.trim().is_empty() => {
+                    steve_types::ReasoningEffort::Default
                 }
+                Some(Value::String(s)) => match steve_types::ReasoningEffort::parse(s.trim()) {
+                    Some(effort) => effort,
+                    None => {
+                        bad.push(format!("fallback_surfaces.{idx}.reasoning_effort"));
+                        steve_types::ReasoningEffort::Default
+                    }
+                },
                 _ => {
                     bad.push(format!("fallback_surfaces.{idx}.reasoning_effort"));
-                    None
+                    steve_types::ReasoningEffort::Default
                 }
             };
             if !h.is_empty() {
@@ -904,15 +915,24 @@ mod tests {
 
     #[test]
     fn bot_patch_validation() {
-        assert!(bot_in(&json!({"reasoning_effort": "high"}), false, &ids()).is_ok());
-        assert!(bot_in(&json!({"reasoning_effort": "turbo"}), false, &ids()).is_ok());
-        assert!(bot_in(&json!({"reasoning_effort": null}), false, &ids()).is_ok());
+        for ok in ["default", "low", "medium", "high", "max"] {
+            assert!(
+                bot_in(&json!({"reasoning_effort": ok}), false, &ids()).is_ok(),
+                "{ok}"
+            );
+        }
         assert_eq!(
-            bot_in(&json!({"reasoning_effort": "bad effort!"}), false, &ids()).unwrap_err(),
-            ApiError::Invalid(vec!["reasoning_effort".into()])
+            bot_in(&json!({"reasoning_effort": null}), false, &ids()).unwrap()["reasoning_effort"],
+            json!("default")
         );
-        // Membership is checked against the harness at write time, not a fixed enum here.
-        assert!(bot_in(&json!({"reasoning_effort": "ultra"}), false, &ids()).is_ok());
+        // Only Steve's five canonical levels are accepted; native/arbitrary names are rejected.
+        for bad_eff in ["bad effort!", "turbo", "ultra", "xhigh", "minimal"] {
+            assert_eq!(
+                bot_in(&json!({"reasoning_effort": bad_eff}), false, &ids()).unwrap_err(),
+                ApiError::Invalid(vec!["reasoning_effort".into()]),
+                "{bad_eff}"
+            );
+        }
         let e = bot_in(&json!({"name": "", "proactive": 3, "avatar": {"color": "red", "skin": "12", "round": 101}}), false, &ids()).unwrap_err();
         assert_eq!(
             e,

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use serde::Serialize;
+use steve_harness_spec::{EffortContext, EffortMapping, EffortMode, ReasoningEffort};
 use steve_node_api::PermissionMode;
 
 /// A model an adapter offers.
@@ -16,6 +17,10 @@ pub struct HarnessModel {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Per-model native ACP effort options probed on the Node (`None`: not probed per model;
+    /// `Some([])`: probed and confirmed no ACP effort option).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efforts: Option<Vec<String>>,
 }
 
 /// One harness adapter.
@@ -37,8 +42,13 @@ pub struct Harness {
     pub models: Vec<HarnessModel>,
     /// What it runs when no model is set.
     pub default_model: Option<String>,
-    /// The reasoning efforts it takes.
+    /// Native reasoning efforts reported on the default model (used internally for mapping).
     pub efforts: Vec<String>,
+    /// Adapter-level effort mapping strategy (`acp_option | model_variant | unsupported`).
+    pub effort_mode: EffortMode,
+    /// Concrete variant model ids reported in `models.availableModels` for `model_variant` lookup.
+    #[serde(skip)]
+    pub variant_models: Vec<String>,
     /// Steve's judgments fall back down Steve's model lists after the bot's model (declared).
     pub model_fallback: bool,
     /// Words that name its quick, cheap models, best first (declared).
@@ -88,10 +98,13 @@ impl Harness {
                     id: m.clone(),
                     name: None,
                     description: None,
+                    efforts: None,
                 })
                 .collect(),
             default_model: None,
             efforts: p.fallback_efforts.clone(),
+            effort_mode: p.effort_mode,
+            variant_models: vec![],
             model_fallback: p.model_fallback,
             fast_models: p.fast_models.clone(),
         }
@@ -154,9 +167,66 @@ impl Harness {
         self.models.iter().map(|m| m.id.clone()).collect()
     }
 
-    /// Whether it takes `effort` (an adapter that reports no efforts takes none).
-    pub fn takes_effort(&self, effort: &str) -> bool {
-        self.efforts.iter().any(|e| e == effort)
+    /// Native ACP effort options for `model`, preferring per-model probed data when present.
+    pub fn acp_efforts_for(&self, model: Option<&str>) -> &[String] {
+        let target = model
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or(self.default_model.as_deref());
+        if let Some(id) = target
+            && let Some(found) = self.models.iter().find(|m| m.id == id)
+            && let Some(per_model) = found.efforts.as_deref()
+        {
+            return per_model;
+        }
+        &self.efforts
+    }
+
+    /// Concrete model ids available for `ModelVariant` sibling lookup.
+    pub fn available_variant_models(&self) -> Vec<String> {
+        if !self.variant_models.is_empty() {
+            self.variant_models.clone()
+        } else {
+            self.model_ids()
+        }
+    }
+
+    /// Deterministic mapping of Steve's five canonical effort levels on `model` (or default model).
+    pub fn effort_map(&self, model: Option<&str>) -> Vec<EffortMapping> {
+        let effective = model
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or(self.default_model.as_deref());
+        let avail = self.available_variant_models();
+        steve_harness_spec::resolve_all_levels(&EffortContext {
+            mode: self.effort_mode,
+            model: effective,
+            acp_options: self.acp_efforts_for(effective),
+            available_models: &avail,
+        })
+    }
+
+    /// Deterministic mapping of one canonical [`ReasoningEffort`] on `model` (or default model).
+    pub fn resolve_effort(&self, model: Option<&str>, effort: ReasoningEffort) -> EffortMapping {
+        let effective = model
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or(self.default_model.as_deref());
+        let avail = self.available_variant_models();
+        steve_harness_spec::resolve_for_model(
+            effort,
+            &EffortContext {
+                mode: self.effort_mode,
+                model: effective,
+                acp_options: self.acp_efforts_for(effective),
+                available_models: &avail,
+            },
+        )
+    }
+
+    /// Whether `effort` is actively supported on `model` (default is always supported).
+    pub fn supports_effort(&self, model: Option<&str>, effort: ReasoningEffort) -> bool {
+        self.resolve_effort(model, effort).supported
     }
 
     /// Whether it can be set to permission mode `mode` (unknown yet: yes).
@@ -253,6 +323,7 @@ mod tests {
                 id: m.to_string(),
                 name: None,
                 description: None,
+                efforts: None,
             })
             .collect();
         h

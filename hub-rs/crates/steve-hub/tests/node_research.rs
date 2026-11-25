@@ -391,7 +391,7 @@ fn bot() -> steve_core::repo::Bot {
         main: true,
         harness: "claude-code".into(),
         model: None,
-        reasoning_effort: None,
+        reasoning_effort: Default::default(),
         rules: "说重点。".into(),
         accept_mode: "inherit".into(),
         perm_mode: "ask".into(),
@@ -513,7 +513,7 @@ async fn a_run_on_the_node_answers_falls_back_and_continues() {
     r.models = steve_core::models::Choice {
         harness: "claude-code".into(),
         models: vec!["m-busy".into(), "m2".into()],
-        effort: Some("max".into()),
+        effort: Some(steve_types::ReasoningEffort::Max),
     };
     let out = node.adapter.research(r, &Seen::default()).await;
     assert_eq!(out.end, RunEnd::Done, "{out:?}");
@@ -531,7 +531,7 @@ async fn a_run_on_the_node_answers_falls_back_and_continues() {
     r.models = steve_core::models::Choice {
         harness: "claude-code".into(),
         models: vec!["m-busy".into(), "m2".into()],
-        effort: Some("max".into()),
+        effort: Some(steve_types::ReasoningEffort::Max),
     };
     r.resume = Some(ResumeFrom {
         run: "tr_2".into(),

@@ -26,7 +26,7 @@ import { Badge } from "@/components/affect/badge-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
-  st, botName, ownsBot, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, removeBotFromWorkspace, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  st, botName, ownsBot, PRO, ACC, PERM, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, removeBotFromWorkspace, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, emit, closedSt, type ExecutionSurface,
 } from "@/store"
 import { api } from "@/api"
@@ -45,6 +45,7 @@ import { AUDIT_CAT, AuditSettingsPane } from "@/audit-settings"
 import { MODELS_CAT, ModelsSettingsPane, SteveJudges } from "@/models-settings"
 import { PLUGINS_CAT, PluginsSettingsPane } from "@/plugins"
 import { ModelPicker } from "@/model-picker"
+import { EffortPicker, effortShortLabel, normalizeEffort } from "@/effort-picker"
 import { SetSelect, SetSwitch } from "@/settings-controls"
 import { TextField } from "@/components/ui/input"
 import { TextArea } from "@/components/affect/text-area-clean"
@@ -269,8 +270,6 @@ export let botTab: "概览" | "设置" | "对外身份" | "能力" | "系统提�
 /** open a bot's 设置 tab */
 export function editBot(k: string) { botTab = "设置"; lastBot = k; go("#/bots/" + k) }
 const BOT_TABS = [["概览", "tabOverview"], ["设置", "tabSettings"], ["能力", "tabCaps"], ["系统提示词", "tabPrompt"], ["记忆", "tabMemory"], ["对外身份", "tabPersona"], ["定时与流程", "tabSchedule"]] as const
-const EFFORT_KEYS = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const
-const isEffortKey = (v: string): v is (typeof EFFORT_KEYS)[number] => (EFFORT_KEYS as readonly string[]).includes(v)
 function FallbackSurfacesEditor({ value, onChange }: { value: ExecutionSurface[]; onChange: (next: ExecutionSurface[]) => void }) {
   const t = useT()
   const runtimes = useRuntimes()
@@ -287,15 +286,14 @@ function FallbackSurfacesEditor({ value, onChange }: { value: ExecutionSurface[]
     if (value.length >= 8) return
     const pick = runtimes.find((r) => r.ok)?.id ?? runtimes[0]?.id ?? defaultHarness()
     if (!pick) return
-    onChange([...value, { harness: pick, model: null, reasoning_effort: null }])
+    onChange([...value, { harness: pick, model: null, reasoning_effort: "default" }])
   }
   return (
     <F label={t("manage:form.fallbackSurfaces")} hint={t("manage:form.fallbackSurfacesHint")}>
       <div className="flex flex-col gap-2" data-bot-fallbacks>
         {value.length === 0 && <div className="type-footnote text-muted-foreground">{t("manage:form.fallbackSurfacesEmpty")}</div>}
         {value.map((s, idx) => {
-          const efforts = harnessEfforts(s.harness)
-          const eff = s.reasoning_effort ?? ""
+          const eff = normalizeEffort(s.reasoning_effort)
           return (
             <div key={idx} className="flex flex-col gap-2 rounded-lg border border-border/70 p-3" data-bot-fallback-row={idx}>
               <div className="flex items-center justify-between gap-2">
@@ -307,12 +305,9 @@ function FallbackSurfacesEditor({ value, onChange }: { value: ExecutionSurface[]
                 </div>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
-                <RuntimeSelect testId={`bot-fallback-harness-${idx}`} value={s.harness} onChange={(h) => updateAt(idx, { harness: h, model: null, reasoning_effort: null })} />
+                <RuntimeSelect testId={`bot-fallback-harness-${idx}`} value={s.harness} onChange={(h) => updateAt(idx, { harness: h, model: null })} />
                 <ModelPicker field testId={`bot-fallback-model-${idx}`} harness={s.harness} value={s.model ?? ""} allowDefault onChange={(m) => updateAt(idx, { model: m || null })} />
-                {efforts.length > 0 && (
-                  <SetSelect wide testId={`bot-fallback-effort-${idx}`} label={t("manage:form.effort")} value={eff || "default"} onChange={(v) => updateAt(idx, { reasoning_effort: v === "default" ? null : v })}
-                    options={[{ v: "default", l: t("manage:effort.default") }, ...efforts.map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v })), ...(eff && !efforts.includes(eff) ? [{ v: eff, l: isEffortKey(eff) ? t(`manage:effort.${eff}`) : eff }] : [])]} />
-                )}
+                <EffortPicker wide testId={`bot-fallback-effort-${idx}`} label={t("manage:form.effort")} harness={s.harness} model={s.model} value={eff} onChange={(v) => updateAt(idx, { reasoning_effort: v })} />
               </div>
             </div>
           )
@@ -333,10 +328,8 @@ export function BotView({ k }: { k: string }) {
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   const runtimes = useRuntimes(!!b)
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
-  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, specialties: b.specialties?.join("\n") ?? "", pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", fallbackSurfaces: b.fallbackSurfaces ?? [], color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
-  const allowedEfforts = harnessEfforts(fm.harness)
-  const rawEffort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
-  const effort = rawEffort && (!runtimes.some(x => x.id === fm.harness) || allowedEfforts.includes(rawEffort)) ? rawEffort : ""
+  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, specialties: b.specialties?.join("\n") ?? "", pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", reasoningEffort: normalizeEffort(b.reasoningEffort), fallbackSurfaces: b.fallbackSurfaces ?? [], color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
+  const effort = normalizeEffort(fm.reasoningEffort ?? b.reasoningEffort)
   const runtime = runtimes.find(r => r.id === fm.harness)
   const modeSupported = (fm.permMode === b.permMode && fm.harness === b.harness) || canConfigurePermission(runtime, fm.permMode)
   const specialties = String(fm.specialties).split("\n").map(tag => tag.trim()).filter(Boolean)
@@ -351,7 +344,7 @@ export function BotView({ k }: { k: string }) {
       actions={<>{!b.main && <><span className="hidden type-footnote text-muted-foreground sm:inline">{b.on ? t("manage:bot.enabled") : t("manage:bot.disabled")}</span><SetSwitch testId="bot-on" checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:bot.enabled") : t("manage:bot.disabled"))} label={t("manage:bot.enable")} /></>}<BotMenu k={k} /></>}>
       <Strip className="mb-8" watch={botTab}><Segmented full className="min-w-max" value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></Strip>
       {botTab === "概览" && <BotOverview k={k} go={(v) => { botTab = v; r() }}
-        labels={{ pro: proLabel(t, b.pro), perm: permName(t, b.permMode), acc: accLabel(t, b.acc), effort: b.reasoningEffort ? (isEffortKey(b.reasoningEffort) ? t(`manage:effort.${b.reasoningEffort}`) : b.reasoningEffort) : null, steveTools: 0 }} />}
+        labels={{ pro: proLabel(t, b.pro), perm: permName(t, b.permMode), acc: accLabel(t, b.acc), effort: b.reasoningEffort && b.reasoningEffort !== "default" ? effortShortLabel(t, normalizeEffort(b.reasoningEffort)) : null, steveTools: 0 }} />}
       {/* the channels page's list, laid into this page's section and panel */}
       {botTab === "对外身份" && <div className="anim-in"><PersonasSection bot={k} panel /></div>}
       {botTab === "定时与流程" && <BotSchedules k={k} />}
@@ -382,9 +375,9 @@ export function BotView({ k }: { k: string }) {
             options={ACC_KEYS.map((key) => ({ value: ACC[key], name: accLabel(t, key), text: t(`manage:form.accText.${key}`), icon: ACC_ICON[key] }))} /></Section>
           <Section label={t("manage:form.run")}><Card className="flex flex-col gap-5 p-5">
             <div className="grid gap-4 sm:grid-cols-2">
-              <F label="Harness"><RuntimeSelect testId="bot-harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "" })} /><RuntimeSetupLink /></F>
+              <F label="Harness"><RuntimeSelect testId="bot-harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "" })} /><RuntimeSetupLink /></F>
               <F label={t("manage:form.model")}><ModelPicker field harness={fm.harness} value={fm.model ?? ""} allowDefault testId="bot-model" onChange={(m) => set({ model: m })} /></F>
-              <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><SetSelect wide testId="bot-effort" label={t("manage:form.effort")} value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...allowedEfforts.map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v })), ...(effort && !allowedEfforts.includes(effort) ? [{ v: effort, l: isEffortKey(effort) ? t(`manage:effort.${effort}`) : effort }] : [])]} /></F>
+              <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><EffortPicker wide testId="bot-effort" label={t("manage:form.effort")} harness={fm.harness} model={fm.model} value={effort} onChange={(v) => set({ reasoningEffort: v })} /></F>
             </div>
             <RuntimeAvailability harness={fm.harness} />
             <FallbackSurfacesEditor value={fm.fallbackSurfaces ?? []} onChange={(fallbackSurfaces) => set({ fallbackSurfaces })} />
@@ -395,7 +388,7 @@ export function BotView({ k }: { k: string }) {
           </Card></Section>
           {!b.main && <ExecutionNodes key={`${st.workspace?.id}:${k}`} bot={k} />}
           <div className="flex gap-2"><Button data-save-bot disabled={!modeSupported || !specialtiesValid} onClick={async () => {
-            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, fallbackSurfaces: fm.fallbackSurfaces ?? [], color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
+            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort, fallbackSurfaces: fm.fallbackSurfaces ?? [], color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
             if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)
             setForm(null); botTab = "概览"; r() }}>{t("common:action.save")}</Button><Button variant="ghost" onClick={() => { setForm(null); botTab = "概览"; r() }}>{t("common:action.cancel")}</Button></div>
         </FieldGroup>

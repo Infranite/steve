@@ -44,6 +44,7 @@ impl HarnessAdapter for CodexAdapter {
             usage_attribution: UsageAttribution::TurnAndModelAll,
             resume: ResumeCapability::SessionLoad,
             upgrade: steve_node_api::UpgradeCapability::ManagedNpm,
+            effort_mode: steve_node_api::EffortMode::AcpOption,
             verified: true,
         }
     }
