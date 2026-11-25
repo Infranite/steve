@@ -648,7 +648,7 @@ async fn org_chart_teams_follow_the_sync() {
     let mine = me_id(&r, &me()).await;
     let a = contact(&r, &me(), "甲").await;
     let b = contact(&r, &me(), "乙").await;
-    fixture::chart_team(t.store(), "tm_root", "易人实验室", None, &[&mine]);
+    fixture::chart_team(t.store(), "tm_root", "示例公司", None, &[&mine]);
     fixture::chart_team(t.store(), "tm_rd", "研发", Some("tm_root"), &[&mine, &a]);
     fixture::chart_team(t.store(), "tm_steve", "Steve 组", Some("tm_rd"), &[&a, &b]);
     fixture::chart_team(t.store(), "tm_infra", "基础设施组", Some("tm_rd"), &[]);
@@ -817,7 +817,7 @@ async fn sync_label_and_scheduling_go_through_the_sync_port() {
     .await;
     assert_eq!((s, e), (400, err("参数不对：connection_id")));
 
-    fixture::chart_team(t.store(), "tm_root", "易人实验室", None, &[]);
+    fixture::chart_team(t.store(), "tm_root", "示例公司", None, &[]);
     let (_, list) = req(&r, &me(), "GET", "/teams", None).await;
     assert_eq!(list["sync"]["label"], "飞书通讯录");
     assert!(
@@ -840,7 +840,7 @@ impl SpacePort for FakeSpaces {
     }
 }
 
-/// The directory sync of P6: one Feishu connection once `connected`.
+/// Fake directory sync: one Feishu connection once `connected`.
 #[derive(Default)]
 struct FakeSync {
     connected: Mutex<bool>,

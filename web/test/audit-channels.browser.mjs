@@ -23,11 +23,12 @@ try {
       if (p === "/api/mail/drafts/md_1" && m === "GET") return route.fulfill({ json: draft(verdict) })
       if (p === "/api/mail/drafts/md_1/check" && m === "POST") { checked.push(1); verdict = "pass"; return route.fulfill({ json: draft(verdict) }) }
       if (p === "/api/connections" && m === "GET") return route.fulfill({ json: [conn] })
+      if (p === "/api/connections/integrations" && m === "GET") return route.fulfill({ json: { areas: [], providers: [], callback_urls: [] } })
       if (p === "/api/accounts/acc_bot") return route.fulfill({ json: account })
       if (p === "/api/personas") return route.fulfill({ json: [] })
       if (p === "/api/spaces") return route.fulfill({ json: [] })
-      if (p === "/api/channels/conn_bot" && m === "GET") return route.fulfill({ json: { connection_id: "conn_bot", persona: null, rules: [], trigger: null, send_delay_s: delay, send_delay_default_s: 3 } })
-      if (p === "/api/channels/conn_bot" && m === "PATCH") { const b = route.request().postDataJSON(); patched.push(b); delay = b.send_delay_s; return route.fulfill({ json: { connection_id: "conn_bot", persona: null, rules: [], trigger: null, send_delay_s: delay, send_delay_default_s: 3 } }) }
+      if (p === "/api/channels/conn_bot" && m === "GET") return route.fulfill({ json: { connection_id: "conn_bot", mode: "bot", permissions: null, persona: null, rules: [], trigger: null, receive: null, send_delay_s: delay, send_delay_default_s: 3 } })
+      if (p === "/api/channels/conn_bot" && m === "PATCH") { const b = route.request().postDataJSON(); patched.push(b); delay = b.send_delay_s; return route.fulfill({ json: { connection_id: "conn_bot", mode: "bot", permissions: null, persona: null, rules: [], trigger: null, receive: null, send_delay_s: delay, send_delay_default_s: 3 } }) }
       return route.fulfill({ status: 404, json: { error: "fixture" } })
     })
     const q = theme === "dark" ? "&dark" : ""

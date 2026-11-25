@@ -143,7 +143,7 @@ async fn a_thread_added_to_the_knowledge_base_is_searchable_for_reasoning_only()
     assert!(e.mail.to_knowledge(&caller(WS2, ME), &e.thread).is_err());
 }
 
-const CANDIDATES: &str = r#"{"items":[{"kind":"fact","text":"预算审批分三步：部门负责人、财务、CFO","about":[],"level":"public","evidence":"三步：部门负责人、财务、CFO","dup_of":null,"conflicts":null}]}"#;
+const CANDIDATES: &str = r#"{"items":[{"kind":"fact","scope":"person","text":"预算审批分三步：部门负责人、财务、CFO","about":["我"],"level":"public","evidence":"三步：部门负责人、财务、CFO","dup_of":null,"conflicts":null}]}"#;
 
 fn candidates(h: &H) -> Vec<(String, String, String, String, String)> {
     db::candidate_mems(h.env.store())

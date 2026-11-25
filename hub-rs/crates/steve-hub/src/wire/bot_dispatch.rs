@@ -588,6 +588,7 @@ impl Routes {
                 matched: vec![],
                 rejected: vec![],
                 fallback: None,
+                deferred_by: None,
             });
         for reason in rejected {
             let blocker = PlacementBlocker {

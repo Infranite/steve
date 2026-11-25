@@ -1,5 +1,5 @@
 {
-  "core.thread.choose_execution_bot": "No Bot was assigned. Choose an eligible Bot in the item details; check its Team and Node settings if needed.",
+  "core.thread.choose_execution_bot": "No eligible executor Bot is available right now. Steve opened a decision card asking how to proceed.",
   "core.bot.invalid_selection": "Invalid Bot selection: %{field}",
   "core.bot.unsupported_selection": "%{harness} does not offer %{field} `%{value}`. Choose a reported value or reset it to default (null).",
   "core.item.closed": "This item has ended; start a new cycle if you need to",
@@ -116,6 +116,8 @@
   "core.draft.value.pro_low": "Only when needed",
   "core.draft.value.pro_mid": "Moderate",
   "core.draft.value.pro_high": "Proactive",
+  "core.draft.value.no_executor_ask": "Ask me",
+  "core.draft.value.no_executor_steve": "Steve handles it",
   "core.draft.value.acc_inherit": "Follow the global setting",
   "core.draft.value.acc_manual": "You accept it",
   "core.draft.value.acc_auto": "Accepted automatically",
@@ -177,6 +179,7 @@
   "core.draft.setting.home": "Open to",
   "core.draft.setting.awayH": "Reports while away",
   "core.draft.setting.tz": "Time zone",
+  "core.draft.setting.noExecutor": "When no Bot can take work",
   "core.draft.setting.accDefault": "Default acceptance",
   "core.draft.setting.depsAfter": "When prerequisites finish",
   "core.draft.setting.quotaAutoHandoff": "Auto-handoff on quota exhaustion",

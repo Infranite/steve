@@ -1,8 +1,7 @@
-//! Notifications (notify.ts): things that happened (a release went out, items were archived) rather than
-//! conversation. They are `messages` rows in space `notify`; a failure also leaves one line in the
-//! conversation pointing back at it.
-//! A failure stops asking for attention once it is closed: the user dismissed it, or a later release notice
-//! of the same item (it went out, or failed again) took its place. Its line then leaves the conversation.
+//! Notifications: typed `thread_notices` rows (no longer `messages(space='notify')` or
+//! `settings.noticeDismissed`). A failure also leaves one line in the main conversation pointing
+//! back at it (`meta.notice.ref`). Closing a notice or superseding a release failure emits
+//! `WorkEvent::Message` for that host line inside the same store transaction.
 
 use std::collections::HashSet;
 
@@ -11,15 +10,11 @@ use serde_json::{Value, json};
 use crate::backend::{BResult, Obj, Repo};
 use crate::bus::Bus;
 
-const SPACE: &str = "notify";
 use steve_store::NOTIFY_SEEN;
-const DISMISSED: &str = "noticeDismissed";
-/// notify rows looked at when deciding what is closed, and dismissed ids kept
+
+/// Maximum notice rows scanned when filtering visible conversation messages.
 const WINDOW: i64 = 500;
 
-fn str_of<'a>(m: &'a Obj, k: &str) -> Option<&'a str> {
-    m.get(k).and_then(Value::as_str)
-}
 fn notice_of<'a>(m: &'a Obj, k: &str) -> Option<&'a str> {
     m.get("meta")
         .and_then(|x| x.get("notice"))
@@ -27,65 +22,18 @@ fn notice_of<'a>(m: &'a Obj, k: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
 }
 
-/// Ids the user closed by hand, oldest first.
-fn dismissed(r: &dyn Repo, ws: &str) -> BResult<Vec<String>> {
-    Ok(r.setting_raw(ws, DISMISSED)?
-        .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
-        .unwrap_or_default())
+/// Ids of closed alerts/notices dismissed by hand (for `GET /api/shell`).
+pub fn dismissed(r: &dyn Repo, ws: &str) -> BResult<Vec<String>> {
+    r.notices_dismissed(ws)
 }
 
-/// Ids of the notify rows that no longer ask for attention: dismissed, or a failure followed by a later
-/// release notice of the same item.
-fn closed(r: &dyn Repo, ws: &str, rows: &[Obj]) -> BResult<HashSet<String>> {
-    let mut out: HashSet<String> = dismissed(r, ws)?.into_iter().collect();
-    let created = |m: &Obj| m.get("created").and_then(Value::as_f64).unwrap_or(0.0);
-    /* ascending by time; among equal times insert order (rows come ascending) */
-    let mut rows: Vec<&Obj> = rows.iter().collect();
-    rows.sort_by(|a, b| {
-        created(a)
-            .partial_cmp(&created(b))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for (n, m) in rows.iter().enumerate() {
-        let (Some(id), Some(item)) = (str_of(m, "id"), str_of(m, "item_id")) else {
-            continue;
-        };
-        if notice_of(m, "level") != Some("fail") || notice_of(m, "kind") != Some("release") {
-            continue;
-        }
-        if rows[n + 1..]
-            .iter()
-            .any(|x| str_of(x, "item_id") == Some(item) && notice_of(x, "kind") == Some("release"))
-        {
-            out.insert(id.into());
-        }
-    }
-    Ok(out)
-}
-
-/// The user closes a notice (a notify row id, or its line in the conversation): it stays in the list,
-/// unpinned, and its line leaves the conversation. The store publishes the change.
+/// The user closes a notice (a notice id, its line in the conversation, or an alert/decision id).
 pub fn dismiss(r: &dyn Repo, ws: &str, id: &str) -> BResult<()> {
-    let id = r
-        .messages_in(ws, "steve", WINDOW)?
-        .iter()
-        .find(|m| str_of(m, "id") == Some(id))
-        .and_then(|m| notice_of(m, "ref").map(String::from))
-        .unwrap_or_else(|| id.to_string());
-    let mut ids = dismissed(r, ws)?;
-    if !ids.contains(&id) {
-        ids.push(id);
-    }
-    let skip = ids.len().saturating_sub(WINDOW as usize);
-    r.setting_put_raw(
-        ws,
-        DISMISSED,
-        &serde_json::to_string(&ids[skip..]).unwrap_or_default(),
-    )?;
+    r.notices_dismiss(ws, id, None)?;
     Ok(())
 }
 
-/// `notify(ws, kind, level, text, item)`; returns the notify row id.
+/// `notify(ws, kind, level, text, item)`; returns the notice row id.
 pub fn notify(
     r: &dyn Repo,
     ws: &str,
@@ -94,25 +42,7 @@ pub fn notify(
     text: &str,
     item: Option<&str>,
 ) -> BResult<String> {
-    let id = r.message_add(
-        ws,
-        "steve",
-        text,
-        item,
-        &json!({ "notice": { "kind": kind, "level": level } }),
-        SPACE,
-    )?;
-    if level == "fail" {
-        r.message_add(
-            ws,
-            "steve",
-            text,
-            item,
-            &json!({ "notice": { "kind": kind, "level": level, "ref": id } }),
-            "steve",
-        )?;
-    }
-    Ok(id)
+    r.notices_post(ws, kind, level, text, item, level == "fail")
 }
 
 /// A stored notice text the Hub wrote itself in the request's language (`steve_core::notice_line`, and
@@ -122,6 +52,10 @@ pub fn shown(stored: &str) -> Option<String> {
     const HUB: &[&str] = &[
         "hub.node.disk_low",
         "hub.node.handed_over",
+        "hub.node.harness_auto_upgraded",
+        "hub.node.harness_auto_upgrade_failed",
+        "hub.node.harness_upgraded",
+        "hub.node.harness_upgrade_failed",
         "hub.notice.outbox_dead",
     ];
     steve_core::notice_line::shown(stored)
@@ -137,31 +71,20 @@ fn show_text(text: Option<&Value>) -> Option<Value> {
 
 /// The latest notices, newest first (ties: later insert first), at most `limit`.
 pub fn list(r: &dyn Repo, ws: &str, limit: i64) -> BResult<Vec<Value>> {
-    let all = r.messages_in(ws, SPACE, WINDOW)?;
-    let shut = closed(r, ws, &all)?;
-    let skip = all.len().saturating_sub(limit.max(0) as usize);
-    let mut rows = all[skip..].to_vec();
-    rows.reverse();
-    let created = |m: &Obj| m.get("created").and_then(Value::as_f64).unwrap_or(0.0);
-    rows.sort_by(|a, b| {
-        created(b)
-            .partial_cmp(&created(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let rows = r.notices_list(ws, limit.max(0))?;
     Ok(rows
         .into_iter()
-        .take(limit.max(0) as usize)
-        .map(|m| {
-            let notice = m.get("meta").and_then(|x| x.get("notice"));
-            let kind = notice.and_then(|n| n.get("kind")).filter(|x| !x.is_null()).cloned().unwrap_or_else(|| json!("release"));
-            let level = notice
-                .and_then(|n| n.get("level"))
-                .filter(|x| !x.is_null())
-                .cloned()
-                .unwrap_or_else(|| json!("success"));
-            let closed = str_of(&m, "id").is_some_and(|id| shut.contains(id));
-            let text = show_text(m.get("text")).or_else(|| m.get("text").cloned());
-            json!({ "id": m.get("id"), "kind": kind, "level": level, "text": text, "item_id": m.get("item_id"), "created": m.get("created"), "closed": closed })
+        .map(|n| {
+            let text = shown(&n.text).unwrap_or(n.text);
+            json!({
+                "id": n.id,
+                "kind": n.kind,
+                "level": n.level,
+                "text": text,
+                "item_id": n.item_id,
+                "created": n.created,
+                "closed": n.closed_at.is_some(),
+            })
         })
         .collect())
 }
@@ -173,7 +96,12 @@ pub fn thread_search(r: &dyn Repo, ws: &str, q: &str, limit: i64) -> BResult<Vec
 }
 
 fn visible(r: &dyn Repo, ws: &str, msgs: Vec<Obj>) -> BResult<Vec<Obj>> {
-    let shut = closed(r, ws, &r.messages_in(ws, SPACE, WINDOW)?)?;
+    let shut: HashSet<String> = r
+        .notices_list(ws, WINDOW)?
+        .into_iter()
+        .filter(|n| n.closed_at.is_some())
+        .map(|n| n.id)
+        .collect();
     Ok(msgs
         .into_iter()
         .filter(|m| !notice_of(m, "ref").is_some_and(|id| shut.contains(id)))
@@ -231,11 +159,12 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use steve_store::ThreadNotice;
 
-    /// messages and raw settings in memory; ids `m1, m2…` in insert order, `created` = insert order unless given
     #[derive(Default)]
     struct Fake {
         rows: RefCell<Vec<(String, Obj)>>,
+        notices: RefCell<Vec<ThreadNotice>>,
         settings: RefCell<HashMap<String, String>>,
     }
     impl Fake {
@@ -275,6 +204,134 @@ mod tests {
         fn setting_put_raw(&self, _ws: &str, key: &str, value: &str) -> BResult<()> {
             self.settings.borrow_mut().insert(key.into(), value.into());
             Ok(())
+        }
+        fn notices_post(
+            &self,
+            ws: &str,
+            kind: &str,
+            level: &str,
+            text: &str,
+            item: Option<&str>,
+            post_host_line: bool,
+        ) -> BResult<String> {
+            let causal_key = if kind == "release" {
+                item.map(|i| format!("release:{i}"))
+            } else {
+                None
+            };
+            let mut ns = self.notices.borrow_mut();
+            let at = ns.len() as i64 + 1;
+            if let Some(ref key) = causal_key {
+                for n in ns.iter_mut() {
+                    if n.workspace_id == ws
+                        && n.causal_key.as_deref() == Some(key.as_str())
+                        && n.level == "fail"
+                        && n.closed_at.is_none()
+                    {
+                        n.closed_at = Some(at);
+                        n.closed_by = Some("superseded".into());
+                    }
+                }
+            }
+            let id = format!("ntc_{at}");
+            let host_message_id = if post_host_line {
+                Some(self.put(
+                    "steve",
+                    text,
+                    item,
+                    json!({"notice": {"kind": kind, "level": level, "ref": id}}),
+                ))
+            } else {
+                None
+            };
+            ns.push(ThreadNotice {
+                id: id.clone(),
+                workspace_id: ws.into(),
+                causal_key,
+                host_message_id,
+                kind: kind.into(),
+                level: level.into(),
+                item_id: item.map(Into::into),
+                text: text.into(),
+                closed_at: None,
+                closed_by: None,
+                created: at,
+            });
+            Ok(id)
+        }
+        fn notices_dismiss(
+            &self,
+            ws: &str,
+            id_or_host_msg: &str,
+            by: Option<&str>,
+        ) -> BResult<bool> {
+            let mut ns = self.notices.borrow_mut();
+            let at = ns.len() as i64 + 100;
+            let mut found = false;
+            let mut closed_any = false;
+            for n in ns.iter_mut() {
+                if n.workspace_id == ws
+                    && (n.id == id_or_host_msg
+                        || n.host_message_id.as_deref() == Some(id_or_host_msg))
+                {
+                    found = true;
+                    if n.closed_at.is_none() {
+                        n.closed_at = Some(at);
+                        n.closed_by = by.map(Into::into);
+                        closed_any = true;
+                    }
+                }
+            }
+            if found {
+                return Ok(closed_any);
+            }
+            let alert_id = format!("{ws}:alert:{id_or_host_msg}");
+            if ns.iter().any(|n| n.id == alert_id) {
+                return Ok(false);
+            }
+            ns.push(ThreadNotice {
+                id: alert_id,
+                workspace_id: ws.into(),
+                causal_key: Some(id_or_host_msg.into()),
+                host_message_id: None,
+                kind: "alert".into(),
+                level: "info".into(),
+                item_id: None,
+                text: String::new(),
+                closed_at: Some(at),
+                closed_by: by.map(Into::into),
+                created: at,
+            });
+            Ok(true)
+        }
+        fn notices_list(&self, ws: &str, limit: i64) -> BResult<Vec<ThreadNotice>> {
+            let mut rows: Vec<ThreadNotice> = self
+                .notices
+                .borrow()
+                .iter()
+                .filter(|n| n.workspace_id == ws && n.kind != "alert")
+                .cloned()
+                .collect();
+            rows.reverse();
+            rows.sort_by(|a, b| b.created.cmp(&a.created));
+            rows.truncate(limit.max(0) as usize);
+            Ok(rows)
+        }
+        fn notices_dismissed(&self, ws: &str) -> BResult<Vec<String>> {
+            let mut out = Vec::new();
+            for n in self.notices.borrow().iter() {
+                if n.workspace_id != ws || n.closed_at.is_none() {
+                    continue;
+                }
+                if n.kind == "alert" {
+                    if let Some(ref k) = n.causal_key {
+                        out.push(k.clone());
+                    }
+                } else {
+                    out.push(n.id.clone());
+                }
+            }
+            Ok(out)
         }
     }
 
@@ -344,7 +401,7 @@ mod tests {
     #[test]
     fn a_dismissed_failure_stays_closed() {
         let r = Fake::default();
-        notify(&r, "w", "release", "fail", "没有发布", Some("ST-1")).expect("notify");
+        let nid = notify(&r, "w", "release", "fail", "没有发布", Some("ST-1")).expect("notify");
         /* closed from its line in the conversation: the id is that of the line, the notice is what gets remembered */
         let line = r.messages_in("w", "steve", 10).expect("rows")[0]["id"]
             .as_str()
@@ -353,9 +410,6 @@ mod tests {
         dismiss(&r, "w", &line).expect("dismiss");
         dismiss(&r, "w", &line).expect("dismiss twice");
         assert_eq!(closed_of(&r), [("没有发布".into(), true)]);
-        assert_eq!(
-            r.settings.borrow().get(DISMISSED).map(String::as_str),
-            Some(r#"["m1"]"#)
-        );
+        assert_eq!(dismissed(&r, "w").expect("dismissed"), vec![nid]);
     }
 }

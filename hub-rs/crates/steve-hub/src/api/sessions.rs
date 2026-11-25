@@ -175,7 +175,7 @@ pub async fn message(
     let files = super::files::file_ids(&mut k);
     k.finish()?;
     let refs = super::files::refs(&st, &c.ws, files).await?;
-    ok(json!({ "result": st.domain.session_message(&id, &text, &mode, refs).await? }))
+    ok(json!({ "result": st.domain.session_message(&id, &text, &mode, refs, &c.me).await? }))
 }
 
 pub async fn cancel(
@@ -380,7 +380,7 @@ pub async fn queued_edit(
     if text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
-    ok(json!(st.domain.queued_edit(&id, &qid, &text).await?))
+    ok(json!(st.domain.queued_edit(&id, &qid, &text, &c.me).await?))
 }
 
 /// `DELETE /api/sessions/:id/queued/:qid` → the row as it was (the composer takes it back).
@@ -390,7 +390,7 @@ pub async fn queued_remove(
     Path((id, qid)): Path<(String, String)>,
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
-    ok(json!(st.domain.queued_remove(&id, &qid).await?))
+    ok(json!(st.domain.queued_remove(&id, &qid, &c.me).await?))
 }
 
 /// `POST /api/sessions/:id/queued/:qid/send-now` → `{result: interrupted | sent | waiting, reason?}`.

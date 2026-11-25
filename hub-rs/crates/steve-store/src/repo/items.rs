@@ -322,10 +322,15 @@ impl Items<'_> {
                 "timeline",
                 "annotations",
                 "artifacts",
-                "thread_items",
+                "thread_forwarded",
             ] {
                 w.exec(Query::delete().from_table(table).and_where(item()))?;
             }
+            w.exec(
+                Query::delete()
+                    .from_table("thread_dispatch_refs")
+                    .and_where(Expr::col("target_item_id").eq(id)),
+            )?;
             w.exec(
                 Query::delete()
                     .from_table("item_deps")

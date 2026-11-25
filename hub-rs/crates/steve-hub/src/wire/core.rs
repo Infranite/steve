@@ -55,6 +55,10 @@ fn cerr(e: CoreError) -> BackendError {
             status: error.http_status(),
             message: handoff_error_text(error),
         },
+        CoreError::Contract(e) => BackendError {
+            status: e.code.http_status(),
+            message: e.to_string(),
+        },
         CoreError::Placement(blocked) => BackendError {
             status: 409,
             message: super::bot_dispatch::text(blocked.reason),
@@ -471,6 +475,27 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     ) -> steve_core::Result<()> {
         self.check_dispatch_choice(item_id, bot_id, Some(choice))
     }
+    fn propose_bot(
+        &self,
+        req: &steve_core::CreateItem,
+        blocked: &steve_types::PlacementBlocked,
+    ) -> steve_core::Result<Option<steve_types::BotProposal>> {
+        Ok(RoutedRuntime::propose_bot(self, req, blocked)?)
+    }
+    fn confirm_bot_proposal(
+        &self,
+        ws: &str,
+        actor: &str,
+        id: &str,
+        edit: steve_types::ConfirmBotProposal,
+    ) -> steve_core::Result<String> {
+        RoutedRuntime::confirm_bot_proposal(self, ws, actor, id, edit).map_err(|err| match err {
+            crate::error::ApiError::Json(code, msg) | crate::error::ApiError::Text(code, msg) => {
+                CoreError::Status(code, msg)
+            }
+            other => CoreError::Msg(other.to_string()),
+        })
+    }
     fn makes_worktrees(&self) -> bool {
         self.node.is_some() && self.worktrees.is_some()
     }
@@ -802,6 +827,9 @@ pub struct CoreDomain {
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The connections' runs (long connections, pollers): stopped with the Hub.
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
+    /// Set when `thread_recover` failed at boot so `ready` retries and reports failure on `/healthz`
+    /// instead of aborting startup before the Hub serves or the Node reconciles.
+    pub thread_recover_failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How long the Hub's shutdown waits for the local Node to stop its harnesses.
@@ -819,12 +847,19 @@ impl Domain for CoreDomain {
     }
     async fn recover(&self) -> BResult<()> {
         let c = self.core.clone();
+        let recover_failed = self.thread_recover_failed.clone();
         blocking(move || {
             // before anything resumes: turns left open were cut by the restart
             super::acp_stats::interrupt_open(c.store().store(), steve_store::now());
             c.recover()?;
-            /* research runs cut off by the restart */
-            c.thread_recover()
+            // Main-conversation recovery trouble is reported on `/healthz` (`recovery`), never a
+            // reason to abort Hub startup or hold back Node reconciliation.
+            if let Err(e) = c.thread_recover() {
+                tracing::error!("thread recovery at boot: {e}");
+                recover_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::recovery::failed(&e.to_string());
+            }
+            Ok(())
         })
         .await
     }
@@ -880,8 +915,13 @@ impl Domain for CoreDomain {
     /// (`recovery`), and its durable intent stays for the next boot.
     async fn ready(&self) -> BResult<()> {
         let c = self.core.clone();
+        let recover_failed = self.thread_recover_failed.clone();
         let r = blocking(move || {
             c.ready();
+            if recover_failed.load(std::sync::atomic::Ordering::SeqCst) {
+                c.thread_recover()?;
+                recover_failed.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
             c.thread_ready()
         })
         .await;
@@ -1108,19 +1148,36 @@ impl Domain for CoreDomain {
         let c = self.core.clone();
         blocking(move || c.lifecycle_tick()).await
     }
-    async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
-        let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());
-        blocking(move || c.revise_goal(&id, &text)).await
+    async fn revise_goal(&self, id: &str, text: &str, actor: &str) -> BResult<()> {
+        let (c, id, text, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            text.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.revise_goal(&id, &text, &actor)).await
     }
-    async fn supplement(&self, id: &str, text: &str, mode: &str, files: Vec<Value>) -> BResult<()> {
+    async fn supplement(
+        &self,
+        id: &str,
+        text: &str,
+        mode: &str,
+        files: Vec<Value>,
+        actor: &str,
+    ) -> BResult<()> {
         let m = match mode {
             "steer" => SupplementMode::Steer,
             "new" => SupplementMode::New,
             _ => SupplementMode::Auto,
         };
         let files = refs(files)?;
-        let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());
-        blocking(move || c.supplement(&id, &text, m, &files)).await
+        let (c, id, text, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            text.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.supplement(&id, &text, m, &files, &actor)).await
     }
     async fn deliver_queued(&self, id: &str) -> BResult<()> {
         let (c, id) = (self.core.clone(), id.to_string());
@@ -1195,13 +1252,23 @@ impl Domain for CoreDomain {
             .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
         result
     }
-    async fn add_dep(&self, id: &str, dep: &str) -> BResult<()> {
-        let (c, id, dep) = (self.core.clone(), id.to_string(), dep.to_string());
-        blocking(move || c.add_dep(&id, &dep)).await
+    async fn add_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
+        let (c, id, dep, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            dep.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.add_dep(&id, &dep, &actor)).await
     }
-    async fn rm_dep(&self, id: &str, dep: &str) -> BResult<()> {
-        let (c, id, dep) = (self.core.clone(), id.to_string(), dep.to_string());
-        blocking(move || c.rm_dep(&id, &dep)).await
+    async fn rm_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
+        let (c, id, dep, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            dep.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.rm_dep(&id, &dep, &actor)).await
     }
 
     async fn session_message(
@@ -1210,12 +1277,18 @@ impl Domain for CoreDomain {
         text: &str,
         mode: &str,
         files: Vec<Value>,
+        actor: &str,
     ) -> BResult<String> {
         let files = refs(files)?;
         let interrupt = mode == "插话";
-        let (c, sid, text) = (self.core.clone(), session.to_string(), text.to_string());
+        let (c, sid, text, actor) = (
+            self.core.clone(),
+            session.to_string(),
+            text.to_string(),
+            actor.to_string(),
+        );
         Ok(
-            blocking(move || c.session_message(&sid, &text, interrupt, &files))
+            blocking(move || c.session_message(&sid, &text, interrupt, &files, &actor))
                 .await?
                 .as_str()
                 .to_string(),
@@ -1236,18 +1309,24 @@ impl Domain for CoreDomain {
             .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
         serde_json::to_value(h).map_err(|e| BackendError::msg(e.to_string()))
     }
-    async fn queued_edit(&self, session: &str, id: &str, text: &str) -> BResult<Obj> {
-        let (c, sid, id, text) = (
+    async fn queued_edit(&self, session: &str, id: &str, text: &str, actor: &str) -> BResult<Obj> {
+        let (c, sid, id, text, actor) = (
             self.core.clone(),
             session.to_string(),
             id.to_string(),
             text.to_string(),
+            actor.to_string(),
         );
-        to_obj(blocking(move || c.queued_edit(&sid, &id, &text)).await?)
+        to_obj(blocking(move || c.queued_edit(&sid, &id, &text, &actor)).await?)
     }
-    async fn queued_remove(&self, session: &str, id: &str) -> BResult<Obj> {
-        let (c, sid, id) = (self.core.clone(), session.to_string(), id.to_string());
-        to_obj(blocking(move || c.queued_remove(&sid, &id)).await?)
+    async fn queued_remove(&self, session: &str, id: &str, actor: &str) -> BResult<Obj> {
+        let (c, sid, id, actor) = (
+            self.core.clone(),
+            session.to_string(),
+            id.to_string(),
+            actor.to_string(),
+        );
+        to_obj(blocking(move || c.queued_remove(&sid, &id, &actor)).await?)
     }
     async fn queued_send_now(&self, session: &str, id: &str) -> BResult<Obj> {
         let (c, sid, id) = (self.core.clone(), session.to_string(), id.to_string());
@@ -1337,14 +1416,37 @@ impl Domain for CoreDomain {
             .map(str::to_string);
         self.core.bot_prompt(&b, ws).map_err(cerr)
     }
-    async fn delete_bot(&self, id: &str, to: &str, actor: &str) -> BResult<Obj> {
+    async fn delete_bot(
+        &self,
+        id: &str,
+        to: &str,
+        actor: &str,
+        allowed_workspaces: Vec<String>,
+    ) -> BResult<Obj> {
         let (c, id, to, actor) = (
             self.core.clone(),
             id.to_string(),
             to.to_string(),
             actor.to_string(),
         );
-        let moved = blocking(move || c.delete_bot(&id, &to, &actor)).await?;
+        let moved = blocking(move || c.delete_bot(&id, &to, &actor, &allowed_workspaces)).await?;
+        to_obj(json!({ "moved": moved }))
+    }
+    async fn remove_bot_from_workspace(
+        &self,
+        ws: &str,
+        id: &str,
+        to: &str,
+        actor: &str,
+    ) -> BResult<Obj> {
+        let (c, ws, id, to, actor) = (
+            self.core.clone(),
+            ws.to_string(),
+            id.to_string(),
+            to.to_string(),
+            actor.to_string(),
+        );
+        let moved = blocking(move || c.remove_bot_from_workspace(&ws, &id, &to, &actor)).await?;
         to_obj(json!({ "moved": moved }))
     }
 
@@ -1378,6 +1480,7 @@ impl Domain for CoreDomain {
         mentions: Vec<steve_modules::contacts::item_people::Mention>,
         item: Option<String>,
         reply_to: Option<String>,
+        client_id: Option<String>,
     ) -> BResult<()> {
         let files = refs(files)?;
         let (c, ws, user, text) = (
@@ -1391,8 +1494,16 @@ impl Domain for CoreDomain {
             reply_to,
         };
         blocking(move || {
-            c.say_to(&ws, Some(&user), &text, &files, &mentions, to)
-                .map(|_| ())
+            c.say_to_with_key(
+                &ws,
+                Some(&user),
+                &text,
+                &files,
+                &mentions,
+                to,
+                client_id.as_deref(),
+            )
+            .map(|_| ())
         })
         .await
     }
@@ -1401,7 +1512,7 @@ impl Domain for CoreDomain {
         blocking(move || c.stop(&ws)).await
     }
     fn thread_active(&self, ws: &str) -> bool {
-        self.core.main_busy_besides(ws)
+        self.core.thread_active(ws)
     }
     async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
         let (c, ws, m, t) = (
@@ -1490,7 +1601,9 @@ impl Domain for CoreDomain {
             if c.store().item(&i)?.is_none_or(|x| x.workspace_id != ws) {
                 return Ok(false);
             }
-            Ok(c.store().store().thread().item_follow(&i, follow)?)
+            Ok(c.store()
+                .store()
+                .write(|w| steve_store::thread::set_dispatch_follow(w, &i, follow))?)
         })
         .await
     }

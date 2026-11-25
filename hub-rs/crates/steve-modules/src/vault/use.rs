@@ -18,12 +18,12 @@
 //! Nothing here holds a value except [`SecretUses::execute`], between decrypting and the end of the
 //! run.
 //!
-//! On a Node (N0e-E7, with [`SecretUses::set_nodes`]): when [`UseNodes::place`] says the session
-//! works on a Node, the command runs there instead, in the session's workspace (`cwd` relative to
-//! it), and the Node takes each value from the Hub when it starts ([`UseValues`]: decrypted then,
-//! once). A Node that may not write files (any but the
-//! Hub's own machine) gets no `files`: the request is refused before anything is asked or run.
-//! Without one, or for a session the Hub runs itself, nothing changes.
+//! On a Node (N0e-E7, with [`SecretUses::set_nodes`]): secret-injected commands execute
+//! exclusively on the session's Node, in the session's workspace (`cwd` relative to it), and the
+//! Node takes each value from the Hub when it starts ([`UseValues`]: decrypted then, once). A Node
+//! that may not write files (any but the Hub's own machine) gets no `files`: the request is refused
+//! before anything is asked or run. When no execution Node is available, the request is refused
+//! with [`VaultError::NoExecutionNode`]; the Hub never executes project commands locally.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -39,15 +39,22 @@ use steve_store::{
 use tokio::sync::mpsc;
 
 use super::grants::{self, add_grant};
-use super::inject::{
-    self, DEFAULT_TIMEOUT_S, How, Injection, MAX_TIMEOUT_S, RunOutput, RunSpec, resolve_cwd,
-};
+use super::inject::{self, DEFAULT_TIMEOUT_S, How, Injection, MAX_TIMEOUT_S, RunOutput, RunSpec};
 use super::items::templates::BANK_CARD;
 use super::{Vault, VaultError, VaultResult};
 use crate::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use crate::{ApiError, ApiResult};
 use steve_store::secret_uses::{SecretUses as UseRows, UseRecord};
 use steve_store::vault_items::{FieldRow, ItemFilter, ItemRow};
+
+fn record_vault_exec_refusal(reason: &'static str) {
+    metrics::counter!(
+        "steve_security_refusals_total",
+        "boundary" => "vault_exec",
+        "reason" => reason
+    )
+    .increment(1);
+}
 
 /// The decisions' `subject_type`.
 pub const SUBJECT: &str = "secret_use";
@@ -65,8 +72,6 @@ const DAY_MS: i64 = 86_400_000;
 const PENDING_MS: i64 = DAY_MS;
 /// Use rows are kept for a year.
 const RETENTION_MS: i64 = 365 * DAY_MS;
-/// Temp directories older than this are removed by the hourly job.
-const SCRATCH_AGE: Duration = Duration::from_secs(15 * 60);
 const PURPOSE_MAX: usize = 500;
 const COMMAND_MAX: usize = 8000;
 
@@ -77,13 +82,12 @@ pub trait SessionSink: Send + Sync {
     async fn send(&self, ws: &str, item_id: Option<&str>, session_id: Option<&str>, text: &str);
 }
 
-/// Where a session's secret uses run when it works on a Node (N0e-E7). The integrator implements
-/// it on its Nodes.
+/// Where a session's secret uses run on a Node (N0e-E7). The integrator implements it on its Nodes.
 #[async_trait]
 pub trait UseNodes: Send + Sync {
-    /// The Node `session` (of `ws`) works on. `Ok(None)`: the Hub runs its commands itself, as
-    /// before. An error (the device is offline) is the request's answer.
-    async fn place(&self, ws: &str, session: &str) -> VaultResult<Option<NodePlace>>;
+    /// The Node `session` (of `ws`) works on. Returns [`VaultError::NoExecutionNode`] or a
+    /// placement/policy error when no execution Node is available.
+    async fn place(&self, ws: &str, session: &str) -> VaultResult<NodePlace>;
     /// Runs `u` there. The Node takes the values from `values`, one field at a time.
     async fn run(&self, u: NodeUse, values: Arc<dyn UseValues>) -> RunOutput;
 }
@@ -249,8 +253,8 @@ struct Pending {
     session_id: Option<String>,
     scope: Value,
     spec: RunSpec,
-    /// It runs on the session's Node, in this directory of its workspace.
-    node: Option<Option<String>>,
+    /// Relative directory inside the session's workspace on its Node (`None`: workspace root).
+    node_cwd: Option<String>,
 }
 
 impl Pending {
@@ -330,7 +334,7 @@ fn request_injections(fields: &[FieldRow], r: &UseRequest) -> VaultResult<Vec<In
 fn pending_use(
     cx: &UseCx,
     r: &UseRequest,
-    place: Option<&NodePlace>,
+    place: &NodePlace,
     context: &UseContext,
     injections: Vec<Injection>,
 ) -> VaultResult<Pending> {
@@ -342,20 +346,14 @@ fn pending_use(
         ..
     } = context;
     let session = context.session.as_str();
-    // on a Node the directory is checked there, inside the session's workspace
-    let (cwd, node) = match place {
-        None => (resolve_cwd(Path::new(&workdir), r.cwd.as_deref())?, None),
-        Some(p) => {
-            if !p.files && injections.iter().any(|i| i.how == How::File) {
-                return Err(ApiError::rule(steve_i18n::t!("modules.vault.files_remote")).into());
-            }
-            let rel = node_cwd(&workdir, r.cwd.as_deref())?;
-            let shown = match &rel {
-                Some(rel) => Path::new(&workdir).join(rel),
-                None => PathBuf::from(&workdir),
-            };
-            (shown, Some(rel))
-        }
+    if !place.files && injections.iter().any(|i| i.how == How::File) {
+        record_vault_exec_refusal("files_not_allowed");
+        return Err(ApiError::rule(steve_i18n::t!("modules.vault.files_remote")).into());
+    }
+    let rel = node_cwd(workdir, r.cwd.as_deref())?;
+    let cwd = match &rel {
+        Some(rel) => Path::new(workdir).join(rel),
+        None => PathBuf::from(workdir),
     };
     let secs = r
         .timeout_s
@@ -378,19 +376,19 @@ fn pending_use(
         scope: scope.clone(),
         spec: RunSpec {
             use_id: use_id.clone(),
-            cwd: cwd.clone(),
+            cwd,
             command: r.command.clone(),
             injections,
             timeout: Duration::from_secs(secs),
         },
-        node,
+        node_cwd: rel,
     })
 }
 
 fn pending_row(
     cx: &UseCx,
     r: &UseRequest,
-    place: Option<&NodePlace>,
+    place: &NodePlace,
     context: &UseContext,
     pending: &Pending,
 ) -> UseRecord {
@@ -414,7 +412,7 @@ fn pending_row(
         fields: pending.labels(),
         decision_id: None,
         grant_id: None,
-        device_id: place.map_or_else(|| "hub".into(), |p| p.device.clone()),
+        device_id: place.device.clone(),
         status: "pending".into(),
         exit_code: None,
         created: at,
@@ -442,7 +440,6 @@ pub struct SecretUses(Arc<Inner>);
 
 struct Inner {
     vault: Vault,
-    home: PathBuf,
     sink: Arc<dyn SessionSink>,
     pending: Mutex<HashMap<String, Pending>>,
     nodes: std::sync::OnceLock<Arc<dyn UseNodes>>,
@@ -500,12 +497,10 @@ fn find_item(c: &mut impl Read, ws: &str, user: &str, name: &str) -> VaultResult
 }
 
 impl SecretUses {
-    /// `home` is `STEVE_HOME` (temp files go to `scratch/secrets/`).
-    pub fn new(vault: Vault, home: impl Into<PathBuf>, sink: Arc<dyn SessionSink>) -> Self {
+    pub fn new(vault: Vault, sink: Arc<dyn SessionSink>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Self(Arc::new(Inner {
             vault,
-            home: home.into(),
             sink,
             pending: Mutex::default(),
             nodes: std::sync::OnceLock::new(),
@@ -518,7 +513,7 @@ impl SecretUses {
         &self.0.vault
     }
 
-    /// Runs the uses of sessions that work on a Node there ([`UseNodes`]). Set once, at startup.
+    /// Runs the uses of sessions on their execution Node ([`UseNodes`]). Set once, at startup.
     pub fn set_nodes(&self, nodes: Arc<dyn UseNodes>) {
         let _ = self.0.nodes.set(nodes);
     }
@@ -528,11 +523,10 @@ impl SecretUses {
         Box::new(UseDecisions(self.clone()))
     }
 
-    /// At startup, inside the runtime: removes leftover temp directories, fails uses that were
-    /// running when the Hub stopped, expires the requests still waiting (their commands were only in
-    /// memory) and tells their sessions; then starts the job worker and the hourly cleanup.
+    /// At startup, inside the runtime: fails uses that were running when the Hub stopped, expires
+    /// the requests still waiting (their commands were only in memory) and tells their sessions;
+    /// then starts the job worker and the hourly retention cleanup.
     pub fn start(&self) {
-        inject::cleanup(&self.0.home, None);
         match self.expire_waiting(i64::MAX, true) {
             Ok(notes) => self.notify(notes),
             Err(e) => tracing::error!(error = %e, "vault: startup cleanup of secret uses failed"),
@@ -560,13 +554,11 @@ impl SecretUses {
         });
     }
 
-    /// Scratch and log retention are independent of approval deadlines.
+    /// Log retention is independent of approval deadlines.
     pub async fn hourly(&self) -> VaultResult<()> {
-        let home = self.0.home.clone();
         self.0
             .vault
             .blocking(move |v| {
-                inject::cleanup(&home, Some(SCRATCH_AGE));
                 v.store().write(|tx| {
                     UseRows(tx).delete_before(now() - RETENTION_MS)?;
                     Ok::<_, VaultError>(())
@@ -645,17 +637,24 @@ impl SecretUses {
     }
 
     /// `steve_secret_use`: runs now under a grant, or opens a decision.
+    /// Requires an isolated execution Node; refuses with [`VaultError::NoExecutionNode`] when none
+    /// is available rather than running commands inside the Hub process.
     pub async fn request(&self, cx: &UseCx, r: UseRequest) -> VaultResult<UseOutcome> {
-        let place = match (self.0.nodes.get(), cx.session_id.as_deref()) {
-            (Some(n), Some(s)) => n.place(&cx.ws, s).await?,
-            _ => None,
+        let session = cx
+            .session_id
+            .as_deref()
+            .ok_or_else(|| ApiError::rule("steve_secret_use only works inside a Steve session."))?;
+        let Some(nodes) = self.0.nodes.get() else {
+            record_vault_exec_refusal("no_nodes_backend");
+            return Err(VaultError::NoExecutionNode);
         };
+        let place = nodes.place(&cx.ws, session).await?;
         let me = self.clone();
         let cx2 = cx.clone();
         let prepared = self
             .0
             .vault
-            .blocking(move |_| me.prepare(&cx2, &r, place.as_ref()))
+            .blocking(move |_| me.prepare(&cx2, &r, &place))
             .await?;
         match prepared {
             Prepared::Asked {
@@ -672,12 +671,7 @@ impl SecretUses {
         }
     }
 
-    fn prepare(
-        &self,
-        cx: &UseCx,
-        r: &UseRequest,
-        place: Option<&NodePlace>,
-    ) -> VaultResult<Prepared> {
+    fn prepare(&self, cx: &UseCx, r: &UseRequest, place: &NodePlace) -> VaultResult<Prepared> {
         let mut chk = crate::Check::new();
         chk.len("purpose", r.purpose.trim(), 1, PURPOSE_MAX).len(
             "command",
@@ -799,6 +793,13 @@ impl SecretUses {
                 requested_by: cx.bot_id.clone(),
                 question_template: None,
                 source: Some(steve_store::DecisionSource::Record),
+                wait: steve_types::WaitContract::bounded(
+                    steve_types::WaitOwner::Owner,
+                    row.created,
+                    PENDING_MS,
+                    steve_types::WaitTimeoutAction::Close,
+                )
+                .ok(),
             })?;
             UseRows(tx).set_decision(&use_id, &d.id)?;
             tx.audit(
@@ -823,43 +824,35 @@ impl SecretUses {
         }
     }
 
-    /// Decrypts, runs, records the result. The values exist only inside this call.
+    /// Executes on the session's Node and records the result. Never runs commands in the Hub.
     async fn execute(&self, use_id: &str, p: &Pending) -> RunOutput {
-        if let (Some(cwd), Some(nodes)) = (&p.node, self.0.nodes.get()) {
-            let values = Arc::new(Values {
-                vault: self.0.vault.clone(),
-                ws: p.ws.clone(),
-                item: p.item_id.clone(),
-                labels: p.labels(),
-            });
-            let u = NodeUse {
-                use_id: use_id.to_string(),
-                ws: p.ws.clone(),
-                session: p.session_id.clone().unwrap_or_default(),
-                cwd: cwd.clone(),
-                command: p.spec.command.clone(),
-                injections: p.spec.injections.clone(),
-                timeout: p.spec.timeout,
-            };
-            let out = nodes.run(u, values).await;
-            return self.record(use_id, out).await;
-        }
-        let (ws, item, labels) = (p.ws.clone(), p.item_id.clone(), p.labels());
-        let values = self
-            .0
-            .vault
-            .blocking(move |v| v.injection_values(&ws, &item, &labels))
-            .await;
-        let out = match values {
-            Ok(values) => inject::run(&self.0.home, &p.spec, &values).await,
-            Err(e) => RunOutput {
+        let Some(nodes) = self.0.nodes.get() else {
+            record_vault_exec_refusal("no_nodes_backend");
+            let out = RunOutput {
                 exit_code: None,
                 timed_out: false,
                 stdout: String::new(),
                 stderr: String::new(),
-                error: Some(e.to_string()),
-            },
+                error: Some(VaultError::NoExecutionNode.to_string()),
+            };
+            return self.record(use_id, out).await;
         };
+        let values = Arc::new(Values {
+            vault: self.0.vault.clone(),
+            ws: p.ws.clone(),
+            item: p.item_id.clone(),
+            labels: p.labels(),
+        });
+        let u = NodeUse {
+            use_id: use_id.to_string(),
+            ws: p.ws.clone(),
+            session: p.session_id.clone().unwrap_or_default(),
+            cwd: p.node_cwd.clone(),
+            command: p.spec.command.clone(),
+            injections: p.spec.injections.clone(),
+            timeout: p.spec.timeout,
+        };
+        let out = nodes.run(u, values).await;
         self.record(use_id, out).await
     }
 

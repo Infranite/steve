@@ -3,6 +3,7 @@
 
 mod changes;
 mod conversations;
+mod coordinator;
 mod cycle;
 mod dependencies;
 mod flows;
@@ -294,3 +295,6 @@ impl Kit {
             .collect()
     }
 }
+
+#[path = "../../tests/fixtures/thread_replay.rs"]
+mod thread_replay;

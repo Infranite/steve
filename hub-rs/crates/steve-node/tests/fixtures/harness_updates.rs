@@ -101,6 +101,7 @@ for spec in args:
                 declared: HashMap::new(),
                 node,
                 claude_executable: PathBuf::new(),
+                claude_config_dir: None,
                 steve_home: home.clone(),
                 codex_home: dir.path().join("codex"),
                 user_home: dir.path().to_path_buf(),
@@ -154,6 +155,7 @@ for spec in args:
                     .iter()
                     .map(|c| (c.id.into(), target.into()))
                     .collect(),
+                self_update: vec![],
             },
         }
     }

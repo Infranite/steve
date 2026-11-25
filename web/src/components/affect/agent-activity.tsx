@@ -36,6 +36,8 @@ export type ActivityItem = {
   by: string;
   /** Who by name, when the who's label is not enough (another member) */
   byName?: string;
+  /** Optional actor avatar rendered in place of the coloured dot */
+  byAvatar?: ReactNode;
   /** Exactly what – "When" · "11月13日 14:20" */
   details?: { label: string; value: ReactNode; mono?: boolean }[];
   /** Why it could: one sentence */
@@ -277,7 +279,7 @@ function ActivityRow({ item: a, who, whoOf, labels, open, onOpen, nested }: { it
           {!nested && (
             <span className="ui-aga-row__meta" data-activity-meta="">
               <span className="ui-aga-who">
-                <span className="ui-aga-dot" data-tone={who?.tone} aria-hidden="true" />
+                {a.byAvatar ?? <span className="ui-aga-dot" data-tone={who?.tone} aria-hidden="true" />}
                 {name}
               </span>
               {folded && <span className="ui-aga-num ui-aga-row__task">· {span}</span>}
@@ -328,7 +330,7 @@ function ActivityPanel({ item: a, who, labels }: { item: ActivityItem; who?: Act
           <h3 className="ui-aga-label">{labels.why}</h3>
           <div className="ui-aga-card ui-aga-why">
             <span className="ui-aga-who">
-              <span className="ui-aga-dot" data-tone={who?.tone} aria-hidden="true" />
+              {a.byAvatar ?? <span className="ui-aga-dot" data-tone={who?.tone} aria-hidden="true" />}
               {a.byName ?? who?.label}
             </span>
             <p className="ui-aga-why__text">{a.why}</p>

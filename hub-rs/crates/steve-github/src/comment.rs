@@ -317,6 +317,7 @@ impl GitHub {
             },
             question_template: None,
             source: None,
+            wait: None,
         };
         let session_ref = cx.session_id.as_deref().unwrap_or("");
         self.store()

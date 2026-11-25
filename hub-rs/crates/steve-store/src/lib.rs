@@ -72,7 +72,6 @@ pub use contract::automation::{ScheduleRow, Schedules};
 pub use contract::changesets as changeset_repo;
 #[cfg(feature = "testkit")]
 pub use contract::core_fixture;
-pub use contract::core_queue;
 pub use contract::core_usage;
 pub use contract::item_delivery;
 pub use contract::message_sources::{
@@ -91,15 +90,21 @@ pub use contract::read_models::{
 };
 pub use contract::realtime_output;
 pub use contract::tags as tag_repo;
-pub use contract::thread_runs;
+pub use contract::thread;
+pub use contract::thread::{
+    CommitOutcome, CommitReplyInput, DeliveryRefClaim, DeliveryRefRow, DispatchClaim, DispatchRef,
+    EditQueuedOutcome, NewRevisionTask, ReceiptDispatch, RecoveredTask, ReplyReceipt,
+    StopTaskOutcome, SubmitInput, SubmitOutcome, ThreadNotice, ThreadTask, WithdrawOutcome,
+};
 pub use contract::vault_uses as vault_use_repo;
+pub use contract::waits as wait_repo;
 pub use contract::{
     AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
     DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,
     FlowSources, FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange,
     ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence,
-    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R,
-    Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
+    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRef,
+    ProjectRows, R, Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
     SessionEvidence, SignalFilter, SignalRow, SignalRows, SignalTriage, SourceConfig,
     StartupRecord, TagRows, W, WorkspaceSettings, Workspaces,
 };

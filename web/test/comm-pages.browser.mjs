@@ -24,10 +24,11 @@ const msg = (n, o = {}) => ({ id: "cm" + n, space_id: "sp_ops", direction: "in",
 const recent = [msg(1), msg(2, { direction: "out", sender: { name: "值班机器人" }, status: "draft", decision_id: "dc_1" }), msg(3), msg(4), msg(5), msg(6)]
 const providers = [
   { id: "feishu", name: "飞书 / Lark", status: "supported", areas: [{ area: "channel", state: "supported" }], adapters: [{ id: "feishu_app", name: "机器人", identity: "bot", auth: "credential", device: false, capabilities: [{ area: "channel", caps: ["msg.receive"], scopes: [], planned: false }] }, { id: "feishu_user", name: "你本人", identity: "self", auth: "oauth", device: true, capabilities: [{ area: "channel", caps: ["msg.receive"], scopes: [], planned: false }] }],
-    connections: [{ id: "conn_bot", account_id: "acc_bot", adapter: "feishu_app", adapter_name: "机器人", identity: "bot", name: "值班机器人", handle: "cli_x", status: "ok", health: health(), last_sync: now, capabilities: [{ area: "channel", state: "missing", missing_scopes: ["im:chat:readonly"], suggested_scopes: [], caps: [] }] }] },
+    connections: [{ id: "conn_bot", account_id: "acc_bot", adapter: "feishu_app", adapter_name: "机器人", identity: "bot", name: "值班机器人", handle: "cli_x", status: "ok", installed: true, health: health(), last_sync: now, capabilities: [{ area: "channel", state: "missing", missing_scopes: ["im:chat:readonly"], suggested_scopes: [], caps: [] }] }] },
   { id: "ext_ws", name: "其他聊天工具", status: "supported", areas: [{ area: "channel", state: "supported" }], adapters: [{ id: "ext_ws", name: "其他聊天工具", identity: "self", auth: "credential", device: false, capabilities: [{ area: "channel", caps: ["msg.receive"], scopes: [], planned: false }] }], connections: [] },
 ]
-const integrations = { areas: [{ id: "channel", label: "聊天" }], providers, callback_urls: [] }
+const integrations = { areas: [{ id: "channel", label: "聊天" }], providers, callback_urls: [],
+  installations: [{ id: "inst_feishu", provider: "feishu", provider_name: "飞书 / Lark", name: "值班机器人", status: "ok", missing: 1, identities: [{ kind: "steve", connection: providers[0].connections[0] }] }] }
 
 const run = async ({ width, scheme }) => {
   const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 900 }, colorScheme: scheme, reducedMotion: "reduce" })
@@ -44,7 +45,14 @@ const run = async ({ width, scheme }) => {
     else if (p === "/spaces/sp_ops") data = { ...spaces[0], recent }
     else if (p === "/personas") data = [persona]
     else if (p === "/connections/integrations") data = integrations
-    else if (p === "/channels/conn_me") data = { connection_id: "conn_me", persona: null, rules: [{ when: { kind: "dm" }, act: "draft" }], trigger: { on: false, words: ["/bot"], where: ["*"], mark: true }, send_delay_s: null, send_delay_default_s: 3 }
+    else if (p === "/channels") data = { accounts: [
+      { connection_id: "conn_bot", mode: "bot", permissions: null, persona: { id: "per_1", name: "小运" }, rules: [{ when: { kind: "mention_or_dm" }, act: "reply" }], trigger: null, receive: null, send_delay_s: null, send_delay_default_s: 3 },
+      { connection_id: "conn_me", mode: "self", permissions: null, persona: null, rules: [{ when: { kind: "dm" }, act: "draft" }], trigger: { on: false, words: ["/bot"], where: ["*"], who: ["me"], reply: "thread", mark: true }, receive: null, send_delay_s: null, send_delay_default_s: 3 },
+      { connection_id: "conn_ext", mode: "self", permissions: null, persona: null, rules: [{ when: { kind: "mention" }, act: "draft" }], trigger: null, receive: null, send_delay_s: null, send_delay_default_s: 3 },
+    ] }
+    else if (p === "/channels/conn_bot") data = { connection_id: "conn_bot", mode: "bot", permissions: null, persona: { id: "per_1", name: "小运" }, rules: [{ when: { kind: "mention_or_dm" }, act: "reply" }], trigger: null, receive: null, send_delay_s: null, send_delay_default_s: 3 }
+    else if (p === "/channels/conn_me") data = { connection_id: "conn_me", mode: "self", permissions: null, persona: null, rules: [{ when: { kind: "dm" }, act: "draft" }], trigger: { on: false, words: ["/bot"], where: ["*"], who: ["me"], reply: "thread", mark: true }, receive: null, send_delay_s: null, send_delay_default_s: 3 }
+    else if (p === "/channels/conn_ext") data = { connection_id: "conn_ext", mode: "self", permissions: null, persona: null, rules: [{ when: { kind: "mention" }, act: "draft" }], trigger: null, receive: null, send_delay_s: null, send_delay_default_s: 3 }
     else if (p.startsWith("/channels/")) data = []
     else return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "fixture" }) })
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(data) })

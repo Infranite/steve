@@ -9,14 +9,56 @@ use steve_store::seeded;
 use super::misc::{SMART, js_num};
 use super::{
     ApiResult, AppState, Ctx, Noun, body, bot_out, objs, ok, ok_true, own, own_bot, str_of,
+    user_workspace_ids,
 };
 use crate::backend::Obj;
 use crate::error::ApiError;
 use crate::js;
 use crate::validate::{Check, Num, Str};
+use steve_types::ConfigReason;
 
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
 const PERM: &[&str] = &["default", "plan", "bypassPermissions"];
+
+fn record_workspace_bot_refusal(reason: &'static str) {
+    metrics::counter!(
+        "steve_security_refusals_total",
+        "boundary" => "workspace_bot",
+        "reason" => reason
+    )
+    .increment(1);
+}
+
+fn is_bot_owner(owner: Option<&str>, caller: &Ctx) -> bool {
+    match owner.filter(|s| !s.is_empty()) {
+        Some(owner) => owner == caller.me,
+        None => caller.user.get("role").and_then(Value::as_str) == Some("owner"),
+    }
+}
+
+fn check_default_project(
+    r: &dyn crate::backend::Repo,
+    ws: &str,
+    project_id: &str,
+) -> Result<(), ApiError> {
+    let belongs = r
+        .project_get(project_id)?
+        .and_then(|p| {
+            p.get("workspace_id")
+                .and_then(Value::as_str)
+                .map(|w| w == ws)
+        })
+        .unwrap_or(false);
+    if !belongs {
+        record_workspace_bot_refusal("foreign_default_project");
+        return Err(ApiError::Contract(
+            ConfigReason::bot_project_outside_workspace(
+                "default_project does not belong to the current workspace",
+            ),
+        ));
+    }
+    Ok(())
+}
 
 fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
     use steve_node_api::PermissionMode as P;
@@ -286,8 +328,14 @@ pub async fn create(
             }
             steve_core::models::validate_bot_patch(None, &p, &harnesses)
                 .map_err(ApiError::bad_request)?;
+            if let Some(Value::String(dp)) = p.get("default_project")
+                && !dp.is_empty()
+            {
+                check_default_project(r, &c.ws, dp)?;
+            }
             let b = r.bot_create(&c.ws, &p, &c.me)?;
-            let out = selection_out(bot_out(r, b, &c.ws)?, &harnesses);
+            let allowed_ws = user_workspace_ids(r, &c.me)?;
+            let out = selection_out(bot_out(r, b, &c.ws, &allowed_ws)?, &harnesses);
             let id = out.get("id").and_then(Value::as_str).map(str::to_string);
             Ok((Value::Object(out), id))
         })
@@ -390,8 +438,9 @@ pub async fn draft(
         steve_core::models::validate_bot_patch(None, &f, &harnesses)
             .map_err(ApiError::bad_request)?;
         let b = w.bot_create(&c.ws, &f, &c.me)?;
+        let allowed_ws = user_workspace_ids(w, &c.me)?;
         ok(Value::Object(selection_out(
-            bot_out(w, b, &c.ws)?,
+            bot_out(w, b, &c.ws, &allowed_ws)?,
             &harnesses,
         )))
     })
@@ -438,11 +487,12 @@ pub async fn patch_one(
         if let Some(Value::String(dp)) = p.get("default_project")
             && !dp.is_empty()
         {
-            own(r.project_get(dp)?, &c.ws, Noun::Project)?;
+            check_default_project(r, &c.ws, dp)?;
         }
         let b = r.bot_patch_checked(&id, &p, &c.me, &harnesses)?;
+        let allowed_ws = user_workspace_ids(r, &c.me)?;
         ok(Value::Object(selection_out(
-            bot_out(r, b, &c.ws)?,
+            bot_out(r, b, &c.ws, &allowed_ws)?,
             &harnesses,
         )))
     })
@@ -455,23 +505,39 @@ pub async fn set_workspaces(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    check_bot(&st, &c.ws, &id).await?;
     let v = body(&b)?;
     let mut k = Check::object(&v);
     let ids = k.str_array("ids", Some(1), None);
     k.finish()?;
     st.write(move |r| {
-        let mine: Vec<String> = r
-            .workspaces_of_user(&c.me)?
-            .iter()
-            .map(|w| str_of(w, "id"))
-            .collect();
+        let Some(bot) = r.bot_get(&id)? else {
+            return Err(ApiError::not_found(Noun::Bot.missing()));
+        };
+        if !is_bot_owner(bot.get("owner").and_then(Value::as_str), &c) {
+            record_workspace_bot_refusal("not_bot_owner");
+            return Err(ApiError::Contract(ConfigReason::bot_owner_required(
+                "only the bot owner can change workspace memberships",
+            )));
+        }
+        let mine = user_workspace_ids(r, &c.me)?;
         if ids.iter().any(|x| !mine.contains(x)) {
+            record_workspace_bot_refusal("foreign_workspace");
             return Err(ApiError::not_found(steve_i18n::t!(
                 "hub.not_found.workspace"
             )));
         }
-        r.bot_set_workspaces(&id, &ids)?;
+        // Keep memberships in workspaces the caller is not a member of untouched.
+        let mut next: Vec<String> = r
+            .bot_workspaces(&id)?
+            .into_iter()
+            .filter(|w| !mine.contains(w))
+            .collect();
+        for w in ids {
+            if !next.contains(&w) {
+                next.push(w);
+            }
+        }
+        r.bot_set_workspaces(&id, &next)?;
         ok_true()
     })
     .await
@@ -497,6 +563,12 @@ pub async fn duplicate(
             "fallback_surfaces".into(),
             json!(r.bot_fallback_surfaces(&id)?),
         );
+        if let Some(Value::String(dp)) = b.get("default_project")
+            && !dp.is_empty()
+            && check_default_project(r, &c.ws, dp).is_err()
+        {
+            b.insert("default_project".into(), Value::Null);
+        }
         steve_core::models::validate_bot_patch(None, &b, &harnesses)
             .map_err(ApiError::bad_request)?;
         let n = r.bot_create(&c.ws, &b, &c.me)?;
@@ -505,14 +577,17 @@ pub async fn duplicate(
         off.insert("enabled".into(), json!(false));
         r.bot_patch(&nid, &off, &c.me)?;
         let got = r.bot_get(&nid)?.unwrap_or_default();
+        let allowed_ws = user_workspace_ids(r, &c.me)?;
         ok(Value::Object(selection_out(
-            bot_out(r, got, &c.ws)?,
+            bot_out(r, got, &c.ws, &allowed_ws)?,
             &harnesses,
         )))
     })
     .await
 }
 
+/// Owner-only global deletion of a bot. Refuses non-owners and refuses if the bot is still a
+/// member of any workspace the caller does not belong to or where the heir is absent.
 pub async fn delete_one(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -526,22 +601,56 @@ pub async fn delete_one(
         .opt_enum("memory", &["delete", "export"])
         .unwrap_or_else(|| "export".into());
     k.finish()?;
-    let (i, t, ws) = (id.clone(), to.clone(), c.ws.clone());
-    let mem = st
+    let (i, t, caller) = (id.clone(), to.clone(), c.clone());
+    let (mem, bot_wss, mine_vec) = st
         .read(move |r| {
-            own_bot(r, &i, &ws)?;
-            own_bot(r, &t, &ws)?;
-            let mut all = vec![];
-            for w in r.bot_workspaces(&i)? {
-                all.extend(r.memories_list(&i, &w)?);
+            let Some(bot) = r.bot_get(&i)? else {
+                return Err(ApiError::not_found(Noun::Bot.missing()));
+            };
+            if !is_bot_owner(bot.get("owner").and_then(Value::as_str), &caller) {
+                record_workspace_bot_refusal("not_bot_owner");
+                return Err(ApiError::Contract(ConfigReason::bot_owner_required(
+                    "only the bot owner can globally delete this bot",
+                )));
             }
-            Ok(all)
+            let mine = user_workspace_ids(r, &caller.me)?;
+            let bot_wss = r.bot_workspaces(&i)?;
+            if bot_wss.iter().any(|w| !mine.contains(w)) {
+                record_workspace_bot_refusal("cross_workspace_delete");
+                return Err(ApiError::Contract(ConfigReason::bot_foreign_workspaces(
+                    "bot belongs to workspaces you are not a member of",
+                )));
+            }
+            if t == i || r.bot_get(&t)?.is_none() {
+                return Err(ApiError::not_found(Noun::Bot.missing()));
+            }
+            for w in &bot_wss {
+                if !r.bot_in_workspace(&t, w)? {
+                    record_workspace_bot_refusal("heir_outside_workspace");
+                    return Err(ApiError::Contract(
+                        ConfigReason::bot_heir_outside_workspace(
+                            "handover bot must belong to every affected workspace",
+                        ),
+                    ));
+                }
+            }
+            let mut all = vec![];
+            for w in &bot_wss {
+                all.extend(r.memories_list(&i, w)?);
+            }
+            Ok((all, bot_wss, mine.into_iter().collect::<Vec<_>>()))
         })
         .await?;
-    let mut out = st.domain.delete_bot(&id, &to, &c.me).await?;
+    let mut out = st.domain.delete_bot(&id, &to, &c.me, mine_vec).await?;
     if memory == "delete" {
         let i = id.clone();
-        st.write(move |r| Ok(r.memories_delete_of_bot(&i)?)).await?;
+        st.write(move |r| {
+            for w in &bot_wss {
+                r.memories_delete_of_bot_in_workspace(&i, w)?;
+            }
+            Ok(())
+        })
+        .await?;
     }
     let exported: Vec<Value> = if memory == "export" {
         mem.iter()
@@ -554,12 +663,75 @@ pub async fn delete_one(
     ok(Value::Object(out))
 }
 
+/// Workspace-scoped removal: detaches a bot from the caller's current workspace (`c.ws`),
+/// hands over open items in `c.ws` to `to`, and exports/deletes memories only in `c.ws`.
+pub async fn remove_from_workspace(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    let v = body(&b)?;
+    let mut k = Check::object(&v);
+    let to = k.str("to", Str::ANY);
+    let memory = k
+        .opt_enum("memory", &["delete", "export", "keep"])
+        .unwrap_or_else(|| "export".into());
+    k.finish()?;
+    let (i, t, ws) = (id.clone(), to.clone(), c.ws.clone());
+    let mem = st
+        .read(move |r| {
+            own_bot(r, &i, &ws)?;
+            if t == i || r.bot_get(&t)?.is_none() {
+                return Err(ApiError::not_found(Noun::Bot.missing()));
+            }
+            if !r.bot_in_workspace(&t, &ws)? {
+                record_workspace_bot_refusal("heir_outside_workspace");
+                return Err(ApiError::Contract(
+                    ConfigReason::bot_heir_outside_workspace(
+                        "handover bot must belong to the current workspace",
+                    ),
+                ));
+            }
+            Ok(r.memories_list(&i, &ws)?)
+        })
+        .await?;
+    let mut out = st
+        .domain
+        .remove_bot_from_workspace(&c.ws, &id, &to, &c.me)
+        .await?;
+    if memory == "delete" {
+        let (i, ws) = (id.clone(), c.ws.clone());
+        st.write(move |r| Ok(r.memories_delete_of_bot_in_workspace(&i, &ws)?))
+            .await?;
+    }
+    let exported: Vec<Value> = if memory == "export" {
+        mem.iter()
+            .map(|m| json!({ "text": m.get("text"), "source": m.get("source"), "created": m.get("created") }))
+            .collect()
+    } else {
+        vec![]
+    };
+    out.insert("memories".into(), Value::Array(exported));
+    out.insert("removed_workspace".into(), json!(c.ws));
+    ok(Value::Object(out))
+}
+
 pub async fn restore(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
     st.write(move |r| {
+        let Some(owner) = r.bot_owner(&id)? else {
+            return Err(ApiError::not_found(Noun::Bot.missing()));
+        };
+        if !is_bot_owner(owner.as_deref(), &c) {
+            record_workspace_bot_refusal("not_bot_owner");
+            return Err(ApiError::Contract(ConfigReason::bot_owner_required(
+                "only the bot owner can restore this bot",
+            )));
+        }
         own_bot(r, &id, &c.ws)?;
         r.bot_restore(&id)?;
         ok_true()
@@ -710,6 +882,66 @@ mod tests {
             ApiError::Invalid(vec!["name".into()])
         );
     }
+
+    #[test]
+    fn bot_owner_and_refusal_metrics_enforce_contract() {
+        let mut owner_user = Obj::new();
+        owner_user.insert("role".into(), json!("owner"));
+        let owner_ctx = Ctx {
+            user: owner_user,
+            me: "usr_alice".into(),
+            ws: "ws_1".into(),
+            client: None,
+        };
+        let mut member_user = Obj::new();
+        member_user.insert("role".into(), json!("member"));
+        let member_ctx = Ctx {
+            user: member_user,
+            me: "usr_bob".into(),
+            ws: "ws_1".into(),
+            client: None,
+        };
+        // Explicit owner wins over instance role.
+        assert!(is_bot_owner(Some("usr_alice"), &owner_ctx));
+        assert!(!is_bot_owner(Some("usr_bob"), &owner_ctx));
+        assert!(is_bot_owner(Some("usr_bob"), &member_ctx));
+        assert!(!is_bot_owner(Some("usr_alice"), &member_ctx));
+        // Missing owner falls back to instance owner only.
+        assert!(is_bot_owner(None, &owner_ctx));
+        assert!(!is_bot_owner(None, &member_ctx));
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            for reason in [
+                "foreign_default_project",
+                "not_bot_owner",
+                "cross_workspace_delete",
+                "heir_outside_workspace",
+                "foreign_workspace",
+            ] {
+                record_workspace_bot_refusal(reason);
+            }
+        });
+        let text = handle.render();
+        for reason in [
+            "foreign_default_project",
+            "not_bot_owner",
+            "cross_workspace_delete",
+            "heir_outside_workspace",
+            "foreign_workspace",
+        ] {
+            assert!(
+                text.lines().any(|l| {
+                    l.starts_with("steve_security_refusals_total{")
+                        && l.contains("boundary=\"workspace_bot\"")
+                        && l.contains(&format!("reason=\"{reason}\""))
+                        && l.ends_with(" 1")
+                }),
+                "missing metric workspace_bot/{reason} in:\n{text}"
+            );
+        }
+    }
 }
 
 /// Routes mounted behind the shared API login and body-limit layers.
@@ -723,6 +955,7 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
             patch(bots::patch_one).delete(bots::delete_one),
         )
         .route("/bots/{id}/prompt", get(bots::prompt))
+        .route("/bots/{id}/workspace", delete(bots::remove_from_workspace))
         .route("/bots/{id}/workspaces", put(bots::set_workspaces))
         .route("/bots/{id}/duplicate", post(bots::duplicate))
         .route("/bots/{id}/restore", post(bots::restore))

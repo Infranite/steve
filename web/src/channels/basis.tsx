@@ -1,10 +1,8 @@
 /* 回复依据 (channels-personas.md §2.6, prototype channels.tsx Basis): which knowledge a reply used, at what level, and how
- * it went out. Only you see it; the people in the chat only see the reply. Also the small shared pieces of the channel pages. */
-import { ShieldCheckIcon, EyeOffIcon, UserIcon } from "lucide-react"
-import { cn } from "cn"
+ * it went out. Only you see it; the people in the chat only see the reply. */
+import { ShieldCheckIcon, EyeOffIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { StatusDot } from "@/ui"
-import { Robot } from "@/robot"
 import { LEVEL, OUT_LABEL, type Basis as B } from "@/api/channels"
 import { useT } from "@/i18n"
 
@@ -28,10 +26,4 @@ export function BasisView({ b }: { b: B | null }) {
       </div></div></CollapsibleContent>
     </Collapsible>
   )
-}
-
-/** a persona's face: the fixed robot avatar of the Bot behind it; no persona = you */
-export function PersonaAvatar({ bot, size = 24, className }: { bot?: string | null; size?: number; className?: string }) {
-  if (!bot) return <span className={cn("inline-flex shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground", className)} style={{ width: size, height: size }} aria-hidden><UserIcon style={{ width: size * 0.55, height: size * 0.55 }} strokeWidth={1.5} /></span>
-  return <Robot k={bot} size={size} className={className} />
 }

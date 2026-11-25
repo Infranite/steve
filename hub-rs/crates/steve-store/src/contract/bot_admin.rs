@@ -41,6 +41,32 @@ pub fn set_bindings(w: &mut W<'_>, ws: &str, bot: &str, nodes: &[String]) -> Res
     Ok(())
 }
 
+pub fn is_main_bot(r: &mut impl Read, ws: &str, bot: &str) -> Result<bool> {
+    Ok(r.one(
+        Query::select()
+            .column(("b", "id"))
+            .from_as("bots", "b")
+            .join_as(
+                JoinType::LeftJoin,
+                "bot_workspaces",
+                "w",
+                Expr::col(("w", "bot_id"))
+                    .eq(Expr::col(("b", "id")))
+                    .and(Expr::col(("w", "workspace_id")).eq(ws)),
+            )
+            .and_where(Expr::col(("b", "id")).eq(bot))
+            .and_where(Expr::col(("b", "deleted")).eq(false))
+            .and_where(Expr::col(("b", "main")).eq(true))
+            .and_where(
+                Expr::col(("b", "workspace_id"))
+                    .eq(ws)
+                    .or(Expr::col(("w", "bot_id")).is_not_null()),
+            ),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
 pub fn save(
     w: &mut W<'_>,
     ws: &str,
@@ -48,6 +74,13 @@ pub fn save(
     name: &str,
     members: &[Member],
 ) -> Result<String> {
+    for member in members {
+        if is_main_bot(w, ws, &member.bot)? {
+            return Err(crate::StoreError::Rejected(
+                "Main bot is the workspace coordinator and cannot be a Team member".into(),
+            ));
+        }
+    }
     let members = serde_json::to_string(members)?;
     if let Some(id) = id {
         let n = w.exec(

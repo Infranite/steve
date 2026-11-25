@@ -62,6 +62,8 @@ struct Inner {
     decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
     names: Names,
+    /// Bounded TTL cache for channel intent rule judgements keyed by input hash.
+    intent_cache: crate::rules::IntentCache,
     /// Where replies' knowledge is searched (the Hub sets the workspace's store; SQLite until then).
     knowledge: std::sync::OnceLock<Arc<dyn steve_knowledge::port::KnowledgeStore>>,
 }
@@ -214,6 +216,7 @@ impl ChannelsBuilder {
             decls: self.decls,
             party_hooks: self.party_hooks,
             names,
+            intent_cache: crate::rules::IntentCache::new(),
             knowledge: std::sync::OnceLock::new(),
         }))
     }
@@ -318,6 +321,10 @@ impl Channels {
 
     pub(crate) fn names_state(&self) -> &Names {
         &self.0.names
+    }
+
+    pub(crate) fn intent_cache(&self) -> &crate::rules::IntentCache {
+        &self.0.intent_cache
     }
 
     /// The identity that looks people up for `connections.adapter = id`.

@@ -166,12 +166,12 @@ pub fn route_matches(
 ) -> Result<bool> {
     Ok(r.one(
         Query::select()
-            .column("message_id")
-            .from("route_log")
+            .column("origin_message_id")
+            .from("thread_reply_receipts")
             .and_where(Expr::col("workspace_id").eq(ws))
-            .and_where(Expr::col("message_id").eq(origin))
-            .and_where(Expr::col("reply_id").eq(reply))
-            .and_where(Expr::col("kind").eq(kind))
+            .and_where(Expr::col("origin_message_id").eq(origin))
+            .and_where(Expr::col("reply_message_id").eq(reply))
+            .and_where(Expr::col("route_kind").eq(kind))
             .limit(1),
         |_| Ok(()),
     )?

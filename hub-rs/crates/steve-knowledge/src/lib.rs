@@ -26,9 +26,10 @@ pub mod sync;
 
 // K2: folder and file sources.
 pub mod scan;
-// K3: item and chat sources, candidate memories.
+// K3: item and chat extraction, candidate memories, project AGENTS.md proposals.
 pub mod candidates;
 pub mod extract;
+pub mod proposals;
 
 pub use api::routes;
 pub use retrieve::{

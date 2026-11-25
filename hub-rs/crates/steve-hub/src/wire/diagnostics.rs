@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_core::Core;
 use steve_store::diagnostics::{Details, Record, Severity};
-use steve_store::{Session, Store, ThreadRun};
+use steve_store::{Session, Store, ThreadTask};
 use tracing::Instrument;
 
 use super::research_mcp::ItemScope;
@@ -396,7 +396,7 @@ pub fn for_session(
 pub fn for_research(
     store: &Store,
     core: &Core,
-    run: &ThreadRun,
+    run: &ThreadTask,
     args: Value,
 ) -> Result<String, String> {
     let args = Args::parse(args)?;
@@ -404,20 +404,20 @@ pub fn for_research(
     query(store, core, &current.workspace_id, &scope, args)
 }
 
-fn research_scope(store: &Store, run: &ThreadRun) -> Result<(ThreadRun, ItemScope), String> {
+fn research_scope(store: &Store, run: &ThreadTask) -> Result<(ThreadTask, ItemScope), String> {
     let current = store
-        .thread()
-        .run(&run.id)
+        .read(|r| steve_store::thread::task_by_id(r, &run.id))
         .map_err(unavailable)?
         .filter(|r| {
-            r.status == "running"
+            r.status == "claimed"
+                && r.cancel_requested_at.is_none()
                 && r.workspace_id == run.workspace_id
-                && r.message_id == run.message_id
+                && r.origin_message_id == run.origin_message_id
         })
         .ok_or("Research run is no longer active.")?;
     let origin = store
         .messages()
-        .get(&current.message_id)
+        .get(&current.origin_message_id)
         .map_err(unavailable)?
         .filter(|m| m.workspace_id == current.workspace_id)
         .ok_or("Research origin is not available.")?;

@@ -1,4 +1,4 @@
-//! `/api/system/workspaces` on the wired Hub (ST-45): the disk report with the configured thresholds and
+//! `/api/system/workspaces` on the wired Hub: the disk report with the configured thresholds and
 //! folders no item points at, and a reclaim pass on demand. Temp STEVE_HOME, adapters `/usr/bin/false`.
 
 use std::collections::HashMap;

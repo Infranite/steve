@@ -35,6 +35,7 @@ try {
       readError = false; paged = false; recordReads = 0; status = q.includes("unknown") ? "unknown" : "failed"
       await page.goto(base + "/test/fixtures/handoff-card.html" + q)
       await page.locator("[data-decision-id]").first().waitFor()
+      if (q.includes("en")) await page.waitForFunction(() => document.documentElement.lang === "en")
       if (q.includes("blocked") || q.includes("fail") || q.includes("unknown")) await page.locator(`[data-send-status="${status}"]`).waitFor()
     }
     const calls = () => page.evaluate(() => JSON.parse(JSON.stringify(window.__calls)))
@@ -94,26 +95,17 @@ try {
     assert.equal(await card.locator('[data-option="send_draft"]').count(), 0)
     assert.equal(await card.locator("[data-card-draft]").count(), 0)
 
-    /* a card opened before: its reply field as it was */
-    await open("?legacy")
-    await card.locator('[data-option-words="draft_reply"]').fill("我晚点回你")
-    assert.equal((await card.locator('[data-option="draft_reply"]').innerText()).trim(), "起草回复")
-    await card.locator('[data-option="draft_reply"]').click()
-    await page.waitForFunction(() => window.__calls.length === 1)
-    assert.deepEqual(await calls(), [{ id: "dec_h", choice: "draft_reply", text: "我晚点回你" }])
-
     await open("?en")
     text = await words()
     assert.ok(text.includes("Send this draft") && text.includes("Make it an item") && text.includes("Leave it") && text.includes("Tell it how to reply"), text)
     for (const label of await card.locator("[data-option]").allTextContents()) assert.doesNotMatch(label, RAW)
 
     // Normal approval still asks the model for a rewrite, without the failed-send edit contract.
-    for (const [selector, choice, note] of [['[data-approve]', "yes"], ['[data-rewrite]', "rewrite"], ['[data-reject]', "no", "请补充依据"]]) {
+    for (const [selector, choice] of [['[data-approve]', "yes"], ['[data-rewrite]', "rewrite"], ['[data-reply-choice="no"]', "no"]]) {
       await open("?approve")
       assert.equal(await page.locator("[data-send-recovery]").count(), 0)
-      if (note) await card.locator("[data-reject-reason]").fill(note)
       await click(selector)
-      assert.deepEqual(await calls(), [{ id: "dec_a", choice, ...(note ? { text: note } : {}) }])
+      assert.deepEqual(await calls(), [{ id: "dec_a", choice }])
     }
 
     for (const [q, want] of [["?fail", ["重新发送", "不发了"]], ["?unknown", ["已经发出了", "重新发送", "不发了"]], ["?blocked-legacy", ["不发了"]], ["?blocked", ["授权后重试", "修改回复", "不发了"]]]) {

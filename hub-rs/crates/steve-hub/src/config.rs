@@ -323,6 +323,7 @@ pub struct Config {
     /// Steve's own repository (`STEVE_REPO`): seed project, items about Steve itself, release repo.
     pub steve_repo: PathBuf,
     pub debug_route: bool,
+    pub claude_config_dir: Option<PathBuf>,
     pub codex_home: PathBuf,
     /// Node used to run `.js` adapters (TS used its own `process.execPath`).
     pub node: String,
@@ -878,6 +879,9 @@ impl Config {
                 .or_else(steve_core::config::steve_checkout_of_exe)
                 .unwrap_or_default(),
             debug_route: steve_auth::flag(&get, "STEVE_DEBUG_ROUTE")?,
+            claude_config_dir: get("CLAUDE_CONFIG_DIR")
+                .filter(|v| !v.trim().is_empty())
+                .map(PathBuf::from),
             codex_home: get("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join(".codex")),

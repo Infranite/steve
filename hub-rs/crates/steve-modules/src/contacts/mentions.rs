@@ -28,6 +28,7 @@ pub struct PartyOption {
     pub kind: String,
     /// The second line: organization and title, `团队 · N 人`, `组织`.
     pub sub: String,
+    pub avatar: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -102,6 +103,7 @@ fn option(c: &mut impl Read, viewer: &Viewer, p: &Party) -> ApiResult<PartyOptio
         name: p.name.clone(),
         kind: p.kind.clone(),
         sub: sub(c, viewer, p)?,
+        avatar: p.avatar.clone(),
     })
 }
 

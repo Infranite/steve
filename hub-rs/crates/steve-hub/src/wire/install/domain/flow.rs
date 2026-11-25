@@ -1,5 +1,29 @@
 use super::*;
 
+struct KnowledgeStewardGuard;
+
+impl steve_flow::ScheduleGuard for KnowledgeStewardGuard {
+    fn check(
+        &self,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        flow_id: &str,
+        trigger: steve_flow::policy::TriggerKind,
+        now: i64,
+    ) -> steve_flow::FlowResult<steve_flow::ScheduleGate> {
+        let manual = trigger == steve_flow::policy::TriggerKind::Manual;
+        match steve_knowledge::steward::check_schedule_trigger(w, ws, flow_id, manual, now)? {
+            steve_knowledge::steward::StewardGate::NotSteward
+            | steve_knowledge::steward::StewardGate::Run { .. } => {
+                Ok(steve_flow::ScheduleGate::Run)
+            }
+            steve_knowledge::steward::StewardGate::Skip { label, reason, .. } => {
+                Ok(steve_flow::ScheduleGate::Skip { label, reason })
+            }
+        }
+    }
+}
+
 install! { prepare(reg, cx) [mut registry] => [registry, setup] {
     let Env { core, preflight, .. } = cx.clone();
     let setup = steve_flow::FlowSetup::new(Arc::new(FlowCore {
@@ -64,7 +88,8 @@ install! { install(reg, cx) [conns, declared, digest, gh, item_events, late, mai
         .item_finder("gh_pr", Arc::new(steve_github::flow::GhPrFinder))
         // a todo's reminder and snooze wake-up, a member's morning brief (`time_alarms`)
         .alarm_source(Arc::new(steve_digest::todo_alarms::TodoAlarms))
-        .alarm_source(Arc::new(steve_digest::brief::BriefAlarms));
+        .alarm_source(Arc::new(steve_digest::brief::BriefAlarms))
+        .schedule_guard(Arc::new(KnowledgeStewardGuard));
     let flow = setup.build(modules.clone(), Arc::new(steve_flow::GraphEngine));
     mail_events.bind(&flow);
     item_events.bind(flow.clone());

@@ -27,14 +27,14 @@ import { useRef, useState, type ReactNode } from "react"
 const FAIL_ORDER = ["wait", "retry", "release_live", "release_retry", "release_waive", "delivered", "tosteve", "drop", "look", "continue"]
 
 /** a decision whose subject draws its own body (Steve's card keeps it); a tool call is an Approval Card */
-export const hasOwnBody = (w: Wait) => FLOW_SUBJECTS.includes(w.subject) || isPeopleDecision(w) || w.subject === "mail_draft" || isModuleCard(w.subject)
+export const hasOwnBody = (w: Wait) => FLOW_SUBJECTS.includes(w.subject) || isPeopleDecision(w) || w.subject === "mail_draft" || w.subject === "no_executor" || isModuleCard(w.subject)
 export const isToolCall = (w: Wait) => w.type === "approve" && w.subject === "tool_call"
 
 const toolOptions = (w: Wait) => {
   const opts = w.options.map((o) => { const [id, name, kind] = o.split("|"); return { id, name, kind } })
   return { always: opts.find((o) => o.kind === "allow_always"), once: opts.find((o) => o.kind === "allow_once") }
 }
-const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : w.subject === GITHUB_PR_MERGE ? tr("core:wait.prMerge") : WT[w.type])
+const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : w.subject === "no_executor" ? tr("core:wait.noExecutor") : w.subject === GITHUB_PR_MERGE ? tr("core:wait.prMerge") : WT[w.type])
 export const busyOf = (w: Wait) => st.pendingActions.has("decision:" + w.decision) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision) || !!channelAnswer(w)
 
 /** the card's labels in the UI language ("later" folds the card here; above the composer it reads Hide, next to the Hub's remind-me-later) */

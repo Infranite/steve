@@ -1,4 +1,4 @@
-/** Knowledge sources, documents and memories. */
+/** Knowledge sources, documents, memories and project AGENTS.md proposals. */
 import { modReq as req, qs, wsHeaders } from "@/api"
 import { hubUrl } from "@/hub"
 import { lazy } from "@/api/accounts"
@@ -7,7 +7,7 @@ import { t } from "@/i18n"
 export type Level = "public" | "conclusion" | "reasoning" | "never"
 export type ObjRef = { type: string; id: string; name?: string }
 export type KbSource = {
-  id: string; kind: "notes" | "files" | "folder" | "items" | "chat" | "mems" | "bot_mems"; name: string; path?: string; include?: string[]; exclude?: string[]
+  id: string; kind: "notes" | "files" | "folder" | "mems" | "bot_mems"; name: string; path?: string; include?: string[]; exclude?: string[]
   visibility: string; level: Level; paused: boolean; status: "ok" | "syncing" | "error"; error: string | null
   stats: { docs?: number; chunks?: number; skipped?: number; bytes?: number; kept?: number; incomplete?: string[] }; last_sync: number | null; builtin: boolean; revision: number
 }
@@ -17,6 +17,10 @@ export type DocBrief = {
 }
 export type Doc = DocBrief & { body?: string; about: ObjRef[]; tags: string[]; preview: { seq: number; heading: string; text: string }[]; uses: number; error: string | null }
 export type Hit = { n: number; type: string; id: string; seq: number; title: string; heading?: string; text: string; label: string; source_kind: string; level: Level; visibility: string; score: number; href: string }
+/** One work-item or conversation record returned separately from knowledge hits. */
+export type RecordHit = { record_kind: "item" | "chat"; id: string; title: string; text: string; label: string; href: string; updated: number }
+export type SearchScope = "knowledge" | "records" | "all"
+export type SearchResult = { hits: Hit[]; records: RecordHit[]; took_ms: number; semantic_down?: boolean }
 /** where a memory came from (`kind`: you | conversation | item | agent | mail | space | event | plugin | other), with a
  *  link there when there is one, who wrote it and the words it was based on */
 export type Origin = { kind: string; type: string; id: string | null; label: string; href: string; writer: string; writer_name: string | null; evidence: string }
@@ -24,12 +28,25 @@ export type Mem = {
   id: string; kind: string; text: string; source_label: string; level: Level; status: "candidate" | "confirmed" | "stale"; visibility: string; about: ObjRef[]; created: number
   updated?: number; origin?: Origin; used?: { count: number; last: number | null }
 }
-/** a person, project, bot … Steve knows things about (`GET /kb/subjects`) */
-export type Subject = { type: string; id: string; name: string; href: string; mems: number; candidates: number; docs: number; last: number }
+/** Project-level AGENTS.md proposal (`GET /kb/proposals`). */
+export type ProjectProposal = {
+  id: string; project_id: string; project_name: string; kind: string; text: string; reason: string; evidence: string
+  origin_kind: string; origin_id: string | null; origin_label: string; origin_href: string
+  status: "pending" | "accepted" | "dismissed"; decision_id: string | null; writer: string; created: number; updated: number
+}
+export type SubjectCategory = "person" | "org" | "project" | "bot" | "other"
+/** a person, organization, project … Steve knows things about (`GET /kb/subjects`) */
+export type Subject = {
+  type: string; id: string; name: string; category: SubjectCategory; party_kind?: string | null
+  href: string; mems: number; candidates: number; docs: number; proposals: number; last: number
+}
 /** where knowledge was handed out: a session, an answer, your search */
 export type SubjectUse = { consumer_type: string; consumer_id: string; href: string; name: string; query: string; created: number; obj: { type: string; id: string; label: string } }
-export type SubjectDetail = { type: string; id: string; name: string; href: string; mems: Mem[]; docs: (DocBrief & { used?: Mem["used"] })[]; uses: SubjectUse[] }
-/** who writes the memories, as the 来源 tab lists them */
+export type SubjectDetail = {
+  type: string; id: string; name: string; category: SubjectCategory; party_kind?: string | null
+  href: string; mems: Mem[]; docs: (DocBrief & { used?: Mem["used"] })[]; proposals: ProjectProposal[]; uses: SubjectUse[]
+}
+/** who writes the memories, as the 资料 tab lists them */
 export type MemProvider = { kind: string; writer: string; writer_name: string | null; count: number; confirmed: number; candidates: number; stale: number; last: number }
 /** what an agent changed in the memories (`GET /kb/changes`); a merge's state follows its candidate */
 export type GoneMem = { id: string; gone: true }
@@ -39,6 +56,13 @@ export const isGone = (m: Mem | GoneMem): m is GoneMem => "gone" in m
 /** `record`, `why`, `scope`: what it would become and why it is worth keeping (ST-41; `why`/`scope` empty when unknown) */
 export type Candidate = { mem: Mem; origin: string; origin_label: string; evidence: string; supersedes: Mem | null; decision_id: string | null; record: string; why: string; scope: string }
 export type ExpiredCandidate = { mem: Mem; origin_label: string; evidence: string; expired: number }
+export type StewardStatus = {
+  schedule_id: string | null
+  threshold: number
+  signals: { new_candidates: number; conflicts: number; total: number }
+  last_run_at: number | null
+  skipped_runs: number
+}
 /** one entry of `messages.meta.cites` */
 export type Cite = { n: number; label: string; href: string; level: Level }
 export type Use = { n: number; type: string; id: string; seq: number; level: Level; title: string; label: string; href: string; deleted: boolean; use_id: string; query: string; created: number }
@@ -47,7 +71,7 @@ const get = <T>(p: string) => req<T>("GET", p)
 const enc = encodeURIComponent
 
 export const kb = {
-  search: (q: string, limit = 20) => get<{ hits: Hit[]; took_ms: number; semantic_down?: boolean }>("/kb/search" + qs({ q, limit })),
+  search: (q: string, limit = 20, scope: SearchScope = "knowledge") => get<SearchResult>("/kb/search" + qs({ q, limit, scope })),
   sources: () => get<KbSource[]>("/kb/sources"),
   addFolder: (p: { name: string; path: string; include?: string[]; exclude?: string[]; visibility?: string; level?: Level }) => req<KbSource>("POST", "/kb/sources", { kind: "folder", ...p }),
   patchSource: (id: string, p: Partial<{ name: string; paused: boolean; visibility: string; level: Level; include: string[]; exclude: string[] }>) => req<KbSource>("PATCH", "/kb/sources/" + enc(id), p),
@@ -72,13 +96,15 @@ export const kb = {
   /** candidates that expired unanswered; `restore` puts one back for another 30 days */
   expired: () => get<ExpiredCandidate[]>("/kb/candidates/expired"),
   restore: (id: string) => req<{ ok: true }>("POST", `/kb/candidates/${enc(id)}/restore`),
+  proposals: (p: { project_id?: string; status?: string } = {}) => get<ProjectProposal[]>("/kb/proposals" + qs(p)),
+  resolveProposal: (id: string, choice: "yes" | "no") => req<ProjectProposal>("POST", `/kb/proposals/${enc(id)}/resolve`, { choice }),
   subjects: () => get<Subject[]>("/kb/subjects"),
   subject: (type: string, id: string) => get<SubjectDetail>(`/kb/subjects/${enc(type)}/${enc(id)}`),
   providers: () => get<{ memory: MemProvider[]; store: string }>("/kb/providers"),
   changes: (run?: string) => get<ChangeRun[]>("/kb/changes" + qs({ run })),
-  /** which schedule is the knowledge steward (the page set it up) */
-  steward: () => get<{ schedule_id: string | null }>("/kb/steward"),
-  setSteward: (schedule_id: string | null) => req<{ schedule_id: string | null }>("PUT", "/kb/steward", { schedule_id }),
+  /** steward schedule binding, trigger threshold and skipped run counts */
+  steward: () => get<StewardStatus>("/kb/steward"),
+  setSteward: (p: { schedule_id?: string | null; threshold?: number }) => req<StewardStatus>("PUT", "/kb/steward", p),
   undoChange: (id: string) => req<{ ok: true }>("POST", `/kb/changes/${enc(id)}/undo`),
   /** answers a flagged conflict: `keep` holds and the others go stale, `null` keeps them all */
   keepChange: (id: string, keep: string | null) => req<{ ok: true }>("POST", `/kb/changes/${enc(id)}/keep`, { keep }),
@@ -95,11 +121,8 @@ export const MEM_KINDS: [string, string][] = lazy([
   () => ["fact", t("api:memKind.fact")], () => ["preference", t("api:memKind.preference")], () => ["rule", t("api:memKind.rule")], () => ["event", t("api:memKind.event")], () => ["summary", t("api:memKind.summary")],
 ])
 export const memKind = (k: string) => MEM_KINDS.find((x) => x[0] === k)?.[1] ?? k
-/** the four kinds of record (ST-41): an item's record and the conversation record are kept where they are and
- *  searchable; only 长期记忆 (preferences, rules you said hold from now on) and 知识条目 (verified facts reusable
- *  elsewhere) are distilled from them, and both wait for your confirmation */
 export const LONG_TERM = ["preference", "rule"]
 export const SOURCE_KIND: Record<string, string> = lazy({
-  notes: () => t("api:sourceKind.notes"), files: () => t("api:sourceKind.files"), folder: () => t("api:sourceKind.folder"), items: () => t("api:sourceKind.items"),
-  chat: () => t("api:sourceKind.chat"), mems: () => t("api:sourceKind.mems"), bot_mems: () => t("api:sourceKind.botMems"),
+  notes: () => t("api:sourceKind.notes"), files: () => t("api:sourceKind.files"), folder: () => t("api:sourceKind.folder"),
+  mems: () => t("api:sourceKind.mems"), bot_mems: () => t("api:sourceKind.botMems"),
 })

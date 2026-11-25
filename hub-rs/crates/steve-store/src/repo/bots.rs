@@ -123,6 +123,15 @@ impl Bots<'_> {
         self.0.read_conn(|c| one(c, BOT, [id], Bot::from_row))
     }
 
+    /// The stored `owner` column for `id`, including soft-deleted bots (`None` if no row exists).
+    pub fn owner(&self, id: &str) -> Result<Option<Option<String>>> {
+        self.0.read_conn(|c| {
+            one(c, "SELECT owner FROM bots WHERE id = ?", [id], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+        })
+    }
+
     /// The main bot (Steve).
     pub fn main(&self) -> Result<Option<Bot>> {
         self.0.read_conn(|c| {
@@ -220,11 +229,17 @@ impl Bots<'_> {
         self.0.write_conn(|w| seed(w.c, id, main, b, ws))
     }
 
-    /// A new (non-main) bot in `ws`; audited as `bot.create`.
+    /// A new (non-main) bot in `ws`; owned by `author` and audited as `bot.create`.
     pub fn create(&self, ws: &str, b: &NewBot, author: &str) -> Result<Option<Bot>> {
         self.0.write_conn(|w| {
             let id = uid("bot");
             seed(w.c, &id, false, b, ws)?;
+            if !author.is_empty() {
+                w.c.run(
+                    "UPDATE bots SET owner = ? WHERE id = ? AND main = 0",
+                    params![author, id],
+                )?;
+            }
             w.c.run(
                 "INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)",
                 params![ws, now(), author, "bot.create", id, json!({"name": b.name}).to_string()],
@@ -547,6 +562,17 @@ impl Memories<'_> {
     pub fn remove_of_bot(&self, bot: &str) -> Result<()> {
         self.0.write_conn(|w| {
             w.c.run("DELETE FROM bot_memories WHERE bot_id = ?", [bot])?;
+            Ok(())
+        })
+    }
+
+    /// Memories of one bot scoped strictly to `ws` (workspace removal or scoped global delete).
+    pub fn remove_of_bot_in_workspace(&self, bot: &str, ws: &str) -> Result<()> {
+        self.0.write_conn(|w| {
+            w.c.run(
+                "DELETE FROM bot_memories WHERE bot_id = ? AND workspace_id = ?",
+                params![bot, ws],
+            )?;
             Ok(())
         })
     }

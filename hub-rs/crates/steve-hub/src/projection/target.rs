@@ -13,7 +13,6 @@ pub(super) enum Dirty<'a> {
     /// The decisions about every conversation of a workspace: a contact (starred or not), an
     /// account or a connection changed.
     Chats(&'a str),
-    Notices(&'a str),
     SessionsOfNode(&'a str),
     None,
 }
@@ -31,16 +30,10 @@ pub(super) fn target(e: &DomainEvent) -> Dirty<'_> {
             WorkEvent::Message { ws, id, space } if space == "steve" => {
                 Dirty::One(ws.as_str(), ViewKind::Message, id.as_str())
             }
-            WorkEvent::Message { ws, space, .. } if space == "notify" => {
-                Dirty::Notices(ws.as_str())
-            }
-            WorkEvent::Message { .. } | WorkEvent::ThreadRun { .. } => Dirty::None,
+            WorkEvent::Message { .. } => Dirty::None,
         },
         DomainEvent::Config(e) => match e {
             ConfigEvent::Workspace { ws, .. } => Dirty::Chats(ws.as_str()),
-            ConfigEvent::Settings { ws, id } if id.as_str() == "noticeDismissed" => {
-                Dirty::Notices(ws.as_str())
-            }
             ConfigEvent::Bot { .. }
             | ConfigEvent::Project { .. }
             | ConfigEvent::Tag { .. }

@@ -192,6 +192,17 @@ impl FlowEnv {
         Self::build(Vec::new())
     }
 
+    /// With a [`crate::ScheduleGuard`] attached to the scheduler.
+    pub fn with_schedule_guard(guard: Arc<dyn crate::ScheduleGuard>) -> Self {
+        let core = Arc::new(FakeCore::default());
+        let setup = FlowSetup::new(core.clone()).schedule_guard(guard);
+        let env = TestEnv::new(|r| setup.register(r));
+        *lock(&core.store) = Some(env.store().clone());
+        flow_store::seed_workspace(env.store()).expect("seed bots");
+        let flow = setup.build(env.modules.clone(), Arc::new(GraphEngine));
+        Self { env, core, flow }
+    }
+
     /// With event adapters registered and a real `Connections` service (vault keys in the temp dir)
     /// for their [`ConnCx`]. Make connections with [`FlowEnv::connection`].
     pub fn with_events(adapters: Vec<Arc<dyn EventAdapter>>) -> Self {

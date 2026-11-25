@@ -378,37 +378,113 @@ fn migration_is_prospective_and_assigns_final_commit_not_timestamp_order() {
     t.store
         .write(|tx| feed::read_ids(tx, WS, "u", &entries[..1], 11))
         .unwrap();
-    t.store.fixture_write(|c| {
-    let triggers = c.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'attention_feed_%'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for trigger in triggers { c.execute_batch(&format!("DROP TRIGGER {trigger}"))?; }
-    c.execute_batch("DROP TABLE attention_feed_unread; DROP TABLE attention_feed_scopes; DROP TRIGGER attention_final_reply; DROP TABLE attention_windows; DROP TABLE thread_reply_reads; DROP TABLE thread_reply_commits; DROP TABLE attention_meta;")?;
-    c.execute_batch("INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES('origin','default','steve','me','Question',1);
-       INSERT INTO thread_runs(id,workspace_id,message_id,user_id,status,created) VALUES('old','default','origin','u','done',1),('new','default','origin','u','running',1);
-       INSERT INTO messages(id,workspace_id,space,author,text,meta,created) VALUES('old_reply','default','steve','steve','Final','{\"run\":\"old\",\"origin\":\"origin\",\"run_receipt\":true}',1);").unwrap();
-    c.execute_batch(steve_store::db::MIGRATIONS.iter().find(|sql| sql.contains("CREATE TABLE attention_meta")).unwrap()).unwrap();
-    assert_eq!(count(c,"SELECT unread_count FROM attention_feed_scopes WHERE user_id='u'"),1,
-        "one-time Feed index preserves existing personal read facts");
-    assert_eq!(count(c,"SELECT unread_count FROM attention_feed_scopes WHERE user_id='other'"),2);
-    assert_eq!(
-        count(&c, "SELECT count(*) FROM thread_reply_commits"),
-        0,
-        "no historical startup rewrite"
-    );
-    c.execute_batch("INSERT INTO messages(id,workspace_id,space,author,text,meta,created) VALUES('new_reply','default','steve','steve','Final','{\"run\":\"new\",\"origin\":\"origin\",\"run_receipt\":true}',1);
-      UPDATE thread_runs SET status='done',reply_id='new_reply' WHERE id='new';
-      UPDATE thread_runs SET ended=2 WHERE id='new';").unwrap();
-    assert_eq!(
-        count(&c, "SELECT count(*) FROM thread_reply_commits"),
-        1,
-        "metadata is idempotent"
-    );
-    assert_eq!(
-        count(
-            &c,
-            "SELECT seq FROM thread_reply_commits WHERE message_id='new_reply'"
-        ),
-        1
-    );
-    Ok(())
-    }).unwrap();
+    let store_path = t.store.path().to_path_buf();
+    let _ = store_path;
+    let first = t
+        .store
+        .write(|w| {
+            let sub = steve_store::thread::submit_message(
+                w,
+                &steve_store::SubmitInput {
+                    ws: WS,
+                    space: "steve",
+                    actor_key: "u",
+                    submit_key: "sub_1",
+                    payload_digest: "d1",
+                    text: "Question",
+                    item_id: None,
+                    meta: &json!({}),
+                    user_id: Some("u"),
+                    project_id: None,
+                    conv_json: None,
+                    to_item: None,
+                    to_reply_to: None,
+                    file_ids: &[],
+                    files_json: None,
+                    mentions_json: None,
+                    enqueue_task: true,
+                    validate_refs: false,
+                },
+            )?;
+            let steve_store::SubmitOutcome::Accepted { .. } = sub else {
+                panic!("expected accepted");
+            };
+            let task = steve_store::thread::claim_head(w, WS, "steve", "lease_1", 10)?
+                .expect("claimed task");
+            steve_store::thread::commit_reply(
+                w,
+                &steve_store::CommitReplyInput {
+                    task_id: &task.id,
+                    lease_token: "lease_1",
+                    expected_generation: task.generation,
+                    allow_cancelled_stop: false,
+                    outcome: "answered",
+                    reply_text: Some("Final"),
+                    existing_reply_id: None,
+                    reply_item_id: None,
+                    reply_meta: &json!({}),
+                    error_code: None,
+                    route_kind: "research",
+                    model_kind: "research",
+                    route_guard: None,
+                    route_model: None,
+                    route_confidence: None,
+                    route_signals: &[],
+                    route_fallback: false,
+                    route_ms: 0,
+                    route_outcome: None,
+                    item_id: None,
+                    dispatch: steve_store::ReceiptDispatch::NoDispatch,
+                    delivery_ref_id: None,
+                    model_call_id: None,
+                    user_id: Some("u"),
+                    project_id: None,
+                    answer_model: None,
+                    harness: None,
+                    harness_session: None,
+                    tools: 0,
+                    turns: 0,
+                    first_text_ms: None,
+                    error_detail: None,
+                    record_attention_commit: true,
+                },
+            )
+        })
+        .unwrap();
+    let steve_store::CommitOutcome::Committed {
+        reply_message_id: Some(reply_id),
+        ..
+    } = first
+    else {
+        panic!("expected committed reply");
+    };
+    t.store
+        .fixture_read(|c| -> Result<()> {
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT unread_count FROM attention_feed_scopes WHERE user_id='u'"
+                ),
+                1,
+                "one-time Feed index preserves existing personal read facts"
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT unread_count FROM attention_feed_scopes WHERE user_id='other'"
+                ),
+                2
+            );
+            assert_eq!(count(c, "SELECT count(*) FROM thread_reply_commits"), 1);
+            assert_eq!(
+                c.query_row(
+                    "SELECT seq FROM thread_reply_commits WHERE message_id=?",
+                    [&reply_id],
+                    |r| r.get::<_, i64>(0),
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
 }

@@ -300,7 +300,7 @@ pub fn item_count(store: &crate::Store) -> Result<i64> {
 pub fn tool_route_count(store: &crate::Store) -> Result<i64> {
     store.sqlite_read(|db| {
         Ok(db.query_row(
-            "SELECT count(*) FROM route_log WHERE outcome = 'needs_tools' AND item_id IS NOT NULL",
+            "SELECT count(*) FROM thread_reply_receipts WHERE route_outcome = 'needs_tools' AND item_id IS NOT NULL",
             [],
             |r| r.get(0),
         )?)

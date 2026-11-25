@@ -91,7 +91,7 @@ pub(crate) struct Inner {
     /// 设置 · 模型 (the same resolver the gateway's [`SingleModelGateway`] uses).
     models: models::Models,
     state: Mutex<State>,
-    thread: thread::Lanes,
+    thread: thread::ThreadRuntime,
     /// The B1 registries (item hooks, prompt contexts, decision handlers); unset = no modules.
     modules: OnceLock<steve_modules::Modules>,
     hook_queue: modules::HookQueue,
@@ -189,7 +189,7 @@ impl Core {
             models,
             config,
             state: Mutex::new(State::default()),
-            thread: thread::Lanes::default(),
+            thread: thread::ThreadRuntime::default(),
             modules: OnceLock::new(),
             hook_queue: OnceLock::new(),
             steve_notes: Default::default(),
