@@ -59,7 +59,9 @@ fn table_counts(c: &rusqlite::Connection) -> BTreeMap<String, usize> {
     let mut st = c
         .prepare(
             "SELECT name FROM sqlite_master
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name NOT LIKE 'kb_fts_%'
              ORDER BY name",
         )
         .unwrap();
@@ -450,15 +452,55 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
         }
     }
 
-    // 127: Durable thread submit idempotency, reply tasks, reply receipts, origin-scoped dispatch
-    // & delivery refs, and typed notices.
+    // 127: WaitContract columns and constraints (in-place rebuilds, no table/row count change).
+
+    // 128: Steve coordinator (#544): strip main bot from teams, rewrite steve_fallback, create
+    // `item_placement_waits`.
+    if v_before < 128 {
+        changes.create_table("item_placement_waits", 0);
+    }
+
+    // 129: Person avatar (#545): link workspace members to contact parties (reusing a unique
+    // unlinked name match, otherwise inserting a new contact row), add `decisions.resolved_by`,
+    // and backfill single-member `'me'` timeline actors.
+    if v_before < 129 {
+        changes.add_rows(
+            "parties",
+            q("SELECT count(*)
+               FROM workspace_members wm
+               JOIN users u ON u.id = wm.user_id
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM parties p
+                 WHERE p.workspace_id = wm.workspace_id AND p.user_id = wm.user_id
+               )
+                 AND NOT (
+                   (SELECT count(*) FROM parties p_same
+                    WHERE p_same.workspace_id = wm.workspace_id
+                      AND p_same.type = 'contact'
+                      AND p_same.status = 'active'
+                      AND p_same.user_id IS NULL
+                      AND lower(trim(p_same.name)) = lower(trim(u.name))) = 1
+                   AND (SELECT count(*) FROM workspace_members wm2
+                        JOIN users u2 ON u2.id = wm2.user_id
+                        WHERE wm2.workspace_id = wm.workspace_id
+                          AND NOT EXISTS (
+                            SELECT 1 FROM parties p3
+                            WHERE p3.workspace_id = wm2.workspace_id AND p3.user_id = wm2.user_id
+                          )
+                          AND lower(trim(u2.name)) = lower(trim(u.name))) = 1
+                 )"),
+        );
+    }
+
+    // 130: Durable thread submit idempotency, reply tasks, reply receipts, origin-scoped dispatch
+    // & delivery refs, and typed notices (#546 W3.4).
     // Drops legacy `thread_resume`, `thread_runs`, `route_log`, `thread_items`; migrates
     // `thread_runs` + non-run `route_log` into settled `thread_reply_tasks` & `thread_reply_receipts`,
     // `thread_items` (whose item still exists) into `thread_dispatch_refs`, `messages(space='notify')`
     // and `settings.noticeDismissed` into `thread_notices` (deleting the migrated `notify` messages
     // and legacy `thread.pending.*` / `noticeDismissed` / `thread.postback.*` settings), and rebuilds
     // `thread_reply_commits` against `thread_reply_receipts(id)` (pruning only orphaned rows).
-    if v_before < 127 {
+    if v_before < 130 {
         for table in ["thread_resume", "thread_runs", "route_log", "thread_items"] {
             changes.drop_table(table);
         }
@@ -507,6 +549,179 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
         );
     }
 
+    // 131: Knowledge redefinition (#550): creates `project_proposals`, migrates codebase
+    // engineering facts out of `mems` into `project_proposals`, and withdraws `items`/`chat`
+    // work-record sources from the knowledge index.
+    if v_before < 131 {
+        const ENG_CTE: &str = "
+            WITH _mig131_eng AS (
+              SELECT m.id AS mem_id, picked.proj_id AS project_id
+              FROM (
+                SELECT
+                  m.id,
+                  COALESCE(
+                    (SELECT a.object_id FROM mem_about a
+                       JOIN projects p ON p.id = a.object_id AND p.workspace_id = m.workspace_id AND p.kind = 'git'
+                      WHERE a.mem_id = m.id AND a.object_type = 'project'
+                      LIMIT 1),
+                    (SELECT i.project_id FROM items i
+                       JOIN projects p ON p.id = i.project_id AND p.workspace_id = m.workspace_id AND p.kind = 'git'
+                      WHERE m.source_type = 'item' AND i.id = m.source_id
+                      LIMIT 1),
+                    (SELECT p.id FROM projects p
+                      WHERE p.workspace_id = m.workspace_id AND p.kind = 'git' AND p.archived = 0
+                        AND instr(lower(m.text), lower(p.name)) > 0
+                      ORDER BY length(p.name) DESC
+                      LIMIT 1)
+                  ) AS proj_id
+                FROM mems m
+                WHERE m.kind = 'fact'
+                  AND m.source_type != 'me'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM mem_about a WHERE a.mem_id = m.id AND a.object_type = 'party'
+                  )
+                  AND (
+                    m.source_type = 'item'
+                    OR (m.status = 'candidate' AND NOT EXISTS (SELECT 1 FROM mem_about a WHERE a.mem_id = m.id))
+                  )
+              ) AS picked
+              JOIN mems m ON m.id = picked.id
+              WHERE picked.proj_id IS NOT NULL
+            ) ";
+        let eng_count = q(&format!("{ENG_CTE} SELECT count(*) FROM _mig131_eng"));
+        changes.create_table("project_proposals", eng_count);
+        changes.remove_rows("mems", eng_count);
+        changes.remove_rows(
+            "mem_candidates",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM mem_candidates WHERE mem_id IN (SELECT mem_id FROM _mig131_eng)"
+            )),
+        );
+        changes.remove_rows(
+            "mem_supersedes",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM mem_supersedes
+                 WHERE mem_id IN (SELECT mem_id FROM _mig131_eng)
+                    OR old_id IN (SELECT mem_id FROM _mig131_eng)"
+            )),
+        );
+        changes.remove_rows(
+            "mem_about",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM mem_about WHERE mem_id IN (SELECT mem_id FROM _mig131_eng)"
+            )),
+        );
+        let removed_chunks = q(&format!(
+            "{ENG_CTE} SELECT count(*) FROM kb_chunks
+             WHERE (obj_type = 'mem' AND obj_id IN (SELECT mem_id FROM _mig131_eng))
+                OR source_kind IN ('items', 'chat')"
+        ));
+        changes.remove_rows("kb_chunks", removed_chunks);
+        changes.remove_rows(
+            "kb_fts",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM kb_fts
+                 WHERE rowid IN (
+                   SELECT id FROM kb_chunks
+                   WHERE (obj_type = 'mem' AND obj_id IN (SELECT mem_id FROM _mig131_eng))
+                      OR source_kind IN ('items', 'chat')
+                 )"
+            )),
+        );
+        changes.remove_rows(
+            "kb_vectors",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM kb_vectors
+                 WHERE chunk_id IN (
+                   SELECT id FROM kb_chunks
+                   WHERE (obj_type = 'mem' AND obj_id IN (SELECT mem_id FROM _mig131_eng))
+                      OR source_kind IN ('items', 'chat')
+                 )"
+            )),
+        );
+        changes.remove_rows(
+            "kb_doc_about",
+            q("SELECT count(*) FROM kb_doc_about
+               WHERE doc_id IN (
+                 SELECT d.id FROM kb_docs d
+                   JOIN kb_sources s ON s.id = d.source_id
+                  WHERE s.kind IN ('items', 'chat')
+               )"),
+        );
+        changes.remove_rows(
+            "kb_docs",
+            q("SELECT count(*) FROM kb_docs
+               WHERE source_id IN (SELECT id FROM kb_sources WHERE kind IN ('items', 'chat'))"),
+        );
+        changes.remove_rows(
+            "kb_sources",
+            q("SELECT count(*) FROM kb_sources WHERE kind IN ('items', 'chat')"),
+        );
+        changes.remove_rows(
+            "kb_marks",
+            q("SELECT count(*) FROM kb_marks WHERE name LIKE 'sync:chat:%'"),
+        );
+    }
+
+    // 132: Agent handoff fallback surfaces (#553).
+    if v_before < 132 {
+        changes.create_table("bot_fallback_surfaces", 0);
+    }
+
+    // 133: Backup v2 (#507): dedicated `backup_policy` singleton moved out of workspace `settings`.
+    if v_before < 133 {
+        let policy_rows = q(
+            "WITH legacy(value) AS (
+               SELECT CASE WHEN json_valid(value) THEN value ELSE '{}' END
+               FROM settings WHERE workspace_id = 'default' AND key = 'backup.daily'
+             )
+             SELECT count(*) FROM legacy
+             WHERE json_type(value, '$.enabled') IN ('true', 'false')
+               AND json_type(value, '$.keep_days') = 'integer'
+               AND json_extract(value, '$.keep_days') BETWEEN 1 AND 365",
+        );
+        changes.create_table("backup_policy", policy_rows);
+        changes.remove_rows(
+            "settings",
+            q("SELECT count(*) FROM settings WHERE workspace_id = 'default' AND key = 'backup.daily'"),
+        );
+    }
+
+    // 134: Remove legacy raw ACP event rows (#563).
+    if v_before < 134 {
+        changes.remove_rows(
+            "events",
+            q("SELECT count(*) FROM events
+               WHERE kind IN (
+                 'tool_call',
+                 'tool_call_update',
+                 'agent_message_chunk',
+                 'user_message_chunk',
+                 'agent_thought_chunk'
+               )
+                  OR format != 'steve.v1'"),
+        );
+    }
+
+    // 135: Retire YOLO audit rows and backfill explicit `bot_node_bindings` (#563).
+    if v_before < 135 {
+        changes.remove_rows(
+            "audit",
+            q("SELECT count(*) FROM audit WHERE action LIKE 'yolo.%'"),
+        );
+        changes.add_rows(
+            "bot_node_bindings",
+            q("SELECT count(*) FROM bot_workspaces w
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM bot_node_bindings b
+                 WHERE b.workspace_id = w.workspace_id AND b.bot_id = w.bot_id
+               )"),
+        );
+    }
+
+    // 136 & 137: Normalize `bots.perm_mode` and drop legacy `project_dir`/`worktree` columns
+    // (no table/row count change).
+
     changes
 }
 
@@ -527,7 +742,7 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         "prod copy at v{v_before}"
     );
     let expected = expected_migration_changes(&path, v_before);
-    let thread_127_backfill = (v_before < 127).then(|| expected_thread_127_backfill(&path));
+    let thread_130_backfill = (v_before < 130).then(|| expected_thread_127_backfill(&path));
 
     let s = Store::open(&path, NoPublisher).unwrap();
     if v_before == db::SCHEMA_VERSION {
@@ -613,7 +828,7 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
     // - `dispatch_ref_id` must link every receipt whose `(workspace_id, origin_message_id)` has a
     //   migrated `create_item` row in `thread_dispatch_refs`, leaving NULL only for non-item turns,
     //   supplements/appends to items created by earlier origins, or deleted items.
-    if let Some(ref bf) = thread_127_backfill {
+    if let Some(ref bf) = thread_130_backfill {
         let actual_reply_non_null =
             n("SELECT count(*) FROM thread_reply_receipts WHERE reply_message_id IS NOT NULL");
         let actual_reply_null =

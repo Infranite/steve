@@ -19,7 +19,6 @@ Dir	steve-hub/src/upgrades/mod.rs	1
 Dir	steve-install/src/common.rs	1
 Dir	steve-install/src/publish.rs	1
 Dir	steve-install/src/release.rs	2
-Dir	steve-install/src/service/boot.rs	1
 Dir	steve-install/src/setup.rs	1
 Dir	steve-install/src/signing.rs	2
 Dir	steve-knowledge/src/eval.rs	1
