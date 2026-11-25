@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 540" width="1280" height="540" role="img" aria-label="Steve 架构图：客户端、Steve Hub 与执行节点 Node">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0d1117"/>
+    <stop offset="1" stop-color="#111826"/>
+  </linearGradient>
+  <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+    <circle cx="2" cy="2" r="1.1" fill="#26303d"/>
+  </pattern>
+  <filter id="cardShadow" x="-8%" y="-8%" width="116%" height="122%">
+    <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.28"/>
+  </filter>
+  <clipPath id="clip"><rect width="1280" height="540" rx="20"/></clipPath>
+</defs>
+
+<g clip-path="url(#clip)">
+  <rect width="1280" height="540" fill="url(#bg)"/>
+  <rect width="1280" height="540" fill="url(#dots)" opacity="0.55"/>
+  <rect x="0.75" y="0.75" width="1278.5" height="538.5" rx="19.5" fill="none" stroke="#30363d" stroke-width="1.25"/>
+
+  <!-- Connectors: Left <-> Center -->
+  <line x1="316" y1="176" x2="406" y2="176" stroke="#6e7b8b" stroke-width="1.6" stroke-dasharray="4 4"/>
+  <polygon points="406,176 398,171.5 398,180.5" fill="#6e7b8b"/>
+  <polygon points="316,176 324,171.5 324,180.5" fill="#6e7b8b"/>
+  <rect x="323" y="146" width="76" height="22" rx="11" fill="#201c34" stroke="#423770" stroke-width="1"/>
+  <text x="361" y="161" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10" font-weight="600" fill="#9b8cf0">REST + SSE</text>
+
+  <line x1="316" y1="436" x2="406" y2="436" stroke="#6e7b8b" stroke-width="1.6" stroke-dasharray="4 4"/>
+  <polygon points="406,436 398,431.5 398,440.5" fill="#6e7b8b"/>
+  <polygon points="316,436 324,431.5 324,440.5" fill="#6e7b8b"/>
+  <rect x="323" y="406" width="76" height="22" rx="11" fill="#212834" stroke="#30363d" stroke-width="1"/>
+  <text x="361" y="421" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#a5b1c2">回调 / 同步</text>
+
+  <!-- Connector: Center <-> Right (Outbound WS Protocol 14) -->
+  <line x1="874" y1="270" x2="964" y2="270" stroke="#5fb39a" stroke-width="2"/>
+  <polygon points="874,270 883,265 883,275" fill="#5fb39a"/>
+  <polygon points="964,270 955,265 955,275" fill="#5fb39a"/>
+  <rect x="877" y="222" width="84" height="38" rx="10" fill="#152925" stroke="#2a564b" stroke-width="1"/>
+  <text x="919" y="238" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="10.5" font-weight="650" fill="#5fb39a">主动外连 WS</text>
+  <text x="919" y="253" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10" fill="#a5b1c2">Protocol 14</text>
+  <text x="919" y="290" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e">Node 主动建连</text>
+
+  <!-- LEFT COLUMN: Clients & Extensions -->
+  <g filter="url(#cardShadow)">
+    <rect x="32" y="32" width="284" height="476" rx="16" fill="#1b222c" stroke="#30363d" stroke-width="1.25"/>
+  </g>
+  <rect x="32" y="32" width="284" height="4" rx="2" fill="#9b8cf0"/>
+  <text x="52" y="62" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11" font-weight="700" letter-spacing="1" fill="#9b8cf0">客户端与内置扩展</text>
+
+  <rect x="48" y="82" width="252" height="68" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <rect x="48" y="94" width="3.5" height="44" rx="1.75" fill="#9b8cf0"/>
+  <text x="66" y="111" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">Web 客户端</text>
+  <text x="66" y="132" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">React 19 · 多 Hub 切换 · 实时 SSE</text>
+  <rect x="48" y="162" width="252" height="68" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <rect x="48" y="174" width="3.5" height="44" rx="1.75" fill="#9b8cf0"/>
+  <text x="66" y="191" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">原生 Apple 客户端</text>
+  <text x="66" y="212" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">macOS 14+ 菜单栏 · iOS 17+</text>
+  <rect x="48" y="242" width="252" height="68" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <rect x="48" y="254" width="3.5" height="44" rx="1.75" fill="#9b8cf0"/>
+  <text x="66" y="271" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">CLI 与开放协议</text>
+  <text x="66" y="292" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">steve CLI · 外部 /mcp · A2A v0.3</text>
+
+  <line x1="52" y1="332" x2="296" y2="332" stroke="#262d36" stroke-width="1.25"/>
+
+  <rect x="48" y="350" width="252" height="136" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <text x="64" y="373" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10" font-weight="600" letter-spacing="0.8" fill="#9b8cf0">内置扩展</text>
+  <text x="64" y="398" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">飞书 / Lark · 邮件</text>
+  <text x="64" y="418" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">GitHub · 日历</text>
+  <text x="64" y="444" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">HMAC Webhook · IMAP IDLE</text>
+  <text x="64" y="463" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">ICS 订阅与 calendar.v1 连接器</text>
+
+  <!-- CENTER COLUMN: Steve Hub -->
+  <g filter="url(#cardShadow)">
+    <rect x="408" y="32" width="464" height="476" rx="16" fill="#1b222c" stroke="#2d4c66" stroke-width="1.5"/>
+  </g>
+  <rect x="408" y="32" width="464" height="5" rx="2.5" fill="#7aa7c7"/>
+  <text x="430" y="62" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11.5" font-weight="700" letter-spacing="1" fill="#7aa7c7">STEVE HUB · 单体 RUST 服务</text>
+  <text x="430" y="81" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="12" fill="#8b949e">唯一事实来源 · 唯一决策点</text>
+
+  <rect x="426" y="96" width="428" height="64" rx="12" fill="#172534" stroke="#2d4c66" stroke-width="1.25"/>
+  <text x="442" y="123" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">REST API + 内存读侧投影</text>
+  <text x="442" y="144" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#a5b1c2">零查库 /api/snapshot · 150 ms 合并 SSE Patch</text>
+
+  <rect x="426" y="174" width="208" height="94" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <text x="442" y="202" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">协调者与对话路由</text>
+  <text x="442" y="225" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">九类路由 · 代码护栏</text>
+  <text x="442" y="244" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">按空间串行持久管线</text>
+  <rect x="646" y="174" width="208" height="94" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <text x="662" y="202" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">事项与待我决定</text>
+  <text x="662" y="225" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">五道收尾闸 · 单一入口</text>
+  <text x="662" y="244" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">同 Bot 确定性交接</text>
+  <rect x="426" y="280" width="208" height="94" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <text x="442" y="308" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">知识与自动化流程</text>
+  <text x="442" y="331" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">AGENTS.md 提议 · 摘要</text>
+  <text x="442" y="350" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">11 种节点持久化流程</text>
+  <rect x="646" y="280" width="208" height="94" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <text x="662" y="308" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">统计账本与插件</text>
+  <text x="662" y="331" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">持久用量与交付核算</text>
+  <text x="662" y="350" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">connector · channel · theme</text>
+
+  <line x1="430" y1="390" x2="850" y2="390" stroke="#262d36" stroke-width="1.25"/>
+  <rect x="426" y="406" width="135" height="80" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <text x="440" y="432" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="13" font-weight="650" fill="#e6edf3">SQLite WAL</text>
+  <text x="440" y="452" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10.5" fill="#8b949e">sea-query</text>
+  <text x="440" y="470" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e">139 项迁移</text>
+  <rect x="572.5" y="406" width="135" height="80" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <text x="586.5" y="432" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="13" font-weight="650" fill="#e6edf3">加密保险箱</text>
+  <text x="586.5" y="452" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10.5" fill="#8b949e">XChaCha20</text>
+  <text x="586.5" y="470" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e">Passkey 验证</text>
+  <rect x="719" y="406" width="135" height="80" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <text x="733" y="432" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="13" font-weight="650" fill="#e6edf3">Restic v2</text>
+  <text x="733" y="452" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="10.5" fill="#8b949e">内置 0.19.1</text>
+  <text x="733" y="470" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e">加密备份仓库</text>
+
+  <!-- RIGHT COLUMN: Execution Nodes -->
+  <g filter="url(#cardShadow)">
+    <rect x="966" y="32" width="282" height="476" rx="16" fill="#1b222c" stroke="#2a564b" stroke-width="1.5"/>
+  </g>
+  <rect x="966" y="32" width="282" height="5" rx="2.5" fill="#5fb39a"/>
+  <text x="986" y="62" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11" font-weight="700" letter-spacing="1" fill="#5fb39a">执行节点 · NODES</text>
+  <text x="986" y="81" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">独立本机进程 · 已配对远程主机</text>
+
+  <rect x="982" y="102" width="250" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <rect x="982" y="114" width="3.5" height="62" rx="1.75" fill="#5fb39a"/>
+  <text x="1000" y="130" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">steve-node 运行时</text>
+  <text x="1000" y="151" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">本地持久执行日志</text>
+  <text x="1000" y="170" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">每会话同时只执行一个回合</text>
+  <rect x="982" y="200" width="250" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <rect x="982" y="212" width="3.5" height="62" rx="1.75" fill="#5fb39a"/>
+  <text x="1000" y="228" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">执行器适配层</text>
+  <text x="1000" y="249" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">Claude Code · Codex · agy · Kimi · Pi</text>
+  <text x="1000" y="268" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">共 18 种内置 ACP + harness.json</text>
+  <rect x="982" y="298" width="250" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <rect x="982" y="310" width="3.5" height="62" rx="1.75" fill="#5fb39a"/>
+  <text x="1000" y="326" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">独立 Worktree 隔离</text>
+  <text x="1000" y="347" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">steve/&lt;id&gt; 分支 · outputs/ 产出</text>
+  <text x="1000" y="366" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">23 种构建工具链缓存隔离</text>
+  <rect x="982" y="396" width="250" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.25"/>
+  <rect x="982" y="408" width="3.5" height="62" rx="1.75" fill="#5fb39a"/>
+  <text x="1000" y="424" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="14" font-weight="650" fill="#e6edf3">系统沙箱与主体状态</text>
+  <text x="1000" y="445" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">Seatbelt / Bubblewrap 隔离</text>
+  <text x="1000" y="464" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',Helvetica,Arial,sans-serif" font-size="11.5" fill="#8b949e">按主体隔离执行器配置目录</text>
+</g>
+</svg>

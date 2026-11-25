@@ -50,6 +50,8 @@ USER_DOCS = {
     "CONTRIBUTING.md",
     "AGENTS.md",
     "CLAUDE.md",
+    "docs/architecture.md",
+    "docs/concepts.md",
     "docs/deployment.md",
 }
 USER_DOC_DIRS = ("docs/assets/",)

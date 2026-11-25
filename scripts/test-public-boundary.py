@@ -152,6 +152,8 @@ class PublicBoundaryTests(unittest.TestCase):
                 "web/test/design-plan.md",
                 # Allowlisted user docs, release notes, and explicit fixture directories.
                 "README.md",
+                "docs/architecture.md",
+                "docs/concepts.md",
                 "docs/deployment.md",
                 "docs/releases/0.11.0.md",
                 "docs/assets/logo.svg",
