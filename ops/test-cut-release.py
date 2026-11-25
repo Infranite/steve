@@ -20,10 +20,9 @@ ENV = dict(
 
 FAKE_GH = r"""#!/usr/bin/env python3
 import json, os, re, subprocess, sys
-args = " ".join(sys.argv[1:])
+args = " ".join(a.replace("\n", " ") for a in sys.argv[1:])
 open(os.environ["FAKE_GH_LOG"], "a").write(args + "\n")
 ci = json.load(open(os.environ["FAKE_GH_CI"]))
-pull = ci.get("pull")
 origin, prs_file = os.environ["FAKE_GH_ORIGIN"], os.environ["FAKE_GH_PRS"]
 prs = json.load(open(prs_file)) if os.path.exists(prs_file) else {}
 def save():
@@ -69,33 +68,47 @@ if sys.argv[1:2] == ["pr"]:
     else:
         sys.exit("fake gh: unexpected " + args)
     sys.exit(0)
+if sys.argv[1:3] == ["api", "graphql"]:
+    if ci.get("down"):
+        sys.exit("HTTP 502")
+    if ci.get("graphql_errors"):
+        print(json.dumps({"errors": ci["graphql_errors"]}))
+        sys.exit(0)
+    cursor = None
+    for idx, tok in enumerate(sys.argv):
+        if tok in ("-f", "-F") and idx + 1 < len(sys.argv) and sys.argv[idx + 1].startswith("endCursor="):
+            cursor = sys.argv[idx + 1].split("=", 1)[1]
+    pages = ci.get("merged_prs_pages")
+    if pages is not None:
+        key = cursor or "first"
+        page = pages.get(key)
+        if page is None:
+            sys.exit("fake gh: unexpected graphql cursor " + str(cursor))
+        print(json.dumps({"data": {"repository": {"pullRequests": page}}}))
+        sys.exit(0)
+    nodes = list(ci.get("merged_prs") or [])
+    for num, p in prs.items():
+        if p.get("state") == "MERGED":
+            nodes.append({
+                "number": int(num),
+                "title": p["title"],
+                "body": p.get("body", ""),
+                "mergedAt": "2026-11-25T12:00:00Z",
+                "updatedAt": "2026-11-25T12:00:00Z",
+                "headRefOid": p["sha"],
+                "mergeCommit": {"oid": p["merged"]} if p.get("merged") else None,
+            })
+    print(json.dumps({"data": {"repository": {"pullRequests": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": nodes,
+    }}}}))
+    sys.exit(0)
 m = re.search(r"workflows/ci\.yml/runs\?head_sha=([0-9a-f]{40})&event=push&branch=main&", args)
-merged = re.search(r"/commits/([0-9a-f]{40})/pulls\?", args)
 tested = re.search(r"workflows/ci\.yml/runs\?head_sha=([0-9a-f]{40})&event=pull_request&", args)
-pr_api = re.search(r"/pulls/(\d+)$", args)
-if sys.argv[1:2] != ["api"] or not (m or merged or tested or pr_api):
+if sys.argv[1:2] != ["api"] or not (m or tested):
     sys.exit("fake gh: unexpected " + args)
 if ci.get("down"):
     sys.exit("HTTP 502")
-if pr_api:
-    num = pr_api.group(1)
-    pr_meta = (ci.get("pr_meta") or {}).get(num)
-    if pr_meta is None:
-        sys.exit("HTTP 404: Not Found")
-    print(json.dumps({"number": int(num), "title": pr_meta["title"], "body": pr_meta.get("body", "")}))
-    sys.exit(0)
-if merged:
-    sha = merged.group(1)
-    commit_pulls = ci.get("commit_pulls") or {}
-    if sha in commit_pulls:
-        print(json.dumps(commit_pulls[sha]))
-    elif pull:
-        print(json.dumps([{"number": pull["number"], "merged_at": "2026-01-01T00:00:00Z",
-                           "merge_commit_sha": pull.get("merged_as", sha),
-                           "head": {"sha": pull["head"]}, "base": {"ref": pull.get("base", "main")}}]))
-    else:
-        print(json.dumps([]))
-    sys.exit(0)
 if tested and any(p["sha"] == tested.group(1) for p in prs.values()):
     if ci.get("move_main") and not os.path.exists(prs_file + ".moved"):
         open(prs_file + ".moved", "w").close()
@@ -118,10 +131,7 @@ if tested and any(p["sha"] == tested.group(1) for p in prs.values()):
     print(json.dumps({"total_count": 1, "workflow_runs": runs}))
     sys.exit(0)
 if tested:
-    runs = [{"id": 77, "run_number": 5, "head_sha": pull["head"], "event": "pull_request", "head_branch": "pr",
-             "status": pull.get("status", "completed"), "conclusion": pull.get("conclusion", "success"),
-             "html_url": "https://github.example/runs/77"}] if pull and pull["head"] == tested.group(1) else []
-    print(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
+    print(json.dumps({"total_count": 0, "workflow_runs": []}))
     sys.exit(0)
 state = ci.get("commits", {}).get(m.group(1), ci)
 pr = {"id": 99, "run_number": 3, "head_sha": m.group(1), "event": "pull_request", "head_branch": "feature",
@@ -402,7 +412,7 @@ Ran cargo nextest.
     assert (p_post1_feat.version, p_post1_feat.bump) == ("1.3.0", "minor")
     ok("version calculation follows pre-1.0 / post-1.0 MAJOR, MINOR, and PATCH rules")
 
-    # Rendering: section order, manual override note, links, and complete coverage.
+    # Rendering: section order, manual override note, links, chore carrier summary, and complete coverage.
     entries = [
         m.ReleaseEntry("1" * 40, 50, "feat(items): add lifecycle", "feat", "items", False, "add lifecycle",
                        "Details line.", ("upgrade web client with Hub",), ()),
@@ -410,6 +420,8 @@ Ran cargo nextest.
         m.ReleaseEntry("3" * 40, None, "perf(chat): batch frames", "perf", "chat", False, "batch frames", None, (), ()),
         m.ReleaseEntry("4" * 40, 52, "refactor(store): unify snapshots", "refactor", "store", False, "unify snapshots", None, (), ()),
         m.ReleaseEntry("5" * 40, 53, "docs: clarify versioning", "docs", None, False, "clarify versioning", None, (), ()),
+        m.ReleaseEntry("6" * 40, 69, "chore(integration): land batch", "chore", "integration", False, "land batch",
+                       "Verbose carrier body that must be suppressed.", (), (), carried_prs=(50, 51)),
     ]
     rendered = m.render_notes("1.0.0", entries, "https://github.com/acme/app", manual_reason="Freeze public contracts")
     order = [rendered.index(h) for h in ("# Steve v1.0.0", "> Version set manually", "## Before upgrading", "## Features", "## Fixes", "## Performance", "## Other changes")]
@@ -419,7 +431,32 @@ Ran cargo nextest.
     assert "[`3333333`](https://github.com/acme/app/commit/" + "3" * 40 + ")" in rendered
     assert "**refactor(store):** unify snapshots ([#52](https://github.com/acme/app/pull/52))" in rendered
     assert "**docs:** clarify versioning ([#53](https://github.com/acme/app/pull/53))" in rendered
-    ok("release notes render in fixed order with upgrade notices, PR/commit links, and full coverage")
+    assert (
+        "- **chore(integration):** land batch ([#69](https://github.com/acme/app/pull/69); "
+        "includes [#50](https://github.com/acme/app/pull/50), [#51](https://github.com/acme/app/pull/51))"
+    ) in rendered, rendered
+    assert "Verbose carrier body" not in rendered, rendered
+    ok("release notes render in fixed order with upgrade notices, PR/commit links, single-line chore carrier, and full coverage")
+
+    # lint_pr rejects PRs whose commits have Upgrade: trailers when the PR description has none.
+    upgrade_commit = m.PrCommit(sha="a1b2c3d4" + "0" * 32, message="feat(store): migrate schema\n\nUpgrade: draft commit upgrade notice.\n")
+    fenced_commit = m.PrCommit(sha="b2c3d4e5" + "0" * 32, message="docs: document trailer\n\n```\nUpgrade: example inside fence\n```\n")
+    try:
+        m.lint_pr("feat(store): migrate schema", "## Release note\n\nSchema migrated.\n", commits=[upgrade_commit])
+        raise AssertionError("missing PR-description Upgrade: passed lint")
+    except m.Refused as e:
+        assert "a1b2c3d" in str(e) and "PR description" in str(e), e
+    # Writing the final Upgrade: into the PR description satisfies lint.
+    m.lint_pr(
+        "feat(store): migrate schema",
+        "## Release note\n\nSchema migrated.\n\nUpgrade: final operator upgrade notice.\n",
+        commits=[upgrade_commit],
+    )
+    # Upgrade: only inside a fenced code block in a commit does not trigger the rule.
+    m.lint_pr("docs: document trailer", "## Summary\n\nDocs.\n", commits=[fenced_commit])
+    # chore(integration) carrier PR is exempt because carried sub-PRs own their PR descriptions.
+    m.lint_pr("chore(integration): land batch 0.12", "Batch PR.", commits=[upgrade_commit])
+    ok("lint rejects PRs with commit Upgrade: trailers missing from the PR description (exempting chore(integration))")
 
     # Cross-entry deduplication in ## Before upgrading (identical text across entries, breaking fallback guard).
     dup_entries = [
@@ -450,12 +487,40 @@ Ran cargo nextest.
         except m.Refused as e:
             assert "Bad title" in str(e), e
         # Live refresh sees an edited valid PR title even if the event snapshot still has the old one.
+        no_commits = lambda repo, num, tok, base: []
         m.lint_github_event(
             str(ev),
             env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
             refresh=lambda repo, num, tok, base: ("fix(ci): edited title", "Upgrade: restart Hub"),
             fetch_files=lambda repo, num, tok, base: [{"filename": "ops/cut-release.py", "status": "modified"}],
+            fetch_commits=no_commits,
         )
+        # Commit carries Upgrade: while PR description omits it -> refused in lint --github-event.
+        try:
+            m.lint_github_event(
+                str(ev),
+                env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+                refresh=lambda repo, num, tok, base: ("feat(store): add migration", "## Release note\n\nMigrated.\n"),
+                fetch_files=lambda repo, num, tok, base: [{"filename": "hub-rs/src/lib.rs", "status": "modified"}],
+                fetch_commits=lambda repo, num, tok, base: [
+                    m.PrCommit(sha="deadbeef" + "0" * 32, message="feat(store): add migration\n\nUpgrade: draft commit note.\n")
+                ],
+            )
+            raise AssertionError("commit Upgrade: without PR-body Upgrade: passed lint_github_event")
+        except m.Refused as e:
+            assert "deadbee" in str(e) and "PR description" in str(e), e
+        # fetch_commits network error fails closed.
+        try:
+            m.lint_github_event(
+                str(ev),
+                env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+                refresh=lambda repo, num, tok, base: ("fix(ci): ok title", ""),
+                fetch_files=lambda repo, num, tok, base: [{"filename": "ops/cut-release.py", "status": "modified"}],
+                fetch_commits=lambda repo, num, tok, base: (_ for _ in ()).throw(OSError("timeout")),
+            )
+            raise AssertionError("fetch_commits failure passed lint_github_event")
+        except m.Refused as e:
+            assert "can't read PR #9 commits from GitHub" in str(e), e
         # Live PR body with Checks: or signature inside ## Release note is refused in lint --github-event.
         try:
             m.lint_github_event(
@@ -466,6 +531,7 @@ Ran cargo nextest.
                     "## Release note\n\nRegrouped sidebar.\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
                 ),
                 fetch_files=lambda repo, num, tok, base: [{"filename": "web/src/nav.tsx", "status": "modified"}],
+                fetch_commits=no_commits,
             )
             raise AssertionError("dirty ## Release note passed lint_github_event")
         except m.Refused as e:
@@ -482,6 +548,7 @@ Ran cargo nextest.
                     env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
                     refresh=lambda repo, num, tok, base: ("docs: edit release notes", ""),
                     fetch_files=lambda repo, num, tok, base, bf=bad_files: bf,
+                    fetch_commits=no_commits,
                 )
                 raise AssertionError(f"docs/releases change passed: {bad_files}")
             except m.Refused as e:
@@ -498,6 +565,7 @@ Ran cargo nextest.
                     env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
                     refresh=lambda repo, num, tok, base: ("chore(release): v0.11.0", ""),
                     fetch_files=lambda repo, num, tok, base, br=bad_rel: br,
+                    fetch_commits=no_commits,
                 )
                 raise AssertionError(f"bad release PR passed: {bad_rel}")
             except m.Refused as e:
@@ -508,6 +576,7 @@ Ran cargo nextest.
             env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
             refresh=lambda repo, num, tok, base: ("chore(release): v0.11.0", ""),
             fetch_files=lambda repo, num, tok, base: [{"filename": "docs/releases/0.11.0.md", "status": "added"}],
+            fetch_commits=no_commits,
         )
         # Deleting files under docs/releases/ (cleanup PR) passes.
         m.lint_github_event(
@@ -518,6 +587,7 @@ Ran cargo nextest.
                 {"filename": "docs/releases/old/note.md", "status": "removed"},
                 {"filename": "ops/cut-release.py", "status": "modified"},
             ],
+            fetch_commits=no_commits,
         )
         ev_non_pr = Path(tmp, "push.json")
         ev_non_pr.write_text(json.dumps({"before": "a" * 40}))
@@ -539,7 +609,7 @@ def integration_checks():
         # Merge a PR whose git merge commit has an old non-conventional title, to prove:
         # (1) non-conventional titles are refused (never silently bucketed into Other changes as PATCH);
         # (2) live GitHub PR title + description edited after merge override the merge commit message!
-        merge_pr(
+        m50 = merge_pr(
             a,
             50,
             "feat/items",
@@ -547,34 +617,54 @@ def integration_checks():
             {"src/items.txt": "1\n"},
             "feat(items): close finished cycles immediately",
         )
+        h50 = git(a, "rev-parse", f"{m50}^2")
         commit(a, {"src/web.txt": "2\n"}, "fix(web): keep scroll anchored")
         commit(a, {"src/chat.txt": "3\n"}, "perf(chat): batch streaming frames")
         commit(a, {"src/doc.txt": "4\n"}, "docs: document version policy")
         git(a, "push", "-q", "origin", "main")
 
+        def gh_pr(number, title, body, merge_sha, head_sha, ts="2026-11-25T12:00:00Z"):
+            return {
+                "number": number,
+                "title": title,
+                "body": body,
+                "mergedAt": ts,
+                "updatedAt": ts,
+                "headRefOid": head_sha,
+                "mergeCommit": {"oid": merge_sha} if merge_sha else None,
+            }
+
         # Without updating PR #50 on GitHub (or in --offline reading merge commit title), next and cut --dry-run MUST refuse!
-        set_ci(conclusion="success", pr_meta={"50": {"title": "Items and delivery: legacy title before convention (#443)", "body": ""}})
+        set_ci(
+            conclusion="success",
+            merged_prs=[gh_pr(50, "Items and delivery: legacy title before convention (#443)", "", m50, h50)],
+        )
         for cmd in (("next",), ("cut", "--dry-run"), ("next", "--range", "v0.2.24..origin/main", "--offline"), ("cut", "--dry-run", "--range", "v0.2.24..origin/main", "--offline")):
             r = cut(a, *cmd)
             assert r.returncode == 1 and "PR #50" in r.stderr and "legacy title before convention" in r.stderr and "Update the PR title on GitHub" in r.stderr, (cmd, r)
-        # Online next/cut fails closed if GitHub API is unreachable (never silently falls back to commit messages).
+        # Online next/cut fails closed if GitHub API is unreachable, returns GraphQL errors, or omits a merged PR.
         set_ci(conclusion="success", down=True)
         r = cut(a, "next")
         assert r.returncode == 1 and "can't read" in r.stderr and "from GitHub" in r.stderr, r
-        # Also fails closed if commits/{sha}/pulls returns [] and pulls/{number} is missing/unreachable.
-        set_ci(conclusion="success", pr_meta={})
+        set_ci(conclusion="success", graphql_errors=[{"message": "API rate limit exceeded"}])
         r = cut(a, "next")
-        assert r.returncode == 1 and "can't read PR #50 from GitHub" in r.stderr, r
-        ok("next and cut refuse non-Conventional PR titles with actionable hints and fail closed if GitHub is down")
+        assert r.returncode == 1 and "GraphQL error" in r.stderr and "rate limit" in r.stderr, r
+        set_ci(conclusion="success", merged_prs=[])
+        r = cut(a, "next")
+        assert r.returncode == 1 and "can't read PR #50" in r.stderr, r
+        ok("next and cut refuse non-Conventional PR titles with actionable hints and fail closed if GitHub is down or incomplete")
 
         # Now maintainer edits PR #50 on GitHub (after merge!) to Conventional Commits + ## Release note + Upgrade:.
-        pr50 = {
-            "50": {
-                "title": "feat(items): close finished cycles immediately",
-                "body": "Summary.\n\n## Release note\n\nFinishing an item closes its active cycle immediately.\n\nUpgrade: upgrade web client alongside the Hub.\n",
-            }
-        }
-        set_ci(conclusion="success", pr_meta=pr50)
+        pr50 = [
+            gh_pr(
+                50,
+                "feat(items): close finished cycles immediately",
+                "Summary.\n\n## Release note\n\nFinishing an item closes its active cycle immediately.\n\nUpgrade: upgrade web client alongside the Hub.\n",
+                m50,
+                h50,
+            )
+        ]
+        set_ci(conclusion="success", merged_prs=pr50)
 
         r = cut(a, "next")
         assert r.returncode == 0 and r.stdout.startswith("0.3.0 (minor, from v0.2.24)\n"), r
@@ -609,19 +699,19 @@ def integration_checks():
 
         # CI failure modes on head.
         head = git(origin, "rev-parse", "main")
-        set_ci(conclusion="failure", pr_meta=pr50)
+        set_ci(conclusion="failure", merged_prs=pr50)
         r = cut(a, "cut", "--ci-wait", "0")
         assert r.returncode == 1 and f"failure on {head[:7]}" in r.stderr and "gh run rerun 42 --failed" in r.stderr, r
         assert git(origin, "tag", "-l", "v0.3.0") == ""
-        set_ci(conclusion="success", status="in_progress", pr_meta=pr50)
+        set_ci(conclusion="success", status="in_progress", merged_prs=pr50)
         assert "still in_progress" in cut(a, "cut", "--ci-wait", "0").stderr
         for conclusion in ("cancelled", "skipped", "neutral"):
-            set_ci(conclusion=conclusion, pr_meta=pr50)
+            set_ci(conclusion=conclusion, merged_prs=pr50)
             r = cut(a, "cut", "--ci-wait", "0")
             assert r.returncode == 1 and f"{conclusion} on" in r.stderr, r
-        set_ci(none=True, pr_meta=pr50)
+        set_ci(none=True, merged_prs=pr50)
         assert "has no push run on" in cut(a, "cut", "--ci-wait", "0").stderr
-        set_ci(down=True, pr_meta=pr50)
+        set_ci(down=True, merged_prs=pr50)
         assert "can't read" in cut(a, "cut", "--ci-wait", "0").stderr
         ok("red, in-progress, cancelled, PR-only, or unreachable CI refuses the release")
 
@@ -631,13 +721,13 @@ def integration_checks():
         (only_git / "git").symlink_to(shutil.which("git"))
         no_gh = dict(ENV, PATH=f"{only_git}{os.pathsep}/usr/bin{os.pathsep}/bin")
         fake = str(Path(tmp, "bin", "gh"))
-        set_ci(conclusion="failure", pr_meta=pr50)
+        set_ci(conclusion="failure", merged_prs=pr50)
         r = subprocess.run([sys.executable, str(CUT), "--repo", str(a), "cut", "--ci-wait", "0"], capture_output=True, text=True, env=dict(no_gh, STEVE_GH=fake))
         assert r.returncode == 1 and f"failure on {head[:7]}" in r.stderr, r
         ok("no gh on PATH: $STEVE_GH is used")
 
         # Full release cut leaves caller checkout untouched.
-        set_ci(conclusion="success", pr_meta=pr50)
+        set_ci(conclusion="success", merged_prs=pr50)
         git(a, "checkout", "-q", "-b", "elsewhere")
         Path(a, "scratch.txt").write_text("mine\n")
         r = cut(a, "cut")
@@ -702,6 +792,14 @@ def integration_checks():
         git(a, "checkout", "-q", "-b", "feat/lint-test", "origin/main")
         commit(a, {"src/l1.txt": "1\n"}, "feat(web): add filter\n\nUpgrade: reload open tabs.")
         assert cut(a, "lint").returncode == 0
+        # Local PR check with --base refuses when branch commits carry Upgrade: but PR body omits it.
+        no_up_body = Path(tmp, "no-up-body.md")
+        no_up_body.write_text("## Release note\n\nAdded filter.\n", encoding="utf-8")
+        r = cut(a, "lint", "--pr-title", "feat(web): add filter", "--pr-body", str(no_up_body), "--base", "origin/main")
+        assert r.returncode == 1 and "PR description" in r.stderr, r
+        with_up_body = Path(tmp, "with-up-body.md")
+        with_up_body.write_text("## Release note\n\nAdded filter.\n\nUpgrade: reload open tabs after upgrading.\n", encoding="utf-8")
+        assert cut(a, "lint", "--pr-title", "feat(web): add filter", "--pr-body", str(with_up_body), "--base", "origin/main").returncode == 0
         # Adding any file under docs/releases/ on a regular branch -> refused.
         commit(a, {"docs/releases/draft.md": "- Draft.\n"}, "docs: add draft note")
         r = cut(a, "lint")
@@ -955,172 +1053,267 @@ def latest_tested_checks():
 
 
 def upgrade_dedupe_and_integration_checks():
-    """Offline fixture checks for per-PR Upgrade: precedence/dedupe and integration PR discovery."""
-    # 1. Per-PR Upgrade: / BREAKING CHANGE: precedence & deduplication (mirrors v0.11.0 #547/#558).
-    with tempfile.TemporaryDirectory(prefix="steve-cut-dedupe-") as tmp:
+    """Fixture checks for PR-description-only Upgrade:/BREAKING CHANGE:, GraphQL discovery, and 9-PR integration batch."""
+
+    def gh_pr(number, title, body, merge_sha, head_sha, ts="2026-11-25T12:00:00Z", updated_ts=None):
+        return {
+            "number": number,
+            "title": title,
+            "body": body,
+            "mergedAt": ts,
+            "updatedAt": updated_ts or ts,
+            "headRefOid": head_sha,
+            "mergeCommit": {"oid": merge_sha} if merge_sha else None,
+        }
+
+    # 1. PR Upgrade:/BREAKING CHANGE: come strictly from PR descriptions (stale/conflicting commit trailers ignored);
+    #    direct commits without a PR still use commit trailers; identical PR notices deduplicate across PRs.
+    with tempfile.TemporaryDirectory(prefix="steve-cut-pr-only-up-") as tmp:
         fake_gh(tmp)
         _, a = setup(tmp)
         git(a, "tag", "-a", "v0.10.1", "-m", "Steve v0.10.1")
         git(a, "push", "-q", "origin", "v0.10.1")
 
-        # PR #547: PR description has polished Upgrade:, commit has older wording -> ONLY PR description wins.
-        merge_pr(
-            a,
-            547,
-            "reform/wf0",
-            "refactor(workflow)!: remove legacy workflow engine",
-            {"src/wf.txt": "removed\n"},
-            "refactor(workflow)!: remove legacy workflow engine\n\n"
-            "Upgrade: drop legacy workflow tables. Remove STEVE_WORKFLOW from steve.env.\n"
-            "BREAKING CHANGE: old commit breaking wording.\n",
-        )
-        c547 = git(a, "rev-parse", "HEAD^2")
-
-        # PR #558: PR description has polished Upgrade:, commit AND merge commit body also have Upgrade: -> ONLY PR description wins.
-        git(a, "checkout", "-q", "-b", "reform/harnesses")
+        # PR #544: early commit contradicts later commit & PR description; commit also has obsolete BREAKING CHANGE:.
+        git(a, "checkout", "-q", "-b", "fix/yolo-cleanup")
         commit(
             a,
-            {"src/h.txt": "h\n"},
-            "feat(devices)!: harness auto-upgrade\n\n"
-            "Upgrade: commit draft wording for STEVE_ADAPTER_UPDATES.\n",
+            {"src/m128.txt": "v1\n"},
+            "refactor(store): initial cleanup\n\n"
+            "Upgrade: Migration 128 irreversibly expires historical YOLO-decided decisions.\n"
+            "BREAKING CHANGE: old commit breaking wording that was superseded.\n",
         )
-        c558 = git(a, "rev-parse", "HEAD")
+        commit(
+            a,
+            {"src/m128.txt": "v2\n"},
+            "fix(store): preserve settled YOLO decisions\n\n"
+            "Upgrade: draft second commit wording for migration 128.\n",
+        )
+        h544 = git(a, "rev-parse", "HEAD")
         git(a, "checkout", "-q", "main")
         git(
             a,
             "merge",
             "-q",
             "--no-ff",
-            "reform/harnesses",
+            "fix/yolo-cleanup",
             "-m",
-            "Merge pull request #558 from acme/reform/harnesses\n\n"
-            "feat(devices)!: harness auto-upgrade\n\n"
-            "Upgrade: merge commit body wording for STEVE_ADAPTER_UPDATES.\n",
+            "Merge pull request #544 from acme/fix/yolo-cleanup\n\n"
+            "refactor(store)!: remove retired YOLO columns\n\n"
+            "Upgrade: stale merge commit body wording.\n",
         )
-        git(a, "branch", "-q", "-D", "reform/harnesses")
+        m544 = git(a, "rev-parse", "HEAD")
+        git(a, "branch", "-q", "-D", "fix/yolo-cleanup")
 
-        # PR #559: PR description has NO Upgrade:, commits carry Upgrade: (with one duplicate across two commits) -> falls back & dedupes.
-        git(a, "checkout", "-q", "-b", "fix/sec")
+        # PR #545: commits carry Upgrade: trailers for a feature that was later reverted/dropped; PR description has NONE.
+        m545 = merge_pr(
+            a,
+            545,
+            "fix/context-cleanup",
+            "fix(node): align harness session options",
+            {"src/ctx.txt": "clean\n"},
+            "feat(node): draft context budget\n\n"
+            "Upgrade: wire protocol advances from 13 to 14 for turn context budgets.\n"
+            "Upgrade: Removes STEVE_TURN_CONTEXT_BUDGET_*.\n",
+        )
+        h545 = git(a, "rev-parse", f"{m545}^2")
+
+        # PR #559 & #560: both PR descriptions carry the exact same Upgrade: text -> cross-PR dedupe keeps one bullet.
+        m559 = merge_pr(a, 559, "fix/sec-1", "fix(security): close boundary holes", {"src/s1.txt": "1\n"})
+        h559 = git(a, "rev-parse", f"{m559}^2")
+        m560 = merge_pr(a, 560, "fix/sec-2", "fix(security): require online node", {"src/s2.txt": "2\n"})
+        h560 = git(a, "rev-parse", f"{m560}^2")
+
+        # Direct commit (no PR) carrying Upgrade: and BREAKING CHANGE: -> still reads commit trailers.
         commit(
             a,
-            {"src/s1.txt": "1\n"},
-            "fix(security): reject custom harness env\n\n"
-            "Upgrade: move custom env into harness config on the Node.\n"
-            "Upgrade: secret use needs an online Node.\n",
+            {"src/direct.txt": "d\n"},
+            "fix(cli): tighten env parser\n\n"
+            "Upgrade: direct commit upgrade action.\n"
+            "BREAKING CHANGE: direct commit breaking detail.\n",
         )
-        c559a = git(a, "rev-parse", "HEAD")
-        commit(
-            a,
-            {"src/s2.txt": "2\n"},
-            "fix(security): harden vault boundary\n\n"
-            "Upgrade: secret use needs\n  an online Node.\n",
-        )
-        c559b = git(a, "rev-parse", "HEAD")
-        git(a, "checkout", "-q", "main")
-        git(
-            a,
-            "merge",
-            "-q",
-            "--no-ff",
-            "fix/sec",
-            "-m",
-            "Merge pull request #559 from acme/fix/sec\n\nfix(security): close boundary holes",
-        )
-        git(a, "branch", "-q", "-D", "fix/sec")
-
-        # PR #560: PR description repeats identical Upgrade: text from #559 -> cross-PR dedupe keeps one bullet.
-        merge_pr(
-            a,
-            560,
-            "fix/sec-followup",
-            "fix(security): require online node",
-            {"src/s3.txt": "3\n"},
-            "fix(security): require online node",
-        )
-        c560 = git(a, "rev-parse", "HEAD^2")
         git(a, "push", "-q", "origin", "main")
 
-        pr547_body = (
-            "## Release note\n\nRemoved the legacy workflow engine.\n\n"
-            "Upgrade: drop legacy workflow tables. Remove `STEVE_WORKFLOW` from `steve.env` if set.\n"
-            "BREAKING CHANGE: polished PR breaking wording.\n"
-        )
-        pr558_body = (
-            "Upgrade: `STEVE_ADAPTER_UPDATES` is replaced by the Node setting (off by default).\n"
-        )
-        pr559_body = "## Release note\n\nClosed security boundary holes.\n"
-        pr560_body = "Upgrade: secret use needs an online Node.\n"
         set_ci(
             conclusion="success",
-            commit_pulls={
-                c547: [{"number": 547, "merged_at": "2026-11-25T01:00:00Z", "title": "refactor(workflow)!: remove legacy workflow engine", "body": pr547_body}],
-                c558: [{"number": 558, "merged_at": "2026-11-25T02:00:00Z", "title": "feat(devices)!: harness auto-upgrade", "body": pr558_body}],
-                c559a: [{"number": 559, "merged_at": "2026-11-25T03:00:00Z", "title": "fix(security): close boundary holes", "body": pr559_body}],
-                c559b: [{"number": 559, "merged_at": "2026-11-25T03:00:00Z", "title": "fix(security): close boundary holes", "body": pr559_body}],
-                c560: [{"number": 560, "merged_at": "2026-11-25T04:00:00Z", "title": "fix(security): require online node", "body": pr560_body}],
-            },
+            merged_prs=[
+                gh_pr(
+                    544,
+                    "refactor(store)!: remove retired YOLO columns",
+                    "## Release note\n\nRemoved retired YOLO columns while preserving settled decisions.\n\n"
+                    "Upgrade: Migration 128 preserves settled YOLO decisions as resolved.\n",
+                    m544,
+                    h544,
+                ),
+                gh_pr(
+                    545,
+                    "fix(node): align harness session options",
+                    "## Release note\n\nAligned harness session options.\n",
+                    m545,
+                    h545,
+                ),
+                gh_pr(
+                    559,
+                    "fix(security): close boundary holes",
+                    "Upgrade: secret use needs an online Node.\n",
+                    m559,
+                    h559,
+                ),
+                gh_pr(
+                    560,
+                    "fix(security): require online node",
+                    "Upgrade: secret use needs\n  an online Node.\n",
+                    m560,
+                    h560,
+                ),
+            ],
         )
 
         r_next = cut(a, "next", "--range", "v0.10.1..origin/main")
         assert r_next.returncode == 0 and r_next.stdout.startswith("0.11.0 (minor, from v0.10.1)\n"), r_next
+        assert "#544" in r_next.stdout and "#545" not in r_next.stdout, r_next
         r_dry = cut(a, "cut", "--dry-run", "--range", "v0.10.1..origin/main", extra_env={"GH_REPO": "acme/app"})
         assert r_dry.returncode == 0, r_dry
         before = r_dry.stdout.split("## Before upgrading\n\n", 1)[1].split("\n\n## ", 1)[0]
         bullets = [line for line in before.splitlines() if line.startswith("- ")]
-        assert len(bullets) == 5, before
-        assert "Remove `STEVE_WORKFLOW` from `steve.env` if set." in before and "STEVE_WORKFLOW from steve.env." not in before, before
-        assert "polished PR breaking wording." in before and "old commit breaking wording." not in before, before
-        assert "`STEVE_ADAPTER_UPDATES` is replaced" in before and "commit draft wording" not in before and "merge commit body wording" not in before, before
+        assert len(bullets) == 4, before
+        assert "Migration 128 preserves settled YOLO decisions as resolved." in before, before
+        for stale in (
+            "irreversibly expires",
+            "old commit breaking wording",
+            "draft second commit wording",
+            "stale merge commit body",
+            "turn context budgets",
+            "STEVE_TURN_CONTEXT_BUDGET_",
+        ):
+            assert stale not in r_dry.stdout, (stale, r_dry.stdout)
+        assert "#545" not in before and "#545" in r_dry.stdout, r_dry.stdout
         assert before.count("secret use needs an online Node.") == 1, before
-        assert "move custom env into harness config on the Node." in before, before
-        assert before.count("#547") == 2 and before.count("#558") == 1 and before.count("#559") == 2 and "#560" not in before, before
-        ok("per-PR Upgrade:/BREAKING CHANGE: prefers PR description, falls back to commits, and dedupes identical text")
+        assert "direct commit upgrade action." in before and "direct commit breaking detail." in before, before
+        ok("PR entries read Upgrade:/BREAKING CHANGE: strictly from PR descriptions; direct commits keep commit trailers")
 
-    # 2. Integration PR (#569) landing multiple sub-PRs via local non-PR merges + commits/{sha}/pulls discovery.
-    with tempfile.TemporaryDirectory(prefix="steve-cut-integ-") as tmp:
+    # 2. Integration batch (#569) with 9 sub-PRs sharing the exact same mergeCommit, alongside direct PRs,
+    #    prior release PR merge, already-released PR, off-branch PR, and paginated GraphQL cutoff.
+    with tempfile.TemporaryDirectory(prefix="steve-cut-integ-9-") as tmp:
         fake_gh(tmp)
         _, a = setup(tmp)
-        git(a, "tag", "-a", "v0.11.0", "-m", "Steve v0.11.0")
+
+        # Already-released PR #400 before v0.11.0.
+        m400 = merge_pr(a, 400, "feat/old", "feat(old): already released", {"src/old.txt": "old\n"})
+        h400 = git(a, "rev-parse", f"{m400}^2")
+
+        # Release v0.11.0 via a release PR merge (#567) whose second parent is tagged v0.11.0.
+        git(a, "checkout", "-q", "-b", "release/v0.11.0")
+        commit(a, {"docs/releases/0.11.0.md": "# Steve v0.11.0\n\nnotes\n"}, "chore(release): v0.11.0")
+        h567 = git(a, "rev-parse", "HEAD")
+        git(a, "tag", "-a", "v0.11.0", "-m", "Steve v0.11.0", h567)
+        git(a, "checkout", "-q", "main")
+        git(
+            a,
+            "merge",
+            "-q",
+            "--no-ff",
+            "release/v0.11.0",
+            "-m",
+            "Merge pull request #567 from acme/release/v0.11.0\n\nchore(release): v0.11.0",
+        )
+        m567 = git(a, "rev-parse", "HEAD")
+        git(a, "branch", "-q", "-D", "release/v0.11.0")
         git(a, "push", "-q", "origin", "v0.11.0")
-        v011_sha = git(a, "rev-parse", "v0.11.0^{commit}")
 
-        # Build 4 independent feature branches off main, then merge them locally into integ/batch-0.12 (step-1..step-4).
-        git(a, "checkout", "-q", "-b", "pr/560", "main")
-        commit(a, {"src/waits.txt": "1\n"}, "feat(waits): enforce unified WaitContract")
-        c560_1 = git(a, "rev-parse", "HEAD")
-        commit(a, {"src/waits.txt": "2\n"}, "fix(waits): align wait fixtures")
-        c560_2 = git(a, "rev-parse", "HEAD")
+        # An off-branch PR #599 merged on a side branch that never lands on main.
+        git(a, "checkout", "-q", "-b", "side-base")
+        git(a, "checkout", "-q", "-b", "feat/side")
+        commit(a, {"src/side.txt": "side\n"}, "feat(side): never merged to main")
+        h599 = git(a, "rev-parse", "HEAD")
+        git(a, "checkout", "-q", "side-base")
+        git(a, "merge", "-q", "--no-ff", "feat/side", "-m", "Merge pull request #599 from acme/feat/side\n\nfeat(side): never merged to main")
+        m599 = git(a, "rev-parse", "HEAD")
+        git(a, "checkout", "-q", "main")
+        git(a, "branch", "-q", "-D", "feat/side")
 
-        git(a, "checkout", "-q", "-b", "pr/507", "main")
-        commit(
-            a,
-            {"src/backup.txt": "1\n"},
-            "Bundle verified restic engine\n\nUpgrade: draft commit upgrade note for backup v2.\n",
-        )
-        c507_1 = git(a, "rev-parse", "HEAD")
-        commit(a, {"src/backup.txt": "2\n"}, "Remove backup v2 transitional checks")
-        c507_2 = git(a, "rev-parse", "HEAD")
+        # Direct PR #568 before the integration batch.
+        m568 = merge_pr(a, 568, "fix/flaky", "fix(research): stabilize item archive", {"src/r.txt": "1\n"})
+        h568 = git(a, "rev-parse", f"{m568}^2")
 
-        git(a, "checkout", "-q", "-b", "pr/563", "main")
-        commit(
-            a,
-            {"src/store.txt": "1\n"},
-            "refactor(store)!: remove legacy remnants\n\n"
-            "Upgrade: back up SQLite before migration 128.\n",
-        )
-        c563_1 = git(a, "rev-parse", "HEAD")
+        # Build the 9 independent sub-PR branches (mirroring real #569's 9 PRs).
+        sub_specs = [
+            (
+                544,
+                "refactor(store)!: remove retired YOLO columns and adopt PermissionMode",
+                "## Release note\n\nRemoved retired YOLO columns and moved bots onto canonical PermissionMode.\n\n"
+                "Upgrade: Migration 128 preserves settled YOLO decisions as resolved.\n",
+                "refactor(store)!: initial cleanup\n\nUpgrade: Migration 128 irreversibly expires historical YOLO-decided decisions.\n",
+            ),
+            (
+                545,
+                "feat(knowledge)!: redefine personal knowledge boundary and proposals",
+                "## Release note\n\nScoped knowledge to personal memory and routed engineering facts to project proposals.\n\n"
+                "Upgrade: Migration 125 withdraws item and chat rows from the knowledge index.\n",
+                "feat(knowledge)!: draft\n\nUpgrade: draft old migration 121 wording.\n",
+            ),
+            (
+                546,
+                "feat(coordinator): route orchestration through unified coordinator",
+                "## Release note\n\nUnified coordinator handles scheduling and handoffs.\n",
+                "feat(coordinator): coordinator\n\nUpgrade: wire protocol advances from 13 to 14 for turn context budgets.\n",
+            ),
+            (
+                550,
+                "perf(store): batch event archive compaction",
+                None,
+                "perf(store): batch compaction\n\nUpgrade: Removes STEVE_TURN_CONTEXT_BUDGET_*.\n",
+            ),
+            (
+                553,
+                "fix(handoff): return typed HandoffError codes",
+                None,
+                "fix(handoff): return typed HandoffError codes",
+            ),
+            (
+                560,
+                "feat(waits): unify wait contract and timeout handling",
+                "## Release note\n\nUnified item dependency wait deadlines.\n",
+                "feat(waits): enforce unified WaitContract",
+            ),
+            (
+                507,
+                "feat(backup)!: single encrypted backup repository",
+                "## Release note\n\nConsolidated backups into one encrypted restic repository.\n\n"
+                "Upgrade: initialize the encrypted backup repository after upgrading.\n",
+                "Bundle verified restic engine\n\nUpgrade: draft commit upgrade note for backup v2.\n",
+            ),
+            (
+                563,
+                "refactor(channels)!: route disclosure audit through gateway",
+                "Upgrade: configure disclosure model in workspace model settings instead of STEVE_MODELS_CHECK.\n",
+                "refactor(channels)!: route disclosure audit",
+            ),
+            (
+                564,
+                "fix(avatar): serve person avatars from canonical store",
+                None,
+                "fix(avatar): serve person avatars",
+            ),
+        ]
 
-        git(a, "checkout", "-q", "-b", "pr/553", "main")
-        commit(a, {"src/handoff.txt": "1\n"}, "fix(handoff): return typed HandoffError codes")
-        c553_1 = git(a, "rev-parse", "HEAD")
+        sub_heads = {}
+        for num, _, _, commit_msg in sub_specs:
+            br = f"pr/{num}"
+            git(a, "checkout", "-q", "-b", br, "main")
+            commit(a, {f"src/pr_{num}.txt": f"{num}\n"}, commit_msg)
+            sub_heads[num] = git(a, "rev-parse", "HEAD")
 
-        # Assemble integ/batch-0.12 with local non-PR merge commits (matching real origin/integ/batch-0.12).
+        # Assemble integ/batch-0.12 with local non-PR merges (step-1..step-9) plus a final integration fixup commit.
         git(a, "checkout", "-q", "-b", "integ/batch-0.12", "main")
-        for step, br in enumerate(("pr/560", "pr/507", "pr/563", "pr/553"), 1):
+        for step, (num, _, _, _) in enumerate(sub_specs, 1):
+            br = f"pr/{num}"
             git(a, "merge", "-q", "--no-ff", br, "-m", f"Merge branch 'integ/batch-0.12' into step-{step}")
             git(a, "branch", "-q", "-D", br)
+        commit(a, {"src/integ_fix.txt": "ok\n"}, "fix(integ): resolve integration test wiring")
+        h569 = git(a, "rev-parse", "HEAD")
 
-        # Land integ/batch-0.12 onto main through integration PR #569 (chore(integration)).
+        # Land integ/batch-0.12 onto main through integration PR #569.
         git(a, "checkout", "-q", "main")
         git(
             a,
@@ -1129,139 +1322,170 @@ def upgrade_dedupe_and_integration_checks():
             "--no-ff",
             "integ/batch-0.12",
             "-m",
-            "Merge pull request #569 from acme/integ/batch-0.12\n\nchore(integration): land batch 0.12",
+            "Merge pull request #569 from acme/integ/batch-0.12\n\nchore(integration): land nine migration-bearing PRs together (0.12 batch)",
         )
+        m569 = git(a, "rev-parse", "HEAD")
         git(a, "branch", "-q", "-D", "integ/batch-0.12")
+
+        # Direct PR #571 after #569.
+        m571 = merge_pr(a, 571, "fix/node-link", "fix(nodes): recover stale upgrade-only nodes", {"src/n.txt": "1\n"})
+        h571 = git(a, "rev-parse", f"{m571}^2")
         git(a, "push", "-q", "origin", "main")
 
-        pr569_obj = {
-            "number": 569,
-            "merged_at": "2026-11-25T10:00:00Z",
-            "title": "chore(integration): land batch 0.12",
-            "body": "Batch integration PR landing #560, #507, #563, #553.",
-        }
-        pr560_obj = {
-            "number": 560,
-            "merged_at": "2026-11-25T10:00:00Z",
-            "title": "feat(waits): unify wait contract and timeout handling",
-            "body": "## Release note\n\nUnified item dependency wait deadlines.\n",
-        }
-        pr507_obj = {
-            "number": 507,
-            "merged_at": "2026-11-25T10:00:00Z",
-            "title": "feat(backup)!: single encrypted backup repository",
-            "body": "Upgrade: initialize the encrypted backup repository after upgrading.\n",
-        }
-        # Omit title/body on #563 in commits/{sha}/pulls to also exercise pulls/{number} fallback fetch.
-        pr563_ref = {"number": 563, "merged_at": "2026-11-25T10:00:00Z"}
-        pr553_obj = {
-            "number": 553,
-            "merged_at": "2026-11-25T10:00:00Z",
-            "title": "fix(handoff): return typed HandoffError codes",
-            "body": None,
-        }
-        # Unmerged (open / closed-without-merge) and already-released PRs must be ignored.
-        open_pr = {"number": 590, "merged_at": None, "title": "wip not merged", "body": ""}
-        closed_pr = {"number": 591, "merged_at": None, "title": "bad closed title", "body": ""}
-        already_released_pr = {
-            "number": 400,
-            "merged_at": "2026-11-20T00:00:00Z",
-            "merge_commit_sha": v011_sha,
-            "title": "feat(old): already released before v0.11.0",
-            "body": "Upgrade: old upgrade already shipped.\n",
-        }
+        # Use real commit timestamps so GraphQL time-window pagination cutoff is genuinely exercised.
+        recent_ts = git(a, "show", "-s", "--format=%cI", m571)
+        old_ts = "2020-01-01T00:00:00Z"
 
-        commit_pulls = {
-            c560_1: [pr560_obj, pr569_obj],
-            c560_2: [pr560_obj, pr569_obj],
-            c507_1: [pr507_obj, pr569_obj],
-            c507_2: [pr507_obj],  # even if GitHub omits #569 on some commits
-            c563_1: [pr563_ref, pr569_obj],
-            c553_1: [pr553_obj, pr569_obj, open_pr, closed_pr, already_released_pr],
+        # Put all 9 sub-PRs + #569 with the exact same mergeCommit m569, split across two GraphQL pages;
+        # page 2 ends with an old PR before the time window while claiming hasNextPage=True (cursor "page3"
+        # is intentionally absent so requesting a 3rd page fails immediately).
+        pr569_node = gh_pr(
+            569,
+            "chore(integration): land nine migration-bearing PRs together (0.12 batch)",
+            "## Release note\n\nCarrier summary that should stay suppressed on a single Other changes line.\n",
+            m569,
+            h569,
+            ts=recent_ts,
+        )
+        sub_nodes = [
+            gh_pr(num, title, body or "", m569, sub_heads[num], ts=recent_ts)
+            for num, title, body, _ in sub_specs
+        ]
+        page1_nodes = [
+            gh_pr(400, "feat(old): already released", "Upgrade: old upgrade already shipped.\n", m400, h400, ts=old_ts, updated_ts=recent_ts),
+            gh_pr(571, "fix(nodes): recover stale upgrade-only nodes", "", m571, h571, ts=recent_ts),
+            gh_pr(599, "feat(side): never merged to main", "Upgrade: side branch upgrade.\n", m599, h599, ts=recent_ts),
+            pr569_node,
+            *sub_nodes[:5],
+        ]
+        page2_nodes = [
+            *sub_nodes[5:],
+            gh_pr(568, "fix(research): stabilize item archive", "", m568, h568, ts=recent_ts),
+            gh_pr(567, "chore(release): v0.11.0", "", m567, h567, ts=recent_ts),
+            gh_pr(10, "chore: ancient released PR", "", m400, h400, ts=old_ts, updated_ts=old_ts),
+        ]
+        pages = {
+            "first": {"pageInfo": {"hasNextPage": True, "endCursor": "page2"}, "nodes": page1_nodes},
+            "page2": {"pageInfo": {"hasNextPage": True, "endCursor": "page3"}, "nodes": page2_nodes},
         }
-        pr_meta = {
-            "563": {"title": "refactor(store)!: remove legacy remnants", "body": ""},
-            "569": {"title": "chore(integration): land batch 0.12", "body": "Batch PR."},
-        }
-        set_ci(conclusion="success", commit_pulls=commit_pulls, pr_meta=pr_meta)
+        set_ci(conclusion="success", merged_prs_pages=pages)
 
+        calls_before = len(gh_calls())
         r_next = cut(a, "next")
         assert r_next.returncode == 0 and r_next.stdout.startswith("0.12.0 (minor, from v0.11.0)\n"), r_next
-        assert "#560 [feat]" in r_next.stdout, r_next.stdout
-        assert "#507 [breaking (pre-1.0 -> MINOR), Upgrade:, feat]" in r_next.stdout, r_next.stdout
-        assert "#563 [breaking (pre-1.0 -> MINOR), Upgrade:]" in r_next.stdout, r_next.stdout
-        assert "#569" not in r_next.stdout, r_next.stdout
-        assert "#590" not in r_next.stdout and "#591" not in r_next.stdout and "#400" not in r_next.stdout, r_next.stdout
+        for trig in ("#507", "#544", "#545", "#546", "#560", "#563"):
+            assert trig in r_next.stdout, (trig, r_next.stdout)
+        for non_trig in ("#569", "#567", "#400", "#599", "#550", "#553", "#564", "#568", "#571"):
+            assert non_trig not in r_next.stdout, (non_trig, r_next.stdout)
 
         r_dry = cut(a, "cut", "--dry-run", extra_env={"GH_REPO": "acme/app"})
         assert r_dry.returncode == 0, r_dry
         out = r_dry.stdout
         assert "# Steve v0.12.0" in out, out
         before = out.split("## Before upgrading\n\n", 1)[1].split("\n\n## ", 1)[0]
-        assert "initialize the encrypted backup repository after upgrading." in before, before
-        assert "draft commit upgrade note for backup v2" not in before, before
-        assert "back up SQLite before migration 128." in before and "#563" in before, before
-        assert "#569" not in before and "#400" not in before, before
+        assert "Migration 128 preserves settled YOLO decisions as resolved." in before and "#544" in before, before
+        assert "Migration 125 withdraws item and chat rows" in before and "#545" in before, before
+        assert "initialize the encrypted backup repository after upgrading." in before and "#507" in before, before
+        assert "configure disclosure model in workspace model settings" in before and "#563" in before, before
+        for excluded_in_before in ("#569", "#546", "#550", "#400", "#599", "irreversibly expires", "turn context budgets", "STEVE_TURN_CONTEXT_BUDGET_", "draft commit upgrade note", "migration 121"):
+            assert excluded_in_before not in before, (excluded_in_before, before)
+
         features = out.split("## Features\n\n", 1)[1].split("\n\n## ", 1)[0]
-        assert "#560" in features and "Unified item dependency wait deadlines." in features and "#507" in features, features
+        for num in (507, 545, 546, 560):
+            assert f"#{num}" in features, (num, features)
         fixes = out.split("## Fixes\n\n", 1)[1].split("\n\n## ", 1)[0]
-        assert "#553" in fixes and "return typed HandoffError codes" in fixes, fixes
+        for num in (553, 564, 568, 571):
+            assert f"#{num}" in fixes, (num, fixes)
+        perf = out.split("## Performance\n\n", 1)[1].split("\n\n## ", 1)[0]
+        assert "#550" in perf, perf
         other = out.split("## Other changes\n\n", 1)[1]
-        assert "**refactor(store):** remove legacy remnants ([#563](https://github.com/acme/app/pull/563))" in other, other
-        assert "**chore(integration):** land batch 0.12 ([#569](https://github.com/acme/app/pull/569))" in other, other
-        assert "#590" not in out and "#591" not in out and "#400" not in out, out
-        ok("integration PR resolves all merged sub-PRs via commits/{sha}/pulls, computes MINOR, and keeps chore carrier in Other changes")
+        assert "#544" in other and "#563" in other, other
+        expected_carrier = (
+            "- **chore(integration):** land nine migration-bearing PRs together (0.12 batch) "
+            "([#569](https://github.com/acme/app/pull/569); includes "
+            + ", ".join(f"[#{n}](https://github.com/acme/app/pull/{n})" for n in (507, 544, 545, 546, 550, 553, 560, 563, 564))
+            + ")"
+        )
+        assert expected_carrier in other, other
+        assert "Carrier summary that should stay suppressed" not in out, out
+        for absent in ("#567", "#400", "#599", "#10"):
+            assert absent not in out, (absent, out)
+
+        # Verify GraphQL-only discovery (zero commits/{sha}/pulls or pulls/{n} calls) and 2-page window cutoff.
+        new_calls = gh_calls()[calls_before:]
+        assert all(c.startswith("api graphql ") for c in new_calls), new_calls
+        assert len(new_calls) == 4, new_calls  # 2 pages for `next` + 2 pages for `cut --dry-run`
+        ok("GraphQL discovery resolves all 9 sub-PRs sharing #569's mergeCommit, stops at time window, and renders chore carrier as one line")
 
         # Non-conventional title on a sub-PR inside an integration PR is refused with an actionable hint.
-        bad_pulls = dict(commit_pulls)
-        bad_pulls[c507_1] = [dict(pr507_obj, title="Backup v2 overhaul"), pr569_obj]
-        bad_pulls[c507_2] = [dict(pr507_obj, title="Backup v2 overhaul")]
-        set_ci(conclusion="success", commit_pulls=bad_pulls, pr_meta=pr_meta)
+        bad_page1 = [dict(n, title="Backup v2 overhaul") if n["number"] == 507 else n for n in page1_nodes]
+        bad_page2 = [dict(n, title="Backup v2 overhaul") if n["number"] == 507 else n for n in page2_nodes]
+        set_ci(
+            conclusion="success",
+            merged_prs_pages={
+                "first": {"pageInfo": {"hasNextPage": True, "endCursor": "page2"}, "nodes": bad_page1},
+                "page2": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": bad_page2},
+            },
+        )
         r_bad = cut(a, "next")
         assert r_bad.returncode == 1 and "PR #507" in r_bad.stderr and "Backup v2 overhaul" in r_bad.stderr, r_bad
         ok("non-conventional sub-PR title inside an integration PR is refused")
 
-        # Post-1.0 MAJOR bump and single-PR carrier tie-break (sub-PR has higher number than integration PR).
+        # 3. Post-1.0 MAJOR bump and single-PR fast-forward carrier tie-break (carrier #570 has lower number
+        #    and identical headRefOid to sub-PR #571, broken deterministically by merge commit subject).
         git(a, "tag", "-a", "v1.0.0", "-m", "Steve v1.0.0")
         git(a, "push", "-q", "origin", "v1.0.0")
-        git(a, "checkout", "-q", "-b", "pr/571", "main")
+        git(a, "checkout", "-q", "-b", "pr/572", "main")
         commit(
             a,
             {"src/api.txt": "v2\n"},
-            "refactor(api)!: drop v1 endpoints\n\nUpgrade: point clients at /api/v2.\n",
+            "refactor(api)!: drop v1 endpoints\n\nUpgrade: stale commit wording.\n",
         )
-        c571 = git(a, "rev-parse", "HEAD")
-        git(a, "checkout", "-q", "-b", "integ/single", "main")
-        git(a, "merge", "-q", "--no-ff", "pr/571", "-m", "Merge branch 'integ/single' into step-1")
+        h572 = git(a, "rev-parse", "HEAD")
         git(a, "checkout", "-q", "main")
         git(
             a,
             "merge",
             "-q",
             "--no-ff",
-            "integ/single",
+            "pr/572",
             "-m",
             "Merge pull request #570 from acme/integ/single\n\nchore(integration): land single breaking PR",
         )
-        git(a, "branch", "-q", "-D", "pr/571", "integ/single")
+        m570 = git(a, "rev-parse", "HEAD")
+        git(a, "branch", "-q", "-D", "pr/572")
         git(a, "push", "-q", "origin", "main")
         set_ci(
             conclusion="success",
-            commit_pulls={
-                c571: [
-                    {"number": 571, "merged_at": "2026-11-25T11:00:00Z", "title": "refactor(api)!: drop v1 endpoints", "body": ""},
-                    {"number": 570, "merged_at": "2026-11-25T11:00:00Z", "title": "chore(integration): land single breaking PR", "body": ""},
-                ]
-            },
+            merged_prs=[
+                gh_pr(
+                    572,
+                    "refactor(api)!: drop v1 endpoints",
+                    "Upgrade: point clients at /api/v2.\n",
+                    m570,
+                    h572,
+                ),
+                gh_pr(
+                    570,
+                    "chore(integration): land single breaking PR",
+                    "",
+                    m570,
+                    h572,
+                ),
+            ],
         )
         r_major = cut(a, "next")
         assert r_major.returncode == 0 and r_major.stdout.startswith("2.0.0 (major, from v1.0.0)\n"), r_major
-        assert "#571 [breaking]" in r_major.stdout and "#570" not in r_major.stdout, r_major
+        assert "#572 [breaking]" in r_major.stdout and "#570" not in r_major.stdout, r_major
         r_major_dry = cut(a, "cut", "--dry-run", extra_env={"GH_REPO": "acme/app"})
         assert r_major_dry.returncode == 0, r_major_dry
         before_major = r_major_dry.stdout.split("## Before upgrading\n\n", 1)[1].split("\n\n## ", 1)[0]
-        assert "point clients at /api/v2." in before_major and "#571" in before_major and "#570" not in before_major, before_major
-        ok("post-1.0 breaking sub-PR triggers MAJOR and single-PR carrier does not steal sub-PR commit trailers")
+        assert "point clients at /api/v2." in before_major and "#572" in before_major and "#570" not in before_major and "stale commit wording" not in r_major_dry.stdout, r_major_dry.stdout
+        assert (
+            "- **chore(integration):** land single breaking PR "
+            "([#570](https://github.com/acme/app/pull/570); includes [#572](https://github.com/acme/app/pull/572))"
+        ) in r_major_dry.stdout, r_major_dry.stdout
+        ok("post-1.0 breaking sub-PR triggers MAJOR and fast-forward carrier tie-break picks merge-subject carrier")
 
 
 if __name__ == "__main__":
