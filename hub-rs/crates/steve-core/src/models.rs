@@ -440,6 +440,63 @@ pub fn validate_bot_patch(
     Ok(())
 }
 
+/// Validates a bot's `perm_mode` against its target harness, and when switching harnesses without
+/// specifying a new `perm_mode`, resets an incompatible carried-over mode to the target harness's
+/// default. Returns `Err("perm_mode")` when an explicitly provided `perm_mode` is not offered.
+pub fn reconcile_bot_perm_mode(
+    current: Option<&Map<String, Value>>,
+    patch: &mut Map<String, Value>,
+    harnesses: &[Harness],
+) -> Result<(), &'static str> {
+    let cur_h = current
+        .and_then(|b| b.get("harness"))
+        .and_then(Value::as_str);
+    let switched_to = patch
+        .get("harness")
+        .and_then(Value::as_str)
+        .filter(|h| !h.is_empty() && cur_h != Some(*h))
+        .map(str::to_string);
+    let target_id = switched_to.as_deref().or(cur_h).unwrap_or_default();
+    let Some(target) = harnesses.iter().find(|h| h.id == target_id) else {
+        return Ok(());
+    };
+    if let Some(pm) = patch.get("perm_mode").and_then(Value::as_str) {
+        if steve_node_api::PermissionMode::from_bot_key(pm)
+            .is_some_and(|m| !target.offers_bot_mode(m))
+        {
+            return Err("perm_mode");
+        }
+    } else if switched_to.is_some()
+        && let Some(cur_pm) = current
+            .and_then(|b| b.get("perm_mode"))
+            .and_then(Value::as_str)
+        && steve_node_api::PermissionMode::from_bot_key(cur_pm)
+            .is_some_and(|m| !target.offers_bot_mode(m))
+    {
+        patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
+    }
+    Ok(())
+}
+
+/// Validates `perm_mode` on bot creation (no prior bot state).
+pub fn validate_bot_perm_mode(
+    fields: &Map<String, Value>,
+    harnesses: &[Harness],
+) -> Result<(), &'static str> {
+    let target_id = fields
+        .get("harness")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
+        && let Some(pm) = fields.get("perm_mode").and_then(Value::as_str)
+        && steve_node_api::PermissionMode::from_bot_key(pm)
+            .is_some_and(|m| !target.offers_bot_mode(m))
+    {
+        return Err("perm_mode");
+    }
+    Ok(())
+}
+
 impl Models {
     pub fn new(store: Store, defaults: Defaults) -> Models {
         Models {

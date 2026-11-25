@@ -515,20 +515,6 @@ pub fn self_layer(owner: &str) -> String {
     )
 }
 
-fn pick_bot_info(
-    r: &mut impl steve_store::Read,
-    ws: &str,
-    ids: &[Option<&str>],
-) -> ChannelResult<Option<BotInfo>> {
-    let mut bots = steve_store::BotRows(r);
-    for id in ids.iter().flatten() {
-        if let Some(bot) = bots.reply_profile(ws, Some(id))? {
-            return Ok(Some(bot));
-        }
-    }
-    Ok(bots.reply_profile(ws, None)?)
-}
-
 /// The personal account's user, or the person who connected the bot.
 pub fn owner_user(r: &mut impl steve_store::Read, ws: &str, conn: &str) -> ChannelResult<String> {
     let conn =
@@ -746,7 +732,8 @@ fn gather_identity(
             }
         }
     };
-    let bot = pick_bot_info(r, ws, &[persona_bot.as_deref(), defaults_bot.as_deref()])?;
+    let bot = steve_store::BotRows(r)
+        .pick_workspace_bot(ws, &[persona_bot.as_deref(), defaults_bot.as_deref()])?;
     // on your own account the Bot only picks the model: the draft is you talking
     let model = bot.as_ref().and_then(|b| b.model.clone());
     let bot = bot.filter(|_| plan.mode == Mode::Bot);

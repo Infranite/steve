@@ -58,16 +58,9 @@ pub fn pick_bot(
         Some(conn) => FlowSources(c).triage(ws, conn)?,
         None => None,
     };
-    let wanted = configured
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .or(triage.as_deref());
-    if let Some(name) = wanted
-        && let Some(bot) = BotRows(c).enabled_prompt(ws, name)?
-    {
-        return Ok(Some(bot));
-    }
-    BotRows(c).main_prompt(ws)
+    Ok(BotRows(c)
+        .pick_workspace_bot(ws, &[configured, triage.as_deref()])?
+        .map(steve_store::ReplyBot::into_prompt))
 }
 
 /// The branches: the configured ones, else the labels of the node's edges.

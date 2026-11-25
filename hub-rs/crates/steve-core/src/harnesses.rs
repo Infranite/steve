@@ -178,15 +178,16 @@ impl Harness {
 
     /// Default `perm_mode` key for a new bot on this harness.
     pub fn default_perm_mode(&self) -> &'static str {
-        const ORDER: [(PermissionMode, &str); 3] = [
-            (PermissionMode::Ask, "default"),
-            (PermissionMode::Plan, "plan"),
-            (PermissionMode::FullAccess, "bypassPermissions"),
+        const ORDER: [PermissionMode; 3] = [
+            PermissionMode::Ask,
+            PermissionMode::Plan,
+            PermissionMode::FullAccess,
         ];
         ORDER
-            .iter()
-            .find(|(m, _)| self.offers_bot_mode(*m))
-            .map_or("default", |(_, k)| *k)
+            .into_iter()
+            .find(|m| self.offers_bot_mode(*m))
+            .unwrap_or(PermissionMode::Ask)
+            .bot_key()
     }
 }
 

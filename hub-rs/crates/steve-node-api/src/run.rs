@@ -113,6 +113,44 @@ pub enum PermissionMode {
     FullAccess,
 }
 
+impl PermissionMode {
+    /// Stored bot `perm_mode` key (`default`, `plan`, `acceptEdits`, `auto`, `bypassPermissions`).
+    pub fn from_bot_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "plan" => Self::Plan,
+            "default" => Self::Ask,
+            "acceptEdits" => Self::AcceptEdits,
+            "auto" => Self::Auto,
+            "bypassPermissions" => Self::FullAccess,
+            _ => return None,
+        })
+    }
+
+    /// Accepts both stored bot keys ([`Self::from_bot_key`]) and snake_case wire names
+    /// (`ask`, `accept_edits`, `full_access`). Unknown keys fail closed (`None`).
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::from_bot_key(key).or_else(|| {
+            Some(match key {
+                "ask" => Self::Ask,
+                "accept_edits" => Self::AcceptEdits,
+                "full_access" => Self::FullAccess,
+                _ => return None,
+            })
+        })
+    }
+
+    /// Canonical stored bot `perm_mode` key for this permission mode.
+    pub const fn bot_key(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Ask => "default",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Auto => "auto",
+            Self::FullAccess => "bypassPermissions",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NetworkScope {
@@ -617,4 +655,36 @@ pub struct SessionView {
     pub guarantees: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumeHandle>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PermissionMode;
+
+    #[test]
+    fn permission_mode_keys_round_trip_and_fail_closed() {
+        for mode in [
+            PermissionMode::Plan,
+            PermissionMode::Ask,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Auto,
+            PermissionMode::FullAccess,
+        ] {
+            let key = mode.bot_key();
+            assert_eq!(PermissionMode::from_bot_key(key), Some(mode));
+            assert_eq!(PermissionMode::from_key(key), Some(mode));
+        }
+        assert_eq!(PermissionMode::from_key("ask"), Some(PermissionMode::Ask));
+        assert_eq!(
+            PermissionMode::from_key("accept_edits"),
+            Some(PermissionMode::AcceptEdits)
+        );
+        assert_eq!(
+            PermissionMode::from_key("full_access"),
+            Some(PermissionMode::FullAccess)
+        );
+        assert_eq!(PermissionMode::from_bot_key("ask"), None);
+        assert_eq!(PermissionMode::from_key(""), None);
+        assert_eq!(PermissionMode::from_key("dontAsk"), None);
+    }
 }

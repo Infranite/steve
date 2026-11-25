@@ -215,7 +215,7 @@ impl RoutedRuntime {
         else {
             return (Some(Reason::Pending), None);
         };
-        let mode = node_binding::permission_mode(requested_mode.unwrap_or("default"));
+        let mode = steve_node_api::PermissionMode::from_key(requested_mode.unwrap_or("default"));
         let bad = compatible(cap.as_ref(), choice, mode);
         (bad, Some(at))
     }
@@ -296,7 +296,7 @@ impl RoutedRuntime {
         choice: &HarnessChoice,
         mode: &str,
     ) -> Result<Option<Reason>> {
-        if node_binding::permission_mode(mode).is_none() {
+        if steve_node_api::PermissionMode::from_key(mode).is_none() {
             return Ok(Some(Reason::Permission));
         }
         if node != "local" && !self.store.read(|r| node_binding::node_takes(r, node, ws))? {

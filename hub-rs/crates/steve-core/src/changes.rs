@@ -145,18 +145,6 @@ fn text_field(key: &str, label: &str, current: &str) -> BotField {
     }
 }
 
-fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
-    use steve_node_api::PermissionMode as P;
-    Some(match k {
-        "plan" => P::Plan,
-        "default" => P::Ask,
-        "acceptEdits" => P::AcceptEdits,
-        "auto" => P::Auto,
-        "bypassPermissions" => P::FullAccess,
-        _ => return None,
-    })
-}
-
 const STANDARD_EFFORTS: &[&str] = &[
     "none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
@@ -201,7 +189,9 @@ fn sanitize_bot_for_harness(
         .is_some_and(|next_id| cur.is_none_or(|b| b.harness.as_str() != next_id));
 
     if let Some(pm) = patch.get("perm_mode").and_then(Value::as_str) {
-        if perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m)) {
+        if steve_node_api::PermissionMode::from_bot_key(pm)
+            .is_some_and(|m| !target.offers_bot_mode(m))
+        {
             if switched {
                 patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
             } else {
@@ -211,7 +201,8 @@ fn sanitize_bot_for_harness(
         }
     } else if switched
         && let Some(b) = cur
-        && perm_mode_of_key(&b.perm_mode).is_some_and(|m| !target.offers_bot_mode(m))
+        && steve_node_api::PermissionMode::from_bot_key(&b.perm_mode)
+            .is_some_and(|m| !target.offers_bot_mode(m))
     {
         patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
     }
@@ -291,9 +282,10 @@ fn bot_fields(
         .filter(|(k, _)| {
             *k == b.perm_mode
                 || harnesses.is_empty()
-                || harnesses
-                    .iter()
-                    .any(|h| perm_mode_of_key(k).is_none_or(|m| h.offers_bot_mode(m)))
+                || harnesses.iter().any(|h| {
+                    steve_node_api::PermissionMode::from_bot_key(k)
+                        .is_none_or(|m| h.offers_bot_mode(m))
+                })
         })
         .collect();
     let perms_enc = perms.clone();
@@ -2127,15 +2119,8 @@ impl Core {
                                 .validate_bot_patch(b.as_object(), &p.patch)
                                 .map_err(msg)?;
                             let mut bp = p.patch.clone();
-                            if let Some(next_id) = bp.get("harness").and_then(Value::as_str)
-                                && next_id != cur_bot.harness.as_str()
-                                && !bp.contains_key("perm_mode")
-                                && let Some(target) = hs.iter().find(|h| h.id == next_id)
-                                && perm_mode_of_key(&cur_bot.perm_mode)
-                                    .is_some_and(|m| !target.offers_bot_mode(m))
-                            {
-                                bp.insert("perm_mode".into(), json!(target.default_perm_mode()));
-                            }
+                            crate::models::reconcile_bot_perm_mode(b.as_object(), &mut bp, &hs)
+                                .map_err(|f| msg(format!("invalid {f}")))?;
                             for k in bp.keys() {
                                 before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
                             }

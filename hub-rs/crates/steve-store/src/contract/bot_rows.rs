@@ -31,19 +31,16 @@ pub struct ReplyBot {
     pub model: Option<String>,
 }
 
-fn decode_prompt(row: &super::Row<'_>) -> Result<BotPrompt> {
-    Ok(BotPrompt {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        role: row.get(2)?,
-        rules: row.get(3)?,
-    })
-}
-
-fn prompt_query(ws: &str) -> SelectStatement {
-    local(ws)
-        .columns([("b", "id"), ("b", "name"), ("b", "role"), ("b", "rules")])
-        .take()
+impl ReplyBot {
+    /// Prompt-relevant subset of a resolved workspace bot.
+    pub fn into_prompt(self) -> BotPrompt {
+        BotPrompt {
+            id: self.id,
+            name: self.name,
+            role: self.role,
+            rules: self.rules,
+        }
+    }
 }
 
 fn local(ws: &str) -> SelectStatement {
@@ -111,23 +108,24 @@ impl<C: Read> BotRows<'_, C> {
         )
     }
 
-    pub fn enabled_prompt(&mut self, ws: &str, id: &str) -> Result<Option<BotPrompt>> {
-        self.0.one(
-            prompt_query(ws)
-                .and_where(Expr::col(("b", "id")).eq(id))
-                .and_where(Expr::col(("b", "enabled")).eq(1_i64)),
-            decode_prompt,
-        )
-    }
-
-    pub fn main_prompt(&mut self, ws: &str) -> Result<Option<BotPrompt>> {
-        self.0.one(
-            prompt_query(ws)
-                .and_where(Expr::col(("b", "main")).eq(1_i64))
-                .order_by(("b", "updated"), Order::Asc)
-                .limit(1),
-            decode_prompt,
-        )
+    /// Resolve a workspace bot by preferred candidate ids in order (skipping blank/disabled/foreign
+    /// ids), falling back to the workspace's enabled main bot.
+    pub fn pick_workspace_bot(
+        &mut self,
+        ws: &str,
+        preferred: &[Option<&str>],
+    ) -> Result<Option<ReplyBot>> {
+        for id in preferred
+            .iter()
+            .flatten()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(bot) = self.reply_profile(ws, Some(id))? {
+                return Ok(Some(bot));
+            }
+        }
+        self.reply_profile(ws, None)
     }
 
     pub fn resolve_name(&mut self, ws: &str, name: &str) -> Result<Option<String>> {

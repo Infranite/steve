@@ -18,18 +18,6 @@ use crate::validate::{Check, Num, Str};
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
 const PERM: &[&str] = &["default", "plan", "bypassPermissions"];
 
-fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
-    use steve_node_api::PermissionMode as P;
-    Some(match k {
-        "plan" => P::Plan,
-        "default" => P::Ask,
-        "acceptEdits" => P::AcceptEdits,
-        "auto" => P::Auto,
-        "bypassPermissions" => P::FullAccess,
-        _ => return None,
-    })
-}
-
 fn known_harness_ids(
     cfg: &crate::config::Config,
     harnesses: &[steve_core::harnesses::Harness],
@@ -239,16 +227,8 @@ fn create_bot_in(
     fields: &Obj,
     harnesses: &[steve_core::harnesses::Harness],
 ) -> ApiResult {
-    let target_id = fields
-        .get("harness")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
-        && let Some(pm) = fields.get("perm_mode").and_then(Value::as_str)
-        && perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m))
-    {
-        return Err(ApiError::Invalid(vec!["perm_mode".into()]));
-    }
+    steve_core::models::validate_bot_perm_mode(fields, harnesses)
+        .map_err(|f| ApiError::Invalid(vec![f.into()]))?;
     steve_core::models::validate_bot_patch(None, fields, harnesses)
         .map_err(ApiError::bad_request)?;
     let b = r.bot_create(ws, fields, author)?;
@@ -368,28 +348,8 @@ pub async fn patch_one(
         let Some(cur) = r.bot_get(&id)? else {
             return Err(ApiError::not_found(Noun::Bot.missing()));
         };
-        let cur_h = str_of(&cur, "harness");
-        let switched_to = p
-            .get("harness")
-            .and_then(Value::as_str)
-            .filter(|h| !h.is_empty() && *h != cur_h.as_str())
-            .map(str::to_string);
-        let target_id = switched_to.as_deref().unwrap_or(&cur_h);
-        if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
-            && let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
-            && perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m))
-        {
-            return Err(ApiError::Invalid(vec!["perm_mode".into()]));
-        }
-        if let Some(target_id) = &switched_to
-            && let Some(target) = harnesses.iter().find(|h| h.id == *target_id)
-            && !p.contains_key("perm_mode")
-        {
-            let cur_pm = str_of(&cur, "perm_mode");
-            if perm_mode_of_key(&cur_pm).is_some_and(|m| !target.offers_bot_mode(m)) {
-                p.insert("perm_mode".into(), json!(target.default_perm_mode()));
-            }
-        }
+        steve_core::models::reconcile_bot_perm_mode(Some(&cur), &mut p, &harnesses)
+            .map_err(|f| ApiError::Invalid(vec![f.into()]))?;
         if let Some(Value::String(dp)) = p.get("default_project")
             && !dp.is_empty()
         {
