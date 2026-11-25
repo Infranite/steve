@@ -178,7 +178,7 @@ impl RoutedRuntime {
                             specialties: Some(bot_dispatch::specialties(edit.specialties)),
                             harness: choice.harness,
                             model: choice.model,
-                            perm_mode: Some("default".into()),
+                            perm_mode: Some("ask".into()),
                             ..Default::default()
                         },
                         actor,

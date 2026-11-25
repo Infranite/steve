@@ -392,7 +392,7 @@ fn bot() -> steve_core::repo::Bot {
         reasoning_effort: None,
         rules: "说重点。".into(),
         accept_mode: "inherit".into(),
-        perm_mode: "default".into(),
+        perm_mode: "ask".into(),
         enabled: true,
         revision: 1,
         updated: 0,

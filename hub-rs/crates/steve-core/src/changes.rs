@@ -79,15 +79,23 @@ const ACC: [(&str, &str); 3] = [
     ("manual", "需要你验收"),
     ("auto", "自动验收"),
 ];
-/// Permission modes and their labels.
-pub const PERM: [(&str, &str); 3] = [
-    ("plan", "只读：只出方案，不改文件"),
-    ("default", "每次改文件或运行命令都问你"),
-    (
-        "bypassPermissions",
-        "不再询问：工具直接运行，由系统沙箱兜底",
-    ),
-];
+/// Prompt label for a Steve [`steve_node_api::PermissionMode`].
+fn perm_label(mode: steve_node_api::PermissionMode) -> &'static str {
+    use steve_node_api::PermissionMode as P;
+    match mode {
+        P::Plan => "只读：只出方案，不改文件",
+        P::Ask => "每次改文件或运行命令都问你",
+        P::AcceptEdits => "可以改项目目录里的文件，运行命令要问你",
+        P::Auto => "可以改文件、运行命令；对外操作仍需你批准",
+        P::FullAccess => "不再询问：工具直接运行，由系统沙箱兜底",
+    }
+}
+
+fn perm_label_value(k: &str) -> Value {
+    perm_mode_of_key(k)
+        .map(|m| json!(perm_label(m)))
+        .unwrap_or(Value::Null)
+}
 const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 
 fn label_of(table: &[(&str, &str)], k: &str) -> Value {
@@ -331,16 +339,15 @@ fn bot_fields(
                 .unwrap_or_else(|| e.to_string())
         },
     );
-    let perms: Vec<(&'static str, &'static str)> = PERM
+    let perms: Vec<(&'static str, &'static str)> = steve_node_api::PermissionMode::ALL
         .iter()
         .copied()
-        .filter(|(k, _)| {
-            *k == b.perm_mode
+        .filter(|m| {
+            m.as_str() == b.perm_mode
                 || harnesses.is_empty()
-                || harnesses
-                    .iter()
-                    .any(|h| perm_mode_of_key(k).is_none_or(|m| h.offers_bot_mode(m)))
+                || harnesses.iter().any(|h| h.offers_bot_mode(*m))
         })
+        .map(|m| (m.as_str(), perm_label(m)))
         .collect();
     let perms_enc = perms.clone();
     let perm_keep = b.perm_mode.clone();
@@ -473,12 +480,12 @@ fn bot_fields(
                 label: "权限".into(),
                 ty: "enum",
                 values: Some(perms.iter().map(|(_, l)| l.to_string()).collect()),
-                current: label_of(&PERM, &b.perm_mode),
+                current: perm_label_value(&b.perm_mode),
             },
             enc: Some(Box::new(move |v| {
                 json!(key_of(&perms_enc, v).unwrap_or_else(|| perm_keep.clone()))
             })),
-            dec: Some(Box::new(|v| label_of(&PERM, v.as_str().unwrap_or("")))),
+            dec: Some(Box::new(|v| perm_label_value(v.as_str().unwrap_or("")))),
         },
         BotField {
             spec: FieldSpec {

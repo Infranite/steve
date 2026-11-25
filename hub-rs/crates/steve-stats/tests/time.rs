@@ -1,6 +1,6 @@
 //! The time series of the daily chart: `turn_ms` (agent working time, each turn whole in the bucket it ended in,
 //! adding up to the summary's `usage.turn_ms`) and `wait_ms` (time a person was waited on: per item, the time any
-//! of its cards for a person was open, cut at local midnight; a card YOLO answered is not a person's time).
+//! of its cards for a person was open, cut at local midnight; a card Steve auto-settled is not a person's time).
 //! Asia/Shanghai, UTC+8.
 
 use steve_stats::metrics::{Query, bounds, summary};
@@ -121,6 +121,7 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
             "approve",
             d1 + 22 * HOUR,
             Some(d1 + 26 * HOUR),
+            false,
         ),
         (
             "b",
@@ -128,6 +129,7 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
             "ask",
             d1 + 23 * HOUR,
             Some(d1 + 25 * HOUR),
+            false,
         ),
         // ST-2 waits at the same time: a person is waited on for each item
         (
@@ -136,6 +138,16 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
             "accept",
             d1 + 23 * HOUR,
             Some(d1 + 24 * HOUR),
+            false,
+        ),
+        // settled automatically by Steve: no person was waited on
+        (
+            "d",
+            Some("ST-1"),
+            "approve",
+            d1 + 10 * HOUR,
+            Some(d1 + 12 * HOUR),
+            true,
         ),
         // a card with no item counts on its own
         (
@@ -144,9 +156,10 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
             "confirm",
             d1 + 8 * HOUR,
             Some(d1 + 8 * HOUR + 30 * MIN),
+            false,
         ),
         // before the range, still open long after it: the whole of 11-07
-        ("f", Some("ST-2"), "ask", d1 - 72 * HOUR, None),
+        ("f", Some("ST-2"), "ask", d1 - 72 * HOUR, None, false),
     ]);
     let w = series(
         &s,

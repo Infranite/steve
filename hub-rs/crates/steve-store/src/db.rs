@@ -268,8 +268,9 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/126.sql"),
     // 127: remove legacy raw ACP event rows and backfill sessions.first_tool_at from steve.v1 tool events.
     include_str!("../migrations/127.sql"),
+    // 128: migrate retired YOLO rows to Steve settlement and backfill bot_node_bindings.
     include_str!("../migrations/128.sql"),
-    // 129: normalize lingering retired Bot perm_mode values to default.
+    // 129: migrate bots.perm_mode to Steve PermissionMode values and default to ask.
     include_str!("../migrations/129.sql"),
     // 130: drop retired bots.project_dir, bots.worktree, and items.project_dir columns.
     include_str!("../migrations/130.sql"),

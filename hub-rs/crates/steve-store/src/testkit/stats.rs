@@ -19,7 +19,7 @@ pub fn seed_events(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
          INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, model, turn_id, session_id, item_id, input, output, cache_read, cache_write) VALUES
            ('default', {t1e}, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 'tn_1', 's1', 'ST-1', 100, 20, 1000, 0);
          INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, result, requested_by, created, resolved) VALUES
-           ('d1', 'default', 'approve', 'item', 'ST-1', 'ST-1', 'q', 'resolved', '{{}}', 'dev', {d1}, {d1r}),
+           ('d1', 'default', 'approve', 'item', 'ST-1', 'ST-1', 'q', 'resolved', '{{\"decided_by\":\"steve\"}}', 'dev', {d1}, {d1r}),
            ('d2', 'default', 'fail', 'item', 'ST-2', 'ST-2', 'q', 'open', NULL, 'dev', {d2}, NULL);
          INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor) VALUES
            ('default', 'ST-1', {k1}, 'status', 'active', 'completed', 'usr_1'),
@@ -39,8 +39,8 @@ pub fn seed_events(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     s.write_locked(|c| Ok(c.execute_batch(&sql)?))
 }
 
-/// (id, item, kind, created, resolved)
-pub type Card<'a> = (&'a str, Option<&'a str>, &'a str, i64, Option<i64>);
+/// (id, item, kind, created, resolved, by_steve)
+pub type Card<'a> = (&'a str, Option<&'a str>, &'a str, i64, Option<i64>, bool);
 
 pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
     let mut sql = String::from(
@@ -49,7 +49,7 @@ pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
          INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ST-1', 'default', 1, 't1', 'active', 0, 0);
          INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ST-2', 'default', 2, 't2', 'active', 0, 0);\n",
     );
-    for (id, item, kind, created, resolved) in cards {
+    for (id, item, kind, created, resolved, by_steve) in cards {
         let item = item.map_or("NULL".into(), |i| format!("'{i}'"));
         let resolved = resolved.map_or("NULL".into(), |r| r.to_string());
         let status = if resolved == "NULL" {
@@ -57,9 +57,14 @@ pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
         } else {
             "resolved"
         };
+        let result = if *by_steve {
+            r#"'{"decided_by":"steve"}'"#
+        } else {
+            "NULL"
+        };
         sql.push_str(&format!(
             "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, result, requested_by, created, resolved)
-             VALUES ('{id}', 'default', '{kind}', 'item', 'x', {item}, '?', '{status}', NULL, 'dev', {created}, {resolved});\n"
+             VALUES ('{id}', 'default', '{kind}', 'item', 'x', {item}, '?', '{status}', {result}, 'dev', {created}, {resolved});\n"
         ));
     }
     s.write_locked(|c| Ok(c.execute_batch(&sql)?))

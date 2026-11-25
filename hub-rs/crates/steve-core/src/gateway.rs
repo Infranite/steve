@@ -2023,7 +2023,7 @@ mod tests {
             reasoning_effort: None,
             rules: String::new(),
             accept_mode: "inherit".into(),
-            perm_mode: "default".into(),
+            perm_mode: "ask".into(),
             enabled: true,
             revision: 1,
             updated: 0,

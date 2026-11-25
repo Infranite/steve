@@ -185,8 +185,10 @@ export default {
   },
   perm: {
     plan: "Read-only: proposes a plan, doesn't change files",
-    default: "Asks you before every file change or command",
-    bypassPermissions: "Never asks: tools run directly, contained by the OS sandbox",
+    ask: "Asks you before every file change or command",
+    accept_edits: "May edit files in the project; asks before running commands",
+    auto: "May edit files and run commands; external actions still wait for your approval",
+    full_access: "Never asks: tools run directly, contained by the OS sandbox",
   },
   effort: {
     default: "Model default",
@@ -327,13 +329,17 @@ export default {
     permSection: "Permissions",
     permName: {
       plan: "Read-only",
-      default: "Always ask",
-      bypassPermissions: "Never ask",
+      ask: "Always ask",
+      accept_edits: "Edit files",
+      auto: "Auto",
+      full_access: "Never ask",
     },
     permText: {
       plan: "Proposes a plan, doesn't change files",
-      default: "Asks you before every file change or command",
-      bypassPermissions: "Tools run directly, contained by the OS sandbox",
+      ask: "Asks you before every file change or command",
+      accept_edits: "May edit files in the project; asks before running commands",
+      auto: "May edit files and run commands; external actions still wait for your approval",
+      full_access: "Tools run directly, contained by the OS sandbox",
     },
     accText: {
       inherit: "The default from Settings › Items and acceptance",

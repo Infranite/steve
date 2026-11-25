@@ -178,26 +178,21 @@ impl Harness {
 
     /// Default `perm_mode` key for a new bot on this harness.
     pub fn default_perm_mode(&self) -> &'static str {
-        const ORDER: [(PermissionMode, &str); 3] = [
-            (PermissionMode::Ask, "default"),
-            (PermissionMode::Plan, "plan"),
-            (PermissionMode::FullAccess, "bypassPermissions"),
+        const ORDER: [PermissionMode; 3] = [
+            PermissionMode::Ask,
+            PermissionMode::Plan,
+            PermissionMode::FullAccess,
         ];
         ORDER
             .iter()
-            .find(|(m, _)| self.offers_bot_mode(*m))
-            .map_or("default", |(_, k)| *k)
+            .find(|&&m| self.offers_bot_mode(m))
+            .map_or(PermissionMode::Ask.as_str(), |m| m.as_str())
     }
 }
 
-/// Maps an active stored Bot `perm_mode` key to its `PermissionMode`.
+/// Maps a stored Steve Bot `perm_mode` key to its `PermissionMode`.
 pub fn perm_mode_of_key(k: &str) -> Option<PermissionMode> {
-    Some(match k {
-        "plan" => PermissionMode::Plan,
-        "default" => PermissionMode::Ask,
-        "bypassPermissions" => PermissionMode::FullAccess,
-        _ => return None,
-    })
+    PermissionMode::parse(k)
 }
 
 /// Default `(harness_id, perm_mode)` for a new bot: `preferred` (e.g. the main bot's harness) when
@@ -214,7 +209,7 @@ pub fn default_bot_choice(list: &[Harness], preferred: Option<&str>) -> (String,
         Some(h) => (h.id.clone(), h.default_perm_mode().into()),
         None => (
             steve_harness_spec::DEFAULT_ADAPTER.0.into(),
-            "default".into(),
+            PermissionMode::Ask.as_str().into(),
         ),
     }
 }

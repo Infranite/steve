@@ -113,6 +113,41 @@ pub enum PermissionMode {
     FullAccess,
 }
 
+impl PermissionMode {
+    /// Every Steve permission mode, in ascending autonomy order.
+    pub const ALL: [Self; 5] = [
+        Self::Plan,
+        Self::Ask,
+        Self::AcceptEdits,
+        Self::Auto,
+        Self::FullAccess,
+    ];
+
+    /// Canonical snake_case wire/storage name (matches `#[serde(rename_all = "snake_case")]`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Ask => "ask",
+            Self::AcceptEdits => "accept_edits",
+            Self::Auto => "auto",
+            Self::FullAccess => "full_access",
+        }
+    }
+
+    /// Parses Steve's canonical snake_case permission mode name. Harness-specific wire names belong
+    /// in `steve-harness-spec`, never in Steve's Bot or Node policy vocabulary.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "plan" => Self::Plan,
+            "ask" => Self::Ask,
+            "accept_edits" => Self::AcceptEdits,
+            "auto" => Self::Auto,
+            "full_access" => Self::FullAccess,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NetworkScope {

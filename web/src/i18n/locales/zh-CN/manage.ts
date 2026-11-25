@@ -186,8 +186,10 @@ export default {
   /* permission modes, by backend key */
   perm: {
     plan: "只读：只出方案，不改文件",
-    default: "每次改文件或运行命令都问你",
-    bypassPermissions: "不再询问：工具直接运行，由系统沙箱兜底",
+    ask: "每次改文件或运行命令都问你",
+    accept_edits: "可以改项目目录里的文件，运行命令要问你",
+    auto: "可以改文件、运行命令；对外操作仍需你批准",
+    full_access: "不再询问：工具直接运行，由系统沙箱兜底",
   },
   effort: {
     default: "跟随模型默认",
@@ -324,13 +326,17 @@ export default {
     permSection: "权限",
     permName: {
       plan: "只读",
-      default: "每次都问",
-      bypassPermissions: "不再询问",
+      ask: "每次都问",
+      accept_edits: "可改文件",
+      auto: "自动",
+      full_access: "不再询问",
     },
     permText: {
       plan: "只出方案，不改文件",
-      default: "每次改文件或运行命令都问你",
-      bypassPermissions: "工具直接运行，由系统沙箱兜底",
+      ask: "每次改文件或运行命令都问你",
+      accept_edits: "可以改项目目录里的文件，运行命令要问你",
+      auto: "可以改文件、运行命令；对外操作仍需你批准",
+      full_access: "工具直接运行，由系统沙箱兜底",
     },
     accText: {
       inherit: "按「设置 › 事项与验收」里的默认方式",

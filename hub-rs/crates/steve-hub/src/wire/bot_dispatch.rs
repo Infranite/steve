@@ -215,7 +215,7 @@ impl RoutedRuntime {
         else {
             return (Some(Reason::Pending), None);
         };
-        let mode = node_binding::permission_mode(requested_mode.unwrap_or("default"));
+        let mode = node_binding::permission_mode(requested_mode.unwrap_or("ask"));
         let bad = compatible(cap.as_ref(), choice, mode);
         (bad, Some(at))
     }
@@ -461,7 +461,7 @@ impl RoutedRuntime {
             session: Some(session),
             project: routes.project.as_ref(),
             choice: &choice,
-            mode: mode.as_deref().unwrap_or("default"),
+            mode: mode.as_deref().unwrap_or("ask"),
         };
         let mut rejected = Vec::new();
         for (priority, node) in &routes.nodes {

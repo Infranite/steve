@@ -52,7 +52,7 @@ pub struct Event {
     pub tool_errors: Option<i64>,
     /// A turn's tokens (input, output and cache), when the turn reported them.
     pub tokens: Option<i64>,
-    /// Who acted: `yolo` or `me` for a resolved decision, a mark's actor.
+    /// Who acted: `steve` or `me` for a resolved decision, a mark's actor.
     pub by: Option<String>,
     /// A turn's id, a decision's id, a mark's id: unique within its kind.
     pub id: String,
@@ -135,7 +135,7 @@ fn decisions(c: &mut impl Read, scope: ReportScope<'_>, item: Option<&str>) -> R
         .into_iter()
         .map(|r| {
             let d = r.decision;
-            let by = (d.status == "resolved").then(|| "me".into());
+            let by = d.settled_by().map(|s| s.as_str().into());
             Event {
                 id: d.id,
                 ts: d.created,

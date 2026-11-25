@@ -12,7 +12,7 @@ if (shots) await mkdir(shots, { recursive: true })
 const ws = { id: 'fixture', name: 'Scope fixture', description: '', item_prefix: 'ST', sort: 0, created: 0 }
 const device = { id: 'hub', name: 'Fixture Hub', roles: ['Hub'], node_id: 'local', connected: true, can_configure: true, revision: 0, os: 'fixture', version: 'fixture', status: '正常', max_sessions: 4, seen: 0, created: 0 }
 const runtime = state => ({ id: 'registry-fixture', name: 'Registry fixture', ok: false, models: [], version: '', path: '', modes: state === 'unavailable' ? [] : ['full_access'], error: `Local probe: ${state}`, setup: { state, can_install: state === 'not_installed', reason: `Local probe: ${state}`, help: 'Review local Node setup', components: [] } })
-const bot = (id = 'scope-bot') => ({ id, name: id, role: 'Fixture Bot', main: false, harness: 'registry-fixture', model: 'existing-target-model', rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'bypassPermissions', avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['fixture'], memories: 0 })
+const bot = (id = 'scope-bot') => ({ id, name: id, role: 'Fixture Bot', main: false, harness: 'registry-fixture', model: 'existing-target-model', rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'full_access', avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['fixture'], memories: 0 })
 let f
 const requests = [], results = []
 const view = () => ({ steve: { bot_id: 'scope-bot', name: 'scope-bot', harness: 'registry-fixture', runs_on: 'registry-fixture', model: null, models: [], effort: null, note: null }, max: 3,
@@ -124,7 +124,7 @@ try {
         await p.locator('[data-save-bot]').click()
         await p.locator('[data-save-bot]').waitFor({ state: 'detached' })
         assert.equal(mutations('/api/bots/scope-bot').at(-1).body.model, 'target/manual-model')
-        assert.equal(mutations('/api/bots/scope-bot').at(-1).body.perm_mode, 'bypassPermissions')
+        assert.equal(mutations('/api/bots/scope-bot').at(-1).body.perm_mode, 'full_access')
       }
       await shot(p, `${f.scenario}-bot`)
       await open('#/bots'); await p.locator('[data-new-bot]').click(); await p.locator('[data-choices=new-bot] [data-choice=blank]').click()
@@ -140,7 +140,7 @@ try {
       if (!before) {
         assert.equal(result.newBotDisabled, false)
         await p.locator('[data-testid=bot-go]').click(); await p.locator('[data-save-bot]').waitFor()
-        assert.equal(mutations('/api/bots').at(-1).body.perm_mode, 'bypassPermissions')
+        assert.equal(mutations('/api/bots').at(-1).body.perm_mode, 'full_access')
       }
       await p.keyboard.press('Escape')
       await open('#/settings/models'); await p.locator('[data-models-advanced-toggle]').click(); if (!await p.locator('[data-purpose=chat]').isVisible()) await p.locator('[data-follows-toggle]').click(); await p.locator('[data-purpose=chat]').click(); await p.locator('[data-models-sheet]').waitFor()

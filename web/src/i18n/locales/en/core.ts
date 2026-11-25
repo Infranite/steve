@@ -15,7 +15,7 @@ export default {
     line: "{{kind}}: {{q}}",
   },
   acc: { inherit: "Use global setting", manual: "You review", auto: "Auto-accept" },
-  perm: { plan: "Read-only: plans only, no file changes", default: "Ask before every file change or command", bypassPermissions: "Never asks: tools run directly, contained by the OS sandbox" },
+  perm: { plan: "Read-only: plans only, no file changes", ask: "Ask before every file change or command", accept_edits: "May edit files in the project; asks before running commands", auto: "May edit files and run commands; external actions still wait for your approval", full_access: "Never asks: tools run directly, contained by the OS sandbox" },
   avatarColor: { mist: "Mist blue", lavender: "Lavender", teal: "Teal", amber: "Amber", coral: "Coral", slate: "Slate", navy: "Navy slate", walnut: "Walnut" },
   kind: { bug: "Fix", feat: "Feature", doc: "Docs", refactor: "Refactor", ops: "Ops", chore: "Chore" },
   tagCat: { project: "Project", kind: "Type", delivery: "Delivery", domain: "Domain", client: "Client", topic: "Topic" },

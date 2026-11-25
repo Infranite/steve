@@ -136,7 +136,10 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(item_id)?
             .iter()
-            .filter(|d| d.status == steve_types::DecisionStatus::Resolved)
+            .filter(|d| {
+                d.status == steve_types::DecisionStatus::Resolved
+                    && d.result.get("decided_by").and_then(|v| v.as_str()) != Some("steve")
+            })
             .filter_map(|d| d.resolved)
             .max()
             .unwrap_or(0))

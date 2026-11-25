@@ -124,6 +124,7 @@ export default {
     dismissed: "你撤回了",
     expired: "已失效：{{choice}}",
     chose: "你选了「{{choice}}」",
+    steveChose: "Steve 替你选了「{{choice}}」",
     undo: "撤销",
     loadMore: "加载更多",
     doneNote: "显示最近 7 天做过的决定。验收通过、“不需要”、“我来看看”和撤回在 24 小时内可以撤销；已经告诉 Bot 的回答和批准收不回来。",

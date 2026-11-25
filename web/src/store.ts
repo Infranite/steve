@@ -20,7 +20,7 @@ import { decisionText } from "./i18n/decision"
 import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
-import { permissionModes, canConfigurePermission } from "./runtime-status"
+import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
 import type { DecisionTier, DecisionView, FoldReason, ItemView, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onViews, messageView, messageViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
@@ -36,6 +36,8 @@ export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
   tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; revision: number; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
+  /** Who settled a resolved decision ("steve" for Steve automatic settlement, "me" for the user). */
+  settledBy?: "me" | "steve"
   /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
   via?: string }
 /** what became of an approved release (hub decision.result.outcome): the card says this, never a bare "approved" */
@@ -141,15 +143,15 @@ export const defaultHarness = (): string => {
 export const permModes = (harness: string): string[] => {
   const r = runtimes().find(r => r.id === harness)
   // Session-native auto is a workspace decision, not a Bot preference.
-  const supported = Object.keys(permissionModes).filter(k => canConfigurePermission(r, k))
-  if (supported.length === 1 && supported[0] === "bypassPermissions") return supported
-  const offered = supported.filter(k => k === "plan" || k === "default")
-  return offered.length ? offered : ["default"]
+  const supported = PERMISSION_MODES.filter(k => canConfigurePermission(r, k))
+  if (supported.length === 1 && supported[0] === "full_access") return supported
+  const offered = supported.filter(k => k === "plan" || k === "ask")
+  return offered.length ? offered : ["ask"]
 }
 /** a compatible permission mode for `harness`, in priority order */
 export const defaultPermMode = (harness: string): string => {
   const ms = permModes(harness)
-  return (["default", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
+  return (["ask", "plan", "full_access"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "ask"
 }
 /** the reasoning efforts `harness` takes, as its adapter reported them */
 export const harnessEfforts = (harness: string): string[] => runtimes().find((r) => r.id === harness)?.efforts ?? []
@@ -157,7 +159,7 @@ export const harnessEfforts = (harness: string): string[] => runtimes().find((r)
 export const harnessSkills = (harness: string): boolean | undefined => runtimes().find((r) => r.id === harness)?.skills
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
-export const PERM: Record<string, string> = live(["plan", "default", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))
+export const PERM: Record<string, string> = live(PERMISSION_MODES, (k) => t(`core:perm.${k}`))
 /* a label in the current language, or the Hub value itself */
 export const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? (label in ACC ? label : "inherit")
 
@@ -1208,6 +1210,7 @@ export function done(): Done[] {
   if (!out) {
     out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
       how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose",
+      settledBy: d.status === "resolved" ? (r.decided_by === "steve" ? "steve" : "me") : undefined,
       via: typeof r.via?.name === "string" ? r.via.name : undefined } satisfies Done })
     doneLists.set(xs, out)
   }

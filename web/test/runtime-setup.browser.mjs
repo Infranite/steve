@@ -18,7 +18,7 @@ const runtime = (id, state, installed = [false, false], extra = {}) => ({
   setup: { state, components: installed.map((on, i) => ({ id: i ? "adapter" : "agent", name: i ? "ACP adapter" : "Agent", package: i ? "@example/acp" : "@example/agent", status: on ? "installed" : "missing", version: on ? "1.0.0" : null, path: on ? "/fixture/managed/" + "component/".repeat(10) + i : null })), can_install: state === "not_installed", reason: "Registry reason: " + state, help: "Registry help: review Node and provider configuration" }, ...extra,
 })
 const legacy = { id: "legacy", name: "Legacy ACP", ok: true, version: "", path: "", models: [], note: "No setup field", modes: ["ask", "full_access"] }
-const bot = (id, harness, perm_mode = "default") => ({ id, name: id, role: "Fixture Bot", main: false, harness, model: null, rules: "", persona: "", proactive: 1, accept_mode: "inherit", perm_mode, avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["fixture"], memories: 0 })
+const bot = (id, harness, perm_mode = "ask") => ({ id, name: id, role: "Fixture Bot", main: false, harness, model: null, rules: "", persona: "", proactive: 1, accept_mode: "inherit", perm_mode, avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["fixture"], memories: 0 })
 const device = { id: "hub", name: "Fixture Hub", roles: ["Hub"], node_id: "local", connected: true, can_configure: true, revision: 0, os: "fixture", version: "fixture", status: "正常", max_sessions: 4, seen: 0, created: 0 }
 const workspace = { id: "fixture", name: "Fixture", description: "", item_prefix: "ST", sort: 0, created: 0 }
 const fits = async page => assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no horizontal overflow")
@@ -263,10 +263,10 @@ try {
     assert.equal(await page.locator("[data-save-bot]").isDisabled(), false, "existing permission remains editable with its warning")
     await page.locator('[data-model-picker="bot-model"]').click()
     await page.locator('[data-model-opt="fixture-model"]').click()
-    await page.locator('[data-choices="bot-perm"] [data-choice=bypassPermissions]').click()
+    await page.locator('[data-choices="bot-perm"] [data-choice=full_access]').click()
     await page.locator("[data-save-bot]").click()
     await page.waitForFunction(() => !document.querySelector("[data-save-bot]"))
-    assert.equal(f.bots.find(b => b.id === "pi-bot").perm_mode, "bypassPermissions")
+    assert.equal(f.bots.find(b => b.id === "pi-bot").perm_mode, "full_access")
     assert.equal(f.bots.find(b => b.id === "pi-bot").model, "fixture-model")
 
     await page.goto(base + "/#/devices/nodes/local/harness")
@@ -327,7 +327,7 @@ try {
     await np.locator("[data-save-bot]").waitFor()
     const created = n.mutations.find(m => m.path === "/api/bots")
     assert.equal(created.body.harness, "fixture-runtime")
-    assert.equal(created.body.perm_mode, "bypassPermissions")
+    assert.equal(created.body.perm_mode, "full_access")
     assert.deepEqual(n.errors, [])
   } finally { await np.close() }
   console.log("PASS: first usable runtime has limited modes; new Bot requires explicit permission and sends it, 320px")

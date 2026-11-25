@@ -19,17 +19,10 @@ fn at(path: &str) -> Option<RootPath> {
     })
 }
 
-/// Steve's permission mode for a harness or bot mode name. `None`: the Node path cannot express it,
-/// fail closed.
+/// Steve's permission mode for a stored bot or policy mode name. `None`: the Node path cannot
+/// express it, fail closed.
 pub(crate) fn permission_mode(perm: &str) -> Option<PermissionMode> {
-    Some(match perm {
-        "plan" => PermissionMode::Plan,
-        "default" | "ask" => PermissionMode::Ask,
-        "acceptEdits" | "accept_edits" => PermissionMode::AcceptEdits,
-        "auto" => PermissionMode::Auto,
-        "bypassPermissions" | "full_access" => PermissionMode::FullAccess,
-        _ => return None,
-    })
+    PermissionMode::parse(perm)
 }
 
 /// A binding is only a plan. The coordinator must bind it before routing a new session. Imported,
@@ -155,7 +148,7 @@ pub fn plan(
     {
         return Err(Mode(b.perm_mode.clone()));
     }
-    let mode = perm.unwrap_or("default");
+    let mode = perm.unwrap_or(PermissionMode::Ask.as_str());
     let permissions = permission_mode(mode).ok_or_else(|| Mode(mode.to_string()))?;
     let cwd = if !s.cwd.is_empty() {
         Some(s.cwd.as_str())
@@ -875,17 +868,20 @@ mod host_tests {
     #[test]
     fn permission_modes_map_and_unknown_ones_fail_closed() {
         assert_eq!(permission_mode("plan"), Some(PermissionMode::Plan));
-        assert_eq!(permission_mode("default"), Some(PermissionMode::Ask));
+        assert_eq!(permission_mode("ask"), Some(PermissionMode::Ask));
         assert_eq!(
-            permission_mode("acceptEdits"),
+            permission_mode("accept_edits"),
             Some(PermissionMode::AcceptEdits)
         );
+        assert_eq!(permission_mode("auto"), Some(PermissionMode::Auto));
         assert_eq!(
-            permission_mode("bypassPermissions"),
+            permission_mode("full_access"),
             Some(PermissionMode::FullAccess)
         );
-        assert_eq!(permission_mode("auto"), Some(PermissionMode::Auto));
         assert_eq!(permission_mode(""), None);
+        assert_eq!(permission_mode("default"), None);
+        assert_eq!(permission_mode("acceptEdits"), None);
+        assert_eq!(permission_mode("bypassPermissions"), None);
         assert_eq!(permission_mode("dontAsk"), None);
     }
 }

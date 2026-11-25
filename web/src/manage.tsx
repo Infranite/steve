@@ -66,11 +66,11 @@ const proLabel = (t: T, i: number) => (PRO_KEYS[i] ? t(`manage:pro.${PRO_KEYS[i]
 const ACC_KEYS = ["inherit", "manual", "auto"] as const
 /** an accept mode by backend key as shown; unknown keys fall back to the store's label */
 const accLabel = (t: T, k: string) => ((ACC_KEYS as readonly string[]).includes(k) ? t(`manage:acc.${k as (typeof ACC_KEYS)[number]}`) : ACC[k] ?? k)
-const PERM_KEYS = ["plan", "default", "bypassPermissions"] as const
+const PERM_KEYS = ["plan", "ask", "accept_edits", "auto", "full_access"] as const
 const permLabel = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:perm.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
 /** a permission mode in a word or two (the tile's name); its sentence is permLabel */
 const permName = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:form.permName.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
-const PERM_ICON: Record<string, ReactNode> = { plan: <EyeIcon />, default: <HandIcon />, bypassPermissions: <ShieldOffIcon /> }
+const PERM_ICON: Record<string, ReactNode> = { plan: <EyeIcon />, ask: <HandIcon />, accept_edits: <PencilIcon />, auto: <SparklesIcon />, full_access: <ShieldOffIcon /> }
 const ACC_ICON: Record<string, ReactNode> = { inherit: <SlidersHorizontalIcon />, manual: <UserCheckIcon />, auto: <CheckCheckIcon /> }
 /* tag categories are stored as Chinese words (store TAG_CATS); only the label is translated */
 const TAG_CAT_KEYS: Record<string, "all" | "project" | "kind" | "delivery" | "domain" | "client" | "topic"> = { 全部: "all", 项目: "project", 类型: "kind", 交付: "delivery", 领域: "domain", 客户: "client", 主题: "topic" }
@@ -170,7 +170,7 @@ const tplText = (t: T, id: TplId) => ({ name: t(`manage:tpl.${id}Name`), role: t
 export function NewBotDialog() {
   const t = useT()
   const [mode, setMode] = useState<"tpl" | "desc" | "blank">("tpl"), [tpl, setTpl] = useState<TplId>(TEMPLATES[0]), [desc, setDesc] = useState(""), [busy, setBusy] = useState(false)
-  const [harness, setHarness] = useState(defaultHarness), [perm, setPerm] = useState("default")
+  const [harness, setHarness] = useState(defaultHarness), [perm, setPerm] = useState("ask")
   const runtimes = useRuntimes()
   useEffect(() => { if (!harness && runtimes.length) setHarness(defaultHarness()) }, [harness, runtimes])
   const runtime = runtimes.find(r => r.id === harness)

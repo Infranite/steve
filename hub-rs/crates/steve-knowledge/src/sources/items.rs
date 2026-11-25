@@ -102,8 +102,9 @@ pub fn facts(c: &mut impl Read, id: &str) -> ApiResult<Option<ItemFacts>> {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
         };
+        let by_steve = result.get("decided_by").and_then(Value::as_str) == Some("steve");
         match card.kind.as_str() {
-            "ask" if card.status == "resolved" => {
+            "ask" if card.status == "resolved" && !by_steve => {
                 if let Some(a) = s("answer") {
                     f.answers.push((card.question, a));
                 }
@@ -111,6 +112,7 @@ pub fn facts(c: &mut impl Read, id: &str) -> ApiResult<Option<ItemFacts>> {
             "accept" => {
                 f.summary = card.draft;
                 if card.status == "resolved"
+                    && !by_steve
                     && s("choice").as_deref() == Some("rework")
                     && let Some(t) = s("text")
                 {

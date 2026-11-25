@@ -935,6 +935,7 @@ pub fn summary(c: &mut impl Read, q: &Query) -> Result<Option<Summary>> {
             hu.expired += 1;
         }
         if d.status == "resolved"
+            && !d.by_steve()
             && let Some(r) = d.resolved
         {
             by_person += 1;

@@ -84,7 +84,6 @@ fn valid_skin(s: &str) -> bool {
 }
 
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
-const PERM: &[&str] = &["default", "plan", "bypassPermissions"];
 
 use steve_core::harnesses::perm_mode_of_key;
 
@@ -202,7 +201,7 @@ fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError
         }
     }
     if let Some(pm) = req.perm_mode {
-        if PERM.contains(&pm.as_str()) {
+        if perm_mode_of_key(&pm).is_some() {
             p.insert("perm_mode".into(), json!(pm));
         } else {
             bad.push("perm_mode".into());
@@ -742,6 +741,15 @@ mod tests {
             bot_in(&json!({}), true, &ids()).unwrap_err(),
             ApiError::Invalid(vec!["name".into()])
         );
+        for mode in ["plan", "ask", "accept_edits", "auto", "full_access"] {
+            assert!(bot_in(&json!({"perm_mode": mode}), false, &ids()).is_ok());
+        }
+        for legacy in ["default", "acceptEdits", "bypassPermissions", "dontAsk"] {
+            assert_eq!(
+                bot_in(&json!({"perm_mode": legacy}), false, &ids()).unwrap_err(),
+                ApiError::Invalid(vec!["perm_mode".into()])
+            );
+        }
     }
 }
 

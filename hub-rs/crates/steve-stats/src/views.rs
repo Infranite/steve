@@ -1143,7 +1143,7 @@ pub struct DecisionOut {
     pub status: String,
     pub created: i64,
     pub resolved: Option<i64>,
-    /// `me`, `yolo`, or `null` while open or expired.
+    /// `me`, `steve`, or `null` while open or expired.
     pub by: Option<String>,
     pub choice: Option<String>,
 }
@@ -1297,7 +1297,7 @@ fn populate_item_details(
     let decisions = items::decisions_of(c, item_id)?
         .into_iter()
         .map(|x| DecisionOut {
-            by: (x.status == "resolved").then(|| "me".to_string()),
+            by: x.settled_by().map(|s| s.as_str().to_string()),
             choice: x.choice().map(str::to_string),
             id: x.id,
             kind: x.kind,

@@ -867,7 +867,7 @@ fn replacing_legacy_approval_preserves_human_and_external_facts() {
     );
     store.fixture_write(|c| {
         assert_eq!(count(c, "SELECT COUNT(*) FROM decisions WHERE id='human' AND status='resolved'"), 1);
-        assert_eq!(count(c, "SELECT COUNT(*) FROM decisions WHERE id='old' AND status='expired'"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM decisions WHERE id='old' AND status='resolved' AND json_extract(result, '$.decided_by')='steve'"), 1);
         assert_eq!(count(c, "SELECT COUNT(*) FROM settings WHERE key IN ('yolo.policy','models.yolo')"), 0);
         assert_eq!(count(c, "SELECT COUNT(*) FROM settings WHERE key='models.draft'"), 1);
         assert_eq!(count(c, "SELECT COUNT(*) FROM mail_drafts WHERE id='queued' AND status='discarded' AND send_at IS NULL"), 1);
@@ -944,14 +944,42 @@ fn migration_128_retires_yolo_rows_and_backfills_node_bindings() {
     c.execute_batch(
         r#"INSERT INTO bots(id,workspace_id,name,harness,updated)
              VALUES ('b1','default','Bot1','claude-code',1),
-                    ('b2','default','Bot2','claude-code',1);
+                    ('b2','default','Bot2','claude-code',1),
+                    ('b3','default','Bot3','claude-code',1);
            INSERT INTO bot_workspaces(bot_id,workspace_id,created)
-             VALUES ('b1','default',1), ('b2','default',1);
+             VALUES ('b1','default',1), ('b2','default',1), ('b3','default',1);
            INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes)
              VALUES ('default','b2','["remote-1"]');
+           INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,local,created,revoked_at)
+             VALUES ('local','owner','Hub',zeroblob(32),'fp-l','active',1,1,NULL),
+                    ('remote-active','owner','Mac',zeroblob(32),'fp-a','active',0,1,NULL),
+                    ('remote-revoked','owner','Old',zeroblob(32),'fp-r','revoked',0,1,10);
+           INSERT INTO sessions(id,workspace_id,bot_id,harness,cwd,status,created,updated)
+             VALUES ('s1','default','b3','claude-code','.','ended',1,1),
+                    ('s2','default','b3','claude-code','.','ended',1,1),
+                    ('s3','default','b3','claude-code','.','ended',1,1);
+           INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
+             VALUES ('s1','local','{}','s1','r1','idle',1),
+                    ('s2','remote-active','{}','s2','r1','idle',1),
+                    ('s3','remote-revoked','{}','s3','r1','idle',1);
            INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,question,status,result,requested_by,created)
-             VALUES ('d_yolo','default','approve','mail_draft','m1','q','resolved','{"decided_by":"yolo","choice":"approve","yolo_reason":"auto"}','steve',1),
+             VALUES ('d_yolo','default','approve','mail_draft','m1','q','resolved','{"decided_by":"yolo","choice":"approve","yolo_action":"a1","yolo_reason":"auto","yolo_rule":"r1","hash":"h","send_at":10,"content_hash":"ch"}','steve',1),
                     ('d_human','default','approve','mail_draft','m2','q','resolved','{"decided_by":"owner","choice":"approve"}','steve',1);
+           INSERT INTO parties(id,workspace_id,type,name,created_by,created,updated)
+             VALUES ('p1','default','person','Owner','owner',1,1);
+           INSERT INTO accounts(id,workspace_id,system_id,family,party_id,kind,handle,handle_display,source,created,updated)
+             VALUES ('acc1','default','feishu','feishu_app','p1','app_bot','bot','bot','me',1,1);
+           INSERT INTO connections(id,workspace_id,account_id,adapter,auth,created_by,created,updated)
+             VALUES ('c1','default','acc1','feishu','none','owner',1,1);
+           INSERT INTO spaces(id,workspace_id,system_id,connection_id,kind,external_id,name,created,updated)
+             VALUES ('sp','default','feishu','c1','group','ext_sp','Group',1,1);
+           INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,decision_id,created,sent)
+             VALUES ('cm_pending','default','sp','out','pending','d_yolo',1,NULL),
+                    ('cm_sent','default','sp','out','sent','d_yolo',1,10);
+           INSERT INTO mail_drafts(id,workspace_id,connection_id,mode,to_addrs,subject,body,author,decision_id,content_hash,status,send_at,created,updated,sent)
+             VALUES ('md_queued','default','c1','new','[]','s','b','bot','d_yolo','h','approved',10,1,1,NULL),
+                    ('md_sending','default','c1','new','[]','s','b','bot','d_yolo','h','sending',10,1,1,10),
+                    ('md_sent','default','c1','new','[]','s','b','bot','d_yolo','h','sent',10,1,1,10);
            INSERT INTO audit(ts,actor,action,target,detail,workspace_id)
              VALUES (1,'yolo','decision.resolve','d_yolo','{}','default'),
                     (2,'owner','yolo.window.start','w1','{}','default'),
@@ -966,7 +994,15 @@ fn migration_128_retires_yolo_rows_and_backfills_node_bindings() {
             assert_eq!(
                 count(
                     c,
-                    "SELECT COUNT(*) FROM decisions WHERE id='d_yolo' AND status='expired' AND json_extract(result,'$.decided_by') IS NULL AND json_extract(result,'$.yolo_reason') IS NULL"
+                    "SELECT COUNT(*) FROM decisions WHERE id='d_yolo' AND status='resolved'
+                       AND json_extract(result,'$.decided_by')='steve'
+                       AND json_extract(result,'$.choice')='approve'
+                       AND json_extract(result,'$.yolo_action') IS NULL
+                       AND json_extract(result,'$.yolo_reason') IS NULL
+                       AND json_extract(result,'$.yolo_rule') IS NULL
+                       AND json_extract(result,'$.hash') IS NULL
+                       AND json_extract(result,'$.send_at') IS NULL
+                       AND json_extract(result,'$.content_hash') IS NULL"
                 ),
                 1
             );
@@ -974,6 +1010,41 @@ fn migration_128_retires_yolo_rows_and_backfills_node_bindings() {
                 count(
                     c,
                     "SELECT COUNT(*) FROM decisions WHERE id='d_human' AND status='resolved' AND json_extract(result,'$.decided_by')='owner'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM chan_messages WHERE id='cm_pending' AND status='discarded'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM chan_messages WHERE id='cm_sent' AND status='sent' AND sent=10"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM mail_drafts WHERE id='md_queued' AND status='discarded' AND send_at IS NULL"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM mail_drafts WHERE id='md_sending' AND status='sending' AND sent=10"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM mail_drafts WHERE id='md_sent' AND status='sent' AND sent=10"
                 ),
                 1
             );
@@ -1003,21 +1074,33 @@ fn migration_128_retires_yolo_rows_and_backfills_node_bindings() {
                 ),
                 1
             );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bot_node_bindings WHERE bot_id='b3' AND nodes='[\"local\",\"remote-active\"]'"
+                ),
+                1
+            );
             Ok(())
         })
         .unwrap();
 }
 
 #[test]
-fn migration_129_normalizes_retired_bot_perm_modes() {
+fn migration_129_migrates_bot_perm_modes_to_steve_vocabulary() {
     let (_dir, path) = at_version(128);
     let c = Connection::open(&path).unwrap();
     c.execute_batch(
         r#"INSERT INTO bots(id,workspace_id,name,harness,perm_mode,updated)
-             VALUES ('b_auto','default','Auto','claude-code','auto',1),
+             VALUES ('b_def','default','Default','claude-code','default',1),
+                    ('b_ask','default','Ask','claude-code','ask',1),
+                    ('b_auto','default','Auto','claude-code','auto',1),
                     ('b_edit','default','Edit','claude-code','acceptEdits',1),
+                    ('b_edit2','default','Edit2','claude-code','accept_edits',1),
                     ('b_plan','default','Plan','claude-code','plan',1),
-                    ('b_full','default','Full','claude-code','bypassPermissions',1);"#,
+                    ('b_full','default','Full','claude-code','bypassPermissions',1),
+                    ('b_full2','default','Full2','claude-code','full_access',1),
+                    ('b_bad','default','Bad','claude-code','dontAsk',1);"#,
     )
     .unwrap();
     drop(c);
@@ -1028,7 +1111,21 @@ fn migration_129_normalizes_retired_bot_perm_modes() {
             assert_eq!(
                 count(
                     c,
-                    "SELECT COUNT(*) FROM bots WHERE id IN ('b_auto','b_edit') AND perm_mode='default'"
+                    "SELECT COUNT(*) FROM bots WHERE id IN ('b_def','b_ask','b_bad') AND perm_mode='ask'"
+                ),
+                3
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id='b_auto' AND perm_mode='auto'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id IN ('b_edit','b_edit2') AND perm_mode='accept_edits'"
                 ),
                 2
             );
@@ -1042,10 +1139,23 @@ fn migration_129_normalizes_retired_bot_perm_modes() {
             assert_eq!(
                 count(
                     c,
-                    "SELECT COUNT(*) FROM bots WHERE id='b_full' AND perm_mode='bypassPermissions'"
+                    "SELECT COUNT(*) FROM bots WHERE id IN ('b_full','b_full2') AND perm_mode='full_access'"
+                ),
+                2
+            );
+            // Column default is now Steve's 'ask', never Claude Code's 'default'.
+            c.execute(
+                "INSERT INTO bots(id,workspace_id,name,harness,updated) VALUES ('b_new','default','New','claude-code',1)",
+                [],
+            )?;
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id='b_new' AND perm_mode='ask'"
                 ),
                 1
             );
+            assert_eq!(count(c, "SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
             Ok(())
         })
         .unwrap();

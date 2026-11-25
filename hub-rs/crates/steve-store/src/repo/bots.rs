@@ -18,8 +18,8 @@ impl Store {
     }
 }
 
-/// What a new or seeded bot may set; unset fields get the repo.ts seed defaults
-/// (`role ""`, `rules ""`, `persona ""`, `proactive 1`, `accept_mode "inherit"`, `perm_mode "default"`, `avatar {}`).
+/// What a new or seeded bot may set; unset fields get the seed defaults
+/// (`role ""`, `rules ""`, `persona ""`, `proactive 1`, `accept_mode "inherit"`, `perm_mode "ask"`, `avatar {}`).
 /// Like TS, `prompt` and `device` cannot be set at creation, only by `patch`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewBot {
@@ -342,7 +342,7 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
         b.persona.as_deref().unwrap_or(""),
         b.proactive.unwrap_or(1),
         b.accept_mode.as_deref().unwrap_or("inherit"),
-        b.perm_mode.as_deref().unwrap_or("default"),
+        b.perm_mode.as_deref().unwrap_or("ask"),
         avatar,
         b.default_project,
         to_json(&b.specialties.as_deref().unwrap_or_default())?,

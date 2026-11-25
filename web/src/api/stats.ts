@@ -75,7 +75,7 @@ export type ItemDetail = {
   item_id: string; no: number; title: string; status: string; facts: ItemFacts; usage: Usage; age_ms: number
   turns?: { id: string; session_id: string; started: number; ended: number | null; stop_reason: string | null; attempt: number; transient: boolean; tools: number; tool_errors: number; usage: Usage }[]
   marks?: { ts: number; kind: string; from_v: string | null; to_v: string | null; actor: string; ref: string | null }[]
-  decisions?: { id: string; kind: string; status: string; created: number; resolved: number | null; by: "me" | null; choice: string | null }[]
+  decisions?: { id: string; kind: string; status: string; created: number; resolved: number | null; by: "me" | "steve" | null; choice: string | null }[]
   by_model?: (Usage & { model: string; label: string })[]
 }
 /** `GET /stats/tree/{id}`: the item and everything started from it, each with its own figures */

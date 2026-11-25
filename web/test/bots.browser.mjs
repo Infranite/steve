@@ -11,7 +11,7 @@ const shots = process.env.STEVE_TEST_SHOTS; if (shots) mkdirSync(shots, { recurs
  * Steve · 内置 (its tools folded inside with this Bot's calls over GET /stats/breakdown?by=tool&bot=) and the library
  * entries the Bot uses, 设置's permission choices (Agent / Permissions) saved
  * with the form, and 记忆 as the Memory Panel with add and forget/undo. */
-const bot = (id, name, extra = {}) => ({ id, name, role: name + '的职责', main: id === 'steve', harness: 'claude-code', model: null, reasoning_effort: null, rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'default', avatar: { color: '#8b7cf6' }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['default'], memories: 1, ...extra })
+const bot = (id, name, extra = {}) => ({ id, name, role: name + '的职责', main: id === 'steve', harness: 'claude-code', model: null, reasoning_effort: null, rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'ask', avatar: { color: '#8b7cf6' }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['default'], memories: 1, ...extra })
 let bots, teams, memories, patches, deletes, posts, hub
 const reset = () => {
   bots = [bot('steve', 'Steve'), bot('dev', '开发'), bot('doc', '文档', { harness: 'codex', enabled: false })]
@@ -141,15 +141,15 @@ const run = async ({ width, height, scheme }) => {
   assert.match(await page.locator('[data-steve-tool="steve_ask"]').innerText(), /30 天没用过/)
   assert.equal(await page.locator('[data-skill]').count(), 0, 'no flat grid of tool tiles any more')
   assert.equal(await page.locator('[data-mcp] [data-mcp-server=github]').count(), 1)
-  assert.equal(await page.locator('[data-caps-perm]').getAttribute('data-caps-perm'), 'default')
+  assert.equal(await page.locator('[data-caps-perm]').getAttribute('data-caps-perm'), 'ask')
   await fits(); await shot('caps')
 
   /* 设置: the permission mode and acceptance as one choice each, saved with the form */
   await page.locator('[data-slot=tabs-trigger]:has-text("设置")').click()
   const perm = page.locator('[data-choices="bot-perm"]')
   await perm.waitFor()
-  assert.deepEqual(await perm.locator('[role=radio]').evaluateAll((choices) => choices.map((choice) => choice.getAttribute('data-choice')).sort()), ['default', 'plan'])
-  assert.equal(await perm.locator('[aria-checked=true]').getAttribute('data-choice'), 'default')
+  assert.deepEqual(await perm.locator('[role=radio]').evaluateAll((choices) => choices.map((choice) => choice.getAttribute('data-choice')).sort()), ['ask', 'plan'])
+  assert.equal(await perm.locator('[aria-checked=true]').getAttribute('data-choice'), 'ask')
   await perm.locator('[data-choice=plan]').click()
   await page.locator('[data-choices="bot-acc"] [data-choice="自动验收"]').click()
   assert.equal(await perm.locator('[aria-checked=true]').getAttribute('data-choice'), 'plan')

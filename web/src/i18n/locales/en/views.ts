@@ -126,6 +126,7 @@ export default {
     dismissed: "You withdrew it",
     expired: "Expired: {{choice}}",
     chose: "You chose “{{choice}}”",
+    steveChose: "Steve chose “{{choice}}” for you",
     undo: "Undo",
     loadMore: "Load more",
     doneNote: "Decisions from the last 7 days. Approvals, “Not needed”, “I'll take a look” and withdrawals can be undone within 24 hours; answers and approvals already sent to a bot can't be taken back.",
