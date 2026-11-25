@@ -62,7 +62,7 @@ try {
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `the page widened at ${tag}`)
     /* a project's path: the home part shortened to ~, set in mono, the folder name kept whole */
     const where = pane.locator('[data-onboard-project="p1"] [title]')
-    assert.equal(await where.getAttribute("title"), "~/Agents/clients/a-rather-long-client-folder/steve-dev-loop")
+    assert.equal(await where.getAttribute("title"), "~/projects/clients/a-rather-long-client-folder/demo-app")
     assert.match(await where.evaluate((el) => getComputedStyle(el).fontFamily), /mono/i)
     assert.ok(await pane.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), `a long path widened the step at ${tag}`)
     /* the bars back to finished steps stay a usable touch target on phones too */

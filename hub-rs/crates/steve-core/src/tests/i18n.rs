@@ -30,6 +30,7 @@ async fn describe_in_english() {
     assert_eq!(
         now,
         [
+            ("When no Bot can take work", "Ask me"),
             ("Default acceptance", "Accepted automatically"),
             ("When prerequisites finish", "Start automatically"),
             ("Handoff threshold", "Never"),

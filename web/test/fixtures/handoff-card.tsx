@@ -17,8 +17,6 @@ const recovery: SendRecoveryInfo | undefined = q.includes("managed") ? { kind: "
 const w: Wait = q.includes("fail") || q.includes("unknown") || q.includes("blocked") || q.includes("managed")
   ? { type: "fail", subjectId: "cm_out", q: q.includes("blocked") ? "渠道服务不允许在这个会话里发送（target_forbidden, -32016）" : "发到「运维群」的消息没有发出去：超时", draft: q.includes("legacy") ? undefined : body, since: "刚刚", decision: "dec_f", subject: "chan_message", session: null, options: q.includes("unknown") ? ["sent", "retry", "discard"] : q.includes("legacy") ? ["discard"] : q.includes("blocked") ? ["retry", "rewrite", "discard"] : ["retry", "discard"], by: "steve", tier: "decide" }
   : q.includes("approve") ? { type: "approve", subjectId: "cm_out", q: "拟发送到「运维群」", draft: "请审阅这条草稿", since: "刚刚", decision: "dec_a", subject: "chan_message", session: null, options: ["yes", "no", "rewrite"], by: "steve", tier: "decide" }
-  : q.includes("legacy")
-  ? { type: "ask", subjectId: "cm_in", q: "「运维群」里 李雷 找你：老板在吗", draft: "", opts: ["draft_reply", "to_item", "done"], since: "刚刚", decision: "dec_h", subject: "chan_message", session: null, options: ["draft_reply", "to_item", "done"], by: "steve", tier: "decide" }
   : { type: "ask", subjectId: "cm_in", q: "「运维群」里 李雷 找你：李雷问周四下午能不能一起过一下方案\n为什么要你：要答应或安排事情（时间、花钱、删除、隐私或人际关系），得你自己定（@了你）\n最近的对话：\n- 我：方案我晚点发\n→ 李雷：周四下午能过一下吗", draft: q.includes("nodraft") ? "" : "周四可以", since: "刚刚", decision: "dec_h", subject: "chan_message", session: null, options: q.includes("nodraft") ? ["instruct", "verbatim", "to_item", "done"] : ["send_draft", "instruct", "verbatim", "to_item", "done"], by: "steve", tier: "decide" }
 st.ready = true
 if (recovery) { w.options = ["retry", "rewrite", "discard"]; w.recovery = recovery }

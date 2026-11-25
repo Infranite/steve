@@ -34,6 +34,10 @@ fn cerr(e: CoreError) -> BackendError {
             },
         },
         CoreError::Status(status, message) => BackendError { status, message },
+        CoreError::Contract(e) => BackendError {
+            status: e.code.http_status(),
+            message: e.to_string(),
+        },
         CoreError::Placement(blocked) => BackendError {
             status: 409,
             message: super::bot_dispatch::text(blocked.reason),
@@ -441,6 +445,27 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     }
     fn can_run(&self, item_id: &str, bot_id: &str, _harness: &str) -> steve_core::Result<()> {
         self.check_dispatch(item_id, bot_id)
+    }
+    fn propose_bot(
+        &self,
+        req: &steve_core::CreateItem,
+        blocked: &steve_types::PlacementBlocked,
+    ) -> steve_core::Result<Option<steve_types::BotProposal>> {
+        Ok(RoutedRuntime::propose_bot(self, req, blocked)?)
+    }
+    fn confirm_bot_proposal(
+        &self,
+        ws: &str,
+        actor: &str,
+        id: &str,
+        edit: steve_types::ConfirmBotProposal,
+    ) -> steve_core::Result<String> {
+        RoutedRuntime::confirm_bot_proposal(self, ws, actor, id, edit).map_err(|err| match err {
+            crate::error::ApiError::Json(code, msg) | crate::error::ApiError::Text(code, msg) => {
+                CoreError::Status(code, msg)
+            }
+            other => CoreError::Msg(other.to_string()),
+        })
     }
     fn makes_worktrees(&self) -> bool {
         self.node.is_some() && self.worktrees.is_some()
@@ -1279,14 +1304,37 @@ impl Domain for CoreDomain {
             .map(str::to_string);
         self.core.bot_prompt(&b, ws).map_err(cerr)
     }
-    async fn delete_bot(&self, id: &str, to: &str, actor: &str) -> BResult<Obj> {
+    async fn delete_bot(
+        &self,
+        id: &str,
+        to: &str,
+        actor: &str,
+        allowed_workspaces: Vec<String>,
+    ) -> BResult<Obj> {
         let (c, id, to, actor) = (
             self.core.clone(),
             id.to_string(),
             to.to_string(),
             actor.to_string(),
         );
-        let moved = blocking(move || c.delete_bot(&id, &to, &actor)).await?;
+        let moved = blocking(move || c.delete_bot(&id, &to, &actor, &allowed_workspaces)).await?;
+        to_obj(json!({ "moved": moved }))
+    }
+    async fn remove_bot_from_workspace(
+        &self,
+        ws: &str,
+        id: &str,
+        to: &str,
+        actor: &str,
+    ) -> BResult<Obj> {
+        let (c, ws, id, to, actor) = (
+            self.core.clone(),
+            ws.to_string(),
+            id.to_string(),
+            to.to_string(),
+            actor.to_string(),
+        );
+        let moved = blocking(move || c.remove_bot_from_workspace(&ws, &id, &to, &actor)).await?;
         to_obj(json!({ "moved": moved }))
     }
 

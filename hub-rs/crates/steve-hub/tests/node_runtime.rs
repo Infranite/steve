@@ -4760,7 +4760,6 @@ async fn startup_preflight_uses_the_actual_node_offer_and_preserves_defaults() {
         auth: vec![],
         install_hint: None,
         system_prompt: false,
-        update: None,
         resume_command: None,
         fork_command: None,
         error: None,

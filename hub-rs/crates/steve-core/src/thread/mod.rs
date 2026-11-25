@@ -1204,7 +1204,11 @@ impl Core {
         let repo = self.config().steve_repo.clone();
         let items = db.items(ws)?;
         Ok(RouteCtx {
-            bots: db.bots(ws)?.into_iter().filter(|b| b.enabled).collect(),
+            bots: db
+                .bots(ws)?
+                .into_iter()
+                .filter(|b| b.enabled && !b.main)
+                .collect(),
             steve_project: projects
                 .iter()
                 .find(|p| crate::config::is_steve_project(&p.path, &repo))

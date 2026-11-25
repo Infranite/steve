@@ -4,6 +4,17 @@ export default {
     turnRepeatedFailure: "同一工具操作连续累计失败五次，Steve 已请求停止。",
     turnNoProgress: "可观察的执行时间累计十五分钟仍无可核实的进展，Steve 已请求停止。",
     mergePullRequest: "合并 PR #{{number}}（{{repo}}）？",
+    noExecutor_other: "有 {{count}} 件事项暂无合格的执行 Bot，怎么处理？",
+    waitTimeout: "{{kind}}已超过等待上限（{{subject}}），请选择后续处理方式。",
+    waitKind: {
+      dependency: "前置等待",
+      decision: "待决定事项",
+      channel_draft: "渠道草稿",
+      item_operation: "事项外部操作",
+      external_effect: "外部执行动作",
+      mail_draft: "邮件草稿",
+      flow_wait: "自动化等待",
+    },
   },
   feed: {
     viewItem: "查看事项",

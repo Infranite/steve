@@ -63,7 +63,7 @@ export type Item = {
   placement?: PlacementExplanation
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
-export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
+export type Bot = { id: string; owner?: string | null; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
@@ -270,7 +270,7 @@ const sessionCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("se
 /* ───────── mapping ───────── */
 function botOf(b: RBot): Bot {
   const proj = shell()?.projects.find((p) => p.id === b.default_project)
-  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
+  return { id: b.id, owner: b.owner ?? null, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
     on: b.enabled, acc: ACC[b.accept_mode] ?? ACC.inherit, ws: proj?.name ?? t("core:projectByItem"), project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
     routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
 }
@@ -444,6 +444,11 @@ function choiceLabel(d: DecisionView) {
   if (d.kind === "accept") return r.choice === "pass" ? t("core:choice.pass") : t("core:choice.rework", { text: r.text ?? "" })
   if (d.subject_type === "space") return (r.choice ?? r.answer) === "mute" ? t("core:choice.mute") : t("core:choice.setup")
   if (optionKey(d.subject_type, r.choice)) return optionLabel(d.subject_type, r.choice)
+  if (d.subject_type === "no_executor") {
+    if (r.choice === "later") return t("core:choice.noExecutorLater")
+    if (r.choice === "confirm_proposal") return t("core:choice.noExecutorProposal", { bot: botName(r.bot ?? null) })
+    if (r.choice === "assign_bot") return t("core:choice.noExecutorAssign", { bot: botName(r.bot ?? null) })
+  }
   if (d.kind === "ask") return String(r.answer ?? "")
   if (d.subject_type === "party_merge") return r.choice === "merge" ? t("core:choice.merge") : t("core:choice.notSame")
   if (d.kind === "confirm") return r.choice === "yes" ? t("core:choice.confirmYes") : t("core:choice.confirmNo")
@@ -1174,6 +1179,7 @@ const DECIDED_BY_SUBJECT: Record<string, readonly string[] | ((c: string) => str
   mem: ["yes", "no"],
   party_merge: ["merge", "not_same"],
   release: ["no"],
+  no_executor: ["assign_bot", "confirm_proposal", "later"],
   chan_message: OPTION_IDS.chan_message,
 }
 const DECIDED_ANY = ["pass", "rework", "yes", "no", "continue", "delivered", "look", "tosteve", "drop", "deny"]
@@ -1236,6 +1242,7 @@ export async function decide(id: string, c: string, text?: string, decision?: st
     }
     const result = await decisionCall(answer(w.decision, c, text), decidedText(w, c, i?.b ?? null))
     if (result && c === "pass") cue("success")
+    if (result && w.subject === "no_executor" && (c === "later" || c === "confirm_proposal")) void refresh()
   } finally { st.pendingActions.delete(key); emit() }
 }
 /** a reply drafted in an IM conversation, closed in that conversation: not sent, for good (undo from 已处理);
@@ -1408,10 +1415,18 @@ export async function makeBot(n: string, role: string, harness = defaultHarness(
   return r?.id
 }
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
-export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
-  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
-  if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
-  toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+export function ownsBot(owner: string | null | undefined): boolean {
+  return owner ? owner === st.me?.user_id : st.owner
+}
+export async function deleteBot(k: string, to: string, mem: "delete" | "export") {
+  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem)); if (!r) return
+  if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "export" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+}
+export async function removeBotFromWorkspace(k: string, to: string, mem: "delete" | "export") {
+  const b = st.bots[k]; const r = await shellCall(api.removeBotFromWorkspace(k, to, mem)); if (!r) return
+  if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "export" ? "core:toast.botRemovedFromWorkspaceExported" : "core:toast.botRemovedFromWorkspace", { name: b?.n, count: r.moved.length, to: botName(to) }))
 }
 export async function dupBot(k: string) { const r = await shellCall(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
 export function addMem(k: string, text: string) { void changeBotMemory(k, api.addMemory(k, text), t("core:toast.memoryAdded")) }

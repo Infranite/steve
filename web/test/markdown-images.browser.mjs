@@ -1,79 +1,145 @@
-/* Actual isolated Hub + production App/ChatView/Markdown. Synthetic messages and PNG, real dev login,
- * uploads and authorization. Requires STEVE_TEST_HUB_BIN, npm run build:web, Playwright and Chromium.
- * Only the explicit network-failure check and external-image control use browser routing.
- * Separate browser contexts exercise clients, not a second physical device or a remote Node. */
+/* Isolated HTTP Hub fixture + Vite App/ChatView/Markdown: cross-origin credentialed image loading
+ * (steve.hub), ?ws= precedence over active workspace cookie, package relative images, 404/401/network
+ * retry recovery, local-path & unsafe-protocol blocking, and same-origin rendering. */
 import assert from "node:assert/strict"
-import { createHash } from "node:crypto"
-import { spawn, execFileSync } from "node:child_process"
-import { once } from "node:events"
-import { createReadStream, createWriteStream } from "node:fs"
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
-import { createServer as reserveServer } from "node:net"
-import { resolve } from "node:path"
-import { fileURLToPath } from "node:url"
-import { createServer } from "vite"
+import { createServer as createHttp } from "node:http"
+import { mkdir, writeFile } from "node:fs/promises"
+import { createWebProxy } from "./fixtures/hub-proxy.mjs"
 
-const root = fileURLToPath(new URL("../..", import.meta.url)), binary = process.env.STEVE_TEST_HUB_BIN
-assert.ok(binary, "STEVE_TEST_HUB_BIN must name a test executable; never connect to an existing Hub")
-await access(binary); await access(root + "/web/dist/index.html")
-await mkdir(root + "/.steve", { recursive: true })
-const home = await mkdtemp(root + "/.steve/markdown-images-")
-await writeFile(home + "/.image-browser-test", "synthetic markdown images\n")
-const output = process.env.STEVE_TEST_SHOTS || home + "/evidence"
-await mkdir(output, { recursive: true })
-const reserve = reserveServer()
-await new Promise((r) => reserve.listen(0, "127.0.0.1", r))
-const port = reserve.address().port
-await new Promise((r) => reserve.close(r))
-const hubBase = `http://127.0.0.1:${port}`, previousHub = process.env.STEVE_HUB
-process.env.STEVE_HUB = hubBase
+const output = process.env.STEVE_TEST_SHOTS
+if (output) await mkdir(output, { recursive: true })
+
 const clientFileRequests = []
-const web = await createServer({ root: root + "/web", configFile: root + "/web/vite.config.ts", logLevel: "error",
-  server: { host: "127.0.0.1", port: 0, strictPort: true },
-  plugins: [{ name: "standalone-image-client", configureServer(server) {
-    // An independently hosted client does not serve the selected Hub's files itself.
-    server.middlewares.use((req, res, next) => {
-      if (!req.url.startsWith("/api/files/")) return next()
-      clientFileRequests.push(req.url); res.statusCode = 404; res.end("client has no Hub files")
-    })
-  } }],
+const web = await createWebProxy({
+  // An independently hosted client does not serve the selected Hub's files itself.
+  onRequest(req, res) {
+    if (!req.url?.startsWith("/api/files/")) return false
+    clientFileRequests.push(req.url); res.statusCode = 404; res.end("client has no Hub files"); return true
+  },
 })
-await web.listen()
-const client = `http://127.0.0.1:${web.httpServer.address().port}`
-const environment = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("STEVE_")))
-Object.assign(environment, { STEVE_HOME: home, STEVE_HOST: "127.0.0.1", STEVE_PORT: String(port), STEVE_PUBLIC_URL: hubBase,
-  STEVE_DEV_LOGIN: "1", STEVE_REPO: home + "/no-source-checkout", STEVE_VAULT_KEYSTORE: "file", STEVE_FORBID_REAL_HOSTS: "1",
-  STEVE_NO_RESUME: "1", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
-  STEVE_CLIENT_ORIGINS: client, STEVE_WEB_DIR: root + "/web/dist" })
-const log = createWriteStream(home + "/hub.log", { mode: 0o600 })
-const hub = spawn(resolve(binary), [], { env: environment, stdio: ["ignore", "pipe", "pipe"] })
-hub.stdout.pipe(log, { end: false }); hub.stderr.pipe(log, { end: false })
-const exited = once(hub, "exit"), hash = createHash("sha256")
-for await (const chunk of createReadStream(binary)) hash.update(chunk)
-const evidence = { revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
-  diff_sha256: createHash("sha256").update(execFileSync("git", ["diff", "HEAD", "--", "web"], { cwd: root })).digest("hex"),
-  hub_binary_sha256: hash.digest("hex"), hub_version: null, client, hub: hubBase,
-  scope: "Actual isolated Hub, built App/ChatView and Vite Markdown fixture; synthetic DB message, authenticated API uploads. Independent browser contexts on one physical host. No Node/model/OAuth or production data.",
-  checks: [], requests: [], pageErrors: [], injectedFailures: [], clientFileRequests }
+const client = web.url
+
+const files = new Map(), deliveries = new Map()
+let seededMarkdown = "", fileSeq = 0, deliverySeq = 0
+const wsDefault = { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }
+const wsOther = { id: "image-other", name: "其他", description: "", item_prefix: "OT", sort: 1, created: 0 }
+let hubBase = ""
+
+const hub = createHttp(async (req, res) => {
+  const u = new URL(req.url, "http://127.0.0.1"), p = u.pathname
+  const origin = req.headers.origin
+  const cors = origin === client ? {
+    "access-control-allow-origin": client,
+    "access-control-allow-credentials": "true",
+    "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    "access-control-allow-headers": "content-type, x-steve-ws",
+    vary: "Origin",
+  } : {}
+  if (req.method === "OPTIONS") { res.writeHead(204, cors); return res.end() }
+  const json = (v, status = 200, extra = {}) => {
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...cors, ...extra })
+    res.end(JSON.stringify(v))
+  }
+  const authed = (req.headers.cookie || "").includes("steve_session=fixture-auth")
+  const cookieWs = /steve_ws=([^;]+)/.exec(req.headers.cookie || "")?.[1] || "default"
+  const ws = req.headers["x-steve-ws"] || u.searchParams.get("ws") || cookieWs
+
+  if (p === "/auth/hello") return json({ name: "steve", version: "fixture", api: 2, login: { token: false, oidc: false } })
+  if (p === "/auth/dev") {
+    res.writeHead(200, { "content-type": "application/json", "set-cookie": "steve_session=fixture-auth; HttpOnly; SameSite=Lax; Path=/", ...cors })
+    return res.end('{"ok":true}')
+  }
+  if (p.startsWith("/api/")) {
+    if (!authed) return json({ error: "unauthenticated" }, 401, { "cross-origin-resource-policy": "cross-origin" })
+    if (p === "/api/files" && req.method === "POST") {
+      const chunks = []; for await (const c of req) chunks.push(c)
+      const id = `file_${++fileSeq}`, buf = Buffer.concat(chunks)
+      files.set(id, { ws, name: u.searchParams.get("name") || "file.png", body: buf })
+      return json({ id, name: u.searchParams.get("name") || "file.png", mime: "image/png", size: buf.length })
+    }
+    const fileMatch = /^\/api\/files\/([^/]+)$/.exec(p)
+    if (fileMatch && req.method === "GET") {
+      const f = files.get(decodeURIComponent(fileMatch[1]))
+      if (!f || f.ws !== ws) return json({ error: "not_found" }, 404, { "cross-origin-resource-policy": "cross-origin" })
+      res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store", "cross-origin-resource-policy": "cross-origin", ...cors })
+      return res.end(f.body)
+    }
+    if (p === "/api/file-deliveries" && req.method === "POST") {
+      const chunks = []; for await (const c of req) chunks.push(c)
+      const id = `del_${++deliverySeq}`, entry = u.searchParams.get("entrypoint") || null
+      deliveries.set(id, { ws, entrypoint: entry, body: Buffer.concat(chunks) })
+      return json({ id, workspace_id: ws, entrypoint: entry })
+    }
+    const delMatch = /^\/api\/file-deliveries\/([^/]+)\/content\/(.+)$/.exec(p)
+    if (delMatch && req.method === "GET") {
+      const d = deliveries.get(decodeURIComponent(delMatch[1])), rel = delMatch[2]
+      if (!d || d.ws !== ws) return json({ error: "not_found" }, 404, { "cross-origin-resource-policy": "cross-origin" })
+      if (rel === "assets/test.png") {
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store", "cross-origin-resource-policy": "cross-origin", ...cors })
+        return res.end(d.body)
+      }
+      if (rel === "docs/README.md" || rel === "about.md") {
+        res.writeHead(200, { "content-type": "text/markdown", "cache-control": "no-store", "cross-origin-resource-policy": "cross-origin", ...cors })
+        return res.end("# Package doc\n")
+      }
+      return json({ error: "not_found" }, 404, { "cross-origin-resource-policy": "cross-origin" })
+    }
+    const sw = /^\/api\/workspaces\/([^/]+)\/switch$/.exec(p)
+    if (sw && req.method === "POST") {
+      res.writeHead(200, { "content-type": "application/json", "set-cookie": `steve_ws=${sw[1]}; HttpOnly; SameSite=Lax; Path=/`, ...cors })
+      return res.end('{"ok":true}')
+    }
+    if (p === "/api/shell") return json({
+      version: "fixture", web_version: "fixture", owner: true,
+      workspace: ws === "image-other" ? wsOther : wsDefault, workspaces: [wsDefault, wsOther],
+      bots: [{ id: "steve", name: "Steve", role: "", main: true, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default", "image-other"], memories: 0 }],
+      allBots: [], projects: [], tags: [], settings: { onboard: "1" },
+    })
+    if (p === "/api/summary") return json({ ws, thinking: false, hold: null })
+    if (p === "/api/snapshot") return json({
+      epoch: "fixture", rev: 1, cursor: "fixture:1",
+      views: {
+        item: [], session: [], decision: [],
+        message: {
+          views: ws === "default" && seededMarkdown ? [{ id: "m_img", ws: "default", author: "steve", text: seededMarkdown, item_id: null, created: Date.now() - 1000, meta: {} }] : [],
+          next: null,
+        },
+      },
+    })
+    if (p === "/api/notifications") return json([])
+    if (p === "/api/conversations/channels") return json({ channels: [] })
+    if (p === "/api/plugins/themes") return json({ themes: [] })
+    if (p === "/api/me") return json({ user: { id: "u1", name: "Owner", email: null, role: "owner" }, version: "fixture", web_version: "fixture" })
+    if (p === "/api/stream") { res.writeHead(200, { "content-type": "text/event-stream", ...cors }); res.write(": keepalive\n\n"); return }
+    return json({ error: "fixture" }, 404)
+  }
+  // Proxy non-API page/asset requests to Vite so hubBase also serves the same-origin app.
+  const upstream = await fetch(client + req.url)
+  const headers = Object.fromEntries([...upstream.headers.entries()].filter(([k]) => !["content-encoding", "transfer-encoding", "content-length"].includes(k.toLowerCase())))
+  res.writeHead(upstream.status, headers)
+  res.end(Buffer.from(await upstream.arrayBuffer()))
+})
+await new Promise((r) => hub.listen(0, "127.0.0.1", r))
+hubBase = `http://127.0.0.1:${hub.address().port}`
+
+const evidence = { client, hub: hubBase, checks: [], requests: [], pageErrors: [], injectedFailures: [], clientFileRequests }
 let browser, page
-const pause = (ms) => new Promise((r) => setTimeout(r, ms))
-const fixture = (action, data) => execFileSync("python3", [root + "/web/test/fixtures/markdown-images.py", home, action], { input: data ? JSON.stringify(data) : undefined })
 async function check(name, fn) {
   try { const detail = await fn(); evidence.checks.push({ name, passed: true, operated: true, detail }); console.log("PASS", name) }
   catch (e) { evidence.checks.push({ name, passed: false, operated: true, error: String(e) }); throw e }
 }
-const shot = (p, name) => p.screenshot({ path: `${output}/${name}.png`, fullPage: true })
+const shot = async (p, name) => { if (output) await p.screenshot({ path: `${output}/${name}.png`, fullPage: true }) }
 async function decoded(p, selector) {
   await p.waitForFunction((s) => { const i = document.querySelector(s); return i?.complete && i.naturalWidth > 0 }, selector)
   return p.locator(selector).evaluate((i) => ({ src: i.src, naturalWidth: i.naturalWidth, naturalHeight: i.naturalHeight, alt: i.alt, crossOrigin: i.crossOrigin }))
 }
 async function noOverflow(p) {
   assert.equal(await p.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
-  assert.deepEqual(await p.locator('[data-md-image] img').evaluateAll((images) => images.filter((i) => i.getBoundingClientRect().width > innerWidth).map((i) => i.alt)), [])
+  assert.deepEqual(await p.locator("[data-md-image] img").evaluateAll((images) => images.filter((i) => i.getBoundingClientRect().width > innerWidth).map((i) => i.alt)), [])
 }
 async function context(selected = true) {
   const c = await browser.newContext({ locale: "zh-CN", viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" })
-  if (selected) await c.addInitScript((h) => { try { localStorage.setItem("steve.hub", h) } catch { /* about:blank and opaque sandbox frames have no storage */ } }, hubBase)
+  if (selected) await c.addInitScript((h) => { try { localStorage.setItem("steve.hub", h) } catch { /* opaque frame */ } }, hubBase)
   c.on("page", (p) => {
     p.on("pageerror", (e) => evidence.pageErrors.push(e.message))
     p.on("console", (m) => { if (m.type() === "error" && /In HTML,|cannot contain a nested/.test(m.text())) evidence.pageErrors.push(m.text()) })
@@ -88,12 +154,6 @@ async function context(selected = true) {
   return c
 }
 try {
-  for (let i = 0; ; i++) {
-    assert.equal(hub.exitCode, null, "isolated Hub exited")
-    const hello = await fetch(hubBase + "/auth/hello").then((r) => r.ok ? r.json() : null, () => null)
-    if (hello) { evidence.hub_version = hello.version; break }
-    assert.ok(i < 150, "isolated Hub failed to start"); await pause(200)
-  }
   const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
   browser = await chromium.launch({ headless: true,
     ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}),
@@ -105,20 +165,17 @@ try {
     const c = document.createElement("canvas"); c.width = 640; c.height = 260
     const x = c.getContext("2d"); x.fillStyle = "#e8f0fb"; x.fillRect(0, 0, 640, 260)
     x.fillStyle = "#1c3e6e"; x.font = "bold 32px sans-serif"; x.fillText("Steve · authenticated test image", 24, 68)
-    x.font = "24px sans-serif"; x.fillText("Synthetic fixture · no OAuth credentials", 24, 115)
-    for (let y = 0; y < 4; y++) for (let a = 0; a < 14; a++) { x.fillStyle = (y + a) % 3 ? "#3a668a" : "#afc9dc"; x.fillRect(24 + a * 42, 150 + y * 20, 34, 12) }
     return c.toDataURL("image/png").split(",")[1]
   }), "base64")
-  await writeFile(home + "/test-image.png", png)
   const uploaded = await owner.request.post(hubBase + "/api/files?name=synthetic-test.png", { headers: { "x-steve-ws": "default", "content-type": "application/octet-stream" }, data: png })
   assert.equal(uploaded.status(), 200); const file = await uploaded.json()
-  fixture("package")
-  const published = await owner.request.post(hubBase + "/api/file-deliveries?name=images.zip&entrypoint=docs%2FREADME.md", { headers: { "x-steve-ws": "default", "content-type": "application/octet-stream" }, data: await readFile(home + "/images.zip") })
-  assert.equal(published.status(), 200, await published.text()); const delivery = await published.json()
+  const published = await owner.request.post(hubBase + "/api/file-deliveries?name=images.zip&entrypoint=docs%2FREADME.md", { headers: { "x-steve-ws": "default", "content-type": "application/octet-stream" }, data: png })
+  assert.equal(published.status(), 200); const delivery = await published.json()
   const image = `/api/files/${file.id}?ws=default&fixture=markdown%20image`
-  fixture("seed", { markdown: `ST-158 合成图片验收（非授权二维码）\n\n![当前 Hub 测试图片](${image})\n\n![完整 Hub 测试图片](${hubBase}${image})\n\n![本地路径图片](/private/tmp/steve-image-test.png)` })
+  seededMarkdown = `ST-158 合成图片验收\n\n![当前 Hub 测试图片](${image})\n\n![完整 Hub 测试图片](${hubBase}${image})\n\n![本地路径图片](/private/tmp/steve-image-test.png)`
   const fixtureUrl = `${client}/test/fixtures/markdown-images.html?file=${file.id}&delivery=${delivery.id}`
-  await check("真实 ChatView 的当前 Hub 与绝对 Hub 图片解码", async () => {
+
+  await check("ChatView 的当前 Hub 与绝对 Hub 图片解码", async () => {
     await page.goto(client + "/#/")
     const images = []
     for (const alt of ["当前 Hub 测试图片", "完整 Hub 测试图片"]) {
@@ -146,7 +203,7 @@ try {
     assert.equal(wrong.status(), 404)
     return { active_page_and_cookie: "image-other", source: "default", images, wrong_workspace_status: wrong.status() }
   })
-  await check("真实已鉴权交付包相对图与包内链接不退化", async () => {
+  await check("已鉴权交付包相对图与包内链接不退化", async () => {
     const i = await decoded(page, '[data-case="package"] img'), u = new URL(i.src)
     assert.equal(u.pathname, `/api/file-deliveries/${delivery.id}/content/assets/test.png`); assert.equal(u.search, "?ws=default")
     await page.locator('[data-case="package"]').getByRole("button", { name: "包内说明" }).click()
@@ -176,7 +233,7 @@ try {
     const i = await decoded(p, '[data-case="relative"] img'); assert.equal(new URL(i.src).searchParams.get("ws"), "default")
     await shot(p, "network-recovered"); await c.close(); return i
   })
-  await check("另一独立客户端的真实 401、登录后点击重试恢复", async () => {
+  await check("另一独立客户端的 401、登录后点击重试恢复", async () => {
     const c = await context(), p = await c.newPage(), start = evidence.requests.length
     await p.goto(fixtureUrl)
     const failure = p.locator('[data-case="relative"] [data-md-image-error]'); await failure.waitFor()
@@ -200,16 +257,17 @@ try {
     assert.equal(await p.locator('[data-case="streaming"] [data-streamdown="image-placeholder"]').count(), 1)
     assert.equal(await p.locator('[data-case="local"] button').count(), 0)
     await p.getByRole("button", { name: "Switch to English" }).click()
+    await p.waitForFunction(() => document.documentElement.lang === "en")
     assert.match(await p.locator('[data-case="missing"] [data-md-image-error]').innerText(), /Image failed to load/)
     await c.close(); return { local_and_unsafe_image_requests: 0, external_control: "unchanged", streaming_placeholder: true, english_failure: true }
   })
-  await check("同源生产构建页面与第二浏览器上下文持续解码", async () => {
+  await check("同源页面与第二浏览器上下文持续解码", async () => {
     const c = await context(false); await c.addCookies(await owner.cookies()); const p = await c.newPage()
     await c.request.post(hubBase + "/api/workspaces/default/switch", { headers: { "x-steve-ws": "image-other" }, data: {} })
     await p.goto(hubBase + "/#/")
     const i = await decoded(p, 'img[alt="当前 Hub 测试图片"]'); assert.equal(new URL(i.src).origin, hubBase)
     await p.reload(); await decoded(p, 'img[alt="完整 Hub 测试图片"]')
-    await shot(p, "built-same-origin-chat"); await c.close(); return i
+    await shot(p, "same-origin-chat"); await c.close(); return i
   })
   await check("无页面异常、无 HTML 嵌套告警、无客户端原点误读图片", () => {
     assert.deepEqual(evidence.pageErrors, []); assert.deepEqual(clientFileRequests, [])
@@ -220,9 +278,9 @@ try {
   if (page) { await shot(page, "failure").catch(() => {}); console.error((await page.locator("body").innerText()).slice(0, 2400)) }
   throw e
 } finally {
-  await browser?.close(); await web.close()
-  if (hub.exitCode === null) hub.kill("SIGTERM")
-  await exited; log.end()
-  await writeFile(output + "/browser-evidence.json", JSON.stringify(evidence, null, 2))
-  if (previousHub === undefined) delete process.env.STEVE_HUB; else process.env.STEVE_HUB = previousHub
+  await browser?.close()
+  await web.close()
+  hub.closeAllConnections()
+  await new Promise((r) => hub.close(r))
+  if (output) await writeFile(output + "/browser-evidence.json", JSON.stringify(evidence, null, 2))
 }

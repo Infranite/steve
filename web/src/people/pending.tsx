@@ -1,6 +1,6 @@
 /* 待确认: merge proposals and unconfirmed contacts (prototype people.tsx PendingContacts), the manual merge dialog,
  * and the 待处理 cards of the contacts decisions (party_merge, and `confirm` on attr_value / attr_def / mem). */
-import { useRef, useState, type ReactNode } from "react"
+import { memo, useCallback, useRef, useState, type ReactNode } from "react"
 import { ChevronRightIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -32,6 +32,8 @@ export function PendingContacts() {
   /* a handful of people is judged one by one: search, filter, ordering and the bulk buttons only once there are more
    * than BULK_FROM (and they stay while this list is open, so a bulk action that leaves few does not pull them away) */
   const bulkSeen = useRef(false)
+  const toggle = useCallback((id: string, on: boolean) => setSel((prev) => on ? (prev.includes(id) ? prev : [...prev, id]) : prev.filter((x) => x !== id)), [])
+  const onRowChanged = useCallback(() => { void reload() }, [reload])
   if (err) return <Empty title={t("people:pending.loadFailed")} sub={err.message} />
   if (!data) return <Loading />
   const ms = data.proposals, unk = data.unconfirmed, quiet = data.quiet ?? 0
@@ -51,10 +53,10 @@ export function PendingContacts() {
     toast(failed.length ? t("people:pending.partial", { done: ids.length - failed.length, total: ids.length }) : ok(ids.length))
   }
   const ignore = (ids: string[]) => batch(ids, (id) => people.patchContact(id, { kind: "virtual" }), (count) => tr("people:pending.ignoredN", { count }))
-  const toggle = (id: string, on: boolean) => setSel((prev) => on ? [...new Set([...prev, id])] : prev.filter((x) => x !== id))
   if (unk.length > BULK_FROM) bulkSeen.current = true
   const bulk = bulkSeen.current
   const groups: [string, PendingContact[]][] = !bulk || order === "active" ? [["", visible]] : bySpace(visible)
+  const selectedSet = new Set(sel)
   return (
     <div className="flex flex-col gap-6" data-pending>
       {ms.length > 0 && <section><SectionLabel>{t("people:pending.sameHead", { n: ms.length })}</SectionLabel><div className="flex flex-col gap-3">{ms.map((m) => <ProposalCard key={m.id} m={m} />)}</div></section>}
@@ -76,7 +78,7 @@ export function PendingContacts() {
         <div className="flex flex-col gap-4">{groups.map(([g, xs]) => (
           <div key={g || "all"} data-pending-group={g || undefined}>
             {g && <SectionLabel>{g === NEVER_SEEN ? t("people:pending.neverSeen") : g} · {xs.length}</SectionLabel>}
-            <Group>{xs.map((c) => <UnknownRow key={c.id} c={c} pick={bulk} checked={sel.includes(c.id)} onCheck={(v) => toggle(c.id, v)} busy={busy} onChanged={() => void reload()} />)}</Group>
+            <Group>{xs.map((c) => <UnknownRow key={c.id} c={c} pick={bulk} checked={selectedSet.has(c.id)} onCheck={toggle} busy={busy} onChanged={onRowChanged} />)}</Group>
           </div>))}</div>
         <div className="mt-3 type-footnote text-muted-foreground">{t("people:pending.note")}{quiet > 0 && " " + t("people:pending.quiet", { count: quiet })}</div>
       </section>}
@@ -96,7 +98,7 @@ function bySpace(xs: PendingContact[]): [string, PendingContact[]][] {
   return [...m.entries()].sort((a, b) => (a[0] === NEVER_SEEN ? 1 : b[0] === NEVER_SEEN ? -1 : b[1].length - a[1].length))
 }
 
-function UnknownRow({ c, pick, checked, onCheck, busy, onChanged }: { c: PendingContact; pick: boolean; checked: boolean; onCheck: (v: boolean) => void; busy: boolean; onChanged: () => void }) {
+const UnknownRow = memo(function UnknownRow({ c, pick, checked, onCheck, busy, onChanged }: { c: PendingContact; pick: boolean; checked: boolean; onCheck: (id: string, v: boolean) => void; busy: boolean; onChanged: () => void }) {
   const t = useT()
   const [merge, setMerge] = useState(false)
   const nameless = isNameless(c), label = labelOf(c), seen = c.seen
@@ -104,8 +106,8 @@ function UnknownRow({ c, pick, checked, onCheck, busy, onChanged }: { c: Pending
   return (
     <Row data-unconfirmed={label} data-nameless={nameless || undefined}
       icon={<span className="flex items-center gap-2.5">{/* a 28px target around the 16px box (WCAG 2.5.8) without moving the row: a click on the margin toggles it too */}
-        {pick && <span className="-m-1.5 grid cursor-pointer place-items-center p-1.5" onClick={(e) => { if (e.target === e.currentTarget && !busy) onCheck(!checked) }} data-pending-pick>
-          <Checkbox aria-label={t("people:pending.select", { name: label })} checked={checked} disabled={busy} onCheckedChange={(v) => onCheck(!!v)} /></span>}
+        {pick && <span className="-m-1.5 grid cursor-pointer place-items-center p-1.5" onClick={(e) => { if (e.target === e.currentTarget && !busy) onCheck(c.id, !checked) }} data-pending-pick>
+          <Checkbox aria-label={t("people:pending.select", { name: label })} checked={checked} disabled={busy} onCheckedChange={(v) => onCheck(c.id, !!v)} /></span>}
         <ActorAvatar actor={partyActor({ id: c.id, name: nameless ? "?" : label, avatar: c.avatar, unconfirmed: true })} size={32} /></span>}
       title={<span className="inline-flex min-w-0 items-center gap-1.5"><a href={"#/contacts/" + c.id} className="truncate hover:underline">{label}</a>{orgLine(c) && <span className="truncate type-footnote font-normal text-muted-foreground">{orgLine(c)}</span>}</span>}
       sub={<span className="flex min-w-0 flex-col gap-0.5">
@@ -120,7 +122,7 @@ function UnknownRow({ c, pick, checked, onCheck, busy, onChanged }: { c: Pending
       </span>
     </Row>
   )
-}
+})
 
 /* a proposal is answered through its decision when it has one (the Hub's handler merges and closes the card in 待处理);
  * without one, “合并” is the manual merge and “不是同一个人” has nothing to record, so it is not offered */

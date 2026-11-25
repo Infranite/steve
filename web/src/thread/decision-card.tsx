@@ -10,6 +10,7 @@ import { MODULE_CARDS } from "@/vault/decisions"
 import { MailDraftCard } from "@/mail/draft"
 import { CardTools, InlineDecision, isToolCall, mapDecision, ToolApproval } from "@/thread/decide"
 import { PeopleDecisionBody } from "@/people/pending"
+import { NoExecutorDecisionBody } from "@/bot-dispatch"
 
 export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?: Item["wait"] & {}; showItem?: boolean }) {
   const t = useT()
@@ -20,7 +21,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
     <CardHeader className="flex min-w-0 flex-col gap-2 pt-4 pb-3">
       <div className="flex w-full min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
       <CardDescription className="flex min-w-0 max-w-full items-center gap-2 type-footnote">
-        <StatusDot s={w.type === "propose" ? "prop" : w.type === "fail" ? "fail" : "wait"} /><span className="shrink-0 whitespace-nowrap font-medium text-foreground/80">{w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : WT[w.type]}</span>
+        <StatusDot s={w.type === "propose" ? "prop" : w.type === "fail" ? "fail" : "wait"} /><span className="shrink-0 whitespace-nowrap font-medium text-foreground/80">{w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : w.subject === "no_executor" ? t("core:wait.noExecutor") : WT[w.type]}</span>
         {showItem && (i.id ? <><span className="text-tertiary">·</span><a href={"#/items/" + i.id} className="min-w-0 truncate hover:text-foreground hover:underline"><span className="font-mono tabular-nums">{i.id}</span> {i.t}</a></>
           : w.session ? <><span className="text-tertiary">·</span><a href={"#/sessions/" + w.session} className="min-w-0 truncate hover:text-foreground hover:underline" data-orphan-session={w.session}>{t("core:card.sessionTitle", { title: i.t })}</a></> : null)}
       </CardDescription>
@@ -34,6 +35,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
   const foot = (c: ReactNode) => <CardFooter className="flex-wrap justify-end gap-2 bg-muted/50 px-4 py-3! dark:bg-muted/40">{c}</CardFooter>
   let body: ReactNode = null
   if (FLOW_SUBJECTS.includes(w.subject)) body = <FlowDecisionBody w={w} act={(c) => void act(c)} busy={busy} head={head} foot={foot} />
+  else if (w.subject === "no_executor") body = <NoExecutorDecisionBody w={w} act={act} busy={busy} head={head} foot={foot} />
   else if (w.type === "confirm" && w.subject === "mem") body = <>{head(memAsk(w.q))}<MemConfirm q={w.q} draft={w.draft} busy={busy} act={(c, t) => void act(c, t)} /></>
   else if (isPeopleDecision(w)) body = <>{head(w.q)}<PeopleDecisionBody w={w} busy={busy} act={(c) => void act(c)} /></>
   else if (w.subject === "mail_draft") body = <MailDraftCard w={w} act={act} busy={busy} head={head} foot={foot} />

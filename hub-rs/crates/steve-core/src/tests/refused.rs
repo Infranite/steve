@@ -96,7 +96,7 @@ fn a_bot_that_cannot_run_gets_no_session_and_one_clear_error() {
     let before = k.db().sessions_of_item(&ok.id).unwrap();
     assert_eq!(before.len(), 1);
     k.rt.st().cannot_run = Some(why.into());
-    let e = k.core.reassign(&ok.id, "dev", "me").unwrap_err();
+    let e = k.core.reassign(&ok.id, "steve", "me").unwrap_err();
     assert!(e.to_string().contains("模型接入"), "{e}");
     let after = k.db().sessions_of_item(&ok.id).unwrap();
     assert_eq!(after.len(), 1);

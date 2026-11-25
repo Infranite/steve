@@ -32,7 +32,7 @@ export type RQueued = { id: string; session_id?: string; text: string; via: stri
 /** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
 export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
-export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
+export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; owner?: string | null; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string } | null; archived: boolean; created: number; updated: number }
@@ -74,8 +74,8 @@ export type RNode = { node_id: string; name: string; fingerprint: string; state:
 /** A Node's latest sample and day of vitals. Network rates are bytes per second. */
 export type RVitals = import("./gen/NodeVitalsDay").NodeVitalsDay
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
-/** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
-/** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */
+/** remote Nodes over tailcat: `hub_url` is `tailcat:<address>:<port>` once it runs */
+/** a remote install over tailcat's SSH: the command for the target, then its steps */
 export type RInstall = { id: string; state: "waiting" | "running" | "done" | "failed"; command: string; steps: RInstallStep[]; node_id: string | null; error: string | null; failed_step?: RInstallKind | null; address?: string | null; created?: number; transfer_route?: "direct_observed" | "derp_observed" | null }
 export type RInstallKind = "probe" | "fetch" | "send" | "setup" | "done"
 /** fetch: download, cached (a copy fetched before, checked again) or verify; send: send; setup: install, pair, adapters, start */
@@ -83,7 +83,7 @@ export type RInstallProgress = { phase: string; done: number; total: number | nu
 /** a step of a remote install: `elapsed_ms` is up to now while it runs */
 export type RInstallStep = { kind: RInstallKind; at: number; text: string; ended?: number | null; elapsed_ms?: number; progress?: RInstallProgress | null; transfer_ms?: number; unpack_ms?: number }
 export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
-/* `custom`: an adapter the Hub's harness manifest adds (harness parity S1), with `error` and `install_hint` when it has them */
+/* `custom`: an adapter declared by the Hub's harness manifest, with `error` and `install_hint` when it has them */
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
@@ -105,8 +105,6 @@ export type RRuntime = {
     }[]
     can_install: boolean; reason?: string | null; help?: string | null; error?: string | null
   }
-  /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
-  update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
 }
 export type RSubagentCapability = "acp_rfd" | "tool_fallback" | "none"
 export type RBackgroundTaskCapability = "acp_rfd" | "tool_fallback" | "none"
@@ -175,7 +173,7 @@ export type Shell = {
   modules: OptionalModules
   version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null
   me?: MemberIdentity | null; members?: MemberIdentity[]
-  workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
+  workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; owner?: string | null; workspaces: string[] }[]
   projects: RProject[]; tags: RTag[]; settings: Record<string, string>
   harnessNames?: Record<string, string>
   notifySeen?: number
@@ -429,7 +427,7 @@ export const api = {
   undo: (id: string, revision: number) => post<DecisionAnswer>(`/decisions/${id}/undo`, { revision }),
   dismiss: (id: string, revision: number) => post<DecisionAnswer>(`/decisions/${id}/dismiss`, { revision }),
   newBot: (p: Partial<RBot> & { name: string }) => post<RBot>("/bots", p), draftBot: (desc: string) => post<RBot>("/bots/draft", { desc }), patchBot: (id: string, p: Partial<RBot>) => patch<RBot>("/bots/" + id, p),
-  botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
+  botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), removeBotFromWorkspace: (id: string, to: string, memory: "delete" | "export" | "keep") => del<{ moved: string[]; memories: any[]; removed_workspace: string }>(`/bots/${id}/workspace`, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
   botPrompt: (id: string) => get<{ generated: string; custom: string | null }>(`/bots/${id}/prompt`), memories: (id: string) => get<{ id: string; text: string; source: string; created: number }[]>(`/bots/${id}/memories`),
   addMemory: (id: string, text: string) => post(`/bots/${id}/memories`, { text }), editMemory: (id: string, text: string) => patch(`/memories/${id}`, { text }), deleteMemory: (id: string) => del(`/memories/${id}`), clearMemories: () => del("/memories"),
   newProject: (p: NewProjectInput) => post<RProject>("/projects", p),
@@ -446,9 +444,12 @@ export const api = {
   /** Installs only this registry entry's declared components, on its Node. */
   installHarness: (id: string) => post<{ accepted: boolean; restart?: boolean }>("/system/harnesses/" + encodeURIComponent(id) + "/install"),
   harnessUpdates: (node: string, fresh = false) => get<import("./harness-update-status").HarnessUpdates>("/node-harness-updates/" + encodeURIComponent(node) + (fresh ? "?fresh=1" : "")),
-  upgradeHarness: (node: string, harness: string, operation: string, versions: Record<string, string>, retry_unknown = false) => post<{ receipt: import("./harness-update-status").HarnessReceipt }>("/node-harness-updates/" + encodeURIComponent(node) + "/" + encodeURIComponent(harness), { operation, versions, retry_unknown }),
+  upgradeHarness: (node: string, harness: string, operation: string, versions: Record<string, string>, retry_unknown = false, self_update: string[] = []) =>
+    post<import("./harness-update-status").UpgradeHarnessResponse>("/node-harness-updates/" + encodeURIComponent(node) + "/" + encodeURIComponent(harness), { operation, versions, self_update, retry_unknown }),
+  setHarnessAutoUpgrade: (node: string, body: import("./harness-update-status").SetHarnessAutoUpgrade) =>
+    req<import("./harness-update-status").HarnessAutoUpgradePolicy>("PUT", "/node-harness-updates/" + encodeURIComponent(node) + "/auto-upgrade", body),
   /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
-  addHarness: (p: { id: string; name?: string; command: string; args?: string[]; env?: Record<string, string>; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
+  addHarness: (p: { id: string; name?: string; command: string; args?: string[]; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),
   /** `off`: this Hub does not listen for remote Nodes (STEVE_NODE_LISTEN=0, or a read-only copy) */
   nodes: () => get<{ nodes: RNode[]; off?: boolean }>("/nodes"),

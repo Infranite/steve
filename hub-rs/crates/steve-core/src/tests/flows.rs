@@ -33,7 +33,16 @@ fn last_session(k: &Kit, item: &str) -> crate::repo::Session {
 #[test]
 fn create_item_starts_a_session_in_a_scratch_dir_with_the_protocol() {
     let k = Kit::new();
-    let i = new_item(&k, "写一首诗");
+    let i = k
+        .core
+        .create_item(CreateItem {
+            ws: WS.into(),
+            goal: "写一首诗".into(),
+            title: "标题".into(),
+            bot: Some("steve".into()),
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(i.id, "ST-1");
     assert_eq!(i.phase, steve_types::ItemPhase::Active);
     assert_eq!(i.bot_id.as_deref(), Some("steve"));
@@ -253,6 +262,7 @@ fn a_git_project_gets_a_worktree_on_the_item_branch() {
             ws: WS.into(),
             goal: "g".into(),
             title: "x".into(),
+            bot: Some("steve".into()),
             project: Some(Some(p.id)),
             ..Default::default()
         })
@@ -292,6 +302,7 @@ fn a_missing_project_dir_is_a_fail_card() {
             ws: WS.into(),
             goal: "g".into(),
             title: "x".into(),
+            bot: Some("steve".into()),
             project: Some(Some(p.id)),
             ..Default::default()
         })
@@ -1253,7 +1264,7 @@ fn reassign_checks_the_workspace() {
             .to_string(),
         "这个 Bot 不在当前工作空间"
     );
-    let same = k.core.reassign(&i.id, "steve", "me").unwrap();
+    let same = k.core.reassign(&i.id, "dev", "me").unwrap();
     assert_eq!(
         k.db().sessions_of_item(&same.id).unwrap().len(),
         1,
@@ -1261,12 +1272,12 @@ fn reassign_checks_the_workspace() {
     );
     let s = only_session(&k, &i.id);
     let d = k.decision(&i.id, Some(&s.id), "ask", "question", &[]);
-    k.core.reassign(&i.id, "dev", "me").unwrap();
+    k.core.reassign(&i.id, "steve", "me").unwrap();
     assert_eq!(
         k.db().decision(&d).unwrap().unwrap().result,
         json!({"reassigned": true})
     );
-    assert_eq!(last_session(&k, &i.id).bot_id.as_deref(), Some("dev"));
+    assert_eq!(last_session(&k, &i.id).bot_id.as_deref(), Some("steve"));
 }
 
 /// B4 / D2: a reassign mid-turn is a handoff into the same worktree. The old turn is stopped and
@@ -1282,14 +1293,14 @@ fn a_reassign_mid_turn_waits_for_the_old_release() {
         s.id.clone(),
         crate::Released::Pending("op_release_1".into()),
     );
-    k.core.reassign(&i.id, "dev", "me").unwrap();
+    k.core.reassign(&i.id, "steve", "me").unwrap();
     assert!(
         k.rt.st().cancelled.contains(&s.id),
         "the old turn is stopped"
     );
     let s2 = last_session(&k, &i.id);
     assert_ne!(s2.id, s.id);
-    assert_eq!(s2.bot_id.as_deref(), Some("dev"));
+    assert_eq!(s2.bot_id.as_deref(), Some("steve"));
     assert_eq!(
         k.rt.st().created.last().unwrap(),
         &(s2.id.clone(), Some("op_release_1".to_string()))
@@ -1480,14 +1491,14 @@ fn deleting_a_bot_hands_its_items_over() {
     let k = Kit::new();
     assert_eq!(
         k.core
-            .delete_bot("steve", "dev", "me")
+            .delete_bot("steve", "dev", "me", &[WS.into()])
             .unwrap_err()
             .to_string(),
         "主 Bot 不能删除"
     );
     assert_eq!(
         k.core
-            .delete_bot("dev", "dev", "me")
+            .delete_bot("dev", "dev", "me", &[WS.into()])
             .unwrap_err()
             .to_string(),
         "没有接手的 Bot"
@@ -1515,7 +1526,10 @@ fn deleting_a_bot_hands_its_items_over() {
     k.core
         .item_action(&paused.id, ItemAction::Pause, "me")
         .unwrap();
-    let moved = k.core.delete_bot("dev", "steve", "me").unwrap();
+    let moved = k
+        .core
+        .delete_bot("dev", "steve", "me", &[WS.into()])
+        .unwrap();
     assert_eq!(moved.len(), 2);
     assert_eq!(
         last_session(&k, &running.id).bot_id.as_deref(),
@@ -1537,6 +1551,107 @@ fn deleting_a_bot_hands_its_items_over() {
     assert!(
         k.timeline_texts(&running.id)
             .contains(&"Steve 开发 Bot 已删除，交给 Steve".to_string())
+    );
+}
+
+#[test]
+fn removing_bot_from_one_workspace_preserves_other_workspaces_and_refuses_foreign_global_delete() {
+    let k = Kit::new();
+    let owner_id = k
+        .db()
+        .store()
+        .users()
+        .create("sub_owner", "Owner", None, "owner")
+        .unwrap();
+    let ws2 = k
+        .db()
+        .store()
+        .workspaces()
+        .create(
+            &steve_store::NewWorkspace {
+                name: "Second".into(),
+                ..Default::default()
+            },
+            &owner_id,
+        )
+        .unwrap()
+        .id;
+    let mut steve_wss = k.db().bot_workspaces("steve").unwrap();
+    steve_wss.push(ws2.clone());
+    k.db()
+        .store()
+        .bots()
+        .set_workspaces("steve", &steve_wss)
+        .unwrap();
+    k.db()
+        .store()
+        .bots()
+        .set_workspaces("dev", &[WS.to_string(), ws2.clone()])
+        .unwrap();
+
+    let item_ws1 = k
+        .core
+        .create_item(CreateItem {
+            ws: WS.into(),
+            goal: "g1".into(),
+            title: "x1".into(),
+            bot: Some("dev".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let item_ws2 = k
+        .core
+        .create_item(CreateItem {
+            ws: ws2.clone(),
+            goal: "g2".into(),
+            title: "x2".into(),
+            bot: Some("dev".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Global delete must refuse if allowed_workspaces does not cover every workspace of the bot.
+    let err = k
+        .core
+        .delete_bot("dev", "steve", "me", &[WS.to_string()])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::CoreError::Contract(ref e)
+                if e.reason
+                    .as_ref()
+                    .is_some_and(|r| r.is(steve_types::ConfigReason::BotForeignWorkspaces))
+        ),
+        "unexpected err: {err:?}"
+    );
+
+    // Removing `dev` from `ws2` only hands over `item_ws2` and leaves `WS` untouched.
+    let moved = k
+        .core
+        .remove_bot_from_workspace(&ws2, "dev", "steve", "me")
+        .unwrap();
+    assert_eq!(moved, vec![item_ws2.id.clone()]);
+    assert!(k.db().bot("dev").unwrap().is_some());
+    assert!(!k.db().bot_in_workspace("dev", &ws2).unwrap());
+    assert!(k.db().bot_in_workspace("dev", WS).unwrap());
+    assert_eq!(
+        k.db()
+            .item(&item_ws1.id)
+            .unwrap()
+            .unwrap()
+            .bot_id
+            .as_deref(),
+        Some("dev")
+    );
+    assert_eq!(
+        k.db()
+            .item(&item_ws2.id)
+            .unwrap()
+            .unwrap()
+            .bot_id
+            .as_deref(),
+        Some("steve")
     );
 }
 

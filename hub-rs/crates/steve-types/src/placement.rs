@@ -1,7 +1,10 @@
 //! Recorded Bot selection. Execution identity is reported independently by the session.
 use serde::{Deserialize, Serialize};
 
-use crate::{BotId, Millis, NodeId};
+use crate::{BotId, ItemId, Millis, NodeId};
+
+/// Decision `subject_type` for workspace-scoped "no eligible executor Bot" cards.
+pub const NO_EXECUTOR: &str = "no_executor";
 
 macro_rules! placement_reasons {
     ($($variant:ident => $code:literal),+ $(,)?) => {
@@ -50,8 +53,58 @@ pub enum PlacementReason {
     Description,
     ProjectPreference,
     StableOrder,
-    SteveFallback,
+    CoordinatorDeferred,
     ExistingAssignment,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum CoordinatorDeferSource {
+    Card,
+    Setting,
+}
+
+impl CoordinatorDeferSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Card => "card",
+            Self::Setting => "setting",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum NoExecutorPolicy {
+    #[default]
+    Ask,
+    Steve,
+}
+
+impl NoExecutorPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Steve => "steve",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ask" => Some(Self::Ask),
+            "steve" => Some(Self::Steve),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NoExecutorItem {
+    pub id: ItemId,
+    pub title: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +135,9 @@ pub struct PlacementExplanation {
     pub matched: Vec<String>,
     pub rejected: Vec<PlacementBlocker>,
     pub fallback: Option<PlacementRejection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub deferred_by: Option<CoordinatorDeferSource>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,7 +175,7 @@ pub struct ProposalTeam {
     pub name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfirmBotProposal {
     pub expected_revision: u32,
     pub name: String,

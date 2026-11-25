@@ -144,7 +144,12 @@ impl StepWrite {
             let node_name = &self.node_name;
             let now = self.now;
             let err = output["error"].as_str().filter(|_| *status == "failed");
-            self.add(tx, r, status, output, branch.as_deref(), err)?;
+            let step_status = if effects.skipped && *status == "ok" {
+                "skipped"
+            } else {
+                status
+            };
+            self.add(tx, r, step_status, output, branch.as_deref(), err)?;
             if let Some(b) = &unrouted
                 && r.outcome_label.is_empty()
                 && effects.label.is_none()
@@ -159,7 +164,7 @@ impl StepWrite {
                 r.attempts = 0;
                 r.retry_at = None;
                 if to.is_none() {
-                    r.status = "done".into();
+                    r.status = if effects.skipped { "skipped" } else { "done" }.into();
                     r.ended = Some(now);
                     r.error = None;
                 }

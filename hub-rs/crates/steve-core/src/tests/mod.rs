@@ -3,6 +3,7 @@
 
 mod changes;
 mod conversations;
+mod coordinator;
 mod cycle;
 mod dependencies;
 mod flows;

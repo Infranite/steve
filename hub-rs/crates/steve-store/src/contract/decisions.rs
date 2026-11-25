@@ -103,7 +103,7 @@ pub fn delivery_summary(c: &mut impl Read, item: &str) -> Result<Option<String>>
     )
 }
 
-const COLUMNS: [&str; 20] = [
+const COLUMNS: [&str; 24] = [
     "id",
     "workspace_id",
     "kind",
@@ -123,9 +123,14 @@ const COLUMNS: [&str; 20] = [
     "revision",
     "source_revision",
     "question_template",
+    "wait_owner",
+    "wait_started_at",
+    "wait_deadline",
+    "wait_on_timeout",
     "resolved_by",
 ];
 fn decode(r: &Row<'_>) -> Result<Decision> {
+    let wait = crate::wait_repo::decode_contract(r.get(19)?, r.get(20)?, r.get(21)?, r.get(22)?)?;
     Ok(Decision {
         id: r.get(0)?,
         revision: r.get(16)?,
@@ -154,7 +159,8 @@ fn decode(r: &Row<'_>) -> Result<Decision> {
         undo: r
             .get::<Option<Json<DecisionUndo>>>(15)?
             .map(|value| value.0),
-        resolved_by: r.get(19)?,
+        resolved_by: r.get(23)?,
+        wait,
     })
 }
 
@@ -277,6 +283,9 @@ impl DecisionRows<'_, W<'_>> {
             .transpose()?;
         let started = std::time::Instant::now();
         let id = uid("dec");
+        let created = now();
+        let wait = crate::wait_repo::default_decision_contract(self.0, d, created)?;
+        let wait_owner = wait.owner.to_code();
         let options = serde_json::to_string(d.options.as_deref().unwrap_or_default())?;
         let mut insert = Query::insert();
         insert
@@ -297,6 +306,10 @@ impl DecisionRows<'_, W<'_>> {
                 "created",
                 "source_revision",
                 "question_template",
+                "wait_owner",
+                "wait_started_at",
+                "wait_deadline",
+                "wait_on_timeout",
             ])
             .values_panic([
                 id.as_str().into(),
@@ -311,9 +324,13 @@ impl DecisionRows<'_, W<'_>> {
                 options.into(),
                 "open".into(),
                 d.requested_by.as_str().into(),
-                now().into(),
+                created.into(),
                 source.as_deref().into(),
                 template.as_deref().into(),
+                wait_owner.as_str().into(),
+                wait.started_at.0.into(),
+                wait.deadline.0.into(),
+                wait.on_timeout.as_str().into(),
             ]);
         if source.is_some() {
             insert.on_conflict(
@@ -351,6 +368,29 @@ impl DecisionRows<'_, W<'_>> {
         metrics::histogram!("steve_decision_transition_seconds", "operation" => "created")
             .record(started.elapsed());
         Ok((d, true))
+    }
+
+    /// Updates the structured prompt template and options of an open decision in place.
+    pub fn update_template(
+        &mut self,
+        id: &str,
+        template: &steve_types::DecisionPrompt,
+        options: &[String],
+    ) -> Result<bool> {
+        let updated = self.0.exec(
+            Query::update()
+                .table("decisions")
+                .value("question", "")
+                .value("question_template", serde_json::to_string(template)?)
+                .value("options", serde_json::to_string(options)?)
+                .and_where(Expr::col("id").eq(id))
+                .and_where(Expr::col("status").eq("open")),
+        )?;
+        if updated != 0 {
+            let d = crate::repo::must(self.get(id)?)?;
+            emit(self.0, &d);
+        }
+        Ok(updated != 0)
     }
 
     /// Writes the card shown to the user in the same transaction as the checked draft.
@@ -438,23 +478,33 @@ impl DecisionRows<'_, W<'_>> {
             return Ok(false);
         };
         let reopening = to == DecisionStatus::Open;
+        let at = now();
         let actor = (!reopening)
             .then_some(resolved_by)
             .flatten()
             .map(str::to_owned);
-        let n = self.0.exec(
-            Query::update()
-                .table("decisions")
-                .value("status", to.as_str())
-                .value("result", (!result.is_null()).then(|| result.to_string()))
-                .value("resolved", (!reopening).then(now))
-                .value("undo", undo.map(serde_json::to_string).transpose()?)
-                .value("resolved_by", actor)
-                .value("revision", decision.revision + i64::from(reopening))
-                .and_where(Expr::col("id").eq(decision.id.as_str()))
-                .and_where(Expr::col("revision").eq(decision.revision))
-                .and_where(Expr::col("status").eq(decision.status.as_str())),
-        )?;
+        let mut update = Query::update();
+        update
+            .table("decisions")
+            .value("status", to.as_str())
+            .value("result", (!result.is_null()).then(|| result.to_string()))
+            .value("resolved", (!reopening).then_some(at))
+            .value("undo", undo.map(serde_json::to_string).transpose()?)
+            .value("resolved_by", actor)
+            .value("revision", decision.revision + i64::from(reopening))
+            .and_where(Expr::col("id").eq(decision.id.as_str()))
+            .and_where(Expr::col("revision").eq(decision.revision))
+            .and_where(Expr::col("status").eq(decision.status.as_str()));
+        if reopening {
+            let span = std::cmp::max(
+                decision.wait.deadline.0 - decision.wait.started_at.0,
+                steve_types::wait::WAIT_LIMIT_MIN_MS,
+            );
+            update
+                .value("wait_started_at", at)
+                .value("wait_deadline", at.saturating_add(span));
+        }
+        let n = self.0.exec(&update)?;
         if n > 0 {
             if matches!(change, DecisionChange::Expire | DecisionChange::Supersede) {
                 let action = if change == DecisionChange::Expire {

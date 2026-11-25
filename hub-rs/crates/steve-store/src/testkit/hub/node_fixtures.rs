@@ -706,12 +706,21 @@ pub fn midturn_event_count(store: &Store, session: &str) -> Result<i64> {
 pub fn block_tools_for_prerequisite(store: &Store, paused: bool) -> Result<()> {
     store.write(|tx| {
         if paused {
-            tx.conn.execute("DELETE FROM item_dependency_waits WHERE item_id='i1'", [])?;
-            tx.conn.execute("UPDATE items SET phase='paused' WHERE id='i1'", [])?;
+            tx.conn
+                .execute("DELETE FROM item_dependency_waits WHERE item_id='i1'", [])?;
+            tx.conn
+                .execute("UPDATE items SET phase='paused' WHERE id='i1'", [])?;
         } else {
             tx.conn.execute(
-                "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated) VALUES('i1',1,NULL,'workspace','','waiting',1,1)",
-                [],
+                "INSERT INTO item_dependency_waits(
+                   item_id,cycle,session_id,resume,reason,state,created,updated,
+                   wait_owner,wait_started_at,wait_deadline,wait_on_timeout
+                 ) VALUES('i1',1,NULL,'workspace','','waiting',1,1,?1,1,?2,?3)",
+                rusqlite::params![
+                    steve_types::WaitOwner::system("dependencies").to_code(),
+                    1 + steve_types::wait::WAIT_LIMIT_DEPENDENCY_MS,
+                    steve_types::WaitTimeoutAction::EscalateToOwner.as_str(),
+                ],
             )?;
         }
         Ok(())

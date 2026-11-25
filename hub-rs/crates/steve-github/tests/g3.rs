@@ -298,6 +298,7 @@ fn item(h: &H, no: i64, branch: Option<&str>) -> String {
                 requested_by: "steve".into(),
                 question_template: None,
                 source: None,
+                wait: None,
             })
         })
         .expect("accept decision");
@@ -321,6 +322,7 @@ fn request_open(h: &H, id: &str) {
                 requested_by: "bot".into(),
                 question_template: None,
                 source: None,
+                wait: None,
             })
         })
         .unwrap();

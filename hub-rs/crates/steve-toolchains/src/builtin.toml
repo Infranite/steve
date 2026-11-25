@@ -1,4 +1,4 @@
-# Steve's built-in toolchain definitions (path model §6.5.2). Data only: the code that reads this knows
+# Steve's built-in toolchain definitions. Data only: the code that reads this knows
 # no tool by name. A Node's or a workspace's definitions may add to or override them by id.
 #
 # detect    marker files (a `*` matches any run of characters), at the repository root or one level down
@@ -9,7 +9,7 @@
 #           env + value: the variable that moves it and what it is set to ({item} = the item's
 #           .steve/build/<id>, {person} = that person's cache for <id>); in_tree: where it stays
 #           when it is not moved. disposable: a whole directory that is only a cache, safe to give
-#           back when the disk is low (what ST-45 frees)
+#           back when the disk is low
 # env       what Steve sets besides
 # options   what a project may switch, each with its variables and default
 #

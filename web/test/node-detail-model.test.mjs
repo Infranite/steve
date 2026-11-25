@@ -147,6 +147,60 @@ test("nodeActionItems handles offline, upgrading, pending and revoked cleanly", 
   assert.deepEqual(nodeActionItems(view({ state: "revoked", linked: false })), [])
 })
 
+test("nodeActionItems surfaces available harness updates with shared upgrade command and session count", () => {
+  const harnessUpdates = {
+    report: {
+      node: "n-1",
+      checking: false,
+      harnesses: [
+        {
+          harness: "h-brew",
+          name: "Brew Runtime",
+          can_upgrade: true,
+          active_sessions: 2,
+          components: [
+            {
+              id: "cli",
+              name: "Brew CLI",
+              managed: false,
+              source: "homebrew_cask",
+              upgrade_method: "homebrew_cask",
+              upgrade_command: "brew upgrade --cask fixture",
+              can_upgrade: true,
+              state: "available",
+              installed: "1.0.0",
+              latest: "2.0.0",
+            },
+          ],
+        },
+      ],
+    },
+    at: NOW,
+    runs: {},
+    retryable_unknown: [],
+    auto_upgrade: { enabled: false, harnesses: {} },
+    error: null,
+    code: null,
+  }
+  const ownerItems = nodeActionItems(view(), {
+    hubVersion: "0.2.112",
+    harnessUpdates,
+    canUpgradeHarness: true,
+  })
+  assert.deepEqual(
+    ownerItems.map((i) => ({ kind: i.kind, tone: i.tone, tab: i.tab, command: i.command, count: i.count, names: i.names, running: i.running })),
+    [{ kind: "harnessUpdatesAvailable", tone: "warn", tab: "harness", command: "upgradeHarnesses", count: 1, names: ["Brew Runtime"], running: 2 }],
+  )
+  const memberItems = nodeActionItems(view(), {
+    hubVersion: "0.2.112",
+    harnessUpdates,
+    canUpgradeHarness: false,
+  })
+  assert.equal(memberItems[0].command, "openTab")
+  const badges = nodeTabBadges(view(), ownerItems, { activeSessions: 2, harnessReadyCount: 1 })
+  assert.deepEqual(badges.harness, { count: 1, tone: "warn" })
+})
+
 test("nodeDiagnosticSnapshot produces sanitized read-only state matching vitals and harness summaries", () => {
   const snap = nodeDiagnosticSnapshot(view(), {
     hubVersion: "0.2.112",

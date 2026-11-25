@@ -469,20 +469,102 @@ async fn take_offer_with_team_worker(enabled: bool) {
     } else {
         assert_eq!(detail["dispatch"]["blocked"]["reason"], "bot", "{detail}");
         assert!(store.sessions().of_item(item).unwrap().is_empty());
+        // Steve opened one workspace-scoped AskOwner no_executor decision card covering this item.
+        let (s, snap) = e.call("GET", "/api/snapshot?kinds=decision", None).await;
+        assert_eq!(s, 200, "{snap}");
+        let no_exec: Vec<&Value> = snap["views"]["decision"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["subject_type"] == "no_executor" && d["status"] == "open")
+            .collect();
+        assert_eq!(no_exec.len(), 1, "{snap}");
+        assert_eq!(no_exec[0]["question"]["template"]["code"], "no_executor");
+        assert_eq!(no_exec[0]["question"]["template"]["items"][0]["id"], item);
+
+        // Hub rejects adding main bot ("steve") into Team members with a typed reason.
+        let (s, bad_team) = e
+            .call(
+                "POST",
+                "/api/bot-teams",
+                Some(json!({
+                    "name":"Bad Team", "members":[{"bot":"steve","nodes":null}]
+                })),
+            )
+            .await;
+        assert_eq!(s, 400, "{bad_team}");
+        assert_eq!(
+            bad_team["reason"], "config.team_member_main_bot",
+            "{bad_team}"
+        );
+        let (s, bad_update) = e
+            .call(
+                "PUT",
+                &format!("/api/bot-teams/{}", team["id"].as_str().unwrap()),
+                Some(json!({
+                    "name":"Team", "members":[{"bot":bot,"nodes":null},{"bot":"steve","nodes":null}]
+                })),
+            )
+            .await;
+        assert_eq!(s, 400, "{bad_update}");
+        assert_eq!(
+            bad_update["reason"], "config.team_member_main_bot",
+            "{bad_update}"
+        );
+
         let (s, again) = e.call("POST", &path, Some(json!({"take":true}))).await;
         assert_eq!(s, 409, "{again}");
         assert_eq!(again["item"]["id"], item);
+
+        // Explicit selection of Steve remains allowed even when a default Team is active,
+        // while an ordinary Bot outside the Team is still refused with outside_team.
+        let (s, explicit_steve) = e
+            .call(
+                "POST",
+                "/api/items",
+                Some(json!({
+                    "title":"Explicit Steve", "goal":"Coordinate", "project":null, "bot":"steve"
+                })),
+            )
+            .await;
+        assert_eq!(s, 200, "{explicit_steve}");
+        assert_eq!(explicit_steve["bot_id"], "steve");
+        let (s, outsider_bot) = e
+            .call(
+                "POST",
+                "/api/bots",
+                Some(json!({
+                    "name":"Outsider", "harness":"claude-code", "perm_mode":"plan"
+                })),
+            )
+            .await;
+        assert_eq!(s, 200, "{outsider_bot}");
         let (s, strict) = e
             .call(
                 "POST",
                 "/api/items",
                 Some(json!({
-                    "title":"Explicit Bot", "goal":"Work", "project":null, "bot":"steve"
+                    "title":"Explicit Outsider", "goal":"Work", "project":null,
+                    "bot": outsider_bot["id"].as_str().unwrap()
                 })),
             )
             .await;
         assert_eq!(s, 409, "{strict}");
         assert_eq!(strict["placement"]["reason"], "outside_team", "{strict}");
+
+        // Workspace setting noExecutor can be toggled by owner via PATCH /api/settings.
+        let (s, v) = e
+            .call(
+                "PATCH",
+                "/api/settings",
+                Some(json!({"noExecutor":"steve"})),
+            )
+            .await;
+        assert_eq!(s, 200, "{v}");
+        let (s, v) = e
+            .call("PATCH", "/api/settings", Some(json!({"noExecutor":"ask"})))
+            .await;
+        assert_eq!(s, 200, "{v}");
 
         let (s, v) = e
             .call("PATCH", &bot_path, Some(json!({"enabled":true})))

@@ -1,5 +1,5 @@
 {
-  "core.thread.choose_execution_bot": "事项尚未分配。请在事项详情选择合格的 Bot，必要时检查 Team 与 Node 设置。",
+  "core.thread.choose_execution_bot": "当前没有合格的执行 Bot，Steve 已在待处理中发卡询问如何处理。",
   "core.bot.invalid_selection": "Bot 配置值无效：%{field}",
   "core.bot.unsupported_selection": "%{harness} 未提供 %{field} `%{value}`；请选择实报值或重置为默认（null）。",
   "core.item.closed": "这个事项已经结束了，需要时先新建周期",
@@ -116,6 +116,8 @@
   "core.draft.value.pro_low": "只在必要时",
   "core.draft.value.pro_mid": "适中",
   "core.draft.value.pro_high": "积极",
+  "core.draft.value.no_executor_ask": "问我",
+  "core.draft.value.no_executor_steve": "Steve 自己做",
   "core.draft.value.acc_inherit": "跟随全局",
   "core.draft.value.acc_manual": "需要你验收",
   "core.draft.value.acc_auto": "自动验收",
@@ -175,6 +177,7 @@
   "core.draft.setting.home": "打开时进入",
   "core.draft.setting.awayH": "离开期间汇报",
   "core.draft.setting.tz": "时区",
+  "core.draft.setting.noExecutor": "无人可接时",
   "core.draft.setting.accDefault": "默认验收方式",
   "core.draft.setting.depsAfter": "前置完成后",
   "core.draft.setting.handoff": "交接阈值",

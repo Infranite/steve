@@ -427,7 +427,7 @@ function JobDialog({ c, onClose, onSaved }: { c: Contact; onClose: () => void; o
   }
   return <Dialog open onOpenChange={(v) => !v && !busy && onClose()}><DialogContent>
     <DialogHeader><DialogTitle>{t("people:job.title")}</DialogTitle><DialogDescription>{t("people:job.desc")}</DialogDescription></DialogHeader>
-    <div className="flex flex-col gap-1.5 type-callout font-medium">{t("people:shared.org")}<Select size="default" label={t("people:job.orgAria")} className="w-full font-normal" value={orgId} onChange={choose} placeholder={t("people:job.pickOrg")} options={(orgs.data ?? []).map((o) => ({ v: o.id, l: o.name }))} /></div>
+    <div className="flex flex-col gap-1.5 type-callout font-medium">{t("people:shared.org")}<Select size="default" label={t("people:job.orgAria")} className="w-full font-normal" value={orgId} onChange={choose} placeholder={t("people:job.pickOrg")} disabled={busy || !orgs.data?.length} options={(orgs.data ?? []).map((o) => ({ v: o.id, l: o.name }))} /></div>
     {orgs.err && <p role="alert" className="type-callout text-destructive">{t("people:job.orgFailed", { msg: orgs.err.message })}</p>}
     <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:job.dept")}<Input aria-label={t("people:job.dept")} value={dept} onChange={(e) => setDept(e.target.value)} maxLength={80} /></label>
     <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:job.position")}<Input aria-label={t("people:job.position")} value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} /></label>

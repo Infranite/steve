@@ -232,6 +232,9 @@ impl Repo for StoreBackend {
     fn bot_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.bots().get(id).map_err(err)?)
     }
+    fn bot_owner(&self, id: &str) -> BResult<Option<Option<String>>> {
+        self.0.bots().owner(id).map_err(err)
+    }
     fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
         Ok(self
             .0
@@ -345,6 +348,12 @@ impl Repo for StoreBackend {
     }
     fn memories_delete_of_bot(&self, bot: &str) -> BResult<()> {
         self.0.memories().remove_of_bot(bot).map_err(err)
+    }
+    fn memories_delete_of_bot_in_workspace(&self, bot: &str, ws: &str) -> BResult<()> {
+        self.0
+            .memories()
+            .remove_of_bot_in_workspace(bot, ws)
+            .map_err(err)
     }
 
     fn tags_list(&self, ws: &str) -> BResult<Vec<Obj>> {

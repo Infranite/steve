@@ -6,7 +6,6 @@
 //! Every command runs in a temp dir created here.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -16,12 +15,12 @@ use data_encoding::BASE64;
 use serde_json::{Value, json};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
 use steve_modules::vault::grants::GRANT_HIGH;
-use steve_modules::vault::inject::{CWD_OUTSIDE, secrets_root};
+use steve_modules::vault::inject::CWD_OUTSIDE;
 use steve_modules::vault::items::{NewField, NewItem};
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::vault::mcp::{self, ToolOut};
 use steve_modules::vault::r#use::{NO_SUCH, SUBJECT, denied_message};
-use steve_modules::vault::{SecretUses, SessionSink, UseCx, Vault, use_api};
+use steve_modules::vault::{SecretUses, SessionSink, UseCx, Vault, VaultError, use_api};
 use steve_modules::{Modules, Registry, decisions};
 use steve_store::secret_uses::{SecretUses as UseRows, UseRecord};
 use steve_store::testkit::vault as fixtures;
@@ -107,13 +106,13 @@ impl Sink {
 struct Env {
     env: TestEnv,
     _keys: TempDir,
-    home: TempDir,
     work: TempDir,
     vault: Vault,
     uses: SecretUses,
     modules: Modules,
     sink: Arc<Sink>,
     r: Router,
+    nodes: Option<Arc<FakeNodes>>,
 }
 
 fn field(label: &str, kind: &str, value: &str) -> NewField {
@@ -127,10 +126,17 @@ fn field(label: &str, kind: &str, value: &str) -> NewField {
 
 impl Env {
     fn new() -> Self {
+        let mut e = Self::new_without_nodes();
+        let nodes = Arc::new(FakeNodes::new(true));
+        e.uses.set_nodes(nodes.clone());
+        e.nodes = Some(nodes);
+        e
+    }
+
+    fn new_without_nodes() -> Self {
         LazyLock::force(&LOGS);
         let env = TestEnv::new(|_| {});
         let keys = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(work.path().join("sub")).unwrap();
         let store = env.store().clone();
@@ -140,7 +146,7 @@ impl Env {
         );
         vault.init(WS, ME).unwrap();
         let sink = Arc::new(Sink::default());
-        let uses = SecretUses::new(vault.clone(), home.path(), sink.clone());
+        let uses = SecretUses::new(vault.clone(), sink.clone());
         let mut reg = Registry::new();
         reg.decision(SUBJECT, uses.decision_handler());
         let modules = Modules::new(store.clone(), env.gateway.clone(), reg);
@@ -161,13 +167,13 @@ impl Env {
         Self {
             env,
             _keys: keys,
-            home,
             work,
             vault,
             uses,
             modules,
             sink,
             r,
+            nodes: None,
         }
     }
 
@@ -266,20 +272,10 @@ impl Env {
             .expect("handled")
             .map_err(|e| format!("{} {e}", e.status()))
     }
-
-    fn temp_root(&self) -> PathBuf {
-        secrets_root(self.home.path())
-    }
 }
 
 fn use_args(item: &str, cmd: &str) -> Value {
     json!({"item": item, "purpose": "推送分支 fix/return-to", "command": cmd, "env": {"GH_TOKEN": "令牌"}})
-}
-
-fn dir_empty(p: &Path) -> bool {
-    std::fs::read_dir(p)
-        .map(|mut d| d.next().is_none())
-        .unwrap_or(true)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -315,7 +311,7 @@ async fn ask_then_grant_then_direct_run() {
         d.options,
         ["once", "grant_1h", "grant_8h", "grant_24h", "deny"]
     );
-    let workdir = e.work.path().canonicalize().unwrap();
+    let workdir = e.work.path();
     assert_eq!(
         d.draft,
         format!(
@@ -327,15 +323,18 @@ async fn ask_then_grant_then_direct_run() {
     assert_eq!(status, "pending");
     assert_eq!(e.uses.waiting(), 1);
 
-    // the user grants an hour: the command runs and the session hears its output
+    // the user grants an hour: the command runs on the Node and the session hears its output
     e.answer(&su, "grant_1h").unwrap();
     let msgs = e.sink.wait(1).await;
     assert_eq!(
         msgs[0],
-        format!(
-            "用户批准了使用「GitHub 令牌」。命令已执行，退出码 0。输出：\nt={TOKEN}\n{}\n",
-            BASE64.encode(TOKEN.as_bytes())
-        )
+        "用户批准了使用「GitHub 令牌」。命令已执行，退出码 0。输出：\non the node\n"
+    );
+    let ran = e.nodes.as_ref().unwrap().ran.lock().unwrap().clone();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(
+        ran[0].1,
+        vec![("令牌".to_string(), TOKEN.as_bytes().to_vec())]
     );
     let row = e.use_row(&su);
     let (status, code) = (row.status, row.exit_code.unwrap());
@@ -351,7 +350,8 @@ async fn ask_then_grant_then_direct_run() {
     let left = until - steve_store::now();
     assert!(left > 3_590_000 && left <= 3_600_000, "{left}");
 
-    // second use: covered by the grant, runs directly
+    // second use: covered by the grant, runs directly on the Node (non-zero exit code -> failed)
+    *e.nodes.as_ref().unwrap().exit_code.lock().unwrap() = Some(4);
     let out = e
         .tool(
             mcp::USE,
@@ -360,7 +360,7 @@ async fn ask_then_grant_then_direct_run() {
         .await
         .unwrap();
     assert!(!out.awaiting_approval);
-    assert_eq!(out.text, format!("Exit code 4.\n{TOKEN}\n"));
+    assert_eq!(out.text, "Exit code 4.\non the node\n");
     let open: i64 = fixtures::decision_count(e.env.store(), SUBJECT, Some("open")).unwrap();
     assert_eq!(open, 0);
     let su2 = e.last_use();
@@ -434,32 +434,37 @@ async fn files_and_stdin_temp_dir_gone_cwd_checked() {
     assert_eq!(code, 200, "{g}");
     assert_eq!(g["scope_label"], "项目 steve");
 
-    let stat_mode = if cfg!(target_os = "macos") {
-        "stat -f '%Lp'"
-    } else {
-        "stat -c '%a'"
-    };
     let out = e
         .tool(
             mcp::USE,
             json!({
                 "item": item, "purpose": "测试", "cwd": "sub",
-                "command": format!("pwd; echo \"f=$TOKF\"; {stat_mode} \"$TOKF\"; cat \"$TOKF\"; echo; read -r x; echo \"in=$x\"; ls \"$(dirname \"$TOKF\")\""),
+                "command": "use-secret",
                 "files": {"TOKF": "令牌"}, "stdin": "令牌"
             }),
         )
         .await
         .unwrap();
-    let sub = e.work.path().canonicalize().unwrap().join("sub");
+    assert_eq!(out.text, "Exit code 0.\non the node\n");
+    let ran = e.nodes.as_ref().unwrap().ran.lock().unwrap().clone();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(ran[0].0.cwd.as_deref(), Some("sub"));
+    assert_eq!(ran[0].0.injections.len(), 2);
     assert_eq!(
-        out.text,
-        format!(
-            "Exit code 0.\n{}\nf={}/TOKF\n600\n{TOKEN}\nin={TOKEN}\nTOKF\n",
-            sub.display(),
-            e.temp_root().join(e.last_use()).display()
-        )
+        ran[0].0.injections[0].how,
+        steve_modules::vault::inject::How::File
     );
-    assert!(dir_empty(&e.temp_root()), "temp dir left behind");
+    assert_eq!(
+        ran[0].0.injections[1].how,
+        steve_modules::vault::inject::How::Stdin
+    );
+    assert_eq!(
+        ran[0].1,
+        vec![
+            ("令牌".to_string(), TOKEN.as_bytes().to_vec()),
+            ("令牌".to_string(), TOKEN.as_bytes().to_vec()),
+        ]
+    );
 
     // cwd escapes
     for bad in ["..", "/tmp", "sub/../.."] {
@@ -555,13 +560,21 @@ async fn high_items_and_bank_cards_always_ask() {
     // a grant choice is not an option
     let err = e.answer(&su, "grant_1h").unwrap_err();
     assert!(err.starts_with("400"), "{err}");
-    // once: runs
+    // once: runs on the Node
     e.answer(&su, "once").unwrap();
     let msgs = e.sink.wait(1).await;
     assert!(
-        msgs[0].ends_with(&format!("退出码 0。输出：\n{CARD}")),
+        msgs[0].ends_with("退出码 0。输出：\non the node\n"),
         "{}",
         msgs[0]
+    );
+    let ran = e.nodes.as_ref().unwrap().ran.lock().unwrap().clone();
+    assert_eq!(
+        ran[0].1,
+        vec![
+            ("卡号".to_string(), CARD.as_bytes().to_vec()),
+            ("CVV".to_string(), CVV.as_bytes().to_vec()),
+        ]
     );
     let grants: i64 = fixtures::other_grants(e.env.store(), &card, "gr_forged").unwrap();
     assert_eq!(grants, 0);
@@ -685,22 +698,17 @@ async fn deny_and_visibility() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn restart_expires_waiting_requests_and_cleans_temp_dirs() {
+async fn restart_expires_waiting_requests() {
     let e = Env::new();
     let item = e.token_item();
     e.tool(mcp::USE, use_args(&item, "true")).await.unwrap();
     let su = e.last_use();
     let d = e.open_decision(&su);
-    // a leftover temp dir from a crashed run
-    let left = e.temp_root().join("su_crashed0001");
-    std::fs::create_dir_all(&left).unwrap();
-    std::fs::write(left.join("T"), TOKEN).unwrap();
 
     // "restart": a new service over the same store
     let sink = Arc::new(Sink::default());
-    let again = SecretUses::new(e.vault.clone(), e.home.path(), sink.clone());
+    let again = SecretUses::new(e.vault.clone(), sink.clone());
     again.start();
-    assert!(!left.exists());
     let status: String = e.use_row(&su).status;
     assert_eq!(status, "expired");
     let ds: String = e
@@ -760,7 +768,6 @@ async fn no_value_reaches_the_database() {
     // the use log and audit rows exist, without values
     let n: i64 = steve_store::testkit::flow::audit_count(e.env.store(), "vault.use").unwrap();
     assert_eq!(n, 2);
-    assert!(dir_empty(&e.temp_root()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -804,7 +811,19 @@ struct FakeNodes {
     files: bool,
     /// Never answers (the Hub stops while it runs).
     hang: bool,
+    exit_code: Mutex<Option<i32>>,
     ran: Mutex<Vec<NodeRan>>,
+}
+
+impl FakeNodes {
+    fn new(files: bool) -> Self {
+        Self {
+            files,
+            hang: false,
+            exit_code: Mutex::new(Some(0)),
+            ran: Mutex::default(),
+        }
+    }
 }
 
 #[async_trait]
@@ -813,11 +832,11 @@ impl steve_modules::vault::UseNodes for FakeNodes {
         &self,
         _ws: &str,
         _session: &str,
-    ) -> steve_modules::vault::VaultResult<Option<steve_modules::vault::NodePlace>> {
-        Ok(Some(steve_modules::vault::NodePlace {
+    ) -> steve_modules::vault::VaultResult<steve_modules::vault::NodePlace> {
+        Ok(steve_modules::vault::NodePlace {
             device: "n_far".into(),
             files: self.files,
-        }))
+        })
     }
     async fn run(
         &self,
@@ -838,7 +857,7 @@ impl steve_modules::vault::UseNodes for FakeNodes {
             std::future::pending::<()>().await;
         }
         steve_modules::vault::inject::RunOutput {
-            exit_code: Some(0),
+            exit_code: *self.exit_code.lock().unwrap(),
             timed_out: false,
             stdout: "on the node\n".into(),
             stderr: String::new(),
@@ -849,13 +868,9 @@ impl steve_modules::vault::UseNodes for FakeNodes {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
-    let e = Env::new();
+    let e = Env::new_without_nodes();
     let item = e.token_item();
-    let nodes = Arc::new(FakeNodes {
-        files: false,
-        hang: false,
-        ran: Mutex::default(),
-    });
+    let nodes = Arc::new(FakeNodes::new(false));
     e.uses.set_nodes(nodes.clone());
     let count = |e: &Env| -> (i64, i64) {
         (
@@ -929,19 +944,13 @@ async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
     );
     let status: String = e.use_row(&su).status;
     assert_eq!(status, "ok");
-    // no temp file on the Hub for a Node's use
-    assert!(dir_empty(&e.temp_root()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_that_may_write_files_gets_them() {
-    let e = Env::new();
+    let e = Env::new_without_nodes();
     let item = e.token_item();
-    let nodes = Arc::new(FakeNodes {
-        files: true,
-        hang: false,
-        ran: Mutex::default(),
-    });
+    let nodes = Arc::new(FakeNodes::new(true));
     e.uses.set_nodes(nodes.clone());
     let out = e
         .tool(
@@ -963,11 +972,12 @@ async fn a_node_that_may_write_files_gets_them() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restart_while_a_node_runs_a_use_fails_it_and_never_runs_it_again() {
-    let e = Env::new();
+    let e = Env::new_without_nodes();
     let item = e.token_item();
     let nodes = Arc::new(FakeNodes {
         files: false,
         hang: true,
+        exit_code: Mutex::new(Some(0)),
         ran: Mutex::default(),
     });
     e.uses.set_nodes(nodes.clone());
@@ -983,11 +993,38 @@ async fn a_restart_while_a_node_runs_a_use_fails_it_and_never_runs_it_again() {
     let status: String = e.use_row(&su).status;
     assert_eq!(status, "running");
     // "restart": a new service over the same store, with the same Nodes
-    let again = SecretUses::new(e.vault.clone(), e.home.path(), Arc::new(Sink::default()));
+    let again = SecretUses::new(e.vault.clone(), Arc::new(Sink::default()));
     again.set_nodes(nodes.clone());
     again.start();
     let status: String = e.use_row(&su).status;
     assert_eq!(status, "failed");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(nodes.ran.lock().unwrap().len(), 1, "never run again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p0_02_no_node_refuses_secret_use_instead_of_running_in_hub() {
+    let e = Env::new_without_nodes();
+    let item = e.token_item();
+    // Without a Node execution backend configured, secret injection must be refused immediately
+    // with a strongly typed error rather than falling back to Hub-local `/bin/sh -c`.
+    let req = steve_modules::vault::UseRequest {
+        item: item.clone(),
+        purpose: "test no-node refusal".into(),
+        command: "env".into(),
+        env: vec![("GH_TOKEN".into(), "令牌".into())],
+        ..Default::default()
+    };
+    let err = e
+        .uses
+        .request(&e.cx(), req)
+        .await
+        .expect_err("secret use without a Node must be refused, not run on the Hub");
+    assert_eq!(err, VaultError::NoExecutionNode);
+    assert_eq!(err.status(), 503, "expected 503 unavailable, got {err:?}");
+    assert_eq!(
+        fixtures::use_count(e.env.store(), None, None, None).unwrap(),
+        0,
+        "refused secret use must not record a use row"
+    );
 }

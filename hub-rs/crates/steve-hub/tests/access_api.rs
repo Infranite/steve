@@ -548,7 +548,7 @@ async fn the_owner_lists_and_signs_out_every_members_clients() {
     assert_eq!(s, 401, "the member's client is signed out");
 }
 
-/// A4b: single sign-on set up in the settings takes effect at once and can be turned off; only the owner.
+/// Single sign-on set up in the settings takes effect at once and can be turned off; only the owner.
 #[tokio::test]
 async fn single_sign_on_is_set_up_in_the_settings_without_a_restart() {
     let e = start().await;

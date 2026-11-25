@@ -84,6 +84,34 @@ pub fn remove(w: &mut W<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove a non-main bot's membership from one workspace without deleting the bot itself.
+pub fn remove_workspace(w: &mut W<'_>, id: &str, ws: &str) -> Result<bool> {
+    use crate::contract::Q;
+    let is_main: Option<bool> = w.one(
+        Query::select()
+            .column("main")
+            .from("bots")
+            .and_where(Expr::col("id").eq(id)),
+        |row| row.get(0),
+    )?;
+    if is_main == Some(true) {
+        return Ok(false);
+    }
+    let deleted = w.exec(
+        Query::delete()
+            .from_table("bot_workspaces")
+            .and_where(Expr::col("bot_id").eq(id))
+            .and_where(Expr::col("workspace_id").eq(ws)),
+    )?;
+    if deleted > 0 {
+        w.emit(steve_types::ConfigEvent::Bot {
+            ws: ws.into(),
+            id: id.into(),
+        });
+    }
+    Ok(deleted > 0)
+}
+
 pub fn named_bots(c: &mut impl Read, ws: &str, name: &str) -> Result<Vec<String>> {
     c.all(
         Query::select()

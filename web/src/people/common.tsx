@@ -1,6 +1,6 @@
 /* Shared pieces of the contacts pages: labels for the API codes, the avatar, the disclosure-level picker,
  * and the data hook that refetches on `party` / `mm` events. */
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 export { Section, Loading } from "@/ui"
 import { useHubEvents, toast, st, emit } from "@/store"
 import { Unauthenticated } from "@/api"
@@ -35,15 +35,15 @@ export function useLoad<T>(f: () => Promise<T>, deps: unknown[], events: string[
   const [data, setData] = useState<T | null>(null), [err, setErr] = useState<(Error & { status?: number }) | null>(null)
   const fn = useRef(f); fn.current = f
   const n = useRef(0)
-  const load = () => {
+  const load = useCallback((): Promise<void> => {
     const k = ++n.current
-    fn.current().then((d) => { if (k === n.current) { setData(d); setErr(null) } }, (e) => {
+    return fn.current().then((d) => { if (k === n.current) { setData(d); setErr(null) } }, (e) => {
       if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit(); return }
       if (k === n.current) setErr(e)
     })
-  }
-  useEffect(() => { setData(null); setErr(null); load() }, deps) // eslint-disable-line react-hooks/exhaustive-deps
-  useHubEvents(events, load, 150)
+  }, [])
+  useEffect(() => { setData(null); setErr(null); void load() }, deps) // eslint-disable-line react-hooks/exhaustive-deps
+  useHubEvents(events, () => { void load() }, 150)
   return { data, err, reload: load, set: setData }
 }
 
