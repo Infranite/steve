@@ -85,7 +85,7 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
   const [open, setOpen] = useState(false)
   const leave = (h: string) => { setOpen(false); go(h) }
   const name = me?.name || t("core:sidebar.account")
-  const actor = me ? memberActor(me, true) : { kind: "person" as const, name }
+  const actor = me ? memberActor(me, true) : { kind: "person" as const, name: "" }
   /* the role in the workspace open now (a workspace switch does not reload the page), the instance role until it is known */
   const r = st.workspaces.find((w) => w.id === st.workspace?.id)?.role ?? me?.role ?? ""
   const role = r === "owner" || r === "member" ? t(`core:sidebar.role.${r}`) : r

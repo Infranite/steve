@@ -265,7 +265,7 @@ impl AgentRuntime for FakeRuntime {
                         specialties: Some(edit.specialties),
                         harness: edit.harness,
                         model: edit.model,
-                        perm_mode: Some("default".into()),
+                        perm_mode: Some("ask".into()),
                         ..Default::default()
                     },
                     actor,

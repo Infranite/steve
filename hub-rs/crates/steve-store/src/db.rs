@@ -719,6 +719,11 @@ fn run_pending(c: &Connection, cur: i64, progress: Option<&MigrationTracker<'_>>
         if i == 121 {
             ensure_item_lifecycle(&tx)?;
         }
+        if i == 135 {
+            // 136 rebuilds `bots` referencing `reasoning_effort`; ensure the column exists even if
+            // the database started at v120..v135 without having run the i == 119 hook.
+            add_reasoning_effort(&tx)?;
+        }
         tx.execute_batch(m)?;
     }
     ensure_item_lifecycle(&tx)?;

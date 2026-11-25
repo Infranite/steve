@@ -61,7 +61,7 @@ export function useMe(): MemberIdentity | null {
 export function MineButton({ className }: { className?: string }) {
   const t = useT(), me = useMe()
   if (location.hash.replace(/^#\/?/, "").split(/[/?]/)[0] === "more") return null
-  const actor = me ? memberActor(me, true) : { kind: "person" as const, name: t("core:nav.mine") }
+  const actor = me ? memberActor(me, true) : { kind: "person" as const, name: "" }
   return (
     <a href="#/more" aria-label={t("core:nav.mine")} className={cn("relative flex size-8 shrink-0 items-center justify-center rounded-full md:hidden", className)} data-mine>
       <ActorAvatar actor={actor} size={28} tooltip={false} account />

@@ -97,7 +97,7 @@ export function ActorAvatar({
       : undefined
     face = (
       <Avatar
-        name={resolved.name || "?"}
+        name={resolved.name}
         src={isPerson ? avatarSrc(resolved.avatar) : undefined}
         seed={actorSeed(resolved)}
         size={size}

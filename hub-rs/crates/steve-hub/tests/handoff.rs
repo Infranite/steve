@@ -387,7 +387,7 @@ impl HubEnv {
     }
 
     async fn create_bot(&self, name: &str, harness: &str) -> String {
-        let body = json!({ "name": name, "harness": harness, "perm_mode": "default" });
+        let body = json!({ "name": name, "harness": harness, "perm_mode": "ask" });
         let (s, v) = self.call("POST", "/api/bots", Some(body)).await;
         assert_eq!(s, 200, "create bot failed: {v}");
         v["id"].as_str().expect("bot id").to_string()
@@ -631,7 +631,7 @@ async fn manual_handoff_same_and_cross_harness_preserves_work_and_blocks_invalid
         "missing handoff outcome metric:\n{prom}"
     );
     assert!(
-        prom.contains(r#"steve_turn_context_peak_tokens_count{harness="primary-harness"}"#),
+        prom.contains(r#"steve_turn_context_peak_tokens_count{harness="custom"}"#),
         "missing read-only context peak metric:\n{prom}"
     );
 }

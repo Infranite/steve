@@ -51,9 +51,11 @@ const run = async ({ width, height, scheme, locale = "zh-CN" }) => {
   page.setDefaultTimeout(10000)
   const errors = []; page.on('pageerror', (e) => errors.push(e.message))
   await page.addInitScript(() => {
+    let leaving = false
+    addEventListener('pagehide', () => { leaving = true }, true)
     const f = window.fetch
     window.fetch = (u, o) => {
-      if (!o?.keepalive) return f(u, o)
+      if (!o?.keepalive || (!leaving && document.visibilityState !== 'hidden')) return f(u, o)
       sessionStorage.setItem('kb-leave', JSON.stringify([...JSON.parse(sessionStorage.getItem('kb-leave') || '[]'), [o.method, String(u)]]))
       return Promise.resolve(new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } }))
     }

@@ -411,12 +411,11 @@ async fn a_partially_unknown_target_set_does_not_certify_an_accepted_save() {
 #[tokio::test]
 async fn create_draft_and_duplicate_all_adopt_creator_as_steward() {
     let e = Env::new();
-    let mut owner = steve_modules::contacts::repo::NewParty::new("contact", "Owner", &e.me);
-    owner.user_id = Some(e.me.clone());
     let me = e
         .store
-        .write(|w| steve_modules::contacts::repo::insert(w, "default", &owner))
-        .unwrap();
+        .read(|r| steve_modules::contacts::repo::me_of(r, "default", &e.me))
+        .unwrap()
+        .expect("creator party auto-created by user creation");
     let created = e.create(json!({"name": "Created"})).await;
     let (s, dup) = e
         .call("POST", &format!("/bots/{created}/duplicate"), json!({}))

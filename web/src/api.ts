@@ -249,7 +249,7 @@ async function apiFetch(method: string, path: string, body?: unknown, signal?: A
     credentials: "include",
     cache: "no-store",
     signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined),
-    keepalive: method === "DELETE",
+    keepalive: method === "DELETE" && body === undefined,
   })
   return scope ? p : p.catch(refused)
 }
