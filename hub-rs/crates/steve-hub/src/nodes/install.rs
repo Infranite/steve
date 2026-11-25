@@ -1,4 +1,4 @@
-//! Installing a Linux Node on another machine from the Hub, over tailcat's SSH (A6b).
+//! Installing a Linux Node on another machine from the Hub, over tailcat's SSH.
 //!
 //! The owner starts an install in Devices and gets one line to run on the target:
 //! `tailcat serve --ssh-authorized-keys='<this install's key>' ssh`. It prints an address, which the

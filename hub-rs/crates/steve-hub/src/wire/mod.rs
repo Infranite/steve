@@ -79,7 +79,7 @@ pub struct Wired {
     pub domain: Arc<dyn Domain>,
     /// steve-auth's `/auth` router (login, callback, logout, dev).
     pub auth: Router,
-    /// Single sign-on's switch: the settings put a configuration in force through it (A4b).
+    /// Single sign-on's switch: the settings put a configuration in force through it.
     pub oidc: Option<Arc<dyn crate::access::OidcSwitch>>,
     /// steve-mcp's streamable HTTP service, mounted behind the loopback gate.
     pub mcp: Option<Router>,

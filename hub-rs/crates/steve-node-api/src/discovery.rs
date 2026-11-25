@@ -152,10 +152,6 @@ pub struct AdapterInfo {
     /// without a session offer. The adapter offer alone cannot prove Node policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_modes: Option<Vec<crate::PermissionMode>>,
-    /// An adapter Steve installed and keeps up to date (`<home>/adapters`): what its last check of
-    /// the npm registry found. `None` for one installed otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub update: Option<AdapterUpdate>,
     /// Shell template (`{id}` replaced with the session id) to resume a session in the CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_command: Option<String>,
@@ -257,28 +253,6 @@ pub enum UpgradeCapability {
     /// No automated upgrade path is declared or verified.
     #[default]
     Manual,
-}
-
-/// The update state of an adapter Steve keeps up to date ([`AdapterInfo::update`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdapterUpdate {
-    /// `STEVE_ADAPTER_UPDATES` on the Node: `auto`, `check` or `off`.
-    pub policy: String,
-    /// The installed release.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installed: Option<String>,
-    /// The latest release on the registry, as of `checked`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest: Option<String>,
-    /// When the registry was asked last (Unix ms).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checked: Option<i64>,
-    /// Why the last check or upgrade failed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// A newer release waits for the Node to have no session running (`auto`).
-    #[serde(default)]
-    pub pending: bool,
 }
 
 /// The permission modes, models and efforts an adapter offers (harness parity S4, S8).

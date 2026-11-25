@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_node_api::PermissionMode;
+use steve_node_api::{
+    ComponentInstallSource, ComponentUpdateReason, PermissionMode, UpgradeMethod,
+};
 
 #[cfg(test)]
 use steve_harness_spec::{AdapterEntry, builtin_packages};
@@ -124,6 +126,448 @@ pub struct UpdateComponent {
     pub name: String,
     pub package: Option<&'static str>,
     pub command: Option<PathBuf>,
+    /// True for the harness's own CLI entry (where Homebrew or self-update applies),
+    /// false for a separate ACP wrapper package.
+    pub is_cli: bool,
+}
+
+/// Official self-update subcommand verified for a harness CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelfUpdateCommand {
+    pub args: &'static [&'static str],
+}
+
+/// Centralized, strongly-typed upgrade rules per built-in harness. Kept here in the adapter layer
+/// so future migration into `HarnessAdapter` is a straight move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessUpgradeSpec {
+    /// Verified official self-update arguments passed to the resolved CLI executable.
+    pub self_update: Option<SelfUpdateCommand>,
+    /// Whether an ordinary user-home standalone binary supports `self_update`.
+    /// False when the CLI's self-updater only supports its own managed layout (e.g. `pi`).
+    pub standalone_self_update: bool,
+    /// Whether Homebrew cask/formula upgrade is an official upgrade path for this CLI.
+    pub homebrew: bool,
+    /// Whether global npm (`npm install -g <pkg>@<version>`) is supported when the resolved
+    /// component lives inside a writable global npm prefix.
+    pub npm_global: bool,
+}
+
+/// Verified official upgrade rules for built-in harness `id`. Harnesses whose self-update command
+/// has not been verified keep `self_update: None` and never guess a command.
+pub fn harness_upgrade_spec(id: &str) -> HarnessUpgradeSpec {
+    match id {
+        // Verified via `claude update --help` and official Anthropic docs:
+        // native install -> `claude update`; Homebrew Cask -> `brew upgrade --cask <cask>`;
+        // global npm -> `npm install -g @anthropic-ai/claude-code@<ver>`.
+        "claude-code" => HarnessUpgradeSpec {
+            self_update: Some(SelfUpdateCommand { args: &["update"] }),
+            standalone_self_update: true,
+            homebrew: true,
+            npm_global: true,
+        },
+        // Verified via `codex update --help` and official OpenAI Codex CLI docs:
+        // standalone -> `codex update`; Homebrew Cask/Formula -> `brew upgrade`;
+        // global npm -> `npm install -g @openai/codex@<ver>`.
+        "codex" => HarnessUpgradeSpec {
+            self_update: Some(SelfUpdateCommand { args: &["update"] }),
+            standalone_self_update: true,
+            homebrew: true,
+            npm_global: true,
+        },
+        // Verified via `agy --help` (`update: Update CLI`) and official antigravity.google docs:
+        // standalone native binary (~/.local/bin/agy) -> `agy update`.
+        "antigravity" => HarnessUpgradeSpec {
+            self_update: Some(SelfUpdateCommand { args: &["update"] }),
+            standalone_self_update: true,
+            homebrew: false,
+            npm_global: false,
+        },
+        // Verified via `pi update --help` and pi's `package-manager-cli.js`:
+        // `pi update --self` works only for pi's managed install (`managed-install.json`) or
+        // writable global npm installs, and refuses custom/read-only wrapper prefixes.
+        "pi" => HarnessUpgradeSpec {
+            self_update: Some(SelfUpdateCommand {
+                args: &["update", "--self"],
+            }),
+            standalone_self_update: false,
+            homebrew: true,
+            npm_global: true,
+        },
+        // Verified via official Kimi Code CLI (`@moonshot-ai/kimi-code`) docs:
+        // official script install -> `kimi upgrade --yes`; global npm -> `npm install -g`.
+        // Archived Python `kimi-cli` under `uv/tools` is rejected as an unsupported package manager.
+        "kimi-code" => HarnessUpgradeSpec {
+            self_update: Some(SelfUpdateCommand {
+                args: &["upgrade", "--yes"],
+            }),
+            standalone_self_update: true,
+            homebrew: true,
+            npm_global: true,
+        },
+        _ => HarnessUpgradeSpec {
+            self_update: None,
+            standalone_self_update: false,
+            homebrew: false,
+            npm_global: builtin(id).is_some(),
+        },
+    }
+}
+
+/// Pure filesystem facts collected on the Node for deterministic install-source classification.
+#[derive(Debug, Clone, Copy)]
+pub struct InstallEvidence<'a> {
+    pub original_path: &'a Path,
+    pub real_path: &'a Path,
+    pub steve_managed: bool,
+    pub user_home: &'a Path,
+    pub npm_global_root: Option<&'a Path>,
+    pub pi_managed_install: bool,
+    pub writable: bool,
+}
+
+/// Resolved install origin for one component binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetectedInstall {
+    SteveManaged {
+        package: &'static str,
+    },
+    HomebrewCask {
+        cask: String,
+    },
+    HomebrewFormula {
+        formula: String,
+    },
+    NpmGlobal {
+        prefix: PathBuf,
+        package: &'static str,
+    },
+    Standalone {
+        executable: PathBuf,
+    },
+    External {
+        reason: ComponentUpdateReason,
+    },
+}
+
+impl DetectedInstall {
+    pub fn source(&self) -> ComponentInstallSource {
+        match self {
+            Self::SteveManaged { .. } => ComponentInstallSource::SteveManaged,
+            Self::HomebrewCask { .. } => ComponentInstallSource::HomebrewCask,
+            Self::HomebrewFormula { .. } => ComponentInstallSource::HomebrewFormula,
+            Self::NpmGlobal { .. } => ComponentInstallSource::NpmGlobal,
+            Self::Standalone { .. } => ComponentInstallSource::Standalone,
+            Self::External { .. } => ComponentInstallSource::External,
+        }
+    }
+}
+
+/// Concrete, trusted upgrade action derived solely from the Node's local catalog and binary path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpgradeAction {
+    SteveManagedNpm {
+        package: &'static str,
+    },
+    HomebrewCask {
+        cask: String,
+    },
+    HomebrewFormula {
+        formula: String,
+    },
+    NpmGlobal {
+        prefix: PathBuf,
+        package: &'static str,
+    },
+    SelfUpdate {
+        executable: PathBuf,
+        args: &'static [&'static str],
+    },
+}
+
+impl UpgradeAction {
+    pub fn method(&self) -> UpgradeMethod {
+        match self {
+            Self::SteveManagedNpm { .. } => UpgradeMethod::SteveManaged,
+            Self::HomebrewCask { .. } => UpgradeMethod::HomebrewCask,
+            Self::HomebrewFormula { .. } => UpgradeMethod::HomebrewFormula,
+            Self::NpmGlobal { .. } => UpgradeMethod::NpmGlobal,
+            Self::SelfUpdate { .. } => UpgradeMethod::SelfUpdate,
+        }
+    }
+
+    /// Human-readable summary of the official command that will be invoked (display only).
+    pub fn display_command(&self) -> String {
+        match self {
+            Self::SteveManagedNpm { package } => format!("npm install {package}"),
+            Self::HomebrewCask { cask } => format!("brew upgrade --cask {cask}"),
+            Self::HomebrewFormula { formula } => format!("brew upgrade {formula}"),
+            Self::NpmGlobal { package, .. } => format!("npm install -g {package}"),
+            Self::SelfUpdate { executable, args } => {
+                let bin = executable
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("cli");
+                if args.is_empty() {
+                    bin.to_string()
+                } else {
+                    format!("{bin} {}", args.join(" "))
+                }
+            }
+        }
+    }
+
+    pub fn needs_managed_prefix(&self) -> bool {
+        matches!(self, Self::SteveManagedNpm { .. })
+    }
+
+    pub fn needs_npm(&self) -> bool {
+        matches!(self, Self::SteveManagedNpm { .. } | Self::NpmGlobal { .. })
+    }
+
+    pub fn needs_brew(&self) -> bool {
+        matches!(
+            self,
+            Self::HomebrewCask { .. } | Self::HomebrewFormula { .. }
+        )
+    }
+}
+
+fn valid_brew_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 128
+        && !token.starts_with('-')
+        && token != "."
+        && token != ".."
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_@.+".contains(&b))
+}
+
+fn homebrew_token(path: &Path, marker: &str) -> Option<String> {
+    let mut iter = path.components();
+    while let Some(comp) = iter.next() {
+        if comp.as_os_str() == marker
+            && let Some(next) = iter.next().and_then(|c| c.as_os_str().to_str())
+            && valid_brew_token(next)
+        {
+            return Some(next.to_string());
+        }
+    }
+    None
+}
+
+fn unsupported_package_manager(path: &Path) -> Option<&'static str> {
+    let normalized = path
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    if normalized.contains("/.pnpm/") || normalized.contains("/pnpm/") {
+        Some("pnpm")
+    } else if normalized.contains("/.yarn/") || normalized.contains("/yarn/") {
+        Some("yarn")
+    } else if normalized.contains("/.bun/install/global/") {
+        Some("bun")
+    } else if normalized.contains("/uv/tools/") {
+        Some("uv")
+    } else if normalized.contains("/nix/store/") || normalized.contains("/gnu/store/") {
+        Some("nix")
+    } else {
+        None
+    }
+}
+
+fn npm_global_prefix(
+    real_path: &Path,
+    package: &str,
+    npm_global_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let pkg_rel = Path::new("node_modules").join(package);
+    let pkg_dir = real_path.ancestors().find(|a| a.ends_with(&pkg_rel))?;
+    let pkg_depth = Path::new(package).components().count();
+    let mut node_modules = pkg_dir;
+    for _ in 0..pkg_depth {
+        node_modules = node_modules.parent()?;
+    }
+    if node_modules.file_name().and_then(|n| n.to_str()) != Some("node_modules") {
+        return None;
+    }
+    let matches_global_root = npm_global_root.is_some_and(|root| root == node_modules);
+    let parent = node_modules.parent()?;
+    if parent.file_name().and_then(|n| n.to_str()) == Some("lib") {
+        return parent.parent().map(Path::to_path_buf);
+    }
+    if matches_global_root {
+        return Some(parent.to_path_buf());
+    }
+    None
+}
+
+/// Deterministically classify how `component` was installed and derive its official upgrade action,
+/// if any. Returns `(detected_install, optional_action, optional_typed_reason)`.
+pub fn resolve_component_upgrade(
+    harness_id: &str,
+    component: &UpdateComponent,
+    evidence: &InstallEvidence<'_>,
+) -> (
+    DetectedInstall,
+    Option<UpgradeAction>,
+    Option<ComponentUpdateReason>,
+) {
+    let spec = harness_upgrade_spec(harness_id);
+
+    // 1. Steve's own managed npm prefix always takes precedence.
+    if evidence.steve_managed
+        && let Some(package) = component.package
+    {
+        return (
+            DetectedInstall::SteveManaged { package },
+            Some(UpgradeAction::SteveManagedNpm { package }),
+            None,
+        );
+    }
+
+    // 2. Homebrew Cask / Formula (detected from canonical realpath under Caskroom/ or Cellar/).
+    if let Some(cask) = homebrew_token(evidence.real_path, "Caskroom")
+        .or_else(|| homebrew_token(evidence.original_path, "Caskroom"))
+    {
+        if component.is_cli && spec.homebrew {
+            return (
+                DetectedInstall::HomebrewCask { cask: cask.clone() },
+                Some(UpgradeAction::HomebrewCask { cask }),
+                None,
+            );
+        }
+        return (
+            DetectedInstall::HomebrewCask { cask },
+            None,
+            Some(ComponentUpdateReason::HomebrewUnverified),
+        );
+    }
+    if let Some(formula) = homebrew_token(evidence.real_path, "Cellar")
+        .or_else(|| homebrew_token(evidence.original_path, "Cellar"))
+    {
+        if component.is_cli && spec.homebrew {
+            return (
+                DetectedInstall::HomebrewFormula {
+                    formula: formula.clone(),
+                },
+                Some(UpgradeAction::HomebrewFormula { formula }),
+                None,
+            );
+        }
+        return (
+            DetectedInstall::HomebrewFormula { formula },
+            None,
+            Some(ComponentUpdateReason::HomebrewUnverified),
+        );
+    }
+
+    // 3. Recognized external package managers without a verified Node-managed upgrader.
+    if let Some(pm) = unsupported_package_manager(evidence.real_path)
+        .or_else(|| unsupported_package_manager(evidence.original_path))
+    {
+        let reason = ComponentUpdateReason::PackageManagerUnsupported {
+            manager: pm.to_string(),
+        };
+        return (
+            DetectedInstall::External {
+                reason: reason.clone(),
+            },
+            None,
+            Some(reason),
+        );
+    }
+
+    // 4. Global npm installation (`<prefix>/lib/node_modules/<package>` or `npm root -g`).
+    if spec.npm_global
+        && let Some(package) = component.package
+        && let Some(prefix) =
+            npm_global_prefix(evidence.real_path, package, evidence.npm_global_root)
+    {
+        if !evidence.writable {
+            return (
+                DetectedInstall::NpmGlobal { prefix, package },
+                None,
+                Some(ComponentUpdateReason::ReadOnlyPath),
+            );
+        }
+        return (
+            DetectedInstall::NpmGlobal {
+                prefix: prefix.clone(),
+                package,
+            },
+            Some(UpgradeAction::NpmGlobal { prefix, package }),
+            None,
+        );
+    }
+
+    // 5. Verified official self-updater on user-owned standalone or CLI-managed installations.
+    if component.is_cli {
+        let in_user_home = !evidence.user_home.as_os_str().is_empty()
+            && (evidence.real_path.starts_with(evidence.user_home)
+                || (evidence.original_path.starts_with(evidence.user_home) && evidence.writable));
+        if evidence.pi_managed_install
+            && let Some(cmd) = spec.self_update
+        {
+            let executable = evidence.original_path.to_path_buf();
+            return (
+                DetectedInstall::Standalone {
+                    executable: executable.clone(),
+                },
+                Some(UpgradeAction::SelfUpdate {
+                    executable,
+                    args: cmd.args,
+                }),
+                None,
+            );
+        }
+        if in_user_home {
+            let executable = evidence.original_path.to_path_buf();
+            if spec.standalone_self_update
+                && let Some(cmd) = spec.self_update
+            {
+                if !evidence.writable {
+                    return (
+                        DetectedInstall::Standalone { executable },
+                        None,
+                        Some(ComponentUpdateReason::ReadOnlyPath),
+                    );
+                }
+                return (
+                    DetectedInstall::Standalone {
+                        executable: executable.clone(),
+                    },
+                    Some(UpgradeAction::SelfUpdate {
+                        executable,
+                        args: cmd.args,
+                    }),
+                    None,
+                );
+            }
+            return (
+                DetectedInstall::Standalone { executable },
+                None,
+                Some(ComponentUpdateReason::UnverifiedUpgrader),
+            );
+        }
+    }
+
+    // 6. System-managed wrapper, custom prefix, or read-only location.
+    let reason = if !evidence.writable {
+        ComponentUpdateReason::ReadOnlyPath
+    } else if component.is_cli && spec.self_update.is_none() {
+        ComponentUpdateReason::UnverifiedUpgrader
+    } else {
+        ComponentUpdateReason::CustomInstallPath
+    };
+    (
+        DetectedInstall::External {
+            reason: reason.clone(),
+        },
+        None,
+        Some(reason),
+    )
 }
 
 /// Official npm sources for CLI and ACP components. Name-specific knowledge stays in this
@@ -135,6 +579,7 @@ pub fn update_components(cfg: &crate::AcpConfig, id: &str) -> Vec<UpdateComponen
             name: cfg.adapter_spec(id).name,
             package: None,
             command: cfg.adapters.get(id).cloned(),
+            is_cli: false,
         }];
     };
     let mut result: Vec<_> = components(id)
@@ -148,6 +593,7 @@ pub fn update_components(cfg: &crate::AcpConfig, id: &str) -> Vec<UpdateComponen
             },
             package: Some(c.package),
             command: cfg.component_command(id, c),
+            is_cli: c.id != "adapter",
         })
         .collect();
     let cli = match id {
@@ -171,6 +617,7 @@ pub fn update_components(cfg: &crate::AcpConfig, id: &str) -> Vec<UpdateComponen
                 name: format!("{} CLI", b.name),
                 package: Some(package),
                 command,
+                is_cli: true,
             },
         );
     } else if result.is_empty() {
@@ -179,9 +626,11 @@ pub fn update_components(cfg: &crate::AcpConfig, id: &str) -> Vec<UpdateComponen
             name: format!("{} CLI / ACP", b.name),
             package: None,
             command: cfg.adapters.get(id).cloned(),
+            is_cli: true,
         });
     } else if result.len() == 1 {
         result[0].name = format!("{} CLI / ACP", b.name);
+        result[0].is_cli = true;
     }
     result
 }
@@ -1658,4 +2107,311 @@ fn default_commands_match_the_pre_extraction_resolvers() {
     let expected: serde_json::Value =
         serde_json::from_str(include_str!("../tests/fixtures/default-commands.json")).unwrap();
     assert_eq!(default_commands_fixture(), expected);
+}
+
+#[cfg(test)]
+mod upgrade_spec_tests {
+    use super::*;
+
+    fn cli_comp(package: Option<&'static str>, is_cli: bool) -> UpdateComponent {
+        UpdateComponent {
+            id: if is_cli { "cli" } else { "adapter" },
+            name: "Fixture".into(),
+            package,
+            command: None,
+            is_cli,
+        }
+    }
+
+    #[test]
+    fn verified_harnesses_declare_official_upgrade_specs_and_unverified_do_not_guess() {
+        assert_eq!(
+            harness_upgrade_spec("claude-code").self_update,
+            Some(SelfUpdateCommand { args: &["update"] })
+        );
+        assert!(harness_upgrade_spec("claude-code").homebrew);
+        assert!(harness_upgrade_spec("claude-code").npm_global);
+
+        assert_eq!(
+            harness_upgrade_spec("codex").self_update,
+            Some(SelfUpdateCommand { args: &["update"] })
+        );
+        assert!(harness_upgrade_spec("codex").homebrew);
+
+        assert_eq!(
+            harness_upgrade_spec("antigravity").self_update,
+            Some(SelfUpdateCommand { args: &["update"] })
+        );
+        assert!(harness_upgrade_spec("antigravity").standalone_self_update);
+        assert!(!harness_upgrade_spec("antigravity").homebrew);
+
+        assert_eq!(
+            harness_upgrade_spec("pi").self_update,
+            Some(SelfUpdateCommand {
+                args: &["update", "--self"],
+            })
+        );
+        assert!(
+            !harness_upgrade_spec("pi").standalone_self_update,
+            "pi refuses self-update outside its managed layout or global npm"
+        );
+
+        assert_eq!(
+            harness_upgrade_spec("kimi-code").self_update,
+            Some(SelfUpdateCommand {
+                args: &["upgrade", "--yes"],
+            })
+        );
+
+        // Unverified CLIs must never guess a self-update subcommand.
+        for id in ["cursor", "kiro", "mistral-vibe", "qoder", "unknown-custom"] {
+            assert_eq!(harness_upgrade_spec(id).self_update, None, "{id}");
+            assert!(!harness_upgrade_spec(id).standalone_self_update, "{id}");
+        }
+    }
+
+    #[test]
+    fn install_source_detection_maps_real_paths_deterministically() {
+        let home = Path::new("/var/tmp/fixture-home");
+
+        // 1. Homebrew Cask (claude-code & codex)
+        let (src, act, reason) = resolve_component_upgrade(
+            "claude-code",
+            &cli_comp(Some("@anthropic-ai/claude-code"), true),
+            &InstallEvidence {
+                original_path: Path::new("/opt/homebrew/bin/claude"),
+                real_path: Path::new("/opt/homebrew/Caskroom/claude-code/2.1.311/claude"),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: None,
+                pi_managed_install: false,
+                writable: true,
+            },
+        );
+        assert_eq!(src.source(), ComponentInstallSource::HomebrewCask);
+        assert_eq!(
+            act,
+            Some(UpgradeAction::HomebrewCask {
+                cask: "claude-code".into()
+            })
+        );
+        assert_eq!(
+            act.as_ref().unwrap().display_command(),
+            "brew upgrade --cask claude-code"
+        );
+        assert!(reason.is_none());
+
+        let (src, act, _) = resolve_component_upgrade(
+            "codex",
+            &cli_comp(Some("@openai/codex"), true),
+            &InstallEvidence {
+                original_path: Path::new("/opt/homebrew/bin/codex"),
+                real_path: Path::new("/opt/homebrew/Caskroom/codex/0.170.0/bin/codex"),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: None,
+                pi_managed_install: false,
+                writable: true,
+            },
+        );
+        assert_eq!(src.source(), ComponentInstallSource::HomebrewCask);
+        assert_eq!(
+            act.as_ref().unwrap().display_command(),
+            "brew upgrade --cask codex"
+        );
+
+        // 2. Homebrew Formula (macOS / Linuxbrew)
+        let (src, act, _) = resolve_component_upgrade(
+            "codex",
+            &cli_comp(Some("@openai/codex"), true),
+            &InstallEvidence {
+                original_path: Path::new("/opt/linuxbrew/bin/codex"),
+                real_path: Path::new("/opt/linuxbrew/Cellar/codex/0.170.0/bin/codex"),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: None,
+                pi_managed_install: false,
+                writable: true,
+            },
+        );
+        assert_eq!(src.source(), ComponentInstallSource::HomebrewFormula);
+        assert_eq!(
+            act.as_ref().unwrap().display_command(),
+            "brew upgrade codex"
+        );
+
+        // 3. Standalone user-home binary (agy, claude native, kimi)
+        let (src, act, _) = resolve_component_upgrade(
+            "antigravity",
+            &cli_comp(None, true),
+            &InstallEvidence {
+                original_path: Path::new("/var/tmp/fixture-home/.local/bin/agy"),
+                real_path: Path::new("/var/tmp/fixture-home/.local/bin/agy"),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: None,
+                pi_managed_install: false,
+                writable: true,
+            },
+        );
+        assert_eq!(src.source(), ComponentInstallSource::Standalone);
+        assert_eq!(act.as_ref().unwrap().display_command(), "agy update");
+
+        let (_, act, _) = resolve_component_upgrade(
+            "kimi-code",
+            &cli_comp(Some("@moonshot-ai/kimi-code"), true),
+            &InstallEvidence {
+                original_path: Path::new("/var/tmp/fixture-home/.local/bin/kimi"),
+                real_path: Path::new("/var/tmp/fixture-home/.local/bin/kimi"),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: None,
+                pi_managed_install: false,
+                writable: true,
+            },
+        );
+        assert_eq!(
+            act.as_ref().unwrap().display_command(),
+            "kimi upgrade --yes"
+        );
+
+        // 4. Global npm (writable vs read-only)
+        let (src, act, _) = resolve_component_upgrade(
+            "pi",
+            &cli_comp(Some("@earendil-works/pi-coding-agent"), true),
+            &InstallEvidence {
+                original_path: Path::new("/opt/homebrew/bin/pi"),
+                real_path: Path::new(
+                    "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+                ),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: Some(Path::new("/opt/homebrew/lib/node_modules")),
+                pi_managed_install: false,
+                writable: true,
+            },
+        );
+        assert_eq!(src.source(), ComponentInstallSource::NpmGlobal);
+        assert_eq!(
+            act,
+            Some(UpgradeAction::NpmGlobal {
+                prefix: PathBuf::from("/opt/homebrew"),
+                package: "@earendil-works/pi-coding-agent",
+            })
+        );
+
+        let (src, act, reason) = resolve_component_upgrade(
+            "pi",
+            &cli_comp(Some("@earendil-works/pi-coding-agent"), true),
+            &InstallEvidence {
+                original_path: Path::new("/usr/local/bin/pi"),
+                real_path: Path::new(
+                    "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+                ),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: Some(Path::new("/usr/local/lib/node_modules")),
+                pi_managed_install: false,
+                writable: false,
+            },
+        );
+        assert_eq!(src.source(), ComponentInstallSource::NpmGlobal);
+        assert!(act.is_none());
+        assert_eq!(reason, Some(ComponentUpdateReason::ReadOnlyPath));
+
+        // 5. Pi custom system wrapper (/usr/local/bin/pi) is NOT upgradable; pi managed install IS
+        let (src, act, reason) = resolve_component_upgrade(
+            "pi",
+            &cli_comp(Some("@earendil-works/pi-coding-agent"), true),
+            &InstallEvidence {
+                original_path: Path::new("/usr/local/bin/pi"),
+                real_path: Path::new("/usr/local/bin/pi"),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: None,
+                pi_managed_install: false,
+                writable: false,
+            },
+        );
+        assert_eq!(src.source(), ComponentInstallSource::External);
+        assert!(act.is_none());
+        assert_eq!(reason, Some(ComponentUpdateReason::ReadOnlyPath));
+
+        let (src, act, _) = resolve_component_upgrade(
+            "pi",
+            &cli_comp(Some("@earendil-works/pi-coding-agent"), true),
+            &InstallEvidence {
+                original_path: Path::new("/var/tmp/fixture-home/.local/bin/pi"),
+                real_path: Path::new(
+                    "/var/tmp/fixture-home/.pi/managed/releases/1.3.0/node_modules/.bin/pi",
+                ),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: None,
+                pi_managed_install: true,
+                writable: true,
+            },
+        );
+        assert_eq!(src.source(), ComponentInstallSource::Standalone);
+        assert_eq!(act.as_ref().unwrap().display_command(), "pi update --self");
+
+        // 6. Archived/unsupported package managers (uv, pnpm, nix) stay unsupported
+        for (path, pm) in [
+            (
+                "/var/tmp/fixture-home/.local/share/uv/tools/kimi-cli/bin/kimi",
+                "uv",
+            ),
+            (
+                "/var/tmp/fixture-home/.local/share/pnpm/global/5/.pnpm/x/bin/claude",
+                "pnpm",
+            ),
+            ("/nix/store/abc-claude/bin/claude", "nix"),
+        ] {
+            let (src, act, reason) = resolve_component_upgrade(
+                "kimi-code",
+                &cli_comp(Some("@moonshot-ai/kimi-code"), true),
+                &InstallEvidence {
+                    original_path: Path::new(path),
+                    real_path: Path::new(path),
+                    steve_managed: false,
+                    user_home: home,
+                    npm_global_root: None,
+                    pi_managed_install: false,
+                    writable: true,
+                },
+            );
+            assert_eq!(src.source(), ComponentInstallSource::External, "{path}");
+            assert!(act.is_none(), "{path}");
+            assert_eq!(
+                reason,
+                Some(ComponentUpdateReason::PackageManagerUnsupported { manager: pm.into() }),
+                "{path}"
+            );
+        }
+
+        // 7. Separate ACP adapter does NOT inherit CLI self_update
+        let (_, act, _) = resolve_component_upgrade(
+            "claude-code",
+            &cli_comp(Some("@agentclientprotocol/claude-agent-acp"), false),
+            &InstallEvidence {
+                original_path: Path::new("/var/tmp/fixture-home/custom/claude-agent-acp"),
+                real_path: Path::new("/var/tmp/fixture-home/custom/claude-agent-acp"),
+                steve_managed: false,
+                user_home: home,
+                npm_global_root: None,
+                pi_managed_install: false,
+                writable: true,
+            },
+        );
+        assert!(act.is_none());
+
+        // 8. Malicious Homebrew cask token starting with '-' is rejected
+        assert_eq!(
+            homebrew_token(
+                Path::new("/opt/homebrew/Caskroom/--evil/1.0/bin"),
+                "Caskroom"
+            ),
+            None
+        );
+    }
 }
