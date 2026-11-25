@@ -384,7 +384,7 @@ impl Env {
                 bot_id: Some("steve".into()),
                 harness: "fixture".into(),
                 model: None,
-                reasoning_effort: None,
+                reasoning_effort: steve_types::ReasoningEffort::Default,
                 cwd: self.dir.path().to_string_lossy().into(),
                 title: "Coordinator".into(),
                 token: format!("tok-{}", item.id),
