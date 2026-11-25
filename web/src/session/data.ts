@@ -39,9 +39,10 @@ export function turnsOf(ev: Ev[], ts: number[], running: boolean, head: (s: stri
       if (!cur) { cur = { n: out.length + 1, idx, prompt: promptOf(e, head), by: k, start: at, live: false, tools: 0, fails: 0 }; out.push(cur) }
       return
     }
-    if (k === "th" || k === "tool" || k === "a" || k === "ask") {
+    if (k === "th" || k === "tool" || k === "sub" || k === "a" || k === "ask") {
       if (!cur) { cur = { n: out.length + 1, idx, prompt: "", by: "", start: at, live: false, tools: 0, fails: 0 }; out.push(cur) }
       if (k === "tool") { cur.tools++; if (e[8] === 1) cur.fails++ }
+      if (k === "sub") { cur.tools++; if (e[1]?.status === "failed") cur.fails++ }
       return
     }
     if (k === "end") {
