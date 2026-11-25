@@ -353,7 +353,39 @@ pub(crate) fn assess(now: &Snapshot, base: Option<&Snapshot>) -> Health {
             (secs > 0.0).then(|| w.delta("steve_web_long_task_seconds_count", &all) / secs * 60.0),
         )
         .max(10.0),
+        Check::new(
+            "job_panics",
+            "count",
+            Some(w.delta("steve_job_panics_total", &all)),
+        )
+        .max(0.0),
+        Check::new(
+            "jobs_down",
+            "count",
+            Some(
+                w.matching("steve_job_up", &all)
+                    .filter(|s| s.value < 1.0)
+                    .count() as f64,
+            ),
+        )
+        .max(0.0),
     ];
+    let jobs = w.subjects("job", &["steve_job_up", "steve_job_panics_total"]);
+    for job in &jobs {
+        let of = |s: &Series| s.label("job") == Some(job.as_str());
+        let up = w.now("steve_job_up", &of);
+        let panics = w.delta("steve_job_panics_total", &of);
+        if up.is_some_and(|v| v < 1.0) {
+            checks.push(Check::new("job_up", "up", up).min(1.0).of(job));
+        }
+        if panics > 0.0 {
+            checks.push(
+                Check::new("job_panics", "count", Some(panics))
+                    .max(0.0)
+                    .of(job),
+            );
+        }
+    }
     let nodes = w.subjects(
         "node",
         &[
@@ -560,5 +592,51 @@ steve_plugin_restarts_total{plugin="p\"1"} 1
             Some(86400.0 * 1440.0)
         );
         assert!(h.warnings.is_empty(), "{h:?}");
+    }
+
+    #[test]
+    fn panicked_and_down_background_jobs_raise_explicit_warnings() {
+        let base = Snapshot::parse(
+            r#"
+steve_job_up{job="calendar.sync"} 1
+steve_job_up{job="mail.sync"} 1
+steve_job_panics_total{job="mail.sync"} 1
+"#,
+            0.0,
+        );
+        let now = Snapshot::parse(
+            r#"
+steve_job_up{job="calendar.sync"} 1
+steve_job_up{job="mail.sync"} 0
+steve_job_panics_total{job="mail.sync"} 3
+"#,
+            60.0,
+        );
+        let h = assess(&now, Some(&base));
+        assert_eq!(check(&h, "job_panics", None).value, Some(2.0));
+        assert_eq!(check(&h, "jobs_down", None).value, Some(1.0));
+        assert_eq!(check(&h, "job_up", Some("mail.sync")).value, Some(0.0));
+        assert_eq!(check(&h, "job_panics", Some("mail.sync")).value, Some(2.0));
+        // Healthy jobs do not clutter the report.
+        assert!(
+            !h.checks
+                .iter()
+                .any(|c| c.subject.as_deref() == Some("calendar.sync"))
+        );
+        let mut warned: Vec<_> = h
+            .warnings
+            .iter()
+            .map(|c| (c.key, c.subject.as_deref()))
+            .collect();
+        warned.sort();
+        assert_eq!(
+            warned,
+            [
+                ("job_panics", None),
+                ("job_panics", Some("mail.sync")),
+                ("job_up", Some("mail.sync")),
+                ("jobs_down", None),
+            ]
+        );
     }
 }

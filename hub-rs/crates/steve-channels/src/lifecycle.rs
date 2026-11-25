@@ -351,30 +351,40 @@ impl ConnectionRuntime {
     }
 
     /// Starts every wanted run, then follows `events` (the Hub bus's `connection` events, tapped
+    /// before this call) until they end or the runtime is shut down. Runs inline so panics are
+    /// visible to the supervising job and each event round records job metrics.
+    pub async fn run(&self, mut events: mpsc::Receiver<steve_types::Notification>) {
+        self.start_all();
+        // names of the people met: kicked runs and the periodic one
+        let _names = self.inner.channels.spawn_names();
+        loop {
+            let ev = tokio::select! {
+                biased;
+                _ = self.inner.shutdown.cancelled() => return,
+                ev = events.recv() => match ev {
+                    Some(ev) => ev,
+                    None => return,
+                },
+            };
+            if let Some(steve_types::DomainEvent::Channels(
+                steve_types::ChannelsEvent::Connection { id, ws },
+            )) = ev.event.as_domain()
+            {
+                steve_runtime::round("channels.lifecycle", async {
+                    self.on_event(ws.as_str(), id.as_str());
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Starts every wanted run, then follows `events` (the Hub bus's `connection` events, tapped
     /// before this call) until they end or the runtime is shut down. Returns at once; the work is
     /// a task of its own.
-    pub fn start(&self, mut events: mpsc::Receiver<steve_types::Notification>) -> JoinHandle<()> {
+    pub fn start(&self, events: mpsc::Receiver<steve_types::Notification>) -> JoinHandle<()> {
         let me = self.clone();
         tokio::spawn(async move {
-            me.start_all();
-            // names of the people met: kicked runs and the periodic one
-            let _names = me.inner.channels.spawn_names();
-            loop {
-                let ev = tokio::select! {
-                    biased;
-                    _ = me.inner.shutdown.cancelled() => return,
-                    ev = events.recv() => match ev {
-                        Some(ev) => ev,
-                        None => return,
-                    },
-                };
-                if let Some(steve_types::DomainEvent::Channels(
-                    steve_types::ChannelsEvent::Connection { id, ws },
-                )) = ev.event.as_domain()
-                {
-                    me.on_event(ws.as_str(), id.as_str());
-                }
-            }
+            me.run(events).await;
         })
     }
 

@@ -1,5 +1,6 @@
-/* A page starts at a user prompt. Each turn keeps its mapped rows, so earlier pages and
- * completed turns keep their identities as live events arrive. */
+/* A page starts at a user prompt. Each turn keeps its mapped rows and incremental build state,
+ * so earlier pages, completed turns, and earlier segments inside the live turn keep their
+ * identities as live events arrive without O(N^2) turn rebuilds. */
 import type { REvent, RSubtaskStatus, RSubtaskView } from "../api"
 import i18n, { t } from "../i18n"
 
@@ -60,61 +61,29 @@ function toolEv(t: Ev, v: any) {
   if (typeof v.duration_ms === "number" && Number.isFinite(v.duration_ms)) t[17] = v.duration_ms
   return t
 }
-function tuplesOf(evs: readonly REvent[]) {
-  const ev: Ev[] = [], seqs: number[] = [], ends: number[] = [], ts: number[] = [], tools = new Map<string, Ev>(), subtasks = new Map<string, Ev>()
-  let cur: REvent | undefined
-  const push = (e: Ev, seq: number) => { ev.push(e); seqs.push(seq); ends.push(seq); ts.push(cur?.ts ?? 0) }
-  for (const e of evs) {
-    const d = e.data ?? {}, last = ev[ev.length - 1]; cur = e
-    if (e.kind === "user") { if (d.via === "steve") push(["hi", briefHead(String(d.text ?? "")), d.files, String(d.text ?? "")], e.seq); else push(["u", d.text, d.via === "me" ? "" : d.via, d.files], e.seq); continue }
-    if (e.kind === "text") {
-      const text = String(d.text ?? ""), k = d.role === "thought" ? "th" : "a"
-      if (last?.[0] === k) { last[1] += text; ends[ends.length - 1] = e.seq }
-      else push(k === "th" ? ["th", text, ""] : ["a", text], e.seq)
-      continue
-    }
-    if (e.kind === "tool") {
-      const v = d.tool ?? {}, id = String(v.id ?? ""), had = tools.get(id), over = v.phase === "succeeded" || v.phase === "failed"
-      /* [13]: when the call ended (the update that settled it), so a turn's timeline can draw each call as long as it took */
-      if (had) { const ended = had[13]; toolEv(had, v); if (ended != null || over) had[13] = ended ?? e.ts; continue }
-      const t = toolEv([], v); if (over) t[13] = e.ts; tools.set(id, t); push(t, e.seq); continue
-    }
-    if (e.kind === "subtask") {
-      const v = d.subtask as RSubtaskView | undefined
-      if (!v || !v.id) continue
-      const id = String(v.id), over = v.status === "done" || v.status === "failed" || v.status === "cancelled"
-      const had = subtasks.get(id)
-      if (had) {
-        const started = had[2], ended = had[3]
-        had[1] = v
-        had[2] = started ?? e.ts
-        if (ended != null || over) had[3] = ended ?? e.ts
-        continue
-      }
-      const sub: Ev = ["sub", v, e.ts, over ? e.ts : undefined]
-      subtasks.set(id, sub); push(sub, e.seq); continue
-    }
-    if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
-    if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
-    if (e.kind === "turn_end") { push(["end", d.stopReason ?? ""], e.seq); continue }
-    if (e.kind === "queued") { push(["sys", t("core:queueLine.queued", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-    if (e.kind === "queued_edited") { push(["sys", t("core:queueLine.edited", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-    if (e.kind === "queued_removed") { push(["sys", t("core:queueLine.removed", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-    if (e.kind === "queued_sent_now") { push(["sys", t(d.interrupted ? "core:queueLine.sentNowInterrupted" : "core:queueLine.sentNow", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
-  }
-  return { ev, seqs, ends, ts }
-}
+
 export type Seg = { id: string; t: string; evs: Ev[]; seq: number; through: number; prompt?: string; /** when each of `evs` came */ at?: number[]; t0?: number; t1?: number; end?: string; files?: [string, number, number][] }
+export type Tuples = { ev: Ev[]; seqs: number[]; ends: number[]; ts: number[] }
 
 const PROMPT = ["u", "hi"]
-export function segmentsOf(tuple: ReturnType<typeof tuplesOf>, rangeStart = 0): Seg[] {
+
+function collectEditedFiles(files: Map<string, [string, number, number]>, indices: readonly number[], ev: readonly Ev[]) {
+  for (const i of indices) {
+    const e = ev[i]
+    if (e[0] !== "tool" || e[1] !== "edit" || e[6] == null || e[8] === 1 || !e[3]) continue
+    const f = files.get(e[3]) ?? [e[3], 0, 0]
+    f[1] += e[6]; f[2] += e[7] ?? 0; files.set(e[3], f)
+  }
+}
+
+export function segmentsOf(tuple: Tuples, rangeStart = 0): Seg[] {
   const { ev, seqs, ends, ts } = tuple
   const rows: Seg[] = []
   let buf: number[] = [], t0 = 0, work: Seg | undefined, prompt: string | undefined
   let files = new Map<string, [string, number, number]>()
   const row = (at: number, kind: string, evs: Ev[], more?: Partial<Seg>) => {
     const seq = seqs[at]
-    const out = { id: seq + ":" + kind, t: kind, evs, seq, through: ends[at], prompt, ...more }
+    const out: Seg = { id: seq + ":" + kind, t: kind, evs, seq, through: ends[at], prompt, ...more }
     rows.push(out)
     return out
   }
@@ -126,18 +95,13 @@ export function segmentsOf(tuple: ReturnType<typeof tuplesOf>, rangeStart = 0): 
       work = row(first, "work", buf.map((i) => ev[i]), {
         at: buf.map((i) => ts[i]), t0: t0 || ts[first], t1: end?.[1] ?? ts[last + 1] ?? ts[last], end: end?.[0],
       })
-      for (const i of buf) {
-        const e = ev[i]
-        if (e[0] !== "tool" || e[1] !== "edit" || e[6] == null || e[8] === 1 || !e[3]) continue
-        const f = files.get(e[3]) ?? [e[3], 0, 0]
-        f[1] += e[6]; f[2] += e[7] ?? 0; files.set(e[3], f)
-      }
+      collectEditedFiles(files, buf, ev)
     }
     if (answer !== undefined) row(answer, "a", [ev[answer]])
     buf = []
   }
   const turnDone = (i: number) => {
-    if (files.size) row(i, "files", [], { files: [...files.values()] })
+    if (files.size) row(i, "files", [], { files: [...files.values()].map(([p, a, d]): [string, number, number] => [p, a, d]) })
     files = new Map()
   }
   for (let i = 0; i < ev.length; i++) {
@@ -161,11 +125,282 @@ export function segmentsOf(tuple: ReturnType<typeof tuplesOf>, rangeStart = 0): 
   return rows
 }
 
-export type TranscriptTurn = ReturnType<typeof mapTurn>
-function mapTurn(events: REvent[]) {
-  const tuples = tuplesOf(events)
-  const start = events[0].seq
-  return { start, events, ...tuples, rows: segmentsOf(tuples) }
+type TurnWorkCache = {
+  rev: number
+  count: number
+  t1: number | undefined
+  seg: Seg
+  filesSeg?: Seg
+}
+
+type TurnState = {
+  tools: Map<string, { idx: number; ev: Ev }>
+  subtasks: Map<string, { idx: number; ev: Ev }>
+  committedRows: Seg[]
+  buf: number[]
+  t0: number
+  workRowIdx: number | undefined
+  prompt: string | undefined
+  files: Map<string, [string, number, number]>
+  workRev: number
+  workCache?: TurnWorkCache
+}
+
+export type TranscriptTurn = {
+  start: number
+  events: REvent[]
+  ev: Ev[]
+  seqs: number[]
+  ends: number[]
+  ts: number[]
+  rows: Seg[]
+}
+
+/* Private incremental build state per turn (kept off the public TranscriptTurn shape). */
+const turnStates = new WeakMap<TranscriptTurn, TurnState>()
+
+function createTurnState(): TurnState {
+  return {
+    tools: new Map(),
+    subtasks: new Map(),
+    committedRows: [],
+    buf: [],
+    t0: 0,
+    workRowIdx: undefined,
+    prompt: undefined,
+    files: new Map(),
+    workRev: 0,
+  }
+}
+
+function advanceSegments(turn: Tuples, state: TurnState, startIdx: number) {
+  const { ev, seqs, ends, ts } = turn
+  const makeRow = (at: number, kind: string, evs: Ev[], more?: Partial<Seg>): Seg => {
+    const seq = seqs[at]
+    return { id: seq + ":" + kind, t: kind, evs, seq, through: ends[at], prompt: state.prompt, ...more }
+  }
+  const flushCommitted = (end?: [string, number]) => {
+    if (!state.buf.length) return
+    const answer = ev[state.buf.at(-1)!][0] === "a" ? state.buf.pop() : undefined
+    if (state.buf.length) {
+      const first = state.buf[0], last = state.buf.at(-1)!
+      const seg = makeRow(first, "work", state.buf.map((idx) => ev[idx]), {
+        at: state.buf.map((idx) => ts[idx]),
+        t0: state.t0 || ts[first],
+        t1: end?.[1] ?? ts[last + 1] ?? ts[last],
+        end: end?.[0],
+      })
+      state.workRowIdx = state.committedRows.length
+      state.committedRows.push(seg)
+      collectEditedFiles(state.files, state.buf, ev)
+    }
+    if (answer !== undefined) state.committedRows.push(makeRow(answer, "a", [ev[answer]]))
+    state.buf = []
+    state.workCache = undefined
+    state.workRev++
+  }
+  const turnDoneCommitted = (atIdx: number) => {
+    if (state.files.size) {
+      state.committedRows.push(makeRow(atIdx, "files", [], {
+        files: [...state.files.values()].map(([p, a, d]): [string, number, number] => [p, a, d]),
+      }))
+    }
+    state.files = new Map()
+  }
+
+  for (let i = startIdx; i < ev.length; i++) {
+    const e = ev[i], kind = e[0]
+    if (PROMPT.includes(kind)) {
+      flushCommitted(); turnDoneCommitted(i); state.t0 = ts[i]; state.workRowIdx = undefined
+      state.prompt = kind === "hi" ? briefHead(String(e[3] ?? e[1])) : String(e[1] ?? "")
+      state.committedRows.push(makeRow(i, kind, [e]))
+    } else if (kind === "th" || kind === "tool" || kind === "sub" || kind === "a") {
+      if (kind !== "a") state.workRev++
+      state.buf.push(i)
+    } else if (kind === "end") {
+      if (!state.buf.length && state.workRowIdx !== undefined) {
+        const prevWork = state.committedRows[state.workRowIdx]
+        if (prevWork && !prevWork.end) state.committedRows[state.workRowIdx] = { ...prevWork, end: e[1], t1: ts[i] }
+      }
+      flushCommitted([e[1], ts[i]]); turnDoneCommitted(i); state.t0 = 0; state.workRowIdx = undefined
+    } else {
+      const split = state.buf.length > 0
+      flushCommitted()
+      state.committedRows.push(makeRow(i, kind, [e]))
+      if (split) state.t0 = 0
+    }
+  }
+}
+
+function materializeRows(turn: Tuples, state: TurnState): Seg[] {
+  const { ev, seqs, ends, ts } = turn
+  const rows = state.committedRows.slice()
+  if (!ev.length) return rows
+  const buf = state.buf
+  const hasAnswer = buf.length > 0 && ev[buf.at(-1)!][0] === "a"
+  const workCount = hasAnswer ? buf.length - 1 : buf.length
+  let filesSeg: Seg | undefined
+  if (workCount > 0) {
+    const first = buf[0], last = buf[workCount - 1]
+    const t1 = ts[last + 1] ?? ts[last]
+    let cache = state.workCache
+    if (!cache || cache.rev !== state.workRev || cache.count !== workCount || cache.t1 !== t1) {
+      const workEvs = new Array<Ev>(workCount)
+      const workAt = new Array<number>(workCount)
+      const mergedFiles = new Map<string, [string, number, number]>()
+      for (const [p, [path, a, d]] of state.files) mergedFiles.set(p, [path, a, d])
+      for (let k = 0; k < workCount; k++) {
+        const idx = buf[k], e = ev[idx]
+        workEvs[k] = e
+        workAt[k] = ts[idx]
+        if (e[0] === "tool" && e[1] === "edit" && e[6] != null && e[8] !== 1 && e[3]) {
+          const f = mergedFiles.get(e[3]) ?? [e[3], 0, 0]
+          f[1] += e[6]; f[2] += e[7] ?? 0; mergedFiles.set(e[3], f)
+        }
+      }
+      const seg: Seg = {
+        id: seqs[first] + ":work", t: "work", evs: workEvs, seq: seqs[first], through: ends[first], prompt: state.prompt,
+        at: workAt, t0: state.t0 || ts[first], t1, end: undefined,
+      }
+      const lastIdx = ev.length - 1
+      const fSeg: Seg | undefined = mergedFiles.size
+        ? { id: seqs[lastIdx] + ":files", t: "files", evs: [], seq: seqs[lastIdx], through: ends[lastIdx], prompt: state.prompt, files: [...mergedFiles.values()] }
+        : undefined
+      cache = { rev: state.workRev, count: workCount, t1, seg, filesSeg: fSeg }
+      state.workCache = cache
+    }
+    rows.push(cache.seg)
+    filesSeg = cache.filesSeg
+  } else if (state.files.size) {
+    const lastIdx = ev.length - 1
+    filesSeg = {
+      id: seqs[lastIdx] + ":files", t: "files", evs: [], seq: seqs[lastIdx], through: ends[lastIdx], prompt: state.prompt,
+      files: [...state.files.values()].map(([p, a, d]): [string, number, number] => [p, a, d]),
+    }
+  }
+  if (hasAnswer) {
+    const answer = buf[buf.length - 1]
+    rows.push({ id: seqs[answer] + ":a", t: "a", evs: [ev[answer]], seq: seqs[answer], through: ends[answer], prompt: state.prompt })
+  }
+  if (filesSeg) {
+    const lastIdx = ev.length - 1
+    if (filesSeg.seq !== seqs[lastIdx] || filesSeg.through !== ends[lastIdx]) {
+      filesSeg = { ...filesSeg, id: seqs[lastIdx] + ":files", seq: seqs[lastIdx], through: ends[lastIdx] }
+    }
+    rows.push(filesSeg)
+  }
+  return rows
+}
+
+/** Incrementally fold `fresh` events into an existing turn in O(|fresh|) while keeping earlier unchanged `Seg` identities. */
+export function appendToTurn(prev: TranscriptTurn, fresh: readonly REvent[]): TranscriptTurn {
+  if (!fresh.length) return prev
+  const state = turnStates.get(prev)
+  if (!state) return mapTurn([...prev.events, ...fresh])
+  const { events, ev, seqs, ends, ts } = prev
+  const firstNewTuple = ev.length
+  let needSegmentRebuild = false
+  let curTs = 0
+  const push = (tuple: Ev, seq: number) => {
+    ev.push(tuple); seqs.push(seq); ends.push(seq); ts.push(curTs)
+  }
+
+  for (const e of fresh) {
+    events.push(e)
+    const d = e.data ?? {}
+    curTs = e.ts ?? 0
+    if (e.kind === "user") {
+      if (d.via === "steve") push(["hi", briefHead(String(d.text ?? "")), d.files, String(d.text ?? "")], e.seq)
+      else push(["u", d.text, d.via === "me" ? "" : d.via, d.files], e.seq)
+      continue
+    }
+    if (e.kind === "text") {
+      const text = String(d.text ?? ""), k = d.role === "thought" ? "th" : "a"
+      const lastIdx = ev.length - 1, last = lastIdx >= 0 ? ev[lastIdx] : undefined
+      if (last?.[0] === k) {
+        ev[lastIdx] = k === "th" ? ["th", last[1] + text, ""] : ["a", last[1] + text]
+        ends[lastIdx] = e.seq
+        if (k === "th") {
+          if (state.buf.length > 0 && lastIdx >= state.buf[0]) state.workRev++
+          else if (lastIdx < firstNewTuple) needSegmentRebuild = true
+        }
+      } else {
+        push(k === "th" ? ["th", text, ""] : ["a", text], e.seq)
+      }
+      continue
+    }
+    if (e.kind === "tool") {
+      const v = d.tool ?? {}, id = String(v.id ?? ""), had = state.tools.get(id), over = v.phase === "succeeded" || v.phase === "failed"
+      /* [13]: when the call ended (the update that settled it), so a turn's timeline can draw each call as long as it took */
+      if (had) {
+        const ended = had.ev[13]
+        const nextEv = toolEv([], v)
+        if (ended != null || over) nextEv[13] = ended ?? e.ts
+        ev[had.idx] = nextEv
+        had.ev = nextEv
+        if (state.buf.length > 0 && had.idx >= state.buf[0]) state.workRev++
+        else if (had.idx < firstNewTuple) needSegmentRebuild = true
+        continue
+      }
+      const nextEv = toolEv([], v)
+      if (over) nextEv[13] = e.ts
+      const idx = ev.length
+      state.tools.set(id, { idx, ev: nextEv })
+      push(nextEv, e.seq)
+      continue
+    }
+    if (e.kind === "subtask") {
+      const v = d.subtask as RSubtaskView | undefined
+      if (!v || !v.id) continue
+      const id = String(v.id), over = v.status === "done" || v.status === "failed" || v.status === "cancelled"
+      const had = state.subtasks.get(id)
+      if (had) {
+        const started = had.ev[2], ended = had.ev[3]
+        const nextEv: Ev = ["sub", v, started ?? e.ts, ended != null || over ? (ended ?? e.ts) : undefined]
+        ev[had.idx] = nextEv
+        had.ev = nextEv
+        if (state.buf.length > 0 && had.idx >= state.buf[0]) state.workRev++
+        else if (had.idx < firstNewTuple) needSegmentRebuild = true
+        continue
+      }
+      const sub: Ev = ["sub", v, e.ts, over ? e.ts : undefined]
+      const idx = ev.length
+      state.subtasks.set(id, { idx, ev: sub })
+      push(sub, e.seq)
+      continue
+    }
+    if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
+    if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
+    if (e.kind === "turn_end") { push(["end", d.stopReason ?? ""], e.seq); continue }
+    if (e.kind === "queued") { push(["sys", t("core:queueLine.queued", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
+    if (e.kind === "queued_edited") { push(["sys", t("core:queueLine.edited", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
+    if (e.kind === "queued_removed") { push(["sys", t("core:queueLine.removed", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
+    if (e.kind === "queued_sent_now") { push(["sys", t(d.interrupted ? "core:queueLine.sentNowInterrupted" : "core:queueLine.sentNow", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
+  }
+
+  if (needSegmentRebuild) {
+    state.committedRows = []
+    state.buf = []
+    state.t0 = 0
+    state.workRowIdx = undefined
+    state.prompt = undefined
+    state.files = new Map()
+    state.workCache = undefined
+    state.workRev++
+    advanceSegments(prev, state, 0)
+  } else if (ev.length > firstNewTuple) {
+    advanceSegments(prev, state, firstNewTuple)
+  }
+
+  const next: TranscriptTurn = { start: prev.start, events, ev, seqs, ends, ts, rows: materializeRows(prev, state) }
+  turnStates.set(next, state)
+  return next
+}
+
+function mapTurn(events: REvent[]): TranscriptTurn {
+  const empty: TranscriptTurn = { start: events[0].seq, events: [], ev: [], seqs: [], ends: [], ts: [], rows: [] }
+  turnStates.set(empty, createTurnState())
+  return appendToTurn(empty, events)
 }
 
 export type Transcript = { turns: TranscriptTurn[]; oldest: number | null; newest: number }
@@ -245,8 +480,11 @@ export function appendEvents(data: Transcript, events: readonly REvent[]): Trans
   const [continuation, ...newTurns] = splitTurns(fresh, last?.events.at(-1)?.kind)
   const turns = data.turns.slice()
   if (continuation.length) {
-    if (last) turns.pop()
-    turns.push(mapTurn([...(last?.events ?? []), ...continuation]))
+    if (last) {
+      turns[turns.length - 1] = appendToTurn(last, continuation)
+    } else {
+      turns.push(mapTurn(continuation))
+    }
   }
   for (const turn of newTurns) turns.push(mapTurn(turn))
   return { ...data, newest: fresh.at(-1)!.seq, turns }

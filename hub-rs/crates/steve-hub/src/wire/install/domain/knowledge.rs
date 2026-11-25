@@ -42,36 +42,72 @@ install! { routes(reg, _cx) [kb, mut module_routes] => [kb, module_routes] {
 
 install! { start(reg, _cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
     // Register the index worker, memory sweeper, folder scans and chat documents.
-    let index = steve_knowledge::index::worker(modules.clone(), kb.clone());
-    jobs.push(Job::new("kb.index", async move {
-        if let Some(index) = index { index.await; }
+    let index = steve_knowledge::index::prepare_worker(modules.clone(), kb.clone());
+    jobs.push(Job::task("kb.index", move || match index {
+        Some(start) => start(),
+        None => steve_runtime::spawn("kb.index", async {}),
     }));
     {
         let modules = modules.clone();
-        jobs.push(Job::new("kb.sweep", steve_knowledge::sync::sweep_job(modules)));
+        jobs.push(Job::task("kb.sweep", move || steve_knowledge::sync::sweep_task(modules)));
     }
     {
         let (modules, kb) = (modules.clone(), kb.clone());
-        jobs.push(Job::new("kb.scans", steve_knowledge::scan_job(modules,kb)));
+        jobs.push(Job::supervised("kb.scans", move || {
+            steve_knowledge::scan_job(modules.clone(), kb.clone())
+        }));
     }
     {
         let (modules, kb) = (modules.clone(), kb.clone());
-        jobs.push(Job::new("kb.chat", steve_knowledge::sources::chat::run(modules,kb)));
+        jobs.push(Job::task("kb.chat", move || steve_knowledge::sources::chat::task(modules, kb)));
     }
 }}
 
 install! { sync(reg, cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
     let Env { bus, .. } = cx.clone();
     // memories and Bot memories are re-indexed when the store says they changed
-    let mut changes = bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Mm { .. } | steve_types::ConfigEvent::Bot { .. }))));
+    let initial = std::sync::Arc::new(std::sync::Mutex::new(Some(bus.tap(|event| {
+        matches!(
+            event.as_domain(),
+            Some(steve_types::DomainEvent::Config(
+                steve_types::ConfigEvent::Mm { .. } | steve_types::ConfigEvent::Bot { .. }
+            ))
+        )
+    }))));
+    let bus = bus.clone();
     let m = modules.clone();
-    jobs.push(Job::new("kb.changes", async move {
-        while let Some(event) = changes.recv().await {
-            let m = m.clone();
-            match tokio::task::spawn_blocking(move || steve_knowledge::sync::on_event(&m, &event.event)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!("kb sync: {e}"),
-                Err(e) => tracing::warn!("kb sync: {e}"),
+    jobs.push(Job::supervised("kb.changes", move || {
+        let mut changes = initial
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .unwrap_or_else(|| {
+                bus.tap(|event| {
+                    matches!(
+                        event.as_domain(),
+                        Some(steve_types::DomainEvent::Config(
+                            steve_types::ConfigEvent::Mm { .. }
+                                | steve_types::ConfigEvent::Bot { .. }
+                        ))
+                    )
+                })
+            });
+        let m = m.clone();
+        async move {
+            while let Some(event) = changes.recv().await {
+                let m = m.clone();
+                steve_runtime::round("kb.changes", async move {
+                    match tokio::task::spawn_blocking(move || {
+                        steve_knowledge::sync::on_event(&m, &event.event)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::warn!("kb sync: {e}"),
+                        Err(e) => tracing::warn!("kb sync: {e}"),
+                    }
+                })
+                .await;
             }
         }
     }));

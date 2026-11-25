@@ -1,10 +1,10 @@
 import { VirtualList } from "@/components/virtual-list"
-import { useArchived, useViewTable } from "@/data/sync"
+import { useArchived, useViewKinds } from "@/data/sync"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { laneOf } from "@/item-lanes"
-import { archive, bulk, closedSt, deleteItem, DOMAIN_CATS, getItems, isKind, itemDisplayState, itemDisplayStatus, itemOf, kindTags, st, tag, type Item } from "@/store"
+import { archive, bulk, closedSt, deleteItem, DOMAIN_CATS, getItems, isKind, itemDisplayState, itemDisplayStatus, itemOf, kindTags, st, tag, useShellStore, type Item } from "@/store"
 import { BotName, Chips, Empty, go, Group, KindTag, openSheet, Page, SectionLabel, Segmented, StatusDot } from "@/ui"
 import { Count, ItemRow, Select, selected } from "@/view-shared"
 import { t as tr, useT } from "@/i18n"
@@ -38,7 +38,8 @@ export function ItemsView() {
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
   const arch = filt === "arch"
   const scroll = useRef<HTMLDivElement>(null)
-  useViewTable()
+  useViewKinds(["item", "session", "decision"])
+  useShellStore()
   const history = useArchived(arch)
   const pool = arch ? history.rows.map((view) => itemOf(view)) : getItems()
   /* the counts above, the 等你 / 进行中 filters, the board's columns and the running-status pill sort items one way (item-lanes.ts) */

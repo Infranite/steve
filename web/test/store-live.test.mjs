@@ -28,39 +28,60 @@ timeoutManager.setTimeoutProvider({
 /* data/sync.ts without TanStack Query: the same table functions behind the same names */
 function fakeSync(snapshot) {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, gcTime: Infinity, retry: false } } })
-  let t = tbl.EMPTY, scope = 0
-  const ls = new Set(), catalog = new Set()
-  const set = (n, all = true) => { if (n !== t) { t = n; ls.forEach((f) => f()); if (all) catalog.forEach((f) => f()) } }
+  const t = new tbl.ViewTable()
+  let scope = 0
+  const catalog = new Set()
+  const notifyCatalog = (changed, kinds) => {
+    if (!changed) return
+    if (kinds.size === 0 || [...kinds].some((k) => k !== "message")) catalog.forEach((f) => f())
+  }
   let cursor = null
-  const open = () => tbl.viewsOf(t, "decision").filter((d) => d.status === "open")
+  const open = () => t.viewsOf("decision", "hot:decision")
   return {
-    decisionsForItem: (id) => open().filter((d) => d.item_id === id),
-    decisionsForSession: (id) => open().filter((d) => d.session_id === id),
-    applyPatch: (e) => set(tbl.mergePatch(t, e.rev, e.ops), e.ops.some((op) => op.type !== "message")),
-    decisionView: (id) => tbl.viewOf(t, "decision", id),
-    loadViews: async () => { cursor = snapshot.cursor ?? null; set(tbl.mergeSnapshot(t, snapshot.rev, {
-      decision: structuredClone(snapshot.decision), item: structuredClone(snapshot.item), session: structuredClone(snapshot.session),
-      message: { views: structuredClone(snapshot.message) },
-    })) },
-    messageView: (id) => tbl.viewOf(t, "message", id),
-    messageViews: () => tbl.viewsOf(t, "message"),
+    decisionsForItem: (id) => t.viewsOf("decision", `decision:item:${id}`).filter((d) => d.status === "open"),
+    decisionsForSession: (id) => t.viewsOf("decision", `decision:session:${id}`).filter((d) => d.status === "open"),
+    applyPatch: (e) => { const c = t.mergePatch(e.rev, e.ops); notifyCatalog(c.changed, c.kinds) },
+    decisionView: (id) => t.viewOf("decision", id),
+    loadViews: async () => {
+      cursor = snapshot.cursor ?? null
+      const c = t.mergeSnapshot(snapshot.rev, {
+        decision: structuredClone(snapshot.decision), item: structuredClone(snapshot.item), session: structuredClone(snapshot.session),
+        message: { views: structuredClone(snapshot.message) },
+      })
+      notifyCatalog(c.changed, c.kinds)
+    },
+    messageView: (id) => t.viewOf("message", id),
+    messageViews: () => t.viewsOf("message"),
     onCatalog: (f) => { catalog.add(f); return () => catalog.delete(f) },
-    itemView: (id) => tbl.viewOf(t, "item", id),
-    sessionView: (id) => tbl.viewOf(t, "session", id),
-    itemViews: () => tbl.viewsOf(t, "item", "hot:item"),
-    sessionViews: () => tbl.viewsOf(t, "session", "hot:session"),
-    sessionsForItem: (id) => tbl.viewsOf(t, "session", `session:item:${id}`),
+    onViewKind: (k, f) => t.subscribeKind(k, f),
+    onViewKinds: (ks, f) => t.subscribeKinds(ks, f),
+    onViewGroup: (g, f) => t.subscribeGroup(g, f),
+    onEntityView: (k, id, f) => t.subscribeEntity(k, id, f),
+    subscribeItemScope: (id, f) => {
+      const a = t.subscribeEntity("item", id, f)
+      const b = t.subscribeGroup(`session:item:${id}`, f)
+      const c = t.subscribeGroup(`decision:item:${id}`, f)
+      return () => { a(); b(); c() }
+    },
+    useItemView: (id) => (id ? t.viewOf("item", id) : undefined),
+    useSessionView: (id) => (id ? t.viewOf("session", id) : undefined),
+    useViewGroup: (g) => t.groupVersion(g),
+    itemView: (id) => t.viewOf("item", id),
+    sessionView: (id) => t.viewOf("session", id),
+    itemViews: () => t.viewsOf("item", "hot:item"),
+    sessionViews: () => t.viewsOf("session", "hot:session"),
+    sessionsForItem: (id) => t.viewsOf("session", `session:item:${id}`),
     itemWork: (id) => {
-      const live = tbl.viewsOf(t, "session", `session:item:${id}`).filter((s) => s.status !== "ended")
+      const live = t.viewsOf("session", `session:item:${id}`).filter((s) => s.status !== "ended")
       return { active: live.at(-1), running: live.some((s) => s.status === "running"),
-        queued: live.at(-1)?.queued ?? 0, decisions: open().filter((d) => d.item_id === id) }
+        queued: live.at(-1)?.queued ?? 0, decisions: t.viewsOf("decision", `decision:item:${id}`).filter((d) => d.status === "open") }
     },
     table: () => t, qc, scopeKey: () => scope,
     readViews: async () => {},
     readItemSessions: async () => {},
-    onViews: (f) => { ls.add(f); return () => ls.delete(f) },
+    onViews: (f) => t.subscribeAll(f),
     openDecisions: open,
-    resetViews: () => { t = tbl.EMPTY; qc.clear(); scope++ },
+    resetViews: () => { t.reset(); qc.clear(); scope++ },
     settle: async (answer) => answer, settled: () => [], viewsCursor: () => cursor,
   }
 }
@@ -105,7 +126,7 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "./components/ui/toaster" || id === "../components/ui/toaster") return { toast: (x) => notices.push(x) }
       if (id === "@tanstack/react-query") return { isCancelledError }
-      if (id === "react") return { useSyncExternalStore: (subscribe, read) => ({ subscribe, read }) }
+      if (id === "react") return { useSyncExternalStore: (subscribe, read) => ({ subscribe, read }), useCallback: (fn) => fn, useRef: (v) => ({ current: v }) }
       throw new Error(id)
     }, window: {}, document: { querySelector: () => null }, localStorage: local, location: {},
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
@@ -746,4 +767,17 @@ test("decision patches change the cards and their item without reading /api/shel
   // an older frame changes nothing
   h.event({ type: "patch", ws: "ws", rev: 4, ops: [{ type: "decision", op: "upsert", id: "d1", view: h.snapshot.decision[0] }] })
   assert.equal(s.it("ST-1").waits.length, 0)
+})
+
+test("shell subscribers ignore view patches and chatQueue caches across non-message updates", async () => {
+  const h = harness(), s = h.store
+  h.snapshot.message = [chatMessage("m1", "me")]
+  s.start(); await flush()
+  let shellTicks = 0
+  const off = s.useShellStore().subscribe(() => { shellTicks++ })
+  const queueBefore = s.chatQueue()
+  h.patch("item", { id: "ST-9", state: { kind: "active" }, cycle: 1, revision: 0, delivery: [] })
+  assert.equal(shellTicks, 0, "view patches must not wake shell-only subscribers")
+  assert.equal(s.chatQueue(), queueBefore, "chatQueue keeps cached identity across unrelated item patches")
+  off()
 })

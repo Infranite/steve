@@ -199,34 +199,37 @@ pub async fn watch_mailboxes(
     let mut known: std::collections::BTreeSet<String> =
         connections(&flow).into_iter().map(|c| c.id).collect();
     while changes.recv().await.is_some() {
-        // E6: a mailbox that appears, recovers or goes away starts or stops its runner now (the
-        // first sync of a new mailbox runs at once)
-        if let Err(err) = mail.reconcile() {
-            tracing::warn!(error = %err, "mail runners");
-        }
-        while changes.try_recv().is_ok() {}
-        for conn in connections(&flow) {
-            let steve_store::connections::WatchedConnection {
-                id,
-                workspace_id: ws,
-                adapter,
-                status,
-                created_by: by,
-            } = conn;
-            if !known.insert(id.clone()) || !live(&status) {
-                continue;
+        steve_runtime::round("mail.mailboxes", async {
+            // E6: a mailbox that appears, recovers or goes away starts or stops its runner now (the
+            // first sync of a new mailbox runs at once)
+            if let Err(err) = mail.reconcile() {
+                tracing::warn!(error = %err, "mail runners");
             }
-            if matches!(adapter.as_str(), "imap" | "gmail" | "outlook") {
-                let (f, cid) = (flow.clone(), id.clone());
-                let r = tokio::task::spawn_blocking(move || {
-                    steve_mail::template::install(&f, &ws, &cid, &by)
-                })
-                .await;
-                if let Ok(Err(e)) = r {
-                    tracing::warn!(connection = %id, "mail triage template: {e}");
+            while changes.try_recv().is_ok() {}
+            for conn in connections(&flow) {
+                let steve_store::connections::WatchedConnection {
+                    id,
+                    workspace_id: ws,
+                    adapter,
+                    status,
+                    created_by: by,
+                } = conn;
+                if !known.insert(id.clone()) || !live(&status) {
+                    continue;
+                }
+                if matches!(adapter.as_str(), "imap" | "gmail" | "outlook") {
+                    let (f, cid) = (flow.clone(), id.clone());
+                    let r = tokio::task::spawn_blocking(move || {
+                        steve_mail::template::install(&f, &ws, &cid, &by)
+                    })
+                    .await;
+                    if let Ok(Err(e)) = r {
+                        tracing::warn!(connection = %id, "mail triage template: {e}");
+                    }
                 }
             }
-        }
+        })
+        .await;
     }
 }
 

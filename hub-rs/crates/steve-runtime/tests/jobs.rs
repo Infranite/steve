@@ -89,16 +89,32 @@ async fn dropping_tasks_cancels_the_current_run_and_future_ticks() {
 #[derive(Clone, Default)]
 struct Recorder {
     panics: Arc<AtomicUsize>,
+    restarts: Arc<AtomicUsize>,
     runs: Arc<AtomicUsize>,
+    up: Arc<Mutex<Option<f64>>>,
     durations: Arc<Mutex<Vec<f64>>>,
 }
-struct Panics(Arc<AtomicUsize>);
-impl metrics::CounterFn for Panics {
+struct AtomicCounter(Arc<AtomicUsize>);
+impl metrics::CounterFn for AtomicCounter {
     fn increment(&self, n: u64) {
         self.0.fetch_add(n as usize, Ordering::SeqCst);
     }
     fn absolute(&self, n: u64) {
         self.0.store(n as usize, Ordering::SeqCst);
+    }
+}
+struct LastGauge(Arc<Mutex<Option<f64>>>);
+impl metrics::GaugeFn for LastGauge {
+    fn increment(&self, v: f64) {
+        let mut g = self.0.lock().unwrap();
+        *g = Some(g.unwrap_or(0.0) + v);
+    }
+    fn decrement(&self, v: f64) {
+        let mut g = self.0.lock().unwrap();
+        *g = Some(g.unwrap_or(0.0) - v);
+    }
+    fn set(&self, v: f64) {
+        *self.0.lock().unwrap() = Some(v);
     }
 }
 impl metrics::CounterFn for Recorder {
@@ -137,25 +153,33 @@ impl metrics::Recorder for Recorder {
     ) {
     }
     fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
-        if key.name() == "steve_job_panics_total"
-            && key
-                .labels()
-                .any(|l| l.key() == "job" && l.value() == "metric")
+        if !key
+            .labels()
+            .any(|l| l.key() == "job" && l.value() == "metric")
         {
-            return metrics::Counter::from_arc(Arc::new(Panics(self.panics.clone())));
+            return metrics::Counter::noop();
         }
-        if key.name() == "steve_job_runs_total"
-            && key
-                .labels()
-                .any(|l| l.key() == "job" && l.value() == "metric")
-        {
-            metrics::Counter::from_arc(Arc::new(self.clone()))
-        } else {
-            metrics::Counter::noop()
+        match key.name() {
+            "steve_job_panics_total" => {
+                metrics::Counter::from_arc(Arc::new(AtomicCounter(self.panics.clone())))
+            }
+            "steve_job_restarts_total" => {
+                metrics::Counter::from_arc(Arc::new(AtomicCounter(self.restarts.clone())))
+            }
+            "steve_job_runs_total" => metrics::Counter::from_arc(Arc::new(self.clone())),
+            _ => metrics::Counter::noop(),
         }
     }
-    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-        metrics::Gauge::noop()
+    fn register_gauge(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+        if key.name() == "steve_job_up"
+            && key
+                .labels()
+                .any(|l| l.key() == "job" && l.value() == "metric")
+        {
+            metrics::Gauge::from_arc(Arc::new(LastGauge(self.up.clone())))
+        } else {
+            metrics::Gauge::noop()
+        }
     }
     fn register_histogram(
         &self,
@@ -181,6 +205,7 @@ async fn spawn_and_each_period_record_runs_and_duration_including_cancellation()
     spawn("metric", async {}).await;
     assert_eq!(recorder.runs.load(Ordering::SeqCst), 1);
     assert_eq!(recorder.durations.lock().unwrap().len(), 1);
+    assert_eq!(*recorder.up.lock().unwrap(), Some(1.0));
     let clock = Arc::new(FakeClock::new(0));
     let task = every(
         "metric",
@@ -214,21 +239,69 @@ async fn spawn_and_each_period_record_runs_and_duration_including_cancellation()
         1,
         "panic is observable before joining the task"
     );
+    assert_eq!(
+        *recorder.up.lock().unwrap(),
+        Some(0.0),
+        "panicked one-shot job marks itself down"
+    );
     panic.await;
     assert_eq!(
         recorder.panics.load(Ordering::SeqCst),
         1,
         "poll does not double count a recorded panic"
     );
-    every(
+
+    // Periodic task recovers from transient panics with backoff, then stops and marks itself down
+    // once consecutive panics exceed PANIC_MAX_CONSECUTIVE.
+    let panic_clock = Arc::new(FakeClock::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let task = every(
         "metric",
-        Arc::new(FakeClock::new(0)),
-        Duration::from_secs(1),
+        panic_clock.clone(),
+        Duration::from_secs(60),
         FirstRun::Immediate,
-        || async { panic!("periodic panic") },
-    )
-    .await;
+        move || {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            async move {
+                // Succeed on attempt 1 (after 1st panic), then panic until the restart cap hits.
+                if n != 1 {
+                    panic!("periodic panic #{n}");
+                }
+            }
+        },
+    );
+    settle().await;
     assert_eq!(recorder.panics.load(Ordering::SeqCst), 2);
+    assert_eq!(recorder.restarts.load(Ordering::SeqCst), 1);
+    assert_eq!(*recorder.up.lock().unwrap(), Some(1.0));
+    // Backoff 1s -> attempt 1 succeeds and resets consecutive panic counter.
+    panic_clock.advance(1_000);
+    settle().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(recorder.panics.load(Ordering::SeqCst), 2);
+    // Next scheduled period (60s) panics repeatedly through PANIC_MAX_CONSECUTIVE restarts:
+    // backoffs 1s, 2s, 4s, 8s, 16s, then stops on the 6th consecutive panic.
+    panic_clock.advance(60_000);
+    settle().await;
+    for backoff_ms in [1_000, 2_000, 4_000, 8_000, 16_000] {
+        panic_clock.advance(backoff_ms);
+        settle().await;
+    }
+    task.await;
+    assert_eq!(
+        recorder.panics.load(Ordering::SeqCst),
+        2 + (steve_runtime::jobs::PANIC_MAX_CONSECUTIVE as usize + 1)
+    );
+    assert_eq!(
+        recorder.restarts.load(Ordering::SeqCst),
+        1 + steve_runtime::jobs::PANIC_MAX_CONSECUTIVE as usize
+    );
+    assert_eq!(
+        *recorder.up.lock().unwrap(),
+        Some(0.0),
+        "job marks itself down once consecutive panics exhaust the restart cap"
+    );
 }
 
 #[tokio::test]
@@ -299,4 +372,28 @@ async fn a_slow_pass_keeps_the_full_delay_and_cancellation_stops_it() {
     clock.advance(100000);
     settle().await;
     assert_eq!(runs.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn supervise_restarts_with_backoff_until_clean_exit_or_cap() {
+    let clock = Arc::new(FakeClock::new(0));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let a = attempts.clone();
+    let task = steve_runtime::supervise("sup.recover", clock.clone(), move || {
+        let n = a.fetch_add(1, Ordering::SeqCst);
+        async move {
+            if n < 2 {
+                panic!("transient crash #{n}");
+            }
+        }
+    });
+    settle().await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    clock.advance(1_000);
+    settle().await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    clock.advance(2_000);
+    settle().await;
+    task.await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }

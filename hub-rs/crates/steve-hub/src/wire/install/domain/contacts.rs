@@ -17,12 +17,16 @@ install! { install(reg, _cx) [conns, mut jobs, modules] => [conns, directory, jo
         steve_modules::contacts::sync::DirectorySync::new(modules.clone(), Arc::new(directory));
     {
         let directory = directory.clone();
-        jobs.push(Job::new("contacts.sync", directory.run()));
+        jobs.push(Job::supervised("contacts.sync", move || {
+            directory.clone().run()
+        }));
     }
     // Committed connection/workspace facts wake the owned directory deadline source.
     {
         let directory = directory.clone();
-        jobs.push(Job::new("contacts.watch", directory.watch()));
+        jobs.push(Job::supervised("contacts.watch", move || {
+            directory.clone().watch()
+        }));
     }
 }}
 

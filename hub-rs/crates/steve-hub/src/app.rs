@@ -533,7 +533,7 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
     // live streams of clients signed out by another process (`steve access revoke`) end too (G11)
     if let Some(m) = &st.modules {
         st.jobs.start("hub.presence", || {
-            steve_runtime::spawn("hub.presence", st.presence.clone().sweep(m.store.clone()))
+            st.presence.clone().sweep_task(m.store.clone())
         });
     }
     // warm the runtimes cache so the first /api/runtimes doesn't wait for `claude --version`

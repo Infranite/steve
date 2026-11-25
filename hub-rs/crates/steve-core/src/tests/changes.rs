@@ -456,7 +456,10 @@ async fn deterministic_single_setting_change_skips_target_picker_and_draft_model
         .await
         .unwrap();
     assert_eq!(p.target, json!({"kind": "settings", "id": "general"}));
-    assert_eq!(p.patch.as_ref().and_then(|m| m.get("tz")), Some(&json!("UTC")));
+    assert_eq!(
+        p.patch.as_ref().and_then(|m| m.get("tz")),
+        Some(&json!("UTC"))
+    );
     k.core.apply(&p.id, "me", WS).unwrap();
     assert_eq!(k.db().setting(WS, "tz", "system").unwrap(), "UTC");
 

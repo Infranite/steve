@@ -23,6 +23,16 @@ impl Job {
     pub fn new(name: &'static str, future: impl Future<Output = ()> + Send + 'static) -> Self {
         Self::task(name, move || steve_runtime::spawn(name, future))
     }
+    /// Starts a long-running background job under bounded exponential-backoff panic supervision.
+    pub fn supervised<F, Fut>(name: &'static str, make: F) -> Self
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        Self::task(name, move || {
+            steve_runtime::supervise(name, Arc::new(steve_runtime::SystemClock), make)
+        })
+    }
     pub fn task(
         name: &'static str,
         start: impl FnOnce() -> steve_runtime::Task + Send + 'static,

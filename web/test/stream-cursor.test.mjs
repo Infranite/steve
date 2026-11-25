@@ -4,7 +4,7 @@ import { resumableStream, STALE_MS } from "../src/stream-cursor.ts"
 
 /* a fake EventSource per open, fake timers and clock, and window/document targets */
 function rig({ cursor = () => null, hidden = false } = {}) {
-  const sources = [], data = [], opens = [], timers = [], downs = []
+  const sources = [], data = [], opens = [], timers = [], downs = [], reconnects = []
   let now = 0
   const target = () => { const ls = {}; return { ls, addEventListener: (t, f) => { (ls[t] ??= new Set()).add(f) }, removeEventListener: (t, f) => ls[t]?.delete(f), fire: (t) => ls[t]?.forEach((f) => f()) } }
   const win = target(), doc = Object.assign(target(), { visibilityState: hidden ? "hidden" : "visible" })
@@ -19,12 +19,12 @@ function rig({ cursor = () => null, hidden = false } = {}) {
       src.drop = () => { src.readyState = 2; src.onerror?.({}) }
       sources.push(src); return src
     },
-    on: (d) => data.push(d), onOpen: (resumed) => opens.push(resumed), onDown: () => downs.push(now), cursor,
+    on: (d) => data.push(d), onOpen: (resumed) => opens.push(resumed), onDown: () => downs.push(now), onReconnect: (reason) => reconnects.push(reason), cursor,
     setTimeout: (f, ms) => { const t = { f, ms, at: now + ms }; timers.push(t); return t }, clearTimeout: (t) => { if (t) t.cancelled = true },
     now: () => now, win, doc,
   })
   const advance = (ms) => { now += ms; for (const t of timers.splice(0)) { if (t.cancelled) continue; if (t.at <= now) t.f(); else timers.push(t) } }
-  return { s, sources, data, opens, downs, timers, win, doc, advance, last: () => sources.at(-1) }
+  return { s, sources, data, opens, downs, reconnects, timers, win, doc, advance, last: () => sources.at(-1) }
 }
 
 test("the first open resumes after the state's watermark; without one it opens as before", () => {
@@ -109,6 +109,9 @@ test("every break and every failed attempt is told; a close is not", () => {
   r.last().open(); assert.deepEqual(r.downs, [])
   r.last().drop(); assert.equal(r.downs.length, 1)
   r.advance(2000); r.last().drop(); assert.equal(r.downs.length, 2) // the retry failed too
-  r.advance(4000); r.last().open(); assert.deepEqual(r.opens, [true, true])
+  r.doc.fire("visibilitychange") // woken during backoff
+  r.advance(STALE_MS); r.win.fire("pageshow") // stale socket replaced
+  r.last().open(); assert.deepEqual(r.opens, [true, true])
+  assert.deepEqual(r.reconnects, ["error", "error", "wake", "stale"])
   r.s.close(); r.last().drop(); assert.equal(r.downs.length, 2)
 })

@@ -34,6 +34,63 @@ const RETENTION_EVERY: Duration = Duration::from_secs(3600);
 /// The longest one sync may take (a first sync of 500 messages takes a few minutes at most).
 const SYNC_DEADLINE: Duration = Duration::from_secs(15 * 60);
 
+/// Bounded mail adapter label for metrics.
+pub(crate) fn mail_adapter_label(adapter: &str) -> &'static str {
+    match adapter {
+        "imap" => "imap",
+        "gmail" => "gmail",
+        "outlook" => "outlook",
+        "demo" => "demo",
+        _ => "other",
+    }
+}
+
+fn record_mail_sync(
+    adapter: &'static str,
+    result: &'static str,
+    elapsed_secs: f64,
+    fetched: usize,
+) {
+    thread_local! {
+        static SYNC_TOTAL: std::cell::RefCell<HashMap<(&'static str, &'static str), metrics::Counter>> =
+            std::cell::RefCell::new(HashMap::new());
+        static SYNC_DURATION: std::cell::RefCell<HashMap<&'static str, metrics::Histogram>> =
+            std::cell::RefCell::new(HashMap::new());
+        static MESSAGES_SYNCED: std::cell::RefCell<HashMap<&'static str, metrics::Counter>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    SYNC_TOTAL.with(|c| {
+        c.borrow_mut()
+            .entry((adapter, result))
+            .or_insert_with(|| {
+                metrics::counter!(
+                    "steve_mail_sync_total",
+                    "adapter" => adapter,
+                    "result" => result
+                )
+            })
+            .increment(1);
+    });
+    SYNC_DURATION.with(|c| {
+        c.borrow_mut()
+            .entry(adapter)
+            .or_insert_with(
+                || metrics::histogram!("steve_mail_sync_duration_seconds", "adapter" => adapter),
+            )
+            .record(elapsed_secs);
+    });
+    if fetched > 0 {
+        MESSAGES_SYNCED.with(|c| {
+            c.borrow_mut()
+                .entry(adapter)
+                .or_insert_with(
+                    || metrics::counter!("steve_mail_messages_synced_total", "adapter" => adapter),
+                )
+                .increment(fetched as u64);
+        });
+    }
+}
+
 /// The next backoff delay.
 pub fn backoff(prev: Option<Duration>) -> Duration {
     match prev {
@@ -106,6 +163,31 @@ impl Mail {
         let l = self.conn_lock(connection_id);
         let _g = l.lock().await;
         let (adapter, cx) = self.adapter_of(ws, connection_id)?;
+        let adapter_label = mail_adapter_label(cx.adapter());
+        let started = std::time::Instant::now();
+        let out = self.sync_now_inner(ws, connection_id, adapter, cx).await;
+        let (result_label, fetched) = match &out {
+            Ok(report) => ("ok", report.fetched),
+            Err(MailError::Adapter(AdapterError::Auth(_))) => ("auth", 0),
+            Err(MailError::Adapter(AdapterError::Transient(_))) => ("transient", 0),
+            Err(_) => ("error", 0),
+        };
+        record_mail_sync(
+            adapter_label,
+            result_label,
+            started.elapsed().as_secs_f64(),
+            fetched,
+        );
+        out
+    }
+
+    async fn sync_now_inner(
+        &self,
+        ws: &str,
+        connection_id: &str,
+        adapter: Arc<dyn MailAdapter>,
+        cx: ConnCx,
+    ) -> MailResult<SyncReport> {
         // one provider session lists the folders and then syncs them
         let (folders, session) = match adapter.open_sync(&cx).await {
             Ok(f) => f,
@@ -406,22 +488,42 @@ impl Mail {
         Ok(wanted.len())
     }
 
+    /// The background job as a supervised periodic [`steve_runtime::Task`]: runners per mailbox
+    /// (reconciled every minute) and hourly retention.
+    pub fn jobs_task(self) -> steve_runtime::Task {
+        let clock = self.0.m.clock.clone();
+        let scope = Arc::new(SyncScope(self.clone()));
+        let last_retention = Arc::new(std::sync::Mutex::new(None::<tokio::time::Instant>));
+        steve_runtime::every_after(
+            "mail.sync",
+            clock,
+            SCAN,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let _scope = scope.clone();
+                let m = self.clone();
+                let last_retention = last_retention.clone();
+                async move {
+                    if let Err(e) = m.reconcile() {
+                        tracing::warn!(error = %e, "mail runners");
+                    }
+                    let due = last_retention
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_none_or(|t| t.elapsed() >= RETENTION_EVERY);
+                    if due {
+                        m.run_retention().await;
+                        *last_retention.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(tokio::time::Instant::now());
+                    }
+                }
+            },
+        )
+    }
+
     /// The background job: runners per mailbox (reconciled every minute) and hourly retention.
     pub async fn run_jobs(self) {
-        let _scope = SyncScope(self.clone());
-        let m = self.clone();
-
-        let mut last_retention: Option<tokio::time::Instant> = None;
-        loop {
-            if let Err(e) = m.reconcile() {
-                tracing::warn!(error = %e, "mail runners");
-            }
-            if last_retention.is_none_or(|t| t.elapsed() >= RETENTION_EVERY) {
-                m.run_retention().await;
-                last_retention = Some(tokio::time::Instant::now());
-            }
-            tokio::time::sleep(SCAN).await;
-        }
+        self.jobs_task().await;
     }
 
     async fn run_retention(&self) {

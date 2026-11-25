@@ -81,10 +81,12 @@ install! { routes(reg, cx) [channels, mut module_routes, outbox] => [channels, m
 }}
 
 install! { notifications(reg, _cx) [channels, mut jobs, outbox] => [channels, jobs, outbox] {
-    jobs.push(Job::new("channels.notifications", steve_channels::notifications::run(
-            channels.clone(),
-            outbox.clone(),
-        )));
+    {
+        let (ch, out) = (channels.clone(), outbox.clone());
+        jobs.push(Job::supervised("channels.notifications", move || {
+            steve_channels::notifications::run(ch.clone(), out.clone())
+        }));
+    }
     let (ch, out) = (channels.clone(), outbox.clone());
     jobs.push(Job::task("channels.trigger_report", move || steve_channels::trigger_report::run(ch, out)));
 }}

@@ -1,12 +1,12 @@
 import { getItem, st } from "@/store"
 import { useState } from "react"
-import { hasMoreSettled, loadMoreSettled } from "@/data/sync"
+import { hasMoreSettled, loadMoreSettled, useSettledVersion } from "@/data/sync"
 import { ChevronRightIcon, RotateCcwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useT } from "@/i18n"
 import { dayHeading, hm } from "@/i18n/format"
 import { cn } from "@/lib/utils"
-import { done, toast, undoDecision, WT, type Done } from "@/store"
+import { done, toast, undoDecision, useShellStore, WT, type Done } from "@/store"
 import { clip } from "@/thread/topics"
 import { Chips, Empty, go, Group, ItemNo, permissionQuestion, RelNote, SectionLabel } from "@/ui"
 import { disambiguateActors, formatActorName, resolveActor, type Actor } from "@/actor"
@@ -84,6 +84,8 @@ function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
 }
 
 export function InboxDone() {
+  useSettledVersion()
+  useShellStore()
   const t = useT()
   const [, f] = useState(0)
   const [loading, setLoading] = useState(false)

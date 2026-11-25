@@ -1,4 +1,5 @@
-import { getItems, useDeviceInventory, useHubEvents } from "@/store"
+import { getItems, useDeviceInventory, useHubEvents, useShellStore } from "@/store"
+import { useViewKinds } from "@/data/sync"
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
 import { api, type CloneProgress, type RBrowse, type RNode, type RProject } from "@/api"
 import { kb, type ProjectProposal } from "@/api/knowledge"
@@ -53,6 +54,8 @@ export function NewWorkspaceDialog() {
 
 /* ── 项目 ── */
 export function ProjectsView() {
+  useShellStore()
+  useViewKinds(["item", "session", "decision"])
   const t = useT()
   const ps = st.projects, running = (id: string) => getItems().filter((i) => i.project === id && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
   return (
@@ -91,6 +94,8 @@ export function projectItems(project: string, items: Item[]) {
 }
 
 export function ProjectView({ id }: { id: string }) {
+  useShellStore()
+  useViewKinds(["item", "session", "decision"])
   const t = useT()
   const p = st.projects.find((x) => x.id === id)
   const [tab, setTab0] = useState<Tab>(lastTab.id === id ? lastTab.tab : "overview")

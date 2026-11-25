@@ -3559,43 +3559,53 @@ impl Outbox {
         let weak = ch.downgrade();
         let wake = ch.store().commit_wake(QUEUE_WAKE_TABLES);
         let ended = weak.clone().closed();
-        steve_runtime::spawn("channels.send", async move {
-            struct Scope(Arc<Outbox>);
-            impl Drop for Scope {
-                fn drop(&mut self) {
-                    self.0.stop_background();
-                }
+        struct Scope(Arc<Outbox>);
+        impl Drop for Scope {
+            fn drop(&mut self) {
+                self.0.stop_background();
             }
-            let _scope = Scope(self.clone());
-            let _maintenance = steve_runtime::every(
-                "channels.send.maintenance",
-                clock.clone(),
-                QUEUE_EVERY,
-                steve_runtime::FirstRun::Immediate,
-                move || {
-                    let (weak, outbox) = (weak.clone(), self.clone());
-                    async move {
-                        if let Some(ch) = weak.upgrade() {
-                            outbox.maintain(&ch).await;
-                            outbox.settle_unknown(&ch, ch.now()).await;
+        }
+        let scope = Arc::new(Scope(self.clone()));
+        let maint_clock = clock.clone();
+        steve_runtime::supervise("channels.send", clock.clone(), move || {
+            let _scope = scope.clone();
+            let source = source.clone();
+            let clock = clock.clone();
+            let maint_clock = maint_clock.clone();
+            let weak = weak.clone();
+            let outbox = self.clone();
+            let wake = wake.clone();
+            async move {
+                let _maintenance = steve_runtime::every(
+                    "channels.send.maintenance",
+                    maint_clock,
+                    QUEUE_EVERY,
+                    steve_runtime::FirstRun::Immediate,
+                    move || {
+                        let (weak, outbox) = (weak.clone(), outbox.clone());
+                        async move {
+                            if let Some(ch) = weak.upgrade() {
+                                outbox.maintain(&ch).await;
+                                outbox.settle_unknown(&ch, ch.now()).await;
+                            }
                         }
-                    }
-                },
-            );
-            steve_runtime::due::due_loop(
-                source,
-                clock,
-                wake,
-                steve_runtime::policy::Backoff {
-                    base: QUEUE_EVERY,
-                    max: QUEUE_EVERY,
-                    factor: 1,
-                    jitter: steve_runtime::policy::Jitter::None,
-                    attempts: None,
-                    reset_after: None,
-                },
-            )
-            .await;
+                    },
+                );
+                steve_runtime::due::due_loop(
+                    source,
+                    clock,
+                    wake,
+                    steve_runtime::policy::Backoff {
+                        base: QUEUE_EVERY,
+                        max: QUEUE_EVERY,
+                        factor: 1,
+                        jitter: steve_runtime::policy::Jitter::None,
+                        attempts: None,
+                        reset_after: None,
+                    },
+                )
+                .await;
+            }
         })
         .until(ended)
     }

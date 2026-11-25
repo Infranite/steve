@@ -277,7 +277,11 @@ impl FlowCx {
                 let cx = self.clone();
                 running.spawn(async move {
                     let _permit = permit;
-                    cx.store().admitted(decisions::followup(&cx, f)).await;
+                    steve_runtime::round(
+                        "flow.followups",
+                        cx.store().admitted(decisions::followup(&cx, f)),
+                    )
+                    .await;
                 });
             }
         }

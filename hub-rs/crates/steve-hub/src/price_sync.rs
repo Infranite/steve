@@ -156,30 +156,45 @@ pub fn due(s: &catalog::SyncState, t: i64) -> bool {
     synced_ago >= DAY && (s.error.is_none() || tried_ago >= RETRY)
 }
 
-/// The background loop (a Hub job) for the catalog at `url` (`None`: turned off).
-pub async fn run(store: Store, url: Option<String>) {
+/// The background loop as a supervised periodic [`steve_runtime::Task`] for the catalog at `url`
+/// (`None`: turned off).
+pub fn task(store: Store, url: Option<String>) -> steve_runtime::Task {
     let Some(url) = url else {
-        tracing::info!("price sync turned off (STEVE_PRICE_CATALOG_URL=off)");
-        return;
+        return steve_runtime::spawn("prices.sync", async {
+            tracing::info!("price sync turned off (STEVE_PRICE_CATALOG_URL=off)");
+        });
     };
     if steve_modules::net::check_url(&url).is_err() {
-        return;
+        return steve_runtime::spawn("prices.sync", async {});
     }
     let client = client();
-    tokio::time::sleep(FIRST).await;
-    loop {
-        let s = store.clone();
-        let state =
-            tokio::task::spawn_blocking(move || s.read(|r| Catalog(r).state(catalog::SOURCE)))
+    steve_runtime::every_after(
+        "prices.sync",
+        std::sync::Arc::new(steve_runtime::SystemClock),
+        TICK,
+        steve_runtime::FirstRun::After(FIRST),
+        move || {
+            let (store, client, url) = (store.clone(), client.clone(), url.clone());
+            async move {
+                let s = store.clone();
+                let state = tokio::task::spawn_blocking(move || {
+                    s.read(|r| Catalog(r).state(catalog::SOURCE))
+                })
                 .await;
-        if let Ok(Ok(state)) = state
-            && due(&state, now())
-            && let Ok(v) = sync_once(&store, &client, &url).await
-        {
-            tracing::info!("price sync: {v:?}");
-        }
-        tokio::time::sleep(TICK).await;
-    }
+                if let Ok(Ok(state)) = state
+                    && due(&state, now())
+                    && let Ok(v) = sync_once(&store, &client, &url).await
+                {
+                    tracing::info!("price sync: {v:?}");
+                }
+            }
+        },
+    )
+}
+
+/// The background loop (a Hub job) for the catalog at `url` (`None`: turned off).
+pub async fn run(store: Store, url: Option<String>) {
+    task(store, url).await;
 }
 
 #[cfg(test)]

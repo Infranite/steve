@@ -90,14 +90,28 @@ impl Backend for Sqlite<'_> {
     }
 
     fn batch(&mut self, sql: &str) -> Result<()> {
-        self.0.execute_batch(sql).map_err(err)
+        let meter =
+            crate::instrumentation::QueryMeter::start(crate::instrumentation::SqlOp::Batch, sql);
+        let result = self.0.execute_batch(sql).map_err(err);
+        if let Some(m) = meter {
+            m.finish(result.is_ok());
+        }
+        result
     }
 
     fn exec(&mut self, sql: &str, values: &Values) -> Result<u64> {
-        let mut st = self.0.prepare_cached(sql).map_err(err)?;
-        Ok(st
-            .execute(rusqlite::params_from_iter(bind(values)))
-            .map_err(err)? as u64)
+        let meter =
+            crate::instrumentation::QueryMeter::start(crate::instrumentation::SqlOp::Exec, sql);
+        let result = (|| {
+            let mut st = self.0.prepare_cached(sql).map_err(err)?;
+            Ok(st
+                .execute(rusqlite::params_from_iter(bind(values)))
+                .map_err(err)? as u64)
+        })();
+        if let Some(m) = meter {
+            m.finish(result.is_ok());
+        }
+        result
     }
 
     fn query(
@@ -106,14 +120,22 @@ impl Backend for Sqlite<'_> {
         values: &Values,
         each: &mut dyn FnMut(&Row<'_>) -> Result<()>,
     ) -> Result<()> {
-        let mut st = self.0.prepare_cached(sql).map_err(err)?;
-        let mut rows = st
-            .query(rusqlite::params_from_iter(bind(values)))
-            .map_err(err)?;
-        while let Some(r) = rows.next().map_err(err)? {
-            each(&Row(RowImpl::Sqlite(r)))?;
+        let meter =
+            crate::instrumentation::QueryMeter::start(crate::instrumentation::SqlOp::Query, sql);
+        let result = (|| {
+            let mut st = self.0.prepare_cached(sql).map_err(err)?;
+            let mut rows = st
+                .query(rusqlite::params_from_iter(bind(values)))
+                .map_err(err)?;
+            while let Some(r) = rows.next().map_err(err)? {
+                each(&Row(RowImpl::Sqlite(r)))?;
+            }
+            Ok(())
+        })();
+        if let Some(m) = meter {
+            m.finish(result.is_ok());
         }
-        Ok(())
+        result
     }
 }
 

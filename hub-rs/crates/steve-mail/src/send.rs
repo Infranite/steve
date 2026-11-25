@@ -55,6 +55,35 @@ pub const UNKNOWN_OPTIONS: [&str; 2] = ["confirmed_not_sent", "discard"];
 pub const SEND_CAP: &str = "mail.send";
 pub const ERR_NO_APPROVAL: &str = "没有有效的批准";
 
+fn record_mail_send(adapter: &'static str, result: &'static str, elapsed_secs: f64) {
+    thread_local! {
+        static SENDS_TOTAL: std::cell::RefCell<std::collections::HashMap<(&'static str, &'static str), metrics::Counter>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+        static SEND_DURATION: std::cell::RefCell<std::collections::HashMap<&'static str, metrics::Histogram>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    SENDS_TOTAL.with(|c| {
+        c.borrow_mut()
+            .entry((adapter, result))
+            .or_insert_with(|| {
+                metrics::counter!(
+                    "steve_mail_sends_total",
+                    "adapter" => adapter,
+                    "result" => result
+                )
+            })
+            .increment(1);
+    });
+    SEND_DURATION.with(|c| {
+        c.borrow_mut()
+            .entry(adapter)
+            .or_insert_with(
+                || metrics::histogram!("steve_mail_send_duration_seconds", "adapter" => adapter),
+            )
+            .record(elapsed_secs);
+    });
+}
+
 /// What steve-core does for drafts (the integrator implements it; calls come after the commit or from
 /// inside the decision's transaction, so implementations should only queue work).
 pub trait DraftHooks: Send + Sync {
@@ -695,30 +724,49 @@ impl Mail {
             Ok(v) => v,
             Err(e) => return self.fail(&d, &e.to_string()),
         };
+        let adapter_label = crate::sync::mail_adapter_label(cx.adapter());
+        let started = std::time::Instant::now();
         let (check, inputs) = match self.full_check(&d).await {
             Ok(c) => c,
-            Err(e) => return self.fail(&d, &e.to_string()),
+            Err(e) => {
+                record_mail_send(adapter_label, "failed", started.elapsed().as_secs_f64());
+                return self.fail(&d, &e.to_string());
+            }
         };
         let refusal = self.revalidate_send(&d, &stored, &approval, &check, &inputs)?;
         if let Some(outcome) = refusal {
             if let SendOutcome::Blocked { reason } = &outcome {
+                record_mail_send(adapter_label, "blocked", started.elapsed().as_secs_f64());
                 self.fail(&d, reason)?;
             }
             attempt.completed = true;
             return Ok(outcome);
         }
-        self.submit(
-            &d,
-            &mut attempt,
-            submission::Submission {
-                adapter: adapter.as_ref(),
-                cx: &cx,
-                built: &built,
-                approval: &approval,
-                now,
-            },
-        )
-        .await
+        let out = self
+            .submit(
+                &d,
+                &mut attempt,
+                submission::Submission {
+                    adapter: adapter.as_ref(),
+                    cx: &cx,
+                    built: &built,
+                    approval: &approval,
+                    now,
+                },
+            )
+            .await;
+        let result_label = match &out {
+            Ok(SendOutcome::Sent { .. }) => Some("sent"),
+            Ok(SendOutcome::Blocked { .. }) => Some("blocked"),
+            Ok(SendOutcome::Failed { .. }) => Some("failed"),
+            Ok(SendOutcome::Unknown { .. }) => Some("unknown"),
+            Ok(SendOutcome::Skipped) => None,
+            Err(_) => Some("error"),
+        };
+        if let Some(label) = result_label {
+            record_mail_send(adapter_label, label, started.elapsed().as_secs_f64());
+        }
+        out
     }
 
     /// Recover only once, before this Mail singleton can claim any draft. Never age out an active
@@ -1060,15 +1108,27 @@ impl Mail {
         Ok(out.into_iter().map(|(_, id, o)| (id, o)).collect())
     }
 
+    /// The send queue as a supervised periodic [`steve_runtime::Task`]: every 2 seconds.
+    pub fn send_queue_task(self) -> steve_runtime::Task {
+        let clock = self.0.m.clock.clone();
+        steve_runtime::every_after(
+            "mail.send",
+            clock,
+            QUEUE_EVERY,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let m = self.clone();
+                async move {
+                    if let Err(e) = m.send_due().await {
+                        tracing::warn!(error = %e, "mail send queue");
+                    }
+                }
+            },
+        )
+    }
+
     /// The send queue: every 2 seconds.
     pub async fn run_send_queue(self) {
-        let m = self.clone();
-
-        loop {
-            if let Err(e) = m.send_due().await {
-                tracing::warn!(error = %e, "mail send queue");
-            }
-            tokio::time::sleep(QUEUE_EVERY).await;
-        }
+        self.send_queue_task().await;
     }
 }

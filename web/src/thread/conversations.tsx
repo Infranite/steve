@@ -1,4 +1,4 @@
-import { decisionView, onViews, useOpenDecisions } from "@/data/sync"
+import { useDecisionView, useOpenDecisions } from "@/data/sync"
 import { Textarea } from "@/components/ui/textarea"
 import { Markdown } from "@/components/markdown"
 /* IM conversations in 对话 (channels-personas.md §2.12): every IM space where Steve answers is a conversation of its
@@ -8,12 +8,12 @@ import { Markdown } from "@/components/markdown"
  * Since #243 a conversation also shows the chat's whole record (every message you may see, with what Steve did with
  * it), a space Steve never answered in is listed too, and a channel switcher picks the account whose conversations
  * the list shows. */
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
 import { ArrowLeftIcon, BotIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon, MessagesSquareIcon } from "lucide-react"
 import { conversationsApi, type ChannelEntry, type ConvBadge, type ConvMessage, type ConvRecord, type ConvRow, type ConvState, type Handling, type Reaction, type RecordPage } from "@/api/conversations"
 import { HANDLING_TONE, handlingDetail, shownUpTo } from "@/thread/channel-record"
-import { st, msgOf, discardOut, decide, editReplyDraft, tm, useHubEvents, useStoreSelector, type Msg } from "@/store"
+import { st, msgOf, discardOut, decide, editReplyDraft, tm, useHubEvents, useShellSelector, type Msg } from "@/store"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { Badge } from "@/components/ui/badge"
 import { ChannelMessageBody } from "@/channels/message-body"
@@ -310,8 +310,8 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const t = useT()
   const [closed, setClosed] = useState(false)
   const s = m?.meta?.chan_out?.status as string | undefined, decision = m?.meta?.chan_out?.decision as string | undefined
-  const tier = useSyncExternalStore(onViews, () => decision ? decisionView(decision)?.tier : undefined)
-  const busy = useStoreSelector(() => !!decision && st.pendingActions.has("decision:" + decision))
+  const tier = useDecisionView(decision)?.tier
+  const busy = useShellSelector(() => !!decision && st.pendingActions.has("decision:" + decision))
   const reason = m?.meta?.chan_out?.reason as string | undefined
   /* a new state from the Hub replaces what this click assumed */
   useEffect(() => setClosed(false), [s, decision])

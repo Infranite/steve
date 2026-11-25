@@ -24,19 +24,22 @@ install! { install(reg, _cx) [mut jobs, modules, tools] => [jobs, modules, tools
         "gh_effects",
         "mail_drafts",
     ]);
-    jobs.push(Job::new("decisions.expire", due_loop(
-        Arc::new(source),
-        clock,
-        wake,
-        Backoff {
-            base: Duration::from_secs(1),
-            max: FALLBACK,
-            factor: 2,
-            jitter: Jitter::None,
-            attempts: None,
-            reset_after: None,
-        },
-    )));
+    let source = Arc::new(source);
+    jobs.push(Job::supervised("decisions.expire", move || {
+        due_loop(
+            source.clone(),
+            clock.clone(),
+            wake.clone(),
+            Backoff {
+                base: Duration::from_secs(1),
+                max: FALLBACK,
+                factor: 2,
+                jitter: Jitter::None,
+                attempts: None,
+                reset_after: None,
+            },
+        )
+    }));
 }}
 
 struct Source {

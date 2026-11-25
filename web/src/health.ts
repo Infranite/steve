@@ -8,6 +8,7 @@ import { formatBytes } from "./devices-install.ts"
 export const KEYS = [
   "http_p95", "write_lock_wait_p95", "sse_delivery_p95", "patch_delay_p95", "reconcile_diff", "ingest_p95", "ingest_rate", "cache_hit_ratio",
   "hub_cpu", "hub_memory", "hub_disk_writes", "backup_destination_space", "web_interaction_p75", "web_long_tasks",
+  "job_panics", "jobs_down", "job_up",
   "node_link", "node_link_drops", "node_command_failures", "node_backlog", "node_disk_writes",
   "plugin_errors", "plugin_restarts", "plugin_backlog",
 ] as const
@@ -54,7 +55,9 @@ export function grouped(h: HubHealth): { title: string; checks: HealthCheck[] }[
   const out: { title: string; checks: HealthCheck[] }[] = []
   for (const c of h.checks.filter(known)) {
     const title = c.subject == null ? t("shell:health.hub")
-      : c.key.startsWith("node_") ? t("shell:health.node", { name: c.subject }) : t("shell:health.plugin", { name: c.subject })
+      : c.key.startsWith("node_") ? t("shell:health.node", { name: c.subject })
+      : c.key.startsWith("job_") ? t("shell:health.job", { name: c.subject })
+      : t("shell:health.plugin", { name: c.subject })
     const g = out.find((x) => x.title === title)
     if (g) g.checks.push(c)
     else out.push({ title, checks: [c] })

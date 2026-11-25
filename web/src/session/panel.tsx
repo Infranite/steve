@@ -1,6 +1,6 @@
-import { useTranscript } from "@/data/transcript"
-import type { Transcript } from "@/data/transcript-model"
-import { getItems, getItem, getSession, getSessions, useDeviceInventory } from "@/store"
+import { useTranscriptSelector } from "@/data/transcript"
+import { useViewKinds } from "@/data/sync"
+import { getItems, getItem, getSession, getSessions, useDeviceInventory, useItem, useSession } from "@/store"
 /* The session page's side panel (a sheet on a phone): what the session is besides its transcript, from what the Hub
  * reports and nothing else. The transcript is the page; the panel is for a glance and the occasional look-up, so it
  * is one quiet column without boxes: sections set apart by space and a small label, and rows of a short muted label
@@ -11,7 +11,7 @@ import { getItems, getItem, getSession, getSessions, useDeviceInventory } from "
  *   · what it produced: the outputs it delivered to its item and the files it changed
  *   · where it sits: its item, what that came from, what came from it (folded to a count), the item's other sessions
  *   · the knowledge it was given; where it runs, folded, with the way to resume it in its harness */
-import { useMemo, useState, type ReactNode } from "react"
+import { memo, useState, type ReactNode } from "react"
 import { cn } from "cn"
 import { ChevronRightIcon, FileDiffIcon, InfoIcon, PackageIcon } from "lucide-react"
 import { api, type RItemDetail } from "@/api"
@@ -63,9 +63,9 @@ function More({ count, all, set, ...rest }: { count: number; all: boolean; set: 
 }
 
 /* ───────── the head ───────── */
-function Head({ s }: { s: Sess }) {
+const Head = memo(function Head({ s }: { s: Sess }) {
   const t = useT()
-  const i = find(s.item)
+  const i = useItem(s.item)
   return (
     <header data-session-head={s.st}>
       <div className="flex min-w-0 items-center gap-2">
@@ -81,9 +81,29 @@ function Head({ s }: { s: Sess }) {
       </div>}
     </header>
   )
-}
+})
 
 /* ───────── the figures ───────── */
+type FiguresSlice = { complete: boolean; turns: Turn[] }
+const EMPTY_TURNS: Turn[] = []
+function figuresSliceEqual(a: FiguresSlice, b: FiguresSlice): boolean {
+  if (a.complete !== b.complete || a.turns.length !== b.turns.length) return false
+  for (let i = 0; i < a.turns.length; i++) {
+    if (a.turns[i].start !== b.turns[i].start || a.turns[i].end !== b.turns[i].end) return false
+  }
+  return true
+}
+function LiveFigures({ k, s, tot }: { k: string; s: Sess; tot?: SessionTotals }) {
+  const running = s.st === "run", imported = !!s.ro
+  const slice = useTranscriptSelector<FiguresSlice>(k, (data) => {
+    const complete = data?.oldest === null
+    return {
+      complete,
+      turns: complete ? turnsOf(data.turns.flatMap((turn) => turn.ev), data.turns.flatMap((turn) => turn.ts), running, briefHead, imported) : EMPTY_TURNS,
+    }
+  }, figuresSliceEqual, (running ? 1 : 0) | (imported ? 2 : 0))
+  return <Figures s={s} turns={slice.turns} complete={slice.complete} tot={tot} />
+}
 function Figures({ s, turns, complete, tot }: { s: Sess; turns: Turn[]; complete: boolean; tot?: SessionTotals }) {
   const t = useT()
   const run = s.st === "run", now = useNow(run)
@@ -163,12 +183,23 @@ function Breakdown({ tot }: { tot: SessionTotals }) {
 }
 
 /* ───────── outputs ───────── */
-function Outputs({ s, det, data }: { s: Sess; det: RItemDetail | null; data?: Transcript }) {
+type FilesSlice = { partial: boolean; files: [string, number, number][] }
+function filesSliceEqual(a: FilesSlice, b: FilesSlice): boolean {
+  if (a.partial !== b.partial || a.files.length !== b.files.length) return false
+  for (let i = 0; i < a.files.length; i++) {
+    if (a.files[i][0] !== b.files[i][0] || a.files[i][1] !== b.files[i][1] || a.files[i][2] !== b.files[i][2]) return false
+  }
+  return true
+}
+function Outputs({ k, s, det }: { k: string; s: Sess; det: RItemDetail | null }) {
   const t = useT()
+  const { partial, files } = useTranscriptSelector<FilesSlice>(k, (data) => ({
+    partial: !!data?.oldest,
+    files: filesOf(data?.turns.flatMap((turn) => turn.ev) ?? []),
+  }), filesSliceEqual)
   const [view, setView] = useState<OutOpen | null>(null)
   const [allFiles, setAllFiles] = useState(false), [allOuts, setAllOuts] = useState(false)
   const now = useNow(false)
-  const files = useMemo(() => filesOf(data?.turns.flatMap((turn) => turn.ev) ?? []), [data])
   const arts = det ? outputsOf(s.id, det.artifacts, det.timeline, s.item ? getItem(s.item)?.ss ?? [] : []) : []
   /* the results first, the records of the work after them; the newest first in each */
   const outs: Out[] = arts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det?.artifactRoles?.[a.id] as Out[5]])
@@ -190,7 +221,7 @@ function Outputs({ s, det, data }: { s: Sess; det: RItemDetail | null; data?: Tr
         {outs.length > 3 && <div><More count={outs.length} all={allOuts} set={setAllOuts} data-session-outs-more /></div>}
       </div>}
       {files.length > 0 && <div className={cn(outs.length > 0 && "mt-3")} data-session-files={files.length}>
-        <div className="flex min-w-0 items-center gap-2.5 py-1 type-callout"><FileDiffIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /><span className="min-w-0 flex-1 truncate">{t(data?.oldest ? "core:transcript.recentFiles" : "core:transcript.filesChanged", { count: files.length })}</span>{num(add, del)}</div>
+        <div className="flex min-w-0 items-center gap-2.5 py-1 type-callout"><FileDiffIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /><span className="min-w-0 flex-1 truncate">{t(partial ? "core:transcript.recentFiles" : "core:transcript.filesChanged", { count: files.length })}</span>{num(add, del)}</div>
         <ul className="flex flex-col pl-[26px]">{shown.map(([p, a, d]) => (
           <li key={p} className="flex min-w-0 items-center gap-2 py-0.5" title={p}><span className="min-w-0 flex-1 truncate font-mono type-footnote text-muted-foreground">{p.split("/").pop()}</span>{num(a, d)}</li>))}</ul>
         {files.length > 5 && <div className="pl-[26px]"><button type="button" onClick={() => setAllFiles(!allFiles)} className={cn(LINK, "mt-1")} data-session-files-more>{allFiles ? t("views:sessionPanel.less") : t("core:transcript.moreFiles", { count: files.length - 5 })}</button></div>}
@@ -223,8 +254,9 @@ function RelLine({ r, why = true, under = false }: { r: Rel; why?: boolean; /** 
       {why && <span className="shrink-0 type-footnote text-tertiary">{t(`views:sessionPanel.why.${r.why}`)}</span>}</a>
   )
 }
-function Relations({ s }: { s: Sess }) {
+const Relations = memo(function Relations({ s }: { s: Sess }) {
   const t = useT()
+  useViewKinds(["item", "session"])
   const [openDown, setOpenDown] = useState(false), [allSame, setAllSame] = useState(false)
   const i = find(s.item)
   const up: Rel[] = [], down: Rel[] = [], same: Rel[] = []
@@ -270,10 +302,10 @@ function Relations({ s }: { s: Sess }) {
       </Rows>
     </Section>
   )
-}
+})
 
 /* ───────── where it runs ───────── */
-function Runtime({ s }: { s: Sess }) {
+const Runtime = memo(function Runtime({ s }: { s: Sess }) {
   const t = useT()
   const devices = useDeviceInventory()
   const device = s.node && devices.find((d) => d.node_id === s.node || d.id === s.node)
@@ -299,25 +331,20 @@ function Runtime({ s }: { s: Sess }) {
       </CollapsibleContent>
     </Collapsible>
   )
-}
+})
 
 export function SessionPanel({ k, tot }: { k: string; tot?: SessionTotals }) {
-  const s = getSession(k)
-  const data = useTranscript(k), running = s?.st === "run", imported = !!s?.ro
-  const complete = data?.oldest === null
-  const turns = useMemo(() => complete
-    ? turnsOf(data.turns.flatMap((turn) => turn.ev), data.turns.flatMap((turn) => turn.ts), running, briefHead, imported)
-    : [], [data, complete, running, imported])
-  const item: Item | undefined = find(s?.item)
+  const s = useSession(k)
+  const item: Item | undefined = useItem(s?.item)
   const det = useHubQuery<RItemDetail | null>(["item", s?.item ?? null, item?.updated ?? 0], () => (s?.item ? api.item(s.item) : Promise.resolve(null)))
   if (!s) return null
   return (
     <div className="flex flex-col gap-8" data-session-panel-body>
       <div className="flex flex-col gap-6">
         <Head s={s} />
-        <Figures s={s} turns={turns} complete={complete} tot={tot} />
+        <LiveFigures k={k} s={s} tot={tot} />
       </div>
-      <Outputs s={s} data={data} det={det.data ?? null} />
+      <Outputs k={k} s={s} det={det.data ?? null} />
       <Relations s={s} />
       <SessionKnowledge id={k} />
       <Runtime s={s} />

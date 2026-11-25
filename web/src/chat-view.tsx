@@ -1,4 +1,4 @@
-import { messageViews } from "@/data/sync"
+import { messageViews, useItemView } from "@/data/sync"
 import type { ConvMessage } from "@/api/conversations"
 import { VirtualList } from "@/components/virtual-list"
 import type { Virtualizer } from "@tanstack/react-virtual"
@@ -24,7 +24,7 @@ import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
 import { ActorAvatar } from "@/components/actor-avatar"
 import { SteveModelControl } from "@/steve-model"
-import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, makeItem, decideCards, pendingCards, quoteMsg, reroute, st, stopReply, useStoreSelector, tm, toast, type Item, type Msg } from "@/store"
+import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, makeItem, decideCards, pendingCards, quoteMsg, reroute, st, stopReply, useShellSelector, tm, toast, type Item, type Msg } from "@/store"
 import { ChatQueue } from "@/queue"
 import { AwaySummary, type AwayItem } from "@/components/affect/away-summary"
 import { MessageActions, type MessageMoreAction } from "@/components/affect/message-actions"
@@ -93,7 +93,7 @@ function SteveSays({ children, sub, still }: { children: ReactNode; sub?: string
 const Me = ({ t, files }: { t: string; files?: RFile[] }) => <div className="flex max-w-[85%] items-start justify-end gap-2 self-end anim-in" data-me-msg>
   <div className="flex min-w-0 flex-col items-end gap-1.5">
     <Files files={files} align="end" />
-    {(t !== "（附件）" || !files?.length) && <div className="min-w-0 max-w-full rounded-2xl rounded-br-md bg-muted px-4 py-2.5 type-chat text-foreground"><Markdown text={t} settled /></div>}
+    {(t !== "（附件）" || !files?.length) && <div className="min-w-0 max-w-full rounded-2xl rounded-br-md bg-muted px-4 py-2.5 type-chat text-foreground"><Markdown text={t} /></div>}
   </div>
   <ActorAvatar actorId="me" size={24} className="mt-1" />
 </div>
@@ -104,7 +104,7 @@ const Me = ({ t, files }: { t: string; files?: RFile[] }) => <div className="fle
 const TOUCH_LAST = "[@media(hover:none)]:opacity-100"
 function MsgActions({ m, last }: { m: Msg; last: boolean }) {
   const fromChat = !!m.item && (m.steps?.route?.kind === "item" || !!m.updates?.length) && !m.update
-  const promoting = useStoreSelector(() => isPromoting(m))
+  const promoting = useShellSelector(() => isPromoting(m))
   const canItem = !m.item && (!!m.chat || !!m.suggest || m.steps?.route?.kind === "research" || m.steps?.route?.kind === "answer")
   const t = useT()
   const more: MessageMoreAction[] = [
@@ -222,8 +222,10 @@ const Onboarding = lazy(() => import("@/onboarding").then((m) => ({ default: m.O
 
 export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
   const { channels, error: channelsError, retry: retryChannels } = useChannels()
-  useStoreSelector(() => st.bots.steve)
-  useStoreSelector(() => `${st.ready}|${st.onboard}|${st.quote ?? ""}|${focusItem() ?? ""}|${st.hold?.item ?? ""}|${hubBase()}|${st.workspace?.id ?? ""}`)
+  useShellSelector(() => st.bots.steve)
+  const focusId = useShellSelector(() => st.focus?.item)
+  useItemView(focusId)
+  useShellSelector(() => `${st.ready}|${st.onboard}|${st.quote ?? ""}|${focusId ?? ""}|${st.hold?.item ?? ""}|${hubBase()}|${st.workspace?.id ?? ""}`)
   const S = st.bots.steve, away = useAway()
   const t = useT()
   const { more, ended, loading } = useHistory()
@@ -615,7 +617,7 @@ const MessageRow = memo(function MessageRow({ id, channel, previous, day, last, 
       {conv ? <StepsBlock m={m} memory={memory} /> : <TurnInterruption m={m} />}
       <SteveSays still={drafted}>
         {!m.update && !m.cardOnly && !delivered && <A2uiHost msg={id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}>
-          <Markdown text={linkCites(m.t ?? "", m.cites)} replyFiles settled />
+          <Markdown text={linkCites(m.t ?? "", m.cites)} replyFiles />
         </A2uiHost>}
         {m.item && !m.update && !m.card && (m.wasCard || threadCardItems().has(m.item)
           ? <CardLink id={m.item} from={id} /> : <ItemRef id={m.item} />)}

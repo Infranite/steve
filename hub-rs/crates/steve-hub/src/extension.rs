@@ -1292,10 +1292,10 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     for job in w.jobs {
         job.start(&st.jobs);
     }
-    Job::new(
-        "upgrades.check",
-        crate::upgrades::run_auto_check((*cfg).clone()),
-    )
+    let upgrade_cfg = (*cfg).clone();
+    Job::task("upgrades.check", move || {
+        crate::upgrades::auto_check_task(upgrade_cfg)
+    })
     .start(&st.jobs);
     let app = crate::app::own_cookies(
         crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes),

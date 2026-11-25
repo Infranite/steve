@@ -1553,6 +1553,8 @@ struct WebPerfReport {
     transcript_open: Option<Vec<f64>>,
     dom_nodes: Option<u64>,
     nav_opens: Option<std::collections::BTreeMap<String, u32>>,
+    errors: Option<std::collections::BTreeMap<String, u32>>,
+    sse_reconnects: Option<std::collections::BTreeMap<String, u32>>,
 }
 
 /// Validates a web telemetry report and records it into the in-memory metrics pipeline.
@@ -1583,6 +1585,18 @@ pub(crate) fn record_web_perf(b: &Bytes) -> Result<Vec<(&'static str, u32)>, Api
     {
         return Err(ApiError::Invalid(vec!["nav_opens".to_string()]));
     }
+    let errors = report.errors.unwrap_or_default();
+    if errors.len() > WEB_NAV_KEYS_MAX || errors.values().any(|&count| count > WEB_NAV_COUNT_MAX) {
+        return Err(ApiError::Invalid(vec!["errors".to_string()]));
+    }
+    let sse_reconnects = report.sse_reconnects.unwrap_or_default();
+    if sse_reconnects.len() > WEB_NAV_KEYS_MAX
+        || sse_reconnects
+            .values()
+            .any(|&count| count > WEB_NAV_COUNT_MAX)
+    {
+        return Err(ApiError::Invalid(vec!["sse_reconnects".to_string()]));
+    }
     let page = report.page.as_deref().unwrap_or("other");
     Ok(crate::metrics::web_report(
         page,
@@ -1593,6 +1607,8 @@ pub(crate) fn record_web_perf(b: &Bytes) -> Result<Vec<(&'static str, u32)>, Api
         &seconds("transcript_open", report.transcript_open)?,
         report.dom_nodes.filter(|n| *n <= 1_000_000),
         &nav_opens,
+        &errors,
+        &sse_reconnects,
     ))
 }
 

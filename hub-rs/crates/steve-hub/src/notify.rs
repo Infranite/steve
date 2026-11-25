@@ -257,7 +257,8 @@ mod tests {
     #[test]
     fn a_dismissed_failure_stays_closed() {
         let (_d, r) = store();
-        let nid = notify(&r, "default", "release", "fail", "没有发布", Some("ST-1")).expect("notify");
+        let nid =
+            notify(&r, "default", "release", "fail", "没有发布", Some("ST-1")).expect("notify");
         /* closed from its line in the conversation: the id is that of the line, the notice is what gets remembered */
         let line = r.messages_in("default", "steve", 10).expect("rows")[0]["id"]
             .as_str()

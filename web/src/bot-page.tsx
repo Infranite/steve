@@ -1,4 +1,5 @@
-import { getItems, useBotMemories } from "@/store"
+import { getItems, useBotMemories, useShellStore } from "@/store"
+import { useViewKinds } from "@/data/sync"
 /* A Bot's page, the parts beyond its settings form (manage.tsx holds the page and the other tabs):
  *  - 概览: who it is, what it did in the last 30 days (GET /stats/summary?bot=), its items (running first, then the
  *    latest closed), and its capabilities and key settings, each leading to the tab where it is changed; a Bot with no
@@ -50,6 +51,8 @@ export function recentItems(k: string, items: Item[]) {
 }
 
 export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) => void; labels: BotLabels }) {
+  useShellStore()
+  useViewKinds(["item", "session", "decision"])
   const memories = useBotMemories(k)
   const t = useT()
   const b = st.bots[k]

@@ -12,7 +12,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { cn } from "cn"
 import { answerOffer, appPairLink, claimPair, currentHub, dropPairRequest, hubDirectory, HubError, hubsOffer, nativeBridge, onArrival, pairAddresses, pairPlan, pairRequest, type HubEntry } from "@/hub"
 import { t as tr, useT } from "@/i18n"
-import { st, toast, useStoreSelector } from "@/store"
+import { st, toast, useShellSelector } from "@/store"
 import { closeSheet, go, openSheet, Row, Section, Panel, Tile, Chevron, LIFT } from "@/ui"
 
 /** why a Hub could not be used, in the page's words */
@@ -55,7 +55,7 @@ function hubSub(h: HubEntry): string {
 /** Said above every page while the live stream is broken: which Hub, that the page keeps trying, and the way to another. */
 export function HubLostBanner() {
   const t = useT(), { dir, hubs } = useHubs()
-  if (!useStoreSelector(() => st.down)) return null
+  if (!useShellSelector(() => st.down)) return null
   const name = hubs?.find((h) => h.current)?.name ?? (dir.native ? "Hub" : hostOf(currentHub()))
   return (
     <div role="status" className="flex shrink-0 items-center gap-2 border-b bg-attention/10 px-4 py-2 type-footnote text-foreground/80 sm:px-6" data-hub-lost>

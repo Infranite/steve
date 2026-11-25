@@ -1,4 +1,5 @@
-import { getItems, nextItemNumber, useRuntimes, useTagUses, useBotMemories } from "@/store"
+import { getItems, nextItemNumber, useRuntimes, useShellStore, useTagUses, useBotMemories } from "@/store"
+import { useViewKinds } from "@/data/sync"
 /* Bot 菜单与设置：Bot 是独立菜单；设置是分类页。所有改动都写到 Hub，也都可以直接告诉 Steve。 */
 import { itemDisplayStatus } from "@/store"
 import { useT } from "@/i18n"
@@ -6,7 +7,7 @@ import { Trans } from "react-i18next"
 import { WorkspaceDisk } from "@/disk-settings"
 import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
 import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon, ArrowUpIcon, ArrowDownIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -80,6 +81,8 @@ const TAG_CAT_KEYS: Record<string, "all" | "project" | "kind" | "delivery" | "do
 const catLabel = (t: T, c: string) => (TAG_CAT_KEYS[c] ? t(`manage:tagCat.${TAG_CAT_KEYS[c]}`) : c)
 
 export function BotsView() {
+  useShellStore()
+  useViewKinds(["item", "session", "decision"])
   const t = useT()
   const teams = useBotTeams()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
@@ -148,6 +151,8 @@ function BotMenu({ k, align = "end" }: { k: string; align?: "end" | "start" }) {
   )
 }
 export function DeleteBotDialog({ k }: { k: string }) {
+  useShellStore()
+  useViewKinds(["item"])
   const memories = useBotMemories(k)
   const t = useT()
   const b = st.bots[k]
@@ -190,6 +195,7 @@ const TEMPLATES = ["review", "research", "writing", "knowledge"] as const
 type TplId = (typeof TEMPLATES)[number]
 const tplText = (t: T, id: TplId) => ({ name: t(`manage:tpl.${id}Name`), role: t(`manage:tpl.${id}Role`), rule: t(`manage:tpl.${id}Rule`) })
 export function NewBotDialog() {
+  useShellStore()
   const t = useT()
   const [mode, setMode] = useState<"tpl" | "desc" | "blank">("tpl"), [tpl, setTpl] = useState<TplId>(TEMPLATES[0]), [desc, setDesc] = useState(""), [busy, setBusy] = useState(false)
   const [harness, setHarness] = useState(defaultHarness), [perm, setPerm] = useState("ask")
@@ -319,6 +325,7 @@ function FallbackSurfacesEditor({ value, onChange }: { value: ExecutionSurface[]
   )
 }
 export function BotView({ k }: { k: string }) {
+  useShellStore()
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const b = st.bots[k]
@@ -457,6 +464,7 @@ const PH_KEYS: Record<string, "phGeneral" | "phItems" | "phTags" | "phModels" | 
 }
 const Sel = ({ v, o, on, testId, label }: { v: string; o: [string, string][]; on: (v: string) => void; testId?: string; label?: string }) => <SetSelect testId={testId} label={label} value={v} options={o} onChange={on} />
 export function SettingsView() {
+  useShellStore()
   const t = useT()
   const [, cat] = useRoute()
   const wide = typeof window !== "undefined" && window.innerWidth >= 768
@@ -619,7 +627,7 @@ function WorkspacePane() {
   /* a save refreshes the workspace; take the new values only into fields the user has not changed since they last
    * matched the Hub, so typing in one field is never replaced by the refresh that saving another one starts */
   const seen = useRef({ id: w.id, name: w.name, description: w.description, item_prefix: w.item_prefix })
-  useEffect(() => {
+  useLayoutEffect(() => {
     const s = seen.current, same = s.id === w.id
     setN((v) => (same && v !== s.name ? v : w.name))
     setD((v) => (same && v !== s.description ? v : w.description))
@@ -686,6 +694,7 @@ function DangerRow({ title, sub, label, what, onOk, testId }: { title: string; s
 /* ═════════ 标签 ═════════ */
 let tagCat = "全部"
 function TagsPane() {
+  useShellStore()
   useTagUses()
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
@@ -721,6 +730,7 @@ function TagsPane() {
 }
 /** create or edit a tag; from an item's picker the new tag is attached to that item */
 export function TagDialog({ id, item, name }: { id?: string; item?: string; name?: string }) {
+  useShellStore()
   const t = useT()
   const tg = id ? tag(id) : undefined
   const kind = isKind(tg)

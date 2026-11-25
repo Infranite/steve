@@ -783,7 +783,12 @@ impl StoreBackend {
             .map(|n| n.id)
             .map_err(err)
     }
-    pub fn notices_dismiss(&self, ws: &str, id_or_host_msg: &str, by: Option<&str>) -> BResult<bool> {
+    pub fn notices_dismiss(
+        &self,
+        ws: &str,
+        id_or_host_msg: &str,
+        by: Option<&str>,
+    ) -> BResult<bool> {
         self.0
             .write(|w| s::thread::close_notice(w, ws, id_or_host_msg, by, steve_store::now()))
             .map_err(err)

@@ -178,10 +178,11 @@ pub async fn tick(m: &Modules, kb: &Knowledge, now: i64) -> ApiResult<()> {
 }
 
 /// Starts the `kb.chat` job (extracts completed days after 03:40).
-pub async fn run(m: Modules, kb: Knowledge) {
+pub fn task(m: Modules, kb: Knowledge) -> steve_runtime::Task {
+    let clock = m.clock.clone();
     steve_runtime::every(
         "kb.chat",
-        m.clock.clone(),
+        clock,
         TICK,
         steve_runtime::FirstRun::Immediate,
         move || {
@@ -194,7 +195,10 @@ pub async fn run(m: Modules, kb: Knowledge) {
             }
         },
     )
-    .await;
+}
+
+pub async fn run(m: Modules, kb: Knowledge) {
+    task(m, kb).await;
 }
 
 #[cfg(test)]

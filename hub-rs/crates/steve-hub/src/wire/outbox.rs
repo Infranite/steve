@@ -75,32 +75,36 @@ async fn notice_dead(store: &Store, groups: &[outbox::DeadGroup]) {
     }
 }
 
-/// The `outbox.dispatch` job. A panicking or failing pass is logged and the loop goes on.
+/// The `outbox.dispatch` job. Each drain pass records per-round metrics and panics are recovered
+/// by the supervising task.
 pub async fn run(d: Arc<Dispatcher>, store: Store, flow: Arc<steve_flow::FlowCx>) {
     flow.recovered().await;
     let wake = store.outbox_wake();
     tracing::info!("outbox dispatcher started");
     loop {
-        // drain: a full batch may leave more behind
-        loop {
-            let (d2, s2) = (d.clone(), store.clone());
-            match tokio::task::spawn_blocking(move || d2.pump(&s2, now_ms())).await {
-                Ok(Ok(p)) => {
-                    notice_dead(&store, &p.newly_dead).await;
-                    if p.done + p.retried + p.dead < outbox::BATCH {
+        steve_runtime::round("outbox.dispatch", async {
+            // drain: a full batch may leave more behind
+            loop {
+                let (d2, s2) = (d.clone(), store.clone());
+                match tokio::task::spawn_blocking(move || d2.pump(&s2, now_ms())).await {
+                    Ok(Ok(p)) => {
+                        notice_dead(&store, &p.newly_dead).await;
+                        if p.done + p.retried + p.dead < outbox::BATCH {
+                            break;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("outbox pass: {e}");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!("outbox pass panicked: {e}");
                         break;
                     }
                 }
-                Ok(Err(e)) => {
-                    tracing::error!("outbox pass: {e}");
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!("outbox pass panicked: {e}");
-                    break;
-                }
             }
-        }
+        })
+        .await;
         tokio::select! {
             _ = wake.notified() => {}
             _ = tokio::time::sleep(FALLBACK) => {}

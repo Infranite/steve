@@ -906,11 +906,7 @@ pub(crate) fn bot_out(
 }
 
 /// The workspace ids of a bot, restricted to `allowed_ws`.
-fn bot_ws(
-    x: &BotExtras,
-    id: &str,
-    allowed_ws: &std::collections::BTreeSet<String>,
-) -> Vec<String> {
+fn bot_ws(x: &BotExtras, id: &str, allowed_ws: &std::collections::BTreeSet<String>) -> Vec<String> {
     x.workspaces
         .get(id)
         .into_iter()

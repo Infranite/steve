@@ -670,16 +670,14 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
 
     // 133: Backup v2 (#507): dedicated `backup_policy` singleton moved out of workspace `settings`.
     if v_before < 133 {
-        let policy_rows = q(
-            "WITH legacy(value) AS (
+        let policy_rows = q("WITH legacy(value) AS (
                SELECT CASE WHEN json_valid(value) THEN value ELSE '{}' END
                FROM settings WHERE workspace_id = 'default' AND key = 'backup.daily'
              )
              SELECT count(*) FROM legacy
              WHERE json_type(value, '$.enabled') IN ('true', 'false')
                AND json_type(value, '$.keep_days') = 'integer'
-               AND json_extract(value, '$.keep_days') BETWEEN 1 AND 365",
-        );
+               AND json_extract(value, '$.keep_days') BETWEEN 1 AND 365");
         changes.create_table("backup_policy", policy_rows);
         changes.remove_rows(
             "settings",
