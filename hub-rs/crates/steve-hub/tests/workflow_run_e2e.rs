@@ -20,9 +20,10 @@ use steve_hub::wire::workspaces::Workspaces;
 use steve_hub::workflow_step::StepRunner;
 use steve_mcp::Backend as _;
 use steve_modules::Caller;
+use steve_store::testkit::SqliteFixtures;
 use steve_store::workflow_runs::{
-    ReviewGateFailure, ReviewGateVerdict, WfAttemptStatus, WfCallStatus, WfRunStatus, WorkflowRuns,
-    pause_reason,
+    ReviewGateFailure, ReviewGateVerdict, WfAttemptStatus, WfCallStatus, WfChildOutcome,
+    WfPauseReason, WfRunStatus, WorkflowRuns,
 };
 use steve_store::{
     NewBot, NewItem, NewProject, NewSession, NoPublisher, Session, Store, StoreError, UserRows, WS,
@@ -30,7 +31,7 @@ use steve_store::{
 };
 use steve_types::{
     CoordinatorDeferSource, DecisionPrompt, DecisionStatus, ItemPhase, NO_EXECUTOR,
-    NoExecutorPolicy, PlacementReason, PlacementRejection,
+    NoExecutorPolicy, PlacementReason, PlacementRejection, WfBudgetScope,
 };
 use steve_workflow_api::{StepFrame, StepInput};
 
@@ -256,10 +257,64 @@ impl Env {
                 )
                 .unwrap();
         }
-        Self::attach(dir, home, store, use_subprocess)
+        Self::attach_with(
+            dir,
+            home,
+            store,
+            if use_subprocess {
+                Arc::new(real_step_runner())
+            } else {
+                Arc::new(InProcessJsExecutor)
+            },
+        )
+    }
+
+    fn with_executor(executor: Arc<dyn WorkflowStepExecutor>) -> Self {
+        let env = Self::new(false);
+        let cfg = CoreConfig::for_home(&env.mcp.home);
+        let core = Core::new(
+            steve_core::repo::Db::new(env.store.clone()),
+            env.rt.clone(),
+            Arc::new(NoModels),
+            cfg,
+        );
+        core.set_workflow_executor(executor);
+        let workspaces = Workspaces::new(env.store.clone(), None, None, vec![]);
+        let mcp = CoreMcp {
+            store: env.store.clone(),
+            core: core.clone(),
+            home: env.mcp.home,
+            public_url: "http://127.0.0.1:18701".into(),
+            workspaces,
+        };
+        Self {
+            dir: env.dir,
+            store: env.store,
+            rt: env.rt,
+            core,
+            mcp,
+        }
     }
 
     fn attach(dir: tempfile::TempDir, home: PathBuf, store: Store, use_subprocess: bool) -> Self {
+        Self::attach_with(
+            dir,
+            home,
+            store,
+            if use_subprocess {
+                Arc::new(real_step_runner())
+            } else {
+                Arc::new(InProcessJsExecutor)
+            },
+        )
+    }
+
+    fn attach_with(
+        dir: tempfile::TempDir,
+        home: PathBuf,
+        store: Store,
+        executor: Arc<dyn WorkflowStepExecutor>,
+    ) -> Self {
         let rt = Arc::new(TestRuntime::new(store.clone()));
         let cfg = CoreConfig::for_home(&home);
         std::fs::create_dir_all(&cfg.scratch).unwrap();
@@ -270,11 +325,7 @@ impl Env {
             Arc::new(NoModels),
             cfg,
         );
-        if use_subprocess {
-            core.set_workflow_executor(Arc::new(real_step_runner()));
-        } else {
-            core.set_workflow_executor(Arc::new(InProcessJsExecutor));
-        }
+        core.set_workflow_executor(executor);
         let workspaces = Workspaces::new(store.clone(), None, None, vec![]);
         let mcp = CoreMcp {
             store: store.clone(),
@@ -370,6 +421,22 @@ impl Env {
             .deliver(&sess, "done".into(), vec![], vec![], None, Some(result))
             .await
             .expect("child deliver should succeed");
+        self.rt.end_turn(&self.core, &sess.id, "end_turn");
+    }
+
+    async fn wf_tool(&self, sess: &Session, args: Value) -> steve_core::Result<Value> {
+        let out = self.core.tool_workflow_run(sess, args).await?;
+        Ok(serde_json::to_value(out).unwrap())
+    }
+
+    async fn fail_child(&self, child_item_id: &str, reason: &str) {
+        let sess = self.child_session(child_item_id);
+        let out = self
+            .core
+            .tool_workflow_run(&sess, json!({ "action": "fail", "reason": reason }))
+            .await
+            .expect("child fail should succeed");
+        assert!(out.ends_turn(), "child fail output must mark ends_turn");
         self.rt.end_turn(&self.core, &sess.id, "end_turn");
     }
 
@@ -530,8 +597,7 @@ async fn scenario_01_sequential_with_real_subprocess_and_independent_review() {
     "#;
 
     let res = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let run_id = res["run"]["id"].as_str().unwrap().to_owned();
@@ -614,8 +680,7 @@ async fn scenario_02_parallel_all_with_mutex_and_parallel_cap() {
     "#;
 
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
@@ -686,8 +751,7 @@ async fn scenario_03_race_cancels_losing_branch() {
         }
     "#;
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
@@ -748,22 +812,19 @@ async fn scenario_04_resume_fail_catch_and_waiting_human_preserves_budget() {
         }
     "#;
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
 
     // Pause and resume via steve_workflow_run.
     let paused = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "pause" }))
+        .wf_tool(&coord, json!({ "action": "pause" }))
         .await
         .unwrap();
     assert_eq!(paused["run"]["status"], "paused");
     let resumed = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "resume" }))
+        .wf_tool(&coord, json!({ "action": "resume" }))
         .await
         .unwrap();
     assert_eq!(resumed["run"]["status"], "running");
@@ -797,13 +858,12 @@ async fn scenario_04_resume_fail_catch_and_waiting_human_preserves_budget() {
     );
 
     // Child 1 explicitly reports failure via `steve_workflow_run { action: "fail" }` -> caught by JS catch -> fallback runs!
-    env.core
-        .tool_workflow_run(
-            &child1_sess,
-            json!({ "action": "fail", "reason": "upstream unavailable" }),
-        )
-        .await
-        .unwrap();
+    env.wf_tool(
+        &child1_sess,
+        json!({ "action": "fail", "reason": "upstream unavailable" }),
+    )
+    .await
+    .unwrap();
     env.wait_for_dispatched_count(&run_id, 2).await;
 
     let attempts = env
@@ -849,8 +909,7 @@ async fn scenario_05_cross_version_lazy_hydration_and_git_fingerprint_verificati
         }
     "#;
     let snap1 = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v1 }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v1 }))
         .await
         .unwrap();
     let run_id = snap1["run"]["id"].as_str().unwrap().to_owned();
@@ -898,8 +957,7 @@ async fn scenario_05_cross_version_lazy_hydration_and_git_fingerprint_verificati
         }
     "#;
     let snap2 = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v2 }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v2 }))
         .await
         .unwrap();
     assert_eq!(snap2["run"]["active_script_version"], 2);
@@ -944,8 +1002,7 @@ async fn scenario_05_cross_version_lazy_hydration_and_git_fingerprint_verificati
             return { a, d };
         }
     "#;
-    env.core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v3 }))
+    env.wf_tool(&coord, json!({ "action": "submit", "script": script_v3 }))
         .await
         .unwrap();
     assert_eq!(
@@ -1006,8 +1063,7 @@ async fn scenario_05_cross_version_lazy_hydration_and_git_fingerprint_verificati
             return { a, e };
         }
     "#;
-    env.core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v4 }))
+    env.wf_tool(&coord, json!({ "action": "submit", "script": script_v4 }))
         .await
         .unwrap();
     assert_eq!(
@@ -1043,7 +1099,13 @@ async fn scenario_05_cross_version_lazy_hydration_and_git_fingerprint_verificati
                 r#"{"unverified":true}"#,
                 "[]",
             )?;
-            WorkflowRuns(w).finalize_attempt(&child_e_id, 1, "completed", None, None)?;
+            WorkflowRuns(w).finalize_attempt(
+                &child_e_id,
+                1,
+                WfChildOutcome::Completed,
+                None,
+                None,
+            )?;
             Ok::<_, StoreError>(())
         })
         .unwrap();
@@ -1054,8 +1116,7 @@ async fn scenario_05_cross_version_lazy_hydration_and_git_fingerprint_verificati
             return { a, e };
         }
     "#;
-    env.core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v5 }))
+    env.wf_tool(&coord, json!({ "action": "submit", "script": script_v5 }))
         .await
         .unwrap();
     let e_attempts = env
@@ -1088,8 +1149,7 @@ async fn scenario_06_non_deterministic_replay_pauses_and_opens_decision() {
         }
     "#;
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
@@ -1108,8 +1168,8 @@ async fn scenario_06_non_deterministic_replay_pauses_and_opens_decision() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        run.pause_reason_code.as_deref(),
-        Some(pause_reason::NON_DETERMINISTIC_REPLAY)
+        run.pause_reason_code,
+        Some(WfPauseReason::NonDeterministicReplay)
     );
     // Zero second attempt was dispatched!
     assert_eq!(
@@ -1155,8 +1215,7 @@ async fn scenario_07_deliver_schema_rejection_leaves_zero_orphan_files() {
         }
     "#;
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let child_id = snap["attempts"][0]["child_item_id"]
@@ -1278,8 +1337,7 @@ async fn scenario_08_same_bot_review_rejected_by_hub() {
         }
     "#;
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
@@ -1307,8 +1365,8 @@ async fn scenario_08_same_bot_review_rejected_by_hub() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        run.pause_reason_code.as_deref(),
-        Some(pause_reason::REVIEW_GATE_BLOCKED)
+        run.pause_reason_code,
+        Some(WfPauseReason::ReviewGateBlocked)
     );
     assert_eq!(
         env.store
@@ -1359,8 +1417,7 @@ async fn scenario_09_stale_review_rejected_then_fresh_review_passes() {
         }
     "#;
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v1 }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v1 }))
         .await
         .unwrap();
     let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
@@ -1416,8 +1473,7 @@ async fn scenario_09_stale_review_rejected_then_fresh_review_passes() {
             return r2;
         }
     "#;
-    env.core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v2 }))
+    env.wf_tool(&coord, json!({ "action": "submit", "script": script_v2 }))
         .await
         .unwrap();
     env.wait_for_dispatched_count(&run_id, 4).await;
@@ -1461,8 +1517,7 @@ async fn scenario_10_cycle_budget_exhaustion_and_owner_top_up() {
         }
     "#;
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v1 }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v1 }))
         .await
         .unwrap();
     let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
@@ -1492,21 +1547,20 @@ async fn scenario_10_cycle_budget_exhaustion_and_owner_top_up() {
         }
     "#;
     let snap2 = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v2 }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v2 }))
         .await
         .unwrap();
     assert_eq!(snap2["run"]["status"], "paused");
     assert_eq!(
         snap2["run"]["pause_reason_code"],
-        pause_reason::BUDGET_EXHAUSTED
+        WfPauseReason::BudgetExhausted.as_str()
     );
     let dec_id = snap2["decision_id"].as_str().unwrap().to_owned();
     let dec = env.store.decisions().get(&dec_id).unwrap().unwrap();
     assert_eq!(
         dec.question_template,
         Some(DecisionPrompt::WorkflowBudgetExhausted {
-            scope: "cycle_total".into(),
+            scope: WfBudgetScope::CycleTotal,
             used: 2,
             limit: 2,
         })
@@ -1581,8 +1635,7 @@ async fn scenarios_11_and_12_bidirectional_owner_finish_contract() {
         }
     "#;
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
@@ -1606,6 +1659,7 @@ async fn scenarios_11_and_12_bidirectional_owner_finish_contract() {
             c1.cas_revision,
             None,
             None,
+            None,
             "owner",
         )
         .unwrap_err();
@@ -1619,18 +1673,32 @@ async fn scenarios_11_and_12_bidirectional_owner_finish_contract() {
         ItemPhase::Active
     );
 
-    // Scenario 12b: Structured owner takeover validates schema and settles child1 atomically!
+    // Scenario 12b: Structured owner takeover via `lifecycle_command("finish", result)` validates
+    // schema and settles child1 atomically!
     assert!(
         env.core
-            .wf_child_owner_deliver(&child1_id, &json!({ "wrong": 1 }), "bad", "owner")
+            .lifecycle_command(
+                &child1_id,
+                "finish",
+                c1.cycle,
+                c1.cas_revision,
+                Some("bad"),
+                None,
+                Some(&json!({ "wrong": 1 })),
+                "owner",
+            )
             .is_err()
     );
     let c1_sess = env.child_session(&child1_id);
     env.core
-        .wf_child_owner_deliver(
+        .lifecycle_command(
             &child1_id,
-            &json!({ "ok": true }),
-            "owner takeover",
+            "finish",
+            c1.cycle,
+            c1.cas_revision,
+            Some("owner takeover"),
+            None,
+            Some(&json!({ "ok": true })),
             "owner",
         )
         .unwrap();
@@ -1653,6 +1721,7 @@ async fn scenarios_11_and_12_bidirectional_owner_finish_contract() {
             "finish",
             parent.cycle,
             parent.cas_revision,
+            None,
             None,
             None,
             "owner",
@@ -1709,8 +1778,7 @@ async fn scenario_13_crash_restart_zero_duplicate_dispatch() {
             }
         "#;
         let snap = env
-            .core
-            .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+            .wf_tool(&coord, json!({ "action": "submit", "script": script }))
             .await
             .unwrap();
         let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
@@ -1722,12 +1790,13 @@ async fn scenario_13_crash_restart_zero_duplicate_dispatch() {
         (run_id, child1, sess1)
     };
 
-    // Restart #1 (Hub crashed while step 1 was still Dispatched): resume MUST NOT duplicate step 1!
+    // Restart #1 (Hub crashed while step 1 was still Dispatched): production `core.ready()` MUST
+    // NOT duplicate step 1!
     {
         let store = Store::open(&db_path, NoPublisher).unwrap();
         let env = Env::attach(tempfile::tempdir().unwrap(), home.clone(), store, false);
-        let resumed = env.core.resume_running_workflows().await.unwrap();
-        assert_eq!(resumed, 1);
+        env.core.ready();
+        tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(
             env.store
                 .read(|r| WorkflowRuns(r).list_attempts_for_run(&run_id))
@@ -1778,11 +1847,13 @@ async fn scenario_13_crash_restart_zero_duplicate_dispatch() {
         );
     }
 
-    // Restart #2 (Hub boots after crash right after step 1 commit): resumes & dispatches step 2 ONCE!
+    // Restart #2 (Hub boots after crash right after step 1 commit): production `core.ready()`
+    // resumes & dispatches step 2 ONCE!
     {
         let store = Store::open(&db_path, NoPublisher).unwrap();
         let env = Env::attach(tempfile::tempdir().unwrap(), home.clone(), store, false);
-        assert_eq!(env.core.resume_running_workflows().await.unwrap(), 1);
+        env.core.ready();
+        env.wait_for_dispatched_count(&run_id, 2).await;
         assert_eq!(
             env.store
                 .read(|r| WorkflowRuns(r).list_attempts_for_run(&run_id))
@@ -1791,8 +1862,9 @@ async fn scenario_13_crash_restart_zero_duplicate_dispatch() {
             2,
             "restart after post-commit crash must advance cleanly to step 2"
         );
-        // Running recovery again is idempotent (still 2 attempts, 0 duplicates).
-        assert_eq!(env.core.resume_running_workflows().await.unwrap(), 1);
+        // Running boot recovery / lifecycle_tick again is idempotent (still 2 attempts, 0 duplicates).
+        env.core.ready();
+        tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(
             env.store
                 .read(|r| WorkflowRuns(r).list_attempts_for_run(&run_id))
@@ -1843,15 +1915,14 @@ async fn placement_blocked_coordinator_rules_and_goal_revision_superseding() {
         }
     "#;
     let snap = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
     assert_eq!(snap["run"]["status"], "paused");
     assert_eq!(
         snap["run"]["pause_reason_code"],
-        pause_reason::PLACEMENT_BLOCKED
+        WfPauseReason::PlacementBlocked.as_str()
     );
     let dec_id = snap["decision_id"].as_str().unwrap().to_owned();
     let dec = env.store.decisions().get(&dec_id).unwrap().unwrap();
@@ -1925,8 +1996,7 @@ async fn placement_blocked_coordinator_rules_and_goal_revision_superseding() {
     //    owner chooses `later` -> Steve executes the waiting workflow step itself AND flips
     //    workspace `noExecutor` policy from `ask` to `steve`!
     let snap_v2 = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
     let run_v2_id = snap_v2["run"]["id"].as_str().unwrap().to_owned();
@@ -1991,8 +2061,7 @@ async fn placement_blocked_coordinator_rules_and_goal_revision_superseding() {
         }
     "#;
     let snap_v3 = env
-        .core
-        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v3 }))
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v3 }))
         .await
         .unwrap();
     assert_eq!(snap_v3["run"]["goal_version"], 3);
@@ -2028,4 +2097,1046 @@ async fn placement_blocked_coordinator_rules_and_goal_revision_superseding() {
         v3_fact.explanation.deferred_by,
         Some(CoordinatorDeferSource::Setting)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_05_e2e_completed_script_cancels_unfinished_sibling_child() {
+    let env = Env::new(false);
+    let (_parent_id, coord) = env.create_parent(None);
+    let script = r#"
+        export default async function () {
+            try {
+                await all([
+                    () => agent("branch A", { bot: "coder", title: "A" }),
+                    () => agent("branch B", { bot: "coder", title: "B" }),
+                ]);
+                return { ok: true };
+            } catch (e) {
+                return { recovered: e.code };
+            }
+        }
+    "#;
+    let snap = env
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
+        .await
+        .unwrap();
+    let run_id = snap["run"]["id"].as_str().unwrap().to_owned();
+    let child_a = snap["attempts"][0]["child_item_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let child_b = snap["attempts"][1]["child_item_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let call_b = snap["attempts"][1]["call_id"].as_str().unwrap().to_owned();
+
+    // Fail A while B is still running; catch completes the script so B MUST be cancelled.
+    env.fail_child(&child_a, "boom").await;
+    let closed_b = env.wait_for_item_closed(&child_b).await;
+    assert_eq!(closed_b.outcome.as_deref(), Some("cancelled"));
+    let call_b_row = env
+        .store
+        .read(|r| WorkflowRuns(r).get_call(&call_b))
+        .unwrap()
+        .unwrap();
+    assert_eq!(call_b_row.status, WfCallStatus::Cancelled);
+    let att_b = env
+        .store
+        .read(|r| WorkflowRuns(r).attempt_by_child_item(&child_b))
+        .unwrap()
+        .unwrap();
+    assert_eq!(att_b.status, WfAttemptStatus::Cancelled);
+    let _ = run_id;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_06_failed_or_cancelled_calls_not_hydrated_across_versions_and_retry_after_catch() {
+    // Part A: A Failed call in v1 must NOT poison v2 (only Completed calls hydrate across versions).
+    let env = Env::new(false);
+    let (_parent_id, coord) = env.create_parent(None);
+    let script_v1 = r#"
+        export default async function () {
+            try {
+                const a = await agent("flaky step", { bot: "coder", title: "Flaky" });
+                return { ok: a };
+            } catch (e) {
+                return await agent("after fail", { bot: "coder", title: "Fallback" });
+            }
+        }
+    "#;
+    let snap1 = env
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v1 }))
+        .await
+        .unwrap();
+    let run_id = snap1["run"]["id"].as_str().unwrap().to_owned();
+    let call_flaky = snap1["attempts"][0]["call_id"].as_str().unwrap().to_owned();
+    let child_flaky_1 = snap1["attempts"][0]["child_item_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Fail flaky step -> catch branch dispatches "after fail" (recorded at seq 1 of v1).
+    env.fail_child(&child_flaky_1, "transient").await;
+    env.wait_for_dispatched_count(&run_id, 2).await;
+    let child_fallback = env
+        .store
+        .read(|r| WorkflowRuns(r).list_attempts_for_run(&run_id))
+        .unwrap()[1]
+        .child_item_id
+        .clone()
+        .unwrap();
+
+    // Part B: Retry the caught failed call inside v1! Must NOT trigger NonDeterministicReplay!
+    let snap_retry = env
+        .wf_tool(&coord, json!({ "action": "retry", "call_id": call_flaky }))
+        .await
+        .unwrap();
+    assert_eq!(
+        snap_retry["run"]["status"], "running",
+        "retrying a caught failed call must stay running, not pause with non_deterministic_replay: {snap_retry}"
+    );
+    let closed_fallback = env.wait_for_item_closed(&child_fallback).await;
+    assert_eq!(closed_fallback.outcome.as_deref(), Some("cancelled"));
+    let flaky_attempts_after_retry = env
+        .store
+        .read(|r| WorkflowRuns(r).list_attempts_for_call(&call_flaky))
+        .unwrap();
+    assert_eq!(flaky_attempts_after_retry.len(), 2);
+    assert_eq!(
+        flaky_attempts_after_retry[1].status,
+        WfAttemptStatus::Dispatched
+    );
+
+    // Fail attempt 2 as well so flaky call is Failed again, then submit v2 calling the EXACT same
+    // "flaky step" WITHOUT catch: v2 MUST NOT hydrate the v1 failure; it must dispatch attempt 3!
+    let child_flaky_2 = flaky_attempts_after_retry[1].child_item_id.clone().unwrap();
+    env.fail_child(&child_flaky_2, "still failing").await;
+    env.wait_for_dispatched_count(&run_id, 4).await;
+
+    let script_v2 = r#"
+        export default async function () {
+            const a = await agent("flaky step", { bot: "coder", title: "Flaky" });
+            const r = await agent("review", { bot: "reviewer", review: true });
+            return { a, r };
+        }
+    "#;
+    let snap_v2 = env
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v2 }))
+        .await
+        .unwrap();
+    assert_eq!(
+        snap_v2["run"]["status"], "running",
+        "v2 must NOT inherit v1's Failed status as a poisoned recorded call: {snap_v2}"
+    );
+    let flaky_attempts_v2 = env
+        .store
+        .read(|r| WorkflowRuns(r).list_attempts_for_call(&call_flaky))
+        .unwrap();
+    assert_eq!(
+        flaky_attempts_v2.len(),
+        3,
+        "v2 must dispatch a fresh attempt 3 for previously failed call"
+    );
+    assert_eq!(flaky_attempts_v2[2].status, WfAttemptStatus::Dispatched);
+    let vc_v2 = env
+        .store
+        .read(|r| WorkflowRuns(r).list_version_calls(&run_id, 2))
+        .unwrap();
+    assert_eq!(
+        vc_v2[0].hydrated_from_version, None,
+        "re-queued non-completed call must NOT be marked as hydrated"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_07_cancelled_run_can_resubmit_script_and_clear_delivery_blocker() {
+    let env = Env::new(false);
+    let (parent_id, coord) = env.create_parent(None);
+
+    let script_v1 = r#"
+        export default async function () {
+            return await agent("old plan", { bot: "coder" });
+        }
+    "#;
+    let snap1 = env
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v1 }))
+        .await
+        .unwrap();
+    let run_id = snap1["run"]["id"].as_str().unwrap().to_owned();
+
+    // Cancel the run.
+    let cancelled = env
+        .wf_tool(
+            &coord,
+            json!({ "action": "cancel", "reason": "wrong approach" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cancelled["run"]["status"], "cancelled");
+
+    // Resubmit a brand-new script version on the cancelled run -> MUST reopen cleanly (v2)!
+    let script_v2 = r#"
+        export default async function () {
+            const w = await agent("better plan", { bot: "coder" });
+            const r = await agent("audit better plan", { bot: "reviewer", review: true });
+            return { w, r };
+        }
+    "#;
+    let snap2 = env
+        .wf_tool(&coord, json!({ "action": "submit", "script": script_v2 }))
+        .await
+        .expect("cancelled run must allow submitting a new script version");
+    assert_eq!(snap2["run"]["id"], run_id);
+    assert_eq!(snap2["run"]["active_script_version"], 2);
+    assert_eq!(snap2["run"]["status"], "running");
+
+    let work_child = env
+        .store
+        .read(|r| WorkflowRuns(r).list_active_attempts_for_run(&run_id))
+        .unwrap()[0]
+        .child_item_id
+        .clone()
+        .unwrap();
+    env.deliver_child(&work_child, json!({ "ok": true })).await;
+    env.wait_for_dispatched_count(&run_id, 3).await;
+    let rev_child = env
+        .store
+        .read(|r| WorkflowRuns(r).list_active_attempts_for_run(&run_id))
+        .unwrap()[0]
+        .child_item_id
+        .clone()
+        .unwrap();
+    env.deliver_child(&rev_child, json!({ "approved": true }))
+        .await;
+    env.wait_for_run_status(&run_id, WfRunStatus::Completed)
+        .await;
+
+    // Parent delivery gate must now be completely unblocked!
+    env.core
+        .tool_deliver(
+            &coord,
+            "Parent complete after reopening cancelled run",
+            &[],
+            &[],
+            &[],
+        )
+        .expect("parent delivery must succeed once reopened run completes");
+    let _ = parent_id;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_10_infra_faults_retry_bounded_and_distinguish_from_script_faults() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use steve_workflow_api::{WorkflowFault, WorkflowFaultCode};
+
+    struct FlakyInfraExecutor {
+        fail_times: usize,
+        code: WorkflowFaultCode,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowStepExecutor for FlakyInfraExecutor {
+        async fn execute(&self, input: &StepInput) -> StepFrame {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_times {
+                StepFrame::Failed {
+                    fault: WorkflowFault::new(self.code, format!("injected fault #{n}")),
+                    emitted_calls: vec![],
+                    logs: vec![],
+                }
+            } else {
+                steve_workflow_js::run_step(input)
+            }
+        }
+    }
+
+    // 1. Two transient SubprocessFailed errors followed by success -> auto-retries and completes!
+    {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let env = Env::with_executor(Arc::new(FlakyInfraExecutor {
+            fail_times: 2,
+            code: WorkflowFaultCode::SubprocessFailed,
+            calls: calls.clone(),
+        }));
+        let (_p, coord) = env.create_parent(None);
+        let snap = env
+            .core
+            .tool_workflow_run(
+                &coord,
+                json!({ "action": "submit", "script": "export default async function () { return { ok: 1 }; }" }),
+            )
+            .await
+            .unwrap();
+        let snap = serde_json::to_value(snap).unwrap();
+        assert_eq!(
+            snap["run"]["status"], "completed",
+            "transient infra faults must auto-retry: {snap}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    // 2. Persistent Timeout exhausts bounded retries and pauses as InfrastructureFault (NOT ScriptFault).
+    {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let env = Env::with_executor(Arc::new(FlakyInfraExecutor {
+            fail_times: 10,
+            code: WorkflowFaultCode::Timeout,
+            calls: calls.clone(),
+        }));
+        let (_p, coord) = env.create_parent(None);
+        let snap = env
+            .core
+            .tool_workflow_run(
+                &coord,
+                json!({ "action": "submit", "script": "export default async function () { return 1; }" }),
+            )
+            .await
+            .unwrap();
+        let snap = serde_json::to_value(snap).unwrap();
+        assert_eq!(snap["run"]["status"], "paused");
+        assert_eq!(
+            snap["run"]["pause_reason_code"],
+            WfPauseReason::InfrastructureFault.as_str(),
+            "exhausted infra fault must use InfrastructureFault pause reason: {snap}"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) > 1,
+            "infra fault must retry before pausing, got {} calls",
+            calls.load(Ordering::SeqCst)
+        );
+    }
+
+    // 3. Deterministic SyntaxError must NOT retry and pauses immediately as ScriptFault.
+    {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let env = Env::with_executor(Arc::new(FlakyInfraExecutor {
+            fail_times: 10,
+            code: WorkflowFaultCode::SyntaxError,
+            calls: calls.clone(),
+        }));
+        let (_p, coord) = env.create_parent(None);
+        let snap = env
+            .core
+            .tool_workflow_run(
+                &coord,
+                json!({ "action": "submit", "script": "export default async function () { return 1; }" }),
+            )
+            .await
+            .unwrap();
+        let snap = serde_json::to_value(snap).unwrap();
+        assert_eq!(snap["run"]["status"], "paused");
+        assert_eq!(
+            snap["run"]["pause_reason_code"],
+            WfPauseReason::ScriptFault.as_str()
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "script faults must not auto-retry"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_12_corrupt_options_json_errors_instead_of_silently_defaulting() {
+    let env = Env::new(false);
+    let (_parent_id, coord) = env.create_parent(None);
+
+    // Typed WfToolOutput::Empty when no run exists yet.
+    let empty_out = env
+        .core
+        .tool_workflow_run(&coord, json!({ "action": "get" }))
+        .await
+        .unwrap();
+    assert!(
+        matches!(empty_out, steve_core::WfToolOutput::Empty { run: None }),
+        "expected typed WfToolOutput::Empty, got {empty_out:?}"
+    );
+
+    let script = r#"
+        export default async function () {
+            const a = await agent("first", { bot: "coder" });
+            const b = await agent("second", { bot: "coder", mutex_key: "m1" });
+            return { a, b };
+        }
+    "#;
+    // Submit returns strongly-typed WfToolOutput::Snapshot.
+    let typed_out = env
+        .core
+        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+        .await
+        .unwrap();
+    let snap = typed_out
+        .into_snapshot()
+        .expect("submit must return WfToolOutput::Snapshot");
+    assert_eq!(
+        env.core.workflow_run_lock_count(),
+        0,
+        "workflow_run_locks must be cleaned up once step completes"
+    );
+    let run_id = snap.run.id.clone();
+
+    // Corrupt call 0's options_canonical_json and requeue it so dispatch must parse it.
+    let call_id = snap.calls[0].id.clone();
+    let child_id = snap.attempts[0].child_item_id.clone().unwrap();
+    env.fail_child(&child_id, "force requeue").await;
+    env.store
+        .write(|w| WorkflowRuns(w).requeue_call_for_retry(&call_id))
+        .unwrap();
+    env.store
+        .fixture_write(|c| {
+            c.execute(
+                "UPDATE wf_calls SET options_canonical_json = '{corrupt' WHERE id = ?1",
+                [&call_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let res = env.core.step_workflow_run(&run_id).await;
+    assert!(
+        res.is_err(),
+        "corrupt options_canonical_json must return an error instead of unwrap_or_default(), got: {res:?}"
+    );
+    assert_eq!(
+        env.core.workflow_run_lock_count(),
+        0,
+        "workflow_run_locks must also clean up after a step error"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_01_workflow_steps_offload_blocking_and_cap_concurrency() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SlowCountingExecutor {
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowStepExecutor for SlowCountingExecutor {
+        async fn execute(&self, input: &StepInput) -> StepFrame {
+            let cur = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(cur, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            let frame = steve_workflow_js::run_step(input);
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            frame
+        }
+    }
+
+    // 1. Concurrency cap: 8 concurrent workflow runs must never exceed the global step cap (4).
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let max_in_flight = Arc::new(AtomicUsize::new(0));
+    let env = Env::with_executor(Arc::new(SlowCountingExecutor {
+        in_flight: in_flight.clone(),
+        max_in_flight: max_in_flight.clone(),
+    }));
+    let mut set = tokio::task::JoinSet::new();
+    for i in 0..8 {
+        let (_pid, coord) = env.create_parent(None);
+        let core = env.core.clone();
+        set.spawn(async move {
+            let script = format!("export default async function () {{ return {{ n: {i} }}; }}");
+            core.tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
+                .await
+                .unwrap()
+        });
+    }
+    while let Some(res) = set.join_next().await {
+        let out = res.unwrap().into_snapshot().unwrap();
+        assert_eq!(out.run.status, WfRunStatus::Completed);
+    }
+    let observed_max = max_in_flight.load(Ordering::SeqCst);
+    assert!(
+        observed_max <= 4,
+        "concurrent workflow steps must be capped (<= 4), observed max_in_flight = {observed_max}"
+    );
+    assert!(observed_max >= 2, "expected parallel execution up to cap");
+
+    // 2. Blocking offload: on a single-threaded tokio runtime, contended SQLite / Core work inside
+    //    `tool_workflow_run` must not stall the tokio event loop timer.
+    let ticks = std::thread::spawn(|| {
+        let single_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        single_rt.block_on(async {
+            let env2 = Env::new(false);
+            let (_pid, coord) = env2.create_parent(None);
+            let store_blocker = env2.store.clone();
+            let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = std::thread::spawn(move || {
+                store_blocker
+                    .fixture_write(|_| {
+                        let _ = locked_tx.send(());
+                        std::thread::sleep(Duration::from_millis(160));
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            locked_rx.recv().unwrap();
+
+            let tick_count = Arc::new(AtomicUsize::new(0));
+            let tc = tick_count.clone();
+            let ticker = tokio::spawn(async move {
+                let mut iv = tokio::time::interval(Duration::from_millis(15));
+                loop {
+                    iv.tick().await;
+                    tc.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+
+            // Submit requires a SQLite write, so it blocks behind `blocker` for ~160ms.
+            let out = env2
+                .core
+                .tool_workflow_run(
+                    &coord,
+                    json!({ "action": "submit", "script": "export default async function () { return 1; }" }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                out.into_snapshot().unwrap().run.status,
+                WfRunStatus::Completed
+            );
+            ticker.abort();
+            blocker.join().unwrap();
+            tick_count.load(Ordering::SeqCst)
+        })
+    })
+    .join()
+    .unwrap();
+    assert!(
+        ticks >= 4,
+        "tool_workflow_run blocked the single-threaded tokio runtime (only {ticks} 15ms timer ticks during 160ms SQLite lock)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_03_shared_repo_and_remote_node_git_hydration_preserve_valid_commits() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use steve_core::node_git::{Applied, Ask, NodeGit};
+    use steve_node_api as na;
+
+    // Part A: `worktree = false` shared repository — subsequent commits advance HEAD in p.path,
+    // which MUST NOT invalidate step A's already-committed output when revising to v2.
+    {
+        let env = Env::new(false);
+        let (proj_id, repo_path) = init_git_project(&env, "wf3-shared-repo");
+        env.store
+            .fixture_write(|c| {
+                c.execute("UPDATE projects SET worktree = 0 WHERE id = ?1", [&proj_id])?;
+                Ok(())
+            })
+            .unwrap();
+        let (_parent_id, coord) = env.create_parent(Some(proj_id.clone()));
+
+        let script_v1 = r#"
+            export default async function () {
+                const a = await agent("step A", { bot: "coder", title: "A" });
+                const b = await agent("step B", { bot: "coder", title: "B" });
+                return { a, b };
+            }
+        "#;
+        let snap1 = env
+            .wf_tool(&coord, json!({ "action": "submit", "script": script_v1 }))
+            .await
+            .unwrap();
+        let run_id = snap1["run"]["id"].as_str().unwrap().to_owned();
+        let child_a = snap1["attempts"][0]["child_item_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let call_a_id = snap1["attempts"][0]["call_id"].as_str().unwrap().to_owned();
+
+        // Child A commits in shared repo_path and delivers.
+        std::fs::write(repo_path.join("a.txt"), "from step A\n").unwrap();
+        git_run(&repo_path, &["add", "a.txt"]);
+        git_run(&repo_path, &["commit", "-m", "commit A"]);
+        env.deliver_child(&child_a, json!({ "done": "A" })).await;
+        env.wait_for_dispatched_count(&run_id, 2).await;
+
+        // Another commit lands in the shared repo_path, advancing HEAD!
+        std::fs::write(repo_path.join("b.txt"), "from step B\n").unwrap();
+        git_run(&repo_path, &["add", "b.txt"]);
+        git_run(&repo_path, &["commit", "-m", "commit B"]);
+
+        // Submit v2 reusing step A -> step A's commit & tree still exist in repo_path -> MUST hydrate!
+        let script_v2 = r#"
+            export default async function () {
+                const a = await agent("step A", { bot: "coder", title: "A" });
+                const c = await agent("step C", { bot: "coder", title: "C" });
+                return { a, c };
+            }
+        "#;
+        env.wf_tool(&coord, json!({ "action": "submit", "script": script_v2 }))
+            .await
+            .unwrap();
+        assert_eq!(
+            env.store
+                .read(|r| WorkflowRuns(r).count_call_attempts(&call_a_id))
+                .unwrap(),
+            1,
+            "worktree=false shared repo: subsequent commit must NOT invalidate prior call A"
+        );
+    }
+
+    // Part B: Remote Node child item — cwd does not exist on Hub; NodeGit verifies commit/tree
+    // off-lock and caches the verified result per script version.
+    {
+        struct MockNodeGit {
+            remote_item: std::sync::Mutex<Option<String>>,
+            valid_head: String,
+            valid_tree: String,
+            present: std::sync::atomic::AtomicBool,
+            facts_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl NodeGit for MockNodeGit {
+            fn on_node(&self, item: &str) -> bool {
+                self.remote_item.lock().unwrap().as_deref() == Some(item)
+            }
+
+            async fn facts(&self, _item: &str, q: Ask) -> na::ApiResult<na::GitFacts> {
+                self.facts_calls.fetch_add(1, Ordering::SeqCst);
+                if !self.present.load(Ordering::SeqCst) {
+                    return Err(na::Error::new(na::Code::Invalid, "commit missing on node"));
+                }
+                let mut reads = Vec::new();
+                for r in q.reads {
+                    let answer = match &r {
+                        na::GitRead::Show { rev, .. } if rev == &self.valid_head => {
+                            na::GitAnswer::Commit {
+                                commit: na::CommitInfo {
+                                    sha: self.valid_head.clone(),
+                                    subject: "remote commit".into(),
+                                    author: "bot".into(),
+                                    time: na::Timestamp(0),
+                                    abbrev: None,
+                                    body: None,
+                                },
+                                stat: String::new(),
+                                patch: String::new(),
+                                truncated: false,
+                            }
+                        }
+                        na::GitRead::ChangedPaths { from, to, .. }
+                            if from == &self.valid_head && to == &self.valid_tree =>
+                        {
+                            na::GitAnswer::ChangedPaths {
+                                paths: vec![],
+                                truncated: false,
+                            }
+                        }
+                        _ => {
+                            return Err(na::Error::new(na::Code::Invalid, "unexpected rev/tree"));
+                        }
+                    };
+                    reads.push(na::GitReadFact {
+                        read: r,
+                        observed: self.valid_head.clone(),
+                        answer,
+                    });
+                }
+                Ok(na::GitFacts {
+                    revision: na::Revision::new("rev1").unwrap(),
+                    head: "0000000000000000000000000000000000000000".into(),
+                    branch: Some("main".into()),
+                    dirty: false,
+                    refs: vec![],
+                    ranges: vec![],
+                    reads,
+                })
+            }
+
+            async fn apply(
+                &self,
+                _item: &str,
+                _operation: &str,
+                _subject: &str,
+                _on: &na::GitFacts,
+                _action: na::GitAction,
+            ) -> Applied {
+                Applied::Unknown("unused".into())
+            }
+        }
+
+        let env = Env::new(false);
+        let facts_calls = Arc::new(AtomicUsize::new(0));
+        let remote_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let remote_tree = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+        let node_git = Arc::new(MockNodeGit {
+            remote_item: std::sync::Mutex::new(None),
+            valid_head: remote_head.clone(),
+            valid_tree: remote_tree.clone(),
+            present: std::sync::atomic::AtomicBool::new(true),
+            facts_calls: facts_calls.clone(),
+        });
+        env.core.set_node_git(node_git.clone());
+
+        let (_parent_id, coord) = env.create_parent(None);
+        let script_v1 = r#"
+            export default async function () {
+                const a = await agent("remote step A", { bot: "coder" });
+                const b = await agent("step B", { bot: "coder" });
+                return { a, b };
+            }
+        "#;
+        let snap1 = env
+            .wf_tool(&coord, json!({ "action": "submit", "script": script_v1 }))
+            .await
+            .unwrap();
+        let run_id = snap1["run"]["id"].as_str().unwrap().to_owned();
+        let child_a = snap1["attempts"][0]["child_item_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let call_a_id = snap1["attempts"][0]["call_id"].as_str().unwrap().to_owned();
+        *node_git.remote_item.lock().unwrap() = Some(child_a.clone());
+
+        // Deliver step A, then record a remote-only git fingerprint whose cwd does NOT exist on Hub.
+        env.deliver_child(&child_a, json!({ "remote": true })).await;
+        env.wait_for_dispatched_count(&run_id, 2).await;
+        env.store
+            .fixture_write(|c| {
+                c.execute(
+                    "UPDATE wf_calls SET git_head = ?1, git_tree = ?2, git_cwd = '/nonexistent/remote-node/wt' WHERE id = ?3",
+                    [&remote_head, &remote_tree, &call_a_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        // Revise to v2 keeping remote step A -> NodeGit verifies commit+tree -> hydrates (1 attempt)!
+        facts_calls.store(0, Ordering::SeqCst);
+        let script_v2 = r#"
+            export default async function () {
+                const a = await agent("remote step A", { bot: "coder" });
+                const c = await agent("step C", { bot: "coder" });
+                const d = await agent("step D", { bot: "coder" });
+                return { a, c, d };
+            }
+        "#;
+        env.wf_tool(&coord, json!({ "action": "submit", "script": script_v2 }))
+            .await
+            .unwrap();
+        assert_eq!(
+            env.store
+                .read(|r| WorkflowRuns(r).count_call_attempts(&call_a_id))
+                .unwrap(),
+            1,
+            "remote Node git output verified via NodeGit must hydrate without re-running"
+        );
+        assert_eq!(
+            facts_calls.load(Ordering::SeqCst),
+            1,
+            "remote Node verification must be queried once for v2"
+        );
+
+        // Advancing another step within v2 (step C -> step D) must NOT re-query NodeGit for A!
+        let child_c = env
+            .store
+            .read(|r| WorkflowRuns(r).list_active_attempts_for_run(&run_id))
+            .unwrap()[0]
+            .child_item_id
+            .clone()
+            .unwrap();
+        env.deliver_child(&child_c, json!({ "c": 1 })).await;
+        env.wait_for_dispatched_count(&run_id, 4).await;
+        assert_eq!(
+            facts_calls.load(Ordering::SeqCst),
+            1,
+            "cached hydration verification must not re-query NodeGit on subsequent steps of v2"
+        );
+
+        // When Node reports the commit missing on v3, hydration MUST be rejected and step A re-runs!
+        node_git.present.store(false, Ordering::SeqCst);
+        let script_v3 = r#"
+            export default async function () {
+                const a = await agent("remote step A", { bot: "coder" });
+                const e = await agent("step E", { bot: "coder" });
+                return { a, e };
+            }
+        "#;
+        env.wf_tool(&coord, json!({ "action": "submit", "script": script_v3 }))
+            .await
+            .unwrap();
+        assert_eq!(
+            env.store
+                .read(|r| WorkflowRuns(r).count_call_attempts(&call_a_id))
+                .unwrap(),
+            2,
+            "missing commit on remote Node must invalidate and re-run step A"
+        );
+        assert_eq!(
+            facts_calls.load(Ordering::SeqCst),
+            2,
+            "new script version v3 must re-verify remote Node git output"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_04_no_resume_maintenance_hold_and_mutex_wait_do_not_spin_steps() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingJsExecutor(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl WorkflowStepExecutor for CountingJsExecutor {
+        async fn execute(&self, input: &StepInput) -> StepFrame {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            steve_workflow_js::run_step(input)
+        }
+    }
+
+    // 1. STEVE_NO_RESUME: ready() + lifecycle_tick() must NOT step pre-existing running runs!
+    {
+        let env = Env::new(false);
+        let (parent_id, _coord) = env.create_parent(None);
+        env.store
+            .write(|w| {
+                WorkflowRuns(w).create_run(
+                    WS,
+                    &parent_id,
+                    1,
+                    1,
+                    "export default async function () { return await agent('should not run', { bot: 'coder' }); }",
+                    "sha-no-resume",
+                    None,
+                )
+            })
+            .unwrap();
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut cfg = CoreConfig::for_home(&env.mcp.home);
+        cfg.no_resume = true;
+        let core_nr = Core::new(
+            steve_core::repo::Db::new(env.store.clone()),
+            env.rt.clone(),
+            Arc::new(NoModels),
+            cfg,
+        );
+        core_nr.set_workflow_executor(Arc::new(CountingJsExecutor(count.clone())));
+        core_nr.ready();
+        core_nr.lifecycle_tick().unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "STEVE_NO_RESUME=1 must prevent ready() and lifecycle_tick() from stepping running runs"
+        );
+    }
+
+    // 2. Maintenance hold: lifecycle_tick() must NOT step running runs while held.
+    {
+        let count = Arc::new(AtomicUsize::new(0));
+        let env = Env::with_executor(Arc::new(CountingJsExecutor(count.clone())));
+        let (parent_id, _coord) = env.create_parent(None);
+        let run = env
+            .store
+            .write(|w| {
+                WorkflowRuns(w).create_run(
+                    WS,
+                    &parent_id,
+                    1,
+                    1,
+                    "export default async function () { return { ok: true }; }",
+                    "sha-hold",
+                    None,
+                )
+            })
+            .unwrap();
+        env.core.maintenance_hold(true).unwrap();
+        env.core.lifecycle_tick().unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "maintenance_hold(true) must prevent lifecycle_tick() from stepping running runs"
+        );
+        env.core.maintenance_hold(false).unwrap();
+        env.wait_for_run_status(&run.id, WfRunStatus::Completed)
+            .await;
+    }
+
+    // 3. Waiting on another run's mutex_key must NOT spin `--workflow-step` on every tick!
+    {
+        let count = Arc::new(AtomicUsize::new(0));
+        let env = Env::with_executor(Arc::new(CountingJsExecutor(count.clone())));
+        let (_p1, coord1) = env.create_parent(None);
+        let (_p2, coord2) = env.create_parent(None);
+
+        let script1 = r#"export default async function () { return await agent("hold lock", { bot: "coder", mutex_key: "deploy" }); }"#;
+        let snap1 = env
+            .wf_tool(&coord1, json!({ "action": "submit", "script": script1 }))
+            .await
+            .unwrap();
+        let child1 = snap1["attempts"][0]["child_item_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let script2 = r#"export default async function () { return await agent("wait lock", { bot: "coder", mutex_key: "deploy" }); }"#;
+        let snap2 = env
+            .wf_tool(&coord2, json!({ "action": "submit", "script": script2 }))
+            .await
+            .unwrap();
+        let run2_id = snap2["run"]["id"].as_str().unwrap().to_owned();
+        assert!(
+            snap2["attempts"].as_array().unwrap().is_empty(),
+            "run2 must be queued behind run1's mutex_key"
+        );
+
+        // Reset step counter and trigger 3 periodic ticks: run2 must NOT spin the JS step executor!
+        count.store(0, Ordering::SeqCst);
+        for _ in 0..3 {
+            env.core.lifecycle_tick().unwrap();
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "run waiting on another run's mutex_key must NOT spin step subprocess on periodic ticks"
+        );
+
+        // Once run1 releases the mutex, next tick dispatches run2!
+        env.deliver_child(&child1, json!({ "ok": 1 })).await;
+        env.core.lifecycle_tick().unwrap();
+        env.wait_for_dispatched_count(&run2_id, 1).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_11_workflow_child_uses_create_item_from_and_owner_finish_api() {
+    let env = Env::new(false);
+    let backend_tag = env
+        .store
+        .tags()
+        .create(
+            WS,
+            &steve_store::NewTag {
+                name: "backend".into(),
+                cat: "domain".into(),
+                description: "Backend work".into(),
+            },
+            "owner",
+        )
+        .unwrap();
+    let (_parent_id, coord) = env.create_parent(None);
+    let script = r#"
+        export default async function () {
+            const w = await agent("implement service", {
+                bot: "coder",
+                tags: ["backend"],
+                schema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } }
+            });
+            return w;
+        }
+    "#;
+    let snap = env
+        .wf_tool(&coord, json!({ "action": "submit", "script": script }))
+        .await
+        .unwrap();
+    let child_id = snap["attempts"][0]["child_item_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // 1. Unified create_item_from invariants: item.create audit entry, workspace tag_ids, requested_by.
+    let audit_count: i64 = env
+        .store
+        .fixture_read(|c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM audit WHERE workspace_id = ?1 AND action = 'item.create' AND target = ?2",
+                [WS, &child_id],
+                |row| row.get(0),
+            )?;
+            Ok::<i64, StoreError>(n)
+        })
+        .unwrap();
+    assert_eq!(
+        audit_count, 1,
+        "workflow child must be created via create_item_from and emit item.create audit"
+    );
+    let child_tags = env.store.tags().of_item(&child_id).unwrap();
+    assert!(
+        child_tags.iter().any(|t| t == &backend_tag.id),
+        "workflow child must resolve CallOptions.tags into workspace tag_ids, got {:?}",
+        child_tags
+    );
+    assert_eq!(
+        env.store
+            .read(|r| steve_store::item_repo::requested_by(r, &child_id))
+            .unwrap()
+            .as_deref(),
+        Some("owner"),
+        "workflow child must inherit verified requester membership"
+    );
+
+    // 2. Owner structured takeover wired into real `lifecycle_command("finish", result)` API:
+    //    - Omitting `result` is refused with `wf_child_structured_delivery_required`;
+    //    - Schema-violating `result` is refused with 409;
+    //    - Valid `result` commits child completion atomically with CAS check.
+    let child_item = env.store.items().get(&child_id).unwrap().unwrap();
+    let err_missing = env
+        .core
+        .lifecycle_command(
+            &child_id,
+            "finish",
+            child_item.cycle,
+            child_item.cas_revision,
+            None,
+            None,
+            None,
+            "owner",
+        )
+        .unwrap_err();
+    assert!(
+        err_missing
+            .to_string()
+            .contains("wf_child_structured_delivery_required")
+    );
+    let err_bad = env
+        .core
+        .lifecycle_command(
+            &child_id,
+            "finish",
+            child_item.cycle,
+            child_item.cas_revision,
+            Some("bad"),
+            None,
+            Some(&json!({ "ok": "not-a-bool" })),
+            "owner",
+        )
+        .unwrap_err();
+    assert!(err_bad.to_string().contains("schema_violation"));
+
+    let child_sess = env.child_session(&child_id);
+    env.core
+        .lifecycle_command(
+            &child_id,
+            "finish",
+            child_item.cycle,
+            child_item.cas_revision,
+            Some("owner completed step"),
+            None,
+            Some(&json!({ "ok": true })),
+            "owner",
+        )
+        .unwrap();
+    env.rt.end_turn(&env.core, &child_sess.id, "end_turn");
+    let closed = env.store.items().get(&child_id).unwrap().unwrap();
+    assert_eq!(closed.phase, ItemPhase::Closed);
+    let attempt = env
+        .store
+        .read(|r| WorkflowRuns(r).attempt_by_child_item(&child_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt.status, WfAttemptStatus::Succeeded);
 }

@@ -30,8 +30,9 @@ pub use schema::{
     validate_structured_result,
 };
 pub use types::{
-    CallIdentity, CallOptions, CallSpec, HostPrimitive, IdentityError, RecordedCall, StepFrame,
-    StepInput, StepLogEntry, WorkflowFault, WorkflowFaultCode, WorkflowState,
+    CallIdentity, CallOptions, CallSpec, HostPrimitive, IdentityError, RecordedCall,
+    STEP_PROTOCOL_VERSION, StepFrame, StepInput, StepLogEntry, StepWireHeader, StepWireRequest,
+    StepWireResponse, WorkflowFault, WorkflowFaultClass, WorkflowFaultCode, WorkflowState,
 };
 
 #[cfg(test)]

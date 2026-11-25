@@ -1,6 +1,6 @@
 //! Strongly-typed workflow script host primitives, `CallIdentity`, step inputs, frames and faults.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -11,6 +11,13 @@ use crate::limits::{MAX_CALL_IDENTITY_BYTES, StepLimitsOverride};
 use crate::schema::{
     JsonSchemaSubset, ResultValidationError, SchemaError, validate_structured_result,
 };
+
+/// Current stdin/stdout wire protocol version between Hub parent and `steve-hub --workflow-step`.
+///
+/// Checked via [`StepWireHeader`] (which ignores unknown fields) before full deserialization so
+/// rolling Hub binary upgrades fail cleanly with `WorkflowFaultCode::ProtocolError` instead of a
+/// cryptic `deny_unknown_fields` error.
+pub const STEP_PROTOCOL_VERSION: u32 = 1;
 
 /// The exact six host primitives exposed to sandboxed workflow JS scripts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -93,6 +100,8 @@ pub struct CallOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<bool>,
@@ -102,6 +111,9 @@ pub struct CallOptions {
     pub mutex_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Optional explicit call-site phase override (`agent(prompt, { phase: "build" })`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 impl CallOptions {
@@ -155,8 +167,10 @@ pub struct CallIdentity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     pub prompt_sha256: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub options_canonical_json: String,
     pub occurrence: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub canonical_json: String,
     pub identity_hash: String,
 }
@@ -228,17 +242,43 @@ impl CallIdentity {
             Err(IdentityError::IntegrityMismatch)
         }
     }
+
+    /// Returns a compact replay reference omitting the redundant canonical JSON strings for a call
+    /// already known to the Hub (`identity_hash` + `prompt_sha256` remain authoritative).
+    pub fn compact_known(&self) -> Self {
+        Self {
+            phase: self.phase.clone(),
+            prompt_sha256: self.prompt_sha256.clone(),
+            options_canonical_json: String::new(),
+            occurrence: self.occurrence,
+            canonical_json: String::new(),
+            identity_hash: self.identity_hash.clone(),
+        }
+    }
 }
 
 /// One `agent()` call emitted during step replay.
+///
+/// For calls already known to the Hub (`StepInput::known_call_hashes` or `recorded_calls`),
+/// `prompt` and `options` are omitted (`None`) so replaying up to 256 calls with large prompts
+/// never overflows [`crate::MAX_STEP_FRAME_BYTES`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CallSpec {
     /// 0-based emission sequence number in this replay step (`wf_version_calls.seq_no`).
     pub seq_no: u32,
     pub identity: CallIdentity,
-    pub prompt: String,
-    pub options: CallOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<CallOptions>,
+}
+
+impl CallSpec {
+    /// True when this emitted call is a compact reference to an already-known Hub call.
+    pub fn is_compact_known(&self) -> bool {
+        self.prompt.is_none() && self.options.is_none()
+    }
 }
 
 /// Previously settled call outcome supplied by the Hub to the replay step.
@@ -263,7 +303,29 @@ pub enum RecordedCall {
     },
 }
 
-/// Single JSON frame sent from Hub parent to `steve-hub --workflow-step` child via stdin.
+/// Lightweight header parsed first (ignoring unknown fields) to verify [`STEP_PROTOCOL_VERSION`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepWireHeader {
+    pub protocol_version: u32,
+}
+
+/// Versioned stdin envelope sent from Hub parent to `steve-hub --workflow-step`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepWireRequest {
+    pub protocol_version: u32,
+    pub input: StepInput,
+}
+
+/// Versioned stdout envelope returned from `steve-hub --workflow-step` to Hub parent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepWireResponse {
+    pub protocol_version: u32,
+    pub frame: StepFrame,
+}
+
+/// Single JSON payload sent from Hub parent to `steve-hub --workflow-step` child via stdin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepInput {
@@ -272,6 +334,10 @@ pub struct StepInput {
     /// Previously settled calls keyed by `CallIdentity.identity_hash`.
     #[serde(default)]
     pub recorded_calls: BTreeMap<String, RecordedCall>,
+    /// Identity hashes already persisted in the Hub's `wf_calls` ledger (including active/queued
+    /// calls) whose full prompts and options may be omitted on replay.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub known_call_hashes: BTreeSet<String>,
     /// Optional stricter execution limits (clamped to hard ceilings).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<StepLimitsOverride>,
@@ -283,6 +349,14 @@ pub struct StepInput {
 pub struct StepLogEntry {
     pub seq: u32,
     pub message: String,
+}
+
+/// Separates deterministic script bugs from transient subprocess/protocol infrastructure failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowFaultClass {
+    Script,
+    Infrastructure,
 }
 
 /// Machine-readable workflow step fault code (no localized prose in core contracts).
@@ -312,6 +386,66 @@ pub enum WorkflowFaultCode {
     UnsupportedValue,
     SubprocessFailed,
     ProtocolError,
+}
+
+impl WorkflowFaultCode {
+    /// Classifies whether this fault is an infrastructure failure (eligible for bounded automatic
+    /// retry) or a deterministic script/contract fault (pauses immediately for revision).
+    pub const fn class(self) -> WorkflowFaultClass {
+        match self {
+            Self::Timeout | Self::SubprocessFailed | Self::ProtocolError => {
+                WorkflowFaultClass::Infrastructure
+            }
+            Self::SyntaxError
+            | Self::MissingEntrypoint
+            | Self::RuntimeError
+            | Self::UnresolvedPromise
+            | Self::OutOfMemory
+            | Self::StackOverflow
+            | Self::TooManyCalls
+            | Self::CallIdentityTooLarge
+            | Self::ResultTooLarge
+            | Self::PromptTooLarge
+            | Self::ScriptTooLarge
+            | Self::FrameTooLarge
+            | Self::InputTooLarge
+            | Self::InvalidArguments
+            | Self::InvalidOptions
+            | Self::InvalidSchema
+            | Self::UnsafeRegex
+            | Self::NonFiniteNumber
+            | Self::UnsafeInteger
+            | Self::UnsupportedValue => WorkflowFaultClass::Script,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SyntaxError => "syntax_error",
+            Self::MissingEntrypoint => "missing_entrypoint",
+            Self::RuntimeError => "runtime_error",
+            Self::UnresolvedPromise => "unresolved_promise",
+            Self::Timeout => "timeout",
+            Self::OutOfMemory => "out_of_memory",
+            Self::StackOverflow => "stack_overflow",
+            Self::TooManyCalls => "too_many_calls",
+            Self::CallIdentityTooLarge => "call_identity_too_large",
+            Self::ResultTooLarge => "result_too_large",
+            Self::PromptTooLarge => "prompt_too_large",
+            Self::ScriptTooLarge => "script_too_large",
+            Self::FrameTooLarge => "frame_too_large",
+            Self::InputTooLarge => "input_too_large",
+            Self::InvalidArguments => "invalid_arguments",
+            Self::InvalidOptions => "invalid_options",
+            Self::InvalidSchema => "invalid_schema",
+            Self::UnsafeRegex => "unsafe_regex",
+            Self::NonFiniteNumber => "non_finite_number",
+            Self::UnsafeInteger => "unsafe_integer",
+            Self::UnsupportedValue => "unsupported_value",
+            Self::SubprocessFailed => "subprocess_failed",
+            Self::ProtocolError => "protocol_error",
+        }
+    }
 }
 
 /// Structured fault returned when a workflow step cannot proceed.

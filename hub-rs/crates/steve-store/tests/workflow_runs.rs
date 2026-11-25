@@ -7,7 +7,7 @@ use common::fresh;
 use steve_store::StoreError;
 use steve_store::workflow_runs::{
     NewWfAttempt, NewWfCall, ReviewGateFailure, ReviewGateVerdict, WfAttemptStatus, WfCallStatus,
-    WfGitFingerprint, WfRunStatus, WorkflowRuns,
+    WfChildOutcome, WfGitFingerprint, WfPauseReason, WfRunStatus, WorkflowRuns,
 };
 
 #[test]
@@ -89,15 +89,17 @@ fn enforces_single_active_and_single_succeeded_attempt_unique_indexes() {
             WorkflowRuns(w).stage_attempt_closing("child-1", 3, r#"{"ok":true}"#, r#"["a1"]"#)
         })
         .unwrap();
-    let wrong_rev = t
-        .store
-        .write(|w| WorkflowRuns(w).finalize_attempt("child-1", 2, "completed", None, None));
+    let wrong_rev = t.store.write(|w| {
+        WorkflowRuns(w).finalize_attempt("child-1", 2, WfChildOutcome::Completed, None, None)
+    });
     assert!(matches!(wrong_rev, Err(StoreError::Conflict(_))));
 
     // Finalizing with exact delivery_revision = 3 succeeds atomically.
     let fin = t
         .store
-        .write(|w| WorkflowRuns(w).finalize_attempt("child-1", 3, "completed", None, None))
+        .write(|w| {
+            WorkflowRuns(w).finalize_attempt("child-1", 3, WfChildOutcome::Completed, None, None)
+        })
         .unwrap()
         .expect("finalized");
     assert_eq!(fin.status, WfAttemptStatus::Succeeded);
@@ -192,7 +194,7 @@ fn review_gate_enforces_all_four_hard_rules_and_cycle_budget_persists_across_scr
         .write(|w| {
             WorkflowRuns(w).stage_attempt_closing("c-work", 1, r#"{"done":true}"#, "[]")?;
             let fin = WorkflowRuns(w)
-                .finalize_attempt("c-work", 1, "completed", None, None)?
+                .finalize_attempt("c-work", 1, WfChildOutcome::Completed, None, None)?
                 .unwrap();
             Ok::<_, StoreError>(fin.new_run_revision)
         })
@@ -239,7 +241,13 @@ fn review_gate_enforces_all_four_hard_rules_and_cycle_budget_persists_across_scr
                 error_message: None,
             })?;
             WorkflowRuns(w).stage_attempt_closing("c-rev-same", 1, r#"{"approved":true}"#, "[]")?;
-            WorkflowRuns(w).finalize_attempt("c-rev-same", 1, "completed", None, None)?;
+            WorkflowRuns(w).finalize_attempt(
+                "c-rev-same",
+                1,
+                WfChildOutcome::Completed,
+                None,
+                None,
+            )?;
             Ok::<_, StoreError>(())
         })
         .unwrap();
@@ -292,7 +300,13 @@ fn review_gate_enforces_all_four_hard_rules_and_cycle_budget_persists_across_scr
                 r#"{"approved":true}"#,
                 "[]",
             )?;
-            WorkflowRuns(w).finalize_attempt("c-rev-stale", 1, "completed", None, None)?;
+            WorkflowRuns(w).finalize_attempt(
+                "c-rev-stale",
+                1,
+                WfChildOutcome::Completed,
+                None,
+                None,
+            )?;
             Ok::<_, StoreError>(())
         })
         .unwrap();
@@ -352,7 +366,13 @@ fn review_gate_enforces_all_four_hard_rules_and_cycle_budget_persists_across_scr
                 r#"{"approved":true}"#,
                 "[]",
             )?;
-            WorkflowRuns(w).finalize_attempt("c-rev-fresh", 1, "completed", None, None)?;
+            WorkflowRuns(w).finalize_attempt(
+                "c-rev-fresh",
+                1,
+                WfChildOutcome::Completed,
+                None,
+                None,
+            )?;
             Ok::<_, StoreError>(rev3.id)
         })
         .unwrap();
@@ -437,7 +457,13 @@ fn git_fingerprint_promotes_on_finalize_and_invalidation_preserves_budget_while_
                 "[]",
                 Some(&fp),
             )?;
-            WorkflowRuns(w).finalize_attempt("child-git-1", 1, "completed", None, None)?;
+            WorkflowRuns(w).finalize_attempt(
+                "child-git-1",
+                1,
+                WfChildOutcome::Completed,
+                None,
+                None,
+            )?;
             Ok::<_, StoreError>((run.id, call.id))
         })
         .unwrap();
@@ -494,7 +520,13 @@ fn git_fingerprint_promotes_on_finalize_and_invalidation_preserves_budget_while_
                 "[]",
                 Some(&fp2),
             )?;
-            WorkflowRuns(w).finalize_attempt("child-git-2", 1, "completed", None, None)?;
+            WorkflowRuns(w).finalize_attempt(
+                "child-git-2",
+                1,
+                WfChildOutcome::Completed,
+                None,
+                None,
+            )?;
             Ok::<_, StoreError>(())
         })
         .unwrap();
@@ -519,4 +551,234 @@ fn git_fingerprint_promotes_on_finalize_and_invalidation_preserves_budget_while_
         call2.git_tree.as_deref(),
         Some("4444444444444444444444444444444444444444")
     );
+}
+
+#[test]
+fn review_02_review_only_script_cannot_bypass_independent_review() {
+    let t = fresh();
+    // Script marks its SOLE work call as `review: true` and returns `{ approved: true }`.
+    // Independent review MUST still be required (not bypassed with NotRequired!).
+    let run_id = t
+        .store
+        .write(|w| {
+            let run =
+                WorkflowRuns(w).create_run("ws1", "parent-bypass", 1, 1, "v1", "sha1", None)?;
+            let (call, _) = WorkflowRuns(w).ensure_call(&NewWfCall {
+                run_id: &run.id,
+                workspace_id: "ws1",
+                identity_hash: "only-review-call",
+                phase: Some("work"),
+                title: Some("Disguised Work"),
+                prompt: "do everything and approve yourself",
+                options_canonical_json: r#"{"review":true}"#,
+                schema_json: None,
+                occurrence: 0,
+                is_review: true,
+                mutex_key: None,
+            })?;
+            WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                call_id: &call.id,
+                run_id: &run.id,
+                parent_item_id: "parent-bypass",
+                parent_cycle: 1,
+                attempt_no: 1,
+                child_item_id: Some("child-bypass-1"),
+                bot_id: Some("bot-coder"),
+                placement_id: None,
+                harness: None,
+                model: None,
+                status: WfAttemptStatus::Dispatched,
+                dispatched_at_revision: 1,
+                error_code: None,
+                error_message: None,
+            })?;
+            WorkflowRuns(w).stage_attempt_closing(
+                "child-bypass-1",
+                1,
+                r#"{"approved":true}"#,
+                "[]",
+            )?;
+            WorkflowRuns(w).finalize_attempt(
+                "child-bypass-1",
+                1,
+                WfChildOutcome::Completed,
+                None,
+                None,
+            )?;
+            Ok::<_, StoreError>(run.id)
+        })
+        .unwrap();
+
+    assert_eq!(
+        t.store
+            .read(|r| WorkflowRuns(r).verify_independent_review(&run_id))
+            .unwrap(),
+        ReviewGateVerdict::Blocked {
+            reason: ReviewGateFailure::MissingReview
+        },
+        "marking all calls review:true must NOT bypass independent review"
+    );
+
+    // Adding a second review:true call on the SAME bot must still be blocked as SameBotAsWorker!
+    t.store
+        .write(|w| {
+            let rev = WorkflowRuns(w).get_run(&run_id)?.unwrap().run_revision;
+            let (call2, _) = WorkflowRuns(w).ensure_call(&NewWfCall {
+                run_id: &run_id,
+                workspace_id: "ws1",
+                identity_hash: "second-review-same-bot",
+                phase: Some("review"),
+                title: Some("Self Review"),
+                prompt: "self approve",
+                options_canonical_json: r#"{"review":true}"#,
+                schema_json: None,
+                occurrence: 0,
+                is_review: true,
+                mutex_key: None,
+            })?;
+            WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                call_id: &call2.id,
+                run_id: &run_id,
+                parent_item_id: "parent-bypass",
+                parent_cycle: 1,
+                attempt_no: 1,
+                child_item_id: Some("child-bypass-2"),
+                bot_id: Some("bot-coder"),
+                placement_id: None,
+                harness: None,
+                model: None,
+                status: WfAttemptStatus::Dispatched,
+                dispatched_at_revision: rev + 1,
+                error_code: None,
+                error_message: None,
+            })?;
+            WorkflowRuns(w).stage_attempt_closing(
+                "child-bypass-2",
+                1,
+                r#"{"approved":true}"#,
+                "[]",
+            )?;
+            WorkflowRuns(w).finalize_attempt(
+                "child-bypass-2",
+                1,
+                WfChildOutcome::Completed,
+                None,
+                None,
+            )?;
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        t.store
+            .read(|r| WorkflowRuns(r).verify_independent_review(&run_id))
+            .unwrap(),
+        ReviewGateVerdict::Blocked {
+            reason: ReviewGateFailure::SameBotAsWorker {
+                bot_id: "bot-coder".into()
+            }
+        }
+    );
+
+    // Only an independent bot (bot-reviewer) dispatched strictly later passes!
+    let rev3_id = t
+        .store
+        .write(|w| {
+            let rev = WorkflowRuns(w).get_run(&run_id)?.unwrap().run_revision;
+            let (call3, _) = WorkflowRuns(w).ensure_call(&NewWfCall {
+                run_id: &run_id,
+                workspace_id: "ws1",
+                identity_hash: "independent-review-bot",
+                phase: Some("review"),
+                title: Some("Independent Review"),
+                prompt: "independently audit",
+                options_canonical_json: r#"{"review":true}"#,
+                schema_json: None,
+                occurrence: 0,
+                is_review: true,
+                mutex_key: None,
+            })?;
+            WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                call_id: &call3.id,
+                run_id: &run_id,
+                parent_item_id: "parent-bypass",
+                parent_cycle: 1,
+                attempt_no: 1,
+                child_item_id: Some("child-bypass-3"),
+                bot_id: Some("bot-reviewer"),
+                placement_id: None,
+                harness: None,
+                model: None,
+                status: WfAttemptStatus::Dispatched,
+                dispatched_at_revision: rev + 1,
+                error_code: None,
+                error_message: None,
+            })?;
+            WorkflowRuns(w).stage_attempt_closing(
+                "child-bypass-3",
+                1,
+                r#"{"approved":true}"#,
+                "[]",
+            )?;
+            WorkflowRuns(w).finalize_attempt(
+                "child-bypass-3",
+                1,
+                WfChildOutcome::Completed,
+                None,
+                None,
+            )?;
+            Ok::<_, StoreError>(call3.id)
+        })
+        .unwrap();
+
+    assert_eq!(
+        t.store
+            .read(|r| WorkflowRuns(r).verify_independent_review(&run_id))
+            .unwrap(),
+        ReviewGateVerdict::Verified {
+            review_call_id: rev3_id
+        }
+    );
+
+    // Owner explicit single_session_override still exempts the run.
+    let run_exempt = t
+        .store
+        .write(|w| {
+            let run =
+                WorkflowRuns(w).create_run("ws1", "parent-exempt", 1, 1, "v1", "sha1", None)?;
+            WorkflowRuns(w).grant_single_session_override(&run.id)?;
+            Ok::<_, StoreError>(run.id)
+        })
+        .unwrap();
+    assert_eq!(
+        t.store
+            .read(|r| WorkflowRuns(r).verify_independent_review(&run_exempt))
+            .unwrap(),
+        ReviewGateVerdict::NotRequired
+    );
+}
+
+#[test]
+fn review_12_typed_child_outcome_and_pause_reason_reject_unknown_strings() {
+    assert_eq!(
+        "completed".parse::<WfChildOutcome>().unwrap(),
+        WfChildOutcome::Completed
+    );
+    assert_eq!(
+        "failed".parse::<WfChildOutcome>().unwrap(),
+        WfChildOutcome::Failed
+    );
+    assert_eq!(
+        "cancelled".parse::<WfChildOutcome>().unwrap(),
+        WfChildOutcome::Cancelled
+    );
+    assert!("bogus_outcome".parse::<WfChildOutcome>().is_err());
+
+    assert_eq!(
+        "infrastructure_fault".parse::<WfPauseReason>().unwrap(),
+        WfPauseReason::InfrastructureFault
+    );
+    assert!(WfPauseReason::InfrastructureFault.is_owner_gated());
+    assert!(!WfPauseReason::CoordinatorPaused.is_owner_gated());
+    assert!("unknown_reason".parse::<WfPauseReason>().is_err());
 }

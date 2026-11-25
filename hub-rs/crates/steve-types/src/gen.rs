@@ -154,6 +154,7 @@ fn bindings_match() {
         DecisionView,
         DecisionStatus,
         DecisionPrompt,
+        WfBudgetScope,
         Said,
         ItemView,
         MessageView,

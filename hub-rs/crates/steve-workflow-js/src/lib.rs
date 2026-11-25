@@ -10,7 +10,7 @@ pub use engine::run_step;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::time::Instant;
 
     use serde_json::json;
@@ -36,6 +36,7 @@ mod tests {
             script_source: script.into(),
             state: base_state(),
             recorded_calls: BTreeMap::new(),
+            known_call_hashes: BTreeSet::new(),
             limits: None,
         }
     }
@@ -87,9 +88,10 @@ mod tests {
             panic!("expected PendingCalls, got {f2:?}");
         };
         assert_eq!(c2.len(), 2);
-        assert_eq!(c2[0].identity, c1[0].identity);
+        assert_eq!(c2[0].identity.identity_hash, c1[0].identity.identity_hash);
+        assert!(c2[0].is_compact_known());
         assert_eq!(c2[1].identity.phase.as_deref(), Some("build"));
-        assert_eq!(c2[1].prompt, "implement v1");
+        assert_eq!(c2[1].prompt.as_deref(), Some("implement v1"));
         assert_eq!(p2, vec![c2[1].identity.identity_hash.clone()]);
 
         // Step 3: both succeeded -> Completed.
@@ -270,7 +272,7 @@ mod tests {
         else {
             panic!("expected PendingCalls, got {f2:?}");
         };
-        assert_eq!(c2[1].prompt, "fallback:timeout");
+        assert_eq!(c2[1].prompt.as_deref(), Some("fallback:timeout"));
 
         // Trying to catch a ReDoS schema fault must still fail the step!
         let bypass = r#"
@@ -483,6 +485,7 @@ mod tests {
                 script_source: script.into(),
                 state: base_state(),
                 recorded_calls: recorded.clone(),
+                known_call_hashes: BTreeSet::new(),
                 limits: None,
             };
             match run_step(&inp) {
@@ -531,6 +534,7 @@ mod tests {
             script_source: script.into(),
             state: base_state(),
             recorded_calls: recorded,
+            known_call_hashes: BTreeSet::new(),
             limits: None,
         };
         let mut samples_ms = Vec::with_capacity(10);
@@ -547,5 +551,299 @@ mod tests {
         samples_ms.sort_by(|a, b| a.total_cmp(b));
         let median = samples_ms[samples_ms.len() / 2];
         eprintln!("wf2_bench_20_call_in_process_ms: median={median:.2} samples={samples_ms:?}");
+    }
+
+    #[test]
+    fn review_05_completed_script_cancels_all_unfinished_calls() {
+        let script = r#"
+            export default async function () {
+              try {
+                await all([
+                  () => agent("call A"),
+                  () => agent("call B"),
+                ]);
+              } catch (e) {
+                return { fallback: e.code };
+              }
+              return { ok: true };
+            }
+        "#;
+        let f1 = run_step(&input(script));
+        let StepFrame::PendingCalls { emitted_calls, .. } = f1 else {
+            panic!("expected PendingCalls, got {f1:?}");
+        };
+        assert_eq!(emitted_calls.len(), 2);
+        let hash_a = emitted_calls[0].identity.identity_hash.clone();
+        let hash_b = emitted_calls[1].identity.identity_hash.clone();
+
+        // Fail A while B is still unsettled: catch block completes the script, so B MUST be cancelled.
+        let mut rec = BTreeMap::new();
+        rec.insert(
+            hash_a,
+            RecordedCall::Failed {
+                error_code: "boom".into(),
+                message: "a failed".into(),
+                settled_at_revision: Some(2),
+            },
+        );
+        let f2 = run_step(&StepInput {
+            script_source: script.into(),
+            state: base_state(),
+            recorded_calls: rec,
+            known_call_hashes: BTreeSet::new(),
+            limits: None,
+        });
+        let StepFrame::Completed {
+            result,
+            cancel_identities,
+            ..
+        } = f2
+        else {
+            panic!("expected Completed, got {f2:?}");
+        };
+        assert_eq!(result, json!({ "fallback": "boom" }));
+        assert!(
+            cancel_identities.contains(&hash_b),
+            "unfinished call B must be listed in Completed.cancel_identities, got {cancel_identities:?}"
+        );
+    }
+
+    #[test]
+    fn review_09_phase_binds_to_call_site_across_async_and_all_branches() {
+        // 1. Exact case from REVIEW-554 #9: phase("A", () => agent("x")) followed by await y, await z.
+        //    Whether x is pending or settled must NEVER change y's or z's phase!
+        let seq_script = r#"
+            export default async function () {
+              const px = phase("A", () => agent("x"));
+              const y = await agent("y");
+              const x = await px;
+              const z = await agent("z");
+              return { x, y, z };
+            }
+        "#;
+        let f_step1 = run_step(&input(seq_script));
+        let StepFrame::PendingCalls {
+            emitted_calls: e1, ..
+        } = f_step1
+        else {
+            panic!("expected PendingCalls step 1, got {f_step1:?}");
+        };
+        assert_eq!(e1.len(), 2);
+        assert_eq!(e1[0].identity.phase.as_deref(), Some("A"));
+        assert_eq!(
+            e1[1].identity.phase.as_deref(),
+            None,
+            "y is outside phase(A) even while x is unsettled"
+        );
+        let hash_x = e1[0].identity.identity_hash.clone();
+        let hash_y = e1[1].identity.identity_hash.clone();
+
+        // Step 2: y settled, x settled -> z MUST also have phase None!
+        let mut rec = BTreeMap::new();
+        rec.insert(
+            hash_x.clone(),
+            RecordedCall::Succeeded {
+                result: json!("vx"),
+                settled_at_revision: Some(2),
+            },
+        );
+        rec.insert(
+            hash_y.clone(),
+            RecordedCall::Succeeded {
+                result: json!("vy"),
+                settled_at_revision: Some(3),
+            },
+        );
+        let f_step2 = run_step(&StepInput {
+            script_source: seq_script.into(),
+            state: base_state(),
+            recorded_calls: rec.clone(),
+            known_call_hashes: BTreeSet::new(),
+            limits: None,
+        });
+        let StepFrame::PendingCalls {
+            emitted_calls: e2, ..
+        } = f_step2
+        else {
+            panic!("expected PendingCalls step 2, got {f_step2:?}");
+        };
+        assert_eq!(e2.len(), 3);
+        assert_eq!(e2[0].identity.identity_hash, hash_x);
+        assert_eq!(e2[1].identity.identity_hash, hash_y);
+        assert_eq!(
+            e2[2].identity.phase.as_deref(),
+            None,
+            "z must have phase None"
+        );
+
+        // 2. Multi-step `all` branches with distinct phases must retain their phase after await!
+        let all_script = r#"
+            export default async function () {
+              const [a, b] = await all([
+                () => phase("A", async () => {
+                  const x = await agent("x");
+                  const y = await agent("y");
+                  return [x, y];
+                }),
+                () => phase("B", async () => {
+                  const p = await agent("p");
+                  const q = await agent("q");
+                  return [p, q];
+                }),
+              ]);
+              const after = await agent("after");
+              return { a, b, after };
+            }
+        "#;
+        let a1 = run_step(&input(all_script));
+        let StepFrame::PendingCalls {
+            emitted_calls: ae1, ..
+        } = a1
+        else {
+            panic!("expected PendingCalls, got {a1:?}");
+        };
+        assert_eq!(ae1.len(), 2);
+        assert_eq!(ae1[0].identity.phase.as_deref(), Some("A"));
+        assert_eq!(ae1[1].identity.phase.as_deref(), Some("B"));
+
+        // Settle both x and p: continuations emit y (MUST be phase "A") and q (MUST be phase "B")!
+        let mut arec = BTreeMap::new();
+        arec.insert(
+            ae1[0].identity.identity_hash.clone(),
+            RecordedCall::Succeeded {
+                result: json!("rx"),
+                settled_at_revision: Some(2),
+            },
+        );
+        arec.insert(
+            ae1[1].identity.identity_hash.clone(),
+            RecordedCall::Succeeded {
+                result: json!("rp"),
+                settled_at_revision: Some(3),
+            },
+        );
+        let a2 = run_step(&StepInput {
+            script_source: all_script.into(),
+            state: base_state(),
+            recorded_calls: arec.clone(),
+            known_call_hashes: BTreeSet::new(),
+            limits: None,
+        });
+        let StepFrame::PendingCalls {
+            emitted_calls: ae2, ..
+        } = a2
+        else {
+            panic!("expected PendingCalls step 2, got {a2:?}");
+        };
+        assert_eq!(ae2.len(), 4);
+        assert_eq!(
+            ae2[2].identity.phase.as_deref(),
+            Some("A"),
+            "continuation y inside all branch phase(A) must keep phase A"
+        );
+        assert_eq!(
+            ae2[3].identity.phase.as_deref(),
+            Some("B"),
+            "continuation q inside all branch phase(B) must keep phase B"
+        );
+
+        arec.insert(
+            ae2[2].identity.identity_hash.clone(),
+            RecordedCall::Succeeded {
+                result: json!("ry"),
+                settled_at_revision: Some(4),
+            },
+        );
+        arec.insert(
+            ae2[3].identity.identity_hash.clone(),
+            RecordedCall::Succeeded {
+                result: json!("rq"),
+                settled_at_revision: Some(5),
+            },
+        );
+        let a3 = run_step(&StepInput {
+            script_source: all_script.into(),
+            state: base_state(),
+            recorded_calls: arec,
+            known_call_hashes: BTreeSet::new(),
+            limits: None,
+        });
+        let StepFrame::PendingCalls {
+            emitted_calls: ae3, ..
+        } = a3
+        else {
+            panic!("expected PendingCalls step 3, got {a3:?}");
+        };
+        assert_eq!(ae3.len(), 5);
+        assert_eq!(
+            ae3[4].identity.phase.as_deref(),
+            None,
+            "call after all([phase(A), phase(B)]) must have phase None"
+        );
+    }
+
+    #[test]
+    fn review_10_replay_omits_known_prompts_to_fit_4mib_frame_budget() {
+        // 24 sequential calls * 200 KiB prompt = 4.8 MiB (> 4 MiB MAX_STEP_FRAME_BYTES).
+        // Replaying with recorded_calls must omit previously known prompts so the StepFrame
+        // never overflows 4 MiB with FrameTooLarge.
+        let script = r#"
+            export default async function () {
+              const pad = "x".repeat(200 * 1024);
+              let last = null;
+              for (let i = 0; i < 24; i++) {
+                last = await agent("step-" + i + "-" + pad);
+              }
+              return { count: 24, last };
+            }
+        "#;
+        let mut recorded = BTreeMap::new();
+        for step_idx in 0..25 {
+            let frame = run_step(&StepInput {
+                script_source: script.into(),
+                state: base_state(),
+                recorded_calls: recorded.clone(),
+                known_call_hashes: BTreeSet::new(),
+                limits: None,
+            });
+            match frame {
+                StepFrame::PendingCalls {
+                    emitted_calls,
+                    pending_identities,
+                    ..
+                } => {
+                    assert_eq!(pending_identities.len(), 1);
+                    let hash = pending_identities[0].clone();
+                    assert!(
+                        emitted_calls
+                            .iter()
+                            .any(|c| c.identity.identity_hash == hash),
+                        "step {step_idx} missing pending call"
+                    );
+                    recorded.insert(
+                        hash,
+                        RecordedCall::Succeeded {
+                            result: json!({ "i": step_idx }),
+                            settled_at_revision: Some((step_idx + 1) as i64),
+                        },
+                    );
+                }
+                StepFrame::Completed {
+                    result,
+                    emitted_calls,
+                    ..
+                } => {
+                    assert_eq!(emitted_calls.len(), 24);
+                    assert_eq!(result["count"], 24);
+                    return;
+                }
+                StepFrame::Failed { fault, .. } => {
+                    panic!(
+                        "step {step_idx} failed unexpectedly (expected compact replay without FrameTooLarge): {fault:?}"
+                    );
+                }
+            }
+        }
+        panic!("did not complete within 25 steps");
     }
 }

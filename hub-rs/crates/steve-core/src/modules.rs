@@ -228,9 +228,11 @@ impl Drop for Tx<'_> {
                 }
             }
         }
-        /* script workflow step wakeups: run asynchronously outside the lock */
+        /* script workflow step wakeups: run asynchronously outside the lock unless held */
         let wf_wakeups = std::mem::take(&mut self.st.wf_step_wakeups);
         if !wf_wakeups.is_empty()
+            && !self.holding()
+            && !self.db().store().maintenance()
             && self.c.workflow_executor().is_some()
             && let Ok(rt) = tokio::runtime::Handle::try_current()
         {

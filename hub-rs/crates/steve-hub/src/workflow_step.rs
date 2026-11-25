@@ -13,26 +13,25 @@
 //! and lets both sides reject oversized frames before allocating payload memory.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use steve_workflow_api::{
-    EffectiveLimits, MAX_STEP_INPUT_BYTES, MAX_STEP_WALL_TIME, StepFrame, StepInput, WorkflowFault,
-    WorkflowFaultCode,
+    EffectiveLimits, MAX_STEP_INPUT_BYTES, MAX_STEP_WALL_TIME, STEP_PROTOCOL_VERSION, StepFrame,
+    StepInput, StepWireHeader, StepWireRequest, StepWireResponse, WorkflowFault, WorkflowFaultCode,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
 
 /// Maximum stderr bytes captured from `--workflow-step` for diagnostics on crash (`16 KiB`).
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 
 /// Entrypoint for `steve-hub --workflow-step`.
 ///
-/// Reads one length-prefixed bounded JSON [`StepInput`] from stdin, runs the QuickJS sandboxed
-/// single-step replay, and writes one length-prefixed bounded JSON [`StepFrame`] to stdout.
-/// Runs synchronously with no Tokio runtime.
+/// Reads one length-prefixed bounded JSON [`StepWireRequest`] from stdin, runs the QuickJS
+/// sandboxed single-step replay under OS `setrlimit` caps, and writes one length-prefixed bounded
+/// JSON [`StepWireResponse`] to stdout. Runs synchronously with no Tokio runtime.
 pub fn main(args: &[String]) -> i32 {
+    steve_confine::PureComputeLimits::for_wall_time(MAX_STEP_WALL_TIME).apply_self();
     if !args.is_empty() {
         let frame = failed_frame(
             WorkflowFaultCode::ProtocolError,
@@ -59,18 +58,39 @@ pub fn main(args: &[String]) -> i32 {
         }
     };
 
-    let input: StepInput = match serde_json::from_slice(&raw_input) {
-        Ok(i) => i,
+    let header: StepWireHeader = match serde_json::from_slice(&raw_input) {
+        Ok(h) => h,
         Err(e) => {
             let frame = failed_frame(
                 WorkflowFaultCode::ProtocolError,
-                format!("invalid StepInput JSON: {e}"),
+                format!("invalid workflow step protocol header: {e}"),
+            );
+            return emit_frame(&frame);
+        }
+    };
+    if header.protocol_version != STEP_PROTOCOL_VERSION {
+        let frame = failed_frame(
+            WorkflowFaultCode::ProtocolError,
+            format!(
+                "workflow step protocol version mismatch: child supports v{STEP_PROTOCOL_VERSION}, received v{}",
+                header.protocol_version
+            ),
+        );
+        return emit_frame(&frame);
+    }
+
+    let req: StepWireRequest = match serde_json::from_slice(&raw_input) {
+        Ok(r) => r,
+        Err(e) => {
+            let frame = failed_frame(
+                WorkflowFaultCode::ProtocolError,
+                format!("invalid StepWireRequest JSON: {e}"),
             );
             return emit_frame(&frame);
         }
     };
 
-    let frame = steve_workflow_js::run_step(&input);
+    let frame = steve_workflow_js::run_step(&req.input);
     emit_frame(&frame)
 }
 
@@ -97,13 +117,20 @@ fn read_sync_frame<R: Read>(reader: &mut R, max_bytes: usize) -> Result<Vec<u8>,
 }
 
 fn emit_frame(frame: &StepFrame) -> i32 {
-    let bytes = match serde_json::to_vec(frame) {
+    let envelope = StepWireResponse {
+        protocol_version: STEP_PROTOCOL_VERSION,
+        frame: frame.clone(),
+    };
+    let bytes = match serde_json::to_vec(&envelope) {
         Ok(b) => b,
         Err(e) => {
-            let fallback = failed_frame(
-                WorkflowFaultCode::ProtocolError,
-                format!("failed to serialize StepFrame: {e}"),
-            );
+            let fallback = StepWireResponse {
+                protocol_version: STEP_PROTOCOL_VERSION,
+                frame: failed_frame(
+                    WorkflowFaultCode::ProtocolError,
+                    format!("failed to serialize StepFrame: {e}"),
+                ),
+            };
             serde_json::to_vec(&fallback).unwrap_or_default()
         }
     };
@@ -121,23 +148,57 @@ fn emit_frame(frame: &StepFrame) -> i32 {
 }
 
 /// Parent-side subprocess executor that communicates with `steve-hub --workflow-step` strictly via
-/// the length-prefixed JSON stdin/stdout frame protocol.
-#[derive(Debug, Clone)]
+/// the length-prefixed versioned JSON stdin/stdout frame protocol inside `steve_confine`'s
+/// read-only, no-network pure-compute OS sandbox.
+#[derive(Clone)]
 pub struct StepRunner {
     binary: PathBuf,
+    sandbox: Option<steve_confine::Sandbox>,
+}
+
+impl std::fmt::Debug for StepRunner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepRunner")
+            .field("binary", &self.binary)
+            .field("confined", &self.sandbox.is_some())
+            .finish()
+    }
 }
 
 impl StepRunner {
-    /// Creates a runner invoking the currently executing `steve-hub` binary.
+    /// Creates a runner invoking the currently executing `steve-hub` binary with standalone
+    /// pure-compute OS confinement.
     pub fn current_exe() -> std::io::Result<Self> {
         Ok(Self {
             binary: std::env::current_exe()?,
+            sandbox: None,
+        })
+    }
+
+    /// Creates a runner invoking the currently executing `steve-hub` binary confined against the
+    /// Hub's `steve_home` and `node_home` control plane via [`steve_confine::Sandbox`].
+    pub fn current_exe_confined(steve_home: &Path, node_home: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            binary: std::env::current_exe()?,
+            sandbox: Some(steve_confine::Sandbox::open(steve_home, node_home)),
         })
     }
 
     /// Creates a runner targeting an explicit `steve-hub` executable path.
     pub fn new(binary: PathBuf) -> Self {
-        Self { binary }
+        Self {
+            binary,
+            sandbox: None,
+        }
+    }
+
+    /// Creates a runner targeting an explicit `steve-hub` executable path with an explicit
+    /// [`steve_confine::Sandbox`] control-plane boundary.
+    pub fn with_sandbox(binary: PathBuf, sandbox: steve_confine::Sandbox) -> Self {
+        Self {
+            binary,
+            sandbox: Some(sandbox),
+        }
     }
 
     /// Executes one workflow step under its resolved [`EffectiveLimits`].
@@ -159,12 +220,16 @@ impl StepRunner {
         let wall_time = parent_wall_time.min(MAX_STEP_WALL_TIME);
         let max_frame_bytes = parent_max_frame_bytes.min(limits.max_frame_bytes);
 
-        let input_bytes = match serde_json::to_vec(input) {
+        let wire_req = StepWireRequest {
+            protocol_version: STEP_PROTOCOL_VERSION,
+            input: input.clone(),
+        };
+        let input_bytes = match serde_json::to_vec(&wire_req) {
             Ok(b) => b,
             Err(e) => {
                 return failed_frame(
                     WorkflowFaultCode::ProtocolError,
-                    format!("failed to serialize StepInput: {e}"),
+                    format!("failed to serialize StepWireRequest: {e}"),
                 );
             }
         };
@@ -184,30 +249,28 @@ impl StepRunner {
             );
         };
 
-        let mut cmd = Command::new(&self.binary);
-        cmd.arg("--workflow-step")
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
+        let rlimits = steve_confine::PureComputeLimits::for_wall_time(wall_time);
+        let mut proc = match steve_confine::Sandbox::spawn_pure_compute(
+            self.sandbox.as_ref(),
+            self.binary.clone(),
+            vec!["--workflow-step".into()],
+            rlimits,
+        ) {
+            Ok(p) => p,
             Err(e) => {
                 return failed_frame(
                     WorkflowFaultCode::SubprocessFailed,
                     format!(
-                        "failed to spawn workflow step subprocess {}: {e}",
+                        "failed to spawn confined workflow step subprocess {}: {e}",
                         self.binary.display()
                     ),
                 );
             }
         };
 
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
+        let mut stdin = proc.child.stdin.take().expect("piped stdin");
+        let stdout = proc.child.stdout.take().expect("piped stdout");
+        let stderr = proc.child.stderr.take().expect("piped stderr");
 
         let run_fut = async {
             let write_fut = async move {
@@ -220,10 +283,10 @@ impl StepRunner {
 
             let status = if matches!(stdout_res, Err(AsyncFrameError::TooLarge { .. })) {
                 // Kill immediately on oversized frame before reaping.
-                let _ = child.start_kill();
-                reap_child(&mut child).await
+                let _ = proc.child.start_kill();
+                reap_child(&mut proc.child).await
             } else {
-                reap_child(&mut child).await
+                reap_child(&mut proc.child).await
             };
             (stdout_res, status)
         };
@@ -231,8 +294,8 @@ impl StepRunner {
         let (stdout_res, status) = match tokio::time::timeout(wall_time, run_fut).await {
             Ok(pair) => pair,
             Err(_) => {
-                let _ = child.start_kill();
-                let _ = reap_child(&mut child).await;
+                let _ = proc.child.start_kill();
+                let _ = reap_child(&mut proc.child).await;
                 return failed_frame(
                     WorkflowFaultCode::Timeout,
                     format!(
@@ -244,14 +307,32 @@ impl StepRunner {
         };
 
         match stdout_res {
-            Ok(stdout_bytes) => match serde_json::from_slice::<StepFrame>(&stdout_bytes) {
-                Ok(frame) => frame,
+            Ok(stdout_bytes) => match serde_json::from_slice::<StepWireHeader>(&stdout_bytes) {
+                Ok(hdr) if hdr.protocol_version != STEP_PROTOCOL_VERSION => failed_frame(
+                    WorkflowFaultCode::ProtocolError,
+                    format!(
+                        "workflow step protocol version mismatch: parent supports v{STEP_PROTOCOL_VERSION}, child returned v{}",
+                        hdr.protocol_version
+                    ),
+                ),
+                Ok(_) => match serde_json::from_slice::<StepWireResponse>(&stdout_bytes) {
+                    Ok(resp) => resp.frame,
+                    Err(e) => {
+                        let stderr_text = read_stderr_briefly(stderr).await;
+                        failed_frame(
+                            WorkflowFaultCode::ProtocolError,
+                            format!(
+                                "workflow step subprocess emitted malformed StepWireResponse ({e}); stderr: {stderr_text}"
+                            ),
+                        )
+                    }
+                },
                 Err(e) => {
                     let stderr_text = read_stderr_briefly(stderr).await;
                     failed_frame(
                         WorkflowFaultCode::ProtocolError,
                         format!(
-                            "workflow step subprocess emitted malformed StepFrame ({e}); stderr: {stderr_text}"
+                            "workflow step subprocess emitted invalid protocol header ({e}); stderr: {stderr_text}"
                         ),
                     )
                 }

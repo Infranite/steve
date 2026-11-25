@@ -32,6 +32,13 @@ const INTERRUPTED: &str = "Hub 重启时这个会话正在运行，这一回合�
 /// The `text` of an acceptance's `pass` that also starts the release (验收并发布); `no-release`
 /// accepts it without one (验收，先不发布).
 
+/// Metadata returned by [`Tx::create_item_with`] for callers (such as script workflows)
+/// that need to know whether placement succeeded or opened a `NO_EXECUTOR` wait.
+pub(crate) struct CreatedItemMeta {
+    pub item: Item,
+    pub blocked: Option<steve_types::PlacementBlocked>,
+}
+
 /// What to create (orchestrator `NewItem`).
 #[derive(Debug, Clone, Default)]
 pub struct CreateItem {
@@ -720,8 +727,9 @@ impl Core {
         self.tx().fail(item, why)
     }
 
-    /// The lifecycle commands of the API (`accept` | `cancel` | `fail` | `new_cycle`), checked against
-    /// the cycle and revision the caller saw (409 otherwise).
+    /// The lifecycle commands of the API (`accept` | `finish` | `cancel` | `fail` | `new_cycle`), checked against
+    /// the cycle and revision the caller saw (409 otherwise). For script-workflow child items, `finish`
+    /// requires a structured JSON `result` validated against the call's schema and review rules.
     #[allow(clippy::too_many_arguments)]
     pub fn lifecycle_command(
         &self,
@@ -731,11 +739,22 @@ impl Core {
         expected_revision: i64,
         reason: Option<&str>,
         goal: Option<&str>,
+        result: Option<&Value>,
         actor: &str,
     ) -> Result<Item> {
         let mut t = self.tx();
         if command == "finish" {
             let i = t.item(item)?;
+            if t.is_wf_run_child(&i.id)? {
+                return t.wf_child_finish_by_owner(
+                    &i,
+                    expected_cycle,
+                    expected_revision,
+                    result,
+                    reason,
+                    actor,
+                );
+            }
             return t.finish_by_owner(&i, expected_cycle, expected_revision, actor);
         }
         let db = t.db().clone();
@@ -958,6 +977,7 @@ impl Core {
         t.set_hold(crate::occupancy::Hold::Maintenance, on);
         if !on {
             t.flush_queued()?;
+            t.wf_run_tick()?;
         }
         Ok(())
     }
@@ -1351,6 +1371,22 @@ impl Tx<'_> {
     }
 
     fn create_item_from(&mut self, n: CreateItem) -> Result<Item> {
+        Ok(self.create_item_with(n, |_, _, _, _| Ok(()))?.item)
+    }
+
+    pub(crate) fn create_item_with<F>(
+        &mut self,
+        n: CreateItem,
+        on_write: F,
+    ) -> Result<CreatedItemMeta>
+    where
+        F: FnOnce(
+            &mut steve_store::W<'_>,
+            &Item,
+            Option<&steve_types::BotPlacement>,
+            Option<&steve_types::PlacementBlocked>,
+        ) -> Result<()>,
+    {
         let db = self.db();
         let (item, bot, project, guessed, blocked, deferred_by_setting) = db
             .store()
@@ -1558,6 +1594,7 @@ impl Tx<'_> {
                     &detail,
                     ws,
                 )?;
+                on_write(w, &item, placement.as_ref(), blocked.as_ref())?;
                 Ok((item, bot, project, guessed, blocked, deferred_by_setting))
             })?;
         let ws = n.ws.as_str();
@@ -1601,8 +1638,8 @@ impl Tx<'_> {
                 }),
                 ..Default::default()
             })?;
-        } else if let Some(blocked) = blocked {
-            match self.rt().propose_bot(&n, &blocked) {
+        } else if let Some(ref blocked) = blocked {
+            match self.rt().propose_bot(&n, blocked) {
                 Ok(Some(proposal)) => {
                     db.store().write(|w| {
                         steve_store::bot_dispatch::set_wait_proposal(w, &item.id, &proposal.id)
@@ -1618,7 +1655,8 @@ impl Tx<'_> {
             self.start_or_fail_files(&item.id, n.opening.as_deref(), None, &n.files)?;
         }
         self.hook(Point::Created, &item.id)?;
-        self.item(&item.id)
+        let item = self.item(&item.id)?;
+        Ok(CreatedItemMeta { item, blocked })
     }
 
     fn build_no_executor_prompt(

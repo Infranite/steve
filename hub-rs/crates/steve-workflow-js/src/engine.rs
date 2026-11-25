@@ -1,7 +1,7 @@
 //! Single-step deterministic replay engine for sandboxed workflow JS scripts.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use rquickjs::function::Rest;
@@ -29,24 +29,39 @@ enum EmittedCallState {
     Cancelled,
 }
 
+/// Host-scheduled promise settlement carrying the exact lexical `(phase, race_stack)` context
+/// bound at the call site where the promise was created.
+struct PendingResolution<'js> {
+    callback: Function<'js>,
+    arg: JsValue<'js>,
+    phase: Vec<String>,
+    race_stack: Vec<(u32, usize)>,
+}
+
 struct ActiveRace<'js> {
     race_id: u32,
     branches: Vec<Promise<'js>>,
     resolve: Function<'js>,
     reject: Function<'js>,
+    saved_phase: Vec<String>,
+    saved_race_stack: Vec<(u32, usize)>,
     settled: bool,
 }
 
 struct EngineState<'js> {
     limits: EffectiveLimits,
     recorded_calls: BTreeMap<String, RecordedCall>,
+    known_call_hashes: BTreeSet<String>,
     occurrence_counts: HashMap<(Option<String>, String, String), u32>,
     emitted_calls: Vec<CallSpec>,
     call_states: Vec<EmittedCallState>,
-    phase_stack: Vec<String>,
+    /// Active lexical phase scope during synchronous thunk execution or a bound continuation turn.
+    /// Never left populated across host primitive returns.
+    active_phase: Vec<String>,
     race_stack: Vec<(u32, usize)>,
     race_branches: HashMap<u32, Vec<Vec<usize>>>,
     active_races: Vec<ActiveRace<'js>>,
+    pending_resolutions: VecDeque<PendingResolution<'js>>,
     next_race_id: u32,
     cancelled_identities: Vec<String>,
     cancelled_set: HashSet<String>,
@@ -55,17 +70,23 @@ struct EngineState<'js> {
 }
 
 impl<'js> EngineState<'js> {
-    fn new(limits: EffectiveLimits, recorded_calls: BTreeMap<String, RecordedCall>) -> Self {
+    fn new(
+        limits: EffectiveLimits,
+        recorded_calls: BTreeMap<String, RecordedCall>,
+        known_call_hashes: BTreeSet<String>,
+    ) -> Self {
         Self {
             limits,
             recorded_calls,
+            known_call_hashes,
             occurrence_counts: HashMap::new(),
             emitted_calls: Vec::new(),
             call_states: Vec::new(),
-            phase_stack: Vec::new(),
+            active_phase: Vec::new(),
             race_stack: Vec::new(),
             race_branches: HashMap::new(),
             active_races: Vec::new(),
+            pending_resolutions: VecDeque::new(),
             next_race_id: 0,
             cancelled_identities: Vec::new(),
             cancelled_set: HashSet::new(),
@@ -81,16 +102,45 @@ impl<'js> EngineState<'js> {
     }
 
     fn current_phase(&self) -> Option<String> {
-        if self.phase_stack.is_empty() {
+        if self.active_phase.is_empty() {
             None
         } else {
-            Some(self.phase_stack.join("/"))
+            Some(self.active_phase.join("/"))
         }
+    }
+
+    fn enqueue_resolution(
+        &mut self,
+        callback: Function<'js>,
+        arg: JsValue<'js>,
+        phase: Vec<String>,
+        race_stack: Vec<(u32, usize)>,
+    ) {
+        self.pending_resolutions.push_back(PendingResolution {
+            callback,
+            arg,
+            phase,
+            race_stack,
+        });
     }
 
     fn mark_cancelled(&mut self, identity_hash: &str) {
         if self.cancelled_set.insert(identity_hash.to_owned()) {
             self.cancelled_identities.push(identity_hash.to_owned());
+        }
+    }
+
+    fn cancel_all_pending(&mut self) {
+        let hashes: Vec<String> = self
+            .emitted_calls
+            .iter()
+            .zip(self.call_states.iter())
+            .filter_map(|(spec, st)| {
+                matches!(st, EmittedCallState::Pending).then(|| spec.identity.identity_hash.clone())
+            })
+            .collect();
+        for h in hashes {
+            self.mark_cancelled(&h);
         }
     }
 
@@ -136,6 +186,7 @@ pub fn run_step(input: &StepInput) -> StepFrame {
         let state = Rc::new(RefCell::new(EngineState::new(
             limits,
             input.recorded_calls.clone(),
+            input.known_call_hashes.clone(),
         )));
 
         let out = match setup_host_primitives(&ctx, &state, &input.state) {
@@ -149,7 +200,11 @@ pub fn run_step(input: &StepInput) -> StepFrame {
 
         // Release all JS handles held inside EngineState before Context teardown so no
         // Rust<->QuickJS reference cycle keeps GC objects alive past JS_FreeRuntime.
-        state.borrow_mut().active_races.clear();
+        {
+            let mut st = state.borrow_mut();
+            st.active_races.clear();
+            st.pending_resolutions.clear();
+        }
         out
     });
 
@@ -326,7 +381,7 @@ fn handle_agent<'js>(
         CallOptions::default()
     };
 
-    let (identity, recorded) = {
+    let (identity, recorded, continuation_phase, continuation_race) = {
         let mut st = state.borrow_mut();
         if st.emitted_calls.len() >= st.limits.max_calls {
             let max_calls = st.limits.max_calls;
@@ -341,12 +396,31 @@ fn handle_agent<'js>(
             );
         }
 
+        if let Some(explicit_phase) = options.phase.as_deref()
+            && (explicit_phase.is_empty()
+                || explicit_phase.len() > MAX_PHASE_NAME_BYTES
+                || explicit_phase.contains('\0'))
+        {
+            drop(st);
+            return fail_fatal(
+                ctx,
+                state,
+                WorkflowFault::new(
+                    WorkflowFaultCode::InvalidOptions,
+                    format!("options.phase must be 1..={MAX_PHASE_NAME_BYTES} non-NUL UTF-8 bytes"),
+                ),
+            );
+        }
+
         if let Err(schema_err) = options.validate() {
             drop(st);
             return fail_fatal(ctx, state, schema_err_to_fault(&schema_err));
         }
 
-        let phase = st.current_phase();
+        let phase = match (st.current_phase(), options.phase.as_deref()) {
+            (_, Some(explicit)) => Some(explicit.to_owned()),
+            (scoped, None) => scoped,
+        };
         let prompt_sha = steve_workflow_api::sha256_hex(prompt.as_bytes());
         let opts_val = serde_json::to_value(&options).expect("CallOptions to JSON");
         let opts_canonical = match to_canonical_json(&opts_val) {
@@ -377,6 +451,7 @@ fn handle_agent<'js>(
 
         let seq_no = st.emitted_calls.len() as u32;
         let recorded = st.recorded_calls.get(&identity.identity_hash).cloned();
+        let is_known = recorded.is_some() || st.known_call_hashes.contains(&identity.identity_hash);
         let call_state = match &recorded {
             Some(RecordedCall::Succeeded {
                 settled_at_revision,
@@ -389,24 +464,34 @@ fn handle_agent<'js>(
             None => EmittedCallState::Pending,
         };
 
-        st.emitted_calls.push(CallSpec {
-            seq_no,
-            identity: identity.clone(),
-            prompt,
-            options,
-        });
+        if is_known {
+            st.emitted_calls.push(CallSpec {
+                seq_no,
+                identity: identity.compact_known(),
+                prompt: None,
+                options: None,
+            });
+        } else {
+            st.emitted_calls.push(CallSpec {
+                seq_no,
+                identity: identity.clone(),
+                prompt: Some(prompt),
+                options: Some(options),
+            });
+        }
         st.call_states.push(call_state);
 
         let active_races: Vec<(u32, usize)> = st.race_stack.clone();
-        for (race_id, branch_idx) in active_races {
-            if let Some(branches) = st.race_branches.get_mut(&race_id) {
-                if let Some(calls) = branches.get_mut(branch_idx) {
+        for (race_id, branch_idx) in &active_races {
+            if let Some(branches) = st.race_branches.get_mut(race_id) {
+                if let Some(calls) = branches.get_mut(*branch_idx) {
                     calls.push(seq_no as usize);
                 }
             }
         }
 
-        (identity, recorded)
+        let continuation_phase = st.active_phase.clone();
+        (identity, recorded, continuation_phase, active_races)
     };
 
     let (promise, resolve, reject) = Promise::new(ctx)?;
@@ -422,7 +507,12 @@ fn handle_agent<'js>(
                     );
                 }
             };
-            resolve.call::<_, ()>((js_res,))?;
+            state.borrow_mut().enqueue_resolution(
+                resolve,
+                js_res,
+                continuation_phase,
+                continuation_race,
+            );
         }
         Some(RecordedCall::Failed {
             error_code,
@@ -430,11 +520,21 @@ fn handle_agent<'js>(
             ..
         }) => {
             let err_obj = make_coded_error(ctx, &error_code, &message)?;
-            reject.call::<_, ()>((err_obj,))?;
+            state.borrow_mut().enqueue_resolution(
+                reject,
+                err_obj,
+                continuation_phase,
+                continuation_race,
+            );
         }
         Some(RecordedCall::Cancelled { .. }) => {
             let err_obj = make_coded_error(ctx, "call_cancelled", "workflow call was cancelled")?;
-            reject.call::<_, ()>((err_obj,))?;
+            state.borrow_mut().enqueue_resolution(
+                reject,
+                err_obj,
+                continuation_phase,
+                continuation_race,
+            );
         }
         None => {
             // Leave promise pending so the workflow suspends and returns StepFrame::PendingCalls.
@@ -463,24 +563,47 @@ fn handle_all<'js>(
     args: &[JsValue<'js>],
 ) -> rquickjs::Result<JsValue<'js>> {
     let thunks = extract_thunks(ctx, state, args, "all")?;
+    let (saved_phase, saved_race) = {
+        let st = state.borrow();
+        (st.active_phase.clone(), st.race_stack.clone())
+    };
+    if thunks.is_empty() {
+        let arr = rquickjs::Array::new(ctx.clone())?;
+        let (outer, resolve, _) = Promise::new(ctx)?;
+        state
+            .borrow_mut()
+            .enqueue_resolution(resolve, arr.into_value(), saved_phase, saved_race);
+        return Ok(outer.into_value());
+    }
+
     let promise_ctor: Object<'js> = ctx.globals().get("Promise")?;
     let promise_all: Function<'js> = promise_ctor.get("all")?;
-
-    let saved_phase = state.borrow().phase_stack.clone();
     let arr = rquickjs::Array::new(ctx.clone())?;
     for (idx, thunk) in thunks.into_iter().enumerate() {
-        state.borrow_mut().phase_stack = saved_phase.clone();
+        {
+            let mut st = state.borrow_mut();
+            st.active_phase = saved_phase.clone();
+            st.race_stack = saved_race.clone();
+        }
         let p = invoke_thunk_as_promise(ctx, &thunk)?;
+        {
+            let mut st = state.borrow_mut();
+            st.active_phase = saved_phase.clone();
+            st.race_stack = saved_race.clone();
+        }
         if state.borrow().fatal_fault.is_some() {
-            state.borrow_mut().phase_stack = saved_phase;
             return Err(ctx.throw(make_js_error(ctx, "workflow fatal fault")?));
         }
         arr.set(idx, p.into_value())?;
     }
-    state.borrow_mut().phase_stack = saved_phase;
 
-    let combined: JsValue<'js> = promise_all.call((rquickjs::function::This(promise_ctor), arr))?;
-    Ok(combined)
+    let combined_val: JsValue<'js> =
+        promise_all.call((rquickjs::function::This(promise_ctor), arr))?;
+    let combined = combined_val
+        .as_promise()
+        .cloned()
+        .expect("Promise.all must return a Promise");
+    wrap_promise_with_scope(ctx, state, combined, saved_phase, saved_race)
 }
 
 fn build_race_fn<'js>(
@@ -514,12 +637,12 @@ fn handle_race<'js>(
         );
     }
 
-    let (race_id, saved_phase) = {
+    let (race_id, saved_phase, saved_race) = {
         let mut st = state.borrow_mut();
         let id = st.next_race_id;
         st.next_race_id += 1;
         st.race_branches.insert(id, vec![Vec::new(); thunks.len()]);
-        (id, st.phase_stack.clone())
+        (id, st.active_phase.clone(), st.race_stack.clone())
     };
 
     let mut branches = Vec::with_capacity(thunks.len());
@@ -527,13 +650,17 @@ fn handle_race<'js>(
     for (idx, thunk) in thunks.into_iter().enumerate() {
         {
             let mut st = state.borrow_mut();
-            st.phase_stack = saved_phase.clone();
+            st.active_phase = saved_phase.clone();
+            st.race_stack = saved_race.clone();
             st.race_stack.push((race_id, idx));
         }
         let p = invoke_thunk_as_promise(ctx, &thunk)?;
-        state.borrow_mut().race_stack.pop();
+        {
+            let mut st = state.borrow_mut();
+            st.active_phase = saved_phase.clone();
+            st.race_stack = saved_race.clone();
+        }
         if state.borrow().fatal_fault.is_some() {
-            state.borrow_mut().phase_stack = saved_phase;
             return Err(ctx.throw(make_js_error(ctx, "workflow fatal fault")?));
         }
         // Attach a passive observer so losing rejected branches never trigger unhandled rejection.
@@ -544,7 +671,6 @@ fn handle_race<'js>(
         ))?;
         branches.push(p);
     }
-    state.borrow_mut().phase_stack = saved_phase;
 
     let (result_promise, resolve, reject) = Promise::new(ctx)?;
     state.borrow_mut().active_races.push(ActiveRace {
@@ -552,6 +678,8 @@ fn handle_race<'js>(
         branches,
         resolve,
         reject,
+        saved_phase,
+        saved_race_stack: saved_race,
         settled: false,
     });
     Ok(result_promise.into_value())
@@ -618,35 +746,66 @@ fn handle_phase<'js>(
         );
     };
 
-    let expected_depth = {
+    let (prev_phase, prev_race) = {
         let mut st = state.borrow_mut();
-        let depth = st.phase_stack.len();
-        st.phase_stack.push(name.clone());
-        depth
+        let prev_phase = st.active_phase.clone();
+        let prev_race = st.race_stack.clone();
+        st.active_phase.push(name);
+        (prev_phase, prev_race)
     };
 
-    let inner = invoke_thunk_as_promise(ctx, &func)?;
+    // Invoke `fn()` synchronously under the child phase and ALWAYS restore the outer lexical scope
+    // immediately before returning — never leak the phase across pending promises or sibling calls.
+    let inner_res = invoke_thunk_as_promise(ctx, &func);
+    {
+        let mut st = state.borrow_mut();
+        st.active_phase = prev_phase.clone();
+        st.race_stack = prev_race.clone();
+    }
+    let inner = inner_res?;
     if state.borrow().fatal_fault.is_some() {
-        pop_phase_if_matching(state, expected_depth, &name);
         return Err(ctx.throw(make_js_error(ctx, "workflow fatal fault")?));
     }
 
+    // Re-wrap `inner` so anything awaiting the returned `phase(...)` promise resumes strictly in
+    // the caller's outer `(prev_phase, prev_race)` context.
+    wrap_promise_with_scope(ctx, state, inner, prev_phase, prev_race)
+}
+
+fn wrap_promise_with_scope<'js>(
+    ctx: &Ctx<'js>,
+    state: &Rc<RefCell<EngineState<'js>>>,
+    inner: Promise<'js>,
+    phase: Vec<String>,
+    race_stack: Vec<(u32, usize)>,
+) -> rquickjs::Result<JsValue<'js>> {
     let (outer, resolve, reject) = Promise::new(ctx)?;
     let st_ok = Rc::clone(state);
-    let name_ok = name.clone();
+    let phase_ok = phase.clone();
+    let race_ok = race_stack.clone();
     let on_ok = Function::new(
         ctx.clone(),
         move |val: JsValue<'js>| -> rquickjs::Result<()> {
-            pop_phase_if_matching(&st_ok, expected_depth, &name_ok);
-            resolve.call::<_, ()>((val,))
+            st_ok.borrow_mut().enqueue_resolution(
+                resolve.clone(),
+                val,
+                phase_ok.clone(),
+                race_ok.clone(),
+            );
+            Ok(())
         },
     )?;
     let st_err = Rc::clone(state);
     let on_err = Function::new(
         ctx.clone(),
         move |err: JsValue<'js>| -> rquickjs::Result<()> {
-            pop_phase_if_matching(&st_err, expected_depth, &name);
-            reject.call::<_, ()>((err,))
+            st_err.borrow_mut().enqueue_resolution(
+                reject.clone(),
+                err,
+                phase.clone(),
+                race_stack.clone(),
+            );
+            Ok(())
         },
     )?;
     let _: JsValue<'js> =
@@ -654,15 +813,6 @@ fn handle_phase<'js>(
             .then()?
             .call((rquickjs::function::This(inner.clone()), on_ok, on_err))?;
     Ok(outer.into_value())
-}
-
-fn pop_phase_if_matching(state: &Rc<RefCell<EngineState<'_>>>, expected_depth: usize, name: &str) {
-    let mut st = state.borrow_mut();
-    if st.phase_stack.len() == expected_depth + 1
-        && st.phase_stack.last().is_some_and(|top| top == name)
-    {
-        st.phase_stack.pop();
-    }
 }
 
 fn build_log_fn<'js>(
@@ -842,6 +992,37 @@ fn drive_until_quiescent<'js>(
         if sandbox.is_timed_out() || state.borrow().fatal_fault.is_some() {
             return Ok(());
         }
+
+        // Dispatch ONE host-scheduled settlement with its bound call-site (phase, race_stack),
+        // then drain all resulting microtasks before clearing scope so sibling async branches
+        // never leak phase or race context into each other.
+        let next_res = state.borrow_mut().pending_resolutions.pop_front();
+        if let Some(res) = next_res {
+            {
+                let mut st = state.borrow_mut();
+                st.active_phase = res.phase;
+                st.race_stack = res.race_stack;
+            }
+            let call_res = res.callback.call::<_, ()>((res.arg,)).catch(ctx);
+            if call_res.is_ok() {
+                while ctx.execute_pending_job() {
+                    if sandbox.is_timed_out() || state.borrow().fatal_fault.is_some() {
+                        break;
+                    }
+                }
+            }
+            {
+                let mut st = state.borrow_mut();
+                st.active_phase.clear();
+                st.race_stack.clear();
+            }
+            call_res?;
+            if sandbox.is_timed_out() || state.borrow().fatal_fault.is_some() {
+                return Ok(());
+            }
+            continue;
+        }
+
         let settled_any = settle_ready_races(ctx, state).catch(ctx)?;
         if !settled_any {
             return Ok(());
@@ -860,10 +1041,14 @@ fn settle_ready_races<'js>(
             resolve: Function<'js>,
             value: JsValue<'js>,
             cancel_hashes: Vec<String>,
+            saved_phase: Vec<String>,
+            saved_race_stack: Vec<(u32, usize)>,
         },
         Reject {
             reject: Function<'js>,
             message: String,
+            saved_phase: Vec<String>,
+            saved_race_stack: Vec<(u32, usize)>,
         },
     }
 
@@ -922,18 +1107,26 @@ fn settle_ready_races<'js>(
                     }
                 }
                 let resolve = st.active_races[i].resolve.clone();
+                let saved_phase = st.active_races[i].saved_phase.clone();
+                let saved_race_stack = st.active_races[i].saved_race_stack.clone();
                 st.active_races[i].settled = true;
                 actions.push(RaceAction::Resolve {
                     resolve,
                     value: win_val,
                     cancel_hashes,
+                    saved_phase,
+                    saved_race_stack,
                 });
             } else if all_rejected {
                 let reject = st.active_races[i].reject.clone();
+                let saved_phase = st.active_races[i].saved_phase.clone();
+                let saved_race_stack = st.active_races[i].saved_race_stack.clone();
                 st.active_races[i].settled = true;
                 actions.push(RaceAction::Reject {
                     reject,
                     message: "all race branches failed".into(),
+                    saved_phase,
+                    saved_race_stack,
                 });
             }
         }
@@ -949,18 +1142,25 @@ fn settle_ready_races<'js>(
                 resolve,
                 value,
                 cancel_hashes,
+                saved_phase,
+                saved_race_stack,
             } => {
-                {
-                    let mut st = state.borrow_mut();
-                    for hash in cancel_hashes {
-                        st.mark_cancelled(&hash);
-                    }
+                let mut st = state.borrow_mut();
+                for hash in cancel_hashes {
+                    st.mark_cancelled(&hash);
                 }
-                resolve.call::<_, ()>((value,))?;
+                st.enqueue_resolution(resolve, value, saved_phase, saved_race_stack);
             }
-            RaceAction::Reject { reject, message } => {
+            RaceAction::Reject {
+                reject,
+                message,
+                saved_phase,
+                saved_race_stack,
+            } => {
                 let err = make_coded_error(ctx, "race_all_failed", &message)?;
-                reject.call::<_, ()>((err,))?;
+                state
+                    .borrow_mut()
+                    .enqueue_resolution(reject, err, saved_phase, saved_race_stack);
             }
         }
     }
@@ -1028,6 +1228,9 @@ fn finalize_completed<'js>(
             ),
         );
     }
+    // Any unsettled call emitted before the script completed (e.g. a sibling branch inside
+    // `try { await all([a, b]) } catch { return x }` or an un-awaited `agent()`) must be cancelled.
+    state.borrow_mut().cancel_all_pending();
     let st = state.borrow();
     StepFrame::Completed {
         result: result_json,

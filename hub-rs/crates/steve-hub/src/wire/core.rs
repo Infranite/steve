@@ -1249,6 +1249,7 @@ impl CoreDomain {
         let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
         to_obj(blocking(move || c.item_action(&id, a, &actor)).await?)
     }
+    #[allow(clippy::too_many_arguments)]
     pub async fn lifecycle_command(
         &self,
         id: &str,
@@ -1257,6 +1258,7 @@ impl CoreDomain {
         expected_revision: i64,
         reason: Option<String>,
         goal: Option<String>,
+        result: Option<Value>,
         actor: &str,
     ) -> BResult<Obj> {
         let (c, id, command, actor) = (
@@ -1274,6 +1276,7 @@ impl CoreDomain {
                     expected_revision,
                     reason.as_deref(),
                     goal.as_deref(),
+                    result.as_ref(),
                     &actor,
                 )
             })

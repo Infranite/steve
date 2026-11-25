@@ -1348,8 +1348,13 @@ impl Tx<'_> {
                 let is_review = steve_store::WorkflowRuns(tx)
                     .get_call(&attempt.call_id)?
                     .is_some_and(|call| call.is_review);
+                let wf_outcome = match c.kind {
+                    CloseKind::Complete => steve_store::workflow_runs::WfChildOutcome::Completed,
+                    CloseKind::Fail => steve_store::workflow_runs::WfChildOutcome::Failed,
+                    CloseKind::Cancel => steve_store::workflow_runs::WfChildOutcome::Cancelled,
+                };
                 steve_store::WorkflowRuns(tx)
-                    .finalize_attempt(&id, rev, outcome, c.rule.as_deref(), Some(&reason))?
+                    .finalize_attempt(&id, rev, wf_outcome, c.rule.as_deref(), Some(&reason))?
                     .map(|fin| {
                         (
                             fin,

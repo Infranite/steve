@@ -1,6 +1,6 @@
 use super::*;
 
-install! { install(reg, _cx) [core_cfg, db, fleet, gateway, harnesses, host, node_host, routed, workspaces] => [core, db, fleet, harnesses, host, node_host, routed, workspaces] {
+install! { install(reg, cx) [core_cfg, db, fleet, gateway, harnesses, host, node_host, routed, workspaces] => [core, db, fleet, harnesses, host, node_host, routed, workspaces] {
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),
         routed.clone(),
@@ -22,7 +22,10 @@ install! { install(reg, _cx) [core_cfg, db, fleet, gateway, harnesses, host, nod
         });
     });
     let _ = host.core.set(core.clone());
-    match crate::workflow_step::StepRunner::current_exe() {
+    match crate::workflow_step::StepRunner::current_exe_confined(
+        &cx.cfg.home,
+        &cx.cfg.data_dir.join("node"),
+    ) {
         Ok(runner) => core.set_workflow_executor(Arc::new(runner)),
         Err(e) => tracing::warn!("workflow step subprocess runner unavailable: {e}"),
     }

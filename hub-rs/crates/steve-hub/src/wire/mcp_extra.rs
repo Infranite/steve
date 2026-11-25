@@ -516,20 +516,21 @@ async fn call_owned_inner(
         .map_err(|e| e.to_string())?;
     }
     if matches!(tool_owner, Owner::WorkflowRun) {
-        let ends_turn = args["action"] == "fail";
         return x
             .tools
             .core
             .tool_workflow_run(&s, args)
             .await
-            .map(|v| {
-                if ends_turn {
-                    format!("{v}\n\n{}", steve_mcp::END)
+            .map_err(|e| e.to_string())
+            .and_then(|out| {
+                let ends_turn = out.ends_turn();
+                let body = serde_json::to_string(&out).map_err(|e| e.to_string())?;
+                Ok(if ends_turn {
+                    format!("{body}\n\n{}", steve_mcp::END)
                 } else {
-                    v.to_string()
-                }
-            })
-            .map_err(|e| e.to_string());
+                    body
+                })
+            });
     }
     if matches!(tool_owner, Owner::A2a) {
         return x.caps.a2a_call(&s.id, name, &args).await;

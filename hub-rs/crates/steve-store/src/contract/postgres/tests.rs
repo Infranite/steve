@@ -393,7 +393,7 @@ fn domain_round_trips(f: &mut Fixture) -> Result<()> {
 fn workflow_ledger_round_trip(f: &mut Fixture) -> Result<()> {
     use crate::workflow_runs::{
         NewWfAttempt, NewWfCall, ReviewGateFailure, ReviewGateVerdict, WfAttemptStatus,
-        WorkflowRuns,
+        WfChildOutcome, WorkflowRuns,
     };
 
     let (run_id, work_call_id, rev_call_id) = f.write(|w| {
@@ -439,7 +439,7 @@ fn workflow_ledger_round_trip(f: &mut Fixture) -> Result<()> {
         })?;
         WorkflowRuns(w).stage_attempt_closing("child-work", 1, r#"{"done":true}"#, "[]")?;
         let fin = WorkflowRuns(w)
-            .finalize_attempt("child-work", 1, "completed", None, None)?
+            .finalize_attempt("child-work", 1, WfChildOutcome::Completed, None, None)?
             .expect("finalized work");
         let (rev_call, _) = WorkflowRuns(w).ensure_call(&NewWfCall {
             run_id: &run.id,
@@ -472,7 +472,7 @@ fn workflow_ledger_round_trip(f: &mut Fixture) -> Result<()> {
             error_message: None,
         })?;
         WorkflowRuns(w).stage_attempt_closing("child-rev", 1, r#"{"approved":true}"#, "[]")?;
-        WorkflowRuns(w).finalize_attempt("child-rev", 1, "completed", None, None)?;
+        WorkflowRuns(w).finalize_attempt("child-rev", 1, WfChildOutcome::Completed, None, None)?;
         Ok((run.id, work_call.id, rev_call.id))
     })?;
 
@@ -522,7 +522,7 @@ fn workflow_ledger_round_trip(f: &mut Fixture) -> Result<()> {
         })?;
         WorkflowRuns(w).stage_attempt_closing("c2-w", 1, r#"{"ok":true}"#, "[]")?;
         let fin = WorkflowRuns(w)
-            .finalize_attempt("c2-w", 1, "completed", None, None)?
+            .finalize_attempt("c2-w", 1, WfChildOutcome::Completed, None, None)?
             .unwrap();
         let (rc, _) = WorkflowRuns(w).ensure_call(&NewWfCall {
             run_id: &run.id,
@@ -554,7 +554,7 @@ fn workflow_ledger_round_trip(f: &mut Fixture) -> Result<()> {
             error_message: None,
         })?;
         WorkflowRuns(w).stage_attempt_closing("c2-r", 1, r#"{"approved":true}"#, "[]")?;
-        WorkflowRuns(w).finalize_attempt("c2-r", 1, "completed", None, None)?;
+        WorkflowRuns(w).finalize_attempt("c2-r", 1, WfChildOutcome::Completed, None, None)?;
         Ok(run.id)
     })?;
     f.read(|r| {

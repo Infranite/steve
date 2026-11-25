@@ -1,7 +1,7 @@
 //! WF-2 acceptance & adversarial integration tests against the real `steve-hub --workflow-step`
 //! subprocess boundary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Once;
 use std::time::{Duration, Instant};
@@ -45,6 +45,7 @@ fn step(script: &str) -> StepInput {
         script_source: script.into(),
         state: state(),
         recorded_calls: BTreeMap::new(),
+        known_call_hashes: BTreeSet::new(),
         limits: None,
     }
 }
@@ -303,6 +304,7 @@ async fn oversized_frames_keys_results_and_inputs_are_rejected() {
         script_source: "x".repeat(MAX_STEP_INPUT_BYTES + 1),
         state: state(),
         recorded_calls: BTreeMap::new(),
+        known_call_hashes: BTreeSet::new(),
         limits: None,
     };
     let f_in = r.execute(&huge_input).await;
@@ -484,6 +486,7 @@ async fn twenty_call_replay_completes_deterministically_and_records_latency() {
             script_source: script.into(),
             state: state(),
             recorded_calls: recorded.clone(),
+            known_call_hashes: BTreeSet::new(),
             limits: None,
         };
         match r.execute(&inp).await {
@@ -508,7 +511,7 @@ async fn twenty_call_replay_completes_deterministically_and_records_latency() {
                     } else if call.identity.phase.as_deref() == Some("verify") {
                         json!({ "passed": true })
                     } else if call.identity.phase.as_deref() == Some("bench") {
-                        if call.prompt.ends_with('A') {
+                        if call.prompt.as_deref().is_some_and(|p| p.ends_with('A')) {
                             json!({ "winner": "A" })
                         } else {
                             json!({ "winner": "B" })
@@ -547,6 +550,7 @@ async fn twenty_call_replay_completes_deterministically_and_records_latency() {
         script_source: script.into(),
         state: state(),
         recorded_calls: recorded,
+        known_call_hashes: BTreeSet::new(),
         limits: None,
     };
 
@@ -565,4 +569,83 @@ async fn twenty_call_replay_completes_deterministically_and_records_latency() {
     let subproc_median = subproc_ms[subproc_ms.len() / 2];
 
     eprintln!("wf2_bench_20_call_subprocess_ms: median={subproc_median:.2} samples={subproc_ms:?}");
+}
+
+#[tokio::test]
+async fn review_10_step_protocol_version_mismatch_is_reported_cleanly() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_steve-hub"));
+    let mut child = tokio::process::Command::new(&bin)
+        .arg("--workflow-step")
+        .env_clear()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    // Send a future protocol version with an unknown field to simulate rolling Hub upgrade skew.
+    let future_payload = serde_json::to_vec(&json!({
+        "protocol_version": 999,
+        "future_field": true,
+        "input": {
+            "script_source": "export default async function () { return 1; }",
+            "state": {
+                "parentItemId": "item-1",
+                "cycle": 1,
+                "goalVersion": 1,
+                "runRevision": 1,
+                "scriptVersion": 1
+            }
+        }
+    }))
+    .unwrap();
+    let len = (future_payload.len() as u32).to_be_bytes();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&len).await.unwrap();
+    stdin.write_all(&future_payload).await.unwrap();
+    drop(stdin);
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut hdr = [0u8; 4];
+    stdout.read_exact(&mut hdr).await.unwrap();
+    let resp_len = u32::from_be_bytes(hdr) as usize;
+    let mut body = vec![0u8; resp_len];
+    stdout.read_exact(&mut body).await.unwrap();
+    let _ = child.wait().await;
+
+    let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        raw.get("protocol_version")
+            .and_then(|v| v.as_u64())
+            .is_some(),
+        "stdout wire response must carry explicit protocol_version, got {raw}"
+    );
+    let detail = raw["frame"]["fault"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("protocol") && detail.contains("999"),
+        "expected explicit protocol version mismatch detail, got {raw}"
+    );
+}
+
+#[tokio::test]
+async fn review_08_step_runner_executes_under_sandbox_confinement() {
+    let dir = tempfile::tempdir().unwrap();
+    let steve_home = dir.path().join("steve");
+    let node_home = steve_home.join("data/node");
+    std::fs::create_dir_all(&node_home).unwrap();
+    let sandbox = steve_confine::Sandbox::open(&steve_home, &node_home);
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_steve-hub"));
+    let r = StepRunner::with_sandbox(bin, sandbox);
+    let frame = r
+        .execute(&step(
+            "export default async function () { return { confined: true, cycle: state.cycle }; }",
+        ))
+        .await;
+    assert!(
+        matches!(frame, StepFrame::Completed { ref result, .. } if *result == json!({ "confined": true, "cycle": 1 })),
+        "confined workflow step must execute cleanly, got {frame:?}"
+    );
 }

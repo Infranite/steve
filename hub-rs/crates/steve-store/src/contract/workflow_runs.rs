@@ -154,15 +154,97 @@ impl FromStr for WfAttemptStatus {
     }
 }
 
-/// Stable machine-readable pause reason codes stored in `wf_runs.pause_reason_code`.
-pub mod pause_reason {
-    pub const SCRIPT_FAULT: &str = "script_fault";
-    pub const NON_DETERMINISTIC_REPLAY: &str = "non_deterministic_replay";
-    pub const BUDGET_EXHAUSTED: &str = "budget_exhausted";
-    pub const PLACEMENT_BLOCKED: &str = "placement_blocked";
-    pub const REVIEW_GATE_BLOCKED: &str = "review_gate_blocked";
-    pub const OWNER_PAUSED: &str = "owner_paused";
-    pub const COORDINATOR_PAUSED: &str = "coordinator_paused";
+/// Strongly-typed machine-readable pause reason stored in `wf_runs.pause_reason_code`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WfPauseReason {
+    ScriptFault,
+    InfrastructureFault,
+    NonDeterministicReplay,
+    BudgetExhausted,
+    PlacementBlocked,
+    ReviewGateBlocked,
+    OwnerPaused,
+    CoordinatorPaused,
+}
+
+impl WfPauseReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ScriptFault => "script_fault",
+            Self::InfrastructureFault => "infrastructure_fault",
+            Self::NonDeterministicReplay => "non_deterministic_replay",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::PlacementBlocked => "placement_blocked",
+            Self::ReviewGateBlocked => "review_gate_blocked",
+            Self::OwnerPaused => "owner_paused",
+            Self::CoordinatorPaused => "coordinator_paused",
+        }
+    }
+
+    /// True when resuming requires an explicit owner decision rather than an autonomous coordinator
+    /// `resume` action.
+    pub const fn is_owner_gated(self) -> bool {
+        matches!(
+            self,
+            Self::ScriptFault
+                | Self::InfrastructureFault
+                | Self::NonDeterministicReplay
+                | Self::BudgetExhausted
+                | Self::PlacementBlocked
+                | Self::ReviewGateBlocked
+        )
+    }
+}
+
+impl std::fmt::Display for WfPauseReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WfPauseReason {
+    type Err = StoreError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "script_fault" => Ok(Self::ScriptFault),
+            "infrastructure_fault" => Ok(Self::InfrastructureFault),
+            "non_deterministic_replay" => Ok(Self::NonDeterministicReplay),
+            "budget_exhausted" => Ok(Self::BudgetExhausted),
+            "placement_blocked" => Ok(Self::PlacementBlocked),
+            "review_gate_blocked" => Ok(Self::ReviewGateBlocked),
+            "owner_paused" => Ok(Self::OwnerPaused),
+            "coordinator_paused" => Ok(Self::CoordinatorPaused),
+            other => Err(StoreError::Storage(format!(
+                "invalid wf_run pause_reason_code: {other}"
+            ))),
+        }
+    }
+}
+
+/// Strongly-typed terminal outcome of a workflow child item when finalizing its active attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WfChildOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl FromStr for WfChildOutcome {
+    type Err = StoreError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            other => Err(StoreError::Storage(format!(
+                "invalid workflow child outcome: {other}"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,7 +255,7 @@ pub struct WfRun {
     pub parent_cycle: i64,
     pub goal_version: i64,
     pub status: WfRunStatus,
-    pub pause_reason_code: Option<String>,
+    pub pause_reason_code: Option<WfPauseReason>,
     pub active_script_version: i64,
     pub run_revision: i64,
     pub single_session_override: bool,
@@ -426,7 +508,7 @@ fn decode_run(r: &Row<'_>) -> Result<WfRun> {
         parent_cycle: r.get(3)?,
         goal_version: r.get(4)?,
         status: r.get::<String>(5)?.parse()?,
-        pause_reason_code: r.get(6)?,
+        pause_reason_code: r.get::<Option<String>>(6)?.map(|s| s.parse()).transpose()?,
         active_script_version: r.get(7)?,
         run_revision: r.get(8)?,
         single_session_override: r.get::<i64>(9)? != 0,
@@ -897,12 +979,14 @@ impl<C: Read> WorkflowRuns<'_, C> {
         )
     }
 
-    /// Authoritative Hub verification of the 4 Independent Final Review hard rules (§2.5):
+    /// Authoritative Hub verification of the 4 Independent Final Review hard rules (§2.5 & §6.2):
+    /// 0. Coverage: if ANY call actually ran in this run (even if every call was tagged
+    ///    `review: true`), an independent review is mandatory unless `single_session_override = 1`.
     /// 1. Identity independence: `review_attempt.bot_id` never ran any non-review attempt in
-    ///    `(parent_item_id, parent_cycle)`.
-    /// 2. Strict freshness: `review_attempt.dispatched_at_revision > MAX(non_review.settled_at_revision)`.
+    ///    `(parent_item_id, parent_cycle)` AND never ran any other call in this run.
+    /// 2. Strict freshness: `review_attempt.dispatched_at_revision > MAX(other_calls.settled_at_revision)`.
     /// 3. Structured approval: `review_attempt.status == succeeded` and `result_json.approved === true`.
-    /// 4. No dangling work: no non-review call in `queued | dispatched` or active attempt.
+    /// 4. No dangling work: no call in `queued | dispatched` and no active attempt remains.
     pub fn verify_independent_review(&mut self, run_id: &str) -> Result<ReviewGateVerdict> {
         let Some(run) = self.get_run(run_id)? else {
             return Err(StoreError::NotFound("wf_run"));
@@ -912,39 +996,38 @@ impl<C: Read> WorkflowRuns<'_, C> {
         }
 
         let calls = self.list_calls(run_id)?;
-        let non_review: Vec<&WfCall> = calls
+        let attempts = self.list_attempts_for_run(run_id)?;
+        let calls_with_executed_attempt: std::collections::HashSet<&str> = attempts
             .iter()
-            .filter(|c| !c.is_review && c.status != WfCallStatus::Cancelled)
+            .filter(|a| a.status != WfAttemptStatus::Blocked)
+            .map(|a| a.call_id.as_str())
             .collect();
-        if non_review.is_empty() {
+
+        // Any call that is non-cancelled OR actually executed a non-blocked attempt counts as work
+        // that requires independent review (a script cannot bypass §6.2 by tagging all calls
+        // `review: true`).
+        let ran_calls: Vec<&WfCall> = calls
+            .iter()
+            .filter(|c| {
+                c.status != WfCallStatus::Cancelled
+                    || calls_with_executed_attempt.contains(c.id.as_str())
+            })
+            .collect();
+        if ran_calls.is_empty() {
             return Ok(ReviewGateVerdict::NotRequired);
         }
 
-        // Rule 4: no dangling non-review work.
-        if non_review.iter().any(|c| c.status.is_active()) {
-            return Ok(ReviewGateVerdict::Blocked {
-                reason: ReviewGateFailure::ActiveWorkRemaining,
-            });
-        }
-        let attempts = self.list_attempts_for_run(run_id)?;
-        let non_review_ids: std::collections::HashSet<&str> =
-            non_review.iter().map(|c| c.id.as_str()).collect();
-        if attempts
-            .iter()
-            .any(|a| non_review_ids.contains(a.call_id.as_str()) && a.status.is_active())
+        // Rule 4: no dangling active calls or attempts remain.
+        if calls.iter().any(|c| c.status.is_active())
+            || attempts.iter().any(|a| a.status.is_active())
         {
             return Ok(ReviewGateVerdict::Blocked {
                 reason: ReviewGateFailure::ActiveWorkRemaining,
             });
         }
 
-        let latest_work_settled_rev = non_review
-            .iter()
-            .filter_map(|c| c.settled_at_revision)
-            .max()
-            .unwrap_or(0);
-
-        let worker_bots: std::collections::HashSet<String> = self
+        let non_review: Vec<&WfCall> = ran_calls.iter().copied().filter(|c| !c.is_review).collect();
+        let cycle_worker_bots: std::collections::HashSet<String> = self
             .non_review_bots_in_cycle(&run.parent_item_id, run.parent_cycle)?
             .into_iter()
             .collect();
@@ -959,11 +1042,23 @@ impl<C: Read> WorkflowRuns<'_, C> {
             });
         }
 
+        let mut saw_candidate_with_other_work = false;
         let mut saw_approved = false;
         let mut same_bot_failure: Option<String> = None;
-        let mut stale_failure: Option<i64> = None;
+        let mut stale_failure: Option<(i64, i64)> = None;
 
         for rc in review_calls {
+            // A review call cannot review itself when no other call ever ran.
+            let other_ran: Vec<&WfCall> = ran_calls
+                .iter()
+                .copied()
+                .filter(|c| c.id != rc.id)
+                .collect();
+            if other_ran.is_empty() {
+                continue;
+            }
+            saw_candidate_with_other_work = true;
+
             // Rule 3: structured `approved === true` on succeeded review attempt.
             let approved = rc
                 .result_json
@@ -986,23 +1081,45 @@ impl<C: Read> WorkflowRuns<'_, C> {
             };
             saw_approved = true;
 
-            // Rule 1: identity independence across the entire parent cycle.
+            // Rule 1: identity independence across the entire parent cycle. When the script marked
+            // every call `review: true` (`non_review.is_empty()`), all other calls are treated as
+            // work so the same bot cannot self-review a disguised work call.
             let Some(bot_id) = attempt.bot_id.as_deref() else {
                 same_bot_failure = Some(String::new());
                 continue;
             };
-            if worker_bots.contains(bot_id) {
+            let self_reviewed_disguised_work = non_review.is_empty()
+                && attempts.iter().any(|a| {
+                    a.call_id != rc.id
+                        && a.status != WfAttemptStatus::Blocked
+                        && a.bot_id.as_deref() == Some(bot_id)
+                });
+            if cycle_worker_bots.contains(bot_id) || self_reviewed_disguised_work {
                 same_bot_failure = Some(bot_id.to_owned());
                 continue;
             }
 
-            // Rule 2: strict freshness by monotonic run_revision.
-            if attempt.dispatched_at_revision <= latest_work_settled_rev {
-                stale_failure = Some(
-                    stale_failure.map_or(attempt.dispatched_at_revision, |prev| {
-                        std::cmp::Ord::max(prev, attempt.dispatched_at_revision)
-                    }),
-                );
+            // Rule 2: strict freshness by monotonic run_revision against all work being reviewed.
+            let work_baseline = if non_review.is_empty() {
+                other_ran
+                    .iter()
+                    .filter_map(|c| c.settled_at_revision)
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                non_review
+                    .iter()
+                    .filter_map(|c| c.settled_at_revision)
+                    .max()
+                    .unwrap_or(0)
+            };
+            if attempt.dispatched_at_revision <= work_baseline {
+                stale_failure = Some(match stale_failure {
+                    Some((prev_disp, _)) if prev_disp >= attempt.dispatched_at_revision => {
+                        (prev_disp, work_baseline)
+                    }
+                    _ => (attempt.dispatched_at_revision, work_baseline),
+                });
                 continue;
             }
 
@@ -1011,7 +1128,11 @@ impl<C: Read> WorkflowRuns<'_, C> {
             });
         }
 
-        if !saw_approved {
+        if !saw_candidate_with_other_work {
+            Ok(ReviewGateVerdict::Blocked {
+                reason: ReviewGateFailure::MissingReview,
+            })
+        } else if !saw_approved {
             Ok(ReviewGateVerdict::Blocked {
                 reason: ReviewGateFailure::NotApproved,
             })
@@ -1019,11 +1140,13 @@ impl<C: Read> WorkflowRuns<'_, C> {
             Ok(ReviewGateVerdict::Blocked {
                 reason: ReviewGateFailure::SameBotAsWorker { bot_id },
             })
-        } else if let Some(review_dispatched_revision) = stale_failure {
+        } else if let Some((review_dispatched_revision, latest_work_settled_revision)) =
+            stale_failure
+        {
             Ok(ReviewGateVerdict::Blocked {
                 reason: ReviewGateFailure::StaleReview {
                     review_dispatched_revision,
-                    latest_work_settled_revision: latest_work_settled_rev,
+                    latest_work_settled_revision,
                 },
             })
         } else {
@@ -1154,6 +1277,9 @@ impl WorkflowRuns<'_, W<'_>> {
                     ("run_revision", next_rev.into()),
                     ("status", WfRunStatus::Running.as_str().into()),
                     ("pause_reason_code", Option::<String>::None.into()),
+                    ("single_session_override", 0_i64.into()),
+                    ("review_verified_call_id", Option::<String>::None.into()),
+                    ("result_json", Option::<String>::None.into()),
                     ("updated_at", ts.into()),
                 ])
                 .and_where(Expr::col("id").eq(run_id)),
@@ -1162,7 +1288,7 @@ impl WorkflowRuns<'_, W<'_>> {
         self.get_run(run_id)?.ok_or(StoreError::NotFound("wf_run"))
     }
 
-    pub fn pause_run(&mut self, run_id: &str, reason_code: &str) -> Result<WfRun> {
+    pub fn pause_run(&mut self, run_id: &str, reason: WfPauseReason) -> Result<WfRun> {
         let run = self
             .get_run(run_id)?
             .ok_or(StoreError::NotFound("wf_run"))?;
@@ -1173,7 +1299,7 @@ impl WorkflowRuns<'_, W<'_>> {
                 .table("wf_runs")
                 .values([
                     ("status", WfRunStatus::Paused.as_str().into()),
-                    ("pause_reason_code", Some(reason_code.to_owned()).into()),
+                    ("pause_reason_code", Some(reason.as_str().to_owned()).into()),
                     ("run_revision", next_rev.into()),
                     ("updated_at", ts.into()),
                 ])
@@ -1442,14 +1568,80 @@ impl WorkflowRuns<'_, W<'_>> {
         Ok(())
     }
 
-    /// Re-queues a failed call for retry (`attempt_no + 1`) and bumps `run_revision`.
-    pub fn requeue_call_for_retry(&mut self, call_id: &str) -> Result<()> {
+    /// Resets a previously `failed` or `cancelled` call back to `queued` when a newer script
+    /// version reaches the same call identity (§2.3: only `completed` calls hydrate across
+    /// versions; prior attempts remain in `wf_call_attempts` for cycle budget accounting).
+    pub fn reset_call_for_new_version(&mut self, call_id: &str) -> Result<WfCall> {
+        let call = self
+            .get_call(call_id)?
+            .ok_or(StoreError::NotFound("wf_call"))?;
+        if !matches!(call.status, WfCallStatus::Failed | WfCallStatus::Cancelled) {
+            return Ok(call);
+        }
+        let ts = now();
+        self.0.exec(
+            Query::update()
+                .table("wf_calls")
+                .values([
+                    ("status", WfCallStatus::Queued.as_str().into()),
+                    ("result_json", Option::<String>::None.into()),
+                    ("artifact_ids_json", Option::<String>::None.into()),
+                    ("git_head", Option::<String>::None.into()),
+                    ("git_tree", Option::<String>::None.into()),
+                    ("git_cwd", Option::<String>::None.into()),
+                    ("settled_at_revision", Option::<i64>::None.into()),
+                    ("updated_at", ts.into()),
+                ])
+                .and_where(Expr::col("id").eq(call_id)),
+        )?;
+        self.get_call(call_id)?
+            .ok_or(StoreError::NotFound("wf_call"))
+    }
+
+    /// Re-queues a failed call for retry (`attempt_no + 1`), truncates any `wf_version_calls`
+    /// recorded strictly after `call_id` in the active script version (e.g. a `catch` branch
+    /// executed after the failure), cancels any active downstream calls, and bumps `run_revision`.
+    /// Returns child item IDs that must be stopped by the caller.
+    pub fn requeue_call_for_retry(&mut self, call_id: &str) -> Result<Vec<String>> {
         let call = self
             .get_call(call_id)?
             .ok_or(StoreError::NotFound("wf_call"))?;
         let run = self
             .get_run(&call.run_id)?
             .ok_or(StoreError::NotFound("wf_run"))?;
+        let version_calls = self.list_version_calls(&run.id, run.active_script_version)?;
+        let mut children_to_stop = Vec::new();
+        if let Some(retried_seq) = version_calls
+            .iter()
+            .find(|vc| vc.call_id == call_id)
+            .map(|vc| vc.seq_no)
+        {
+            let kept: std::collections::HashSet<&str> = version_calls
+                .iter()
+                .filter(|vc| vc.seq_no <= retried_seq)
+                .map(|vc| vc.call_id.as_str())
+                .collect();
+            let downstream_ids: Vec<String> = version_calls
+                .iter()
+                .filter(|vc| vc.seq_no > retried_seq && !kept.contains(vc.call_id.as_str()))
+                .map(|vc| vc.call_id.clone())
+                .collect();
+            self.0.exec(
+                Query::delete()
+                    .from_table("wf_version_calls")
+                    .and_where(Expr::col("run_id").eq(run.id.as_str()))
+                    .and_where(Expr::col("script_version").eq(run.active_script_version))
+                    .and_where(Expr::col("seq_no").gt(retried_seq)),
+            )?;
+            for downstream_id in downstream_ids {
+                if let Some(dc) = self.get_call(&downstream_id)?
+                    && dc.status.is_active()
+                    && let Some(cid) = self.cancel_call(&dc.id)?
+                {
+                    children_to_stop.push(cid);
+                }
+            }
+        }
         let ts = now();
         self.0.exec(
             Query::update()
@@ -1471,7 +1663,7 @@ impl WorkflowRuns<'_, W<'_>> {
                 .and_where(Expr::col("id").eq(run.id.as_str())),
         )?;
         emit_run_changed(self.0, &run.workspace_id, &run.id, &run.parent_item_id);
-        Ok(())
+        Ok(children_to_stop)
     }
 
     pub fn bump_run_revision(&mut self, run_id: &str) -> Result<i64> {
@@ -1775,7 +1967,7 @@ impl WorkflowRuns<'_, W<'_>> {
         &mut self,
         child_item_id: &str,
         item_delivery_revision: i64,
-        outcome: &str,
+        outcome: WfChildOutcome,
         error_code: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<Option<FinalizedAttempt>> {
@@ -1792,7 +1984,7 @@ impl WorkflowRuns<'_, W<'_>> {
         let ts = now();
 
         match outcome {
-            "completed" => {
+            WfChildOutcome::Completed => {
                 if attempt.closing_delivery_revision != Some(item_delivery_revision) {
                     return Err(StoreError::Conflict(format!(
                         "wf_delivery_revision_mismatch: attempt closing_delivery_revision={:?} != item delivery_revision={item_delivery_revision}",
@@ -1849,7 +2041,7 @@ impl WorkflowRuns<'_, W<'_>> {
                     status: WfAttemptStatus::Succeeded,
                 }))
             }
-            "failed" => {
+            WfChildOutcome::Failed => {
                 self.0.exec(
                     Query::update()
                         .table("wf_call_attempts")
@@ -1890,7 +2082,7 @@ impl WorkflowRuns<'_, W<'_>> {
                     status: WfAttemptStatus::Failed,
                 }))
             }
-            _ => {
+            WfChildOutcome::Cancelled => {
                 self.0.exec(
                     Query::update()
                         .table("wf_call_attempts")

@@ -7,9 +7,9 @@
 //! decisions (`subject_type = "wf_run"`), live SQL `COUNT(*)` cycle budgets, and Hub-authoritative
 //! 4-rule independent final review.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -17,14 +17,14 @@ use serde_json::{Value, json};
 use steve_store::decision_repo::DecisionChange;
 use steve_store::workflow_runs::{
     NewWfAttempt, NewWfCall, ReviewGateFailure, ReviewGateVerdict, WfAttemptStatus, WfCall,
-    WfCallAttempt, WfCallStatus, WfGitFingerprint, WfRun, WfRunStatus, WorkflowRuns, pause_reason,
+    WfCallAttempt, WfCallStatus, WfGitFingerprint, WfPauseReason, WfRun, WfRunStatus, WorkflowRuns,
 };
-use steve_store::{Decision, DecisionRows, DecisionSource, NewDecision, NewItem, Store};
-use steve_types::DecisionPrompt;
+use steve_store::{Decision, DecisionRows, DecisionSource, NewDecision, Store};
+use steve_types::{DecisionPrompt, WfBudgetScope};
 use steve_workflow_api::{
     CallOptions, CallSpec, JsonSchemaSubset, MAX_RESULT_BYTES, MAX_SCRIPT_SOURCE_BYTES,
     RecordedCall, ResultValidationError, StepFrame, StepInput, ValidationViolationCode,
-    WorkflowState, sha256_hex, to_canonical_json, validate_structured_result,
+    WorkflowFaultClass, WorkflowState, sha256_hex, to_canonical_json, validate_structured_result,
 };
 
 use crate::cycle::{CloseKind, ClosePolicy};
@@ -51,6 +51,20 @@ pub const DEFAULT_MAX_PARALLEL_SESSIONS: i64 = 4;
 
 /// Default owner budget top-up increment when resolving `add_budget` without an explicit number.
 pub const DEFAULT_BUDGET_ALLOWANCE_DELTA: i64 = 6;
+/// Upper bound on a single owner budget top-up decision to prevent accidental runaway allowances.
+pub const MAX_BUDGET_ALLOWANCE_DELTA: i64 = 100;
+
+/// Maximum concurrent workflow step executions across the Hub.
+/// Bounds blocking SQLite/Git work and `--workflow-step` subprocess fan-out on boot/ticks.
+pub const MAX_CONCURRENT_WORKFLOW_STEPS: usize = 4;
+
+/// Maximum CAS re-step attempts when `run_revision` moves concurrently during JS execution.
+pub const MAX_STEP_CAS_RETRIES: usize = 3;
+/// Maximum automatic retries for transient step infrastructure faults (`Timeout`,
+/// `SubprocessFailed`, `ProtocolError`) before pausing as `WfPauseReason::InfrastructureFault`.
+pub const MAX_STEP_INFRA_RETRIES: u32 = 2;
+/// Base linear backoff delay between automatic step infrastructure retries.
+pub const STEP_INFRA_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 
 /// Out-of-process JS step executor injected by `steve-hub` (`StepRunner`).
 #[async_trait]
@@ -116,7 +130,7 @@ pub enum WfDeliveryBlocker {
     },
     RunPaused {
         run_id: String,
-        reason: Option<String>,
+        reason: Option<WfPauseReason>,
     },
     RunFailed {
         run_id: String,
@@ -274,6 +288,83 @@ pub enum WfRunAction {
     },
 }
 
+/// Strongly-typed owner decision choices for `subject_type = "wf_run"` cards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WfDecisionChoice {
+    AddBudget,
+    SingleSession,
+    Cancel,
+    Revise,
+    Retry,
+}
+
+impl WfDecisionChoice {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AddBudget => "add_budget",
+            Self::SingleSession => "single_session",
+            Self::Cancel => "cancel",
+            Self::Revise => "revise",
+            Self::Retry => "retry",
+        }
+    }
+
+    pub fn from_choice_str(s: &str) -> Option<Self> {
+        match s {
+            "add_budget" => Some(Self::AddBudget),
+            "single_session" | "yes" => Some(Self::SingleSession),
+            "cancel" => Some(Self::Cancel),
+            "revise" | "no" => Some(Self::Revise),
+            "retry" => Some(Self::Retry),
+            _ => None,
+        }
+    }
+}
+
+/// Strongly-typed status marker returned when a workflow child reports failure via MCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WfChildFailStatus {
+    Failing,
+}
+
+/// Strongly-typed output returned by `Core::tool_workflow_run` (`steve_workflow_run` MCP tool).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WfToolOutput {
+    Snapshot(Box<WfRunSnapshot>),
+    Empty {
+        run: Option<WfRun>,
+    },
+    ChildFailing {
+        status: WfChildFailStatus,
+        child_item_id: String,
+        reason: String,
+        end_turn: bool,
+    },
+}
+
+impl WfToolOutput {
+    pub fn into_snapshot(self) -> Option<WfRunSnapshot> {
+        match self {
+            Self::Snapshot(s) => Some(*s),
+            _ => None,
+        }
+    }
+
+    pub fn as_snapshot(&self) -> Option<&WfRunSnapshot> {
+        match self {
+            Self::Snapshot(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn ends_turn(&self) -> bool {
+        matches!(self, Self::ChildFailing { end_turn: true, .. })
+    }
+}
+
 /// Strongly-typed workflow run summary returned by `steve_workflow_run` and Core APIs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WfRunSnapshot {
@@ -287,6 +378,34 @@ pub struct WfRunSnapshot {
     pub review_gate: ReviewGateVerdict,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_id: Option<String>,
+}
+
+struct WorkflowRunLockGuard {
+    core: Core,
+    run_id: String,
+    lock: Arc<tokio::sync::Mutex<()>>,
+    _guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for WorkflowRunLockGuard {
+    fn drop(&mut self) {
+        // Release the per-run lock first so any queued waiter can run, then acquire the map lock.
+        // If strong_count == 2 (only `self.lock` and the map entry remain), no other task holds a
+        // clone of this lock, so removing it from the map is race-free.
+        self._guard.take();
+        let mut locks = self
+            .core
+            .0
+            .workflow_run_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = locks.get(&self.run_id)
+            && Arc::ptr_eq(entry, &self.lock)
+            && Arc::strong_count(entry) == 2
+        {
+            locks.remove(&self.run_id);
+        }
+    }
 }
 
 struct PreparedStep {
@@ -355,6 +474,266 @@ fn capture_git_fingerprint(item: &Item) -> Option<WfGitFingerprint> {
     })
 }
 
+async fn run_blocking<F, R>(f: F) -> Result<R>
+where
+    F: FnOnce() -> Result<R> + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| CoreError::Msg(format!("wf_blocking_task_failed: {e}")))?
+}
+
+struct HydrationCandidate {
+    call_id: String,
+    is_review: bool,
+    is_git_backed: bool,
+    git_head: Option<String>,
+    git_tree: Option<String>,
+    git_cwd: Option<String>,
+    project_path: Option<String>,
+    project_worktree: bool,
+    child_item_id: Option<String>,
+    on_node: bool,
+    artifact_ids: Vec<String>,
+}
+
+enum HydrationOutcome {
+    Valid {
+        call_id: String,
+    },
+    Invalid {
+        call_id: String,
+        is_review: bool,
+        reason_code: &'static str,
+        detail: String,
+    },
+    TransientUnavailable {
+        detail: String,
+    },
+}
+
+fn verify_local_git_candidate(c: &HydrationCandidate) -> HydrationOutcome {
+    let (Some(rec_head), Some(rec_tree)) = (c.git_head.as_deref(), c.git_tree.as_deref()) else {
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "missing_git_fingerprint",
+            detail: format!(
+                "git-backed call {} has no recorded (git_head, git_tree) fingerprint",
+                c.call_id
+            ),
+        };
+    };
+    if rec_head.is_empty() || rec_tree.is_empty() {
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "missing_git_fingerprint",
+            detail: format!("git-backed call {} has empty git fingerprint", c.call_id),
+        };
+    }
+
+    let cwd = c.git_cwd.as_deref().filter(|d| !d.is_empty());
+    let project_path = c.project_path.as_deref().filter(|d| !d.is_empty());
+    let is_shared_repo = !c.project_worktree
+        || match (cwd, project_path) {
+            (Some(d), Some(p)) => d == p,
+            _ => false,
+        };
+
+    if is_shared_repo {
+        // Shared repository (`worktree = false`): subsequent calls or commits legitimately advance
+        // HEAD in `project.path`. Verify the recorded commit & its tree still exist in the repo;
+        // only fall back to the live working-tree fingerprint for uncommitted deliveries.
+        let repo_dir = project_path.or(cwd);
+        if let Some(dir) = repo_dir {
+            if git_commit_tree_matches(dir, rec_head, rec_tree) {
+                return HydrationOutcome::Valid {
+                    call_id: c.call_id.clone(),
+                };
+            }
+            if std::path::Path::new(dir).exists()
+                && let Some(live_raw) = crate::cycle::fingerprint(Some(dir))
+            {
+                let live = crate::upstream::parse(&live_raw);
+                if live.head == rec_head && live.tree == rec_tree {
+                    return HydrationOutcome::Valid {
+                        call_id: c.call_id.clone(),
+                    };
+                }
+            }
+        }
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "git_fingerprint_mismatch",
+            detail: format!(
+                "shared repo commit tree {rec_head}^{{tree}} != {rec_tree} could not be verified"
+            ),
+        };
+    }
+
+    // Dedicated worktree (`worktree = true`): if the worktree directory still exists on disk,
+    // verify its live fingerprint matches (detecting local tampering); if tidied after commit,
+    // verify `recorded_head^{tree} == recorded_tree` in the project repository.
+    if let Some(dir) = cwd.filter(|d| std::path::Path::new(d).exists()) {
+        let Some(live_raw) = crate::cycle::fingerprint(Some(dir)) else {
+            return HydrationOutcome::Invalid {
+                call_id: c.call_id.clone(),
+                is_review: c.is_review,
+                reason_code: "git_fingerprint_unreadable",
+                detail: format!("unable to compute live git fingerprint for {dir}"),
+            };
+        };
+        let live = crate::upstream::parse(&live_raw);
+        if live.head == rec_head && live.tree == rec_tree {
+            return HydrationOutcome::Valid {
+                call_id: c.call_id.clone(),
+            };
+        }
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "git_fingerprint_mismatch",
+            detail: format!(
+                "recorded {rec_head}:{rec_tree} != live {}:{} in {dir}",
+                live.head, live.tree
+            ),
+        };
+    }
+
+    if let Some(repo_path) = project_path
+        && git_commit_tree_matches(repo_path, rec_head, rec_tree)
+    {
+        return HydrationOutcome::Valid {
+            call_id: c.call_id.clone(),
+        };
+    }
+    HydrationOutcome::Invalid {
+        call_id: c.call_id.clone(),
+        is_review: c.is_review,
+        reason_code: "git_fingerprint_mismatch",
+        detail: format!(
+            "worktree missing and commit tree {rec_head}^{{tree}} != {rec_tree} could not be verified"
+        ),
+    }
+}
+
+async fn verify_remote_node_git_candidate(
+    port: &dyn crate::node_git::NodeGit,
+    c: &HydrationCandidate,
+) -> HydrationOutcome {
+    use steve_node_api as na;
+
+    let (Some(rec_head), Some(rec_tree)) = (c.git_head.as_deref(), c.git_tree.as_deref()) else {
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "missing_git_fingerprint",
+            detail: format!(
+                "remote git-backed call {} has no recorded (git_head, git_tree) fingerprint",
+                c.call_id
+            ),
+        };
+    };
+    if rec_head.is_empty() || rec_tree.is_empty() {
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "missing_git_fingerprint",
+            detail: format!(
+                "remote git-backed call {} has empty git fingerprint",
+                c.call_id
+            ),
+        };
+    }
+    let Some(child_id) = c.child_item_id.as_deref() else {
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "git_fingerprint_mismatch",
+            detail: format!("remote git-backed call {} missing child_item_id", c.call_id),
+        };
+    };
+
+    let ask = crate::node_git::Ask {
+        heads_only: true,
+        reads: vec![
+            na::GitRead::Show {
+                rev: rec_head.to_owned(),
+                path: None,
+                max: 1,
+            },
+            na::GitRead::ChangedPaths {
+                from: rec_head.to_owned(),
+                to: rec_tree.to_owned(),
+                max: 1,
+            },
+        ],
+        ..Default::default()
+    };
+    match port.facts(child_id, ask).await {
+        Ok(facts) => {
+            let has_commit = facts
+                .reads
+                .iter()
+                .any(|r| matches!(r.answer, na::GitAnswer::Commit { .. }));
+            let tree_matches = facts.reads.iter().any(|r| {
+                matches!(
+                    &r.answer,
+                    na::GitAnswer::ChangedPaths { paths, truncated }
+                        if paths.is_empty() && !truncated
+                )
+            });
+            if has_commit && tree_matches {
+                return HydrationOutcome::Valid {
+                    call_id: c.call_id.clone(),
+                };
+            }
+            // Fallback for uncommitted Node deliveries whose synthetic tree differs from HEAD^{tree}.
+            if let Ok(fp_facts) = port
+                .facts(
+                    child_id,
+                    crate::node_git::Ask {
+                        reads: vec![na::GitRead::Fingerprint],
+                        ..Default::default()
+                    },
+                )
+                .await
+                && fp_facts.head == rec_head
+                && fp_facts.reads.iter().any(|r| {
+                    matches!(&r.answer, na::GitAnswer::Fingerprint { tree, .. } if tree == rec_tree)
+                })
+            {
+                return HydrationOutcome::Valid {
+                    call_id: c.call_id.clone(),
+                };
+            }
+            HydrationOutcome::Invalid {
+                call_id: c.call_id.clone(),
+                is_review: c.is_review,
+                reason_code: "git_fingerprint_mismatch",
+                detail: format!(
+                    "remote Node commit/tree {rec_head}:{rec_tree} did not verify for {child_id}"
+                ),
+            }
+        }
+        Err(e) if e.code == na::Code::Unavailable => HydrationOutcome::TransientUnavailable {
+            detail: e.safe_detail,
+        },
+        Err(e) => HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "git_fingerprint_mismatch",
+            detail: format!(
+                "remote Node git verification failed for {child_id}: {}",
+                e.safe_detail
+            ),
+        },
+    }
+}
+
 /// Checks whether `recorded_head^{tree}` in `repo_dir` matches `recorded_tree` when a child's
 /// worktree directory has already been tidied after committing.
 fn git_commit_tree_matches(repo_dir: &str, recorded_head: &str, recorded_tree: &str) -> bool {
@@ -387,53 +766,84 @@ impl Core {
         self.0.workflow_executor.get().cloned()
     }
 
-    async fn workflow_run_lock(&self, run_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self
-            .0
+    /// Returns the number of currently tracked per-run step locks (reaches 0 once idle).
+    pub fn workflow_run_lock_count(&self) -> usize {
+        self.0
             .workflow_run_locks
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        locks
-            .entry(run_id.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    async fn acquire_workflow_run_lock(&self, run_id: &str) -> WorkflowRunLockGuard {
+        let lock = {
+            let mut locks = self
+                .0
+                .workflow_run_locks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            locks
+                .entry(run_id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let guard = lock.clone().lock_owned().await;
+        WorkflowRunLockGuard {
+            core: self.clone(),
+            run_id: run_id.to_owned(),
+            lock,
+            _guard: Some(guard),
+        }
     }
 
     /// MCP entrypoint for `steve_workflow_run`.
-    pub async fn tool_workflow_run(&self, session: &Session, args: Value) -> Result<Value> {
+    ///
+    /// Offloads all synchronous `Core::tx()` / SQLite operations onto Tokio's blocking pool so
+    /// contended state locks or disk I/O never stall async runtime worker threads.
+    pub async fn tool_workflow_run(&self, session: &Session, args: Value) -> Result<WfToolOutput> {
         let action: WfRunAction = serde_json::from_value(args)
             .map_err(|e| CoreError::Status(400, format!("wf_invalid_args: {e}")))?;
-        let Some(item_id) = session.item_id.as_deref() else {
+        let Some(item_id) = session.item_id.clone() else {
             return Err(CoreError::Status(
                 400,
                 "wf_session_missing_item: session is not bound to an item".into(),
             ));
         };
-        let is_child = self.tx().is_wf_run_child(item_id)?;
+        let core_c = self.clone();
+        let iid_c = item_id.clone();
+        let is_child = run_blocking(move || core_c.tx().is_wf_run_child(&iid_c)).await?;
         if is_child {
             return match action {
                 WfRunAction::Get => {
-                    let run_id = self
-                        .store()
-                        .store()
-                        .read(|r| WorkflowRuns(r).attempt_by_child_item(item_id))?
-                        .map(|a| a.run_id)
-                        .ok_or_else(|| CoreError::Status(404, "wf_run_not_found".into()))?;
-                    let snap = self.tx().wf_run_snapshot(&run_id)?;
-                    Ok(serde_json::to_value(snap)?)
+                    let core = self.clone();
+                    run_blocking(move || {
+                        let run_id = core
+                            .store()
+                            .store()
+                            .read(|r| WorkflowRuns(r).attempt_by_child_item(&item_id))?
+                            .map(|a| a.run_id)
+                            .ok_or_else(|| CoreError::Status(404, "wf_run_not_found".into()))?;
+                        let snap = core.tx().wf_run_snapshot(&run_id)?;
+                        Ok(WfToolOutput::Snapshot(Box::new(snap)))
+                    })
+                    .await
                 }
                 WfRunAction::Fail { reason } => {
-                    let reason = reason.trim();
+                    let reason = reason.trim().to_owned();
                     if reason.is_empty() {
                         return Err(CoreError::Status(400, "wf_fail_reason_required".into()));
                     }
-                    self.tx().wf_child_report_failure(session, reason)?;
-                    Ok(json!({
-                        "status": "failing",
-                        "child_item_id": item_id,
-                        "reason": reason,
-                        "end_turn": true,
-                    }))
+                    let core = self.clone();
+                    let sess = session.clone();
+                    let reason_c = reason.clone();
+                    run_blocking(move || core.tx().wf_child_report_failure(&sess, &reason_c))
+                        .await?;
+                    Ok(WfToolOutput::ChildFailing {
+                        status: WfChildFailStatus::Failing,
+                        child_item_id: item_id,
+                        reason,
+                        end_turn: true,
+                    })
                 }
                 _ => Err(CoreError::Status(
                     403,
@@ -445,49 +855,69 @@ impl Core {
         match action {
             WfRunAction::Submit { script } => {
                 let snap = self
-                    .submit_workflow_script(item_id, &script, Some(&session.id))
+                    .submit_workflow_script(&item_id, &script, Some(&session.id))
                     .await?;
-                Ok(serde_json::to_value(snap)?)
+                Ok(WfToolOutput::Snapshot(Box::new(snap)))
             }
             WfRunAction::Get => {
-                let item = self.tx().item(item_id)?;
-                let run = self
-                    .store()
-                    .store()
-                    .read(|r| WorkflowRuns(r).latest_run_for_cycle(item_id, item.cycle))?;
-                match run {
-                    Some(r) => Ok(serde_json::to_value(self.tx().wf_run_snapshot(&r.id)?)?),
-                    None => Ok(json!({ "run": null })),
-                }
+                let core = self.clone();
+                run_blocking(move || {
+                    let item = core.tx().item(&item_id)?;
+                    let run = core
+                        .store()
+                        .store()
+                        .read(|r| WorkflowRuns(r).latest_run_for_cycle(&item_id, item.cycle))?;
+                    match run {
+                        Some(r) => Ok(WfToolOutput::Snapshot(Box::new(
+                            core.tx().wf_run_snapshot(&r.id)?,
+                        ))),
+                        None => Ok(WfToolOutput::Empty { run: None }),
+                    }
+                })
+                .await
             }
             WfRunAction::Pause { reason: _ } => {
-                let run_id = self
-                    .tx()
-                    .wf_pause_parent_run(item_id, pause_reason::COORDINATOR_PAUSED)?;
-                let snap = self.tx().wf_run_snapshot(&run_id)?;
-                Ok(serde_json::to_value(snap)?)
+                let core = self.clone();
+                run_blocking(move || {
+                    let mut t = core.tx();
+                    let run_id =
+                        t.wf_pause_parent_run(&item_id, WfPauseReason::CoordinatorPaused)?;
+                    let snap = t.wf_run_snapshot(&run_id)?;
+                    Ok(WfToolOutput::Snapshot(Box::new(snap)))
+                })
+                .await
             }
             WfRunAction::Resume => {
-                let run_id = self.tx().wf_resume_parent_run(item_id, false)?;
+                let core = self.clone();
+                let run_id =
+                    run_blocking(move || core.tx().wf_resume_parent_run(&item_id, false)).await?;
                 let snap = self.step_workflow_run(&run_id).await?;
-                Ok(serde_json::to_value(snap)?)
+                Ok(WfToolOutput::Snapshot(Box::new(snap)))
             }
             WfRunAction::Cancel { reason } => {
-                let run_id = self.tx().wf_cancel_parent_run(
-                    item_id,
-                    reason.as_deref().unwrap_or("coordinator_cancelled"),
-                )?;
-                let snap = self.tx().wf_run_snapshot(&run_id)?;
-                Ok(serde_json::to_value(snap)?)
+                let core = self.clone();
+                run_blocking(move || {
+                    let mut t = core.tx();
+                    let run_id = t.wf_cancel_parent_run(
+                        &item_id,
+                        reason.as_deref().unwrap_or("coordinator_cancelled"),
+                    )?;
+                    let snap = t.wf_run_snapshot(&run_id)?;
+                    Ok(WfToolOutput::Snapshot(Box::new(snap)))
+                })
+                .await
             }
             WfRunAction::Retry { call_id } => {
-                let (run_id, should_step) = self.tx().wf_retry_call(item_id, &call_id)?;
+                let core = self.clone();
+                let (run_id, should_step) =
+                    run_blocking(move || core.tx().wf_retry_call(&item_id, &call_id)).await?;
                 let snap = if should_step {
                     self.step_workflow_run(&run_id).await?
                 } else {
-                    self.tx().wf_run_snapshot(&run_id)?
+                    let core = self.clone();
+                    run_blocking(move || core.tx().wf_run_snapshot(&run_id)).await?
                 };
-                Ok(serde_json::to_value(snap)?)
+                Ok(WfToolOutput::Snapshot(Box::new(snap)))
             }
             WfRunAction::Fail { .. } => Err(CoreError::Status(
                 400,
@@ -516,75 +946,107 @@ impl Core {
                 ),
             ));
         }
+        let core = self.clone();
+        let pid = parent_item_id.to_owned();
+        let src = script_source.to_owned();
+        let sid = session_id.map(str::to_owned);
         let (run_id, should_step) =
-            self.tx()
-                .wf_submit_script(parent_item_id, script_source, session_id)?;
+            run_blocking(move || core.tx().wf_submit_script(&pid, &src, sid.as_deref())).await?;
         if should_step {
             self.step_workflow_run(&run_id).await
         } else {
-            self.tx().wf_run_snapshot(&run_id)
+            let core = self.clone();
+            run_blocking(move || core.tx().wf_run_snapshot(&run_id)).await
         }
     }
 
-    /// Owner structured takeover for a script-workflow child item (§2.4 #2):
-    /// validates `result` against the call's schema + <= 32 KiB + review rules, stages closing
-    /// via `request_delivery_close_in`, and commits atomically through `commit_cycle`.
-    pub fn wf_child_owner_deliver(
+    async fn verify_hydration_candidates(
         &self,
-        child_item_id: &str,
-        result: &Value,
-        summary: &str,
-        actor: &str,
-    ) -> Result<Item> {
-        let canonical = validate_child_result(self.store().store(), child_item_id, Some(result))
-            .map_err(|e| CoreError::Status(409, e.to_string()))?
-            .ok_or_else(|| {
-                CoreError::Status(
-                    404,
-                    format!("wf_not_child_item: {child_item_id} is not a workflow child item"),
-                )
-            })?;
-        let mut t = self.tx();
-        let item = t.item(child_item_id)?;
-        if item.phase == crate::cycle::CLOSED {
-            return Err(crate::cycle::conflict("wf_child_already_closed"));
+        candidates: Vec<HydrationCandidate>,
+    ) -> Vec<HydrationOutcome> {
+        let node_git = self.node_git();
+        let store = self.store().store().clone();
+        let mut results = Vec::with_capacity(candidates.len());
+        for cand in candidates {
+            if !cand.is_git_backed {
+                let store_c = store.clone();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    if !cand.artifact_ids.is_empty()
+                        && let Some(cid) = cand.child_item_id.as_deref()
+                    {
+                        let present: HashSet<String> = match store_c.artifacts().list(cid) {
+                            Ok(list) => list.into_iter().map(|a| a.id).collect(),
+                            Err(e) => {
+                                return HydrationOutcome::Invalid {
+                                    call_id: cand.call_id,
+                                    is_review: cand.is_review,
+                                    reason_code: "artifact_missing",
+                                    detail: format!("failed to list artifacts on {cid}: {e}"),
+                                };
+                            }
+                        };
+                        for aid in &cand.artifact_ids {
+                            if !present.contains(aid) {
+                                return HydrationOutcome::Invalid {
+                                    call_id: cand.call_id,
+                                    is_review: cand.is_review,
+                                    reason_code: "artifact_missing",
+                                    detail: format!(
+                                        "recorded artifact {aid} is no longer present on {cid}"
+                                    ),
+                                };
+                            }
+                        }
+                    }
+                    HydrationOutcome::Valid {
+                        call_id: cand.call_id,
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| HydrationOutcome::TransientUnavailable {
+                    detail: format!("artifact verification task panicked: {e}"),
+                });
+                results.push(outcome);
+                continue;
+            }
+            if cand.on_node
+                && let Some(port) = node_git.as_deref()
+            {
+                results.push(verify_remote_node_git_candidate(port, &cand).await);
+                continue;
+            }
+            let outcome = tokio::task::spawn_blocking(move || verify_local_git_candidate(&cand))
+                .await
+                .unwrap_or_else(|e| HydrationOutcome::TransientUnavailable {
+                    detail: format!("git verification task panicked: {e}"),
+                });
+            results.push(outcome);
         }
-        let summary_text = if summary.trim().is_empty() {
-            "owner_structured_delivery"
-        } else {
-            summary.trim()
-        };
-        t.db()
-            .timeline_add(child_item_id, actor, "me", summary_text, None)?;
-        let item = t.request_delivery_close_in(
-            child_item_id,
-            actor,
-            ClosePolicy::Owner,
-            true,
-            summary_text,
-            None,
-            vec![],
-            |w, committed_item| {
-                let git_fp = capture_git_fingerprint(committed_item);
-                WorkflowRuns(w).stage_attempt_closing_with_git(
-                    child_item_id,
-                    committed_item.delivery_revision,
-                    &canonical,
-                    "[]",
-                    git_fp.as_ref(),
-                )?;
-                Ok(())
-            },
-        )?;
-        Ok(item)
+        results
     }
 
-    /// Executes one replay & dispatch step for `run_id`, serialized by a per-run async lock.
+    pub(crate) fn clear_hydration_cache(&self, run_id: &str) {
+        self.0
+            .workflow_hydration_verified
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(run_id);
+    }
+
+    /// Executes one replay & dispatch step for `run_id`, serialized by a per-run async lock and
+    /// bounded globally by [`MAX_CONCURRENT_WORKFLOW_STEPS`].
     ///
-    /// Never holds Core's state mutex across the `--workflow-step` subprocess `.await`.
+    /// Never holds Core's state mutex across Git commands, Node RPCs, or `--workflow-step` I/O,
+    /// and offloads all synchronous `Core::tx()` / SQLite operations onto Tokio's blocking pool.
     pub async fn step_workflow_run(&self, run_id: &str) -> Result<WfRunSnapshot> {
-        let lock = self.workflow_run_lock(run_id).await;
-        let _guard = lock.lock().await;
+        let _run_guard = self.acquire_workflow_run_lock(run_id).await;
+        let _step_permit = self
+            .0
+            .workflow_step_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| CoreError::Msg("wf_step_semaphore_closed".into()))?;
 
         let Some(executor) = self.workflow_executor() else {
             return Err(CoreError::Msg(
@@ -592,10 +1054,83 @@ impl Core {
             ));
         };
 
-        // Loop handles at most 2 retries if run_revision moved concurrently while executing JS.
-        for _ in 0..3 {
-            let Some(prepared) = self.tx().wf_prepare_step(run_id)? else {
-                return self.tx().wf_run_snapshot(run_id);
+        let mut cas_attempts = 0usize;
+        let mut infra_retries = 0u32;
+        while cas_attempts < MAX_STEP_CAS_RETRIES {
+            let core_c = self.clone();
+            let rid_c = run_id.to_owned();
+            let candidates =
+                run_blocking(move || core_c.tx().wf_collect_hydration_candidates(&rid_c)).await?;
+
+            if let Some((script_version, list)) = candidates
+                && !list.is_empty()
+            {
+                let verifications = self.verify_hydration_candidates(list).await;
+                if let Some(detail) = verifications.iter().find_map(|v| match v {
+                    HydrationOutcome::TransientUnavailable { detail } => Some(detail.clone()),
+                    _ => None,
+                }) {
+                    if infra_retries < MAX_STEP_INFRA_RETRIES {
+                        infra_retries += 1;
+                        metrics::counter!(
+                            "steve_wf_step_infra_retry_total",
+                            "code" => "node_git_unavailable"
+                        )
+                        .increment(1);
+                        tracing::warn!(
+                            run_id = %run_id,
+                            attempt = infra_retries,
+                            max = MAX_STEP_INFRA_RETRIES,
+                            detail = %detail,
+                            "retrying workflow step after transient remote Node git error"
+                        );
+                        tokio::time::sleep(STEP_INFRA_RETRY_BASE_DELAY * infra_retries).await;
+                        continue;
+                    }
+                    let core_p = self.clone();
+                    let rid_p = run_id.to_owned();
+                    run_blocking(move || {
+                        core_p.tx().pause_and_open_decision(
+                            &rid_p,
+                            WfPauseReason::InfrastructureFault,
+                            "fail",
+                            DecisionPrompt::WorkflowScriptFault {
+                                fault_code: "node_git_unavailable".into(),
+                            },
+                            format!(
+                                "remote Node git unavailable during hydration verification: {detail}"
+                            ),
+                            &[
+                                WfDecisionChoice::Retry,
+                                WfDecisionChoice::Revise,
+                                WfDecisionChoice::Cancel,
+                                WfDecisionChoice::SingleSession,
+                            ],
+                        )?;
+                        Ok(())
+                    })
+                    .await?;
+                    break;
+                }
+                let core_a = self.clone();
+                let rid_a = run_id.to_owned();
+                run_blocking(move || {
+                    core_a.tx().wf_apply_hydration_verifications(
+                        &rid_a,
+                        script_version,
+                        &verifications,
+                    )
+                })
+                .await?;
+            }
+
+            let core_p = self.clone();
+            let rid_p = run_id.to_owned();
+            let Some(prepared) = run_blocking(move || core_p.tx().wf_prepare_step(&rid_p)).await?
+            else {
+                let core_s = self.clone();
+                let rid_s = run_id.to_owned();
+                return run_blocking(move || core_s.tx().wf_run_snapshot(&rid_s)).await;
             };
             let run_rev = prepared.run.run_revision;
             let started = Instant::now();
@@ -615,44 +1150,147 @@ impl Core {
             let outcome_label = match &frame {
                 StepFrame::PendingCalls { .. } => "pending_calls",
                 StepFrame::Completed { .. } => "completed",
+                StepFrame::Failed { fault, .. }
+                    if fault.code.class() == WorkflowFaultClass::Infrastructure =>
+                {
+                    "infra_failed"
+                }
                 StepFrame::Failed { .. } => "failed",
             };
             metrics::histogram!("steve_wf_step_duration_seconds", "outcome" => outcome_label)
                 .record(elapsed.as_secs_f64());
 
-            let outcome = self.tx().wf_apply_step_frame(&prepared.run, frame)?;
-            update_active_runs_gauge(self.store().store());
+            if let StepFrame::Failed { ref fault, .. } = frame
+                && fault.code.class() == WorkflowFaultClass::Infrastructure
+                && infra_retries < MAX_STEP_INFRA_RETRIES
+            {
+                infra_retries += 1;
+                metrics::counter!(
+                    "steve_wf_step_infra_retry_total",
+                    "code" => fault.code.as_str()
+                )
+                .increment(1);
+                tracing::warn!(
+                    run_id = %run_id,
+                    code = fault.code.as_str(),
+                    attempt = infra_retries,
+                    max = MAX_STEP_INFRA_RETRIES,
+                    detail = %fault.detail,
+                    "retrying workflow step after transient infrastructure fault"
+                );
+                tokio::time::sleep(STEP_INFRA_RETRY_BASE_DELAY * infra_retries).await;
+                continue;
+            }
+
+            let core_f = self.clone();
+            let expected_run = prepared.run;
+            let outcome = run_blocking(move || {
+                let out = core_f.tx().wf_apply_step_frame(&expected_run, frame)?;
+                update_active_runs_gauge(core_f.store().store());
+                Ok(out)
+            })
+            .await?;
             match outcome {
                 StepApplyOutcome::Done | StepApplyOutcome::PausedWithDecision => break,
-                StepApplyOutcome::StaleRetry => continue,
-            }
-        }
-        self.tx().wf_run_snapshot(run_id)
-    }
-
-    /// Crash/restart continuation: scans all `running` `wf_runs` and idempotently steps each one.
-    /// Already-dispatched calls are never duplicated; settled calls advance the script immediately.
-    pub async fn resume_running_workflows(&self) -> Result<usize> {
-        let runs = self
-            .store()
-            .store()
-            .read(|r| WorkflowRuns(r).list_runs_by_status(WfRunStatus::Running))?;
-        update_active_runs_gauge(self.store().store());
-        let mut stepped = 0usize;
-        for run in runs {
-            if self.workflow_executor().is_some() {
-                if let Err(e) = self.step_workflow_run(&run.id).await {
-                    tracing::warn!(run_id = %run.id, "workflow recovery step failed: {e}");
-                } else {
-                    stepped += 1;
+                StepApplyOutcome::StaleRetry => {
+                    cas_attempts += 1;
+                    continue;
                 }
             }
         }
-        Ok(stepped)
+        let core_s = self.clone();
+        let rid_s = run_id.to_owned();
+        run_blocking(move || core_s.tx().wf_run_snapshot(&rid_s)).await
     }
 }
 
 impl Tx<'_> {
+    /// Owner structured takeover for a script-workflow child item via `POST /items/:id/lifecycle`
+    /// (`command = "finish"` with a structured JSON `result`). Enforces cycle/CAS revision checks,
+    /// rejects unstructured `finish` (`result = None`) with `409 wf_child_structured_delivery_required`,
+    /// validates schema + <= 32 KiB + review rules, stages closing via `request_delivery_close_in`,
+    /// and commits atomically through `commit_cycle`.
+    pub(crate) fn wf_child_finish_by_owner(
+        &mut self,
+        item: &Item,
+        expected_cycle: i64,
+        expected_revision: i64,
+        result: Option<&Value>,
+        reason: Option<&str>,
+        actor: &str,
+    ) -> Result<Item> {
+        if item.cycle == expected_cycle
+            && item.phase == crate::cycle::CLOSED
+            && self.db().store().items().owner_finish_recorded(
+                &item.id,
+                expected_cycle,
+                expected_revision,
+            )?
+        {
+            return Ok(item.clone());
+        }
+        if item.cycle != expected_cycle || item.cas_revision != expected_revision {
+            return Err(crate::cycle::conflict(steve_i18n::t!(
+                "core.item.stale",
+                cycle = item.cycle,
+                revision = item.cas_revision
+            )));
+        }
+        if item.phase == crate::cycle::CLOSED {
+            return Err(crate::cycle::conflict("wf_child_already_closed"));
+        }
+        let Some(result) = result else {
+            return Err(crate::cycle::conflict(
+                "wf_child_structured_delivery_required",
+            ));
+        };
+        let canonical = validate_child_result(self.db().store(), &item.id, Some(result))
+            .map_err(|e| CoreError::Status(409, e.to_string()))?
+            .ok_or_else(|| {
+                CoreError::Status(
+                    404,
+                    format!(
+                        "wf_not_child_item: {} is not a workflow child item",
+                        item.id
+                    ),
+                )
+            })?;
+        let summary_text = reason
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("owner_structured_delivery");
+        self.db().audit(
+            actor,
+            "item.lifecycle.finish",
+            &item.id,
+            &json!({"cycle": item.cycle, "revision": item.cas_revision, "reason": reason}),
+            &item.workspace_id,
+        )?;
+        self.db()
+            .timeline_add(&item.id, actor, "me", summary_text, None)?;
+        let item_id = item.id.clone();
+        self.request_delivery_close_in(
+            &item_id,
+            actor,
+            ClosePolicy::Owner,
+            true,
+            summary_text,
+            None,
+            vec![],
+            |w, committed_item| {
+                let git_fp = capture_git_fingerprint(committed_item);
+                WorkflowRuns(w).stage_attempt_closing_with_git(
+                    &item_id,
+                    committed_item.delivery_revision,
+                    &canonical,
+                    "[]",
+                    git_fp.as_ref(),
+                )?;
+                Ok(())
+            },
+        )
+    }
+
     /// Schedules an asynchronous workflow step wakeup to be spawned once the Core lock drops.
     pub(crate) fn schedule_wf_step(&mut self, run_id: &str) {
         if !self.st.wf_step_wakeups.iter().any(|r| r == run_id) {
@@ -662,6 +1300,9 @@ impl Tx<'_> {
 
     /// Schedules all `Running` workflow runs on startup (`Core::ready`).
     pub(crate) fn schedule_running_wf_runs(&mut self) -> Result<usize> {
+        if self.cfg().no_resume || self.holding() || self.db().store().maintenance() {
+            return Ok(0);
+        }
         let runs = self
             .db()
             .store()
@@ -675,8 +1316,13 @@ impl Tx<'_> {
     }
 
     /// Periodic tick wakeup: only schedules `Running` runs that can actually make progress now
-    /// (zero active attempts, or a `Queued` call with an available parallel slot and free mutex).
+    /// (zero active attempts and no mutex-blocked queued calls, or a `Queued` call with an
+    /// available parallel slot and free mutex). Respects `STEVE_NO_RESUME`, maintenance mode, and
+    /// active occupancy holds.
     pub(crate) fn wf_run_tick(&mut self) -> Result<()> {
+        if self.cfg().no_resume || self.holding() || self.db().store().maintenance() {
+            return Ok(());
+        }
         let store = self.db().store().clone();
         let runs = store.read(|r| WorkflowRuns(r).list_runs_by_status(WfRunStatus::Running))?;
         for run in runs {
@@ -684,15 +1330,16 @@ impl Tx<'_> {
             let needs_step = store.read(|r| {
                 let mut repo = WorkflowRuns(r);
                 let active_attempts = repo.list_active_attempts_for_run(&run.id)?;
+                let calls = repo.list_calls(&run.id)?;
+                let queued_calls: Vec<&WfCall> = calls
+                    .iter()
+                    .filter(|c| c.status == WfCallStatus::Queued)
+                    .collect();
                 if active_attempts.is_empty() {
-                    return Ok::<_, steve_store::StoreError>(true);
-                }
-                let dispatched = repo.count_active_dispatched(&run.id)?;
-                if dispatched >= budget.max_parallel_sessions {
-                    return Ok(false);
-                }
-                for call in repo.list_calls(&run.id)? {
-                    if call.status == WfCallStatus::Queued {
+                    if queued_calls.is_empty() {
+                        return Ok::<_, steve_store::StoreError>(true);
+                    }
+                    for call in queued_calls {
                         let mutex_free = match call.mutex_key.as_deref() {
                             Some(mk) => !repo.has_active_mutex(&run.workspace_id, mk, &call.id)?,
                             None => true,
@@ -700,6 +1347,20 @@ impl Tx<'_> {
                         if mutex_free {
                             return Ok(true);
                         }
+                    }
+                    return Ok(false);
+                }
+                let dispatched = repo.count_active_dispatched(&run.id)?;
+                if dispatched >= budget.max_parallel_sessions {
+                    return Ok(false);
+                }
+                for call in queued_calls {
+                    let mutex_free = match call.mutex_key.as_deref() {
+                        Some(mk) => !repo.has_active_mutex(&run.workspace_id, mk, &call.id)?,
+                        None => true,
+                    };
+                    if mutex_free {
+                        return Ok(true);
                     }
                 }
                 Ok(false)
@@ -804,6 +1465,9 @@ impl Tx<'_> {
             self.stop_wf_child_best_effort(&child_id, "goal_revised", "wf_goal_superseded");
         }
         if !superseded.is_empty() {
+            for run in &superseded {
+                self.c.clear_hydration_cache(&run.id);
+            }
             update_active_runs_gauge(self.db().store());
         }
         Ok(())
@@ -830,7 +1494,7 @@ impl Tx<'_> {
                 review_gate,
             ))
         })?;
-        let budget = WfBudget::load(store, &run.workspace_id)?;
+        let budget = WfBudget::load(&store, &run.workspace_id)?;
         let open_decision = self
             .db()
             .decisions_of_item(&run.parent_item_id)?
@@ -844,7 +1508,7 @@ impl Tx<'_> {
             .map(|d| d.id)
             .or_else(|| {
                 (run.status == WfRunStatus::Paused
-                    && run.pause_reason_code.as_deref() == Some(pause_reason::PLACEMENT_BLOCKED))
+                    && run.pause_reason_code == Some(WfPauseReason::PlacementBlocked))
                 .then(|| {
                     store
                         .read(|r| {
@@ -924,10 +1588,7 @@ impl Tx<'_> {
                 Ok((run.id, true))
             }
             Some(run) => {
-                if matches!(
-                    run.status,
-                    WfRunStatus::Completed | WfRunStatus::Cancelled | WfRunStatus::Superseded
-                ) {
+                if matches!(run.status, WfRunStatus::Completed | WfRunStatus::Superseded) {
                     return Err(crate::cycle::conflict(format!(
                         "wf_run_terminal: cannot revise run in status {}",
                         run.status.as_str()
@@ -940,10 +1601,10 @@ impl Tx<'_> {
                 if versions_used >= budget.max_script_versions {
                     let paused = self.pause_and_open_decision(
                         &run.id,
-                        pause_reason::BUDGET_EXHAUSTED,
+                        WfPauseReason::BudgetExhausted,
                         "ask",
                         DecisionPrompt::WorkflowBudgetExhausted {
-                            scope: "script_versions".into(),
+                            scope: WfBudgetScope::ScriptVersions,
                             used: versions_used,
                             limit: budget.max_script_versions,
                         },
@@ -951,7 +1612,7 @@ impl Tx<'_> {
                             "script_versions budget exhausted: {versions_used}/{}",
                             budget.max_script_versions
                         ),
-                        vec!["cancel".into(), "single_session".into()],
+                        &[WfDecisionChoice::Cancel, WfDecisionChoice::SingleSession],
                     )?;
                     let _ = paused;
                     return Ok((run.id, false));
@@ -972,7 +1633,11 @@ impl Tx<'_> {
         }
     }
 
-    fn wf_pause_parent_run(&mut self, parent_item_id: &str, reason: &str) -> Result<String> {
+    fn wf_pause_parent_run(
+        &mut self,
+        parent_item_id: &str,
+        reason: WfPauseReason,
+    ) -> Result<String> {
         let parent = self.item(parent_item_id)?;
         let run = self
             .db()
@@ -1005,22 +1670,17 @@ impl Tx<'_> {
                 run.status.as_str()
             )));
         }
-        let owner_gated = matches!(
-            run.pause_reason_code.as_deref(),
-            Some(
-                pause_reason::NON_DETERMINISTIC_REPLAY
-                    | pause_reason::BUDGET_EXHAUSTED
-                    | pause_reason::PLACEMENT_BLOCKED
-                    | pause_reason::REVIEW_GATE_BLOCKED
-                    | pause_reason::SCRIPT_FAULT
-            )
-        );
+        let owner_gated = run
+            .pause_reason_code
+            .is_some_and(WfPauseReason::is_owner_gated);
         if owner_gated && !by_owner {
             return Err(CoreError::Status(
                 409,
                 format!(
                     "wf_owner_decision_required: run is paused for {}",
-                    run.pause_reason_code.as_deref().unwrap_or("unknown")
+                    run.pause_reason_code
+                        .map(WfPauseReason::as_str)
+                        .unwrap_or("unknown")
                 ),
             ));
         }
@@ -1074,13 +1734,14 @@ impl Tx<'_> {
             |d| d.subject_type == WF_RUN_SUBJECT && d.subject_id == run_id,
             reason,
         );
+        self.c.clear_hydration_cache(run_id);
         update_active_runs_gauge(self.db().store());
         Ok(())
     }
 
     fn wf_retry_call(&mut self, parent_item_id: &str, call_id: &str) -> Result<(String, bool)> {
         let parent = self.item(parent_item_id)?;
-        let store = self.db().store();
+        let store = self.db().store().clone();
         let (run, call, call_attempts, cycle_attempts) = store.read(|r| {
             let mut repo = WorkflowRuns(r);
             let call = repo
@@ -1102,30 +1763,35 @@ impl Tx<'_> {
                 call.status.as_str()
             )));
         }
-        let budget = WfBudget::load(store, &run.workspace_id)?;
+        let budget = WfBudget::load(&store, &run.workspace_id)?;
         let per_call_limit = budget.max_attempts_per_call + run.extra_attempts_budget;
         let total_limit = budget.max_total_attempts + run.extra_attempts_budget;
 
-        // Requeue the failed call so once budget is available (now or after owner top-up) it runs.
-        store.write(|w| WorkflowRuns(w).requeue_call_for_retry(call_id))?;
+        // Requeue the failed call so once budget is available (now or after owner top-up) it runs,
+        // and stop any downstream child items that were only reached after this failure (e.g. a
+        // catch branch) so replaying up to this call does not trigger NonDeterministicReplay.
+        let children_to_stop = store.write(|w| WorkflowRuns(w).requeue_call_for_retry(call_id))?;
+        for child_id in children_to_stop {
+            self.stop_wf_child_best_effort(&child_id, "workflow", "wf_retry_invalidated_branch");
+        }
 
         if call_attempts >= per_call_limit {
             self.pause_and_open_decision(
                 &run.id,
-                pause_reason::BUDGET_EXHAUSTED,
+                WfPauseReason::BudgetExhausted,
                 "ask",
                 DecisionPrompt::WorkflowBudgetExhausted {
-                    scope: "per_call".into(),
+                    scope: WfBudgetScope::PerCall,
                     used: call_attempts,
                     limit: per_call_limit,
                 },
                 format!(
                     "call_id={call_id} exhausted per_call budget {call_attempts}/{per_call_limit}"
                 ),
-                vec![
-                    "add_budget".into(),
-                    "cancel".into(),
-                    "single_session".into(),
+                &[
+                    WfDecisionChoice::AddBudget,
+                    WfDecisionChoice::Cancel,
+                    WfDecisionChoice::SingleSession,
                 ],
             )?;
             return Ok((run.id, false));
@@ -1133,18 +1799,18 @@ impl Tx<'_> {
         if cycle_attempts >= total_limit {
             self.pause_and_open_decision(
                 &run.id,
-                pause_reason::BUDGET_EXHAUSTED,
+                WfPauseReason::BudgetExhausted,
                 "ask",
                 DecisionPrompt::WorkflowBudgetExhausted {
-                    scope: "cycle_total".into(),
+                    scope: WfBudgetScope::CycleTotal,
                     used: cycle_attempts,
                     limit: total_limit,
                 },
                 format!("cycle budget exhausted {cycle_attempts}/{total_limit}"),
-                vec![
-                    "add_budget".into(),
-                    "cancel".into(),
-                    "single_session".into(),
+                &[
+                    WfDecisionChoice::AddBudget,
+                    WfDecisionChoice::Cancel,
+                    WfDecisionChoice::SingleSession,
                 ],
             )?;
             return Ok((run.id, false));
@@ -1153,7 +1819,7 @@ impl Tx<'_> {
         if run.status == WfRunStatus::Paused {
             store.write(|w| WorkflowRuns(w).resume_run(&run.id))?;
         }
-        update_active_runs_gauge(store);
+        update_active_runs_gauge(&store);
         Ok((run.id, true))
     }
 
@@ -1268,6 +1934,176 @@ impl Tx<'_> {
         })
     }
 
+    /// Collects unverified completed calls from earlier script versions so `step_workflow_run`
+    /// can verify their Git / remote-Node / Hub-artifact outputs completely OFF `Core::tx()`.
+    fn wf_collect_hydration_candidates(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<(i64, Vec<HydrationCandidate>)>> {
+        let store = self.db().store();
+        let Some(run) = store.read(|r| WorkflowRuns(r).get_run(run_id))? else {
+            return Ok(None);
+        };
+        if run.status != WfRunStatus::Running || run.active_script_version <= 1 {
+            return Ok(None);
+        }
+        let Some(parent) = self.db().item(&run.parent_item_id)? else {
+            return Ok(None);
+        };
+        if parent.phase == crate::cycle::CLOSED
+            || parent.cycle != run.parent_cycle
+            || parent.is_paused()
+        {
+            return Ok(None);
+        }
+        let (calls, attempts, active_version_calls) = store.read(|r| {
+            let mut repo = WorkflowRuns(r);
+            Ok::<_, steve_store::StoreError>((
+                repo.list_calls(&run.id)?,
+                repo.list_attempts_for_run(&run.id)?,
+                repo.list_version_calls(&run.id, run.active_script_version)?,
+            ))
+        })?;
+        let recorded_on_active_ver: HashSet<&str> = active_version_calls
+            .iter()
+            .map(|vc| vc.call_id.as_str())
+            .collect();
+        let already_verified: HashSet<String> = self
+            .c
+            .0
+            .workflow_hydration_verified
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&run.id)
+            .map(|set| {
+                set.iter()
+                    .filter(|(ver, _)| *ver == run.active_script_version)
+                    .map(|(_, cid)| cid.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut succeeded_attempt_by_call: HashMap<&str, &WfCallAttempt> = HashMap::new();
+        for a in &attempts {
+            if a.status == WfAttemptStatus::Succeeded {
+                succeeded_attempt_by_call.insert(a.call_id.as_str(), a);
+            }
+        }
+        let node_git = self.c.node_git();
+        let mut candidates = Vec::new();
+        for c in &calls {
+            if c.status != WfCallStatus::Completed
+                || recorded_on_active_ver.contains(c.id.as_str())
+                || already_verified.contains(&c.id)
+            {
+                continue;
+            }
+            let child_item = match succeeded_attempt_by_call
+                .get(c.id.as_str())
+                .and_then(|a| a.child_item_id.as_deref())
+            {
+                Some(cid) => self.db().item(cid)?,
+                None => None,
+            };
+            let effective_project_id = child_item
+                .as_ref()
+                .and_then(|ch| ch.project_id.as_deref())
+                .or(parent.project_id.as_deref());
+            let project = self.db().project(effective_project_id)?;
+            let is_git_project = project.as_ref().is_some_and(|p| p.kind == "git");
+            let is_git_backed = is_git_project
+                || c.git_head.is_some()
+                || c.git_tree.is_some()
+                || c.git_cwd.is_some();
+            let child_item_id = child_item.as_ref().map(|ch| ch.id.clone());
+            let on_node = child_item_id
+                .as_deref()
+                .is_some_and(|cid| node_git.as_deref().is_some_and(|p| p.on_node(cid)));
+            let git_cwd = c
+                .git_cwd
+                .clone()
+                .or_else(|| child_item.as_ref().and_then(|ch| ch.cwd.clone()));
+            let artifact_ids = c
+                .artifact_ids_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+                .unwrap_or_default();
+            candidates.push(HydrationCandidate {
+                call_id: c.id.clone(),
+                is_review: c.is_review,
+                is_git_backed,
+                git_head: c.git_head.clone(),
+                git_tree: c.git_tree.clone(),
+                git_cwd,
+                project_path: project.as_ref().map(|p| p.path.clone()),
+                project_worktree: project.as_ref().is_some_and(|p| p.worktree),
+                child_item_id,
+                on_node,
+                artifact_ids,
+            });
+        }
+        Ok(Some((run.active_script_version, candidates)))
+    }
+
+    /// Commits off-lock hydration verification outcomes (invalidating mismatched calls and caching
+    /// verified `(script_version, call_id)` entries for the active script version).
+    fn wf_apply_hydration_verifications(
+        &mut self,
+        run_id: &str,
+        script_version: i64,
+        outcomes: &[HydrationOutcome],
+    ) -> Result<()> {
+        let store = self.db().store();
+        let mut verified_ids = Vec::new();
+        for outcome in outcomes {
+            match outcome {
+                HydrationOutcome::Valid { call_id } => {
+                    verified_ids.push(call_id.clone());
+                }
+                HydrationOutcome::Invalid {
+                    call_id,
+                    is_review,
+                    reason_code,
+                    detail,
+                } => {
+                    tracing::info!(
+                        run_id = %run_id,
+                        call_id = %call_id,
+                        reason = *reason_code,
+                        detail = %detail,
+                        "cross-version hydration rejected: output fingerprint verification failed; invalidating for rerun"
+                    );
+                    store.write(|w| {
+                        WorkflowRuns(w).invalidate_call_for_rerun(call_id, reason_code, detail)
+                    })?;
+                    metrics::counter!(
+                        "steve_wf_calls_total",
+                        "outcome" => "invalidated",
+                        "review" => if *is_review { "true" } else { "false" },
+                        "hydrated" => "false"
+                    )
+                    .increment(1);
+                }
+                HydrationOutcome::TransientUnavailable { .. } => {}
+            }
+        }
+        if !verified_ids.is_empty() {
+            let mut cache = self
+                .c
+                .0
+                .workflow_hydration_verified
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let entry = cache.entry(run_id.to_owned()).or_default();
+            // Drop stale version keys so cache remains strictly bounded to the active version.
+            entry.retain(|(v, _)| *v == script_version);
+            for cid in verified_ids {
+                entry.insert((script_version, cid));
+            }
+        }
+        Ok(())
+    }
+
     fn wf_prepare_step(&mut self, run_id: &str) -> Result<Option<PreparedStep>> {
         let store = self.db().store();
         let Some(run) = store.read(|r| WorkflowRuns(r).get_run(run_id))? else {
@@ -1310,52 +2146,16 @@ impl Tx<'_> {
             .collect();
 
         let mut latest_failed: HashMap<&str, &WfCallAttempt> = HashMap::new();
-        let mut succeeded_attempt_by_call: HashMap<&str, &WfCallAttempt> = HashMap::new();
         for a in &attempts {
             if a.status == WfAttemptStatus::Failed {
                 latest_failed.insert(a.call_id.as_str(), a);
-            } else if a.status == WfAttemptStatus::Succeeded {
-                succeeded_attempt_by_call.insert(a.call_id.as_str(), a);
             }
         }
 
-        let mut invalidated_any = false;
         let mut recorded_calls = BTreeMap::new();
         for c in &calls {
             match c.status {
                 WfCallStatus::Completed => {
-                    // Cross-version lazy hydration verification: before reusing a completed call
-                    // produced by an earlier script version, verify its Git tree/commit output
-                    // fingerprint (or Hub artifact existence for non-Git calls). Never hydrate an
-                    // unverified or mutated Git output.
-                    if run.active_script_version > 1
-                        && !recorded_on_active_ver.contains(c.id.as_str())
-                        && let Err((reason_code, detail)) = self.verify_output_for_hydration(
-                            &parent,
-                            c,
-                            succeeded_attempt_by_call.get(c.id.as_str()).copied(),
-                        )?
-                    {
-                        tracing::info!(
-                            run_id = %run.id,
-                            call_id = %c.id,
-                            reason = reason_code,
-                            detail = %detail,
-                            "cross-version hydration rejected: output fingerprint verification failed; invalidating for rerun"
-                        );
-                        store.write(|w| {
-                            WorkflowRuns(w).invalidate_call_for_rerun(&c.id, reason_code, &detail)
-                        })?;
-                        metrics::counter!(
-                            "steve_wf_calls_total",
-                            "outcome" => "invalidated",
-                            "review" => if c.is_review { "true" } else { "false" },
-                            "hydrated" => "false"
-                        )
-                        .increment(1);
-                        invalidated_any = true;
-                        continue;
-                    }
                     let result: Value = c
                         .result_json
                         .as_deref()
@@ -1371,49 +2171,51 @@ impl Tx<'_> {
                     );
                 }
                 WfCallStatus::Failed => {
-                    let (error_code, message) = latest_failed
-                        .get(c.id.as_str())
-                        .map(|a| {
-                            (
-                                a.error_code
-                                    .clone()
-                                    .unwrap_or_else(|| "child_failed".into()),
-                                a.error_message
-                                    .clone()
-                                    .unwrap_or_else(|| "workflow child failed".into()),
-                            )
-                        })
-                        .unwrap_or_else(|| ("child_failed".into(), "workflow child failed".into()));
-                    recorded_calls.insert(
-                        c.identity_hash.clone(),
-                        RecordedCall::Failed {
-                            error_code,
-                            message,
-                            settled_at_revision: c.settled_at_revision,
-                        },
-                    );
+                    // Only hydrate failed outcomes within the same script version (§2.3: cross-version
+                    // hydration only reuses `completed` calls, never poisoning newer versions).
+                    if recorded_on_active_ver.contains(c.id.as_str()) {
+                        let (error_code, message) = latest_failed
+                            .get(c.id.as_str())
+                            .map(|a| {
+                                (
+                                    a.error_code
+                                        .clone()
+                                        .unwrap_or_else(|| "child_failed".into()),
+                                    a.error_message
+                                        .clone()
+                                        .unwrap_or_else(|| "workflow child failed".into()),
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                ("child_failed".into(), "workflow child failed".into())
+                            });
+                        recorded_calls.insert(
+                            c.identity_hash.clone(),
+                            RecordedCall::Failed {
+                                error_code,
+                                message,
+                                settled_at_revision: c.settled_at_revision,
+                            },
+                        );
+                    }
                 }
                 WfCallStatus::Cancelled => {
-                    recorded_calls.insert(
-                        c.identity_hash.clone(),
-                        RecordedCall::Cancelled {
-                            settled_at_revision: c.settled_at_revision,
-                        },
-                    );
+                    // Only preserve cancelled outcomes within the same script version (§2.3).
+                    if recorded_on_active_ver.contains(c.id.as_str()) {
+                        recorded_calls.insert(
+                            c.identity_hash.clone(),
+                            RecordedCall::Cancelled {
+                                settled_at_revision: c.settled_at_revision,
+                            },
+                        );
+                    }
                 }
                 WfCallStatus::Queued | WfCallStatus::Dispatched => {}
             }
         }
 
-        // Reload run if invalidation bumped run_revision so StepInput and CAS revision match.
-        let run = if invalidated_any {
-            store
-                .read(|r| WorkflowRuns(r).get_run(&run.id))?
-                .ok_or(steve_store::StoreError::NotFound("wf_run"))?
-        } else {
-            run
-        };
-
+        let known_call_hashes: BTreeSet<String> =
+            calls.iter().map(|c| c.identity_hash.clone()).collect();
         let input = StepInput {
             script_source: script.script_source,
             state: WorkflowState {
@@ -1424,117 +2226,10 @@ impl Tx<'_> {
                 script_version: run.active_script_version,
             },
             recorded_calls,
+            known_call_hashes,
             limits: None,
         };
         Ok(Some(PreparedStep { run, input }))
-    }
-
-    /// Verifies a completed call's verifiable output identity before cross-version lazy hydration:
-    /// - For Git-backed calls (recorded Git fingerprint OR bound to a `kind == "git"` project):
-    ///   requires both `git_head` and `git_tree` to be present and still match either the live
-    ///   worktree's `(HEAD, tree)` or (if the worktree was tidied) the repository's `HEAD^{tree}`.
-    /// - For non-Git calls: verifies every recorded Hub artifact ID still exists.
-    fn verify_output_for_hydration(
-        &self,
-        parent: &Item,
-        call: &WfCall,
-        succeeded_attempt: Option<&WfCallAttempt>,
-    ) -> Result<std::result::Result<(), (&'static str, String)>> {
-        let child_item = match succeeded_attempt.and_then(|a| a.child_item_id.as_deref()) {
-            Some(cid) => self.db().item(cid)?,
-            None => None,
-        };
-        let effective_project_id = child_item
-            .as_ref()
-            .and_then(|c| c.project_id.as_deref())
-            .or(parent.project_id.as_deref());
-        let project = self.db().project(effective_project_id)?;
-        let is_git_project = project.as_ref().is_some_and(|p| p.kind == "git");
-        let is_git_backed = is_git_project
-            || call.git_head.is_some()
-            || call.git_tree.is_some()
-            || call.git_cwd.is_some();
-
-        if is_git_backed {
-            let (Some(rec_head), Some(rec_tree)) =
-                (call.git_head.as_deref(), call.git_tree.as_deref())
-            else {
-                return Ok(Err((
-                    "missing_git_fingerprint",
-                    format!(
-                        "git-backed call {} has no recorded (git_head, git_tree) fingerprint",
-                        call.id
-                    ),
-                )));
-            };
-            if rec_head.is_empty() || rec_tree.is_empty() {
-                return Ok(Err((
-                    "missing_git_fingerprint",
-                    format!("git-backed call {} has empty git fingerprint", call.id),
-                )));
-            }
-            let cwd = call
-                .git_cwd
-                .as_deref()
-                .or_else(|| child_item.as_ref().and_then(|c| c.cwd.as_deref()));
-            if let Some(dir) = cwd.filter(|d| !d.is_empty() && std::path::Path::new(d).exists()) {
-                let Some(live_raw) = crate::cycle::fingerprint(Some(dir)) else {
-                    return Ok(Err((
-                        "git_fingerprint_unreadable",
-                        format!("unable to compute live git fingerprint for {dir}"),
-                    )));
-                };
-                let live = crate::upstream::parse(&live_raw);
-                if live.head == rec_head && live.tree == rec_tree {
-                    return Ok(Ok(()));
-                }
-                return Ok(Err((
-                    "git_fingerprint_mismatch",
-                    format!(
-                        "recorded {rec_head}:{rec_tree} != live {}:{} in {dir}",
-                        live.head, live.tree
-                    ),
-                )));
-            }
-            // Worktree directory no longer exists (e.g. tidied after commit): verify the exact
-            // commit and its tree object still match in the project's main Git repository.
-            if let Some(repo_path) = project.as_ref().map(|p| p.path.as_str())
-                && git_commit_tree_matches(repo_path, rec_head, rec_tree)
-            {
-                return Ok(Ok(()));
-            }
-            return Ok(Err((
-                "git_fingerprint_mismatch",
-                format!(
-                    "worktree missing and commit tree {rec_head}^{{tree}} != {rec_tree} could not be verified"
-                ),
-            )));
-        }
-
-        // Non-Git call: verify any recorded Hub artifacts still exist.
-        if let Some(raw_ids) = call.artifact_ids_json.as_deref()
-            && let Ok(ids) = serde_json::from_str::<Vec<String>>(raw_ids)
-            && !ids.is_empty()
-            && let Some(cid) = child_item.as_ref().map(|c| c.id.as_str())
-        {
-            let present: HashSet<String> = self
-                .db()
-                .store()
-                .artifacts()
-                .list(cid)?
-                .into_iter()
-                .map(|a| a.id)
-                .collect();
-            for aid in &ids {
-                if !present.contains(aid) {
-                    return Ok(Err((
-                        "artifact_missing",
-                        format!("recorded artifact {aid} is no longer present on {cid}"),
-                    )));
-                }
-            }
-        }
-        Ok(Ok(()))
     }
 
     fn wf_apply_step_frame(
@@ -1557,19 +2252,36 @@ impl Tx<'_> {
 
         match frame {
             StepFrame::Failed { fault, .. } => {
-                let code = serde_json::to_value(fault.code)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "runtime_error".into());
+                let code = fault.code.as_str().to_owned();
+                let (reason, options): (WfPauseReason, &[WfDecisionChoice]) =
+                    match fault.code.class() {
+                        WorkflowFaultClass::Infrastructure => (
+                            WfPauseReason::InfrastructureFault,
+                            &[
+                                WfDecisionChoice::Retry,
+                                WfDecisionChoice::Revise,
+                                WfDecisionChoice::Cancel,
+                                WfDecisionChoice::SingleSession,
+                            ],
+                        ),
+                        WorkflowFaultClass::Script => (
+                            WfPauseReason::ScriptFault,
+                            &[
+                                WfDecisionChoice::Revise,
+                                WfDecisionChoice::Cancel,
+                                WfDecisionChoice::SingleSession,
+                            ],
+                        ),
+                    };
                 let _dec_id = self.pause_and_open_decision(
                     &current.id,
-                    pause_reason::SCRIPT_FAULT,
+                    reason,
                     "fail",
                     DecisionPrompt::WorkflowScriptFault {
                         fault_code: code.clone(),
                     },
                     format!("fault_code={code}: {}", fault.detail),
-                    vec!["revise".into(), "cancel".into(), "single_session".into()],
+                    options,
                 )?;
                 return Ok(StepApplyOutcome::PausedWithDecision);
             }
@@ -1599,6 +2311,27 @@ impl Tx<'_> {
                 {
                     return Ok(StepApplyOutcome::PausedWithDecision);
                 }
+                // Cancel any remaining active calls/attempts when the script completes (e.g. an
+                // un-awaited call or sibling in `try { await all([a, b]) } catch { return x }`).
+                let remaining_children = store.write(|w| {
+                    let mut repo = WorkflowRuns(w);
+                    let mut to_stop = Vec::new();
+                    for call in repo.list_calls(&current.id)? {
+                        if call.status.is_active()
+                            && let Some(cid) = repo.cancel_call(&call.id)?
+                        {
+                            to_stop.push(cid);
+                        }
+                    }
+                    Ok::<_, steve_store::StoreError>(to_stop)
+                })?;
+                for child_id in remaining_children {
+                    self.stop_wf_child_best_effort(
+                        &child_id,
+                        "workflow",
+                        "wf_run_completed_cleanup",
+                    );
+                }
                 let canonical = to_canonical_json(&result)
                     .map_err(|e| CoreError::Status(400, format!("wf_invalid_final_result: {e}")))?;
                 let verdict =
@@ -1610,6 +2343,7 @@ impl Tx<'_> {
                         store.write(|w| {
                             WorkflowRuns(w).complete_run(&current.id, &canonical, None)
                         })?;
+                        self.c.clear_hydration_cache(&current.id);
                         Ok(StepApplyOutcome::Done)
                     }
                     ReviewGateVerdict::Verified { review_call_id } => {
@@ -1622,6 +2356,7 @@ impl Tx<'_> {
                                 Some(&review_call_id),
                             )
                         })?;
+                        self.c.clear_hydration_cache(&current.id);
                         Ok(StepApplyOutcome::Done)
                     }
                     ReviewGateVerdict::Blocked { reason } => {
@@ -1630,13 +2365,17 @@ impl Tx<'_> {
                             .increment(1);
                         let _dec_id = self.pause_and_open_decision(
                             &current.id,
-                            pause_reason::REVIEW_GATE_BLOCKED,
+                            WfPauseReason::ReviewGateBlocked,
                             "ask",
                             DecisionPrompt::WorkflowReviewBlocked {
                                 reason: code.into(),
                             },
                             serde_json::to_string(&reason).unwrap_or_else(|_| code.into()),
-                            vec!["revise".into(), "single_session".into(), "cancel".into()],
+                            &[
+                                WfDecisionChoice::Revise,
+                                WfDecisionChoice::SingleSession,
+                                WfDecisionChoice::Cancel,
+                            ],
                         )?;
                         Ok(StepApplyOutcome::PausedWithDecision)
                     }
@@ -1654,12 +2393,26 @@ impl Tx<'_> {
         emitted_calls: &[CallSpec],
         cancel_identities: &[String],
     ) -> Result<Option<String>> {
+        let store = self.db().store().clone();
+        let (prev_version_calls, existing_calls) = store.read(|r| {
+            let mut repo = WorkflowRuns(r);
+            Ok::<_, steve_store::StoreError>((
+                repo.list_version_calls(&run.id, run.active_script_version)?,
+                repo.list_calls(&run.id)?,
+            ))
+        })?;
+        let existing_by_hash: HashMap<&str, &WfCall> = existing_calls
+            .iter()
+            .map(|c| (c.identity_hash.as_str(), c))
+            .collect();
+
         // 1. Authoritative CallIdentity re-verification (never trust subprocess hashes blindly).
+        //    Compact references omit prompt/options only for calls already persisted in wf_calls.
         for (idx, spec) in emitted_calls.iter().enumerate() {
             if spec.seq_no as usize != idx {
                 let dec_id = self.pause_and_open_decision(
                     &run.id,
-                    pause_reason::SCRIPT_FAULT,
+                    WfPauseReason::InfrastructureFault,
                     "fail",
                     DecisionPrompt::WorkflowScriptFault {
                         fault_code: "protocol_error".into(),
@@ -1668,34 +2421,86 @@ impl Tx<'_> {
                         "emitted_calls seq_no mismatch at index {idx}: got {}",
                         spec.seq_no
                     ),
-                    vec!["revise".into(), "cancel".into(), "single_session".into()],
+                    &[
+                        WfDecisionChoice::Retry,
+                        WfDecisionChoice::Revise,
+                        WfDecisionChoice::Cancel,
+                        WfDecisionChoice::SingleSession,
+                    ],
                 )?;
                 return Ok(Some(dec_id));
             }
-            if let Err(err) = spec.identity.verify(&spec.prompt, &spec.options) {
+            if let (Some(prompt), Some(options)) = (spec.prompt.as_deref(), spec.options.as_ref()) {
+                if let Err(err) = spec.identity.verify(prompt, options) {
+                    let dec_id = self.pause_and_open_decision(
+                        &run.id,
+                        WfPauseReason::InfrastructureFault,
+                        "fail",
+                        DecisionPrompt::WorkflowScriptFault {
+                            fault_code: "protocol_error".into(),
+                        },
+                        format!(
+                            "authoritative CallIdentity verification failed at seq {idx}: {err}"
+                        ),
+                        &[
+                            WfDecisionChoice::Retry,
+                            WfDecisionChoice::Revise,
+                            WfDecisionChoice::Cancel,
+                            WfDecisionChoice::SingleSession,
+                        ],
+                    )?;
+                    return Ok(Some(dec_id));
+                }
+            } else if spec.is_compact_known() {
+                let valid = existing_by_hash
+                    .get(spec.identity.identity_hash.as_str())
+                    .is_some_and(|existing| {
+                        sha256_hex(existing.prompt.as_bytes()) == spec.identity.prompt_sha256
+                            && existing.phase == spec.identity.phase
+                            && existing.occurrence == i64::from(spec.identity.occurrence)
+                    });
+                if !valid {
+                    let dec_id = self.pause_and_open_decision(
+                        &run.id,
+                        WfPauseReason::InfrastructureFault,
+                        "fail",
+                        DecisionPrompt::WorkflowScriptFault {
+                            fault_code: "protocol_error".into(),
+                        },
+                        format!(
+                            "compact CallSpec at seq {idx} does not match any known persisted call ({})",
+                            spec.identity.identity_hash
+                        ),
+                        &[
+                            WfDecisionChoice::Retry,
+                            WfDecisionChoice::Revise,
+                            WfDecisionChoice::Cancel,
+                            WfDecisionChoice::SingleSession,
+                        ],
+                    )?;
+                    return Ok(Some(dec_id));
+                }
+            } else {
                 let dec_id = self.pause_and_open_decision(
                     &run.id,
-                    pause_reason::SCRIPT_FAULT,
+                    WfPauseReason::InfrastructureFault,
                     "fail",
                     DecisionPrompt::WorkflowScriptFault {
                         fault_code: "protocol_error".into(),
                     },
-                    format!("authoritative CallIdentity verification failed at seq {idx}: {err}"),
-                    vec!["revise".into(), "cancel".into(), "single_session".into()],
+                    format!("malformed partial CallSpec at seq {idx}"),
+                    &[
+                        WfDecisionChoice::Retry,
+                        WfDecisionChoice::Revise,
+                        WfDecisionChoice::Cancel,
+                        WfDecisionChoice::SingleSession,
+                    ],
                 )?;
                 return Ok(Some(dec_id));
             }
         }
 
-        let store = self.db().store().clone();
         // 2. Same-version strict superset check (§2.3).
-        let (prev_version_calls, existing_calls) = store.read(|r| {
-            let mut repo = WorkflowRuns(r);
-            Ok::<_, steve_store::StoreError>((
-                repo.list_version_calls(&run.id, run.active_script_version)?,
-                repo.list_calls(&run.id)?,
-            ))
-        })?;
         let call_hash_by_id: HashMap<&str, &str> = existing_calls
             .iter()
             .map(|c| (c.id.as_str(), c.identity_hash.as_str()))
@@ -1724,11 +2529,15 @@ impl Tx<'_> {
         if let Some(detail) = drift {
             let dec_id = self.pause_and_open_decision(
                 &run.id,
-                pause_reason::NON_DETERMINISTIC_REPLAY,
+                WfPauseReason::NonDeterministicReplay,
                 "fail",
                 DecisionPrompt::WorkflowNonDeterministicReplay,
                 detail,
-                vec!["revise".into(), "cancel".into(), "single_session".into()],
+                &[
+                    WfDecisionChoice::Revise,
+                    WfDecisionChoice::Cancel,
+                    WfDecisionChoice::SingleSession,
+                ],
             )?;
             return Ok(Some(dec_id));
         }
@@ -1745,27 +2554,44 @@ impl Tx<'_> {
             let mut repo = WorkflowRuns(w);
             let mut hydrated_metrics: Vec<bool> = Vec::new();
             for (idx, spec) in emitted_calls.iter().enumerate() {
-                let schema_json = spec
-                    .options
-                    .schema
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()?;
-                let (call, created) = repo.ensure_call(&NewWfCall {
-                    run_id: &run.id,
-                    workspace_id: &run.workspace_id,
-                    identity_hash: &spec.identity.identity_hash,
-                    phase: spec.identity.phase.as_deref(),
-                    title: spec.options.title.as_deref(),
-                    prompt: &spec.prompt,
-                    options_canonical_json: &spec.identity.options_canonical_json,
-                    schema_json: schema_json.as_deref(),
-                    occurrence: i64::from(spec.identity.occurrence),
-                    is_review: spec.options.is_review(),
-                    mutex_key: spec.options.mutex_key.as_deref(),
-                })?;
+                let (mut call, created) = if let (Some(prompt), Some(options)) =
+                    (spec.prompt.as_deref(), spec.options.as_ref())
+                {
+                    let schema_json = options
+                        .schema
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?;
+                    repo.ensure_call(&NewWfCall {
+                        run_id: &run.id,
+                        workspace_id: &run.workspace_id,
+                        identity_hash: &spec.identity.identity_hash,
+                        phase: spec.identity.phase.as_deref(),
+                        title: options.title.as_deref(),
+                        prompt,
+                        options_canonical_json: &spec.identity.options_canonical_json,
+                        schema_json: schema_json.as_deref(),
+                        occurrence: i64::from(spec.identity.occurrence),
+                        is_review: options.is_review(),
+                        mutex_key: options.mutex_key.as_deref(),
+                    })?
+                } else {
+                    let existing = repo
+                        .get_call_by_hash(&run.id, &spec.identity.identity_hash)?
+                        .ok_or(steve_store::StoreError::NotFound("wf_call"))?;
+                    (existing, false)
+                };
                 if idx >= prev_len {
-                    let hydrated_from = if !created {
+                    // Only `completed` calls hydrate across versions (§2.3). When a new script
+                    // version (or post-retry replay) reaches a previously `failed` or `cancelled`
+                    // call not yet bound to this version, re-queue it fresh while keeping prior
+                    // attempts in `wf_call_attempts` for cycle budget accounting.
+                    if !created
+                        && matches!(call.status, WfCallStatus::Failed | WfCallStatus::Cancelled)
+                    {
+                        call = repo.reset_call_for_new_version(&call.id)?;
+                    }
+                    let hydrated_from = if !created && call.status == WfCallStatus::Completed {
                         repo.first_version_of_call(&run.id, &call.id)?
                             .filter(|&v| v < run.active_script_version)
                     } else {
@@ -1880,10 +2706,10 @@ impl Tx<'_> {
             if call_attempts >= per_call_limit {
                 let _dec_id = self.pause_and_open_decision(
                     &run.id,
-                    pause_reason::BUDGET_EXHAUSTED,
+                    WfPauseReason::BudgetExhausted,
                     "ask",
                     DecisionPrompt::WorkflowBudgetExhausted {
-                        scope: "per_call".into(),
+                        scope: WfBudgetScope::PerCall,
                         used: call_attempts,
                         limit: per_call_limit,
                     },
@@ -1891,10 +2717,10 @@ impl Tx<'_> {
                         "call_id={} per_call budget {call_attempts}/{per_call_limit}",
                         call.id
                     ),
-                    vec![
-                        "add_budget".into(),
-                        "cancel".into(),
-                        "single_session".into(),
+                    &[
+                        WfDecisionChoice::AddBudget,
+                        WfDecisionChoice::Cancel,
+                        WfDecisionChoice::SingleSession,
                     ],
                 )?;
                 return Ok(StepApplyOutcome::PausedWithDecision);
@@ -1902,25 +2728,30 @@ impl Tx<'_> {
             if cycle_attempts >= total_limit {
                 let _dec_id = self.pause_and_open_decision(
                     &run.id,
-                    pause_reason::BUDGET_EXHAUSTED,
+                    WfPauseReason::BudgetExhausted,
                     "ask",
                     DecisionPrompt::WorkflowBudgetExhausted {
-                        scope: "cycle_total".into(),
+                        scope: WfBudgetScope::CycleTotal,
                         used: cycle_attempts,
                         limit: total_limit,
                     },
                     format!("cycle_total budget {cycle_attempts}/{total_limit}"),
-                    vec![
-                        "add_budget".into(),
-                        "cancel".into(),
-                        "single_session".into(),
+                    &[
+                        WfDecisionChoice::AddBudget,
+                        WfDecisionChoice::Cancel,
+                        WfDecisionChoice::SingleSession,
                     ],
                 )?;
                 return Ok(StepApplyOutcome::PausedWithDecision);
             }
 
             let options: CallOptions =
-                serde_json::from_str(&call.options_canonical_json).unwrap_or_default();
+                serde_json::from_str(&call.options_canonical_json).map_err(|e| {
+                    CoreError::Msg(format!(
+                        "wf_corrupt_call_options: call {} has invalid options_canonical_json: {e}",
+                        call.id
+                    ))
+                })?;
             let attempt_no = call_attempts + 1;
 
             match self.select_and_dispatch_call(run, &parent, &call, &options, attempt_no)? {
@@ -1932,7 +2763,7 @@ impl Tx<'_> {
             }
         }
         if any_blocked {
-            store.write(|w| WorkflowRuns(w).pause_run(&run.id, pause_reason::PLACEMENT_BLOCKED))?;
+            store.write(|w| WorkflowRuns(w).pause_run(&run.id, WfPauseReason::PlacementBlocked))?;
             self.open_or_update_no_executor_card(&run.workspace_id)?;
             update_active_runs_gauge(&store);
             return Ok(StepApplyOutcome::PausedWithDecision);
@@ -1951,200 +2782,117 @@ impl Tx<'_> {
         let started = Instant::now();
         let ws = run.workspace_id.as_str();
         let store = self.db().store().clone();
-        let team =
-            store.read(|r| steve_store::bot_dispatch::selected(r, ws, options.team.as_deref()))?;
         let project_opt: Option<Option<String>> = match options.project.as_deref() {
             Some(p) if !p.is_empty() => Some(Some(p.to_owned())),
             _ => Some(parent.project_id.clone()),
         };
-        let tags = options.tags.clone().unwrap_or_default();
-        let specialties = options.specialties.clone().unwrap_or_default();
-        let explicit_bot = options.bot.as_deref().filter(|b| !b.is_empty());
-        let req = crate::placement::DispatchRequest {
-            workspace: ws,
-            bot: explicit_bot,
-            harness: None,
-            model: None,
-            effort: None,
-            team: team.as_ref(),
-            project: &project_opt,
-            goal: &call.prompt,
-            tags: &tags,
-            required_specialties: &specialties,
-            node: options.node.as_deref(),
-            required_nodes: None,
-        };
-        let default_model = |rt_id: &str| self.c.models().agent_model(ws, rt_id);
-
-        let (selected, deferred_by_setting) =
-            match crate::placement::select(self.db(), self.rt(), req, default_model) {
-                Ok(pair) => (Ok(pair), false),
-                Err(CoreError::Placement(blocked)) if explicit_bot.is_none() => {
-                    let policy =
-                        store.read(|r| steve_store::bot_dispatch::no_executor_policy(r, ws))?;
-                    metrics::counter!(
-                        "steve_dispatch_no_executor_total",
-                        "policy" => policy.as_str(),
-                        "reason" => blocked.reason.as_str()
-                    )
-                    .increment(1);
-                    if policy == steve_types::NoExecutorPolicy::Steve {
-                        let coord_req = crate::placement::DispatchRequest {
-                            workspace: ws,
-                            bot: None,
-                            harness: None,
-                            model: None,
-                            effort: None,
-                            team: team.as_ref(),
-                            project: &project_opt,
-                            goal: &call.prompt,
-                            tags: &tags,
-                            required_specialties: &specialties,
-                            node: options.node.as_deref(),
-                            required_nodes: None,
-                        };
-                        match crate::placement::select_coordinator(
-                            self.db(),
-                            self.rt(),
-                            coord_req,
-                            default_model,
-                            blocked.clone(),
-                            steve_types::CoordinatorDeferSource::Setting,
-                        ) {
-                            Ok(pair) => (Ok(pair), true),
-                            Err(CoreError::Placement(coord_blocked)) => (Err(coord_blocked), false),
-                            Err(e) => return Err(e),
-                        }
-                    } else {
-                        (Err(blocked), false)
-                    }
+        let title = call
+            .title
+            .clone()
+            .or_else(|| call.phase.clone())
+            .unwrap_or_else(|| format!("Workflow step {}", call.occurrence + 1));
+        let opening = build_child_opening_prompt(call);
+        let parent_requester =
+            store.read(|r| steve_store::item_repo::requested_by(r, &parent.id))?;
+        let tag_ids = if let Some(requested) = options.tags.as_deref() {
+            let ws_tags = self.db().store().tags().list(ws)?;
+            let mut resolved = Vec::new();
+            for raw in requested {
+                let needle = raw.trim();
+                if needle.is_empty() {
+                    continue;
                 }
-                Err(CoreError::Placement(blocked)) => (Err(blocked), false),
-                Err(e) => return Err(e),
-            };
-
-        let (placement, project) = match selected {
-            Ok(pair) => pair,
-            Err(blocked) => {
-                // Unassigned workflow child follows the exact same NO_EXECUTOR coordinator flow as
-                // ordinary items (§6 #4): create unassigned child item, record item_placement_waits
-                // + deferred opening prompt + blocked wf_call_attempts row, propose a Bot if possible,
-                // and let dispatch_pending_calls open/update the single workspace NO_EXECUTOR card.
-                let title = call
-                    .title
-                    .clone()
-                    .or_else(|| call.phase.clone())
-                    .unwrap_or_else(|| format!("Workflow step {}", call.occurrence + 1));
-                let opening = build_child_opening_prompt(call);
-                let db = self.db().clone();
-                let project = db
-                    .project(project_opt.as_ref().and_then(|p| p.as_deref()))?
-                    .filter(|p| p.workspace_id == ws && !p.archived);
-                let child = store.write::<_, CoreError>(|w| {
-                    let (settled_tags, _) =
-                        crate::kinds::settle(&db, ws, &[], &title, &call.prompt)?;
-                    let parent_requester = steve_store::item_repo::requested_by(w, &parent.id)?;
-                    let child = db.item_create(
-                        ws,
-                        &NewItem {
-                            title: title.clone(),
-                            goal: call.prompt.clone(),
-                            bot_id: String::new(),
-                            project_id: project.as_ref().map(|p| p.id.clone()),
-                            kind: None,
-                            phase: None,
-                            source: Some(("workflow".into(), "script".into())),
-                            parent: Some(parent_ref(&parent.id)),
-                            tags: settled_tags,
-                            requested_by: parent_requester,
-                        },
-                    )?;
-                    db.timeline_add_files(
-                        &child.id,
-                        "steve",
-                        &format!("deferred_start:{}", child.cycle),
-                        &opening,
-                        None,
-                        &[],
-                    )?;
-                    if let Some(team) = team.as_ref() {
-                        steve_store::bot_dispatch::snapshot(w, &child.id, team, "inherited")?;
-                    }
-                    steve_store::bot_dispatch::record_wait(w, ws, &child.id, &blocked, None)?;
-                    let current_rev = WorkflowRuns(w)
-                        .get_run(&run.id)?
-                        .map(|r| r.run_revision)
-                        .unwrap_or(run.run_revision);
-                    WorkflowRuns(w).create_attempt(&NewWfAttempt {
-                        call_id: &call.id,
-                        run_id: &run.id,
-                        parent_item_id: &run.parent_item_id,
-                        parent_cycle: run.parent_cycle,
-                        attempt_no,
-                        child_item_id: Some(&child.id),
-                        bot_id: None,
-                        placement_id: None,
-                        harness: None,
-                        model: None,
-                        status: WfAttemptStatus::Blocked,
-                        dispatched_at_revision: current_rev,
-                        error_code: Some(blocked.reason.as_str()),
-                        error_message: None,
-                    })?;
-                    Ok(child)
-                })?;
-                let proposal_req = crate::CreateItem {
-                    ws: ws.to_owned(),
-                    title,
-                    goal: call.prompt.clone(),
-                    project: project_opt,
-                    team: options.team.clone(),
-                    required_specialties: specialties,
-                    node: options.node.clone(),
-                    ..Default::default()
-                };
-                match self.rt().propose_bot(&proposal_req, &blocked) {
-                    Ok(Some(proposal)) => {
-                        store.write(|w| {
-                            steve_store::bot_dispatch::set_wait_proposal(w, &child.id, &proposal.id)
-                        })?;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(item = %child.id, "workflow bot proposal skipped: {error}");
-                    }
+                if let Some(found) = ws_tags
+                    .iter()
+                    .find(|t| t.id == needle || t.name.eq_ignore_ascii_case(needle))
+                    && !resolved.contains(&found.id)
+                {
+                    resolved.push(found.id.clone());
                 }
-                metrics::counter!(
-                    "steve_wf_calls_total",
-                    "outcome" => "blocked",
-                    "review" => if call.is_review { "true" } else { "false" },
-                    "hydrated" => "false"
-                )
-                .increment(1);
-                return Ok(DispatchCallResult::Blocked);
             }
+            resolved
+        } else {
+            vec![]
         };
 
-        if deferred_by_setting {
+        let create_req = crate::CreateItem {
+            ws: ws.to_owned(),
+            title,
+            goal: call.prompt.clone(),
+            bot: options
+                .bot
+                .as_deref()
+                .filter(|b| !b.is_empty())
+                .map(str::to_owned),
+            team: options.team.clone(),
+            node: options.node.clone(),
+            node_tag: options.node_tag.clone(),
+            required_specialties: options.specialties.clone().unwrap_or_default(),
+            project: project_opt,
+            source: Some(("workflow".into(), "script".into())),
+            parent: Some(parent_ref(&parent.id)),
+            tag_ids,
+            opening: Some(opening),
+            actor: Some("steve".into()),
+            requester: parent_requester,
+            ..Default::default()
+        };
+
+        let mut dispatch_rev = run.run_revision;
+        let created = self.create_item_with(create_req, |w, child, placement, blocked| {
+            if let Some(placement) = placement {
+                dispatch_rev = WorkflowRuns(w).bump_run_revision(&run.id)?;
+                WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                    call_id: &call.id,
+                    run_id: &run.id,
+                    parent_item_id: &run.parent_item_id,
+                    parent_cycle: run.parent_cycle,
+                    attempt_no,
+                    child_item_id: Some(&child.id),
+                    bot_id: Some(placement.explanation.bot.as_str()),
+                    placement_id: None,
+                    harness: Some(&placement.harness),
+                    model: placement.model.as_deref(),
+                    status: WfAttemptStatus::Dispatched,
+                    dispatched_at_revision: dispatch_rev,
+                    error_code: None,
+                    error_message: None,
+                })?;
+            } else if let Some(blocked) = blocked {
+                let current_rev = WorkflowRuns(w)
+                    .get_run(&run.id)?
+                    .map(|r| r.run_revision)
+                    .unwrap_or(run.run_revision);
+                WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                    call_id: &call.id,
+                    run_id: &run.id,
+                    parent_item_id: &run.parent_item_id,
+                    parent_cycle: run.parent_cycle,
+                    attempt_no,
+                    child_item_id: Some(&child.id),
+                    bot_id: None,
+                    placement_id: None,
+                    harness: None,
+                    model: None,
+                    status: WfAttemptStatus::Blocked,
+                    dispatched_at_revision: current_rev,
+                    error_code: Some(blocked.reason.as_str()),
+                    error_message: None,
+                })?;
+            }
+            Ok(())
+        })?;
+
+        if created.blocked.is_some() {
             metrics::counter!(
-                "steve_coordinator_self_executions_total",
-                "source" => steve_types::CoordinatorDeferSource::Setting.as_str()
+                "steve_wf_calls_total",
+                "outcome" => "blocked",
+                "review" => if call.is_review { "true" } else { "false" },
+                "hydrated" => "false"
             )
             .increment(1);
+            return Ok(DispatchCallResult::Blocked);
         }
-
-        let (child_item, dispatch_rev) = self.create_child_and_attempt(
-            run,
-            parent,
-            call,
-            attempt_no,
-            team.as_ref(),
-            &placement,
-            project.as_ref(),
-        )?;
-        let opening = build_child_opening_prompt(call);
-        let bot_id = placement.explanation.bot.as_str();
-        self.start_or_fail(&child_item.id, Some(&opening), Some(bot_id))?;
 
         let duration_ms = started.elapsed().as_millis() as u64;
         tracing::info_span!(
@@ -2192,7 +2940,7 @@ impl Tx<'_> {
         )?;
         if let Some(run) = WorkflowRuns(w).get_run(&attempt.run_id)?
             && run.status == WfRunStatus::Paused
-            && run.pause_reason_code.as_deref() == Some(pause_reason::PLACEMENT_BLOCKED)
+            && run.pause_reason_code == Some(WfPauseReason::PlacementBlocked)
             && WorkflowRuns(w)
                 .blocked_attempt_for_run(&attempt.run_id)?
                 .is_none()
@@ -2203,81 +2951,20 @@ impl Tx<'_> {
         Ok(None)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn create_child_and_attempt(
-        &mut self,
-        run: &WfRun,
-        parent: &Item,
-        call: &WfCall,
-        attempt_no: i64,
-        team: Option<&steve_store::bot_dispatch::Team>,
-        placement: &steve_types::BotPlacement,
-        project: Option<&steve_store::Project>,
-    ) -> Result<(Item, i64)> {
-        let ws = run.workspace_id.as_str();
-        let title = call
-            .title
-            .clone()
-            .or_else(|| call.phase.clone())
-            .unwrap_or_else(|| format!("Workflow step {}", call.occurrence + 1));
-        let bot_id = placement.explanation.bot.as_str().to_owned();
-        let db = self.db().clone();
-        let (child, dispatch_rev) = db.store().write::<_, CoreError>(|w| {
-            let (tags, _) = crate::kinds::settle(&db, ws, &[], &title, &call.prompt)?;
-            let parent_requester = steve_store::item_repo::requested_by(w, &parent.id)?;
-            let child = db.item_create(
-                ws,
-                &NewItem {
-                    title: title.clone(),
-                    goal: call.prompt.clone(),
-                    bot_id: bot_id.clone(),
-                    project_id: project.map(|p| p.id.clone()),
-                    kind: None,
-                    phase: None,
-                    source: Some(("workflow".into(), "script".into())),
-                    parent: Some(parent_ref(&parent.id)),
-                    tags,
-                    requested_by: parent_requester,
-                },
-            )?;
-            if let Some(team) = team {
-                steve_store::bot_dispatch::snapshot(w, &child.id, team, "inherited")?;
-            }
-            steve_store::bot_dispatch::record(w, ws, &child.id, None, Ok(placement))?;
-            let dispatch_rev = WorkflowRuns(w).bump_run_revision(&run.id)?;
-            WorkflowRuns(w).create_attempt(&NewWfAttempt {
-                call_id: &call.id,
-                run_id: &run.id,
-                parent_item_id: &run.parent_item_id,
-                parent_cycle: run.parent_cycle,
-                attempt_no,
-                child_item_id: Some(&child.id),
-                bot_id: Some(&bot_id),
-                placement_id: None,
-                harness: Some(&placement.harness),
-                model: placement.model.as_deref(),
-                status: WfAttemptStatus::Dispatched,
-                dispatched_at_revision: dispatch_rev,
-                error_code: None,
-                error_message: None,
-            })?;
-            Ok((child, dispatch_rev))
-        })?;
-        Ok((child, dispatch_rev))
-    }
-
     fn pause_and_open_decision(
         &mut self,
         run_id: &str,
-        reason_code: &str,
+        reason: WfPauseReason,
         kind: &str,
         template: DecisionPrompt,
         draft: String,
-        options: Vec<String>,
+        options: &[WfDecisionChoice],
     ) -> Result<String> {
         let store = self.db().store().clone();
+        let reason_code = reason.as_str();
+        let option_strings: Vec<String> = options.iter().map(|c| c.as_str().to_owned()).collect();
         let (dec_id, _) = store.write::<_, CoreError>(|w| {
-            let run = WorkflowRuns(w).pause_run(run_id, reason_code)?;
+            let run = WorkflowRuns(w).pause_run(run_id, reason)?;
             let parent_session = self.active_session(&run.parent_item_id)?.map(|s| s.id);
             let source = DecisionSource::Revision {
                 revision: format!("{reason_code}:{}", run.run_revision),
@@ -2291,7 +2978,7 @@ impl Tx<'_> {
                 session_id: parent_session,
                 question: String::new(),
                 draft: Some(draft),
-                options: Some(options),
+                options: Some(option_strings),
                 requested_by: "steve".into(),
                 question_template: Some(template),
                 source: Some(source),
@@ -2315,21 +3002,26 @@ impl Tx<'_> {
         let _run = store
             .read(|r| WorkflowRuns(r).get_run(&run_id))?
             .ok_or_else(|| CoreError::Status(404, "wf_run_not_found".into()))?;
-        let choice = cx.choice;
+        let Some(choice) = WfDecisionChoice::from_choice_str(cx.choice) else {
+            return Err(CoreError::Status(
+                400,
+                format!("wf_invalid_decision_choice: {}", cx.choice),
+            ));
+        };
         let text = cx.text.trim();
 
         match choice {
-            "add_budget" => {
+            WfDecisionChoice::AddBudget => {
                 let delta = text
                     .parse::<i64>()
                     .ok()
                     .filter(|n| *n > 0)
                     .unwrap_or(DEFAULT_BUDGET_ALLOWANCE_DELTA)
-                    .min(100);
+                    .min(MAX_BUDGET_ALLOWANCE_DELTA);
                 store.write::<_, CoreError>(|w| {
                     settle_fn(
                         w,
-                        json!({"choice": "add_budget", "delta": delta}),
+                        json!({"choice": choice.as_str(), "delta": delta}),
                         DecisionChange::Resolve,
                     )?;
                     WorkflowRuns(w).add_budget_allowance(&run_id, delta)?;
@@ -2337,11 +3029,23 @@ impl Tx<'_> {
                 })?;
                 self.schedule_wf_step(&run_id);
             }
-            "single_session" | "yes" => {
+            WfDecisionChoice::Retry => {
+                store.write::<_, CoreError>(|w| {
+                    settle_fn(
+                        w,
+                        json!({"choice": choice.as_str()}),
+                        DecisionChange::Resolve,
+                    )?;
+                    WorkflowRuns(w).resume_run(&run_id)?;
+                    Ok(())
+                })?;
+                self.schedule_wf_step(&run_id);
+            }
+            WfDecisionChoice::SingleSession => {
                 let children = store.write::<_, CoreError>(|w| {
                     settle_fn(
                         w,
-                        json!({"choice": choice, "single_session_override": true}),
+                        json!({"choice": choice.as_str(), "single_session_override": true}),
                         DecisionChange::Resolve,
                     )?;
                     WorkflowRuns(w).grant_single_session_override(&run_id)?;
@@ -2359,9 +3063,13 @@ impl Tx<'_> {
                     self.stop_wf_child_best_effort(&cid, cx.actor, "wf_single_session_override");
                 }
             }
-            "cancel" => {
+            WfDecisionChoice::Cancel => {
                 let children = store.write::<_, CoreError>(|w| {
-                    settle_fn(w, json!({"choice": "cancel"}), DecisionChange::Resolve)?;
+                    settle_fn(
+                        w,
+                        json!({"choice": choice.as_str()}),
+                        DecisionChange::Resolve,
+                    )?;
                     WorkflowRuns(w).set_run_terminal(&run_id, WfRunStatus::Cancelled)?;
                     let mut to_stop = Vec::new();
                     for call in WorkflowRuns(w).list_calls(&run_id)? {
@@ -2377,20 +3085,14 @@ impl Tx<'_> {
                     self.stop_wf_child_best_effort(&cid, cx.actor, "wf_owner_cancelled");
                 }
             }
-            "revise" | "no" => {
+            WfDecisionChoice::Revise => {
                 store.write::<_, CoreError>(|w| {
                     settle_fn(
                         w,
-                        json!({"choice": choice, "text": text}),
+                        json!({"choice": choice.as_str(), "text": text}),
                         DecisionChange::Resolve,
                     )
                 })?;
-            }
-            _ => {
-                return Err(CoreError::Status(
-                    400,
-                    format!("wf_invalid_decision_choice: {choice}"),
-                ));
             }
         }
         update_active_runs_gauge(&store);
