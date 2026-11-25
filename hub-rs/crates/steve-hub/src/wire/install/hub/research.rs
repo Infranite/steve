@@ -30,7 +30,36 @@ install! { install(reg, cx) [core, db, mode, model_node, mut node_jobs, workspac
                 None,
                 workspaces::configured(cfg),
             );
-            node_jobs.push(Job::new("research.roots", ws.clone().follow(bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project { .. }) | steve_types::DomainEvent::Knowledge(_)))))));
+            let initial = std::sync::Arc::new(std::sync::Mutex::new(Some(bus.tap(|event| {
+                matches!(
+                    event.as_domain(),
+                    Some(
+                        steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project { .. })
+                            | steve_types::DomainEvent::Knowledge(_)
+                    )
+                )
+            }))));
+            let bus = bus.clone();
+            let ws_job = ws.clone();
+            node_jobs.push(Job::supervised("research.roots", move || {
+                let events = initial
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                    .unwrap_or_else(|| {
+                        bus.tap(|event| {
+                            matches!(
+                                event.as_domain(),
+                                Some(
+                                    steve_types::DomainEvent::Config(
+                                        steve_types::ConfigEvent::Project { .. }
+                                    ) | steve_types::DomainEvent::Knowledge(_)
+                                )
+                            )
+                        })
+                    });
+                ws_job.clone().follow("research.roots", events)
+            }));
             ws
         };
         adapter = adapter.on_node(crate::wire::research::NodeResearch {

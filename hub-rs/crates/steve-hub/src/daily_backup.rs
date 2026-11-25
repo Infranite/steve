@@ -95,48 +95,66 @@ pub fn make_if_enabled(
     }
     make(home, db, day).map(Some)
 }
-/// The background loop (a Hub job): looks every ten minutes whether the day's copy is due.
-pub async fn run(home: PathBuf, db: PathBuf, store: steve_store::Store, on: bool) {
+/// The background loop as a supervised periodic [`steve_runtime::Task`]: looks every ten minutes
+/// whether the day's copy is due.
+pub fn task(
+    home: PathBuf,
+    db: PathBuf,
+    store: steve_store::Store,
+    on: bool,
+) -> steve_runtime::Task {
     if !on {
-        tracing::info!("daily backup turned off (STEVE_BACKUP=off)");
-        return;
+        return steve_runtime::spawn("backup.daily", async {
+            tracing::info!("daily backup turned off (STEVE_BACKUP=off)");
+        });
     }
-    tokio::time::sleep(FIRST).await;
-    let mut wait = 0;
-    loop {
-        let (day, minute) = local(now_secs());
-        if wait > 0 {
-            wait -= 1;
-        } else if due(&home, &day, minute) {
-            let (h, d) = (home.clone(), db.clone());
-            let store_for_copy = store.clone();
-            match tokio::task::spawn_blocking(move || {
-                make_if_enabled(&store_for_copy, &h, &d, &day)
-            })
-            .await
-            {
-                Ok(Ok(None)) => {}
-                Ok(Ok(Some(m))) => tracing::info!(
-                    "daily backup: {}{}",
-                    m.database.display(),
-                    if m.files.is_some() {
-                        " and its files"
-                    } else {
-                        ""
+    let wait = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    steve_runtime::every_after(
+        "backup.daily",
+        std::sync::Arc::new(steve_runtime::SystemClock),
+        TICK,
+        steve_runtime::FirstRun::After(FIRST),
+        move || {
+            let (home, db, store, wait) = (home.clone(), db.clone(), store.clone(), wait.clone());
+            async move {
+                let (day, minute) = local(now_secs());
+                let remaining = wait.load(std::sync::atomic::Ordering::Relaxed);
+                if remaining > 0 {
+                    wait.store(remaining - 1, std::sync::atomic::Ordering::Relaxed);
+                } else if due(&home, &day, minute) {
+                    match tokio::task::spawn_blocking(move || {
+                        make_if_enabled(&store, &home, &db, &day)
+                    })
+                    .await
+                    {
+                        Ok(Ok(None)) => {}
+                        Ok(Ok(Some(m))) => tracing::info!(
+                            "daily backup: {}{}",
+                            m.database.display(),
+                            if m.files.is_some() {
+                                " and its files"
+                            } else {
+                                ""
+                            }
+                        ),
+                        Ok(Err(e)) => {
+                            tracing::warn!("daily backup: {e:#}; trying again in an hour");
+                            wait.store(RETRY_TICKS, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            tracing::warn!("daily backup: {e}; trying again in an hour");
+                            wait.store(RETRY_TICKS, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
-                ),
-                Ok(Err(e)) => {
-                    tracing::warn!("daily backup: {e:#}; trying again in an hour");
-                    wait = RETRY_TICKS;
-                }
-                Err(e) => {
-                    tracing::warn!("daily backup: {e}; trying again in an hour");
-                    wait = RETRY_TICKS;
                 }
             }
-        }
-        tokio::time::sleep(TICK).await;
-    }
+        },
+    )
+}
+
+/// The background loop (a Hub job): looks every ten minutes whether the day's copy is due.
+pub async fn run(home: PathBuf, db: PathBuf, store: steve_store::Store, on: bool) {
+    task(home, db, store, on).await;
 }
 
 #[cfg(test)]

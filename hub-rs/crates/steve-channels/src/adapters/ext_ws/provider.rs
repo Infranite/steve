@@ -48,6 +48,9 @@ pub const ME: &str = "me";
 /// `connections.config` key: the platform the service said it reaches (hello `platform`, §16), a
 /// provider id. Kept current on every connect; the 接入 page lists the connection under it.
 pub const PLATFORM: &str = steve_modules::accounts::connections::PLATFORM_KEY;
+/// `connections.config` key written by the Hub when connecting an installed plugin: the bounded
+/// manifest plugin id used for metrics (never trusted from remote `hello` fields).
+pub const PLUGIN_ID: &str = "plugin_id";
 /// Last service-reported policy, for display only. Authorization always uses the live session.
 const WRITE_POLICY: &str = "write_policy";
 const WRITE_POLICY_AT: &str = "write_policy_checked_at";
@@ -214,7 +217,11 @@ impl ExtWs {
     > {
         let (ep, token) = self.endpoint(cx).await.map_err(OpenFail::Provider)?;
         let now = cx.connections().modules().clock.now();
-        let (s, notes) = Session::open(&ep, &token, self.timing, now)
+        let plugin = cx
+            .config_str(PLUGIN_ID)
+            .filter(|id| wire::valid_plugin_id(id))
+            .unwrap_or_else(|| self.adapter());
+        let (s, notes) = Session::open(&ep, &token, self.timing, now, plugin)
             .await
             .map_err(OpenFail::Open)?;
         drop(token);

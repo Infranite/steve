@@ -37,45 +37,64 @@ pub fn due(
         .collect()
 }
 
-pub async fn run(svc: Arc<NodeService>, core: steve_core::Core, minutes: i64) {
+pub fn task(svc: Arc<NodeService>, core: steve_core::Core, minutes: i64) -> steve_runtime::Task {
     if minutes == 0 {
-        return;
+        return steve_runtime::spawn("nodes.handover", async {});
     }
     let up_since = super::now();
-    loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        let (store, svc2, core2) = (svc.store.clone(), svc.clone(), core.clone());
-        let moved = tokio::task::spawn_blocking(move || {
-            let mut moved = vec![];
-            for (sid, name, away) in due(&store, &svc2, minutes, up_since, super::now()) {
-                match core2.hand_over_from_offline(&sid, &name, away) {
-                    Ok(Some(new)) => {
-                        tracing::info!(session = %sid, new = %new, "device {name} away {away} min: handed over");
-                        moved.push((sid, name, away));
+    steve_runtime::every_after(
+        "nodes.handover",
+        Arc::new(steve_runtime::SystemClock),
+        Duration::from_secs(60),
+        steve_runtime::FirstRun::AfterPeriod,
+        move || {
+            let svc = svc.clone();
+            let core = core.clone();
+            async move {
+                let (store, svc2, core2) = (svc.store.clone(), svc.clone(), core.clone());
+                let moved = tokio::task::spawn_blocking(move || {
+                    let mut moved = vec![];
+                    for (sid, name, away) in due(&store, &svc2, minutes, up_since, super::now()) {
+                        match core2.hand_over_from_offline(&sid, &name, away) {
+                            Ok(Some(new)) => {
+                                tracing::info!(session = %sid, new = %new, "device {name} away {away} min: handed over");
+                                moved.push((sid, name, away));
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::error!(session = %sid, "handing over from {name}: {e}"),
+                        }
                     }
-                    Ok(None) => {}
-                    Err(e) => tracing::error!(session = %sid, "handing over from {name}: {e}"),
+                    moved
+                })
+                .await
+                .unwrap_or_default();
+                if moved.is_empty() {
+                    return;
                 }
+                let store = svc.store.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let db = steve_core::repo::Db::new(store);
+                    for (_, name, away) in moved {
+                        let text =
+                            steve_i18n::t!("hub.node.handed_over", name = name, minutes = away);
+                        if let Err(e) = steve_core::notify::notify(
+                            &db,
+                            steve_store::WS,
+                            "system",
+                            "info",
+                            &text,
+                            None,
+                        ) {
+                            tracing::error!("hand-over notice: {e}");
+                        }
+                    }
+                })
+                .await;
             }
-            moved
-        })
-        .await
-        .unwrap_or_default();
-        if moved.is_empty() {
-            continue;
-        }
-        let store = svc.store.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let db = steve_core::repo::Db::new(store);
-            for (_, name, away) in moved {
-                let text = steve_i18n::t!("hub.node.handed_over", name = name, minutes = away);
-                if let Err(e) =
-                    steve_core::notify::notify(&db, steve_store::WS, "system", "info", &text, None)
-                {
-                    tracing::error!("hand-over notice: {e}");
-                }
-            }
-        })
-        .await;
-    }
+        },
+    )
+}
+
+pub async fn run(svc: Arc<NodeService>, core: steve_core::Core, minutes: i64) {
+    task(svc, core, minutes).await;
 }

@@ -12,7 +12,12 @@ const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
 install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
-    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone(), cx.cfg.diagnostic())));
+    let store = db.clone();
+    let home = cx.cfg.home.clone();
+    let diagnostic = cx.cfg.diagnostic();
+    jobs.push(Job::supervised("storage.retention", move || {
+        run(store.clone(), home.clone(), diagnostic)
+    }));
 }}
 
 struct State {

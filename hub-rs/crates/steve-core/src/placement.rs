@@ -131,20 +131,39 @@ pub(crate) fn select(
 ) -> Result<(BotPlacement, Option<Project>)> {
     let started = Instant::now();
     let result = select_inner(db, rt, request, model);
-    metrics::histogram!("steve_bot_selection_seconds").record(started.elapsed().as_secs_f64());
+    thread_local! {
+        static SELECTION_SECONDS: std::cell::OnceCell<metrics::Histogram> =
+            const { std::cell::OnceCell::new() };
+        static BLOCKED_TOTAL: std::cell::RefCell<
+            std::collections::HashMap<&'static str, metrics::Counter>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    SELECTION_SECONDS.with(|cell| {
+        cell.get_or_init(|| metrics::histogram!("steve_bot_selection_seconds"))
+            .record(elapsed);
+    });
     if let Err(CoreError::Placement(blocked)) = &result {
         let reasons = blocked
             .rejected
             .iter()
             .map(|b| b.reason)
             .collect::<BTreeSet<_>>();
-        for reason in reasons
-            .into_iter()
-            .chain(blocked.rejected.is_empty().then_some(blocked.reason))
-        {
-            metrics::counter!("steve_bot_selection_blocked_total", "reason" => reason.as_str())
-                .increment(1);
-        }
+        BLOCKED_TOTAL.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            for reason in reasons
+                .into_iter()
+                .chain(blocked.rejected.is_empty().then_some(blocked.reason))
+            {
+                let key = reason.as_str();
+                cache
+                    .entry(key)
+                    .or_insert_with(
+                        || metrics::counter!("steve_bot_selection_blocked_total", "reason" => key),
+                    )
+                    .increment(1);
+            }
+        });
     }
     result
 }

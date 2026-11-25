@@ -39,6 +39,7 @@ tokio = { version = "=1.54.1", features = ["net", "io-util", "sync", "rt", "time
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "logging", "tls12"] }
 tokio-util = "=0.7.20"
 tracing = "=0.1.44"
+metrics = "=0.24.6"
 zeroize = "=1.9.1"
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "query", "form", "tokio"] }
 # fake only
