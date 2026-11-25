@@ -271,6 +271,21 @@ pub(super) fn describe() {
         Seconds,
         "How late a due loop woke. Labels: loop."
     );
+    describe_counter!(
+        "steve_periodic_task_evaluations_total",
+        Count,
+        "Periodic task gate evaluations. Labels: task, outcome (triggered, skipped), reason (changed, no_change, queue_driven, disabled, not_due, overlap)."
+    );
+    describe_counter!(
+        "steve_periodic_task_tokens_total",
+        Count,
+        "Model tokens spent by periodic tasks. Labels: task, kind (input, output, cache_read, cache_write)."
+    );
+    describe_counter!(
+        "steve_model_calls_avoided_total",
+        Count,
+        "Model calls avoided by deterministic gating, batching, deduplication, or caching. Labels: purpose, reason (no_change, queue_driven, batched, cached, deduplicated, deterministic)."
+    );
     // Node protocol, Hub side (node_runtime: receive, send_one; RemoteNode attach/detach)
     describe_counter!(
         "steve_session_steve_tools_missing_total",
