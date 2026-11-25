@@ -307,7 +307,7 @@ fn busy_sessions_and_running_processes_keep_everything() {
     let s = k.session(&busy, "running");
     k.rt.st().turning.insert(s);
     let (served, _, served_wt) = item_with_caches(&k, &r, &p, "done");
-    let mut child = std::process::Command::new("sleep")
+    let mut child = steve_runtime::testkit::process::Command::new("sleep")
         .arg("30")
         .current_dir(&served_wt)
         .spawn()
