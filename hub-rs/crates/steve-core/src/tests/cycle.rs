@@ -295,6 +295,7 @@ fn a_running_operation_of_an_older_revision_holds_a_failure_ruling() {
             i.cas_revision,
             Some("做不成"),
             None,
+            None,
             "me",
         )
         .unwrap();
@@ -327,6 +328,7 @@ fn commands_check_the_version_and_the_phase() {
             i.cas_revision - 1,
             None,
             None,
+            None,
             "me",
         )
         .unwrap_err();
@@ -342,7 +344,8 @@ fn commands_check_the_version_and_the_phase() {
                 i.cas_revision,
                 Some(" "),
                 None,
-                "me"
+                None,
+                "me",
             )
             .is_err()
     );
@@ -357,13 +360,23 @@ fn commands_check_the_version_and_the_phase() {
                 i.cas_revision,
                 None,
                 None,
+                None,
                 "me",
             )
             .unwrap_err(),
     );
     let done = k
         .core
-        .lifecycle_command(&x.id, "accept", i.cycle, i.cas_revision, None, None, "me")
+        .lifecycle_command(
+            &x.id,
+            "accept",
+            i.cycle,
+            i.cas_revision,
+            None,
+            None,
+            None,
+            "me",
+        )
         .unwrap();
     assert_eq!(
         (done.phase.as_str(), done.acceptance.as_deref()),
@@ -378,7 +391,16 @@ fn commands_check_the_version_and_the_phase() {
     for c in ["accept", "cancel"] {
         conflict(
             k.core
-                .lifecycle_command(&x.id, c, done.cycle, done.cas_revision, None, None, "me")
+                .lifecycle_command(
+                    &x.id,
+                    c,
+                    done.cycle,
+                    done.cas_revision,
+                    None,
+                    None,
+                    None,
+                    "me",
+                )
                 .unwrap_err(),
         );
     }
@@ -390,6 +412,7 @@ fn commands_check_the_version_and_the_phase() {
                 done.cycle,
                 done.cas_revision,
                 Some("晚了"),
+                None,
                 None,
                 "me",
             )
@@ -412,6 +435,7 @@ fn commands_check_the_version_and_the_phase() {
             "new_cycle",
             done.cycle,
             done.cas_revision,
+            None,
             None,
             None,
             "me",

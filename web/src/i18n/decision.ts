@@ -13,5 +13,10 @@ export function decisionText(said: Said): string {
       kind: t(`views:decision.waitKind.${prompt.wait_kind}`),
       subject: prompt.subject,
     })
+    case "workflow_script_fault": return t("views:decision.workflowScriptFault", { faultCode: prompt.fault_code })
+    case "workflow_non_deterministic_replay": return t("views:decision.workflowNonDeterministicReplay")
+    case "workflow_budget_exhausted": return t("views:decision.workflowBudgetExhausted", { scope: prompt.scope, used: prompt.used, limit: prompt.limit })
+    case "workflow_review_blocked": return t("views:decision.workflowReviewBlocked", { reason: prompt.reason })
+    case "workflow_single_session_override": return t("views:decision.workflowSingleSessionOverride")
   }
 }

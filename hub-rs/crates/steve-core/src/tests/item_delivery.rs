@@ -124,6 +124,7 @@ fn mail_receipt_closes_only_its_original_delivery_version() {
             closed.cas_revision,
             None,
             None,
+            None,
             "me",
         )
         .unwrap();

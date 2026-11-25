@@ -11,6 +11,7 @@ fn main() -> anyhow::Result<()> {
             &args[2],
         )),
         Some("--stats-snapshot") => Some(steve_hub::stats_snapshot::main(&args[1..])),
+        Some("--workflow-step") => Some(steve_hub::workflow_step::main(&args[1..])),
         Some("--build-info") => {
             println!(
                 "{}",

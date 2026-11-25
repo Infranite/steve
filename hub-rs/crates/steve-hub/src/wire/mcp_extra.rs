@@ -34,6 +34,7 @@ pub(crate) enum Owner {
     Devices,
     Diagnostics,
     Items,
+    WorkflowRun,
     Upgrade,
     Contacts,
     Knowledge,
@@ -142,6 +143,8 @@ pub(crate) fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::Diagnostics)
     } else if super::item_mcp::handles(name) {
         Some(Owner::Items)
+    } else if name == "steve_workflow_run" {
+        Some(Owner::WorkflowRun)
     } else if name == "steve_upgrade" {
         Some(Owner::Upgrade)
     } else if name == steve_knowledge::candidates::REMEMBER || name == mcp::REMEMBER {
@@ -180,6 +183,7 @@ fn extra_tools() -> Vec<Value> {
     let mut v: Vec<Value> = mcp::tools().to_vec();
     v.push(super::diagnostics::tool());
     v.extend(super::item_mcp::tools());
+    v.push(workflow_run_tool());
     v.extend(steve_knowledge::tools::all_tools().iter().cloned());
     v.extend(steve_digest::tools::tools());
     v.extend(steve_digest::todo_tools::tools());
@@ -194,6 +198,39 @@ fn extra_tools() -> Vec<Value> {
     v.extend(steve_channels::im_mcp::tools());
     v.push(json!({"name":"steve_upgrade","description":"Check Steve GitHub releases, inspect an upgrade, or request an instance upgrade. A request requires instance owner approval in Settings / Versions before execution. Never grants approval through an agent token.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["check","status","request"]},"version":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["action"]}}));
     v
+}
+
+fn workflow_run_tool() -> Value {
+    json!({
+        "name": "steve_workflow_run",
+        "description": "Submit or revise a deterministic JavaScript workflow script for this item, or pause, resume, cancel, retry, or inspect its persisted run. Scripts run in an isolated QuickJS sandbox with host primitives agent(prompt, options?), all(thunks), race(thunks), phase(name, fn), state, and log(msg). Completed calls hydrate across script revisions; independent final review is enforced authoritatively by the Hub. Workflow child items may only call action=get or action=fail with a reason.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["submit", "get", "pause", "resume", "cancel", "retry", "fail"]
+                },
+                "script": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "JavaScript ES module exporting `default async function()` (required for action=submit)."
+                },
+                "call_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Failed workflow call ID to retry (required for action=retry)."
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional reason for pause/cancel, required for child action=fail."
+                }
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }
+    })
 }
 
 /// A tool result that opened an approval: the session waits for the user.
@@ -478,6 +515,23 @@ async fn call_owned_inner(
         .await
         .map_err(|e| e.to_string())?;
     }
+    if matches!(tool_owner, Owner::WorkflowRun) {
+        return x
+            .tools
+            .core
+            .tool_workflow_run(&s, args)
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|out| {
+                let ends_turn = out.ends_turn();
+                let body = serde_json::to_string(&out).map_err(|e| e.to_string())?;
+                Ok(if ends_turn {
+                    format!("{body}\n\n{}", steve_mcp::END)
+                } else {
+                    body
+                })
+            });
+    }
     if matches!(tool_owner, Owner::A2a) {
         return x.caps.a2a_call(&s.id, name, &args).await;
     }
@@ -488,6 +542,7 @@ async fn call_owned_inner(
     let out: Result<String, String> = match tool_owner {
         Owner::Diagnostics => unreachable!("diagnostics preserve the session above"),
         Owner::Items => unreachable!("item management preserves the session above"),
+        Owner::WorkflowRun => unreachable!("workflow_run preserves the session above"),
         Owner::A2a => unreachable!("remote agents are answered above"),
         Owner::Upgrade => call_upgrade(x, &cx, &args).await,
         Owner::Contacts => mcp::call(&x.modules, &x.ports, &cx, name, &args).await,

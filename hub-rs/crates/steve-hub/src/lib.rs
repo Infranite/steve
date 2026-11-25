@@ -43,6 +43,7 @@ pub mod stats_snapshot;
 pub mod system;
 pub mod web;
 pub mod wire;
+pub mod workflow_step;
 
 pub mod upgrades;
 

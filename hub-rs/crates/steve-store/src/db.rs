@@ -294,8 +294,12 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/139.sql"),
     // 140: canonicalize reasoning_effort to Steve's five levels and add sessions.effort_mapping.
     include_str!("../migrations/140.sql"),
-    // 141: file-as-truth memory architecture (source role/write_mode, sidecar memory_entries, evidence, observations, tombstones, revisions, SKILL.md proposals).
+    // 141: dynamic script workflow ledger (`wf_runs`, `wf_script_versions`, `wf_calls`, `wf_call_attempts`, `wf_version_calls`).
     include_str!("../migrations/141.sql"),
+    // 142: one-time retirement of non-terminal legacy dynamic work-graph child items (`source[1] = "workflow"`).
+    include_str!("../migrations/142.sql"),
+    // 143: file-as-truth memory architecture (source role/write_mode, sidecar memory_entries, evidence, observations, tombstones, revisions, SKILL.md proposals).
+    include_str!("../migrations/143.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -553,7 +553,7 @@ impl EventCapability {
             "vault" => Err(EventTypeRefusal::VaultForbidden),
             "space" | "chan_message" | "channel" | "persona" | "connection" => Ok(Self::Channels),
             "item" | "decision" | "session" | "event" | "message" | "steve.thinking"
-            | "steve.draft" | "steve.tool" | "thread.run" => Ok(Self::Work),
+            | "steve.draft" | "steve.tool" | "workflow.run" => Ok(Self::Work),
             "bot" | "project" | "tag" | "workspace" | "settings" | "mm" | "changeset" => {
                 Ok(Self::Config)
             }

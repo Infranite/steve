@@ -151,6 +151,15 @@ pub(super) fn scope(store: &Store, session: &Session) -> Result<(Session, ItemSc
         return Err(denied());
     }
     let own = ItemScope::Conversation([id.to_string()].into_iter().collect());
+    // Script-workflow child items are scoped to their own item and never inherit
+    // the parent's main-conversation privileges.
+    let work_unit = store
+        .read(|r| steve_store::WorkflowRuns(r).attempt_by_child_item(id))
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if work_unit {
+        return Ok((s, own));
+    }
     let origin = store
         .read(|r| steve_store::thread::dispatch_by_item(r, id))
         .map_err(|e| e.to_string())?

@@ -56,6 +56,9 @@ pub struct CloseRequest {
     pub at: i64,
     pub frozen_revision: i64,
     pub scope_revision: i64,
+    /// Monotonic `wf_runs.run_revision` of the active script workflow run when delivery froze.
+    #[serde(default)]
+    pub wf_run_revision: Option<i64>,
     /// The worktree's `HEAD` and changes when the result was frozen; `None` without a git worktree.
     #[serde(default)]
     pub fingerprint: Option<String>,

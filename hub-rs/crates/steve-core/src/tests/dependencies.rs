@@ -36,6 +36,7 @@ fn owner_finish_closes_paused_items_even_after_a_dropped_prerequisite_left_a_wai
                 before.cas_revision,
                 None,
                 None,
+                None,
                 "me",
             )
             .unwrap()

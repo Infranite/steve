@@ -212,7 +212,7 @@ use Until::{Hub, Later, Library, NoNode};
 #[rustfmt::skip]
 const RATIONALE: &[Entry] = &[
     /* shared OS execution mechanism: Node runs and Hub-host capability servers */
-    e(Spawn, "steve-confine/src/lib.rs", Library, "fresh login environment and confined host capability process; callers never construct these processes"),
+    e(Spawn, "steve-confine/src/lib.rs", Library, "fresh login environment, confined host capability process, and OS-confined pure-compute subprocess (--workflow-step); callers never construct these processes"),
     e(Spawn, "steve-confine/src/probe.rs", Library, "the single sandbox probe, with a minimal or control-plane policy on /usr/bin/true"),
     e(Dir, "steve-confine/src/control.rs", Library, "protected filename prefixes in the shared bubblewrap control-plane plan"),
     e(Dir, "steve-confine/src/profile.rs", Library, "hide other entries when explicitly opening a harness credential store"),

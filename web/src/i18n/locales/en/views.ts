@@ -16,6 +16,11 @@ export default {
       mail_draft: "Mail draft",
       flow_wait: "Automation wait",
     },
+    workflowScriptFault: "Workflow script faulted ({{faultCode}}) and is paused for your decision.",
+    workflowNonDeterministicReplay: "Workflow replay detected non-deterministic drift and paused before dispatching.",
+    workflowBudgetExhausted: "Workflow cycle budget exhausted ({{scope}}: {{used}}/{{limit}}). Choose whether to add budget, cancel, or take over in a single session.",
+    workflowReviewBlocked: "Workflow did not pass independent final review ({{reason}}). Run an independent review or decide how to proceed.",
+    workflowSingleSessionOverride: "Confirm skipping the workflow and switching to single-session delivery?",
   },
   feed: {
     viewItem: "View item",

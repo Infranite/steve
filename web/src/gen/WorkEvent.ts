@@ -6,4 +6,4 @@ import type { MessageId } from "./MessageId";
 import type { SessionId } from "./SessionId";
 import type { WorkspaceId } from "./WorkspaceId";
 
-export type WorkEvent = { "type": "item", id: ItemId, ws: WorkspaceId, } | { "type": "decision", id: DecisionId, item_id?: ItemId | null, ws: WorkspaceId, } | { "type": "session", id: SessionId, item_id?: ItemId | null, ws: WorkspaceId, } | { "type": "message", id: MessageId, ws: WorkspaceId, space: string, };
+export type WorkEvent = { "type": "item", id: ItemId, ws: WorkspaceId, } | { "type": "decision", id: DecisionId, item_id?: ItemId | null, ws: WorkspaceId, } | { "type": "session", id: SessionId, item_id?: ItemId | null, ws: WorkspaceId, } | { "type": "message", id: MessageId, ws: WorkspaceId, space: string, } | { "type": "workflow.run", id: string, item_id: ItemId, ws: WorkspaceId, };
