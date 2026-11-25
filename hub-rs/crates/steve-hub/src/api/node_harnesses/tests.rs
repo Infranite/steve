@@ -301,13 +301,14 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     let fake = FakeNode::new("local");
     fake.set_harnesses(vec![cap("local-cli", "local/model")]);
     let runtime = NodeRuntime::new(h.store.clone(), fake, h.ends.clone());
+    let bus = crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let st = AppState::new(
-        cfg,
-        Arc::new(StoreBackend(h.store.clone())),
-        Arc::new(crate::backend::NoDomain),
-        crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-            Default::default(),
-        ))),
+        cfg.clone(),
+        StoreBackend(h.store.clone()),
+        crate::wire::core::CoreDomain::for_test(&cfg, h.store.clone(), &bus, None),
+        bus,
     )
     .with_node(Some(runtime))
     .with_nodes(Some(h.svc.clone()));

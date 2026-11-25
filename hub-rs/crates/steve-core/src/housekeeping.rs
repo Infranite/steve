@@ -75,7 +75,7 @@ impl Core {
             if !archived.is_empty() {
                 let text = crate::notice_line::archived(&archived, &days.to_string());
                 let one = (archived.len() == 1).then(|| archived[0].as_str());
-                crate::notify::notify(t.db(), &ws, "archive", "info", &text, one)?;
+                steve_store::notify::notify(t.db().store(), &ws, "archive", "info", &text, one)?;
             }
             if keep_sessions_ms(&t.db().setting(&ws, "keepSess", "永久")?).is_none() {
                 continue;

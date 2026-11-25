@@ -13,8 +13,8 @@ export const parseSubject = (s: string): { type: string; id: string } | null => 
   const at = s.indexOf(":"); if (at <= 0) return null
   return { type: decodeURIComponent(s.slice(0, at)), id: decodeURIComponent(s.slice(at + 1)) }
 }
-/** what kind of thing a subject is: 联系人, 项目, Bot … */
-export const subjectKind = (type: string) => (["party", "project", "bot", "item", "space", "persona", "me"].includes(type) ? t(`knowledge:subject.kind.${type as "party"}`) : type)
+/** what kind of thing a subject is: 联系人, 组织, 团队, 项目, Bot … */
+export const subjectKind = (type: string) => (["party", "org", "team", "project", "bot", "item", "space", "persona", "me"].includes(type) ? t(`knowledge:subject.kind.${type as "party"}`) : type)
 export const aboutName = (a: ObjRef) => a.name || (a.type === "party" ? t("knowledge:mems.aboutParty", { id: a.id }) : a.type === "item" ? t("knowledge:mems.aboutItem", { id: a.id }) : a.id)
 
 /** where it came from, in words: “你写的”, “11-12 的对话”, “ST-12 交付时” … */

@@ -11,7 +11,10 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { go, Group, Row, SectionLabel, Segmented, Empty } from "@/ui"
 import { looksLikeHandle, nameOf, people, type Contact, type MergeProposal, type PendingContact } from "@/api/people"
 import { tm, toast } from "@/store"
-import { ContactAvatar, Loading, act, joinList, orgLine, useLoad } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { Loading, PEOPLE_EVENTS, act, joinList, orgLine } from "@/people/common"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { t as tr, useT } from "@/i18n"
 import type { Wait } from "@/store"
 import { Select } from "@/view-shared"
@@ -23,7 +26,7 @@ type Order = "active" | "space"
 let corder: Order = "active"
 export function PendingContacts() {
   const t = useT()
-  const { data, err, reload } = useLoad(() => people.pending(), [])
+  const { data, error: err, reload } = useHubQuery(["people", "pending"], () => people.pending(), { events: PEOPLE_EVENTS })
   const [query, setQuery] = useState(""), [filter, setFilter] = useState("all"), [progress, setProgress] = useState(""), [failure, setFailure] = useState("")
   const [retry, setRetry] = useState<{ ids: string[]; run: (id: string) => Promise<unknown>; ok: (n: number) => string } | null>(null)
   const [order, setOrder] = useState<Order>(corder), [sel, setSel] = useState<string[]>([]), [busy, setBusy] = useState(false)
@@ -99,14 +102,14 @@ function bySpace(xs: PendingContact[]): [string, PendingContact[]][] {
 const UnknownRow = memo(function UnknownRow({ c, pick, checked, onCheck, busy, onChanged }: { c: PendingContact; pick: boolean; checked: boolean; onCheck: (id: string, v: boolean) => void; busy: boolean; onChanged: () => void }) {
   const t = useT()
   const [merge, setMerge] = useState(false)
-  const nameless = isNameless(c), label = labelOf(c), seen = c.seen, url = (c.avatar as { url?: string } | null)?.url
+  const nameless = isNameless(c), label = labelOf(c), seen = c.seen
   const where = seen && joinList(seen.spaces.map((x) => (x.kind === "dm" ? t("people:pending.dm", { name: x.name }) : x.name)))
   return (
     <Row data-unconfirmed={label} data-nameless={nameless || undefined}
       icon={<span className="flex items-center gap-2.5">{/* a 28px target around the 16px box (WCAG 2.5.8) without moving the row: a click on the margin toggles it too */}
         {pick && <span className="-m-1.5 grid cursor-pointer place-items-center p-1.5" onClick={(e) => { if (e.target === e.currentTarget && !busy) onCheck(c.id, !checked) }} data-pending-pick>
           <Checkbox aria-label={t("people:pending.select", { name: label })} checked={checked} disabled={busy} onCheckedChange={(v) => onCheck(c.id, !!v)} /></span>}
-        {url ? <img src={url} alt="" className="size-8 rounded-full object-cover" /> : <ContactAvatar name={nameless ? "?" : label} unconfirmed size={32} />}</span>}
+        <ActorAvatar actor={partyActor({ id: c.id, name: nameless ? "?" : label, avatar: c.avatar, unconfirmed: true })} size={32} /></span>}
       title={<span className="inline-flex min-w-0 items-center gap-1.5"><a href={"#/contacts/" + c.id} className="truncate hover:underline">{label}</a>{orgLine(c) && <span className="truncate type-footnote font-normal text-muted-foreground">{orgLine(c)}</span>}</span>}
       sub={<span className="flex min-w-0 flex-col gap-0.5">
         {where ? <span className="truncate">{seen && seen.messages > 0 ? t("people:pending.seenInMsgs", { where, count: seen.messages }) : t("people:pending.seenIn", { where })}</span> : <span>{c.account ? t("people:pending.notSeenSystem", { system: c.account.system_name }) : t("people:pending.notSeenAccounts", { count: c.accounts })}</span>}
@@ -134,9 +137,9 @@ function ProposalCard({ m }: { m: MergeProposal }) {
     <div className="flex flex-col gap-3 rounded-xl bg-card px-4 py-3 shadow-[var(--lift)] sm:flex-row sm:items-center" data-merge={m.id}>
       <div className="min-w-0 flex-1">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <span className="inline-flex min-w-0 items-center gap-2"><ContactAvatar name={m.from.name} unconfirmed={m.from.kind === "unconfirmed"} size={32} /><span className="truncate font-mono type-callout">{m.account?.handle ?? m.from.name}</span></span>
+        <span className="inline-flex min-w-0 items-center gap-2"><ActorAvatar actor={partyActor({ id: m.from.id, name: m.from.name, contactKind: m.from.kind, avatar: m.from.avatar, unconfirmed: m.from.kind === "unconfirmed" })} size={32} /><span className="truncate font-mono type-callout">{m.account?.handle ?? m.from.name}</span></span>
         <ChevronRightIcon className="size-4 text-tertiary" aria-label={t("people:pending.maybe")} />
-        <a href={"#/contacts/" + m.into.id} className="inline-flex min-w-0 items-center gap-2 hover:underline"><ContactAvatar name={m.into.name} avatar={m.into.avatar} size={32} /><span className="type-body">{m.into.name}</span></a>
+        <a href={"#/contacts/" + m.into.id} className="inline-flex min-w-0 items-center gap-2 hover:underline"><ActorAvatar actor={partyActor({ id: m.into.id, name: m.into.name, contactKind: m.into.kind, avatar: m.into.avatar })} size={32} /><span className="type-body">{m.into.name}</span></a>
         {orgLine(m.into) && <span className="type-footnote text-muted-foreground">{orgLine(m.into)}</span>}
       </div>
       {m.reason && <div className="mt-1.5 type-footnote text-muted-foreground">{t("people:shared.reason", { reason: m.reason })}</div>}
@@ -153,7 +156,7 @@ function ProposalCard({ m }: { m: MergeProposal }) {
 export function MergeDialog({ from, onClose }: { from: Pick<Contact, "id" | "name"> & { label?: string }; onClose: () => void }) {
   const t = useT()
   const [q, setQ] = useState(""), [into, setInto] = useState<string | null>(null), [busy, setBusy] = useState(false)
-  const cs = useLoad(() => people.contacts({ q: q.trim(), limit: 50 }), [q])
+  const cs = useHubQuery(["people", "contacts-search", q], () => people.contacts({ q: q.trim(), limit: 50 }), { events: PEOPLE_EVENTS })
   const xs = (cs.data ?? []).filter((c) => c.id !== from.id)
   const target = xs.find((c) => c.id === into)
   const merge = async () => {
@@ -169,7 +172,7 @@ export function MergeDialog({ from, onClose }: { from: Pick<Contact, "id" | "nam
         <div className="max-h-64 overflow-y-auto rounded-xl bg-muted/60 p-1" role="radiogroup" aria-label={t("people:merge.into")}>
           {!cs.data ? <Loading /> : !xs.length ? <div className="px-3 py-3 type-callout text-muted-foreground">{t("people:shared.noMatch")}</div> : xs.map((c) => (
             <button key={c.id} type="button" role="radio" aria-checked={into === c.id} onClick={() => setInto(c.id)} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left hover:bg-accent aria-checked:bg-primary/10" data-merge-opt={c.name}>
-              <ContactAvatar name={c.name} avatar={c.avatar} size={20} /><span className="type-callout">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span><span className="ml-auto type-footnote text-muted-foreground">{orgLine(c)}</span></button>))}
+              <ActorAvatar actor={partyActor({ id: c.id, name: c.name, contactKind: c.kind, avatar: c.avatar, isMe: c.is_me })} size={20} tooltip={false} /><span className="type-callout">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span><span className="ml-auto type-footnote text-muted-foreground">{orgLine(c)}</span></button>))}
         </div>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!into || busy} onClick={() => void merge()} data-merge-go>{target ? t("people:shared.mergeInto", { name: target.name }) : t("people:shared.merge")}</Button></DialogFooter>
       </DialogContent>

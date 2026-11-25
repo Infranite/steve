@@ -533,6 +533,7 @@ export default {
     lastVisit: "最后一次 {{ago}}",
     via: "经 {{route}}",
     token: "令牌 {{name}}",
+    loginAs: "登录账号 {{login}}",
     of: "{{name}} 的",
     you: "你",
     signOut: "退出登录",

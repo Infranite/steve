@@ -546,6 +546,7 @@ export default {
     lastVisit: "Last {{ago}}",
     via: "Via {{route}}",
     token: "Token {{name}}",
+    loginAs: "Login {{login}}",
     of: "{{name}}'s",
     you: "You",
     signOut: "Sign out",

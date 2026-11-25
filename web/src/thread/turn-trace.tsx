@@ -8,7 +8,8 @@ import { TraceWaterfall, type TraceSpan } from "@/components/affect/trace-waterf
 import type { ToolStep, TrailItem } from "@/components/work-trail"
 import { isActiveSubtaskStatus, partitionWork, subtaskOf, subtaskTimes, toolDurationMs } from "@/data/transcript-model"
 import { stats } from "@/api/stats"
-import { fmtUsd, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtUsd } from "@/stats/format"
 import { useT } from "@/i18n"
 
 /* one line of plain text: Markdown's marks and code fences dropped, like the folded reply line */
@@ -157,9 +158,9 @@ export default function TurnTrace({ k, prompt, evs, at, items, t0: turnT0, t1, l
   const t = useT()
   const item = getSession(k)?.item ?? null
   /* the turn's usage: the Hub keeps it per turn for an item's sessions */
-  const [u] = useStats(() => (item ? stats.item(item) : Promise.resolve(null)), [item, live ? 0 : t1], !live)
+  const u = useHubQuery(["stats", "item", item ?? null, live ? 0 : t1 ?? 0], () => (item ? stats.item(item) : Promise.resolve(null)), { events: ["stats"], debounceMs: 200, live: !live })
   const t0 = turnT0 || at.find(Boolean) || Date.now()
-  const turn = u.s === "ok" && u.v && !live && t1 ? u.v.turns?.find((x) => x.session_id === k && Math.abs(x.started - t0) <= 5000 && x.ended != null && Math.abs(x.ended - t1) <= 5000) : undefined
+  const turn = u.data && !live && t1 ? u.data.turns?.find((x) => x.session_id === k && Math.abs(x.started - t0) <= 5000 && x.ended != null && Math.abs(x.ended - t1) <= 5000) : undefined
   const root = useMemo<TraceSpan>(() => {
     const rel = (ms: number | undefined) => (ms ? Math.max(0, ms - t0) : 0)
     const children = turnSpans(evs, at, items, t0, t1, live, t)

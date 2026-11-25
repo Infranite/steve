@@ -191,6 +191,26 @@ pub trait AgentRuntime: Send + Sync {
         Ok(None)
     }
 
+    /// Propose a new Bot on a verified route when automatic placement found no eligible executor.
+    fn propose_bot(
+        &self,
+        _req: &crate::CreateItem,
+        _blocked: &steve_types::PlacementBlocked,
+    ) -> Result<Option<steve_types::BotProposal>> {
+        Ok(None)
+    }
+
+    /// Confirm a previously proposed Bot as the workspace owner and return its created Bot ID.
+    fn confirm_bot_proposal(
+        &self,
+        _ws: &str,
+        _actor: &str,
+        _id: &str,
+        _edit: steve_types::ConfirmBotProposal,
+    ) -> Result<String> {
+        Err(crate::error::msg("当前运行环境不支持确认新建 Bot 提案。"))
+    }
+
     /// Whether `bot` (of `harness`) could run `item_id`'s work at all, before a session is made
     /// for it or the item is given to the Bot: its harness installed, ready and signed in on the
     /// Nodes. `Err` says why and where to fix it (stored text, zh-CN); nothing is made then, and
@@ -200,12 +220,34 @@ pub trait AgentRuntime: Send + Sync {
         let _ = (item_id, bot_id, harness);
         Ok(())
     }
+    /// Like [`Self::can_run`], checking an explicit [`steve_node_api::HarnessChoice`] (e.g. a
+    /// handoff overriding harness or model) against the Bot's authorized Nodes before ending an
+    /// existing session. Defaults to [`Self::can_run`].
+    fn can_run_choice(
+        &self,
+        item_id: &str,
+        bot_id: &str,
+        choice: &steve_node_api::HarnessChoice,
+    ) -> Result<()> {
+        self.can_run(item_id, bot_id, &choice.harness)
+    }
     /// A session was just created (before its first prompt): the runtime may fix its backend now.
     /// Only new sessions are ever bound here; existing ones keep the backend they have. `after`: it
     /// takes over from a session whose release is still on its way ([`Released::Pending`]); its
     /// harness does not start before that release is done (two harnesses never share a worktree).
     fn created(&self, session_id: &str, after: Option<&str>) {
         let _ = (session_id, after);
+    }
+    /// Like [`Self::created`], carrying the W3.1 [`steve_types::PlacementExplanation`] recorded by
+    /// placement selection when a session switches Bot, harness, or model.
+    fn created_with_placement(
+        &self,
+        session_id: &str,
+        after: Option<&str>,
+        explanation: Option<&steve_types::PlacementExplanation>,
+    ) {
+        let _ = explanation;
+        self.created(session_id, after);
     }
     /// Why nothing can run `session_id` (stored text, zh-CN), asked once [`Self::created`] had its
     /// say: no backend takes it, and there is no in-process runner to fall back on (B7). The core

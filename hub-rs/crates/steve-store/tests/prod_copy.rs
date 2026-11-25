@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use common::*;
+use steve_store::thread;
 use steve_store::views::{DecisionPage, Page, SettledCursor};
 use steve_store::*;
 
@@ -58,7 +59,9 @@ fn table_counts(c: &rusqlite::Connection) -> BTreeMap<String, usize> {
     let mut st = c
         .prepare(
             "SELECT name FROM sqlite_master
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name NOT LIKE 'kb_fts_%'
              ORDER BY name",
         )
         .unwrap();
@@ -76,7 +79,7 @@ fn table_counts(c: &rusqlite::Connection) -> BTreeMap<String, usize> {
         .collect()
 }
 
-/// Expected schema-table and row-count changes made on purpose by migrations 120–124.
+/// Expected schema-table and row-count changes made on purpose by migrations 120–127.
 /// Every other table present before migration must survive with its exact row count.
 #[derive(Default)]
 struct MigrationChanges {
@@ -88,6 +91,7 @@ struct MigrationChanges {
 
 impl MigrationChanges {
     fn drop_table(&mut self, table: &str) {
+        self.created_tables.remove(table);
         self.dropped_tables.insert(table.to_owned());
     }
 
@@ -108,6 +112,126 @@ impl MigrationChanges {
     }
 }
 
+/// Exact backfill counts expected from migration 127, evaluated on the pre-migration database so
+/// post-migration checks prove neither `reply_message_id` nor `dispatch_ref_id` dropped links.
+struct Thread127Backfill {
+    total_receipts: usize,
+    /// Distinct non-empty reply_ids available without the `route_log.reply_id` fallback on
+    /// `thread_runs` (i.e., what only `thread_runs.reply_id` + non-run `route_log.reply_id` had).
+    legacy_direct_reply_ids: usize,
+    /// Distinct non-empty candidate reply_ids across `COALESCE(thread_runs.reply_id, route_log.reply_id)`
+    /// unioned with non-run `route_log.reply_id`. Every distinct candidate maps to one receipt row.
+    backfillable_reply_ids: usize,
+    /// Receipts whose `(workspace_id, origin_message_id)` has a valid `thread_items` row
+    /// referencing an existing `items.id` (migrated to `thread_dispatch_refs` as `create_item`).
+    backfillable_dispatch_refs: usize,
+    /// Receipts with `item_id IS NULL` and no origin dispatch (inline answers, asks, configs, etc.).
+    unbackfillable_dispatch_no_item: usize,
+    /// Receipts with `item_id IS NOT NULL` whose `(workspace_id, origin_message_id)` has no valid
+    /// `create_item` row in `thread_items` (for example, `supplement` / `suggest` appends targeting
+    /// an item created by an earlier origin, or a deleted item).
+    unbackfillable_dispatch_other_origin_or_deleted: usize,
+    /// High-water mark of `thread_reply_commits` in `sqlite_sequence` before table rebuild.
+    reply_commits_seq: i64,
+}
+
+fn expected_thread_127_backfill(path: &Path) -> Thread127Backfill {
+    let q = |sql: &str| cli_count(path, sql);
+
+    let total_receipts = q(
+        "SELECT (SELECT count(*) FROM thread_runs)
+              + (SELECT count(*) FROM route_log rl
+                  WHERE NOT EXISTS (SELECT 1 FROM thread_runs r WHERE r.message_id = rl.message_id))",
+    );
+    let legacy_direct_reply_ids = q("SELECT count(DISTINCT reply_id) FROM (
+           SELECT NULLIF(r.reply_id, '') AS reply_id FROM thread_runs r
+           UNION
+           SELECT NULLIF(rl.reply_id, '') AS reply_id
+           FROM route_log rl
+           WHERE NOT EXISTS (SELECT 1 FROM thread_runs r WHERE r.message_id = rl.message_id)
+         ) WHERE reply_id IS NOT NULL");
+    let backfillable_reply_ids = q("SELECT count(DISTINCT reply_id) FROM (
+           SELECT COALESCE(NULLIF(r.reply_id, ''), NULLIF(rl.reply_id, '')) AS reply_id
+           FROM thread_runs r
+           LEFT JOIN route_log rl ON rl.message_id = r.message_id
+           UNION
+           SELECT NULLIF(rl.reply_id, '') AS reply_id
+           FROM route_log rl
+           WHERE NOT EXISTS (SELECT 1 FROM thread_runs r WHERE r.message_id = rl.message_id)
+         ) WHERE reply_id IS NOT NULL");
+
+    const ALL_RECEIPTS_CTE: &str = "
+        WITH all_receipts AS (
+          SELECT r.workspace_id, r.message_id AS origin_message_id, rl.item_id
+          FROM thread_runs r
+          LEFT JOIN route_log rl ON rl.message_id = r.message_id
+          UNION ALL
+          SELECT rl.workspace_id, rl.message_id AS origin_message_id, rl.item_id
+          FROM route_log rl
+          WHERE NOT EXISTS (SELECT 1 FROM thread_runs r WHERE r.message_id = rl.message_id)
+        ) ";
+
+    let backfillable_dispatch_refs = q(&format!(
+        "{ALL_RECEIPTS_CTE}
+         SELECT count(*) FROM all_receipts ar
+         WHERE EXISTS (
+           SELECT 1 FROM thread_items ti
+           WHERE ti.workspace_id = ar.workspace_id
+             AND ti.origin_msg = ar.origin_message_id
+             AND EXISTS (SELECT 1 FROM items i WHERE i.id = ti.item_id)
+         )"
+    ));
+    let unbackfillable_dispatch_no_item = q(&format!(
+        "{ALL_RECEIPTS_CTE}
+         SELECT count(*) FROM all_receipts ar
+         WHERE ar.item_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM thread_items ti
+             WHERE ti.workspace_id = ar.workspace_id
+               AND ti.origin_msg = ar.origin_message_id
+               AND EXISTS (SELECT 1 FROM items i WHERE i.id = ti.item_id)
+           )"
+    ));
+    let unbackfillable_dispatch_other_origin_or_deleted = q(&format!(
+        "{ALL_RECEIPTS_CTE}
+         SELECT count(*) FROM all_receipts ar
+         WHERE ar.item_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM thread_items ti
+             WHERE ti.workspace_id = ar.workspace_id
+               AND ti.origin_msg = ar.origin_message_id
+               AND EXISTS (SELECT 1 FROM items i WHERE i.id = ti.item_id)
+           )"
+    ));
+    assert_eq!(
+        backfillable_dispatch_refs
+            + unbackfillable_dispatch_no_item
+            + unbackfillable_dispatch_other_origin_or_deleted,
+        total_receipts,
+        "every pre-127 receipt must fall into exactly one dispatch backfill bucket"
+    );
+
+    let reply_commits_seq: i64 = cli(
+        path,
+        "SELECT COALESCE(
+           (SELECT seq FROM sqlite_sequence WHERE name = 'thread_reply_commits'),
+           (SELECT MAX(seq) FROM thread_reply_commits),
+           0
+         )",
+    )
+    .parse()
+    .unwrap();
+
+    Thread127Backfill {
+        total_receipts,
+        legacy_direct_reply_ids,
+        backfillable_reply_ids,
+        backfillable_dispatch_refs,
+        unbackfillable_dispatch_no_item,
+        unbackfillable_dispatch_other_origin_or_deleted,
+        reply_commits_seq,
+    }
+}
 /// Computes the exact tables dropped/created and rows added/removed on purpose by migrations
 /// newer than `v_before`, evaluated against the pre-migration database at `path`.
 fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
@@ -303,6 +427,299 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
         changes.create_table("decision_choice_receipts", 0);
     }
 
+    // 125: Durable daily aggregates for low-cardinality telemetry counters.
+    if v_before < 125 {
+        changes.create_table("telemetry_daily", 0);
+    }
+
+    // 126: Remove retired dynamic work-graph tables, steve_workflow tool pins, and stale
+    // close-request workflow_revision keys.
+    if v_before < 126 {
+        for table in [
+            "workflow_review_findings",
+            "workflow_units",
+            "workflow_history",
+            "workflow_attempts",
+            "workflows",
+        ] {
+            changes.drop_table(table);
+        }
+        if v_before >= 69 {
+            changes.remove_rows(
+                "bot_tool_pins",
+                q("SELECT count(*) FROM bot_tool_pins WHERE kind = 'tool' AND target = 'steve_workflow'"),
+            );
+        }
+    }
+
+    // 127: WaitContract columns and constraints (in-place rebuilds, no table/row count change).
+
+    // 128: Steve coordinator (#544): strip main bot from teams, rewrite steve_fallback, create
+    // `item_placement_waits`.
+    if v_before < 128 {
+        changes.create_table("item_placement_waits", 0);
+    }
+
+    // 129: Person avatar (#545): link workspace members to contact parties (reusing a unique
+    // unlinked name match, otherwise inserting a new contact row), add `decisions.resolved_by`,
+    // and backfill single-member `'me'` timeline actors.
+    if v_before < 129 {
+        changes.add_rows(
+            "parties",
+            q("SELECT count(*)
+               FROM workspace_members wm
+               JOIN users u ON u.id = wm.user_id
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM parties p
+                 WHERE p.workspace_id = wm.workspace_id AND p.user_id = wm.user_id
+               )
+                 AND NOT (
+                   (SELECT count(*) FROM parties p_same
+                    WHERE p_same.workspace_id = wm.workspace_id
+                      AND p_same.type = 'contact'
+                      AND p_same.status = 'active'
+                      AND p_same.user_id IS NULL
+                      AND lower(trim(p_same.name)) = lower(trim(u.name))) = 1
+                   AND (SELECT count(*) FROM workspace_members wm2
+                        JOIN users u2 ON u2.id = wm2.user_id
+                        WHERE wm2.workspace_id = wm.workspace_id
+                          AND NOT EXISTS (
+                            SELECT 1 FROM parties p3
+                            WHERE p3.workspace_id = wm2.workspace_id AND p3.user_id = wm2.user_id
+                          )
+                          AND lower(trim(u2.name)) = lower(trim(u.name))) = 1
+                 )"),
+        );
+    }
+
+    // 130: Durable thread submit idempotency, reply tasks, reply receipts, origin-scoped dispatch
+    // & delivery refs, and typed notices (#546 W3.4).
+    // Drops legacy `thread_resume`, `thread_runs`, `route_log`, `thread_items`; migrates
+    // `thread_runs` + non-run `route_log` into settled `thread_reply_tasks` & `thread_reply_receipts`,
+    // `thread_items` (whose item still exists) into `thread_dispatch_refs`, `messages(space='notify')`
+    // and `settings.noticeDismissed` into `thread_notices` (deleting the migrated `notify` messages
+    // and legacy `thread.pending.*` / `noticeDismissed` / `thread.postback.*` settings), and rebuilds
+    // `thread_reply_commits` against `thread_reply_receipts(id)` (pruning only orphaned rows).
+    if v_before < 130 {
+        for table in ["thread_resume", "thread_runs", "route_log", "thread_items"] {
+            changes.drop_table(table);
+        }
+        let migrated_receipts = q(
+            "SELECT (SELECT count(*) FROM thread_runs)
+                  + (SELECT count(*) FROM route_log rl
+                      WHERE NOT EXISTS (SELECT 1 FROM thread_runs r WHERE r.message_id = rl.message_id))",
+        );
+        let migrated_dispatches = q("SELECT count(*) FROM thread_items ti
+             WHERE EXISTS (SELECT 1 FROM items i WHERE i.id = ti.item_id)");
+        let notify_messages = q("SELECT count(*) FROM messages WHERE space = 'notify'");
+        let dismissed_alerts = q(
+            "SELECT count(DISTINCT s.workspace_id || ':alert:' || CAST(j.value AS TEXT))
+             FROM settings s, json_each(s.value) j
+             WHERE s.key = 'noticeDismissed'
+               AND json_valid(s.value)
+               AND json_type(s.value) = 'array'
+               AND j.type = 'text'
+               AND NOT EXISTS (
+                 SELECT 1 FROM messages m
+                 WHERE m.workspace_id = s.workspace_id
+                   AND m.space = 'notify'
+                   AND m.id = CAST(j.value AS TEXT)
+               )",
+        );
+        changes.create_table("thread_submit_keys", 0);
+        changes.create_table("thread_reply_tasks", migrated_receipts);
+        changes.create_table("thread_reply_receipts", migrated_receipts);
+        changes.create_table("thread_dispatch_refs", migrated_dispatches);
+        changes.create_table("thread_forwarded", 0);
+        changes.create_table("thread_delivery_refs", 0);
+        changes.create_table("thread_notices", notify_messages + dismissed_alerts);
+        changes.remove_rows("messages", notify_messages);
+        changes.remove_rows(
+            "settings",
+            q("SELECT count(*) FROM settings
+               WHERE key LIKE 'thread.pending.%'
+                  OR key = 'noticeDismissed'
+                  OR key LIKE 'thread.postback.%'"),
+        );
+        changes.remove_rows(
+            "thread_reply_commits",
+            q("SELECT count(*) FROM thread_reply_commits c
+               WHERE NOT EXISTS (SELECT 1 FROM thread_runs r WHERE r.id = c.run_id)
+                  OR NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = c.message_id)"),
+        );
+    }
+
+    // 131: Knowledge redefinition (#550): creates `project_proposals`, migrates codebase
+    // engineering facts out of `mems` into `project_proposals`, and withdraws `items`/`chat`
+    // work-record sources from the knowledge index.
+    if v_before < 131 {
+        const ENG_CTE: &str = "
+            WITH _mig131_eng AS (
+              SELECT m.id AS mem_id, picked.proj_id AS project_id
+              FROM (
+                SELECT
+                  m.id,
+                  COALESCE(
+                    (SELECT a.object_id FROM mem_about a
+                       JOIN projects p ON p.id = a.object_id AND p.workspace_id = m.workspace_id AND p.kind = 'git'
+                      WHERE a.mem_id = m.id AND a.object_type = 'project'
+                      LIMIT 1),
+                    (SELECT i.project_id FROM items i
+                       JOIN projects p ON p.id = i.project_id AND p.workspace_id = m.workspace_id AND p.kind = 'git'
+                      WHERE m.source_type = 'item' AND i.id = m.source_id
+                      LIMIT 1),
+                    (SELECT p.id FROM projects p
+                      WHERE p.workspace_id = m.workspace_id AND p.kind = 'git' AND p.archived = 0
+                        AND instr(lower(m.text), lower(p.name)) > 0
+                      ORDER BY length(p.name) DESC
+                      LIMIT 1)
+                  ) AS proj_id
+                FROM mems m
+                WHERE m.kind = 'fact'
+                  AND m.source_type != 'me'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM mem_about a WHERE a.mem_id = m.id AND a.object_type = 'party'
+                  )
+                  AND (
+                    m.source_type = 'item'
+                    OR (m.status = 'candidate' AND NOT EXISTS (SELECT 1 FROM mem_about a WHERE a.mem_id = m.id))
+                  )
+              ) AS picked
+              JOIN mems m ON m.id = picked.id
+              WHERE picked.proj_id IS NOT NULL
+            ) ";
+        let eng_count = q(&format!("{ENG_CTE} SELECT count(*) FROM _mig131_eng"));
+        changes.create_table("project_proposals", eng_count);
+        changes.remove_rows("mems", eng_count);
+        changes.remove_rows(
+            "mem_candidates",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM mem_candidates WHERE mem_id IN (SELECT mem_id FROM _mig131_eng)"
+            )),
+        );
+        changes.remove_rows(
+            "mem_supersedes",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM mem_supersedes
+                 WHERE mem_id IN (SELECT mem_id FROM _mig131_eng)
+                    OR old_id IN (SELECT mem_id FROM _mig131_eng)"
+            )),
+        );
+        changes.remove_rows(
+            "mem_about",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM mem_about WHERE mem_id IN (SELECT mem_id FROM _mig131_eng)"
+            )),
+        );
+        let removed_chunks = q(&format!(
+            "{ENG_CTE} SELECT count(*) FROM kb_chunks
+             WHERE (obj_type = 'mem' AND obj_id IN (SELECT mem_id FROM _mig131_eng))
+                OR source_kind IN ('items', 'chat')"
+        ));
+        changes.remove_rows("kb_chunks", removed_chunks);
+        changes.remove_rows(
+            "kb_fts",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM kb_fts
+                 WHERE rowid IN (
+                   SELECT id FROM kb_chunks
+                   WHERE (obj_type = 'mem' AND obj_id IN (SELECT mem_id FROM _mig131_eng))
+                      OR source_kind IN ('items', 'chat')
+                 )"
+            )),
+        );
+        changes.remove_rows(
+            "kb_vectors",
+            q(&format!(
+                "{ENG_CTE} SELECT count(*) FROM kb_vectors
+                 WHERE chunk_id IN (
+                   SELECT id FROM kb_chunks
+                   WHERE (obj_type = 'mem' AND obj_id IN (SELECT mem_id FROM _mig131_eng))
+                      OR source_kind IN ('items', 'chat')
+                 )"
+            )),
+        );
+        changes.remove_rows(
+            "kb_doc_about",
+            q("SELECT count(*) FROM kb_doc_about
+               WHERE doc_id IN (
+                 SELECT d.id FROM kb_docs d
+                   JOIN kb_sources s ON s.id = d.source_id
+                  WHERE s.kind IN ('items', 'chat')
+               )"),
+        );
+        changes.remove_rows(
+            "kb_docs",
+            q("SELECT count(*) FROM kb_docs
+               WHERE source_id IN (SELECT id FROM kb_sources WHERE kind IN ('items', 'chat'))"),
+        );
+        changes.remove_rows(
+            "kb_sources",
+            q("SELECT count(*) FROM kb_sources WHERE kind IN ('items', 'chat')"),
+        );
+        changes.remove_rows(
+            "kb_marks",
+            q("SELECT count(*) FROM kb_marks WHERE name LIKE 'sync:chat:%'"),
+        );
+    }
+
+    // 132: Agent handoff fallback surfaces (#553).
+    if v_before < 132 {
+        changes.create_table("bot_fallback_surfaces", 0);
+    }
+
+    // 133: Backup v2 (#507): dedicated `backup_policy` singleton moved out of workspace `settings`.
+    if v_before < 133 {
+        let policy_rows = q("WITH legacy(value) AS (
+               SELECT CASE WHEN json_valid(value) THEN value ELSE '{}' END
+               FROM settings WHERE workspace_id = 'default' AND key = 'backup.daily'
+             )
+             SELECT count(*) FROM legacy
+             WHERE json_type(value, '$.enabled') IN ('true', 'false')
+               AND json_type(value, '$.keep_days') = 'integer'
+               AND json_extract(value, '$.keep_days') BETWEEN 1 AND 365");
+        changes.create_table("backup_policy", policy_rows);
+        changes.remove_rows(
+            "settings",
+            q("SELECT count(*) FROM settings WHERE workspace_id = 'default' AND key = 'backup.daily'"),
+        );
+    }
+
+    // 134: Remove legacy raw ACP event rows (#563).
+    if v_before < 134 {
+        changes.remove_rows(
+            "events",
+            q("SELECT count(*) FROM events
+               WHERE kind IN (
+                 'tool_call',
+                 'tool_call_update',
+                 'agent_message_chunk',
+                 'user_message_chunk',
+                 'agent_thought_chunk'
+               )
+                  OR format != 'steve.v1'"),
+        );
+    }
+
+    // 135: Retire YOLO audit rows and backfill explicit `bot_node_bindings` (#563).
+    if v_before < 135 {
+        changes.remove_rows(
+            "audit",
+            q("SELECT count(*) FROM audit WHERE action LIKE 'yolo.%'"),
+        );
+        changes.add_rows(
+            "bot_node_bindings",
+            q("SELECT count(*) FROM bot_workspaces w
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM bot_node_bindings b
+                 WHERE b.workspace_id = w.workspace_id AND b.bot_id = w.bot_id
+               )"),
+        );
+    }
+
+    // 136 & 137: Normalize `bots.perm_mode` and drop legacy `project_dir`/`worktree` columns
+    // (no table/row count change).
+
     changes
 }
 
@@ -323,6 +740,7 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         "prod copy at v{v_before}"
     );
     let expected = expected_migration_changes(&path, v_before);
+    let thread_130_backfill = (v_before < 130).then(|| expected_thread_127_backfill(&path));
 
     let s = Store::open(&path, NoPublisher).unwrap();
     if v_before == db::SCHEMA_VERSION {
@@ -400,6 +818,85 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
 
     // Every row decodes through the repositories and read views, and counts match the sqlite3 CLI.
     let n = |sql: &str| cli_count(&path, sql);
+
+    // Migration 127 backfill verification:
+    // - `reply_message_id` must preserve every unique `COALESCE(thread_runs.reply_id, route_log.reply_id)`
+    //   and non-run `route_log.reply_id` (recovering historical answer runs whose `thread_runs.reply_id`
+    //   was NULL while `route_log.reply_id` was populated).
+    // - `dispatch_ref_id` must link every receipt whose `(workspace_id, origin_message_id)` has a
+    //   migrated `create_item` row in `thread_dispatch_refs`, leaving NULL only for non-item turns,
+    //   supplements/appends to items created by earlier origins, or deleted items.
+    if let Some(ref bf) = thread_130_backfill {
+        let actual_reply_non_null =
+            n("SELECT count(*) FROM thread_reply_receipts WHERE reply_message_id IS NOT NULL");
+        let actual_reply_null =
+            n("SELECT count(*) FROM thread_reply_receipts WHERE reply_message_id IS NULL");
+        let actual_dispatch_non_null =
+            n("SELECT count(*) FROM thread_reply_receipts WHERE dispatch_ref_id IS NOT NULL");
+        let actual_dispatch_null =
+            n("SELECT count(*) FROM thread_reply_receipts WHERE dispatch_ref_id IS NULL");
+        assert_eq!(
+            actual_reply_non_null, bf.backfillable_reply_ids,
+            "migration 127 reply_message_id backfill count mismatch (legacy_direct={}, backfillable={}, actual={})",
+            bf.legacy_direct_reply_ids, bf.backfillable_reply_ids, actual_reply_non_null
+        );
+        assert!(
+            actual_reply_non_null >= bf.legacy_direct_reply_ids,
+            "migration 127 must not lose direct reply_message_id links"
+        );
+        assert_eq!(
+            actual_reply_null,
+            bf.total_receipts - bf.backfillable_reply_ids,
+            "migration 127 unbackfillable reply_message_id count mismatch"
+        );
+        assert_eq!(
+            actual_dispatch_non_null, bf.backfillable_dispatch_refs,
+            "migration 127 dispatch_ref_id backfill count mismatch"
+        );
+        assert_eq!(
+            actual_dispatch_null,
+            bf.unbackfillable_dispatch_no_item + bf.unbackfillable_dispatch_other_origin_or_deleted,
+            "migration 127 unbackfillable dispatch_ref_id count mismatch"
+        );
+        // Every backfilled dispatch_ref_id resolves to a matching create_item dispatch ref.
+        assert_eq!(
+            n("SELECT count(*) FROM thread_reply_receipts r
+               JOIN thread_dispatch_refs d ON d.id = r.dispatch_ref_id
+               WHERE d.workspace_id = r.workspace_id
+                 AND d.effect_kind = 'create_item'
+                 AND d.origin_message_id IN (
+                   r.origin_message_id,
+                   CASE WHEN r.item_id IS NOT NULL THEN r.origin_message_id || ':legacy:' || r.item_id END
+                 )"),
+            actual_dispatch_non_null,
+            "every backfilled dispatch_ref_id must match its origin create_item dispatch ref"
+        );
+        if bf.reply_commits_seq > 0 {
+            let seq_after: i64 = cli(
+                &path,
+                "SELECT seq FROM sqlite_sequence WHERE name = 'thread_reply_commits'",
+            )
+            .parse()
+            .unwrap();
+            assert_eq!(
+                seq_after, bf.reply_commits_seq,
+                "thread_reply_commits sqlite_sequence high-water mark changed"
+            );
+        }
+        eprintln!(
+            "prod_copy m127 backfill: receipts={} reply_message_id={}/{} (legacy_direct={}, +{} recovered) dispatch_ref_id={}/{} (unbackfillable: no_item={}, other_origin_or_deleted={})",
+            bf.total_receipts,
+            actual_reply_non_null,
+            bf.total_receipts,
+            bf.legacy_direct_reply_ids,
+            actual_reply_non_null - bf.legacy_direct_reply_ids,
+            actual_dispatch_non_null,
+            bf.total_receipts,
+            bf.unbackfillable_dispatch_no_item,
+            bf.unbackfillable_dispatch_other_origin_or_deleted,
+        );
+    }
+
     let wss = s.workspaces().all().unwrap();
     assert_eq!(wss.len(), n("SELECT count(*) FROM workspaces"));
 
@@ -444,6 +941,12 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
     let mut tags = 0;
     let mut projects = 0;
     let mut ws_settings_count = 0;
+    let mut active_thread_tasks = 0;
+    let mut rev0_receipts = 0;
+    let mut create_item_dispatches = 0;
+    let mut thread_notices = 0;
+    let mut dismissed_notice_alerts = 0;
+    let mut notice_host_messages = 0;
 
     for w in &wss {
         items += s.items().all(&w.id).unwrap().len();
@@ -586,11 +1089,276 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
             }
         }
 
+        // Durable thread repository (W3.4 / migration 127) workspace-scoped readback.
+        active_thread_tasks += s
+            .read(|r| thread::list_active_tasks(r, &w.id))
+            .unwrap()
+            .len();
+        rev0_receipts += s
+            .read(|r| thread::list_receipts_range(r, &w.id, i64::MIN, i64::MAX))
+            .unwrap()
+            .len();
+        let ws_dispatches = s
+            .read(|r| thread::dispatches_of_workspace(r, &w.id))
+            .unwrap();
+        for d in &ws_dispatches {
+            let by_origin = s
+                .read(|r| {
+                    thread::dispatch_by_origin(
+                        r,
+                        &d.workspace_id,
+                        &d.origin_message_id,
+                        &d.effect_kind,
+                    )
+                })
+                .unwrap()
+                .expect("dispatch_by_origin must find workspace dispatch");
+            assert_eq!(&by_origin, d);
+            if let Some(ref item_id) = d.target_item_id {
+                let by_item = s
+                    .read(|r| thread::dispatch_by_item(r, item_id))
+                    .unwrap()
+                    .expect("dispatch_by_item must find create_item dispatch");
+                assert_eq!(&by_item, d);
+            }
+        }
+        create_item_dispatches += ws_dispatches.len();
+
+        thread_notices += s
+            .read(|r| thread::list_notices(r, &w.id, i64::MAX))
+            .unwrap()
+            .len();
+        dismissed_notice_alerts += s
+            .read(|r| thread::dismissed_alert_ids(r, &w.id))
+            .unwrap()
+            .len();
+        let host_ids = s
+            .read(|r| thread::notice_host_message_ids(r, &w.id))
+            .unwrap();
+        assert_eq!(
+            host_ids,
+            s.read(|r| r.message_views().notices(&w.id)).unwrap(),
+            "MessageViews::notices must match thread::notice_host_message_ids"
+        );
+        notice_host_messages += host_ids.len();
+
         tags += s.tags().list(&w.id).unwrap().len();
         projects += s.projects().list(&w.id, false).unwrap().len()
             + s.projects().list(&w.id, true).unwrap().len();
         ws_settings_count += s.settings().all(&w.id).unwrap().len();
     }
+
+    // Full per-row readback across all migration 127 thread repository tables.
+    assert_eq!(
+        s.read(|r| thread::list_queued_spaces(r)).unwrap().len(),
+        n(
+            "SELECT count(*) FROM (SELECT DISTINCT workspace_id, space FROM thread_reply_tasks WHERE status = 'queued')"
+        )
+    );
+
+    assert_eq!(
+        active_thread_tasks,
+        n("SELECT count(*) FROM thread_reply_tasks WHERE status IN ('queued', 'claimed')")
+    );
+    let task_keys: Vec<(String, String)> = s
+        .fixture_write(|c| {
+            let mut st = c.prepare("SELECT id, origin_message_id FROM thread_reply_tasks")?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    let mut task_origins = BTreeSet::new();
+    for (task_id, origin_id) in &task_keys {
+        let task = s
+            .read(|r| thread::task_by_id(r, task_id))
+            .unwrap()
+            .unwrap_or_else(|| panic!("thread::task_by_id missing {task_id}"));
+        assert_eq!(task.origin_message_id, *origin_id);
+        task_origins.insert(origin_id.clone());
+    }
+    let mut tasks_by_origin_count = 0;
+    for origin_id in &task_origins {
+        tasks_by_origin_count += s
+            .read(|r| thread::tasks_of_origin(r, origin_id))
+            .unwrap()
+            .len();
+    }
+    assert_eq!(
+        tasks_by_origin_count,
+        n("SELECT count(*) FROM thread_reply_tasks")
+    );
+
+    assert_eq!(
+        rev0_receipts,
+        n("SELECT count(*) FROM thread_reply_receipts WHERE reply_revision = 0")
+    );
+    let receipt_keys: Vec<(String, String, String)> = s
+        .fixture_write(|c| {
+            let mut st =
+                c.prepare("SELECT id, task_id, origin_message_id FROM thread_reply_receipts")?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    let mut receipt_origins = BTreeSet::new();
+    for (receipt_id, task_id, origin_id) in &receipt_keys {
+        let by_id = s
+            .read(|r| thread::receipt_by_id(r, receipt_id))
+            .unwrap()
+            .unwrap_or_else(|| panic!("thread::receipt_by_id missing {receipt_id}"));
+        let by_task = s
+            .read(|r| thread::receipt_by_task(r, task_id))
+            .unwrap()
+            .unwrap_or_else(|| panic!("thread::receipt_by_task missing {task_id}"));
+        assert_eq!(by_id, by_task);
+        assert_eq!(by_id.origin_message_id, *origin_id);
+        receipt_origins.insert(origin_id.clone());
+    }
+    let mut receipts_by_origin_count = 0;
+    for origin_id in &receipt_origins {
+        let first = s
+            .read(|r| thread::receipt_by_origin(r, origin_id))
+            .unwrap()
+            .unwrap_or_else(|| panic!("thread::receipt_by_origin missing {origin_id}"));
+        let latest = s
+            .read(|r| thread::latest_receipt_by_origin(r, origin_id))
+            .unwrap()
+            .unwrap_or_else(|| panic!("thread::latest_receipt_by_origin missing {origin_id}"));
+        let all = s
+            .read(|r| thread::receipts_of_origin(r, origin_id))
+            .unwrap();
+        assert_eq!(all.first(), Some(&first));
+        assert_eq!(all.last(), Some(&latest));
+        receipts_by_origin_count += all.len();
+    }
+    assert_eq!(
+        receipts_by_origin_count,
+        n("SELECT count(*) FROM thread_reply_receipts")
+    );
+    assert_eq!(
+        n("SELECT count(*) FROM thread_reply_receipts WHERE json_valid(route_signals)"),
+        n("SELECT count(*) FROM thread_reply_receipts"),
+        "all thread_reply_receipts.route_signals JSON valid"
+    );
+    let receipt_spaces: Vec<(String, String, bool)> = s
+        .fixture_write(|c| {
+            let mut st = c.prepare(
+                "SELECT workspace_id, space,
+                        MAX(CASE WHEN outcome = 'answered' AND harness_session IS NOT NULL THEN 1 ELSE 0 END)
+                 FROM thread_reply_receipts
+                 GROUP BY workspace_id, space",
+            )?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    for (ws, space, expect_resumable) in &receipt_spaces {
+        let resumable = s
+            .read(|r| thread::last_resumable_receipt(r, ws, space))
+            .unwrap();
+        assert_eq!(
+            resumable.is_some(),
+            *expect_resumable,
+            "last_resumable_receipt mismatch for ({ws}, {space})"
+        );
+    }
+
+    assert_eq!(
+        create_item_dispatches,
+        n(
+            "SELECT count(*) FROM thread_dispatch_refs WHERE effect_kind = 'create_item' AND target_item_id IS NOT NULL"
+        )
+    );
+    let dispatch_keys: Vec<(String, String, String)> = s
+        .fixture_write(|c| {
+            let mut st = c.prepare(
+                "SELECT workspace_id, origin_message_id, effect_kind FROM thread_dispatch_refs",
+            )?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    for (ws, origin_id, kind) in &dispatch_keys {
+        assert!(
+            s.read(|r| thread::dispatch_by_origin(r, ws, origin_id, kind))
+                .unwrap()
+                .is_some(),
+            "thread::dispatch_by_origin missing ({ws}, {origin_id}, {kind})"
+        );
+    }
+    assert_eq!(
+        dispatch_keys.len(),
+        n("SELECT count(*) FROM thread_dispatch_refs")
+    );
+
+    assert_eq!(
+        thread_notices,
+        n("SELECT count(*) FROM thread_notices WHERE kind != 'alert'")
+    );
+    assert_eq!(
+        dismissed_notice_alerts,
+        n("SELECT count(*) FROM thread_notices WHERE closed_at IS NOT NULL")
+    );
+    assert_eq!(
+        notice_host_messages,
+        n("SELECT count(*) FROM thread_notices WHERE host_message_id IS NOT NULL")
+    );
+
+    let delivery_origins: Vec<(String, String, String)> = s
+        .fixture_write(|c| {
+            let mut st = c.prepare(
+                "SELECT DISTINCT workspace_id, space, origin_message_id FROM thread_delivery_refs",
+            )?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    let mut delivery_refs = 0;
+    for (ws, space, origin_id) in &delivery_origins {
+        delivery_refs += s
+            .read(|r| thread::delivery_refs_of_origin(r, ws, space, origin_id))
+            .unwrap()
+            .len();
+    }
+    assert_eq!(
+        delivery_refs,
+        n("SELECT count(*) FROM thread_delivery_refs")
+    );
+
+    let forwarded_items: Vec<String> = s
+        .fixture_write(|c| {
+            let mut st = c.prepare("SELECT item_id FROM thread_forwarded")?;
+            let rows = st
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    for item_id in &forwarded_items {
+        assert!(
+            s.read(|r| thread::peek_forwarded(r, item_id))
+                .unwrap()
+                .is_some(),
+            "thread::peek_forwarded missing {item_id}"
+        );
+    }
+    assert_eq!(
+        n("SELECT count(*) FROM thread_reply_commits c
+           JOIN thread_reply_receipts r ON r.id = c.receipt_id
+           JOIN messages m ON m.id = c.message_id"),
+        n("SELECT count(*) FROM thread_reply_commits"),
+        "all thread_reply_commits join cleanly to thread_reply_receipts and messages"
+    );
 
     assert_eq!(items, n("SELECT count(*) FROM items WHERE kind = 'task'"));
     assert_eq!(
@@ -655,7 +1423,9 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
     );
     assert_eq!(
         message_view_ids.len(),
-        n("SELECT count(*) FROM messages WHERE space = 'steve'")
+        n(
+            "SELECT count(*) FROM messages WHERE space = 'steve' AND COALESCE(json_extract(meta, '$.withdrawn'), 0) != 1"
+        )
     );
     assert_eq!(tags, n("SELECT count(*) FROM tags"));
     assert_eq!(projects, n("SELECT count(*) FROM projects"));

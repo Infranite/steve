@@ -7,6 +7,7 @@ export default {
   "config.diagnostic_model_disabled": "Model execution is disabled on this diagnostic Hub.",
   "config.harness_builtin_protected": "Built-in harness \"{{harness}}\" cannot be overridden or removed.",
   "config.harness_env_not_allowed": "Custom harness declarations do not accept environment variables.",
+  "config.team_member_main_bot": "Steve is the workspace coordinator and cannot be added to a Team’s member list.",
   "node.downgrade": "The Node refused to install an older version.",
   "node.invalid_harness_update_state": "Saved harness update state is invalid; migrate or restart the Hub to clear stale entries.",
   "node.operation_not_found": "The Node has no receipt for this operation.",

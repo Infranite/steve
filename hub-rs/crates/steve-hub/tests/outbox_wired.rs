@@ -17,7 +17,7 @@ use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
 struct Env {
-    domain: Arc<dyn steve_hub::backend::Domain>,
+    domain: Arc<steve_hub::wire::core::CoreDomain>,
     store: steve_store::Store,
     _home: tempfile::TempDir,
     base: String,

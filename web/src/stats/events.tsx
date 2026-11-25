@@ -14,7 +14,8 @@ import { go, ItemNo, Segmented } from "@/ui"
 import { Panel, PanelFoot } from "@/panel"
 import { Loading } from "@/stats/overview"
 import { DECISION, RELEASE, STOP } from "@/stats/drill"
-import { fmtMs, fmtN, tickLabel, timeTicks, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtMs, fmtN, tickLabel, timeTicks } from "@/stats/format"
 import { t, useT } from "@/i18n"
 
 type Win = [number, number]
@@ -32,7 +33,7 @@ export function eventLabel(e: StatEvent) {
   if (e.kind === "turn") return e.open ? t("stats:events.turnRunning") : t("stats:events.turn", { what: STOP()[e.what] ?? (e.what || "—") })
   if (e.kind === "decision") {
     const kind = DECISION()[e.what] ?? e.what
-    const state = e.open ? t("stats:events.decOpen") : e.by === "yolo" ? t("stats:events.decYolo") : e.by === "me" ? t("stats:events.decMe") : t("stats:events.decExpired")
+    const state = e.open ? t("stats:events.decOpen") : e.by === "steve" ? t("stats:events.decSteve") : e.by === "me" ? t("stats:events.decMe") : t("stats:events.decExpired")
     return t("stats:events.decision", { kind, state })
   }
   if (e.what === "status") return t("stats:events.status", { to: e.to === "fail" ? t("stats:events.failed") : ST[e.to ?? ""]?.[0] ?? e.to ?? "—" })
@@ -54,8 +55,8 @@ export function EventExplorer({ f, fkey, live }: { f: Filter; fkey: string; live
   useEffect(() => { setZoom([]); setSel(null) }, [fkey.split("#")[0]])
   const span = zoom.at(-1)
   const q = { lo: span?.[0], hi: span?.[1], a: sel?.[0], b: sel?.[1], kind: kind === "all" ? undefined : kind, buckets: typeof window !== "undefined" && window.innerWidth < 640 ? 48 : 96 }
-  const [d] = useStats(() => stats.events(f, q), [fkey, JSON.stringify(q)], live)
-  const v = d.s === "ok" && d.v.histogram ? d.v : null
+  const d = useHubQuery(["stats", "events", fkey, JSON.stringify(q)], () => stats.events(f, q), { events: ["stats"], debounceMs: 200, live })
+  const v = d.data && d.data.histogram ? d.data : null
   /* the count of each kind for the switch: a narrowed answer counts only its kind, so the others keep the figures of the
      last answer over all kinds in the same window */
   const wkey = JSON.stringify([q.lo, q.hi, q.a, q.b])
@@ -89,7 +90,7 @@ export function EventExplorer({ f, fkey, live }: { f: Filter; fkey: string; live
           <button type="button" aria-label={t("stats:events.clear")} className="ml-0.5 rounded-md p-0.5 text-muted-foreground hover:text-foreground" onClick={() => setSel(null)}><XIcon className="size-3" /></button></span>}
       </div>
       <div className="border-t-0! px-5 pb-2">
-        {!v ? <Loading h={150} err={d.s === "error" ? d.msg : null} />
+        {!v ? <Loading h={150} err={d.error ? d.error.message : null} />
           : <Brush v={v} sel={sel} long={long} onSel={setSel} onZoom={zoomIn} canOut={zoom.length > 0} onOut={() => { setZoom(zoom.slice(0, -1)); setSel(null) }} />}
       </div>
       {v && <EventList v={v} long={long} />}

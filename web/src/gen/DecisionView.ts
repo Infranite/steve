@@ -10,6 +10,7 @@ import type { RawJson } from "./RawJson";
 import type { Said } from "./Said";
 import type { SessionId } from "./SessionId";
 import type { SpaceId } from "./SpaceId";
+import type { WaitContract } from "./WaitContract";
 import type { WorkspaceId } from "./WorkspaceId";
 
 /**
@@ -23,7 +24,11 @@ kind: string, subject_type: string, subject_id: string, item_id: ItemId | null, 
 /**
  * What it was settled with, as recorded.
  */
-result: RawJson | null, requested_by: string, created: Millis, resolved: Millis | null, 
+result: RawJson | null, requested_by: string, 
+/**
+ * Actor who settled the decision (a user id, `"yolo"`, or `None` when expired/system-settled).
+ */
+resolved_by?: string, created: Millis, resolved: Millis | null, 
 /**
  * Until when the answer can be taken back; `None` when it cannot.
  */
@@ -39,4 +44,4 @@ tier: DecisionTier,
 /**
  * Why it is folded away (`tier` = `folded`).
  */
-folded: FoldReason | null, revision: number, };
+folded: FoldReason | null, revision: number, wait?: WaitContract, };

@@ -212,7 +212,12 @@ pub fn seed_starting_session(store: &Store, key1: &str) -> Result<()> {
 
 pub fn seed_thread_runs(store: &Store, run: &str, ws: &str) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO thread_runs (id, workspace_id, message_id, status, created) VALUES (?, ?, 'msg_1', 'running', 1)", rusqlite::params![run, ws])?;
+        let space = format!("test:{run}");
+        let origin = format!("msg_{run}");
+        tx.conn.execute(
+            "INSERT INTO thread_reply_tasks (id, workspace_id, space, origin_message_id, reply_revision, origin_version, input_seq, status, generation, lease_token, created, claimed_at, updated) VALUES (?, ?, ?, ?, 0, 1, 1, 'claimed', 1, 'lease', 1, 1, 1)",
+            rusqlite::params![run, ws, space, origin],
+        )?;
         Ok(())
     })
 }
@@ -484,7 +489,7 @@ pub fn set_sessions_workspace_id_foreign(store: &Store) -> Result<()> {
 pub fn set_thread_runs_status_done(store: &Store) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute(
-            "UPDATE thread_runs SET status='done' WHERE id='tr_t'",
+            "UPDATE thread_reply_tasks SET status='settled', lease_token=NULL WHERE id='tr_t'",
             rusqlite::params![],
         )?;
         Ok(())
@@ -706,12 +711,21 @@ pub fn midturn_event_count(store: &Store, session: &str) -> Result<i64> {
 pub fn block_tools_for_prerequisite(store: &Store, paused: bool) -> Result<()> {
     store.write(|tx| {
         if paused {
-            tx.conn.execute("DELETE FROM item_dependency_waits WHERE item_id='i1'", [])?;
-            tx.conn.execute("UPDATE items SET phase='paused' WHERE id='i1'", [])?;
+            tx.conn
+                .execute("DELETE FROM item_dependency_waits WHERE item_id='i1'", [])?;
+            tx.conn
+                .execute("UPDATE items SET phase='paused' WHERE id='i1'", [])?;
         } else {
             tx.conn.execute(
-                "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated) VALUES('i1',1,NULL,'workspace','','waiting',1,1)",
-                [],
+                "INSERT INTO item_dependency_waits(
+                   item_id,cycle,session_id,resume,reason,state,created,updated,
+                   wait_owner,wait_started_at,wait_deadline,wait_on_timeout
+                 ) VALUES('i1',1,NULL,'workspace','','waiting',1,1,?1,1,?2,?3)",
+                rusqlite::params![
+                    steve_types::WaitOwner::system("dependencies").to_code(),
+                    1 + steve_types::wait::WAIT_LIMIT_DEPENDENCY_MS,
+                    steve_types::WaitTimeoutAction::EscalateToOwner.as_str(),
+                ],
             )?;
         }
         Ok(())

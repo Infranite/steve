@@ -5,7 +5,7 @@ import { StepperForm, StepperSuccess, type Step, type StepperLabels } from "@/co
 import { Button } from "@/components/ui/button"
 import { emit, finishOnboarding, meet, skipOnboarding, st, toast, useShellSelector, useShellStore, useRuntimes } from "@/store"
 import { go } from "@/ui"
-import { homeTilde } from "@/resume"
+import { homeTilde } from "@/lib/path"
 import { useT } from "@/i18n"
 import { cn } from "cn"
 import { ArrowUpRightIcon } from "lucide-react"

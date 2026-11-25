@@ -31,25 +31,6 @@ pub fn seed_decision_foreign(store: &Store) -> Result<()> {
     })
 }
 
-pub fn seed_recovery_review_fences_legacy_auto_approval_and_preserves(
-    store: &Store,
-    result: &str,
-    review: &str,
-    message: &str,
-) -> Result<()> {
-    project_write(store, |c| {
-        c.execute(
-            r#"UPDATE decisions SET status='resolved',result=?1 WHERE id=?2;"#,
-            params![result, review],
-        )?;
-        c.execute(
-            r#"UPDATE chan_messages SET status='pending',sent=NULL WHERE id=?1"#,
-            params![message],
-        )?;
-        Ok(())
-    })
-}
-
 pub fn set_decision_status_resolved(store: &Store, id: &str) -> Result<()> {
     project_write(store, |c| {
         c.execute(r#"UPDATE decisions SET status = 'resolved', result = '{"dismissed":true}' WHERE id = ?1"#, params![id])?;

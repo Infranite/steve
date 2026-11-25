@@ -19,7 +19,6 @@ const first = [
   entry(9, today(11, 20), "usr_me", "pair.create", "pair_2"),
   entry(8, today(11, 10), "usr_me", "pair.create", "pair_1"),
   entry(7, today(10, 5), "steve", "item.create", "ST-7", { bot: "dev", source: ["对话", "chat"] }),
-  entry(6, today(9, 0), "yolo", "decision.resolve", "dec_1", { choice: "yes", text: "" }),
   entry(5, today(8, 0), "steve", "settings.models", "ws", { before: { "models.route": "a" }, after: { "models.route": "b" } }),
   // the Hub's own upkeep, written under the main Bot's id: not a Bot's work
   entry(4, today(7, 0), "steve", "settings.models.migrate", "ws", {}),
@@ -109,13 +108,10 @@ try {
     await page.goto(base + "/test/fixtures/command-audit.html?audit" + q)
     await page.locator("[data-activity]").waitFor()
     const rows = page.locator("[data-activity-day] > ul > li")
-    assert.deepEqual(await page.locator("[data-activity-day] [data-activity-text]").allInnerTexts(), ["生成配对码", "新建事项「改登录页」", "做出决定", "修改模型设置", "自动选定默认模型", "指定负责人"]); assertions++
+    assert.deepEqual(await page.locator("[data-activity-day] [data-activity-text]").allInnerTexts(), ["生成配对码", "新建事项「改登录页」", "修改模型设置", "自动选定默认模型", "指定负责人"]); assertions++
     // who did it, said by name and as a filter with counts
-    assert.deepEqual(await page.locator("[data-filter]").allInnerTexts().then((xs) => xs.map((x) => x.replace(/\s+/g, " ").trim())), ["全部 8", "你 3", "Bot 自己做的 2", "YOLO 替你 1", "Hub 自动 2"]); assertions++
+    assert.deepEqual(await page.locator("[data-filter]").allInnerTexts().then((xs) => xs.map((x) => x.replace(/\s+/g, " ").trim())), ["全部 7", "你 3", "Bot 自己做的 2", "Hub 自动 2"]); assertions++
     assert.match(await rows.nth(1).locator("[data-activity-meta]").innerText(), /Steve/); assertions++
-    assert.match(await rows.nth(2).locator("[data-activity-meta]").innerText(), /YOLO 替你/); assertions++
-    await page.locator("[data-filter='yolo']").click()
-    assert.deepEqual(await page.locator("[data-activity-text]").allInnerTexts(), ["做出决定"]); assertions++
     await page.locator("[data-filter='hub']").click()
     assert.deepEqual(await page.locator("[data-activity-text]").allInnerTexts(), ["自动选定默认模型", "指定负责人"]); assertions++
     await page.locator("[data-filter='all']").click()
@@ -134,17 +130,14 @@ try {
     assert.doesNotMatch(await detail.innerText(), /谁让它做的/); assertions++
     await detail.locator("[data-activity-open]").click()
     await page.waitForFunction(() => location.hash === "#/items/ST-7"); assertions++
-    // YOLO's answer says why it could
-    await rows.nth(2).locator(".ui-aga-row__main").click()
-    assert.match(await page.locator("[data-activity-detail]").innerText(), /谁让它做的[\s\S]*YOLO 开着/); assertions++
     // the Hub's migration is the Hub's, not the Bot's
-    await rows.nth(4).locator(".ui-aga-row__main").click()
+    await rows.nth(3).locator(".ui-aga-row__main").click()
     const hubDetail = await page.locator("[data-activity-detail]").innerText()
     assert.match(hubDetail, /操作人\s*Hub 自动/); assertions++
     assert.doesNotMatch(hubDetail, /Bot 自己做的|谁让它做的/); assertions++
-    assert.match(await rows.nth(4).locator("[data-activity-meta]").innerText(), /Hub 自动/); assertions++
+    assert.match(await rows.nth(3).locator("[data-activity-meta]").innerText(), /Hub 自动/); assertions++
     // a changed setting reads as old → new under the purpose's name
-    await rows.nth(3).locator(".ui-aga-row__main").click()
+    await rows.nth(2).locator(".ui-aga-row__main").click()
     assert.match(await page.locator("[data-activity-detail]").innerText(), /分流\s*a → b/); assertions++
     if (shots) await page.screenshot({ path: `${shots}/audit-${theme}-${width}.png`, fullPage: true })
     // search, with the keyboard: / focuses it

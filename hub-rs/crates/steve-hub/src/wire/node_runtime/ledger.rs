@@ -131,6 +131,42 @@ impl NodeRuntime {
         }))
     }
 
+    /// Waits for `op`'s ledger state to satisfy `check`, waking on committed runtime writes
+    /// rather than busy-polling SQLite. Returns `None` if `timeout` elapses first.
+    pub async fn wait_ledger_until<T>(
+        &self,
+        op: &str,
+        timeout: Duration,
+        mut check: impl FnMut(Result<Option<LedgerEntry>, StoreError>) -> std::ops::ControlFlow<T>,
+    ) -> Option<T> {
+        const TRANSIENT_RETRY_CAP: Duration = Duration::from_millis(500);
+        let mut rx = self.ledger_rev.subscribe();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            rx.borrow_and_update();
+            let res = self.ledger(op);
+            let is_err = res.is_err();
+            if let std::ops::ControlFlow::Break(done) = check(res) {
+                return Some(done);
+            }
+            let rem = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if rem.is_zero() {
+                return None;
+            }
+            let wait = if is_err {
+                rem.min(TRANSIENT_RETRY_CAP)
+            } else {
+                rem
+            };
+            match tokio::time::timeout(wait, rx.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return None,
+                Err(_) if is_err => {}
+                Err(_) => return None,
+            }
+        }
+    }
+
     /// `op`, a ledger `exec` or push the Node can no longer tell the end of, stopped now rather
     /// than at its deadline (you asked for what it was for to run again, or a push is compared): a recover stops what is left of
     /// it and it ends interrupted. True: it is not unknown any more, or a recover of it is on its
@@ -173,7 +209,14 @@ impl NodeRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_subject;
+    use super::*;
+    use std::ops::ControlFlow;
+    use steve_node_api::testkit::FakeNode;
+
+    struct NoopDomain;
+    impl NodeDomain for NoopDomain {
+        fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
+    }
 
     #[test]
     fn subjects_name_what_the_operation_is_for() {
@@ -189,5 +232,39 @@ mod tests {
         for s in ["", "flow_run:", "push", "other:x", "session:s1", "release:"] {
             assert!(!valid_subject(s), "{s}");
         }
+    }
+
+    #[tokio::test]
+    async fn wait_ledger_until_wakes_on_commit_and_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("steve.db"), steve_store::NoPublisher).unwrap();
+        let node = FakeNode::new("local");
+        let runtime = NodeRuntime::new(store, node, Arc::new(NoopDomain));
+
+        // Times out cleanly when nothing matches.
+        let timed = runtime
+            .wait_ledger_until("op_missing", Duration::from_millis(20), |res| match res {
+                Ok(Some(e)) => ControlFlow::Break(e.state),
+                _ => ControlFlow::Continue(()),
+            })
+            .await;
+        assert_eq!(timed, None);
+
+        // Wakes promptly when a committed runtime write inserts the ledger entry.
+        let rt_bg = runtime.clone();
+        let submit = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            rt_bg
+                .submit("op_wake_1", "flow_run:r1", "exec", serde_json::json!({}))
+                .unwrap();
+        });
+        let seen = runtime
+            .wait_ledger_until("op_wake_1", Duration::from_secs(2), |res| match res {
+                Ok(Some(e)) => ControlFlow::Break(e.state),
+                _ => ControlFlow::Continue(()),
+            })
+            .await;
+        submit.await.unwrap();
+        assert_eq!(seen.as_deref(), Some("pending"));
     }
 }

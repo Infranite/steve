@@ -26,8 +26,10 @@ import { clockDur, longDur, nearTime, pastTime } from "@/i18n/format"
 import { OutDialog, type OutOpen } from "@/item-outputs"
 import { itemDisplayStatus } from "@/store"
 import { SessionKnowledge } from "@/knowledge/parts"
+import { homeTilde } from "@/lib/path"
 import { ResumeCard } from "@/resume"
-import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd } from "@/stats/format"
 import { briefHead, type Item, type Out, type Sess } from "@/store"
 import { BotName, DiscChevron, ItemNo, openSheet, SectionLabel, Status, StatusDot } from "@/ui"
 import { useNow } from "@/thread/transcript"
@@ -320,7 +322,7 @@ const Runtime = memo(function Runtime({ s }: { s: Sess }) {
           <Row k={t("views:sessionPanel.row.effort")}>{s.reasoningEffort ?? t("views:session.effortInherit")}</Row>
           <Row k={t("views:sessionPanel.row.device")}>{device ? <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hover:underline">{device.name}</a> : s.node ?? t("core:unknownNode")}</Row>
           <Row k={t("views:sessionPanel.row.source")}>{s.src}</Row>
-          {s.cwd && <Row k={t("views:sessionPanel.row.cwd")}><span className="break-all font-mono type-footnote text-muted-foreground">{s.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Row>}
+          {s.cwd && <Row k={t("views:sessionPanel.row.cwd")}><span className="break-all font-mono type-footnote text-muted-foreground">{homeTilde(s.cwd)}</span></Row>}
         </Rows>
         <Collapsible className="mt-3" data-session-resume>
           <CollapsibleTrigger className={cn(LINK, "group/disc inline-flex items-center gap-1 type-callout")}>{t("views:session.resume")}<DiscChevron className="size-3" /></CollapsibleTrigger>
@@ -334,7 +336,7 @@ const Runtime = memo(function Runtime({ s }: { s: Sess }) {
 export function SessionPanel({ k, tot }: { k: string; tot?: SessionTotals }) {
   const s = useSession(k)
   const item: Item | undefined = useItem(s?.item)
-  const [det] = useStats<RItemDetail | null>(() => (s?.item ? api.item(s.item) : Promise.resolve(null)), [s?.item, item?.updated], false)
+  const det = useHubQuery<RItemDetail | null>(["item", s?.item ?? null, item?.updated ?? 0], () => (s?.item ? api.item(s.item) : Promise.resolve(null)))
   if (!s) return null
   return (
     <div className="flex flex-col gap-8" data-session-panel-body>
@@ -342,7 +344,7 @@ export function SessionPanel({ k, tot }: { k: string; tot?: SessionTotals }) {
         <Head s={s} />
         <LiveFigures k={k} s={s} tot={tot} />
       </div>
-      <Outputs k={k} s={s} det={det.s === "ok" ? det.v : null} />
+      <Outputs k={k} s={s} det={det.data ?? null} />
       <Relations s={s} />
       <SessionKnowledge id={k} />
       <Runtime s={s} />

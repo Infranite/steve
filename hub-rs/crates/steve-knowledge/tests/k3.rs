@@ -159,16 +159,17 @@ impl Env {
 
 fn item_json(extra: Value) -> String {
     let mut items = vec![
-        json!({"kind":"preference","text":"Sarah 喜欢简短的邮件，不超过五行","about":["Sarah Chen"],"level":"conclusion","evidence":"Sarah 一直喜欢简短的邮件，别超过五行","basis":"explicit","dup_of":null,"conflicts":null,"why":"以后写信用","scope":"给 Sarah 写邮件时"}),
-        json!({"kind":"rule","text":"给 Acme 的邮件一律用英文","about":["Acme"],"level":"public","evidence":["Acme 的邮件一律用英文"],"basis":"explicit","dup_of":null,"conflicts":null}),
-        json!({"kind":"fact","text":"重复的一条","about":[],"evidence":"五行以内","dup_of":"mm_whatever"}),
-        json!({"kind":"preference","text":"用户希望续签邮件抄送 Sarah","about":[],"evidence":"给 Acme 写续签邮件，抄送 Sarah","basis":"explicit"}),
-        json!({"kind":"fact","text":"没有原话的一条","about":[]}),
-        json!({"kind":"fact","text":"王五负责 Acme 的采购","about":["王五"],"evidence":"五行以内"}),
-        json!({"kind":"fact","text":"关于 Sarah 和王五","about":["Sarah","王五"],"level":"reasoning","evidence":"写好了续签邮件草稿"}),
+        json!({"kind":"preference","scope":"person","text":"Sarah 喜欢简短的邮件，不超过五行","about":["Sarah Chen"],"level":"conclusion","evidence":"Sarah 一直喜欢简短的邮件，别超过五行","basis":"explicit","dup_of":null,"conflicts":null,"why":"以后写信用","when":"给 Sarah 写邮件时"}),
+        json!({"kind":"rule","scope":"organization","text":"给 Acme 的邮件一律用英文","about":["Acme"],"level":"public","evidence":["Acme 的邮件一律用英文"],"basis":"explicit","dup_of":null,"conflicts":null}),
+        json!({"kind":"fact","scope":"organization","text":"重复的一条","about":["Acme"],"evidence":"五行以内","dup_of":"mm_whatever"}),
+        json!({"kind":"preference","scope":"person","text":"用户希望续签邮件抄送 Sarah","about":[],"evidence":"给 Acme 写续签邮件，抄送 Sarah","basis":"explicit"}),
+        json!({"kind":"fact","scope":"organization","text":"没有原话的一条","about":["Acme"]}),
+        json!({"kind":"fact","scope":"organization","text":"没有关于对象的孤立事实","about":[],"evidence":"五行以内"}),
+        json!({"kind":"fact","scope":"person","text":"王五负责 Acme 的采购","about":["王五"],"evidence":"五行以内"}),
+        json!({"kind":"fact","scope":"person","text":"关于 Sarah 和王五","about":["Sarah","王五"],"level":"reasoning","evidence":"写好了续签邮件草稿"}),
     ];
     for i in 0..5 {
-        items.push(json!({"kind":"fact","text":format!("额外的第 {i} 条"),"about":[],"evidence":"五行以内"}));
+        items.push(json!({"kind":"fact","scope":"organization","text":format!("额外的第 {i} 条"),"about":["Acme"],"evidence":"五行以内"}));
     }
     if let Value::Array(x) = extra {
         items.splice(0..0, x);
@@ -191,6 +192,7 @@ async fn item_completion_yields_at_most_three_filtered_candidates() {
     assert!(!texts.contains(&"重复的一条"));
     assert!(!texts.contains(&"用户希望续签邮件抄送 Sarah"));
     assert!(!texts.contains(&"没有原话的一条"));
+    assert!(!texts.contains(&"没有关于对象的孤立事实"));
     assert!(!texts.contains(&"王五负责 Acme 的采购"));
     assert_eq!(texts[0], "Sarah 喜欢简短的邮件，不超过五行");
     assert_eq!(got[0].about, vec![ObjRef::new("party", "ct_sarah")]);
@@ -251,7 +253,8 @@ async fn item_completion_yields_at_most_three_filtered_candidates() {
     for s in [
         "ST-12 交付时",
         "目标 v2：给 Acme 写续签邮件，抄送 Sarah",
-        "属于事项记录",
+        "1. 事项记录：",
+        "AGENTS.md 提议",
         "你补充：Sarah 一直喜欢简短的邮件",
         "你的回答：Acme 的邮件一律用英文",
         "交付摘要：写好了续签邮件草稿",
@@ -262,7 +265,7 @@ async fn item_completion_yields_at_most_three_filtered_candidates() {
     }
     assert!(!p.contains("你补充：验收通过"));
 
-    // The item document is in the index (workspace-wide, so the other user finds it too).
+    // Items are NOT indexed into knowledge recall; they are searchable under records instead.
     let viewer = Viewer::bare(WS, OTHER);
     let hits = e
         .env
@@ -280,9 +283,25 @@ async fn item_completion_yields_at_most_three_filtered_candidates() {
         })
         .unwrap();
     assert!(
-        hits.iter()
-            .any(|h| h.source_kind == "items" && h.href == "#/items/ST-12"),
-        "{hits:#?}"
+        hits.is_empty(),
+        "items must not enter knowledge index: {hits:#?}"
+    );
+    let (s, v) = e
+        .me(
+            "GET",
+            "/kb/search?q=%E7%BB%AD%E7%AD%BE%E9%82%AE%E4%BB%B6&scope=records",
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["hits"].as_array().unwrap().is_empty());
+    assert!(
+        v["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["record_kind"] == "item" && r["href"] == "#/items/ST-12"),
+        "{v}"
     );
 
     // Once per completion: the same completion again does not call the model.
@@ -369,9 +388,9 @@ async fn confirming_with_supersedes_makes_the_old_memory_stale() {
     let old_id = old["id"].as_str().unwrap().to_string();
     e.env.gateway.script(
         PROMPT_HEAD,
-        json!({"items": [{"kind": "preference", "text": "Sarah 喜欢简短的邮件", "about": ["Sarah Chen"],
+        json!({"items": [{"kind": "preference", "scope": "person", "text": "Sarah 喜欢简短的邮件", "about": ["Sarah Chen"],
             "evidence": "Sarah 一直喜欢简短的邮件，别超过五行", "dup_of": null, "conflicts": old_id},
-            {"kind": "fact", "text": "冲突对象不存在", "evidence": "五行以内", "conflicts": "mm_nope"}]})
+            {"kind": "fact", "scope": "organization", "text": "冲突对象不存在", "about": ["Acme"], "evidence": "五行以内", "conflicts": "mm_nope"}]})
         .to_string(),
     );
     let got = items::finished(&e.env.modules, &e.kb, "ST-12")
@@ -587,12 +606,12 @@ async fn steve_remember_saves_a_candidate() {
 }
 
 #[tokio::test]
-async fn chat_days_are_documents_and_extracted_once() {
+async fn chat_days_are_records_and_extracted_once() {
     let e = setup();
     let m = &e.env.modules;
     let (start, _) = chat::day_bounds("2026-10-31", steve_runtime::tz::Zone::system()).unwrap();
     fixture::seed_day_messages(e.env.store(), start).unwrap();
-    let doc = chat::sync_day(m, WS, "2026-10-31").unwrap().unwrap();
+    // Chat messages are never indexed as knowledge documents; they are found under records.
     let viewer = Viewer::bare(WS, OTHER);
     let hits = e
         .env
@@ -609,15 +628,25 @@ async fn chat_days_are_documents_and_extracted_once() {
             )
         })
         .unwrap();
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].obj_id, doc);
-    assert_eq!(hits[0].label, "会话记录 · 2026-10-31 的对话");
-    assert!(hits[0].text.contains("我（10:00）：以后周五下午不安排部署"));
-    assert!(!hits[0].text.contains("别的空间"));
+    assert!(hits.is_empty(), "{hits:#?}");
+    let (s, v) = e
+        .me("GET", "/kb/search?q=%E9%83%A8%E7%BD%B2&scope=records", None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let recs = v["records"].as_array().unwrap();
+    assert!(!recs.is_empty(), "{v}");
+    assert!(recs.iter().any(|r| {
+        r["record_kind"] == "chat"
+            && r["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("以后周五下午不安排部署")
+    }));
+    assert!(!v.to_string().contains("别的空间"));
 
     e.env.gateway.script(
         PROMPT_HEAD,
-        r#"{"items":[{"kind":"rule","text":"周五下午不安排部署","about":[],"evidence":"以后周五下午不安排部署"}]}"#,
+        r#"{"items":[{"kind":"rule","scope":"person","text":"周五下午不安排部署","about":[],"evidence":"以后周五下午不安排部署"}]}"#,
     );
     let got = chat::extract_day(m, &e.kb, WS, "2026-10-31").await.unwrap();
     assert_eq!(got.len(), 1);
@@ -648,9 +677,14 @@ async fn chat_days_are_documents_and_extracted_once() {
             .is_empty()
     );
 
-    // A day without messages has no document.
+    // A day without messages yields nothing on extraction.
     fixture::clear_messages(e.env.store()).unwrap();
-    assert_eq!(chat::sync_day(m, WS, "2026-10-31").unwrap(), None);
+    assert!(
+        chat::extract_day(m, &e.kb, WS, "2026-10-30")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -781,16 +815,16 @@ async fn chat_failed_extraction_retries_and_catches_up_only_seven_days() {
     assert!(!marked("2026-11-09"));
     e.env.gateway.script(
         PROMPT_HEAD,
-        r#"{"items":[{"kind":"rule","text":"周五不部署","evidence":"以后周五不部署"}]}"#,
+        r#"{"items":[{"kind":"rule","scope":"person","text":"周五不部署","evidence":"以后周五不部署"}]}"#,
     );
-    chat::tick(&e.env.modules, &e.kb, clock.now(), false)
+    chat::tick(&e.env.modules, &e.kb, clock.now())
         .await
         .unwrap();
     assert!(marked("2026-11-03"));
     assert!(marked("2026-11-09"));
     assert!(!marked("2026-11-02"));
     let calls = e.env.gateway.prompts.lock().unwrap().len();
-    chat::tick(&e.env.modules, &e.kb, clock.now(), false)
+    chat::tick(&e.env.modules, &e.kb, clock.now())
         .await
         .unwrap();
     assert_eq!(e.env.gateway.prompts.lock().unwrap().len(), calls);

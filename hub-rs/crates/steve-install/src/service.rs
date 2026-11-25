@@ -2010,10 +2010,8 @@ mod tests {
         dropin: String,
         pending_dropin: String,
         stale: Option<String>,
-        legacy: BTreeMap<String, PathBuf>,
-        legacy_programs: BTreeMap<String, PathBuf>,
         gui_domain_unsupported: bool,
-        legacy_print_error: Option<(i32, String)>,
+        print_error: Option<(i32, String)>,
         node_signatures: BTreeMap<PathBuf, String>,
         cert_sha1: Option<String>,
         signing_failure: bool,
@@ -2212,57 +2210,18 @@ mod tests {
             } else if args.starts_with(&["/usr/bin/sudo".into(), "/bin/rm".into()]) {
                 assert_eq!(Path::new(&args[3]), self.config);
                 fs::remove_file(&self.config)?;
-            } else if self
-                .config
-                .parent()
-                .is_some_and(|path| path.ends_with("LaunchDaemons"))
-                && ((args[0] == "launchctl" && !args[2].starts_with("system/"))
-                    || (args.starts_with(&["/usr/bin/sudo".into(), "/bin/launchctl".into()])
-                        && args[2] == "bootout"
-                        && !args[3].starts_with("system/")))
-            {
-                let args = if args[0] == "/usr/bin/sudo" {
-                    &args[1..]
-                } else {
-                    args
-                };
-                match (args[1].as_str(), self.legacy.get(&args[2])) {
-                    ("print", Some(path)) => {
-                        result.stdout = format!(
-                            "\tpath = {}\n\tstate = running\n\tpid = 42\n",
-                            path.display()
-                        );
-                        if let Some(program) = self.legacy_programs.get(&args[2]) {
-                            result
-                                .stdout
-                                .push_str(&format!("\tprogram = {}\n", program.display()));
-                        }
-                    }
-                    ("print", None) => {
-                        if let Some((code, stderr)) = &self.legacy_print_error {
-                            result.code = *code;
-                            result.stderr = stderr.clone();
-                        } else if args[2].starts_with("gui/") && self.gui_domain_unsupported {
-                            result.code = LAUNCHCTL_ERR_DOMAIN_UNSUPPORTED;
-                            result.stderr =
-                                "Could not print domain: 125: Domain does not support specified action"
-                                    .into();
-                        } else {
-                            result.code = LAUNCHCTL_ERR_NOT_FOUND;
-                            result.stderr = if args[2].starts_with("gui/") {
-                                "Could not find domain for".into()
-                            } else {
-                                "Could not find service in domain".into()
-                            };
-                        }
-                    }
-                    ("bootout", Some(_)) => {
-                        self.legacy.remove(&args[2]);
-                    }
-                    _ => panic!("unexpected legacy command {args:?}"),
-                }
             } else if has("print") {
-                if self.unknown {
+                if let Some((code, stderr)) = &self.print_error {
+                    result.code = *code;
+                    result.stderr = stderr.clone();
+                } else if self.gui_domain_unsupported
+                    && args.get(2).is_some_and(|a| a.starts_with("gui/"))
+                {
+                    result.code = LAUNCHCTL_ERR_DOMAIN_UNSUPPORTED;
+                    result.stderr =
+                        "Could not print domain: 125: Domain does not support specified action"
+                            .into();
+                } else if self.unknown {
                     result.code = 1;
                     result.stderr = "access denied".into();
                 } else if !self.loaded {
@@ -2425,15 +2384,9 @@ mod tests {
                         m.failure.as_deref() != Some("-v"),
                         "fake authorization denied"
                     );
-                    if is_refresh {
-                        if refresh_reload {
-                            m.loaded = false;
-                            m.running = false;
-                        }
-                    } else {
-                        for legacy in &args[8..] {
-                            m.legacy.remove(legacy);
-                        }
+                    if is_refresh && refresh_reload {
+                        m.loaded = false;
+                        m.running = false;
                     }
                 }
                 finish()?;
@@ -2910,52 +2863,19 @@ esac
     }
 
     #[test]
-    fn legacy_mac_node_migrates_once_then_updates_and_uninstalls_one_definition() {
+    fn mac_node_registers_once_then_updates_and_uninstalls_one_definition() {
         let f = Fixture::new();
         let (mut s, manager) =
             f.service_at(System::Darwin, "node", &f.home, Some("example.boot-node"));
-        let agent = s.legacy_config();
-        fs::create_dir_all(agent.parent().unwrap()).unwrap();
-        let old = s
-            .definition(&f.release, DARWIN_DEFAULT_SERVICE_PATH)
-            .unwrap();
-        fs::write(&agent, &old).unwrap();
-        let (_, info) = s.bundle(&f.release).unwrap();
-        atomic(
-            &s.record_path,
-            &json_bytes(&json!({"component":"node","label":s.label,
-            "release":f.release,"build":info}))
-            .unwrap(),
-        )
-        .unwrap();
-        s.record = object(&s.record_path).unwrap();
-        let uid = unsafe { libc::getuid() };
-        let gui = format!("gui/{uid}/{}", s.label);
-        let user = format!("user/{uid}/{}", s.label);
         let system = format!("system/{}", s.label);
-        manager
-            .lock()
-            .unwrap()
-            .legacy
-            .extend([(gui.clone(), agent.clone()), (user.clone(), agent.clone())]);
-
+        s.dispatch("install", Some(&f.release), 0).unwrap();
         assert_eq!(
             s.dispatch("status", None, 0).unwrap()["boot"],
-            "migration_required"
+            "enable_required"
         );
-        assert!(s.dispatch("update", Some(&f.next), 0).is_err());
         manager.lock().unwrap().calls.clear();
         s.dispatch("enable-boot", None, 0).unwrap();
-        assert!(!agent.exists());
-        assert_eq!(
-            fs::read(f.home.join("services/node-launchagent.previous")).unwrap(),
-            old
-        );
         assert_eq!(s.record["boot_release"], text(&f.release).unwrap());
-        assert!(
-            s.record.get("release").is_none(),
-            "old helpers cannot manage this system job"
-        );
         assert_eq!(adapter_target(&f.home, Some("node")).unwrap().1, f.release);
         let original = fs::read(&s.config).unwrap();
         let mutations = |manager: &Arc<Mutex<Manager>>| {
@@ -2965,11 +2885,8 @@ esac
                 .calls
                 .iter()
                 .filter_map(|call| match call.as_slice() {
-                    [cmd, op, target] if cmd == "launchctl" && op == "bootout" => {
-                        Some(format!("{op} {target}"))
-                    }
                     [sudo, cmd, rest @ ..] if sudo == "/usr/bin/sudo" => Some(match cmd.as_str() {
-                        "/bin/sh" => format!("register {}", call[8..].join(" ")),
+                        "/bin/sh" => "register".into(),
                         "/bin/launchctl" => rest.join(" "),
                         "/bin/rm" => "remove definition".into(),
                         _ => panic!("unexpected admin command {call:?}"),
@@ -2978,7 +2895,7 @@ esac
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(mutations(&manager), [format!("register {gui} {user}")]);
+        assert_eq!(mutations(&manager), ["register"]);
         manager.lock().unwrap().calls.clear();
         s.dispatch("enable-boot", None, 0).unwrap();
         assert!(mutations(&manager).is_empty());
@@ -3008,109 +2925,8 @@ esac
                 "remove definition".into(),
             ]
         );
-        assert!(!agent.exists() && !s.config.exists());
-        f.preserved();
-    }
-
-    #[test]
-    fn migration_refuses_foreign_jobs_and_resumes_after_admin_install_failure() {
-        let f = Fixture::new();
-        let (mut s, manager) = f.service(System::Darwin, "node");
-        let agent = s.legacy_config();
-        fs::create_dir_all(agent.parent().unwrap()).unwrap();
-        let old = s
-            .definition(&f.release, DARWIN_DEFAULT_SERVICE_PATH)
-            .unwrap();
-        fs::write(&agent, &old).unwrap();
-        let (_, info) = s.bundle(&f.release).unwrap();
-        atomic(
-            &s.record_path,
-            &json_bytes(&json!({"component":"node","label":s.label,
-            "release":f.release,"build":info}))
-            .unwrap(),
-        )
-        .unwrap();
-        let gui = format!("gui/{}/{}", unsafe { libc::getuid() }, s.label);
-        manager.lock().unwrap().failure = Some("-v".into());
-        assert!(s.dispatch("enable-boot", None, 0).is_err());
-        assert_eq!(fs::read(&agent).unwrap(), old);
         assert!(!s.config.exists());
-        manager.lock().unwrap().failure = None;
-        manager
-            .lock()
-            .unwrap()
-            .legacy
-            .insert(gui.clone(), f.root.join("foreign.plist"));
-        assert!(
-            s.dispatch("enable-boot", None, 0)
-                .unwrap_err()
-                .to_string()
-                .contains("owned service definition")
-        );
-        assert_eq!(fs::read(&agent).unwrap(), old);
-        assert!(!s.config.exists());
-        {
-            let mut m = manager.lock().unwrap();
-            m.legacy.insert(gui, agent.clone());
-            m.failure = Some("/usr/bin/install".into());
-        }
-        assert!(s.dispatch("enable-boot", None, 0).is_err());
-        assert!(!agent.exists() && !s.config.exists());
-        assert_eq!(s.record["boot_release"], text(&f.release).unwrap());
-        manager.lock().unwrap().failure = None;
-        s.dispatch("enable-boot", None, 0).unwrap();
-        assert!(s.config.exists() && !agent.exists());
         f.preserved();
-    }
-
-    #[test]
-    fn migration_repairs_a_stale_receipt_from_the_live_job_or_latest_verified_bundle() {
-        for running in [true, false] {
-            let f = Fixture::new();
-            let (mut s, manager) = f.service(System::Darwin, "node");
-            let releases = f.home.join("releases");
-            fs::create_dir(&releases).unwrap();
-            let latest = Fixture::bundle(&releases, "0.2.2", "c");
-            let incomplete = Fixture::bundle(&releases, "0.2.3", "d");
-            fs::remove_file(incomplete.join("bin/steve-node")).unwrap();
-            let agent = s.legacy_config();
-            fs::create_dir_all(agent.parent().unwrap()).unwrap();
-            fs::write(
-                &agent,
-                s.definition(&f.release, DARWIN_DEFAULT_SERVICE_PATH)
-                    .unwrap(),
-            )
-            .unwrap();
-            let (_, build) = s.bundle(&f.release).unwrap();
-            atomic(
-                &s.record_path,
-                &json_bytes(&json!({
-                    "component": "node", "label": s.label, "release": f.release, "build": build
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-            if running {
-                let domain = format!("user/{}/{}", unsafe { libc::getuid() }, s.label);
-                let mut manager = manager.lock().unwrap();
-                manager.legacy.insert(domain.clone(), agent);
-                manager
-                    .legacy_programs
-                    .insert(domain, f.next.join("bin/steve-node"));
-            }
-            let expected = if running { &f.next } else { &latest };
-            let report = s.dispatch("enable-boot", None, 0).unwrap();
-            assert_eq!(report["configured_release"], text(expected).unwrap());
-            assert_eq!(
-                report["configured_build"]["version"],
-                if running { "0.2.1" } else { "0.2.2" }
-            );
-            let receipt = object(&s.record_path).unwrap();
-            assert_eq!(receipt["boot_release"], report["configured_release"]);
-            assert_eq!(receipt["build"], report["configured_build"]);
-            assert!(receipt.get("release").is_none());
-            f.preserved();
-        }
     }
 
     #[cfg(target_os = "macos")]
@@ -3879,6 +3695,12 @@ esac
         let prepared = s.dispatch("install", Some(&f.release), 0).unwrap();
         assert_eq!(prepared["prepared"], true);
         assert_eq!(prepared["boot"], "enable_required");
+        // Verify gui/<uid> returning 125 is classified as absent (not loaded, not running).
+        let gui_state = s
+            .launch_state("gui/501", &f.root.join("unused.plist"), false)
+            .unwrap();
+        assert_eq!(gui_state["loaded"], false);
+        assert_eq!(gui_state["running"], false);
 
         let enabled = s.dispatch("enable-boot", None, 0).unwrap();
         assert_eq!(enabled["registered_now"], true);
@@ -3890,11 +3712,11 @@ esac
             Some(f.release.canonicalize().unwrap().to_str().unwrap())
         );
 
-        // An unrecognized launchctl error on legacy inspection must still fail and carry verbatim output.
+        // An unrecognized launchctl error during enable-boot must fail and preserve stderr verbatim.
         let f2 = Fixture::new();
         let (mut s2, m2) = f2.service(System::Darwin, "node");
         s2.dispatch("install", Some(&f2.release), 0).unwrap();
-        m2.lock().unwrap().legacy_print_error = Some((
+        m2.lock().unwrap().print_error = Some((
             150,
             "Could not print service: 150: Operation not permitted".into(),
         ));

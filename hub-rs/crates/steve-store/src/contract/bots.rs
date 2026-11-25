@@ -1,5 +1,154 @@
-use crate::{Read, Result, W};
-use sea_query::{Expr, ExprTrait, JoinType, Order, Query};
+use crate::{Avatar, Bot, NewBot, Read, Result, W};
+use sea_query::{Expr, ExprTrait, JoinType, OnConflict, Order, Query};
+
+/// Creates a new (non-main) bot inside the caller's write transaction, joins it to `ws`,
+/// records `bot.create` in the audit trail, and emits `ConfigEvent::Bot`.
+pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> {
+    let id = crate::uid("bot");
+    let now = crate::now();
+    let owner = if !author.is_empty() {
+        Some(author.to_string())
+    } else {
+        crate::settings::workspace_owner(w, ws)?
+    };
+    let role = b.role.clone().unwrap_or_default();
+    let rules = b.rules.clone().unwrap_or_default();
+    let persona = b.persona.clone().unwrap_or_default();
+    let proactive = b.proactive.unwrap_or(1);
+    let accept_mode = b
+        .accept_mode
+        .clone()
+        .unwrap_or_else(|| "inherit".to_string());
+    let perm_mode = b.perm_mode.clone().unwrap_or_else(|| "ask".to_string());
+    let avatar = b.avatar.clone().unwrap_or_else(Avatar::default);
+    let specialties = b.specialties.clone().unwrap_or_default();
+    let enabled = b.enabled.unwrap_or(true);
+    let avatar_json = serde_json::to_string(&avatar)?;
+    let specialties_json = serde_json::to_string(&specialties)?;
+
+    w.exec(
+        Query::insert()
+            .into_table("bots")
+            .columns([
+                "id",
+                "workspace_id",
+                "name",
+                "role",
+                "main",
+                "harness",
+                "model",
+                "reasoning_effort",
+                "rules",
+                "persona",
+                "proactive",
+                "accept_mode",
+                "perm_mode",
+                "avatar",
+                "default_project",
+                "specialties",
+                "enabled",
+                "revision",
+                "updated",
+                "owner",
+            ])
+            .values_panic([
+                id.as_str().into(),
+                ws.into(),
+                b.name.as_str().into(),
+                role.as_str().into(),
+                0_i64.into(),
+                b.harness.as_str().into(),
+                b.model.as_deref().into(),
+                b.reasoning_effort.as_deref().into(),
+                rules.as_str().into(),
+                persona.as_str().into(),
+                proactive.into(),
+                accept_mode.as_str().into(),
+                perm_mode.as_str().into(),
+                avatar_json.as_str().into(),
+                b.default_project.as_deref().into(),
+                specialties_json.as_str().into(),
+                i64::from(enabled).into(),
+                1_i64.into(),
+                now.into(),
+                owner.as_deref().into(),
+            ]),
+    )?;
+    if let Some(fallbacks) = b.fallback_surfaces.as_deref() {
+        for (idx, surface) in fallbacks.iter().enumerate() {
+            w.exec(
+                Query::insert()
+                    .into_table("bot_fallback_surfaces")
+                    .columns(["bot_id", "position", "harness", "model", "reasoning_effort"])
+                    .values_panic([
+                        id.as_str().into(),
+                        (idx as i64).into(),
+                        surface.harness.as_str().into(),
+                        surface.model.as_deref().into(),
+                        surface.reasoning_effort.as_deref().into(),
+                    ]),
+            )?;
+        }
+    }
+    w.exec(
+        Query::insert()
+            .into_table("bot_workspaces")
+            .columns(["bot_id", "workspace_id", "created"])
+            .values_panic([id.as_str().into(), ws.into(), now.into()])
+            .on_conflict(
+                OnConflict::columns(["bot_id", "workspace_id"])
+                    .do_nothing()
+                    .to_owned(),
+            ),
+    )?;
+    let default_nodes = serde_json::to_string(crate::bot_dispatch::DEFAULT_NODES)?;
+    w.exec(
+        Query::insert()
+            .into_table("bot_node_bindings")
+            .columns(["workspace_id", "bot_id", "nodes"])
+            .values_panic([ws.into(), id.as_str().into(), default_nodes.as_str().into()])
+            .on_conflict(
+                OnConflict::columns(["workspace_id", "bot_id"])
+                    .do_nothing()
+                    .to_owned(),
+            ),
+    )?;
+    w.audit(
+        ws,
+        author,
+        "bot.create",
+        &id,
+        &serde_json::json!({"name": b.name}),
+    )?;
+    w.emit(steve_types::ConfigEvent::Bot {
+        ws: ws.into(),
+        id: id.clone().into(),
+    });
+    Ok(Bot {
+        id,
+        workspace_id: ws.into(),
+        name: b.name.clone(),
+        role,
+        main: false,
+        harness: b.harness.clone(),
+        model: b.model.clone(),
+        rules,
+        accept_mode,
+        perm_mode,
+        enabled,
+        revision: 1,
+        updated: now,
+        persona,
+        proactive,
+        avatar,
+        default_project: b.default_project.clone(),
+        prompt: None,
+        device: None,
+        owner,
+        reasoning_effort: b.reasoning_effort.clone(),
+        specialties,
+    })
+}
 
 /// A bot's display name.
 pub fn bot_name(c: &mut impl Read, bot: &str) -> Result<Option<String>> {

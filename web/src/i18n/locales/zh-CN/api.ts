@@ -172,9 +172,7 @@ export default {
     notes: "笔记",
     files: "文件",
     folder: "文件夹",
-    items: "事项记录",
-    chat: "会话记录",
-    mems: "长期记忆与知识条目",
+    mems: "偏好、规则与事实",
     botMems: "Bot 记忆",
   },
   /* mail (api/mail.ts): IMAP presets, views and draft states */

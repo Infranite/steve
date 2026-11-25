@@ -181,7 +181,7 @@ fn item_json_shape() {
         j,
         json!({
             "id": "ST-1", "workspace_id": "default", "no": 1, "kind": "task", "title": "派生",
-            "bot_id": "steve", "project_dir": null, "cwd": null, "branch": null, "plan": [], "accept_mode": null,
+            "bot_id": "steve", "cwd": null, "branch": null, "plan": [], "accept_mode": null,
             "priority": "中", "archived": false, "created": i.created, "updated": i.updated, "project_id": null, "star": false,
             "due": null, "snooze": null, "source": ["派生", "fork"], "parent": {"item": null, "session": "ses_1", "at": 12},
             "phase": "paused", "cycle": 1, "delivery_revision": 0, "cas_revision": i.cas_revision, "outcome": null, "acceptance": null, "closing": null,

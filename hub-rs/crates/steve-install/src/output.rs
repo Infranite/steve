@@ -380,10 +380,8 @@ impl Summary<'_> {
             installed,
             ..
         } = *self;
-        if matches!(
-            self.report["boot"].as_str(),
-            Some("enable_required" | "migration_required")
-        ) && let Some(command) = command(role, "enable-boot", home, label)
+        if self.report["boot"].as_str() == Some("enable_required")
+            && let Some(command) = command(role, "enable-boot", home, label)
         {
             NextStep::Command(command)
         } else if installed == Some(false) {

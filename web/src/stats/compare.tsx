@@ -13,7 +13,8 @@ import { st } from "@/store"
 import { stats, type Filter, type Summary, type UsageRow } from "@/api/stats"
 import { Est } from "@/stats/kpi"
 import { Table, th } from "@/stats/tables"
-import { fmtMs, fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtMs, fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd } from "@/stats/format"
 import { harnessName } from "@/model-picker"
 import { t, useT } from "@/i18n"
 
@@ -79,11 +80,11 @@ const per = (n: number, d: number) => (d > 0 ? n / d : null)
 
 export function BotCompare({ f, fkey, live, onBot }: { f: Filter; fkey: string; live: boolean; onBot: (id: string) => void }) {
   const t = useT()
-  const [d] = useStats(async (): Promise<BotRow[]> => {
+  const d = useHubQuery(["stats", "compare", "bots", fkey], async (): Promise<BotRow[]> => {
     const rows = (await stats.usage(f, "bot")).rows.filter((r) => r.key && (r.turns > 0 || r.total > 0 || r.calls > 0))
     const ss = await Promise.all(rows.map((r) => stats.summary({ ...f, bot: r.key })))
     return rows.map((r, i) => ({ id: r.key, name: st.bots[r.key]?.n ?? r.label ?? r.key, s: ss[i], usage: r }))
-  }, [fkey], live)
+  }, { events: ["stats"], debounceMs: 200, live })
   const cols: Col<BotRow>[] = [
     { k: "done", label: t("stats:v2.bots.done"), def: t("stats:v2.bots.doneDef"), v: (r) => r.s.throughput.done },
     { k: "first_pass", label: t("stats:v2.bots.firstPass"), def: t("stats:v2.bots.firstPassDef"), v: (r) => (r.s.quality.first_pass_n ? r.s.quality.first_pass : null),
@@ -104,10 +105,10 @@ export function BotCompare({ f, fkey, live, onBot }: { f: Filter; fkey: string; 
   ]
   return (
     <Panel k="bots" data-bots>
-      {d.s === "loading" ? <div className="flex h-32 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
-        : d.s !== "ok" ? <div className="px-5 py-6 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : t("stats:usage.loadFailed")}</div>
-        : !d.v.length ? <div className="px-5 py-6 type-callout text-muted-foreground" data-bots-empty>{t("stats:v2.bots.empty")}</div>
-        : <SortTable k="bots" rows={d.v} cols={cols} sort0="done" rowKey={(r) => r.id} label={t("stats:v2.bots.title")} rowTitle={f.bot ? undefined : t("stats:v2.bots.rowTitle")}
+      {d.loading ? <div className="flex h-32 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
+        : d.error || !d.data ? <div className="px-5 py-6 type-callout text-muted-foreground" role="alert">{d.error ? d.error.message : t("stats:usage.loadFailed")}</div>
+        : !d.data.length ? <div className="px-5 py-6 type-callout text-muted-foreground" data-bots-empty>{t("stats:v2.bots.empty")}</div>
+        : <SortTable k="bots" rows={d.data} cols={cols} sort0="done" rowKey={(r) => r.id} label={t("stats:v2.bots.title")} rowTitle={f.bot ? undefined : t("stats:v2.bots.rowTitle")}
           onRow={f.bot ? undefined : (r) => onBot(r.id)} first={{ label: "Bot", cell: (r) => <span className="font-medium text-foreground">{r.name}</span> }} />}
     </Panel>
   )
@@ -123,11 +124,11 @@ type ModelRow = UsageRow & { harness: string; model: string; priced?: boolean }
 export function ModelCompare({ f, fkey, live }: { f: Filter; fkey: string; live: boolean }) {
   const t = useT()
   const g: Filter = { ...f, source: "agent" }
-  const [d] = useStats(async (): Promise<ModelRow[]> => {
+  const d = useHubQuery(["stats", "compare", "models", fkey], async (): Promise<ModelRow[]> => {
     const models = (await stats.usage(g, "model")).rows.filter((r) => r.key && (r.turns > 0 || r.total > 0))
     const by = await Promise.all(models.map((m) => stats.usage({ ...g, model: m.key }, "harness")))
     return models.flatMap((m, i) => by[i].rows.filter((r) => r.turns > 0 || r.total > 0).map((r) => ({ ...r, harness: r.key, model: m.key, priced: m.priced })))
-  }, [fkey], live)
+  }, { events: ["stats"], debounceMs: 200, live })
   const ok = (r: ModelRow) => (r.turns > 0 ? 1 - r.turn_errors / r.turns : null)
   const cols: Col<ModelRow>[] = [
     { k: "turns", label: t("stats:v2.models.turns"), def: t("stats:v2.models.turnsDef"), v: (r) => r.turns },
@@ -145,10 +146,10 @@ export function ModelCompare({ f, fkey, live }: { f: Filter; fkey: string; live:
   ]
   return (
     <Panel k="models" data-models>
-      {d.s === "loading" ? <div className="flex h-32 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
-        : d.s !== "ok" ? <div className="px-5 py-6 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : t("stats:usage.loadFailed")}</div>
-        : !d.v.length ? <div className="px-5 py-6 type-callout text-muted-foreground" data-models-empty>{t("stats:v2.models.empty")}</div>
-        : <SortTable k="models" rows={d.v} cols={cols} sort0="turns" rowKey={(r) => r.harness + "\u0000" + r.model} label={t("stats:v2.models.title")}
+      {d.loading ? <div className="flex h-32 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
+        : d.error || !d.data ? <div className="px-5 py-6 type-callout text-muted-foreground" role="alert">{d.error ? d.error.message : t("stats:usage.loadFailed")}</div>
+        : !d.data.length ? <div className="px-5 py-6 type-callout text-muted-foreground" data-models-empty>{t("stats:v2.models.empty")}</div>
+        : <SortTable k="models" rows={d.data} cols={cols} sort0="turns" rowKey={(r) => r.harness + "\u0000" + r.model} label={t("stats:v2.models.title")}
           first={{ label: t("stats:v2.models.name"), cell: (r) => <span className="flex min-w-0 flex-col leading-tight"><span className="truncate font-mono type-code text-foreground" title={r.model}>{r.model}</span><span className="truncate type-footnote text-muted-foreground">{r.harness ? harnessName(r.harness) : t("stats:word.unknown")}</span></span> }} />}
     </Panel>
   )

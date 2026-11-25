@@ -7,6 +7,7 @@ export default {
   "config.diagnostic_model_disabled": "此诊断副本已禁用模型执行。",
   "config.harness_builtin_protected": "内置 harness「{{harness}}」不能通过自定义接口覆盖或移除。",
   "config.harness_env_not_allowed": "自定义 harness 声明不允许注入环境变量。",
+  "config.team_member_main_bot": "Steve 是工作空间协调者，不能加入 Team 成员列表。",
   "node.downgrade": "Node 拒绝安装较旧的版本。",
   "node.invalid_harness_update_state": "保存的 harness 更新状态已失效，升级或迁移 Hub 后会自动清理。",
   "node.operation_not_found": "Node 没有这项操作的回执。",

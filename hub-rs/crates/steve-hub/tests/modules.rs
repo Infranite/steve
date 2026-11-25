@@ -653,20 +653,21 @@ async fn module_config_drafts_go_to_the_modules() {
         (200, json!({ "ok": true }))
     );
     assert_eq!(c.call("POST", &drop, None, None).await.0, 409);
+    // unknown changeset ids fail closed with 409 on the unified persisted engine
     assert_eq!(
         c.call("POST", "/api/config/chg_0000000000000000/drop", None, None)
-            .await,
-        (200, json!({ "ok": true }))
+            .await
+            .0,
+        409
     );
-    // TS kinds still go to the core
     let (s, v) = c
         .call("POST", "/api/config/chg_0000000000000000/apply", None, None)
         .await;
     assert_eq!(
         (s, v),
         (
-            500,
-            json!({"error": "这份草稿已经失效，请重新说一次", "code":"internal", "retry":{"kind":"never"}, "reason":null, "params":{}})
+            409,
+            json!({"error": "这份草稿已经失效，请重新说一次", "code":"conflict", "retry":{"kind":"never"}, "reason":null, "params":{}})
         )
     );
     // contacts registered its targets (and merge its decision handlers)
@@ -1367,6 +1368,17 @@ async fn ownership_routes_and_tools() {
     let bid = bot["id"].as_str().expect("bot id");
     let (_, v) = c
         .call("GET", &format!("/api/stewards/bot/{bid}"), None, None)
+        .await;
+    assert_eq!(v["stewards"][0]["person_id"], me["id"], "{v}");
+
+    let (s, dup) = c
+        .call("POST", &format!("/api/bots/{bid}/duplicate"), None, None)
+        .await;
+    assert_eq!(s, 200, "{dup}");
+    let dup_id = dup["id"].as_str().expect("duplicate bot id");
+    assert_eq!(dup["enabled"], false);
+    let (_, v) = c
+        .call("GET", &format!("/api/stewards/bot/{dup_id}"), None, None)
         .await;
     assert_eq!(v["stewards"][0]["person_id"], me["id"], "{v}");
 

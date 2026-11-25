@@ -154,7 +154,7 @@ mutation!(
 mutation!(
     update_messages_id_reply_unbound_status_failed,
     "UPDATE messages SET meta='{}' WHERE id='reply_unbound';
-              UPDATE thread_runs SET status='failed' WHERE id='run_unbound';"
+              UPDATE thread_reply_tasks SET status='settled' WHERE id='run_unbound';"
 );
 
 mutation!(

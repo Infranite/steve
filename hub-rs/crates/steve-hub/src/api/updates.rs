@@ -40,7 +40,7 @@ pub async fn status(
             op.insert("previous".into(), Value::Null);
             op.insert("target".into(), Value::Null);
             op.remove("runner");
-            op.remove("backup");
+            op.remove("backup_snapshot");
             op.remove("drain");
         }
     };
@@ -84,7 +84,7 @@ pub async fn get(
         op.previous = None;
         op.target = None;
         op.runner = None;
-        op.backup = None;
+        op.backup_snapshot = None;
         op.drain = None;
     }
     Ok(Json(op))

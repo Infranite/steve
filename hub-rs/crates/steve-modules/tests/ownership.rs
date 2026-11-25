@@ -132,9 +132,7 @@ async fn me_gets_the_bots_personas_and_hub_device_and_edits_undo() {
     assert_eq!(h["responsible"][0]["role_label"], "负责人");
 
     // undo through the change record puts “我” back
-    records::undo(&t.modules, &caller(WS, ME), &undo)
-        .expect("ours")
-        .expect("undone");
+    records::undo(&t.modules, &caller(WS, ME), &undo).expect("undone");
     let v = ok(&r, "GET", "/stewards/bot/steve", None).await;
     assert_eq!(owners(&v), vec!["Dev"]);
 
@@ -160,7 +158,6 @@ async fn me_gets_the_bots_personas_and_hub_device_and_edits_undo() {
         &caller(WS, ME),
         v["undo"].as_str().expect("undo"),
     )
-    .expect("ours")
     .expect("undone");
     assert!(rows(&t).contains(&format!("bot steve {me} owner seed confirmed")));
 
@@ -405,9 +402,7 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
 
     // the user takes it back within 24 hours: the changeset undoes it
     let cs: String = fixture::latest_applied_changeset(t.store()).expect("changeset");
-    records::undo(&t.modules, &me(), &cs)
-        .expect("ours")
-        .expect("undone");
+    records::undo(&t.modules, &me(), &cs).expect("undone");
     assert!(!rows(&t).iter().any(|x| x.contains(&bot)));
 
     // bad arguments

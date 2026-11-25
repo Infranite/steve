@@ -8,7 +8,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
-use steve_store::{Store, ThreadRun};
+use steve_store::{Store, ThreadTask};
 
 use super::mcp_extra::Extra;
 
@@ -318,7 +318,7 @@ fn text_result(id: &Value, out: Result<String, String>) -> Response {
 /// Callers establish the live run identity; audience checks are repeated inside every tool.
 pub async fn call(
     x: &Extra,
-    run: &ThreadRun,
+    run: &ThreadTask,
     name: &str,
     args: &Value,
     owner: &str,
@@ -341,7 +341,7 @@ pub async fn call(
         }
         steve_knowledge::tools::SEARCH | steve_knowledge::tools::READ => {
             // A user's view only when only the owner reads the answer.
-            let (store, origin) = (x.store.clone(), run.message_id.clone());
+            let (store, origin) = (x.store.clone(), run.origin_message_id.clone());
             let own = tokio::task::spawn_blocking(move || own_reader(&store, &origin))
                 .await
                 .map_err(|e| e.to_string())??;
@@ -364,7 +364,7 @@ pub async fn call(
                 x.store.clone(),
                 args["query"].as_str().unwrap_or("").to_string(),
             );
-            let origin = run.message_id.clone();
+            let origin = run.origin_message_id.clone();
             tokio::task::spawn_blocking(move || {
                 items_search(&store, &ws, &ItemScope::of(&store, &origin)?, &q)
             })
@@ -376,7 +376,7 @@ pub async fn call(
                 x.store.clone(),
                 args["id"].as_str().unwrap_or("").to_string(),
             );
-            let origin = run.message_id.clone();
+            let origin = run.origin_message_id.clone();
             tokio::task::spawn_blocking(move || {
                 item_read(&store, &ws, &ItemScope::of(&store, &origin)?, &i)
             })
@@ -388,7 +388,7 @@ pub async fn call(
         }
         SESSIONS_LIST => {
             let (store, all) = (x.store.clone(), args["all"].as_bool().unwrap_or(false));
-            let origin = run.message_id.clone();
+            let origin = run.origin_message_id.clone();
             tokio::task::spawn_blocking(move || {
                 // your agents' sessions are yours: not for a run answering someone else
                 if !own_reader(&store, &origin)? {
@@ -404,11 +404,11 @@ pub async fn call(
 }
 
 /// The chat read scope of `run`: `Some` only for a run answering a channel conversation's turn.
-async fn im_scope(x: &Extra, run: &ThreadRun) -> Option<steve_channels::im_conv_mcp::Scope> {
+async fn im_scope(x: &Extra, run: &ThreadTask) -> Option<steve_channels::im_conv_mcp::Scope> {
     let (ch, ws, origin) = (
         x.tools.channels.clone(),
         run.workspace_id.clone(),
-        run.message_id.clone(),
+        run.origin_message_id.clone(),
     );
     tokio::task::spawn_blocking(move || ch.conv_read_scope(&ws, &origin))
         .await
@@ -421,7 +421,7 @@ async fn im_scope(x: &Extra, run: &ThreadRun) -> Option<steve_channels::im_conv_
 /// A chat read tool for `run`, refused outside a channel conversation.
 async fn im_conv(
     x: &Extra,
-    run: &ThreadRun,
+    run: &ThreadTask,
     name: &str,
     args: &Value,
 ) -> Result<steve_channels::im_conv_mcp::Answer, String> {
@@ -445,7 +445,7 @@ fn im_descriptors() -> Vec<steve_node_api::ToolDescriptor> {
 }
 
 /// The first meeting is on for `run` (`onboard_mcp::open`), asked off the async workers.
-async fn meeting(x: &Extra, run: &ThreadRun) -> bool {
+async fn meeting(x: &Extra, run: &ThreadTask) -> bool {
     let (core, run) = (x.tools.core.clone(), run.clone());
     tokio::task::spawn_blocking(move || super::onboard_mcp::open(&core, &run))
         .await
@@ -454,7 +454,7 @@ async fn meeting(x: &Extra, run: &ThreadRun) -> bool {
 
 /// What `/mcp` lists for `run`: the research tools, the chat read tools in a channel conversation,
 /// and the first meeting's while it is on for it.
-async fn listed(x: &Extra, run: &ThreadRun) -> Vec<Value> {
+async fn listed(x: &Extra, run: &ThreadTask) -> Vec<Value> {
     let mut list = tools();
     if im_scope(x, run).await.is_some() {
         list.extend(steve_channels::im_conv_mcp::tools());
@@ -482,7 +482,7 @@ pub fn descriptors() -> Vec<steve_node_api::ToolDescriptor> {
 
 /// The catalog of the research job of `run`: [`descriptors`], the chat read tools in a channel
 /// conversation, and the first meeting's tools while it is on for that run.
-pub async fn catalog(x: &Extra, run: &ThreadRun) -> Vec<steve_node_api::ToolDescriptor> {
+pub async fn catalog(x: &Extra, run: &ThreadTask) -> Vec<steve_node_api::ToolDescriptor> {
     let mut list = descriptors();
     if im_scope(x, run).await.is_some() {
         list.extend(im_descriptors());
@@ -496,7 +496,7 @@ pub async fn catalog(x: &Extra, run: &ThreadRun) -> Vec<steve_node_api::ToolDesc
 /// A research job's tool call through its Node, answered as `/mcp` answers an in-process run.
 pub async fn call_tool(
     x: &Extra,
-    run: ThreadRun,
+    run: ThreadTask,
     name: &str,
     args: Value,
 ) -> Result<String, String> {
@@ -510,7 +510,7 @@ pub async fn call_tool(
 }
 
 /// One JSON-RPC message from a research run.
-pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Response {
+pub async fn handle(x: &Extra, run: ThreadTask, msg: Value, owner: String) -> Response {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let method = msg["method"].as_str().unwrap_or_default();
     match method {

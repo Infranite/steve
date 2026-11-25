@@ -12,7 +12,8 @@ import { Kpi, Est, kpiRow } from "@/stats/kpi"
 import { Table, num, th } from "@/stats/tables"
 import { CostPanel } from "@/stats/cost"
 import { t, useT } from "@/i18n"
-import { fmtMs, fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, tickLabel, time, timeTicks, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtMs, fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, tickLabel, time, timeTicks } from "@/stats/format"
 
 /* labels for the Hub's values, built at render so they follow the language */
 export const STOP = (): Record<string, string> => ({ end_turn: t("stats:drill.stop.endTurn"), cancelled: t("stats:drill.stop.cancelled"), max_tokens: t("stats:drill.stop.maxTokens"), refusal: t("stats:drill.stop.refusal"), error: t("stats:drill.stop.error"), interrupted: t("stats:drill.stop.interrupted") })
@@ -22,14 +23,14 @@ export const RELEASE = (): Record<string, string> => ({ released: t("stats:drill
 
 export function StatsItemView({ id }: { id: string }) {
   const t = useT()
-  const [d] = useStats(() => stats.item(id), [id])
-  const title = d.s === "ok" ? d.v.title : getItem(id)?.t ?? id
+  const d = useHubQuery(["stats", "item", id], () => stats.item(id), { events: ["stats"], debounceMs: 200 })
+  const title = d.data ? d.data.title : getItem(id)?.t ?? id
   return (
     <Page title={<span className="flex min-w-0 items-baseline gap-2"><span className="shrink-0 font-mono font-normal tabular-nums text-tertiary" data-no>{id}</span><span className="min-w-0 break-words">{title}</span></span>} back={["#/stats", t("stats:page.title")]} max={1280}
       sub={<a href={"#/items/" + id} className="inline-flex items-center gap-0.5 text-blue hover:underline" data-item-link>{t("stats:drill.openItem")}<ChevronRightIcon className="size-3.5" /></a>}>
-      {d.s === "loading" ? <div className="flex justify-center py-24"><Spinner className="size-5 text-muted-foreground" /></div>
-        : d.s === "error" ? <Empty title={t("stats:drill.loadFailed")} sub={d.msg} />
-        : <Drill d={d.v} />}
+      {d.loading ? <div className="flex justify-center py-24"><Spinner className="size-5 text-muted-foreground" /></div>
+        : d.error || !d.data ? <Empty title={t("stats:drill.loadFailed")} sub={d.error?.message} />
+        : <Drill d={d.data} />}
     </Page>
   )
 }
@@ -121,7 +122,7 @@ function Timeline({ d }: { d: ItemDetail }) {
                 onMouseEnter={() => {
                   const v = { kind: decision[c.kind] ?? c.kind, time: time(c.created) }
                   if (!c.resolved) return show(c.created, cy, waiting ? t("stats:drill.decOpen", v) : t("stats:drill.decExpired", v))
-                  const done = t(c.by === "yolo" ? "stats:drill.decResolvedYolo" : "stats:drill.decResolved", { ...v, dur: fmtMs(c.resolved - c.created) })
+                  const done = t(c.by === "steve" ? "stats:drill.decResolvedSteve" : "stats:drill.decResolved", { ...v, dur: fmtMs(c.resolved - c.created) })
                   show(c.created, cy, c.choice && choice[c.choice] ? t("stats:drill.decChoice", { text: done, choice: choice[c.choice] }) : done)
                 }} />
             </g>
@@ -145,11 +146,11 @@ function Timeline({ d }: { d: ItemDetail }) {
 /** 事项详情属性里的两行（stats.md §6.5）：用量与用时，点击进下钻 */
 export function ItemStatsRows({ id, render }: { id: string; render: (usage: string, time: string, href: string) => React.ReactNode }) {
   const t = useT()
-  const [d] = useStats(() => stats.item(id, true), [id, getItem(id)?.updated])
-  if (d.s === "error") return <p role="alert" className="type-footnote text-destructive">{d.msg}</p>
-  if (d.s !== "ok") return null
-  const u = d.v.usage, f = d.v.facts
+  const d = useHubQuery(["stats", "item-summary", id, getItem(id)?.updated ?? 0], () => stats.item(id, true), { events: ["stats"], debounceMs: 200 })
+  if (d.error) return <p role="alert" className="type-footnote text-destructive">{d.error.message}</p>
+  if (!d.data) return null
+  const u = d.data.usage, f = d.data.facts
   const usage = u.coverage.total === null ? fmtUsage(u) : u.total || u.coverage.state === "complete" ? (u.hit_rate != null ? t("stats:drill.usageHit", { tokens: fmtUsage(u), pct: fmtPct(u.hit_rate), usd: fmtUsageCost(u) }) : t("stats:drill.usage", { tokens: fmtUsage(u), usd: fmtUsageCost(u) })) : u.reported ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : fmtUsage(u)
-  const tm = t(f.done_at ? "stats:drill.timeDone" : "stats:drill.timeOpen", { agent: fmtMs(f.agent_ms ?? 0), wait: fmtMs(f.wait_ms ?? 0), age: fmtMs(d.v.age_ms) })
+  const tm = t(f.done_at ? "stats:drill.timeDone" : "stats:drill.timeOpen", { agent: fmtMs(f.agent_ms ?? 0), wait: fmtMs(f.wait_ms ?? 0), age: fmtMs(d.data.age_ms) })
   return <>{render(usage, tm, "#/stats/items/" + id)}</>
 }

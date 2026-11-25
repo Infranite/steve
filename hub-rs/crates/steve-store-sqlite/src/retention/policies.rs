@@ -1,11 +1,10 @@
-//! Transitional table declarations (G2-T8), to move into entity owners in wave 4.
+//! Bounded retention policy implementations for SQLite tables.
 use super::*;
 use rusqlite::params;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
 };
-use steve_storage_api::{Domain, retention::OpName, uow::AnyOp};
 
 pub const DAY: u64 = 86_400_000;
 pub const OUTBOX_KEEP_MS: i64 = 7 * DAY as i64;
@@ -411,7 +410,7 @@ impl Turns {
         definition.select = Select::MaxRows {
             group: vec!["session_id".into()],
             keep: KEPT_TURNS as u64,
-            order: vec![("updated".into(), steve_storage_api::query::Order::Desc)],
+            order: vec![("updated".into(), Order::Desc)],
         };
         Self {
             definition,
@@ -552,11 +551,7 @@ impl<'a> SessionEvents<'a> {
             order: vec![],
         };
         definition.before = Some(OpName("compact_session_event".into()));
-        definition.action = Action::Op(AnyOp {
-            name: "compact_session_event".into(),
-            domain: Domain::Stream,
-            body: "{}".parse().expect("static JSON"),
-        });
+        definition.action = Action::Custom(OpName("compact_session_event".into()));
         Self {
             definition,
             session,

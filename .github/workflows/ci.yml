@@ -237,6 +237,12 @@ jobs:
           cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --message-format json > ci-artifacts/full.json
           cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --partition "$PARTITION" --message-format json > ci-artifacts/list.json
           cp hub-rs/target/cargo-timings/cargo-timing.html ci-artifacts/
+      - name: Stage the bundled backup engine for end-to-end tests
+        shell: bash
+        run: |
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          python3 scripts/package-release.py restic --target "$target" --out hub-rs/target/debug
+          cp -p hub-rs/target/debug/restic hub-rs/target/debug/deps/restic
       - name: Rust tests
         id: rust-tests
         run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 0 --no-fail-fast --partition "$PARTITION"
@@ -349,7 +355,7 @@ jobs:
           STEVE_TEST_POSTGRES_URL: "host=127.0.0.1 port=${{ job.services.postgres.ports[5432] }} dbname=steve_contract user=steve_contract connect_timeout=5"
           CARGO_INCREMENTAL: '0'
           CARGO_PROFILE_TEST_DEBUG: '0'
-        run: cargo test --locked -p steve-store --lib -- --ignored contract::postgres::tests::postgres_contract --exact
+        run: cargo test --locked -p steve-store --lib -- --ignored contract::postgres::tests::postgres_contract
   test:
     name: CI gate
     # Always runs, so a cancelled run reports a failed gate: branch rules take a skipped required check

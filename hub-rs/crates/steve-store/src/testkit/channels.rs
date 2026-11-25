@@ -4,8 +4,6 @@ pub mod inspect;
 pub mod notifications;
 pub mod seed;
 
-use std::path::{Path, PathBuf};
-
 use crate::contract::Q;
 use serde::Serialize;
 
@@ -92,17 +90,6 @@ pub fn inbound_history(store: &Store) -> Result<Vec<Inbound>> {
     })
 }
 
-pub fn destructive_backup(database: &Path, root: &Path, what: &str) -> Result<PathBuf> {
-    use steve_store_sqlite::backup::{BackupPlan, CancelFlag, Reason, backup};
-
-    let plan = BackupPlan::new(
-        root.to_path_buf(),
-        Reason::PreDestructive { what: what.into() },
-    );
-    let saved = backup(database, &plan, &|_| {}, &CancelFlag::default())
-        .map_err(|e| crate::StoreError::Storage(e.to_string()))?;
-    Ok(saved.database_path().strip_prefix(root).unwrap().to_owned())
-}
 fn project_write<T>(
     store: &Store,
     write: impl FnOnce(&rusqlite::Connection) -> Result<T>,

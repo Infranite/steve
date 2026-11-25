@@ -2,7 +2,7 @@
  * order, the edge each Node's status gives it, and the edges' geometry from the cards' boxes. Pure, so the order and
  * the shapes do not depend on the page; web/test/device-map-model.test.mjs pins it. Imports use .ts so node --test
  * loads it. Nothing here is random or force-directed: the same data always gives the same map. */
-import type { AccessClient, AccessView } from "./access-api.ts"
+import type { AccessClient, AccessView } from "./api/access.ts"
 import { nodeStatus, type NodeStatus, type NodeView } from "./device-model.ts"
 
 /** from this many remote Nodes on, a card is one line (state dot, name, what matters, version) */

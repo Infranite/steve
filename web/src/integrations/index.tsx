@@ -10,7 +10,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot, Notice, Disclosure } from "@/ui"
 import { AppDirectory, type App, type AppCategory, type AppDirectoryLabels } from "@/components/affect/app-directory-clean"
 import { t as tr, useT } from "@/i18n"
-import { useLoad } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { CONN_STATUS } from "@/api/accounts"
 import { ConnectDialog } from "@/accounts/dialogs"
 import { botAdapterIds } from "@/integrations/sides"
@@ -29,10 +29,10 @@ const join = (xs: string[]) => xs.join(tr("integrations:list.sep"))
 /** #/integrations and #/integrations/:provider */
 export function IntegrationsRoute({ id }: { id?: string }) {
   const t = useT()
-  const L = useLoad(() => integrationsApi.all(), [], ["connection", "account"])
+  const L = useHubQuery(["integrations", "all"], () => integrationsApi.all(), { events: ["connection", "account"] })
   const back: [string, string] | undefined = id ? ["#/integrations", t("integrations:page.title")] : undefined
-  if (L.s === "loading") return <Page title={t("integrations:page.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (L.s === "error") return <Page title={t("integrations:page.title")} back={back}><Empty title={L.err} /></Page>
+  if (L.loading) return <Page title={t("integrations:page.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.error || !L.data) return <Page title={t("integrations:page.title")} back={back}><Empty title={L.error?.message ?? ""} /></Page>
   if (!id) return <Overview x={L.data} />
   const p = L.data.providers.find((x) => x.id === id)
   return p ? <ProviderView key={p.id} p={p} x={L.data} reload={() => void L.reload()} /> : <Page title={t("integrations:page.title")} back={back}><Empty title={t("integrations:page.notFound")} sub={t("integrations:page.notFoundSub")} /></Page>
@@ -119,8 +119,8 @@ function ProviderView({ p, x, reload }: { p: IProvider; x: Integrations; reload:
   const [dlg, setDlg] = useState<IAdapter | null>(null)
   const insts = installationsOf(x, p.id)
   // Load rules, personas and groups when a connection offers a channel.
-  const C = useLoad(() => (p.connections.some((c) => c.capabilities.some((a) => a.area === "channel" && a.state !== "planned")) ? channelsApi.accounts() : Promise.resolve([])), [p.id, p.connections.length], ["connection", "space", "channel"])
-  const chans = C.s === "ok" ? C.data : null
+  const C = useHubQuery(["integrations", "channels", p.id, p.connections.length], () => (p.connections.some((c) => c.capabilities.some((a) => a.area === "channel" && a.state !== "planned")) ? channelsApi.accounts() : Promise.resolve([])), { events: ["connection", "space", "channel"] })
+  const chans = C.data ?? null
   const botIds = botAdapterIds(p.adapters), selfIds = p.adapters.filter((a) => a.identity === "self").map((a) => a.id)
   const bots = p.connections.filter((c) => botIds.includes(c.adapter)).map((c) => {
     const raw = c.detail && "domain" in c.detail ? c.detail.domain : undefined
@@ -134,7 +134,7 @@ function ProviderView({ p, x, reload }: { p: IProvider; x: Integrations; reload:
       sub={<Meta><span>{insts.length ? t(p.id === "feishu" ? "integrations:page.connectedApps" : "integrations:page.connectedN", { count: insts.length }) : t("integrations:page.notConnected")}</span>{p.adapters.length > 0 && p.id !== "feishu" && <span>{p.adapters.map((a) => a.name).join(" / ")}</span>}</Meta>}>
       {dlg && <ConnectDialog adapter={asAdapter(dlg, p.id)} onClose={() => setDlg(null)} done={() => go("#/integrations/" + p.id)} />}
       <div className="flex flex-col gap-8" data-provider-page={p.id}>
-        {C.s === "error" && <p role="alert" className="type-callout text-destructive">{C.err}</p>}
+        {C.error && <p role="alert" className="type-callout text-destructive">{C.error.message}</p>}
         {insts.length > 0 && <section><SectionLabel>{t("integrations:page.connectedSection", { n: insts.length })}</SectionLabel>
           <div className="flex flex-col gap-6">{insts.map((i) => <InstallationCard key={i.id} inst={i} p={p} chans={chans} onChange={reload} />)}</div></section>}
         <Leftovers p={p} />
@@ -184,10 +184,10 @@ function WaysIn({ p, onConnect, bare }: { p: IProvider; onConnect: (a: IAdapter)
 /** identities disconnected earlier whose groups and messages are still here: clean them up */
 function Leftovers({ p }: { p: IProvider }) {
   const t = useT()
-  const L = useLoad(() => cleanupApi.leftovers(), [], ["connection", "space"])
+  const L = useHubQuery(["integrations", "leftovers"], () => cleanupApi.leftovers(), { events: ["connection", "space"] })
   const [pick, setPick] = useState<Leftover | null>(null)
-  if (L.s === "error") return <section data-leftovers><SectionLabel>{t("integrations:page.leftovers")}</SectionLabel><p role="alert" className="type-callout text-destructive">{L.err}</p><Button size="sm" variant="outline" onClick={() => void L.reload()}>{t("common:action.retry")}</Button></section>
-  if (L.s === "loading") return null
+  if (L.error) return <section data-leftovers><SectionLabel>{t("integrations:page.leftovers")}</SectionLabel><p role="alert" className="type-callout text-destructive">{L.error.message}</p><Button size="sm" variant="outline" onClick={() => void L.reload()}>{t("common:action.retry")}</Button></section>
+  if (L.loading || !L.data) return null
   const systems = new Set([p.id, ...p.adapters.map((a) => a.id), p.id + "_app"])
   const xs = L.data.filter((l) => systems.has(l.system_id))
   if (!xs.length) return null

@@ -13,7 +13,7 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::{Value, json};
 
-use crate::backend::Obj;
+use crate::wire::store::Obj;
 
 /// Where the harnesses keep their sessions: what the Hub's own environment gives its agents.
 #[derive(Debug, Clone, Default)]

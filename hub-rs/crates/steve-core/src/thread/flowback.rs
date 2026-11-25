@@ -158,21 +158,23 @@ fn conv_of(db: &Db, origin: &str) -> String {
 
 /// Post `u` for `item` if it came from the conversation; the message whose card shows it.
 pub fn flow(db: &Db, item: &str, u: Update<'_>) -> Result<Option<String>> {
-    let th = db.store().thread();
-    let Some(ti) = th.item(item)? else {
+    let Some(ti) = db
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_item(r, item))?
+    else {
         return Ok(None);
     };
     if !ti.follow && !ALWAYS.contains(&u.kind) {
         return Ok(None);
     }
     let at = now();
-    let space = conv_of(db, &ti.origin_msg);
+    let space = conv_of(db, &ti.origin_message_id);
     let visible: Vec<Message> = db
         .messages_in(&ti.workspace_id, &space, 200)?
         .into_iter()
         .filter(|m| !hidden(m))
         .collect();
-    let h = host(&visible, item, ti.reply_msg.as_deref());
+    let h = host(&visible, item, ti.reply_message_id.as_deref());
     let below = h.map_or(usize::MAX, |i| visible.len() - 1 - i);
     let card = merged(h.and_then(|i| card_of(&visible[i])), item, &u, at);
     /* an answer to a question is worth reading where the user is now, like the user's input */
@@ -190,7 +192,8 @@ pub fn flow(db: &Db, item: &str, u: Update<'_>) -> Result<Option<String>> {
         } else {
             db.message_patch_meta(&m.id, &meta)?;
         }
-        th.item_posted(item, at)?;
+        db.store()
+            .write(|w| steve_store::thread::set_dispatch_last_post(w, item, at))?;
         return Ok(Some(m.id.clone()));
     }
     if let Some(i) = h {
@@ -199,9 +202,10 @@ pub fn flow(db: &Db, item: &str, u: Update<'_>) -> Result<Option<String>> {
     /* a question's answer is a normal message (the summary is its text); otherwise the card is the message */
     let full = u.kind == "deliver" && u.full;
     let text = if full { u.text } else { text };
-    let meta = json!({"card": card, "card_only": !full, "reply_to": ti.origin_msg});
+    let meta = json!({"card": card, "card_only": !full, "reply_to": ti.origin_message_id});
     let id = db.message_add_in(&ti.workspace_id, &space, "steve", &text, Some(item), &meta)?;
-    th.item_posted(item, at)?;
+    db.store()
+        .write(|w| steve_store::thread::set_dispatch_last_post(w, item, at))?;
     Ok(Some(id))
 }
 
@@ -216,15 +220,18 @@ pub fn flow_quiet(db: &Db, item: &str, u: Update<'_>) {
 /// shows is over. The card goes back to running in place, never moves, and is left alone in any other
 /// state; the failure itself stays in the item's timeline. No-op for items not made from the conversation.
 pub fn recover(db: &Db, item: &str) -> Result<()> {
-    let Some(ti) = db.store().thread().item(item)? else {
+    let Some(ti) = db
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_item(r, item))?
+    else {
         return Ok(());
     };
     let visible: Vec<Message> = db
-        .messages_in(&ti.workspace_id, &conv_of(db, &ti.origin_msg), 200)?
+        .messages_in(&ti.workspace_id, &conv_of(db, &ti.origin_message_id), 200)?
         .into_iter()
         .filter(|m| !hidden(m))
         .collect();
-    let Some(m) = host(&visible, item, ti.reply_msg.as_deref()).map(|i| &visible[i]) else {
+    let Some(m) = host(&visible, item, ti.reply_message_id.as_deref()).map(|i| &visible[i]) else {
         return Ok(());
     };
     let Some(c) = card_of(m).filter(|c| c["state"] == "fail") else {
@@ -263,12 +270,14 @@ pub fn recover_quiet(db: &Db, item: &str) {
 /// message to it): the card it had elsewhere comes along, that message lets it go. No-op for items not
 /// made from the conversation.
 pub fn adopt(db: &Db, item: &str, msg: &str) -> Result<()> {
-    let th = db.store().thread();
-    let Some(ti) = th.item(item)? else {
+    let Some(ti) = db
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_item(r, item))?
+    else {
         return Ok(());
     };
     let visible: Vec<Message> = db
-        .messages_in(&ti.workspace_id, &conv_of(db, &ti.origin_msg), 200)?
+        .messages_in(&ti.workspace_id, &conv_of(db, &ti.origin_message_id), 200)?
         .into_iter()
         .filter(|m| !hidden(m) && m.id != msg)
         .collect();
@@ -276,7 +285,7 @@ pub fn adopt(db: &Db, item: &str, msg: &str) -> Result<()> {
     if let Some(i) = host(
         &visible,
         item,
-        ti.reply_msg.as_deref().filter(|r| *r != msg),
+        ti.reply_message_id.as_deref().filter(|r| *r != msg),
     ) {
         let m = &visible[i];
         if let Some(c) = card_of(m) {
@@ -305,8 +314,7 @@ pub fn adopt_quiet(db: &Db, item: &str, msg: &str) {
 pub fn delivery(db: &Db, item: &str, summary: &str) -> Result<(String, bool)> {
     let q = db
         .store()
-        .thread()
-        .item(item)?
+        .read(|r| steve_store::thread::dispatch_by_item(r, item))?
         .is_some_and(|t| t.from_question);
     Ok(if q {
         (js_head(summary.trim(), 4000).to_string(), true)

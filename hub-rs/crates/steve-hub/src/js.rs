@@ -89,13 +89,7 @@ pub fn string(v: &Value) -> String {
 
 /// JS truthiness of a JSON value.
 pub fn truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(_) => true,
-    }
+    steve_runtime::json::truthy_opt(v)
 }
 
 /// `JSON.parse(text)` of a request body with V8's SyntaxError message for the common cases. Hono served
@@ -136,13 +130,9 @@ fn syntax_message(text: &str, e: &serde_json::Error) -> String {
 /// gateway.ts `firstJson`: the greedy `{…}` span of a model reply, parsed. No braces → `None`; a span that
 /// is not valid JSON throws (500, the model's fault) like `JSON.parse`.
 pub fn first_json(text: &str) -> Result<Option<Value>, ApiError> {
-    let (Some(a), Some(b)) = (text.find('{'), text.rfind('}')) else {
+    let Some(span) = steve_runtime::json::first_json_span(text) else {
         return Ok(None);
     };
-    if b < a {
-        return Ok(None);
-    }
-    let span = &text[a..=b];
     serde_json::from_str(span)
         .map(Some)
         .map_err(|e| ApiError::internal(syntax_message(span, &e)))

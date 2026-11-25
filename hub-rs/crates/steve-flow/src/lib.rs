@@ -124,7 +124,7 @@ pub use item_events::{ItemEvent, ItemTrigger, ingest_item_event};
 pub use link::ItemFinder;
 pub use nodes::action::Action;
 pub use nodes::{NodeKind, NodeOutcome, RunCx};
-pub use ports::{Core, ItemRequest};
+pub use ports::{Core, ItemRequest, ScheduleGate, ScheduleGuard};
 pub use scheduler::Scheduler;
 
 /// Errors of this crate: the module API error (`400/404/409` with Chinese text, `500` otherwise).
@@ -170,6 +170,8 @@ pub struct FlowCx {
     pub signals: signals::SignalDebounce,
     /// Registered alarm sources ([`alarms::AlarmSource`]).
     pub alarms: alarms::AlarmSources,
+    /// Pre-start guards checked before starting a schedule run.
+    pub schedule_guards: Vec<Arc<dyn ScheduleGuard>>,
     wake: Arc<Notify>,
     followup_wake: Arc<Notify>,
     pub(crate) alarm_wake: Arc<Notify>,
@@ -334,6 +336,7 @@ pub struct FlowSetup {
     nodes: Vec<Arc<dyn NodeKind>>,
     finders: link::ItemFinders,
     alarms: alarms::AlarmSources,
+    schedule_guards: Vec<Arc<dyn ScheduleGuard>>,
     wake: Arc<Notify>,
     followup_wake: Arc<Notify>,
     tx: mpsc::UnboundedSender<Followup>,
@@ -352,6 +355,7 @@ impl FlowSetup {
             nodes: Vec::new(),
             finders: link::ItemFinders::default(),
             alarms: alarms::AlarmSources::default(),
+            schedule_guards: Vec::new(),
             wake: Arc::new(Notify::new()),
             followup_wake: Arc::new(Notify::new()),
             tx,
@@ -415,6 +419,12 @@ impl FlowSetup {
         self
     }
 
+    /// Registers a pre-start schedule guard ([`ScheduleGuard`]).
+    pub fn schedule_guard(mut self, g: Arc<dyn ScheduleGuard>) -> Self {
+        self.schedule_guards.push(g);
+        self
+    }
+
     /// Registers an event source (its `id()` is the `connections.adapter` it serves).
     pub fn event_adapter(mut self, a: Arc<dyn EventAdapter>) -> Self {
         self.events.add(a);
@@ -443,6 +453,7 @@ impl FlowSetup {
             drops: ingest::DropStats::default(),
             signals: signals::SignalDebounce::default(),
             alarms: self.alarms,
+            schedule_guards: self.schedule_guards,
             wake: self.wake,
             followup_wake: self.followup_wake,
             alarm_wake: Arc::new(Notify::new()),

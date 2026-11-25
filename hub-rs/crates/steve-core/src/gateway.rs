@@ -367,6 +367,9 @@ pub async fn with_images<F: std::future::Future>(images: Vec<Value>, f: F) -> F:
 tokio::task_local! {
     /// The harness and models the calls made inside [`with_choice`] run on.
     static CHOICE: crate::models::Choice;
+    /// A model to avoid selecting during [`with_excluded_model`] (e.g. the drafting model during
+    /// a `disclosure` audit).
+    static EXCLUDE_MODEL: String;
 }
 
 /// Runs `f` with its model calls on `choice` instead of what 设置 · 模型 says for their purpose: a
@@ -376,9 +379,22 @@ pub async fn with_choice<F: std::future::Future>(choice: crate::models::Choice, 
     CHOICE.scope(choice, f).await
 }
 
+/// Runs `f` excluding `model` from selection when another candidate is available.
+pub async fn with_excluded_model<F: std::future::Future>(model: Option<&str>, f: F) -> F::Output {
+    match model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => EXCLUDE_MODEL.scope(m.to_string(), f).await,
+        None => f.await,
+    }
+}
+
 /// The choice of [`with_choice`], if the current call runs inside one.
 pub fn current_choice() -> Option<crate::models::Choice> {
     CHOICE.try_with(Clone::clone).ok()
+}
+
+/// The model excluded by [`with_excluded_model`], if any.
+pub fn current_excluded_model() -> Option<String> {
+    EXCLUDE_MODEL.try_with(Clone::clone).ok()
 }
 
 /// The images of the current call, if any (see [`with_images`]).
@@ -429,19 +445,44 @@ impl<M: OneModel> SingleModelGateway<M> {
     /// The models (and effort) of this call: its purpose and workspace come from the caller's
     /// [`crate::stats::CallTag`].
     pub fn choice(&self, tier: Tier) -> crate::models::Choice {
+        let excluded = current_excluded_model();
         /* a caller that chose for itself ([`with_choice`]: the judge, kept off the worker's model) */
-        if let Some(c) = current_choice() {
+        if let Some(mut c) = current_choice() {
+            if let Some(ex) = excluded.as_deref().filter(|s| !s.is_empty()) {
+                let filtered: Vec<String> = c
+                    .models
+                    .iter()
+                    .filter(|m| m.as_str() != ex)
+                    .cloned()
+                    .collect();
+                if !filtered.is_empty() {
+                    c.models = filtered;
+                }
+            }
             return c;
         }
         match &self.models {
             Some(m) => {
                 let tag = crate::stats::current_tag();
-                m.for_call(&tag.workspace_id, tag.purpose, tier)
+                m.for_call_excluding(&tag.workspace_id, tag.purpose, tier, excluded.as_deref())
             }
-            None => crate::models::Choice::default_adapter(match tier {
-                Tier::Fast => self.fast.clone(),
-                Tier::Smart => self.smart.clone(),
-            }),
+            None => {
+                let mut models = match tier {
+                    Tier::Fast => self.fast.clone(),
+                    Tier::Smart => self.smart.clone(),
+                };
+                if let Some(ex) = excluded.as_deref().filter(|s| !s.is_empty()) {
+                    let filtered: Vec<String> = models
+                        .iter()
+                        .filter(|m| m.as_str() != ex)
+                        .cloned()
+                        .collect();
+                    if !filtered.is_empty() {
+                        models = filtered;
+                    }
+                }
+                crate::models::Choice::default_adapter(models)
+            }
         }
     }
 
@@ -590,6 +631,16 @@ pub struct SharedGateway(pub std::sync::Arc<dyn ModelGateway>);
 
 #[async_trait]
 impl steve_modules::Gateway for SharedGateway {
+    async fn run_excluding(
+        &self,
+        tier: steve_modules::Tier,
+        prompt: &str,
+        exclude_model: Option<&str>,
+        timeout: Duration,
+    ) -> std::result::Result<steve_modules::GatewayOut, GatewayError> {
+        with_excluded_model(exclude_model, self.run(tier, prompt, timeout)).await
+    }
+
     async fn run_with_images(
         &self,
         tier: steve_modules::Tier,
@@ -649,25 +700,11 @@ pub fn jstr(v: &Value) -> String {
     }
 }
 
-/// JS truthiness of a JSON value.
-pub fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0 && !f.is_nan()),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
-
-static BRACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{[\s\S]*\}").expect("valid regex"));
+pub use steve_runtime::json::truthy;
 
 /// The greedy first `{…}` of a model reply, parsed; `None` without braces, an error for bad JSON.
 pub fn first_json(t: &str) -> Result<Option<Value>> {
-    match BRACES.find(t) {
-        None => Ok(None),
-        Some(m) => Ok(Some(serde_json::from_str(m.as_str())?)),
-    }
+    Ok(steve_runtime::json::first_json(t)?)
 }
 
 /// The string value of `"key": "…` in a reply still being written, as far as it has got (escapes decoded,
@@ -1556,16 +1593,7 @@ pub async fn answer(
     }
 }
 
-/// A field the config draft may change.
-#[derive(Debug, Clone)]
-pub struct FieldSpec {
-    pub key: String,
-    pub label: String,
-    /// text | enum | number
-    pub ty: &'static str,
-    pub values: Option<Vec<String>>,
-    pub current: Value,
-}
+pub use steve_modules::changes::FieldSpec;
 
 /// Map a request onto fields; returns `(key, value)` for known keys only.
 pub async fn draft_fields(
@@ -1971,7 +1999,7 @@ mod tests {
             reasoning_effort: None,
             rules: String::new(),
             accept_mode: "inherit".into(),
-            perm_mode: "default".into(),
+            perm_mode: "ask".into(),
             enabled: true,
             revision: 1,
             updated: 0,
@@ -2490,5 +2518,62 @@ mod tests {
         .await
         .unwrap();
         assert!(current_images().is_none());
+    }
+
+    #[tokio::test]
+    async fn shared_gateway_passes_exclude_model_and_clears_scope() {
+        struct Capture;
+        #[async_trait]
+        impl ModelGateway for Capture {
+            async fn call(&self, _: &str, _: Tier, _: Duration, _: &ThinkTools) -> Result<Printed> {
+                assert_eq!(
+                    current_excluded_model().as_deref(),
+                    Some("claude-sonnet-5-5")
+                );
+                Ok(Printed {
+                    model: "claude-haiku-5-5".into(),
+                    ..Printed::default()
+                })
+            }
+        }
+        use steve_modules::Gateway;
+        let g = SharedGateway(std::sync::Arc::new(Capture));
+        let out = g
+            .run_excluding(
+                steve_modules::Tier::Fast,
+                "check",
+                Some("claude-sonnet-5-5"),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.model, "claude-haiku-5-5");
+        assert!(current_excluded_model().is_none());
+
+        // SingleModelGateway also skips the excluded model on fixed tier lists.
+        struct NoopOne;
+        #[async_trait]
+        impl OneModel for NoopOne {
+            async fn once(
+                &self,
+                _: &OneCall<'_>,
+                _: &str,
+                _: Option<&str>,
+                _: Option<OnText<'_>>,
+            ) -> Tried {
+                unreachable!()
+            }
+        }
+        let single = SingleModelGateway {
+            one: NoopOne,
+            fast: vec!["claude-sonnet-5-5".into(), "claude-haiku-5-5".into()],
+            smart: vec![],
+            models: None,
+        };
+        let picked = with_excluded_model(Some("claude-sonnet-5-5"), async {
+            single.choice(Tier::Fast)
+        })
+        .await;
+        assert_eq!(picked.models, vec!["claude-haiku-5-5"]);
     }
 }

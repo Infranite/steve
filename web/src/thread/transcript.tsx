@@ -24,7 +24,8 @@ import { Files } from "@/attach"
 import { useTurnUsage } from "@/session/turn-usage"
 import { fmtUsageCost, fmtUsage } from "@/stats/format"
 import { steveToolIcon } from "@/tool-icons"
-import { BotAvatar, Segmented, Status, StatusDot, go, openSheet } from "@/ui"
+import { Segmented, Status, StatusDot, go, openSheet } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 
 import { getTranscript, loadOlderTranscript, useTranscript, useTranscriptSelector } from "@/data/transcript"
 import { isActiveSubtaskStatus, partitionWork, segmentsOf, subtaskOf, subtaskTimes, toolDurationMs, type Seg } from "@/data/transcript-model"
@@ -544,7 +545,7 @@ export function ReplyBlock({ r }: { r: Reply }) {
   return (
     <div className="mb-1.5 ml-2.5 border-l pl-4.5" data-reply={r.s}>
       <div className="flex min-h-7 min-w-0 items-center gap-1.5 type-footnote text-muted-foreground">
-        <BotAvatar k={who} size={16} /><span className="shrink-0 font-medium text-foreground/80">{botName(who)}</span>
+        <ActorAvatar actorId={who} size={16} /><span className="shrink-0 font-medium text-foreground/80">{botName(who)}</span>
         <span className="shrink-0">{t("core:session.replyNo", { n: s.n })}</span>
         {stats.length > 0 && <span className="min-w-0 truncate" data-reply-stats>· {stats.join(" · ")}</span>}
         {r.live && !open && <Spinner className="size-3 shrink-0" />}

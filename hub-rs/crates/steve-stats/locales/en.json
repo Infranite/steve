@@ -13,7 +13,6 @@
   "stats.label.judge": "Completion judge",
   "stats.label.mail": "Email drafting",
   "stats.label.disclosure": "Disclosure checks",
-  "stats.label.yolo": "Legacy automatic approval",
   "stats.label.intent": "Intent detection",
   "stats.label.flow": "Flow bot nodes",
   "stats.label.digest": "Reports",

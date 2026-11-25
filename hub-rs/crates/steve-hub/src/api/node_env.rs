@@ -8,8 +8,16 @@ use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 
-use super::{ApiResult, AppState, Ctx, body, ok, ok_true};
-use crate::validate::{Check, Str};
+use super::{ApiResult, AppState, Ctx, check_len, json_body, ok, ok_true};
+use crate::error::ApiError;
+
+#[derive(serde::Deserialize)]
+struct PutBody {
+    value: String,
+    #[serde(default)]
+    note: String,
+    principal: Option<String>,
+}
 
 fn principal_of(c: &Ctx, asked: Option<String>) -> String {
     asked
@@ -36,15 +44,27 @@ pub async fn put(
     Path((node, key)): Path<(String, String)>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let value = k.str("value", Str::len(0, crate::wire::node_env::MAX_VALUE));
-    let note = k.opt_str("note", Str::len(0, 200)).unwrap_or_default();
-    let principal = k.opt_str("principal", Str::len(1, 200));
-    k.finish()?;
-    let p = principal_of(&c, principal);
+    let req: PutBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if !check_len(&req.value, 0, crate::wire::node_env::MAX_VALUE) {
+        bad.push("value".into());
+    }
+    if !check_len(&req.note, 0, 200) {
+        bad.push("note".into());
+    }
+    if req
+        .principal
+        .as_deref()
+        .is_some_and(|p| !check_len(p, 1, 200))
+    {
+        bad.push("principal".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    let p = principal_of(&c, req.principal);
     st.write(move |r| {
-        r.node_env_put(&c.me, &c.ws, &node, &p, &key, Some(&value), &note)?;
+        r.node_env_put(&c.me, &c.ws, &node, &p, &key, Some(&req.value), &req.note)?;
         ok_true()
     })
     .await

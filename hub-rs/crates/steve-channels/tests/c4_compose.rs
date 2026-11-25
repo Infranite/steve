@@ -1137,35 +1137,6 @@ fn parse_reads_the_answer() {
     );
 }
 
-#[derive(Default)]
-struct MediaCapture(Mutex<Vec<(String, Vec<Value>)>>);
-#[async_trait]
-impl compose::PinnedModel for MediaCapture {
-    async fn run(
-        &self,
-        _: &str,
-        _: &str,
-        _: std::time::Duration,
-    ) -> Result<steve_modules::GatewayOut, String> {
-        panic!("the image-aware composer must not call the text-only method")
-    }
-    async fn run_with_images(
-        &self,
-        _: &str,
-        prompt: &str,
-        images: &[Value],
-        _: std::time::Duration,
-    ) -> Result<steve_modules::GatewayOut, String> {
-        self.0
-            .lock()
-            .unwrap()
-            .push((prompt.into(), images.to_vec()));
-        Ok(steve_modules::GatewayOut {
-            text: REPLY.into(),
-            ..Default::default()
-        })
-    }
-}
 struct MessageMedia;
 #[async_trait]
 impl steve_channels::media_agent::MediaSource for MessageMedia {
@@ -1197,19 +1168,17 @@ async fn composer_receives_real_images_and_file_text_and_rejects_stale_source() 
         json!({"type":"file","key":"file_fixture"}),
     ];
     let incoming = push(&h, &c, m).await;
-    seed::people::set_bot_model_fixture_model(h.env.store()).unwrap();
+    h.env.gateway.accept_images();
+    h.env.gateway.script(H_SAFETY, REPLY);
     let plan =
         steve_channels::flow_actions::plan_of(h.ch.store(), WS, &incoming.message_id).unwrap();
-    let capture = Arc::new(MediaCapture::default());
-    let composer = compose::Composer::new()
-        .media(Arc::new(MessageMedia))
-        .pinned(capture.clone());
+    let composer = compose::Composer::new().media(Arc::new(MessageMedia));
     composer
         .generate(&h.ch, &plan, &compose::ComposeOpts::default())
         .await
         .unwrap();
     {
-        let seen = capture.0.lock().unwrap();
+        let seen = h.env.gateway.image_calls.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].1.len(), 1);
         assert_eq!(seen[0].1[0]["source"]["media_type"], "image/png");
@@ -1240,7 +1209,7 @@ async fn composer_receives_real_images_and_file_text_and_rejects_stale_source() 
             .is_err()
     );
     assert_eq!(
-        capture.0.lock().unwrap().len(),
+        h.env.gateway.image_calls.lock().unwrap().len(),
         1,
         "no source change may reach a second model call"
     );
@@ -1269,20 +1238,18 @@ async fn media_cleanup_during_download_never_reaches_the_model() {
     let mut m = msg("C_OPS", "media-race", "ulilei", "读取文件", false);
     m.attachments = vec![json!({"type":"file","key":"file_fixture"})];
     let incoming = push(&h, &h.oncall, m).await;
-    seed::people::set_bot_model_fixture_model(h.env.store()).unwrap();
+    h.env.gateway.accept_images();
+    h.env.gateway.script(H_SAFETY, REPLY);
     let plan =
         steve_channels::flow_actions::plan_of(h.ch.store(), WS, &incoming.message_id).unwrap();
-    let capture = Arc::new(MediaCapture::default());
-    let composer = compose::Composer::new()
-        .media(Arc::new(PurgeDuringDownload))
-        .pinned(capture.clone());
+    let composer = compose::Composer::new().media(Arc::new(PurgeDuringDownload));
     assert!(
         composer
             .generate(&h.ch, &plan, &compose::ComposeOpts::default())
             .await
             .is_err()
     );
-    assert!(capture.0.lock().unwrap().is_empty());
+    assert!(h.env.gateway.prompts.lock().unwrap().is_empty());
 }
 
 /// 2026-11-09: a reply in the thread an item came from goes straight to that item, past the gate and
@@ -1364,34 +1331,6 @@ async fn a_thread_reply_by_the_raiser_goes_to_its_item() {
     assert_eq!(supplements(&h).len(), 1);
 }
 
-/// A model that reads the images it is given and says what it saw ([`compose::DESCRIBE`]).
-struct Describing;
-#[async_trait]
-impl compose::PinnedModel for Describing {
-    async fn run(
-        &self,
-        _: &str,
-        _: &str,
-        _: std::time::Duration,
-    ) -> Result<steve_modules::GatewayOut, String> {
-        panic!("images are given")
-    }
-    async fn run_with_images(
-        &self,
-        _: &str,
-        prompt: &str,
-        images: &[Value],
-        _: std::time::Duration,
-    ) -> Result<steve_modules::GatewayOut, String> {
-        assert!(!images.is_empty() && prompt.contains(compose::DESCRIBE));
-        Ok(steve_modules::GatewayOut {
-            text: r#"{"outcome": "skip", "text": "只是给我看图", "described": "一张部署失败的报错截图"}"#
-                .into(),
-            ..Default::default()
-        })
-    }
-}
-
 /// What the composer read in an image is kept with the message, and a later conversation shows it
 /// instead of an unread image (#203).
 #[tokio::test(flavor = "multi_thread")]
@@ -1401,14 +1340,22 @@ async fn what_was_read_in_an_image_is_reused_later() {
     let mut m = msg("C_OPS", "img-1", "ulilei", "[image]", false);
     m.attachments = vec![json!({"type":"image","key":"img_fixture"})];
     let first = push(&h, &c, m).await;
-    seed::people::set_bot_model_fixture_model(h.env.store()).unwrap();
+    h.env.gateway.accept_images();
+    h.env.gateway.script(
+        H_SAFETY,
+        r#"{"outcome": "skip", "text": "只是给我看图", "described": "一张部署失败的报错截图"}"#,
+    );
     let plan = steve_channels::flow_actions::plan_of(h.ch.store(), WS, &first.message_id).unwrap();
     compose::Composer::new()
         .media(Arc::new(MessageMedia))
-        .pinned(Arc::new(Describing))
         .generate(&h.ch, &plan, &compose::ComposeOpts::default())
         .await
         .unwrap();
+    {
+        let calls = h.env.gateway.image_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].1.is_empty() && calls[0].0.contains(compose::DESCRIBE));
+    }
     let atts: Value = serde_json::from_str(
         inspect::messages::message_attachments(h.env.store(), &first.message_id).unwrap()[0]
             .as_str()

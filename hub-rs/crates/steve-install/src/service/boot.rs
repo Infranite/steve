@@ -138,50 +138,13 @@ impl Drop for StagedRunnerGuard {
     }
 }
 
-struct LegacyAgent {
-    definition: Option<Vec<u8>>,
-    domains: Vec<String>,
-    installed: Option<PathBuf>,
-    running: Option<PathBuf>,
-}
-
-fn program_release(program: &str) -> Option<PathBuf> {
-    let path = Path::new(program);
-    let bin = path.parent()?;
-    (path.is_absolute() && path.ends_with("bin/steve-node")).then_some(bin.parent()?.to_owned())
-}
-
-// One sudo command, including migration over SSH. The shell never sources a user file or
-// executes the launcher. Only after launchctl detaches the old job does the unprivileged CLI
-// update its own files and acknowledge readiness. EOF (failure or interruption) aborts.
+// One sudo command. The shell never sources a user file or executes the launcher.
+// Once authorized, the unprivileged CLI prepares its own files and acknowledges readiness.
+// EOF (failure or interruption) aborts.
 const REGISTER: &str = r#"set -eu
 export LC_ALL=C
 definition=$1 config=$2 target=$3
-shift 3
 [ ! -e "$config" ] && [ ! -L "$config" ] || exit 1
-for legacy; do
-    if ! /bin/launchctl bootout "$legacy" >&2; then
-        # gui/ and user/ may name the same job; the first bootout can remove both.
-        rc=0
-        state=$(/bin/launchctl print "$legacy" 2>&1) || rc=$?
-        [ "$rc" -ne 0 ] || exit 1
-        case "$rc" in
-            3|113) ;;
-            125)
-                case "$legacy" in
-                    gui/*) ;;
-                    *) printf '%s\n' "$state" >&2; exit 1 ;;
-                esac
-                ;;
-            *)
-                case "$legacy:$state" in
-                    gui/*:*": 125:"*) ;;
-                    *) printf '%s\n' "$state" >&2; exit 1 ;;
-                esac
-                ;;
-        esac
-    fi
-done
 printf '%s\n' detached
 IFS= read -r ack && [ "$ack" = ready ] || exit 1
 temp=$(/usr/bin/mktemp "${config%/*}/.steve-node.XXXXXXXX")
@@ -247,7 +210,7 @@ pub(super) fn execute_register(
         output.read_line(&mut ready)?;
         ensure!(
             ready == "detached\n",
-            "administrator authorization or legacy detach did not complete"
+            "administrator authorization did not complete"
         );
         finish()?;
         writeln!(input, "ready")?;
@@ -367,12 +330,6 @@ impl Service {
         self.system == System::Darwin && self.component == "node"
     }
 
-    pub(super) fn legacy_config(&self) -> PathBuf {
-        self.user_home
-            .join("Library/LaunchAgents")
-            .join(format!("{}.plist", self.label))
-    }
-
     pub(super) fn boot_dispatch(
         &mut self,
         action: &str,
@@ -381,9 +338,7 @@ impl Service {
     ) -> Result<Value> {
         if matches!(action, "status" | "doctor") {
             let mut report = self.status(release, action == "doctor")?;
-            report["boot"] = json!(if self.legacy_registration() {
-                "migration_required"
-            } else if report["service"]["installed"] == true {
+            report["boot"] = json!(if report["service"]["installed"] == true {
                 "registered"
             } else if self.record["boot_release"].is_string() && self.record["uninstalled"] != true
             {
@@ -395,9 +350,6 @@ impl Service {
         }
         if action != "install" {
             self.require_registration(action)?;
-        }
-        if matches!(action, "install" | "update") {
-            self.require_no_agent()?;
         }
         if action == "install" {
             fs::create_dir_all(&self.home)?;
@@ -433,12 +385,8 @@ impl Service {
             "enable-boot" => self.enable_boot(),
             "refresh-env" => self.refresh_boot_env(),
             "install" | "update" => self.prepare_boot(release, action == "update", wait),
-            "start" | "restart" | "stop" => {
-                self.require_no_agent()?;
-                self.boot_action(action)
-            }
+            "start" | "restart" | "stop" => self.boot_action(action),
             "uninstall" => {
-                self.require_no_agent()?;
                 if !exists(&self.config)
                     && self.record["uninstall"]["phase"] != "pending"
                     && self.record["uninstalled"] != true
@@ -457,23 +405,7 @@ impl Service {
         }
     }
 
-    fn legacy_registration(&self) -> bool {
-        (self.record["release"].is_string()
-            && self.record["boot_release"].is_null()
-            && self.record["uninstalled"] != true)
-            || exists(&self.legacy_config())
-    }
-
-    fn require_no_agent(&self) -> Result<()> {
-        ensure!(
-            !self.legacy_registration(),
-            "legacy macOS Node service; finish sessions and run steve node enable-boot to migrate it first"
-        );
-        Ok(())
-    }
-
     fn prepare_boot(&mut self, release: Option<&Path>, update: bool, wait: u64) -> Result<Value> {
-        self.require_no_agent()?;
         let release = release
             .map(Path::to_owned)
             .or_else(|| self.record["boot_release"].as_str().map(PathBuf::from))
@@ -794,7 +726,6 @@ impl Service {
     }
 
     fn refresh_boot_env(&mut self) -> Result<Value> {
-        self.require_no_agent()?;
         ensure!(
             self.record["uninstalled"] != true && self.record.get("uninstall").is_none(),
             "finish uninstall and prepare an installation before refreshing the service environment"
@@ -854,7 +785,6 @@ impl Service {
         self.check_owner()?;
         let service_path = self.resolve_service_path();
         if exists(&self.config) {
-            self.require_no_agent()?;
             let (release, info) = self.bundle(&release)?;
             let identity = self.node_signing_identity()?;
             self.sign_release_binaries(&release, &identity)?;
@@ -897,12 +827,7 @@ impl Service {
             }
         } else {
             self.wait_unloaded("system", &self.config, 0)?;
-            let legacy = self.legacy_before()?;
-            let (release, info) = if self.record["boot_release"].is_null() {
-                self.migration_release(&legacy, &release)?
-            } else {
-                self.bundle(&release)?
-            };
+            let (release, info) = self.bundle(&release)?;
             let identity = self.node_signing_identity()?;
             let requirement = identity.node_requirement();
             self.sign_release_binaries(&release, &identity)?;
@@ -915,7 +840,7 @@ impl Service {
                 &identity,
             )?);
             let data = self.boot_definition(&account, &service_path.path)?;
-            let args = [
+            let args = vec![
                 "/usr/bin/sudo".into(),
                 "/bin/sh".into(),
                 "-c".into(),
@@ -924,13 +849,9 @@ impl Service {
                 std::str::from_utf8(&data)?.into(),
                 text(&self.config)?,
                 format!("system/{}", self.label),
-            ]
-            .into_iter()
-            .chain(legacy.domains)
-            .collect::<Vec<_>>();
+            ];
             let register = self.boot_registrar.clone();
             register(&args, &mut || {
-                self.retire_agent(legacy.definition.as_deref())?;
                 self.wait_node_exit(self.node_exit_wait)?;
                 self.write_boot_record(
                     &release,
@@ -955,128 +876,6 @@ impl Service {
             return self.status(None, false);
         }
         self.boot_action("start")
-    }
-
-    fn legacy_domains() -> [String; 2] {
-        let uid = unsafe { libc::getuid() };
-        [format!("gui/{uid}"), format!("user/{uid}")]
-    }
-
-    fn legacy_before(&self) -> Result<LegacyAgent> {
-        let agent = self.legacy_config();
-        let (definition, installed) = if exists(&agent) {
-            let bytes = maintenance_file(&agent)?;
-            ensure!(
-                self.record["release"].is_string() && self.record["boot_release"].is_null(),
-                "unexpected LaunchAgent with this label; inspect it before enabling boot"
-            );
-            let definition = self.check_launch_definition(&bytes)?;
-            let installed = definition["ProgramArguments"][0]
-                .as_str()
-                .and_then(program_release);
-            (Some(bytes), installed)
-        } else {
-            (None, None)
-        };
-        let mut domains = Vec::new();
-        let mut running = None;
-        for domain in Self::legacy_domains() {
-            let state = self.launch_state(&domain, &agent, true)?;
-            ensure!(
-                state["running"].is_boolean(),
-                "cannot determine legacy launchd state for {domain}/{}: {}",
-                self.label,
-                state["diagnostic"]
-                    .as_str()
-                    .unwrap_or("unknown launchctl failure")
-            );
-            if state["loaded"] == true {
-                ensure!(
-                    definition.is_some(),
-                    "found a legacy job without an owned definition; inspect it first"
-                );
-                domains.push(format!("{domain}/{}", self.label));
-                if state["running"] == true
-                    && let Some(actual) = state["program"].as_str().and_then(program_release)
-                {
-                    ensure!(
-                        running.as_ref().is_none_or(|path| path == &actual),
-                        "legacy jobs point to different running releases"
-                    );
-                    running = Some(actual);
-                }
-            }
-        }
-        Ok(LegacyAgent {
-            definition,
-            installed,
-            domains,
-            running,
-        })
-    }
-
-    fn migration_release(&self, agent: &LegacyAgent, receipt: &Path) -> Result<(PathBuf, Value)> {
-        if let Some(running) = &agent.running
-            && let Ok(bundle) = self.bundle(running)
-        {
-            return Ok(bundle);
-        }
-        let releases = match fs::read_dir(self.home.join("releases")) {
-            Ok(releases) => Some(releases),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e).context("read the Node's verified release directory"),
-        };
-        let discovered = releases.into_iter().flatten().filter_map(|entry| {
-            let entry = entry.ok()?;
-            (entry.file_type().ok()?.is_dir()
-                && !entry.file_name().as_encoded_bytes().starts_with(b"."))
-            .then(|| entry.path())
-        });
-        let candidates: std::collections::BTreeSet<_> =
-            [receipt.to_owned(), self.home.join("current")]
-                .into_iter()
-                .chain(agent.installed.clone())
-                .chain(discovered)
-                .collect();
-        let mut versions = candidates
-            .into_iter()
-            .filter_map(|path| {
-                let manifest: Value =
-                    serde_json::from_slice(&maintenance_file(&path.join("release.json")).ok()?)
-                        .ok()?;
-                let version = semver::Version::parse(manifest["version"].as_str()?).ok()?;
-                Some((version, path))
-            })
-            .collect::<Vec<_>>();
-        versions.sort_unstable_by(|a, b| b.cmp(a));
-        versions
-            .into_iter()
-            .find_map(|(_, path)| self.bundle(&path).ok())
-            .context("no verified Node release available for boot migration")
-    }
-
-    fn retire_agent(&self, before: Option<&[u8]>) -> Result<()> {
-        let agent = self.legacy_config();
-        for domain in Self::legacy_domains() {
-            self.wait_unloaded(&domain, &agent, 15)?;
-        }
-        if let Some(bytes) = before {
-            let saved = self.home.join("services/node-launchagent.previous");
-            atomic(&saved, bytes)?;
-            ensure!(
-                maintenance_file(&agent)? == bytes,
-                "legacy definition changed during migration"
-            );
-            fs::remove_file(&agent)?;
-        }
-        ensure!(
-            !exists(&agent),
-            "legacy definition reappeared during migration"
-        );
-        for domain in Self::legacy_domains() {
-            self.wait_unloaded(&domain, &agent, 0)?;
-        }
-        Ok(())
     }
 
     pub(super) fn wait_unloaded(&self, domain: &str, path: &Path, seconds: u64) -> Result<()> {

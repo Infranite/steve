@@ -33,6 +33,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -141,23 +142,27 @@ def snapshot(src_home):
     src = src_home / "data/steve.sqlite3"
     if not src.is_file():
         die(f"no database at {src}")
-    # Back up before replacing the development copy; failure leaves it intact.
-    result = subprocess.run([str(HUB_BIN), "--admin", "backup", "--reason", "diagnostic"],
-                            env={**os.environ, "STEVE_HOME": str(src_home.resolve())},
-                            capture_output=True, text=True, check=True, timeout=120)
-    manifest = json.loads(result.stdout)
-    name = manifest["database"]["name"]
-    if (manifest.get("completed") is not True or manifest["database"].get("quick_check") != "ok"
-            or Path(name).name != name):
-        die("Hub returned an incomplete backup")
-    saved = Path(manifest["directory"]) / name
-    if not saved.is_file():
-        die("Hub backup database is missing")
-    clear_data()
-    data = DEV / "data"
-    data.mkdir(parents=True)
-    dst = data / "steve.sqlite3"
-    shutil.copy2(saved, dst)
+    # The same repository is used for diagnostic snapshots. Restore into private staging
+    # before replacing anything in the development home.
+    binary = src_home / "current/bin/steve-hub"
+    command = [str(binary if binary.is_file() else HUB_BIN), "--admin"]
+    env = {**os.environ, "STEVE_HOME": str(src_home.resolve())}
+    result = subprocess.run([*command, "backup", "--reason", "diagnostic"],
+                            env=env, capture_output=True, text=True, check=True, timeout=120)
+    receipt = json.loads(result.stdout)
+    if receipt["purpose"] != "diagnostic":
+        die("Hub returned an incomplete diagnostic backup")
+    with tempfile.TemporaryDirectory(prefix="steve-dev-restore-") as parent:
+        result = subprocess.run([*command, "restore", receipt["snapshot_id"], "--to", parent],
+                                env=env, capture_output=True, text=True, check=True, timeout=120)
+        saved = Path(result.stdout.strip()) / "data/steve.sqlite3"
+        if not saved.is_file() or not saved.is_relative_to(Path(parent).resolve()):
+            die("Hub restored no database into the staging directory")
+        clear_data()
+        data = DEV / "data"
+        data.mkdir(parents=True)
+        dst = data / "steve.sqlite3"
+        shutil.copy2(saved, dst)
     with closing(sqlite3.connect(dst)) as d, d:
         # the copy's owner signs in with the one-click development login
         d.execute(

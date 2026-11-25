@@ -9,7 +9,8 @@ import { applyStoredLook } from "@/lib/motion"
 import { deliveryRoute } from "@/delivery"
 import { lazyView } from "@/lazy"
 import { bindPageHub } from "@/hub"
-import { modReq, setPageWorkspace } from "@/api"
+import { setPageWorkspace } from "@/api"
+import { systemApi } from "@/api/system"
 import { startPerf } from "@/perf"
 import { QueryClientProvider } from "@tanstack/react-query"
 import { qc, takePatchTimes, takeSnapshotTimes } from "@/data/sync"
@@ -25,7 +26,7 @@ if (delivery || workspace) {
   if (!delivery?.shared && workspace) setPageWorkspace(workspace)
 }
 // Share pages must not start the authenticated application, its state requests or its event stream.
-if (!delivery?.shared) startPerf((r) => modReq("POST", "/system/web-perf", r), 60_000, takePatchTimes, takeSnapshotTimes)
+if (!delivery?.shared) startPerf((r) => systemApi.webPerf(r), 60_000, takePatchTimes, takeSnapshotTimes)
 // Wait to render instead of blocking module evaluation: the locale chunk can share code with the entry.
 void languageReady.then(() => {
   createRoot(document.getElementById("root")!).render(<StrictMode>{delivery?.shared ? <DeliveryPage id={delivery.id} shared /> : <QueryClientProvider client={qc}><App deliveryId={delivery?.id} /></QueryClientProvider>}</StrictMode>)

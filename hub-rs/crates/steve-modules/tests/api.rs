@@ -519,11 +519,10 @@ async fn store_errors_map_to_codes() {
 }
 
 #[test]
-fn single_user_viewer_preserves_identity_without_loading_scopes() {
+fn single_user_viewer_preserves_identity() {
     let t = TestEnv::new(|_| {});
     let who = caller(WS, OTHER);
     let viewer = t.modules.viewer(&who).unwrap();
     assert_eq!(viewer.ws, WS);
     assert_eq!(viewer.user, OTHER);
-    assert!(viewer.scopes.is_empty());
 }

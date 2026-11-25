@@ -15,6 +15,14 @@
 
 steve_i18n::init!();
 
+/// Physical backup and restore of an offline or WAL-mode SQLite installation. These storage
+/// maintenance operations do not open a Store or run migrations, and never take its writer lock.
+pub mod backup {
+    pub use steve_store_sqlite::backup::offline::{
+        BackupError, CancelFlag, CopiedFile, CopyOptions, Progress, backup_file, close_wal,
+        verify_file,
+    };
+}
 pub mod base;
 pub mod bot_dispatch;
 mod bus;
@@ -24,6 +32,7 @@ pub mod compact;
 mod contract;
 pub use contract::approval;
 pub use contract::audit as audit_repo;
+pub use contract::backup_policy;
 pub use contract::channel_feed;
 pub use contract::channel_messages as channel_message_repo;
 pub use contract::channel_names;
@@ -35,6 +44,7 @@ pub use contract::channel_trigger_report;
 pub use contract::channel_write_policy;
 pub use contract::feishu_registration;
 pub use contract::notifications as notification_repo;
+pub use contract::notify;
 pub use contract::reply_basis;
 pub use contract::{
     Accounts, AuthSessions, ConnRow, ConnectionBrief, HealthState, MatchRule, MatchRules, NewParty,
@@ -72,7 +82,6 @@ pub use contract::automation::{ScheduleRow, Schedules};
 pub use contract::changesets as changeset_repo;
 #[cfg(feature = "testkit")]
 pub use contract::core_fixture;
-pub use contract::core_queue;
 pub use contract::core_usage;
 pub use contract::item_delivery;
 pub use contract::message_sources::{
@@ -91,15 +100,21 @@ pub use contract::read_models::{
 };
 pub use contract::realtime_output;
 pub use contract::tags as tag_repo;
-pub use contract::thread_runs;
+pub use contract::thread;
+pub use contract::thread::{
+    CommitOutcome, CommitReplyInput, DeliveryRefClaim, DeliveryRefRow, DispatchClaim, DispatchRef,
+    EditQueuedOutcome, NewRevisionTask, ReceiptDispatch, RecoveredTask, ReplyReceipt,
+    StopTaskOutcome, SubmitInput, SubmitOutcome, ThreadNotice, ThreadTask, WithdrawOutcome,
+};
 pub use contract::vault_uses as vault_use_repo;
+pub use contract::waits as wait_repo;
 pub use contract::{
     AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
     DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,
     FlowSources, FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange,
     ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence,
-    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R,
-    Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
+    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRef,
+    ProjectRows, R, Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
     SessionEvidence, SignalFilter, SignalRow, SignalRows, SignalTriage, SourceConfig,
     StartupRecord, TagRows, W, WorkspaceSettings, Workspaces,
 };
@@ -303,7 +318,7 @@ impl Store {
     /// Opens an existing database at exactly this build's schema head for offline administration.
     /// The caller must hold the Hub instance lock. Repository writes remain available, but opening
     /// never migrates, optimizes, initializes workspaces or starts diagnostic recording. One lazy
-    /// read connection is enough for a CLI. Transitional adapter, replaced by the storage engine.
+    /// read connection is enough for a CLI.
     pub fn open_admin(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_observed(path.as_ref(), NoPublisher, None, true)
     }
@@ -1325,6 +1340,8 @@ pub mod instrumentation {
         pub result: &'static str,
         pub seconds: f64,
         pub usage: Vec<crate::ModelUsage>,
+        /// Peak prompt context tokens observed during an agent turn, when reported.
+        pub context_peak: Option<u64>,
     }
 
     impl ModelCall {
@@ -1343,6 +1360,7 @@ pub mod instrumentation {
             struct ModelCache {
                 calls: std::collections::HashMap<CallKey, metrics::Counter>,
                 durations: std::collections::HashMap<DurKey, metrics::Histogram>,
+                context_peaks: std::collections::HashMap<&'static str, metrics::Histogram>,
                 tokens: std::collections::HashMap<TokKey, metrics::Counter>,
                 costs: std::collections::HashMap<CostKey, metrics::Counter>,
             }
@@ -1378,6 +1396,20 @@ pub mod instrumentation {
                         )
                     })
                     .record(self.seconds);
+                if source == "agent"
+                    && let Some(peak) = self.context_peak.filter(|&n| n > 0)
+                {
+                    cache
+                        .context_peaks
+                        .entry(harness)
+                        .or_insert_with(|| {
+                            metrics::histogram!(
+                                "steve_turn_context_peak_tokens",
+                                "harness" => harness,
+                            )
+                        })
+                        .record(peak as f64);
+                }
                 for u in &self.usage {
                     let model = if u.model.is_empty() {
                         call_model
@@ -1637,7 +1669,7 @@ impl Drop for WriteGuard<'_> {
     }
 }
 
-/// Legacy storage grants; scheduling belongs to the Hub assembly root.
+/// Bounded retention slices on the store's writer connection; scheduling belongs to the Hub.
 pub mod retention {
     use super::{Result, Store};
     pub use steve_store_sqlite::retention::{

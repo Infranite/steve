@@ -1,5 +1,4 @@
-//! The built-in SQLite implementation of the domain storage contract (`steve-storage-api`):
-//! backup, retention and the digest intake.
+//! SQLite storage primitives: backup, bounded retention, and digest intake.
 
 pub mod backup;
 pub mod digest;

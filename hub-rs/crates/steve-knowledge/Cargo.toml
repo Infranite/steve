@@ -19,6 +19,7 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 axum = { version = "=0.8.9", default-features = false, features = ["json", "query"] }
 # bounded, ordered loading in the index worker
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+metrics = "=0.24.6"
 html2text = "=0.17.4"
 pdf-extract = "=0.12.1"
 pulldown-cmark = { version = "=0.13.6", default-features = false }

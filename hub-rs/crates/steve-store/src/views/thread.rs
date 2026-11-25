@@ -14,23 +14,40 @@ fn main_query() -> SelectStatement {
     Query::select()
         .from(Alias::new("messages"))
         .and_where(column("space").eq("steve"))
+        .and_where(Expr::cust(
+            "COALESCE(json_extract(meta, '$.withdrawn'), 0) != 1",
+        ))
         .to_owned()
 }
 
 fn select() -> SelectStatement {
     main_query()
         .columns(["id", "workspace_id", "author", "text", "item_id", "created", "meta"].map(Alias::new))
-        .expr(Expr::cust("CASE WHEN json_extract(meta, '$.notice.ref') IS NOT NULL THEN (
-            EXISTS (SELECT 1 FROM settings s, json_each(s.value) d WHERE s.workspace_id=messages.workspace_id
-                AND s.key='noticeDismissed' AND d.value=json_extract(messages.meta, '$.notice.ref'))
-            OR EXISTS (SELECT 1 FROM messages old JOIN messages newer ON newer.workspace_id=old.workspace_id
-                AND newer.space='notify' AND newer.item_id=old.item_id
-                AND (newer.created,newer.rowid)>(old.created,old.rowid)
-                AND json_extract(newer.meta, '$.notice.kind')='release'
-                WHERE old.id=json_extract(messages.meta, '$.notice.ref') AND old.workspace_id=messages.workspace_id
-                    AND old.space='notify' AND json_extract(old.meta, '$.notice.kind')='release'
-                    AND json_extract(old.meta, '$.notice.level')='fail')
-        ) ELSE 0 END"))
+        .expr(Expr::cust(
+            "CASE WHEN json_extract(meta, '$.notice.ref') IS NOT NULL THEN EXISTS (
+                SELECT 1 FROM thread_notices n
+                 WHERE n.workspace_id = messages.workspace_id
+                   AND (n.id = json_extract(messages.meta, '$.notice.ref') OR n.host_message_id = messages.id)
+                   AND n.closed_at IS NOT NULL
+            ) ELSE 0 END",
+        ))
+        .expr(Expr::cust(
+            "CASE WHEN messages.author = 'me' THEN EXISTS (
+                SELECT 1 FROM thread_reply_tasks t
+                 WHERE t.workspace_id = messages.workspace_id
+                   AND t.space = messages.space
+                   AND t.origin_message_id = messages.id
+                   AND t.reply_revision = 0
+                   AND t.status = 'queued'
+                   AND EXISTS (
+                     SELECT 1 FROM thread_reply_tasks ahead
+                      WHERE ahead.workspace_id = t.workspace_id
+                        AND ahead.space = t.space
+                        AND ahead.status IN ('queued', 'claimed')
+                        AND (ahead.input_seq < t.input_seq OR (ahead.input_seq = t.input_seq AND ahead.id < t.id))
+                   )
+            ) ELSE 0 END",
+        ))
         .to_owned()
 }
 
@@ -40,6 +57,12 @@ fn row(r: &Row<'_>) -> Result<MessageView> {
         .map_or(Value::Null, |x| x.0);
     if r.get::<bool>(7)? {
         meta["notice"]["closed"] = Value::Bool(true);
+    }
+    if r.get::<bool>(8)? {
+        if !meta.is_object() {
+            meta = Value::Object(serde_json::Map::new());
+        }
+        meta["held"] = Value::Bool(true);
     }
     Ok(MessageView {
         id: r.get::<String>(0)?.into(),
@@ -89,13 +112,7 @@ impl<C: Read> MessageViews<'_, C> {
     }
 
     pub fn notices(&mut self, ws: &str) -> Result<Vec<String>> {
-        self.0.all(
-            main_query()
-                .column(Alias::new("id"))
-                .and_where(column("workspace_id").eq(ws))
-                .and_where(Expr::cust("json_extract(meta, '$.notice.ref') IS NOT NULL")),
-            |r| r.get(0),
-        )
+        crate::thread::notice_host_message_ids(self.0, ws)
     }
 
     pub fn of(&mut self, ws: &str, ids: &[String]) -> Result<Vec<MessageView>> {

@@ -87,7 +87,7 @@ fn release_texts_follow_the_kind() {
         let k = Kit::new();
         last_json(&k, r.clone());
         k.core.report_release().unwrap();
-        let ns = k.core.notifications(WS).unwrap();
+        let ns = steve_store::notify::list_recent(k.db().store(), WS, 100).unwrap();
         assert_eq!(ns[0].text, want, "{r}");
     }
 }
@@ -139,7 +139,7 @@ fn a_new_message_on_a_closed_item_is_refused_until_a_new_cycle() {
     assert_eq!(k.item_label(&x.id), "done");
     let e = k
         .core
-        .session_message(&x.session, "再改一下", false, &[])
+        .session_message(&x.session, "再改一下", false, &[], "me")
         .unwrap_err();
     assert!(e.to_string().contains("已经结束了"), "{e}");
     assert_eq!(k.item_label(&x.id), "done", "nothing reopened it");
@@ -153,7 +153,7 @@ fn a_new_message_on_a_closed_item_is_refused_until_a_new_cycle() {
         .lifecycle_command(&x.id, "new_cycle", 1, expected, None, None, "me")
         .unwrap();
     k.core
-        .session_message(&x.session, "再改一下", false, &[])
+        .session_message(&x.session, "再改一下", false, &[], "me")
         .unwrap();
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(
@@ -176,10 +176,10 @@ fn supplementing_a_closed_item_is_refused() {
     let before = k.rt.prompts_of(&x.session).len();
     assert!(
         k.core
-            .supplement(&x.id, "还有一点", SupplementMode::Auto, &[])
+            .supplement(&x.id, "还有一点", SupplementMode::Auto, &[], "me")
             .is_err()
     );
-    assert!(k.core.revise_goal(&x.id, "新目标").is_err());
+    assert!(k.core.revise_goal(&x.id, "新目标", "me").is_err());
     assert!(k.core.deliver_queued(&x.id).is_err());
     assert_eq!(
         k.rt.prompts_of(&x.session).len(),
@@ -796,7 +796,7 @@ fn undoing_an_acceptance_before_the_close_takes_it_back() {
     let k = Kit::new();
     let x = k.delivered(false);
     let dep = k.item("block", "定义", None);
-    k.core.add_dep(&dep, &x.id).unwrap();
+    k.core.add_dep(&dep, &x.id, "me").unwrap();
     // the delivering turn still runs: the accepted result waits for it
     k.rt.st().turning.insert(x.session.clone());
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
@@ -822,7 +822,7 @@ fn undoing_an_acceptance_of_a_closed_cycle_is_refused_and_a_started_dependent_ru
     let k = Kit::new();
     let x = k.delivered(false);
     let dep = k.item("block", "定义", None);
-    k.core.add_dep(&dep, &x.id).unwrap();
+    k.core.add_dep(&dep, &x.id, "me").unwrap();
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     /* auto start: a session began on the dependent */
     assert_eq!(k.item_label(&dep), "run");
@@ -864,7 +864,7 @@ fn a_dropped_item_gives_back_its_clean_worktree_and_a_new_message_brings_it_back
     // a message does not bring it back; an explicit new cycle with a goal does
     assert!(
         k.core
-            .supplement(&i, "还是要做", SupplementMode::Auto, &[])
+            .supplement(&i, "还是要做", SupplementMode::Auto, &[], "me")
             .is_err()
     );
     let expected = k.db().item(&i).unwrap().unwrap().cas_revision;

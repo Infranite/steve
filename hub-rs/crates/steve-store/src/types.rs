@@ -210,7 +210,17 @@ impl Project {
     }
 }
 
-/// `rowBot`: `project_dir`, `worktree`, `deleted` are dropped; `workspace_id` is the legacy owner.
+/// One execution surface (`harness + model + reasoning_effort`) a Bot can run on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExecutionSurface {
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+/// `rowBot`: `deleted` is omitted from serialized JSON; `workspace_id` is the legacy owner.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Bot {
     pub id: String,
@@ -322,7 +332,7 @@ impl Tag {
     }
 }
 
-/// `rowItem`. `project_dir` (legacy, always null today) stays in the JSON like in TS.
+/// `rowItem`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Item {
     pub id: String,
@@ -332,7 +342,6 @@ pub struct Item {
     pub kind: String,
     pub title: String,
     pub bot_id: Option<String>,
-    pub project_dir: Option<String>,
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub plan: Vec<PlanStep>,
@@ -386,7 +395,6 @@ impl Item {
             kind: r.get("kind")?,
             title: r.get("title")?,
             bot_id: r.get("bot_id")?,
-            project_dir: r.get("project_dir")?,
             cwd: r.get("cwd")?,
             branch: r.get("branch")?,
             plan: json_col(r, "plan", Vec::new())?,
@@ -596,6 +604,8 @@ pub struct Decision {
     pub revision: i64,
     #[serde(skip_serializing)]
     pub source_revision: Option<crate::DecisionSource>,
+    pub resolved_by: Option<String>,
+    pub wait: steve_types::WaitContract,
 }
 
 impl Decision {
@@ -630,6 +640,8 @@ impl Decision {
             undo: json_col(r, "undo", None)?,
             revision: r.get("revision")?,
             source_revision: json_col(r, "source_revision", None)?,
+            resolved_by: r.get("resolved_by")?,
+            wait: crate::wait_repo::decode_contract_rusqlite(r)?,
         })
     }
 }

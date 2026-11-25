@@ -73,3 +73,25 @@ pub trait Core: Send + Sync {
         Err("补充事项还没有接上".into())
     }
 }
+
+/// Decision of a [`ScheduleGuard`] when a scheduled or manual run is about to start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleGate {
+    /// Proceed with starting the run.
+    Run,
+    /// Skip this run and record a `skipped` `flow_runs` row with `label` and `reason`.
+    Skip { label: String, reason: &'static str },
+}
+
+/// Deterministic pre-start guard for schedules (e.g. the knowledge steward trigger threshold).
+/// Runs inside the scheduler's transaction before inserting a `running` row.
+pub trait ScheduleGuard: Send + Sync {
+    fn check(
+        &self,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        flow_id: &str,
+        trigger: crate::policy::TriggerKind,
+        now: i64,
+    ) -> crate::FlowResult<ScheduleGate>;
+}

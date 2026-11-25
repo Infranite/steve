@@ -67,17 +67,40 @@ fn check_about(c: &mut impl Read, viewer: &Viewer, about: &[ObjRef]) -> ApiResul
 
 // ---- search
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchScope {
+    #[default]
+    Knowledge,
+    Records,
+    All,
+}
+
+impl SearchScope {
+    fn parse(raw: Option<&str>) -> ApiResult<Self> {
+        match raw.map(str::trim) {
+            None | Some("") | Some("knowledge") => Ok(Self::Knowledge),
+            Some("records") => Ok(Self::Records),
+            Some("all") => Ok(Self::All),
+            Some(_) => Err(ApiError::invalid("scope")),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct SearchParams {
     pub q: Option<String>,
     pub kind: Option<String>,
+    pub scope: Option<String>,
     pub limit: Option<String>,
 }
 
-/// `GET /kb/search` (`Purpose::Search`, viewer = me); records the use.
+/// `GET /kb/search` (`Purpose::Search`, viewer = me); records the use when knowledge is searched.
+/// `scope` defaults to `knowledge` (never mixing work-item/chat records into knowledge recall);
+/// `records` searches work items and main-thread chat; `all` returns both as distinct lists.
 pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> ApiResult<Value> {
     let started = Instant::now();
     let q = p.q.unwrap_or_default();
+    let scope = SearchScope::parse(p.scope.as_deref())?;
     let limit = match p.limit.as_deref() {
         None | Some("") => 10,
         Some(s) => s
@@ -94,23 +117,36 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
         .map(|k| k.split(',').map(|s| s.trim().to_string()).collect());
     let viewer = m.viewer(who)?;
     let now = m.clock.now();
-    let found = m.store.read(|c| {
-        let kinds_ref: Option<Vec<&str>> = kinds
-            .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect());
-        let mut query = Query::new(kb.store(), &viewer, &q, Purpose::Search);
-        query.k = limit;
-        query.now = now;
-        query.kinds = kinds_ref.as_deref();
-        retrieve::retrieve_all(c, &query)
+    let (hits, semantic_down, records) = m.store.read(|c| {
+        let (hits, semantic_down) = if matches!(scope, SearchScope::Knowledge | SearchScope::All) {
+            let kinds_ref: Option<Vec<&str>> = kinds
+                .as_ref()
+                .map(|v| v.iter().map(String::as_str).collect());
+            let mut query = Query::new(kb.store(), &viewer, &q, Purpose::Search);
+            query.k = limit;
+            query.now = now;
+            query.kinds = kinds_ref.as_deref();
+            let found = retrieve::retrieve_all(c, &query)?;
+            (found.hits, found.semantic_down)
+        } else {
+            (Vec::new(), false)
+        };
+        let records = if matches!(scope, SearchScope::Records | SearchScope::All) {
+            retrieve::search_records(c, &viewer, &q, limit)?
+        } else {
+            Vec::new()
+        };
+        Ok::<_, StoreError>((hits, semantic_down, records))
     })?;
-    let hits = found.hits;
-    m.store
-        .write(|tx| retrieve::record_use(tx, &who.ws, ("search", &who.me), &q, &hits))?;
+    if matches!(scope, SearchScope::Knowledge | SearchScope::All) {
+        m.store
+            .write(|tx| retrieve::record_use(tx, &who.ws, ("search", &who.me), &q, &hits))?;
+    }
     Ok(json!({
         "hits": hits,
+        "records": records,
         "took_ms": started.elapsed().as_millis() as u64,
-        "semantic_down": found.semantic_down,
+        "semantic_down": semantic_down,
     }))
 }
 
@@ -155,7 +191,7 @@ pub fn doc_brief(d: &DocRow, s: &SourceRow) -> Value {
     json!({
         "id": d.id,
         "source": {"id": s.id, "kind": s.kind, "name": crate::sources::name_shown(&s.kind, &s.name)},
-        "title": if s.kind == "chat" { crate::sources::chat_day_shown(&d.title) } else { d.title.clone() },
+        "title": d.title.clone(),
         "ref": d.r#ref,
         "visibility": d.eff_visibility(s),
         "level": d.eff_level(s),
@@ -339,8 +375,8 @@ fn own_doc_any(c: &mut impl Read, id: &str) -> ApiResult<(DocRow, SourceRow)> {
     Ok((d, s))
 }
 
-/// `DELETE /kb/docs/:id`: notes are deleted, files leave the knowledge base; folder, item and chat
-/// documents follow their origin and cannot be deleted here.
+/// `DELETE /kb/docs/:id`: notes are deleted, files leave the knowledge base; folder documents
+/// follow their origin and cannot be deleted here.
 pub fn delete_doc(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
     let viewer = m.viewer(who)?;
     m.store.write(|tx| {
@@ -351,12 +387,6 @@ pub fn delete_doc(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
                 return Err(ApiError::rule(steve_i18n::t!(
                     "knowledge.doc.delete_folder"
                 )));
-            }
-            "items" => {
-                return Err(ApiError::rule(steve_i18n::t!("knowledge.doc.delete_item")));
-            }
-            "chat" => {
-                return Err(ApiError::rule(steve_i18n::t!("knowledge.doc.delete_chat")));
             }
             _ => return Err(ApiError::rule(steve_i18n::t!("knowledge.doc.delete_other"))),
         }

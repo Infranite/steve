@@ -722,7 +722,7 @@ impl GatewayJudge<'_> {
 
 /// Reads the judgement: `{"match": bool}` (anywhere in the answer), else a leading 是/yes/true.
 pub fn parse_judgement(answer: &str) -> bool {
-    if let Some(v) = steve_modules::changes::first_json(answer)
+    if let Some(v) = steve_runtime::json::first_json_opt(answer)
         && let Some(b) = v.get("match").and_then(Value::as_bool)
     {
         return b;
@@ -736,7 +736,7 @@ pub fn parse_batch_judgement(answer: &str, count: usize) -> Option<usize> {
     if count == 0 {
         return None;
     }
-    if let Some(v) = steve_modules::changes::first_json(answer)
+    if let Some(v) = steve_runtime::json::first_json_opt(answer)
         && let Some(m) = v.get("match")
     {
         return match m {

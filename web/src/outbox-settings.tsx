@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
-import { HubError, modReq } from "@/api"
+import { HubError } from "@/api"
+import { systemApi } from "@/api/system"
 import { Button } from "@/components/ui/button"
 import { Row, Panel, Section, Notice } from "@/ui"
 import { toast } from "@/store"
@@ -12,7 +13,7 @@ import { deadSub, reviveText, type OutboxReport } from "@/outbox"
 export function OutboxDead() {
   const [r, setR] = useState<OutboxReport | null>(null), [error, setError] = useState("")
   const [busy, setBusy] = useState<string | null>(null), t = useT()
-  const load = () => modReq<OutboxReport>("GET", "/system/outbox")
+  const load = () => systemApi.outbox()
     .then((v) => { setR(v); setError("") })
     .catch((e: Error) => { if (e instanceof HubError && e.status === 403) { setR(null); setError("") } else setError(e.message) })
   useEffect(() => { void load() }, [])
@@ -20,7 +21,7 @@ export function OutboxDead() {
   const revive = async (consumer: string) => {
     setBusy(consumer)
     try {
-      const x = await modReq<{ revived: number }>("POST", "/system/outbox/revive", { consumer })
+      const x = await systemApi.reviveOutbox(consumer)
       toast(reviveText(x.revived))
       await load()
     } catch (e) { toast(e instanceof Error ? e.message : String(e)) }

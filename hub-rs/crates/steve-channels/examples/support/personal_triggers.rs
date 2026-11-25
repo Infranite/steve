@@ -32,7 +32,7 @@ impl Fixture {
     pub async fn new() -> Self {
         let core = Arc::new(FakeCore::default());
         let flow_setup = FlowSetup::new(core.clone());
-        let disclosure = Disclosure::with_models(Vec::new());
+        let disclosure = Disclosure::new();
         let link = OutLink::new();
         let env = TestEnv::new(|r| {
             flow_setup.register(r);

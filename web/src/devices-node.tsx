@@ -27,7 +27,7 @@ import { go, Page, Empty, Loading } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
 import { useT } from "@/i18n"
 import { date } from "@/i18n/format"
-import { homeTilde } from "@/resume"
+import { homeTilde } from "@/lib/path"
 import { agoText, findNode, fpGroups, hostLine, hostOf, isUpgradeOnlyLink, linkRoute, nodeStatus, offlineReason, statusText, upgradeCard, type NodeView } from "@/device-model"
 import { harnessSummary } from "@/node-harness-model"
 import {

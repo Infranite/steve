@@ -464,8 +464,7 @@ async fn record_finished_outcome(store: &Store, node_id: &str, info: &FinishedNo
                 ),
             ),
         };
-        let db = steve_core::repo::Db::new(store);
-        if let Err(e) = steve_core::notify::notify(&db, WS, "system", level, &text, None) {
+        if let Err(e) = steve_store::notify::notify(&store, WS, "system", level, &text, None) {
             tracing::warn!("harness upgrade notice failed: {e}");
         }
     })

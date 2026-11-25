@@ -1,24 +1,7 @@
-//! An answer that needs tools: the answer is a model call without them, so a question that has to
-//! run a command, read a file or look at the machine (“看下磁盘还剩多少”) makes the model reach for
-//! one, and the call refuses it ([`GatewayError::NeedsTools`]). That is decided by the refusal, not by
-//! how the question reads: for the owner's own trigger word on their account ([`Conv::hands_on`]) the
-//! question becomes an item a Bot works on, once, where the conversation lets a turn become one.
-//! Anywhere else (the web conversation, a Bot's chat, a chat with outside members) the
-//! conversation says why in plain words and what to do instead; “做成事项” still makes one.
-//!
-//! [`Conv::hands_on`]: super::Conv::hands_on
-//!
-//! [`GatewayError::NeedsTools`]: steve_modules::gateway::GatewayError::NeedsTools
+//! Capability-preflight messages for requests that require machine tools.
+//! Tool-less answer models are never probed first to trigger a handoff.
 
-use super::offer::ThreadItem;
-use super::research::InlineJob;
-use super::{Steps, lock};
-use crate::Core;
-use crate::error::Result;
-use crate::util::now;
-use serde_json::{Map, json};
-
-/// `route_log.outcome` of a question handed to an item because its answer needed tools.
+/// `thread_reply_receipts.route_outcome` of a question preflighted to an item because it needs tools.
 pub const NEEDS_TOOLS_OUTCOME: &str = "needs_tools";
 
 /// What a chat's conversation says when a question needs tools and may not become an item there.
@@ -36,7 +19,7 @@ pub fn not_handed_off(error: &str) -> String {
 
 /// The reply that says a question became item `id` because it needs tools; `proposal`: it waits for
 /// the owner's yes first.
-fn handed_off(id: &str, bot: &str, proposal: bool) -> String {
+pub(crate) fn handed_off(id: &str, bot: &str, proposal: bool) -> String {
     if proposal {
         format!(
             "这件事要在机器上动手（跑命令、读文件或查看系统状态），直接回答做不到。已做成事项 {id}，等主人确认后交给 {bot} 去做。"
@@ -45,57 +28,6 @@ fn handed_off(id: &str, bot: &str, proposal: bool) -> String {
         format!(
             "这件事要在机器上动手（跑命令、读文件或查看系统状态），直接回答做不到，已做成事项 {id} 交给 {bot} 去做。"
         )
-    }
-}
-
-impl Core {
-    /// The answer to `j` reached for a tool it may not use: the question becomes an item, once.
-    /// `Ok(None)`: it may not become one here ([`InlineJob::to_item`]) or already did; the caller
-    /// says why there is no answer.
-    pub(crate) async fn hand_off(&self, ws: &str, j: &InlineJob) -> Result<Option<String>> {
-        let Some(start) = j.to_item else {
-            return Ok(None);
-        };
-        let th = self.store().store().thread();
-        // The failure authorizes no second model call, reroute, or privileged selection.
-        let _one = lock(&self.0.thread.acting);
-        // made meanwhile (a click on “做成事项”, a second failure of the same question): that one
-        if th.route_of(&j.origin)?.is_some_and(|r| r.item_id.is_some()) {
-            return Ok(None);
-        }
-        let item = self.thread_item(ThreadItem {
-            ws,
-            origin: &j.origin,
-            title: crate::util::js_head(&j.question, 24).to_string(),
-            goal: j.question.clone(),
-            bot: None,
-            project: j.project.clone(),
-            tags: vec![],
-            files: j.files.clone(),
-            from_question: super::decide::pure_question(&j.question),
-            answer: None,
-            start,
-            by: j.user.clone(),
-        })?;
-        metrics::counter!("steve_gateway_handoffs_total").increment(1);
-        th.route_outcome(&j.origin, NEEDS_TOOLS_OUTCOME, Some(&item.id))?;
-        let text = handed_off(
-            &item.id,
-            &self.bot_name(&item),
-            item.phase == crate::cycle::READY,
-        );
-        let steps = Steps {
-            route: j.route.clone(),
-            ..Default::default()
-        };
-        let mut meta = Map::new();
-        meta.insert("steps".into(), steps.json(now() - j.t0));
-        meta.insert(
-            "handoff".into(),
-            json!({"why": NEEDS_TOOLS_OUTCOME, "item": item.id}),
-        );
-        let id = self.announce(ws, &item, &j.origin, &text, meta)?;
-        Ok(Some(id))
     }
 }
 

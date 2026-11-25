@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { api } from "../../src/api"
-import { modelSetupApi } from "../../src/steve-model"
+import { modelSetupApi } from "../../src/api/models"
 import { Onboarding } from "../../src/onboarding"
 import { st, useStore, meeting, setRuntimes } from "../../src/store"
 

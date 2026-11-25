@@ -275,8 +275,9 @@ pub(crate) fn mark_in(c: &Connection, m: &NewMark) -> Result<i64> {
     Ok(id)
 }
 
-/// The event kind of a tool call (`events.kind`), the first of which sets `sessions.first_tool_at`.
-pub const TOOL_CALL_EVENT: &str = "tool_call";
+/// The `steve.v1` event kind of a tool invocation (`events.kind`), the first of which sets
+/// `sessions.first_tool_at`.
+pub const TOOL_CALL_EVENT: &str = "tool";
 
 /// The `stats` change event of a workspace.
 pub fn stats_changed(ws: &str, day: Option<&str>) -> steve_types::DomainEvent {

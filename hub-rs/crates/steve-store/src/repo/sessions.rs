@@ -504,9 +504,9 @@ fn event_row(r: &rusqlite::Row) -> rusqlite::Result<Event> {
 }
 
 fn hydrate_event(c: &rusqlite::Connection, session: &str, e: &mut Event) -> Result<()> {
-    // Only these event kinds are normalized; high-frequency small text chunks
+    // Only `steve.v1` tool events are normalized; high-frequency small text chunks
     // do not incur a second SQL statement just to discover they have no payload.
-    if matches!(e.kind.as_str(), "tool_call" | "tool_call_update") {
+    if e.kind == crate::TOOL_CALL_EVENT {
         crate::event_payload::hydrate(c, session, e.seq, &mut e.data)?;
     }
     Ok(())

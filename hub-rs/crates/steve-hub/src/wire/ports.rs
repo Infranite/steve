@@ -10,7 +10,7 @@ use steve_core::Core;
 use steve_modules::hooks::ItemHooks;
 use steve_store::Item;
 
-use crate::backend::Backend;
+use crate::wire::store::StoreBackend;
 
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -151,7 +151,7 @@ impl steve_mail::items::MailItems for MailItems {
 
 /// E5: a mail attachment landed as a Hub attachment (`files` + blob), like an upload.
 pub struct HubFiles {
-    pub backend: Arc<dyn Backend>,
+    pub backend: StoreBackend,
     pub data_dir: PathBuf,
 }
 
@@ -164,8 +164,7 @@ impl steve_mail::attach::FileStore for HubFiles {
         by: &str,
     ) -> Result<steve_store::FileRef, steve_mail::attach::Refused> {
         let refused = |status: u16, m: String| steve_mail::attach::Refused::new(status, m);
-        let w = self.backend.writer().map_err(|e| refused(500, e.message))?;
-        let f = crate::files::store(w.as_ref(), &self.data_dir, ws, bytes, Some(name), by)
+        let f = crate::files::store(&self.backend, &self.data_dir, ws, bytes, Some(name), by)
             .map_err(|e| refused(e.status, e.message))?;
         serde_json::from_value(crate::files::file_ref(&f)).map_err(|e| refused(500, e.to_string()))
     }

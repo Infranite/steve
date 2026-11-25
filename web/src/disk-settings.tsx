@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
-import { HubError, modReq } from "@/api"
+import { HubError } from "@/api"
+import { systemApi } from "@/api/system"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
@@ -7,7 +8,7 @@ import { ItemNo, Row, Panel, Section, Note, Blank } from "@/ui"
 import { toast } from "@/store"
 import { cn } from "cn"
 import { useT } from "@/i18n"
-import { stateLabel, bytes, diskRows, entryState, pressureText, reclaimText, scratchRows, type DiskEntry, type DiskReport, type Reclaimed } from "@/disk"
+import { stateLabel, bytes, diskRows, entryState, pressureText, reclaimText, scratchRows, type DiskEntry, type DiskReport } from "@/disk"
 
 /** Settings · 数据 · 工作区与磁盘: what each item's worktree takes, how much of it is rebuildable cache, the disk
  * against Steve's thresholds, and a reclaim now. The Hub answers the instance owner only (paths of this machine);
@@ -19,7 +20,7 @@ export function WorkspaceDisk() {
   const [busy, setBusy] = useState(false), t = useT()
   const load = () => {
     setErr(null)
-    return modReq<DiskReport>("GET", "/system/workspaces", undefined, AbortSignal.timeout(120_000))
+    return systemApi.workspaces()
       .then(setR)
       .catch((e) => { if (e instanceof HubError && e.status === 403) setHidden(true); else setErr(e instanceof Error ? e.message : String(e)) })
   }
@@ -28,7 +29,7 @@ export function WorkspaceDisk() {
   const reclaim = async () => {
     setBusy(true)
     try {
-      const x = await modReq<Reclaimed>("POST", "/system/workspaces/reclaim", {}, AbortSignal.timeout(600_000))
+      const x = await systemApi.reclaimWorkspaces()
       toast(reclaimText(x))
       await load()
     } catch (e) { toast(e instanceof Error ? e.message : String(e)) }

@@ -756,6 +756,7 @@ impl NodeRuntime {
                     source: Some(steve_store::DecisionSource::Revision {
                         revision: format!("startup:{session}:{session_revision}"),
                     }),
+                    wait: None,
                 })?;
             }
             if let Some(item) = scope.item {

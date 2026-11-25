@@ -26,6 +26,8 @@ import { HubError } from "@/api"
 import { hubBase } from "@/hub"
 import { MessageActions } from "@/components/affect/message-actions"
 import { OpenInFeishu, openable, openInApp, openInFeishuLabel } from "@/channels/open-in-app"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 
 /** records asked for at a time, and the most kept in view when the conversation reloads on a live update */
 const RECORD_PAGE = 100, RECORD_KEEP = 500
@@ -367,7 +369,15 @@ export function SenderLine({ m }: { m?: ConvMessage }) {
   const t = useT()
   const c = m?.meta?.chan
   if (!c) return null
-  return <div className="flex items-center justify-end gap-2 self-end type-footnote text-tertiary"><span className="font-medium text-muted-foreground">{c.sender || t("thread:who.someone")}{c.command ? " · /bot" : ""}</span><ReactionChip r={m?.reaction} /></div>
+  const name = c.sender || t("thread:who.someone")
+  const sender = m?.channel_message?.sender
+  return (
+    <div className="flex items-center justify-end gap-1.5 self-end type-footnote text-tertiary">
+      <ActorAvatar actor={partyActor({ id: sender?.party_id, name, avatar: sender?.avatar })} size={18} />
+      <span className="font-medium text-muted-foreground">{name}{c.command ? " · /bot" : ""}</span>
+      <ReactionChip r={m?.reaction} />
+    </div>
+  )
 }
 
 /** in place of the composer: this conversation is read here, said there */
@@ -437,7 +447,10 @@ export function RecordRow({ r, last }: { r: ConvRecord; last?: boolean }) {
   const failed = out?.status === "failed" || out?.status === "disconnected"
   return (
     <div className={cn("relative flex min-w-0 flex-col gap-1.5", mine ? "group/sm items-start" : "group/me items-end")} data-msg={r.id} data-record={r.direction}>
-      <div className={cn("flex min-w-0 max-w-full items-baseline gap-2 px-1 type-footnote text-tertiary", mine ? "self-start" : "self-end")}>
+      <div className={cn("flex min-w-0 max-w-full items-center gap-1.5 px-1 type-footnote text-tertiary", mine ? "self-start" : "self-end")}>
+        {mine && !r.sender.party_id
+          ? <ActorAvatar actorId={r.on_behalf === "proxy" ? "me" : "steve"} name={r.sender.name || undefined} size={18} />
+          : <ActorAvatar actor={partyActor({ id: r.sender.party_id, name: r.sender.name || t("thread:who.someone"), avatar: r.sender.avatar })} size={18} />}
         <span className="truncate font-medium text-muted-foreground">{r.sender.name || t("thread:who.someone")}</span>
         <time className="shrink-0 tabular-nums" dateTime={new Date(r.created).toISOString()}>{tm(r.created)}</time>
         {r.history && <span className="shrink-0">{t("thread:record.history")}</span>}

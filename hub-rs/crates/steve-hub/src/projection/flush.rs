@@ -36,7 +36,6 @@ pub(super) struct Ws {
     /// conversations (spaces) whose decisions are dirty, and whether all of them are
     chats: BTreeSet<String>,
     all_chats: bool,
-    notices: bool,
     /// when the oldest change not flushed yet came in
     first_dirty: Option<Instant>,
     /// when it flushes next
@@ -181,10 +180,6 @@ impl Run {
                     w.all_chats = true;
                     w
                 }),
-                Dirty::Notices(ws) => self.touch(ws).map(|w| {
-                    w.notices = true;
-                    w
-                }),
                 Dirty::SessionsOfNode(node) => {
                     let sessions: Vec<_> = self
                         .ws
@@ -323,7 +318,6 @@ impl Run {
             std::mem::take(&mut w.chats),
             std::mem::take(&mut w.all_chats),
         );
-        let notices = std::mem::take(&mut w.notices);
         let held_messages: BTreeSet<_> = w
             .hot
             .keys()
@@ -354,14 +348,6 @@ impl Run {
                                 .map(decision_key),
                         );
                     }
-                }
-                if notices {
-                    dirty.extend(
-                        r.message_views()
-                            .notices(&name)?
-                            .into_iter()
-                            .map(|id| (ViewKind::Message, id)),
-                    );
                 }
                 let mut batches = BTreeMap::<ViewKind, Vec<String>>::new();
                 for (kind, id) in dirty {
@@ -399,7 +385,6 @@ impl Run {
                 w.dirty.extend(taken.0);
                 w.chats.extend(taken.1);
                 w.all_chats |= taken.2;
-                w.notices |= notices;
                 w.retrying = true;
                 w.due = Some(Instant::now() + std::time::Duration::from_secs(1));
                 return;
@@ -530,12 +515,11 @@ pub(super) fn apply(
 
 impl Ws {
     pub(super) fn has_dirty(&self) -> bool {
-        !self.dirty.is_empty() || self.all_chats || !self.chats.is_empty() || self.notices
+        !self.dirty.is_empty() || self.all_chats || !self.chats.is_empty()
     }
 
     pub(super) fn may_change(&self, key: &Key) -> bool {
         self.dirty.contains(key)
-            || (key.0 == ViewKind::Message && self.notices)
             || (key.0 == ViewKind::Decision && (self.all_chats || !self.chats.is_empty()))
     }
 

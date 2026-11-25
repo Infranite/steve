@@ -1,7 +1,6 @@
-//! The `chat` source: the main thread with Steve (`messages`, space `steve`), one
-//! document per local day (`ref = chat:2026-10-31`), text only — no draft-card JSON, which lives in
-//! `meta`. Today's document is refreshed hourly; yesterday is finalized at 03:30 and extracted
-//! at 03:40, with up to seven completed local days revisited after downtime.
+//! Main-thread conversation extraction (`messages`, space `steve`): conversations are no longer
+//! indexed into `kb_docs` / `kb_chunks` (they remain searchable as records), while completed local
+//! days are extracted after 03:40 (with up to seven completed local days revisited after downtime).
 
 use std::time::Duration;
 
@@ -11,25 +10,17 @@ use steve_runtime::tz::Zone;
 use steve_store::base::Level;
 use steve_store::base::mems::Mem;
 use steve_store::knowledge::Documents;
-use steve_store::{MessageEvidence, Read, Workspaces, uid};
+use steve_store::{MessageEvidence, Read, Workspaces};
 
 use crate::candidates::{Origin, OriginKind};
-use crate::chunk::TextKind;
 use crate::extract;
-use crate::extract_text::{Extracted, FrontMatter};
-use crate::index::{self, BoxFuture, DocLoader, Loaded};
-use crate::sources;
 use crate::state::Knowledge;
-use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
 
-pub const KIND: &str = "chat";
 /// The main thread's `messages.space`.
 pub const SPACE: &str = "steve";
-/// How often the job wakes up; today's document is rebuilt every [`TODAY_EVERY`].
+/// How often the job wakes up.
 pub const TICK: Duration = Duration::from_secs(600);
-pub const TODAY_EVERY: i64 = 3600 * 1000;
-/// Local time after which yesterday is finalized, and after which it is extracted.
-pub const FINALIZE_AT: (u32, u32) = (3, 30);
+/// Local time after which yesterday's conversation is extracted.
 pub const EXTRACT_AT: (u32, u32) = (3, 40);
 /// Metric task label for daily main-thread memory extraction.
 pub const PERIODIC_TASK_EXTRACT: &str = "kb.chat_extract";
@@ -54,7 +45,7 @@ fn hhmm(ms: i64, zone: Zone) -> String {
 }
 
 /// The day's conversation as text, `我（10:31）：…` / `Steve（10:32）：…`; `None` if nothing was said.
-fn workspace_zone(c: &mut impl Read, ws: &str) -> steve_store::Result<Zone> {
+pub(crate) fn workspace_zone(c: &mut impl Read, ws: &str) -> steve_store::Result<Zone> {
     let zone = steve_modules::zone::Zone::for_user(c, ws, None)?;
     Ok(Zone::parse(zone.name()).expect("IANA zone"))
 }
@@ -76,71 +67,13 @@ pub fn day_text(c: &mut impl Read, ws: &str, day: &str) -> steve_store::Result<O
     Ok((!lines.is_empty()).then(|| lines.join("\n\n")))
 }
 
-fn extracted(text: String) -> Extracted {
-    Extracted {
-        text,
-        kind: TextKind::Plain,
-        front: FrontMatter::default(),
-    }
-}
-
 /// `2026-10-31` → `10-31 的对话` (the label of its candidates).
 fn short_label(day: &str) -> String {
     format!("{} 的对话", day.get(5..).unwrap_or(day))
 }
 
-/// Rebuilds the document of one day: written and indexed when there are messages, removed when there
-/// are none. Returns the document id, if one exists afterwards.
-pub fn sync_day(m: &Modules, ws: &str, day: &str) -> ApiResult<Option<String>> {
-    let now = m.clock.now();
-    m.store.write(|tx| {
-        let user = extract::owner(tx, ws)?;
-        let src = sources::builtin(tx, ws, KIND, &user, now)?;
-        let r#ref = format!("chat:{day}");
-        let existing = Documents(tx).doc_by_ref(&src.id, &r#ref)?;
-        let Some(text) = day_text(tx, ws, day)? else {
-            if let Some(d) = existing {
-                index::delete_doc(tx, &d.id)?;
-                crate::state::emit_change(tx, ws, &d.id);
-            }
-            return Ok(None);
-        };
-        let title = format!("{day} 的对话");
-        let id = match existing {
-            Some(d) => {
-                Documents(tx).reactivate_doc(&d.id, &title, text.len() as i64, now)?;
-                d.id
-            }
-            None => {
-                let id = uid("kd");
-                Documents(tx).insert_doc(
-                    ws,
-                    &NewDoc {
-                        id: id.clone(),
-                        source_id: src.id.clone(),
-                        r#ref,
-                        title,
-                        mime: "text/plain".into(),
-                        size: text.len() as i64,
-                        created_by: user,
-                        ..Default::default()
-                    },
-                    now,
-                )?;
-                id
-            }
-        };
-        let doc = Documents(tx)
-            .doc(&id)?
-            .ok_or_else(|| ApiError::not_found("文档"))?;
-        index::index_document(tx, &doc, &src, &extracted(text), now, false)?;
-        crate::state::emit_change(tx, ws, &id);
-        Ok(Some(id))
-    })
-}
-
-/// Extracts candidates from one day's conversation, once (`kb_marks extract:chat:<day>`). Returns the
-/// candidates written.
+/// Extracts candidates and proposals from one day's conversation, once (`kb_marks extract:chat:<day>`).
+/// Returns the memory candidates written.
 pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> ApiResult<Vec<Mem>> {
     let mark = format!("extract:chat:{day}");
     let now = m.clock.now();
@@ -213,9 +146,9 @@ fn commit_extraction(
 /// Completed local days revisited after downtime, oldest first, bounded to seven days per tick.
 pub const CATCH_UP_DAYS: u64 = 7;
 
-/// One run of the job at `now`: today's document of every workspace (when `today` is set), and after
-/// 03:30 / 03:40 yesterday's final document / extraction, plus uncompleted days in the catch-up window.
-pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResult<()> {
+/// One run of the job at `now`: after 03:40 extracts yesterday and any uncompleted days in the
+/// catch-up window. Does not index chat transcripts into `kb_docs`.
+pub async fn tick(m: &Modules, kb: &Knowledge, now: i64) -> ApiResult<()> {
     let mut wss = m
         .blocking(|m| Ok(m.store.read(|c| Workspaces(c).ids())?))
         .await?;
@@ -229,29 +162,11 @@ pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResu
             continue;
         };
         let hm = (local.hour(), local.minute());
-        if today {
-            let w = ws.clone();
-            m.blocking(move |m| sync_day(m, &w, &day_of(now, zone)))
-                .await?;
-        }
         for ago in (1..=CATCH_UP_DAYS).rev() {
             let Some(day) = local.date().checked_sub_days(chrono::Days::new(ago)) else {
                 continue;
             };
             let day = day.format("%Y-%m-%d").to_string();
-            let (w, d) = (ws.clone(), day.clone());
-            if ago > 1 || hm >= FINALIZE_AT {
-                m.blocking(move |m| {
-                    let mark = format!("sync:chat:{d}");
-                    if m.store.read(|c| Documents(c).mark(&w, &mark))?.is_none() {
-                        sync_day(m, &w, &d)?;
-                        m.store
-                            .write(|tx| Documents(tx).set_mark(&w, &mark, "final", now))?;
-                    }
-                    Ok::<_, ApiError>(())
-                })
-                .await?;
-            }
             if (ago > 1 || hm >= EXTRACT_AT)
                 && let Err(e) = extract_day(m, kb, &ws, &day).await
             {
@@ -262,10 +177,9 @@ pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResu
     Ok(())
 }
 
-/// Starts the `kb.chat` job (today hourly; yesterday at 03:30 and its extraction at 03:40).
+/// Starts the `kb.chat` job (extracts completed days after 03:40).
 pub fn task(m: Modules, kb: Knowledge) -> steve_runtime::Task {
     let clock = m.clock.clone();
-    let mut last_today = i64::MIN;
     steve_runtime::every(
         "kb.chat",
         clock,
@@ -273,13 +187,9 @@ pub fn task(m: Modules, kb: Knowledge) -> steve_runtime::Task {
         steve_runtime::FirstRun::Immediate,
         move || {
             let now = m.clock.now();
-            let today = now.saturating_sub(last_today) >= TODAY_EVERY;
-            if today {
-                last_today = now;
-            }
             let (m, kb) = (m.clone(), kb.clone());
             async move {
-                if let Err(e) = tick(&m, &kb, now, today).await {
+                if let Err(e) = tick(&m, &kb, now).await {
                     tracing::warn!("kb.chat: {e}");
                 }
             }
@@ -289,30 +199,6 @@ pub fn task(m: Modules, kb: Knowledge) -> steve_runtime::Task {
 
 pub async fn run(m: Modules, kb: Knowledge) {
     task(m, kb).await;
-}
-
-/// Re-reads a day document for the index queue.
-pub struct ChatLoader;
-
-impl DocLoader for ChatLoader {
-    fn kinds(&self) -> &[&str] {
-        &[KIND]
-    }
-    fn load<'a>(
-        &'a self,
-        m: &'a Modules,
-        doc: &'a DocRow,
-        _: &'a SourceRow,
-    ) -> BoxFuture<'a, Loaded> {
-        Box::pin(async move {
-            let day = doc.r#ref.strip_prefix("chat:").unwrap_or(&doc.r#ref);
-            match m.store.read(|c| day_text(c, &doc.workspace_id, day)) {
-                Ok(Some(t)) => Loaded::Text(extracted(t)),
-                Ok(None) => Loaded::Gone,
-                Err(e) => Loaded::Failed(format!("读不到这天的对话：{e}")),
-            }
-        })
-    }
 }
 
 #[cfg(test)]
@@ -368,6 +254,7 @@ mod tests {
         let prepared = extract::Prepared {
             text: "我（10:00）：以后周五不部署".into(),
             candidates: vec![candidate],
+            proposals: Vec::new(),
         };
         let mark = "extract:chat:2026-10-31";
         let path = env.dir.path().join("steve.sqlite3");

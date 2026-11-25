@@ -14,13 +14,14 @@ import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, StatusDot, 
 import { Clamp } from "@/auto/common"
 import { Select } from "@/view-shared"
 import { tm, toast } from "@/store"
-import { useLoad, useBusy } from "@/accounts/load"
+import { useBusy } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { accountsApi, CONN_STATUS } from "@/api/accounts"
 import { channelsApi, TRIGGER_ALL_DMS, TRIGGER_EVERYWHERE, attentionOf, isDm, spaceTitle, type ChannelAccount, type Rule, type Space, type Trigger } from "@/api/channels"
 import { SpaceAvatar, kindLine } from "@/channels/space-bits"
 import { GroupedSpaces } from "@/channels/space-groups"
 import { Rules, ruleOk } from "@/channels/rules"
-import { PersonaAvatar } from "@/channels/basis"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { PermissionList, SelfButtons } from "@/integrations/feishu"
 import { integrationsApi, type IAdapter } from "@/api/integrations"
 import { receiveNote, selfSidesFor } from "@/integrations/sides"
@@ -32,7 +33,7 @@ const SEND_DELAYS = [0, 3, 5, 10, 20, 30, 60]
 
 export function AccountView({ id }: { id: string }) {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["channels", "account", id], async () => {
     const a = await channelsApi.account(id)
     const [personas, ig] = await Promise.all([channelsApi.personas(), integrationsApi.all()])
     /* “你本人” through this bot: a side acting as you that pairs with this bot's adapter, and its connections */
@@ -42,11 +43,11 @@ export function AccountView({ id }: { id: string }) {
     const self = all.filter((c) => sides.some((x) => x.id === c.adapter))
     const side = (sides[0] as IAdapter | undefined) ?? null
     return { a, personas, self, side }
-  }, [id], ["connection", "account", "space", "persona", "channel"])
+  }, { events: ["connection", "account", "space", "persona", "channel"] })
   const [busy, act] = useBusy(), [rules, setRules] = useState<Rule[] | null>(null)
   const back: [string, string] = ["#/channels", t("channels:list.title")]
-  if (L.s === "loading") return <Page title={t("channels:account.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (L.s === "error") return <Page title={t("channels:account.title")} back={back}><Empty title={L.err} /></Page>
+  if (L.loading) return <Page title={t("channels:account.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.error || !L.data) return <Page title={t("channels:account.title")} back={back}><Empty title={L.error?.message ?? ""} /></Page>
   const { a, personas, self, side } = L.data
   if (!a) return <Page title={t("channels:account.title")} back={back}><Empty title={t("channels:account.notFound")} sub={t("channels:account.notFoundSub")} /></Page>
   const me = a.mode === "self", c = a.connection
@@ -71,7 +72,7 @@ export function AccountView({ id }: { id: string }) {
           <GroupedSpaces a={a} empty={t(me ? "channels:account.noSessions" : "channels:account.noGroups")} onChanged={() => void L.reload()} />
         </section>
         <section><SectionLabel>{t("channels:account.defaultRules")}</SectionLabel>
-          {!me && <Group className="mb-2"><Row icon={<PersonaAvatar bot={a.personaBot} size={32} />} title={t("channels:account.defaultPersona", { name: a.persona?.name ?? "—" })} sub={t("channels:account.defaultPersonaSub")}>
+          {!me && <Group className="mb-2"><Row icon={<ActorAvatar actorId={a.personaBot ?? "me"} size={32} />} title={t("channels:account.defaultPersona", { name: a.persona?.name ?? "—" })} sub={t("channels:account.defaultPersonaSub")}>
               <Select align="end" testId="acc-default-persona" value={a.persona?.id ?? ""} onChange={(v) => void patch({ persona_id: v }, t("channels:account.personaChanged"))} options={personas.map((p) => ({ v: p.id, l: p.name }))} /></Row></Group>}
           {me && <div className="mb-2 type-footnote text-muted-foreground">{t("channels:account.selfSub")}</div>}
           <Rules rules={rulesNow} self={me} onChange={setRules} note={t("channels:account.rulesNote")} />
@@ -83,7 +84,7 @@ export function AccountView({ id }: { id: string }) {
         </section>
         {me && <TriggerSection a={a} onSave={(x) => patch({ trigger: x }, t("channels:account.triggerSaved"))} busy={busy} />}
         {side && <section><SectionLabel>{t("channels:word.you")}</SectionLabel>
-          {self.length ? <Group>{self.map((s) => <Row key={s.id} icon={<PersonaAvatar bot={null} size={28} />} title={t("channels:account.selfAuthorized")} sub={t("channels:account.selfAuthorizedSub", { status: CONN_STATUS[s.status]?.[0] ?? s.status })} onClick={() => go("#/channels/acc/" + s.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
+          {self.length ? <Group>{self.map((s) => <Row key={s.id} icon={<ActorAvatar actorId="me" size={28} />} title={t("channels:account.selfAuthorized")} sub={t("channels:account.selfAuthorizedSub", { status: CONN_STATUS[s.status]?.[0] ?? s.status })} onClick={() => go("#/channels/acc/" + s.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
             : <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-self-auth>
               <div className="type-callout text-muted-foreground">{t("channels:account.selfAuthHint")}</div>
               <div className="flex flex-wrap justify-end gap-2"><SelfButtons app={c.id} side={side} /></div></div>}</section>}

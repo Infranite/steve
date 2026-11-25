@@ -887,7 +887,7 @@ async fn only_the_owner_rescopes_builtin_sources() {
             .and_then(|s| s["id"].as_str().map(str::to_string))
             .unwrap_or_else(|| panic!("no {kind} source: {list}"))
     };
-    for kind in ["notes", "files", "items", "chat", "mems", "bot_mems"] {
+    for kind in ["notes", "files", "mems", "bot_mems"] {
         let id = id_of(kind);
         let path = format!("/kb/sources/{id}");
         let cur = list_of(&list)

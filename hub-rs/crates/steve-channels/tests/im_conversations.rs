@@ -159,7 +159,7 @@ async fn setup(with_thread: bool) -> H {
 async fn setup_answering(with_thread: bool, composed: &str) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
-    let disclosure = Disclosure::with_models(Vec::new());
+    let disclosure = Disclosure::new();
     let link = OutLink::new();
     let (reg_disclosure, reg_link) = (disclosure.clone(), link.clone());
     let env = TestEnv::new(|r| {
@@ -2738,13 +2738,14 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
     let space = i.space_id.clone();
     // A real Core only announces an item after storing it. The fixed receipt needs that evidence.
     seed::items::seed_item_st_9(h.env.store()).unwrap();
+    const SYSTEM_NOTICE: &str = "前面还有 3 个问题在排队，先等等或停掉当前的";
     for (text, item, meta) in [
         (
-            steve_core::thread::research::QUEUE_FULL,
+            SYSTEM_NOTICE,
             None,
             json!({ steve_core::thread::research::SYSTEM: true }),
         ),
-        (steve_core::thread::research::QUEUE_FULL, None, json!({})),
+        (SYSTEM_NOTICE, None, json!({})),
         (
             "你说的“很稳定”具体是指什么？",
             None,
@@ -2789,7 +2790,20 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
         "the item is still linked to your message"
     );
 
-    // the composer's answer: kept on the turn, said as it wrote it (no options added)
+    // the composer's answer on a fresh trigger turn: kept on the turn, said as it wrote it (no options added)
+    let _i2 = push(
+        &h,
+        &h.me.clone(),
+        msg("C_OPS", "v3", "upx", "/bot 跟他说周四可以", false, false),
+    )
+    .await;
+    let (turn, _) = t
+        .turns
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("a second turn");
     let said = h.ch.conv_answer(WS, &turn).await.expect("answer");
     assert_eq!(
         inspect::conversations::turn_outcome(h.env.store(), &turn).unwrap(),
@@ -2891,7 +2905,7 @@ async fn a_full_queue_is_never_said_and_reaches_you_instead() {
         &h,
         &i.space_id,
         &turn,
-        steve_core::thread::research::QUEUE_FULL,
+        "前面还有 3 个问题在排队，先等等或停掉当前的",
         None,
         json!({ steve_core::thread::research::SYSTEM: true }),
     );

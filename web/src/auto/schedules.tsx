@@ -10,10 +10,12 @@ import { Textarea } from "@/components/ui/textarea"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { Empty, StatusDot, BotAvatar, go, Panel, Tile, Pill, Notice } from "@/ui"
+import { Empty, StatusDot, go, Panel, Tile, Pill, Notice } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { cn } from "@/lib/utils"
 import { st, botName, toast } from "@/store"
-import { flowApi, errText, type Load, type Parsed, type Schedule, type ScheduleBody, type ScheduleMode, type ScheduleRun } from "@/api/flow"
+import { flowApi, errText, type Parsed, type Schedule, type ScheduleBody, type ScheduleMode, type ScheduleRun } from "@/api/flow"
+import type { HubQuery } from "@/data/use-hub-query"
 import { HubError } from "@/api"
 import { useRuntimeSetupHref } from "@/runtime-access"
 import { Modal, Pick, Failed, Clamp, when, botOptions, mainBot, RUN_STATUS } from "@/auto/common"
@@ -28,7 +30,7 @@ const triggerLabel = (x: string) => ((TRIGGERS as readonly string[]).includes(x)
 const TZS = ["Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"]
 const usd = (n: number) => (n ? t("auto:schedule.usd", { n: num(n, { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false }) }) : t("auto:schedule.unlimited"))
 
-export function Schedules({ L, onNew }: { L: Load<Schedule[]>; onNew: () => void }) {
+export function Schedules({ L, onNew }: { L: HubQuery<Schedule[]>; onNew: () => void }) {
   const [open, setOpen] = useState<string | null>(null), [del, setDel] = useState<Schedule | null>(null), [edit, setEdit] = useState<Schedule | null>(null), [busy, setBusy] = useState<string | null>(null)
   const t = useT()
   if (L.error && !L.data) return <Failed title="" msg={errText(L.error)} retry={() => void L.reload()} />
@@ -77,7 +79,7 @@ function ScheduleDetail({ s, busy, onRun, onEdit, onDelete }: { s: Schedule; bus
   const rows: [string, ReactNode][] = [
     [t("auto:schedule.rowWhat"), <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{brief ? t("auto:schedule.briefWhat") : s.what}</span>],
     [t("auto:schedule.rowTime"), <>{s.describe} <span className="type-footnote text-muted-foreground">{s.tz} · <span className="font-mono">{s.cron}</span></span></>],
-    [t("auto:schedule.rowRun"), brief ? <span>{modeLabel(s.mode)}</span> : <span className="inline-flex items-center gap-1.5"><BotAvatar k={s.bot} size={16} />{botName(s.bot)} · {modeLabel(s.mode)}</span>],
+    [t("auto:schedule.rowRun"), brief ? <span>{modeLabel(s.mode)}</span> : <span className="inline-flex items-center gap-1.5"><ActorAvatar actorId={s.bot} size={16} />{botName(s.bot)} · {modeLabel(s.mode)}</span>],
     [t("auto:schedule.rowRules"), <span className="text-muted-foreground">{brief ? t("auto:schedule.briefRules") : t("auto:schedule.rules", { missed: t(`auto:schedule.missed.${s.missed}`), overlap: t(`auto:schedule.overlap.${s.overlap}`), budget: usd(s.budget_usd) })}</span>],
   ]
   return (

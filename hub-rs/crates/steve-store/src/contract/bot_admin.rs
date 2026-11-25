@@ -41,6 +41,32 @@ pub fn set_bindings(w: &mut W<'_>, ws: &str, bot: &str, nodes: &[String]) -> Res
     Ok(())
 }
 
+pub fn is_main_bot(r: &mut impl Read, ws: &str, bot: &str) -> Result<bool> {
+    Ok(r.one(
+        Query::select()
+            .column(("b", "id"))
+            .from_as("bots", "b")
+            .join_as(
+                JoinType::LeftJoin,
+                "bot_workspaces",
+                "w",
+                Expr::col(("w", "bot_id"))
+                    .eq(Expr::col(("b", "id")))
+                    .and(Expr::col(("w", "workspace_id")).eq(ws)),
+            )
+            .and_where(Expr::col(("b", "id")).eq(bot))
+            .and_where(Expr::col(("b", "deleted")).eq(false))
+            .and_where(Expr::col(("b", "main")).eq(true))
+            .and_where(
+                Expr::col(("b", "workspace_id"))
+                    .eq(ws)
+                    .or(Expr::col(("w", "bot_id")).is_not_null()),
+            ),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
 pub fn save(
     w: &mut W<'_>,
     ws: &str,
@@ -48,6 +74,13 @@ pub fn save(
     name: &str,
     members: &[Member],
 ) -> Result<String> {
+    for member in members {
+        if is_main_bot(w, ws, &member.bot)? {
+            return Err(crate::StoreError::Rejected(
+                "Main bot is the workspace coordinator and cannot be a Team member".into(),
+            ));
+        }
+    }
     let members = serde_json::to_string(members)?;
     if let Some(id) = id {
         let n = w.exec(
@@ -134,10 +167,25 @@ pub fn wrong_node(
     Ok(r.one(&q, |_| Ok(()))?.is_some())
 }
 
-pub fn harness_nodes(
-    r: &mut impl Read,
-    bot: Option<&str>,
-) -> Result<(std::collections::BTreeSet<String>, bool)> {
+/// The execution Node an item's non-readonly Steve sessions are already bound to, if any.
+pub fn bound_node(r: &mut impl Read, item: &str) -> Result<Option<String>> {
+    let mut q = Query::select();
+    q.column(("r", "node_id"))
+        .from_as("sessions", "s")
+        .join_as(
+            JoinType::InnerJoin,
+            "runtime_sessions",
+            "r",
+            Expr::col(("r", "session_id")).eq(Expr::col(("s", "id"))),
+        )
+        .and_where(Expr::col(("s", "item_id")).eq(item))
+        .and_where(Expr::col(("s", "readonly")).eq(false))
+        .and_where(Expr::col(("s", "source")).eq("Steve"))
+        .limit(1);
+    r.one(&q, |row| row.get(0))
+}
+
+pub fn harness_nodes(r: &mut impl Read, bot: &str) -> Result<std::collections::BTreeSet<String>> {
     let mut nodes = std::collections::BTreeSet::new();
     let parameter = sea_query::Values(vec![bot.into()]);
     r.db().query(
@@ -153,13 +201,5 @@ pub fn harness_nodes(
             Ok(())
         },
     )?;
-    let mut legacy = false;
-    r.db().query(
-        "SELECT NOT EXISTS(SELECT 1 FROM bot_node_bindings WHERE bot_id=?1)
-           OR EXISTS(SELECT 1 FROM bot_workspaces w WHERE w.bot_id=?1 AND NOT EXISTS
-             (SELECT 1 FROM bot_node_bindings b WHERE b.bot_id=w.bot_id AND b.workspace_id=w.workspace_id))",
-        &parameter,
-        &mut |row| { legacy = row.get(0)?; Ok(()) },
-    )?;
-    Ok((nodes, legacy))
+    Ok(nodes)
 }

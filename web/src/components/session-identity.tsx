@@ -1,7 +1,8 @@
 import { HarnessMark, ModelMark } from "@/components/harness-mark"
 import { useT } from "@/i18n"
 import { botName, type Sess, useDeviceInventory } from "@/store"
-import { BotAvatar, Status } from "@/ui"
+import { Status } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 
 export function SessionIdentity({ session, compact = false }: { session: Sess; compact?: boolean }) {
   const t = useT()
@@ -13,7 +14,7 @@ export function SessionIdentity({ session, compact = false }: { session: Sess; c
   return (
     <span className="inline-flex min-w-0 items-center gap-1.5" data-execution-identity
       title={[bot, harness, model, node].join(" · ")}>
-      {session.b && <BotAvatar k={session.b} size={16} />}
+      {session.b && <ActorAvatar actorId={session.b} size={16} />}
       <span className={compact ? "sr-only" : "truncate"}>{bot}</span>
       <HarnessMark harness={session.harness} title={harness} className="size-3.5" />
       <span className={compact ? "sr-only" : "truncate"}>{harness}</span>

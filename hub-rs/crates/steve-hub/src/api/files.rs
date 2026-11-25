@@ -13,15 +13,9 @@ use serde_json::{Value, json};
 
 use super::{ApiResult, AppState, Ctx, Noun, ok, own};
 use crate::error::{ApiError, json_response};
-use crate::files::{self as att, MAX_FILE, MAX_FILES};
-use crate::validate::{Check, Str};
+use crate::files::{self as att, MAX_FILE};
 
 const BODY_LIMIT: usize = MAX_FILE + 64 * 1024;
-
-/// `files: z.array(z.string().max(64)).max(10).optional()`.
-pub(crate) fn file_ids(k: &mut Check) -> Option<Vec<String>> {
-    k.opt_str_array_of("files", Str::max(64), None, Some(MAX_FILES))
-}
 
 /// Attachment ids → FileRefs of the current workspace; any other id is a 404 before anything happens.
 pub(crate) async fn refs(

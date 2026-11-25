@@ -143,7 +143,7 @@ async fn a_thread_added_to_the_knowledge_base_is_searchable_for_reasoning_only()
     assert!(e.mail.to_knowledge(&caller(WS2, ME), &e.thread).is_err());
 }
 
-const CANDIDATES: &str = r#"{"items":[{"kind":"fact","text":"预算审批分三步：部门负责人、财务、CFO","about":[],"level":"public","evidence":"三步：部门负责人、财务、CFO","dup_of":null,"conflicts":null}]}"#;
+const CANDIDATES: &str = r#"{"items":[{"kind":"fact","scope":"person","text":"预算审批分三步：部门负责人、财务、CFO","about":["我"],"level":"public","evidence":"三步：部门负责人、财务、CFO","dup_of":null,"conflicts":null}]}"#;
 
 fn candidates(h: &H) -> Vec<(String, String, String, String, String)> {
     db::candidate_mems(h.env.store())
@@ -290,17 +290,14 @@ async fn the_section_10_example_drafts_applies_and_undoes() {
     assert_eq!(ops[0]["op"], OP_PATCH);
 
     // apply
-    let r = changes::apply(m, &me(), &p.id).unwrap().unwrap();
+    let r = changes::apply(m, &me(), &p.id).unwrap();
     assert_eq!(r, json!({"ok": true, "undo": p.id}));
     let s = e.mail.settings(&me(), &e.conn).unwrap();
     assert_eq!(s.signature, "— Peng");
     assert_eq!(s.duty, "用中文回信\n回客户的信先给结论");
 
     // undo
-    assert_eq!(
-        changes::undo(m, &me(), &p.id).unwrap().unwrap(),
-        json!({"ok": true})
-    );
+    assert_eq!(changes::undo(m, &me(), &p.id).unwrap(), json!({"ok": true}));
     let s = e.mail.settings(&me(), &e.conn).unwrap();
     assert_eq!(s.signature, "");
     assert_eq!(s.duty, "用中文回信");
@@ -316,7 +313,7 @@ async fn the_section_10_example_drafts_applies_and_undoes() {
             &serde_json::from_value(json!({"send_delay_s": 30})).unwrap(),
         )
         .unwrap();
-    let err = changes::apply(m, &me(), &p2.id).unwrap().unwrap_err();
+    let err = changes::apply(m, &me(), &p2.id).unwrap_err();
     assert!(format!("{err:?}").contains(changes::STALE), "{err:?}");
 
     // somebody else's view of the mailbox: 404
@@ -359,13 +356,13 @@ async fn other_fields_and_unrecognized_values() {
             ("（没认出）".into(), "—".into(), "colour: red".into()),
         ]
     );
-    changes::apply(m, &me(), &p.id).unwrap().unwrap();
+    changes::apply(m, &me(), &p.id).unwrap();
     let s = e.mail.settings(&me(), &e.conn).unwrap();
     assert_eq!(
         (s.send_delay_s, s.archive_on_done, s.sync_days),
         (30, true, 30)
     );
-    changes::undo(m, &me(), &p.id).unwrap().unwrap();
+    changes::undo(m, &me(), &p.id).unwrap();
     let s = e.mail.settings(&me(), &e.conn).unwrap();
     assert_eq!((s.send_delay_s, s.archive_on_done), (10, false));
 }
