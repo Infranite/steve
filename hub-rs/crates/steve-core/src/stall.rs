@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::error::Result;
 use crate::repo::NewDecision;
-use crate::turn_wait::{CoordinatorAttention, stopped};
+use crate::turn_wait::stopped;
 use crate::util::{js_head, now};
 use crate::{Core, Tx};
 
@@ -86,10 +86,6 @@ impl Tx<'_> {
                 let Some(s) = self.active_session(&i.id)? else {
                     continue;
                 };
-                /* a unit's session belongs to its graph: the graph resumes it or reports it; its coordinator handles follow-up */
-                if self.workflow_child(&i)? {
-                    continue;
-                }
                 if self.turn_has_wait(&i, true)? {
                     continue;
                 }
@@ -98,30 +94,12 @@ impl Tx<'_> {
                     continue;
                 }
                 /* the cause from state, never the session's last system line */
-                /* your Stop comes first: a failure the coordinator was told of and you then stopped
-                 * is shown with its reason, and is yours to go on with (no continue spent) */
-                let (cause, yours) = stopped(self.db().store().sessions().stop(&s.id)?.as_ref());
-                let attention = self.coordinator_attention(&i.id)?;
-                let failed = matches!(attention, Some(CoordinatorAttention::Failed(_)));
-                let (why, yours) = match attention {
-                    Some(CoordinatorAttention::Failed(why)) if yours => {
-                        (format!("{why}；{cause}"), true)
-                    }
-                    Some(CoordinatorAttention::Failed(why)) => (why, false),
-                    Some(CoordinatorAttention::PausedByAgent(why)) => (why, true),
-                    None => (cause, yours),
-                };
+                let (why, yours) = stopped(self.db().store().sessions().stop(&s.id)?.as_ref());
                 let mut question = format!("它停下了：{}", js_head(&why, 200));
                 /* Steve looks first, unless it was you who stopped it */
                 if !yours {
-                    let stop = if failed {
-                        crate::takeover::Stop::Workflow {
-                            why: question.clone(),
-                        }
-                    } else {
-                        crate::takeover::Stop::Idle {
-                            why: question.clone(),
-                        }
+                    let stop = crate::takeover::Stop::Idle {
+                        why: question.clone(),
                     };
                     match self.takeover(&i.id, &s.id, stop)? {
                         Some(q) => question = q,
@@ -174,23 +152,6 @@ impl Tx<'_> {
                 json!({"superseded": "它又开始工作了"}),
                 steve_store::decision_repo::DecisionChange::Expire,
                 None,
-            )?;
-        }
-        /* a unit at work again: the coordinator's card about a stop (its own, or a unit's failure)
-         * no longer describes the parent either */
-        /* by_child also finds retired attempts: only the graph's current one counts */
-        if let Some((parent, _)) = self.db().store().workflows().by_child(&item)?
-            && let Some(unit) = self.db().store().workflows().get(&parent)?.and_then(|g| {
-                g.units
-                    .into_iter()
-                    .find(|u| u.session_id.as_deref() == Some(session_id))
-            })
-        {
-            crate::lifecycle::supersede_where(
-                self.db(),
-                &parent,
-                crate::lifecycle::stop_card,
-                &format!("协作工作 {} 又开始执行了", unit.spec.title),
             )?;
         }
         Ok(())

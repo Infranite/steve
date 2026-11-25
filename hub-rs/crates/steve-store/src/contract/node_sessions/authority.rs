@@ -230,34 +230,3 @@ fn difference(value: Option<PathDifference<'_>>) -> Result<(Option<i64>, Option<
         None => Ok((None, None)),
     }
 }
-
-pub fn is_workflow_child(r: &mut impl Read, session: &str) -> Result<bool> {
-    let d = r.db().dialect();
-    let belongs_to = |table| {
-        Query::select()
-            .column(("c", "item_id"))
-            .from_as(table, "c")
-            .and_where(Expr::col(("c", "item_id")).eq(Expr::col(("i", "id"))))
-            .take()
-    };
-    let workflow = d
-        .json_path(Expr::col(("i", "source")), "$[1]")
-        .eq("workflow")
-        .or(Expr::exists(belongs_to("workflow_units")))
-        .or(Expr::exists(belongs_to("workflow_attempts")));
-    Ok(r.one(
-        Query::select()
-            .column(("i", "id"))
-            .from_as("sessions", "s")
-            .join_as(
-                JoinType::InnerJoin,
-                "items",
-                "i",
-                Expr::col(("i", "id")).eq(Expr::col(("s", "item_id"))),
-            )
-            .and_where(Expr::col(("s", "id")).eq(session))
-            .and_where(workflow),
-        |_| Ok(()),
-    )?
-    .is_some())
-}

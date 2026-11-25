@@ -129,6 +129,7 @@ pub(crate) fn info(cfg: &AcpConfig, id: &str, p: &Probe) -> AdapterInfo {
         execution_modes: None,
         resume_command: spec.properties.resume_cli,
         fork_command: spec.properties.fork_cli,
+        capabilities: Some(steve_acp::adapter::capabilities_for(id)),
     }
 }
 

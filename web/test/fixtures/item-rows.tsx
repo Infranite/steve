@@ -21,18 +21,13 @@ const rows = [
   /* a real wait: the card's question and the way to it, instead of the stale summary */
   item("ST-52", "发布脚本加上回滚", { st: "wait", progress: "交付了，等你验收", plan: [["改脚本", 1], ["测试", 1]], wait: approve, waits: [approve, wait("ask", "回滚保留几个版本？")] }),
   item("ST-53", "选择数据库迁移方案", { st: "wait", progress: "等你回答", wait: wait("ask", "迁移要在白天还是晚上做？这会影响要不要先停写入，一个很长的问题，看看会不会把行撑出去"), waits: [] }),
-  item("ST-5", "修复权限状态", { progress: "协作执行中：统一边界" }),
-  item("ST-10", "修复协作状态", { progress: "协作已暂停", workflowPaused: true, workflowFailed: ["ST-43"] }),
-  item("ST-44", "下一周期继续", { cycle: 2, workflowCycle: 1, workflowPaused: true, progress: "协作已暂停", q: [{ id: "q1", text: "补充一", via: "me", created: now }, { id: "q2", text: "补充二", via: "me", created: now }], ss: ["s1", "s2"], parent: { item: "ST-1" } }),
-  item("ST-26", "统一边界", { src: ["协作工作", "workflow"], parent: { item: "ST-5" }, progress: "正在执行检查" }),
-  item("ST-18", "旧评审", { phase: "closed", src: ["协作工作", "workflow"], parent: { item: "ST-5" }, progress: "已失败但保留旧状态" }),
+  item("ST-5", "修复权限状态", { progress: "正在检查边界" }),
+  item("ST-10", "整理发布说明", { st: "pause", progress: "已暂停 · 等下周发版" }),
+  item("ST-44", "下一周期继续", { cycle: 2, progress: "正在补齐测试", q: [{ id: "q1", text: "补充一", via: "me", created: now }, { id: "q2", text: "补充二", via: "me", created: now }], ss: ["s1", "s2"], parent: { item: "ST-1" } }),
   item("ST-27", "另一项", { progress: "正在处理" }),
   item("ST-28", "普通派生", { parent: { item: "ST-27" }, progress: "独立工作" }),
-  /* a child whose summary is a long error: the relation still reads in full */
-  item("ST-31", "独立审查状态判定", { src: ["协作工作", "workflow"], parent: { item: "ST-10" }, progress: "失败：Internal error: API Error: 400 the request was rejected as invalid because the upstream refused it" }),
   /* closed as failed: a finished row in its own group, not lost from the list */
   item("ST-43", "独立审查回归覆盖", { st: "fail", phase: "closed", progress: "失败：评审不通过" }),
-  item("ST-29", "已结束的旧单元", { st: "done", phase: "closed", src: ["协作工作", "workflow"], parent: { item: "ST-27" }, progress: "已完成" }),
   item("ST-30", "已完成的独立事项", { st: "done", phase: "closed", progress: "已完成归档前展示" }),
 ]
 rows[3].waits = [rows[3].wait!]

@@ -14,6 +14,7 @@
 
 steve_i18n::init!();
 
+pub mod adapter;
 pub mod adapters;
 mod capacity;
 mod config;

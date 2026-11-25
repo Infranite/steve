@@ -564,6 +564,7 @@ pub(crate) async fn ready_locally(harnesses: &[&str], models: &[&str]) -> Arc<Hu
                 execution_modes: Some(modes.clone()),
                 resume_command: None,
                 fork_command: None,
+                capabilities: None,
             }),
         })
         .collect();
@@ -609,6 +610,7 @@ mod tests {
                 execution_modes: None,
                 resume_command: None,
                 fork_command: None,
+                capabilities: None,
             }),
         }
     }

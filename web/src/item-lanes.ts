@@ -1,10 +1,10 @@
 /* ── where an item goes on the board, in the items page's counts and filters, and in the running-status pill ──
  * All of them read an item's one state (item-state.ts) and sort it the way the items list groups it
- * (item-workflow-relation.ts AS_ST), so the board, the page's "N 件进行中 · M 件等你", its 等你 / 进行中 filters and the
+ * (item-state.ts AS_ST), so the board, the page's "N 件进行中 · M 件等你", its 等你 / 进行中 filters and the
  * pill all mean the same thing:
- *   needs    a card or a proposal waits for your answer, or the graph cannot execute until you fix it (the list's 等你)
+ *   needs    a card or a proposal waits for your answer (the list's 等你)
  *   running  a session works, your message is queued, or the item is open with nothing asked (the list's 进行中)
- *   paused   the item or its graph is paused, or it waits for its prerequisites (the list's 已暂停 and 等前置)
+ *   paused   the item is paused, or it waits for its prerequisites (the list's 已暂停 and 等前置)
  *   done     finished
  * Dropped and failed items are closed without a result to show, so none of them lists those. Pure, so it is tested
  * alone. */
@@ -15,9 +15,9 @@ export type Lane = "needs" | "running" | "paused" | "done"
 export type RunState = "running" | "needs-you" | "paused"
 
 const LANE: Record<StateKind, Lane | null> = {
-  proposed: "needs", asking: "needs", unavailable: "needs",
+  proposed: "needs", asking: "needs",
   working: "running", queued: "running", idle: "running", closing: "running",
-  paused: "paused", graphPaused: "paused", blocked: "paused",
+  paused: "paused", blocked: "paused",
   done: "done", dropped: null, failed: null,
 }
 export const laneOf = (s: ItemState): Lane | null => s.kind === "closing" && s.move === "you" ? "needs" : LANE[s.kind]
@@ -28,8 +28,7 @@ export function runStateOf(s: ItemState): RunState | null {
   return lane === "needs" ? "needs-you" : lane === "running" ? "running" : lane === "paused" ? "paused" : null
 }
 
-/** a paused item resumes from the pill; a paused graph resumes on its own page, where its failures are; an item waiting
- *  for its prerequisites goes on when they are done */
+/** a paused item resumes from the pill; an item waiting for its prerequisites goes on when they are done */
 export const resumable = (s: ItemState) => s.kind === "paused"
 
 /** the pill lists what needs you first, then what runs, then what is paused */

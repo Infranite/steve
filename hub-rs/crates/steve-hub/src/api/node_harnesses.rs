@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::Caller;
 use steve_node_api::{
-    AdapterStatus, Code, HarnessCapability, HarnessSetup, Node, NodeId, SetupState,
+    AdapterCapabilities, AdapterStatus, Code, HarnessCapability, HarnessSetup, Node, NodeId,
+    SetupState,
 };
 use steve_types::devices::HarnessDegradedReason;
 
@@ -101,6 +102,8 @@ struct Harness {
     degraded_reason: Option<HarnessDegradedReason>,
     error: Option<String>,
     setup: Option<HarnessSetup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<AdapterCapabilities>,
 }
 
 fn harness(c: HarnessCapability) -> Harness {
@@ -159,6 +162,7 @@ fn harness(c: HarnessCapability) -> Harness {
             a.and_then(|a| a.session_error.clone().or_else(|| a.error.clone()))
         },
         setup: c.setup,
+        capabilities: a.and_then(|a| a.capabilities.clone()),
     }
 }
 

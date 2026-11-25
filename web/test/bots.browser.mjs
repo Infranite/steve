@@ -27,7 +27,7 @@ const state = () => ({ version: 'fixture', web_version: 'fixture', workspace: { 
   runtimes: [{ id: 'claude-code', name: 'Claude Code', ok: true, version: '', path: '', models: [], note: '', modes: ['plan', 'ask', 'accept_edits', 'auto', 'full_access'] }, { id: 'codex', name: 'Codex', ok: true, version: '', path: '', models: [], note: '' }] })
 const breakdown = { by: 'tool', rows: [
   { key: 'exec', label: 'exec', dim: 'kind', count: 40 }, { key: 'tool:Bash', label: 'Bash', dim: 'tool', count: 40 },
-  { key: 'mcp:steve_update', label: 'steve_update', dim: 'mcp', count: 3 }, { key: 'mcp:steve_workflow', label: 'steve_workflow', dim: 'mcp', count: 2 },
+  { key: 'mcp:steve_update', label: 'steve_update', dim: 'mcp', count: 3 }, { key: 'mcp:steve_deliver', label: 'steve_deliver', dim: 'mcp', count: 2 },
   { key: 'tool:mcp__lark__send', label: 'mcp__lark__send', dim: 'tool', count: 1 },
 ] }
 

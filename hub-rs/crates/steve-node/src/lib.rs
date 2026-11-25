@@ -2685,6 +2685,20 @@ impl SessionExecutor for LocalNode {
         }
         Ok(r)
     }
+
+    async fn cancel_subtask(&self, c: CancelSubtask) -> ApiResult<bool> {
+        let exists = self.0.j.read(|t| t.session(&c.session))?.is_some();
+        if !exists {
+            return Err(NodeReason::session_not_open("no such session"));
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = self.actor(&c.session).send(Msg::CancelSubtask {
+            subtask: c.subtask,
+            done: tx,
+        });
+        rx.await
+            .map_err(|_| Error::new(Code::Unavailable, "session actor stopped"))?
+    }
 }
 
 #[async_trait]

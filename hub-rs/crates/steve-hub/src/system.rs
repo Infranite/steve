@@ -1293,6 +1293,7 @@ mod tests {
                 execution_modes: None,
                 resume_command: None,
                 fork_command: None,
+                capabilities: None,
             }),
         };
         let mut no_session = reported.clone();

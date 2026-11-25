@@ -115,7 +115,7 @@ impl NodeRuntime {
         };
         let key = next_revision(tx, Intent::Prepare(idv(session.to_string())?), advance)?;
         let op = key.op().to_string();
-        let (req, digest) = command(&op, prepare)?;
+        let (req, digest) = self.command(&op, prepare)?;
         rt::insert_intent_in(
             tx,
             &key,
@@ -191,7 +191,7 @@ impl NodeRuntime {
                 expected: view.revision,
                 keep_branch,
             };
-            let (mut request, _) = command(&op, body)?;
+            let (mut request, _) = self.command(&op, body)?;
             request["subject"] = format!("tidy:{item}").into();
             let digest = digest_of(&request).map_err(conflict)?.to_string();
             rt::insert_intent_in(
@@ -269,7 +269,7 @@ impl NodeRuntime {
                 ReceiptState::Rejected,
                 false,
                 &json!({ "reason": "its prepare failed" }),
-                now(),
+                self.clock.now(),
             )?;
         }
         if opens.is_empty() {

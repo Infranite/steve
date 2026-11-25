@@ -16,7 +16,6 @@ declare global {
     __refresh?: () => Promise<void>
     __preview?: (question: string, draft: string) => Promise<void>
     __waitChanges?: unknown[]
-    __workflowChanges?: unknown[]
     __graphOpened?: string
     __resyncs?: () => number
     __transcript?: () => string[]
