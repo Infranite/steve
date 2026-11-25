@@ -5,8 +5,8 @@
 //!
 //! - `steve setup` installs the ones its user chose ([`install`]) and records the choice
 //!   ([`selection`]): an adapter that was not chosen is not installed later either;
-//! - a Node checks for newer releases once a day and upgrades an adapter none of its sessions is
-//!   using ([`Updates`]), as `STEVE_ADAPTER_UPDATES` says (`auto`, the default; `check`; `off`);
+//! - automatic upgrades are controlled exclusively by the Hub's owner-only Node/harness auto-upgrade
+//!   settings (default off), running through the journaled `harness.upgrade` operation;
 //! - `steve adapters status|upgrade` does the same by hand, and `steve adapters install <id>` adds
 //!   one.
 
@@ -432,31 +432,6 @@ pub fn newer(a: &str, b: &str) -> bool {
             (Some(ap), Some(bp)) => cmp_pre(ap, bp) == std::cmp::Ordering::Greater,
         },
         o => o == std::cmp::Ordering::Greater,
-    }
-}
-
-/// `STEVE_ADAPTER_UPDATES`: what a Node does about newer adapter releases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpdatePolicy {
-    /// Check once a day and upgrade an adapter no session is using (the default).
-    Auto,
-    /// Check and show; upgrade only by hand (`steve adapters upgrade`).
-    Check,
-    /// Neither.
-    Off,
-}
-
-impl UpdatePolicy {
-    pub fn from_env() -> UpdatePolicy {
-        match std::env::var("STEVE_ADAPTER_UPDATES")
-            .as_deref()
-            .map(str::trim)
-        {
-            Ok("check") => UpdatePolicy::Check,
-            Ok("off") | Ok("0") => UpdatePolicy::Off,
-            _ => UpdatePolicy::Auto,
-        }
     }
 }
 

@@ -461,8 +461,6 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 "path": path,
                 "version": reported.map(|h| version_of(&h.version)).unwrap_or_default(),
                 "adapter_version": adapter.and_then(|a| a.version.clone()),
-                // one Steve installed: its update check (steve_acp::managed)
-                "update": adapter.and_then(|a| a.update.clone()),
                 "setup": setup,
                 "models": models,
                 "default_model": session.and_then(|o| o.default_model.clone()),
@@ -1293,7 +1291,6 @@ mod tests {
                 session_error: None,
                 session_auth_required: None,
                 execution_modes: None,
-                update: None,
                 resume_command: None,
                 fork_command: None,
                 capabilities: None,

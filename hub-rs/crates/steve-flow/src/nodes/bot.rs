@@ -40,6 +40,8 @@ pub const NAME_MAX: usize = 40;
 pub const RESERVED_FIELDS: [&str; 2] = ["branch", "reason"];
 const INSTRUCTION_MAX: usize = 2000;
 const REASON_MAX: usize = 200;
+/// Metric task label for `bot` nodes invoked inside periodic (`time` / `catch_up`) flow runs.
+const PERIODIC_TASK_BOT: &str = "flow.bot";
 
 /// The `bot` node kind.
 #[derive(Debug, Default, Clone, Copy)]
@@ -304,7 +306,12 @@ impl NodeKind for BotNode {
         )
         .await
         {
-            Ok(Ok(o)) => o,
+            Ok(Ok(o)) => {
+                if matches!(cx.run.trigger_kind.as_str(), "time" | "catch_up") {
+                    steve_modules::gateway::record_periodic_usage(PERIODIC_TASK_BOT, &o.usage);
+                }
+                o
+            }
             Ok(Err(e)) => {
                 tracing::warn!(run = %cx.run.id, node = %cx.node.id, "bot node: gateway failed: {e}");
                 return NodeOutcome::Fail(format!("{} 没有给出判断：{e}", bot.name));

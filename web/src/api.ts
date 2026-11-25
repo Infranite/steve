@@ -74,8 +74,8 @@ export type RNode = { node_id: string; name: string; fingerprint: string; state:
 /** A Node's latest sample and day of vitals. Network rates are bytes per second. */
 export type RVitals = import("./gen/NodeVitalsDay").NodeVitalsDay
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
-/** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
-/** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */
+/** remote Nodes over tailcat: `hub_url` is `tailcat:<address>:<port>` once it runs */
+/** a remote install over tailcat's SSH: the command for the target, then its steps */
 export type RInstall = { id: string; state: "waiting" | "running" | "done" | "failed"; command: string; steps: RInstallStep[]; node_id: string | null; error: string | null; failed_step?: RInstallKind | null; address?: string | null; created?: number; transfer_route?: "direct_observed" | "derp_observed" | null }
 export type RInstallKind = "probe" | "fetch" | "send" | "setup" | "done"
 /** fetch: download, cached (a copy fetched before, checked again) or verify; send: send; setup: install, pair, adapters, start */
@@ -83,7 +83,7 @@ export type RInstallProgress = { phase: string; done: number; total: number | nu
 /** a step of a remote install: `elapsed_ms` is up to now while it runs */
 export type RInstallStep = { kind: RInstallKind; at: number; text: string; ended?: number | null; elapsed_ms?: number; progress?: RInstallProgress | null; transfer_ms?: number; unpack_ms?: number }
 export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
-/* `custom`: an adapter the Hub's harness manifest adds (harness parity S1), with `error` and `install_hint` when it has them */
+/* `custom`: an adapter declared by the Hub's harness manifest, with `error` and `install_hint` when it has them */
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
@@ -105,8 +105,6 @@ export type RRuntime = {
     }[]
     can_install: boolean; reason?: string | null; help?: string | null; error?: string | null
   }
-  /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
-  update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
 }
 export type RSubagentCapability = "acp_rfd" | "tool_fallback" | "none"
 export type RBackgroundTaskCapability = "acp_rfd" | "tool_fallback" | "none"
@@ -444,7 +442,10 @@ export const api = {
   /** Installs only this registry entry's declared components, on its Node. */
   installHarness: (id: string) => post<{ accepted: boolean; restart?: boolean }>("/system/harnesses/" + encodeURIComponent(id) + "/install"),
   harnessUpdates: (node: string, fresh = false) => get<import("./harness-update-status").HarnessUpdates>("/node-harness-updates/" + encodeURIComponent(node) + (fresh ? "?fresh=1" : "")),
-  upgradeHarness: (node: string, harness: string, operation: string, versions: Record<string, string>, retry_unknown = false) => post<{ receipt: import("./harness-update-status").HarnessReceipt }>("/node-harness-updates/" + encodeURIComponent(node) + "/" + encodeURIComponent(harness), { operation, versions, retry_unknown }),
+  upgradeHarness: (node: string, harness: string, operation: string, versions: Record<string, string>, retry_unknown = false, self_update: string[] = []) =>
+    post<import("./harness-update-status").UpgradeHarnessResponse>("/node-harness-updates/" + encodeURIComponent(node) + "/" + encodeURIComponent(harness), { operation, versions, self_update, retry_unknown }),
+  setHarnessAutoUpgrade: (node: string, body: import("./harness-update-status").SetHarnessAutoUpgrade) =>
+    req<import("./harness-update-status").HarnessAutoUpgradePolicy>("PUT", "/node-harness-updates/" + encodeURIComponent(node) + "/auto-upgrade", body),
   /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
   addHarness: (p: { id: string; name?: string; command: string; args?: string[]; env?: Record<string, string>; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),

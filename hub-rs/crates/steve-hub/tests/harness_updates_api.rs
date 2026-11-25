@@ -503,3 +503,102 @@ async fn authorization_policy_old_nodes_and_failed_installers_are_explicit() {
     n.shutdown().await;
     dn.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_upgrade_policy_is_owner_only_and_idle_auto_upgrade_notifies_and_stops_on_failure() {
+    let local = Fixture::new("local", "1.0.0", "1.0.0", "2.0.0");
+    let n = Arc::new(local.node());
+    checked(n.as_ref()).await;
+    let e = start(n.clone()).await;
+
+    // Default auto-upgrade is OFF; running an auto pass does nothing.
+    let initial = e.report("local").await;
+    assert_eq!(initial["auto_upgrade"]["enabled"], false);
+    assert_eq!(initial["auto_upgrade"]["harnesses"], json!({}));
+    let node_dyn: Arc<dyn Node> = n.clone();
+    steve_hub::api::harness_updates::run_auto_upgrade_pass(&e.store, Some(&node_dyn), None, None)
+        .await;
+    assert_eq!(local.installs(), 0);
+
+    // Owner enables per-harness override ON (Node default still OFF).
+    let (s, policy) = e
+        .call(
+            "PUT",
+            "/api/node-harness-updates/local/auto-upgrade",
+            Some(json!({ "harness": "pi", "mode": "on" })),
+        )
+        .await;
+    assert_eq!(s, 200, "{policy}");
+    assert_eq!(policy["enabled"], false);
+    assert_eq!(policy["harnesses"]["pi"], true);
+
+    // Auto-upgrade pass sees pi available & idle -> upgrades and writes notification.
+    steve_hub::api::harness_updates::run_auto_upgrade_pass(&e.store, Some(&node_dyn), None, None)
+        .await;
+    eventually(
+        on_timeout(|| async { "auto-upgrade finishes and records notification".into() }),
+        || async {
+            let r = e.report("local").await;
+            r["runs"]["pi"]["state"]["state"] == "finished"
+                && r["runs"]["pi"]["state"]["outcome"] == "succeeded"
+        },
+    )
+    .await;
+    assert_eq!(local.installs(), 1);
+    let (ns, notices) = e.call("GET", "/api/notifications", None).await;
+    assert_eq!(ns, 200, "{notices}");
+    let notice_arr = notices.as_array().unwrap();
+    assert!(
+        notice_arr
+            .iter()
+            .any(|m| m["level"] == "success" && m["text"].as_str().unwrap_or("").contains("Pi")),
+        "expected success notification for Pi auto-upgrade, got {notices}"
+    );
+
+    // Simulate a new version whose upgrade fails -> notifies failure and does NOT retry in a loop.
+    std::fs::write(local.dir.path().join("latest"), "3.0.0").unwrap();
+    checked(n.as_ref()).await;
+    local.mark("fail");
+    steve_hub::api::harness_updates::run_auto_upgrade_pass(&e.store, Some(&node_dyn), None, None)
+        .await;
+    eventually(
+        on_timeout(|| async { "failed auto-upgrade finishes".into() }),
+        || async {
+            let r = e.report("local").await;
+            r["runs"]["pi"]["state"]["state"] == "finished"
+                && r["runs"]["pi"]["state"]["outcome"] == "failed"
+        },
+    )
+    .await;
+    assert_eq!(local.installs(), 2);
+    // Second auto-upgrade pass for the same failed version does not re-run.
+    steve_hub::api::harness_updates::run_auto_upgrade_pass(&e.store, Some(&node_dyn), None, None)
+        .await;
+    assert_eq!(local.installs(), 2);
+
+    // Clearing override (`inherit`) + enabling Node-level toggle works.
+    let (s, policy) = e
+        .call(
+            "PUT",
+            "/api/node-harness-updates/local/auto-upgrade",
+            Some(json!({ "enabled": true, "harness": "pi", "mode": "inherit" })),
+        )
+        .await;
+    assert_eq!(s, 200, "{policy}");
+    assert_eq!(policy["enabled"], true);
+    assert_eq!(policy["harnesses"], json!({}));
+
+    // Non-owner member is rejected with 403.
+    let owner = e.store.access().owner().unwrap().unwrap().id;
+    steve_store::testkit::hub::set_user_role(&e.store, &owner, "member").unwrap();
+    let (s, _) = e
+        .call(
+            "PUT",
+            "/api/node-harness-updates/local/auto-upgrade",
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+    assert_eq!(s, 403);
+
+    n.shutdown().await;
+}

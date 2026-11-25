@@ -531,10 +531,8 @@ mod tests {
     #[test]
     fn wiki_link_rewrite() {
         assert_eq!(
-            wiki_links(
-                "见 [[30_项目/Steve终态领域设计|Steve 终态领域设计]] 和 [[部署]]。![[图.png]]结束"
-            ),
-            "见 Steve 终态领域设计 和 部署。结束"
+            wiki_links("见 [[guides/domain-overview|领域概览]] 和 [[部署]]。![[图.png]]结束"),
+            "见 领域概览 和 部署。结束"
         );
         assert_eq!(wiki_links("[[未闭合\n]] [x]"), "[[未闭合\n]] [x]");
     }

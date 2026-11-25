@@ -128,6 +128,21 @@ fn apply_linear_result<'a>(
             }
             ("ok", output.clone(), None)
         }
+        ActionOutcome::Skip {
+            output,
+            outcome,
+            label,
+        } => {
+            if still_ours {
+                r.status = "skipped".into();
+                r.outcome = Some((*outcome).into());
+                r.outcome_label = label_with_prefix(r, label);
+                r.cursor = None;
+                r.error = None;
+                r.ended = Some(now);
+            }
+            ("skipped", output.clone(), None)
+        }
         ActionOutcome::Retry { error, cost } => {
             r.cost += cost;
             if still_ours {

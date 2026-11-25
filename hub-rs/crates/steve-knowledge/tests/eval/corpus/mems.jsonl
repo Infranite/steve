@@ -48,5 +48,5 @@
 {"id": "mm_48", "kind": "fact", "text": "评测集 recall@5 的门槛是 0.8", "about": "知识库"}
 {"id": "mm_49", "kind": "fact", "text": "首页 LCP 已从 4.3 秒优化到 1.6 秒", "about": "前端"}
 {"id": "mm_50", "kind": "fact", "text": "附件已迁到 MinIO，和 Hub 在同一台机器上，还是单点", "about": "MinIO"}
-{"id": "mm_51", "kind": "fact", "text": "公司全称是易人实验室（虚构），发票抬头要写全称"}
+{"id": "mm_51", "kind": "fact", "text": "公司全称是示例科技有限公司，发票抬头要写全称"}
 {"id": "mm_52", "kind": "fact", "text": "杭州办公室在西湖区，周三有免费午餐"}

@@ -27,6 +27,8 @@ pub trait BotRunner: Send + Sync + 'static {
 
 /// One due batch contains at most this many workspaces (each starts at most one Bot).
 pub const BOT_BATCH: usize = 32;
+/// Metric task identifier for queue-driven Digest Bot evaluations.
+pub const PERIODIC_TASK: &str = "digest.bot";
 
 /// Tables read by BotSource and the Hub's schedule readiness/reference checks.
 /// Production and real-store wake tests must subscribe to this same set.
@@ -136,13 +138,29 @@ impl<R: BotRunner> steve_runtime::due::DueSource for BotSource<R> {
             {
                 let step = (|| -> Result<()> {
                     store.write(|w| w.digest_packets().release_expired(&ws, now))?;
-                    let due = store.read::<_, steve_store::StoreError>(|r| {
+                    let (enabled, due) = store.read::<_, steve_store::StoreError>(|r| {
                         let mut packets = r.digest_packets();
                         let b = packets.batching(&ws)?;
-                        Ok(b.enabled && packets.due(&ws, now, &b)?.is_some())
+                        Ok((b.enabled, b.enabled && packets.due(&ws, now, &b)?.is_some()))
                     })?;
-                    if due && runner.ready(&ws)?.is_some_and(|at| at <= now) {
+                    if !enabled {
+                        steve_runtime::jobs::record_periodic_skipped(
+                            PERIODIC_TASK,
+                            steve_runtime::jobs::SkipReason::Disabled,
+                        );
+                    } else if !due {
+                        steve_runtime::jobs::record_periodic_skipped(
+                            PERIODIC_TASK,
+                            steve_runtime::jobs::SkipReason::NoChange,
+                        );
+                    } else if runner.ready(&ws)?.is_some_and(|at| at <= now) {
                         runner.start(&ws, now)?;
+                        steve_runtime::jobs::record_periodic_triggered(PERIODIC_TASK);
+                    } else {
+                        steve_runtime::jobs::record_periodic_skipped(
+                            PERIODIC_TASK,
+                            steve_runtime::jobs::SkipReason::Overlap,
+                        );
                     }
                     Ok(())
                 })();
