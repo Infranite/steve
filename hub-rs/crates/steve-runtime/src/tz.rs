@@ -1,5 +1,4 @@
-//! Replaces modules::zone, flow::cron::resolve_wall and calendar::ics::local_ms
-//! with RFC 5545 gap/fold resolution (W2b §1.4). Policy lookup stays in domains.
+//! Time-zone resolution with RFC 5545 gap/fold handling. Policy lookup stays in domains.
 #[cfg(feature = "schedule")]
 use chrono::Duration;
 use chrono::{DateTime, LocalResult, NaiveDateTime, NaiveTime, Offset, TimeZone, Utc};

@@ -1,4 +1,4 @@
-//! W3.3 acceptance suite: verifies every registered module subject and every core subject through
+//! Decision lifecycle acceptance suite: verifies every registered module subject and every core subject through
 //! the single `Core::decision_command` settlement entry (one success + one refusal each, replay
 //! idempotence, conflicting-choice rejection, cross-workspace isolation, natural-key deduplication)
 //! and proves staged decision replies wake idle Node sessions after commit.

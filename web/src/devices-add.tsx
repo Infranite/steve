@@ -285,7 +285,7 @@ function TailcatSwitch({ s, onChange }: { s: RTailcat | null; onChange: (s: RTai
   </div>
 }
 
-/* A remote install over tailcat (A6b): a line to run on the target machine, its address pasted back, the rest done by
+/* A remote install over tailcat: a line to run on the target machine, its address pasted back, the rest done by
  * the Hub (download and verify, install, pair, start). A Node installed so needs no fingerprint compared by hand.
  * Each step shows how far it is (bytes and speed while fetching and sending, the setup's phase on the target) and how
  * long it took, all kept by the Hub: the dialog opened again picks up the install that runs (or the last one that
