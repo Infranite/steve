@@ -868,7 +868,7 @@ async fn a_turn_cannot_change_the_sessions_configuration() {
     t.run.choice.model = Some("opus".into());
     variants.push(t);
     let mut t = base.clone();
-    t.run.choice.effort = Some("high".into());
+    t.run.choice.effort = Some(steve_node_api::ReasoningEffort::High);
     variants.push(t);
     let mut t = base.clone();
     t.run.policy.permissions = PermissionMode::FullAccess;

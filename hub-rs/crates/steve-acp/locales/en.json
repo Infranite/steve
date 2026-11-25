@@ -12,5 +12,12 @@
   "acp.managed.installing": "Installing ACP adapters into %{dir}: %{packages}",
   "acp.managed.install_failed": "Install failed: %{error}",
   "acp.managed.usage": "Usage: adapters status [--json] | list --json | install [--only] [<id>…] | upgrade",
-  "acp.managed.npm_missing": "npm was not found: ACP adapters need Node.js. On macOS run brew install node, on Linux use your distribution's package or https://nodejs.org, then run steve adapters install again."
+  "acp.managed.npm_missing": "npm was not found: ACP adapters need Node.js. On macOS run brew install node, on Linux use your distribution's package or https://nodejs.org, then run steve adapters install again.",
+  "acp.session.missing_session_id": "Adapter returned no sessionId on session/new.",
+  "acp.session.mode_apply_failed": "Permission mode %{mode} could not be applied: %{detail}",
+  "acp.session.model_apply_failed": "Model %{model} could not be applied: %{detail}",
+  "acp.session.model_mismatch": "Model did not take effect: requested %{requested}, actual %{actual}",
+  "acp.session.effort_apply_failed": "Reasoning effort %{requested} (mapped to %{applied}) could not be applied: %{detail}",
+  "acp.session.effort_mismatch": "Reasoning effort did not take effect: requested %{requested} (expected %{expected}), actual %{actual}",
+  "acp.session.unknown": "unknown"
 }

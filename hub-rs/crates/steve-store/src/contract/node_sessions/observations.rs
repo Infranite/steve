@@ -3,10 +3,32 @@
 use sea_query::{Expr, ExprTrait, Func, Order, Query, SelectStatement};
 use steve_node_api::{Role, SessionView};
 
+use crate::contract::Json;
 use crate::{Read, Result, W};
+
+pub fn current_effort_mapping(
+    c: &mut impl Read,
+    session: &str,
+) -> Result<Option<steve_types::EffortMapping>> {
+    Ok(c.one(
+        Query::select()
+            .column("effort_mapping")
+            .from("sessions")
+            .and_where(Expr::col("id").eq(session)),
+        |r| r.get::<Option<Json<steve_types::EffortMapping>>>(0),
+    )?
+    .flatten()
+    .map(|Json(m)| m))
+}
 
 pub fn effective(w: &mut W<'_>, session: &str, view: &SessionView, at: i64) -> Result<()> {
     let resume = view.resume.as_ref().map(ToString::to_string);
+    let effort = view.effective.effort.map(|e| e.as_str());
+    let mapping = view
+        .effort_mapping
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     w.exec(
         Query::update()
             .table("sessions")
@@ -19,10 +41,11 @@ pub fn effective(w: &mut W<'_>, session: &str, view: &SessionView, at: i64) -> R
             )
             .value(
                 "reasoning_effort",
-                Func::coalesce([
-                    Expr::val(view.effective.effort.as_deref()),
-                    Expr::col("reasoning_effort"),
-                ]),
+                Func::coalesce([Expr::val(effort), Expr::col("reasoning_effort")]),
+            )
+            .value(
+                "effort_mapping",
+                Func::coalesce([Expr::val(mapping.as_deref()), Expr::col("effort_mapping")]),
             )
             .value(
                 "acp_session_id",

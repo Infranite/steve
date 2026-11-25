@@ -77,6 +77,7 @@
   "core.purpose.compose.desc": "Writes replies for you in channels",
   "core.purpose.judge.label": "Completion judge",
   "core.purpose.judge.desc": "Judges whether an item is done after its turn ends; by default avoids the working Bot's model (recorded only for now; it changes nothing on the item)",
+  "core.effort.default": "Default",
   "core.effort.none": "Off",
   "core.effort.minimal": "Minimal",
   "core.effort.low": "Low",

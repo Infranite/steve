@@ -31,6 +31,8 @@ import { GitHubMoreRow } from "@/github/index"
 import { HubMore } from "@/hub-ui"
 import { lazyView } from "@/lazy"
 import { ModelPicker } from "@/model-picker"
+import { EffortPicker } from "@/effort-picker"
+import type { ReasoningEffort } from "@/gen"
 import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
 import { AnnRefs } from "@/annotate"
 import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
@@ -85,22 +87,24 @@ export function HandoffDialog({ item, session }: { item: string; session?: strin
   const [bot, setBot] = useState(() => enabledBots.find((k) => k !== curBot) ?? curBot)
   const [harness, setHarness] = useState(curHarness)
   const [model, setModel] = useState("")
+  const [effort, setEffort] = useState<ReasoningEffort>("default")
   const [makeDefault, setMakeDefault] = useState(false)
   const [busy, setBusy] = useState(false)
   const [placementError, setPlacementError] = useState<BotPlacementError>()
-  useEffect(() => setPlacementError(undefined), [mode, bot, harness, model, makeDefault])
+  useEffect(() => setPlacementError(undefined), [mode, bot, harness, model, effort, makeDefault])
   if (!i) return null
   const activeHarness = mode === "bot" ? (st.bots[bot]?.harness ?? curHarness) : mode === "harness" ? harness : curHarness
   const canSubmit = !busy && (mode === "same" || (mode === "harness" ? !!harness : !!st.bots[bot]))
-  const showDefaultCheck = mode === "harness" || (mode === "same" && !!model)
+  const showDefaultCheck = mode === "harness" || (mode === "same" && (!!model || effort !== "default"))
   const submit = async () => {
     setPlacementError(undefined)
     setBusy(true)
+    const eff = effort !== "default" ? { effort } : {}
     const choice = mode === "same"
-      ? { ...(model ? { model } : {}), ...(showDefaultCheck && makeDefault ? { make_bot_default: true } : {}) }
+      ? { ...(model ? { model } : {}), ...eff, ...(showDefaultCheck && makeDefault ? { make_bot_default: true } : {}) }
       : mode === "harness"
-        ? { harness, ...(model ? { model } : {}), ...(makeDefault ? { make_bot_default: true } : {}) }
-        : { bot, ...(model ? { model } : {}) }
+        ? { harness, ...(model ? { model } : {}), ...eff, ...(makeDefault ? { make_bot_default: true } : {}) }
+        : { bot, ...(model ? { model } : {}), ...eff }
     const next = await handoff({ item, session }, choice, setPlacementError)
     setBusy(false)
     if (next) {
@@ -129,6 +133,8 @@ export function HandoffDialog({ item, session }: { item: string; session?: strin
             options={enabledBots.map((k) => ({ v: k, l: `${st.bots[k].n} · ${runtimeName(st.bots[k].harness) ?? st.bots[k].harness}` }))} /></Field>}
         {activeHarness && <Field><FieldLabel>{t("views:handoff.chooseModel")}</FieldLabel>
           <ModelPicker field testId="handoff-model" harness={activeHarness} value={model} onChange={setModel} allowDefault defaultLabel={t("views:handoff.modelDefault")} /></Field>}
+        {activeHarness && <Field><FieldLabel>{t("views:handoff.chooseEffort")}</FieldLabel>
+          <EffortPicker wide testId="handoff-effort" label={t("views:handoff.chooseEffort")} harness={activeHarness} model={model || null} value={effort} defaultLabel={t("views:handoff.effortInherit")} onChange={setEffort} /></Field>}
         {showDefaultCheck && <label className="flex cursor-pointer items-start gap-2.5 type-callout" data-handoff-make-default>
           <Checkbox checked={makeDefault} onCheckedChange={(v) => setMakeDefault(!!v)} className="mt-0.5" />
           <span className="min-w-0 flex-1"><span className="block">{t("views:handoff.makeBotDefault", { bot: st.bots[curBot]?.n ?? curBot })}</span>

@@ -26,6 +26,7 @@ import { fmtPct, fmtUsage, fmtUsageCost, fmtUsd } from "@/stats/format"
 import { closedSt, hm, interrupt, sessPatch, sessRemove, sessSend, st, toast, useItem, useSessionQueue, type Sess, useDeviceInventory } from "@/store"
 import { Empty, go, openSheet, Page, PANEL_W, Status } from "@/ui"
 import { Composer, type ComposerHandle } from "@/composer"
+import { formatEffortMapping } from "@/effort-picker"
 import { RunBar, Transcript } from "@/thread/transcript"
 import { ProjectChip } from "@/view-shared"
 
@@ -128,7 +129,7 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
                 {device && <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hidden hover:text-foreground sm:inline" data-runtime-device>{t("views:session.runsOn", { device: device.name })}</a>}
                 <SessionApproval id={k} />
                 <NativeIdLine k={k} label={t("views:session.nativeId")} className="w-auto" />
-                <span>{t("views:session.effortLabel")} <span className="text-muted-foreground">{s.reasoningEffort ?? t("views:session.effortInherit")}</span></span>
+                <span>{t("views:session.effortLabel")} <span className="text-muted-foreground" data-session-effort-mapping>{formatEffortMapping(t, s.effortMapping, s.h, s.reasoningEffort)}</span></span>
                 {/* a reported context is the composer's ring; that nothing is reported is said here */}
                 {!s.ro && !s.contextKnown && <span data-session-ctx-unreported>{t("views:session.ctxLabel")} <span className="text-muted-foreground">{t("views:session.unreported")}</span></span>}
               </div>

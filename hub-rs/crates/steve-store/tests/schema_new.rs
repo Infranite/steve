@@ -1304,6 +1304,152 @@ fn migration_139_adds_mems_pinned_and_orders_anchors_by_pin_and_kind_priority() 
 }
 
 #[test]
+fn migration_140_canonicalizes_reasoning_effort_and_adds_effort_mapping() {
+    let before_140 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("ALTER TABLE sessions ADD COLUMN effort_mapping TEXT"))
+        .unwrap();
+    let (_dir, path) = at_version(before_140);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO bots(id,workspace_id,name,harness,reasoning_effort,updated)
+             VALUES ('b_null','default','Null','claude-code',NULL,1),
+                    ('b_min','default','Min','codex','minimal',1),
+                    ('b_low','default','Low','codex','low',1),
+                    ('b_med','default','Med','codex','med',1),
+                    ('b_medium','default','Medium','codex','medium',1),
+                    ('b_high','default','High','claude-code','high',1),
+                    ('b_xhigh','default','XHigh','codex','xhigh',1),
+                    ('b_max','default','Max','claude-code','max',1),
+                    ('b_ultra','default','Ultra','codex','ultra',1),
+                    ('b_none','default','None','antigravity','none',1),
+                    ('b_off','default','Off','antigravity','off',1),
+                    ('b_bad','default','Bad','antigravity','turbo',1);
+           INSERT INTO bot_fallback_surfaces(bot_id,ordinal,harness,model,reasoning_effort)
+             VALUES ('b_high',0,'codex','gpt-6.2-sol','xhigh'),
+                    ('b_high',1,'antigravity','gemini-pro-orchestrator-neon',NULL),
+                    ('b_high',2,'pi','m1','minimal');
+           INSERT INTO sessions(id,workspace_id,no,harness,reasoning_effort,cwd,status,title,created,updated)
+             VALUES ('s_xhigh','default',1,'codex','xhigh','/','ended','S1',1,1),
+                    ('s_null','default',2,'antigravity',NULL,'/','ended','S2',1,1),
+                    ('s_med','default',3,'claude-code','med','/','ended','S3',1,1);
+           INSERT INTO settings(workspace_id,key,value,updated)
+             VALUES ('default','models.research','{"harness":"codex","model":"gpt-6.2-sol","effort":"ultra"}',1),
+                    ('default','models.compose','{"harness":"claude-code","effort":"none"}',1);
+           INSERT INTO items(id,workspace_id,no,title,phase,created,updated)
+             VALUES ('ST-1','default',1,'I1','active',1,1),
+                    ('ST-2','default',2,'I2','active',1,1);
+           INSERT INTO bot_placements(item_id,session_id,fact)
+             VALUES ('ST-1','s_xhigh','{"rule_version":1,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"codex","model":"gpt-6.2-sol","reasoning_effort":"xhigh","explanation":{"bot":"b_high","reason":"manual","matched":[],"rejected":[],"fallback":null}}'),
+                    ('ST-2','s_null','{"rule_version":1,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"antigravity","model":null,"reasoning_effort":null,"explanation":{"bot":"b_null","reason":"manual","matched":[],"rejected":[],"fallback":null}}');"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    store
+        .fixture_write(|c| {
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id IN ('b_null','b_none','b_off','b_bad') AND reasoning_effort='default'"
+                ),
+                4
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id IN ('b_min','b_low') AND reasoning_effort='low'"
+                ),
+                2
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id IN ('b_med','b_medium') AND reasoning_effort='medium'"
+                ),
+                2
+            );
+            assert_eq!(
+                count(c, "SELECT COUNT(*) FROM bots WHERE id='b_high' AND reasoning_effort='high'"),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM bots WHERE id IN ('b_xhigh','b_max','b_ultra') AND reasoning_effort='max'"
+                ),
+                3
+            );
+            // Default on bots.reasoning_effort is now 'default' (NOT NULL).
+            c.execute(
+                "INSERT INTO bots(id,workspace_id,name,harness,updated) VALUES ('b_new','default','New','claude-code',1)",
+                [],
+            )?;
+            assert_eq!(
+                count(c, "SELECT COUNT(*) FROM bots WHERE id='b_new' AND reasoning_effort='default'"),
+                1
+            );
+            // Fallback surfaces normalized.
+            assert_eq!(
+                count(c, "SELECT COUNT(*) FROM bot_fallback_surfaces WHERE ordinal=0 AND reasoning_effort='max'"),
+                1
+            );
+            assert_eq!(
+                count(c, "SELECT COUNT(*) FROM bot_fallback_surfaces WHERE ordinal=1 AND reasoning_effort='default'"),
+                1
+            );
+            assert_eq!(
+                count(c, "SELECT COUNT(*) FROM bot_fallback_surfaces WHERE ordinal=2 AND reasoning_effort='low'"),
+                1
+            );
+            // Sessions normalized and effort_mapping column present.
+            assert!(columns(c, "sessions").contains(&"effort_mapping".to_string()));
+            assert_eq!(
+                count(c, "SELECT COUNT(*) FROM sessions WHERE id='s_xhigh' AND reasoning_effort='max'"),
+                1
+            );
+            assert_eq!(
+                count(c, "SELECT COUNT(*) FROM sessions WHERE id='s_null' AND reasoning_effort='default'"),
+                1
+            );
+            assert_eq!(
+                count(c, "SELECT COUNT(*) FROM sessions WHERE id='s_med' AND reasoning_effort='medium'"),
+                1
+            );
+            // Settings models.* normalized.
+            let research: String = c.query_row(
+                "SELECT json_extract(value, '$.effort') FROM settings WHERE key='models.research'",
+                [],
+                |r| r.get(0),
+            )?;
+            let compose: String = c.query_row(
+                "SELECT json_extract(value, '$.effort') FROM settings WHERE key='models.compose'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(research, "max");
+            assert_eq!(compose, "default");
+            // Placements normalized so typed BotPlacement deserializes cleanly.
+            let p1: String = c.query_row(
+                "SELECT json_extract(fact, '$.reasoning_effort') FROM bot_placements WHERE item_id='ST-1'",
+                [],
+                |r| r.get(0),
+            )?;
+            let p2: String = c.query_row(
+                "SELECT json_extract(fact, '$.reasoning_effort') FROM bot_placements WHERE item_id='ST-2'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(p1, "max");
+            assert_eq!(p2, "default");
+            assert_eq!(count(c, "SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn migration_130_preserves_history_commits_seq_and_notices() {
     let before_130 = db::MIGRATIONS
         .iter()
@@ -1598,8 +1744,8 @@ fn migration_128_strips_main_bot_from_teams_and_rewrites_steve_fallback() {
 }
 
 #[test]
-fn migration_140_rebinds_work_tidy_to_item_lifecycle_preserving_cursor() {
-    let (_dir, path) = at_version(139);
+fn migration_141_rebinds_work_tidy_to_item_lifecycle_preserving_cursor() {
+    let (_dir, path) = at_version(140);
     let c = Connection::open(&path).unwrap();
     c.execute_batch(
         "INSERT INTO outbox_events (seq, id, workspace_id, topic, version, payload, created)

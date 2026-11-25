@@ -206,7 +206,11 @@ fn gateway_for(
                     name: b.name.clone(),
                     harness: route.harness.clone().unwrap_or_default(),
                     model: b.model.clone(),
-                    reasoning_effort: route.effort.clone(),
+                    reasoning_effort: route
+                        .effort
+                        .as_deref()
+                        .and_then(steve_types::ReasoningEffort::parse)
+                        .unwrap_or_default(),
                     ..Default::default()
                 },
                 ws,

@@ -23,6 +23,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use steve_store::Store;
+use steve_types::ReasoningEffort;
 
 use crate::config::CoreConfig;
 use crate::gateway::Tier;
@@ -105,41 +106,33 @@ pub fn harness_name(h: &str) -> String {
     steve_acp::adapters::spec(h, None).name
 }
 
-/// The label of a reasoning effort, by its usual name (`high` → 高); an unknown one has none.
-pub fn effort_label(e: &str) -> Option<&'static str> {
-    Some(match e {
-        "none" | "off" => "关闭",
-        "minimal" => "最低",
-        "low" => "低",
-        "medium" => "中",
-        "high" => "高",
-        "xhigh" => "很高",
-        "max" => "最高",
-        "ultra" => "极致",
-        _ => return None,
-    })
+/// The Chinese label of a canonical [`ReasoningEffort`] (used in model-facing config prompts).
+pub fn effort_label(e: ReasoningEffort) -> &'static str {
+    match e {
+        ReasoningEffort::Default => "默认",
+        ReasoningEffort::Low => "低",
+        ReasoningEffort::Medium => "中",
+        ReasoningEffort::High => "高",
+        ReasoningEffort::Max => "最高",
+    }
 }
 
-/// [`effort_label`] as the UI shows it, in the request's language (the Chinese label stays what models read).
-pub fn effort_shown(e: &str) -> Option<String> {
-    Some(match e {
-        "none" | "off" => steve_i18n::t!("core.effort.none"),
-        "minimal" => steve_i18n::t!("core.effort.minimal"),
-        "low" => steve_i18n::t!("core.effort.low"),
-        "medium" => steve_i18n::t!("core.effort.medium"),
-        "high" => steve_i18n::t!("core.effort.high"),
-        "xhigh" => steve_i18n::t!("core.effort.xhigh"),
-        "max" => steve_i18n::t!("core.effort.max"),
-        "ultra" => steve_i18n::t!("core.effort.ultra"),
-        _ => return None,
-    })
+/// [`effort_label`] as the UI shows it, in the request's language.
+pub fn effort_shown(e: ReasoningEffort) -> String {
+    match e {
+        ReasoningEffort::Default => steve_i18n::t!("core.effort.default"),
+        ReasoningEffort::Low => steve_i18n::t!("core.effort.low"),
+        ReasoningEffort::Medium => steve_i18n::t!("core.effort.medium"),
+        ReasoningEffort::High => steve_i18n::t!("core.effort.high"),
+        ReasoningEffort::Max => steve_i18n::t!("core.effort.max"),
+    }
 }
 
-/// Efforts as the settings page lists them: `{key, label}` with the label in the request's language
-/// (an effort with no usual name by its own).
-fn efforts_shown(list: &[String]) -> Vec<Value> {
-    list.iter()
-        .map(|k| json!({"key": k, "label": effort_shown(k).unwrap_or_else(|| k.clone())}))
+/// Steve's five canonical reasoning effort levels as `{key, label}` in the request's language.
+pub fn canonical_efforts_shown() -> Vec<Value> {
+    ReasoningEffort::ALL
+        .into_iter()
+        .map(|k| json!({"key": k.as_str(), "label": effort_shown(k)}))
         .collect()
 }
 
@@ -223,7 +216,7 @@ pub struct Choice {
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
+    pub effort: Option<ReasoningEffort>,
 }
 
 impl Default for Choice {
@@ -342,13 +335,13 @@ pub struct Steve {
     /// The bot's model as set (`None`: the harness default).
     pub model: Option<String>,
     /// The bot's reasoning effort as set.
-    pub bot_effort: Option<String>,
+    pub bot_effort: ReasoningEffort,
     /// What its judgments run on: its harness (judgments fail while that adapter is missing).
     pub runs_on: String,
     /// Model preferences (the Bot's model first). The gateway only dispatches the first.
     pub models: Vec<String>,
-    /// The effort passed to the harness (the bot's, when the harness takes it).
-    pub effort: Option<String>,
+    /// Steve's canonical reasoning effort passed to the harness (the adapter maps or falls back).
+    pub effort: ReasoningEffort,
     /// Why its judgments cannot run now, when they cannot (its adapter is missing).
     pub note: Option<String>,
     /// Where the first model comes from when the bot names none.
@@ -456,23 +449,22 @@ pub fn validate_bot_patch(
 }
 
 fn validate_surface_field(h: &Harness, key: &str, value: &Value) -> Result<(), String> {
-    let Some(value) = value.as_str().filter(|v| {
-        if key == "model" {
-            valid_model(v)
-        } else {
-            !v.trim().is_empty() && v.len() <= 100
+    if key == "reasoning_effort" {
+        let Some(raw) = value.as_str() else {
+            return Err(steve_i18n::t!("core.bot.invalid_selection", field = key));
+        };
+        if ReasoningEffort::parse(raw).is_none() {
+            return Err(steve_i18n::t!("core.bot.invalid_selection", field = key));
         }
-    }) else {
+        return Ok(());
+    }
+    let Some(value) = value.as_str().filter(|v| valid_model(v)) else {
         return Err(steve_i18n::t!("core.bot.invalid_selection", field = key));
     };
     if h.ready != Some(true) {
         return Ok(());
     }
-    let supported = if key == "model" {
-        h.models.iter().any(|m| m.id == value)
-    } else {
-        h.takes_effort(value)
-    };
+    let supported = h.models.iter().any(|m| m.id == value);
     if !supported {
         return Err(steve_i18n::t!(
             "core.bot.unsupported_selection",
@@ -642,9 +634,15 @@ impl Models {
                 b.name,
                 b.harness,
                 b.model.filter(|m| valid_model(m)),
-                b.reasoning_effort.filter(|e| !e.is_empty()),
+                b.reasoning_effort,
             ),
-            None => (None, "Steve".into(), default_adapter(), None, None),
+            None => (
+                None,
+                "Steve".into(),
+                default_adapter(),
+                None,
+                ReasoningEffort::Default,
+            ),
         };
         // the bot's harness, whatever it is: a missing or unavailable adapter fails its judgments
         // (and says so) rather than moving them silently to another one
@@ -663,9 +661,7 @@ impl Models {
                 models.push(m);
             }
         }
-        let effort = bot_effort
-            .clone()
-            .filter(|e| h.as_ref().is_some_and(|h| h.takes_effort(e)));
+        let effort = bot_effort;
         let model_note = match &model {
             Some(_) => None,
             None if models.is_empty() => Some(steve_i18n::t!("core.models.note.adapter_default")),
@@ -696,10 +692,10 @@ impl Models {
             }
         };
         let c: Choice = serde_json::from_value(v?).ok()?;
-        let h = self.harness(&c.harness)?;
+        let _h = self.harness(&c.harness)?;
         let c = Choice {
             models: c.models.into_iter().filter(|m| valid_model(m)).collect(),
-            effort: c.effort.filter(|e| h.takes_effort(e)),
+            effort: c.effort.and_then(ReasoningEffort::non_default),
             harness: c.harness,
         };
         Some(c)
@@ -878,7 +874,7 @@ impl Models {
             {
                 c.models.push(m);
             }
-            c.effort = c.effort.filter(|e| h.takes_effort(e));
+            c.effort = c.effort.and_then(ReasoningEffort::non_default);
         }
         Some(c)
     }
@@ -899,14 +895,15 @@ impl Models {
                     },
                     effort: c
                         .effort
-                        .or_else(|| same.then(|| st.effort.clone()).flatten()),
+                        .and_then(ReasoningEffort::non_default)
+                        .or_else(|| same.then(|| st.effort.non_default()).flatten()),
                     harness: c.harness,
                 }
             }
             None => Choice {
                 harness: st.runs_on.clone(),
                 models: st.models.clone(),
-                effort: st.effort.clone(),
+                effort: st.effort.non_default(),
             },
         }
     }
@@ -1076,7 +1073,9 @@ impl Models {
                     "id": h.id, "name": h.name, "builtin": h.builtin, "ready": h.ready,
                     "modes": h.modes,
                     "judgments": h.offers_mode(steve_node_api::PermissionMode::Plan),
-                    "efforts": efforts_shown(&h.efforts),
+                    "efforts": canonical_efforts_shown(),
+                    "effort_mode": h.effort_mode,
+                    "effort_map": h.effort_map(None),
                     "default_model": h.default_model,
                     "default_models": self.defaults.harness_list(Some(h)),
                 })
@@ -1148,8 +1147,9 @@ impl Models {
             let patch = steve_store::BotPatch {
                 harness: Some(choice.harness.clone()),
                 model: Some(choice.model.clone()),
-                // A model change must not carry an incompatible reasoning level across adapters.
-                reasoning_effort: Some(bot.reasoning_effort.filter(|e| target.takes_effort(e))),
+                // Canonical Steve reasoning effort is preserved across adapters; the adapter layer
+                // maps it to the target harness/model or falls back to model default.
+                reasoning_effort: Some(bot.reasoning_effort),
                 ..Default::default()
             };
             self.store.bots().patch(&bot.id, &patch, actor)?;
@@ -1348,8 +1348,17 @@ fn choice_value(
     let h = harness.clone().unwrap_or_else(default_adapter);
     let effort = match o.get("effort") {
         None | Some(Value::Null) => None,
-        Some(Value::String(e)) if e.is_empty() => None,
-        Some(Value::String(e)) if known(&h).is_some_and(|x| x.takes_effort(e)) => Some(e.clone()),
+        Some(Value::String(e)) if e.trim().is_empty() => None,
+        Some(Value::String(e)) => match ReasoningEffort::parse(e.trim()) {
+            Some(ReasoningEffort::Default) => None,
+            Some(explicit) => Some(explicit),
+            None => {
+                return Err(steve_i18n::t!(
+                    "core.models.invalid.choice_effort",
+                    purpose = purpose_label(p.key)
+                ));
+            }
+        },
         Some(_) => {
             return Err(steve_i18n::t!(
                 "core.models.invalid.choice_effort",
@@ -1417,11 +1426,11 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    fn ch(h: &str, m: &[&str], e: Option<&str>) -> Choice {
+    fn ch(h: &str, m: &[&str], e: Option<ReasoningEffort>) -> Choice {
         Choice {
             harness: h.into(),
             models: l(m),
-            effort: e.map(String::from),
+            effort: e,
         }
     }
 
@@ -1459,7 +1468,7 @@ mod tests {
             &s,
             BotPatch {
                 model: Some(Some("claude-opus-5-5".into())),
-                reasoning_effort: Some(Some("high".into())),
+                reasoning_effort: Some(ReasoningEffort::High),
                 ..BotPatch::default()
             },
         );
@@ -1468,35 +1477,35 @@ mod tests {
             ch(
                 CLAUDE_CODE,
                 &["claude-opus-5-5", "sonnet", "opus"],
-                Some("high")
+                Some(ReasoningEffort::High)
             )
         );
-        // Codex Steve: its model, no fallback list; an effort Codex does not take is dropped
+        // Codex Steve: its model, no fallback list; canonical Max maps on Codex at adapter layer
         patch_bot(
             &s,
             BotPatch {
                 harness: Some(CODEX.into()),
                 model: Some(Some("gpt-6-luna".into())),
-                reasoning_effort: Some(Some("ultra".into())),
+                reasoning_effort: Some(ReasoningEffort::Max),
                 ..BotPatch::default()
             },
         );
         assert_eq!(
             m.for_purpose("default", "route"),
-            ch(CODEX, &["gpt-6-luna"], Some("ultra"))
+            ch(CODEX, &["gpt-6-luna"], Some(ReasoningEffort::Max))
         );
         patch_bot(
             &s,
             BotPatch {
                 model: Some(None),
-                reasoning_effort: Some(Some("max".into())),
+                reasoning_effort: Some(ReasoningEffort::Max),
                 ..BotPatch::default()
             },
         );
-        // no model: the adapter's own default, shown as such (Codex takes max too)
+        // no model: the adapter's own default, shown as such
         assert_eq!(
             m.for_purpose("default", "chat"),
-            ch(CODEX, &[], Some("max"))
+            ch(CODEX, &[], Some(ReasoningEffort::Max))
         );
         let st = m.steve();
         assert_eq!(
@@ -1523,7 +1532,11 @@ mod tests {
         );
         assert_eq!(
             m.for_purpose("default", "chat"),
-            ch("no-such-harness", &["no-such-x"], None)
+            ch(
+                "no-such-harness",
+                &["no-such-x"],
+                Some(ReasoningEffort::Max)
+            )
         );
     }
 
@@ -1537,7 +1550,7 @@ mod tests {
             "default",
             &json!({"purposes": {
                 "route": {"harness": "claude-code", "models": ["opus", "haiku"], "effort": "low"},
-                "chat": {"harness": "codex", "models": ["gpt-6-sol"], "effort": "ultra"},
+                "chat": {"harness": "codex", "models": ["gpt-6-sol"], "effort": "max"},
                 "draft": {"harness": "codex"},
                 "title": {"harness": "claude-code", "effort": "max"},
             }}),
@@ -1546,7 +1559,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             m.for_call("default", "route", Tier::Fast),
-            ch(CLAUDE_CODE, &["opus", "haiku"], Some("low"))
+            ch(CLAUDE_CODE, &["opus", "haiku"], Some(ReasoningEffort::Low))
         );
         // channel-rule intent is routing; a call with no workspace is for the only workspace
         assert_eq!(
@@ -1555,7 +1568,7 @@ mod tests {
         );
         assert_eq!(
             m.for_purpose("default", "chat"),
-            ch(CODEX, &["gpt-6-sol"], Some("ultra"))
+            ch(CODEX, &["gpt-6-sol"], Some(ReasoningEffort::Max))
         );
         // a harness alone: that harness's default model (not Steve's, which is another harness's)
         assert_eq!(m.for_purpose("default", "draft"), ch(CODEX, &[], None));
@@ -1565,7 +1578,7 @@ mod tests {
             ch(
                 CLAUDE_CODE,
                 &["claude-sonnet-5-5", "sonnet", "opus"],
-                Some("max")
+                Some(ReasoningEffort::Max)
             )
         );
         // null goes back to following Steve
@@ -1667,6 +1680,7 @@ mod tests {
                         id: m.to_string(),
                         name: None,
                         description: None,
+                        efforts: None,
                     })
                     .collect();
             }
@@ -1771,8 +1785,11 @@ mod tests {
             json!({"purposes": {"route": {"models": ["a"], "effort": "huge"}}}),
             json!({"purposes": {"route": {"models": ["a"], "tier": "fast"}}}),
             json!({"purposes": {"route": {"harness": "no-such-harness"}}}),
-            // an effort only the other harness has
+            // harness-native effort names are rejected — only Steve's five canonical levels are accepted
             json!({"purposes": {"route": {"harness": "claude-code", "effort": "ultra"}}}),
+            json!({"purposes": {"route": {"harness": "codex", "effort": "ultra"}}}),
+            json!({"purposes": {"route": {"harness": "claude-code", "effort": "xhigh"}}}),
+            json!({"purposes": {"route": {"harness": "codex", "effort": "minimal"}}}),
             json!({"agents": {"no-such-harness": "x"}}),
             json!({"agents": {"codex": 3}}),
         ];
@@ -1782,9 +1799,9 @@ mod tests {
         }
         let ok = validate(
             &json!({"purposes": {
-            "research": {"models": [" claude-opus-5-5[1m] ", "us.anthropic.claude-x-v1:0"], "effort": "xhigh"},
+            "research": {"models": [" claude-opus-5-5[1m] ", "us.anthropic.claude-x-v1:0"], "effort": "high"},
             "chat": {"models": []},
-            "route": {"harness": "codex", "effort": "ultra"},
+            "route": {"harness": "codex", "effort": "max"},
         }, "agents": {"codex": "gpt-6-sol"}}),
             &hs,
         )
@@ -1792,9 +1809,9 @@ mod tests {
         assert_eq!(
             Value::Object(ok),
             json!({
-                "models.research": {"harness": "claude-code", "models": ["claude-opus-5-5[1m]", "us.anthropic.claude-x-v1:0"], "effort": "xhigh"},
+                "models.research": {"harness": "claude-code", "models": ["claude-opus-5-5[1m]", "us.anthropic.claude-x-v1:0"], "effort": "high"},
                 "models.chat": null,
-                "models.route": {"harness": "codex", "models": [], "effort": "ultra"},
+                "models.route": {"harness": "codex", "models": [], "effort": "max"},
                 "models.agent.codex": "gpt-6-sol",
             })
         );
@@ -1836,7 +1853,8 @@ mod tests {
         assert_eq!(y["value"]["models"], json!(["g"]));
         assert_eq!(y["effective"]["harness"], json!("codex"));
         assert_eq!(v["purposes"].as_array().unwrap().len(), PURPOSES.len());
-        assert_eq!(v["harnesses"][1]["efforts"][0]["key"], json!("low"));
+        assert_eq!(v["harnesses"][1]["efforts"][0]["key"], json!("default"));
+        assert_eq!(v["harnesses"][1]["efforts"][1]["key"], json!("low"));
     }
 
     #[test]

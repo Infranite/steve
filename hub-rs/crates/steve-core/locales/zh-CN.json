@@ -77,6 +77,7 @@
   "core.purpose.compose.desc": "在渠道里替你写回复",
   "core.purpose.judge.label": "完成判定",
   "core.purpose.judge.desc": "事项一轮结束后判断做没做完；默认避开干活 Bot 的模型（目前只记录，不改变事项）",
+  "core.effort.default": "默认",
   "core.effort.none": "关闭",
   "core.effort.minimal": "最低",
   "core.effort.low": "低",
