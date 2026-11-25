@@ -5,7 +5,7 @@
  * they are read again at once. Nodes and devices refresh every 10 seconds while visible for live counters that
  * lack change events. Per-Node harness reports are read with them and can be explicitly
  * reprobed on a Node's page; vitals are read every minute (the Hub samples once a minute). */
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { api, type RDevice, type RNodeHarnessReport, type RUpgradeDefault, type RVitals } from "@/api"
 import { access, type AccessView } from "@/access-api"
@@ -37,7 +37,9 @@ function usePoll<T>(load: () => Promise<T>, initial: T | null, keep: (v: T) => v
     document.addEventListener("visibilitychange", visible)
     return () => { live = false; clearTimeout(timer); document.removeEventListener("visibilitychange", visible) }
   }, [rev, ...deps])
-  return { value, error, replace: (v: T) => { keep(v); setValue(v) }, reload: () => setRev((x) => x + 1) }
+  const replace = useCallback((v: T) => { keep(v); setValue(v) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  const reload = useCallback(() => setRev((x) => x + 1), [])
+  return { value, error, replace, reload }
 }
 
 export type DevicesData = {
@@ -95,17 +97,21 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
   const hubVersion = st.version
   const ds = devices.value ?? []
   const views = useMemo(() => nodeViews(ds, nodes?.nodes ?? null, hubVersion), [ds, nodes, hubVersion])
+  const harnessesRef = useRef(harnesses.value)
+  harnessesRef.current = harnesses.value
+  const refreshHarnesses = useCallback(async (id: string) => {
+    const r = await api.refreshNodeHarnesses(id)
+    harnesses.replace({ ...(harnessesRef.current ?? {}), [id]: r.report })
+    harnesses.reload()
+  }, [harnesses.replace, harnesses.reload])
+  const reloadNodes = useCallback(() => { void readNodes(); devices.reload() }, [readNodes, devices.reload])
   const value: DevicesData = {
     views, nodesRead: nodes != null, nodesError: nodesError?.message ?? "", nodesOff: !!nodes?.off, devicesError: devices.error,
     harnesses: harnesses.value, harnessesError: harnesses.error,
-    refreshHarnesses: async (id) => {
-      const r = await api.refreshNodeHarnesses(id)
-      harnesses.replace({ ...(harnesses.value ?? {}), [id]: r.report })
-      harnesses.reload()
-    },
+    refreshHarnesses,
     access: acc.value, accessError: acc.error, hubVersion, vitals: vit.value, vitalsError: vit.error,
     upgradeDefault: defs.value?.upgrade ?? null, contextDefault: defs.value?.context ?? null,
-    reloadNodes: () => { void readNodes(); devices.reload() }, reloadAccess: acc.reload, reloadDefaults: defs.reload,
+    reloadNodes, reloadAccess: acc.reload, reloadDefaults: defs.reload,
   }
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

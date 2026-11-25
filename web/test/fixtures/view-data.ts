@@ -169,9 +169,9 @@ export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<
         requested_by: w.by ?? i.b, tier: w.tier ?? "decide",
       }) })
     }
-    if (i.outs?.length) {
+    if (i.outs?.length || i.progress) {
       qc.setQueryData(["detail", scopeKey(), "item", i.id], {
-        decisions: [], timeline: [], dependents: [], goalsList: [], plan: [], planRounds: [],
+        decisions: [], timeline: i.progress ? [{ id: 1, ts: i.updated ?? 0, actor: i.b, kind: "progress", text: i.progress, session_id: null }] : [], dependents: [], goalsList: [], plan: [], planRounds: [],
         artifacts: (i.outs ?? []).map(([kind, title, location, id, created, , delivery_id]) => ({ kind, title, location, id, created, delivery_id })),
       })
     }

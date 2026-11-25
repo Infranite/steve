@@ -13,6 +13,7 @@
     "test": "npm run test:web",
     "test:web": "node --test web/test/*.test.mjs",
     "test:web:browser-smoke": "node web/test/browser-smoke.mjs",
+    "test:web:browser-extended": "node web/test/browser-smoke.mjs --extended",
     "bench:web:chat": "node web/bench/chat-stream.mjs"
   },
   "devDependencies": {
