@@ -6,7 +6,7 @@ export { briefHead } from "./data/transcript-model"
 /* UI selectors over the read projection. The shell is independent of the read views.
  * Item detail, queue contents and session events load when opened. */
 import { isCancelledError, useQuery } from "@tanstack/react-query"
-import { useEffect, useRef, useSyncExternalStore } from "react"
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { OPTION_IDS, optionKey } from "./decision-options"
@@ -23,7 +23,7 @@ import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
 import type { DecisionTier, DecisionView, FoldReason, ItemView, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
-import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onViews, messageView, messageViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
+import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onEntityView, onViewKinds, messageView, messageViews, openDecisions, resetViews, settle, settled, subscribeItemScope, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork, useItemView, useSessionView, useViewGroup } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
 
@@ -233,13 +233,21 @@ function unlockClosed() {
 ;(window as any).__steve = st
 
 const ls = new Set<() => void>()
+const shellLs = new Set<() => void>()
 let shellVersion = 0
 const publishStore = () => { st.ver++; ls.forEach((f) => f()) }
-export function emit() { shellVersion = st.ver + 1; publishStore() }
+export function emit() {
+  st.ver++
+  shellVersion = st.ver
+  shellLs.forEach((f) => f())
+  ls.forEach((f) => f())
+}
 const onStore = (cb: () => void) => { ls.add(cb); return () => ls.delete(cb) }
+const onShell = (cb: () => void) => { shellLs.add(cb); return () => shellLs.delete(cb) }
 export function useStoreSelector<T>(read: () => T) { return useSyncExternalStore(onStore, read) }
 export function useStore() { return useStoreSelector(() => st.ver) }
-export function useShellStore() { return useStoreSelector(() => shellVersion) }
+export function useShellSelector<T>(read: () => T) { return useSyncExternalStore(onShell, read) }
+export function useShellStore() { return useShellSelector(() => shellVersion) }
 export function toast(t: string, opts?: ToastOptions) { notify(t, opts) }
 /** Tell the instance manager once per version (per browser) that a newer Steve can be installed from Settings · 关于. */
 export function announceUpdate(update: StateUpdate | null) {
@@ -312,7 +320,8 @@ export function sessOf(s: SessionView): Sess {
 export const getSession = (id: string) => { const s = sessionView(id); return s ? sessOf(s) : undefined }
 export const getSessions = () => sessionViews().map(sessOf)
 export function useSession(id: string | null | undefined) {
-  const s = useSyncExternalStore(onViews, () => id ? sessionView(id) : undefined)
+  const s = useSessionView(id)
+  useViewGroup(id ? `decision:session:${id}` : null)
   const scope = scopeKey()
   useEffect(() => { if (id && !sessionView(id) && !table().tomb.has(`session:${id}`)) void readViews("session", [id]).catch(fail) }, [id, scope])
   return s ? sessOf(s) : undefined
@@ -596,11 +605,27 @@ export const chatMessage = (id: string) => {
   const v = messageView(id)
   return v && msgOfView(v)
 }
-let queued: Msg[] = []
+let queued: Msg[] = [], queuedVer = -1
 export function chatQueue() {
+  const ver = table().kindVersion("message")
+  if (ver === queuedVer) return queued
+  queuedVer = ver
   const rows = messageViews().map(msgOfView).filter((m) => m.held).sort((a, b) => (a.created ?? 0) - (b.created ?? 0) || a.id!.localeCompare(b.id!))
   if (rows.length !== queued.length || rows.some((m, i) => m !== queued[i])) queued = rows
   return queued
+}
+let completedResearchRuns = new Set<string>(), researchRunsVer = -1
+function hasCompletedResearchRun(run: string): boolean {
+  const ver = table().kindVersion("message")
+  if (ver !== researchRunsVer) {
+    researchRunsVer = ver
+    completedResearchRuns = new Set()
+    for (const v of messageViews()) {
+      const r = msgOfView(v).steps?.research?.run
+      if (r) completedResearchRuns.add(r)
+    }
+  }
+  return completedResearchRuns.has(run)
 }
 
 const proposals = new Map<string, any>()
@@ -700,6 +725,8 @@ async function itemDetails(id: string, signal: AbortSignal) {
 export function useItemDetail(id: string, enabled = true) {
   const { data } = useQuery({ queryKey: detailKey(id), queryFn: ({ signal }) => itemDetails(id, signal), enabled }, qc)
   const v = useItemView(id)
+  useViewGroup(`session:item:${id}`)
+  useViewGroup(`decision:item:${id}`)
   const sessions = itemSessions(id)
   const latest = itemWork(id).active?.id ?? sessions.at(-1)?.id
   useTranscripts(sessions.map((s) => s.id), latest ? [latest] : [])
@@ -812,7 +839,7 @@ function onHub(e: HubEvent) {
     return
   }
   if (e.type === "steve.tool") {
-    if (!messageViews().some((v) => msgOfView(v).steps?.research?.run === e.run))
+    if (!hasCompletedResearchRun(e.run))
       updateChat({ live: researchEvent(chatLive().live, e) }, "frame")
     return
   }
@@ -900,9 +927,10 @@ export function getItems(): Item[] {
   }
   return list
 }
-const useItemView = (id: string | null | undefined) => useSyncExternalStore(onViews, () => id ? itemView(id) : undefined)
 export function useItem(id: string | null | undefined) {
   const v = useItemView(id)
+  useViewGroup(id ? `decision:item:${id}` : null)
+  useViewGroup(id ? `session:item:${id}` : null)
   return v ? itemOf(v) : undefined
 }
 let runtimeScope = -1
@@ -925,13 +953,22 @@ function loadItemRuntime(id: string) {
 
 export function useItemRuntime(id: string) {
   const stable = useRef<SessionView[]>([])
-  useSyncExternalStore(onViews, () => {
+  const depsKey = (itemView(id)?.deps ?? []).join(",")
+  const subscribe = useCallback((cb: () => void) => {
+    const offs = [subscribeItemScope(id, cb)]
+    for (const dep of depsKey ? depsKey.split(",") : []) offs.push(onEntityView("item", dep, cb))
+    return () => { for (const off of offs) off() }
+  }, [id, depsKey])
+  useSyncExternalStore(subscribe, () => {
     const t = table()
     const sessions = sessionsForItem(id)
     if (sessions.length !== stable.current.length || sessions.some((s, n) => s !== stable.current[n])) stable.current = sessions
-    const revisions = (kind: string, rows: { id: string }[]) => rows.map((v) => t.rows.get(`${kind}:${v.id}`)?.rev).join(",")
-    const deps = itemView(id)?.deps ?? []
-    return `${revisions("session", stable.current)}|${revisions("decision", decisionsForItem(id))}|${deps.map((d) => itemView(d)?.state.kind).join(",")}`
+    let ver = Math.max(t.groupVersion(`session:item:${id}`), t.groupVersion(`decision:item:${id}`), t.entityVersion("item", id))
+    for (const dep of itemView(id)?.deps ?? []) {
+      const dv = t.entityVersion("item", dep)
+      if (dv > ver) ver = dv
+    }
+    return ver
   })
   const scope = scopeKey()
   const v = itemView(id)
@@ -967,6 +1004,8 @@ export const decisionBadgeCount = () => {
     return d.tier === "decide" && !item?.archived && (item?.snooze?.until ?? 0) <= now
   }).length
 }
+const onDecisionBadge = (cb: () => void) => onViewKinds(["decision", "item"], cb)
+export const useDecisionBadgeCount = () => useSyncExternalStore(onDecisionBadge, decisionBadgeCount)
 /** the memories waiting to be confirmed (their batch page is 知识 › 待确认) */
 export const memCards = (decisions?: DecisionView[]): Orphan[] => allCards(decisions).filter((c) => isMemCard(c.w))
 /** the open cards a session is waiting on, with or without an item */

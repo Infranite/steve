@@ -1,7 +1,7 @@
 import { VirtualList } from "@/components/virtual-list"
 import { SessionIdentity } from "@/components/session-identity"
-import { readViews, useEnded, useViewTable } from "@/data/sync"
-import { getItem, getSession, getSessions, sessOf } from "@/store"
+import { readViews, useEnded, useViewKinds } from "@/data/sync"
+import { getItem, getSession, getSessions, sessOf, useShellStore } from "@/store"
 import { HarnessMark } from "@/components/harness-mark"
 import { api } from "@/api"
 import { Button } from "@/components/ui/button"
@@ -84,7 +84,8 @@ export function SessionsView() {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const scroll = useRef<HTMLDivElement>(null)
-  useViewTable()
+  useViewKinds(["session", "decision", "item"])
+  useShellStore()
   const history = useEnded(sf !== "live" && !sq)
   const [hits, setHits] = useState<{ q: string; ids: string[] } | null>(null)
   useEffect(() => {

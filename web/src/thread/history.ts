@@ -1,26 +1,46 @@
 /* ST-50: history pages and the latest messages share one revisioned view table. */
-import { useSyncExternalStore } from "react"
+import { useCallback, useSyncExternalStore } from "react"
 import { modReq, qs, type ConversationMessage } from "@/api"
 import { chatMessage, msgOf, msgOfView, type Msg } from "@/store"
-import { itemView, loadMessagePage, messagePageState, messageViews, onViews, scopeKey, table, useMessagePage } from "@/data/sync"
+import { itemView, loadMessagePage, messagePageState, messageViews, onEntityView, onViewKinds, scopeKey, table, useMessagePage } from "@/data/sync"
 
 const empty: string[] = []
-let ids = empty, lastTable: ReturnType<typeof table> | undefined
+const noop = () => {}
+let ids = empty, lastMsgVer = -1, lastNoticeItemsVer = -1, noticeItemIds: string[] = []
+function noticeItemsVersion() {
+  const t = table()
+  let max = t.kindVersion("message") > 0 ? 0 : 0
+  for (let i = 0; i < noticeItemIds.length; i++) {
+    const v = t.entityVersion("item", noticeItemIds[i])
+    if (v > max) max = v
+  }
+  return max
+}
 function threadIds() {
   const t = table()
-  if (t === lastTable) return ids
-  lastTable = t
+  const msgVer = t.kindVersion("message")
+  const noticeVer = noticeItemsVersion()
+  if (msgVer === lastMsgVer && noticeVer === lastNoticeItemsVer) return ids
+  lastMsgVer = msgVer
+  const noticed = new Set<string>()
   const next = messageViews().filter((v) => {
     const m = msgOfView(v), meta = v.meta as { hidden?: boolean } | null
+    if (m.notice && m.item) noticed.add(m.item)
     return !m.held && !meta?.hidden && !m.notice?.closed && !(m.notice && m.item && itemView(m.item)?.state.kind === "closed")
   }).sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : a.id === b.id ? 0 : 1)).map((v) => v.id)
+  noticeItemIds = [...noticed]
+  lastNoticeItemsVer = noticeItemsVersion()
   if (next.length !== ids.length || next.some((id, i) => id !== ids[i])) ids = next
   return ids
 }
 
-export const useThreadIds = (enabled = true) => useSyncExternalStore(onViews, enabled ? threadIds : () => empty)
+const onThreadViews = (cb: () => void) => onViewKinds(["message", "item"], cb)
+export const useThreadIds = (enabled = true) => useSyncExternalStore(enabled ? onThreadViews : () => noop, enabled ? threadIds : () => empty)
 export const threadMsg = chatMessage
-export const useThreadMessage = (id?: string) => useSyncExternalStore(onViews, () => id ? chatMessage(id) : undefined)
+export function useThreadMessage(id?: string) {
+  const subscribe = useCallback((cb: () => void) => (id ? onEntityView("message", id, cb) : noop), [id])
+  return useSyncExternalStore(subscribe, () => (id ? chatMessage(id) : undefined))
+}
 export const threadMessages = () => threadIds().map((id) => chatMessage(id)!)
 export const historyState = () => {
   const p = messagePageState()

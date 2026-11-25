@@ -1,15 +1,14 @@
-import { useSettledDecisions } from "@/data/sync"
-import { Fragment, memo, useRef, useState, type ReactNode, type RefObject } from "react"
+import { itemView, itemViews, onViewKind, table, useOpenDecisions, useSettledDecisions } from "@/data/sync"
+import { Fragment, memo, useCallback, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react"
 import { BookOpenIcon, ChevronRightIcon } from "lucide-react"
 import { VirtualList } from "@/components/virtual-list"
 import { ItemSeparator } from "@/components/ui/item"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
-import { useOpenDecisions } from "@/data/sync"
 import { lang, useT } from "@/i18n"
 import { nearTime } from "@/i18n/format"
 import { InboxDone } from "@/inbox-done"
-import { dismissDrafts, memCards, pendingCards, snoozed, unsnooze, WT, type Orphan } from "@/store"
+import { dismissDrafts, memCards, pendingCards, snoozed, unsnooze, useShellStore, WT, type Orphan } from "@/store"
 import { busyOf } from "@/thread/decide"
 import { Chips, Empty, go, Group, ItemNo, Page, Row, SectionLabel, Segmented } from "@/ui"
 import { DecisionCard } from "@/thread/decision-card"
@@ -17,10 +16,31 @@ import { Count } from "@/view-shared"
 
 /* ibType is a decision type key ("all" or one of `types`); the chips show labels, mapped back on change */
 let ibTab: "pending" | "done" = "pending"; let ibType = "all"
+const onItemViews = (cb: () => void) => onViewKind("item", cb)
+/** Track only items linked to open decisions or snoozed, so patches on unrelated items never re-render the inbox. */
+function useInboxItemsVersion(decisions: ReturnType<typeof useOpenDecisions>) {
+  const ids = decisions.map((d) => d.item_id).filter((id): id is string => !!id)
+  const key = ids.join(",")
+  const read = useCallback(() => {
+    const t = table(), now = Date.now()
+    let sig = ""
+    for (const id of ids) {
+      const v = itemView(id)
+      sig += `${id}:${v ? t.entityVersion("item", id) : 0}|`
+    }
+    for (const v of itemViews()) {
+      if (v.snooze && v.snooze.until > now) sig += `s:${v.id}:${v.snooze.until}|`
+    }
+    return sig
+  }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  useSyncExternalStore(onItemViews, read)
+}
 export function InboxView() {
   useSettledDecisions(ibTab === "done")
+  useShellStore()
   const t = useT()
   const decisions = useOpenDecisions()
+  useInboxItemsVersion(decisions)
   const scroll = useRef<HTMLDivElement>(null)
   const [ignoring, setIgnoring] = useState(false)
   const [, f] = useState(0); const r = () => f((x) => x + 1)

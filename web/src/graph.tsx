@@ -1,4 +1,5 @@
-import { getItems, getSession } from "@/store"
+import { getItems, getSession, useShellStore } from "@/store"
+import { useViewKinds } from "@/data/sync"
 /* Dependency topology and provenance are separate views of the same items. */
 import { useMemo, useState } from "react"
 import dagre from "@dagrejs/dagre"
@@ -57,6 +58,8 @@ export function RelationGraph({ focus, scope = "comp", height = 420, hideSimple 
   /** for a side panel: no zoom controls, and flat muted fields instead of lifted cards */
   minimal?: boolean
 }) {
+  useShellStore()
+  useViewKinds(["item", "session", "decision"])
   const t = useT()
   const [mode, setMode] = useState<Mode>(focus && getSession(focus) ? "lineage" : "blocking")
   const [picked, setPicked] = useState<string | null>(focus ?? null)

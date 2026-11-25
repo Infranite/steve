@@ -107,7 +107,7 @@ function Stream({ text }: { text: string }) {
   useLayoutEffect(() => { const el = ref.current; if (!el) return; el.scrollTop = el.scrollHeight; setOver(el.scrollHeight > el.clientHeight + 1) }, [text])
   return (
     <div ref={ref} className={cn("mt-0.5 mb-1 max-h-36 overflow-hidden break-words text-muted-foreground", over && "[mask-image:linear-gradient(to_bottom,transparent,black_3rem)]")} data-thought-stream>
-      <Markdown text={text} className="type-callout" />
+      <Markdown text={text} streaming className="type-callout" />
     </div>
   )
 }
