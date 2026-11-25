@@ -13,7 +13,7 @@ import { cn } from "cn"
 import { ArrowLeftIcon, BotIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon, MessagesSquareIcon } from "lucide-react"
 import { conversationsApi, type ChannelEntry, type ConvBadge, type ConvMessage, type ConvRecord, type ConvRow, type ConvState, type Handling, type Reaction, type RecordPage } from "@/api/conversations"
 import { HANDLING_TONE, handlingDetail, shownUpTo } from "@/thread/channel-record"
-import { st, msgOf, discardOut, decide, editReplyDraft, tm, useHubEvents, type Msg } from "@/store"
+import { st, msgOf, discardOut, decide, editReplyDraft, tm, useHubEvents, useStoreSelector, type Msg } from "@/store"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { Badge } from "@/components/ui/badge"
 import { ChannelMessageBody } from "@/channels/message-body"
@@ -309,6 +309,7 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const [closed, setClosed] = useState(false)
   const s = m?.meta?.chan_out?.status as string | undefined, decision = m?.meta?.chan_out?.decision as string | undefined
   const tier = useSyncExternalStore(onViews, () => decision ? decisionView(decision)?.tier : undefined)
+  const busy = useStoreSelector(() => !!decision && st.pendingActions.has("decision:" + decision))
   const reason = m?.meta?.chan_out?.reason as string | undefined
   /* a new state from the Hub replaces what this click assumed */
   useEffect(() => setClosed(false), [s, decision])
@@ -319,7 +320,6 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const note = <div className={cn("type-callout", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{reason ? t("thread:chanOut.withReason", { label, reason }) : label}</div>
   if (shown !== "draft" || !decision) return note
   if (tier === "draft") return null
-  const busy = st.pendingActions.has("decision:" + decision)
   const discard = async () => { if (await discardOut(decision)) setClosed(true) }
   return (
     <div className="flex flex-wrap items-center gap-2" data-chan-out-decision={decision}>

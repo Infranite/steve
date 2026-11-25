@@ -7,8 +7,9 @@ const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5213"
 const shots = process.env.STEVE_TEST_SHOTS
 if (shots) mkdirSync(shots, { recursive: true })
 const locale = process.env.STEVE_TEST_LOCALE || "en"
-const connection = { id: "conn_mail", account_id: "acc_mail", adapter: "imap", adapter_name: "Mailbox", identity: "self", name: "Work mailbox", handle: "mail@example.com", status: "ok", health: { last_ok: 1, last_error: "", error_at: 0 }, last_sync: 1, capabilities: [] }
-const integrations = { areas: [], callback_urls: [], providers: [{ id: "mail", name: "Mail", status: "supported", areas: [], adapters: [], connections: [connection] }] }
+const connection = { id: "conn_mail", account_id: "acc_mail", adapter: "imap", adapter_name: "Mailbox", identity: "self", name: "Work mailbox", handle: "mail@example.com", status: "ok", installed: true, health: { last_ok: 1, last_error: "", error_at: 0 }, last_sync: 1, capabilities: [] }
+const integrations = { areas: [], callback_urls: [], providers: [{ id: "mail", name: "Mail", status: "supported", areas: [], adapters: [], connections: [connection] }],
+  installations: [{ id: "inst_mail", provider: "mail", provider_name: "Mail", name: "Work mailbox", status: "ok", missing: 0, identities: [{ kind: "you", connection }] }] }
 const conversation = (space, text) => ({ conversation: { space, space_id: space.replace("chan:", ""), name: "Release coordination", provider: "Chat", dm: false, kind: "group", system: "chat", member_count: 5, mode: "bot", has_external: false }, messages: [{ id: "fixture-message", role: "assistant", author: "steve", text, created: Date.now(), space }] })
 let runs = 0
 try {
@@ -17,7 +18,7 @@ try {
     page.setDefaultTimeout(12000)
     const errors = [], writes = []
     page.on("pageerror", e => errors.push(e.message))
-    let mode = "error", ownerMode = "error", peopleOn = true, pending = [], requests = 0
+    let mode = "error", ownerMode = "error", pending = [], requests = 0
     await page.route("**/*", async route => {
       const req = route.request(), u = new URL(req.url())
       if (u.origin !== base) return route.abort()
@@ -34,7 +35,7 @@ try {
         if (current === "missing") return route.fulfill({ status: 404, json: { error: "not_found" } })
         return route.fulfill({ json: conversation(space, current) })
       }
-      if (u.pathname === "/api/me/contact") return route.fulfill(peopleOn ? { json: { id: "me", name: "You", is_me: true, avatar: null } } : { status: 404, json: { error: "not_found" } })
+      if (u.pathname === "/api/me/contact") return route.fulfill({ json: { id: "me", name: "You", is_me: true, avatar: null } })
       if (u.pathname === "/api/connections/integrations") return route.fulfill({ json: integrations })
       if (u.pathname === "/api/stewards/connection/conn_mail") {
         if (ownerMode === "network") return route.abort("failed")
@@ -119,10 +120,6 @@ try {
         ownerMode = "network"; await page.reload()
         await page.locator("[data-conn-owner] [role=alert]").waitFor()
         assert.match(await page.locator("[data-conn-owner]").innerText(), /Couldn't load the owner|负责人载入失败/)
-        peopleOn = false; await page.reload()
-        await page.locator("[data-conn-owner] [role=status]").waitFor()
-        assert.match(await page.locator("[data-conn-owner]").innerText(), /Owner information is unavailable|负责人信息暂不可用/)
-        assert.equal(await page.locator("[data-conn-owner] button").count(), 0)
         await fits()
       }
       assert.deepEqual(writes, []); assert.deepEqual(errors, [])

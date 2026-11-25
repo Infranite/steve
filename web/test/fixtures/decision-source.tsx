@@ -1,6 +1,7 @@
 import { fixtureBot, seedMessages } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
+import { api } from "../../src/api"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { st, useStore, hubSubs, type Msg } from "../../src/store"
@@ -14,6 +15,15 @@ const main: Msg[] = [
 ]
 st.bots = { steve: fixtureBot({ id: "steve", main: true, n: "Steve", role: "你的助手" }) }
 seedMessages(location.search.includes("main") ? main : [])
+const origSay = api.say
+api.say = async (...args) => {
+  const r = await origSay(...args)
+  if (location.search.includes("main")) {
+    const id = typeof r === "object" && r !== null && "id" in r && typeof r.id === "string" ? r.id : "m_sent"
+    seedMessages([...main, { id, k: "me", t: args[0], created: Date.now() }])
+  }
+  return r
+}
 /* the Hub saying a chat message of the space changed, as its event stream would */
 window.addEventListener("fixture-reload", () => hubSubs.forEach((f) => f({ rev: 1, type: "chan_message", id: "cm_out", space_id: "sp1", ws: "default" })))
 function Fixture() {

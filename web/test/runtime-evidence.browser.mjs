@@ -5,7 +5,7 @@ import { readFile, mkdir, writeFile } from "node:fs/promises"
 import { emptySnapshot } from "./fixtures/wire-views.ts"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:19614"
-const apiPort = Number(process.env.STEVE_TEST_API_PORT || 19615)
+const apiPort = Number(process.env.STEVE_TEST_API_PORT || 0)
 const shots = process.env.STEVE_TEST_SHOTS
 if (shots) await mkdir(shots, { recursive: true })
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
@@ -51,18 +51,28 @@ const server = http.createServer(async (req, res) => {
     } else if (p === "/api/nodes") data = { nodes: [] }
     else if (p === "/api/vitals") data = { nodes: {} }
     else if (p === "/api/node-tags") data = { tags: {} }
+    else if (p === "/api/notifications") data = []
     else if (p.endsWith("/events")) data = []
     else { res.writeHead(404, { "content-type": "application/json" }); res.end("{}"); return }
     res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(data))
   } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); console.error(e) }
 })
 await new Promise(resolve => server.listen(apiPort, "127.0.0.1", resolve))
+const apiBase = `http://127.0.0.1:${server.address().port}`
 const open = async (rows, lang = "zh-CN", width = 375) => {
   const f = current = { rows, probes: 0, installs: 0, probeGates: [] }
   const page = await browser.newPage({ viewport: { width, height: 900 }, locale: lang, reducedMotion: "reduce" })
   page.setDefaultTimeout(12000)
   f.errors = []; page.on("pageerror", e => f.errors.push(e.message))
   await page.addInitScript(lang => { localStorage.setItem("steve-lang", lang); localStorage.setItem("steve-onboarded", "1") }, lang)
+  await page.route("**/*", async route => {
+    const u = new URL(route.request().url())
+    if (u.origin !== base) return route.abort("blockedbyclient")
+    if (u.pathname === "/auth/hello" || u.pathname.startsWith("/api/")) {
+      return route.fulfill({ response: await route.fetch({ url: apiBase + u.pathname + u.search }) })
+    }
+    return route.continue()
+  })
   await page.goto(base + "/#/devices/nodes/local/harness")
   await page.locator("[data-panel=runtimes]").waitFor()
   f.page = page

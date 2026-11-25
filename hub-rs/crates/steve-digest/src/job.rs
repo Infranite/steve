@@ -3,9 +3,12 @@ use std::time::Duration;
 
 use steve_modules::Modules;
 
+/// Deterministic window-cutting cadence over already-stored messages (no model or harness calls).
+pub const INTAKE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Cut windows from already stored messages once a minute. No history fetch, model or harness call.
 pub async fn run(m: Modules) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    let mut interval = tokio::time::interval(INTAKE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;

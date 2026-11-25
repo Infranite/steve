@@ -892,15 +892,22 @@ pub fn route_prompt(c: &RouteCtx, text: &str, history: &[Said], promote: bool) -
     route_prompt_for(c, &[text.to_string()], history, promote)
 }
 
+/// Maximum recent conversation messages included in the route classification prompt.
+const ROUTE_HISTORY_MAX: usize = 6;
+/// Character cap per recent conversation message in the route classification prompt.
+const ROUTE_HISTORY_CHARS: usize = 800;
+/// Maximum recent conversation messages included in the direct chat answer prompt.
+const ANSWER_HISTORY_MAX: usize = 10;
+
 /// The router prompt for several messages the user sent in a row, decided in one call ([`route_many`]);
 /// one message gives exactly [`route_prompt`].
 pub fn route_prompt_for(c: &RouteCtx, texts: &[String], history: &[Said], promote: bool) -> String {
-    let skip = history.len().saturating_sub(6);
+    let skip = history.len().saturating_sub(ROUTE_HISTORY_MAX);
     let recent: Vec<String> = history[skip..]
         .iter()
         .map(|m| {
-            let t = if js_len(&m.text) > 800 {
-                format!("{}…", js_head(&m.text, 800))
+            let t = if js_len(&m.text) > ROUTE_HISTORY_CHARS {
+                format!("{}…", js_head(&m.text, ROUTE_HISTORY_CHARS))
             } else {
                 m.text.clone()
             };
@@ -993,22 +1000,13 @@ pub fn route_prompt_for(c: &RouteCtx, texts: &[String], history: &[Said], promot
 }
 
 /// Build the stable routing instructions and workspace catalog before conversation-specific context.
+/// Bot rosters are deliberately omitted: `Route` does not select a Bot, and keeping bots out of
+/// the static head saves per-message tokens and preserves prompt-cache stability across bot edits.
 fn route_instructions(c: &RouteCtx) -> Vec<String> {
     let mut head: Vec<String> = vec![
         ROUTE_RULES.trim_end().to_string(),
-        "Bots (id: role):".into(),
+        "For item proposals, use task tags that describe the work and do not assign or name a Bot in the reply.".into(),
     ];
-    head.extend(c.bots.iter().map(|b| {
-        format!(
-            "  {}: {} (specialties: {}; harness: {}; model: {})",
-            b.id,
-            b.role,
-            b.specialties.join(", "),
-            b.harness,
-            b.model.as_deref().unwrap_or("default"),
-        )
-    }));
-    head.push("For item proposals, use task tags that describe the work and do not assign or name a Bot in the reply.".into());
     head.push("Projects (id: name — description · default bot). For an item: the project whose directory the work happens in; for research: the project to read; null if none fits:".into());
     head.extend(c.projects.iter().map(|p| {
         format!(
@@ -1401,7 +1399,7 @@ pub fn answer_prompt(
     files: &ChatFiles,
     extra: &str,
 ) -> String {
-    let skip = history.len().saturating_sub(10);
+    let skip = history.len().saturating_sub(ANSWER_HISTORY_MAX);
     let ctx = history[skip..]
         .iter()
         .map(|m| {
@@ -2467,6 +2465,7 @@ mod tests {
         assert!(p.contains("  ST-21: 改按钮 · run · \"帮我把按钮改了\""));
         assert!(p.contains("Steve is reading for an earlier question right now."));
         assert!(p.contains("  prj_a: prj_a —  · dev"));
+        assert!(!p.contains("Bots (id: role):"));
     }
     #[tokio::test]
     async fn shared_gateway_passes_images_and_clears_the_scope() {
