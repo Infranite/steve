@@ -85,9 +85,16 @@ if pr_api:
     print(json.dumps({"number": int(num), "title": pr_meta["title"], "body": pr_meta.get("body", "")}))
     sys.exit(0)
 if merged:
-    print(json.dumps([{"number": pull["number"], "merged_at": "2026-01-01T00:00:00Z",
-                       "merge_commit_sha": pull.get("merged_as", merged.group(1)),
-                       "head": {"sha": pull["head"]}, "base": {"ref": pull.get("base", "main")}}] if pull else []))
+    sha = merged.group(1)
+    commit_pulls = ci.get("commit_pulls") or {}
+    if sha in commit_pulls:
+        print(json.dumps(commit_pulls[sha]))
+    elif pull:
+        print(json.dumps([{"number": pull["number"], "merged_at": "2026-01-01T00:00:00Z",
+                           "merge_commit_sha": pull.get("merged_as", sha),
+                           "head": {"sha": pull["head"]}, "base": {"ref": pull.get("base", "main")}}]))
+    else:
+        print(json.dumps([]))
     sys.exit(0)
 if tested and any(p["sha"] == tested.group(1) for p in prs.values()):
     if ci.get("move_main") and not os.path.exists(prs_file + ".moved"):
@@ -301,7 +308,69 @@ Ran cargo nextest.
     assert rn == "Marking an item finished closes its cycle immediately.\n\n- Handles paused and running items.", rn
     assert m.extract_release_note("## Summary\nNothing else.") is None
     assert m.extract_release_note("## Release note\n<!-- only comment -->\n") is None
-    ok("## Release note extraction strips comments and trailing Upgrade: lines cleanly")
+    # Stops at any next Markdown heading (including ### Checks), while preserving headings inside code fences.
+    pr_subhead = (
+        "## Release note\n\nUser summary.\n\n"
+        "```md\n### Example heading inside fence\n```\n\n"
+        "### Checks\n\nChecks: npm run check\n\n"
+        "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
+    )
+    assert m.extract_release_note(pr_subhead) == "User summary.\n\n```md\n### Example heading inside fence\n```", m.extract_release_note(pr_subhead)
+    ok("## Release note extraction stops at any next heading and strips comments and trailing Upgrade: lines")
+
+    # lint_pr rejects Checks: paragraphs and signature lines inside ## Release note, and accepts them after ## Checks.
+    m.lint_pr(
+        "feat(web): split Node page",
+        "## Release note\n\nReorganized the Node page.\n\n## Checks\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+    )
+    m.lint_pr(
+        "feat(web): split Node page",
+        "## Release note\n\nReorganized the Node page.\n\n### Checks\n\nLocal checks: npm run check\n\nCo-Authored-By: Gemini <noreply@google.com>\n",
+    )
+    # Without ## Release note, Checks: and signature lines in PR body are allowed.
+    m.lint_pr(
+        "refactor(core): tidy helper",
+        "## Summary\n\nInternal cleanup.\n\nChecks: cargo test\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+    )
+    # Checks: / signature inside fenced code blocks or HTML comments within ## Release note are allowed.
+    m.lint_pr(
+        "docs(release): document example",
+        "## Release note\n\n<!-- Checks: comment ignored -->\n```\nChecks: example\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n```\n",
+    )
+    # Checks: variants inside ## Release note (no separating heading) are refused with ## Checks guidance.
+    for bad_checks in (
+        "Checks: npm run check, test:web 361/361",
+        "Local checks: steve-types, guards",
+        "Local focused checks: cargo check",
+        "**Checks:** npm run check",
+    ):
+        try:
+            m.lint_pr("feat(web): split Node page", f"## Release note\n\nUser summary.\n\n{bad_checks}\n")
+            raise AssertionError(f"checks paragraph passed lint: {bad_checks}")
+        except m.Refused as e:
+            assert "## Checks" in str(e) and "checks paragraph" in str(e), e
+    # Signature / attribution lines inside ## Release note are refused with ## Checks guidance.
+    for bad_sig in (
+        "🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+        "Generated with [Claude Code](https://claude.com/claude-code)",
+        "Co-Authored-By: Gemini <noreply@google.com>",
+        "Signed-off-by: Maintainer <m@example.com>",
+    ):
+        try:
+            m.lint_pr("feat(web): split Node page", f"## Release note\n\nUser summary.\n\n{bad_sig}\n")
+            raise AssertionError(f"signature line passed lint: {bad_sig}")
+        except m.Refused as e:
+            assert "## Checks" in str(e) and "signature/attribution line" in str(e), e
+    # Both Checks: and signature in the same ## Release note report both violations together.
+    try:
+        m.lint_pr(
+            "feat(web): split Node page",
+            "## Release note\n\nUser summary.\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+        )
+        raise AssertionError("combined Checks: + signature passed lint")
+    except m.Refused as e:
+        assert "checks paragraph" in str(e) and "signature/attribution line" in str(e) and "## Checks" in str(e), e
+    ok("lint rejects Checks: paragraphs and signature lines inside ## Release note with ## Checks guidance")
 
     # Version computation: pre-1.0 vs post-1.0, PATCH/MINOR/MAJOR, triggers.
     def mk(ct, *, breaking=False, upgrades=(), pr=None, title=None):
@@ -352,6 +421,25 @@ Ran cargo nextest.
     assert "**docs:** clarify versioning ([#53](https://github.com/acme/app/pull/53))" in rendered
     ok("release notes render in fixed order with upgrade notices, PR/commit links, and full coverage")
 
+    # Cross-entry deduplication in ## Before upgrading (identical text across entries, breaking fallback guard).
+    dup_entries = [
+        m.ReleaseEntry("1" * 40, 60, "feat(node)!: bump protocol", "feat", "node", True, "bump protocol",
+                       None, ("upgrade Hub and Node together.",), ()),
+        m.ReleaseEntry("2" * 40, 61, "fix(node)!: align protocol", "fix", "node", True, "align protocol",
+                       None, ("upgrade Hub and\n  Node together.",), ()),
+        m.ReleaseEntry("3" * 40, 62, "refactor(api)!: drop v1", "refactor", "api", True, "drop v1",
+                       None, (), ("drop legacy `/api/v1`.",)),
+        m.ReleaseEntry("4" * 40, 63, "chore(api)!: remove v1 routes", "chore", "api", True, "remove v1 routes",
+                       None, (), ("drop legacy   `/api/v1`.",)),
+    ]
+    dup_rendered = m.render_notes("0.12.0", dup_entries, "https://github.com/acme/app")
+    before_sec = dup_rendered.split("## Features")[0]
+    assert before_sec.count("upgrade Hub and") == 1, before_sec
+    assert "align protocol" not in before_sec, before_sec
+    assert before_sec.count("drop legacy") == 1, before_sec
+    assert "remove v1 routes" not in before_sec, before_sec
+    ok("render_notes deduplicates identical Upgrade:/BREAKING CHANGE: notices across entries")
+
     # lint --github-event with live refresh, invalid title rejection, and docs/releases/ file guard.
     with tempfile.TemporaryDirectory(prefix="steve-lint-event-") as tmp:
         ev = Path(tmp, "event.json")
@@ -368,6 +456,20 @@ Ran cargo nextest.
             refresh=lambda repo, num, tok, base: ("fix(ci): edited title", "Upgrade: restart Hub"),
             fetch_files=lambda repo, num, tok, base: [{"filename": "ops/cut-release.py", "status": "modified"}],
         )
+        # Live PR body with Checks: or signature inside ## Release note is refused in lint --github-event.
+        try:
+            m.lint_github_event(
+                str(ev),
+                env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+                refresh=lambda repo, num, tok, base: (
+                    "feat(web): regroup sidebar",
+                    "## Release note\n\nRegrouped sidebar.\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+                ),
+                fetch_files=lambda repo, num, tok, base: [{"filename": "web/src/nav.tsx", "status": "modified"}],
+            )
+            raise AssertionError("dirty ## Release note passed lint_github_event")
+        except m.Refused as e:
+            assert "## Checks" in str(e) and "checks paragraph" in str(e) and "signature/attribution line" in str(e), e
         # Ordinary PR adding or modifying any file under docs/releases/ is refused.
         for bad_files in (
             [{"filename": "docs/releases/0.11.0.md", "status": "added"}],
@@ -455,8 +557,12 @@ def integration_checks():
         for cmd in (("next",), ("cut", "--dry-run"), ("next", "--range", "v0.2.24..origin/main", "--offline"), ("cut", "--dry-run", "--range", "v0.2.24..origin/main", "--offline")):
             r = cut(a, *cmd)
             assert r.returncode == 1 and "PR #50" in r.stderr and "legacy title before convention" in r.stderr and "Update the PR title on GitHub" in r.stderr, (cmd, r)
-        # Online next/cut fails closed if GitHub PR API is unreachable (never silently falls back to commit messages).
+        # Online next/cut fails closed if GitHub API is unreachable (never silently falls back to commit messages).
         set_ci(conclusion="success", down=True)
+        r = cut(a, "next")
+        assert r.returncode == 1 and "can't read" in r.stderr and "from GitHub" in r.stderr, r
+        # Also fails closed if commits/{sha}/pulls returns [] and pulls/{number} is missing/unreachable.
+        set_ci(conclusion="success", pr_meta={})
         r = cut(a, "next")
         assert r.returncode == 1 and "can't read PR #50 from GitHub" in r.stderr, r
         ok("next and cut refuse non-Conventional PR titles with actionable hints and fail closed if GitHub is down")
@@ -614,9 +720,16 @@ def integration_checks():
         git(a, "checkout", "-q", "-b", "release/v0.4.0", "origin/main")
         commit(a, {"docs/releases/0.4.0.md": "# Steve v0.4.0\n"}, "chore(release): v0.4.0")
         assert cut(a, "lint").returncode == 0
-        # --pr-title check.
+        # --pr-title and --pr-body check.
         assert cut(a, "lint", "--pr-title", "fix(hub): handle EOF").returncode == 0
         assert cut(a, "lint", "--pr-title", "Handle EOF").returncode == 1
+        bad_body = Path(tmp, "bad-pr-body.md")
+        bad_body.write_text("## Release note\n\nFixed EOF.\n\nChecks: cargo test\n", encoding="utf-8")
+        r = cut(a, "lint", "--pr-title", "fix(hub): handle EOF", "--pr-body", str(bad_body))
+        assert r.returncode == 1 and "## Checks" in r.stderr, r
+        good_body = Path(tmp, "good-pr-body.md")
+        good_body.write_text("## Release note\n\nFixed EOF.\n\n## Checks\n\nChecks: cargo test\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n", encoding="utf-8")
+        assert cut(a, "lint", "--pr-title", "fix(hub): handle EOF", "--pr-body", str(good_body)).returncode == 0
         # --range check on main skips release PR merges and validates commits.
         assert cut(a, "lint", "--range", "v0.3.0..origin/main").returncode == 0
         ok("lint validates branch commits, PR titles, ranges, and enforces docs/releases/ cut-only rule")
@@ -841,8 +954,319 @@ def latest_tested_checks():
         ok("latest tested commit determines both tree and version bump; untested feat waits for next release")
 
 
+def upgrade_dedupe_and_integration_checks():
+    """Offline fixture checks for per-PR Upgrade: precedence/dedupe and integration PR discovery."""
+    # 1. Per-PR Upgrade: / BREAKING CHANGE: precedence & deduplication (mirrors v0.11.0 #547/#558).
+    with tempfile.TemporaryDirectory(prefix="steve-cut-dedupe-") as tmp:
+        fake_gh(tmp)
+        _, a = setup(tmp)
+        git(a, "tag", "-a", "v0.10.1", "-m", "Steve v0.10.1")
+        git(a, "push", "-q", "origin", "v0.10.1")
+
+        # PR #547: PR description has polished Upgrade:, commit has older wording -> ONLY PR description wins.
+        merge_pr(
+            a,
+            547,
+            "reform/wf0",
+            "refactor(workflow)!: remove legacy workflow engine",
+            {"src/wf.txt": "removed\n"},
+            "refactor(workflow)!: remove legacy workflow engine\n\n"
+            "Upgrade: drop legacy workflow tables. Remove STEVE_WORKFLOW from steve.env.\n"
+            "BREAKING CHANGE: old commit breaking wording.\n",
+        )
+        c547 = git(a, "rev-parse", "HEAD^2")
+
+        # PR #558: PR description has polished Upgrade:, commit AND merge commit body also have Upgrade: -> ONLY PR description wins.
+        git(a, "checkout", "-q", "-b", "reform/harnesses")
+        commit(
+            a,
+            {"src/h.txt": "h\n"},
+            "feat(devices)!: harness auto-upgrade\n\n"
+            "Upgrade: commit draft wording for STEVE_ADAPTER_UPDATES.\n",
+        )
+        c558 = git(a, "rev-parse", "HEAD")
+        git(a, "checkout", "-q", "main")
+        git(
+            a,
+            "merge",
+            "-q",
+            "--no-ff",
+            "reform/harnesses",
+            "-m",
+            "Merge pull request #558 from acme/reform/harnesses\n\n"
+            "feat(devices)!: harness auto-upgrade\n\n"
+            "Upgrade: merge commit body wording for STEVE_ADAPTER_UPDATES.\n",
+        )
+        git(a, "branch", "-q", "-D", "reform/harnesses")
+
+        # PR #559: PR description has NO Upgrade:, commits carry Upgrade: (with one duplicate across two commits) -> falls back & dedupes.
+        git(a, "checkout", "-q", "-b", "fix/sec")
+        commit(
+            a,
+            {"src/s1.txt": "1\n"},
+            "fix(security): reject custom harness env\n\n"
+            "Upgrade: move custom env into harness config on the Node.\n"
+            "Upgrade: secret use needs an online Node.\n",
+        )
+        c559a = git(a, "rev-parse", "HEAD")
+        commit(
+            a,
+            {"src/s2.txt": "2\n"},
+            "fix(security): harden vault boundary\n\n"
+            "Upgrade: secret use needs\n  an online Node.\n",
+        )
+        c559b = git(a, "rev-parse", "HEAD")
+        git(a, "checkout", "-q", "main")
+        git(
+            a,
+            "merge",
+            "-q",
+            "--no-ff",
+            "fix/sec",
+            "-m",
+            "Merge pull request #559 from acme/fix/sec\n\nfix(security): close boundary holes",
+        )
+        git(a, "branch", "-q", "-D", "fix/sec")
+
+        # PR #560: PR description repeats identical Upgrade: text from #559 -> cross-PR dedupe keeps one bullet.
+        merge_pr(
+            a,
+            560,
+            "fix/sec-followup",
+            "fix(security): require online node",
+            {"src/s3.txt": "3\n"},
+            "fix(security): require online node",
+        )
+        c560 = git(a, "rev-parse", "HEAD^2")
+        git(a, "push", "-q", "origin", "main")
+
+        pr547_body = (
+            "## Release note\n\nRemoved the legacy workflow engine.\n\n"
+            "Upgrade: drop legacy workflow tables. Remove `STEVE_WORKFLOW` from `steve.env` if set.\n"
+            "BREAKING CHANGE: polished PR breaking wording.\n"
+        )
+        pr558_body = (
+            "Upgrade: `STEVE_ADAPTER_UPDATES` is replaced by the Node setting (off by default).\n"
+        )
+        pr559_body = "## Release note\n\nClosed security boundary holes.\n"
+        pr560_body = "Upgrade: secret use needs an online Node.\n"
+        set_ci(
+            conclusion="success",
+            commit_pulls={
+                c547: [{"number": 547, "merged_at": "2026-11-25T01:00:00Z", "title": "refactor(workflow)!: remove legacy workflow engine", "body": pr547_body}],
+                c558: [{"number": 558, "merged_at": "2026-11-25T02:00:00Z", "title": "feat(devices)!: harness auto-upgrade", "body": pr558_body}],
+                c559a: [{"number": 559, "merged_at": "2026-11-25T03:00:00Z", "title": "fix(security): close boundary holes", "body": pr559_body}],
+                c559b: [{"number": 559, "merged_at": "2026-11-25T03:00:00Z", "title": "fix(security): close boundary holes", "body": pr559_body}],
+                c560: [{"number": 560, "merged_at": "2026-11-25T04:00:00Z", "title": "fix(security): require online node", "body": pr560_body}],
+            },
+        )
+
+        r_next = cut(a, "next", "--range", "v0.10.1..origin/main")
+        assert r_next.returncode == 0 and r_next.stdout.startswith("0.11.0 (minor, from v0.10.1)\n"), r_next
+        r_dry = cut(a, "cut", "--dry-run", "--range", "v0.10.1..origin/main", extra_env={"GH_REPO": "acme/app"})
+        assert r_dry.returncode == 0, r_dry
+        before = r_dry.stdout.split("## Before upgrading\n\n", 1)[1].split("\n\n## ", 1)[0]
+        bullets = [line for line in before.splitlines() if line.startswith("- ")]
+        assert len(bullets) == 5, before
+        assert "Remove `STEVE_WORKFLOW` from `steve.env` if set." in before and "STEVE_WORKFLOW from steve.env." not in before, before
+        assert "polished PR breaking wording." in before and "old commit breaking wording." not in before, before
+        assert "`STEVE_ADAPTER_UPDATES` is replaced" in before and "commit draft wording" not in before and "merge commit body wording" not in before, before
+        assert before.count("secret use needs an online Node.") == 1, before
+        assert "move custom env into harness config on the Node." in before, before
+        assert before.count("#547") == 2 and before.count("#558") == 1 and before.count("#559") == 2 and "#560" not in before, before
+        ok("per-PR Upgrade:/BREAKING CHANGE: prefers PR description, falls back to commits, and dedupes identical text")
+
+    # 2. Integration PR (#569) landing multiple sub-PRs via local non-PR merges + commits/{sha}/pulls discovery.
+    with tempfile.TemporaryDirectory(prefix="steve-cut-integ-") as tmp:
+        fake_gh(tmp)
+        _, a = setup(tmp)
+        git(a, "tag", "-a", "v0.11.0", "-m", "Steve v0.11.0")
+        git(a, "push", "-q", "origin", "v0.11.0")
+        v011_sha = git(a, "rev-parse", "v0.11.0^{commit}")
+
+        # Build 4 independent feature branches off main, then merge them locally into integ/batch-0.12 (step-1..step-4).
+        git(a, "checkout", "-q", "-b", "pr/560", "main")
+        commit(a, {"src/waits.txt": "1\n"}, "feat(waits): enforce unified WaitContract")
+        c560_1 = git(a, "rev-parse", "HEAD")
+        commit(a, {"src/waits.txt": "2\n"}, "fix(waits): align wait fixtures")
+        c560_2 = git(a, "rev-parse", "HEAD")
+
+        git(a, "checkout", "-q", "-b", "pr/507", "main")
+        commit(
+            a,
+            {"src/backup.txt": "1\n"},
+            "Bundle verified restic engine\n\nUpgrade: draft commit upgrade note for backup v2.\n",
+        )
+        c507_1 = git(a, "rev-parse", "HEAD")
+        commit(a, {"src/backup.txt": "2\n"}, "Remove backup v2 transitional checks")
+        c507_2 = git(a, "rev-parse", "HEAD")
+
+        git(a, "checkout", "-q", "-b", "pr/563", "main")
+        commit(
+            a,
+            {"src/store.txt": "1\n"},
+            "refactor(store)!: remove legacy remnants\n\n"
+            "Upgrade: back up SQLite before migration 128.\n",
+        )
+        c563_1 = git(a, "rev-parse", "HEAD")
+
+        git(a, "checkout", "-q", "-b", "pr/553", "main")
+        commit(a, {"src/handoff.txt": "1\n"}, "fix(handoff): return typed HandoffError codes")
+        c553_1 = git(a, "rev-parse", "HEAD")
+
+        # Assemble integ/batch-0.12 with local non-PR merge commits (matching real origin/integ/batch-0.12).
+        git(a, "checkout", "-q", "-b", "integ/batch-0.12", "main")
+        for step, br in enumerate(("pr/560", "pr/507", "pr/563", "pr/553"), 1):
+            git(a, "merge", "-q", "--no-ff", br, "-m", f"Merge branch 'integ/batch-0.12' into step-{step}")
+            git(a, "branch", "-q", "-D", br)
+
+        # Land integ/batch-0.12 onto main through integration PR #569 (chore(integration)).
+        git(a, "checkout", "-q", "main")
+        git(
+            a,
+            "merge",
+            "-q",
+            "--no-ff",
+            "integ/batch-0.12",
+            "-m",
+            "Merge pull request #569 from acme/integ/batch-0.12\n\nchore(integration): land batch 0.12",
+        )
+        git(a, "branch", "-q", "-D", "integ/batch-0.12")
+        git(a, "push", "-q", "origin", "main")
+
+        pr569_obj = {
+            "number": 569,
+            "merged_at": "2026-11-25T10:00:00Z",
+            "title": "chore(integration): land batch 0.12",
+            "body": "Batch integration PR landing #560, #507, #563, #553.",
+        }
+        pr560_obj = {
+            "number": 560,
+            "merged_at": "2026-11-25T10:00:00Z",
+            "title": "feat(waits): unify wait contract and timeout handling",
+            "body": "## Release note\n\nUnified item dependency wait deadlines.\n",
+        }
+        pr507_obj = {
+            "number": 507,
+            "merged_at": "2026-11-25T10:00:00Z",
+            "title": "feat(backup)!: single encrypted backup repository",
+            "body": "Upgrade: initialize the encrypted backup repository after upgrading.\n",
+        }
+        # Omit title/body on #563 in commits/{sha}/pulls to also exercise pulls/{number} fallback fetch.
+        pr563_ref = {"number": 563, "merged_at": "2026-11-25T10:00:00Z"}
+        pr553_obj = {
+            "number": 553,
+            "merged_at": "2026-11-25T10:00:00Z",
+            "title": "fix(handoff): return typed HandoffError codes",
+            "body": None,
+        }
+        # Unmerged (open / closed-without-merge) and already-released PRs must be ignored.
+        open_pr = {"number": 590, "merged_at": None, "title": "wip not merged", "body": ""}
+        closed_pr = {"number": 591, "merged_at": None, "title": "bad closed title", "body": ""}
+        already_released_pr = {
+            "number": 400,
+            "merged_at": "2026-11-20T00:00:00Z",
+            "merge_commit_sha": v011_sha,
+            "title": "feat(old): already released before v0.11.0",
+            "body": "Upgrade: old upgrade already shipped.\n",
+        }
+
+        commit_pulls = {
+            c560_1: [pr560_obj, pr569_obj],
+            c560_2: [pr560_obj, pr569_obj],
+            c507_1: [pr507_obj, pr569_obj],
+            c507_2: [pr507_obj],  # even if GitHub omits #569 on some commits
+            c563_1: [pr563_ref, pr569_obj],
+            c553_1: [pr553_obj, pr569_obj, open_pr, closed_pr, already_released_pr],
+        }
+        pr_meta = {
+            "563": {"title": "refactor(store)!: remove legacy remnants", "body": ""},
+            "569": {"title": "chore(integration): land batch 0.12", "body": "Batch PR."},
+        }
+        set_ci(conclusion="success", commit_pulls=commit_pulls, pr_meta=pr_meta)
+
+        r_next = cut(a, "next")
+        assert r_next.returncode == 0 and r_next.stdout.startswith("0.12.0 (minor, from v0.11.0)\n"), r_next
+        assert "#560 [feat]" in r_next.stdout, r_next.stdout
+        assert "#507 [breaking (pre-1.0 -> MINOR), Upgrade:, feat]" in r_next.stdout, r_next.stdout
+        assert "#563 [breaking (pre-1.0 -> MINOR), Upgrade:]" in r_next.stdout, r_next.stdout
+        assert "#569" not in r_next.stdout, r_next.stdout
+        assert "#590" not in r_next.stdout and "#591" not in r_next.stdout and "#400" not in r_next.stdout, r_next.stdout
+
+        r_dry = cut(a, "cut", "--dry-run", extra_env={"GH_REPO": "acme/app"})
+        assert r_dry.returncode == 0, r_dry
+        out = r_dry.stdout
+        assert "# Steve v0.12.0" in out, out
+        before = out.split("## Before upgrading\n\n", 1)[1].split("\n\n## ", 1)[0]
+        assert "initialize the encrypted backup repository after upgrading." in before, before
+        assert "draft commit upgrade note for backup v2" not in before, before
+        assert "back up SQLite before migration 128." in before and "#563" in before, before
+        assert "#569" not in before and "#400" not in before, before
+        features = out.split("## Features\n\n", 1)[1].split("\n\n## ", 1)[0]
+        assert "#560" in features and "Unified item dependency wait deadlines." in features and "#507" in features, features
+        fixes = out.split("## Fixes\n\n", 1)[1].split("\n\n## ", 1)[0]
+        assert "#553" in fixes and "return typed HandoffError codes" in fixes, fixes
+        other = out.split("## Other changes\n\n", 1)[1]
+        assert "**refactor(store):** remove legacy remnants ([#563](https://github.com/acme/app/pull/563))" in other, other
+        assert "**chore(integration):** land batch 0.12 ([#569](https://github.com/acme/app/pull/569))" in other, other
+        assert "#590" not in out and "#591" not in out and "#400" not in out, out
+        ok("integration PR resolves all merged sub-PRs via commits/{sha}/pulls, computes MINOR, and keeps chore carrier in Other changes")
+
+        # Non-conventional title on a sub-PR inside an integration PR is refused with an actionable hint.
+        bad_pulls = dict(commit_pulls)
+        bad_pulls[c507_1] = [dict(pr507_obj, title="Backup v2 overhaul"), pr569_obj]
+        bad_pulls[c507_2] = [dict(pr507_obj, title="Backup v2 overhaul")]
+        set_ci(conclusion="success", commit_pulls=bad_pulls, pr_meta=pr_meta)
+        r_bad = cut(a, "next")
+        assert r_bad.returncode == 1 and "PR #507" in r_bad.stderr and "Backup v2 overhaul" in r_bad.stderr, r_bad
+        ok("non-conventional sub-PR title inside an integration PR is refused")
+
+        # Post-1.0 MAJOR bump and single-PR carrier tie-break (sub-PR has higher number than integration PR).
+        git(a, "tag", "-a", "v1.0.0", "-m", "Steve v1.0.0")
+        git(a, "push", "-q", "origin", "v1.0.0")
+        git(a, "checkout", "-q", "-b", "pr/571", "main")
+        commit(
+            a,
+            {"src/api.txt": "v2\n"},
+            "refactor(api)!: drop v1 endpoints\n\nUpgrade: point clients at /api/v2.\n",
+        )
+        c571 = git(a, "rev-parse", "HEAD")
+        git(a, "checkout", "-q", "-b", "integ/single", "main")
+        git(a, "merge", "-q", "--no-ff", "pr/571", "-m", "Merge branch 'integ/single' into step-1")
+        git(a, "checkout", "-q", "main")
+        git(
+            a,
+            "merge",
+            "-q",
+            "--no-ff",
+            "integ/single",
+            "-m",
+            "Merge pull request #570 from acme/integ/single\n\nchore(integration): land single breaking PR",
+        )
+        git(a, "branch", "-q", "-D", "pr/571", "integ/single")
+        git(a, "push", "-q", "origin", "main")
+        set_ci(
+            conclusion="success",
+            commit_pulls={
+                c571: [
+                    {"number": 571, "merged_at": "2026-11-25T11:00:00Z", "title": "refactor(api)!: drop v1 endpoints", "body": ""},
+                    {"number": 570, "merged_at": "2026-11-25T11:00:00Z", "title": "chore(integration): land single breaking PR", "body": ""},
+                ]
+            },
+        )
+        r_major = cut(a, "next")
+        assert r_major.returncode == 0 and r_major.stdout.startswith("2.0.0 (major, from v1.0.0)\n"), r_major
+        assert "#571 [breaking]" in r_major.stdout and "#570" not in r_major.stdout, r_major
+        r_major_dry = cut(a, "cut", "--dry-run", extra_env={"GH_REPO": "acme/app"})
+        assert r_major_dry.returncode == 0, r_major_dry
+        before_major = r_major_dry.stdout.split("## Before upgrading\n\n", 1)[1].split("\n\n## ", 1)[0]
+        assert "point clients at /api/v2." in before_major and "#571" in before_major and "#570" not in before_major, before_major
+        ok("post-1.0 breaking sub-PR triggers MAJOR and single-PR carrier does not steal sub-PR commit trailers")
+
+
 if __name__ == "__main__":
     unit_checks()
     integration_checks()
     latest_tested_checks()
+    upgrade_dedupe_and_integration_checks()
     print("All cut-release checks passed")

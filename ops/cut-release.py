@@ -14,10 +14,13 @@ Versions are MAJOR.MINOR.PATCH (CONTRIBUTING.md, "Changes and releases"):
            or breaking changes before 1.0. Resets PATCH to 0.
   - PATCH: fixes, performance, docs, and internal refactors only; safe to roll back in place.
 
-Release notes are generated automatically from `main`'s first-parent history since the last `vX.Y.Z`
-tag. Merged PRs use the PR title and optional `## Release note` section from the PR description;
-direct commits use their commit subject. `Upgrade:` trailers (and breaking notices) appear at the
-top under `## Before upgrading`, followed by Features, Fixes, Performance, and Other changes.
+Release notes are generated automatically from all commits since the last `vX.Y.Z` tag. Merged PRs
+are resolved from git merge commits and GitHub's `commits/{sha}/pulls` API (so PRs landed through
+an integration branch are included alongside direct merges) using live PR titles, descriptions, and
+optional `## Release note` sections; direct commits without a merged PR use their commit subject.
+`Upgrade:` and `BREAKING CHANGE:` trailers prefer the PR description and fall back to the PR's own
+commit trailers only when the PR description has none, with identical notices deduplicated under
+`## Before upgrading`, followed by Features, Fixes, Performance, and Other changes.
 
 `cut` takes the newest first-parent commit on `origin/<branch>` whose own full CI push run passed,
 commits `docs/releases/X.Y.Z.md` on top of it (`chore(release): vX.Y.Z`, changing nothing else),
@@ -27,7 +30,7 @@ tag `vX.Y.Z` on the notes commit itself after the merge lands.
 Talks to `origin`; "can't reach it" is an error, never "there are no tags".
 """
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -60,6 +63,19 @@ TRAILER_STOP_RE = re.compile(
     r"|[A-Za-z][A-Za-z0-9-]*:\s|BREAKING[ -]CHANGE:\s|(?i:Closes|Fixes|Resolves|Refs)\s+#\d+)"
 )
 RELEASE_NOTE_HEADING_RE = re.compile(r"^##\s+Release notes?\s*$", re.I)
+NEXT_HEADING_RE = re.compile(r"^#{1,6}\s+")
+RELEASE_NOTE_CHECKS_RE = re.compile(
+    r"^(?:[*_]{1,2})?(?:local(?:\s+[a-z-]+)?\s+)?checks(?:[*_]{1,2})?[:：](?!:)",
+    re.I,
+)
+RELEASE_NOTE_SIGNATURE_RE = re.compile(
+    r"^(?:"
+    r"🤖"
+    r"|(?:[*_]{1,2})?Generated\s+(?:with|by)\s+\[[^\]]+\]\(https?://[^)]+\)(?:[*_]{1,2})?\s*$"
+    r"|(?:Co-Authored-By|Signed-off-by):\s*\S"
+    r")",
+    re.I,
+)
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
@@ -248,10 +264,10 @@ def _strip_trailers_outside_fences(lines):
     return out
 
 
-def extract_release_note(pr_body):
-    """Return the optional `## Release note` section from a PR description, or None."""
+def _extract_release_note_lines(pr_body):
+    """Return cleaned lines inside `## Release note` (up to the next Markdown heading), or []."""
     if not pr_body:
-        return None
+        return []
     lines = pr_body.splitlines()
     collected, in_section, fence = [], False, None
     for line in lines:
@@ -264,11 +280,11 @@ def extract_release_note(pr_body):
             if RELEASE_NOTE_HEADING_RE.match(line.strip()):
                 in_section = True
             continue
-        if re.match(r"^#{1,2}\s+", line):
+        if NEXT_HEADING_RE.match(line.strip()):
             break
         collected.append(line)
     if not collected:
-        return None
+        return []
     cleaned = _strip_trailers_outside_fences(collected)
     # Strip HTML comments only outside code fences.
     out, fence = [], None
@@ -276,7 +292,7 @@ def extract_release_note(pr_body):
 
     def flush_buf():
         if buf:
-            out.extend(HTML_COMMENT_RE.sub("", "\n".join(buf)).splitlines())
+            out.extend(HTML_COMMENT_RE.sub("", "\n".join(buf)).split("\n"))
             buf.clear()
 
     for line in cleaned:
@@ -287,8 +303,46 @@ def extract_release_note(pr_body):
         else:
             buf.append(line)
     flush_buf()
-    result = "\n".join(out).strip()
+    return out
+
+
+def extract_release_note(pr_body):
+    """Return the optional `## Release note` section from a PR description, or None."""
+    lines = _extract_release_note_lines(pr_body)
+    if not lines:
+        return None
+    result = "\n".join(lines).strip()
     return result or None
+
+
+def validate_release_note(pr_body):
+    """Refuse `Checks:` paragraphs or signature/attribution lines inside `## Release note`."""
+    lines = _extract_release_note_lines(pr_body)
+    if not lines:
+        return
+    errors = []
+    fence = None
+    for line in lines:
+        fence, toggled = _fence_toggle(line, fence)
+        if toggled or fence is not None:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if RELEASE_NOTE_CHECKS_RE.match(stripped):
+            preview = stripped[:80]
+            errors.append(
+                f"`## Release note` contains a checks paragraph ({preview!r}); "
+                "move check/test summaries into a separate section after `## Release note` (for example `## Checks`)."
+            )
+        elif RELEASE_NOTE_SIGNATURE_RE.match(stripped):
+            preview = stripped[:80]
+            errors.append(
+                f"`## Release note` contains a signature/attribution line ({preview!r}); "
+                "move it after a separate heading (for example `## Checks`) because `## Release note` runs until the next Markdown heading."
+            )
+    if errors:
+        raise Refused("\n".join(errors))
 
 
 def dedupe_texts(items):
@@ -397,24 +451,31 @@ def api(repo, path):
         raise Refused(f"can't read from GitHub: unexpected answer {out.strip()[:200]!r}")
 
 
-def pr_fetcher(repo, *, offline):
-    """Return a cached callable(number) -> (title, body) | None for live GitHub PR metadata.
+def github_fetchers(repo, *, offline):
+    """Return `(fetch_pr, fetch_commit_pulls)` callables for live GitHub PR metadata.
 
-    Always reads live title and description from GitHub unless `--offline` is explicitly set,
+    Always reads live PR metadata from GitHub unless `--offline` is explicitly set,
     so PR titles and descriptions edited after merge take effect immediately.
     """
-    cache = {}
+    pr_cache = {}
+    pulls_cache = {}
     warned_offline = False
 
-    def fetch(number):
+    def warn_offline():
         nonlocal warned_offline
-        if number in cache:
-            return cache[number]
+        if not warned_offline:
+            print(
+                "note: --offline: using commit messages only (GitHub PR titles and descriptions skipped)",
+                file=sys.stderr,
+            )
+            warned_offline = True
+
+    def fetch_pr(number):
+        if number in pr_cache:
+            return pr_cache[number]
         if offline:
-            if not warned_offline:
-                print("note: --offline: using commit messages only (GitHub PR titles and descriptions skipped)", file=sys.stderr)
-                warned_offline = True
-            cache[number] = None
+            warn_offline()
+            pr_cache[number] = None
             return None
         try:
             data = api(repo, f"pulls/{number}")
@@ -423,10 +484,35 @@ def pr_fetcher(repo, *, offline):
         if not isinstance(data, dict) or not isinstance(data.get("title"), str):
             raise Refused(f"can't read PR #{number} from GitHub: unexpected payload")
         val = (data["title"], data.get("body") or "")
-        cache[number] = val
+        pr_cache[number] = val
         return val
 
-    return fetch
+    def fetch_commit_pulls(sha):
+        if sha in pulls_cache:
+            return pulls_cache[sha]
+        if offline:
+            warn_offline()
+            pulls_cache[sha] = None
+            return None
+        try:
+            data = api(repo, f"commits/{sha}/pulls?per_page=100")
+        except Refused as e:
+            raise Refused(f"can't read PRs for commit {sha[:7]} from GitHub: {e}")
+        if not isinstance(data, list):
+            raise Refused(f"can't read PRs for commit {sha[:7]} from GitHub: unexpected payload")
+        for item in data:
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("number"), int)
+                and not isinstance(item.get("number"), bool)
+                and isinstance(item.get("title"), str)
+                and "body" in item
+            ):
+                pr_cache.setdefault(item["number"], (item["title"], item.get("body") or ""))
+        pulls_cache[sha] = data
+        return data
+
+    return fetch_pr, fetch_commit_pulls
 
 
 def commit_meta(repo, sha):
@@ -455,6 +541,14 @@ def _is_already_released_merge(repo, parents, exclude):
     return not git("rev-list", "-n", "1", parents[1], *exclude, cwd=repo).stdout.strip()
 
 
+def _is_already_released_commit(repo, sha, exclude):
+    """True when `sha` exists locally and is already reachable from `exclude`."""
+    if not sha:
+        return False
+    r = git("rev-list", "-n", "1", sha, *exclude, cwd=repo, check=False)
+    return r.returncode == 0 and not r.stdout.strip()
+
+
 def first_parent_commits(repo, to_ref, from_ref=None):
     """Chronological first-parent commits in the release range, skipping already-released merges."""
     exclude = _exclude_args(from_ref)
@@ -468,47 +562,214 @@ def first_parent_commits(repo, to_ref, from_ref=None):
     return kept
 
 
-def collect_entries(repo, to_ref, from_ref=None, *, fetch_pr=None):
-    """Build ReleaseEntry items from `main`'s first-parent history in chronological order."""
-    entries = []
-    for sha in first_parent_commits(repo, to_ref, from_ref):
-        parents, subject, body = commit_meta(repo, sha)
-        m_pr = PR_MERGE_RE.match(subject) if len(parents) >= 2 else None
-        if m_pr:
-            pr_number = int(m_pr.group(1))
-            fallback_title = next((l.strip() for l in body.splitlines() if l.strip()), subject)
-            gh_pr = fetch_pr(pr_number) if fetch_pr else None
-            raw_title = gh_pr[0].strip() if gh_pr else fallback_title
-            pr_body = gh_pr[1] if gh_pr else ""
-            release_note = extract_release_note(pr_body)
-            upgrades, breaking_notes = parse_trailers(pr_body)
-            for msg in commit_bodies_in_pr(repo, parents[0], parents[1]):
-                u, b = parse_trailers(msg)
-                upgrades.extend(u)
-                breaking_notes.extend(b)
+def _range_commits(repo, to_ref, exclude):
+    """Return `(sha, parents, subject, body)` tuples in topological reverse order for the release range."""
+    raw = git("log", "-z", "--topo-order", "--reverse", "--format=%H%n%P%n%s%n%b", to_ref, *exclude, cwd=repo).stdout
+    records = []
+    for chunk in raw.split("\x00"):
+        if not chunk:
+            continue
+        parts = chunk.split("\n", 3)
+        sha = parts[0].strip()
+        if not sha:
+            continue
+        parents = parts[1].split() if len(parts) > 1 and parts[1].strip() else []
+        subject = parts[2].strip() if len(parts) > 2 else ""
+        body = parts[3] if len(parts) > 3 else ""
+        records.append((sha, parents, subject, body))
+    return records
+
+
+@dataclass
+class _PrAcc:
+    number: int
+    merge_sha: str | None = None
+    merge_body: str = ""
+    fallback_title: str | None = None
+    live_title: str | None = None
+    live_body: str | None = None
+    merged_at: str | None = None
+    is_first_parent_merge: bool = False
+    commits: list[str] = field(default_factory=list)
+    commit_set: set[str] = field(default_factory=set)
+
+    def add_commit(self, sha):
+        if sha not in self.commit_set:
+            self.commit_set.add(sha)
+            self.commits.append(sha)
+
+
+def collect_entries(repo, to_ref, from_ref=None, *, fetch_pr=None, fetch_commit_pulls=None):
+    """Build ReleaseEntry items from all commits in the release range, grouped by merged PR.
+
+    Resolves PRs from both git PR merge commits and GitHub's `commits/{sha}/pulls` API so pull
+    requests landed through an integration branch are all included alongside direct merges.
+    Per PR, `Upgrade:` and `BREAKING CHANGE:` trailers prefer the PR description and fall back
+    to the PR's own commits only when the PR description omits them.
+    """
+    exclude = _exclude_args(from_ref)
+    records = _range_commits(repo, to_ref, exclude)
+    if not records:
+        return []
+
+    pos = {sha: i for i, (sha, _, _, _) in enumerate(records)}
+    first_parent_set = set(git("rev-list", "--first-parent", to_ref, *exclude, cwd=repo).stdout.split())
+
+    prs: dict[int, _PrAcc] = {}
+    commit_to_prs: dict[str, set[int]] = {}
+    non_merge_shas: list[str] = []
+    commit_subjects: dict[str, str] = {}
+    commit_bodies: dict[str, str] = {}
+
+    def get_pr(number):
+        acc = prs.get(number)
+        if acc is None:
+            acc = _PrAcc(number=number)
+            prs[number] = acc
+        return acc
+
+    for sha, parents, subject, body in records:
+        if len(parents) >= 2:
+            if _is_already_released_merge(repo, parents, exclude):
+                continue
+            m_pr = PR_MERGE_RE.match(subject)
+            if not m_pr:
+                continue  # branch-sync or local integration merge; its commits are handled below
+            pr_num = int(m_pr.group(1))
+            pr = get_pr(pr_num)
+            pr.merge_sha = sha
+            pr.merge_body = body
+            pr.fallback_title = next((l.strip() for l in body.splitlines() if l.strip()), subject)
+            if sha in first_parent_set:
+                pr.is_first_parent_merge = True
+            member_shas = git(
+                "rev-list", "--no-merges", "--reverse", parents[1], f"^{parents[0]}", *exclude, cwd=repo
+            ).stdout.split()
+            for msha in member_shas:
+                pr.add_commit(msha)
+                commit_to_prs.setdefault(msha, set()).add(pr_num)
         else:
-            pr_number = None
-            raw_title = subject
-            release_note = None
-            upgrades, breaking_notes = parse_trailers(body)
+            non_merge_shas.append(sha)
+            commit_subjects[sha] = subject
+            commit_bodies[sha] = body
+
+    if fetch_commit_pulls is not None:
+        for sha in non_merge_shas:
+            pulls = fetch_commit_pulls(sha)
+            if pulls is None:
+                break  # --offline
+            for item in pulls:
+                if not isinstance(item, dict):
+                    continue
+                merged_at = item.get("merged_at")
+                if not merged_at:
+                    continue
+                pr_num = item.get("number")
+                if not isinstance(pr_num, int) or isinstance(pr_num, bool):
+                    continue
+                if _is_already_released_commit(repo, item.get("merge_commit_sha"), exclude):
+                    continue
+                pr = get_pr(pr_num)
+                pr.add_commit(sha)
+                commit_to_prs.setdefault(sha, set()).add(pr_num)
+                if pr.merged_at is None:
+                    pr.merged_at = merged_at
+                if pr.live_title is None and isinstance(item.get("title"), str):
+                    if "body" in item:
+                        pr.live_title = item["title"]
+                        pr.live_body = item.get("body") or ""
+                    elif pr.fallback_title is None:
+                        pr.fallback_title = item["title"]
+
+    # Attribute each non-merge commit's fallback trailers only to its most specific (originating) PR
+    # so a carrier/integration PR does not inherit upgrade or breaking trailers from its sub-PRs.
+    owned_commits: dict[int, list[str]] = {}
+    direct_shas: list[str] = []
+    for sha in non_merge_shas:
+        owners = commit_to_prs.get(sha)
+        if not owners:
+            direct_shas.append(sha)
+            continue
+        owner_num = min(
+            owners,
+            key=lambda n: (
+                len(prs[n].commits),
+                1 if prs[n].is_first_parent_merge else 0,
+                prs[n].merged_at or "",
+                n,
+            ),
+        )
+        owned_commits.setdefault(owner_num, []).append(sha)
+
+    sortable = []
+    for pr in prs.values():
+        if pr.live_title is not None:
+            raw_title = pr.live_title.strip()
+            pr_body = pr.live_body or ""
+        else:
+            gh_pr = fetch_pr(pr.number) if fetch_pr else None
+            raw_title = gh_pr[0].strip() if gh_pr else (pr.fallback_title or f"PR #{pr.number}")
+            pr_body = gh_pr[1] if gh_pr else ""
+        release_note = extract_release_note(pr_body)
+        pr_upgrades, pr_breaking = parse_trailers(pr_body)
+        commit_upgrades, commit_breaking = [], []
+        if not pr_upgrades or not pr_breaking:
+            fallback_msgs = [commit_bodies[c] for c in owned_commits.get(pr.number, ())]
+            if pr.merge_body:
+                fallback_msgs.append(pr.merge_body)
+            for msg in fallback_msgs:
+                u, b = parse_trailers(msg)
+                commit_upgrades.extend(u)
+                commit_breaking.extend(b)
+        upgrades_t = dedupe_texts(pr_upgrades) if pr_upgrades else dedupe_texts(commit_upgrades)
+        breaking_t = dedupe_texts(pr_breaking) if pr_breaking else dedupe_texts(commit_breaking)
+        parsed = parse_header(raw_title)
+        rep_sha = pr.merge_sha or max(pr.commits, key=lambda c: pos[c])
+        sort_key = (pos[rep_sha], 1 if pr.is_first_parent_merge else 0, len(pr.commits), pr.number)
+        sortable.append(
+            (
+                sort_key,
+                ReleaseEntry(
+                    sha=rep_sha,
+                    pr_number=pr.number,
+                    raw_title=raw_title,
+                    commit_type=parsed.commit_type if parsed else None,
+                    scope=parsed.scope if parsed else None,
+                    breaking=bool((parsed and parsed.breaking) or breaking_t),
+                    description=parsed.description if parsed else raw_title,
+                    release_note=release_note,
+                    upgrades=upgrades_t,
+                    breaking_notes=breaking_t,
+                ),
+            )
+        )
+
+    for sha in direct_shas:
+        raw_title = commit_subjects[sha]
+        upgrades, breaking_notes = parse_trailers(commit_bodies[sha])
         parsed = parse_header(raw_title)
         upgrades_t = dedupe_texts(upgrades)
         breaking_t = dedupe_texts(breaking_notes)
-        entries.append(
-            ReleaseEntry(
-                sha=sha,
-                pr_number=pr_number,
-                raw_title=raw_title,
-                commit_type=parsed.commit_type if parsed else None,
-                scope=parsed.scope if parsed else None,
-                breaking=bool((parsed and parsed.breaking) or breaking_t),
-                description=parsed.description if parsed else raw_title,
-                release_note=release_note,
-                upgrades=upgrades_t,
-                breaking_notes=breaking_t,
+        sortable.append(
+            (
+                (pos[sha], 0, 0, 0),
+                ReleaseEntry(
+                    sha=sha,
+                    pr_number=None,
+                    raw_title=raw_title,
+                    commit_type=parsed.commit_type if parsed else None,
+                    scope=parsed.scope if parsed else None,
+                    breaking=bool((parsed and parsed.breaking) or breaking_t),
+                    description=parsed.description if parsed else raw_title,
+                    release_note=None,
+                    upgrades=upgrades_t,
+                    breaking_notes=breaking_t,
+                ),
             )
         )
-    return entries
+
+    sortable.sort(key=lambda item: item[0])
+    return [entry for _, entry in sortable]
 
 
 def validate_entries(entries):
@@ -614,19 +875,27 @@ def render_notes(version, entries, web_url, *, manual_reason=None):
         sections.append(f"> Version set manually (`--version {version}`): {manual_reason}")
 
     before_upgrading = []
+    seen_norm = set()
     for entry in entries:
         ref = _entry_ref(entry, web_url)
-        seen_norm = set()
+        entry_has_notice = False
         for up in entry.upgrades:
-            seen_norm.add(" ".join(up.split()))
-            before_upgrading.append(_format_upgrade_bullet(up, ref))
+            entry_has_notice = True
+            norm = " ".join(up.split())
+            if norm not in seen_norm:
+                seen_norm.add(norm)
+                before_upgrading.append(_format_upgrade_bullet(up, ref))
         for br in entry.breaking_notes:
+            entry_has_notice = True
             norm = " ".join(br.split())
             if norm not in seen_norm:
                 seen_norm.add(norm)
                 before_upgrading.append(_format_upgrade_bullet(f"**Breaking:** {br}", ref))
-        if entry.breaking and not seen_norm:
-            before_upgrading.append(_format_upgrade_bullet(f"**Breaking:** {entry.description}", ref))
+        if entry.breaking and not entry_has_notice:
+            norm = " ".join(entry.description.split())
+            if norm not in seen_norm:
+                seen_norm.add(norm)
+                before_upgrading.append(_format_upgrade_bullet(f"**Breaking:** {entry.description}", ref))
 
     if before_upgrading:
         sections.append("## Before upgrading\n\n" + "\n".join(before_upgrading))
@@ -1017,7 +1286,8 @@ def cut_range_preview(repo, range_spec, version_arg, reason, offline):
     from_ref, to_ref = parse_range(range_spec)
     git("rev-parse", "--verify", f"{from_ref}^{{commit}}", cwd=repo)
     to_sha = git("rev-parse", "--verify", f"{to_ref}^{{commit}}", cwd=repo).stdout.strip()
-    entries = collect_entries(repo, to_sha, from_ref, fetch_pr=pr_fetcher(repo, offline=offline))
+    fetch_pr, fetch_commit_pulls = github_fetchers(repo, offline=offline)
+    entries = collect_entries(repo, to_sha, from_ref, fetch_pr=fetch_pr, fetch_commit_pulls=fetch_commit_pulls)
     if not entries:
         raise Refused(f"nothing to release in {from_ref}..{to_ref}")
     validate_entries(entries)
@@ -1070,7 +1340,8 @@ def cut_once(repo, branch, version_arg, reason, dry, ci_wait=CI_WAIT, offline=Fa
                 if base != head:
                     git("checkout", "--quiet", "--detach", base, cwd=wt)
 
-            entries = collect_entries(wt, base, fetch_pr=pr_fetcher(repo, offline=offline))
+            fetch_pr, fetch_commit_pulls = github_fetchers(repo, offline=offline)
+            entries = collect_entries(wt, base, fetch_pr=fetch_pr, fetch_commit_pulls=fetch_commit_pulls)
             if not entries:
                 raise Refused(
                     f"nothing to release at the newest tested commit {base[:7]}: newer commits on {branch} are still untested"
@@ -1118,7 +1389,8 @@ def cmd_next(repo, branch, range_spec, offline):
         git("rev-parse", "--verify", f"{from_ref}^{{commit}}", cwd=repo)
         to_sha = git("rev-parse", "--verify", f"{to_ref}^{{commit}}", cwd=repo).stdout.strip()
         current = base_version_for_range(repo, from_ref)
-        entries = collect_entries(repo, to_sha, from_ref, fetch_pr=pr_fetcher(repo, offline=offline))
+        fetch_pr, fetch_commit_pulls = github_fetchers(repo, offline=offline)
+        entries = collect_entries(repo, to_sha, from_ref, fetch_pr=fetch_pr, fetch_commit_pulls=fetch_commit_pulls)
     else:
         if offline:
             have = local_versions(repo)
@@ -1129,7 +1401,8 @@ def cmd_next(repo, branch, range_spec, offline):
         current = max(have) if have else None
         branch = branch or default_branch(repo)
         head = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
-        entries = collect_entries(repo, head, fetch_pr=pr_fetcher(repo, offline=offline))
+        fetch_pr, fetch_commit_pulls = github_fetchers(repo, offline=offline)
+        entries = collect_entries(repo, head, fetch_pr=fetch_pr, fetch_commit_pulls=fetch_commit_pulls)
     validate_entries(entries)
     plan = compute_version(current, entries)
     print(format_next(plan, len(entries)), end="")
@@ -1190,6 +1463,7 @@ def validate_release_dir_files(all_files, added_or_modified, added_only, release
 def lint_pr(title, body="", files=None):
     validate_header(title, label="PR title")
     parse_trailers(body, validate=True)
+    validate_release_note(body)
     if files is not None:
         all_files, added_or_modified, added_only = [], [], []
         for item in files:
