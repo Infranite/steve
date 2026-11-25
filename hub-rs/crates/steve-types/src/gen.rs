@@ -91,6 +91,8 @@ fn bindings_match() {
         WorkEvent,
         ConfigEvent,
         DevicesEvent,
+        devices::NodeLinkMode,
+        devices::NodeProtocolOlder,
         devices::NodeOffline,
         devices::NodeOfflineReason,
         devices::HarnessDegradedReason,

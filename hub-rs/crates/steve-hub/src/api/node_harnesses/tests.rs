@@ -24,6 +24,7 @@ fn local(node: Arc<dyn Node>) -> Target {
         node: Some(node),
         remote: None,
         generation: None,
+        upgrade_only: false,
     }
 }
 
@@ -101,7 +102,8 @@ async fn empty_success_failure_unsupported_and_offline_remain_distinct() {
             id: "never-seen".into(),
             node: None,
             remote: None,
-            generation: None
+            generation: None,
+            upgrade_only: false,
         })
         .await
         .stale
@@ -391,4 +393,28 @@ async fn off_returns_the_probe_response_without_retaining_a_report() {
     assert_eq!(report.harnesses[0].models, ["direct/model"]);
     assert!(inv.cache.peek(&target.id).await.is_none());
     assert_eq!(inv.view(&target).await.state, "unreported");
+}
+
+#[tokio::test]
+async fn upgrade_only_target_returns_upgrade_required_without_calling_probe() {
+    let inv = Inventory::new(Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
+    let fake = FakeNode::new("n_old");
+    fake.set_harnesses(vec![cap("1", "old/model")]);
+    let target = Target {
+        id: "n_old".into(),
+        node: Some(fake.clone()),
+        remote: None,
+        generation: Some(1),
+        upgrade_only: true,
+    };
+    let report = inv.refresh(&target, true).await;
+    assert_eq!(report.state, "upgrade_required");
+    assert!(report.error.is_none());
+    assert!(!report.refreshing);
+    assert!(
+        fake.log().is_empty(),
+        "upgrade-only target must never invoke ordinary probe()"
+    );
 }

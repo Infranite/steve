@@ -22,7 +22,7 @@ use steve_modules::Caller;
 use steve_node_api::{FileAccessReport, HostInfo, NodeId};
 use steve_node_wire::identity;
 use steve_store::StoreError;
-use steve_types::devices::{NodeOffline, NodeOfflineReason};
+use steve_types::devices::{NodeLinkMode, NodeOffline, NodeOfflineReason};
 
 use super::{NodeService, Peer, now};
 use crate::error::json_response;
@@ -348,19 +348,35 @@ fn link_view(svc: &NodeService, n: &steve_store::nodes::NodeRow, linked: bool) -
     }
 }
 
-/// The Node's protocol and whether its link only serves upgrades; returns the latter.
+fn hub_version(up: Option<&super::upgrade::Upgrades>) -> String {
+    up.and_then(|u| u.hub())
+        .map(|b| b.version.clone())
+        .unwrap_or_else(|| {
+            option_env!("STEVE_BUILD_VERSION")
+                .unwrap_or(env!("CARGO_PKG_VERSION"))
+                .to_string()
+        })
+}
+
+/// The Node's protocol and typed link mode (`normal` | `upgrade_only`); returns whether it is
+/// currently upgrade-only.
 fn protocol_view(svc: &NodeService, node: &str, v: &mut Value) -> bool {
     let upgrade_only = svc
         .registry
         .conn(node)
         .is_some_and(|c| !c.is_closed() && c.is_upgrade());
+    let link_mode = if upgrade_only {
+        NodeLinkMode::UpgradeOnly
+    } else {
+        NodeLinkMode::Normal
+    };
+    v["link_mode"] = json!(link_mode);
     v["protocol"] = json!(svc.fleet.protocol(node));
-    v["protocol_mode"] = json!(if upgrade_only { "upgrade" } else { "normal" });
-    let status = upgrade_only
-        .then(|| svc.fleet.protocol_status(node))
-        .flatten();
-    v["protocol_status"] = json!(status.map(|(_, text)| text));
-    v["protocol_older"] = json!(status.map(|(older, _)| older));
+    v["protocol_older"] = json!(
+        upgrade_only
+            .then(|| svc.fleet.protocol_older(node))
+            .flatten()
+    );
     upgrade_only
 }
 
@@ -413,6 +429,9 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
     let (default, rows) = rows;
     let up = svc.upgrades.get().cloned();
     let rm = svc.removals.get().cloned();
+    let current_hub_version = hub_version(up.as_deref());
+    let local_node_version =
+        crate::wire::local_service::running_version(&svc.fleet.data_dir().join("node"));
     let items: Vec<Value> = rows
         .into_iter()
         .map(|(room, n, latest, removal)| {
@@ -447,6 +466,18 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
                 v["link_error"] = json!({ "at": at, "error": error });
             }
             let upgrade_only = protocol_view(&svc, &n.node_id, &mut v);
+            let node_version = if n.local {
+                local_node_version
+                    .clone()
+                    .or_else(|| Some(current_hub_version.clone()))
+            } else {
+                up.as_ref()
+                    .and_then(|u| u.seen(&n.node_id))
+                    .and_then(|s| s.build)
+                    .map(|b| b.version)
+            };
+            v["node_version"] = json!(node_version);
+            v["hub_version"] = json!(current_hub_version);
             // from the key, at today's length: a Node paired before M4 stored 16 digits
             if let Ok(k) = <[u8; 32]>::try_from(n.pubkey.as_slice()) {
                 v["fingerprint"] = json!(identity::fingerprint(&k));
@@ -463,11 +494,13 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             }
             if let Some(up) = &up {
                 v["upgrade"] = up.view(&n, &default, latest.as_ref());
-                // asked in the background: the next list shows it
+                // asked in the background: push a refresh once the Node reports its build
                 if linked && !n.local && up.seen(&n.node_id).is_none() {
-                    let (up, id) = (up.clone(), n.node_id.clone());
+                    let (up, store, id) = (up.clone(), svc.store.clone(), n.node_id.clone());
                     tokio::spawn(async move {
-                        up.look(&id).await;
+                        if up.look(&id).await.is_some() {
+                            super::tell(&store, &id).await;
+                        }
                     });
                 }
             }
@@ -480,6 +513,7 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             "nodes": items,
             "upgrade_default": default,
             "hub_build": up.as_ref().and_then(|u| u.hub().cloned()),
+            "hub_version": current_hub_version,
         }),
     )
 }

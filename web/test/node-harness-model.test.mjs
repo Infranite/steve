@@ -32,3 +32,15 @@ test("installation and unknown availability have separate labels", () => {
   assert.equal(harnessState(harness("h", false)), "unavailable")
   assert.equal(harnessState(harness("h")), "ready")
 })
+
+test("upgrade_only link explains version mismatch instead of probe failure", () => {
+  const stale = { linked: true, linkMode: "upgrade_only", version: "0.9.0", hubVersion: "0.11.1", protocolOlder: "node" }
+  assert.equal(
+    harnessSummary(stale, report([], { state: "upgrade_required" })),
+    "Node 版本 0.9.0 低于 Hub 0.11.1，升级后才能探测 harness",
+  )
+  assert.equal(
+    harnessSummary(stale, report([], { state: "failed" })),
+    "Node 版本 0.9.0 低于 Hub 0.11.1，升级后才能探测 harness",
+  )
+})

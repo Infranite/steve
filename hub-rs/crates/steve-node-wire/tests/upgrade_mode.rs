@@ -266,6 +266,7 @@ async fn all_five_methods_work_without_ordinary_protocol_payloads() {
     node.set_build(Some(build("1.9.0")));
     let (remote, hub, peer, files, archive) = wired(node).await;
     assert!(remote.is_upgrade());
+    assert!(remote.is_upgrade_only());
     assert!(remote.ready_generation().is_none());
     assert_eq!(
         remote.probe(false).await.unwrap_err().retry,

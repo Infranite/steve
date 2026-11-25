@@ -2058,4 +2058,34 @@ mod tests {
             "zero token counts must not emit empty series:\n{text}"
         );
     }
+
+    #[test]
+    fn node_link_mode_and_protocol_delta_metrics_are_described_and_removable() {
+        let recorder = recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            catalog::describe();
+            metrics::gauge!("steve_node_link_mode", "node" => "n_stale", "mode" => "normal")
+                .set(0.0);
+            metrics::gauge!("steve_node_link_mode", "node" => "n_stale", "mode" => "upgrade_only")
+                .set(1.0);
+            metrics::gauge!("steve_node_link_protocol_delta", "node" => "n_stale").set(2.0);
+        });
+        let text = handle.render();
+        for line in [
+            "# HELP steve_node_link_mode ",
+            "# HELP steve_node_link_protocol_delta ",
+            "steve_node_link_mode{node=\"n_stale\",mode=\"normal\"} 0",
+            "steve_node_link_mode{node=\"n_stale\",mode=\"upgrade_only\"} 1",
+            "steve_node_link_protocol_delta{node=\"n_stale\"} 2",
+        ] {
+            assert!(text.contains(line), "missing `{line}` in:\n{text}");
+        }
+        handle.remove_label("node", "n_stale");
+        let after = handle.render();
+        assert!(
+            !after.contains("n_stale"),
+            "removed node label must disappear from rendered metrics:\n{after}"
+        );
+    }
 }

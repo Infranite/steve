@@ -517,6 +517,13 @@ impl NodeRuntime {
             let mut waited = false;
             loop {
                 let Some(me) = weak.upgrade() else { return };
+                // An upgrade-only link carries only the frozen upgrade channel; never run
+                // ordinary reconciliation or spam retry warnings until it links normally.
+                if me.node.is_upgrade_only() {
+                    drop(me);
+                    clock.sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
                 match me.reconcile().await {
                     Ok(n) => {
                         if n > 0 {
@@ -526,6 +533,7 @@ impl NodeRuntime {
                         me.plan_waiting();
                         break;
                     }
+                    Err(e) if e.code == Code::Unavailable && me.node.is_upgrade_only() => {}
                     Err(e) if e.code == Code::Unavailable && !waited => {
                         waited = true;
                         tracing::info!(

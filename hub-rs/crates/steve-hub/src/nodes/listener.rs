@@ -262,11 +262,33 @@ async fn serve_after(
     };
     let _ = installed.send(true);
     svc.fleet.linked(&node, hello.proto);
+    let protocol_delta = i64::from(PROTOCOL) - i64::from(hello.proto);
+    ::metrics::gauge!("steve_node_link_protocol_delta", "node" => node.to_string())
+        .set(protocol_delta as f64);
     // its owner's pages show it linked; what its machine is, asked once per link (G2)
     super::tell(&svc.store, node.as_str()).await;
-    tracing::info!(node = %node, generation, restarted, paused, "node linked");
+    if node.as_str() != crate::wire::local_service::NODE_ID
+        && let Some(up) = svc.upgrades.get().cloned()
+    {
+        let (store, id) = (svc.store.clone(), node.to_string());
+        tokio::spawn(async move {
+            if up.look(&id).await.is_some() {
+                super::tell(&store, &id).await;
+            }
+        });
+    }
     // an upgrade-only link serves the upgrade methods and nothing else
-    if !conn.is_upgrade() {
+    if conn.is_upgrade() {
+        tracing::warn!(
+            node = %node,
+            node_proto = hello.proto,
+            hub_proto = PROTOCOL,
+            generation,
+            "node {node} protocol {}, Hub protocol {PROTOCOL}, upgrade required",
+            hello.proto
+        );
+    } else {
+        tracing::info!(node = %node, generation, restarted, paused, "node linked");
         start_ordinary(&svc, &node, &remote, &conn, paused);
     }
     let every = Duration::from_secs(60);
@@ -285,6 +307,9 @@ async fn serve_after(
     svc.registry.remove(node.as_str(), generation);
     record_seen(&svc, &node, generation, true).await;
     remote.detach(generation);
+    if remote.generation().is_none() {
+        ::metrics::gauge!("steve_node_link_protocol_delta", "node" => node.to_string()).set(0.0);
+    }
 }
 
 // Persist recent observations even if the Hub itself crashes and never sees the close.

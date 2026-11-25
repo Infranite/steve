@@ -394,6 +394,9 @@ pub(crate) struct Inner {
     files: Mutex<Option<Arc<dyn HubFiles>>>,
     /// Where a command's secrets come from (the Hub).
     secrets: Mutex<Option<Arc<dyn HubSecrets>>>,
+    /// This process's own release identity ([`LocalNode::set_build`]), reported by `probe_build`
+    /// even when Hub-managed upgrades are unavailable.
+    build: std::sync::OnceLock<BuildIdentity>,
     /// Who stages and switches releases for the Hub ([`LocalNode::set_upgrader`]); none: this Node
     /// is upgraded by its operator.
     upgrader: std::sync::OnceLock<Arc<dyn Upgrader>>,
@@ -1510,6 +1513,7 @@ impl LocalNode {
             sink: Mutex::new(None),
             files: Mutex::new(None),
             secrets: Mutex::new(None),
+            build: std::sync::OnceLock::new(),
             upgrader: std::sync::OnceLock::new(),
             remover: std::sync::OnceLock::new(),
             retiring: AtomicBool::new(false),
@@ -1591,6 +1595,12 @@ impl LocalNode {
     /// that needs one fails without running.
     pub fn connect_secrets(&self, secrets: Arc<dyn HubSecrets>) {
         *self.0.secrets.lock().unwrap() = Some(secrets);
+    }
+
+    /// Records this process's own release build so `probe_build` always reports it, including when
+    /// Hub-managed upgrades are unavailable. Set once.
+    pub fn set_build(&self, build: BuildIdentity) {
+        let _ = self.0.build.set(build);
     }
 
     /// Lets the Hub upgrade this Node through `upgrader` (the host that installed it as a
@@ -4476,8 +4486,14 @@ impl Discovery for LocalNode {
         })
     }
     async fn probe_build(&self) -> ApiResult<upgrade_v1::ProbeBuildResponse> {
+        let build = self
+            .0
+            .build
+            .get()
+            .cloned()
+            .or_else(|| self.0.upgrader.get().map(|u| u.build()));
         Ok(upgrade_v1::ProbeBuildResponse {
-            build: self.0.upgrader.get().map(|u| u.build().into()),
+            build: build.map(Into::into),
             upgradable: self.0.upgrader.get().is_some(),
             running: self.running_work()? as u64,
         })
@@ -4829,5 +4845,43 @@ mod fit_tests {
             matches!(out.as_slice(), [EventBody::Diagnostic { code, .. }] if code == "event_too_large"),
             "{out:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn probe_build_reports_build_even_without_upgrader() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = LocalNode::open(NodeConfig {
+            node: NodeId::new("n_build").unwrap(),
+            home: dir.path().to_path_buf(),
+            acp: AcpConfig {
+                adapters: Default::default(),
+                declared: Default::default(),
+                node: PathBuf::from("/usr/bin/false"),
+                claude_executable: PathBuf::from("/usr/bin/false"),
+                claude_config_dir: None,
+                steve_home: dir.path().to_path_buf(),
+                codex_home: dir.path().to_path_buf(),
+                user_home: dir.path().to_path_buf(),
+                version: "0.11.1".into(),
+            },
+            roots: vec![],
+            capacity: Capacity {
+                sessions: 1,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Storage::default(),
+            ceiling: PolicyCeiling::default(),
+        })
+        .unwrap();
+        let build = BuildIdentity {
+            version: "0.11.1".into(),
+            commit: "a".repeat(40),
+            target: "aarch64-apple-darwin".into(),
+        };
+        node.set_build(build.clone());
+        let probed = node.probe_build().await.unwrap();
+        assert!(!probed.upgradable);
+        assert_eq!(probed.build, Some(build.into()));
     }
 }

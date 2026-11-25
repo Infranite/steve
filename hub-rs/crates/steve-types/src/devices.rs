@@ -11,6 +11,8 @@ reasons! {
         SessionNotOpen = session_not_open [Invalid] (),
         WorkspaceBindingConflict = workspace_binding_conflict [Conflict] (),
         ToolRefused = tool_refused [Internal] (),
+        InvalidHarnessUpdateState = invalid_harness_update_state [Conflict] (),
+        UpgradeRequired = upgrade_required [Conflict] (),
     }
     retired { }
 }
@@ -34,6 +36,25 @@ reasons! {
     retired { }
 }
 pub const REASONS: &[ReasonSet] = &[NodeReason::SET, NodeStopReason::SET];
+
+/// Whether a Node's live link serves normal protocol work or only the frozen upgrade channel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum NodeLinkMode {
+    #[default]
+    Normal,
+    UpgradeOnly,
+}
+
+/// Which peer runs the older application protocol when a link is in upgrade-only mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum NodeProtocolOlder {
+    Node,
+    Hub,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

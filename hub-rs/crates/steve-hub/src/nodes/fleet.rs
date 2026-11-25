@@ -199,13 +199,17 @@ impl NodeFleet {
         });
     }
 
-    /// Which peer needs an upgrade, based on the authenticated application protocol numbers.
-    pub fn protocol_status(&self, node: &str) -> Option<(&'static str, &'static str)> {
+    /// Which peer runs the older application protocol, based on the authenticated handshake.
+    pub fn protocol_older(&self, node: &str) -> Option<steve_types::devices::NodeProtocolOlder> {
         match self.protocol(node)?.cmp(&steve_node_api::PROTOCOL) {
-            std::cmp::Ordering::Less => Some(("node", "版本不一致，需要升级 Node")),
-            std::cmp::Ordering::Greater => Some(("hub", "版本不一致，需要升级 Hub")),
+            std::cmp::Ordering::Less => Some(steve_types::devices::NodeProtocolOlder::Node),
+            std::cmp::Ordering::Greater => Some(steve_types::devices::NodeProtocolOlder::Hub),
             std::cmp::Ordering::Equal => None,
         }
+    }
+
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
     }
 
     pub fn protocol(&self, node: &str) -> Option<u32> {
