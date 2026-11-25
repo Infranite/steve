@@ -15,11 +15,15 @@ Versions are MAJOR.MINOR.PATCH (CONTRIBUTING.md, "Changes and releases"):
   - PATCH: fixes, performance, docs, and internal refactors only; safe to roll back in place.
 
 Release notes are generated automatically from all commits since the last `vX.Y.Z` tag. Merged PRs
-are resolved from git merge commits and GitHub's `commits/{sha}/pulls` API (so PRs landed through
-an integration branch are included alongside direct merges) using live PR titles, descriptions, and
-optional `## Release note` sections; direct commits without a merged PR use their commit subject.
-`Upgrade:` and `BREAKING CHANGE:` trailers prefer the PR description and fall back to the PR's own
-commit trailers only when the PR description has none, with identical notices deduplicated under
+are listed from GitHub via GraphQL over the release range's time window and filtered to those whose
+`mergeCommit.oid` lies in the release range (covering both direct merges and sub-PRs landed through
+an integration PR). Multiple PRs sharing one `mergeCommit` are split into a single carrier PR (whose
+`headRefOid` matches the merge commit's merged-branch parent) and independent sub-PR entries; a
+`chore` carrier PR renders as one line under `## Other changes` listing its carried sub-PR numbers.
+Live PR titles, descriptions, and optional `## Release note` sections come from GitHub; direct
+commits without a merged PR use their commit subject. For PR entries, `Upgrade:` and
+`BREAKING CHANGE:` trailers are read strictly from the PR description (never falling back to commit
+trailers); direct commits without a PR read commit trailers. Identical notices are deduplicated under
 `## Before upgrading`, followed by Features, Fixes, Performance, and Other changes.
 
 `cut` takes the newest first-parent commit on `origin/<branch>` whose own full CI push run passed,
@@ -29,8 +33,11 @@ tag `vX.Y.Z` on the notes commit itself after the merge lands.
 
 Talks to `origin`; "can't reach it" is an error, never "there are no tags".
 """
+from __future__ import annotations
+
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -90,6 +97,39 @@ CI_APPEAR = 180  # a push's run shows up within seconds; one that never does is 
 # where gh is when PATH is launchd's bare one (a service running `cut` with its environment); the same places
 # the Hub looks (steve-core config.rs gh_cli())
 GH_PLACES = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh")
+# Cushion subtracted from the earliest commit timestamp in the release range when paginating
+# GitHub's merged PRs (ordered by UPDATED_AT DESC), covering clock skew between git committer
+# timestamps and GitHub's mergedAt/updatedAt timestamps.
+MERGED_WINDOW_PAD_SECONDS = 24 * 3600
+INTEGRATION_PR_SCOPE = "integration"
+MERGED_PRS_GRAPHQL = """
+query($owner: String!, $repo: String!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(
+      states: [MERGED]
+      orderBy: {field: UPDATED_AT, direction: DESC}
+      first: 100
+      after: $endCursor
+    ) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        number
+        title
+        body
+        mergedAt
+        updatedAt
+        headRefOid
+        mergeCommit {
+          oid
+        }
+      }
+    }
+  }
+}
+""".strip()
 
 
 class Refused(Exception):
@@ -109,6 +149,32 @@ class ParsedHeader:
 
 
 @dataclass(frozen=True)
+class CommitRecord:
+    sha: str
+    parents: tuple[str, ...]
+    committer_ts: int
+    subject: str
+    body: str
+
+
+@dataclass(frozen=True)
+class MergedPr:
+    number: int
+    title: str
+    body: str
+    merge_sha: str | None
+    head_ref_oid: str | None
+    merged_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
+class PrCommit:
+    sha: str
+    message: str
+
+
+@dataclass(frozen=True)
 class ReleaseEntry:
     sha: str
     pr_number: int | None
@@ -120,6 +186,7 @@ class ReleaseEntry:
     release_note: str | None
     upgrades: tuple[str, ...]
     breaking_notes: tuple[str, ...]
+    carried_prs: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -451,68 +518,145 @@ def api(repo, path):
         raise Refused(f"can't read from GitHub: unexpected answer {out.strip()[:200]!r}")
 
 
-def github_fetchers(repo, *, offline):
-    """Return `(fetch_pr, fetch_commit_pulls)` callables for live GitHub PR metadata.
+def _parse_iso_ts(value):
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def graphql(repo, query, variables=None):
+    args = ["api", "graphql", "-f", f"query={query}"]
+    for key, val in (variables or {}).items():
+        if val is None:
+            continue
+        if isinstance(val, str) and val in ("{owner}", "{repo}", "{branch}"):
+            args += ["-F", f"{key}={val}"]
+        elif isinstance(val, str):
+            args += ["-f", f"{key}={val}"]
+        else:
+            args += ["-F", f"{key}={json.dumps(val)}"]
+    out = gh(*args, cwd=repo)
+    try:
+        payload = json.loads(out)
+    except ValueError:
+        raise Refused(f"can't read from GitHub: unexpected GraphQL answer {out.strip()[:200]!r}")
+    if not isinstance(payload, dict):
+        raise Refused("can't read from GitHub: unexpected GraphQL payload")
+    if errors := payload.get("errors"):
+        items = errors if isinstance(errors, list) else [errors]
+        msg = "; ".join(e.get("message", str(e)) if isinstance(e, dict) else str(e) for e in items)
+        raise Refused(f"can't read from GitHub: GraphQL error: {msg[:300]}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise Refused("can't read from GitHub: unexpected GraphQL payload")
+    return data
+
+
+def _parse_merged_pr_node(node):
+    if not isinstance(node, dict):
+        return None
+    number = node.get("number")
+    title = node.get("title")
+    if not isinstance(number, int) or isinstance(number, bool) or not isinstance(title, str):
+        raise Refused(f"can't read merged PRs from GitHub: unexpected PR node {node!r}"[:300])
+    body = node.get("body")
+    if body is not None and not isinstance(body, str):
+        raise Refused(f"can't read merged PRs from GitHub: unexpected body on PR #{number}")
+    merge_commit = node.get("mergeCommit")
+    merge_sha = (
+        merge_commit.get("oid")
+        if isinstance(merge_commit, dict) and isinstance(merge_commit.get("oid"), str)
+        else None
+    )
+    head_ref_oid = node.get("headRefOid") if isinstance(node.get("headRefOid"), str) else None
+    merged_at = node.get("mergedAt") if isinstance(node.get("mergedAt"), str) else None
+    updated_at = node.get("updatedAt") if isinstance(node.get("updatedAt"), str) else None
+    return MergedPr(
+        number=number,
+        title=title,
+        body=body or "",
+        merge_sha=merge_sha,
+        head_ref_oid=head_ref_oid,
+        merged_at=merged_at,
+        updated_at=updated_at,
+    )
+
+
+def fetch_merged_prs_from_github(repo, since_ts):
+    """Fetch merged PRs updated on or after `since_ts` (Unix seconds) via GitHub GraphQL.
+
+    GitHub guarantees `updatedAt >= mergedAt`, so paginating `MERGED` PRs in `UPDATED_AT DESC`
+    order and stopping once a page's last node has `updatedAt < since_ts` covers every PR merged
+    since `since_ts` with no search indexing lag and no 1,000-result search cap.
+    """
+    prs: list[MergedPr] = []
+    seen: set[int] = set()
+    cursor: str | None = None
+    while True:
+        try:
+            data = graphql(
+                repo,
+                MERGED_PRS_GRAPHQL,
+                {"owner": "{owner}", "repo": "{repo}", "endCursor": cursor},
+            )
+        except Refused as e:
+            raise Refused(f"can't read merged PRs from GitHub: {e}")
+        repo_data = data.get("repository")
+        pr_conn = repo_data.get("pullRequests") if isinstance(repo_data, dict) else None
+        nodes = pr_conn.get("nodes") if isinstance(pr_conn, dict) else None
+        page_info = pr_conn.get("pageInfo") if isinstance(pr_conn, dict) else None
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            raise Refused("can't read merged PRs from GitHub: unexpected GraphQL payload")
+        last_updated_ts = None
+        for node in nodes:
+            pr = _parse_merged_pr_node(node)
+            if pr is None:
+                continue
+            ts = _parse_iso_ts(pr.updated_at or pr.merged_at)
+            if ts is not None:
+                last_updated_ts = ts
+            if pr.number not in seen:
+                seen.add(pr.number)
+                prs.append(pr)
+        if not page_info.get("hasNextPage"):
+            break
+        if last_updated_ts is not None and last_updated_ts < since_ts:
+            break
+        next_cursor = page_info.get("endCursor")
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+    return prs
+
+
+def github_merged_prs_fetcher(repo, *, offline):
+    """Return a `(since_ts) -> list[MergedPr] | None` callable for live GitHub merged PR metadata.
 
     Always reads live PR metadata from GitHub unless `--offline` is explicitly set,
     so PR titles and descriptions edited after merge take effect immediately.
     """
-    pr_cache = {}
-    pulls_cache = {}
     warned_offline = False
 
-    def warn_offline():
+    def fetch(since_ts):
         nonlocal warned_offline
-        if not warned_offline:
-            print(
-                "note: --offline: using commit messages only (GitHub PR titles and descriptions skipped)",
-                file=sys.stderr,
-            )
-            warned_offline = True
-
-    def fetch_pr(number):
-        if number in pr_cache:
-            return pr_cache[number]
         if offline:
-            warn_offline()
-            pr_cache[number] = None
+            if not warned_offline:
+                print(
+                    "note: --offline: using commit messages only (GitHub PR titles and descriptions skipped)",
+                    file=sys.stderr,
+                )
+                warned_offline = True
             return None
-        try:
-            data = api(repo, f"pulls/{number}")
-        except Refused as e:
-            raise Refused(f"can't read PR #{number} from GitHub: {e}")
-        if not isinstance(data, dict) or not isinstance(data.get("title"), str):
-            raise Refused(f"can't read PR #{number} from GitHub: unexpected payload")
-        val = (data["title"], data.get("body") or "")
-        pr_cache[number] = val
-        return val
+        return fetch_merged_prs_from_github(repo, since_ts)
 
-    def fetch_commit_pulls(sha):
-        if sha in pulls_cache:
-            return pulls_cache[sha]
-        if offline:
-            warn_offline()
-            pulls_cache[sha] = None
-            return None
-        try:
-            data = api(repo, f"commits/{sha}/pulls?per_page=100")
-        except Refused as e:
-            raise Refused(f"can't read PRs for commit {sha[:7]} from GitHub: {e}")
-        if not isinstance(data, list):
-            raise Refused(f"can't read PRs for commit {sha[:7]} from GitHub: unexpected payload")
-        for item in data:
-            if (
-                isinstance(item, dict)
-                and isinstance(item.get("number"), int)
-                and not isinstance(item.get("number"), bool)
-                and isinstance(item.get("title"), str)
-                and "body" in item
-            ):
-                pr_cache.setdefault(item["number"], (item["title"], item.get("body") or ""))
-        pulls_cache[sha] = data
-        return data
-
-    return fetch_pr, fetch_commit_pulls
+    return fetch
 
 
 def commit_meta(repo, sha):
@@ -541,14 +685,6 @@ def _is_already_released_merge(repo, parents, exclude):
     return not git("rev-list", "-n", "1", parents[1], *exclude, cwd=repo).stdout.strip()
 
 
-def _is_already_released_commit(repo, sha, exclude):
-    """True when `sha` exists locally and is already reachable from `exclude`."""
-    if not sha:
-        return False
-    r = git("rev-list", "-n", "1", sha, *exclude, cwd=repo, check=False)
-    return r.returncode == 0 and not r.stdout.strip()
-
-
 def first_parent_commits(repo, to_ref, from_ref=None):
     """Chronological first-parent commits in the release range, skipping already-released merges."""
     exclude = _exclude_args(from_ref)
@@ -563,210 +699,189 @@ def first_parent_commits(repo, to_ref, from_ref=None):
 
 
 def _range_commits(repo, to_ref, exclude):
-    """Return `(sha, parents, subject, body)` tuples in topological reverse order for the release range."""
-    raw = git("log", "-z", "--topo-order", "--reverse", "--format=%H%n%P%n%s%n%b", to_ref, *exclude, cwd=repo).stdout
-    records = []
+    """Return CommitRecord items in topological reverse order for the release range."""
+    raw = git(
+        "log", "-z", "--topo-order", "--reverse", "--format=%H%n%P%n%ct%n%s%n%b", to_ref, *exclude, cwd=repo
+    ).stdout
+    records: list[CommitRecord] = []
     for chunk in raw.split("\x00"):
         if not chunk:
             continue
-        parts = chunk.split("\n", 3)
+        parts = chunk.split("\n", 4)
         sha = parts[0].strip()
         if not sha:
             continue
-        parents = parts[1].split() if len(parts) > 1 and parts[1].strip() else []
-        subject = parts[2].strip() if len(parts) > 2 else ""
-        body = parts[3] if len(parts) > 3 else ""
-        records.append((sha, parents, subject, body))
+        parents = tuple(parts[1].split()) if len(parts) > 1 and parts[1].strip() else ()
+        committer_ts = int(parts[2].strip()) if len(parts) > 2 and parts[2].strip() else 0
+        subject = parts[3].strip() if len(parts) > 3 else ""
+        body = parts[4] if len(parts) > 4 else ""
+        records.append(CommitRecord(sha=sha, parents=parents, committer_ts=committer_ts, subject=subject, body=body))
     return records
 
 
-@dataclass
-class _PrAcc:
-    number: int
-    merge_sha: str | None = None
-    merge_body: str = ""
-    fallback_title: str | None = None
-    live_title: str | None = None
-    live_body: str | None = None
-    merged_at: str | None = None
-    is_first_parent_merge: bool = False
-    commits: list[str] = field(default_factory=list)
-    commit_set: set[str] = field(default_factory=set)
+def _pick_carrier_pr(group, merge_record):
+    """Identify the carrier PR among multiple PRs sharing the same merge commit.
 
-    def add_commit(self, sha):
-        if sha not in self.commit_set:
-            self.commit_set.add(sha)
-            self.commits.append(sha)
+    The carrier is the PR whose `headRefOid` matches the merge commit's merged-branch parent
+    (`parents[1]`). If multiple PRs match (for example, a fast-forward integration branch) or
+    none match (a single-parent squash commit), break ties with the PR number named in the
+    merge commit subject (`Merge pull request #N from ...`), then the highest PR number.
+    """
+    merged_head = merge_record.parents[1] if len(merge_record.parents) >= 2 else None
+    m_pr = PR_MERGE_RE.match(merge_record.subject)
+    subject_num = int(m_pr.group(1)) if m_pr else None
+    return max(
+        group,
+        key=lambda pr: (
+            1 if (merged_head and pr.head_ref_oid == merged_head) else 0,
+            1 if (subject_num is not None and pr.number == subject_num) else 0,
+            pr.number,
+        ),
+    )
 
 
-def collect_entries(repo, to_ref, from_ref=None, *, fetch_pr=None, fetch_commit_pulls=None):
-    """Build ReleaseEntry items from all commits in the release range, grouped by merged PR.
+def _pr_release_entry(sha, pr_number, raw_title, pr_body, *, carried_prs=()):
+    release_note = extract_release_note(pr_body)
+    pr_upgrades, pr_breaking = parse_trailers(pr_body)
+    upgrades_t = dedupe_texts(pr_upgrades)
+    breaking_t = dedupe_texts(pr_breaking)
+    parsed = parse_header(raw_title)
+    return ReleaseEntry(
+        sha=sha,
+        pr_number=pr_number,
+        raw_title=raw_title,
+        commit_type=parsed.commit_type if parsed else None,
+        scope=parsed.scope if parsed else None,
+        breaking=bool((parsed and parsed.breaking) or breaking_t),
+        description=parsed.description if parsed else raw_title,
+        release_note=release_note,
+        upgrades=upgrades_t,
+        breaking_notes=breaking_t,
+        carried_prs=tuple(carried_prs),
+    )
 
-    Resolves PRs from both git PR merge commits and GitHub's `commits/{sha}/pulls` API so pull
-    requests landed through an integration branch are all included alongside direct merges.
-    Per PR, `Upgrade:` and `BREAKING CHANGE:` trailers prefer the PR description and fall back
-    to the PR's own commits only when the PR description omits them.
+
+def _direct_commit_entry(rec):
+    raw_title = rec.subject
+    upgrades, breaking_notes = parse_trailers(rec.body)
+    upgrades_t = dedupe_texts(upgrades)
+    breaking_t = dedupe_texts(breaking_notes)
+    parsed = parse_header(raw_title)
+    return ReleaseEntry(
+        sha=rec.sha,
+        pr_number=None,
+        raw_title=raw_title,
+        commit_type=parsed.commit_type if parsed else None,
+        scope=parsed.scope if parsed else None,
+        breaking=bool((parsed and parsed.breaking) or breaking_t),
+        description=parsed.description if parsed else raw_title,
+        release_note=None,
+        upgrades=upgrades_t,
+        breaking_notes=breaking_t,
+    )
+
+
+def _cover_merge_branch(repo, rec, exclude, covered):
+    covered.add(rec.sha)
+    if len(rec.parents) >= 2:
+        branch_shas = git(
+            "rev-list", rec.parents[1], f"^{rec.parents[0]}", *exclude, cwd=repo
+        ).stdout.split()
+        covered.update(branch_shas)
+
+
+def collect_entries(repo, to_ref, from_ref=None, *, fetch_merged_prs=None):
+    """Build ReleaseEntry items from the release range, resolving merged PRs deterministically.
+
+    Online mode fetches merged PRs from GitHub GraphQL over the range's time window and filters
+    them to PRs whose `mergeCommit.oid` is in the release range (ancestor of `to_ref`, outside
+    `exclude`, and not an already-released merge such as a previous release PR). When multiple
+    PRs share one `mergeCommit` (an integration batch PR plus its carried sub-PRs), the carrier
+    is the PR whose `headRefOid` matches the merge commit's merged-branch parent, and each sub-PR
+    becomes an independent entry. PR entries take `Upgrade:` and `BREAKING CHANGE:` strictly from
+    their PR descriptions (never falling back to commit trailers); direct commits without a PR
+    read their own commit trailers.
     """
     exclude = _exclude_args(from_ref)
     records = _range_commits(repo, to_ref, exclude)
     if not records:
         return []
 
-    pos = {sha: i for i, (sha, _, _, _) in enumerate(records)}
-    first_parent_set = set(git("rev-list", "--first-parent", to_ref, *exclude, cwd=repo).stdout.split())
+    pos = {rec.sha: i for i, rec in enumerate(records)}
+    record_by_sha = {rec.sha: rec for rec in records}
+    skipped_merges: set[str] = set()
+    git_pr_merges: list[tuple[CommitRecord, int]] = []
 
-    prs: dict[int, _PrAcc] = {}
-    commit_to_prs: dict[str, set[int]] = {}
-    non_merge_shas: list[str] = []
-    commit_subjects: dict[str, str] = {}
-    commit_bodies: dict[str, str] = {}
-
-    def get_pr(number):
-        acc = prs.get(number)
-        if acc is None:
-            acc = _PrAcc(number=number)
-            prs[number] = acc
-        return acc
-
-    for sha, parents, subject, body in records:
-        if len(parents) >= 2:
-            if _is_already_released_merge(repo, parents, exclude):
-                continue
-            m_pr = PR_MERGE_RE.match(subject)
-            if not m_pr:
-                continue  # branch-sync or local integration merge; its commits are handled below
-            pr_num = int(m_pr.group(1))
-            pr = get_pr(pr_num)
-            pr.merge_sha = sha
-            pr.merge_body = body
-            pr.fallback_title = next((l.strip() for l in body.splitlines() if l.strip()), subject)
-            if sha in first_parent_set:
-                pr.is_first_parent_merge = True
-            member_shas = git(
-                "rev-list", "--no-merges", "--reverse", parents[1], f"^{parents[0]}", *exclude, cwd=repo
-            ).stdout.split()
-            for msha in member_shas:
-                pr.add_commit(msha)
-                commit_to_prs.setdefault(msha, set()).add(pr_num)
-        else:
-            non_merge_shas.append(sha)
-            commit_subjects[sha] = subject
-            commit_bodies[sha] = body
-
-    if fetch_commit_pulls is not None:
-        for sha in non_merge_shas:
-            pulls = fetch_commit_pulls(sha)
-            if pulls is None:
-                break  # --offline
-            for item in pulls:
-                if not isinstance(item, dict):
-                    continue
-                merged_at = item.get("merged_at")
-                if not merged_at:
-                    continue
-                pr_num = item.get("number")
-                if not isinstance(pr_num, int) or isinstance(pr_num, bool):
-                    continue
-                if _is_already_released_commit(repo, item.get("merge_commit_sha"), exclude):
-                    continue
-                pr = get_pr(pr_num)
-                pr.add_commit(sha)
-                commit_to_prs.setdefault(sha, set()).add(pr_num)
-                if pr.merged_at is None:
-                    pr.merged_at = merged_at
-                if pr.live_title is None and isinstance(item.get("title"), str):
-                    if "body" in item:
-                        pr.live_title = item["title"]
-                        pr.live_body = item.get("body") or ""
-                    elif pr.fallback_title is None:
-                        pr.fallback_title = item["title"]
-
-    # Attribute each non-merge commit's fallback trailers only to its most specific (originating) PR
-    # so a carrier/integration PR does not inherit upgrade or breaking trailers from its sub-PRs.
-    owned_commits: dict[int, list[str]] = {}
-    direct_shas: list[str] = []
-    for sha in non_merge_shas:
-        owners = commit_to_prs.get(sha)
-        if not owners:
-            direct_shas.append(sha)
+    for rec in records:
+        if len(rec.parents) < 2:
             continue
-        owner_num = min(
-            owners,
-            key=lambda n: (
-                len(prs[n].commits),
-                1 if prs[n].is_first_parent_merge else 0,
-                prs[n].merged_at or "",
-                n,
-            ),
-        )
-        owned_commits.setdefault(owner_num, []).append(sha)
+        if _is_already_released_merge(repo, rec.parents, exclude):
+            skipped_merges.add(rec.sha)
+            continue
+        if m_pr := PR_MERGE_RE.match(rec.subject):
+            git_pr_merges.append((rec, int(m_pr.group(1))))
 
-    sortable = []
-    for pr in prs.values():
-        if pr.live_title is not None:
-            raw_title = pr.live_title.strip()
-            pr_body = pr.live_body or ""
-        else:
-            gh_pr = fetch_pr(pr.number) if fetch_pr else None
-            raw_title = gh_pr[0].strip() if gh_pr else (pr.fallback_title or f"PR #{pr.number}")
-            pr_body = gh_pr[1] if gh_pr else ""
-        release_note = extract_release_note(pr_body)
-        pr_upgrades, pr_breaking = parse_trailers(pr_body)
-        commit_upgrades, commit_breaking = [], []
-        if not pr_upgrades or not pr_breaking:
-            fallback_msgs = [commit_bodies[c] for c in owned_commits.get(pr.number, ())]
-            if pr.merge_body:
-                fallback_msgs.append(pr.merge_body)
-            for msg in fallback_msgs:
-                u, b = parse_trailers(msg)
-                commit_upgrades.extend(u)
-                commit_breaking.extend(b)
-        upgrades_t = dedupe_texts(pr_upgrades) if pr_upgrades else dedupe_texts(commit_upgrades)
-        breaking_t = dedupe_texts(pr_breaking) if pr_breaking else dedupe_texts(commit_breaking)
-        parsed = parse_header(raw_title)
-        rep_sha = pr.merge_sha or max(pr.commits, key=lambda c: pos[c])
-        sort_key = (pos[rep_sha], 1 if pr.is_first_parent_merge else 0, len(pr.commits), pr.number)
-        sortable.append(
-            (
-                sort_key,
-                ReleaseEntry(
-                    sha=rep_sha,
-                    pr_number=pr.number,
-                    raw_title=raw_title,
-                    commit_type=parsed.commit_type if parsed else None,
-                    scope=parsed.scope if parsed else None,
-                    breaking=bool((parsed and parsed.breaking) or breaking_t),
-                    description=parsed.description if parsed else raw_title,
-                    release_note=release_note,
-                    upgrades=upgrades_t,
-                    breaking_notes=breaking_t,
-                ),
-            )
-        )
+    # `valid_range_shas` is the exact set of commits reachable from `to_ref` and outside `exclude`
+    # (equivalent to `git merge-base --is-ancestor <sha> <to_ref>` and not reachable from `exclude`),
+    # minus already-released merge commits such as a prior `release/vX.Y.Z` merge.
+    valid_range_shas = set(pos) - skipped_merges
+    if not valid_range_shas:
+        return []
 
-    for sha in direct_shas:
-        raw_title = commit_subjects[sha]
-        upgrades, breaking_notes = parse_trailers(commit_bodies[sha])
-        parsed = parse_header(raw_title)
-        upgrades_t = dedupe_texts(upgrades)
-        breaking_t = dedupe_texts(breaking_notes)
-        sortable.append(
-            (
-                (pos[sha], 0, 0, 0),
-                ReleaseEntry(
-                    sha=sha,
-                    pr_number=None,
-                    raw_title=raw_title,
-                    commit_type=parsed.commit_type if parsed else None,
-                    scope=parsed.scope if parsed else None,
-                    breaking=bool((parsed and parsed.breaking) or breaking_t),
-                    description=parsed.description if parsed else raw_title,
-                    release_note=None,
-                    upgrades=upgrades_t,
-                    breaking_notes=breaking_t,
-                ),
-            )
-        )
+    since_ts = min(record_by_sha[sha].committer_ts for sha in valid_range_shas) - MERGED_WINDOW_PAD_SECONDS
+    github_prs = fetch_merged_prs(since_ts) if fetch_merged_prs is not None else None
+
+    covered: set[str] = set()
+    sortable: list[tuple[tuple[int, int, int], ReleaseEntry]] = []
+
+    if github_prs is None:
+        # --offline (or caller omitted fetcher): infer PRs solely from local git PR merge commits.
+        for rec, pr_num in git_pr_merges:
+            _cover_merge_branch(repo, rec, exclude, covered)
+            fallback_title = next((l.strip() for l in rec.body.splitlines() if l.strip()), rec.subject)
+            entry = _pr_release_entry(rec.sha, pr_num, fallback_title, "")
+            sortable.append(((pos[rec.sha], 1, pr_num), entry))
+    else:
+        by_merge_sha: dict[str, list[MergedPr]] = {}
+        found_pr_numbers: set[int] = set()
+        for pr in github_prs:
+            if not pr.merge_sha or pr.merge_sha not in valid_range_shas:
+                continue
+            by_merge_sha.setdefault(pr.merge_sha, []).append(pr)
+            found_pr_numbers.add(pr.number)
+
+        for rec, pr_num in git_pr_merges:
+            if pr_num not in found_pr_numbers:
+                raise Refused(
+                    f"can't read PR #{pr_num} ({rec.sha[:7]}) from GitHub: merged PR not found in GitHub GraphQL response"
+                )
+
+        for merge_sha, group in by_merge_sha.items():
+            rec = record_by_sha[merge_sha]
+            _cover_merge_branch(repo, rec, exclude, covered)
+            if len(group) == 1:
+                pr = group[0]
+                entry = _pr_release_entry(merge_sha, pr.number, pr.title.strip(), pr.body)
+                sortable.append(((pos[merge_sha], 1, pr.number), entry))
+            else:
+                carrier = _pick_carrier_pr(group, rec)
+                sub_prs = sorted((p for p in group if p.number != carrier.number), key=lambda p: p.number)
+                for sub in sub_prs:
+                    sub_entry = _pr_release_entry(merge_sha, sub.number, sub.title.strip(), sub.body)
+                    sortable.append(((pos[merge_sha], 0, sub.number), sub_entry))
+                carrier_entry = _pr_release_entry(
+                    merge_sha,
+                    carrier.number,
+                    carrier.title.strip(),
+                    carrier.body,
+                    carried_prs=tuple(p.number for p in sub_prs),
+                )
+                sortable.append(((pos[merge_sha], 1, carrier.number), carrier_entry))
+
+    for rec in records:
+        if len(rec.parents) >= 2 or rec.sha in covered:
+            continue
+        sortable.append(((pos[rec.sha], 0, 0), _direct_commit_entry(rec)))
 
     sortable.sort(key=lambda item: item[0])
     return [entry for _, entry in sortable]
@@ -835,9 +950,13 @@ def compute_version(current, entries):
     return VersionPlan(f"{major}.{minor}.{patch + 1}", "patch", prev, ())
 
 
+def _pr_ref(number, web_url):
+    return f"[#{number}]({web_url}/pull/{number})" if web_url else f"#{number}"
+
+
 def _entry_ref(entry, web_url):
     if entry.pr_number is not None:
-        return f"[#{entry.pr_number}]({web_url}/pull/{entry.pr_number})" if web_url else f"#{entry.pr_number}"
+        return _pr_ref(entry.pr_number, web_url)
     short = entry.sha[:7]
     return f"[`{short}`]({web_url}/commit/{entry.sha})" if web_url else f"`{short}`"
 
@@ -855,6 +974,9 @@ def _format_upgrade_bullet(text, ref):
 
 def _format_entry_bullet(entry, web_url, *, include_type):
     ref = _entry_ref(entry, web_url)
+    if entry.carried_prs:
+        carried = ", ".join(_pr_ref(n, web_url) for n in entry.carried_prs)
+        ref = f"{ref}; includes {carried}"
     if include_type and entry.commit_type:
         label = f"{entry.commit_type}({entry.scope})" if entry.scope else entry.commit_type
         head = f"**{label}:** {entry.description} ({ref})"
@@ -862,7 +984,7 @@ def _format_entry_bullet(entry, web_url, *, include_type):
         head = f"**{entry.scope}:** {entry.description} ({ref})"
     else:
         head = f"{entry.description} ({ref})"
-    if not entry.release_note:
+    if not entry.release_note or (entry.carried_prs and entry.commit_type == "chore"):
         return f"- {head}"
     body_lines = "\n".join(f"  {l}" if l.strip() else "" for l in entry.release_note.splitlines())
     return f"- {head}\n\n{body_lines}"
@@ -1286,8 +1408,8 @@ def cut_range_preview(repo, range_spec, version_arg, reason, offline):
     from_ref, to_ref = parse_range(range_spec)
     git("rev-parse", "--verify", f"{from_ref}^{{commit}}", cwd=repo)
     to_sha = git("rev-parse", "--verify", f"{to_ref}^{{commit}}", cwd=repo).stdout.strip()
-    fetch_pr, fetch_commit_pulls = github_fetchers(repo, offline=offline)
-    entries = collect_entries(repo, to_sha, from_ref, fetch_pr=fetch_pr, fetch_commit_pulls=fetch_commit_pulls)
+    fetch_merged_prs = github_merged_prs_fetcher(repo, offline=offline)
+    entries = collect_entries(repo, to_sha, from_ref, fetch_merged_prs=fetch_merged_prs)
     if not entries:
         raise Refused(f"nothing to release in {from_ref}..{to_ref}")
     validate_entries(entries)
@@ -1340,8 +1462,8 @@ def cut_once(repo, branch, version_arg, reason, dry, ci_wait=CI_WAIT, offline=Fa
                 if base != head:
                     git("checkout", "--quiet", "--detach", base, cwd=wt)
 
-            fetch_pr, fetch_commit_pulls = github_fetchers(repo, offline=offline)
-            entries = collect_entries(wt, base, fetch_pr=fetch_pr, fetch_commit_pulls=fetch_commit_pulls)
+            fetch_merged_prs = github_merged_prs_fetcher(repo, offline=offline)
+            entries = collect_entries(wt, base, fetch_merged_prs=fetch_merged_prs)
             if not entries:
                 raise Refused(
                     f"nothing to release at the newest tested commit {base[:7]}: newer commits on {branch} are still untested"
@@ -1389,8 +1511,8 @@ def cmd_next(repo, branch, range_spec, offline):
         git("rev-parse", "--verify", f"{from_ref}^{{commit}}", cwd=repo)
         to_sha = git("rev-parse", "--verify", f"{to_ref}^{{commit}}", cwd=repo).stdout.strip()
         current = base_version_for_range(repo, from_ref)
-        fetch_pr, fetch_commit_pulls = github_fetchers(repo, offline=offline)
-        entries = collect_entries(repo, to_sha, from_ref, fetch_pr=fetch_pr, fetch_commit_pulls=fetch_commit_pulls)
+        fetch_merged_prs = github_merged_prs_fetcher(repo, offline=offline)
+        entries = collect_entries(repo, to_sha, from_ref, fetch_merged_prs=fetch_merged_prs)
     else:
         if offline:
             have = local_versions(repo)
@@ -1401,8 +1523,8 @@ def cmd_next(repo, branch, range_spec, offline):
         current = max(have) if have else None
         branch = branch or default_branch(repo)
         head = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
-        fetch_pr, fetch_commit_pulls = github_fetchers(repo, offline=offline)
-        entries = collect_entries(repo, head, fetch_pr=fetch_pr, fetch_commit_pulls=fetch_commit_pulls)
+        fetch_merged_prs = github_merged_prs_fetcher(repo, offline=offline)
+        entries = collect_entries(repo, head, fetch_merged_prs=fetch_merged_prs)
     validate_entries(entries)
     plan = compute_version(current, entries)
     print(format_next(plan, len(entries)), end="")
@@ -1443,6 +1565,79 @@ def _fetch_pr_files_from_github(repo_slug, number, token, api_base):
     return files
 
 
+def _fetch_pr_commits_from_github(repo_slug, number, token, api_base):
+    url = f"{api_base.rstrip('/')}/repos/{repo_slug}/pulls/{number}/commits?per_page=100"
+    commits: list[PrCommit] = []
+    while url:
+        page, link = _github_get_json(url, token)
+        if not isinstance(page, list):
+            raise Refused(f"unexpected GitHub PR commits response for #{number}")
+        for item in page:
+            if not isinstance(item, dict):
+                continue
+            sha = item.get("sha") if isinstance(item.get("sha"), str) else ""
+            commit_obj = item.get("commit") if isinstance(item.get("commit"), dict) else {}
+            msg = commit_obj.get("message") if isinstance(commit_obj.get("message"), str) else ""
+            commits.append(PrCommit(sha=sha, message=msg))
+        m = re.search(r'<([^>]+)>;\s*rel="next"', link)
+        url = m.group(1) if m else None
+    return commits
+
+
+def _commit_body_from_message(message):
+    if "\n" not in message:
+        return ""
+    return message.split("\n", 1)[1]
+
+
+def _normalize_pr_commits(commits):
+    out: list[PrCommit] = []
+    for item in commits:
+        if isinstance(item, PrCommit):
+            out.append(item)
+        elif isinstance(item, dict):
+            sha = item.get("sha") if isinstance(item.get("sha"), str) else ""
+            commit_obj = item.get("commit") if isinstance(item.get("commit"), dict) else {}
+            raw_msg = commit_obj.get("message") if "commit" in item else item.get("message")
+            msg = raw_msg if isinstance(raw_msg, str) else ""
+            out.append(PrCommit(sha=sha, message=msg))
+        elif isinstance(item, tuple) and len(item) == 2:
+            out.append(PrCommit(sha=str(item[0]), message=str(item[1])))
+        else:
+            raise Refused(f"unexpected PR commit entry: {item!r}")
+    return out
+
+
+def validate_pr_upgrade_trailers(parsed_title, body, commits):
+    """Refuse PRs whose commits carry `Upgrade:` trailers when the PR description has none.
+
+    Release notes read `Upgrade:` trailers strictly from PR descriptions (never falling back to
+    commit trailers so superseded draft wording cannot leak). `chore(integration)` carrier PRs
+    are exempt because each carried sub-PR owns its own PR description.
+    """
+    if not commits:
+        return
+    if parsed_title.commit_type == "chore" and parsed_title.scope == INTEGRATION_PR_SCOPE:
+        return
+    pr_upgrades, _ = parse_trailers(body)
+    if pr_upgrades:
+        return
+    offending = []
+    for c in _normalize_pr_commits(commits):
+        commit_upgrades, _ = parse_trailers(_commit_body_from_message(c.message))
+        if commit_upgrades:
+            offending.append(c.sha[:7] if c.sha else "<unknown>")
+    if offending:
+        shown = ", ".join(offending[:5])
+        more = f" (+{len(offending) - 5} more)" if len(offending) > 5 else ""
+        raise Refused(
+            f"PR commit(s) {shown}{more} contain an `Upgrade:` trailer, but the PR description has none. "
+            "Release notes read `Upgrade:` notices only from the PR description (commit trailers are ignored "
+            "so superseded draft wording does not leak). Write the final `Upgrade:` notice into the PR "
+            "description (or remove obsolete `Upgrade:` trailers from commits if no operator action is needed)."
+        )
+
+
 def validate_release_dir_files(all_files, added_or_modified, added_only, release_title):
     """Files under `docs/releases/` may only be generated by `ops/cut-release.py cut`
     (a `chore(release): vX.Y.Z` release PR adding `docs/releases/X.Y.Z.md` alone)."""
@@ -1460,10 +1655,11 @@ def validate_release_dir_files(all_files, added_or_modified, added_only, release
     )
 
 
-def lint_pr(title, body="", files=None):
-    validate_header(title, label="PR title")
+def lint_pr(title, body="", files=None, commits=None):
+    parsed = validate_header(title, label="PR title")
     parse_trailers(body, validate=True)
     validate_release_note(body)
+    validate_pr_upgrade_trailers(parsed, body, commits)
     if files is not None:
         all_files, added_or_modified, added_only = [], [], []
         for item in files:
@@ -1485,6 +1681,7 @@ def lint_github_event(
     env=os.environ,
     refresh=_refresh_pr_from_github,
     fetch_files=_fetch_pr_files_from_github,
+    fetch_commits=_fetch_pr_commits_from_github,
 ):
     try:
         event = json.loads(Path(event_path).read_text(encoding="utf-8"))
@@ -1496,6 +1693,7 @@ def lint_github_event(
     title = pr.get("title") or ""
     body = pr.get("body") or ""
     files = pr.get("files") if isinstance(pr.get("files"), list) else None
+    commits = pr.get("commit_messages") if isinstance(pr.get("commit_messages"), list) else None
     token = env.get("GITHUB_TOKEN")
     repo_slug = env.get("GITHUB_REPOSITORY") or (event.get("repository") or {}).get("full_name")
     number = pr.get("number")
@@ -1512,7 +1710,33 @@ def lint_github_event(
                 files = fetch_files(repo_slug, number, token, api_base)
             except (OSError, ValueError, urllib.error.URLError) as e:
                 raise Refused(f"can't read PR #{number} files from GitHub: {e}")
-    lint_pr(title, body, files=files)
+        if commits is None:
+            try:
+                commits = fetch_commits(repo_slug, number, token, api_base)
+            except (OSError, ValueError, urllib.error.URLError) as e:
+                raise Refused(f"can't read PR #{number} commits from GitHub: {e}")
+    lint_pr(title, body, files=files, commits=commits)
+
+
+def _commits_for_pr_lint(repo, base=None, head="HEAD", range_spec=None):
+    if range_spec:
+        from_ref, to_ref = parse_range(range_spec)
+        git("rev-parse", "--verify", f"{from_ref}^{{commit}}", cwd=repo)
+        head_sha = git("rev-parse", "--verify", f"{to_ref}^{{commit}}", cwd=repo).stdout.strip()
+        base_ref = from_ref
+    else:
+        target_base = base or f"refs/remotes/origin/{default_branch(repo)}"
+        base_ref = git("merge-base", head, target_base, cwd=repo).stdout.strip()
+        head_sha = git("rev-parse", "--verify", f"{head}^{{commit}}", cwd=repo).stdout.strip()
+    raw = git("log", "-z", "--no-merges", "--format=%H%n%B", f"{base_ref}..{head_sha}", cwd=repo).stdout
+    commits: list[PrCommit] = []
+    for chunk in raw.split("\x00"):
+        if not chunk:
+            continue
+        sha, _, msg = chunk.partition("\n")
+        if sha.strip():
+            commits.append(PrCommit(sha=sha.strip(), message=msg))
+    return commits
 
 
 def lint_commits(repo, base=None, head="HEAD", range_spec=None):
@@ -1660,7 +1884,12 @@ def main(argv=None):
                 lint_github_event(a.github_event)
             elif a.pr_title is not None:
                 body = Path(a.pr_body).read_text(encoding="utf-8") if a.pr_body else ""
-                lint_pr(a.pr_title, body)
+                commits = (
+                    _commits_for_pr_lint(repo, a.base, a.head, a.range_spec)
+                    if (a.range_spec or a.base)
+                    else None
+                )
+                lint_pr(a.pr_title, body, commits=commits)
             else:
                 lint_commits(repo, a.base, a.head, a.range_spec)
     except Refused as e:
