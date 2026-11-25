@@ -417,6 +417,16 @@ impl Repo for StoreBackend {
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.items().get(id).map_err(err)?)
     }
+    fn item_view(&self, ws: &str, id: &str) -> BResult<Option<steve_types::ItemView>> {
+        use s::Views;
+        let id = id.to_string();
+        Ok(self
+            .0
+            .read(|r| r.item_views().of(ws, std::slice::from_ref(&id)))
+            .map_err(err)?
+            .into_iter()
+            .next())
+    }
     fn item_patch(&self, id: &str, p: &Obj) -> BResult<Option<Obj>> {
         opt(self.0.items().patch(id, &patch(p)?).map_err(err)?)
     }

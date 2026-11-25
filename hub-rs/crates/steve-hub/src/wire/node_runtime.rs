@@ -730,6 +730,29 @@ impl NodeRuntime {
     pub fn node(&self) -> Arc<dyn Node> {
         self.node.clone()
     }
+
+    /// Cancel a single active subtask on this Node without cancelling the parent turn.
+    pub async fn cancel_subtask(&self, session: &str, subtask: &str) -> ApiResult<bool> {
+        let session =
+            SessionId::new(session).map_err(|e| Error::new(Code::Invalid, e.to_string()))?;
+        let subtask = CallId::new(subtask).map_err(|e| Error::new(Code::Invalid, e.to_string()))?;
+        let res = self
+            .node
+            .cancel_subtask(CancelSubtask { session, subtask })
+            .await;
+        let outcome = match &res {
+            Ok(true) => "cancelled",
+            Ok(false) => "noop",
+            Err(_) => "error",
+        };
+        metrics::counter!(
+            "steve_subtask_cancels_total",
+            "node" => self.node_id.to_string(),
+            "outcome" => outcome,
+        )
+        .increment(1);
+        res
+    }
 }
 
 /// The option ids of a Node permission card.

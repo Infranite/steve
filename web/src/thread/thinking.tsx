@@ -41,6 +41,7 @@ export function ChatThinking({ items, status = "running", label, startedAt, last
     if (item.t === "think") return { id: item.key, kind: "step", status: live && item.live ? "running" : "done", label: t("thread:thinking.reasoning"),
       render: <Reasoning text={item.text} live={live && item.live} completed={!live} />, attrs: { ...attrs(item.attrs), "data-thinking": live && item.live ? "" : undefined } }
     if (item.t === "note") return { id: item.key, kind: "step", status: "done", label: item.text }
+    if (item.t === "block") return { id: item.key, kind: "step", status: state(item.state, live), label: t("core:subtask.list"), render: item.body, attrs: attrs(item.attrs) }
     return { id: item.key, kind: "step", status: state(item.state, live), label: <>{item.label}{item.detail && <span className="ml-1.5">{item.detail}</span>}</>, body: item.body, attrs: attrs(item.attrs) }
   }), [items, live, t])
   const terminal = endLabel ?? t(status === "error" ? "thread:thinking.failed" : status === "stopped" ? "thread:thinking.stopped" : "thread:thinking.done")

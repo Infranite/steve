@@ -338,6 +338,10 @@ pub trait Repo {
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("item_get")
     }
+    /// One task item's read view (`steve_types::ItemView`) in `ws`.
+    fn item_view(&self, ws: &str, id: &str) -> BResult<Option<steve_types::ItemView>> {
+        todo_backend!("item_view")
+    }
     /// `items.patch`: present keys only (booleans → 0/1, `plan`/`snooze` JSON-encoded), bumps `updated` and
     /// publishes `item` unless `patch` is empty. Returns the item as read back.
     fn item_patch(&self, id: &str, patch: &Obj) -> BResult<Option<Obj>> {
