@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict'
+import http from 'node:http'
+import { createWebProxy, OFFLINE_CHROMIUM_ARGS } from './fixtures/hub-proxy.mjs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
-const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE })
-const base = process.env.STEVE_TEST_WEB || 'http://127.0.0.1:5195'
-const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 } })
-page.setDefaultTimeout(10000)
+const browser = await chromium.launch({ headless: true, args: OFFLINE_CHROMIUM_ARGS, executablePath: process.env.PLAYWRIGHT_EXECUTABLE })
 
-const errors = []; page.on('pageerror', e => errors.push(e.message))
 let pending = Array.from({length: 125}, (_, i) => ({ id: 'p'+i, name: '用户'+i, label: '用户'+i, nameless: i < 120, aliases: [], rels: [], tags: [], accounts: 1, items: 0, kind: 'unconfirmed', org: null, avatar: null }))
 let fail = true, orgFail = true, accounts = []
 let org = { id: 'o1', name: '旧组织', name_state: 'workspace', name_reason: 'permission', name_scope: 'tenant:tenant:readonly', kind: 'self', domains: [], aliases: [], tags: [], note: '', attrs: [], people: [], revision: 1 }
 let contact = { id:'c1', name:'同事', kind:'real', aliases:[], rels:[], tags:[], org:null, avatar:null, note:'', status:'active', visibility:'workspace', profile:{checked:1,next_check:null,source:'chat',fields:{name:{state:'known'},org:{state:'missing',reason:'pending'},title:{state:'missing',reason:'external'},email:{state:'missing',reason:'permission',scope:'contact:user.email:readonly'}}},jobs:[], attrs:[{ id:'a1', key:'address', label:'地址', value:'上海市浦东新区世纪大道 100 号 环球金融中心 52 层 5201 室', source_label:'手动', level:'conclusion', status:'confirmed' }], teams:[], merges:[], reports_to:[] }
-await page.route('**/*', async route => {
- const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith('/api/')) return route.continue()
- let data = [], status = 200; const method = route.request().method(), body = method === 'PATCH' || method === 'POST' ? route.request().postDataJSON() : null
+const apiServer = http.createServer(async (req, res) => {
+ const u = new URL(req.url || '/', 'http://127.0.0.1')
+ const method = req.method || 'GET'
+ let raw = ''; for await (const chunk of req) raw += chunk
+ const body = (method === 'PATCH' || method === 'POST') && raw ? JSON.parse(raw) : null
+ let data = [], status = 200
  if (u.pathname === '/api/merges') data = {proposals:[],unconfirmed:pending}
  else if (u.pathname.startsWith('/api/contacts/p') && method === 'PATCH') { const id = u.pathname.split('/').at(-1); if (id === 'p0' && fail) { status=500; data={error:'模拟失败'}; fail=false } else { pending=pending.filter(x=>x.id!==id); data={ok:true} } }
  else if (u.pathname === '/api/me/contact') data = contact
@@ -22,8 +23,16 @@ await page.route('**/*', async route => {
  else if (u.pathname === '/api/orgs') data=[org]
  else if (u.pathname === '/api/contacts/c1') { if(method==='PATCH') contact={...contact,...body}; data=contact }
  else if (u.pathname === '/api/contacts/c1/jobs') {contact={...contact,jobs:[{...body,org_name:org.name,to:null}]};data=contact}
- return route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)})
+ res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+ res.end(JSON.stringify(data))
 })
+await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve))
+const web = await createWebProxy({ hubUrl: `http://127.0.0.1:${apiServer.address().port}`, cacheAssets: true })
+const base = web.url
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 }, reducedMotion: "reduce" })
+page.setDefaultTimeout(10000)
+
+const errors = []; page.on('pageerror', e => errors.push(e.message))
 const fits = async () => assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true)
 try {
  await page.goto(base+'/test/fixtures/people-management.html'); await page.getByRole('button',{name:'全选筛选结果（125）'}).waitFor()
@@ -41,8 +50,10 @@ try {
  await page.getByLabel('搜索待确认联系人').fill('no-match'); await page.getByText('没有匹配的联系人',{exact:true}).waitFor()
  await page.goto(base+'/test/fixtures/people-management.html?org'); await page.getByRole('button',{name:'编辑组织',exact:true}).click()
  assert.equal(await page.getByLabel('组织类型',{exact:true}).isDisabled(),true)
- await page.getByLabel('组织名称',{exact:true}).fill('新组织'); await page.getByRole('button',{name:'保存',exact:true}).click()
- await page.waitForTimeout(200); assert.equal(await page.getByLabel('组织名称',{exact:true}).inputValue(),'新组织')
+ await page.getByLabel('组织名称',{exact:true}).fill('新组织')
+ const firstOrgSave = page.waitForResponse(r => new URL(r.url()).pathname === '/api/orgs/o1' && r.request().method() === 'PATCH' && r.status() === 500)
+ await page.getByRole('button',{name:'保存',exact:true}).click(); await firstOrgSave
+ assert.equal(await page.getByLabel('组织名称',{exact:true}).inputValue(),'新组织')
  await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByRole('heading',{name:'新组织',exact:true}).waitFor(); await fits()
  await page.goto(base+'/test/fixtures/people-management.html?contact'); await page.getByText('职位：飞书不向应用提供外部联系人的此项资料',{exact:true}).waitFor(); assert.equal(await page.getByText('资料完整性').count(),0); await page.getByRole('button',{name:'编辑资料',exact:true}).click()
  await page.getByLabel('名字',{exact:true}).fill('新名字'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByRole('heading',{name:'新名字',exact:true}).waitFor()
@@ -53,4 +64,4 @@ try {
  assert.ok(values.length > 0, 'the contact shows its details'); for (const w of values) assert.ok(w > 120, `detail value squeezed to ${w}px at 390px`)
  await page.setViewportSize({width:1280,height:900}); await fits()
  assert.deepEqual(errors,[]); console.log('PASS: 125 contacts, filtered selection, partial failure/retry, zero results, org save retry/self kind, contact edit/jobs, 390px/1280px layout')
-} catch(e) { console.error(await page.locator("body").innerText(),errors); throw e } finally {await browser.close()}
+} catch(e) { console.error(await page.locator("body").innerText(),errors); throw e } finally { await browser.close(); await web.close(); apiServer.closeAllConnections(); await new Promise(resolve => apiServer.close(resolve)) }

@@ -2,13 +2,17 @@
 import assert from "node:assert/strict"
 import http from "node:http"
 import { readFile, mkdir, writeFile } from "node:fs/promises"
+import { createWebProxy, OFFLINE_CHROMIUM_ARGS } from "./fixtures/hub-proxy.mjs"
 import { emptySnapshot } from "./fixtures/wire-views.ts"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
-const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:19614"
 const apiPort = Number(process.env.STEVE_TEST_API_PORT || 0)
 const shots = process.env.STEVE_TEST_SHOTS
 if (shots) await mkdir(shots, { recursive: true })
-const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
+const browser = await chromium.launch({
+  headless: true,
+  args: OFFLINE_CHROMIUM_ARGS,
+  ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}),
+})
 const ws = { id: "fixture", name: "HTTP fixture", description: "Simulated API", item_prefix: "ST", sort: 0, created: 0 }
 const device = { id: "hub", name: "HTTP fixture Hub", roles: ["Hub"], node_id: "local", connected: true, can_configure: true, revision: 0, os: "fixture", version: "fixture", status: "正常", max_sessions: 4, seen: 0, created: 0 }
 const runtime = (state, extra = {}) => ({ id: "registry-fixture", name: "Registry fixture", ok: state === "ready", version: "", path: "/fixture/adapter", models: [], note: "HTTP fixture; no real Pi process", modes: ["full_access"], install_hint: "Generic: install components first", ...extra,
@@ -23,11 +27,19 @@ const entered = async g => {
 }
 let current
 const requests = [], observations = []
+const streams = new Set()
 const server = http.createServer(async (req, res) => {
   try {
     const f = current, url = new URL(req.url, "http://fixture"), p = url.pathname
     let bytes = ""; for await (const chunk of req) bytes += chunk
     requests.push({ method: req.method, path: req.url, body: bytes ? JSON.parse(bytes) : null })
+    if (p === "/api/stream") {
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" })
+      res.write(": keepalive\n\n")
+      streams.add(res)
+      req.on("close", () => streams.delete(res))
+      return
+    }
     let data
     if (p === "/auth/hello") data = { name: "steve", version: "fixture", api: 2, login: { token: false, oidc: false } }
     else if (p === "/api/shell") {
@@ -36,7 +48,7 @@ const server = http.createServer(async (req, res) => {
     else if (p === "/api/summary") data = { thinking: false, hold: null }
     else if (p === "/api/devices") data = { devices: [device] }
     else if (p === "/api/runtimes") {
-      if (url.searchParams.get("fresh") !== "1") { res.writeHead(200, {"content-type":"application/json"}); res.end(JSON.stringify(clone(f.rows))); return }
+      if (url.searchParams.get("fresh") !== "1") { res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(clone(f.rows))); return }
       f.probes++
       const g = f.probeGates.shift()
       data = clone(g?.rows || f.rows)
@@ -53,26 +65,33 @@ const server = http.createServer(async (req, res) => {
     else if (p === "/api/node-tags") data = { tags: {} }
     else if (p === "/api/notifications") data = []
     else if (p.endsWith("/events")) data = []
-    else { res.writeHead(404, { "content-type": "application/json" }); res.end("{}"); return }
-    res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(data))
+    else { res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" }); res.end("{}"); return }
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(data))
   } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); console.error(e) }
 })
 await new Promise(resolve => server.listen(apiPort, "127.0.0.1", resolve))
 const apiBase = `http://127.0.0.1:${server.address().port}`
+const web = await createWebProxy({ hubUrl: apiBase, cacheAssets: true })
+const base = web.url
+// One BrowserContext per locale keeps Chromium's cached Vite modules warm across viewports/scenarios
+// while each `open()` still uses a fresh Page (fresh JS realm, store, and query cache).
+const contexts = new Map()
+const contextFor = async (lang) => {
+  let ctx = contexts.get(lang)
+  if (!ctx) {
+    ctx = await browser.newContext({ locale: lang, reducedMotion: "reduce" })
+    await ctx.addInitScript(l => { localStorage.setItem("steve-lang", l); localStorage.setItem("steve-onboarded", "1") }, lang)
+    contexts.set(lang, ctx)
+  }
+  return ctx
+}
 const open = async (rows, lang = "zh-CN", width = 375) => {
   const f = current = { rows, probes: 0, installs: 0, probeGates: [] }
-  const page = await browser.newPage({ viewport: { width, height: 900 }, locale: lang, reducedMotion: "reduce" })
+  const ctx = await contextFor(lang)
+  const page = await ctx.newPage()
+  await page.setViewportSize({ width, height: 900 })
   page.setDefaultTimeout(12000)
   f.errors = []; page.on("pageerror", e => f.errors.push(e.message))
-  await page.addInitScript(lang => { localStorage.setItem("steve-lang", lang); localStorage.setItem("steve-onboarded", "1") }, lang)
-  await page.route("**/*", async route => {
-    const u = new URL(route.request().url())
-    if (u.origin !== base) return route.abort("blockedbyclient")
-    if (u.pathname === "/auth/hello" || u.pathname.startsWith("/api/")) {
-      return route.fulfill({ response: await route.fetch({ url: apiBase + u.pathname + u.search }) })
-    }
-    return route.continue()
-  })
   await page.goto(base + "/#/devices/nodes/local/harness")
   await page.locator("[data-panel=runtimes]").waitFor()
   f.page = page
@@ -131,7 +150,10 @@ try {
       assert.equal(f.installs, 1, "real installer failure offers an effective retry")
       // Reopen the full matrix for the screenshot after exercising the retry.
       f.rows = [external, discovered, ready, provider, failed, interrupted]
+      const refreshed = p.waitForResponse(r => new URL(r.url()).pathname === "/api/runtimes" && new URL(r.url()).searchParams.get("fresh") === "1")
       await p.locator("[data-runtime-refresh]").click()
+      await refreshed
+      await card(p, "installer-error").locator('[data-runtime-state="unavailable"]').waitFor()
       await card(p, external.id).waitFor()
       await fits(p); await shot(p, `evidence-${lang}-${width}`)
       assert.deepEqual(f.errors, [])
@@ -144,6 +166,7 @@ try {
     const f = await open([missing]), p = f.page
     const old = gate([runtime("ready")]), fresh = gate()
     try {
+      await p.locator("[data-runtime-unavailable-toggle]").waitFor()
       f.probeGates.push(old)
       await p.locator("[data-runtime-refresh]").click()
       await entered(old)
@@ -176,6 +199,10 @@ try {
   console.log("PASS: deterministic HTTP gates for old runtime responses after install acceptance; stale ready preserves pending/disabled install; new fresh probe + polling recover; no timing sleeps")
 } finally {
   if (shots) await writeFile(`${shots}/http-observations.json`, JSON.stringify({ data_source: "Running Web with isolated simulated HTTP API; no real Pi", observations, requests }, null, 2))
+  for (const s of streams) s.end()
+  for (const ctx of contexts.values()) await ctx.close()
   await browser.close()
+  await web.close()
+  server.closeAllConnections()
   await new Promise(resolve => server.close(resolve))
 }

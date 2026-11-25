@@ -15,11 +15,16 @@
 import assert from "node:assert/strict"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
+import { createWebProxy, OFFLINE_CHROMIUM_ARGS } from "./fixtures/hub-proxy.mjs"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
-const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
-const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5198"
+const browser = await chromium.launch({
+  headless: true,
+  args: OFFLINE_CHROMIUM_ARGS,
+  ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}),
+})
 const SHOTS = process.env.STEVE_TEST_SHOTS, BASELINE = process.env.STEVE_TEST_BASELINE, ONLY = process.env.STEVE_TEST_ONLY
 const TOLERANCE = Number(process.env.STEVE_TEST_SHOT_TOLERANCE ?? 0)
+const CONTEXT_JOBS = Math.max(1, Number(process.env.STEVE_DEVICES_LOOK_JOBS) || 2)
 if (SHOTS) await mkdir(SHOTS, { recursive: true })
 
 /* the clock every screen is drawn against, fixed in the page too (in UTC): relative times ("3 小时前"), a chart's hours
@@ -100,39 +105,39 @@ const screens = [
   } },
 ].filter((s) => !ONLY || s.name.includes(ONLY))
 
-const json = (route, body, code = 200) => route.fulfill({ status: code, contentType: "application/json", body: JSON.stringify(body) })
+const sendJson = (res, body, code = 200) => {
+  res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" })
+  res.end(JSON.stringify(body))
+}
 /** the owner's Hub for one screen: what it answers, and every path it was asked that it does not know */
-async function hub(page, scene, unknown) {
-  const nodes = scenes[scene]()
-  await page.route("**/*", async (route) => {
-    const request = route.request(), url = new URL(request.url()), path = url.pathname, get = request.method() === "GET"
-    if (url.origin !== base) return route.abort("blockedbyclient")
-    if (path === "/auth/hello") return json(route, { name: "steve", api: 2, version: HUB })
-    if (!path.startsWith("/api/")) return route.continue()
-    if (path === "/api/nodes") return json(route, { nodes })
-    if (path === "/api/node-harnesses") return json(route, { nodes: {} })
-    if (path.startsWith("/api/node-harness-updates/")) return json(route, { report: { node: path.split("/")[3], checking: false, harnesses: [] }, runs: {}, at: NOW, error: null })
-    if (path === "/api/vitals") return json(route, { nodes: vitals(nodes) })
-    if (path === "/api/nodes/upgrade-default") return json(route, { policy: "notify", hub: { version: HUB, commit: "abc", target: "x" }, drain_secs: 1800, health_secs: 180 })
-    if (path === "/api/nodes/pairings" && !get) return json(route, { code: "stv1-fixture-code", expires: NOW + 10 * MIN, pin: null, hub_id: "hub_example" })
-    if (path === "/api/nodes/tailcat") return json(route, { available: true, enabled: false })
-    if (path === "/api/node-tags") return json(route, { tags: { local: ["gpu"], "n-mbp": ["mac", "xcode"] } })
-    if (path === "/api/node-context") return json(route, { owner_context: "on" })
-    if (path === "/api/access") return json(route, { tokens, clients, current: "c1", route: "lan", hub: { version: HUB }, me: "u1", all: true, users: { u1: "Owner" } })
-    if (path === "/api/access/oidc") return json(route, { source: "none", issuer: null, client_id: null, has_secret: false, callback: "https://hub.example.net/auth/callback", enabled: false })
-    if (path === "/api/access/pairings" && !get) return json(route, { id: "cp1", code: "fixture-client-code", name: "New client", expires: NOW + 10 * MIN, public_url: "https://hub.example.net", lan_urls: ["http://192.168.1.10:8080"], loopback_only: false, links: [{ url: "https://hub.example.net", kind: "public", link: "https://hub.example.net/#/pair/fixture-client-code" }] })
-    if (path.startsWith("/api/access/pairings/")) return json(route, { id: "cp1", status: "pending", expires: NOW + 10 * MIN, client: null })
-    if (path === "/api/hub-metadata") return json(route, metadata)
-    if (path === "/api/devices") return json(route, { devices: [{ id: "hub", name: "Studio Mac", roles: ["Hub"], node_id: "local", os: "macOS 26.1", version: HUB, status: "正常", max_sessions: 32, seen: NOW, created: 0 }], runtimes })
-    if (path === "/api/runtimes") return json(route, runtimes)
-    if (path.startsWith("/api/stewards/")) return json(route, {}, 404)
-    /* the owner chip asks for the people module, which this Hub (like any without it) does not have */
-    if (path === "/api/me/contact") return json(route, {}, 404)
-    /* the page header's account button asks who is signed in */
-    if (path === "/api/me") return json(route, { user: { id: "u1", name: "Owner", email: null, role: "owner" }, version: HUB, web_version: HUB })
-    unknown.add(request.method() + " " + path)
-    return json(route, { error: "fixture" }, 404)
-  })
+function answerHub(req, res, nodes, unknown) {
+  const url = new URL(req.url || "/", "http://127.0.0.1"), path = url.pathname, get = req.method === "GET"
+  if (path === "/auth/hello") { sendJson(res, { name: "steve", api: 2, version: HUB }); return true }
+  if (!path.startsWith("/api/")) return false
+  if (path === "/api/nodes") { sendJson(res, { nodes }); return true }
+  if (path === "/api/node-harnesses") { sendJson(res, { nodes: {} }); return true }
+  if (path.startsWith("/api/node-harness-updates/")) { sendJson(res, { report: { node: path.split("/")[3], checking: false, harnesses: [] }, runs: {}, at: NOW, error: null }); return true }
+  if (path === "/api/vitals") { sendJson(res, { nodes: vitals(nodes) }); return true }
+  if (path === "/api/nodes/upgrade-default") { sendJson(res, { policy: "notify", hub: { version: HUB, commit: "abc", target: "x" }, drain_secs: 1800, health_secs: 180 }); return true }
+  if (path === "/api/nodes/pairings" && !get) { sendJson(res, { code: "stv1-fixture-code", expires: NOW + 10 * MIN, pin: null, hub_id: "hub_example" }); return true }
+  if (path === "/api/nodes/tailcat") { sendJson(res, { available: true, enabled: false }); return true }
+  if (path === "/api/node-tags") { sendJson(res, { tags: { local: ["gpu"], "n-mbp": ["mac", "xcode"] } }); return true }
+  if (path === "/api/node-context") { sendJson(res, { owner_context: "on" }); return true }
+  if (path === "/api/access") { sendJson(res, { tokens, clients, current: "c1", route: "lan", hub: { version: HUB }, me: "u1", all: true, users: { u1: "Owner" } }); return true }
+  if (path === "/api/access/oidc") { sendJson(res, { source: "none", issuer: null, client_id: null, has_secret: false, callback: "https://hub.example.net/auth/callback", enabled: false }); return true }
+  if (path === "/api/access/pairings" && !get) { sendJson(res, { id: "cp1", code: "fixture-client-code", name: "New client", expires: NOW + 10 * MIN, public_url: "https://hub.example.net", lan_urls: ["http://192.168.1.10:8080"], loopback_only: false, links: [{ url: "https://hub.example.net", kind: "public", link: "https://hub.example.net/#/pair/fixture-client-code" }] }); return true }
+  if (path.startsWith("/api/access/pairings/")) { sendJson(res, { id: "cp1", status: "pending", expires: NOW + 10 * MIN, client: null }); return true }
+  if (path === "/api/hub-metadata") { sendJson(res, metadata); return true }
+  if (path === "/api/devices") { sendJson(res, { devices: [{ id: "hub", name: "Studio Mac", roles: ["Hub"], node_id: "local", os: "macOS 26.1", version: HUB, status: "正常", max_sessions: 32, seen: NOW, created: 0 }], runtimes }); return true }
+  if (path === "/api/runtimes") { sendJson(res, runtimes); return true }
+  if (path.startsWith("/api/stewards/")) { sendJson(res, {}, 404); return true }
+  /* the owner chip asks for the people module, which this Hub (like any without it) does not have */
+  if (path === "/api/me/contact") { sendJson(res, {}, 404); return true }
+  /* the page header's account button asks who is signed in */
+  if (path === "/api/me") { sendJson(res, { user: { id: "u1", name: "Owner", email: null, role: "owner" }, version: HUB, web_version: HUB }); return true }
+  unknown.add(req.method + " " + path)
+  sendJson(res, { error: "fixture" }, 404)
+  return true
 }
 
 /** what a drawn screen must hold: nothing past the window or cut at the side of the page's scroller, no scroller that
@@ -180,18 +185,34 @@ async function compare(page, a, b) {
 }
 const dataUrl = async (file) => "data:image/png;base64," + (await readFile(file)).toString("base64")
 
-const problems = [], moved = []
-let drawn = 0
-try {
-  for (const [width, height] of [[1440, 1000], [390, 844]]) for (const theme of ["light", "dark"]) {
-    const ctx = await browser.newContext({ locale: "zh-CN", timezoneId: "UTC", colorScheme: theme, reducedMotion: "reduce", viewport: { width, height }, deviceScaleFactor: 1, hasTouch: width < 600 })
+const variants = []
+for (const [width, height] of [[1440, 1000], [390, 844]]) for (const theme of ["light", "dark"]) variants.push({ width, height, theme })
+const results = Array.from({ length: variants.length })
+let nextVariant = 0
+
+async function runVariant(index) {
+  const { width, height, theme } = variants[index]
+  const problems = [], moved = []
+  let drawn = 0
+  let currentNodes = [], currentUnknown = new Set()
+  const web = await createWebProxy({
+    onRequest: (req, res) => answerHub(req, res, currentNodes, currentUnknown),
+    cacheAssets: true,
+  })
+  const ctx = await browser.newContext({ locale: "zh-CN", timezoneId: "UTC", colorScheme: theme, reducedMotion: "reduce", viewport: { width, height }, deviceScaleFactor: 1, hasTouch: width < 600 })
+  try {
     await ctx.clock.setFixedTime(NOW)
     await ctx.addInitScript(() => { localStorage.setItem("steve-lang", "zh-CN"); localStorage.setItem("steve-onboarded", "1") })
     for (const s of screens) {
       const tag = `${s.name}-${width}-${theme}`, page = await ctx.newPage(), errors = [], unknown = new Set()
+      currentNodes = scenes[s.scene]()
+      currentUnknown = unknown
       page.on("pageerror", (e) => errors.push(e.message))
-      await hub(page, s.scene, unknown)
-      await page.goto(base + "/test/fixtures/devices.html" + s.hash)
+      page.on("request", (req) => {
+        const u = new URL(req.url())
+        if (u.protocol.startsWith("http") && u.origin !== web.url) unknown.add(`OFF_ORIGIN ${req.method()} ${u.href}`)
+      })
+      await page.goto(web.url + "/test/fixtures/devices.html" + s.hash)
       try { await page.locator(s.ready).first().waitFor({ timeout: 15_000 }) } catch (e) { if (SHOTS) await page.screenshot({ path: `${SHOTS}/${tag}.failed.png`, fullPage: true }); throw new Error(`${tag}: ${s.ready} never showed; unanswered: ${[...unknown].join(", ") || "none"}; errors: ${errors.join("; ") || "none"}`) }
       if (s.then) await s.then(page)
       if (s.check) await s.check(page)
@@ -227,8 +248,20 @@ try {
       drawn++
       await page.close()
     }
+    results[index] = { problems, moved, drawn }
+  } finally {
     await ctx.close()
+    await web.close()
   }
+}
+
+try {
+  await Promise.all(Array.from({ length: Math.min(CONTEXT_JOBS, variants.length) }, async () => {
+    while (nextVariant < variants.length) await runVariant(nextVariant++)
+  }))
+  const problems = results.flatMap((r) => r.problems)
+  const moved = results.flatMap((r) => r.moved)
+  const drawn = results.reduce((sum, r) => sum + r.drawn, 0)
   assert.deepEqual(problems, [], "every devices screen drawn whole at 1440 and 390 px in both themes")
   assert.deepEqual(moved, [], `screens that differ from ${BASELINE}`)
   assert.ok(drawn > 0, "no screen matched STEVE_TEST_ONLY")
