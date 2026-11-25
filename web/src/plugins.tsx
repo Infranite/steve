@@ -27,7 +27,8 @@ import { Unauthenticated } from "@/api"
 import { accountsApi, type RAccount } from "@/api/accounts"
 import { pluginsApi, type Plugin, type PluginInstance as Instance, type PluginState as State, type PluginStore as Store, type PluginText as Text, type PluginsView as View } from "@/api/plugins"
 import { vaultApi } from "@/api/vault"
-import { useLoad, useBusy, report } from "@/accounts/load"
+import { useBusy, report } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { toast } from "@/store"
 import { t as tr, useT, lang } from "@/i18n"
 import { ago } from "@/i18n/format"
@@ -60,22 +61,22 @@ type Dlg = { k: "connect"; s: Store; p: Plugin } | { k: "connected"; connection:
 
 export function PluginsSettingsPane() {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["plugins", "list"], async () => {
     const [v, mine] = await Promise.all([pluginsApi.list(), accountsApi.accounts({ scope: "mine" }).catch(() => [] as RAccount[])])
     return { v, mine }
-  }, [], ["connection"])
+  }, { events: ["connection"] })
   const [dlg, setDlg] = useState<Dlg | null>(null)
   /* a plugin process's state has no event of its own: while one of the caller's is starting or waiting, look again */
-  const unsettled = L.s === "ok" && L.data.v.stores.some((s) => s.plugins.some((p) => p.connections.some((c) => c.status.state === "starting" || c.status.state === "waiting")))
+  const unsettled = !!L.data && L.data.v.stores.some((s) => s.plugins.some((p) => p.connections.some((c) => c.status.state === "starting" || c.status.state === "waiting")))
   const { reload } = L
   useEffect(() => { if (!unsettled) return; const h = setInterval(() => void reload(), 5000); return () => clearInterval(h) }, [unsettled, reload])
   /* what is installed changed: the theme plugins are read again, so a new skin is a choice in 外观 at once (and on
    * opening the pane, so a theme's state below is this client's own) */
   const changed = async () => { await reload(); await syncPluginThemes().catch(report) }
   useEffect(() => { void syncPluginThemes().catch(report) }, [])
-  if (L.s === "loading") return <Loading />
-  if (L.s === "error") return (
-    <div data-plugins-error><Empty compact className="bg-muted/50" icon={<PlugIcon />} title={t("pages:plugins.loadFailed")} sub={L.err}
+  if (L.loading) return <Loading />
+  if (L.error || !L.data) return (
+    <div data-plugins-error><Empty compact className="bg-muted/50" icon={<PlugIcon />} title={t("pages:plugins.loadFailed")} sub={L.error?.message ?? ""}
       action={<Button size="sm" variant="outline" onClick={() => void L.reload()} data-plugins-retry>{t("common:action.retry")}</Button>} /></div>
   )
   const { v, mine } = L.data

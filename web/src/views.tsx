@@ -93,7 +93,7 @@ export function ForkDialog({ k, at }: { k: string; at?: number }) {
 export function NewItemDialog({ project: pre, bot: preBot }: { project?: string; bot?: string } = {}) {
   const t = useT()
   const [g, setG] = useState(""), [mode, setMode] = useState<"start" | "propose">("start"), [bot, setBot] = useState(preBot ?? "auto"), [proj, setProj] = useState(pre ?? "auto"), [busy, setBusy] = useState(false)
-  const { value: teams } = useBotTeams()
+  const { data: teams } = useBotTeams()
   const [placementError, setPlacementError] = useState<BotPlacementError>()
   const [specialties, setSpecialties] = useState("")
   const requiredSpecialties = specialties.split(/[,\uFF0C]/u).map(tag => tag.trim()).filter(Boolean)

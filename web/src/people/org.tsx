@@ -10,19 +10,20 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { people, type Org } from "@/api/people"
-import { ContactAvatar, Loading, Section, act, codes, joinList, label, useLoad } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { ContactAvatar, Loading, PEOPLE_EVENTS, Section, act, codes, joinList, label } from "@/people/common"
 import { useT } from "@/i18n"
 import { AttrRow, MemSection, NewAttr, ctxOf } from "@/people/contact"
 import { Select } from "@/view-shared"
 
 export function OrgView({ id }: { id: string }) {
   const t = useT()
-  const { data: o, err, reload } = useLoad(() => people.org(id), [id])
-  const items = useLoad(() => people.items(id), [id], ["party", "item"])
-  const mems = useLoad(() => people.memories(id), [id])
+  const { data: o, error: err, status, reload } = useHubQuery(["people", "org", id], () => people.org(id), { events: PEOPLE_EVENTS })
+  const items = useHubQuery(["people", "items", id], () => people.items(id), { events: ["party", "item"] })
+  const mems = useHubQuery(["people", "memories", id], () => people.memories(id), { events: PEOPLE_EVENTS })
   const [newAttr, setNewAttr] = useState(false), [edit, setEdit] = useState(false)
   const back: [string, string] = ["#/contacts", t("people:shared.contacts")]
-  if (err) return <Page title={t("people:shared.org")} back={back}><Empty title={err.status === 404 ? t("people:org.notFound") : t("people:shared.orgLoadFailed")} sub={err.status === 404 ? undefined : err.message} /></Page>
+  if (err) return <Page title={t("people:shared.org")} back={back}><Empty title={status === 404 ? t("people:org.notFound") : t("people:shared.orgLoadFailed")} sub={status === 404 ? undefined : err.message} /></Page>
   if (!o) return <Page title={t("people:shared.org")} back={back}><Loading /></Page>
   const ps = o.people ?? []
   return (

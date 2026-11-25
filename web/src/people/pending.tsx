@@ -11,7 +11,8 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { go, Group, Row, SectionLabel, Segmented, Empty } from "@/ui"
 import { looksLikeHandle, nameOf, people, type Contact, type MergeProposal, type PendingContact } from "@/api/people"
 import { tm, toast } from "@/store"
-import { ContactAvatar, Loading, act, joinList, orgLine, useLoad } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { ContactAvatar, Loading, PEOPLE_EVENTS, act, joinList, orgLine } from "@/people/common"
 import { t as tr, useT } from "@/i18n"
 import type { Wait } from "@/store"
 import { Select } from "@/view-shared"
@@ -23,7 +24,7 @@ type Order = "active" | "space"
 let corder: Order = "active"
 export function PendingContacts() {
   const t = useT()
-  const { data, err, reload } = useLoad(() => people.pending(), [])
+  const { data, error: err, reload } = useHubQuery(["people", "pending"], () => people.pending(), { events: PEOPLE_EVENTS })
   const [query, setQuery] = useState(""), [filter, setFilter] = useState("all"), [progress, setProgress] = useState(""), [failure, setFailure] = useState("")
   const [retry, setRetry] = useState<{ ids: string[]; run: (id: string) => Promise<unknown>; ok: (n: number) => string } | null>(null)
   const [order, setOrder] = useState<Order>(corder), [sel, setSel] = useState<string[]>([]), [busy, setBusy] = useState(false)
@@ -151,7 +152,7 @@ function ProposalCard({ m }: { m: MergeProposal }) {
 export function MergeDialog({ from, onClose }: { from: Pick<Contact, "id" | "name"> & { label?: string }; onClose: () => void }) {
   const t = useT()
   const [q, setQ] = useState(""), [into, setInto] = useState<string | null>(null), [busy, setBusy] = useState(false)
-  const cs = useLoad(() => people.contacts({ q: q.trim(), limit: 50 }), [q])
+  const cs = useHubQuery(["people", "contacts-search", q], () => people.contacts({ q: q.trim(), limit: 50 }), { events: PEOPLE_EVENTS })
   const xs = (cs.data ?? []).filter((c) => c.id !== from.id)
   const target = xs.find((c) => c.id === into)
   const merge = async () => {

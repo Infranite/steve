@@ -15,7 +15,8 @@ import { CompactBreakdown } from "@/components/affect/compact-breakdown"
 import { OTHER, SERIES } from "@/stats/chart"
 import { splitParts } from "@/stats/split"
 import { Est } from "@/stats/kpi"
-import { fmtEst, fmtMs, fmtN, fmtUsage, fmtUsd, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtEst, fmtMs, fmtN, fmtUsage, fmtUsd } from "@/stats/format"
 import { harnessName } from "@/model-picker"
 import { t, useT } from "@/i18n"
 
@@ -31,13 +32,13 @@ export function WhereSection({ s, f, fkey, live }: { s: Summary; f: Filter; fkey
   const [tab, setTab] = useState<WhereTab>("bot")
   const [measure, setMeasure] = useState<Measure>("cost")
   const by = tab === "item" ? null : tab
-  const [u] = useStats(() => (by ? stats.usage(f, by).then((v) => ({ ...v, tab })) : Promise.resolve(null)), [fkey, tab], live)
+  const u = useHubQuery(["stats", "where-usage", fkey, tab], () => (by ? stats.usage(f, by).then((v) => ({ ...v, tab })) : Promise.resolve(null)), { events: ["stats"], debounceMs: 200, live })
   /* the items: the 100 most expensive (or busiest) of the range, enough for four parts and the rest */
-  const [it] = useStats(() => (tab === "item" ? stats.items(f, "est", undefined, 100).then((v) => ({ ...v, tab })) : Promise.resolve(null)), [fkey, tab], live)
+  const it = useHubQuery(["stats", "where-items", fkey, tab], () => (tab === "item" ? stats.items(f, "est", undefined, 100).then((v) => ({ ...v, tab })) : Promise.resolve(null)), { events: ["stats"], debounceMs: 200, live })
   let parts: Part[] | null = null
-  if (tab === "item" && it.s === "ok" && it.v) parts = it.v.rows.map((r) => ({ key: r.item_id, label: `${r.item_id} ${r.title}`, est: measure === "cost" ? r.est : 0, total: measure === "cost" ? 0 : r.agent_ms ?? 0 }))
-  else if (tab !== "item" && u.s === "ok" && u.v && u.v.tab === tab) parts = u.v.rows.map((r: UsageRow) => ({ key: r.key, label: label(tab, r), est: measure === "cost" ? r.est : 0, total: measure === "cost" ? 0 : r.turn_ms }))
-  const err = tab === "item" ? (it.s === "error" ? it.msg : null) : u.s === "error" ? u.msg : null
+  if (tab === "item" && it.data) parts = it.data.rows.map((r) => ({ key: r.item_id, label: `${r.item_id} ${r.title}`, est: measure === "cost" ? r.est : 0, total: measure === "cost" ? 0 : r.agent_ms ?? 0 }))
+  else if (tab !== "item" && u.data && u.data.tab === tab) parts = u.data.rows.map((r: UsageRow) => ({ key: r.key, label: label(tab, r), est: measure === "cost" ? r.est : 0, total: measure === "cost" ? 0 : r.turn_ms }))
+  const err = tab === "item" ? (it.error ? it.error.message : null) : u.error ? u.error.message : null
   const split = parts && splitParts(parts, SERIES, { color: OTHER, label: (count) => t("stats:usage.otherN", { count }) }, t("stats:word.unknown"))
   const time = measure === "time"
   const nothing = split && !split.items.length
@@ -79,13 +80,13 @@ const PAGE = 8
 function TopItems({ f, fkey, live }: { f: Filter; fkey: string; live: boolean }) {
   const t = useT()
   const [limit, setLimit] = useState(PAGE)
-  const [d] = useStats(() => stats.items(f, "est", undefined, limit), [fkey, limit], live)
-  const rows = d.s === "ok" ? d.v.rows.filter((r) => r.est > 0 || r.tokens > 0 || r.reported > 0) : []
+  const d = useHubQuery(["stats", "top-items", fkey, limit], () => stats.items(f, "est", undefined, limit), { events: ["stats"], debounceMs: 200, live })
+  const rows = d.data ? d.data.rows.filter((r) => r.est > 0 || r.tokens > 0 || r.reported > 0) : []
   const max = Math.max(0, ...rows.map((r) => r.est))
   return (
-    <PanelSection k="top-items" label={t("stats:v2.where.top")} meta={d.s === "ok" ? t("stats:v2.where.topMeta", { count: d.v.total }) : undefined} className="pt-2">
-      {d.s === "loading" ? <div className="flex h-24 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
-        : d.s !== "ok" ? <div className="py-4 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : t("stats:items.loadFailed")}</div>
+    <PanelSection k="top-items" label={t("stats:v2.where.top")} meta={d.data ? t("stats:v2.where.topMeta", { count: d.data.total }) : undefined} className="pt-2">
+      {d.loading ? <div className="flex h-24 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
+        : d.error || !d.data ? <div className="py-4 type-callout text-muted-foreground" role="alert">{d.error ? d.error.message : t("stats:items.loadFailed")}</div>
         : !rows.length ? <div className="py-4 type-callout text-muted-foreground">{t("stats:items.emptyActive")}</div>
         : <>
           <div className="-mx-2 flex flex-col" role="list" data-top-items>
@@ -94,7 +95,7 @@ function TopItems({ f, fkey, live }: { f: Filter; fkey: string; live: boolean })
             </div>
             {rows.map((r) => <TopRow key={r.item_id} r={r} max={max} />)}
           </div>
-          {d.v.total > rows.length && rows.length === limit && limit < 100 && <Button size="xs" variant="ghost" className="mt-1 -ml-2 text-muted-foreground" onClick={() => setLimit(limit === PAGE ? 25 : 100)} data-top-more>{t("stats:overview.showMore", { count: Math.min(d.v.total, limit === PAGE ? 25 : 100) - limit })}</Button>}
+          {d.data.total > rows.length && rows.length === limit && limit < 100 && <Button size="xs" variant="ghost" className="mt-1 -ml-2 text-muted-foreground" onClick={() => setLimit(limit === PAGE ? 25 : 100)} data-top-more>{t("stats:overview.showMore", { count: Math.min(d.data.total, limit === PAGE ? 25 : 100) - limit })}</Button>}
         </>}
     </PanelSection>
   )

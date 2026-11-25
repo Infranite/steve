@@ -12,7 +12,8 @@ import { toast, st } from "@/store"
 import { hubBase } from "@/hub"
 import { people, type ContactBrief } from "@/api/people"
 import { ownership, type Changed, type ObjectType, type Steward } from "@/api/ownership"
-import { act, joinList, useLoad } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { act, joinList } from "@/people/common"
 import { t as tr, useT } from "@/i18n"
 
 /** the toast after a change, with 撤销 when the Hub recorded one */
@@ -31,7 +32,7 @@ export function OwnerChip({ objectType, objectId, className, bare = false }: { o
 
 function Chip({ objectType, objectId, className, bare }: { objectType: ObjectType; objectId: string; className?: string; bare: boolean }) {
   const t = useT()
-  const L = useLoad(() => ownership.of(objectType, objectId), [objectType, objectId], ["party", "patch"])
+  const L = useHubQuery(["ownership", "of", objectType, objectId], () => ownership.of(objectType, objectId), { events: ["party", "patch"] })
   const [open, setOpen] = useState(false), [q, setQ] = useState(""), [busy, setBusy] = useState(false)
   const [found, setFound] = useState<ContactBrief[] | null>(null)
   useEffect(() => {
@@ -40,7 +41,7 @@ function Chip({ objectType, objectId, className, bare }: { objectType: ObjectTyp
     const h = setTimeout(() => { people.contacts({ q: q.trim() || undefined, limit: 30 }).then((xs) => { if (live) setFound(xs) }, () => { if (live) setFound([]) }) }, q ? 150 : 0)
     return () => { live = false; clearTimeout(h) }
   }, [open, q])
-  if (L.err) return <span className={cn("flex flex-wrap items-center justify-end gap-2 type-callout", className)} role="alert" data-owner-error><span className="text-destructive">{t("people:owner.loadFailed")}</span><Button size="xs" variant="outline" onClick={() => L.reload()}>{t("common:action.retry")}</Button></span>
+  if (L.error) return <span className={cn("flex flex-wrap items-center justify-end gap-2 type-callout", className)} role="alert" data-owner-error><span className="text-destructive">{t("people:owner.loadFailed")}</span><Button size="xs" variant="outline" onClick={() => void L.reload()}>{t("common:action.retry")}</Button></span>
   if (!L.data) return <Skeleton className={cn("inline-flex h-6 w-20 rounded-full", className)} aria-hidden />
   const { object, stewards } = L.data
   const owners = ownersOf(stewards), confirmed = owners.filter((s) => s.status === "confirmed"), proposed = owners.filter((s) => s.status !== "confirmed")

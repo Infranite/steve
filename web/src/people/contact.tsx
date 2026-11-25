@@ -19,7 +19,8 @@ import { go, Page, Row, Meta, Empty, Tags, ItemNo, Status, Panel } from "@/ui"
 import { AskSteve, type Ctx } from "@/config-ui"
 import { nameOf, people, type AccountBrief, type Attr, type Contact, type Level, type Mem, type ProfileField } from "@/api/people"
 import { channelsApi } from "@/api/channels"
-import { ContactAvatar, LevelSel, Loading, Section, act, codes, day, joinList, label, orgLine, relLabel, useLoad, visLabel } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { ContactAvatar, LevelSel, Loading, PEOPLE_EVENTS, Section, act, codes, day, joinList, label, orgLine, relLabel, visLabel } from "@/people/common"
 import { MergeDialog } from "@/people/pending"
 import { HoldingsSection, ResponsibleSection } from "@/people/holdings"
 import { AvatarEdit } from "@/people/avatar-edit"
@@ -40,9 +41,9 @@ const MEM_FOLD = 5
 
 export function ContactView({ id }: { id: string }) {
   const t = useT()
-  const { data: c, err, reload } = useLoad(() => people.contact(id), [id])
+  const { data: c, error: err, status, reload } = useHubQuery(["people", "contact", id], () => people.contact(id), { events: PEOPLE_EVENTS })
   const back: [string, string] = ["#/contacts", t("people:shared.contacts")]
-  if (err) return <Page title={t("people:shared.contacts")} back={back}><Empty title={err.status === 404 ? t("people:contact.notFound") : t("people:contact.loadFailed")} sub={err.status === 404 ? t("people:contact.goneSub") : err.message} /></Page>
+  if (err) return <Page title={t("people:shared.contacts")} back={back}><Empty title={status === 404 ? t("people:contact.notFound") : t("people:contact.loadFailed")} sub={status === 404 ? t("people:contact.goneSub") : err.message} /></Page>
   if (!c) return <Page title={t("people:shared.contacts")} back={back}><Loading /></Page>
   if (c.status === "merged" && c.merged_into) return <Page title={c.name} back={back}><Empty title={t("people:contact.merged")} sub={t("people:contact.mergedSub")} /><div className="flex justify-center"><Button variant="outline" onClick={() => go("#/contacts/" + c.merged_into)}>{t("people:contact.seeMerged")}</Button></div></Page>
   return <ContactBody c={c} reload={() => void reload()} />
@@ -55,12 +56,12 @@ export function ContactView({ id }: { id: string }) {
 function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
   const t = useT()
   const [del, setDel] = useState(false), [edit, setEdit] = useState(false), [merge, setMerge] = useState(false), [job, setJob] = useState(false)
-  const items = useLoad(() => people.items(c.id), [c.id], ["party", "item"])
-  const tl = useLoad(() => people.timeline(c.id), [c.id])
-  const mems = useLoad(() => people.memories(c.id), [c.id])
-  const accts = useLoad(() => people.accounts(c.id), [c.id])
+  const items = useHubQuery(["people", "items", c.id], () => people.items(c.id), { events: ["party", "item"] })
+  const tl = useHubQuery(["people", "timeline", c.id], () => people.timeline(c.id), { events: PEOPLE_EVENTS })
+  const mems = useHubQuery(["people", "memories", c.id], () => people.memories(c.id), { events: PEOPLE_EVENTS })
+  const accts = useHubQuery(["people", "accounts", c.id], () => people.accounts(c.id), { events: PEOPLE_EVENTS })
   const orgId = c.org?.id
-  const org = useLoad(() => (orgId ? people.org(orgId) : Promise.resolve(null)), [orgId])
+  const org = useHubQuery(["people", "org", orgId ?? null], () => (orgId ? people.org(orgId) : Promise.resolve(null)), { events: PEOPLE_EVENTS })
   const rels = c.rels.filter((r) => r !== "me"), unconfirmed = c.kind === "unconfirmed"
   const mates = (org.data?.people ?? []).filter((x) => x.id !== c.id)
   const setRels = (r: string) => void act(people.patchContact(c.id, { rels: c.rels.includes(r) ? c.rels.filter((x) => x !== r) : [...c.rels, r] }))
@@ -93,7 +94,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
       {job && <JobDialog c={c} onClose={() => setJob(false)} onSaved={() => { setJob(false); reload() }} />}
       {merge && <MergeDialog from={c} onClose={() => setMerge(false)} />}
       <div className="flex flex-col gap-8">
-        {accts.err && <p role="alert" className="type-callout text-destructive">{accts.err.message}</p>}
+        {accts.error && <p role="alert" className="type-callout text-destructive">{accts.error.message}</p>}
         {c.important && !c.is_me && <p className="type-callout text-muted-foreground" data-starred-note>{t("people:contact.starredNote")}</p>}
         {c.kind === "virtual" && <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-muted/60 px-4 py-3 type-callout"><span>{t("people:contact.virtualBanner")}</span><Button size="sm" variant="outline" onClick={async () => { if (await act(people.patchContact(c.id, { kind: "real" }), t("people:contact.restored"))) reload() }}>{t("people:contact.restore")}</Button></div>}
         {unconfirmed && <div className="flex flex-wrap items-center gap-3 rounded-xl bg-card px-5 py-4 shadow-[var(--lift)]" data-unconfirmed-banner>
@@ -162,7 +163,7 @@ function Bio({ text, empty, onEdit }: { text: string; empty: string; onEdit: () 
 /** “Steve 记得的你”: one list of label and value. Every value changes in place (a job opens its dialog: it needs an
  *  organization), an empty one says 补充, and a detail carries its disclosure level beside it. Why an empty field could
  *  not be filled in automatically is said once under the list, not on every row. */
-function Facts({ c, accounts, emails, onJob, reload }: { c: Contact; accounts: AccountBrief[] | null; emails: string[] | null; onJob: () => void; reload: () => void }) {
+function Facts({ c, accounts, emails, onJob, reload }: { c: Contact; accounts?: AccountBrief[] | null; emails: string[] | null; onJob: () => void; reload: () => void }) {
   const t = useT()
   const [adding, setAdding] = useState(false)
   if (c.is_me) return <MeFacts c={c} accounts={accounts} onJob={onJob} reload={reload} />
@@ -205,14 +206,14 @@ function Facts({ c, accounts, emails, onJob, reload }: { c: Contact; accounts: A
 
 /** Structured facts, not a heuristic parser of a person's prose. Unknown custom facts stay visible.
  * Accounts/jobs are read from their owning modules; the Hub never probes the browser host or git. */
-function MeFacts({ c, accounts, onJob, reload }: { c: Contact; accounts: AccountBrief[] | null; onJob: () => void; reload: () => void }) {
+function MeFacts({ c, accounts, onJob, reload }: { c: Contact; accounts?: AccountBrief[] | null; onJob: () => void; reload: () => void }) {
   const t = useT()
   const [adding, setAdding] = useState<string | null>(null)
   const [scope, setScope] = useState("persona"), [scopeId, setScopeId] = useState(""), [scopeName, setScopeName] = useState("")
-  const targets = useLoad(async () => {
+  const targets = useHubQuery(["people", "me-targets"], async () => {
     const [personas, spaces] = await Promise.all([channelsApi.personas(), channelsApi.spaces()])
     return { persona: personas.map(p => ({ v: p.id, l: p.name })), space: spaces.filter(s => s.status === "active").map(s => ({ v: s.id, l: s.title || s.name })) }
-  }, [])
+  }, { events: PEOPLE_EVENTS })
   const options = targets.data?.[scope as "persona" | "space"] ?? []
   const groups = [
     { id: "identity", keys: ["role"] },
@@ -252,7 +253,7 @@ function MeFacts({ c, accounts, onJob, reload }: { c: Contact; accounts: Account
             if (await act(people.addAttr(c.id, { key: "call_ext_scope", label: `${scope}:${keyFor(scopeId.trim())}`, value: JSON.stringify({ kind: scope, id: scopeId.trim(), name: scopeName.trim() }), level: "public" }))) { setScopeId(""); setScopeName(""); reload() }
           }}>{t("common:action.save")}</Button>
         </div>
-        {targets.err && <p role="alert" className="mt-2 type-footnote text-destructive">{targets.err.message}</p>}
+        {targets.error && <p role="alert" className="mt-2 type-footnote text-destructive">{targets.error.message}</p>}
         {targets.data && !options.length && <p className="mt-2 type-footnote text-muted-foreground">{t("people:me.noScopes")}</p>}
       </details>
     </Panel></Section>
@@ -351,7 +352,7 @@ export function AttrRow({ a, readOnly, onChanged }: { a: Attr; readOnly?: boolea
 export function NewAttr({ party, init, onDone }: { party: string; init: { key?: string; label: string }; onDone: () => void }) {
   const t = useT()
   const [label, setLabel] = useState(init.label), [v, setV] = useState(""), [busy, setBusy] = useState(false)
-  const defs = useLoad(() => people.attrDefs().catch(() => []), [])
+  const defs = useHubQuery(["people", "attr-defs"], () => people.attrDefs().catch(() => []), { events: PEOPLE_EVENTS })
   const save = async () => {
     const l = label.trim(), d = defs.data?.find((x) => x.label === l || x.key === l)
     setBusy(true)
@@ -368,7 +369,7 @@ export function NewAttr({ party, init, onDone }: { party: string; init: { key?: 
   )
 }
 
-export function MemSection({ party, mems, label: heading, editable = true, hideEmpty = false, fold }: { party: string; mems: Mem[] | null; label: string; editable?: boolean; hideEmpty?: boolean; fold?: number }) {
+export function MemSection({ party, mems, label: heading, editable = true, hideEmpty = false, fold }: { party: string; mems?: Mem[] | null; label: string; editable?: boolean; hideEmpty?: boolean; fold?: number }) {
   const t = useT()
   const [adding, setAdding] = useState(false), [text, setText] = useState(""), [all, setAll] = useState(false)
   const add = async () => { if (await act(people.addMemory(party, { text: text.trim() }))) { setText(""); setAdding(false) } }
@@ -415,7 +416,7 @@ function EditDialog({ c, onClose, onSaved }: { c: Contact; onClose: () => void; 
 
 function JobDialog({ c, onClose, onSaved }: { c: Contact; onClose: () => void; onSaved: () => void }) {
   const t = useT()
-  const orgs = useLoad(() => people.orgs(), [])
+  const orgs = useHubQuery(["people", "orgs"], () => people.orgs(), { events: PEOPLE_EVENTS })
   const [orgId, setOrgId] = useState(c.jobs.find((j) => !j.to)?.org_id ?? ""), [title, setTitle] = useState(c.jobs.find((j) => !j.to)?.title ?? ""), [dept, setDept] = useState(c.jobs.find((j) => !j.to)?.dept ?? ""), [busy, setBusy] = useState(false)
   const choose = (id: string) => { setOrgId(id); const j = c.jobs.find((x) => x.org_id === id); setTitle(j?.title ?? ""); setDept(j?.dept ?? "") }
   const save = async () => {
@@ -426,7 +427,7 @@ function JobDialog({ c, onClose, onSaved }: { c: Contact; onClose: () => void; o
   return <Dialog open onOpenChange={(v) => !v && !busy && onClose()}><DialogContent>
     <DialogHeader><DialogTitle>{t("people:job.title")}</DialogTitle><DialogDescription>{t("people:job.desc")}</DialogDescription></DialogHeader>
     <div className="flex flex-col gap-1.5 type-callout font-medium">{t("people:shared.org")}<Select size="default" label={t("people:job.orgAria")} className="w-full font-normal" value={orgId} onChange={choose} placeholder={t("people:job.pickOrg")} options={(orgs.data ?? []).map((o) => ({ v: o.id, l: o.name }))} /></div>
-    {orgs.err && <p role="alert" className="type-callout text-destructive">{t("people:job.orgFailed", { msg: orgs.err.message })}</p>}
+    {orgs.error && <p role="alert" className="type-callout text-destructive">{t("people:job.orgFailed", { msg: orgs.error.message })}</p>}
     <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:job.dept")}<Input aria-label={t("people:job.dept")} value={dept} onChange={(e) => setDept(e.target.value)} maxLength={80} /></label>
     <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:job.position")}<Input aria-label={t("people:job.position")} value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} /></label>
     <DialogFooter><Button variant="outline" disabled={busy} onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={busy || !orgId} onClick={() => void save()}>{t("common:action.save")}</Button></DialogFooter>

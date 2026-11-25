@@ -18,7 +18,8 @@ import { useT } from "@/i18n"
 import { lazyView } from "@/lazy"
 import { queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine } from "@/resume"
-import { fmtPct, fmtUsage, fmtUsageCost, fmtUsd, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtPct, fmtUsage, fmtUsageCost, fmtUsd } from "@/stats/format"
 import { hm, interrupt, it, sessPatch, sessRemove, sessSend, st, toast, useSessionQueue, type Sess, useDeviceInventory } from "@/store"
 import { Empty, go, openSheet, Page, PANEL_W, Status } from "@/ui"
 import { Composer, type ComposerHandle } from "@/composer"
@@ -36,8 +37,8 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
   const [debugOpen, setDebugOpen] = useState(false)
   const phone = useIsMobile()
   const composer = useRef<ComposerHandle | null>(null)
-  const [totalsResult] = useStats(() => s ? stats.session(k) : Promise.resolve(null), [k, !!s, s?.st === "run" ? 0 : s?.at], !!s)
-  const totals = totalsResult.s === "ok" ? totalsResult.v ?? undefined : undefined
+  const totalsResult = useHubQuery(["stats", "session", k, !!s, s?.st === "run" ? 0 : s?.at], () => (s ? stats.session(k) : Promise.resolve(null)), { events: ["stats"], debounceMs: 200, live: !!s })
+  const totals = totalsResult.data ?? undefined
   useSessionQueue(s?.id)
   const scroller = useRef<HTMLDivElement>(null)
   useEffect(() => { setDebugOpen(false); setInfoOpen(false) }, [k])

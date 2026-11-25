@@ -1,8 +1,6 @@
-/* Shared pieces of the contacts pages: labels for the API codes, the avatar, the disclosure-level picker,
- * and the data hook that refetches on `party` / `mm` events. */
-import { useEffect, useRef, useState } from "react"
+/* Shared pieces of the contacts pages: labels for the API codes, the avatar, and the disclosure-level picker. */
 export { Section, Loading } from "@/ui"
-import { useHubEvents, toast, st, emit } from "@/store"
+import { toast, st, emit } from "@/store"
 import { Unauthenticated } from "@/api"
 import { Select } from "@/view-shared"
 import type { ContactBrief, Level, Visibility } from "@/api/people"
@@ -31,25 +29,9 @@ export function LevelSel({ v, on, testId }: { v: Level; on: (l: Level) => void; 
 }
 
 /* ───────── data ───────── */
-/** load with `f`, again whenever a contacts event arrives (debounced) or `deps` change; `null` while loading.
- *  `err` is the last failure (with the HTTP status when there was one). */
-export function useLoad<T>(f: () => Promise<T>, deps: unknown[], events: string[] = ["party", "mm", "patch"]) {
-  const [data, setData] = useState<T | null>(null), [err, setErr] = useState<(Error & { status?: number }) | null>(null)
-  const fn = useRef(f); fn.current = f
-  const n = useRef(0)
-  const load = () => {
-    const k = ++n.current
-    fn.current().then((d) => { if (k === n.current) { setData(d); setErr(null) } }, (e) => {
-      if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit(); return }
-      if (k === n.current) setErr(e)
-    })
-  }
-  useEffect(() => { setData(null); setErr(null); load() }, deps) // eslint-disable-line react-hooks/exhaustive-deps
-  useHubEvents(events, load, 150)
-  return { data, err, reload: load, set: setData }
-}
+export const PEOPLE_EVENTS = ["party", "mm", "patch"] as const
 
-/** run a write; report failures as a toast; the caller's `useLoad` refreshes from the SSE event */
+/** run a write; report failures as a toast; queries refresh from the SSE event */
 export async function act<T>(p: Promise<T>, ok?: string): Promise<T | undefined> {
   try { const r = await p; if (ok) toast(ok); return r }
   catch (e) { if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit() } else toast((e as Error).message || t("people:shared.failed")); return undefined }

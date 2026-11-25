@@ -10,7 +10,8 @@ import { go, Page, Group, Row, Segmented, SectionLabel, Empty, Chips, Tags, Meta
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
 import { nameOf, people, type ContactBrief } from "@/api/people"
-import { ContactAvatar, Loading, act, codes, joinList, label, relLabel, useLoad } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { ContactAvatar, Loading, PEOPLE_EVENTS, act, codes, joinList, label, relLabel } from "@/people/common"
 import { t as tr, useT } from "@/i18n"
 import { DirectoryNotes, TeamRow, TeamsTab } from "@/people/teams"
 import { PendingContacts } from "@/people/pending"
@@ -27,7 +28,7 @@ export function ContactsView() {
   const t = useT()
   const [tab, setTab] = useState<Tab>(ctab), [rel, setRel] = useState<Filter>(crel), [q, setQ] = useState(cq), [dq, setDq] = useState(cq), [newOpen, setNewOpen] = useState(false)
   useEffect(() => { const h = setTimeout(() => setDq(q.trim()), 200); return () => clearTimeout(h) }, [q])
-  const pend = useLoad(() => people.pending(), [])
+  const pend = useHubQuery(["people", "pending"], () => people.pending(), { events: PEOPLE_EVENTS })
   const n = pend.data ? pend.data.proposals.length + pend.data.unconfirmed.length : 0
   return (
     <Page title={t("people:shared.contacts")} sub={t("people:contacts.sub")} max={760}
@@ -58,7 +59,7 @@ const filterLabel = (f: Filter) => (f === "all" ? tr("people:contacts.all") : f 
 const whoLine = (c: ContactBrief) => [c.org?.title, c.org?.name].filter(Boolean).join(" · ")
 function ContactList({ q, f, toolbar }: { q: string; f: { rel?: string; kind?: string }; toolbar: ReactNode }) {
   const t = useT()
-  const { data, err } = useLoad(() => people.contacts({ q, ...f }), [q, f.rel, f.kind])
+  const { data, error: err } = useHubQuery(["people", "contacts", q, f.rel ?? "", f.kind ?? ""], () => people.contacts({ q, ...f }), { events: PEOPLE_EVENTS })
   if (err) return <Empty title={t("people:contact.loadFailed")} sub={err.message} />
   if (!data) return <Loading />
   const xs = data.filter((c) => !c.is_me), filtered = !!(q || f.rel || f.kind)
@@ -74,8 +75,8 @@ function ContactList({ q, f, toolbar }: { q: string; f: { rel?: string; kind?: s
 
 function OrgList() {
   const t = useT()
-  const { data, err } = useLoad(() => people.orgs(), [])
-  const teams = useLoad(() => people.teams().catch(() => null), [])
+  const { data, error: err } = useHubQuery(["people", "orgs"], () => people.orgs(), { events: PEOPLE_EVENTS })
+  const teams = useHubQuery(["people", "teams-safe"], () => people.teams().catch(() => null), { events: PEOPLE_EVENTS })
   if (err) return <Empty title={t("people:shared.orgLoadFailed")} sub={err.message} />
   if (!data) return <Loading />
   if (!data.length) return <Empty title={t("people:orgs.empty")} sub={t("people:orgs.emptySub")} />
@@ -97,7 +98,7 @@ function OrgList() {
 export function NewContactDialog({ onClose }: { onClose: () => void }) {
   const t = useT()
   const [n, setN] = useState(""), [rel, setRel] = useState("colleague"), [o, setO] = useState(""), [title, setTitle] = useState(""), [mail, setMail] = useState(""), [busy, setBusy] = useState(false)
-  const orgs = useLoad(() => people.orgs(), [])
+  const orgs = useHubQuery(["people", "orgs"], () => people.orgs(), { events: PEOPLE_EVENTS })
   const create = async () => {
     setBusy(true)
     try {

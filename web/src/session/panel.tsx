@@ -28,7 +28,8 @@ import { itemDisplayStatus } from "@/store"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { homeTilde } from "@/lib/path"
 import { ResumeCard } from "@/resume"
-import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd } from "@/stats/format"
 import { briefHead, type Item, type Out, type Sess } from "@/store"
 import { BotName, DiscChevron, ItemNo, openSheet, SectionLabel, Status, StatusDot } from "@/ui"
 import { useNow } from "@/thread/transcript"
@@ -308,7 +309,7 @@ export function SessionPanel({ k, tot }: { k: string; tot?: SessionTotals }) {
     ? turnsOf(data.turns.flatMap((turn) => turn.ev), data.turns.flatMap((turn) => turn.ts), running, briefHead, imported)
     : [], [data, complete, running, imported])
   const item: Item | undefined = find(s?.item)
-  const [det] = useStats<RItemDetail | null>(() => (s?.item ? api.item(s.item) : Promise.resolve(null)), [s?.item, item?.updated], false)
+  const det = useHubQuery<RItemDetail | null>(["item", s?.item ?? null, item?.updated ?? 0], () => (s?.item ? api.item(s.item) : Promise.resolve(null)))
   if (!s) return null
   return (
     <div className="flex flex-col gap-8" data-session-panel-body>
@@ -316,7 +317,7 @@ export function SessionPanel({ k, tot }: { k: string; tot?: SessionTotals }) {
         <Head s={s} />
         <Figures s={s} turns={turns} complete={complete} tot={tot} />
       </div>
-      <Outputs s={s} data={data} det={det.s === "ok" ? det.v : null} />
+      <Outputs s={s} data={data} det={det.data ?? null} />
       <Relations s={s} />
       <SessionKnowledge id={k} />
       <Runtime s={s} />

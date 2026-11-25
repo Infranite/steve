@@ -10,7 +10,8 @@ import { IntegrationRow, IntegrationSaveBar, IntegrationSection, IntegrationText
 import { go } from "@/ui"
 import { Select } from "@/view-shared"
 import { tm } from "@/store"
-import { useLoad, useBusy } from "@/accounts/load"
+import { useBusy } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { mailApi, type MailAccount, type MailSettings } from "@/api/mail"
 import { useT } from "@/i18n"
 
@@ -26,12 +27,12 @@ export type MailSettingsState = ReturnType<typeof useMailSettings>
 /** the mailbox behind `connection` (null: no mailbox), and the draft of its two texts */
 export function useMailSettings(connection: string | null) {
   const t = useT()
-  const L = useLoad(() => (connection ? mailApi.accounts().then((xs) => xs.find((x) => x.connection_id === connection) ?? null) : Promise.resolve(null)), [connection], ["mail", "connection"])
+  const L = useHubQuery(["mail", "settings", connection], () => (connection ? mailApi.accounts().then((xs) => xs.find((x) => x.connection_id === connection) ?? null) : Promise.resolve(null)), { events: ["mail", "connection"] })
   const [busy, act] = useBusy()
   const [a, setA] = useState<MailAccount | null>(null)
   // `base`: the texts when the edit began; a reload from the stream refreshes `a` but never the edit in progress
   const [edit, setEdit] = useState<{ base: Texts; draft: Texts } | null>(null)
-  useEffect(() => { if (L.s === "ok") setA(L.data) }, [L])
+  useEffect(() => { if (L.data !== undefined) setA(L.data) }, [L.data])
   const changed = edit ? TEXTS.filter((k) => edit.draft[k] !== edit.base[k]) : []
   const dirty = changed.length > 0
   // leaving the page (reload, close) with typed text unsaved asks first
@@ -56,7 +57,7 @@ export function useMailSettings(connection: string | null) {
   }
   const discard = () => setEdit(null)
   const sync = () => { if (connection) void act(() => mailApi.sync(connection), t("mail:settings.syncStarted")) }
-  return { a, values, dirty, busy, type, put, save, discard, sync, error: L.s === "error" ? L.err : null }
+  return { a, values, dirty, busy, type, put, save, discard, sync, error: L.error ? L.error.message : null }
 }
 
 export function MailSettingsSections({ m, connection }: { m: MailSettingsState; connection: string }) {

@@ -4,7 +4,8 @@ import { XIcon } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { people } from "@/api/people"
-import { ContactAvatar, act, label, useLoad } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { ContactAvatar, act, label } from "@/people/common"
 import { useT } from "@/i18n"
 
 const href = (type: string, id: string) => (type === "team" ? "#/teams/" : type === "org" ? "#/orgs/" : "#/contacts/") + id
@@ -17,9 +18,9 @@ export function ItemPeopleProp({ id, Prop }: { id: string; Prop: (p: { label: st
 
 export function ItemPeople({ id }: { id: string }) {
   const t = useT()
-  const { data } = useLoad(() => people.itemPeople(id), [id], ["party", "item"])
+  const { data } = useHubQuery(["people", "item", id], () => people.itemPeople(id), { events: ["party", "item"] })
   const [open, setOpen] = useState(false), [q, setQ] = useState("")
-  const opts = useLoad(() => (open ? people.mentionOptions(q.trim()) : Promise.resolve(null)), [open, q], [])
+  const opts = useHubQuery(["people", "mentions", open, q], () => (open ? people.mentionOptions(q.trim()) : Promise.resolve(null)))
   const xs = data ?? []
   const cands = (opts.data?.parties ?? []).filter((p) => !xs.some((x) => x.party_id === p.id))
   return (

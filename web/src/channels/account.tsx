@@ -14,7 +14,8 @@ import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, StatusDot, 
 import { Clamp } from "@/auto/common"
 import { Select } from "@/view-shared"
 import { tm, toast } from "@/store"
-import { useLoad, useBusy } from "@/accounts/load"
+import { useBusy } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { accountsApi, CONN_STATUS } from "@/api/accounts"
 import { channelsApi, TRIGGER_ALL_DMS, TRIGGER_EVERYWHERE, attentionOf, isDm, spaceTitle, type ChannelAccount, type Rule, type Space, type Trigger } from "@/api/channels"
 import { SpaceAvatar, kindLine } from "@/channels/space-bits"
@@ -32,7 +33,7 @@ const SEND_DELAYS = [0, 3, 5, 10, 20, 30, 60]
 
 export function AccountView({ id }: { id: string }) {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["channels", "account", id], async () => {
     const a = await channelsApi.account(id)
     const [personas, ig] = await Promise.all([channelsApi.personas(), integrationsApi.all()])
     /* “你本人” through this bot: a side acting as you that pairs with this bot's adapter, and its connections */
@@ -42,11 +43,11 @@ export function AccountView({ id }: { id: string }) {
     const self = all.filter((c) => sides.some((x) => x.id === c.adapter))
     const side = (sides[0] as IAdapter | undefined) ?? null
     return { a, personas, self, side }
-  }, [id], ["connection", "account", "space", "persona", "channel"])
+  }, { events: ["connection", "account", "space", "persona", "channel"] })
   const [busy, act] = useBusy(), [rules, setRules] = useState<Rule[] | null>(null)
   const back: [string, string] = ["#/channels", t("channels:list.title")]
-  if (L.s === "loading") return <Page title={t("channels:account.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (L.s === "error") return <Page title={t("channels:account.title")} back={back}><Empty title={L.err} /></Page>
+  if (L.loading) return <Page title={t("channels:account.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.error || !L.data) return <Page title={t("channels:account.title")} back={back}><Empty title={L.error?.message ?? ""} /></Page>
   const { a, personas, self, side } = L.data
   if (!a) return <Page title={t("channels:account.title")} back={back}><Empty title={t("channels:account.notFound")} sub={t("channels:account.notFoundSub")} /></Page>
   const me = a.mode === "self", c = a.connection

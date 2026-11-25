@@ -13,7 +13,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Empty, StatusDot, BotAvatar, go, Panel, Tile, Pill, Notice } from "@/ui"
 import { cn } from "@/lib/utils"
 import { st, botName, toast } from "@/store"
-import { flowApi, errText, type Load, type Parsed, type Schedule, type ScheduleBody, type ScheduleMode, type ScheduleRun } from "@/api/flow"
+import { flowApi, errText, type Parsed, type Schedule, type ScheduleBody, type ScheduleMode, type ScheduleRun } from "@/api/flow"
+import type { HubQuery } from "@/data/use-hub-query"
 import { HubError } from "@/api"
 import { useRuntimeSetupHref } from "@/runtime-access"
 import { Modal, Pick, Failed, Clamp, when, botOptions, mainBot, RUN_STATUS } from "@/auto/common"
@@ -28,7 +29,7 @@ const triggerLabel = (x: string) => ((TRIGGERS as readonly string[]).includes(x)
 const TZS = ["Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"]
 const usd = (n: number) => (n ? t("auto:schedule.usd", { n: num(n, { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false }) }) : t("auto:schedule.unlimited"))
 
-export function Schedules({ L, onNew }: { L: Load<Schedule[]>; onNew: () => void }) {
+export function Schedules({ L, onNew }: { L: HubQuery<Schedule[]>; onNew: () => void }) {
   const [open, setOpen] = useState<string | null>(null), [del, setDel] = useState<Schedule | null>(null), [edit, setEdit] = useState<Schedule | null>(null), [busy, setBusy] = useState<string | null>(null)
   const t = useT()
   if (L.error && !L.data) return <Failed title="" msg={errText(L.error)} retry={() => void L.reload()} />

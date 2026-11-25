@@ -13,7 +13,8 @@ import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, Panel, Section, Note, Notice, Blank, Disclosure } from "@/ui"
 import { Select } from "@/view-shared"
 import { botName, st, tm } from "@/store"
-import { useLoad, useBusy, report } from "@/accounts/load"
+import { useBusy, report } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { channelsApi, ATTENTION, BOT_NOTICES, LEVEL, MSG_STATUS, REPLY_AS_YOU, ROLE, attentionOf, spaceTitle, type Attention, type BotNotices, type ChanMessage, type Level, type ReplyAsYou, type Rule, type SpacePatch } from "@/api/channels"
 import { Conflicts, SpaceAvatar, kindLine } from "@/channels/space-bits"
 import { Rules, ruleText, ruleOk } from "@/channels/rules"
@@ -25,18 +26,18 @@ const MSG_PREVIEW = 5
 
 export function SpaceView({ id }: { id: string }) {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["channels", "space", id], async () => {
     const s = await channelsApi.space(id)
     const [acc, personas] = await Promise.all([channelsApi.account(s.connection_id), channelsApi.personas()])
     return { s, acc, personas }
-  }, [id], ["space", "chan_message", "persona", "channel"])
+  }, { events: ["space", "chan_message", "persona", "channel"] })
   const [busy, act] = useBusy()
   const [duty, setDuty] = useState<string | null>(null), [rules, setRules] = useState<Rule[] | null>(null)
   const [older, setOlder] = useState<ChanMessage[]>([]), [more, setMore] = useState<"idle" | "loading" | "end">("idle"), [allMsgs, setAllMsgs] = useState(false)
   useEffect(() => { setOlder([]); setMore("idle") }, [id])
   const home: [string, string] = ["#/channels", t("channels:list.title")]
-  if (L.s === "loading") return <Page title={t("channels:space.title")} back={home}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (L.s === "error") return <Page title={t("channels:space.title")} back={home}><Empty title={L.status === 404 ? t("channels:space.notFound") : L.err} sub={L.status === 404 ? t("channels:space.notFoundSub") : undefined} /></Page>
+  if (L.loading) return <Page title={t("channels:space.title")} back={home}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.error || !L.data) return <Page title={t("channels:space.title")} back={home}><Empty title={L.status === 404 ? t("channels:space.notFound") : (L.error?.message ?? "")} sub={L.status === 404 ? t("channels:space.notFoundSub") : undefined} /></Page>
   const { s, acc, personas } = L.data
   const me = acc?.mode === "self", accName = acc?.name ?? t("channels:space.account")
   const persona = s.persona ? personas.find((p) => p.id === s.persona!.id) : undefined

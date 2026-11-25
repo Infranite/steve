@@ -8,7 +8,8 @@ import { Input } from "@/components/ui/input"
 import { SkillGrid, type Skill } from "@/components/affect/agent-skills"
 import { Section, Loading, Notice, Disclosure } from "@/ui"
 import { capsApi, type BotCaps, type ToolPin } from "@/api/caps"
-import { errText, useList } from "./common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { errText } from "./common"
 import { toolDescKey } from "./tool-catalog"
 import { steveToolIcon } from "@/tool-icons"
 
@@ -18,13 +19,14 @@ const MAX_PINS = 32
 
 export function BotToolPins({ bot, caps }: { bot: string; caps: BotCaps | null }) {
   const t = useT()
-  const [data, load] = useList(() => Promise.all([capsApi.tools(bot), capsApi.steve()]), [bot])
+  const data = useHubQuery(["caps", "tool-pins", bot], () => Promise.all([capsApi.tools(bot), capsApi.steve()]), { events: ["bot"], debounceMs: 300 })
+  const load = data.reload
   const [query, setQuery] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  if (data.s === "loading") return <Loading className="py-4" />
-  if (data.s === "error") return <Notice tone="destructive">{data.e}<Button variant="ghost" size="xs" onClick={() => void load()}>{t("caps:pins.retry")}</Button></Notice>
-  const [tools, server] = data.v
+  if (data.loading) return <Loading className="py-4" />
+  if (data.error || !data.data) return <Notice tone="destructive">{data.error?.message ?? ""}<Button variant="ghost" size="xs" onClick={() => void load()}>{t("caps:pins.retry")}</Button></Notice>
+  const [tools, server] = data.data
   const core = new Set(tools.core), pinned = new Set(tools.pins.map(key))
   const usageRows = tools.usage
   const usage = new Map(usageRows.map((u) => [u.tool, u]))

@@ -13,7 +13,8 @@ import { Select } from "@/view-shared"
 import { st, tm, botName, toast } from "@/store"
 import { accountsApi, type RAccount } from "@/api/accounts"
 import { vaultApi, keyStoreState, SENS_LABEL, MODE_LABEL, USE_STATUS, type RItem, type RField, type RUse, type RVaultStatus, type Sensitivity } from "@/api/vault"
-import { useLoad, useBusy, report } from "@/accounts/load"
+import { useBusy, report } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { NewVaultDialog } from "@/vault/new-item"
 import { useReveal, Countdown } from "@/vault/reveal"
 import { t as tr, useT } from "@/i18n"
@@ -89,14 +90,14 @@ function VaultView() {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const [newItem, setNewItem] = useState(false)
-  const L = useLoad(async () => {
+  const L = useHubQuery(["vault", "home"], async () => {
     const status = await vaultApi.status()
     if (!status.initialized) return { status, items: [] as RItem[], uses: null as RUse[] | null }
     const [items, uses] = await Promise.all([vaultApi.items(), vaultApi.uses({ limit: 6 })])
     return { status, items, uses }
-  }, [], ["vault"])
-  if (L.s === "loading") return <Page title={t("vault:title")} back={back()}><Loading /></Page>
-  if (L.s === "error") return <Page title={t("vault:title")} back={back()}><Empty title={L.err} /></Page>
+  }, { events: ["vault"] })
+  if (L.loading) return <Page title={t("vault:title")} back={back()}><Loading /></Page>
+  if (L.error || !L.data) return <Page title={t("vault:title")} back={back()}><Empty title={L.error?.message ?? ""} /></Page>
   const { status, items, uses } = L.data
   const sub = t("vault:home.sub")
   if (!status.initialized) return <Page title={t("vault:title")} back={back()} sub={sub} max={640}><EnableVault onDone={() => void L.reload()} /></Page>
@@ -129,16 +130,16 @@ function VaultView() {
 /* ═════════ 条目 ═════════ */
 function VaultItemView({ id }: { id: string }) {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["vault", "item", id], async () => {
     const [item, uses] = await Promise.all([vaultApi.item(id), vaultApi.uses({ item: id, limit: 50 })])
     return { item, uses }
-  }, [id], ["vault"])
+  }, { events: ["vault"] })
   const [del, setDel] = useState(false), [edit, setEdit] = useState<RField | null>(null), [, act] = useBusy()
   const reload = L.reload
   const used = useCallback(() => void reload(), [reload])
   const R = useReveal(id, used)
-  if (L.s === "loading") return <Page title={t("vault:title")} back={backVault()}><Loading /></Page>
-  if (L.s === "error") return <Page title={t("vault:title")} back={backVault()}><Empty title={L.status === 404 ? t("vault:item.notFound") : L.err} /></Page>
+  if (L.loading) return <Page title={t("vault:title")} back={backVault()}><Loading /></Page>
+  if (L.error || !L.data) return <Page title={t("vault:title")} back={backVault()}><Empty title={L.status === 404 ? t("vault:item.notFound") : (L.error?.message ?? "")} /></Page>
   const { item: v, uses } = L.data
   const fields = v.fields ?? []
   const setSens = async (x: Sensitivity) => {

@@ -1,26 +1,14 @@
-/* What the library's three kinds share: loading a list, the Bots that use an entry (chips, and a menu to choose them
+/* What the library's three kinds share: the Bots that use an entry (chips, and a menu to choose them
  * from the library's side), and the error text of a failed call. */
-import { useEffect, useState } from "react"
 import { BotIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { st, toast, useHubEvents, useStore } from "@/store"
+import { st, toast, useStore } from "@/store"
 import { BotAvatar } from "@/ui"
 import { capsApi, type CapKind, type CapUser } from "@/api/caps"
 
 export const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
-
-export type Load<T> = { s: "loading" } | { s: "error"; e: string } | { s: "ok"; v: T }
-
-/** a list from the Hub, again when a Bot changes (an assignment publishes the Bot's event) */
-export function useList<T>(f: () => Promise<T>, deps: unknown[]): [Load<T>, () => Promise<void>, (v: T) => void] {
-  const [d, setD] = useState<Load<T>>({ s: "loading" })
-  const load = () => f().then((v) => setD({ s: "ok", v }), (e) => setD({ s: "error", e: errText(e) }))
-  useEffect(() => { setD({ s: "loading" }); void load() }, deps)
-  useHubEvents(["bot"], () => void load())
-  return [d, load, (v: T) => setD({ s: "ok", v })]
-}
 
 /** every Bot of this workspace, Steve's own first */
 export function useBots() {

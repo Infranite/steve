@@ -15,7 +15,8 @@ import { AskSteve } from "@/config-ui"
 import { crumbs, emptyNote, lookUp, nameOf, narrowed, projectNodes } from "@/dir-browse"
 import { GitHubLine, Health, projectRepo, useProjectGitHub } from "@/github/index"
 import { itemDisplayStatus } from "@/store"
-import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtMs, fmtN, fmtPct, fmtUsd } from "@/stats/format"
 import { botName, closedSt, newProject, newWorkspace, patchProject, refresh, st, toast, type Item } from "@/store"
 import { Blank, BotName, Card, closeSheet, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Row, Section, Segmented } from "@/ui"
 import { ItemRowExport as ItemRow, Select } from "@/view-shared"
@@ -123,8 +124,8 @@ function Overview({ p, gh, ghError, onSettings }: Parts & { onSettings: () => vo
 /** the last 7 days in six figures: what got done, landed and released, what failed, and what it cost in money and time */
 function Recent({ p }: { p: RProject }) {
   const t = useT()
-  const [d] = useStats(() => stats.summary({ range: "7d", project: p.id }), [p.id])
-  const s = d.s === "ok" ? d.v : null
+  const d = useHubQuery(["stats", "summary", "7d", "project", p.id], () => stats.summary({ range: "7d", project: p.id }), { events: ["stats"], debounceMs: 200 })
+  const s = d.data ?? null
   const fails = s ? Object.entries(s.quality.fails).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]) : []
   const figs = [
     s && { k: "done", label: t("pages:projects.fig.done"), value: fmtN(s.throughput.done), sub: s.throughput.wip ? t("pages:projects.fig.wip", { count: s.throughput.wip }) : undefined },
@@ -139,8 +140,8 @@ function Recent({ p }: { p: RProject }) {
   return (
     <Section label={t("pages:projects.recent")} data-proj-recent
       right={s && !quiet ? <button type="button" onClick={openStats} className="type-footnote font-normal text-muted-foreground hover:text-foreground" data-proj-stats-open>{t("pages:projects.openStats")}</button> : undefined}>
-      {d.s === "loading" ? <Loading className="py-8" />
-        : quiet ? <Blank data-proj-quiet>{d.s === "error" ? d.msg : t("pages:projects.quiet")}</Blank>
+      {d.loading ? <Loading className="py-8" />
+        : quiet ? <Blank data-proj-quiet>{d.error ? d.error.message : t("pages:projects.quiet")}</Blank>
         : <Card className="grid grid-cols-2 gap-0 p-1 sm:grid-cols-3" data-proj-figures>{figs.map((f) => <Figure key={f.k} testId={f.k} label={f.label} value={f.value} sub={f.sub} />)}</Card>}
     </Section>
   )

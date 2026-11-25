@@ -14,7 +14,8 @@ import { Page, Empty, Meta, SectionLabel, ItemRef, ItemNo, go } from "@/ui"
 import { refresh, tm } from "@/store"
 import { ContactAvatar } from "@/people/avatar"
 import { size } from "@/attach"
-import { useLoad, useBusy } from "@/accounts/load"
+import { useBusy } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { mailApi, type Message, type Thread, type MailAttachment, type Addr } from "@/api/mail"
 import { ThreadDraft } from "@/mail/draft"
 import { useT } from "@/i18n"
@@ -26,12 +27,12 @@ const reSubject = (s: string) => (/^\s*(re|回复|答复)\s*[:：]/i.test(s) ? s
 
 export function ThreadView({ id }: { id: string }) {
   const t = useT()
-  const T = useLoad(() => mailApi.thread(id), [id], ["mail"])
+  const T = useHubQuery(["mail", "thread", id], () => mailApi.thread(id), { events: ["mail"] })
   const read = useRef(false)
-  useEffect(() => { if (T.s === "ok" && T.data.unread > 0 && !read.current) { read.current = true; mailApi.read(id).catch(() => {}) } }, [T, id])
+  useEffect(() => { if (T.data && T.data.unread > 0 && !read.current) { read.current = true; mailApi.read(id).catch(() => {}) } }, [T.data, id])
   const back: [string, string] = ["#/mail", t("mail:shared.title")]
-  if (T.s === "loading") return <Page title={t("mail:shared.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (T.s === "error") return <Page title={t("mail:shared.title")} back={back}><Empty title={T.status === 404 ? t("mail:thread.notFound") : T.err} /></Page>
+  if (T.loading) return <Page title={t("mail:shared.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (T.error || !T.data) return <Page title={t("mail:shared.title")} back={back}><Empty title={T.status === 404 ? t("mail:thread.notFound") : (T.error?.message ?? "")} /></Page>
   return <ThreadPage t={T.data} reload={T.reload} back={back} />
 }
 

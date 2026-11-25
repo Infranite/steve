@@ -9,7 +9,8 @@ import { Switch } from "@/components/ui/switch"
 import { Page, Row, Segmented, Empty, go, Panel, Section, Chevron, FieldRow, Tile, Pill, Notice, Disclosure } from "@/ui"
 import { cn } from "cn"
 import { toast, tm } from "@/store"
-import { flowApi, useLoad, errText, sourceLabel, type FlowSummary, type Load, type Schedule, type Signal, type Source } from "@/api/flow"
+import { flowApi, errText, sourceLabel, type FlowSummary, type Schedule, type Signal, type Source } from "@/api/flow"
+import { useHubQuery, type HubQuery } from "@/data/use-hub-query"
 import { srcIcon, Failed } from "@/auto/common"
 import { NewRuleDialog } from "@/auto/new-rule"
 import { Schedules, NewScheduleDialog } from "@/auto/schedules"
@@ -31,10 +32,10 @@ export function AutoRoute({ b, c }: { b?: string; c?: string }) {
 const realSources = (xs: Source[] | undefined) => (xs ?? []).filter((s) => s.source !== "im")
 
 export function AutomationView({ tab }: { tab: Tab }) {
-  const flows = useLoad(() => flowApi.flows("flow"), [], ["flow"])
-  const sch = useLoad(() => flowApi.schedules(), [], ["flow", "run"])
-  const sig = useLoad(() => flowApi.signals({ range: "today" }), [], ["signal"])
-  const src = useLoad(() => flowApi.sources(), [], ["signal"])
+  const flows = useHubQuery(["flow", "flows", "flow"], () => flowApi.flows("flow"), { events: ["flow"], debounceMs: 300 })
+  const sch = useHubQuery(["flow", "schedules"], () => flowApi.schedules(), { events: ["flow", "run"], debounceMs: 300 })
+  const sig = useHubQuery(["flow", "signals", "today"], () => flowApi.signals({ range: "today" }), { events: ["signal"], debounceMs: 300 })
+  const src = useHubQuery(["flow", "sources"], () => flowApi.sources(), { events: ["signal"], debounceMs: 300 })
   const [dialog, setDialog] = useState<null | "rule" | "schedule">(null)
   const t = useT()
   /* today's signals, in one line under the title: the way to 信号 and the count that matters there */
@@ -108,7 +109,7 @@ function Guide({ accounts, onFlow, onSchedule }: { accounts: number; onFlow: () 
   )
 }
 
-function FlowList({ L, signals, sources, onNew }: { L: Load<FlowSummary[]>; signals?: Signal[]; sources?: Source[]; onNew: () => void }) {
+function FlowList({ L, signals, sources, onNew }: { L: HubQuery<FlowSummary[]>; signals?: Signal[]; sources?: Source[]; onNew: () => void }) {
   const [busy, setBusy] = useState<string | null>(null)
   const t = useT()
   if (L.error && !L.data) return <Failed title="" msg={errText(L.error)} retry={() => void L.reload()} />
@@ -149,7 +150,7 @@ function FlowList({ L, signals, sources, onNew }: { L: Load<FlowSummary[]>; sign
   )
 }
 
-function SourceList({ L }: { L: Load<Source[]> }) {
+function SourceList({ L }: { L: HubQuery<Source[]> }) {
   const t = useT()
   if (L.error && !L.data) return <Failed title="" msg={errText(L.error)} retry={() => void L.reload()} />
   if (!L.data) return null

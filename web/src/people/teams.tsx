@@ -16,7 +16,8 @@ import { go, Page, Group, Row, SectionLabel, Empty, ItemNo, Status, Meta } from 
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
 import { people, type DirectoryStatus, type Team } from "@/api/people"
-import { ContactAvatar, Loading, Section, act, codes, label, useLoad, visLabel } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { ContactAvatar, Loading, PEOPLE_EVENTS, Section, act, codes, label, visLabel } from "@/people/common"
 import { useT } from "@/i18n"
 import { MemSection, ctxOf } from "@/people/contact"
 
@@ -29,8 +30,8 @@ export function TeamRow({ g, indent = 0, spaces }: { g: Team; indent?: number; s
 }
 export function TeamsTab() {
   const t = useT()
-  const { data, err } = useLoad(() => people.teams(), [])
-  const spaces = useLoad(people.spaces, [], [])
+  const { data, error: err } = useHubQuery(["people", "teams"], () => people.teams(), { events: PEOPLE_EVENTS })
+  const spaces = useHubQuery(["people", "spaces"], people.spaces)
   const [open, setOpen] = useState(false), [syncing, setSyncing] = useState(false)
   if (err) return <Empty title={t("people:teams.loadFailed")} sub={err.message} />
   if (!data) return <Loading />
@@ -62,15 +63,15 @@ export function DirectoryNotes({ ds }: { ds?: DirectoryStatus[] }) {
 
 export function TeamView({ id }: { id: string }) {
   const t = useT()
-  const { data: g, err } = useLoad(() => people.team(id), [id])
-  const all = useLoad(() => people.teams(), [])
-  const items = useLoad(() => people.items(id), [id], ["party", "item"])
-  const mems = useLoad(() => people.memories(id), [id])
-  const spaces = useLoad(people.spaces, [], [])
+  const { data: g, error: err, status } = useHubQuery(["people", "team", id], () => people.team(id), { events: PEOPLE_EVENTS })
+  const all = useHubQuery(["people", "teams"], () => people.teams(), { events: PEOPLE_EVENTS })
+  const items = useHubQuery(["people", "items", id], () => people.items(id), { events: ["party", "item"] })
+  const mems = useHubQuery(["people", "memories", id], () => people.memories(id), { events: PEOPLE_EVENTS })
+  const spaces = useHubQuery(["people", "spaces"], people.spaces)
   const [del, setDel] = useState(false), [purpose, setPurpose] = useState<string | null>(null)
   useEffect(() => setPurpose(null), [g?.purpose])
   const back: [string, string] = ["#/contacts", t("people:shared.contacts")]
-  if (err) return <Page title={t("people:team.title")} back={back}><Empty title={err.status === 404 ? t("people:team.notFound") : t("people:teams.loadFailed")} sub={err.status === 404 ? t("people:team.goneSub") : err.message} /></Page>
+  if (err) return <Page title={t("people:team.title")} back={back}><Empty title={status === 404 ? t("people:team.notFound") : t("people:teams.loadFailed")} sub={status === 404 ? t("people:team.goneSub") : err.message} /></Page>
   if (!g) return <Page title={t("people:team.title")} back={back}><Loading /></Page>
   const v = g.kind === "virtual", members = g.members ?? []
   const teams = all.data ? [...all.data.chart, ...all.data.virtual] : []
@@ -110,7 +111,7 @@ export function TeamView({ id }: { id: string }) {
 function AddMember({ have, onPick }: { have: string[]; onPick: (cid: string) => void }) {
   const t = useT()
   const [open, setOpen] = useState(false)
-  const cs = useLoad(() => (open ? people.contacts({ limit: 500 }) : Promise.resolve(null)), [open])
+  const cs = useHubQuery(["people", "contacts-500", open], () => (open ? people.contacts({ limit: 500 }) : Promise.resolve(null)), { events: PEOPLE_EVENTS })
   const xs = (cs.data ?? []).filter((c) => !have.includes(c.id))
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -125,9 +126,9 @@ function AddMember({ have, onPick }: { have: string[]; onPick: (cid: string) => 
 
 export function NewTeamDialog({ onClose }: { onClose: () => void }) {
   const t = useT()
-  const me = useLoad(people.me, []).data?.id
+  const me = useHubQuery(["people", "me"], people.me, { events: PEOPLE_EVENTS }).data?.id
   const [n, setN] = useState(""), [pur, setPur] = useState(""), [pick, setPick] = useState<string[]>(me ? [me] : []), [busy, setBusy] = useState(false)
-  const cs = useLoad(() => people.contacts({ limit: 500 }), [])
+  const cs = useHubQuery(["people", "contacts-500"], () => people.contacts({ limit: 500 }), { events: PEOPLE_EVENTS })
   const xs = (cs.data ?? []).filter((c) => c.kind !== "unconfirmed").sort((a, b) => Number(b.is_me) - Number(a.is_me))
   const create = async () => {
     setBusy(true)

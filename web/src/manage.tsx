@@ -49,7 +49,8 @@ import { TextArea } from "@/components/affect/text-area-clean"
 import { AboutVersions } from "@/version"
 import { NotificationSettingsPane } from "@/notification-settings"
 import { currentHub } from "@/hub"
-import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
+import { flowApi, errText } from "@/api/flow"
+import { useHubQuery } from "@/data/use-hub-query"
 import { when } from "@/auto/common"
 import { ExecutionNodes, TeamsSection, useBotTeams } from "@/bot-dispatch"
 import { BotOverview, BotPrompt, RunsOn } from "@/bot-page"
@@ -111,7 +112,7 @@ export function BotsView() {
  *  and what it runs on underneath; the switch and the menu stay their own buttons above the card's target */
 function BotCard({ k, teams, title, sub, meta, action, off, size = 36, as }: { k: string; teams: ReturnType<typeof useBotTeams>; title: ReactNode; sub: string; meta: (string | false | null | undefined)[]; action: ReactNode; off?: boolean; size?: number; as?: "li" }) {
   const t = useT()
-  const joined = teams.value?.teams.filter(team => team.members.some(member => member.bot === k)) ?? []
+  const joined = teams.data?.teams.filter(team => team.members.some(member => member.bot === k)) ?? []
   return (
     <ACard as={as} interactive className="anim-in" data-bot-card={k} data-off={off || undefined}>
       <CardHeader icon={<BotAvatar k={k} size={size} className={cn("transition-[opacity,filter]", EASE, off && "opacity-40 grayscale")} />} action={action}
@@ -120,7 +121,7 @@ function BotCard({ k, teams, title, sub, meta, action, off, size = 36, as }: { k
       <Meta>{meta.filter(Boolean).map((x, i) => <span key={i}>{x}</span>)}</Meta>
       <div className="flex min-w-0 flex-wrap items-center gap-1.5 type-footnote text-muted-foreground" data-bot-teams>
         <span>{t("manage:list.joinedTeams")}</span>
-        {teams.error ? <span>{t("manage:list.teamsLoadFailed")}</span> : !teams.value ? <span>{t("manage:list.teamsLoading")}</span>
+        {teams.error ? <span>{t("manage:list.teamsLoadFailed")}</span> : !teams.data ? <span>{t("manage:list.teamsLoading")}</span>
           : joined.length ? joined.map(team => <Badge key={team.id} title={team.name}>{team.name}</Badge>) : <span>{t("manage:list.noTeams")}</span>}
       </div>
     </ACard>
@@ -420,7 +421,7 @@ function LanguageRow() {
 /** a Bot's schedules, read from 自动化 where they are made and changed */
 function BotSchedules({ k }: { k: string }) {
   const t = useT()
-  const L = useFlowLoad(() => flowApi.schedules(), [], ["flow", "run"])
+  const L = useHubQuery(["flow", "schedules"], () => flowApi.schedules(), { events: ["flow", "run"], debounceMs: 300 })
   if (L.error && !L.data) return <Empty title={errText(L.error)} />
   if (!L.data) return <Loading />
   const mine = L.data.filter((s) => s.bot === k)

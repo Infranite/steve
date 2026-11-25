@@ -7,7 +7,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Page, Group, Segmented, Chips, StatusDot, Empty, go, SearchField, ConnectPrompt } from "@/ui"
 import { cn } from "@/lib/utils"
 import { st, tm, toast, botName } from "@/store"
-import { flowApi, useLoad, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
+import { flowApi, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
+import { useHubQuery } from "@/data/use-hub-query"
 import { HubError } from "@/api"
 import { WORKSPACE_SETTING_DEFAULTS } from "@/gen"
 import { srcIcon, Json, Failed, Clamp, ms, RUN_STATUS } from "@/auto/common"
@@ -36,9 +37,9 @@ export function SignalsView() {
   if (focus && range === "today") range = "7d"
   const [q, setQ] = useState(query)
   useEffect(() => { const h = setTimeout(() => { query = q; r() }, 300); return () => clearTimeout(h) }, [q])
-  const L = useLoad(() => flowApi.signals({ range, q: query }), [range, query], ["signal", "run"])
+  const L = useHubQuery(["flow", "signals", range, query], () => flowApi.signals({ range, q: query }), { events: ["signal", "run"], debounceMs: 300 })
   /* whether anything can send signals yet: an empty page says what to do about it */
-  const src = useLoad(() => flowApi.sources().catch(() => null), [], ["signal"])
+  const src = useHubQuery(["flow", "sources-safe"], () => flowApi.sources().catch(() => null), { events: ["signal"], debounceMs: 300 })
   const connected = src.data ? src.data.some((s) => s.source !== "im" && s.connections.length > 0) : true
   const [row, setRow] = useState<string | null>(null)
   const groups = useMemo(() => {

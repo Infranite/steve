@@ -1,9 +1,10 @@
 /* Bot Team configuration and per-Bot execution grants, scoped to the workspace they were loaded in. */
-import { useEffect, useId, useState } from "react"
+import { useId, useState } from "react"
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
 import { type ModuleScope, type RItemDetail } from "@/api"
 import { botDispatchApi, type BotTeam, type CandidateNode as Candidate, type ItemDispatch, type NodeList, type TeamList, type TeamMember } from "@/api/bot-dispatch"
 import { modelsApi } from "@/api/models"
+import { useHubQuery } from "@/data/use-hub-query"
 import type { BotProposal, PlacementBlocked, PlacementExplanation, PlacementRejection } from "@/gen"
 import { hubBase } from "@/hub"
 import { useT } from "@/i18n"
@@ -23,36 +24,23 @@ const msg = (e: unknown) => e instanceof Error ? e.message : String(e)
 const activeScope = (): ModuleScope => ({ workspace: st.workspace?.id ?? "", hub: hubBase() })
 const reasonLabel = (t: ReturnType<typeof useT>, reason: string) => t(`manage:dispatch.reason.${reason}`, { defaultValue: t("manage:dispatch.reason.bind_failed") })
 
-function useDispatchLoad<T>(resourceKey: string, loadFn: (scope: ModuleScope, signal: AbortSignal) => Promise<T>, poll = 0) {
+export function useBotTeams() {
   const scope = activeScope()
-  const key = JSON.stringify([scope, resourceKey])
-  const [result, setResult] = useState<{ key: string; value?: T; error?: string }>()
-  const [rev, setRev] = useState(0)
-  useEffect(() => {
-    const cancel = new AbortController()
-    const load = () => loadFn(scope, cancel.signal).then(
-      value => { if (!cancel.signal.aborted) setResult({ key, value }) },
-      e => { if (!cancel.signal.aborted) setResult({ key, error: msg(e) }) },
-    )
-    void load()
-    const timer = poll ? window.setInterval(load, poll) : undefined
-    return () => { cancel.abort(); window.clearInterval(timer) }
-  // The key includes every part of scope and the resource.
-  }, [key, rev, poll])
-  return { value: result?.key === key ? result.value : undefined, error: result?.key === key ? result.error : undefined, scope, reload: () => setRev(v => v + 1) }
+  const q = useHubQuery<TeamList>(["bot-teams", scope.workspace, scope.hub], (signal) => botDispatchApi.teams(scope, signal))
+  return { ...q, scope }
 }
-export const useBotTeams = () => useDispatchLoad<TeamList>("bot-teams", botDispatchApi.teams)
 const nodeLabel = (t: ReturnType<typeof useT>, n: Candidate) => n.name || (n.id === "local" ? t("manage:dispatch.local") : n.id)
 
 export function ExecutionNodes({ bot }: { bot: string }) {
-  const load = useDispatchLoad<NodeList>(`execution-nodes:${bot}`, (scope, signal) => botDispatchApi.executionNodes(bot, scope, signal), 12000)
+  const scope = activeScope()
+  const load = useHubQuery<NodeList>(["bot-execution-nodes", bot, scope.workspace, scope.hub], (signal) => botDispatchApi.executionNodes(bot, scope, signal), { pollMs: 12000 })
   const t = useT()
   const [draft, setDraft] = useState<string[]>()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState("")
   const [saved, setSaved] = useState(false)
-  const { value } = load
-  if (!value) return load.error ? <p role="alert">{load.error}</p> : null
+  const value = load.data
+  if (!value) return load.error ? <p role="alert">{load.error.message}</p> : null
   const ids = draft ?? value.bindings
   const list = value.candidates
   // Prefer the ordered selected list, then the unbound candidates in report order.
@@ -67,13 +55,13 @@ export function ExecutionNodes({ bot }: { bot: string }) {
     if (draft === undefined) return
     setBusy(true); setErr(""); setSaved(false)
     try {
-      await botDispatchApi.setExecutionNodes(bot, draft, load.scope)
-      setDraft(undefined); load.reload(); setSaved(true)
+      await botDispatchApi.setExecutionNodes(bot, draft, scope)
+      setDraft(undefined); void load.reload(); setSaved(true)
     } catch (e) { setErr(msg(e)) } finally { setBusy(false) }
   }
   const refresh = async () => {
     setBusy(true); setErr("")
-    try { await modelsApi.refreshCatalog(load.scope); load.reload() }
+    try { await modelsApi.refreshCatalog(scope); void load.reload() }
     catch (e) { setErr(msg(e)) } finally { setBusy(false) }
   }
   return <Section label={t("manage:dispatch.executionNodes")} right={<Button size="xs" variant="ghost" disabled={busy} onClick={() => void refresh()} aria-label={t("manage:dispatch.refresh")}><RefreshCwIcon /></Button>}>
@@ -108,7 +96,8 @@ export function ExecutionNodes({ bot }: { bot: string }) {
 
 function TeamNodeRange({ bot, nodes, update, disabled }: { bot: string; nodes: string[] | null; update: (ids: string[] | null) => void; disabled: boolean }) {
   const t = useT()
-  const { value, error } = useDispatchLoad<NodeList>(`execution-nodes:${bot}`, (scope, signal) => botDispatchApi.executionNodes(bot, scope, signal))
+  const scope = activeScope()
+  const { data: value, error } = useHubQuery<NodeList>(["bot-execution-nodes", bot, scope.workspace, scope.hub], (signal) => botDispatchApi.executionNodes(bot, scope, signal))
   const bound = value?.bindings ?? []
   const ids = [...new Set([...bound, ...(nodes ?? [])])]
   return <div className="flex flex-col gap-2 pl-2">
@@ -121,7 +110,7 @@ function TeamNodeRange({ bot, nodes, update, disabled }: { bot: string; nodes: s
         data-team-node={id} onChange={e => update(e.currentTarget.checked ? [...nodes, id] : nodes.filter(n => n !== id))} />
     })}
     {value && !bound.length && <p className="type-footnote text-muted-foreground">{t("manage:dispatch.reason.no_bindings")}</p>}
-    {error && <p role="alert" className="type-footnote text-destructive">{error}</p>}
+    {error && <p role="alert" className="type-footnote text-destructive">{error.message}</p>}
   </div>
 }
 
@@ -162,13 +151,13 @@ function TeamEditor({ team, scope, onSaved, onCancel }: { team?: BotTeam; scope:
 /** Share this load with the Bot cards so a Team edit updates both views together. */
 export function TeamsSection({ load }: { load: ReturnType<typeof useBotTeams> }) {
   const t = useT()
-  const { value } = load
+  const value = load.data
   const [edit, setEdit] = useState<string | null>(null)
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
-  if (!value) return load.error ? <p role="alert">{load.error}</p> : null
+  if (!value) return load.error ? <p role="alert">{load.error.message}</p> : null
   const setDefault = async (team: string) => {
     setBusy(true); setError("")
-    try { await botDispatchApi.setDefaultTeam(team, load.scope); load.reload() }
+    try { await botDispatchApi.setDefaultTeam(team, load.scope); void load.reload() }
     catch (e) { setError(msg(e)) } finally { setBusy(false) }
   }
   const current = value.teams.find(o => o.id === edit)

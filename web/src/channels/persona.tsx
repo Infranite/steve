@@ -13,7 +13,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { go, Page, Group, Row, SectionLabel, Empty, BotAvatar, Panel, Chevron, Blank } from "@/ui"
 import { Select } from "@/view-shared"
 import { st, botName } from "@/store"
-import { useLoad, useBusy } from "@/accounts/load"
+import { useBusy } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { channelsApi, type Persona, type Reveal } from "@/api/channels"
 import { PersonaAvatar } from "@/channels/basis"
 import { OwnerChip } from "@/people/owner-chip"
@@ -29,10 +30,10 @@ const usedText = (p: Persona) => {
  *  configuration pages lay them out */
 export function PersonasSection({ bot, panel = false }: { bot?: string; panel?: boolean }) {
   const t = useT()
-  const L = useLoad(() => channelsApi.personas(), [], ["persona", "space", "channel"])
+  const L = useHubQuery(["channels", "personas"], () => channelsApi.personas(), { events: ["persona", "space", "channel"] })
   const [busy, act] = useBusy()
-  if (L.s === "loading") return <div className="flex justify-center py-10"><Spinner className="size-5 text-muted-foreground" /></div>
-  if (L.s === "error") return <Empty title={L.err} />
+  if (L.loading) return <div className="flex justify-center py-10"><Spinner className="size-5 text-muted-foreground" /></div>
+  if (L.error || !L.data) return <Empty title={L.error?.message ?? ""} />
   const xs = bot ? L.data.filter((p) => p.bot_id === bot) : L.data
   const create = async () => {
     const p = await act(() => channelsApi.newPersona({ ...newPersonaDefaults(), bot_id: bot ?? "steve" }))
@@ -65,15 +66,15 @@ const formOf = (p: Persona): Form => ({ name: p.name, intro: p.intro, soul: p.so
 
 function PersonaView({ id }: { id: string }) {
   const t = useT()
-  const L = useLoad(() => channelsApi.persona(id), [id], ["persona"])
+  const L = useHubQuery(["channels", "persona", id], () => channelsApi.persona(id), { events: ["persona"] })
   const [form, setForm] = useState<Form | null>(null), [reveal, setReveal] = useState<Reveal | null>(null), [del, setDel] = useState(false), [busy, act] = useBusy()
-  const p = L.s === "ok" ? L.data : null
+  const p = L.data ?? null
   /* a change from elsewhere (the stream) replaces the form only when nothing is being edited */
   useEffect(() => { if (p) { setReveal(p.reveal); setForm((f) => (f && dirty(f, p) ? f : formOf(p))) } }, [p?.revision, p?.id])
   const preview = useMemo(() => (p && form && reveal ? introOf({ name: form.name, intro: form.intro, reveal }, ownerOf(p)) : ""), [p, form, reveal])
   const back: [string, string] = ["#/channels/personas", t("channels:persona.title")]
-  if (L.s === "loading") return <Page title={t("channels:persona.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (L.s === "error") return <Page title={t("channels:persona.title")} back={back}><Empty title={L.status === 404 ? t("channels:persona.notFound") : L.err} sub={L.status === 404 ? t("channels:persona.notFoundSub") : undefined} /></Page>
+  if (L.loading) return <Page title={t("channels:persona.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.error) return <Page title={t("channels:persona.title")} back={back}><Empty title={L.status === 404 ? t("channels:persona.notFound") : L.error.message} sub={L.status === 404 ? t("channels:persona.notFoundSub") : undefined} /></Page>
   if (!p || !form || !reveal) return null
   const changed = dirty(form, p)
   const ok = form.name.trim().length >= 1 && form.name.trim().length <= 20 && form.intro.length <= 400 && form.soul.length <= 2000 && form.signature.length <= 60

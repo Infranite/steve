@@ -9,7 +9,7 @@ import { Page, Group, Segmented, Empty, ItemNo, StatusDot, go, SearchField, Conn
 import { Select } from "@/view-shared"
 import { tm } from "@/store"
 import { ContactAvatar } from "@/people/avatar"
-import { useLoad } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { mailApi, VIEWS, DRAFT_STATUS, type MailView, type ThreadBrief, type MailAccount } from "@/api/mail"
 import { useT } from "@/i18n"
 
@@ -23,9 +23,9 @@ const remember = (p: { view: MailView; account: string; q: string }) => {
 
 export function MailView() {
   const t = useT()
-  const A = useLoad(() => mailApi.accounts(), [], ["mail", "connection"])
-  if (A.s === "loading") return <Page title={t("mail:shared.title")}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (A.s === "error") return <Page title={t("mail:shared.title")}><Empty title={A.err} /></Page>
+  const A = useHubQuery(["mail", "accounts"], () => mailApi.accounts(), { events: ["mail", "connection"] })
+  if (A.loading) return <Page title={t("mail:shared.title")}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (A.error || !A.data) return <Page title={t("mail:shared.title")}><Empty title={A.error?.message ?? ""} /></Page>
   if (!A.data.length) return <Onboarding />
   return <Threads accounts={A.data} />
 }
@@ -49,7 +49,7 @@ function Threads({ accounts }: { accounts: MailAccount[] }) {
   const [q, setQ] = useState(q0.get("q") ?? ""), [qq, setQq] = useState(q)
   useEffect(() => { const h = setTimeout(() => setQq(q.trim()), 250); return () => clearTimeout(h) }, [q])
   useEffect(() => remember({ view, account, q: qq }), [view, account, qq])
-  const T = useLoad(() => mailApi.threads({ view, account: account || undefined, q: qq || undefined, limit: 100 }), [view, account, qq], ["mail"])
+  const T = useHubQuery(["mail", "threads", view, account, qq], () => mailApi.threads({ view, account: account || undefined, q: qq || undefined, limit: 100 }), { events: ["mail"] })
   const labels = useMemo(() => accounts.map((a) => a.address || a.connection_id), [accounts])
   const unread = accounts.reduce((n, a) => n + a.unread, 0)
   return (
@@ -58,8 +58,8 @@ function Threads({ accounts }: { accounts: MailAccount[] }) {
         {accounts.length > 1 && <Select testId="mail-account" value={account || "__all"} onChange={(v) => setAccount(v === "__all" ? "" : v)} options={[{ v: "__all", l: ALL }, ...accounts.map((a, n) => ({ v: a.connection_id, l: a.unread ? tr("mail:list.accountUnread", { name: labels[n], count: a.unread }) : labels[n] }))]} />}
         <SearchField size="sm" type="search" className="min-w-0 flex-1 sm:w-56 sm:flex-none" aria-label={tr("mail:list.searchAria")} placeholder={tr("mail:list.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} data-mail-search /></div>}>
       <div className="-mx-1 mb-4 overflow-x-auto px-1"><Segmented value={view} onChange={setView} options={VIEWS} /></div>
-      {T.s === "loading" ? <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
-        : T.s === "error" ? <Empty title={T.err} />
+      {T.loading ? <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
+        : T.error || !T.data ? <Empty title={T.error?.message ?? ""} />
         : !T.data.length ? <Empty title={qq ? tr("mail:list.noMatch") : tr(`mail:list.empty.${view}`)} />
         : <div data-mail-list={view}><Group>{T.data.map((t) => <ThreadRow key={t.id} t={t} showAccount={accounts.length > 1 && !account} />)}</Group></div>}
     </Page>
