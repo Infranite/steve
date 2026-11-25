@@ -240,6 +240,7 @@ async fn child_session_updates_are_routed_and_single_subtask_cancel_keeps_parent
             state: Default::default(),
             artifact_view: None,
             skills: vec![],
+            system_context: None,
         },
     ))
     .await

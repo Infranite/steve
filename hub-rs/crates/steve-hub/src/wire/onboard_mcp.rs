@@ -264,6 +264,7 @@ fn profile(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
                     text: t,
                     kind: Some(kind.into()),
                     level: None,
+                    pinned: false,
                 },
             )
             .map_err(shown)?;

@@ -927,6 +927,7 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                         writer: "steve".into(),
                         decision_id: None,
                         created_by: "owner".into(),
+                        pinned: false,
                         about: vec![],
                     },
                 )

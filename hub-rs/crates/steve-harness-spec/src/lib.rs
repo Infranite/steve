@@ -331,6 +331,22 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// Native channel a harness provides to append Steve's assembled personal user context without
+/// modifying or overwriting the user's own instruction files (`CLAUDE.md` / `AGENTS.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AppendSystemContext {
+    /// Standard ACP `session/new|load` `systemPrompt` with `mode = "append"`, used only when the
+    /// adapter advertises `agentCapabilities.sessionCapabilities.systemPrompt`.
+    AcpSystemPrompt,
+    /// Adapter-specific `_meta.<namespace>.systemPrompt = { "append": "<text>" }` on
+    /// `session/new|load`, used only when `agentCapabilities._meta.<namespace>.systemPrompt.append`
+    /// is truthy.
+    MetaAppend { namespace: String },
+    /// CLI flag appended at adapter launch as `[flag, "<text>"]`.
+    CliFlag { flag: String },
+}
+
 /// What `session/new|load` carries in `_meta` for the adapter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -578,6 +594,10 @@ adapter_properties! {
     /// (for example `--no-sandbox` so Copilot CLI disables its nested inner sandbox rather than
     /// aborting inside Seatbelt or Bubblewrap).
     outer_sandbox_args: Vec<String> = vec![] => Option<Vec<String>>, "Option::is_none", cloned;
+    /// Native channel to append Steve's assembled personal user context without modifying the
+    /// user's own `CLAUDE.md` / `AGENTS.md`. `None`: delivered in the opening protocol under
+    /// `## User Context`.
+    append_system_context: Option<AppendSystemContext> = None => Option<AppendSystemContext>, "Option::is_none", state;
 }
 /// What a manifest declares about an adapter besides its command.
 /// Environment variables are never accepted from custom manifests (harness credentials and

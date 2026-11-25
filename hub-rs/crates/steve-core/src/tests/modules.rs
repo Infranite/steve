@@ -10,7 +10,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use steve_modules::context::{ChatCtx, ChatDone, PromptContext};
+use steve_modules::context::{ChatCtx, ChatDone, PromptContext, SessionPrompt};
 use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::hooks::ItemHooks;
 use steve_modules::{ApiError, ApiResult, Gateway, Modules, Registry};
@@ -171,12 +171,15 @@ struct Ctx {
 }
 
 impl PromptContext for Ctx {
-    fn session(&self, _: &steve_store::Store, ws: &str, item: &Item) -> Option<String> {
+    fn session(&self, _: &steve_store::Store, ws: &str, item: &Item) -> Option<SessionPrompt> {
         self.seen
             .lock()
             .unwrap()
             .push(format!("session {ws} {}", item.id));
-        Some(self.session.into())
+        Some(SessionPrompt {
+            user_context: String::new(),
+            task_context: self.session.into(),
+        })
     }
     fn chat(&self, _: &steve_store::Store, ws: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
         self.seen
@@ -240,6 +243,128 @@ fn session_context_goes_into_the_protocol_before_the_steve_tools() {
             format!("session {WS} {}", i.id),
             format!("session {WS} {}", i.id)
         ]
+    );
+}
+
+#[test]
+fn declarative_append_system_context_routes_user_context_natively_or_to_protocol() {
+    struct UserCtxProvider(&'static str, &'static str);
+    impl PromptContext for UserCtxProvider {
+        fn session(&self, _: &steve_store::Store, _: &str, _: &Item) -> Option<SessionPrompt> {
+            Some(SessionPrompt {
+                user_context: self.0.into(),
+                task_context: self.1.into(),
+            })
+        }
+    }
+
+    let native_harness = steve_harness_spec::builtins()
+        .iter()
+        .find(|b| b.properties.append_system_context.is_some())
+        .expect("at least one builtin declares append_system_context")
+        .id;
+    let fallback_harness = steve_harness_spec::builtins()
+        .iter()
+        .find(|b| b.properties.append_system_context.is_none())
+        .expect("at least one builtin omits append_system_context")
+        .id;
+
+    let k = Kit::new();
+    attach(&k, move |r| {
+        r.prompt_context(Box::new(UserCtxProvider(
+            "Me: run cargo check before every commit.",
+            "Task knowledge: SQLite WAL mode.",
+        )));
+    });
+
+    // Native harness receives user_context via OpenSession.system_context, not duplicated in protocol.
+    let native_bot = k
+        .db()
+        .store()
+        .bots()
+        .create(
+            WS,
+            &steve_store::NewBot {
+                name: "Native".into(),
+                harness: native_harness.to_string(),
+                ..Default::default()
+            },
+            "me",
+        )
+        .unwrap()
+        .unwrap();
+    let item_native = k
+        .core
+        .create_item(CreateItem {
+            ws: WS.into(),
+            goal: "g1".into(),
+            title: "t1".into(),
+            bot: Some(native_bot.id),
+            ..Default::default()
+        })
+        .unwrap();
+    let s_native = k.db().sessions_of_item(&item_native.id).unwrap().remove(0);
+    assert_eq!(
+        k.rt.st()
+            .system_contexts
+            .get(&s_native.id)
+            .map(String::as_str),
+        Some("Me: run cargo check before every commit.")
+    );
+    let p_native = &k.rt.prompts_of(&s_native.id)[0];
+    assert!(!p_native.contains("## User Context"), "{p_native}");
+    assert!(
+        !p_native.contains("Me: run cargo check before every commit."),
+        "{p_native}"
+    );
+    assert!(
+        p_native.contains("Task knowledge: SQLite WAL mode."),
+        "{p_native}"
+    );
+
+    // Undeclared harness receives user_context under `## User Context` in opening protocol.
+    let fallback_bot = k
+        .db()
+        .store()
+        .bots()
+        .create(
+            WS,
+            &steve_store::NewBot {
+                name: "Fallback".into(),
+                harness: fallback_harness.to_string(),
+                ..Default::default()
+            },
+            "me",
+        )
+        .unwrap()
+        .unwrap();
+    let item_fallback = k
+        .core
+        .create_item(CreateItem {
+            ws: WS.into(),
+            goal: "g2".into(),
+            title: "t2".into(),
+            bot: Some(fallback_bot.id),
+            ..Default::default()
+        })
+        .unwrap();
+    let s_fallback = k
+        .db()
+        .sessions_of_item(&item_fallback.id)
+        .unwrap()
+        .remove(0);
+    assert!(
+        !k.rt.st().system_contexts.contains_key(&s_fallback.id),
+        "fallback harness must not receive OpenSession.system_context"
+    );
+    let p_fallback = &k.rt.prompts_of(&s_fallback.id)[0];
+    assert!(
+        p_fallback.contains("## User Context\n\nMe: run cargo check before every commit."),
+        "{p_fallback}"
+    );
+    assert!(
+        p_fallback.contains("Task knowledge: SQLite WAL mode."),
+        "{p_fallback}"
     );
 }
 

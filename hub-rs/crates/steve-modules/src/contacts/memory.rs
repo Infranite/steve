@@ -48,6 +48,7 @@ pub struct MemOut {
     pub level: Level,
     pub status: String,
     pub visibility: Visibility,
+    pub pinned: bool,
     pub about: Vec<ObjRef>,
     pub created: i64,
 }
@@ -62,6 +63,7 @@ impl From<&Mem> for MemOut {
             level: m.level,
             status: m.status.clone(),
             visibility: m.visibility.clone(),
+            pinned: m.pinned,
             about: m.about.clone(),
             created: m.created,
         }
@@ -108,6 +110,8 @@ pub struct NewMemBody {
     pub text: String,
     pub kind: Option<String>,
     pub level: Option<Level>,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// `POST /parties/:id/memories`: what you say is `confirmed`, `source_type = me`, private by default.
@@ -132,6 +136,7 @@ pub fn create(m: &Modules, who: &Caller, id: &str, b: NewMemBody) -> ApiResult<M
                 level: b.level.unwrap_or(Level::Conclusion),
                 writer: "me".into(),
                 created_by: who.me.clone(),
+                pinned: b.pinned,
                 about: vec![ObjRef::new(PARTY, &p.id)],
                 ..Default::default()
             },
@@ -154,6 +159,7 @@ pub struct MemPatchBody {
     pub level: Option<Level>,
     pub status: Option<String>,
     pub visibility: Option<Visibility>,
+    pub pinned: Option<bool>,
 }
 
 fn own_mem(r: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Mem> {
@@ -186,6 +192,7 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: MemPatchBody) -> ApiResult<
             level: b.level,
             status: b.status.clone(),
             visibility: b.visibility.clone(),
+            pinned: b.pinned,
             ..Default::default()
         };
         let mem = Memories(w)

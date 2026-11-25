@@ -418,7 +418,16 @@ async fn memories_name_what_they_are_about_and_anchors_rank_higher() {
     let am = e
         .env
         .store()
-        .read(|c| anchor_mems(c, &viewer, &anchors, 5, steve_store::now()))
+        .read(|c| {
+            anchor_mems(
+                c,
+                &viewer,
+                &anchors,
+                steve_knowledge::context::L1_ENTITY_MAX_CHARS,
+                false,
+                steve_store::now(),
+            )
+        })
         .unwrap();
     assert_eq!(am.len(), 1);
     assert_eq!(am[0].obj_id, a["id"].as_str().unwrap());
@@ -427,7 +436,16 @@ async fn memories_name_what_they_are_about_and_anchors_rank_higher() {
     let am = e
         .env
         .store()
-        .read(|c| anchor_mems(c, &other, &anchors, 5, steve_store::now()))
+        .read(|c| {
+            anchor_mems(
+                c,
+                &other,
+                &anchors,
+                steve_knowledge::context::L1_ENTITY_MAX_CHARS,
+                false,
+                steve_store::now(),
+            )
+        })
         .unwrap();
     assert_eq!(am.len(), 1);
     assert_eq!(am[0].obj_id, a["id"].as_str().unwrap());

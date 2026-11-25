@@ -290,6 +290,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/137.sql"),
     // 138: clear cached harness update state persisted before typed update reasons.
     include_str!("../migrations/138.sql"),
+    // 139: add mems.pinned for priority-and-budget personal context assembly.
+    include_str!("../migrations/139.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

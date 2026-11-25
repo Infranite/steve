@@ -25,6 +25,10 @@ pub struct Candidate {
     pub doc_ref: Option<String>,
 }
 
+/// Source kinds excluded from default knowledge recall (#550): work items and chat logs are
+/// searched via dedicated record search rather than mixed into knowledge retrieval.
+pub const EXCLUDED_KNOWLEDGE_KINDS: [&str; 2] = ["items", "chat"];
+
 pub struct ChunkFilter<'a> {
     pub ws: &'a str,
     pub workspace_only: bool,
@@ -122,6 +126,8 @@ fn scope(query: &mut SelectStatement, filter: &ChunkFilter<'_>) {
     }
     if let Some(kinds) = filter.kinds {
         query.and_where(Expr::col(("c", "source_kind")).is_in(kinds.iter().map(String::as_str)));
+    } else {
+        query.and_where(Expr::col(("c", "source_kind")).is_not_in(EXCLUDED_KNOWLEDGE_KINDS));
     }
     if filter.paused_mems {
         query.and_where(Expr::col(("c", "obj_type")).ne("mem"));

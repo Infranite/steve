@@ -351,16 +351,24 @@ pub fn retrieve_all(c: &mut R<'_>, q: &Query) -> Result<Retrieved> {
     })
 }
 
-/// The confirmed rules and preferences about any of `anchors`, newest first, independent of a
-/// query (prompt layer 6). Same visibility, `never` and paused-source rules as [`retrieve`].
+/// Href prefix for memory entries (`#/knowledge?mem=<id>`), shared by hit builders and citation
+/// metric accounting.
+pub const MEM_HREF_PREFIX: &str = "#/knowledge?mem=";
+
+/// Active confirmed memories about any of `anchors`, ordered by `pinned DESC`, kind priority
+/// (`rule` > `preference` > `summary` > `fact` > `event`), `updated DESC`, `id ASC`, and assembled
+/// up to `max_chars` (total text characters, each entry capped at [`crate::context::SNIPPET_MAX`]).
+/// Same visibility, `never` and paused-source rules as [`retrieve`]; `workspace_only` restricts to
+/// `Visibility::Workspace` (for multi-member workspaces).
 pub fn anchor_mems(
     c: &mut impl Read,
     viewer: &Viewer,
     anchors: &[ObjRef],
-    limit: usize,
+    max_chars: usize,
+    workspace_only: bool,
     now: i64,
 ) -> Result<Vec<Hit>> {
-    if anchors.is_empty() || limit == 0 {
+    if anchors.is_empty() || max_chars == 0 {
         return Ok(Vec::new());
     }
     if Documents(c)
@@ -370,23 +378,43 @@ pub fn anchor_mems(
     {
         return Ok(Vec::new());
     }
+    let query = steve_store::knowledge::AnchorQuery {
+        workspace_only,
+        max_rows: steve_store::knowledge::ANCHOR_QUERY_MAX_ROWS,
+    };
     let mut hits = Vec::new();
-    for m in Memories(c).anchors(viewer, anchors, limit, now)? {
+    let mut used_chars = 0usize;
+    for m in Memories(c).anchors(viewer, anchors, now, query)? {
         let names = about_names(c, &m.about)?;
         let label = sync::mem_label(&m.kind, &names);
+        let mut text = if names.is_empty() {
+            m.text
+        } else {
+            format!("{names}：{}", m.text)
+        };
+        let entry_chars = text.chars().count().min(crate::context::SNIPPET_MAX);
+        if !hits.is_empty() && used_chars + entry_chars > max_chars {
+            break;
+        }
+        if hits.is_empty() && entry_chars > max_chars {
+            text = if max_chars > 1 {
+                let mut t: String = text.chars().take(max_chars - 1).collect();
+                t.push('…');
+                t
+            } else {
+                text.chars().take(max_chars).collect()
+            };
+        }
+        used_chars += entry_chars.min(max_chars);
         hits.push(Hit {
             n: hits.len() + 1,
             obj_type: "mem".into(),
-            href: format!("#/knowledge?mem={}", m.id),
+            href: format!("{MEM_HREF_PREFIX}{}", m.id),
             obj_id: m.id,
             seq: 0,
             title: sync::mem_title(&label).to_string(),
             heading: String::new(),
-            text: if names.is_empty() {
-                m.text
-            } else {
-                format!("{names}：{}", m.text)
-            },
+            text,
             label,
             source_kind: "mems".into(),
             level: m.level,
@@ -412,7 +440,8 @@ pub(crate) fn use_hits(hits: &[Hit]) -> Vec<steve_store::knowledge::UseHit> {
         .collect()
 }
 
-/// Records which pieces a consumer saw, using the surrounding transaction.
+/// Records which pieces a consumer saw, using the surrounding transaction, and emits
+/// `steve_memory_uses_total{consumer, stage="injected"}` for injected memory entries.
 pub fn record_use(
     tx: &mut W<'_>,
     ws: &str,
@@ -420,7 +449,10 @@ pub fn record_use(
     query: &str,
     hits: &[Hit],
 ) -> Result<String> {
-    KnowledgeUses(tx).record(ws, consumer, query, &use_hits(hits))
+    let id = KnowledgeUses(tx).record(ws, consumer, query, &use_hits(hits))?;
+    let mem_hits = hits.iter().filter(|h| h.obj_type == "mem").count() as u64;
+    crate::uses::record_memory_uses(consumer.0, crate::uses::MemoryUseStage::Injected, mem_hits);
+    Ok(id)
 }
 
 /// The knowledge a disclosure basis names (`entries` of `reply_basis` / a mail draft's basis), read again

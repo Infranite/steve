@@ -38,10 +38,46 @@ pub struct ChatDone {
     pub meta: Option<serde_json::Map<String, Value>>,
 }
 
+/// Extra context assembled for a session: fixed personal user context (delivered through the
+/// harness's declared `append_system_context` channel, or under [`Self::USER_CONTEXT_HEADING`] in
+/// the opening prompt otherwise) and task-specific context (contact cards and retrieved knowledge).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionPrompt {
+    /// Fixed personal context for the requester (`me` memories and address), bounded by budget.
+    pub user_context: String,
+    /// Task-specific context (contact cards, entity anchors, retrieved knowledge).
+    pub task_context: String,
+}
+
+impl SessionPrompt {
+    /// Standard Markdown heading used when a harness does not declare native
+    /// `append_system_context`.
+    pub const USER_CONTEXT_HEADING: &'static str = "## User Context";
+
+    pub fn is_empty(&self) -> bool {
+        self.user_context.is_empty() && self.task_context.is_empty()
+    }
+
+    /// Formats `user_context` (under [`Self::USER_CONTEXT_HEADING`]) and `task_context` for an
+    /// opening prompt. Returns `task_context` unchanged when `user_context` is empty.
+    pub fn into_protocol_text(self) -> String {
+        let user_block = if self.user_context.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n{}", Self::USER_CONTEXT_HEADING, self.user_context)
+        };
+        [user_block, self.task_context]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
 /// One provider. All methods default to adding nothing.
 pub trait PromptContext: Send + Sync {
-    /// Text for the opening prompt of a session working on `item` (`""` or `None` = nothing).
-    fn session(&self, c: &Store, ws: &str, item: &Item) -> Option<String> {
+    /// Extra context for a session working on `item` (`None` or empty = nothing).
+    fn session(&self, c: &Store, ws: &str, item: &Item) -> Option<SessionPrompt> {
         let _ = (c, ws, item);
         None
     }
@@ -78,14 +114,22 @@ impl PromptContexts {
         self.0.push(p);
     }
 
-    /// The non-empty session texts joined by a blank line; `""` when there are none.
-    pub fn session(&self, c: &Store, ws: &str, item: &Item) -> String {
-        self.0
-            .iter()
-            .filter_map(|p| p.session(c, ws, item))
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n")
+    /// Assembled personal and task contexts across all providers, joined by blank lines.
+    pub fn session(&self, c: &Store, ws: &str, item: &Item) -> SessionPrompt {
+        let mut user = Vec::new();
+        let mut task = Vec::new();
+        for cx in self.0.iter().filter_map(|p| p.session(c, ws, item)) {
+            if !cx.user_context.is_empty() {
+                user.push(cx.user_context);
+            }
+            if !cx.task_context.is_empty() {
+                task.push(cx.task_context);
+            }
+        }
+        SessionPrompt {
+            user_context: user.join("\n\n"),
+            task_context: task.join("\n\n"),
+        }
     }
 
     /// The first provider with something to say. Its index goes back into [`Self::chat_done`]; answers
