@@ -426,7 +426,7 @@ impl Real {
     }
 
     async fn start_on(h: Home) -> Real {
-        Real::start_as(h, "default").await
+        Real::start_as(h, "ask").await
     }
 
     /// With the test Bot in `perm_mode`.
@@ -789,7 +789,7 @@ async fn the_test_project_is_a_node_root_from_the_first_turn() {
 /// Owner policy changes reach an idle Node and leave the next turn runnable.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mode_change_at_idle_configures_the_node_session() {
-    let r = Real::start_as(Home::fake(), "default").await;
+    let r = Real::start_as(Home::fake(), "ask").await;
     let sid = r.item("A7 mode @say first-A7").await;
     r.turn_over(&sid, 1, "first turn").await;
     let mode_url = format!("/api/approval-policy/sessions/{sid}");

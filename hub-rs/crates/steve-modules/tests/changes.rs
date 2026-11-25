@@ -297,7 +297,7 @@ async fn draft_apply_undo_round_trip() {
     );
 
     assert_eq!(
-        changes::apply(&t.modules, &me, &p.id).unwrap().unwrap(),
+        changes::apply(&t.modules, &me, &p.id).unwrap(),
         json!({"ok": true, "undo": p.id})
     );
     assert_eq!(state(&t), ("Sarah Chen".into(), 2, 1, 1));
@@ -326,18 +326,18 @@ async fn draft_apply_undo_round_trip() {
     assert_eq!(before[0]["before"], json!({"name": "Sarah"}));
 
     assert_eq!(
-        changes::apply(&t.modules, &me, &p.id).unwrap(),
+        changes::apply(&t.modules, &me, &p.id),
         Err(ApiError::conflict(changes::STALE)),
         "second apply"
     );
     assert_eq!(
-        changes::undo(&t.modules, &me, &p.id).unwrap().unwrap(),
+        changes::undo(&t.modules, &me, &p.id).unwrap(),
         json!({"ok": true})
     );
     assert_eq!(state(&t).0, "Sarah");
     assert_eq!((state(&t).2, state(&t).3), (0, 0), "org and job gone");
     assert_eq!(
-        changes::undo(&t.modules, &me, &p.id).unwrap(),
+        changes::undo(&t.modules, &me, &p.id),
         Err(ApiError::conflict(changes::NOT_UNDOABLE)),
         "second undo"
     );
@@ -360,7 +360,7 @@ async fn target_revision_change_makes_the_draft_stale() {
     .await
     .unwrap();
     fixture::edit_contact(t.store()).unwrap();
-    let r = changes::apply(&t.modules, &me, &p.id).unwrap();
+    let r = changes::apply(&t.modules, &me, &p.id);
     assert_eq!(r, Err(ApiError::conflict("这份草稿已经失效，请重新说一次")));
     assert_eq!(r.unwrap_err().status(), 409);
     assert_eq!(state(&t), ("Sarah".into(), 2, 0, 0));
@@ -387,7 +387,7 @@ async fn undo_after_24_hours_is_refused() {
     )
     .await
     .unwrap();
-    changes::apply(&t.modules, &me, &p.id).unwrap().unwrap();
+    changes::apply(&t.modules, &me, &p.id).unwrap();
     let applied = t
         .store()
         .read(|r| ChangeSets(r).get(&p.id))
@@ -395,13 +395,11 @@ async fn undo_after_24_hours_is_refused() {
         .unwrap()
         .applied
         .unwrap();
-    let late = changes::undo_at(&t.modules, &me, &p.id, applied + UNDO_WINDOW_MS + 1).unwrap();
+    let late = changes::undo_at(&t.modules, &me, &p.id, applied + UNDO_WINDOW_MS + 1);
     assert_eq!(late, Err(ApiError::conflict("这次改动已经不能撤销了")));
     assert_eq!(state(&t).0, "Sarah Chen");
     assert!(
-        changes::undo_at(&t.modules, &me, &p.id, applied + UNDO_WINDOW_MS)
-            .unwrap()
-            .is_ok(),
+        changes::undo_at(&t.modules, &me, &p.id, applied + UNDO_WINDOW_MS).is_ok(),
         "exactly 24 h is still fine"
     );
     assert!(now() >= applied);
@@ -438,7 +436,7 @@ async fn failing_op_rolls_back_everything_and_keeps_the_draft() {
     )
     .unwrap();
     assert_eq!(
-        changes::apply(&t.modules, &me, &p.id).unwrap(),
+        changes::apply(&t.modules, &me, &p.id),
         Err(ApiError::rule("组织不对"))
     );
     assert_eq!(state(&t), ("Sarah".into(), 1, 0, 0));
@@ -466,29 +464,29 @@ async fn failing_op_rolls_back_everything_and_keeps_the_draft() {
     )
     .unwrap();
     assert_eq!(
-        changes::apply(&t.modules, &me, &p2.id).unwrap(),
+        changes::apply(&t.modules, &me, &p2.id),
         Err(ApiError::invalid("name"))
     );
     assert_eq!(
-        changes::drop_draft(&t.modules, &me, &p2.id).unwrap(),
+        changes::drop_draft(&t.modules, &me, &p2.id),
         Ok(json!({"ok": true}))
     );
-    assert!(
-        changes::drop_draft(&t.modules, &me, &p2.id)
-            .unwrap()
-            .is_err()
-    );
+    assert!(changes::drop_draft(&t.modules, &me, &p2.id).is_err());
 }
 
 #[tokio::test]
-async fn unknown_ids_fall_back_and_other_workspaces_are_refused() {
+async fn unknown_ids_and_other_workspaces_are_refused() {
     let t = env();
     let me = caller(WS, ME);
-    assert!(
-        changes::apply(&t.modules, &me, "chg_inmemory").is_none(),
-        "not ours: the in-memory drafts handle it"
+    assert_eq!(
+        changes::apply(&t.modules, &me, "chg_missing"),
+        Err(ApiError::conflict(changes::STALE)),
+        "unknown id fails closed on the single persisted engine"
     );
-    assert!(changes::undo(&t.modules, &me, "chg_inmemory").is_none());
+    assert_eq!(
+        changes::undo(&t.modules, &me, "chg_missing"),
+        Err(ApiError::conflict(changes::NOT_UNDOABLE))
+    );
     t.gateway.reply(REPLY);
     let p = changes::draft(
         &t.modules,
@@ -502,7 +500,7 @@ async fn unknown_ids_fall_back_and_other_workspaces_are_refused() {
     .unwrap();
     let there = caller(WS2, ME);
     assert_eq!(
-        changes::apply(&t.modules, &there, &p.id).unwrap(),
+        changes::apply(&t.modules, &there, &p.id),
         Err(ApiError::conflict(changes::STALE))
     );
     // drafting a target in another workspace is a 404 from the target's own check
@@ -562,6 +560,9 @@ async fn unusable_model_reply_gives_an_empty_draft() {
         .status(),
         500
     );
-    assert_eq!(changes::first_json("x {\"a\":1} y"), Some(json!({"a": 1})));
-    assert_eq!(changes::first_json("none"), None);
+    assert_eq!(
+        steve_runtime::json::first_json_opt("x {\"a\":1} y"),
+        Some(json!({"a": 1}))
+    );
+    assert_eq!(steve_runtime::json::first_json_opt("none"), None);
 }

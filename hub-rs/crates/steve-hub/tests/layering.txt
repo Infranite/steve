@@ -34,6 +34,7 @@ edge steve-hub steve-node-api	1
 edge steve-hub steve-runtime	1
 edge steve-hub steve-types	1
 edge steve-hub steve-vault	1
+edge steve-install steve-harness-spec	1
 edge steve-install steve-i18n	1
 edge steve-install steve-store	1
 edge steve-install steve-types	1
@@ -58,8 +59,6 @@ edge steve-node-cli steve-node-api	1
 edge steve-node-wire steve-node-api	1
 edge steve-research steve-confine	1
 edge steve-stats steve-runtime	1
-edge steve-storage-api steve-types	1
-edge steve-store-sqlite steve-storage-api	1
 edge steve-store-sqlite steve-types	1
 edge steve-transcript steve-node-api	1
 edge steve-vault steve-confine	1

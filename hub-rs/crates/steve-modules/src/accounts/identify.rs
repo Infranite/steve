@@ -771,6 +771,7 @@ fn propose(
         requested_by: "steve".into(),
         question_template: None,
         source: Some(steve_store::DecisionSource::Record),
+        wait: None,
     })?;
     MergeProposals(w).set_decision(&id, &d.id)?;
     Ok(Some(id))

@@ -37,6 +37,7 @@ pub fn routes(kb: Knowledge) -> Router<Modules> {
         .route("/kb/uses", get(list_uses))
         .route("/kb/providers", get(providers))
         .merge(crate::candidates::routes())
+        .merge(crate::proposals::routes())
         .merge(crate::subjects::routes())
         .merge(crate::steward::routes())
         .layer(Extension(kb))

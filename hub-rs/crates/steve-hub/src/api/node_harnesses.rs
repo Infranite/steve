@@ -75,6 +75,7 @@ struct Target {
     // A remote link is checked again after awaiting the probe, before publishing its answer.
     remote: Option<Arc<steve_node_wire::RemoteNode>>,
     generation: Option<u64>,
+    upgrade_only: bool,
 }
 
 impl Target {
@@ -150,13 +151,28 @@ fn harness(c: HarnessCapability) -> NodeHarnessView {
             return Some(AuthenticationRequired);
         }
         match a.status {
-            AdapterStatus::AdapterMissing => Some(AdapterMissing),
+            AdapterStatus::AdapterMissing => {
+                if a.missing_command
+                    .as_ref()
+                    .is_some_and(|m| m.login_shell_path.is_some())
+                {
+                    Some(CommandNotInServicePath)
+                } else {
+                    Some(AdapterMissing)
+                }
+            }
             AdapterStatus::InitializeFailed => Some(InitializeFailed),
             AdapterStatus::Ready if a.session.is_none() => Some(SessionUnavailable),
             _ => None,
         }
     });
+    let has_login_shell_cmd = a.is_some_and(|a| {
+        a.missing_command
+            .as_ref()
+            .is_some_and(|m| m.login_shell_path.is_some())
+    });
     let has_partial_install = !c.version.is_empty()
+        || has_login_shell_cmd
         || s.is_some_and(|s| {
             s.components
                 .iter()
@@ -184,7 +200,9 @@ fn harness(c: HarnessCapability) -> NodeHarnessView {
         }
     } else if let Some(a) = a {
         match a.status {
-            AdapterStatus::AdapterMissing => !a.builtin || !c.version.is_empty(),
+            AdapterStatus::AdapterMissing => {
+                !a.builtin || !c.version.is_empty() || has_login_shell_cmd
+            }
             AdapterStatus::Ready | AdapterStatus::InitializeFailed => true,
         }
     } else {
@@ -200,7 +218,7 @@ fn harness(c: HarnessCapability) -> NodeHarnessView {
         match s.state {
             SetupState::Installing => Some(Installing),
             SetupState::Unknown => Some(ProbeUnknown),
-            SetupState::NotInstalled => Some(AdapterMissing),
+            SetupState::NotInstalled => adapter_reason.or(Some(AdapterMissing)),
             SetupState::Unavailable => {
                 if s.error.is_some() {
                     Some(InstallFailed)
@@ -252,6 +270,7 @@ fn harness(c: HarnessCapability) -> NodeHarnessView {
         } else {
             a.and_then(|a| a.session_error.clone().or_else(|| a.error.clone()))
         },
+        missing_command: a.and_then(|a| a.missing_command.clone()),
         setup: c.setup.map(setup_view),
         capabilities: a.and_then(|a| a.capabilities.clone()),
     }
@@ -273,6 +292,13 @@ impl Inventory {
             },
         );
         let linked = t.node.is_some() && t.current();
+        if t.upgrade_only && linked {
+            report.state = NodeHarnessReportState::UpgradeRequired;
+            report.error = None;
+            report.refreshing = false;
+            report.stale = report.checked_at.is_some();
+            return report;
+        }
         report.stale = report.checked_at.is_some()
             && (!linked || !current || report.state != NodeHarnessReportState::Reported);
         if !linked {
@@ -283,6 +309,9 @@ impl Inventory {
         report
     }
     async fn refresh(&self, t: &Target, fresh: bool) -> Report {
+        if t.upgrade_only {
+            return self.view(t).await;
+        }
         let Some(node) = &t.node else {
             return self.view(t).await;
         };
@@ -371,6 +400,7 @@ async fn targets(st: &AppState, caller: Caller) -> Result<Vec<Target>, ApiError>
             .map(|_| svc.fleet.remote(&NodeId::new("local").expect("static id")))
     });
     let local_generation = local_remote.as_ref().and_then(|n| n.generation());
+    let local_upgrade_only = local_remote.as_ref().is_some_and(|n| n.is_upgrade());
     let mut out = vec![Target {
         id: "local".into(),
         node: st
@@ -380,6 +410,7 @@ async fn targets(st: &AppState, caller: Caller) -> Result<Vec<Target>, ApiError>
             .map(|n| n.node()),
         remote: local_remote,
         generation: local_generation,
+        upgrade_only: local_upgrade_only,
     }];
     if let Some(svc) = &st.nodes {
         let store = svc.store.clone();
@@ -397,11 +428,13 @@ async fn targets(st: &AppState, caller: Caller) -> Result<Vec<Target>, ApiError>
                 .map_err(|_| ApiError::Json(500, "invalid Node identity".into()))?;
             let remote = svc.fleet.remote(&id);
             let generation = remote.generation();
+            let upgrade_only = remote.is_upgrade();
             out.push(Target {
                 id: n.node_id,
                 node: generation.map(|_| remote.clone() as Arc<dyn Node>),
                 remote: Some(remote),
                 generation,
+                upgrade_only,
             });
         }
     }
@@ -423,7 +456,8 @@ pub async fn list(
             nodes.insert(t.id.clone(), st.node_harnesses.refresh(&t, false).await);
             continue;
         }
-        let due = t.node.is_some()
+        let due = !t.upgrade_only
+            && t.node.is_some()
             && st
                 .node_harnesses
                 .cache

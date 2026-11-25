@@ -31,7 +31,7 @@ use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig}
 use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
-use steve_modules::{ApiResult, FakeClock, GatewayOut};
+use steve_modules::{ApiResult, FakeClock};
 use steve_store::base::Viewer;
 use tempfile::TempDir;
 
@@ -50,33 +50,14 @@ struct Slow {
     during: Mutex<Option<During>>,
 }
 
-#[async_trait]
-impl compose::PinnedModel for Slow {
-    async fn run(
-        &self,
-        model: &str,
-        prompt: &str,
-        t: std::time::Duration,
-    ) -> Result<GatewayOut, String> {
-        self.run_with_images(model, prompt, &[], t).await
-    }
-    async fn run_with_images(
-        &self,
-        _: &str,
-        prompt: &str,
-        _: &[Value],
-        _: std::time::Duration,
-    ) -> Result<GatewayOut, String> {
+impl Slow {
+    fn on_compose(&self, prompt: &str) {
         self.prompts.lock().unwrap().push(prompt.into());
         self.clock.advance(self.advance.load(Ordering::SeqCst));
         let during = self.during.lock().unwrap().take();
         if let Some(f) = during {
             f();
         }
-        Ok(GatewayOut {
-            text: REPLY.into(),
-            ..Default::default()
-        })
     }
 }
 
@@ -115,7 +96,7 @@ struct H {
 async fn setup() -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
-    let disclosure = Disclosure::with_models(Vec::new());
+    let disclosure = Disclosure::new();
     let link = OutLink::new();
     let (reg_disclosure, reg_link) = (disclosure.clone(), link.clone());
     let env = TestEnv::new(|r| {
@@ -155,10 +136,17 @@ async fn setup() -> H {
         prompts: Mutex::new(Vec::new()),
         during: Mutex::new(None),
     });
+    env.gateway.script(compose::H_SAFETY, REPLY);
+    let slow_hook = model.clone();
+    env.gateway.on_run(move |_, prompt| {
+        if steve_modules::gateway::current_tag().purpose == "compose" {
+            slow_hook.on_compose(prompt);
+        }
+    });
     let replies = Arc::new(
         Replies::new()
             .outbound(outbox.clone())
-            .composer(Composer::new().pinned(model.clone())),
+            .composer(Composer::new()),
     );
     let flow = flow_setup
         .connections(conns.clone())

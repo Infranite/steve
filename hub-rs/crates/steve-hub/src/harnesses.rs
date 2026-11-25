@@ -214,16 +214,15 @@ impl HubHarnesses {
     ) -> steve_core::models::BotHarnessSource {
         let me = self.clone();
         Arc::new(move |bot| {
-            let (mut nodes, unconfigured) = store
-                .read(|r| steve_store::bot_admin::harness_nodes(r, bot))
-                .unwrap_or_default();
-            if unconfigured {
-                nodes.extend(
-                    steve_store::bot_dispatch::DEFAULT_NODES
-                        .iter()
-                        .map(ToString::to_string),
-                );
-            }
+            let nodes: std::collections::BTreeSet<String> = match bot {
+                Some(id) => store
+                    .read(|r| steve_store::bot_admin::harness_nodes(r, id))
+                    .unwrap_or_default(),
+                None => steve_store::bot_dispatch::DEFAULT_NODES
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            };
             if nodes.is_empty() {
                 // Placement is not fixed yet; another Node's offer must not certify this one.
                 return me.for_node("");
@@ -704,6 +703,7 @@ pub(crate) async fn ready_locally(harnesses: &[&str], models: &[&str]) -> Arc<Hu
                 resume_command: None,
                 fork_command: None,
                 capabilities: None,
+                missing_command: None,
             }),
         })
         .collect();
@@ -750,6 +750,7 @@ mod tests {
                 resume_command: None,
                 fork_command: None,
                 capabilities: None,
+                missing_command: None,
             }),
         }
     }

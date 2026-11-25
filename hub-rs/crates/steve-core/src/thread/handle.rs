@@ -1,24 +1,22 @@
-//! One message on the workspace lane: route it, let the guards decide, log the routing, and act —
-//! queue an answer or research, make an item, show a card, send it to an item, or correct the last routing.
+//! Single-task execution: deterministic rules first (zero router calls), bounded router call for
+//! ambiguous messages, capability preflight (zero tool-less probe calls), and atomic fenced commit.
 
 use super::decide::{self, DecideCtx};
+use super::handoff;
 use super::offer::{ThreadItem, confirms};
-use super::research::{Inline, InlineJob, QUEUE_FULL, SYSTEM};
+use super::research::SYSTEM;
 use super::suggest;
-use super::{AT, Job, Steps, lock, route_step};
+use super::{AT, Conv, SayTo, Steps, Stop, lock, route_step};
 use crate::Core;
 use crate::error::Result;
-use crate::gateway::{Route, Said};
+use crate::gateway::{Offer, Route, Said};
 use crate::repo::FileRef;
 use crate::util::{js_head, now};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use std::sync::{LazyLock, Mutex};
 use steve_modules::contacts::item_people::Mention;
-use steve_store::NewRouteLog;
-
-/// Posts Steve's reply unless the user stopped it; the stored message's id.
-type Reply<'a> = &'a (dyn Fn(&str, Option<&str>, Option<Value>) -> Option<String> + Sync);
+use steve_store::{CommitOutcome, CommitReplyInput, ReceiptDispatch, ThreadTask, thread};
 
 /// “别建事项，直接在这告诉我”: a spoken correction back into the conversation.
 pub(super) static TO_INLINE: LazyLock<Regex> = LazyLock::new(|| {
@@ -31,168 +29,377 @@ pub(super) static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"进展|进度|做完没|做完了吗|完成了吗|怎么样了|到哪了|到哪一步").expect("valid regex")
 });
 
-/// How long a spoken “别建事项” reaches back.
 const REROUTE_WINDOW: i64 = 10 * 60 * 1000;
 
-/// The items the routing made or touched, for `route_log`.
-struct Logged {
-    item: Option<String>,
+/// Publishes `steve.thinking = false` when the task exits (even on early return or error).
+struct ThinkingGuard<'a> {
+    core: &'a Core,
+    ws: &'a str,
+    active: bool,
+}
+
+impl Drop for ThinkingGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.core
+                .store()
+                .store()
+                .publish(steve_types::LiveEvent::from(
+                    steve_types::WorkLiveEvent::SteveThinking {
+                        on: false,
+                        ws: self.ws.to_owned().into(),
+                        phase: None,
+                    },
+                ));
+        }
+    }
+}
+
+/// Resolved route metadata carried into `commit_reply`.
+pub(super) struct RouteInfo {
+    pub kind: String,
+    pub model_kind: String,
+    pub guard: Option<String>,
+    pub model: Option<String>,
+    pub confidence: Option<f64>,
+    pub signals: Vec<String>,
+    pub fallback: bool,
+    pub ms: i64,
+    pub project: Option<String>,
+    pub offer: Option<Offer>,
+    pub step_json: Option<Value>,
+}
+
+impl Default for RouteInfo {
+    fn default() -> Self {
+        Self {
+            kind: "answer".into(),
+            model_kind: "answer".into(),
+            guard: None,
+            model: None,
+            confidence: None,
+            signals: vec![],
+            fallback: false,
+            ms: 0,
+            project: None,
+            offer: None,
+            step_json: None,
+        }
+    }
 }
 
 impl Core {
-    pub(super) async fn handle(&self, ws: &str, j: &Job) {
-        let (mid, text, files, user) = (
-            j.mid.as_str(),
-            j.text.as_str(),
-            &j.files[..],
-            j.user.as_deref(),
-        );
-        let space = j.conv.space.as_str();
-        let lane = if j.after {
-            super::after_lane(ws, space)
-        } else if j.direct {
-            super::direct_lane(ws, space)
-        } else {
-            super::lane_key(ws, space)
+    pub(super) async fn execute_task(&self, task: &ThreadTask, lease: &str, stop: &Stop) {
+        let ws = task.workspace_id.as_str();
+        let space = task.space.as_str();
+        let conv: Conv = match task.conv_json.as_deref() {
+            Some(raw) => match serde_json::from_str::<Conv>(raw) {
+                Ok(c) if c.space == space => c,
+                _ => {
+                    tracing::error!(task = %task.id, ws, space, "corrupt or mismatched task conv_json");
+                    let mut meta = Map::new();
+                    meta.insert("origin".into(), json!(task.origin_message_id));
+                    meta.insert("rerun".into(), json!(task.origin_message_id));
+                    meta.insert("error".into(), json!(true));
+                    meta.insert(SYSTEM.into(), json!(true));
+                    let _ = self.commit_simple(
+                        task,
+                        lease,
+                        false,
+                        "failed",
+                        Some("（队列任务数据损坏，未自动执行，需要时请重试）"),
+                        None,
+                        Value::Object(meta),
+                        &RouteInfo {
+                            kind: "unknown".into(),
+                            model_kind: "unknown".into(),
+                            ..Default::default()
+                        },
+                        None,
+                        None,
+                        ReceiptDispatch::NoDispatch,
+                        Some("corrupt_task"),
+                        Some("corrupt or mismatched conv_json"),
+                    );
+                    return;
+                }
+            },
+            None => {
+                if space == super::MAIN {
+                    Conv::main()
+                } else {
+                    Conv {
+                        space: space.into(),
+                        research: false,
+                        items: false,
+                        owner_only: false,
+                        start: false,
+                        hands_on: false,
+                    }
+                }
+            }
         };
-        let flag = super::Stop::for_origin(mid);
-        lock(&self.0.thread.inflight).insert(lane.clone(), flag.clone());
-        /* the web's “thinking” line is about your conversation only, and stays with the turn in progress
-        while a message with a fixed way passes it */
-        let quiet = j.conv.guest()
-            || (j.direct && self.main_busy_besides(ws))
-            || (j.ahead.is_some() && self.answering(ws));
+        let quiet = conv.guest();
         if !quiet {
             self.store().store().publish(steve_types::LiveEvent::from(
                 steve_types::WorkLiveEvent::SteveThinking {
                     on: true,
-                    ws: {
-                        let value: String = ws.into();
-                        value.into()
-                    },
+                    ws: ws.to_owned().into(),
                     phase: None,
                 },
             ));
         }
-        /* what Steve did for this message, kept on the reply as meta.steps so the conversation can show it folded */
-        let steps = Mutex::new(Steps::default());
-        let t0 = now();
-        let reply = |t: &str, item: Option<&str>, meta: Option<Value>| {
-            if flag.is_stopped() {
-                return None;
-            }
-            let mut m = match meta {
-                Some(Value::Object(m)) => m,
-                _ => Map::new(),
-            };
-            m.entry("origin").or_insert_with(|| json!(mid));
-            m.insert("steps".into(), lock(&steps).json(now() - t0));
-            match self
-                .store()
-                .message_add_in(ws, space, "steve", t, item, &Value::Object(m))
-            {
-                Ok(id) => {
-                    let th = self.store().store().thread();
-                    if let Err(e) = th.route_reply(mid, &id, item) {
-                        tracing::error!("route log of {mid}: {e}");
-                    }
-                    /* an item's announcement is told once its card is in place (on_item) */
-                    if item.is_none() {
-                        self.said(ws, space, &id);
-                    }
-                    Some(id)
-                }
-                Err(e) => {
-                    tracing::error!("reply {e}");
-                    None
-                }
-            }
+        let _thinking = ThinkingGuard {
+            core: self,
+            ws,
+            active: !quiet,
         };
+
+        let t0 = now();
+        let steps = Mutex::new(Steps::default());
         if let Err(e) = self
-            .handle_inner(
-                ws,
-                mid,
-                text,
-                files,
-                user,
-                &j.mentions,
-                &j.to,
-                &j.conv,
-                j.ahead.clone(),
-                &flag,
-                &reply,
-                &steps,
-                quiet,
-            )
+            .execute_task_inner(task, lease, stop, &conv, &steps, t0)
             .await
         {
-            reply(
-                &format!("（出错了：{}）", js_head(&e.to_string(), 120)),
+            tracing::error!(task = %task.id, ws, space, "thread task failed: {e}");
+            let text = format!("（出错了：{}）", js_head(&e.to_string(), 120));
+            let mut meta = Map::new();
+            meta.insert("origin".into(), json!(task.origin_message_id));
+            meta.insert("error".into(), json!(true));
+            meta.insert(SYSTEM.into(), json!(true));
+            meta.insert("steps".into(), lock(&steps).json(now() - t0));
+            let _ = self.commit_simple(
+                task,
+                lease,
+                false,
+                "failed",
+                Some(&text),
                 None,
-                Some(json!({"error": true, SYSTEM: true})),
+                Value::Object(meta),
+                &RouteInfo {
+                    kind: "unknown".into(),
+                    model_kind: "unknown".into(),
+                    ..Default::default()
+                },
+                None,
+                None,
+                ReceiptDispatch::NoDispatch,
+                Some("task_error"),
+                Some(&e.to_string()),
             );
         }
-        lock(&self.0.thread.inflight).remove(&lane);
-        if !quiet {
-            self.store().store().publish(steve_types::LiveEvent::from(
-                steve_types::WorkLiveEvent::SteveThinking {
-                    on: false,
-                    ws: {
-                        let value: String = ws.into();
-                        value.into()
-                    },
-                    phase: None,
+        // If `stop` / `stop_run` committed right before `set_task_token` or a non-stop
+        // `commit_reply`, that commit returned `Fenced` while leaving this task `claimed` under
+        // our lease with `cancel_requested_at != NULL`. Settle it cleanly as `stopped` so the
+        // space head never stays stuck in `claimed`.
+        let still_claimed_cancelled = self
+            .store()
+            .store()
+            .read(|r| thread::task_by_id(r, &task.id))
+            .ok()
+            .flatten()
+            .is_some_and(|cur| {
+                cur.status == "claimed"
+                    && cur.lease_token.as_deref() == Some(lease)
+                    && cur.generation == task.generation
+                    && cur.cancel_requested_at.is_some()
+            });
+        if still_claimed_cancelled {
+            let _ = self.commit_stopped(task, lease, &steps, t0, &RouteInfo::default());
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn commit_simple(
+        &self,
+        task: &ThreadTask,
+        lease: &str,
+        allow_cancelled_stop: bool,
+        outcome: &str,
+        reply_text: Option<&str>,
+        reply_item_id: Option<&str>,
+        reply_meta: Value,
+        route: &RouteInfo,
+        route_outcome: Option<&str>,
+        item_id: Option<&str>,
+        dispatch: ReceiptDispatch<'_>,
+        error_code: Option<&str>,
+        error_detail: Option<&str>,
+    ) -> Result<CommitOutcome> {
+        let committed = self.store().store().write(|w| {
+            thread::commit_reply(
+                w,
+                &CommitReplyInput {
+                    task_id: &task.id,
+                    lease_token: lease,
+                    expected_generation: task.generation,
+                    allow_cancelled_stop,
+                    outcome,
+                    reply_text,
+                    existing_reply_id: None,
+                    reply_item_id,
+                    reply_meta: &reply_meta,
+                    error_code,
+                    route_kind: &route.kind,
+                    model_kind: &route.model_kind,
+                    route_guard: route.guard.as_deref(),
+                    route_model: route.model.as_deref(),
+                    route_confidence: route.confidence,
+                    route_signals: &route.signals,
+                    route_fallback: route.fallback,
+                    route_ms: route.ms,
+                    route_outcome,
+                    item_id,
+                    dispatch,
+                    delivery_ref_id: None,
+                    model_call_id: None,
+                    user_id: task.user_id.as_deref(),
+                    project_id: route.project.as_deref().or(task.project_id.as_deref()),
+                    answer_model: None,
+                    harness: None,
+                    harness_session: None,
+                    tools: 0,
+                    turns: 0,
+                    first_text_ms: None,
+                    error_detail,
+                    record_attention_commit: task.space == super::MAIN && task.user_id.is_some(),
                 },
-            ));
-        }
-    }
-
-    /// “已作为补充送到 ST-n。” under the user's message to an item: the item's card moves there, so it
-    /// sits after the user's latest message about it and the reply grows on it.
-    fn acknowledge(&self, id: &str, reply: Reply<'_>) {
-        if let Some(m) = reply(&format!("已作为补充送到 {id}。"), Some(id), None) {
-            super::flowback::adopt_quiet(self.store(), id, &m);
-        }
-    }
-
-    /// One `route_log` row for a message that was not routed by the model (`/汇报`, explicit target).
-    fn log_fixed(&self, ws: &str, mid: &str, kind: &str, item: Option<&str>) -> Result<()> {
-        self.store().store().thread().route_add(&NewRouteLog {
-            workspace_id: ws.into(),
-            message_id: mid.into(),
-            model_kind: kind.into(),
-            kind: kind.into(),
-            confidence: Some(1.0),
-            item_id: item.map(String::from),
-            ..Default::default()
+            )
         })?;
+        if let CommitOutcome::Committed {
+            reply_message_id: Some(ref id),
+            ..
+        } = committed
+        {
+            if let ReceiptDispatch::Dispatched(disp_id) = dispatch {
+                let _ = self.store().store().write(|w| {
+                    thread::set_dispatch_reply_if_origin(w, disp_id, &task.origin_message_id, id)
+                });
+            }
+            if let Some(item) = reply_item_id {
+                super::flowback::adopt_quiet(self.store(), item, id);
+            }
+            self.said(&task.workspace_id, &task.space, id);
+        }
+        Ok(committed)
+    }
+
+    fn commit_stopped(
+        &self,
+        task: &ThreadTask,
+        lease: &str,
+        steps: &Mutex<Steps>,
+        t0: i64,
+        route: &RouteInfo,
+    ) -> Result<()> {
+        let mut meta = Map::new();
+        meta.insert("origin".into(), json!(task.origin_message_id));
+        meta.insert("stopped".into(), json!(true));
+        meta.insert(SYSTEM.into(), json!(true));
+        meta.insert("steps".into(), lock(steps).json(now() - t0));
+        self.commit_simple(
+            task,
+            lease,
+            true,
+            "stopped",
+            Some("好，停下了。要我换个方式就直接说。"),
+            None,
+            Value::Object(meta),
+            route,
+            None,
+            None,
+            ReceiptDispatch::NoDispatch,
+            None,
+            None,
+        )?;
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn handle_inner(
+    async fn execute_task_inner(
         &self,
-        ws: &str,
-        mid: &str,
-        text: &str,
-        files: &[FileRef],
-        user: Option<&str>,
-        mentions: &[Mention],
-        j_to: &super::SayTo,
-        conv: &super::Conv,
-        ahead: Option<(Route, i64)>,
-        flag: &super::Stop,
-        reply: Reply<'_>,
+        task: &ThreadTask,
+        lease: &str,
+        stop: &Stop,
+        conv: &Conv,
         steps: &Mutex<Steps>,
-        quiet: bool,
+        t0: i64,
     ) -> Result<()> {
         let db = self.store();
+        let ws = task.workspace_id.as_str();
+        let space = task.space.as_str();
+        let mid = task.origin_message_id.as_str();
         let guest = conv.guest();
+        let user = task.user_id.as_deref();
+
+        if stop.is_stopped() || task.cancel_requested_at.is_some() {
+            return self.commit_stopped(task, lease, steps, t0, &RouteInfo::default());
+        }
+
+        let Some(om) = db.message(mid)? else {
+            // Origin was deleted; settle cleanly with no reply.
+            self.commit_simple(
+                task,
+                lease,
+                true,
+                "stopped",
+                None,
+                None,
+                Value::Null,
+                &RouteInfo::default(),
+                None,
+                None,
+                ReceiptDispatch::NoDispatch,
+                Some("origin_missing"),
+                None,
+            )?;
+            return Ok(());
+        };
+        let text = om.text.as_str();
+        let files: Vec<FileRef> = task
+            .files_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| {
+                om.meta
+                    .get("files")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default()
+            });
+        let mentions: Vec<Mention> = task
+            .mentions_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let to = SayTo {
+            item: task.to_item.clone(),
+            reply_to: task.to_reply_to.clone(),
+        };
+
+        // 0. Forced inline revision (from suggest("here") or reroute(Inline)).
+        if let Some(forced) = task.forced_kind.as_deref() {
+            let route_json: Option<Value> = task
+                .route_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let info = RouteInfo {
+                kind: forced.into(),
+                model_kind: forced.into(),
+                guard: Some("forced".into()),
+                project: task.project_id.clone(),
+                step_json: route_json,
+                ..Default::default()
+            };
+            return self
+                .execute_inline(task, lease, stop, conv, text, &files, info, t0)
+                .await;
+        }
+
+        // 1. Fixed rule: `/汇报` in MAIN (0 model calls).
         if !guest && text.trim() == "/汇报" {
-            self.log_fixed(ws, mid, "status", None)?;
             let i = Steps::begin(steps, "digest", json!({}));
             let mut d = Steps::end(steps, i, self.digest_text(ws), |_| json!({}))?;
-            /* what the modules noted for the report (steve-flow's `digest` steps) */
             let notes = self
                 .modules()
                 .map(|m| m.registry.take_digest(ws))
@@ -200,11 +407,34 @@ impl Core {
             for n in notes {
                 d.push_str(&format!("\n· {n}"));
             }
-            reply(&d, None, None);
+            let route = RouteInfo {
+                kind: "status".into(),
+                model_kind: "status".into(),
+                guard: Some("fixed".into()),
+                confidence: Some(1.0),
+                ..Default::default()
+            };
+            let meta = json!({"origin": mid, "steps": lock(steps).json(now() - t0)});
+            self.commit_simple(
+                task,
+                lease,
+                false,
+                "answered",
+                Some(&d),
+                None,
+                meta,
+                &route,
+                None,
+                None,
+                ReceiptDispatch::NoDispatch,
+                None,
+                None,
+            )?;
             return Ok(());
         }
-        /* sent to an item (focus bar) or quoting one of its messages: straight there, no router */
-        let target = match (&j_to.item, &j_to.reply_to) {
+
+        // 2. Fixed rule: explicit SayTo (focus bar or quoting an item's message) in MAIN (0 model calls).
+        let target = match (&to.item, &to.reply_to) {
             (Some(i), _) => Some(i.clone()),
             (None, Some(r)) => db.message(r)?.and_then(|m| m.item_id),
             _ => None,
@@ -215,47 +445,254 @@ impl Core {
                 .is_some_and(|i| i.workspace_id == ws && !i.is_closed())
         {
             if PROGRESS.is_match(text) {
-                self.log_fixed(ws, mid, "status", Some(&id))?;
-                reply(&self.status_text(&id)?, None, Some(json!({"status": id})));
+                let status = self.status_text(&id)?;
+                let route = RouteInfo {
+                    kind: "status".into(),
+                    model_kind: "status".into(),
+                    guard: Some("fixed".into()),
+                    confidence: Some(1.0),
+                    ..Default::default()
+                };
+                let meta =
+                    json!({"origin": mid, "status": id, "steps": lock(steps).json(now() - t0)});
+                self.commit_simple(
+                    task,
+                    lease,
+                    false,
+                    "answered",
+                    Some(&status),
+                    None,
+                    meta,
+                    &route,
+                    None,
+                    Some(&id),
+                    ReceiptDispatch::NoDispatch,
+                    None,
+                    None,
+                )?;
                 return Ok(());
             }
-            if !quiet {
-                self.phase(ws, "supplement");
-            }
+            self.phase(ws, "supplement");
             let i = Steps::begin(
                 steps,
                 "supplement",
                 json!({"item": id, "files": files.len()}),
             );
-            if Steps::end(
+            if let Some(disp_id) = Steps::end(
                 steps,
                 i,
-                self.forward_open(&id, text, files, mid),
-                |sent| json!({"sent": sent}),
+                self.forward_open(&id, text, &files, mid),
+                |disp| json!({"sent": disp.is_some()}),
             )? {
-                self.log_fixed(ws, mid, "supplement", Some(&id))?;
-                self.acknowledge(&id, reply);
+                let route = RouteInfo {
+                    kind: "supplement".into(),
+                    model_kind: "supplement".into(),
+                    guard: Some("fixed".into()),
+                    confidence: Some(1.0),
+                    ..Default::default()
+                };
+                let meta = json!({"origin": mid, "steps": lock(steps).json(now() - t0)});
+                let ack = format!("已作为补充送到 {id}。");
+                self.commit_simple(
+                    task,
+                    lease,
+                    false,
+                    "handed_off",
+                    Some(&ack),
+                    Some(&id),
+                    meta,
+                    &route,
+                    None,
+                    Some(&id),
+                    ReceiptDispatch::Dispatched(&disp_id),
+                    None,
+                    None,
+                )?;
                 return Ok(());
             }
         }
-        if let Err(e) = self.expire_suggestions(ws, &conv.space) {
+
+        if let Err(e) = self.expire_suggestions(ws, space) {
             tracing::warn!("expire suggestion cards in {ws}: {e}");
         }
+
+        // 3. Explicit `@Bot` mention (Rule 1) -> 0 router calls!
+        let named = if !guest || conv.items {
+            self.named_bot(ws, text)?
+        } else {
+            None
+        };
+        if let Some(bot) = named {
+            let stripped = AT.replace(text, "").trim().to_string();
+            let goal = if stripped.is_empty() {
+                text.to_string()
+            } else {
+                stripped
+            };
+            let r = Route {
+                kind: "item".into(),
+                confidence: 1.0,
+                signals: vec!["explicit".into()],
+                title: js_head(&goal, 24).to_string(),
+                goal,
+                why: "显式 @Bot 指定".into(),
+                ..Route::default()
+            };
+            let d = decide::Decision {
+                kind: "item".into(),
+                guard: Some("1"),
+                offer: None,
+                for_item: None,
+            };
+            let step = route_step(&r, Some(&d), 0);
+            lock(steps).route = Some(step.clone());
+            let info = RouteInfo {
+                kind: "item".into(),
+                model_kind: "item".into(),
+                guard: Some("1".into()),
+                confidence: Some(1.0),
+                signals: r.signals.clone(),
+                step_json: Some(step),
+                ..Default::default()
+            };
+            return self.execute_item(
+                task,
+                lease,
+                text,
+                &files,
+                user,
+                &mentions,
+                &r,
+                Some(bot),
+                conv.start,
+                &info,
+                steps,
+                t0,
+            );
+        }
+
+        // 4. Short confirmation of an open offer ("好，改吧") -> 0 router calls!
+        if confirms(text)
+            && let Some(offer_msg) = self.open_offer_before(ws, mid)?
+        {
+            let h = self.offer_as(ws, &offer_msg.id, true, conv.start, user)?;
+            let (outcome, dispatch) = match h.dispatch_ref_id.as_deref() {
+                Some(id) => ("handed_off", ReceiptDispatch::Dispatched(id)),
+                None => ("answered", ReceiptDispatch::NoDispatch),
+            };
+            let _ = self.store().store().write(|w| {
+                thread::commit_reply(
+                    w,
+                    &CommitReplyInput {
+                        task_id: &task.id,
+                        lease_token: lease,
+                        expected_generation: task.generation,
+                        allow_cancelled_stop: false,
+                        outcome,
+                        reply_text: None,
+                        existing_reply_id: (!h.message_id.is_empty())
+                            .then_some(h.message_id.as_str()),
+                        reply_item_id: None,
+                        reply_meta: &Value::Null,
+                        error_code: None,
+                        route_kind: "item",
+                        model_kind: "item",
+                        route_guard: Some("offer"),
+                        route_model: None,
+                        route_confidence: Some(1.0),
+                        route_signals: &[],
+                        route_fallback: false,
+                        route_ms: 0,
+                        route_outcome: Some("offer_taken"),
+                        item_id: h.item.as_ref().map(|i| i.id.as_str()),
+                        dispatch,
+                        delivery_ref_id: None,
+                        model_call_id: None,
+                        user_id: task.user_id.as_deref(),
+                        project_id: task.project_id.as_deref(),
+                        answer_model: None,
+                        harness: None,
+                        harness_session: None,
+                        tools: 0,
+                        turns: 0,
+                        first_text_ms: None,
+                        error_detail: None,
+                        record_attention_commit: false,
+                    },
+                )
+            })?;
+            return Ok(());
+        }
+
+        // 5. Explicit item phrase ("帮我建个事项：...") -> 0 router calls!
+        if (!guest || conv.items)
+            && decide::explicit_item(text)
+            && !decide::is_config_phrase(text)
+            && !TO_INLINE.is_match(text)
+        {
+            let cleaned = strip_explicit_prefix(text);
+            let r = Route {
+                kind: "item".into(),
+                confidence: 1.0,
+                signals: vec!["explicit".into()],
+                title: js_head(&cleaned, 24).to_string(),
+                goal: text.to_string(),
+                why: "用户明确要求建事项".into(),
+                ..Route::default()
+            };
+            let d = decide::Decision {
+                kind: "item".into(),
+                guard: Some("2"),
+                offer: None,
+                for_item: None,
+            };
+            let step = route_step(&r, Some(&d), 0);
+            lock(steps).route = Some(step.clone());
+            let info = RouteInfo {
+                kind: "item".into(),
+                model_kind: "item".into(),
+                guard: Some("2".into()),
+                confidence: Some(1.0),
+                signals: r.signals.clone(),
+                step_json: Some(step),
+                ..Default::default()
+            };
+            return self.execute_item(
+                task, lease, text, &files, user, &mentions, &r, None, conv.start, &info, steps, t0,
+            );
+        }
+
+        // 6. Tool-needing request preflight before any router or tool-less answer call (when
+        //    research is off and hands_on + items is on, or when routed to answer below).
+        if !conv.research && conv.hands_on && conv.items && decide::needs_machine_tools(text) {
+            return self.preflight_hands_on_item(
+                task,
+                lease,
+                conv,
+                text,
+                &files,
+                &RouteInfo {
+                    kind: "answer".into(),
+                    model_kind: "answer".into(),
+                    guard: Some("preflight".into()),
+                    confidence: Some(1.0),
+                    ..Default::default()
+                },
+                steps,
+                t0,
+            );
+        }
+
+        // 7. Onboarding meeting, obvious short reply ("谢谢"), or plain question -> 0 router calls!
         let history = self.history_before(ws, mid)?;
-        let routed = super::routed_text(text, files);
-        /* the first meeting is a conversation with Steve itself: no router, which a fresh installation
-        has not given a fast model yet, unless the message names a Bot or an item in so many words */
         let meeting = !guest
-            && conv.space == super::MAIN
-            && ahead.is_none()
+            && space == super::MAIN
             && !decide::names_work(text)
             && super::research::asked_by_owner(db, user)
             && self.meeting(ws)?;
-        /* a plain question needs no router: its kind is known (#52); one routed ahead of an answer is not plain */
-        let plain = match decide::without_router(text, !files.is_empty(), guest, &[])
-            .filter(|_| ahead.is_none() && !meeting)
-        {
-            _ if meeting => Some(
+
+        let deterministic = if meeting {
+            Some((
                 Route {
                     kind: "research".into(),
                     confidence: 1.0,
@@ -263,67 +700,80 @@ impl Core {
                     ..Route::fallback(text, None)
                 }
                 .plain(),
-            ),
-            Some(_) => {
-                let c = self.route_ctx_in(ws, guest)?;
-                decide::without_router(text, !files.is_empty(), guest, &c.focus).map(|kind| {
-                    let project = c.steve_project.clone().or_else(|| {
-                        c.projects
-                            .iter()
-                            .find(|p| !p.archived)
-                            .map(|p| p.id.clone())
-                    });
+                "meet",
+            ))
+        } else if decide::obvious_reply(text, !files.is_empty()) {
+            Some((
+                Route {
+                    kind: "answer".into(),
+                    confidence: 1.0,
+                    why: "简短寒暄或致谢，直接回复".into(),
+                    ..Route::fallback(text, None)
+                }
+                .plain(),
+                "obvious",
+            ))
+        } else if decide::without_router(text, !files.is_empty(), guest, &[]).is_some() {
+            let c = self.route_ctx_in(ws, guest)?;
+            decide::without_router(text, !files.is_empty(), guest, &c.focus).map(|kind| {
+                let project = c.steve_project.clone().or_else(|| {
+                    c.projects
+                        .iter()
+                        .find(|p| !p.archived)
+                        .map(|p| p.id.clone())
+                });
+                (
                     Route {
                         kind: kind.into(),
                         confidence: 1.0,
                         why: "纯问题，没有问路由".into(),
                         ..Route::fallback(text, project)
                     }
-                    .plain()
-                })
-            }
-            None => None,
-        };
-        if !guest && plain.is_none() && ahead.is_none() {
-            self.phase(ws, "route");
-        }
-        let r0 = now();
-        /* stopping does not wait for the router: nothing has happened yet */
-        let (r, ms) = match (plain.clone(), ahead) {
-            (_, Some(a)) => a,
-            (Some(r), None) => (r, now() - r0),
-            (None, None) => {
-                let r = tokio::select! {
-                    r = self.route_in(ws, &routed, &history, false, guest) => r?,
-                    _ = flag.stopped() => return Ok(()),
-                };
-                (r, now() - r0)
-            }
-        };
-        if flag.is_stopped() {
-            return Ok(());
-        }
-        /* “@名字 …” picks the bot explicitly */
-        let named = if !guest || conv.items {
-            self.named_bot(ws, text)?
+                    .plain(),
+                    "q",
+                )
+            })
         } else {
             None
         };
-        let mut d = decide::decide(
-            &r,
-            text,
-            DecideCtx {
-                named_bot: named.is_some(),
-            },
-        );
+
+        // 8. Ambiguous message -> single router model call raced against stop.
+        let r0 = now();
+        let (r, ms, det_guard) = match deterministic {
+            Some((r, g)) => (r, now() - r0, Some(g)),
+            None => {
+                lock(&self.0.thread.running_phase)
+                    .insert((ws.to_string(), space.to_string()), "route");
+                if !guest {
+                    self.phase(ws, "route");
+                }
+                let routed = super::routed_text(text, &files);
+                let maybe = tokio::select! {
+                    res = self.route_in(ws, &routed, &history, false, guest) => Some(res?),
+                    _ = stop.stopped() => None,
+                };
+                lock(&self.0.thread.running_phase).remove(&(ws.to_string(), space.to_string()));
+                let Some(r) = maybe.filter(|_| !stop.is_stopped()) else {
+                    return self.commit_stopped(task, lease, steps, t0, &RouteInfo::default());
+                };
+                (r, now() - r0, None)
+            }
+        };
+
+        if stop.is_stopped() {
+            return self.commit_stopped(task, lease, steps, t0, &RouteInfo::default());
+        }
+
+        let mut d = decide::decide(&r, text, DecideCtx { named_bot: false });
         if guest {
             d = decide::for_guest(d, &r, conv.research, conv.items);
         } else {
             d = decide::for_main(d, &r);
         }
-        d = decide::for_owner(d, conv.owner_only && conv.research);
-        /* The item may have ended since the router saw it, including an ahead-of-turn route.
-         * Keep the original message actionable instead of forwarding it into a lifecycle error. */
+        // Obvious greetings stay a single lightweight answer; owner-only chat questions use research.
+        if det_guard != Some("obvious") {
+            d = decide::for_owner(d, conv.owner_only && conv.research);
+        }
         if !guest
             && (d.kind == "supplement" || d.for_item.is_some())
             && let Some(id) = r.item.as_deref()
@@ -333,71 +783,62 @@ impl Core {
             d.guard = Some("closed");
             d.for_item = Some(id.into());
         }
-        if plain.is_some() {
-            d.guard = Some(if meeting { "meet" } else { "q" });
+        if let Some(g) = det_guard {
+            d.guard = Some(g);
         }
-        lock(steps).route = Some(route_step(&r, Some(&d), ms));
-        self.store().store().thread().route_add(&NewRouteLog {
-            workspace_id: ws.into(),
-            message_id: mid.into(),
-            model: r.model.clone(),
-            model_kind: r.kind.clone(),
+        let step = route_step(&r, Some(&d), ms);
+        lock(steps).route = Some(step.clone());
+        let info = RouteInfo {
             kind: d.kind.clone(),
+            model_kind: r.kind.clone(),
+            guard: d.guard.map(String::from),
+            model: r.model.clone(),
             confidence: (!r.fallback).then_some(r.confidence),
             signals: r.signals.clone(),
-            guard: d.guard.map(String::from),
             fallback: r.fallback,
             ms,
-            ..Default::default()
-        })?;
-        let logged = match d.kind.as_str() {
+            project: r.project.clone(),
+            offer: d.offer.clone(),
+            step_json: Some(step),
+        };
+
+        match d.kind.as_str() {
             "answer" | "research" => {
-                /* a follow-up of the research answer just given continues its session */
-                let resume = self.resume_for(ws, mid)?;
-                /* only a research run resumes the session that already saw them; an answer starts fresh */
-                let resumed = resume.as_ref().filter(|_| d.kind == "research");
-                let earlier = self.earlier_files(ws, mid, files, resumed)?;
-                let job = InlineJob {
-                    kind: if d.kind == "research" {
-                        Inline::Research
-                    } else {
-                        Inline::Answer
-                    },
-                    origin: mid.into(),
-                    question: text.into(),
-                    files: files.to_vec(),
-                    earlier,
-                    user: user.map(String::from),
-                    project: r.project.clone(),
-                    route: lock(steps).route.clone(),
-                    offer: d.offer.clone(),
-                    reply_to: None,
-                    run: None,
-                    /* one stop for the whole turn: a Stop that lands after the route is decided and
-                    before the answer is queued still reaches it */
-                    stop: flag.clone(),
-                    t0: now(),
-                    resume,
-                    space: conv.space.clone(),
-                    to_item: (conv.hands_on && conv.items).then_some(conv.start),
-                };
-                if !self.enqueue_inline(ws, job)? {
-                    reply(QUEUE_FULL, None, Some(json!({SYSTEM: true})));
-                }
-                Logged { item: None }
+                self.execute_inline(task, lease, stop, conv, text, &files, info, t0)
+                    .await
             }
             "config" => {
                 let request = with_earlier(text, &history);
-                self.on_config(ws, &request, user, reply, steps).await?
+                self.execute_config(task, lease, &request, user, &info, steps, t0)
+                    .await
             }
             "suggest" => {
                 let item = match &d.for_item {
-                    Some(i) => self.store().item(i)?,
+                    Some(i) => db.item(i)?,
                     None => None,
                 };
                 let (q, card) = suggest::card(&r, &d, item.as_ref());
-                reply(&q, None, Some(json!({"suggest": card})));
-                Logged { item: None }
+                let meta = json!({
+                    "origin": mid,
+                    "suggest": card,
+                    "steps": lock(steps).json(now() - t0),
+                });
+                self.commit_simple(
+                    task,
+                    lease,
+                    false,
+                    "answered",
+                    Some(&q),
+                    None,
+                    meta,
+                    &info,
+                    None,
+                    None,
+                    ReceiptDispatch::NoDispatch,
+                    None,
+                    None,
+                )?;
+                Ok(())
             }
             "ask" => {
                 let q = if r.reply.trim().is_empty() {
@@ -405,8 +846,27 @@ impl Core {
                 } else {
                     r.reply.trim().to_string()
                 };
-                reply(&q, None, Some(json!({"ask": {"options": r.options}})));
-                Logged { item: None }
+                let meta = json!({
+                    "origin": mid,
+                    "ask": {"options": r.options},
+                    "steps": lock(steps).json(now() - t0),
+                });
+                self.commit_simple(
+                    task,
+                    lease,
+                    false,
+                    "answered",
+                    Some(&q),
+                    None,
+                    meta,
+                    &info,
+                    None,
+                    None,
+                    ReceiptDispatch::NoDispatch,
+                    None,
+                    None,
+                )?;
+                Ok(())
             }
             "supplement" => {
                 let id = r.item.clone().unwrap_or_default();
@@ -416,56 +876,207 @@ impl Core {
                     "supplement",
                     json!({"item": id, "files": files.len()}),
                 );
-                if Steps::end(
+                if let Some(disp_id) = Steps::end(
                     steps,
                     i,
-                    self.forward_open(&id, text, files, mid),
-                    |sent| json!({"sent": sent}),
+                    self.forward_open(&id, text, &files, mid),
+                    |disp| json!({"sent": disp.is_some()}),
                 )? {
-                    self.acknowledge(&id, reply);
-                    Logged { item: Some(id) }
+                    let meta = json!({"origin": mid, "steps": lock(steps).json(now() - t0)});
+                    let ack = format!("已作为补充送到 {id}。");
+                    self.commit_simple(
+                        task,
+                        lease,
+                        false,
+                        "handed_off",
+                        Some(&ack),
+                        Some(&id),
+                        meta,
+                        &info,
+                        None,
+                        Some(&id),
+                        ReceiptDispatch::Dispatched(&disp_id),
+                        None,
+                        None,
+                    )?;
                 } else {
                     d.for_item = Some(id.clone());
                     let item = db.item(&id)?;
                     let (q, card) = suggest::card(&r, &d, item.as_ref());
-                    reply(&q, None, Some(json!({"suggest": card})));
-                    Logged { item: None }
+                    let meta = json!({
+                        "origin": mid,
+                        "suggest": card,
+                        "steps": lock(steps).json(now() - t0),
+                    });
+                    self.commit_simple(
+                        task,
+                        lease,
+                        false,
+                        "answered",
+                        Some(&q),
+                        None,
+                        meta,
+                        &info,
+                        None,
+                        None,
+                        ReceiptDispatch::NoDispatch,
+                        None,
+                        None,
+                    )?;
                 }
+                Ok(())
             }
             "status" => {
                 let id = r.item.clone().unwrap_or_default();
-                reply(&self.status_text(&id)?, None, Some(json!({"status": id})));
-                Logged { item: Some(id) }
+                let st = self.status_text(&id)?;
+                let meta =
+                    json!({"origin": mid, "status": id, "steps": lock(steps).json(now() - t0)});
+                self.commit_simple(
+                    task,
+                    lease,
+                    false,
+                    "answered",
+                    Some(&st),
+                    None,
+                    meta,
+                    &info,
+                    None,
+                    Some(&id),
+                    ReceiptDispatch::NoDispatch,
+                    None,
+                    None,
+                )?;
+                Ok(())
             }
-            "reroute" => self.spoken_reroute(ws, mid, text, &r, user, reply).await?,
-            _ => self.on_item(
-                ws, mid, text, files, user, mentions, &r, named, conv.start, reply, steps,
-            )?,
-        };
-        if let Some(i) = logged.item {
-            let th = self.store().store().thread();
-            if let Some(l) = th.route_of(mid)?
-                && l.item_id.is_none()
-                && let Some(reply_id) = l.reply_id
-            {
-                th.route_reply(mid, &reply_id, Some(&i))?;
+            "reroute" => {
+                self.execute_spoken_reroute(task, lease, text, &r, user, &info, steps, t0)
+                    .await
             }
+            _ => self.execute_item(
+                task, lease, text, &files, user, &mentions, &r, None, conv.start, &info, steps, t0,
+            ),
         }
-        Ok(())
     }
 
-    /// A standing setting said in words (router kind `config`): every configuration it touches is
-    /// drafted as a card to apply — Steve's own settings, bots, projects and tags, and with a known user
-    /// the modules' (schedules, flows, knowledge sources, mailboxes…) — or, when the user only asks,
-    /// shown as it is now.
-    async fn on_config(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn preflight_hands_on_item(
         &self,
-        ws: &str,
+        task: &ThreadTask,
+        lease: &str,
+        conv: &Conv,
+        text: &str,
+        files: &[FileRef],
+        info: &RouteInfo,
+        steps: &Mutex<Steps>,
+        t0: i64,
+    ) -> Result<()> {
+        let ws = &task.workspace_id;
+        let mid = &task.origin_message_id;
+        let _one = lock(&self.0.thread.acting);
+        match self.thread_item_once(ThreadItem {
+            ws,
+            origin: mid,
+            title: js_head(text, 24).to_string(),
+            goal: text.to_string(),
+            bot: None,
+            project: info.project.clone(),
+            tags: vec![],
+            files: files.to_vec(),
+            from_question: decide::pure_question(text),
+            answer: None,
+            start: conv.start,
+            by: task.user_id.clone(),
+        }) {
+            Ok((item, already, disp_id)) => {
+                if already {
+                    self.commit_simple(
+                        task,
+                        lease,
+                        false,
+                        "handed_off",
+                        None,
+                        None,
+                        Value::Null,
+                        info,
+                        Some(handoff::NEEDS_TOOLS_OUTCOME),
+                        Some(&item.id),
+                        ReceiptDispatch::Dispatched(&disp_id),
+                        None,
+                        None,
+                    )?;
+                    return Ok(());
+                }
+                metrics::counter!("steve_gateway_handoffs_total").increment(1);
+                let reply_text = Self::unplaced_reply(&item).unwrap_or_else(|| {
+                    handoff::handed_off(
+                        &item.id,
+                        &self.bot_name(&item),
+                        item.phase == crate::cycle::READY,
+                    )
+                });
+                let meta = json!({
+                    "origin": mid,
+                    "steps": lock(steps).json(now() - t0),
+                    "handoff": {"why": handoff::NEEDS_TOOLS_OUTCOME, "item": item.id},
+                });
+                self.commit_simple(
+                    task,
+                    lease,
+                    false,
+                    "handed_off",
+                    Some(&reply_text),
+                    Some(&item.id),
+                    meta,
+                    info,
+                    Some(handoff::NEEDS_TOOLS_OUTCOME),
+                    Some(&item.id),
+                    ReceiptDispatch::Dispatched(&disp_id),
+                    None,
+                    None,
+                )?;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(origin = mid, "preflight hand-off failed: {e}");
+                let reply_text = handoff::not_handed_off(&e.to_string());
+                let meta = json!({
+                    "origin": mid,
+                    "error": true,
+                    SYSTEM: true,
+                    "steps": lock(steps).json(now() - t0),
+                });
+                self.commit_simple(
+                    task,
+                    lease,
+                    false,
+                    "failed",
+                    Some(&reply_text),
+                    None,
+                    meta,
+                    info,
+                    None,
+                    None,
+                    ReceiptDispatch::NoDispatch,
+                    Some("handoff_failed"),
+                    Some(&e.to_string()),
+                )?;
+                Ok(())
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_config(
+        &self,
+        task: &ThreadTask,
+        lease: &str,
         text: &str,
         user: Option<&str>,
-        reply: Reply<'_>,
+        info: &RouteInfo,
         steps: &Mutex<Steps>,
-    ) -> Result<Logged> {
+        t0: i64,
+    ) -> Result<()> {
+        let ws = &task.workspace_id;
         self.phase(ws, "config");
         let i = Steps::begin(
             steps,
@@ -483,18 +1094,36 @@ impl Core {
                     .sum::<usize>(),
             })
         })?;
-        /* the L0 ones apply right away: their cards say 已应用 and offer the undo */
         let applied = if ask {
             vec![]
         } else {
             self.config_auto_apply(ws, user, &ds).await
         };
-        let (text, meta) = config_reply(ask, &ds, &applied);
-        reply(&text, None, meta);
-        Ok(Logged { item: None })
+        let (reply_text, extra_meta) = config_reply(ask, &ds, &applied);
+        let mut meta = match extra_meta {
+            Some(Value::Object(m)) => m,
+            _ => Map::new(),
+        };
+        meta.insert("origin".into(), json!(task.origin_message_id));
+        meta.insert("steps".into(), lock(steps).json(now() - t0));
+        self.commit_simple(
+            task,
+            lease,
+            false,
+            "answered",
+            Some(&reply_text),
+            None,
+            Value::Object(meta),
+            info,
+            None,
+            None,
+            ReceiptDispatch::NoDispatch,
+            None,
+            None,
+        )?;
+        Ok(())
     }
 
-    /// “ST-n 进展怎样了？”: the item as it stands, without disturbing its session.
     fn status_text(&self, id: &str) -> Result<String> {
         let Some(i) = self.store().item(id)? else {
             return Ok(format!("没找到 {id}。"));
@@ -505,7 +1134,6 @@ impl Core {
             i.title,
             i.outcome.as_deref().unwrap_or_else(|| i.phase.as_str())
         );
-
         if !i.plan.is_empty() {
             let done = i.plan.iter().filter(|p| p.done).count();
             s.push_str(&format!("计划完成 {done}/{} 步。", i.plan.len()));
@@ -522,50 +1150,74 @@ impl Core {
         Ok(s)
     }
 
-    /// A correction said in words: back into the conversation for the latest item made here in
-    /// the last 10 minutes, or the latest answer made into an item. Only the latest one counts.
-    async fn spoken_reroute(
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_spoken_reroute(
         &self,
-        ws: &str,
-        mid: &str,
+        task: &ThreadTask,
+        lease: &str,
         text: &str,
         r: &Route,
         user: Option<&str>,
-        reply: Reply<'_>,
-    ) -> Result<Logged> {
-        let th = self.store().store().thread();
+        info: &RouteInfo,
+        steps: &Mutex<Steps>,
+        t0: i64,
+    ) -> Result<()> {
+        let ws = &task.workspace_id;
+        let mid = &task.origin_message_id;
         let msgs = self.store().messages(ws)?;
         if TO_INLINE.is_match(text) {
-            let target = th.items(ws)?.into_iter().find(|t| {
-                r.item.as_deref().is_none_or(|i| i == t.item_id)
+            let dispatches = self
+                .store()
+                .store()
+                .read(|rd| thread::dispatches_of_workspace(rd, ws))?;
+            let target = dispatches.into_iter().find(|t| {
+                let Some(ref iid) = t.target_item_id else {
+                    return false;
+                };
+                r.item.as_deref().is_none_or(|i| i == iid)
                     && now() - t.created <= REROUTE_WINDOW
                     && self
                         .store()
-                        .item(&t.item_id)
+                        .item(iid)
                         .ok()
                         .flatten()
                         .is_some_and(|i| !i.is_closed())
             });
             if let Some(t) = target
-                && let Some(rm) = t.reply_msg.clone()
+                && let Some(item_id) = t.target_item_id.clone()
+                && let Some(rm) = t.reply_message_id.clone()
             {
                 let h = self
                     .reroute(ws, &rm, super::RerouteTo::Inline, user)
                     .await?;
-                reply(
-                    &format!("好，{} 不做了，改在这里回答。", t.item_id),
-                    None,
-                    Some(json!({"reply_to": h.message_id})),
-                );
-                return Ok(Logged {
-                    item: Some(t.item_id),
+                let meta = json!({
+                    "origin": mid,
+                    "reply_to": h.message_id,
+                    "steps": lock(steps).json(now() - t0),
                 });
+                let reply_text = format!("好，{item_id} 不做了，改在这里回答。");
+                self.commit_simple(
+                    task,
+                    lease,
+                    false,
+                    "answered",
+                    Some(&reply_text),
+                    None,
+                    meta,
+                    info,
+                    None,
+                    Some(&item_id),
+                    ReceiptDispatch::NoDispatch,
+                    None,
+                    None,
+                )?;
+                return Ok(());
             }
         } else {
             let target = msgs
                 .iter()
                 .rev()
-                .filter(|m| m.id != mid)
+                .filter(|m| m.id != *mid)
                 .take(10)
                 .find(|m| {
                     m.author == "steve" && m.meta.get("chat").is_some_and(crate::gateway::truthy)
@@ -575,21 +1227,54 @@ impl Core {
                     .reroute(ws, &m.id, super::RerouteTo::Item, user)
                     .await?;
                 let item = h.item.map(|i| i.id);
-                if let Some(i) = &item {
-                    reply(&format!("好，已经做成 {i}。"), Some(i), None);
-                }
-                return Ok(Logged { item });
+                let reply_text = item.as_ref().map(|i| format!("好，已经做成 {i}。"));
+                let (outcome, dispatch) = match h.dispatch_ref_id.as_deref() {
+                    Some(id) => ("handed_off", ReceiptDispatch::Dispatched(id)),
+                    None => ("answered", ReceiptDispatch::NoDispatch),
+                };
+                let meta = json!({"origin": mid, "steps": lock(steps).json(now() - t0)});
+                self.commit_simple(
+                    task,
+                    lease,
+                    false,
+                    outcome,
+                    reply_text.as_deref(),
+                    item.as_deref(),
+                    meta,
+                    info,
+                    None,
+                    item.as_deref(),
+                    dispatch,
+                    None,
+                    None,
+                )?;
+                return Ok(());
             }
         }
-        reply("是哪一条？我没找到最近能改的那条。", None, None);
-        Ok(Logged { item: None })
+        let meta = json!({"origin": mid, "steps": lock(steps).json(now() - t0)});
+        self.commit_simple(
+            task,
+            lease,
+            false,
+            "answered",
+            Some("是哪一条？我没找到最近能改的那条。"),
+            None,
+            meta,
+            info,
+            None,
+            None,
+            ReceiptDispatch::NoDispatch,
+            None,
+            None,
+        )?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn on_item(
+    fn execute_item(
         &self,
-        ws: &str,
-        mid: &str,
+        task: &ThreadTask,
+        lease: &str,
         text: &str,
         files: &[FileRef],
         user: Option<&str>,
@@ -597,32 +1282,16 @@ impl Core {
         r: &Route,
         named: Option<crate::repo::Bot>,
         start: bool,
-        reply: Reply<'_>,
+        info: &RouteInfo,
         steps: &Mutex<Steps>,
-    ) -> Result<Logged> {
+        t0: i64,
+    ) -> Result<()> {
         let db = self.store();
-        /* “好，改吧” after an answer with an offer takes the offer: not a new routing, not a correction */
-        if named.is_none()
-            && confirms(text)
-            && let Some(m) = self.open_offer_before(ws, mid)?
-        {
-            let h = self.offer_as(ws, &m.id, true, start, user)?;
-            if let Some(rs) = lock(steps).route.as_mut() {
-                rs["offer"] = json!(m.id);
-            }
-            self.store().store().thread().route_reply(
-                mid,
-                &h.message_id,
-                h.item.as_ref().map(|i| i.id.as_str()),
-            )?;
-            return Ok(Logged {
-                item: h.item.map(|i| i.id),
-            });
-        }
+        let ws = &task.workspace_id;
+        let mid = &task.origin_message_id;
         if let (Some(b), Some(rs)) = (&named, lock(steps).route.as_mut()) {
             rs["picked"] = json!(b.id);
         }
-        /* a follow-up like “按建议” becomes the proposal it confirms; the user's own words stay with it */
         let goal = if named.is_some() {
             AT.replace(text, "").to_string()
         } else if !r.goal.trim().is_empty() && r.goal.trim() != text.trim() {
@@ -641,7 +1310,7 @@ impl Core {
             }
         }
         let bot = named.as_ref().map(|b| b.id.clone());
-        if self.conv_of(mid) == super::MAIN {
+        if task.space == super::MAIN {
             self.phase(ws, "item");
         }
         let i = Steps::begin(
@@ -649,7 +1318,8 @@ impl Core {
             "create_item",
             json!({"title": r.title, "bot": bot, "project": r.project, "tags": tag_ids, "files": files.len()}),
         );
-        let res = self.thread_item(ThreadItem {
+        let _one = lock(&self.0.thread.acting);
+        let res = self.thread_item_once(ThreadItem {
             ws,
             origin: mid,
             title: r.title.clone(),
@@ -663,13 +1333,30 @@ impl Core {
             start,
             by: user.map(String::from),
         });
-        let item = Steps::end(
+        let (item, already, disp_id) = Steps::end(
             steps,
             i,
             res,
-            |i| json!({"item": i.id, "bot": i.bot_id, "project": i.project_id}),
+            |(i, _, _)| json!({"item": i.id, "bot": i.bot_id, "project": i.project_id}),
         )?;
-        /* what the item got: the category first, Steve's own pick when the router named none */
+        if already {
+            self.commit_simple(
+                task,
+                lease,
+                false,
+                "handed_off",
+                None,
+                None,
+                Value::Null,
+                info,
+                None,
+                Some(&item.id),
+                ReceiptDispatch::Dispatched(&disp_id),
+                None,
+                None,
+            )?;
+            return Ok(());
+        }
         let tag_ids = db.tags_of_item(&item.id)?;
         let tag_text = if tag_ids.is_empty() {
             String::new()
@@ -696,19 +1383,39 @@ impl Core {
             Some(n) => format!(" {n}。"),
             None => String::new(),
         };
-        if let Some(id) = reply(&format!("{head}{tag_text}{people}"), Some(&item.id), None) {
-            db.store().thread().item_reply(&item.id, &id)?;
-            super::flowback::adopt_quiet(db, &item.id, &id);
-            self.said(ws, &self.conv_of(&id), &id);
-        }
-        Ok(Logged {
-            item: Some(item.id),
-        })
+        let reply_text = format!("{head}{tag_text}{people}");
+        let meta = json!({"origin": mid, "steps": lock(steps).json(now() - t0)});
+        self.commit_simple(
+            task,
+            lease,
+            false,
+            "handed_off",
+            Some(&reply_text),
+            Some(&item.id),
+            meta,
+            info,
+            None,
+            Some(&item.id),
+            ReceiptDispatch::Dispatched(&disp_id),
+            None,
+            None,
+        )?;
+        Ok(())
     }
 }
 
-/// A settings request with Steve's last reply, which “按这个方案改” refers to: the drafts read the
-/// proposal from it, and leave it alone when the request says what to change by itself.
+fn strip_explicit_prefix(text: &str) -> String {
+    let t = text.trim();
+    for sep in ['：', ':'] {
+        if let Some((_, rest)) = t.split_once(sep)
+            && !rest.trim().is_empty()
+        {
+            return rest.trim().to_string();
+        }
+    }
+    t.to_string()
+}
+
 fn with_earlier(text: &str, history: &[Said]) -> String {
     match history.iter().rev().find(|m| m.author != "me") {
         Some(m) if !m.text.trim().is_empty() => format!(
@@ -719,7 +1426,6 @@ fn with_earlier(text: &str, history: &[Said]) -> String {
     }
 }
 
-/// How it is set now, a line per field (at most 20).
 fn listed(d: &crate::changes::Drafted) -> String {
     let mut lines: Vec<String> = d
         .current
@@ -733,8 +1439,6 @@ fn listed(d: &crate::changes::Drafted) -> String {
     lines.join("\n")
 }
 
-/// The reply to a configuration request: the drafted cards (`meta.proposal`, or `meta.proposals` when
-/// there are several; those `applied` already marked so in `meta.cfg_state`), and how the rest is set now.
 fn config_reply(
     ask: bool,
     ds: &[crate::changes::Drafted],

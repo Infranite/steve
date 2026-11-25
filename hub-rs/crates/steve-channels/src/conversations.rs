@@ -73,8 +73,8 @@ pub(crate) const OP_SAID: &str = "said";
 /// answering turn `origin` says in its space, for `purpose` ([`OP_SAID`], …): every delivery of `m`
 /// (a retry, a restart before its result was recorded, a second pass at the same time) asks for the
 /// same outbound message, so it is created and sent once.
-pub(crate) fn conv_operation(m: &steve_store::Message, origin: &str, purpose: &str) -> String {
-    format!("conv:{}:{origin}:{purpose}", m.id)
+pub(crate) fn conv_operation(_m: &steve_store::Message, origin: &str, purpose: &str) -> String {
+    format!("conv:{origin}:{purpose}")
 }
 
 fn skipped(code: &str, reason: &str) -> Value {
@@ -244,6 +244,11 @@ impl Composed {
     fn says(&self, text: &str) -> bool {
         self.text.trim() == text.trim()
     }
+}
+
+enum OutboundClaim {
+    Proceed(String),
+    Already(Option<Delivered>),
 }
 
 /// A conversation message Steve's thread wrote about itself rather than as an answer: the queue
@@ -758,12 +763,19 @@ impl Channels {
             self.react_finish(&plan.message_id, Finish::Failed).await;
             // a trigger word answered as you: said in its thread too, as you; the reaction stays failed
             if command && plan.mode == Mode::Own {
-                let op = conv_operation(&m, origin, OP_TRIGGER_FAILED);
+                let op = match self.claim_outbound_ref(&m, origin, OP_TRIGGER_FAILED)? {
+                    OutboundClaim::Proceed(op) => op,
+                    OutboundClaim::Already(d) => return Ok(d),
+                };
                 let d = self.trigger_failed_note(ws, &plan, out, op).await?;
-                self.mark_out(&m, &d)?;
+                self.mark_out_for(&m, origin, OP_TRIGGER_FAILED, &d)?;
                 return Ok(Some(d));
             }
             if plan.mode == Mode::Bot {
+                let op = match self.claim_outbound_ref(&m, origin, OP_FAILURE_NOTE)? {
+                    OutboundClaim::Proceed(op) => op,
+                    OutboundClaim::Already(d) => return Ok(d),
+                };
                 let owner = self
                     .store()
                     .read(|r| personas::owner_name_for_space(r, ws, &plan.space_id))
@@ -781,11 +793,11 @@ impl Channels {
                                 source: plan.message_id.clone(),
                                 act: Act::Reply,
                             },
-                            operation_id: Some(conv_operation(&m, origin, OP_FAILURE_NOTE)),
+                            operation_id: Some(op),
                         },
                     )
                     .await?;
-                self.mark_out(&m, &d)?;
+                self.mark_out_for(&m, origin, OP_FAILURE_NOTE, &d)?;
                 return Ok(Some(d));
             }
             return Ok(None);
@@ -880,6 +892,10 @@ impl Channels {
         } else {
             OutTarget::reply(&plan)
         };
+        let op = match self.claim_outbound_ref(&m, origin, OP_SAID)? {
+            OutboundClaim::Proceed(op) => op,
+            OutboundClaim::Already(d) => return Ok(d),
+        };
         let d = out
             .deliver(
                 self,
@@ -890,11 +906,11 @@ impl Channels {
                     approve,
                     generation,
                     auth,
-                    operation_id: Some(conv_operation(&m, origin, OP_SAID)),
+                    operation_id: Some(op),
                 },
             )
             .await?;
-        self.mark_out(&m, &d)?;
+        self.mark_out_for(&m, origin, OP_SAID, &d)?;
         if command && as_you {
             self.after_trigger_send(ws, &plan.connection_id, &d);
         }
@@ -1012,7 +1028,84 @@ impl Channels {
         })
     }
 
+    fn claim_outbound_ref(
+        &self,
+        m: &steve_store::Message,
+        origin: &str,
+        purpose: &str,
+    ) -> ChannelResult<OutboundClaim> {
+        let op = conv_operation(m, origin, purpose);
+        let claim = self.store().write(|w| {
+            steve_store::thread::claim_delivery_ref(
+                w,
+                &m.workspace_id,
+                &m.space,
+                origin,
+                purpose,
+                &op,
+                self.now(),
+            )
+        })?;
+        match claim {
+            steve_store::DeliveryRefClaim::Claimed(r)
+            | steve_store::DeliveryRefClaim::Existing(r) => {
+                Ok(OutboundClaim::Proceed(r.outbound_op_id))
+            }
+            steve_store::DeliveryRefClaim::Blocked(existing) => {
+                use steve_store::channel_message_repo::records::{self, Content};
+                let status = if existing.state == "drafted" {
+                    "draft"
+                } else {
+                    existing.state.as_str()
+                };
+                self.store().write(|w| -> ChannelResult<()> {
+                    records::set_channel_content(
+                        w,
+                        &m.workspace_id,
+                        &m.id,
+                        Content::Outcome(&json!({
+                            "message": existing.outbound_message_id,
+                            "status": status,
+                            "decision": Value::Null,
+                            "reason": Value::Null,
+                        })),
+                    )?;
+                    Ok(())
+                })?;
+                let prior = if existing.purpose == purpose {
+                    match (existing.state.as_str(), existing.outbound_message_id) {
+                        ("sent", Some(message_id)) => Some(Delivered::Sent { message_id }),
+                        ("unknown", Some(message_id)) => Some(Delivered::Queued { message_id }),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                Ok(OutboundClaim::Already(prior))
+            }
+        }
+    }
+
     pub(crate) fn mark_out(&self, m: &steve_store::Message, d: &Delivered) -> ChannelResult<()> {
+        self.mark_out_inner(m, None, d)
+    }
+
+    fn mark_out_for(
+        &self,
+        m: &steve_store::Message,
+        origin: &str,
+        purpose: &str,
+        d: &Delivered,
+    ) -> ChannelResult<()> {
+        self.mark_out_inner(m, Some((origin, purpose)), d)
+    }
+
+    fn mark_out_inner(
+        &self,
+        m: &steve_store::Message,
+        origin_ref: Option<(&str, &str)>,
+        d: &Delivered,
+    ) -> ChannelResult<()> {
         let said = match d {
             Delivered::Sent { .. } => "sent",
             Delivered::Drafted { .. } => "draft",
@@ -1022,6 +1115,7 @@ impl Channels {
             Delivered::Skipped => "skipped",
         };
         use steve_store::channel_message_repo::records::{self, Content};
+        let now_ts = self.now();
         self.store().write(|w| -> ChannelResult<()> {
             let now = match d.message_id() {
                 Some(id) => out_state(w, &m.workspace_id, id)?.map(|(status, _)| status),
@@ -1036,6 +1130,26 @@ impl Channels {
             records::set_channel_content(w, &m.workspace_id, &m.id, Content::Outcome(
                 &json!({"message": d.message_id(), "status": status, "decision": d.decision_id(), "reason": reason}),
             ))?;
+            if let Some((origin, purpose)) = origin_ref {
+                let ref_state = match status {
+                    "sent" => "sent",
+                    "draft" | "drafted" => "drafted",
+                    "unknown" => "unknown",
+                    "failed" => "failed",
+                    "pending" => "pending",
+                    _ => "skipped",
+                };
+                steve_store::thread::settle_delivery_ref(
+                    w,
+                    &m.workspace_id,
+                    &m.space,
+                    origin,
+                    purpose,
+                    ref_state,
+                    d.message_id(),
+                    now_ts,
+                )?;
+            }
             Ok(())
         })
     }
@@ -1181,8 +1295,20 @@ impl Channels {
             &conv,
         )?;
         if let Some(i) = item {
-            let th = self.store().thread();
-            th.item_add(i, &plan.ws, &origin, Some(&reply), false)?;
+            let now_ts = self.now();
+            self.store().write(|w| {
+                steve_store::thread::record_dispatch(
+                    w,
+                    &plan.ws,
+                    &conv,
+                    &origin,
+                    i,
+                    Some(&reply),
+                    false,
+                    true,
+                    now_ts,
+                )
+            })?;
         }
         Ok(())
     }

@@ -491,6 +491,7 @@ fn gate_wait(
             requested_by: "steve".into(),
             question_template: None,
             source: None,
+            wait: None,
         }),
         output: json!({ "waiting": "approval" }),
     }
@@ -740,6 +741,52 @@ pub(crate) fn claim_waits_at(cx: &FlowCx, now: i64) -> FlowResult<crate::schedul
                 let Some(run) = RunRows(w).get(&wait.run)? else {
                     return Ok(None);
                 };
+                if wait.mode == "decision" {
+                    if let Some(decision_id) = wait.decision.as_deref() {
+                        DecisionRows(w).settle(
+                            decision_id,
+                            &json!({ "expired": true, "reason": "wait_timeout" }),
+                            steve_store::decision_repo::DecisionChange::Expire,
+                            None,
+                        )?;
+                    }
+                    let cancelled = cancel(w, &run, now)?;
+                    if cancelled {
+                        w.audit(
+                            &run.workspace_id,
+                            "steve",
+                            "wait.timeout",
+                            &run.id,
+                            &json!({
+                                "kind": steve_types::WaitKind::FlowWait.as_str(),
+                                "mode": "decision",
+                                "node": wait.node,
+                                "action": steve_types::WaitTimeoutAction::Close.as_str(),
+                            }),
+                        )?;
+                    }
+                    return Ok(cancelled.then_some(wait.run));
+                }
+                if wait.mode == "flow" {
+                    let ws = run.workspace_id.clone();
+                    let res = json!({ "error": "subflow wait timed out" });
+                    let resumed = resume_in(w, run, &wait.node, res)?;
+                    if resumed {
+                        w.audit(
+                            &ws,
+                            "steve",
+                            "wait.timeout",
+                            &wait.run,
+                            &json!({
+                                "kind": steve_types::WaitKind::FlowWait.as_str(),
+                                "mode": "flow",
+                                "node": wait.node,
+                                "action": steve_types::WaitTimeoutAction::Close.as_str(),
+                            }),
+                        )?;
+                    }
+                    return Ok(resumed.then_some(wait.run));
+                }
                 let matcher = wait
                     .matcher
                     .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -823,6 +870,7 @@ pub fn recover(cx: &FlowCx) -> FlowResult<Vec<String>> {
                     source: Some(steve_store::DecisionSource::Revision {
                         revision: format!("recover:{cursor}:{reruns}"),
                     }),
+                    wait: None,
                 },
             )?;
             r.status = "failed".into();

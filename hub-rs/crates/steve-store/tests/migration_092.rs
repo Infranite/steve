@@ -104,15 +104,15 @@ fn the_first_tool_call_of_a_session_is_kept() {
     s.events()
         .add(
             &id,
-            "tool_call",
-            json!({"toolCallId": "t1", "status": "pending"}),
+            "tool",
+            json!({"tool": {"id": "t1", "phase": "pending"}}),
         )
         .unwrap();
     let at = first().expect("set by the first tool call");
     let ts: i64 = s
         .fixture_write(|c| {
             Ok(c.query_row(
-                "SELECT ts FROM events WHERE session_id = ? AND kind = 'tool_call'",
+                "SELECT ts FROM events WHERE session_id = ? AND kind = 'tool'",
                 [&id],
                 |r| r.get(0),
             )?)
@@ -123,8 +123,8 @@ fn the_first_tool_call_of_a_session_is_kept() {
     s.events()
         .add(
             &id,
-            "tool_call",
-            json!({"toolCallId": "t2", "status": "pending"}),
+            "tool",
+            json!({"tool": {"id": "t2", "phase": "pending"}}),
         )
         .unwrap();
     assert_eq!(first(), Some(at), "later calls leave it");

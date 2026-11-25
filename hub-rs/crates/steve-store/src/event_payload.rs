@@ -1,6 +1,6 @@
-//! Lossless normalization of large strings in tool events. References live in a
-//! separate, trusted table: a string/object supplied by an agent is never a reference.
-//! Payloads belong to a session, and are reachable only through that session's events.
+//! Lossless normalization of large strings in `steve.v1` tool events (`{"tool": ToolView}`).
+//! References live in a separate, trusted table: a string/object supplied by an agent is never a
+//! reference. Payloads belong to a session, and are reachable only through that session's events.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -11,7 +11,9 @@ use serde_json::Value;
 
 const THRESHOLD: usize = 64 * 1024;
 const PREVIEW_CHARS: usize = 4000;
-const CONTENT_FIELDS: [&str; 4] = ["content", "rawOutput", "rawInput", "_meta"];
+/// `ToolView` fields whose nested strings can exceed [`THRESHOLD`] while keeping metadata
+/// (`id`, `origin`, `name`, `category`, `phase`, `title`) inline for queries and statistics.
+const TOOL_CONTENT_FIELDS: [&str; 3] = ["result", "action", "error"];
 
 struct PayloadRef {
     path: String,
@@ -26,35 +28,46 @@ pub(crate) struct Payloads {
     refs: Vec<PayloadRef>,
 }
 
-/// Keep protocol identifiers/status and small text inline; only the tool's content
-/// fields can be large. Statistics can still read tool names and statuses directly.
-/// Ordinary events borrow the input. Large tool events construct only the preview
-/// tree rather than cloning all full strings and trimming them afterwards.
+/// Keep protocol identifiers/status and small text inline; only a `steve.v1` tool event's content
+/// fields (`tool.{result,action,error}`) can be large. Ordinary events borrow the input. Large
+/// tool events construct only the preview tree rather than cloning all full strings and trimming
+/// them afterwards.
 pub(crate) fn split<'a>(kind: &str, data: &'a Value) -> Result<(Cow<'a, Value>, Payloads)> {
     let mut payloads = Payloads::default();
-    let Some(object) = data
-        .as_object()
-        .filter(|_| matches!(kind, "tool_call" | "tool_call_update"))
-    else {
+    if kind != crate::TOOL_CALL_EVENT {
+        return Ok((Cow::Borrowed(data), payloads));
+    }
+    let Some(outer) = data.as_object() else {
         return Ok((Cow::Borrowed(data), payloads));
     };
-    if !CONTENT_FIELDS
+    let Some(tool) = outer.get("tool").and_then(Value::as_object) else {
+        return Ok((Cow::Borrowed(data), payloads));
+    };
+    if !TOOL_CONTENT_FIELDS
         .iter()
-        .any(|key| object.get(*key).is_some_and(has_large_string))
+        .any(|key| tool.get(*key).is_some_and(has_large_string))
     {
         return Ok((Cow::Borrowed(data), payloads));
     }
     // Borrow keys from the original strings. HashMap checks exact string equality,
     // so duplicate text is serialized and SHA-hashed only on its first occurrence.
     let mut seen: HashMap<&str, String> = HashMap::new();
-    let mut stored = serde_json::Map::with_capacity(object.len());
-    for (key, value) in object {
-        let value = if CONTENT_FIELDS.contains(&key.as_str()) {
-            preview(value, &format!("/{key}"), &mut payloads, &mut seen)?
+    let mut stored_tool = serde_json::Map::with_capacity(tool.len());
+    for (key, value) in tool {
+        let value = if TOOL_CONTENT_FIELDS.contains(&key.as_str()) {
+            preview(value, &format!("/tool/{key}"), &mut payloads, &mut seen)?
         } else {
             value.clone()
         };
-        stored.insert(key.clone(), value);
+        stored_tool.insert(key.clone(), value);
+    }
+    let mut stored = serde_json::Map::with_capacity(outer.len());
+    for (key, value) in outer {
+        if key == "tool" {
+            stored.insert(key.clone(), Value::Object(stored_tool.clone()));
+        } else {
+            stored.insert(key.clone(), value.clone());
+        }
     }
     Ok((Cow::Owned(Value::Object(stored)), payloads))
 }
@@ -205,14 +218,14 @@ mod tests {
     fn ordinary_and_threshold_sized_events_borrow_input_without_copying() {
         for (kind, value) in [
             (
-                "agent_message_chunk",
-                json!({"text":"large non-tool event".repeat(20_000)}),
+                "text",
+                json!({"role": "assistant", "message": "m1", "text": "large non-tool event".repeat(20_000)}),
             ),
             (
-                "tool_call_update",
-                json!({"rawOutput":"x".repeat(THRESHOLD)}),
+                "tool",
+                json!({"tool": {"id": "t1", "result": [{"type": "text", "text": "x".repeat(THRESHOLD)}]}}),
             ),
-            ("tool_call_update", json!(["unusual-root-array"])),
+            ("tool", json!(["unusual-root-array"])),
         ] {
             let (preview, payloads) = split(kind, &value).unwrap();
             assert!(matches!(preview, Cow::Borrowed(_)));
@@ -226,10 +239,25 @@ mod tests {
     fn repeated_large_fields_keep_one_serialized_payload_and_only_preview_strings() {
         // Escaping exercises serialized-vs-original size without changing the persisted hash.
         let text = "image\\\"\n🙂".repeat(100_000);
-        let value = json!({"content":[{"data":text},{"data":text}],"rawOutput":text,"_meta":{"again/~":text},"status":"completed"});
+        let value = json!({
+            "tool": {
+                "id": "t1",
+                "origin": "harness",
+                "name": "Bash",
+                "category": "exec",
+                "title": "Run",
+                "phase": "failed",
+                "action": {"type": "tool", "name": "steve_deliver", "args": {"again/~": text}},
+                "result": [
+                    {"type": "text", "text": text},
+                    {"type": "diff", "path": "a.rs", "new": text, "added": 1, "removed": 0}
+                ],
+                "error": text
+            }
+        });
         let original = tree_string_capacity(&value);
         let serialized = serde_json::to_string(&text).unwrap();
-        let (preview, payloads) = split("tool_call_update", &value).unwrap();
+        let (preview, payloads) = split("tool", &value).unwrap();
         assert_eq!(payloads.unique.len(), 1);
         assert_eq!(payloads.refs.len(), 4);
         assert_eq!(payloads.unique.get(&sha(&serialized)), Some(&serialized));
@@ -245,8 +273,6 @@ mod tests {
             .map(|r| r.path.capacity() + r.hash.capacity())
             .sum();
         let resident_proxy = preview_bytes + payload_bytes + ref_bytes;
-        // Previously refs held four independently serialized copies, plus a full input clone
-        // before trimming. This lower bound deliberately excludes the latter transient clone.
         let old_refs_lower_bound = serialized.len() * payloads.refs.len();
         println!(
             "normalization retained_string_capacity_proxy original={original} preview={preview_bytes} unique_payload={payload_bytes} refs={ref_bytes} total={resident_proxy} prior_refs_lower_bound={old_refs_lower_bound}"
@@ -254,7 +280,7 @@ mod tests {
         assert!(resident_proxy < old_refs_lower_bound / 2);
         assert!(preview_bytes < 100_000);
         assert_eq!(
-            value["rawOutput"], text,
+            value["tool"]["result"][0]["text"], text,
             "input remains lossless for publication"
         );
         for r in &payloads.refs {

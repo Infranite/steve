@@ -16,11 +16,11 @@ import { useT } from "@/i18n"
 import { monthDayTime } from "@/i18n/format"
 import { closeSheet, go, openSheet, resolvedTheme, setTheme, StatusDot } from "@/ui"
 import { jumpToMsg, searchThread } from "@/thread/history"
+import { homeTilde } from "@/lib/path"
 import { openQuickAdd } from "@/todos/quick"
 
 const PARTY_HREF: Record<PartyOption["type"], string> = { contact: "#/contacts/", org: "#/orgs/", team: "#/teams/" }
 const PARTY_ICON: Record<PartyOption["type"], typeof ContactRoundIcon> = { contact: ContactRoundIcon, org: Building2Icon, team: UsersRoundIcon }
-const home = (p: string) => p.replace(/^\/(Users|home)\/[^/]+/, "~")
 /** a message as one line: its text without the line breaks, cut short */
 const line = (s: string) => { const x = s.replace(/\s+/g, " ").trim(); return x.length > 90 ? x.slice(0, 90) + "…" : x }
 
@@ -119,7 +119,7 @@ export function CommandPalette() {
     jumpToMsg(m.id!, m.created)
   }, { hint: m.created ? monthDayTime(m.created) : undefined, always: true, data: { "data-cmd-msg": m.id! } })) }
   const parties: CommandGroup = { id: "parties", label: t("shell:cmd.parties"), commands: found.parties.map((p) => { const I = PARTY_ICON[p.type] ?? ContactRoundIcon; return row("c:" + p.type + p.id, p.name, <I />, () => go(PARTY_HREF[p.type] + p.id), { hint: p.sub, always: true, data: { "data-cmd-party": p.id } }) }) }
-  const projects: CommandGroup = { id: "projects", label: t("shell:cmd.page.projects"), commands: st.projects.map((p) => row("j:" + p.id, p.name, <FolderIcon />, () => go("#/projects/" + p.id), { hint: home(p.path), mono: true })) }
+  const projects: CommandGroup = { id: "projects", label: t("shell:cmd.page.projects"), commands: st.projects.map((p) => row("j:" + p.id, p.name, <FolderIcon />, () => go("#/projects/" + p.id), { hint: homeTilde(p.path), mono: true })) }
   const bots: CommandGroup = { id: "bots", label: "Bot", commands: Object.keys(st.bots).map((k) => row("b:" + k, st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot", <BotIcon />, () => go("#/bots/" + k), { hint: st.bots[k].role, keywords: "Bot" })) }
   /* with text typed what it found leads; without, what one does and where one goes */
   const groups = q.trim() ? [items, sessions, msgs, parties, projects, bots, actions, pages] : [actions, pages, items, sessions, projects, bots]

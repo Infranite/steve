@@ -1270,6 +1270,6 @@ pub struct Judgment {
 
 /// The judge's JSON, anywhere in its answer.
 pub fn parse_judgment(answer: &str) -> Option<Judgment> {
-    let v = steve_modules::changes::first_json(answer)?;
+    let v = steve_runtime::json::first_json_opt(answer)?;
     serde_json::from_value(v).ok()
 }

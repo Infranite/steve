@@ -943,7 +943,7 @@ final class SteveClientKitTests: XCTestCase {
         defer { hubA.stop() }
         let hubB = try await MockUpstreamServer.start()
         defer { hubB.stop() }
-        // Hub B receives `/api/state` but does not answer it until released: the test looks at the
+        // Hub B receives `/api/summary` but does not answer it until released: the test looks at the
         // coordinator while that request is known to be in flight.
         hubB.holdStateResponses()
 
@@ -961,7 +961,7 @@ final class SteveClientKitTests: XCTestCase {
         creds.setCredential("cli_a.secret", for: HubProfile.localDefaultID)
 
         // Hub B has an unreachable public URL (`127.0.0.1:9`) and a reachable LAN fallback (`hubB.baseURL`),
-        // plus a held `/api/state` response so we can inspect state mid-`fetchStateSummary`.
+        // plus a held `/api/summary` response so we can inspect state mid-`fetchStateSummary`.
         let hubBProfile = HubProfile(
             id: "hub-b",
             name: "Hub B",
@@ -992,7 +992,7 @@ final class SteveClientKitTests: XCTestCase {
         let pageATokenCookie = coordinator.proxy.authCookieHeader
         let nonceBeforeSwitch = coordinator.webReloadNonce
 
-        // Begin switching to Hub B (whose `/api/state` is held)
+        // Begin switching to Hub B (whose `/api/summary` is held)
         let switchTask = Task {
             _ = try await coordinator.handleBridgeCall(op: "hubs.switch", args: ["id": hubBProfile.id], platform: "macos")
         }
@@ -1000,7 +1000,7 @@ final class SteveClientKitTests: XCTestCase {
         // `fetchStateSummary` for Hub B is in flight and stays so until the release below. At this point:
         // 1) the proxy points at Hub B and `webReloadNonce` has ALREADY changed, so the WebView reloads
         //    without waiting for the state summary
-        try await waitUntil("Hub B has received /api/state") { hubB.stateCallCount() >= 1 }
+        try await waitUntil("Hub B has received /api/summary") { hubB.stateCallCount() >= 1 }
         XCTAssertEqual(coordinator.proxy.currentTarget().baseURL, hubB.baseURL)
         XCTAssertNotEqual(
             coordinator.webReloadNonce,
@@ -1043,7 +1043,7 @@ final class SteveClientKitTests: XCTestCase {
         )
         _ = store.upsertProfile(overlayProfile, makeActive: true)
         // Its address is outside loopback, so its API client gets a session that answers locally: the
-        // `/api/state` request the activation makes is seen by the stub and goes nowhere.
+        // `/api/summary` request the activation makes is seen by the stub and goes nowhere.
         let overlayCoord = SteveClientCoordinator(
             hubStore: store,
             api: HubClientAPI(session: NoNetworkURLProtocol.session()),
@@ -1061,7 +1061,7 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(overlayItem["route"] as? String, "tailnet")
         XCTAssertEqual(
             NoNetworkURLProtocol.requests(toHost: "100.64.12.34").map(\.path),
-            ["/api/state"],
+            ["/api/summary"],
             "the overlay Hub's state request must be answered by the stub session"
         )
     }
@@ -2278,7 +2278,7 @@ private final class MockUpstreamServer: @unchecked Sendable {
                         conn.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in conn.cancel() })
                     }
 
-                    if path == "/api/state" {
+                    if path == "/api/summary" {
                         if auth.isEmpty && cookie.isEmpty {
                             let unauthorized = Data("{\"error\":\"unauthorized\"}".utf8)
                             let head = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\(corsHeaders)Content-Length: \(unauthorized.count)\r\nConnection: close\r\n\r\n"
@@ -2286,7 +2286,7 @@ private final class MockUpstreamServer: @unchecked Sendable {
                             return
                         }
                         let payload = Data("""
-                        {"version":"0.3.0","web_version":"0.3.0","thinking":true,"workspace":{"name":"Core"},"devices":[{"status":"正常"},{"status":"暂停接活"},{"status":"离线"}],"sessions":[{"status":"running","busy":true},{"status":"idle","busy":true},{"status":"idle","busy":false}],"decisions":[{"status":"open"},{"status":"resolved"}]}
+                        {"ws":"default","workspace_name":"Core","version":"0.3.0","web_version":"0.3.0","thinking":true,"hold":null,"sessions_running":2,"decisions_open":1,"devices_online":2,"devices_total":3}
                         """.utf8)
                         if let server = box.server {
                             server.answerState { sendJSONResponse(payload) }

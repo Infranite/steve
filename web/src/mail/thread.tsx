@@ -12,9 +12,11 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { fileUrl } from "@/api"
 import { Page, Empty, Meta, SectionLabel, ItemRef, ItemNo, go } from "@/ui"
 import { refresh, tm } from "@/store"
-import { ContactAvatar } from "@/people/avatar"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { size } from "@/attach"
-import { useLoad, useBusy } from "@/accounts/load"
+import { useBusy } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { mailApi, type Message, type Thread, type MailAttachment, type Addr } from "@/api/mail"
 import { ThreadDraft } from "@/mail/draft"
 import { useT } from "@/i18n"
@@ -26,12 +28,12 @@ const reSubject = (s: string) => (/^\s*(re|回复|答复)\s*[:：]/i.test(s) ? s
 
 export function ThreadView({ id }: { id: string }) {
   const t = useT()
-  const T = useLoad(() => mailApi.thread(id), [id], ["mail"])
+  const T = useHubQuery(["mail", "thread", id], () => mailApi.thread(id), { events: ["mail"] })
   const read = useRef(false)
-  useEffect(() => { if (T.s === "ok" && T.data.unread > 0 && !read.current) { read.current = true; mailApi.read(id).catch(() => {}) } }, [T, id])
+  useEffect(() => { if (T.data && T.data.unread > 0 && !read.current) { read.current = true; mailApi.read(id).catch(() => {}) } }, [T.data, id])
   const back: [string, string] = ["#/mail", t("mail:shared.title")]
-  if (T.s === "loading") return <Page title={t("mail:shared.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (T.s === "error") return <Page title={t("mail:shared.title")} back={back}><Empty title={T.status === 404 ? t("mail:thread.notFound") : T.err} /></Page>
+  if (T.loading) return <Page title={t("mail:shared.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (T.error || !T.data) return <Page title={t("mail:shared.title")} back={back}><Empty title={T.status === 404 ? t("mail:thread.notFound") : (T.error?.message ?? "")} /></Page>
   return <ThreadPage t={T.data} reload={T.reload} back={back} />
 }
 
@@ -69,7 +71,9 @@ function MessageBlock({ m, open, onToggle }: { m: Message; open: boolean; onTogg
   const line = (m.text_new ?? m.text ?? "").replace(/\s+/g, " ").trim()
   const head = (
     <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-start gap-3 px-4 py-3.5 text-left hover:bg-accent/60" data-message-toggle={m.id}>
-      <ContactAvatar name={who(m.from)} size={28} className="mt-0.5" />
+      {m.direction === "out"
+        ? <ActorAvatar actorId="me" size={28} className="mt-0.5" tooltip={false} />
+        : <ActorAvatar actor={partyActor({ id: m.from.party_id ?? m.from.addr, name: who(m.from), subtitle: m.from.addr })} size={28} className="mt-0.5" tooltip={false} />}
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-2"><span className="min-w-0 truncate type-body font-medium">{m.direction === "out" ? t("mail:thread.me") : who(m.from)}</span>
           {open && m.direction === "in" && m.from.name && <span className="hidden min-w-0 truncate type-footnote text-muted-foreground sm:inline">{m.from.addr}</span>}

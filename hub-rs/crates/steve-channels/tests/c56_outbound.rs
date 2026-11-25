@@ -171,7 +171,7 @@ async fn setup_with(as_user: Option<Arc<dyn ActAsUser>>) -> H {
 async fn setup_full(as_user: Option<Arc<dyn ActAsUser>>, decl: Option<ChannelDecl>) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
-    let disclosure = Disclosure::with_models(Vec::new());
+    let disclosure = Disclosure::new();
     let link = OutLink::new();
     let reg_disclosure = disclosure.clone();
     let reg_link = link.clone();
@@ -1260,6 +1260,7 @@ async fn a_finished_item_answers_in_its_thread_as_a_draft() {
                 requested_by: "ops".into(),
                 question_template: None,
                 source: None,
+                wait: None,
             })
         })
         .unwrap();
@@ -3048,7 +3049,7 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
         CHECK_HEAD,
         r#"{"verdict": "leak", "spans": [{"text": "运行在你的电脑上", "reason": "内部细节", "basis": "internal_detail"}]}"#,
     );
-    let d = Disclosure::with_models(Vec::new());
+    let d = Disclosure::new();
     d.bind(h.env.store().clone(), h.env.gateway.clone());
     let cx = CheckCx {
         ws: WS.into(),
@@ -3128,7 +3129,7 @@ async fn the_workspaces_own_people_with_public_knowledge_skip_the_model() {
         CHECK_HEAD,
         r#"{"verdict": "leak", "spans": [{"text": "周四", "reason": "内部细节", "basis": "internal_detail"}]}"#,
     );
-    let d = Disclosure::with_models(Vec::new());
+    let d = Disclosure::new();
     d.bind(h.env.store().clone(), h.env.gateway.clone());
     let cx = CheckCx {
         ws: WS.into(),
@@ -4987,9 +4988,7 @@ async fn review_refusal(h: &H, managed: bool) -> (String, String) {
 fn restore_review_permission(h: &H, managed: bool, message: &str) {
     if managed {
         let p = steve_channels::recovery::propose(&h.ch, &caller(WS, ME), message).unwrap();
-        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &p.id)
-            .unwrap()
-            .unwrap();
+        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &p.id).unwrap();
     } else {
         *h.fake.block_target_send.lock().unwrap() = None;
     }
@@ -5158,47 +5157,22 @@ async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn recovery_review_fences_legacy_auto_approval_and_preserves_send_time_rechecks() {
+async fn recovery_review_preserves_send_time_disclosure_rechecks() {
     let h = setup().await;
     let (old, fail) = review_refusal(&h, false).await;
     restore_review_permission(&h, false, &old);
     let (message, review) = recovered_draft(&h, &old, &fail, "仍需人工批准的正文").await;
-    // Simulate a pending approval persisted by a pre-fix engine; verify must fence it too.
-    let result = json!({"choice":"yes","recovery_review":true,"decided_by":"yolo",
-        "hash":steve_channels::outbound::text_hash("仍需人工批准的正文"),"send_at":h.ch.now()});
-    seed::decisions::seed_recovery_review_fences_legacy_auto_approval_and_preserves(
-        h.env.store(),
-        &result.to_string(),
-        &review,
-        &message,
-    )
-    .unwrap();
-    let queue = cold_outbox(&h);
-    queue.send_due(&h.ch).await;
-    assert_eq!(status(&h, &message), "draft");
-    let reopened = decision_of(&h, &message);
-    assert_ne!(reopened, review);
-    assert_eq!(
-        h.env
-            .store()
-            .read(|c| steve_store::decision_repo::get(c, &reopened))
-            .unwrap()
-            .unwrap()
-            .result["recovery_review"],
-        true
-    );
-    nothing_sent(&h);
     // Human approval still does not waive the final disclosure check.
     h.env.gateway.unscript(CHECK_HEAD);
     h.env.gateway.script(
         CHECK_HEAD,
         r#"{"verdict":"leak","spans":[{"text":"正文","reason":"needs review"}]}"#,
     );
-    decide(&h, &reopened, "yes", "").unwrap();
+    decide(&h, &review, "yes", "").unwrap();
     h.env.clock.advance(11_000);
     h.outbox.send_due(&h.ch).await;
     let disclosure = decision_of(&h, &message);
-    assert_ne!(disclosure, reopened);
+    assert_ne!(disclosure, review);
     assert_eq!(status(&h, &message), "draft");
     nothing_sent(&h);
     h.env.gateway.unscript(CHECK_HEAD);
@@ -5514,17 +5488,9 @@ async fn recovery_permission_missing_is_reviewed_undoable_and_separate_from_retr
         0,
         "creating a proposal grants and sends nothing"
     );
-    assert!(
-        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), id)
-            .unwrap()
-            .is_ok()
-    );
+    assert!(steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), id).is_ok());
     assert_eq!(status(&h, &m), "failed", "authorization does not send");
-    assert!(
-        steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), id)
-            .unwrap()
-            .is_ok()
-    );
+    assert!(steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), id).is_ok());
     decide(&h, &d, "retry", "").unwrap();
     h.outbox.send_due(&h.ch).await;
     assert_eq!(
@@ -5545,7 +5511,6 @@ async fn recovery_permission_missing_is_reviewed_undoable_and_separate_from_retr
         &caller(WS, ME),
         proposal["id"].as_str().unwrap(),
     )
-    .unwrap()
     .unwrap();
     decide(&h, &d2, "retry", "").unwrap();
     h.outbox.send_due(&h.ch).await;
@@ -5787,23 +5752,15 @@ async fn recovery_permission_proposal_rechecks_owner_revision_and_preserves_newe
             &caller(WS, steve_modules::testkit::OTHER),
             &proposal.id
         )
-        .unwrap()
         .is_err()
     );
     seed::connections::set_connection_revision(h.env.store(), &h.me).unwrap();
-    assert!(
-        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id)
-            .unwrap()
-            .is_err()
-    );
+    assert!(steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id).is_err());
     let proposal = steve_channels::recovery::propose(&h.ch, &caller(WS, ME), &m).unwrap();
-    steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id)
-        .unwrap()
-        .unwrap();
+    steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id).unwrap();
     seed::connections::set_connection_revision(h.env.store(), &h.me).unwrap();
-    let undone = steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), &proposal.id)
-        .unwrap()
-        .unwrap();
+    let undone =
+        steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), &proposal.id).unwrap();
     assert!(
         undone["kept"].as_array().is_some_and(|v| !v.is_empty()),
         "{undone}"

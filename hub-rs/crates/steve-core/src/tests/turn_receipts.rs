@@ -335,7 +335,7 @@ fn a_delivery_from_the_previous_input_never_hides_a_real_stop() {
         .unwrap();
     detach(&k, &s);
     k.core
-        .session_message(&s.id, "Do another thing", false, &[])
+        .session_message(&s.id, "Do another thing", false, &[], "me")
         .unwrap();
     let core = k.reopened();
     assert_eq!(receipt(&core, &s, None), None);

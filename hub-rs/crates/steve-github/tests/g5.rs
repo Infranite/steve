@@ -301,9 +301,7 @@ async fn the_section_9_example_drafts_applies_and_undoes() {
         ]
     );
 
-    let r = changes::apply(&h.env.modules, &me, &p.id)
-        .expect("stored")
-        .expect("apply");
+    let r = changes::apply(&h.env.modules, &me, &p.id).expect("apply");
     assert_eq!(r["ok"], true);
     let v = repo_json(&h).await;
     assert_eq!(v["settings"]["merge_method"], "squash");
@@ -314,12 +312,10 @@ async fn the_section_9_example_drafts_applies_and_undoes() {
         "PATCH, apply"
     );
 
-    changes::undo(&h.env.modules, &me, &p.id)
-        .expect("stored")
-        .expect("undo");
+    changes::undo(&h.env.modules, &me, &p.id).expect("undo");
     let v = repo_json(&h).await;
     assert_eq!(v["settings"]["merge_method"], "rebase");
-    let again = changes::undo(&h.env.modules, &me, &p.id).expect("stored");
+    let again = changes::undo(&h.env.modules, &me, &p.id);
     assert!(again.is_err(), "undone once");
 }
 
@@ -346,9 +342,7 @@ async fn a_draft_goes_stale_when_the_repo_changes() {
     )
     .await;
     assert_eq!(s, 200);
-    let e = changes::apply(&h.env.modules, &me, &p.id)
-        .expect("stored")
-        .expect_err("stale");
+    let e = changes::apply(&h.env.modules, &me, &p.id).expect_err("stale");
     assert_eq!(e.to_string(), changes::STALE);
     assert_eq!(repo_json(&h).await["settings"]["ci_fail"], "supplement");
 }
@@ -374,13 +368,9 @@ async fn projects_are_matched_by_exact_name_only() {
     )
     .await;
     assert_eq!(lines(&p.changes), vec![l("关联的项目", "Demo", "Other")]);
-    changes::apply(&h.env.modules, &me, &p.id)
-        .expect("stored")
-        .expect("apply");
+    changes::apply(&h.env.modules, &me, &p.id).expect("apply");
     assert_eq!(repo_json(&h).await["project"]["id"], "prj_other");
-    changes::undo(&h.env.modules, &me, &p.id)
-        .expect("stored")
-        .expect("undo");
+    changes::undo(&h.env.modules, &me, &p.id).expect("undo");
     assert_eq!(repo_json(&h).await["project"]["id"], PROJECT);
 
     let p = draft(
@@ -390,9 +380,7 @@ async fn projects_are_matched_by_exact_name_only() {
     )
     .await;
     assert_eq!(lines(&p.changes), vec![l("关联的项目", "Demo", "（无）")]);
-    changes::apply(&h.env.modules, &me, &p.id)
-        .expect("stored")
-        .expect("apply");
+    changes::apply(&h.env.modules, &me, &p.id).expect("apply");
     assert_eq!(repo_json(&h).await["project"], Value::Null);
 }
 
@@ -414,9 +402,7 @@ async fn a_comment_grant_is_drafted_applied_and_undone() {
             "在 GitHub 评论（仓库 steve-test/demo），8 小时"
         )]
     );
-    changes::apply(&h.env.modules, &me, &p.id)
-        .expect("stored")
-        .expect("apply");
+    changes::apply(&h.env.modules, &me, &p.id).expect("apply");
     let now = steve_store::now();
     let g = h
         .env
@@ -429,9 +415,7 @@ async fn a_comment_grant_is_drafted_applied_and_undone() {
     assert!((7.9..=8.01).contains(&hours), "{hours}");
     assert_eq!(q(&h, Inspect::AuditCount3, &[&h.repo]), json!(1));
 
-    changes::undo(&h.env.modules, &me, &p.id)
-        .expect("stored")
-        .expect("undo");
+    changes::undo(&h.env.modules, &me, &p.id).expect("undo");
     assert_eq!(q(&h, Inspect::GrantsCount, &[]), json!(0));
 
     // Nothing is guessed: an unknown bot, or hours beyond the cap, make no operation.
@@ -451,9 +435,7 @@ async fn a_comment_grant_is_drafted_applied_and_undone() {
             l("授权 前端 Bot", "—", "（没认出：48，只能 1、8 或 24 小时）"),
         ]
     );
-    let r = changes::apply(&h.env.modules, &me, &p.id)
-        .expect("stored")
-        .expect("apply of nothing");
+    let r = changes::apply(&h.env.modules, &me, &p.id).expect("apply of nothing");
     assert_eq!(r["ok"], true);
     assert_eq!(
         q(&h, Inspect::GrantsCount2, &[]),

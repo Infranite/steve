@@ -10,12 +10,13 @@ use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
 
 use super::misc::FAST;
-use super::{ApiResult, AppState, Ctx, Noun, blocking, body, ok, own, own_bot};
-use crate::backend::{NewProject, Obj};
+use super::{
+    ApiResult, AppState, Ctx, Noun, Patch, blocking, check_len, json_body, ok, own, own_bot,
+};
 use crate::config::home_dir;
 use crate::error::ApiError;
 use crate::js;
-use crate::validate::{Check, Str};
+use crate::wire::store::{NewProject, Obj};
 use crate::wire::workspaces::{At, PlacementError};
 use steve_node_api as na;
 
@@ -280,20 +281,22 @@ async fn hub_dir_and_git(path: &str) -> Result<(bool, bool), ApiError> {
     blocking(move || Ok((exists(&p) && is_dir(&p), exists(&join(&p, ".git"))))).await
 }
 
+#[derive(serde::Deserialize)]
 pub(super) struct Registration {
     name: String,
+    #[serde(default)]
     description: String,
     worktree: Option<bool>,
     default_bot: Option<String>,
 }
 
 impl Registration {
-    pub(super) fn parse(k: &mut Check<'_>) -> Self {
-        Self {
-            name: k.str("name", Str::len(1, 40)),
-            description: k.opt_str("description", Str::max(1000)).unwrap_or_default(),
-            worktree: k.opt_bool("worktree"),
-            default_bot: k.opt_nullable_str("default_bot", Str::ANY).flatten(),
+    pub(super) fn check(&self, bad: &mut Vec<String>) {
+        if !check_len(&self.name, 1, 40) {
+            bad.push("name".into());
+        }
+        if !check_len(&self.description, 0, 1000) {
+            bad.push("description".into());
         }
     }
 
@@ -347,17 +350,56 @@ pub(super) fn already_project() -> ApiError {
     ApiError::bad_request(steve_i18n::t!("hub.project.already_project"))
 }
 
+#[derive(serde::Deserialize)]
+struct CreateBody {
+    #[serde(flatten)]
+    registration: Registration,
+    path: String,
+    node: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct PatchBody {
+    name: Option<String>,
+    description: Option<String>,
+    worktree: Option<bool>,
+    #[serde(default)]
+    default_bot: Patch<String>,
+    archived: Option<bool>,
+    #[serde(default)]
+    release: Patch<Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct ReleaseIn {
+    kind: String,
+    cmd: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DescribeBody {
+    path: String,
+}
+
 pub async fn create(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let registration = Registration::parse(&mut k);
-    let raw = k.str("path", Str::min(1));
-    let node = k.opt_str("node", Str::ANY);
-    k.finish()?;
+    let req: CreateBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    req.registration.check(&mut bad);
+    if req.path.is_empty() {
+        bad.push("path".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    let CreateBody {
+        registration,
+        path: raw,
+        node,
+    } = req;
     on_builtin_node(node.as_deref())?;
     registration.validate(&st, &c).await?;
     let path = expand(&raw);
@@ -388,44 +430,54 @@ pub async fn patch_one(
     let (i, ws) = (id.clone(), c.ws.clone());
     st.read(move |r| Ok(own(r.project_get(&i)?, &ws, Noun::Project)?))
         .await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
+    let req: PatchBody = json_body(&b)?;
+    let mut bad = Vec::new();
     let mut p = Obj::new();
-    if let Some(x) = k.opt_str("name", Str::len(1, 40)) {
-        p.insert("name".into(), json!(x));
+    if let Some(x) = req.name {
+        if !check_len(&x, 1, 40) {
+            bad.push("name".into());
+        } else {
+            p.insert("name".into(), json!(x));
+        }
     }
-    if let Some(x) = k.opt_str("description", Str::max(1000)) {
-        let x = steve_store::seeded::stored(&x, steve_store::seeded::PROJECT[0].1).unwrap_or(x);
-        p.insert("description".into(), json!(x));
+    if let Some(x) = req.description {
+        if !check_len(&x, 0, 1000) {
+            bad.push("description".into());
+        } else {
+            let x = steve_store::seeded::stored(&x, steve_store::seeded::PROJECT[0].1).unwrap_or(x);
+            p.insert("description".into(), json!(x));
+        }
     }
-    if let Some(x) = k.opt_bool("worktree") {
+    if let Some(x) = req.worktree {
         p.insert("worktree".into(), json!(x));
     }
-    if let Some(x) = k.opt_nullable_str("default_bot", Str::ANY) {
+    if let Some(x) = req.default_bot.into_option() {
         p.insert("default_bot".into(), json!(x));
     }
-    if let Some(x) = k.opt_bool("archived") {
+    if let Some(x) = req.archived {
         p.insert("archived".into(), json!(x));
     }
-    match k.raw("release") {
-        None => {}
-        Some(Value::Null) => {
+    match req.release {
+        Patch::Missing => {}
+        Patch::Value(None) => {
             p.insert("release".into(), Value::Null);
         }
-        Some(_) => {
-            let Some(mut release) = k.sub("release", false) else {
-                return Err(ApiError::Invalid(vec!["release".into()]));
-            };
-            let kind = release.str("kind", Str::len(1, 32));
-            let cmd = release.str("cmd", Str::len(1, 2000));
-            k.absorb(release);
-            if kind != "script" {
-                return Err(ApiError::Invalid(vec!["release".into()]));
+        Patch::Value(Some(v)) => match serde_json::from_value::<ReleaseIn>(v) {
+            Ok(r) if r.kind == "script" && check_len(&r.cmd, 1, 2000) => {
+                p.insert(
+                    "release".into(),
+                    json!(steve_store::Release {
+                        kind: r.kind,
+                        cmd: r.cmd,
+                    }),
+                );
             }
-            p.insert("release".into(), json!(steve_store::Release { kind, cmd }));
-        }
+            _ => bad.push("release".into()),
+        },
     }
-    k.finish()?;
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
     st.write(move |r| {
         if let Some(Value::String(bot)) = p.get("default_bot")
             && !bot.is_empty()
@@ -472,10 +524,11 @@ pub async fn describe(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let raw = k.str("path", Str::min(1));
-    k.finish()?;
+    let req: DescribeBody = json_body(&b)?;
+    if req.path.is_empty() {
+        return Err(ApiError::Invalid(vec!["path".into()]));
+    }
+    let raw = req.path;
     let path = expand(&raw);
     let missing = || ApiError::bad_request(steve_i18n::t!("hub.project.dir_missing", path = raw));
     // the Node's answer has the git check in it; the Hub's own disk is asked after, as always

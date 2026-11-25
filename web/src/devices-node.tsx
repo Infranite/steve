@@ -27,8 +27,8 @@ import { go, Page, Empty, Loading } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
 import { useT } from "@/i18n"
 import { date } from "@/i18n/format"
-import { homeTilde } from "@/resume"
-import { agoText, findNode, fpGroups, hostLine, hostOf, linkRoute, nodeStatus, offlineReason, statusText, upgradeCard, type NodeView } from "@/device-model"
+import { homeTilde } from "@/lib/path"
+import { agoText, findNode, fpGroups, hostLine, hostOf, isUpgradeOnlyLink, linkRoute, nodeStatus, offlineReason, statusText, upgradeCard, type NodeView } from "@/device-model"
 import { harnessSummary } from "@/node-harness-model"
 import {
   NODE_TABS, nodeActionItems, nodeDiagnosticSnapshot, nodeHref, nodeTabBadges,
@@ -201,6 +201,7 @@ const ACTION_ICON: Record<NodeActionItem["kind"], typeof ShieldAlertIcon> = {
   harnessUpdatesAvailable: DownloadIcon,
   upgradeFailed: RotateCcwIcon,
   upgradeRunning: LoaderIcon,
+  upgradeRequired: ArrowUpCircleIcon,
   upgradeOutdated: ArrowUpCircleIcon,
   upgradeManual: ArrowUpCircleIcon,
   sessionsWaiting: MessageCircleIcon,
@@ -259,6 +260,20 @@ function ActionText({ v, item }: { v: NodeView; item: NodeActionItem }) {
           })}
         </>
       )
+    case "upgradeRequired": {
+      const from = item.from || ""
+      const to = item.version || ""
+      if (item.protocolOlder === "hub") {
+        return <>{t("devices:nodeOverview.actionUpgradeHub", { from: from || "?", to: to || "?" })}</>
+      }
+      if (v.local) {
+        return <>{t("devices:nodeOverview.actionUpgradeRequiredLocal", { from: from || "?", to: to || "?" })}</>
+      }
+      if (from && to) {
+        return <>{t(item.command === "startUpgrade" ? "devices:nodeOverview.actionUpgradeRequired" : "devices:nodeOverview.actionUpgradeRequiredManual", { from, to })}</>
+      }
+      return <>{t("devices:nodeOverview.actionUpgradeRequiredUnknown")}</>
+    }
     case "upgradeOutdated":
       return <>{t("devices:nodeOverview.actionUpgradeOutdated", { from: item.from ?? "?", to: item.version ?? "?" })}</>
     case "upgradeManual":
@@ -280,10 +295,16 @@ function OverviewNodeTab({
 }) {
   const t = useT(), { hubVersion, harnesses, harnessesError, contextDefault } = useDevices()
   const up = upgradeCard(v, hubVersion)
+  const upgradeOnly = isUpgradeOnlyLink(v)
+  const effectiveHub = v.hubVersion || hubVersion
   const worst = actionItems.some((a) => a.tone === "bad")
   const hasWarn = actionItems.some((a) => a.tone === "warn")
 
-  const harnessText = harnessesError ? t("devices:harness.readFailed") : harnessSummary(v, harnesses?.[v.id])
+  const harnessText = upgradeOnly
+    ? harnessSummary(v, harnesses?.[v.id], effectiveHub)
+    : harnessesError
+      ? t("devices:harness.readFailed")
+      : harnessSummary(v, harnesses?.[v.id], effectiveHub)
   const contextChoice = v.node?.owner_context == null
     ? (contextDefault ? t("shell:devices.ownerContext.inherit", { value: t(`shell:devices.ownerContext.${contextDefault}`) }) : t("devices:context.inheritPlain"))
     : t(`shell:devices.ownerContext.${v.node.owner_context ? "on" : "off"}`)
@@ -298,17 +319,19 @@ function OverviewNodeTab({
         : isRemoteMac
           ? t("devices:nodeOverview.summaryAccessUnknown", { cfg: contextChoice })
           : t("devices:nodeOverview.summaryAccessOther", { cfg: contextChoice })
-  const versionText = up.kind === "builtIn"
-    ? t("devices:nodeOverview.summaryVersionBuiltIn", { version: hubVersion || v.version || "?" })
-    : up.kind === "outdated"
-      ? t("devices:nodeOverview.summaryVersionOutdated", { from: up.from ?? "?", to: up.to })
-      : up.kind === "running"
-        ? t("devices:nodeOverview.summaryVersionUpgrading", { to: up.run.version })
-        : up.kind === "failed"
-          ? t("devices:nodeOverview.summaryVersionFailed", { to: up.run.version, from: up.run.from_version ?? "?" })
-          : up.kind === "offline"
-            ? t("devices:nodeOverview.summaryVersionOffline", { version: up.last ?? "?" })
-            : t("devices:nodeOverview.summaryVersionSame", { version: v.version ?? hubVersion ?? "?" })
+  const versionText = up.kind === "running"
+    ? t("devices:nodeOverview.summaryVersionUpgrading", { to: up.run.version })
+    : up.kind === "failed"
+      ? t("devices:nodeOverview.summaryVersionFailed", { to: up.run.version, from: up.run.from_version ?? "?" })
+      : upgradeOnly
+        ? t("devices:nodeOverview.summaryVersionUpgradeRequired", { from: v.version ?? "?", to: effectiveHub || "?" })
+        : up.kind === "builtIn"
+          ? t("devices:nodeOverview.summaryVersionBuiltIn", { version: effectiveHub || v.version || "?" })
+          : up.kind === "outdated"
+            ? t("devices:nodeOverview.summaryVersionOutdated", { from: up.from ?? "?", to: up.to })
+            : up.kind === "offline"
+              ? t("devices:nodeOverview.summaryVersionOffline", { version: up.last ?? "?" })
+              : t("devices:nodeOverview.summaryVersionSame", { version: v.version ?? effectiveHub ?? "?" })
   const dirs = v.device ? st.projects.filter((p) => p.device_id === v.device!.id) : []
   const workSummaryParts = [
     v.max != null ? t(v.paused ? "devices:nodeOverview.summaryWorkPaused" : "devices:nodeOverview.summaryWorkActive", { max: v.max }) : "",
@@ -419,7 +442,8 @@ function OverviewNodeTab({
             {fileAccess?.status === "missing" && <Badge tone="warning" size="sm">{t("devices:fileAccess.state.missing")}</Badge>}
           </DRow>
           <DRow icon={<ArrowUpCircleIcon />} title={t("devices:nodeTab.version")} sub={versionText} onClick={() => onOpenTab("version")} data-overview-link="version">
-            {up.kind === "outdated" && <Badge tone="warning" size="sm">{t("devices:upgrade.can")}</Badge>}
+            {upgradeOnly && up.kind !== "running" && up.kind !== "failed" && <Badge tone="danger" size="sm">{t("devices:upgrade.requiredBadge")}</Badge>}
+            {!upgradeOnly && up.kind === "outdated" && <Badge tone="warning" size="sm">{t("devices:upgrade.can")}</Badge>}
             {up.kind === "running" && <Badge tone="info" size="sm" dot live>{t("devices:upgrade.upgrading")}</Badge>}
             {up.kind === "failed" && <Badge tone="danger" size="sm">{t("devices:upgrade.rolledBack")}</Badge>}
           </DRow>
@@ -439,6 +463,7 @@ function HarnessNodeTab({
   actionItems: NodeActionItem[]
   onOpenTab: (tab: NodeTab) => void
 }) {
+  const upgradeOnly = isUpgradeOnlyLink(v)
   const harnessActions = actionItems.filter((a) => a.tab === "harness")
   return (
     <>
@@ -452,8 +477,8 @@ function HarnessNodeTab({
           </div>
         )
       })}
-      <NodeHarnesses v={v} actions={actions}>
-        {v.local && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}
+      <NodeHarnesses v={v} actions={actions} onOpenTab={onOpenTab}>
+        {v.local && !upgradeOnly && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}
       </NodeHarnesses>
     </>
   )
@@ -659,9 +684,22 @@ function DiagnosticsNodeTab({ v }: { v: NodeView }) {
         <dl className="grid gap-x-6 gap-y-2.5 px-5 pb-5 sm:grid-cols-[8.5rem_minmax(0,1fr)]">
           {row(
             t("devices:diagnostics.linkState"),
-            <Badge tone={v.linked ? "success" : "neutral"} size="sm" dot>
-              {t(v.linked ? "devices:diagnostics.linkConnected" : "devices:diagnostics.linkDisconnected")}
-            </Badge>,
+            <span className="inline-flex flex-wrap items-center gap-1.5">
+              <Badge tone={v.linked ? (isUpgradeOnlyLink(v) ? "warning" : "success") : "neutral"} size="sm" dot>
+                {t(
+                  !v.linked
+                    ? "devices:diagnostics.linkDisconnected"
+                    : isUpgradeOnlyLink(v)
+                      ? "devices:diagnostics.linkUpgradeOnly"
+                      : "devices:diagnostics.linkConnected",
+                )}
+              </Badge>
+              {v.node?.protocol != null && (
+                <span className="type-code text-muted-foreground">
+                  {t("devices:diagnostics.linkProtocol", { proto: v.node.protocol })}
+                </span>
+              )}
+            </span>,
           )}
           {route && row(t("devices:diagnostics.linkRoute"), `${t(`devices:route.${route}`)}${link?.tls ? " · TLS" : ""}`)}
           {link?.peer && row(t("devices:diagnostics.linkPeer"), <span className="type-code">{link.peer}</span>)}

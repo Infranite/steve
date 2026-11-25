@@ -11,12 +11,13 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steve_store::db::inspect_schema;
+use steve_types::backup::{BackupPurpose, BackupReceipt, SnapshotId};
 
 pub struct DeployOutcome {
     pub exit_code: i32,
@@ -500,12 +501,11 @@ impl Drop for ProbeProcess {
         let _ = self.0.wait();
     }
 }
-/// Ask the verified candidate to use the same backup contract as a running Hub.
-fn backup(runtime: &Runtime, candidate: &Path) -> Result<(PathBuf, PathBuf)> {
+/// Take the pre-upgrade snapshot with the verified candidate, after stopping the running Hub.
+fn backup(runtime: &Runtime, candidate: &Path) -> Result<SnapshotId> {
     let mut command = runtime.hub_command(candidate);
     command
-        .args(["--admin", "backup", "--reason", "pre-upgrade"])
-        .env("STEVE_HOME", &runtime.home)
+        .args(["--admin", "backup", "--reason", "pre-upgrade", "--offline"])
         .stdin(Stdio::null());
     let output = signing::output(&mut command, Duration::from_secs(120))?;
     ensure!(
@@ -513,27 +513,20 @@ fn backup(runtime: &Runtime, candidate: &Path) -> Result<(PathBuf, PathBuf)> {
         "candidate backup failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let manifest: Value =
-        serde_json::from_slice(&output.stdout).context("candidate returned no backup manifest")?;
+    let receipt: BackupReceipt = serde_json::from_slice(&output.stdout)
+        .context("candidate returned no verified backup receipt")?;
     ensure!(
-        manifest["completed"] == true && manifest["database"]["quick_check"] == "ok",
+        receipt.purpose == BackupPurpose::PreUpgrade
+            && receipt.database.bytes > 0
+            && receipt.database.sha256.len() == 64
+            && receipt
+                .database
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit()),
         "candidate backup is incomplete or unverified"
     );
-    let directory = PathBuf::from(
-        manifest["directory"]
-            .as_str()
-            .context("backup directory missing")?,
-    );
-    let name = manifest["database"]["name"]
-        .as_str()
-        .context("backup database missing")?;
-    ensure!(
-        Path::new(name).file_name().and_then(|n| n.to_str()) == Some(name),
-        "invalid backup database name"
-    );
-    let database = directory.join(name);
-    ensure!(database.is_file(), "backup database missing");
-    Ok((directory, database))
+    Ok(receipt.snapshot_id)
 }
 fn link(path: &Path, target: &Path) -> Result<()> {
     private_dir(path.parent().context("link parent missing")?)?;
@@ -561,9 +554,8 @@ fn restore(
     old_hub: &Path,
     old_web: &Path,
     old_manifest: &Value,
-    saved: Option<&Path>,
+    saved: Option<&SnapshotId>,
     candidate: &Path,
-    stamp: &str,
     ident: &Value,
 ) -> (bool, Vec<String>) {
     let mut steps = Vec::new();
@@ -592,28 +584,20 @@ fn restore(
             "database backup restored; probed files retained separately",
             (|| -> Result<()> {
                 let saved = saved.context("verified backup missing")?;
-                let failed = runtime.home.join("backups").join(format!(
-                    "failed-probe-{}-{stamp}",
-                    candidate
-                        .file_name()
-                        .context("candidate name missing")?
-                        .to_string_lossy()
-                ));
-                fs::create_dir(&failed)?;
-                fs::set_permissions(&failed, fs::Permissions::from_mode(0o700))?;
-                let db = runtime.home.join("data/steve.sqlite3");
-                for entry in fs::read_dir(db.parent().unwrap())? {
-                    let path = entry?.path();
-                    if path
-                        .file_name()
-                        .is_some_and(|n| n.to_string_lossy().starts_with("steve.sqlite3"))
-                    {
-                        fs::rename(&path, failed.join(path.file_name().unwrap()))?;
-                    }
-                }
-                fs::copy(saved, &db)?;
-                File::open(&db)?.sync_all()?;
-                File::open(db.parent().unwrap())?.sync_all()?;
+                let mut command = runtime.hub_command(candidate);
+                command
+                    .args(["--admin", "restore", saved.as_str(), "--database-only"])
+                    .stdin(Stdio::null());
+                let output = signing::output(&mut command, Duration::from_secs(3600))?;
+                ensure!(
+                    output.status.success(),
+                    "candidate restore failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                ensure!(
+                    String::from_utf8_lossy(&output.stdout).trim() == saved.as_str(),
+                    "candidate returned the wrong restored snapshot"
+                );
                 Ok(())
             })(),
         );
@@ -740,11 +724,16 @@ fn deploy_with(
         changed.stopped = true;
         runtime.service("stop", &ident)?;
         journal.update("backing_up", None, None, json!({}))?;
-        let (directory, database) = backup(runtime, candidate)?;
-        saved = Some(database);
-        receipt["backup"] = json!(directory);
+        let snapshot = backup(runtime, candidate)?;
+        receipt["backup_snapshot"] = json!(snapshot);
         atomic_json(&result_path, &receipt)?;
-        journal.update("backing_up", None, None, json!({"backup":directory}))?;
+        journal.update(
+            "backing_up",
+            None,
+            None,
+            json!({"backup_snapshot":snapshot}),
+        )?;
+        saved = Some(snapshot);
         phase = "probe";
         changed.probed = true;
         journal.update("backing_up", None, Some("probing"), json!({}))?;
@@ -791,9 +780,7 @@ fn deploy_with(
         Err(error) if changed.started => {
             let message = format!(
                 "Upgrade committed; new database retained and automatic rollback refused: {error:#}. Verified backup: {}",
-                saved
-                    .as_deref()
-                    .map_or_else(|| "none".into(), |p| p.display().to_string())
+                saved.as_ref().map_or("none", SnapshotId::as_str)
             );
             receipt["ok"] = false.into();
             receipt["degraded"] = true.into();
@@ -810,9 +797,8 @@ fn deploy_with(
                 &old_hub,
                 &old_web,
                 &old_manifest,
-                saved.as_deref(),
+                saved.as_ref(),
                 candidate,
-                &stamp,
                 &ident,
             );
             let message = format!("{phase} failed: {error:#}; recovery: {}", steps.join("; "));
@@ -1039,29 +1025,23 @@ mod tests {
             return;
         }
         let home = PathBuf::from(std::env::var("STEVE_HOME").unwrap());
+        let fixture = home.join("fixture-backup.sqlite3");
         if std::env::var("STEVE_NATIVE_TEST_BACKUP").as_deref() == Ok("1") {
             assert_ne!(
                 std::env::var("STEVE_NATIVE_TEST_BACKUP_FAIL").as_deref(),
                 Ok("1")
             );
-            let directory = home.join("backups/pre-upgrade-fixture");
-            fs::create_dir_all(&directory).unwrap();
-            fs::copy(
-                home.join("data/steve.sqlite3"),
-                directory.join("steve.sqlite3"),
-            )
-            .unwrap();
-            fs::set_permissions(
-                directory.join("steve.sqlite3"),
-                fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
-            atomic_json(
-                &home.join("fixture-manifest.json"),
-                &json!({"completed":true,
-                "directory":directory,"database":{"name":"steve.sqlite3","quick_check":"ok"}}),
-            )
-            .unwrap();
+            fs::copy(home.join("data/steve.sqlite3"), &fixture).unwrap();
+            atomic_json(&home.join("fixture-manifest.json"), &json!({
+                "purpose":"pre-upgrade", "snapshot_id":"a".repeat(64), "created_ms":0, "written_bytes":1,
+                "database":{"bytes":1,"sha256":"b".repeat(64)}
+            })).unwrap();
+            return;
+        }
+        if std::env::var("STEVE_NATIVE_TEST_RESTORE").as_deref() == Ok("1") {
+            let db = home.join("data/steve.sqlite3");
+            fs::rename(&db, home.join("data/failed-probe.sqlite3")).unwrap();
+            fs::copy(fixture, db).unwrap();
             return;
         }
         set_schema(&home.join("data/steve.sqlite3"), 54, Some(54)).unwrap();
@@ -1199,14 +1179,21 @@ case "${{1:-}}" in
     --build-info) printf '%s\n' '{{"version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target":"aarch64-apple-darwin","schema":54,"check_config":true}}'; exit 0;;
     --check-config) printf '%s\n' '{{"ok":true}}'; exit 0;;
     --admin)
-        [ "$2 $3 $4" = "backup --reason pre-upgrade" ] || exit 9
-        STEVE_NATIVE_TEST_BACKUP=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
-        cat "$STEVE_HOME/fixture-manifest.json"
+        case "$2" in
+            backup) [ "$3 $4 $5" = "--reason pre-upgrade --offline" ] || exit 9
+                STEVE_NATIVE_TEST_BACKUP=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
+                cat "$STEVE_HOME/fixture-manifest.json";;
+            restore) [ "$3 $4" = "{snapshot} --database-only" ] || exit 9
+                STEVE_NATIVE_TEST_RESTORE=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
+                printf '%s\n' "$3";;
+            *) exit 9;;
+        esac
         exit 0;;
 esac
 export STEVE_NATIVE_TEST_FIXTURE=1
 exec {quoted} --exact release::tests::fixture_process --nocapture
-"#
+"#,
+                snapshot = "a".repeat(64),
             ),
         );
         let manager = home.join("launchctl");
@@ -1270,12 +1257,12 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
                 .schema,
             54
         );
-        let backup =
-            PathBuf::from(outcome.receipt["backup"].as_str().unwrap()).join("steve.sqlite3");
-        assert_eq!(inspect_schema(&backup).unwrap().schema, 53);
+        assert_eq!(outcome.receipt["backup_snapshot"], "a".repeat(64));
         assert_eq!(
-            fs::metadata(backup).unwrap().permissions().mode() & 0o777,
-            0o600
+            inspect_schema(&dir.path().join("fixture-backup.sqlite3"))
+                .unwrap()
+                .schema,
+            53
         );
     }
     #[test]
@@ -1318,15 +1305,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             json_file(&dir.path().join("current/release.json")).unwrap()["version"],
             "1.2.2"
         );
-        let files: Vec<_> = fs::read_dir(dir.path().join("backups"))
-            .unwrap()
-            .flatten()
-            .collect();
-        assert!(
-            files
-                .iter()
-                .any(|p| p.file_name().to_string_lossy().starts_with("failed-probe-"))
-        );
+        assert!(dir.path().join("data/failed-probe.sqlite3").is_file());
         assert_eq!(
             fs::read_to_string(dir.path().join("service-state")).unwrap(),
             "start"

@@ -80,6 +80,7 @@ steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"
 
 [dev-dependencies]
+steve-flow = { path = "../steve-flow", features = ["testkit"] }
 steve-store-sqlite = { path = "../steve-store-sqlite" }
 steve-runtime = { path = "../steve-runtime", features = ["due-contract", "testkit"] }
 steve-store = { path = "../steve-store", features = ["testkit"] }

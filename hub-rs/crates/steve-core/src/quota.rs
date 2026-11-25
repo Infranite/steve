@@ -21,6 +21,29 @@ const LONGEST_MS: i64 = 7 * 24 * 3_600_000;
 static QUOTA: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b429\b|quota|rate[ _-]?limit|usage limit|too many requests").unwrap()
 });
+static HARD_QUOTA: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)quota|usage limit|insufficient_quota|billing|credit balance|credits? exhausted",
+    )
+    .unwrap()
+});
+
+/// True when `error` indicates a model quota or rate-limit failure.
+pub(crate) fn is_quota_error(error: &str) -> bool {
+    QUOTA.is_match(error)
+}
+
+/// True when `error` reports a quota/rate-limit failure with a future reset time, so short
+/// transport-level retries (5s/15s/45s) are futile and the turn should hand off to core policy.
+pub fn has_quota_reset(error: &str, now: i64) -> bool {
+    reset_at(error, now).is_some()
+}
+
+/// True when `error` explicitly indicates hard quota/usage exhaustion (as opposed to a bare
+/// transient HTTP 429 burst with no reset window).
+pub(crate) fn is_hard_quota_error(error: &str) -> bool {
+    HARD_QUOTA.is_match(error)
+}
 static RFC3339: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})")
         .unwrap()

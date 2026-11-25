@@ -19,19 +19,6 @@ fn at(path: &str) -> Option<RootPath> {
     })
 }
 
-/// Steve's permission mode for a harness or bot mode name. `None`: the Node path cannot express it,
-/// fail closed.
-pub(crate) fn permission_mode(perm: &str) -> Option<PermissionMode> {
-    Some(match perm {
-        "plan" => PermissionMode::Plan,
-        "default" | "ask" => PermissionMode::Ask,
-        "acceptEdits" | "accept_edits" => PermissionMode::AcceptEdits,
-        "auto" => PermissionMode::Auto,
-        "bypassPermissions" | "full_access" => PermissionMode::FullAccess,
-        _ => return None,
-    })
-}
-
 /// A binding is only a plan. The coordinator must bind it before routing a new session. Imported,
 /// ended, read-only, cross-workspace or unrecognized permission settings fail closed.
 /// `perm`: the harness mode the session is meant to start in (the workspace approval policy; `None`: the asking mode). `allows`: whether the Node takes a directory (its roots); a directory it does not take
@@ -151,12 +138,12 @@ pub fn plan(
     // migration resets former widening settings; malformed data still fails closed on binding.
     if let Some(b) = &bot
         && !b.perm_mode.is_empty()
-        && permission_mode(&b.perm_mode).is_none()
+        && PermissionMode::parse(&b.perm_mode).is_none()
     {
         return Err(Mode(b.perm_mode.clone()));
     }
-    let mode = perm.unwrap_or("default");
-    let permissions = permission_mode(mode).ok_or_else(|| Mode(mode.to_string()))?;
+    let mode = perm.unwrap_or(PermissionMode::Ask.as_str());
+    let permissions = PermissionMode::parse(mode).ok_or_else(|| Mode(mode.to_string()))?;
     let cwd = if !s.cwd.is_empty() {
         Some(s.cwd.as_str())
     } else {
@@ -874,18 +861,21 @@ mod host_tests {
 
     #[test]
     fn permission_modes_map_and_unknown_ones_fail_closed() {
-        assert_eq!(permission_mode("plan"), Some(PermissionMode::Plan));
-        assert_eq!(permission_mode("default"), Some(PermissionMode::Ask));
+        assert_eq!(PermissionMode::parse("plan"), Some(PermissionMode::Plan));
+        assert_eq!(PermissionMode::parse("ask"), Some(PermissionMode::Ask));
         assert_eq!(
-            permission_mode("acceptEdits"),
+            PermissionMode::parse("accept_edits"),
             Some(PermissionMode::AcceptEdits)
         );
+        assert_eq!(PermissionMode::parse("auto"), Some(PermissionMode::Auto));
         assert_eq!(
-            permission_mode("bypassPermissions"),
+            PermissionMode::parse("full_access"),
             Some(PermissionMode::FullAccess)
         );
-        assert_eq!(permission_mode("auto"), Some(PermissionMode::Auto));
-        assert_eq!(permission_mode(""), None);
-        assert_eq!(permission_mode("dontAsk"), None);
+        assert_eq!(PermissionMode::parse(""), None);
+        assert_eq!(PermissionMode::parse("default"), None);
+        assert_eq!(PermissionMode::parse("acceptEdits"), None);
+        assert_eq!(PermissionMode::parse("bypassPermissions"), None);
+        assert_eq!(PermissionMode::parse("dontAsk"), None);
     }
 }

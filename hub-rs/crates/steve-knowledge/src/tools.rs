@@ -33,7 +33,7 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     vec![
         json!({
             "name": SEARCH,
-            "description": "Search the user's knowledge base: notes, documents, wiki pages, past deliverables and confirmed memories. Each result has a disclosure level; follow it.",
+            "description": "Search the user's knowledge base: notes, documents, wiki pages and confirmed memories. Each result has a disclosure level; follow it.",
             "inputSchema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",

@@ -130,7 +130,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// When you last answered a card of the item (not YOLO for you); 0 when never.
+    /// When you last answered a card of the item; 0 when never.
     fn last_answered(&self, item_id: &str) -> Result<i64> {
         Ok(self
             .db()
@@ -138,7 +138,7 @@ impl Tx<'_> {
             .iter()
             .filter(|d| {
                 d.status == steve_types::DecisionStatus::Resolved
-                    && d.result["decided_by"] != "yolo"
+                    && d.result.get("decided_by").and_then(|v| v.as_str()) != Some("steve")
             })
             .filter_map(|d| d.resolved)
             .max()
@@ -170,7 +170,7 @@ impl Tx<'_> {
 
     /// The reasons `steve_deliver` was refused since the last delivery taken in or the last thing you
     /// did on the item, newest first.
-    fn refusals(&self, item_id: &str) -> Result<Vec<String>> {
+    pub(crate) fn refusals(&self, item_id: &str) -> Result<Vec<String>> {
         let answered = self.last_answered(item_id)?;
         let t = self.db().timeline(item_id)?;
         Ok(t.iter()

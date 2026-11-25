@@ -12,7 +12,7 @@ import { cn } from "cn"
 import { useEffect, useState, type ReactNode } from "react"
 import { t, useT } from "@/i18n"
 
-export const homeTilde = (p: string) => p.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~")
+import { homeTilde } from "@/lib/path"
 const copy = (text: string, what: string) => { void navigator.clipboard?.writeText(text).then(() => toast(t("shell:resume.copied", { what })), () => toast(t("shell:resume.clipboardBlocked"))) }
 
 /** why a session has no harness id yet */

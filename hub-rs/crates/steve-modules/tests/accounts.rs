@@ -1371,7 +1371,7 @@ async fn account_add_applies_and_undoes() {
             json!({ "op": "account.add", "party": a.sarah, "system": "phone", "handle": "+1 (415) 555-0123" }),
         ],
     );
-    let res = changes::apply(&t.modules, &me(), &cs).unwrap().unwrap();
+    let res = changes::apply(&t.modules, &me(), &cs).unwrap();
     assert_eq!(res["ok"], true);
     let mut rows = fixtures::phone_accounts(t.store()).unwrap();
     assert_eq!(rows.len(), 1);
@@ -1385,7 +1385,7 @@ async fn account_add_applies_and_undoes() {
         ),
         ("+14155550123", "phone", "chat", "你说的")
     );
-    changes::undo(&t.modules, &me(), &cs).unwrap().unwrap();
+    changes::undo(&t.modules, &me(), &cs).unwrap();
     let n: i64 = fixtures::phone_accounts(t.store()).unwrap().len() as i64;
     assert_eq!(n, 0);
 
@@ -1396,7 +1396,7 @@ async fn account_add_applies_and_undoes() {
             json!({ "op": "account.add", "party": a.sarah, "system": "mail", "handle": "sarah@acme.com" }),
         ],
     );
-    let e = changes::apply(&t.modules, &me(), &cs).unwrap().unwrap_err();
+    let e = changes::apply(&t.modules, &me(), &cs).unwrap_err();
     assert_eq!(e, ApiError::conflict("这个账号已经记在「Sarah Chen」名下"));
     let cs = plan(
         &t,
@@ -1405,7 +1405,7 @@ async fn account_add_applies_and_undoes() {
         ],
     );
     assert_eq!(
-        changes::apply(&t.modules, &me(), &cs).unwrap().unwrap_err(),
+        changes::apply(&t.modules, &me(), &cs).unwrap_err(),
         ApiError::not_found("联系人")
     );
 }
@@ -1422,7 +1422,7 @@ async fn account_patch_applies_and_undoes() {
             json!({ "op": "account.patch", "id": a.sarah_mail, "owner": tom, "display_name": "共用邮箱" }),
         ],
     );
-    changes::apply(&t.modules, &me(), &cs).unwrap().unwrap();
+    changes::apply(&t.modules, &me(), &cs).unwrap();
     let acc = ok(
         &r,
         "GET",
@@ -1434,7 +1434,7 @@ async fn account_patch_applies_and_undoes() {
         (acc["party"]["id"].clone(), acc["display_name"].clone()),
         (json!(tom), json!("共用邮箱"))
     );
-    changes::undo(&t.modules, &me(), &cs).unwrap().unwrap();
+    changes::undo(&t.modules, &me(), &cs).unwrap();
     let acc = ok(
         &r,
         "GET",
@@ -1450,7 +1450,7 @@ async fn account_patch_applies_and_undoes() {
         vec![json!({ "op": "account.patch", "id": "acc_nope", "kind": "other" })],
     );
     assert_eq!(
-        changes::apply(&t.modules, &me(), &cs).unwrap().unwrap_err(),
+        changes::apply(&t.modules, &me(), &cs).unwrap_err(),
         ApiError::not_found("账号")
     );
 }

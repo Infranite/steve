@@ -4,10 +4,10 @@
  * the browser. A theme whose plugin was uninstalled is unregistered, and a choice that used it falls back to the default.
  * What each plugin's manifest came to (registered, or why not) is kept for the Plugins page to show. */
 import { useSyncExternalStore } from "react"
-import { modReq } from "./api"
+import { pluginsApi, type PluginTheme } from "@/api/plugins"
 import { registerTheme, unregisterTheme } from "./themes"
 
-export type PluginTheme = { store: string; plugin: string; version: string; manifest: unknown }
+export type { PluginTheme }
 /** a plugin's theme on this client: its id once registered, otherwise why it was refused */
 export type ThemeState = { id?: string; errors?: string[] }
 
@@ -18,7 +18,7 @@ const key = (store: string, plugin: string) => `${store}/${plugin}`
 
 /** reads the installed theme plugins again and brings the registered themes in line with them */
 export async function syncPluginThemes(): Promise<void> {
-  const { themes } = await modReq<{ themes: PluginTheme[] }>("GET", "/plugins/themes")
+  const { themes } = await pluginsApi.themes()
   const now = new Set<string>(), next: Record<string, ThemeState> = {}
   for (const t of themes) {
     const r = t.manifest == null ? { ok: false as const, errors: ["the manifest could not be read"] } : registerTheme(t.manifest)

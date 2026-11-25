@@ -94,19 +94,24 @@ try {
   assert.deepEqual(availIds, ["claude-code", "codex", "gemini", "opencode"])
 
   const attnIds = await root.locator('[data-harness-section="attention"] [data-node-harness-id]').evaluateAll((els) => els.map((el) => el.getAttribute("data-node-harness-id")))
-  assert.deepEqual(attnIds, ["kimi-code", "pi", "antigravity", "codebuddy-code"])
+  assert.deepEqual(attnIds, ["kimi-code", "antigravity", "pi", "codebuddy-code"])
 
-  // Typed reasons and concrete actions on every Needs Attention card
-  await root.locator('[data-node-harness-id="antigravity"] [data-node-harness-reason="adapter_missing"]').waitFor()
-  await root.locator('[data-node-harness-id="antigravity"] [data-harness-attention-action="refresh"]').waitFor()
-  await root.locator('[data-node-harness-id="antigravity"] [data-harness-install-copy="antigravity"]').waitFor()
+  // Typed reasons, MissingCommandDiagnostic, and concrete actions on every Needs Attention card
+  const agyCard = root.locator('[data-node-harness-id="antigravity"]')
+  await agyCard.locator('[data-node-harness-reason="command_not_in_service_path"]').waitFor()
+  await agyCard.locator("[data-node-harness-missing-command]").waitFor()
+  assert.equal(await agyCard.locator("[data-missing-command-login-path]").innerText(), "/Users/example/.local/bin/agy")
+  assert.equal(await agyCard.locator("[data-missing-command-service-path]").innerText(), "/usr/bin:/bin:/usr/sbin:/sbin")
+  assert.equal(await agyCard.locator("[data-missing-command-refresh]").innerText(), "steve node refresh-env")
+  await agyCard.locator('[data-harness-attention-action="copy_refresh_env"][data-harness-refresh-env-copy="antigravity"]').waitFor()
+  await agyCard.locator('[data-harness-attention-action="refresh"]').waitFor()
   await root.locator('[data-node-harness-id="kimi-code"] [data-node-harness-reason="authentication_required"]').waitFor()
   await root.locator('[data-node-harness-id="pi"] [data-node-harness-reason="version_outdated"]').waitFor()
   await root.locator('[data-node-harness-id="pi"] [data-harness-attention-action="upgrade"]').waitFor()
   await root.locator('[data-node-harness-id="codebuddy-code"] [data-node-harness-reason="session_unavailable"]').waitFor()
 
   // Secondary details & Kimi's last reported models stay folded inside Details by default
-  assert.equal(await root.getByText("spawn agy ENOENT", { exact: false }).isVisible(), false)
+  assert.equal(await root.getByText("the adapter's command is missing", { exact: false }).isVisible(), false)
   assert.equal(await root.locator('[data-node-harness-id="kimi-code"] [data-node-harness-reported-models]').isVisible(), false)
 
   // Compact Claude Code card: default model + family chips + "全部 66 个模型" toggle (not a wall of 66 IDs)
@@ -158,7 +163,7 @@ try {
   await root.locator('[data-node-harness-id="cursor"] [data-harness-install-copy="cursor"]').waitFor()
 
   await root.locator('[data-node-harness-id="antigravity"] [data-node-harness-details] summary').click()
-  await root.getByText("spawn agy ENOENT", { exact: false }).waitFor()
+  await root.getByText("the adapter's command is missing", { exact: false }).waitFor()
 
   // Capture expanded Light + Dark desktop screenshots
   await snap("harness-tab-expanded-light.png")
@@ -205,7 +210,9 @@ try {
   await enRoot.locator('[data-harness-section-toggle="available"]').getByText("Available").waitFor()
   await enRoot.locator('[data-harness-section-toggle="attention"]').getByText("Needs attention").waitFor()
   await enRoot.locator('[data-harness-section-toggle="not_installed"]').getByText("Not installed").waitFor()
-  await enRoot.locator('[data-node-harness-id="antigravity"]').getByText("Command missing").waitFor()
+  await enRoot.locator('[data-node-harness-id="antigravity"]').getByText("Missing from service PATH").waitFor()
+  await enRoot.locator('[data-node-harness-id="antigravity"]').getByText("Copy refresh command").waitFor()
+  await enRoot.locator('[data-node-harness-id="antigravity"] [data-missing-command-refresh]').getByText("steve node refresh-env").waitFor()
   await enRoot.locator('[data-node-harness-id="pi"]').getByText("Version outdated").waitFor()
   await enRoot.locator('[data-node-harness-id="claude-code"] [data-harness-models-toggle]').getByText("All 66 models").waitFor()
   await enPage.close()

@@ -8,7 +8,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { api, type RDevice, type RNodeHarnessReport, type RUpgradeDefault, type RVitals } from "@/api"
-import { access, type AccessView } from "@/access-api"
+import { access, type AccessView } from "@/api/access"
 import { qc, scopeKey } from "@/data/sync"
 import { nodeViews, type NodeView } from "@/device-model"
 import { st, useHubEvents, useStore } from "@/store"
@@ -94,7 +94,7 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
   }, lastDefaults, (v) => { lastDefaults = v }, [], 10 * 60_000)
   useHubEvents(["node", "device"], () => { void readNodes(); devices.reload(); harnesses.reload() })
   useHubEvents(["client"], () => acc.reload())
-  const hubVersion = st.version
+  const hubVersion = nodes?.hub_version || st.version || ""
   const ds = devices.value ?? []
   const views = useMemo(() => nodeViews(ds, nodes?.nodes ?? null, hubVersion), [ds, nodes, hubVersion])
   const harnessesRef = useRef(harnesses.value)

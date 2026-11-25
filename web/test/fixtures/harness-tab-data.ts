@@ -220,18 +220,25 @@ export const MACBOOK_HARNESS_REPORT = {
       setup: null,
     },
 
-    // Section 2: Needs attention (4 — command missing, auth required, version outdated, session unavailable)
+    // Section 2: Needs attention (4 — auth required, service PATH mismatch, version outdated, session unavailable)
     {
       id: "antigravity",
       name: "Antigravity CLI",
       available: false,
-      version: "1.5.16",
+      version: "",
       adapter_version: null,
       models: [],
-      degraded_reason: "adapter_missing",
+      degraded_reason: "command_not_in_service_path",
       install_hint: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
       installed: true,
-      error: "spawn agy ENOENT (checked service PATH; ~/.local/bin not exported)",
+      error: "the adapter's command is missing",
+      missing_command: {
+        command: "agy",
+        service_path: "/usr/bin:/bin:/usr/sbin:/sbin",
+        login_shell_path: "/Users/example/.local/bin/agy",
+        login_shell: "/bin/zsh",
+        refresh_command: "steve node refresh-env",
+      },
       setup: null,
     },
     {

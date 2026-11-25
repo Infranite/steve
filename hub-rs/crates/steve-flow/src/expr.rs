@@ -187,6 +187,8 @@ pub fn check_template(tpl: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Flow expression truthiness treats empty arrays and objects as falsy
+/// (intentionally distinct from [`steve_runtime::json::truthy`]).
 pub fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,

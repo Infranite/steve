@@ -5,9 +5,11 @@ import { PlusIcon, RefreshCwIcon, WorkflowIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
-import { Page, Row, Empty, StatusDot, BotAvatar, go, Panel, Section, SectionLabel, Blank, Chevron, Tile, Pill, Notice, ConnectPrompt } from "@/ui"
+import { Page, Row, Empty, StatusDot, go, Panel, Section, SectionLabel, Blank, Chevron, Tile, Pill, Notice, ConnectPrompt } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { tm, toast, botName } from "@/store"
-import { flowApi, useLoad, errText, type ScopeMode, type SourcePatch } from "@/api/flow"
+import { flowApi, errText, type ScopeMode, type SourcePatch } from "@/api/flow"
+import { useHubQuery } from "@/data/use-hub-query"
 import { Pick, Loading, Failed, botOptions, mainBot } from "@/auto/common"
 import { NewRuleDialog } from "@/auto/new-rule"
 import { t as tr, useT } from "@/i18n"
@@ -16,10 +18,10 @@ const back = (): [string, string] => ["#/auto/sources", tr("auto:title")]
 const modes = (): { v: ScopeMode; l: string }[] => [{ v: "receive", l: tr("auto:source.modeReceive") }, { v: "record", l: tr("auto:source.modeRecord") }, { v: "ignore", l: tr("auto:source.modeIgnore") }]
 
 export function SourceView({ adapter }: { adapter: string }) {
-  const L = useLoad(() => flowApi.sources(), [], ["signal"])
-  const flows = useLoad(() => flowApi.flows("flow"), [], ["flow"])
+  const L = useHubQuery(["flow", "sources"], () => flowApi.sources(), { events: ["signal"], debounceMs: 300 })
+  const flows = useHubQuery(["flow", "flows", "flow"], () => flowApi.flows("flow"), { events: ["flow"], debounceMs: 300 })
   const s = L.data?.find((x) => x.adapter === adapter)
-  const recent = useLoad(() => (s ? flowApi.signals({ range: "7d", source: s.source }) : Promise.resolve(null)), [s?.source], ["signal"])
+  const recent = useHubQuery(["flow", "signals", "7d", s?.source ?? null], () => (s ? flowApi.signals({ range: "7d", source: s.source }) : Promise.resolve(null)), { events: ["signal"], debounceMs: 300 })
   const [busy, setBusy] = useState(false), [newRule, setNewRule] = useState(false)
   const t = useT(), BACK = back()
   if (L.error && !L.data) return <Failed title={t("auto:source.page")} back={BACK} msg={errText(L.error)} retry={() => void L.reload()} />
@@ -64,7 +66,7 @@ export function SourceView({ adapter }: { adapter: string }) {
         </Section>
         {on && <Section label={t("auto:source.settings")} data-source-settings>
           <div className="flex flex-col gap-4">
-            <Panel><Row icon={<BotAvatar k={triage} size={28} />} title={t("auto:source.triage")} sub={t("auto:source.triageSub")}>
+            <Panel><Row icon={<ActorAvatar actorId={triage} size={28} />} title={t("auto:source.triage")} sub={t("auto:source.triageSub")}>
               <Pick label={t("auto:source.triage")} testId="src-bot" value={s.triage_bot ?? "_"} disabled={busy} options={[{ v: "_", l: t("auto:source.mainBot", { name: botName(mainBot()) }) }, ...botOptions()]} onChange={(v) => void patch({ triage_bot: v === "_" ? null : v }, t("auto:source.triageSet", { name: botName(v === "_" ? mainBot() : v) }))} /></Row></Panel>
             {s.scopes.length > 0 && <div>
               <SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void refresh()}><RefreshCwIcon />{t("common:action.refresh")}</Button>}>{t("auto:source.scopes")}</SectionLabel>

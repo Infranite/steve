@@ -36,7 +36,7 @@
 //! ```ignore
 //! steve_channels::drafts::register(&mut registry, clock.clone());   // C8, before `Modules` is built
 //! // C5 + C6, before `Modules` is built:
-//! let disclosure = steve_channels::Disclosure::new();                  // STEVE_MODELS_CHECK / _FAST
+//! let disclosure = steve_channels::Disclosure::new();
 //! registry.outbound_check(Box::new(disclosure.clone()));
 //! let link = steve_channels::OutLink::new();
 //! registry.decision(steve_channels::respond::SUBJECT_MESSAGE, link.handler());

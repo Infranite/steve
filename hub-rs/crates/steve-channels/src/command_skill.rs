@@ -200,15 +200,8 @@ impl Channels {
     /// conversation). Best-effort.
     fn alert_owner(&self, ws: &str, text: &str, risk: bool) {
         let level = if risk { "fail" } else { "info" };
-        let r = self.store().messages().add(
-            ws,
-            "steve",
-            text,
-            None,
-            &serde_json::json!({"notice": {"kind": "security", "level": level}}),
-            "notify",
-        );
-        if let Err(e) = r {
+        if let Err(e) = steve_store::notify::notify(self.store(), ws, "security", level, text, None)
+        {
             tracing::warn!("trigger guard: owner not alerted: {e}");
         }
     }
@@ -236,7 +229,7 @@ const GUARD: &str = "你是一道隐私关卡。有人在聊天里用触发词�
 
 /// Reads the guard's answer; anything unreadable is [`Guard::Unsure`].
 pub(crate) fn parse_guard(answer: &str) -> Guard {
-    let Some(v) = steve_modules::changes::first_json(answer) else {
+    let Some(v) = steve_runtime::json::first_json_opt(answer) else {
         return Guard::Unsure("判断结果读不出".into());
     };
     let why = v["why"].as_str().unwrap_or("").trim().to_string();

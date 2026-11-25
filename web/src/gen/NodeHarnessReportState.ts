@@ -4,4 +4,4 @@
 /**
  * Observation status of one Node's harness probe report (`GET /api/node-harnesses`).
  */
-export type NodeHarnessReportState = "reported" | "unreported" | "offline" | "unsupported" | "failed";
+export type NodeHarnessReportState = "reported" | "unreported" | "offline" | "unsupported" | "failed" | "upgrade_required";

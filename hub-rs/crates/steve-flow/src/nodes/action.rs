@@ -930,6 +930,7 @@ impl Action for Notify {
             source: Some(steve_store::DecisionSource::Revision {
                 revision: format!("notify:{}:{}:{}", cx.run.id, cx.node.id, cx.run.attempts),
             }),
+            wait: None,
         };
         let opened = cx
             .flow

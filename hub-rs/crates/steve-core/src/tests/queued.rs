@@ -22,7 +22,7 @@ fn started(k: &Kit) -> (String, String) {
 fn queue(k: &Kit, sid: &str, texts: &[&str]) -> Vec<String> {
     for t in texts {
         assert_eq!(
-            k.core.session_message(sid, t, false, &[]).unwrap(),
+            k.core.session_message(sid, t, false, &[], "me").unwrap(),
             crate::Prompted::Queued
         );
     }
@@ -52,7 +52,7 @@ fn edit_changes_what_the_next_turn_sends() {
     let k = Kit::new();
     let (item, sid) = started(&k);
     let q = queue(&k, &sid, &["一", "二"]);
-    let after = k.core.queued_edit(&sid, &q[1], "二（改）").unwrap();
+    let after = k.core.queued_edit(&sid, &q[1], "二（改）", "me").unwrap();
     assert_eq!(after.text, "二（改）");
     let ev = k.db().events_after(&sid, 0).unwrap();
     let e = ev.iter().find(|e| e.kind == "queued_edited").unwrap();
@@ -78,10 +78,10 @@ fn remove_takes_it_out_of_the_queue() {
     let (item, sid) = started(&k);
     let f = k.file("a.txt", "text/plain", b"x");
     k.core
-        .session_message(&sid, "一", false, std::slice::from_ref(&f))
+        .session_message(&sid, "一", false, std::slice::from_ref(&f), "me")
         .unwrap();
     let q = queue(&k, &sid, &["二"]);
-    let gone = k.core.queued_remove(&sid, &q[0]).unwrap();
+    let gone = k.core.queued_remove(&sid, &q[0], "me").unwrap();
     assert_eq!(
         (gone.text.as_str(), gone.files.as_slice()),
         ("一", &[f][..]),
@@ -105,9 +105,11 @@ fn a_row_a_turn_already_took_is_a_409_and_nothing_changes() {
     assert_eq!(k.rt.prompts_of(&sid).last().unwrap(), "一");
     let before = kinds(&k, &sid).len();
     assert!(is_conflict(
-        k.core.queued_edit(&sid, &q[0], "晚了").unwrap_err()
+        k.core.queued_edit(&sid, &q[0], "晚了", "me").unwrap_err()
     ));
-    assert!(is_conflict(k.core.queued_remove(&sid, &q[0]).unwrap_err()));
+    assert!(is_conflict(
+        k.core.queued_remove(&sid, &q[0], "me").unwrap_err()
+    ));
     assert!(is_conflict(
         k.core.queued_send_now(&sid, &q[0]).unwrap_err()
     ));
@@ -117,7 +119,7 @@ fn a_row_a_turn_already_took_is_a_409_and_nothing_changes() {
     let q = queue(&k, &sid, &["二"]);
     let (_, other) = started(&k);
     assert!(is_conflict(
-        k.core.queued_edit(&other, &q[0], "x").unwrap_err()
+        k.core.queued_edit(&other, &q[0], "x", "me").unwrap_err()
     ));
 }
 

@@ -427,6 +427,37 @@ pub fn upgrade_phase(
     Ok(n == 1)
 }
 
+/// Reconciles the latest settled non-succeeded upgrade record for `node_id` when the Node actually
+/// reports running that target version (for example after a switch succeeded despite a prior Hub
+/// timeout or restart, or after an operator completed the switch to that exact version).
+/// Returns the prior row when a stale record was corrected to `succeeded`.
+pub fn upgrade_reconcile_observed(
+    tx: &mut W<'_>,
+    node_id: &str,
+    version: &str,
+    now: i64,
+) -> Result<Option<UpgradeRow>> {
+    let Some(latest) = upgrade_latest_on(&tx.conn, node_id)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        latest.phase.as_str(),
+        "failed" | "rolled_back" | "abandoned" | "unknown"
+    ) || latest.version != version
+    {
+        return Ok(None);
+    }
+    let n = tx.conn.execute(
+        "UPDATE node_upgrades SET phase='succeeded', error=NULL, updated=?2 WHERE operation_id=?1",
+        params![latest.operation_id, now],
+    )?;
+    if n == 1 {
+        changed(tx, node_id)?;
+        return Ok(Some(latest));
+    }
+    Ok(None)
+}
+
 /// Marks an unfinished upgrade as forced (its owner asked to switch it now).
 pub fn upgrade_force(tx: &mut W<'_>, operation_id: &str) -> Result<bool> {
     Ok(tx.conn.execute(

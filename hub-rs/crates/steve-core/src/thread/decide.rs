@@ -165,6 +165,41 @@ static CONFIG: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 
+pub fn is_config_phrase(text: &str) -> bool {
+    let t = text.trim();
+    CONFIG.is_match(t) && !explicit_item(t)
+}
+
+/// Short conversational greetings or acknowledgements that need only one answer generation
+/// and zero router calls.
+static OBVIOUS_REPLY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(谢谢|谢谢你|多谢|感谢|好的|好呀|好滴|你好|您好|嗨|哈喽|收到|明白|明白了|了解了|知道了|辛苦了|早安|早上好|晚安|拜拜|再见|不客气|太好了|赞|棒|hi|hello|hey|thanks|thank you|thx|ok|okay|got it|bye)[。！!，,～~\.\s]*$",
+    )
+    .expect("valid regex")
+});
+
+pub fn obvious_reply(text: &str, files: bool) -> bool {
+    !files && OBVIOUS_REPLY.is_match(text.trim())
+}
+
+/// Deterministic preflight for requests that require machine/local-inspection tools (disk, files,
+/// logs, processes, ports, shell commands), so a tool-less answer call is never used as a probe.
+static MACHINE_TOOL_NOUN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)磁盘|硬盘|剩余空间|磁盘空间|内存|CPU|进程|端口|日志|目录|本地文件|文件|代码库|仓库|系统状态|终端|命令行|shell|stdout|stderr|\b(ls|df|ps|grep|git\s+(status|log|diff))\b")
+        .expect("valid regex")
+});
+
+static MACHINE_TOOL_VERB: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)看下|看一下|看看|查下|查一下|查看|检查|跑下|跑一下|运行|执行|读一下|读下|列一下|列出|统计一下")
+        .expect("valid regex")
+});
+
+pub fn needs_machine_tools(text: &str) -> bool {
+    let t = text.trim();
+    !t.is_empty() && MACHINE_TOOL_NOUN.is_match(t) && MACHINE_TOOL_VERB.is_match(t)
+}
+
 /// Asking Steve to do something, even as a question (“给我讲一下”, “你看看怎么设计”): the router may see
 /// work in it and offer it as an item.
 static REQUEST: LazyLock<Regex> = LazyLock::new(|| {
@@ -221,22 +256,6 @@ pub fn without_router(
         return Some("research");
     }
     (text.trim().chars().count() <= GUEST_SHORT).then_some("answer")
-}
-
-/// The least confidence of a message handled while Steve is still answering earlier ones ([`now_while_answering`]).
-pub const AHEAD_MIN: f64 = 0.8;
-
-/// While the main conversation is still answering earlier messages: whether this one is handled now,
-/// ahead of those answers, rather than after them. Only what stands on its own and has a clear object —
-/// an instruction for an item, new work, a status question, a setting — the router sure of it and
-/// saying it does not need the answers ([`Route::after`]). Anything else waits, as every message did
-/// before: waiting only delays, while going ahead without an answer it refers to would act on a guess.
-/// Decided by the user on 2026-11-09.
-pub fn now_while_answering(r: &Route, d: &Decision) -> bool {
-    !r.fallback
-        && !r.after
-        && r.confidence >= AHEAD_MIN
-        && matches!(d.kind.as_str(), "item" | "supplement" | "status" | "config")
 }
 
 /// Apply the guards in order. Rule 6, the router failing, is already in `route.fallback`.
@@ -301,32 +320,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_sure_standalone_messages_go_ahead_of_an_answer() {
-        let r = |kind: &str, confidence: f64, after: bool| Route {
-            kind: kind.into(),
-            confidence,
-            after,
-            signals: vec!["change".into()],
-            item: Some("ST-1".into()),
-            ..Route::default()
-        };
-        let go = |r: &Route| {
-            let d = decide(r, "x", DecideCtx { named_bot: false });
-            now_while_answering(r, &for_main(d, r))
-        };
-        for k in ["item", "supplement", "status", "config"] {
-            assert!(go(&r(k, 0.9, false)), "{k}");
-            assert!(!go(&r(k, 0.9, true)), "{k} needs the answer");
-            assert!(!go(&r(k, 0.7, false)), "{k} not sure");
-        }
-        for k in ["answer", "research", "suggest", "ask", "reroute"] {
-            assert!(!go(&r(k, 1.0, false)), "{k}");
-        }
-        let failed = Route {
-            fallback: true,
-            ..r("item", 1.0, false)
-        };
-        assert!(!go(&failed));
+    fn obvious_replies_and_machine_tool_preflight() {
+        assert!(obvious_reply("谢谢", false));
+        assert!(obvious_reply("谢谢！", false));
+        assert!(obvious_reply("hello", false));
+        assert!(!obvious_reply("谢谢", true));
+        assert!(!obvious_reply("谢谢，顺便帮我改个按钮", false));
+        assert!(needs_machine_tools("帮我看下磁盘还剩多少"));
+        assert!(needs_machine_tools("看下我现在磁盘情况"));
+        assert!(needs_machine_tools("查一下服务日志"));
+        assert!(!needs_machine_tools("在吗"));
+        assert!(!needs_machine_tools("谢谢"));
     }
 
     #[test]

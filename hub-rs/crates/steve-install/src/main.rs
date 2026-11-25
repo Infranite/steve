@@ -142,6 +142,7 @@ fn service_command(command: &str, mut args: Vec<String>) -> Result<i32> {
         "install",
         "enable-boot",
         "file-access",
+        "refresh-env",
         "start",
         "stop",
         "restart",
@@ -174,6 +175,10 @@ fn service_command(command: &str, mut args: Vec<String>) -> Result<i32> {
         !matches!(action.as_str(), "enable-boot" | "file-access")
             || (cfg!(target_os = "macos") && command == "node" && release.is_none()),
         "{action} is only for a prepared macOS Node; it takes no --release"
+    );
+    anyhow::ensure!(
+        action != "refresh-env" || release.is_none(),
+        "refresh-env takes no --release"
     );
     if action == "file-access" {
         steve_install::service::file_access::guide(&home, false, json)?;

@@ -9,10 +9,11 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::backend::{BResult, BackendError, ImportedSession, Repo};
 use crate::bus::Bus;
 use crate::config::Config;
+use crate::error::{BResult, BackendError};
 use crate::js;
+use crate::wire::store::{ImportedSession, StoreBackend};
 
 /// `uid(p)`: `p_` + 16 hex chars of a random UUID.
 pub fn uid(p: &str) -> String {
@@ -77,7 +78,7 @@ pub async fn hub_device(version: &str) -> (String, String, String) {
 }
 
 /// Boot `registerHub()`: upsert device `hub` (no SSE, as in TS).
-pub fn register_hub(r: &dyn Repo, name: &str, os: &str, version: &str) -> BResult<()> {
+pub fn register_hub(r: &StoreBackend, name: &str, os: &str, version: &str) -> BResult<()> {
     r.device_upsert("hub", name, &["Hub".into(), "执行节点".into()], os, version)
 }
 
@@ -669,7 +670,7 @@ async fn node_import(node: &dyn Discovery, entry: &HistoryEntry) -> Result<Vec<N
 }
 
 /// The database side of `importLocal` (under the write lock): returns the new session id or the TS error.
-pub fn import_prepared(r: &dyn Repo, bus: &Bus, ws: &str, p: Prepared) -> BResult<String> {
+pub fn import_prepared(r: &StoreBackend, bus: &Bus, ws: &str, p: Prepared) -> BResult<String> {
     let key = match &p {
         Prepared::Missing => return Err(BackendError::msg(steve_i18n::t!("hub.import.gone"))),
         Prepared::NotListed => {
@@ -718,7 +719,7 @@ pub fn import_prepared(r: &dyn Repo, bus: &Bus, ws: &str, p: Prepared) -> BResul
 }
 
 /// `removeImported`: only read-only (imported) sessions can be removed.
-pub fn remove_imported(r: &dyn Repo, id: &str) -> BResult<()> {
+pub fn remove_imported(r: &StoreBackend, id: &str) -> BResult<()> {
     let ro = r
         .session_get(id)?
         .is_some_and(|s| js::truthy(s.get("readonly")));
@@ -1294,6 +1295,7 @@ mod tests {
                 resume_command: None,
                 fork_command: None,
                 capabilities: None,
+                missing_command: None,
             }),
         };
         let mut no_session = reported.clone();

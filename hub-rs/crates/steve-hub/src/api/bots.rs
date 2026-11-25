@@ -8,17 +8,86 @@ use steve_store::seeded;
 
 use super::misc::{SMART, js_num};
 use super::{
-    ApiResult, AppState, Ctx, Noun, body, bot_out, objs, ok, ok_true, own, own_bot, str_of,
-    user_workspace_ids,
+    ApiResult, AppState, Ctx, Noun, Patch, body, bot_out, check_len, from_body, json_body, objs,
+    ok, ok_true, own, own_bot, str_of, user_workspace_ids,
 };
-use crate::backend::Obj;
 use crate::error::ApiError;
 use crate::js;
-use crate::validate::{Check, Num, Str};
+use crate::wire::store::{Obj, StoreBackend};
 use steve_types::ConfigReason;
 
+#[derive(serde::Deserialize)]
+struct AvatarIn {
+    color: Option<String>,
+    #[serde(default)]
+    skin: Patch<String>,
+    round: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+struct BotIn {
+    name: Option<String>,
+    role: Option<String>,
+    specialties: Option<Vec<String>>,
+    harness: Option<String>,
+    #[serde(default)]
+    model: Patch<String>,
+    #[serde(default)]
+    reasoning_effort: Patch<String>,
+    rules: Option<String>,
+    persona: Option<String>,
+    proactive: Option<i64>,
+    accept_mode: Option<String>,
+    perm_mode: Option<String>,
+    avatar: Option<AvatarIn>,
+    #[serde(default)]
+    default_project: Patch<String>,
+    #[serde(default)]
+    prompt: Patch<String>,
+    #[serde(default)]
+    device: Patch<String>,
+    enabled: Option<bool>,
+    fallback_surfaces: Option<Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct DraftBody {
+    desc: String,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspacesBody {
+    ids: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct DeleteBody {
+    to: String,
+    memory: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct TextBody {
+    text: String,
+}
+
+fn valid_effort(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
+}
+
+fn valid_hex_color(s: &str) -> bool {
+    s.len() == 7 && s.as_bytes()[0] == b'#' && s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn valid_skin(s: &str) -> bool {
+    (3..=4).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
+}
+
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
-const PERM: &[&str] = &["default", "plan", "bypassPermissions"];
+
+use steve_core::harnesses::perm_mode_of_key;
 
 fn record_workspace_bot_refusal(reason: &'static str) {
     metrics::counter!(
@@ -36,11 +105,7 @@ fn is_bot_owner(owner: Option<&str>, caller: &Ctx) -> bool {
     }
 }
 
-fn check_default_project(
-    r: &dyn crate::backend::Repo,
-    ws: &str,
-    project_id: &str,
-) -> Result<(), ApiError> {
+fn check_default_project(r: &StoreBackend, ws: &str, project_id: &str) -> Result<(), ApiError> {
     let belongs = r
         .project_get(project_id)?
         .and_then(|p| {
@@ -59,19 +124,6 @@ fn check_default_project(
     }
     Ok(())
 }
-
-fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
-    use steve_node_api::PermissionMode as P;
-    Some(match k {
-        "plan" => P::Plan,
-        "default" => P::Ask,
-        "acceptEdits" => P::AcceptEdits,
-        "auto" => P::Auto,
-        "bypassPermissions" => P::FullAccess,
-        _ => return None,
-    })
-}
-
 fn known_harness_ids(
     cfg: &crate::config::Config,
     harnesses: &[steve_core::harnesses::Harness],
@@ -112,98 +164,185 @@ fn selection_out(mut bot: Obj, harnesses: &[steve_core::harnesses::Harness]) -> 
 #[path = "bot_selection_tests.rs"]
 mod selection_tests;
 fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError> {
-    let mut c = Check::object(v);
+    let req: BotIn = from_body(v.clone())?;
+    let mut bad = Vec::new();
     let mut p = Obj::new();
-    let mut put = |k: &str, x: Option<Value>| {
-        if let Some(x) = x {
-            p.insert(k.into(), x);
+    match req.name {
+        Some(n) if check_len(&n, 1, 40) => {
+            p.insert("name".into(), json!(n));
         }
-    };
-    let name = if create {
-        Some(c.str("name", Str::len(1, 40)))
-    } else {
-        c.opt_str("name", Str::len(1, 40))
-    };
-    put("name", name.map(Value::from));
-    put("role", c.opt_str("role", Str::max(200)).map(Value::from));
-    put(
-        "specialties",
-        c.opt_str_array_of("specialties", Str::len(1, 48), None, Some(12))
-            .map(|tags| json!(steve_store::bot_dispatch::specialties(tags))),
-    );
-    let allowed: Vec<&str> = harnesses.iter().map(String::as_str).collect();
-    let harness = c.opt_enum("harness", &allowed);
-    put("harness", harness.map(Value::from));
-    put(
-        "model",
-        c.opt_nullable_str("model", Str::ANY).map(|m| json!(m)),
-    );
-    put(
-        "reasoning_effort",
-        c.opt_nullable_str("reasoning_effort", Str::pattern("^[A-Za-z0-9_.:-]{1,64}$"))
-            .map(|m| json!(m)),
-    );
-    put("rules", c.opt_str("rules", Str::max(8000)).map(Value::from));
-    put(
-        "persona",
-        c.opt_str("persona", Str::max(400)).map(Value::from),
-    );
-    put(
-        "proactive",
-        c.opt_num(
-            "proactive",
-            Num {
-                int: true,
-                min: Some(0.0),
-                max: Some(2.0),
-                gt: None,
-            },
-        )
-        .map(js_num),
-    );
-    put(
-        "accept_mode",
-        c.opt_enum("accept_mode", ACCEPT).map(Value::from),
-    );
-    put("perm_mode", c.opt_enum("perm_mode", PERM).map(Value::from));
-    if let Some(mut a) = c.sub("avatar", true) {
-        let mut av = Obj::new();
-        if let Some(x) = a.opt_str("color", Str::pattern(r"^#[0-9a-fA-F]{6}$")) {
-            av.insert("color".into(), json!(x));
-        }
-        if let Some(x) = a.opt_nullable_str("skin", Str::pattern(r"^\d{3,4}$")) {
-            av.insert("skin".into(), json!(x));
-        }
-        if let Some(x) = a.opt_num(
-            "round",
-            Num {
-                int: false,
-                min: Some(0.0),
-                max: Some(100.0),
-                gt: None,
-            },
-        ) {
-            av.insert("round".into(), js_num(x));
-        }
-        c.absorb(a);
-        put("avatar", Some(Value::Object(av)));
+        Some(_) => bad.push("name".into()),
+        None if create => bad.push("name".into()),
+        None => {}
     }
-    put(
-        "default_project",
-        c.opt_nullable_str("default_project", Str::ANY)
-            .map(|x| json!(x)),
-    );
-    put(
-        "prompt",
-        c.opt_nullable_str("prompt", Str::max(20000))
-            .map(|x| json!(x)),
-    );
-    put(
-        "device",
-        c.opt_nullable_str("device", Str::ANY).map(|x| json!(x)),
-    );
-    put("enabled", c.opt_bool("enabled").map(Value::from));
-    c.finish()?;
+    if let Some(r) = req.role {
+        if check_len(&r, 0, 200) {
+            p.insert("role".into(), json!(r));
+        } else {
+            bad.push("role".into());
+        }
+    }
+    if let Some(tags) = req.specialties {
+        if tags.len() > 12 || tags.iter().any(|t| !check_len(t, 1, 48)) {
+            bad.push("specialties".into());
+        } else {
+            p.insert(
+                "specialties".into(),
+                json!(steve_store::bot_dispatch::specialties(tags)),
+            );
+        }
+    }
+    if let Some(h) = req.harness {
+        if harnesses.iter().any(|id| id == &h) {
+            p.insert("harness".into(), json!(h));
+        } else {
+            bad.push("harness".into());
+        }
+    }
+    if let Some(m) = req.model.into_option() {
+        p.insert("model".into(), json!(m));
+    }
+    if let Some(m) = req.reasoning_effort.into_option() {
+        if m.as_deref().is_some_and(|s| !valid_effort(s)) {
+            bad.push("reasoning_effort".into());
+        } else {
+            p.insert("reasoning_effort".into(), json!(m));
+        }
+    }
+    if let Some(r) = req.rules {
+        if check_len(&r, 0, 8000) {
+            p.insert("rules".into(), json!(r));
+        } else {
+            bad.push("rules".into());
+        }
+    }
+    if let Some(x) = req.persona {
+        if check_len(&x, 0, 400) {
+            p.insert("persona".into(), json!(x));
+        } else {
+            bad.push("persona".into());
+        }
+    }
+    if let Some(n) = req.proactive {
+        if (0..=2).contains(&n) {
+            p.insert("proactive".into(), json!(n));
+        } else {
+            bad.push("proactive".into());
+        }
+    }
+    if let Some(a) = req.accept_mode {
+        if ACCEPT.contains(&a.as_str()) {
+            p.insert("accept_mode".into(), json!(a));
+        } else {
+            bad.push("accept_mode".into());
+        }
+    }
+    if let Some(pm) = req.perm_mode {
+        if perm_mode_of_key(&pm).is_some() {
+            p.insert("perm_mode".into(), json!(pm));
+        } else {
+            bad.push("perm_mode".into());
+        }
+    }
+    if let Some(a) = req.avatar {
+        let mut av = Obj::new();
+        if let Some(x) = a.color {
+            if valid_hex_color(&x) {
+                av.insert("color".into(), json!(x));
+            } else {
+                bad.push("avatar.color".into());
+            }
+        }
+        if let Some(x) = a.skin.into_option() {
+            if x.as_deref().is_some_and(|s| !valid_skin(s)) {
+                bad.push("avatar.skin".into());
+            } else {
+                av.insert("skin".into(), json!(x));
+            }
+        }
+        if let Some(x) = a.round {
+            if (0.0..=100.0).contains(&x) {
+                av.insert("round".into(), js_num(x));
+            } else {
+                bad.push("avatar.round".into());
+            }
+        }
+        p.insert("avatar".into(), Value::Object(av));
+    }
+    if let Some(x) = req.default_project.into_option() {
+        p.insert("default_project".into(), json!(x));
+    }
+    if let Some(x) = req.prompt.into_option() {
+        if x.as_deref().is_some_and(|s| !check_len(s, 0, 20000)) {
+            bad.push("prompt".into());
+        } else {
+            p.insert("prompt".into(), json!(x));
+        }
+    }
+    if let Some(x) = req.device.into_option() {
+        p.insert("device".into(), json!(x));
+    }
+    if let Some(e) = req.enabled {
+        p.insert("enabled".into(), json!(e));
+    }
+    if let Some(raw_fs) = req.fallback_surfaces {
+        let Some(arr) = raw_fs.as_array() else {
+            return Err(ApiError::Invalid(vec!["fallback_surfaces".into()]));
+        };
+        if arr.len() > 8 {
+            return Err(ApiError::Invalid(vec!["fallback_surfaces".into()]));
+        }
+        let mut parsed: Vec<steve_store::ExecutionSurface> = Vec::with_capacity(arr.len());
+        for (idx, item) in arr.iter().enumerate() {
+            let Some(obj) = item.as_object() else {
+                bad.push(format!("fallback_surfaces.{idx}"));
+                continue;
+            };
+            let h = match obj.get("harness").and_then(Value::as_str) {
+                Some(h) if harnesses.iter().any(|id| id == h) => h.to_string(),
+                _ => {
+                    bad.push(format!("fallback_surfaces.{idx}.harness"));
+                    String::new()
+                }
+            };
+            let m = match obj.get("model") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) if check_len(s, 0, 200) => {
+                    let trimmed = s.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }
+                _ => {
+                    bad.push(format!("fallback_surfaces.{idx}.model"));
+                    None
+                }
+            };
+            let e = match obj.get("reasoning_effort") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) if valid_effort(s) => {
+                    let trimmed = s.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }
+                _ => {
+                    bad.push(format!("fallback_surfaces.{idx}.reasoning_effort"));
+                    None
+                }
+            };
+            if !h.is_empty() {
+                let surface = steve_store::ExecutionSurface {
+                    harness: h,
+                    model: m,
+                    reasoning_effort: e,
+                };
+                if !parsed.contains(&surface) {
+                    parsed.push(surface);
+                }
+            }
+        }
+        p.insert("fallback_surfaces".into(), json!(parsed));
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
     // a seeded text the page showed in its reader's language and sent back unchanged stays the seed
     seeded::store(&mut p, seeded::BOT);
     Ok(p)
@@ -236,7 +375,7 @@ pub async fn prompt(
 /// Picks `(harness, perm_mode)` for a newly created bot when omitted: prefers `ws`'s main bot's
 /// harness if ready/unknown, else the first ready harness, and picks a compatible `perm_mode`.
 fn fill_new_bot_defaults(
-    r: &dyn crate::backend::Repo,
+    r: &StoreBackend,
     ws: &str,
     harnesses: &[steve_core::harnesses::Harness],
     p: &mut Obj,
@@ -272,6 +411,32 @@ fn fill_new_bot_defaults(
     }
 }
 
+/// Validates `fields` against `harnesses`, creates the Bot (with steward adoption in the same
+/// transaction via [`StoreBackend::bot_create`]), and returns its API representation.
+fn create_bot_in(
+    r: &StoreBackend,
+    ws: &str,
+    author: &str,
+    fields: &Obj,
+    harnesses: &[steve_core::harnesses::Harness],
+) -> ApiResult {
+    steve_core::models::validate_bot_perm_mode(fields, harnesses)
+        .map_err(|f| ApiError::Invalid(vec![f.into()]))?;
+    steve_core::models::validate_bot_patch(None, fields, harnesses)
+        .map_err(ApiError::bad_request)?;
+    if let Some(Value::String(dp)) = fields.get("default_project")
+        && !dp.is_empty()
+    {
+        check_default_project(r, ws, dp)?;
+    }
+    let b = r.bot_create(ws, fields, author)?;
+    let allowed_ws = user_workspace_ids(r, author)?;
+    ok(Value::Object(selection_out(
+        bot_out(r, b, ws, &allowed_ws)?,
+        harnesses,
+    )))
+}
+
 pub async fn create(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -280,44 +445,11 @@ pub async fn create(
     let harnesses = st.domain.bot_harnesses(None).await?;
     let allowed = known_harness_ids(&st.cfg, &harnesses);
     let mut p = bot_in(&body(&b)?, true, &allowed)?;
-    let (ws, me) = (c.ws.clone(), c.me.clone());
-    let (out, id) = st
-        .write(move |r| {
-            fill_new_bot_defaults(r, &c.ws, &harnesses, &mut p);
-            let target_id = p.get("harness").and_then(Value::as_str).unwrap_or_default();
-            if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
-                && let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
-                && perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m))
-            {
-                return Err(ApiError::Invalid(vec!["perm_mode".into()]));
-            }
-            steve_core::models::validate_bot_patch(None, &p, &harnesses)
-                .map_err(ApiError::bad_request)?;
-            if let Some(Value::String(dp)) = p.get("default_project")
-                && !dp.is_empty()
-            {
-                check_default_project(r, &c.ws, dp)?;
-            }
-            let b = r.bot_create(&c.ws, &p, &c.me)?;
-            let allowed_ws = user_workspace_ids(r, &c.me)?;
-            let out = selection_out(bot_out(r, b, &c.ws, &allowed_ws)?, &harnesses);
-            let id = out.get("id").and_then(Value::as_str).map(str::to_string);
-            Ok((Value::Object(out), id))
-        })
-        .await?;
-    // the user who creates a Bot is its 负责人 (best effort: the Bot exists either way)
-    if let (Some(m), Some(id)) = (st.modules.clone(), id) {
-        let done = tokio::task::spawn_blocking(move || {
-            m.store.write(|tx| {
-                steve_modules::contacts::stewards::adopt(tx, &ws, "bot", &id, Some(&me), "seed")
-            })
-        })
-        .await;
-        if let Ok(Err(e)) = done {
-            tracing::warn!(error = %e, "bot create: no default 负责人");
-        }
-    }
-    ok(out)
+    st.write(move |r| {
+        fill_new_bot_defaults(r, &c.ws, &harnesses, &mut p);
+        create_bot_in(r, &c.ws, &c.me, &p, &harnesses)
+    })
+    .await
 }
 
 /// “描述给 Steve，让它起草”: the model fills the bot's fields from one sentence.
@@ -326,10 +458,11 @@ pub async fn draft(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let desc = k.str("desc", Str::len(2, 2000));
-    k.finish()?;
+    let req: DraftBody = json_body(&b)?;
+    if !check_len(&req.desc, 2, 2000) {
+        return Err(ApiError::Invalid(vec!["desc".into()]));
+    }
+    let desc = req.desc;
     let harnesses = st.domain.bot_harnesses(None).await?;
     let ws_pref = c.ws.clone();
     let preferred = st
@@ -399,17 +532,8 @@ pub async fn draft(
     f.insert("harness".into(), json!(harness_id));
     f.insert("perm_mode".into(), json!(perm_mode));
     let harnesses = st.domain.bot_harnesses(None).await?;
-    st.write(move |w| {
-        steve_core::models::validate_bot_patch(None, &f, &harnesses)
-            .map_err(ApiError::bad_request)?;
-        let b = w.bot_create(&c.ws, &f, &c.me)?;
-        let allowed_ws = user_workspace_ids(w, &c.me)?;
-        ok(Value::Object(selection_out(
-            bot_out(w, b, &c.ws, &allowed_ws)?,
-            &harnesses,
-        )))
-    })
-    .await
+    st.write(move |w| create_bot_in(w, &c.ws, &c.me, &f, &harnesses))
+        .await
 }
 
 pub async fn patch_one(
@@ -427,28 +551,8 @@ pub async fn patch_one(
         let Some(cur) = r.bot_get(&id)? else {
             return Err(ApiError::not_found(Noun::Bot.missing()));
         };
-        let cur_h = str_of(&cur, "harness");
-        let switched_to = p
-            .get("harness")
-            .and_then(Value::as_str)
-            .filter(|h| !h.is_empty() && *h != cur_h.as_str())
-            .map(str::to_string);
-        let target_id = switched_to.as_deref().unwrap_or(&cur_h);
-        if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
-            && let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
-            && perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m))
-        {
-            return Err(ApiError::Invalid(vec!["perm_mode".into()]));
-        }
-        if let Some(target_id) = &switched_to
-            && let Some(target) = harnesses.iter().find(|h| h.id == *target_id)
-            && !p.contains_key("perm_mode")
-        {
-            let cur_pm = str_of(&cur, "perm_mode");
-            if perm_mode_of_key(&cur_pm).is_some_and(|m| !target.offers_bot_mode(m)) {
-                p.insert("perm_mode".into(), json!(target.default_perm_mode()));
-            }
-        }
+        steve_core::models::reconcile_bot_perm_mode(Some(&cur), &mut p, &harnesses)
+            .map_err(|f| ApiError::Invalid(vec![f.into()]))?;
         if let Some(Value::String(dp)) = p.get("default_project")
             && !dp.is_empty()
         {
@@ -470,10 +574,11 @@ pub async fn set_workspaces(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let ids = k.str_array("ids", Some(1), None);
-    k.finish()?;
+    let req: WorkspacesBody = json_body(&b)?;
+    if req.ids.is_empty() {
+        return Err(ApiError::Invalid(vec!["ids".into()]));
+    }
+    let ids = req.ids;
     st.write(move |r| {
         let Some(bot) = r.bot_get(&id)? else {
             return Err(ApiError::not_found(Noun::Bot.missing()));
@@ -524,25 +629,17 @@ pub async fn duplicate(
         b.insert("name".into(), json!(name));
         b.insert("enabled".into(), json!(false));
         b.insert("main".into(), json!(false));
+        b.insert(
+            "fallback_surfaces".into(),
+            json!(r.bot_fallback_surfaces(&id)?),
+        );
         if let Some(Value::String(dp)) = b.get("default_project")
             && !dp.is_empty()
             && check_default_project(r, &c.ws, dp).is_err()
         {
             b.insert("default_project".into(), Value::Null);
         }
-        steve_core::models::validate_bot_patch(None, &b, &harnesses)
-            .map_err(ApiError::bad_request)?;
-        let n = r.bot_create(&c.ws, &b, &c.me)?;
-        let nid = str_of(&n, "id");
-        let mut off = Obj::new();
-        off.insert("enabled".into(), json!(false));
-        r.bot_patch(&nid, &off, &c.me)?;
-        let got = r.bot_get(&nid)?.unwrap_or_default();
-        let allowed_ws = user_workspace_ids(r, &c.me)?;
-        ok(Value::Object(selection_out(
-            bot_out(r, got, &c.ws, &allowed_ws)?,
-            &harnesses,
-        )))
+        create_bot_in(r, &c.ws, &c.me, &b, &harnesses)
     })
     .await
 }
@@ -555,13 +652,12 @@ pub async fn delete_one(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let to = k.str("to", Str::ANY);
-    let memory = k
-        .opt_enum("memory", &["delete", "export"])
-        .unwrap_or_else(|| "export".into());
-    k.finish()?;
+    let req: DeleteBody = json_body(&b)?;
+    let memory = req.memory.unwrap_or_else(|| "export".into());
+    if !matches!(memory.as_str(), "delete" | "export") {
+        return Err(ApiError::Invalid(vec!["memory".into()]));
+    }
+    let to = req.to;
     let (i, t, caller) = (id.clone(), to.clone(), c.clone());
     let (mem, bot_wss, mine_vec) = st
         .read(move |r| {
@@ -632,13 +728,12 @@ pub async fn remove_from_workspace(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let to = k.str("to", Str::ANY);
-    let memory = k
-        .opt_enum("memory", &["delete", "export", "keep"])
-        .unwrap_or_else(|| "export".into());
-    k.finish()?;
+    let req: DeleteBody = json_body(&b)?;
+    let memory = req.memory.unwrap_or_else(|| "export".into());
+    if !matches!(memory.as_str(), "delete" | "export" | "keep") {
+        return Err(ApiError::Invalid(vec!["memory".into()]));
+    }
+    let to = req.to;
     let (i, t, ws) = (id.clone(), to.clone(), c.ws.clone());
     let mem = st
         .read(move |r| {
@@ -713,10 +808,11 @@ pub async fn memories(
 }
 
 fn memory_text(v: &Value) -> Result<String, ApiError> {
-    let mut k = Check::object(v);
-    let text = k.str("text", Str::len(1, 2000));
-    k.finish()?;
-    Ok(text)
+    let req: TextBody = from_body(v.clone())?;
+    if !check_len(&req.text, 1, 2000) {
+        return Err(ApiError::Invalid(vec!["text".into()]));
+    }
+    Ok(req.text)
 }
 
 pub async fn memory_add(
@@ -784,6 +880,26 @@ mod tests {
             bot_in(&json!({"harness": "unknown"}), false, &ids()).unwrap_err(),
             ApiError::Invalid(vec!["harness".into()])
         );
+        let p = bot_in(
+            &json!({"fallback_surfaces": [
+                {"harness": "codex", "model": "gpt-5.4", "reasoning_effort": "high"},
+                {"harness": "codex", "model": "gpt-5.4", "reasoning_effort": "high"},
+                {"harness": "mine", "model": null}
+            ]}),
+            false,
+            &ids(),
+        )
+        .expect("fallback surfaces ok");
+        assert_eq!(p["fallback_surfaces"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            bot_in(
+                &json!({"fallback_surfaces": [{"harness": "unknown"}]}),
+                false,
+                &ids(),
+            )
+            .unwrap_err(),
+            ApiError::Invalid(vec!["fallback_surfaces.0.harness".into()])
+        );
     }
 
     #[test]
@@ -822,6 +938,15 @@ mod tests {
             bot_in(&json!({}), true, &ids()).unwrap_err(),
             ApiError::Invalid(vec!["name".into()])
         );
+        for mode in ["plan", "ask", "accept_edits", "auto", "full_access"] {
+            assert!(bot_in(&json!({"perm_mode": mode}), false, &ids()).is_ok());
+        }
+        for legacy in ["default", "acceptEdits", "bypassPermissions", "dontAsk"] {
+            assert_eq!(
+                bot_in(&json!({"perm_mode": legacy}), false, &ids()).unwrap_err(),
+                ApiError::Invalid(vec!["perm_mode".into()])
+            );
+        }
     }
 
     #[test]

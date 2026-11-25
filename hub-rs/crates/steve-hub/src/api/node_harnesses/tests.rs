@@ -26,6 +26,7 @@ fn local(node: Arc<dyn Node>) -> Target {
         node: Some(node),
         remote: None,
         generation: None,
+        upgrade_only: false,
     }
 }
 
@@ -68,10 +69,90 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
         Some(HarnessDegradedReason::AuthenticationRequired)
     );
     assert!(h.error.is_none());
+
+    let mut path_mismatch = cap("cli-1", "actual/model");
+    path_mismatch.setup = None;
+    let a = path_mismatch.adapter.as_mut().unwrap();
+    a.status = AdapterStatus::AdapterMissing;
+    a.session = None;
+    a.error = Some("the adapter's command is missing".into());
+    a.missing_command = Some(steve_node_api::MissingCommandDiagnostic {
+        command: "agy".into(),
+        service_path: "/usr/bin:/bin:/usr/sbin:/sbin".into(),
+        login_shell_path: Some("/Users/example/.local/bin/agy".into()),
+        login_shell: Some("/bin/zsh".into()),
+        refresh_command: "steve node refresh-env".into(),
+    });
+    let h = harness(path_mismatch.clone());
+    assert_eq!(h.available, Some(false));
+    assert_eq!(
+        h.degraded_reason,
+        Some(HarnessDegradedReason::CommandNotInServicePath)
+    );
+    let diag = h.missing_command.expect("missing command forwarded");
+    assert_eq!(diag.command, "agy");
+    assert_eq!(diag.service_path, "/usr/bin:/bin:/usr/sbin:/sbin");
+    assert_eq!(
+        diag.login_shell_path.as_deref(),
+        Some("/Users/example/.local/bin/agy")
+    );
+    assert_eq!(diag.refresh_command, "steve node refresh-env");
+
+    path_mismatch
+        .adapter
+        .as_mut()
+        .unwrap()
+        .missing_command
+        .as_mut()
+        .unwrap()
+        .login_shell_path = None;
+    let h = harness(path_mismatch);
+    assert_eq!(h.available, Some(false));
+    assert_eq!(
+        h.degraded_reason,
+        Some(HarnessDegradedReason::AdapterMissing)
+    );
 }
 
 #[test]
 fn typed_installed_and_degraded_reasons_distinguish_uninstalled_outdated_and_broken() {
+    // Built-in PATH binary installed in login shell but missing from service PATH (e.g. agy).
+    let path_mismatch_builtin: HarnessCapability = serde_json::from_value(json!({
+        "name": "antigravity", "version": "", "sessions": false, "jobs": false,
+        "models": [], "resume": true, "cancel": true, "permissions": true,
+        "images": false, "enforcement": [],
+        "adapter": {
+            "title": "Antigravity CLI",
+            "builtin": true,
+            "status": "adapter_missing",
+            "missing_command": {
+                "command": "agy",
+                "service_path": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "login_shell_path": "/Users/example/.local/bin/agy",
+                "login_shell": "/bin/zsh",
+                "refresh_command": "steve node refresh-env"
+            }
+        },
+        "setup": null
+    }))
+    .unwrap();
+    let v = harness(path_mismatch_builtin);
+    assert!(
+        v.installed,
+        "login-shell hit proves the command is installed"
+    );
+    assert_eq!(v.available, Some(false));
+    assert_eq!(
+        v.degraded_reason,
+        Some(HarnessDegradedReason::CommandNotInServicePath)
+    );
+    assert_eq!(
+        v.missing_command
+            .as_ref()
+            .and_then(|m| m.login_shell_path.as_deref()),
+        Some("/Users/example/.local/bin/agy")
+    );
+
     // Truly uninstalled built-in path-only adapter (no setup, empty version, adapter missing).
     let absent_builtin: HarnessCapability = serde_json::from_value(json!({
         "name": "cursor", "version": "", "sessions": false, "jobs": false,
@@ -217,7 +298,8 @@ async fn empty_success_failure_unsupported_and_offline_remain_distinct() {
             id: "never-seen".into(),
             node: None,
             remote: None,
-            generation: None
+            generation: None,
+            upgrade_only: false,
         })
         .await
         .stale
@@ -372,13 +454,14 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     let fake = FakeNode::new("local");
     fake.set_harnesses(vec![cap("local-cli", "local/model")]);
     let runtime = NodeRuntime::new(h.store.clone(), fake, h.ends.clone());
+    let bus = crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let st = AppState::new(
-        cfg,
-        Arc::new(StoreBackend(h.store.clone())),
-        Arc::new(crate::backend::NoDomain),
-        crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-            Default::default(),
-        ))),
+        cfg.clone(),
+        StoreBackend(h.store.clone()),
+        crate::wire::core::CoreDomain::for_test(&cfg, h.store.clone(), &bus, None),
+        bus,
     )
     .with_node(Some(runtime))
     .with_nodes(Some(h.svc.clone()));
@@ -509,5 +592,29 @@ async fn off_returns_the_probe_response_without_retaining_a_report() {
     assert_eq!(
         inv.view(&target).await.state,
         NodeHarnessReportState::Unreported
+    );
+}
+
+#[tokio::test]
+async fn upgrade_only_target_returns_upgrade_required_without_calling_probe() {
+    let inv = Inventory::new(Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
+    let fake = FakeNode::new("n_old");
+    fake.set_harnesses(vec![cap("1", "old/model")]);
+    let target = Target {
+        id: "n_old".into(),
+        node: Some(fake.clone()),
+        remote: None,
+        generation: Some(1),
+        upgrade_only: true,
+    };
+    let report = inv.refresh(&target, true).await;
+    assert_eq!(report.state, NodeHarnessReportState::UpgradeRequired);
+    assert!(report.error.is_none());
+    assert!(!report.refreshing);
+    assert!(
+        fake.log().is_empty(),
+        "upgrade-only target must never invoke ordinary probe()"
     );
 }

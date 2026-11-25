@@ -22,6 +22,7 @@ pub struct ItemOperation {
     pub evidence: Value,
     pub created: i64,
     pub updated: i64,
+    pub wait: steve_types::WaitContract,
 }
 
 const COLUMNS: &[&str] = &[
@@ -37,6 +38,10 @@ const COLUMNS: &[&str] = &[
     "evidence",
     "created",
     "updated",
+    "wait_owner",
+    "wait_started_at",
+    "wait_deadline",
+    "wait_on_timeout",
 ];
 
 fn query() -> SelectStatement {
@@ -47,6 +52,7 @@ fn query() -> SelectStatement {
 }
 
 fn row(r: &Row<'_>) -> Result<ItemOperation> {
+    let wait = crate::wait_repo::decode_contract(r.get(12)?, r.get(13)?, r.get(14)?, r.get(15)?)?;
     Ok(ItemOperation {
         id: r.get(0)?,
         item_id: r.get(1)?,
@@ -60,6 +66,7 @@ fn row(r: &Row<'_>) -> Result<ItemOperation> {
         evidence: crate::types::json_or(r.get(9)?, Value::Object(Map::new())),
         created: r.get(10)?,
         updated: r.get(11)?,
+        wait,
     })
 }
 
@@ -118,6 +125,21 @@ pub fn add(
     }
     let id = uid("op");
     let at = now();
+    let ws = items::item_workspace(w, item_id)?.unwrap_or_else(|| crate::WS.to_string());
+    let owner_name = if kind.trim().is_empty() {
+        "operations"
+    } else {
+        kind
+    };
+    let wait = crate::wait_repo::contract_for(
+        w,
+        &ws,
+        steve_types::WaitKind::ItemOperation,
+        steve_types::WaitOwner::system(owner_name),
+        at,
+        steve_types::WaitTimeoutAction::EscalateToOwner,
+    )?;
+    let wait_owner = wait.owner.to_code();
     w.exec(
         Query::insert()
             .into_table("item_operations")
@@ -135,6 +157,10 @@ pub fn add(
                 to_json(evidence)?.into(),
                 at.into(),
                 at.into(),
+                wait_owner.as_str().into(),
+                wait.started_at.0.into(),
+                wait.deadline.0.into(),
+                wait.on_timeout.as_str().into(),
             ]),
     )?;
     emit_item(w, item_id)?;

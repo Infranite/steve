@@ -262,6 +262,16 @@ pub(crate) fn assess(now: &Snapshot, base: Option<&Snapshot>) -> Health {
     let lookups = w.delta("steve_cache_requests_total", &|s| {
         s.label("result") != Some("off")
     });
+    // Backup planning samples free space and the space for staging and repacking the current DB.
+    let mut backup_space = Check::new(
+        "backup_destination_space",
+        "bytes",
+        w.now("steve_backup_destination_available_bytes", &all)
+            .filter(|bytes| bytes.is_finite()),
+    );
+    backup_space.min = w
+        .now("steve_backup_destination_required_bytes", &all)
+        .filter(|bytes| bytes.is_finite() && *bytes > 0.0);
     let mut checks = vec![
         Check::new(
             "http_p95",
@@ -330,6 +340,7 @@ pub(crate) fn assess(now: &Snapshot, base: Option<&Snapshot>) -> Health {
             w.per_day(w.delta("steve_process_disk_written_bytes", &all)),
         )
         .max(5.0 * GIB),
+        backup_space,
         Check::new(
             "web_interaction_p75",
             "seconds",
@@ -544,6 +555,32 @@ steve_plugin_restarts_total{plugin="p\"1"} 1
                 ("node_command_failures", Some("n1")),
             ]
         );
+    }
+
+    #[test]
+    fn backup_space_uses_the_sampled_requirement() {
+        let sample = |required| {
+            Snapshot::parse(
+                &format!(
+                    "steve_backup_destination_available_bytes 200\nsteve_backup_destination_required_bytes {required}\n"
+                ),
+                60.0,
+            )
+        };
+        for (required, expected) in [("200", Some(200.0)), ("201", Some(201.0)), ("NaN", None)] {
+            let health = assess(&sample(required), None);
+            assert_eq!(
+                check(&health, "backup_destination_space", None).min,
+                expected
+            );
+            assert_eq!(
+                health
+                    .warnings
+                    .iter()
+                    .any(|check| check.key == "backup_destination_space"),
+                required == "201"
+            );
+        }
     }
 
     #[test]

@@ -161,6 +161,9 @@ pub struct AdapterInfo {
     /// Strongly-typed runtime adapter capabilities declared by the Node's `steve-acp` adapter layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<AdapterCapabilities>,
+    /// Diagnostic context when the adapter command cannot be resolved from the service's `PATH`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_command: Option<steve_types::devices::MissingCommandDiagnostic>,
 }
 
 pub use steve_types::devices::{

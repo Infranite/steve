@@ -395,6 +395,7 @@ pub fn owner_me(c: &mut impl Read, ws: &str) -> ApiResult<Option<Party>> {
 pub struct StewardOut {
     pub person_id: String,
     pub person_name: String,
+    pub person_avatar: Value,
     pub is_me: bool,
     pub role: String,
     pub role_label: String,
@@ -410,6 +411,10 @@ fn steward_out(c: &mut impl Read, s: &Steward) -> ApiResult<StewardOut> {
     Ok(StewardOut {
         person_id: s.person_id.clone(),
         person_name: p.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
+        person_avatar: p
+            .as_ref()
+            .map(|p| p.avatar.clone())
+            .unwrap_or_else(|| Value::Object(Default::default())),
         is_me: p.as_ref().is_some_and(Party::is_me),
         role: s.role.clone(),
         role_label: role_shown(&s.role),
@@ -728,10 +733,8 @@ fn record(
         context: Value::Null,
     };
     let p = changes::store_plan(m, who, "contact", &prepared, plan, origin)?;
-    match changes::apply(m, who, &p.id) {
-        Some(r) => r.map(|_| Some(p.id)),
-        None => Err(ApiError::Internal("steward changeset vanished".into())),
-    }
+    changes::apply(m, who, &p.id)?;
+    Ok(Some(p.id))
 }
 
 /// `PUT /stewards/:type/:id {person_id, role?, replace?}`.
@@ -1045,6 +1048,18 @@ pub fn link(
         &json!({ "object_type": object_type, "person": person_id, "source": source }),
     )?;
     Ok(true)
+}
+
+/// Creates a Bot and assigns `author`'s `"me"` party as its 负责人 in the same transaction.
+pub fn create_bot(
+    tx: &mut W<'_>,
+    ws: &str,
+    bot: &steve_store::NewBot,
+    author: &str,
+) -> ApiResult<steve_store::Bot> {
+    let created = steve_store::bots::create(tx, ws, bot, author)?;
+    adopt(tx, ws, "bot", &created.id, Some(author), "seed")?;
+    Ok(created)
 }
 
 /// A new object gets “我” of `user` (or of the workspace's owner) as 负责人, unless it has stewards

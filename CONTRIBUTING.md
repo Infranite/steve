@@ -29,6 +29,18 @@ npm run test:web
 
 CI enforces Rust formatting: run `cargo fmt --all` in `hub-rs/` with the pinned toolchain (`cargo +1.99.1 fmt --all`) before you push.
 
+The backup integration tests and supervisor fixtures use the same verified restic binary as a release. Before running those tests on a supported release platform, stage it next to both test executables from the repository root.
+
+```sh
+target=$(rustc -vV | sed -n 's/^host: //p')
+debug="${CARGO_TARGET_DIR:-hub-rs/target}/debug"
+python3 scripts/package-release.py restic --target "$target" --out "$debug"
+mkdir -p "$debug/deps"
+cp -p "$debug/restic" "$debug/deps/restic"
+```
+
+On an idle machine, run `python3 ops/bench-backup.py > backup-benchmark.json` to build the release Hub and measure backups and restores of a synthetic 1.5 GB SQLite payload in a disposable installation. The cold pre-upgrade measurement includes repository initialization, which is also reported separately. The other samples cover a pre-upgrade backup in the same repository, a second daily backup with unchanged data, an incremental daily backup after a 10 MB write, a full restore and a database-only restore. Initialization bytes are the size of the new repository files. Backup bytes come from the verified receipts. The timings exclude the build, engine staging, fixture preparation and telemetry readback. A failed run returns a nonzero status and reports any completed samples in the JSON output.
+
 The workspace suite includes the Node boundary guard (`hub-rs/crates/steve-hub/tests/node_boundary.rs`): production code outside the Node crates (`steve-node` and `steve-node-cli`) may start processes or harnesses, list directories, or open, write, create or remove files and directories only at the call sites in `node_boundary.txt`. Each listed rule and file needs a reason in the guard's `RATIONALE` table, and each reason must still have a listed key. A new site fails; a removed site requires shortening the inventory. When the last site for a key disappears, remove its rationale too. Select only the inventory test when rewriting this list, then run the complete Node boundary test binary without BLESS so inventory writes and rationale validation do not race. Diagnostics include source line numbers. Imports count too, so a braced, renamed or glob `use` of a listed item cannot hide a call. This is a text scan of where handles are created or imported, not every place one is passed to.
 
 The harness parity guards (`hub-rs/crates/steve-hub/tests/harness_parity.rs` and `web/test/harness-parity.test.mjs`) fail when production code tells harnesses apart by name outside the adapter layer (`steve-acp/src/config.rs`, `steve-acp/src/adapters.rs`). Declare an adapter property instead. Existing exceptions are counted in the Rust and web parity inventories. The Chinese comparison guards (`zh_compare.rs` and `web/test/guard-zh-compare.test.mjs`) use the same shrinking-inventory rules.
@@ -85,11 +97,27 @@ Versions and release notes are generated automatically from commits at release t
 - **Commit and pull request format (Conventional Commits).**
   - Every commit subject and pull request title uses `type(scope): imperative summary` (or `type: imperative summary`), where `type` is one of `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`.
   - Mark incompatible public-contract changes with `!` after the type/scope (for example `feat(api)!: ...`) or a `BREAKING CHANGE: <why>` trailer.
-  - When operators must act before or after upgrading, add a trailer `Upgrade: <what to do>` (may span multiple lines) in the commit message or pull request description.
-  - Pull requests merge into `main` with merge commits so `main`'s first-parent history records one entry per PR. Add an optional `## Release note` section to the PR description for user-facing context; when omitted, the PR title is used. Direct commits use their commit subject.
-  - CI rejects pull requests whose title does not follow this format, whose release trailers are empty, or that add/modify files under `docs/releases/` (except a `chore(release): vX.Y.Z` release PR adding `docs/releases/X.Y.Z.md` alone), via `ops/cut-release.py lint --github-event`. Locally, `python3 ops/cut-release.py lint` enforces the same rules on the current branch (use `--range A..B` to check any commit range).
+  - When operators must act before or after upgrading, add a trailer `Upgrade: <what to do>` (may span multiple lines) in the commit message or pull request description. When a pull request description carries `Upgrade:` (or `BREAKING CHANGE:`), it takes precedence over commit trailers inside that PR so each PR's upgrade notice is not duplicated; identical notices are deduplicated across the section.
+  - Pull requests merge into `main` with merge commits; when multiple pull requests land together through an integration pull request, `ops/cut-release.py` still resolves each merged pull request from its commits. Add an optional `## Release note` section to the PR description for user-facing context; when omitted, the PR title is used. `## Release note` runs until the next Markdown heading, so place sections in this order (keeping test summaries and any trailing signature out of `## Release note`):
+
+    ```markdown
+    ## Release note
+
+    Concise user-facing summary of what changed.
+
+    Upgrade: optional operator action before or after upgrading.
+
+    ## Checks
+
+    Checks and tests run for this pull request.
+
+    <!-- Optional attribution / signature line goes after ## Checks -->
+    ```
+
+    Direct commits without a merged PR use their commit subject.
+  - CI rejects pull requests whose title does not follow this format, whose release trailers are empty, whose `## Release note` section contains a `Checks:` paragraph or a signature/attribution line (move them under a separate heading such as `## Checks`), or that add/modify files under `docs/releases/` (except a `chore(release): vX.Y.Z` release PR adding `docs/releases/X.Y.Z.md` alone), via `ops/cut-release.py lint --github-event`. Locally, `python3 ops/cut-release.py lint` enforces the same rules on the current branch (use `--range A..B` to check any commit range, or `--pr-title`/`--pr-body` to check a PR description).
 - **Automatic version calculation and release notes.**
-  - `ops/cut-release.py` walks `main`'s first-parent commits since the highest `vX.Y.Z` tag, fetches live PR titles and descriptions from GitHub (so editing a merged PR's title or description on GitHub takes effect immediately), and computes the next version automatically:
+  - `ops/cut-release.py` walks all commits since the highest `vX.Y.Z` tag, resolves every commit's merged pull requests via GitHub (`commits/{sha}/pulls`, so pull requests landed via an integration branch are included alongside direct merges), fetches live PR titles and descriptions from GitHub (so editing a merged PR's title or description on GitHub takes effect immediately), and computes the next version automatically across all resolved PRs and direct commits:
     - `!` or `BREAKING CHANGE:` → **MAJOR** after `1.0`, **MINOR** before `1.0`;
     - `feat` or any `Upgrade:` trailer → **MINOR**;
     - anything else → **PATCH**.

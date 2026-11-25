@@ -11,7 +11,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Page, Row, Segmented, StatusDot, Meta, Empty, go, Panel, SectionLabel, Pill } from "@/ui"
 import { Composer } from "@/composer"
 import { tm, toast } from "@/store"
-import { flowApi, useLoad, errText, type Flow, type GNode, type Graph, type Run } from "@/api/flow"
+import { flowApi, errText, type Flow, type GNode, type Graph, type Run } from "@/api/flow"
+import { useHubQuery } from "@/data/use-hub-query"
 import { HubError } from "@/api"
 import { traceOf } from "@/auto/trace"
 import { lazyView } from "@/lazy"
@@ -28,10 +29,10 @@ const authorLabel = (a: string) => (a === "steve" ? "Steve" : a.startsWith("plug
 type Trace = { key: string; path: string[]; ran: Record<string, any>; run: Run; label: string }
 
 export function RuleView({ id }: { id: string }) {
-  const L = useLoad(() => flowApi.flow(id), [id], ["flow"])
-  const flows = useLoad(() => flowApi.flows("flow"), [])
-  const sources = useLoad(() => flowApi.sources().catch(() => []), [])
-  const runs = useLoad(() => flowApi.flowRuns(id, 10), [id], ["run"])
+  const L = useHubQuery(["flow", "rule", id], () => flowApi.flow(id), { events: ["flow"], debounceMs: 300 })
+  const flows = useHubQuery(["flow", "flows", "flow"], () => flowApi.flows("flow"))
+  const sources = useHubQuery(["flow", "sources-safe"], () => flowApi.sources().catch(() => []))
+  const runs = useHubQuery(["flow", "runs", id, 10], () => flowApi.flowRuns(id, 10), { events: ["run"], debounceMs: 300 })
   const [work, setWork] = useState<Graph | null>(null), [dirty, setDirty] = useState(false), [rev, setRev] = useState(0)
   const [sel, setSel] = useState<string | null>(null)
   const [trace, setTrace] = useState<Trace | null>(null)

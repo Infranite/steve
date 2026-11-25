@@ -1,5 +1,5 @@
 import type { RNodeHarness, RNodeHarnessReport } from "./api.ts"
-import type { NodeView } from "./device-model.ts"
+import { isUpgradeOnlyLink, type NodeView } from "./device-model.ts"
 import type { HarnessDegradedReason } from "./gen/HarnessDegradedReason.ts"
 import { hasUpgradeAction, type MergedNodeHarness } from "./harness-update-status.ts"
 import { t } from "./i18n/index.ts"
@@ -14,7 +14,7 @@ export type HarnessDisplayState =
 
 export type HarnessSection = "available" | "attention" | "not_installed"
 
-export type HarnessAttentionAction = "upgrade" | "install" | "retry_install" | "refresh"
+export type HarnessAttentionAction = "copy_refresh_env" | "upgrade" | "install" | "retry_install" | "refresh"
 
 export type PartitionedNodeHarnesses = {
   available: MergedNodeHarness[]
@@ -24,14 +24,15 @@ export type PartitionedNodeHarnesses = {
 
 const REASON_SEVERITY: Record<HarnessDegradedReason, number> = {
   authentication_required: 0,
-  version_outdated: 1,
-  runtime_incompatible: 2,
-  adapter_missing: 3,
-  install_failed: 4,
-  initialize_failed: 5,
-  session_unavailable: 6,
-  installing: 7,
-  probe_unknown: 8,
+  command_not_in_service_path: 1,
+  version_outdated: 2,
+  runtime_incompatible: 3,
+  adapter_missing: 4,
+  install_failed: 5,
+  initialize_failed: 6,
+  session_unavailable: 7,
+  installing: 8,
+  probe_unknown: 9,
 }
 
 export function harnessState(h: RNodeHarness): HarnessDisplayState {
@@ -51,6 +52,7 @@ export function isHarnessInstalled(item: MergedNodeHarness): boolean {
   if (update?.components.some((c) => c.state !== "not_installed" || !!c.installed)) return true
   if (!probe) return false
   if (probe.installed === true) return true
+  if (probe.missing_command?.login_shell_path) return true
   if (probe.degraded_reason != null) return true
   if (probe.available == null) return true
   if (probe.setup) {
@@ -89,6 +91,9 @@ export function attentionActionFor(
   opts: { canInstallLocal: boolean; canUpgrade: boolean },
 ): HarnessAttentionAction {
   const upgradeReady = opts.canUpgrade && !!item.update && hasUpgradeAction(item.update)
+  if (reason === "command_not_in_service_path" && item.probe?.missing_command?.refresh_command) {
+    return "copy_refresh_env"
+  }
   if (reason === "install_failed") {
     return opts.canInstallLocal ? "retry_install" : "refresh"
   }
@@ -153,9 +158,22 @@ export function partitionNodeHarnesses(items: readonly MergedNodeHarness[]): Par
   return { available, attention, notInstalled }
 }
 
-/** The target Node's own evidence. Offline and failures never look like a confirmed empty list. */
-export function harnessSummary(v: Pick<NodeView, "linked">, r?: RNodeHarnessReport | null): string {
+/** The target Node's own evidence. Offline, upgrade-only, and failures never look like a confirmed empty list. */
+export function harnessSummary(
+  v: Pick<NodeView, "linked" | "linkMode" | "node" | "version" | "hubVersion" | "protocolOlder">,
+  r?: RNodeHarnessReport | null,
+  hubVersion = "",
+): string {
   if (!v.linked || r?.state === "offline") return t(r?.checked_at ? "devices:harness.offlineCached" : "devices:harness.offline")
+  if (isUpgradeOnlyLink(v) || r?.state === "upgrade_required") {
+    const older = v.protocolOlder ?? v.node?.protocol_older ?? null
+    const from = v.version || ""
+    const to = v.hubVersion || hubVersion || ""
+    if (older === "hub") return t("devices:harness.upgradeRequiredHub", { from: from || "?", to: to || "?" })
+    return from && to
+      ? t("devices:harness.upgradeRequired", { from, to })
+      : t("devices:harness.upgradeRequiredUnknown")
+  }
   if (!r || r.state === "unreported") return t("devices:harness.unreported")
   if (r.state === "unsupported") return t("devices:harness.unsupported")
   if (r.state === "failed") return t(r.checked_at ? "devices:harness.failedCached" : "devices:harness.failed")

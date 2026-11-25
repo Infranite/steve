@@ -23,10 +23,12 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { IntegrationRow, IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
 import { go, Section, Panel, Row, Tile, Empty, Blank, Notice, Pill, Meta, StatusDot, Loading, Chevron } from "@/ui"
-import { modReq, Unauthenticated } from "@/api"
+import { Unauthenticated } from "@/api"
 import { accountsApi, type RAccount } from "@/api/accounts"
+import { pluginsApi, type Plugin, type PluginInstance as Instance, type PluginState as State, type PluginStore as Store, type PluginText as Text, type PluginsView as View } from "@/api/plugins"
 import { vaultApi } from "@/api/vault"
-import { useLoad, useBusy, report } from "@/accounts/load"
+import { useBusy, report } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { toast } from "@/store"
 import { t as tr, useT, lang } from "@/i18n"
 import { ago } from "@/i18n/format"
@@ -38,41 +40,7 @@ export const PLUGINS_CAT = Object.defineProperties(["plugins", "", PlugIcon, ""]
   3: { get: () => tr("manage:settings.catPluginsSub"), enumerable: true },
 }) as [string, string, any, string]
 
-/** a library's or a plugin's words: one string, or one per language */
-type Text = string | Record<string, string>
-type ConfigField = { key: string; label: Text; hint?: Text; secret: boolean; required: boolean }
-type State = "starting" | "running" | "waiting" | "stopped"
-type Instance = { instance: string; connection: string | null; status: { state: State; pid?: number; error?: string } }
-type Plugin = {
-  id: string; name: Text; summary: Text; kind: string; version: string; homepage: string | null; config: ConfigField[]
-  /** false: installed, and the library no longer lists it */
-  listed: boolean
-  /** this Hub cannot run it: its kind or its contract is from a newer Steve */
-  unsupported: "kind" | "contract" | null
-  /** the library has a build for the Hub's machine (or one for any machine) */
-  available: boolean
-  installed: { version: string; installed: number; config: ConfigField[] } | null; update: boolean
-  /** the caller's own */
-  connections: Instance[]
-}
-/** `address` and `error` are the owner's to see; anyone else gets `failed` */
-type Store = { id: string; name: Text | null; checked: number | null; official: boolean; plugins: Plugin[]; address?: string; error?: string | null; failed?: boolean }
-type View = { target: string; owner: boolean; stores: Store[] }
 type Entry = { s: Store; p: Plugin }
-
-const e = encodeURIComponent
-const pluginsApi = {
-  list: () => modReq<View>("GET", "/plugins"),
-  addStore: (address: string) => modReq<{ id: string }>("POST", "/plugins/stores", { address }),
-  /** `error`: the index could not be read this time; what was read before stays */
-  refresh: (store: string) => modReq<{ id: string; checked: number | null; error: string | null }>("POST", `/plugins/stores/${e(store)}/refresh`, {}),
-  removeStore: (store: string) => modReq<{ ok: true }>("DELETE", `/plugins/stores/${e(store)}`),
-  /** also the update: installs the version the library names now */
-  install: (store: string, plugin: string) => modReq<{ version: string; installed: number }>("POST", `/plugins/installed/${e(store)}/${e(plugin)}`, {}),
-  uninstall: (store: string, plugin: string) => modReq<{ ok: true }>("DELETE", `/plugins/installed/${e(store)}/${e(plugin)}`),
-  /** the settings go straight into the body, never anywhere else */
-  connect: (store: string, plugin: string, config: Record<string, string>) => modReq<{ instance: string; connection: string }>("POST", `/plugins/installed/${e(store)}/${e(plugin)}/connect`, { config }),
-}
 
 /** in the reader's language, else English, else whatever there is */
 const say = (x: Text | null | undefined): string => (typeof x === "string" ? x : x ? x[lang()] ?? x.en ?? Object.values(x)[0] ?? "" : "")
@@ -93,22 +61,22 @@ type Dlg = { k: "connect"; s: Store; p: Plugin } | { k: "connected"; connection:
 
 export function PluginsSettingsPane() {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["plugins", "list"], async () => {
     const [v, mine] = await Promise.all([pluginsApi.list(), accountsApi.accounts({ scope: "mine" }).catch(() => [] as RAccount[])])
     return { v, mine }
-  }, [], ["connection"])
+  }, { events: ["connection"] })
   const [dlg, setDlg] = useState<Dlg | null>(null)
   /* a plugin process's state has no event of its own: while one of the caller's is starting or waiting, look again */
-  const unsettled = L.s === "ok" && L.data.v.stores.some((s) => s.plugins.some((p) => p.connections.some((c) => c.status.state === "starting" || c.status.state === "waiting")))
+  const unsettled = !!L.data && L.data.v.stores.some((s) => s.plugins.some((p) => p.connections.some((c) => c.status.state === "starting" || c.status.state === "waiting")))
   const { reload } = L
   useEffect(() => { if (!unsettled) return; const h = setInterval(() => void reload(), 5000); return () => clearInterval(h) }, [unsettled, reload])
   /* what is installed changed: the theme plugins are read again, so a new skin is a choice in 外观 at once (and on
    * opening the pane, so a theme's state below is this client's own) */
   const changed = async () => { await reload(); await syncPluginThemes().catch(report) }
   useEffect(() => { void syncPluginThemes().catch(report) }, [])
-  if (L.s === "loading") return <Loading />
-  if (L.s === "error") return (
-    <div data-plugins-error><Empty compact className="bg-muted/50" icon={<PlugIcon />} title={t("pages:plugins.loadFailed")} sub={L.err}
+  if (L.loading) return <Loading />
+  if (L.error || !L.data) return (
+    <div data-plugins-error><Empty compact className="bg-muted/50" icon={<PlugIcon />} title={t("pages:plugins.loadFailed")} sub={L.error?.message ?? ""}
       action={<Button size="sm" variant="outline" onClick={() => void L.reload()} data-plugins-retry>{t("common:action.retry")}</Button>} /></div>
   )
   const { v, mine } = L.data

@@ -4,6 +4,7 @@
 //! metric is described in [`catalog`]; labels take bounded values only (route templates, methods,
 //! results, reason codes, harnesses, plugin and Node ids), never a session, item or message id.
 //! Hot paths use static keys or handles registered once; nothing here writes to the database.
+pub(crate) mod backup;
 mod catalog;
 pub(crate) mod health;
 pub(crate) mod nodes;
@@ -68,6 +69,20 @@ const COUNT_BUCKETS: &[f64] = &[
 const LONG_BUCKETS: &[f64] = &[
     0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0, 21600.0,
     86400.0, 604800.0,
+];
+const TOKEN_BUCKETS: &[f64] = &[
+    4_000.0,
+    16_000.0,
+    32_000.0,
+    64_000.0,
+    128_000.0,
+    160_000.0,
+    200_000.0,
+    256_000.0,
+    384_000.0,
+    512_000.0,
+    768_000.0,
+    1_000_000.0,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +213,8 @@ fn buckets_for(name: &str) -> &'static [f64] {
         COUNT_BUCKETS
     } else if catalog::LONG.contains(&name) {
         LONG_BUCKETS
+    } else if catalog::TOKENS.contains(&name) {
+        TOKEN_BUCKETS
     } else {
         DEFAULT_BUCKETS
     }
@@ -556,6 +573,11 @@ fn recorder() -> HubRecorder {
             .set_buckets_for_metric(Matcher::Full((*name).into()), LONG_BUCKETS)
             .expect("static long buckets");
     }
+    for name in catalog::TOKENS {
+        b = b
+            .set_buckets_for_metric(Matcher::Full((*name).into()), TOKEN_BUCKETS)
+            .expect("static token buckets");
+    }
     HubRecorder {
         inner: b.build_recorder(),
         dyn_series: Arc::new(DynSeries::default()),
@@ -571,6 +593,7 @@ struct Installed {
     handle: HubHandle,
     started: Instant,
     history: Mutex<History>,
+    backup_paths: Option<(PathBuf, PathBuf)>,
 }
 
 #[derive(Default)]
@@ -619,6 +642,14 @@ pub(crate) fn remove_plugin(id: &str) {
 /// Installs the in-memory recorder, before anything that records starts. Collection is always on;
 /// a second call (or another recorder already in place) changes nothing.
 pub fn install() {
+    install_recorder(None);
+}
+
+pub(crate) fn install_with_backup(home: PathBuf, database: PathBuf) {
+    install_recorder(Some((home, database)));
+}
+
+fn install_recorder(backup_paths: Option<(PathBuf, PathBuf)>) {
     let recorder = recorder();
     let handle = recorder.handle();
     if let Err(e) = metrics::set_global_recorder(recorder) {
@@ -632,6 +663,7 @@ pub fn install() {
         handle,
         started: Instant::now(),
         history: Mutex::default(),
+        backup_paths,
     });
     // build_recorder starts no exporter upkeep: fold buffered histogram samples here.
     tokio::spawn(async move {
@@ -646,8 +678,11 @@ pub fn install() {
 
 /// Capture one interval. The Node readings already carry their Hub receipt timestamps. Both the
 /// typed history and exported gauges are updated from the same observations in this pass.
-pub(crate) fn record_minute(observations: Vec<nodes::Observation>) {
+pub(crate) async fn record_minute(observations: Vec<nodes::Observation>) {
     let Some(i) = INSTALLED.get() else { return };
+    if let Some((home, database)) = &i.backup_paths {
+        backup::collect(home, database).await;
+    }
     let mut history = i.history.lock().unwrap_or_else(|e| e.into_inner());
     history.nodes.record(observations, crate::nodes::now());
     let text = i.render();
@@ -1791,13 +1826,15 @@ mod tests {
             _ => None,
         })
         .unwrap();
+        let cfg = Arc::new(cfg);
+        let bus = crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let st = crate::api::AppState::new(
-            Arc::new(cfg),
-            Arc::new(crate::wire::store::StoreBackend(store.clone())),
-            Arc::new(crate::backend::NoDomain),
-            crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-                Default::default(),
-            ))),
+            cfg.clone(),
+            crate::wire::store::StoreBackend(store.clone()),
+            crate::wire::core::CoreDomain::for_test(&cfg, store.clone(), &bus, None),
+            bus,
         );
         let recorder = recorder();
         let handle = recorder.handle();
@@ -2056,6 +2093,36 @@ mod tests {
         assert!(
             !text.contains("kind=\"cache_write\""),
             "zero token counts must not emit empty series:\n{text}"
+        );
+    }
+
+    #[test]
+    fn node_link_mode_and_protocol_delta_metrics_are_described_and_removable() {
+        let recorder = recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            catalog::describe();
+            metrics::gauge!("steve_node_link_mode", "node" => "n_stale", "mode" => "normal")
+                .set(0.0);
+            metrics::gauge!("steve_node_link_mode", "node" => "n_stale", "mode" => "upgrade_only")
+                .set(1.0);
+            metrics::gauge!("steve_node_link_protocol_delta", "node" => "n_stale").set(2.0);
+        });
+        let text = handle.render();
+        for line in [
+            "# HELP steve_node_link_mode ",
+            "# HELP steve_node_link_protocol_delta ",
+            "steve_node_link_mode{node=\"n_stale\",mode=\"normal\"} 0",
+            "steve_node_link_mode{node=\"n_stale\",mode=\"upgrade_only\"} 1",
+            "steve_node_link_protocol_delta{node=\"n_stale\"} 2",
+        ] {
+            assert!(text.contains(line), "missing `{line}` in:\n{text}");
+        }
+        handle.remove_label("node", "n_stale");
+        let after = handle.render();
+        assert!(
+            !after.contains("n_stale"),
+            "removed node label must disappear from rendered metrics:\n{after}"
         );
     }
 }

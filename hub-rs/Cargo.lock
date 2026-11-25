@@ -5889,6 +5889,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
+ "jiff",
  "jsonschema",
  "libc",
  "markdown",
@@ -5925,7 +5926,6 @@ dependencies = [
  "steve-runtime",
  "steve-stats",
  "steve-store",
- "steve-store-sqlite",
  "steve-transcript",
  "steve-types",
  "steve-vault",
@@ -5972,6 +5972,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "shlex",
+ "steve-harness-spec",
  "steve-i18n",
  "steve-runtime",
  "steve-store",
@@ -6005,6 +6006,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "html2text",
+ "metrics",
  "pdf-extract",
  "pulldown-cmark",
  "quick-xml 0.42.0",
@@ -6261,6 +6263,7 @@ dependencies = [
  "metrics",
  "moka",
  "rand 0.10.3",
+ "serde_json",
  "steve-runtime",
  "tokio",
  "tracing",
@@ -6283,19 +6286,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "steve-storage-api"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "steve-types",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6336,7 +6326,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "steve-storage-api",
  "steve-store",
  "steve-types",
  "tempfile",

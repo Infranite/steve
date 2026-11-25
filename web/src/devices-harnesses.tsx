@@ -1,5 +1,6 @@
 import { useId, useMemo, useState, type ReactNode } from "react"
 import {
+  ArrowUpCircleIcon,
   CheckIcon,
   ChevronDownIcon,
   CopyIcon,
@@ -12,6 +13,7 @@ import { api } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/affect/badge-clean"
 import { Card } from "@/components/affect/card-clean"
+import { EmptyState } from "@/components/affect/empty-state-clean"
 import { TextField } from "@/components/affect/text-field-clean"
 import { Spinner } from "@/components/ui/spinner"
 import { IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
@@ -19,9 +21,10 @@ import { HarnessMark, ModelMark } from "@/components/harness-mark"
 import { useFieldLabels } from "@/components/ui/input"
 import { useT } from "@/i18n"
 import { date, monthDayTime } from "@/i18n/format"
-import type { NodeView } from "@/device-model"
+import { isUpgradeOnlyLink, upgradeCard, type NodeView } from "@/device-model"
 import { useDevices } from "@/devices-data"
 import { DCard } from "@/devices-ui"
+import { UpgradeSteps } from "@/devices-upgrade"
 import {
   filterModelGroups,
   OTHER_FAMILY,
@@ -37,6 +40,7 @@ import {
   harnessSummary,
   partitionNodeHarnesses,
 } from "@/node-harness-model"
+import type { NodeTab } from "@/node-detail-model"
 import { st, toast, useStore } from "@/store"
 import {
   DEFAULT_AUTO_POLICY,
@@ -57,7 +61,10 @@ import {
 import type { NodeActions } from "@/devices-node-actions"
 import { cn } from "cn"
 
-type HarnessActionSlice = Pick<NodeActions, "harnessBusy" | "harnessError" | "probeHarnesses" | "harnessUpdates">
+type HarnessActionSlice = Pick<
+  NodeActions,
+  "harnessBusy" | "harnessError" | "probeHarnesses" | "harnessUpdates" | "canUpgrade" | "upgradeBusy" | "startUpgrade"
+>
 
 const COPY_FEEDBACK_MS = 1800
 
@@ -70,14 +77,16 @@ function stripSourcePrefixForChip(id: string, source: ModelSource): string {
 export function NodeHarnesses({
   v,
   actions,
+  onOpenTab,
   children,
 }: {
   v: NodeView
   actions?: HarnessActionSlice
+  onOpenTab?: (tab: NodeTab) => void
   children?: ReactNode
 }) {
   useStore()
-  const t = useT(), { harnesses, harnessesError, refreshHarnesses } = useDevices()
+  const t = useT(), { hubVersion, harnesses, harnessesError, refreshHarnesses } = useDevices()
   const r = harnesses?.[v.id], [ownBusy, setOwnBusy] = useState(false), [ownError, setOwnError] = useState("")
   const [installingId, setInstallingId] = useState<string | null>(null)
   const [availableOpen, setAvailableOpen] = useState(true)
@@ -87,6 +96,7 @@ export function NodeHarnesses({
   const busy = actions ? actions.harnessBusy : ownBusy
   const error = actions ? actions.harnessError : ownError
   const updates = actions?.harnessUpdates
+  const upgradeOnly = isUpgradeOnlyLink(v) || r?.state === "upgrade_required"
   const stale = !v.linked || !!r?.stale || !!harnessesError || r?.state !== "reported"
 
   const refresh = async () => {
@@ -114,14 +124,89 @@ export function NodeHarnesses({
     [r, updates?.data],
   )
   const policy = updates?.data?.auto_upgrade ?? DEFAULT_AUTO_POLICY
-  const showUpdatesChrome = !!updates && v.state !== "revoked"
+  const showUpdatesChrome = !!updates && v.state !== "revoked" && !upgradeOnly
   const updatesUnavailable = !!updates?.unavailable
+
+  if (upgradeOnly) {
+    const effectiveHub = v.hubVersion || hubVersion
+    const from = v.version || ""
+    const older = v.protocolOlder ?? v.node?.protocol_older ?? null
+    const up = upgradeCard(v, effectiveHub)
+    const canStart = !v.local && older !== "hub" && !!actions?.canUpgrade && !!v.node?.upgrade?.can && up.kind !== "running"
+    const summaryText = older === "hub"
+      ? t("devices:harness.upgradeRequiredHub", { from: from || "?", to: effectiveHub || "?" })
+      : from && effectiveHub
+        ? t("devices:harness.upgradeRequired", { from, to: effectiveHub })
+        : t("devices:harness.upgradeRequiredUnknown")
+    const hintText = v.local
+      ? t("devices:harness.upgradeRequiredLocalHint")
+      : older === "hub"
+        ? t("devices:harness.upgradeRequiredHubHint")
+        : !canStart && up.kind !== "running"
+          ? t("devices:harness.upgradeRequiredManualHint")
+          : null
+
+    return (
+      <DCard
+        icon={<CpuIcon />}
+        title={t("devices:harness.title")}
+        sub={summaryText}
+        data-node-harnesses={v.id}
+        data-node-harness-upgrade-required={v.id}
+      >
+        <div className="px-4 pb-5">
+          <EmptyState
+            icon={<ArrowUpCircleIcon />}
+            title={t(older === "hub" ? "devices:harness.upgradeRequiredHubTitle" : "devices:harness.upgradeRequiredTitle")}
+            text={
+              <span className="flex flex-col items-center gap-2">
+                <span>{summaryText}</span>
+                {hintText && <span className="type-footnote text-muted-foreground">{hintText}</span>}
+                {up.kind === "running" && (
+                  <span className="mt-1 w-full max-w-md text-left">
+                    <UpgradeSteps steps={up.steps} />
+                  </span>
+                )}
+              </span>
+            }
+            action={
+              <>
+                {canStart && (
+                  <Button
+                    size="sm"
+                    disabled={actions.upgradeBusy}
+                    onClick={() => void actions.startUpgrade(false)}
+                    data-harness-upgrade-node={v.id}
+                  >
+                    {actions.upgradeBusy ? <Spinner className="size-3.5" /> : <ArrowUpCircleIcon />}
+                    {effectiveHub
+                      ? t("devices:upgrade.nodeTo", { version: effectiveHub })
+                      : t("devices:upgrade.nodeAction")}
+                  </Button>
+                )}
+                {onOpenTab && (
+                  <Button
+                    size="sm"
+                    variant={canStart ? "outline" : "default"}
+                    onClick={() => onOpenTab("version")}
+                    data-harness-open-version
+                  >
+                    {t("devices:nodeTab.version")}
+                  </Button>
+                )}
+              </>
+            }
+          />
+        </div>
+      </DCard>
+    )
+  }
 
   return (
     <DCard
       icon={<CpuIcon />}
       title={t("devices:harness.title")}
-      sub={harnessSummary(v, r)}
+      sub={harnessSummary(v, r, hubVersion)}
       data-node-harnesses={v.id}
       data-harness-updates={v.id}
       action={
@@ -190,19 +275,20 @@ export function NodeHarnesses({
         )}
 
         {showUpdatesChrome && (updatesUnavailable || updates.message) && (
-          <div className="px-2 type-footnote text-attention" role="alert" data-harness-update-error>
-            <p>
+          <div className="rounded-lg bg-attention/10 px-3 py-2 type-footnote text-attention" role="alert" data-harness-update-error>
+            <p className="font-medium">
               {t(
                 updates.data?.code === "unsupported"
                   ? "devices:harnessUpdates.oldNode"
                   : "devices:harnessUpdates.unavailable",
               )}
             </p>
-            {updates.data?.report && <p>{t("devices:harnessUpdates.stale")}</p>}
-            <details className="mt-1">
-              <summary className="cursor-pointer">{t("devices:harnessUpdates.details")}</summary>
-              <p className="break-words whitespace-pre-wrap">{updates.message || updates.error || updates.data?.error}</p>
-            </details>
+            {(updates.message || updates.error || updates.data?.error) && (
+              <p className="mt-1 break-words whitespace-pre-wrap" data-harness-update-reason>
+                {updates.message || updates.error || updates.data?.error}
+              </p>
+            )}
+            {updates.data?.report && <p className="mt-1 text-muted-foreground">{t("devices:harnessUpdates.stale")}</p>}
           </div>
         )}
 
@@ -474,7 +560,7 @@ function AttentionHarnessCard({
   onInstall: () => void
 }) {
   const t = useT()
-  const [copied, setCopied] = useState(false)
+  const [copiedKey, setCopiedKey] = useState<"install" | "refresh" | null>(null)
   const { probe, update, receipt } = item
   const reason = effectiveDegradedReason(item) ?? "probe_unknown"
   const uStatus = receiptStatus(receipt)
@@ -495,13 +581,14 @@ function AttentionHarnessCard({
     canUpgrade: canUpgradeNow,
   })
   const installCmd = formatInstallCommand(probe?.install_hint)
+  const refreshEnvCmd = probe?.missing_command?.refresh_command?.trim() || null
 
-  const copyCommand = async () => {
-    if (!installCmd) return
+  const copyCommand = async (cmd: string | null, kind: "install" | "refresh") => {
+    if (!cmd) return
     try {
-      await navigator.clipboard.writeText(installCmd)
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), COPY_FEEDBACK_MS)
+      await navigator.clipboard.writeText(cmd)
+      setCopiedKey(kind)
+      window.setTimeout(() => setCopiedKey((cur) => (cur === kind ? null : cur)), COPY_FEEDBACK_MS)
     } catch {
       toast(t("devices:diagnostics.copyFailed"))
     }
@@ -567,11 +654,74 @@ function AttentionHarnessCard({
     >
       <IntegrationSection>
         <div className="flex flex-col gap-2.5">
-          <p className="type-footnote text-foreground/90" data-node-harness-degraded={reason}>
-            {t(`devices:harness.degraded.${reason}`)}
-          </p>
+          <div className="flex flex-col gap-2" data-node-harness-degraded={reason}>
+            <p className="type-footnote text-foreground/90">
+              {t(`devices:harness.degraded.${reason}`)}
+            </p>
+            {probe?.missing_command && (
+              <div
+                className="flex flex-col gap-1.5 rounded-md border border-border/70 bg-muted/40 px-3 py-2 type-footnote"
+                data-node-harness-missing-command
+              >
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground">
+                    {probe.missing_command.login_shell_path
+                      ? probe.missing_command.login_shell
+                        ? t("devices:harness.missingCommand.loginShellFoundWithShell", {
+                            shell: probe.missing_command.login_shell,
+                          })
+                        : t("devices:harness.missingCommand.loginShellFound")
+                      : t("devices:harness.missingCommand.loginShellMissing")}
+                  </span>
+                  {probe.missing_command.login_shell_path && (
+                    <code className="break-all font-mono text-foreground" data-missing-command-login-path>
+                      {probe.missing_command.login_shell_path}
+                    </code>
+                  )}
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground">
+                    {t("devices:harness.missingCommand.servicePath")}
+                  </span>
+                  <code className="break-all font-mono text-foreground/90" data-missing-command-service-path>
+                    {probe.missing_command.service_path || t("devices:harness.missingCommand.emptyPath")}
+                  </code>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground">
+                    {t("devices:harness.missingCommand.refreshHint")}
+                  </span>
+                  <code className="break-all font-mono text-foreground" data-missing-command-refresh>
+                    {probe.missing_command.refresh_command}
+                  </code>
+                </div>
+              </div>
+            )}
+          </div>
           <div className="flex flex-wrap items-center gap-2">
-            {primaryAction === "upgrade" && update && updates ? (
+            {primaryAction === "copy_refresh_env" && refreshEnvCmd ? (
+              <>
+                <Button
+                  size="sm"
+                  onClick={() => void copyCommand(refreshEnvCmd, "refresh")}
+                  data-harness-attention-action="copy_refresh_env"
+                  data-harness-refresh-env-copy={item.id}
+                >
+                  {copiedKey === "refresh" ? <CheckIcon /> : <CopyIcon />}
+                  {t(copiedKey === "refresh" ? "devices:harness.action.copiedRefreshEnv" : "devices:harness.action.copyRefreshEnv")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !v.linked || v.state === "pending" || v.state === "revoked"}
+                  onClick={onRefresh}
+                  data-harness-attention-action="refresh"
+                >
+                  {busy ? <Spinner /> : <RefreshCwIcon />}
+                  {t("devices:harness.refresh")}
+                </Button>
+              </>
+            ) : primaryAction === "upgrade" && update && updates ? (
               <Button
                 size="sm"
                 disabled={upgradeDisabled || uStatus === "running" || uStatus === "waiting"}
@@ -622,11 +772,11 @@ function AttentionHarnessCard({
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => void copyCommand()}
+                onClick={() => void copyCommand(installCmd, "install")}
                 data-harness-install-copy={item.id}
               >
-                {copied ? <CheckIcon /> : <CopyIcon />}
-                {t(copied ? "devices:harness.action.copiedInstall" : "devices:harness.action.copyInstall")}
+                {copiedKey === "install" ? <CheckIcon /> : <CopyIcon />}
+                {t(copiedKey === "install" ? "devices:harness.action.copiedInstall" : "devices:harness.action.copyInstall")}
               </Button>
             )}
           </div>

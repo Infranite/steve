@@ -43,24 +43,6 @@ fn party(s: &Store, id: &str, ws: &str, ty: &str, user: Option<&str>) {
     .unwrap();
 }
 
-fn team(s: &Store, id: &str, parent: Option<&str>, members: &[&str]) {
-    party(s, id, "default", "team", None);
-    s.fixture_write(|c| {
-        c.execute(
-            "INSERT INTO team_details (party_id, workspace_id, kind, parent_id) VALUES (?, 'default', 'chart', ?)",
-            rusqlite::params![id, parent],
-        )?;
-        for m in members {
-            c.execute(
-                "INSERT INTO team_members (workspace_id, team_id, contact_id, joined) VALUES ('default', ?, ?, 1)",
-                [id, m],
-            )?;
-        }
-        Ok(())
-    })
-    .unwrap();
-}
-
 #[test]
 fn empty_database_gets_the_current_version_with_builtin_attributes() {
     let t = fresh();
@@ -244,14 +226,7 @@ fn single_user_reads_private_memory_without_crossing_workspaces_or_disclosure_le
     assert_eq!(private.about, about);
     assert_eq!(private.writer, "me");
 
-    let (a, b) = s
-        .fixture_read(|c| {
-            Ok::<_, StoreError>((
-                Viewer::load(c, "default", A)?,
-                Viewer::load(c, "default", B)?,
-            ))
-        })
-        .unwrap();
+    let (a, b) = (Viewer::bare("default", A), Viewer::bare("default", B));
     let texts = |v: &Viewer, f: &mems::MemFilter| -> Vec<String> {
         s.fixture_read(|c| mems::about(c, v, &about[0], f))
             .unwrap()
@@ -337,106 +312,18 @@ fn service_cannot_read_its_own_private_memory_candidates() {
 }
 
 #[test]
-fn service_audiences_remain_workspace_only_with_legacy_bindings() {
-    let c = Connection::open_in_memory().unwrap();
-    c.execute_batch("CREATE TABLE objects (visibility TEXT, created_by TEXT);
-        INSERT INTO objects VALUES ('workspace', NULL), ('private', ''), ('private', 'svc:default'), ('team:t1', 'usr_a'), (NULL, NULL);")
-        .unwrap();
+fn service_audiences_remain_workspace_only() {
     for user in ["", "svc:default"] {
-        let viewer = Viewer {
-            scopes: vec!["team:t1".into()],
-            ..Viewer::bare("default", user)
-        };
+        let viewer = Viewer::bare("default", user);
         assert!(viewer.is_service());
         assert!(viewer.sees(&Visibility::Workspace, A));
         assert!(!viewer.sees(&Visibility::Private, user));
         assert!(!viewer.sees(&Visibility::Team("t1".into()), A));
-        let scope = viewer.sql("o");
-        assert_eq!(scope.params.len(), 2);
-        let found = c
-            .prepare(&format!(
-                "SELECT visibility FROM objects o WHERE {}",
-                scope.sql
-            ))
-            .unwrap()
-            .query_map(rusqlite::params_from_iter(scope.params), |r| {
-                r.get::<_, String>(0)
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(found, ["workspace"]);
     }
-    assert!(!Viewer::bare("default", A).is_service());
-}
-
-#[test]
-fn single_user_visibility_keeps_bindings_and_does_not_load_team_scopes() {
-    let t = setup();
-    party(&t.store, "ct_b", "default", "contact", Some(B));
-    team(&t.store, "tm_top", None, &[]);
-    team(&t.store, "tm_sub", Some("tm_top"), &["ct_b"]);
-    let viewer = t
-        .store
-        .fixture_read(|c| Viewer::load(c, "default", B))
-        .unwrap();
-    assert!(viewer.scopes.is_empty());
-    // Loading no longer needs any team or party schema at all.
-    let c = Connection::open_in_memory().unwrap();
-    assert_eq!(Viewer::load(&c, "default", B).unwrap(), viewer);
-    let viewer = Viewer {
-        scopes: vec!["team:tm_top".into(), "space:spc_1".into()],
-        ..viewer
-    };
-    for code in [
-        "workspace",
-        "private",
-        "team:tm_top",
-        "team:other",
-        "space:spc_1",
-        "space:other",
-    ] {
-        assert!(viewer.sees(&Visibility::parse(code).unwrap(), A));
-        let scope = base::visible_sql("m", &viewer);
-        assert_eq!(
-            scope.params,
-            [B, "team:tm_top", "space:spc_1"]
-                .map(|value| rusqlite::types::Value::Text(value.into()))
-                .to_vec()
-        );
-        let sql = format!(
-            "SELECT count(*) FROM (SELECT ? AS visibility, ? AS created_by) m WHERE {}",
-            scope.sql
-        );
-        let mut params = vec![
-            rusqlite::types::Value::Text(code.into()),
-            rusqlite::types::Value::Text(A.into()),
-        ];
-        params.extend(scope.params);
-        assert_eq!(
-            c.query_row(&sql, rusqlite::params_from_iter(params), |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-    }
-    for viewer in [Viewer::bare("default", B), viewer] {
-        let scope = viewer.sql("m");
-        let sql = format!(
-            "SELECT count(*) FROM (SELECT NULL AS visibility, NULL AS created_by) m WHERE {}",
-            scope.sql
-        );
-        for params in [
-            scope.params.clone(),
-            vec![rusqlite::types::Value::Null; scope.params.len()],
-        ] {
-            assert_eq!(
-                c.query_row(&sql, rusqlite::params_from_iter(params), |r| r
-                    .get::<_, i64>(0))
-                    .unwrap(),
-                1
-            );
-        }
+    let personal = Viewer::bare("default", A);
+    assert!(!personal.is_service());
+    for code in ["workspace", "private", "team:tm_top", "space:spc_1"] {
+        assert!(personal.sees(&Visibility::parse(code).unwrap(), B));
     }
 }
 

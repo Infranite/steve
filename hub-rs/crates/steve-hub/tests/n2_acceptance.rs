@@ -550,7 +550,7 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
             "POST",
             "/api/bots",
             Some(json!({"name": REMOTE_BOT, "harness": "claude-code",
-                        "model": "kiro/claude-opus-5-5", "perm_mode": "default"})),
+                        "model": "kiro/claude-opus-5-5", "perm_mode": "ask"})),
         )
         .await;
     assert_eq!(st, 200, "{bot}");
@@ -1012,7 +1012,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
             "/api/bots",
             Some(json!({
                 "name":"Team worker", "harness":"claude-code",
-                "model":"kiro/claude-opus-5-5", "perm_mode":"default"
+                "model":"kiro/claude-opus-5-5", "perm_mode":"ask"
             })),
         )
         .await;

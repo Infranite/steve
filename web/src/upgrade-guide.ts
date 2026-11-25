@@ -61,14 +61,14 @@ export function upgradeGuide(install: Install, version: string): Guide {
       label: t("pages:guide.source.label"),
       summary: t("pages:guide.source.summary"),
       steps: [
-        { title: t("pages:guide.source.backup"), command: `mkdir -p ${home}/backups && sqlite3 ${home}/data/steve.sqlite3 ".backup ${home}/backups/before-${v}.sqlite3"`, note: t("pages:guide.source.backupNote") },
+        { title: t("pages:guide.source.backup"), command: `STEVE_HOME=${home} ${home}/current/bin/steve-hub --admin backup --reason pre-upgrade`, note: t("pages:guide.source.backupNote") },
         { title: t("pages:guide.source.checkout"), command: `git -C ${repo} fetch --tags origin && git -C ${repo} checkout ${tag}`, note: t("pages:guide.source.checkoutNote") },
         { title: t("pages:guide.source.build"), command: `cd ${repo} && npm ci && npm -w web run build && cargo build --release --manifest-path hub-rs/Cargo.toml -p steve-hub` },
         { title: t("pages:guide.source.restart"), note: t("pages:guide.source.restartNote") },
         verify,
       ],
-      backup: t("pages:guide.source.backupText", { file: `${home}/backups/before-${v}.sqlite3` }),
-      recovery: [t("pages:guide.source.recovery", { file: `${home}/backups/before-${v}.sqlite3`, db: `${home}/data/steve.sqlite3` })],
+      backup: t("pages:guide.source.backupText", { file: `${home}/backups/restic` }),
+      recovery: [t("pages:guide.source.recovery")],
     }
     default: return {
       label: t("pages:guide.external.label"),

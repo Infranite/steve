@@ -12,7 +12,7 @@ use steve_store::{Read, Result, W};
 pub const ATTEMPTED: &[&str] = &["released", "failed", "rolled_back", "unknown"];
 
 pub use steve_store::statistics::{
-    DecisionRow, HUMAN_KINDS, ItemFacts, ItemInput, MarkRow, ModelTokens, TurnRow,
+    DecisionRow, DecisionSettler, HUMAN_KINDS, ItemFacts, ItemInput, MarkRow, ModelTokens, TurnRow,
 };
 
 /// How a delivery was judged.
@@ -274,14 +274,14 @@ mod tests {
             decisions: vec![
                 dec("a", "ask", "resolved", 100, Some(400), json!({})),
                 dec("b", "fail", "resolved", 300, Some(500), json!({})),
-                // decided by YOLO: not the user's time
+                // settled automatically by Steve: not the user's wait time
                 dec(
                     "c",
                     "approve",
                     "resolved",
                     600,
                     Some(900),
-                    json!({"decided_by": "yolo"}),
+                    json!({"decided_by": "steve"}),
                 ),
             ],
             ..Default::default()

@@ -390,52 +390,149 @@ pub fn validate_bot_patch(
     patch: &Map<String, Value>,
     harnesses: &[Harness],
 ) -> Result<(), String> {
-    let selection = ["harness", "model", "reasoning_effort"];
+    let selection = ["harness", "model", "reasoning_effort", "fallback_surfaces"];
     if current.is_some() && !selection.iter().any(|k| patch.contains_key(*k)) {
         return Ok(());
     }
-    let get = |key: &str| patch.get(key).or_else(|| current.and_then(|b| b.get(key)));
-    let harness = get("harness")
-        .and_then(Value::as_str)
-        .unwrap_or(steve_harness_spec::DEFAULT_ADAPTER.0);
-    let h = harnesses
-        .iter()
-        .find(|h| h.id == harness)
-        .ok_or_else(|| steve_i18n::t!("core.models.invalid.no_harness", harness = harness))?;
-    let switched =
-        current.is_none_or(|b| b.get("harness").and_then(Value::as_str) != Some(harness));
-    for key in ["model", "reasoning_effort"] {
-        if !switched && !patch.contains_key(key) {
-            continue;
-        }
-        let Some(value) = get(key).filter(|v| !v.is_null()) else {
-            continue;
-        };
-        let Some(value) = value.as_str().filter(|v| {
-            if key == "model" {
-                valid_model(v)
-            } else {
-                !v.trim().is_empty() && v.len() <= 100
+    let primary_changed = current.is_none()
+        || ["harness", "model", "reasoning_effort"]
+            .iter()
+            .any(|k| patch.contains_key(*k));
+    if primary_changed {
+        let get = |key: &str| patch.get(key).or_else(|| current.and_then(|b| b.get(key)));
+        let harness = get("harness")
+            .and_then(Value::as_str)
+            .unwrap_or(steve_harness_spec::DEFAULT_ADAPTER.0);
+        let h = harnesses
+            .iter()
+            .find(|h| h.id == harness)
+            .ok_or_else(|| steve_i18n::t!("core.models.invalid.no_harness", harness = harness))?;
+        let switched =
+            current.is_none_or(|b| b.get("harness").and_then(Value::as_str) != Some(harness));
+        for key in ["model", "reasoning_effort"] {
+            if !switched && !patch.contains_key(key) {
+                continue;
             }
-        }) else {
-            return Err(steve_i18n::t!("core.bot.invalid_selection", field = key));
-        };
-        if h.ready != Some(true) {
-            continue;
+            let Some(value) = get(key).filter(|v| !v.is_null()) else {
+                continue;
+            };
+            validate_surface_field(h, key, value)?;
         }
-        let supported = if key == "model" {
-            h.models.iter().any(|m| m.id == value)
-        } else {
-            h.takes_effort(value)
-        };
-        if !supported {
+    }
+    if let Some(raw) = patch.get("fallback_surfaces") {
+        let arr = raw.as_array().ok_or_else(|| {
+            steve_i18n::t!("core.bot.invalid_selection", field = "fallback_surfaces")
+        })?;
+        if arr.len() > 8 {
             return Err(steve_i18n::t!(
-                "core.bot.unsupported_selection",
-                harness = h.name,
-                field = key,
-                value = value
+                "core.bot.invalid_selection",
+                field = "fallback_surfaces"
             ));
         }
+        for entry in arr {
+            let obj = entry.as_object().ok_or_else(|| {
+                steve_i18n::t!("core.bot.invalid_selection", field = "fallback_surfaces")
+            })?;
+            let rt_id = obj
+                .get("harness")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    steve_i18n::t!("core.bot.invalid_selection", field = "fallback_surfaces")
+                })?;
+            let h = harnesses
+                .iter()
+                .find(|h| h.id == rt_id)
+                .ok_or_else(|| steve_i18n::t!("core.models.invalid.no_harness", harness = rt_id))?;
+            for key in ["model", "reasoning_effort"] {
+                if let Some(value) = obj.get(key).filter(|v| !v.is_null()) {
+                    validate_surface_field(h, key, value)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_field(h: &Harness, key: &str, value: &Value) -> Result<(), String> {
+    let Some(value) = value.as_str().filter(|v| {
+        if key == "model" {
+            valid_model(v)
+        } else {
+            !v.trim().is_empty() && v.len() <= 100
+        }
+    }) else {
+        return Err(steve_i18n::t!("core.bot.invalid_selection", field = key));
+    };
+    if h.ready != Some(true) {
+        return Ok(());
+    }
+    let supported = if key == "model" {
+        h.models.iter().any(|m| m.id == value)
+    } else {
+        h.takes_effort(value)
+    };
+    if !supported {
+        return Err(steve_i18n::t!(
+            "core.bot.unsupported_selection",
+            harness = h.name,
+            field = key,
+            value = value
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a bot's `perm_mode` against its target harness, and when switching harnesses without
+/// specifying a new `perm_mode`, resets an incompatible carried-over mode to the target harness's
+/// default. Returns `Err("perm_mode")` when an explicitly provided `perm_mode` is not offered.
+pub fn reconcile_bot_perm_mode(
+    current: Option<&Map<String, Value>>,
+    patch: &mut Map<String, Value>,
+    harnesses: &[Harness],
+) -> Result<(), &'static str> {
+    let cur_h = current
+        .and_then(|b| b.get("harness"))
+        .and_then(Value::as_str);
+    let switched_to = patch
+        .get("harness")
+        .and_then(Value::as_str)
+        .filter(|h| !h.is_empty() && cur_h != Some(*h))
+        .map(str::to_string);
+    let target_id = switched_to.as_deref().or(cur_h).unwrap_or_default();
+    let Some(target) = harnesses.iter().find(|h| h.id == target_id) else {
+        return Ok(());
+    };
+    if let Some(pm) = patch.get("perm_mode").and_then(Value::as_str) {
+        if steve_node_api::PermissionMode::parse(pm).is_some_and(|m| !target.offers_bot_mode(m)) {
+            return Err("perm_mode");
+        }
+    } else if switched_to.is_some()
+        && let Some(cur_pm) = current
+            .and_then(|b| b.get("perm_mode"))
+            .and_then(Value::as_str)
+        && steve_node_api::PermissionMode::parse(cur_pm).is_some_and(|m| !target.offers_bot_mode(m))
+    {
+        patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
+    }
+    Ok(())
+}
+
+/// Validates `perm_mode` on bot creation (no prior bot state).
+pub fn validate_bot_perm_mode(
+    fields: &Map<String, Value>,
+    harnesses: &[Harness],
+) -> Result<(), &'static str> {
+    let target_id = fields
+        .get("harness")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
+        && let Some(pm) = fields.get("perm_mode").and_then(Value::as_str)
+        && steve_node_api::PermissionMode::parse(pm).is_some_and(|m| !target.offers_bot_mode(m))
+    {
+        return Err("perm_mode");
     }
     Ok(())
 }
@@ -672,6 +769,88 @@ impl Models {
     /// Steve's model answers every call that is not overridden).
     pub fn for_call(&self, ws: &str, purpose: &str, _tier: Tier) -> Choice {
         let st = self.steve();
+        self.resolve(ws, purpose, &st)
+    }
+
+    /// Like [`Models::for_call`], excluding `exclude_model` when another configured or offered
+    /// model is available (used by the `disclosure` purpose so cross-model auditing does not run
+    /// on the same model that drafted the reply).
+    pub fn for_call_excluding(
+        &self,
+        ws: &str,
+        purpose: &str,
+        _tier: Tier,
+        exclude_model: Option<&str>,
+    ) -> Choice {
+        let st = self.steve();
+        let mut choice = self.resolve(ws, purpose, &st);
+        let Some(excluded) = exclude_model.map(str::trim).filter(|m| !m.is_empty()) else {
+            return choice;
+        };
+        let excluded_is_first = match choice.models.first() {
+            Some(m) => m == excluded,
+            None => {
+                self.harness(&choice.harness)
+                    .and_then(|h| h.default_model)
+                    .as_deref()
+                    == Some(excluded)
+            }
+        };
+        if !excluded_is_first {
+            choice.models.retain(|m| m != excluded);
+            return choice;
+        }
+        choice.models.retain(|m| m != excluded);
+        if !choice.models.is_empty() {
+            return choice;
+        }
+        let without = |candidate: Option<Choice>| -> Option<Choice> {
+            let mut c = candidate?;
+            c.models.retain(|m| m != excluded);
+            (!c.models.is_empty()).then_some(c)
+        };
+        if let Some(p) = purpose_of(purpose)
+            && let Some(c) = without(self.recommended(p))
+        {
+            return c;
+        }
+        if let Some(c) = without(self.lightweight_effective(ws)) {
+            return c;
+        }
+        if let Some(alt) = st.models.iter().find(|m| m.as_str() != excluded) {
+            return Choice {
+                harness: st.runs_on.clone(),
+                models: vec![alt.clone()],
+                effort: None,
+            };
+        }
+        if let Some(h) = self.harness(&choice.harness) {
+            if let Some(fast) = h.fast_model().filter(|m| m != excluded) {
+                return Choice {
+                    harness: h.id,
+                    models: vec![fast],
+                    effort: None,
+                };
+            }
+            if let Some(alt) = h
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .find(|m| valid_model(m) && *m != excluded)
+            {
+                return Choice {
+                    harness: h.id,
+                    models: vec![alt.to_string()],
+                    effort: None,
+                };
+            }
+        }
+        tracing::warn!(
+            purpose,
+            excluded,
+            harness = %choice.harness,
+            "no alternate model available for exclude_model; using configured choice"
+        );
         self.resolve(ws, purpose, &st)
     }
 
@@ -1658,5 +1837,43 @@ mod tests {
         assert_eq!(y["effective"]["harness"], json!("codex"));
         assert_eq!(v["purposes"].as_array().unwrap().len(), PURPOSES.len());
         assert_eq!(v["harnesses"][1]["efforts"][0]["key"], json!("low"));
+    }
+
+    #[test]
+    fn for_call_excluding_avoids_drafting_model_for_disclosure() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        steve_bot(&s, CLAUDE_CODE, Some("claude-sonnet-5-5"));
+        let m = Models::new(s.clone(), Defaults::default());
+        probed(&m, CLAUDE_CODE, &["claude-sonnet-5-5", "claude-haiku-5-5"]);
+        m.apply(
+            "default",
+            &json!({"purposes": {"disclosure": {"models": ["claude-sonnet-5-5", "claude-haiku-5-5"]}}}),
+            "u1",
+        )
+        .unwrap();
+
+        let excluded = m.for_call_excluding(
+            "default",
+            "disclosure",
+            Tier::Fast,
+            Some("claude-sonnet-5-5"),
+        );
+        assert_eq!(excluded.models, vec!["claude-haiku-5-5"]);
+
+        // Single-model override matching the excluded model falls back to another harness candidate.
+        m.apply(
+            "default",
+            &json!({"purposes": {"disclosure": {"models": ["claude-sonnet-5-5"]}}}),
+            "u1",
+        )
+        .unwrap();
+        let alt = m.for_call_excluding(
+            "default",
+            "disclosure",
+            Tier::Fast,
+            Some("claude-sonnet-5-5"),
+        );
+        assert_eq!(alt.models, vec!["claude-haiku-5-5"]);
     }
 }

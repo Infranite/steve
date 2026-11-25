@@ -19,7 +19,7 @@ pub fn seed_events(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
          INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, model, turn_id, session_id, item_id, input, output, cache_read, cache_write) VALUES
            ('default', {t1e}, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 'tn_1', 's1', 'ST-1', 100, 20, 1000, 0);
          INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, result, requested_by, created, resolved) VALUES
-           ('d1', 'default', 'approve', 'item', 'ST-1', 'ST-1', 'q', 'resolved', '{{\"decided_by\":\"yolo\"}}', 'dev', {d1}, {d1r}),
+           ('d1', 'default', 'approve', 'item', 'ST-1', 'ST-1', 'q', 'resolved', '{{\"decided_by\":\"steve\"}}', 'dev', {d1}, {d1r}),
            ('d2', 'default', 'fail', 'item', 'ST-2', 'ST-2', 'q', 'open', NULL, 'dev', {d2}, NULL);
          INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor) VALUES
            ('default', 'ST-1', {k1}, 'status', 'active', 'completed', 'usr_1'),
@@ -39,7 +39,7 @@ pub fn seed_events(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     s.write_locked(|c| Ok(c.execute_batch(&sql)?))
 }
 
-/// (id, item, kind, created, resolved, decided by YOLO)
+/// (id, item, kind, created, resolved, by_steve)
 pub type Card<'a> = (&'a str, Option<&'a str>, &'a str, i64, Option<i64>, bool);
 
 pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
@@ -49,7 +49,7 @@ pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
          INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ST-1', 'default', 1, 't1', 'active', 0, 0);
          INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ST-2', 'default', 2, 't2', 'active', 0, 0);\n",
     );
-    for (id, item, kind, created, resolved, yolo) in cards {
+    for (id, item, kind, created, resolved, by_steve) in cards {
         let item = item.map_or("NULL".into(), |i| format!("'{i}'"));
         let resolved = resolved.map_or("NULL".into(), |r| r.to_string());
         let status = if resolved == "NULL" {
@@ -57,8 +57,8 @@ pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
         } else {
             "resolved"
         };
-        let result = if *yolo {
-            "'{\"decided_by\":\"yolo\"}'"
+        let result = if *by_steve {
+            r#"'{"decided_by":"steve"}'"#
         } else {
             "NULL"
         };
@@ -98,7 +98,7 @@ pub fn seed_delivery(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     sql.push_str(&format!(
         "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, source, created, updated, outcome) VALUES ('ST-2', 'default', 2, 't', 'active', 'dev', '[\"对话\",\"chat\"]', {t0}, {t0}, NULL);
          UPDATE sessions SET item_id='ST-2' WHERE id='sr1';
-         INSERT INTO events (session_id, ts, kind, data) VALUES ('sw1', {}, 'tool_call', '{{}}'), ('sw1', {}, 'tool_call', '{{}}');
+         INSERT INTO events (session_id, ts, kind, data) VALUES ('sw1', {}, 'tool', '{{}}'), ('sw1', {}, 'tool', '{{}}');
          INSERT INTO item_stats (item_id, workspace_id, created, accepted, done_at, updated) VALUES
            ('ST-1', 'default', {t0}, {}, {}, {t0}), ('ST-5', 'default', {t0}, NULL, {}, {t0});
          INSERT INTO item_marks (workspace_id, item_id, ts, kind, to_v, actor, detail) VALUES
@@ -279,15 +279,15 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
         &mut sql,
         "s1",
         m(2),
-        "tool_call",
-        r#"{"toolCallId":"a","kind":"execute","_meta":{"claudeCode":{"toolName":"Bash"}}}"#,
+        "tool",
+        r#"{"tool":{"id":"a","origin":"harness","name":"Bash","category":"exec","title":"Bash","phase":"running"}}"#,
     );
     ev(
         &mut sql,
         "s1",
         m(3),
-        "tool_call_update",
-        r#"{"toolCallId":"a","status":"failed"}"#,
+        "tool",
+        r#"{"tool":{"id":"a","origin":"harness","name":"Bash","category":"exec","title":"Bash","phase":"failed"}}"#,
     );
     ev(
         &mut sql,
@@ -393,10 +393,10 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
         "approve",
         "tool_call",
         "rm",
-        "resolved",
-        r#"{"choice":"yes","decided_by":"yolo"}"#,
+        "expired",
+        r#"{"choice":"yes"}"#,
         m(55),
-        Some(m(56)),
+        Some(m(55)),
     );
     dec(
         &mut sql,

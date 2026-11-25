@@ -4,4 +4,4 @@
 /**
  * Strongly-typed reason explaining why an installed or configured harness is unavailable.
  */
-export type HarnessDegradedReason = "authentication_required" | "adapter_missing" | "initialize_failed" | "session_unavailable" | "version_outdated" | "runtime_incompatible" | "install_failed" | "installing" | "probe_unknown";
+export type HarnessDegradedReason = "authentication_required" | "adapter_missing" | "command_not_in_service_path" | "initialize_failed" | "session_unavailable" | "version_outdated" | "runtime_incompatible" | "install_failed" | "installing" | "probe_unknown";

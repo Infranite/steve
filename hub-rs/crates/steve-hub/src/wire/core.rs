@@ -18,7 +18,97 @@ use serde_json::{Value, json};
 use steve_core::{Core, CoreError, ItemAction, SendNow, SupplementMode};
 use steve_store::Store;
 
-use crate::backend::{BResult, BackendError, CreateItem, Domain, NewTag, Obj, Route, Tier};
+use crate::error::{BResult, BackendError};
+use crate::wire::store::Obj;
+
+/// Input for creating an item from the HTTP or A2A boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateItem {
+    pub ws: String,
+    pub goal: String,
+    pub title: String,
+    pub bot: Option<String>,
+    pub team: Option<String>,
+    pub node: Option<String>,
+    pub required_specialties: Vec<String>,
+    pub deps: Vec<String>,
+    /// `None` → the bot's default project; `Some(None)` → explicitly no project.
+    pub project: Option<Option<String>>,
+    pub tag_ids: Vec<String>,
+    pub source: [String; 2],
+    /// `start` or `propose`.
+    pub mode: String,
+    pub actor: String,
+    pub opening: Option<String>,
+}
+
+/// A tag the router proposes creating.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTag {
+    pub name: String,
+    pub cat: String,
+    pub description: String,
+}
+
+/// Router result validated against the workspace.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Route {
+    pub kind: String,
+    pub title: String,
+    pub project: Option<String>,
+    pub tag_ids: Vec<String>,
+    pub new_tags: Vec<NewTag>,
+    pub reply: String,
+}
+
+/// Model tier of one-off gateway calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Fast,
+    Smart,
+}
+
+#[derive(serde::Serialize)]
+pub struct BotNodeCandidates {
+    pub bindings: Vec<String>,
+    pub unavailable_bindings: usize,
+    pub candidates: Vec<BotNodeCandidate>,
+}
+
+#[derive(serde::Serialize)]
+pub struct BotNodeCandidate {
+    pub id: String,
+    pub name: Option<String>,
+    pub state: BotNodeState,
+    pub reason: Option<steve_types::PlacementRejection>,
+    pub checked_at: Option<i64>,
+    pub provider_verified: bool,
+}
+
+#[derive(PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotNodeState {
+    Candidate,
+    Pending,
+    Unavailable,
+}
+
+fn handoff_error_text(error: steve_core::HandoffError) -> String {
+    match error {
+        steve_core::HandoffError::NoEligibleSession => {
+            steve_i18n::t!("hub.handoff.no_eligible_session")
+        }
+        steve_core::HandoffError::ReadonlySession => {
+            steve_i18n::t!("hub.handoff.readonly_session")
+        }
+        steve_core::HandoffError::SessionNotBoundToItem => {
+            steve_i18n::t!("hub.handoff.session_not_bound_to_item")
+        }
+        steve_core::HandoffError::AutoBotSwitchForbidden => {
+            steve_i18n::t!("hub.handoff.auto_bot_switch_forbidden")
+        }
+    }
+}
 
 fn cerr(e: CoreError) -> BackendError {
     match e {
@@ -34,6 +124,10 @@ fn cerr(e: CoreError) -> BackendError {
             },
         },
         CoreError::Status(status, message) => BackendError { status, message },
+        CoreError::Handoff(error) => BackendError {
+            status: error.http_status(),
+            message: handoff_error_text(error),
+        },
         CoreError::Contract(e) => BackendError {
             status: e.code.http_status(),
             message: e.to_string(),
@@ -446,6 +540,35 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     fn can_run(&self, item_id: &str, bot_id: &str, _harness: &str) -> steve_core::Result<()> {
         self.check_dispatch(item_id, bot_id)
     }
+    fn can_run_choice(
+        &self,
+        item_id: &str,
+        bot_id: &str,
+        choice: &steve_node_api::HarnessChoice,
+    ) -> steve_core::Result<()> {
+        self.check_dispatch_choice(item_id, bot_id, Some(choice))
+    }
+    fn propose_bot(
+        &self,
+        req: &steve_core::CreateItem,
+        blocked: &steve_types::PlacementBlocked,
+    ) -> steve_core::Result<Option<steve_types::BotProposal>> {
+        Ok(RoutedRuntime::propose_bot(self, req, blocked)?)
+    }
+    fn confirm_bot_proposal(
+        &self,
+        ws: &str,
+        actor: &str,
+        id: &str,
+        edit: steve_types::ConfirmBotProposal,
+    ) -> steve_core::Result<String> {
+        RoutedRuntime::confirm_bot_proposal(self, ws, actor, id, edit).map_err(|err| match err {
+            crate::error::ApiError::Json(code, msg) | crate::error::ApiError::Text(code, msg) => {
+                CoreError::Status(code, msg)
+            }
+            other => CoreError::Msg(other.to_string()),
+        })
+    }
     fn makes_worktrees(&self) -> bool {
         self.node.is_some() && self.worktrees.is_some()
     }
@@ -474,11 +597,19 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     /// planned. Otherwise it is bound nowhere, and [`Self::refusal`] says why. `after` (a
     /// predecessor's release on its way): it opens only once that is done.
     fn created(&self, session_id: &str, after: Option<&str>) {
+        self.created_with_placement(session_id, after, None);
+    }
+    fn created_with_placement(
+        &self,
+        session_id: &str,
+        after: Option<&str>,
+        explanation: Option<&steve_types::PlacementExplanation>,
+    ) {
         if let Err(e) = self.check_session_gate(session_id) {
             tracing::warn!(session_id, "session gate held before binding: {e}");
             return;
         }
-        match self.bind_dispatch(session_id, after) {
+        match self.bind_dispatch(session_id, after, explanation) {
             Ok(true) => return,
             // a session of no item
             Ok(false) => {}
@@ -769,6 +900,9 @@ pub struct CoreDomain {
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The connections' runs (long connections, pollers): stopped with the Hub.
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
+    /// Set when `thread_recover` failed at boot so `ready` retries and reports failure on `/healthz`
+    /// instead of aborting startup before the Hub serves or the Node reconciles.
+    pub thread_recover_failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How long the Hub's shutdown waits for the local Node to stop its harnesses.
@@ -778,24 +912,131 @@ fn refs(files: Vec<Value>) -> BResult<Vec<steve_core::repo::FileRef>> {
     files.into_iter().map(from_json).collect()
 }
 
-#[async_trait]
-impl Domain for CoreDomain {
-    async fn seed(&self) -> BResult<()> {
+impl CoreDomain {
+    /// Builds a lightweight domain for HTTP/SSE tests without live Nodes or plugins.
+    pub fn for_test(
+        cfg: &crate::config::Config,
+        store: Store,
+        bus: &crate::bus::Bus,
+        gateway: Option<Arc<dyn steve_core::ModelGateway>>,
+    ) -> Arc<Self> {
+        let harnesses = crate::harnesses::HubHarnesses::of(cfg, bus.reports());
+        struct NoSessions;
+        impl steve_core::AgentRuntime for NoSessions {
+            fn prompt(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[steve_core::repo::FileRef],
+            ) -> steve_core::Result<steve_core::Prompted> {
+                Ok(steve_core::Prompted::Sent)
+            }
+            fn running(&self, _: &str) -> Option<steve_core::Running> {
+                None
+            }
+            fn stop(&self, _: &steve_core::Running) -> steve_core::Result<steve_core::Stop> {
+                Ok(steve_core::Stop::NotRunning)
+            }
+            fn is_busy(&self, _: &str) -> bool {
+                false
+            }
+            fn flush(&self, _: &str, _: Option<(&str, &str)>) -> steve_core::Flushed {
+                steve_core::Flushed::Empty
+            }
+            fn release(&self, _: &str) -> steve_core::Result<steve_core::Released> {
+                Ok(steve_core::Released::Gone)
+            }
+            fn answer_permission(
+                &self,
+                _: steve_core::PermissionAnswer<'_>,
+            ) -> steve_core::Result<steve_core::Answered> {
+                Ok(steve_core::Answered::Gone)
+            }
+            fn hold(&self, _: bool) {}
+            fn is_holding(&self) -> bool {
+                false
+            }
+            fn running_turns(&self) -> usize {
+                0
+            }
+        }
+        struct NoGateway;
+        #[async_trait]
+        impl steve_core::ModelGateway for NoGateway {
+            async fn call(
+                &self,
+                _: &str,
+                _: steve_core::Tier,
+                _: Duration,
+                _: &steve_core::gateway::ThinkTools,
+            ) -> steve_core::Result<steve_core::gateway::Printed> {
+                Err(CoreError::Msg("no model gateway in test".into()))
+            }
+        }
+        let host = Arc::new(HubHost {
+            store: store.clone(),
+            data_dir: cfg.data_dir.clone(),
+            core: OnceLock::new(),
+            flow: OnceLock::new(),
+            approval: Default::default(),
+            local_node: OnceLock::new(),
+        });
+        let routed = Arc::new(RoutedRuntime {
+            host,
+            node: None,
+            fleet: None,
+            workspaces: super::workspaces::Workspaces::new(store.clone(), None, None, vec![]),
+            store: store.clone(),
+            worktrees: None,
+            dispatch_harnesses: Some(harnesses.clone()),
+        });
+        let mut core_cfg = steve_core::CoreConfig::for_home(&cfg.home);
+        core_cfg.data_dir = cfg.data_dir.clone();
+        core_cfg.worktrees = cfg.worktrees.clone();
+        let core = Core::new(
+            steve_core::repo::Db::new(store),
+            Arc::new(NoSessions),
+            gateway.unwrap_or_else(|| Arc::new(NoGateway)),
+            core_cfg,
+        );
+        Arc::new(Self {
+            plugins: crate::plugins::Plugins::new(&cfg.home, Some("off".into()))
+                .expect("test plugins"),
+            jobs: Arc::new(crate::jobs::Tasks::default()),
+            core,
+            harnesses,
+            routed,
+            node: None,
+            nodes: None,
+            lifecycle: None,
+            thread_recover_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+
+    pub async fn seed(&self) -> BResult<()> {
         let c = self.core.clone();
         blocking(move || c.seed()).await
     }
-    async fn recover(&self) -> BResult<()> {
+    pub async fn recover(&self) -> BResult<()> {
         let c = self.core.clone();
+        let recover_failed = self.thread_recover_failed.clone();
         blocking(move || {
             // before anything resumes: turns left open were cut by the restart
             super::acp_stats::interrupt_open(c.store().store(), steve_store::now());
             c.recover()?;
-            /* research runs cut off by the restart */
-            c.thread_recover()
+            // Main-conversation recovery trouble is reported on `/healthz` (`recovery`), never a
+            // reason to abort Hub startup or hold back Node reconciliation.
+            if let Err(e) = c.thread_recover() {
+                tracing::error!("thread recovery at boot: {e}");
+                recover_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::recovery::failed(&e.to_string());
+            }
+            Ok(())
         })
         .await
     }
-    async fn upgrade_drain(&self, action: &str) -> BResult<Obj> {
+    pub async fn upgrade_drain(&self, action: &str) -> BResult<Obj> {
         static CONTROL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _lock = CONTROL.lock().await;
         let store = self.core.store().store();
@@ -845,21 +1086,22 @@ impl Domain for CoreDomain {
     }
     /// Never fails the Hub: what could not be resumed is logged and reported on `/healthz`
     /// (`recovery`), and its durable intent stays for the next boot.
-    async fn ready(&self) -> BResult<()> {
+    pub async fn ready(&self) -> BResult<()> {
         let c = self.core.clone();
+        let recover_failed = self.thread_recover_failed.clone();
         let r = blocking(move || {
             c.ready();
+            if recover_failed.load(std::sync::atomic::Ordering::SeqCst) {
+                c.thread_recover()?;
+                recover_failed.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
             c.thread_ready()
         })
         .await;
         crate::recovery::record(&r);
         Ok(())
     }
-    async fn report_release(&self) -> BResult<()> {
-        let c = self.core.clone();
-        blocking(move || c.report_release()).await
-    }
-    async fn shutdown(&self) {
+    pub async fn shutdown(&self) {
         let node = async {
             match &self.node {
                 Some(n) => tokio::time::timeout(NODE_SHUTDOWN, n.shutdown())
@@ -888,10 +1130,10 @@ impl Domain for CoreDomain {
         self.jobs.stop().await;
         self.plugins.stop_all().await;
     }
-    fn background_tasks(&self) -> Option<Arc<crate::jobs::Tasks>> {
+    pub fn background_tasks(&self) -> Option<Arc<crate::jobs::Tasks>> {
         Some(self.jobs.clone())
     }
-    fn spawn_background(&self) {
+    pub fn spawn_background(&self) {
         self.jobs.start("core.releases", || {
             self.core
                 .clone()
@@ -908,7 +1150,7 @@ impl Domain for CoreDomain {
             .start("core.stalls", || self.core.clone().watch_stalls());
     }
 
-    async fn create_item(&self, p: CreateItem) -> Result<Obj, crate::error::ApiError> {
+    pub async fn create_item(&self, p: CreateItem) -> Result<Obj, crate::error::ApiError> {
         let c = self.core.clone();
         let [a, b] = p.source;
         let n = steve_core::CreateItem {
@@ -950,7 +1192,7 @@ impl Domain for CoreDomain {
         Ok(to_obj(result?)?)
     }
 
-    async fn confirm_bot_proposal(
+    pub async fn confirm_bot_proposal(
         &self,
         ws: String,
         actor: String,
@@ -965,20 +1207,20 @@ impl Domain for CoreDomain {
         .map_err(|e| BackendError::msg(format!("task failed: {e}")))?
     }
 
-    async fn disk_report(&self) -> BResult<Value> {
+    pub async fn disk_report(&self) -> BResult<Value> {
         let c = self.core.clone();
         let r = blocking(move || c.disk_report()).await?;
         serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
     }
-    async fn reclaim_workspaces(&self) -> BResult<Value> {
+    pub async fn reclaim_workspaces(&self) -> BResult<Value> {
         let c = self.core.clone();
         let r = blocking(move || c.reclaim_workspaces()).await?;
         serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
     }
-    async fn route(&self, ws: &str, text: &str) -> BResult<Route> {
+    pub async fn route(&self, ws: &str, text: &str) -> BResult<Route> {
         self.route_for_team(ws, text, None).await
     }
-    async fn route_for_team(&self, ws: &str, text: &str, team: Option<&str>) -> BResult<Route> {
+    pub async fn route_for_team(&self, ws: &str, text: &str, team: Option<&str>) -> BResult<Route> {
         let r = self
             .core
             .route_for_team(ws, text, &[], false, false, team)
@@ -1001,13 +1243,13 @@ impl Domain for CoreDomain {
             reply: r.reply,
         })
     }
-    async fn item_action(&self, id: &str, action: &str, actor: &str) -> BResult<Obj> {
+    pub async fn item_action(&self, id: &str, action: &str, actor: &str) -> BResult<Obj> {
         let a = ItemAction::parse(action)
             .ok_or_else(|| BackendError::msg(format!("unknown action {action}")))?;
         let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
         to_obj(blocking(move || c.item_action(&id, a, &actor)).await?)
     }
-    async fn lifecycle_command(
+    pub async fn lifecycle_command(
         &self,
         id: &str,
         command: &str,
@@ -1038,19 +1280,19 @@ impl Domain for CoreDomain {
             .await?,
         )
     }
-    async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
+    pub async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.lifecycle_view(&id).map(Some)).await
     }
-    async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
+    pub async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.diagnostic_snapshot(&id)).await
     }
-    async fn dependency_get(&self, id: &str) -> BResult<Value> {
+    pub async fn dependency_get(&self, id: &str) -> BResult<Value> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.dependency_get(&id)).await
     }
-    async fn dependency_wait(
+    pub async fn dependency_wait(
         &self,
         id: &str,
         expected_cycle: i64,
@@ -1065,33 +1307,50 @@ impl Domain for CoreDomain {
         );
         blocking(move || c.dependency_wait(&id, expected_cycle, &resume, &reason)).await
     }
-    async fn retire_legacy_workflow_children(&self) -> BResult<usize> {
+    pub async fn retire_legacy_workflow_children(&self) -> BResult<usize> {
         let c = self.core.clone();
         blocking(move || c.retire_legacy_workflow_children()).await
     }
-    async fn lifecycle_tick(&self) -> BResult<usize> {
+    pub async fn lifecycle_tick(&self) -> BResult<usize> {
         let c = self.core.clone();
         blocking(move || c.lifecycle_tick()).await
     }
-    async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
-        let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());
-        blocking(move || c.revise_goal(&id, &text)).await
+    pub async fn revise_goal(&self, id: &str, text: &str, actor: &str) -> BResult<()> {
+        let (c, id, text, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            text.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.revise_goal(&id, &text, &actor)).await
     }
-    async fn supplement(&self, id: &str, text: &str, mode: &str, files: Vec<Value>) -> BResult<()> {
+    pub async fn supplement(
+        &self,
+        id: &str,
+        text: &str,
+        mode: &str,
+        files: Vec<Value>,
+        actor: &str,
+    ) -> BResult<()> {
         let m = match mode {
             "steer" => SupplementMode::Steer,
             "new" => SupplementMode::New,
             _ => SupplementMode::Auto,
         };
         let files = refs(files)?;
-        let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());
-        blocking(move || c.supplement(&id, &text, m, &files)).await
+        let (c, id, text, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            text.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.supplement(&id, &text, m, &files, &actor)).await
     }
-    async fn deliver_queued(&self, id: &str) -> BResult<()> {
+    pub async fn deliver_queued(&self, id: &str) -> BResult<()> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.deliver_queued(&id)).await
     }
-    async fn reassign(&self, id: &str, bot: &str, actor: &str) -> BResult<Obj> {
+    pub async fn reassign(&self, id: &str, bot: &str, actor: &str) -> BResult<Obj> {
         let (c, id, bot, actor) = (
             self.core.clone(),
             id.to_string(),
@@ -1100,33 +1359,109 @@ impl Domain for CoreDomain {
         );
         to_obj(blocking(move || c.reassign(&id, &bot, &actor)).await?)
     }
-    async fn add_dep(&self, id: &str, dep: &str) -> BResult<()> {
-        let (c, id, dep) = (self.core.clone(), id.to_string(), dep.to_string());
-        blocking(move || c.add_dep(&id, &dep)).await
+    pub async fn handoff_item(
+        &self,
+        id: &str,
+        target: steve_core::HandoffTarget,
+        actor: &str,
+    ) -> Result<Value, crate::error::ApiError> {
+        let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
+        let result =
+            tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+                c.handoff_item(&id, target, &actor)
+                    .map(|out| {
+                        let mut body = json!({ "session": out.session.id });
+                        if let Some(updated) = out.bot_default_updated {
+                            body["bot_default_updated"] =
+                                serde_json::to_value(updated).unwrap_or(Value::Null);
+                        }
+                        body
+                    })
+                    .map_err(|error| match error {
+                        CoreError::Placement(blocked) => crate::error::ApiError::Placement {
+                            blocked,
+                            proposal: None,
+                        },
+                        other => cerr(other).into(),
+                    })
+            })))
+            .await
+            .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
+        result
     }
-    async fn rm_dep(&self, id: &str, dep: &str) -> BResult<()> {
-        let (c, id, dep) = (self.core.clone(), id.to_string(), dep.to_string());
-        blocking(move || c.rm_dep(&id, &dep)).await
+    pub async fn handoff_session(
+        &self,
+        session: &str,
+        target: steve_core::HandoffTarget,
+        actor: &str,
+    ) -> Result<Value, crate::error::ApiError> {
+        let (c, sid, actor) = (self.core.clone(), session.to_string(), actor.to_string());
+        let result =
+            tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+                c.handoff_session(&sid, target, &actor)
+                    .map(|out| {
+                        let mut body = json!({ "session": out.session.id });
+                        if let Some(updated) = out.bot_default_updated {
+                            body["bot_default_updated"] =
+                                serde_json::to_value(updated).unwrap_or(Value::Null);
+                        }
+                        body
+                    })
+                    .map_err(|error| match error {
+                        CoreError::Placement(blocked) => crate::error::ApiError::Placement {
+                            blocked,
+                            proposal: None,
+                        },
+                        other => cerr(other).into(),
+                    })
+            })))
+            .await
+            .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
+        result
+    }
+    pub async fn add_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
+        let (c, id, dep, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            dep.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.add_dep(&id, &dep, &actor)).await
+    }
+    pub async fn rm_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
+        let (c, id, dep, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            dep.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.rm_dep(&id, &dep, &actor)).await
     }
 
-    async fn session_message(
+    pub async fn session_message(
         &self,
         session: &str,
         text: &str,
         mode: &str,
         files: Vec<Value>,
+        actor: &str,
     ) -> BResult<String> {
         let files = refs(files)?;
         let interrupt = mode == "插话";
-        let (c, sid, text) = (self.core.clone(), session.to_string(), text.to_string());
+        let (c, sid, text, actor) = (
+            self.core.clone(),
+            session.to_string(),
+            text.to_string(),
+            actor.to_string(),
+        );
         Ok(
-            blocking(move || c.session_message(&sid, &text, interrupt, &files))
+            blocking(move || c.session_message(&sid, &text, interrupt, &files, &actor))
                 .await?
                 .as_str()
                 .to_string(),
         )
     }
-    async fn cancel(&self, session: &str) -> BResult<bool> {
+    pub async fn cancel(&self, session: &str) -> BResult<bool> {
         // routed: a Node session's stop goes to its coordinator
         let (c, sid) = (self.core.clone(), session.to_string());
         tokio::task::spawn_blocking(move || c.cancel_turn(&sid))
@@ -1134,27 +1469,39 @@ impl Domain for CoreDomain {
             .map_err(|e| BackendError::msg(format!("task failed: {e}")))?
             .map_err(|e| BackendError::msg(e.to_string()))
     }
-    async fn hold_status(&self) -> BResult<Value> {
+    pub async fn hold_status(&self) -> BResult<Value> {
         let c = self.core.clone();
         let h = tokio::task::spawn_blocking(move || c.hold_status())
             .await
             .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
         serde_json::to_value(h).map_err(|e| BackendError::msg(e.to_string()))
     }
-    async fn queued_edit(&self, session: &str, id: &str, text: &str) -> BResult<Obj> {
-        let (c, sid, id, text) = (
+    pub async fn queued_edit(
+        &self,
+        session: &str,
+        id: &str,
+        text: &str,
+        actor: &str,
+    ) -> BResult<Obj> {
+        let (c, sid, id, text, actor) = (
             self.core.clone(),
             session.to_string(),
             id.to_string(),
             text.to_string(),
+            actor.to_string(),
         );
-        to_obj(blocking(move || c.queued_edit(&sid, &id, &text)).await?)
+        to_obj(blocking(move || c.queued_edit(&sid, &id, &text, &actor)).await?)
     }
-    async fn queued_remove(&self, session: &str, id: &str) -> BResult<Obj> {
-        let (c, sid, id) = (self.core.clone(), session.to_string(), id.to_string());
-        to_obj(blocking(move || c.queued_remove(&sid, &id)).await?)
+    pub async fn queued_remove(&self, session: &str, id: &str, actor: &str) -> BResult<Obj> {
+        let (c, sid, id, actor) = (
+            self.core.clone(),
+            session.to_string(),
+            id.to_string(),
+            actor.to_string(),
+        );
+        to_obj(blocking(move || c.queued_remove(&sid, &id, &actor)).await?)
     }
-    async fn queued_send_now(&self, session: &str, id: &str) -> BResult<Obj> {
+    pub async fn queued_send_now(&self, session: &str, id: &str) -> BResult<Obj> {
         let (c, sid, id) = (self.core.clone(), session.to_string(), id.to_string());
         to_obj(
             match blocking(move || c.queued_send_now(&sid, &id)).await? {
@@ -1164,18 +1511,18 @@ impl Domain for CoreDomain {
             },
         )
     }
-    fn is_busy(&self, session: &str) -> bool {
+    pub fn is_busy(&self, session: &str) -> bool {
         self.core.is_busy(session)
     }
-    async fn end_session(&self, session: &str) -> BResult<()> {
+    pub async fn end_session(&self, session: &str) -> BResult<()> {
         let (c, sid) = (self.core.clone(), session.to_string());
         blocking(move || c.end_session(&sid)).await
     }
-    async fn continue_in_new_session(&self, session: &str, actor: &str) -> BResult<String> {
+    pub async fn continue_in_new_session(&self, session: &str, actor: &str) -> BResult<String> {
         let (c, sid, actor) = (self.core.clone(), session.to_string(), actor.to_string());
         blocking(move || c.continue_in_new_session(&sid, &actor)).await
     }
-    async fn fork(
+    pub async fn fork(
         &self,
         ws: &str,
         session: &str,
@@ -1202,7 +1549,7 @@ impl Domain for CoreDomain {
         to_obj(blocking(move || c.fork(&ws, &sid, seq, &goal, as_session, &actor)).await?)
     }
 
-    async fn settle_decision(
+    pub async fn settle_decision(
         &self,
         caller: steve_modules::Caller,
         id: String,
@@ -1212,7 +1559,7 @@ impl Domain for CoreDomain {
         let core = self.core.clone();
         to_obj(blocking(move || core.decision_command(&caller, &id, revision, command)).await?)
     }
-    async fn drain(&self, token: &str, start: bool) -> BResult<Option<Obj>> {
+    pub async fn drain(&self, token: &str, start: bool) -> BResult<Option<Obj>> {
         let (c, token) = (self.core.clone(), token.to_string());
         match blocking(move || c.drain(&token, start)).await? {
             Some(d) => Ok(Some(to_obj(
@@ -1221,12 +1568,8 @@ impl Domain for CoreDomain {
             None => Ok(None),
         }
     }
-    async fn tidy_branch(&self, item: &str) -> BResult<()> {
-        let (c, item) = (self.core.clone(), item.to_string());
-        blocking(move || c.tidy_branch(&item)).await
-    }
 
-    fn bot_prompt(&self, bot: &Obj, ws: &str) -> BResult<String> {
+    pub fn bot_prompt(&self, bot: &Obj, ws: &str) -> BResult<String> {
         let id = bot.get("id").and_then(Value::as_str).unwrap_or_default();
         let mut b = self
             .core
@@ -1242,7 +1585,7 @@ impl Domain for CoreDomain {
             .map(str::to_string);
         self.core.bot_prompt(&b, ws).map_err(cerr)
     }
-    async fn delete_bot(
+    pub async fn delete_bot(
         &self,
         id: &str,
         to: &str,
@@ -1258,7 +1601,7 @@ impl Domain for CoreDomain {
         let moved = blocking(move || c.delete_bot(&id, &to, &actor, &allowed_workspaces)).await?;
         to_obj(json!({ "moved": moved }))
     }
-    async fn remove_bot_from_workspace(
+    pub async fn remove_bot_from_workspace(
         &self,
         ws: &str,
         id: &str,
@@ -1276,7 +1619,7 @@ impl Domain for CoreDomain {
         to_obj(json!({ "moved": moved }))
     }
 
-    async fn say(
+    pub async fn say(
         &self,
         ws: &str,
         user: &str,
@@ -1297,7 +1640,7 @@ impl Domain for CoreDomain {
         })
         .await
     }
-    async fn say_to(
+    pub async fn say_to(
         &self,
         ws: &str,
         user: &str,
@@ -1306,6 +1649,7 @@ impl Domain for CoreDomain {
         mentions: Vec<steve_modules::contacts::item_people::Mention>,
         item: Option<String>,
         reply_to: Option<String>,
+        client_id: Option<String>,
     ) -> BResult<()> {
         let files = refs(files)?;
         let (c, ws, user, text) = (
@@ -1319,19 +1663,27 @@ impl Domain for CoreDomain {
             reply_to,
         };
         blocking(move || {
-            c.say_to(&ws, Some(&user), &text, &files, &mentions, to)
-                .map(|_| ())
+            c.say_to_with_key(
+                &ws,
+                Some(&user),
+                &text,
+                &files,
+                &mentions,
+                to,
+                client_id.as_deref(),
+            )
+            .map(|_| ())
         })
         .await
     }
-    async fn stop(&self, ws: &str) -> BResult<bool> {
+    pub async fn stop(&self, ws: &str) -> BResult<bool> {
         let (c, ws) = (self.core.clone(), ws.to_string());
         blocking(move || c.stop(&ws)).await
     }
-    fn thread_active(&self, ws: &str) -> bool {
-        self.core.main_busy_besides(ws)
+    pub fn thread_active(&self, ws: &str) -> bool {
+        self.core.thread_active(ws)
     }
-    async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
+    pub async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
         let (c, ws, m, t) = (
             self.core.clone(),
             ws.to_string(),
@@ -1340,14 +1692,14 @@ impl Domain for CoreDomain {
         );
         blocking(move || c.thread_queued_edit(&ws, &m, &t)).await
     }
-    async fn thread_queued_withdraw(&self, ws: &str, message: &str) -> BResult<Option<Obj>> {
+    pub async fn thread_queued_withdraw(&self, ws: &str, message: &str) -> BResult<Option<Obj>> {
         let (c, ws, m) = (self.core.clone(), ws.to_string(), message.to_string());
         match blocking(move || c.thread_queued_withdraw(&ws, &m)).await? {
             Some((text, files)) => Ok(Some(to_obj(json!({"text": text, "files": files}))?)),
             None => Ok(None),
         }
     }
-    async fn promote(&self, ws: &str, message: &str, by: &str) -> BResult<Obj> {
+    pub async fn promote(&self, ws: &str, message: &str, by: &str) -> BResult<Obj> {
         to_obj(
             self.core
                 .promote(ws, message, Some(by))
@@ -1355,7 +1707,13 @@ impl Domain for CoreDomain {
                 .map_err(cerr)?,
         )
     }
-    async fn reroute(&self, ws: &str, message: &str, to: &str, by: &str) -> BResult<(Obj, bool)> {
+    pub async fn reroute(
+        &self,
+        ws: &str,
+        message: &str,
+        to: &str,
+        by: &str,
+    ) -> BResult<(Obj, bool)> {
         let to = steve_core::thread::RerouteTo::parse(to).ok_or_else(|| BackendError {
             status: 400,
             message: steve_i18n::t!("hub.error.invalid", fields = "to"),
@@ -1367,7 +1725,13 @@ impl Domain for CoreDomain {
                 .map_err(cerr)?,
         )
     }
-    async fn offer(&self, ws: &str, message: &str, take: bool, by: &str) -> BResult<(Obj, bool)> {
+    pub async fn offer(
+        &self,
+        ws: &str,
+        message: &str,
+        take: bool,
+        by: &str,
+    ) -> BResult<(Obj, bool)> {
         let (c, ws, m, by) = (
             self.core.clone(),
             ws.to_string(),
@@ -1376,7 +1740,7 @@ impl Domain for CoreDomain {
         );
         handled(blocking(move || c.offer(&ws, &m, take, Some(&by))).await?)
     }
-    async fn suggest(
+    pub async fn suggest(
         &self,
         ws: &str,
         message: &str,
@@ -1392,7 +1756,7 @@ impl Domain for CoreDomain {
         );
         handled(blocking(move || c.suggest(&ws, &m, &ch, Some(&by))).await?)
     }
-    async fn a2ui_action(
+    pub async fn a2ui_action(
         &self,
         ws: &str,
         user: &str,
@@ -1408,22 +1772,24 @@ impl Domain for CoreDomain {
         let r = blocking(move || c.a2ui_action(&ws, Some(&user), &m, action)).await?;
         to_obj(json!(r))
     }
-    async fn stop_run(&self, ws: &str, run: &str) -> BResult<bool> {
+    pub async fn stop_run(&self, ws: &str, run: &str) -> BResult<bool> {
         let (c, ws, r) = (self.core.clone(), ws.to_string(), run.to_string());
         blocking(move || c.stop_run(&ws, &r)).await
     }
-    async fn thread_follow(&self, ws: &str, item: &str, follow: bool) -> BResult<bool> {
+    pub async fn thread_follow(&self, ws: &str, item: &str, follow: bool) -> BResult<bool> {
         let (c, ws, i) = (self.core.clone(), ws.to_string(), item.to_string());
         blocking(move || {
             if c.store().item(&i)?.is_none_or(|x| x.workspace_id != ws) {
                 return Ok(false);
             }
-            Ok(c.store().store().thread().item_follow(&i, follow)?)
+            Ok(c.store()
+                .store()
+                .write(|w| steve_store::thread::set_dispatch_follow(w, &i, follow))?)
         })
         .await
     }
 
-    async fn claude_print(
+    pub async fn claude_print(
         &self,
         purpose: &'static str,
         ws: &str,
@@ -1453,7 +1819,7 @@ impl Domain for CoreDomain {
         Ok(p.text)
     }
 
-    async fn harnesses(&self, fresh: bool) -> BResult<Vec<steve_core::harnesses::Harness>> {
+    pub async fn harnesses(&self, fresh: bool) -> BResult<Vec<steve_core::harnesses::Harness>> {
         if fresh {
             let local = self
                 .node
@@ -1466,23 +1832,23 @@ impl Domain for CoreDomain {
         Ok(self.core.models().harnesses())
     }
 
-    async fn bot_nodes(&self, ws: &str, bot: &str) -> BResult<crate::backend::BotNodeCandidates> {
+    pub async fn bot_nodes(&self, ws: &str, bot: &str) -> BResult<BotNodeCandidates> {
         let (rt, ws, bot) = (self.routed.clone(), ws.to_string(), bot.to_string());
         blocking(move || rt.bot_candidates(&ws, &bot)).await
     }
 
-    async fn bot_harnesses(
+    pub async fn bot_harnesses(
         &self,
         bot: Option<&str>,
     ) -> BResult<Vec<steve_core::harnesses::Harness>> {
         Ok(self.core.models().bot_harnesses(bot))
     }
 
-    async fn models_view(&self, ws: &str) -> BResult<Value> {
+    pub async fn models_view(&self, ws: &str) -> BResult<Value> {
         let (c, ws) = (self.core.clone(), ws.to_string());
         blocking(move || Ok(c.models().view(&ws))).await
     }
-    async fn models_used(&self, ws: &str, harness: &str) -> BResult<Value> {
+    pub async fn models_used(&self, ws: &str, harness: &str) -> BResult<Value> {
         let (c, ws, h) = (self.core.clone(), ws.to_string(), harness.to_string());
         blocking(move || {
             let since = steve_store::now() - 7 * 86_400_000;
@@ -1490,7 +1856,7 @@ impl Domain for CoreDomain {
         })
         .await
     }
-    async fn models_write(&self, ws: &str, values: &Obj, actor: &str) -> BResult<()> {
+    pub async fn models_write(&self, ws: &str, values: &Obj, actor: &str) -> BResult<()> {
         let (c, ws, values, actor) = (
             self.core.clone(),
             ws.to_string(),
@@ -1499,7 +1865,7 @@ impl Domain for CoreDomain {
         );
         blocking(move || Ok(c.models().write(&ws, &values, &actor, "settings.models")?)).await
     }
-    async fn models_select(
+    pub async fn models_select(
         &self,
         ws: &str,
         choice: &steve_core::models::SteveSelection,
@@ -1513,15 +1879,15 @@ impl Domain for CoreDomain {
         );
         blocking(move || c.models().select_steve(&ws, &choice, &actor)).await
     }
-    async fn onboard_start(&self, ws: &str, actor: &str) -> BResult<String> {
+    pub async fn onboard_start(&self, ws: &str, actor: &str) -> BResult<String> {
         let (c, ws, actor) = (self.core.clone(), ws.to_string(), actor.to_string());
         blocking(move || c.onboard_start(&ws, &actor)).await
     }
-    async fn onboard_end(&self, ws: &str, actor: &str) -> BResult<()> {
+    pub async fn onboard_end(&self, ws: &str, actor: &str) -> BResult<()> {
         let (c, ws, actor) = (self.core.clone(), ws.to_string(), actor.to_string());
         blocking(move || c.onboard_end(&ws, &actor, steve_core::thread::onboard::SKIPPED)).await
     }
-    async fn config_draft(&self, ws: &str, target: &Obj, text: &str) -> BResult<Obj> {
+    pub async fn config_draft(&self, ws: &str, target: &Obj, text: &str) -> BResult<Obj> {
         let t = steve_core::changes::Target {
             kind: target
                 .get("kind")
@@ -1545,29 +1911,7 @@ impl Domain for CoreDomain {
         }
         to_obj(self.core.draft(ws, t, text).await.map_err(cerr)?)
     }
-    async fn config_apply(&self, id: &str, actor: &str, ws: &str) -> BResult<Obj> {
-        let (c, id, actor, ws) = (
-            self.core.clone(),
-            id.to_string(),
-            actor.to_string(),
-            ws.to_string(),
-        );
-        to_obj(blocking(move || c.apply(&id, &actor, &ws)).await?)
-    }
-    async fn config_undo(&self, id: &str, actor: &str, ws: &str) -> BResult<Obj> {
-        let (c, id, actor, ws) = (
-            self.core.clone(),
-            id.to_string(),
-            actor.to_string(),
-            ws.to_string(),
-        );
-        to_obj(blocking(move || c.undo(&id, &actor, &ws)).await?)
-    }
-    async fn config_drop(&self, id: &str, ws: &str) -> BResult<Obj> {
-        let (c, id, ws) = (self.core.clone(), id.to_string(), ws.to_string());
-        to_obj(blocking(move || c.drop_draft(&id, &ws)).await?)
-    }
-    async fn config_mark(&self, ws: &str, id: &str, state: Option<&str>) -> BResult<()> {
+    pub async fn config_mark(&self, ws: &str, id: &str, state: Option<&str>) -> BResult<()> {
         let (c, id, ws, state) = (
             self.core.clone(),
             id.to_string(),
@@ -2064,6 +2408,47 @@ mod routed_tests {
                 panic!("{case:?}: a message to it ran");
             }
             assert!(!bound(&rt), "{case:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn handoff_errors_localize_in_zh_and_en() {
+        let cases = [
+            (
+                steve_core::HandoffError::NoEligibleSession,
+                409,
+                "当前事项还没有可交接的会话",
+                "This item has no session eligible for handoff yet",
+            ),
+            (
+                steve_core::HandoffError::ReadonlySession,
+                409,
+                "只读或外部导入的会话不能交接",
+                "Read-only or externally imported sessions cannot be handed off",
+            ),
+            (
+                steve_core::HandoffError::SessionNotBoundToItem,
+                409,
+                "只有关联事项的会话才能交接",
+                "Only sessions linked to an item can be handed off",
+            ),
+            (
+                steve_core::HandoffError::AutoBotSwitchForbidden,
+                400,
+                "自动交接不更换 Bot，只切换当前 Bot 的执行面",
+                "Automatic handoff does not switch Bots; it only switches the current Bot's execution surface",
+            ),
+        ];
+        for (err, status, zh, en) in cases {
+            let got_zh = super::cerr(steve_core::CoreError::Handoff(err));
+            assert_eq!(got_zh.status, status);
+            assert_eq!(got_zh.message, zh);
+            let got_en = steve_i18n::scope(steve_i18n::EN, async {
+                super::cerr(steve_core::CoreError::Handoff(err))
+            })
+            .await;
+            assert_eq!(got_en.status, status);
+            assert_eq!(got_en.message, en);
         }
     }
 }

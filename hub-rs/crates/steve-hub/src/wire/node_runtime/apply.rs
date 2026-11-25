@@ -11,6 +11,8 @@ const RETRY_DELAYS_MS: [i64; 3] = [20_000, 60_000, 120_000];
 
 /// How many message roles the coordinator keeps in memory before it starts over.
 const ROLES_KEPT: usize = 4096;
+/// Upper bound on tracked in-flight attempt peak context observations.
+const CONTEXT_PEAKS_KEPT: usize = 4096;
 
 /// What one attempt did, as its statistics row counts it.
 #[derive(Debug, Clone, Default)]
@@ -24,6 +26,8 @@ pub struct AttemptFacts {
     pub model: Option<String>,
     /// The attempt's share of the harness's own dollar figure, if it reported one.
     pub cost: Option<f64>,
+    /// Peak observed prompt context tokens during this attempt (read-only observation).
+    pub context_peak: Option<u64>,
 }
 
 /// What an attempt did so far, kept as its events are applied ([`steve_store::Attempts`]): by
@@ -254,6 +258,7 @@ impl NodeRuntime {
                 at,
                 measure,
             } => {
+                self.context_peaks.lock().unwrap().remove(&attempt);
                 if let Some(m) = measure {
                     m.record();
                 }
@@ -416,7 +421,8 @@ impl NodeRuntime {
                 if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
                     && state != "finished"
                 {
-                    let facts = take_facts(w, a)?;
+                    let mut facts = take_facts(w, a)?;
+                    facts.context_peak = self.context_peaks.lock().unwrap().get(a).copied();
                     let measure = super::super::acp_stats::try_node_attempt_finished(
                         &self.store,
                         &session,
@@ -484,6 +490,16 @@ impl NodeRuntime {
             }
             if let Some(d) = delta {
                 kept.cost = Some(kept.cost.unwrap_or(0.0) + d);
+            }
+            if let Some(used) = report.context_used.filter(|&n| n > 0) {
+                let mut peaks = self.context_peaks.lock().unwrap();
+                if peaks.len() >= CONTEXT_PEAKS_KEPT && !peaks.contains_key(a) {
+                    peaks.clear();
+                }
+                peaks
+                    .entry(a.to_owned())
+                    .and_modify(|p| *p = (*p).max(used))
+                    .or_insert(used);
             }
             w.attempts().keep_facts(a, &kept)?;
         }
@@ -716,9 +732,14 @@ impl NodeRuntime {
         c: &Completion,
     ) -> Result<Option<End>, StoreError> {
         let (ordinal, cancelled) = self.store.read(|r| node_turns::retry_state(r, turn))?;
+        let quota_reset = c
+            .error
+            .as_ref()
+            .is_some_and(|e| steve_core::has_quota_reset(&said(e), self.clock.now()));
         if c.outcome == Outcome::Failed
             && !c.acted
             && !cancelled
+            && !quota_reset
             && let Some(Error {
                 retry: Retry::Later { after_ms },
                 ..

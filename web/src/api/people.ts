@@ -1,16 +1,18 @@
 /** Contacts, organizations and teams. */
-import { useEffect, useState } from "react"
-import { modReq as req, Unauthenticated, HubError, qs, fileUrl, wsHeaders } from "@/api"
+import { modReq as req, Unauthenticated, HubError, qs, wsHeaders } from "@/api"
+import { avatarSrc } from "@/actor"
 import { hubUrl } from "@/hub"
 import { t } from "@/i18n"
+import { notePersonIdentity } from "@/store"
+import type { AvatarRef } from "@/gen"
 
+export { avatarSrc }
+export type { AvatarRef }
 export type Level = "public" | "conclusion" | "reasoning" | "never"
 export type Visibility = string // workspace | private | team:<id> | space:<id>
 export type ContactKind = "real" | "virtual" | "unconfirmed" | "bot"
 export type OrgRef = { id: string; name: string; title: string | null; dept: string | null }
-/** a party's picture: `file` is one the Hub stores (an upload, cut to a 256px square), `url` one a provider gave */
-export type AvatarRef = { file?: string; url?: string; seed?: string } | null
-type Head = { id: string; name: string; aliases: string[]; kind: ContactKind | null; rels: string[]; important: boolean; org: OrgRef | null; tags: string[]; visibility: Visibility; is_me: boolean; avatar: AvatarRef | unknown; updated: number }
+type Head = { id: string; name: string; aliases: string[]; kind: ContactKind | null; rels: string[]; important: boolean; org: OrgRef | null; tags: string[]; visibility: Visibility; is_me: boolean; avatar: AvatarRef | null | unknown; updated: number }
 export type ContactBrief = Head & { accounts: number; items: number }
 export type Job = { org_id: string; org_name: string; title: string | null; dept: string | null; from: string | null; to: string | null; source: string }
 export type Attr = { id: string; key: string; label: string; value: string; source_label: string; source?: string; level: Level; status: "confirmed" | "candidate" | "stale" | string }
@@ -22,8 +24,8 @@ export type Contact = Head & {
   note: string; status: "active" | "merged" | "deleted"; merged_into: string | null; source: string; revision: number; created: number
   jobs: Job[]; attrs: Attr[]; teams: TeamRef[]; reports_to: { id: string; name: string }[]; merges: { id: string; from_name: string; created: number; splittable: boolean }[]
 }
-export type Org = { name_state?: "manual" | "provider" | "placeholder" | "workspace"; name_reason?: "external_unavailable" | "permission" | null; name_scope?: string | null; tenant?: { key: string; own: boolean } | null; id: string; name: string; aliases: string[]; kind: string | null; domains: string[]; note: string; tags: string[]; attrs: Attr[]; people?: { id: string; name: string; title: string | null }[]; revision: number }
-export type TeamMember = { contact_id: string; name: string; role: "lead" | "member"; external: boolean; source: string }
+export type Org = { name_state?: "manual" | "provider" | "placeholder" | "workspace"; name_reason?: "external_unavailable" | "permission" | null; name_scope?: string | null; tenant?: { key: string; own: boolean } | null; id: string; name: string; aliases: string[]; kind: string | null; domains: string[]; note: string; tags: string[]; attrs: Attr[]; people?: { id: string; name: string; title: string | null; avatar?: unknown }[]; revision: number }
+export type TeamMember = { contact_id: string; name: string; role: "lead" | "member"; external: boolean; source: string; avatar?: unknown }
 export type Team = {
   id: string; name: string; kind: "chart" | "virtual"; status: "active" | "dissolved"; parent_id: string | null; org_id: string | null; purpose: string; space_id: string | null
   tags: string[]; visibility: Visibility; source_label: string; headcount: number; members?: TeamMember[]; children: string[]; depth?: number; revision: number
@@ -32,8 +34,8 @@ export type TeamList = { chart: Team[]; virtual: Team[]; sync: { connection_id: 
 export type Mem = { id: string; kind: string; text: string; source_label: string; level: Level; status: "confirmed" | "candidate" | "stale" | string; visibility: Visibility; about: { type: string; id: string }[]; created: number }
 export type PartyItem = { item_id: string; title?: string; role: string; source: string; confidence: number }
 export type TimelineEntry = { ts: number; kind: "mail" | "message" | "meeting" | "item" | "event"; text: string; href: string }
-export type ItemPerson = { party_id: string; name: string; type: "contact" | "org" | "team"; role: string; source: string; confidence: number }
-export type PartyOption = { id: string; name: string; type: "contact" | "org" | "team"; sub: string }
+export type ItemPerson = { party_id: string; name: string; type: "contact" | "org" | "team"; role: string; source: string; confidence: number; avatar?: unknown }
+export type PartyOption = { id: string; name: string; type: "contact" | "org" | "team"; sub: string; avatar?: unknown }
 export type MentionOptions = { bots: { id: string; name: string }[]; parties: PartyOption[] }
 export type Mention = { kind: "party" | "bot"; id: string }
 export type MergeProposal = { id: string; from: ContactBrief; into: ContactBrief; account: { id: string; handle: string; system: string } | null; reason: string; decision_id: string | null }
@@ -57,7 +59,7 @@ export const people = {
   contact: (id: string) => get<Contact>("/contacts/" + e(id)).then(noteMine),
   me: () => get<Contact>("/me/contact").then(noteMine),
   newContact: (b: { name: string; aliases?: string[]; rels?: string[]; org_id?: string; title?: string; kind?: "real" | "virtual"; note?: string; visibility?: Visibility }) => post<Contact>("/contacts", b),
-  patchContact: (id: string, b: Partial<{ name: string; aliases: string[]; rels: string[]; important: boolean; note: string; kind: "real" | "virtual"; visibility: Visibility; tags: string[] }>) => patch<Contact>("/contacts/" + e(id), b),
+  patchContact: (id: string, b: Partial<{ name: string; aliases: string[]; rels: string[]; important: boolean; note: string; kind: "real" | "virtual"; visibility: Visibility; tags: string[] }>) => patch<Contact>("/contacts/" + e(id), b).then(noteMine),
   confirm: (id: string) => post<Contact>(`/contacts/${e(id)}/confirm`),
   deleteContact: (id: string) => del("/contacts/" + e(id)),
   addJob: (id: string, b: { org_id: string; title?: string; dept?: string; from?: string }) => post<Contact>(`/contacts/${e(id)}/jobs`, b),
@@ -105,35 +107,14 @@ export const people = {
   clearAvatar: (id: string) => del<Contact>(`/contacts/${e(id)}/avatar`).then(noteMine),
   accounts: (party: string) => get<AccountBrief[]>("/accounts" + qs({ party })),
   addAccount: (b: { system_id: string; party_id: string; kind: string; handle: string }) => post<AccountBrief>("/accounts", b),
+  /** the channels module's groups; `null` when it is not installed (the bound-group parts hide) */
+  spaces: () => get<{ id: string; name: string }[]>("/spaces").catch(() => null),
 }
 
-let meAvatar: string | undefined
-const listeners = new Set<() => void>()
-
-/** Updates the sidebar picture when a contact read or edit returns the signed-in user's contact. */
-function noteMine<C extends { is_me: boolean; avatar: unknown }>(c: C): C {
-  if (c.is_me && avatarSrc(c.avatar) !== meAvatar) {
-    meAvatar = avatarSrc(c.avatar)
-    listeners.forEach((f) => f())
-  }
+/** Updates unified person identity in the store when a contact read or edit returns a person. */
+function noteMine<C extends { id?: string; name?: string; is_me: boolean; avatar: unknown }>(c: C): C {
+  notePersonIdentity(c)
   return c
-}
-
-/** the address of a party's own picture, when it has one the Hub stores */
-export function avatarSrc(a: unknown): string | undefined {
-  const f = a && typeof a === "object" ? (a as { file?: unknown }).file : undefined
-  return typeof f === "string" && f ? fileUrl(f) : undefined
-}
-/** The sidebar uses initials until the contact's picture is loaded. */
-export function useMyAvatar(): string | undefined {
-  const [avatar, setAvatar] = useState(meAvatar)
-  useEffect(() => {
-    const sync = () => setAvatar(meAvatar)
-    listeners.add(sync)
-    void people.me().catch((e) => console.warn(e))
-    return () => { listeners.delete(sync) }
-  }, [])
-  return avatar
 }
 
 /** a provider id that identification fell back to as a name (`ou_…`, `on_…`, `cli_…`) — never shown as one */

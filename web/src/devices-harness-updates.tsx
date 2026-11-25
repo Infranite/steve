@@ -25,7 +25,7 @@ import {
   type HarnessUpdate,
   type HarnessUpdates,
 } from "@/harness-update-status"
-import type { NodeView } from "@/device-model"
+import { isUpgradeOnlyLink, type NodeView } from "@/device-model"
 
 /** Cache by Node id only; every receipt, installed version, and auto-upgrade policy comes from that target's API. */
 const cache = new Map<string, HarnessUpdates>()
@@ -44,8 +44,10 @@ export function useNodeHarnessUpdates(v: NodeView) {
   const reading = useRef(false), sending = useRef(false), mounted = useRef(true)
   const seeded = useRef(false), seenSucceeded = useRef<Set<string>>(new Set())
 
+  const upgradeOnly = isUpgradeOnlyLink(v)
+
   const reload = useCallback(async (fresh = false) => {
-    if (reading.current) return
+    if (reading.current || upgradeOnly) return
     reading.current = true
     setBusy(true)
     try {
@@ -71,28 +73,28 @@ export function useNodeHarnessUpdates(v: NodeView) {
       reading.current = false
       if (mounted.current) setBusy(false)
     }
-  }, [v.id, t, refreshHarnesses])
+  }, [v.id, t, refreshHarnesses, upgradeOnly])
 
   useEffect(() => {
     mounted.current = true
     seeded.current = false
     seenSucceeded.current = new Set()
     setData(cache.get(v.id) ?? null)
-    if (st.owner && v.state !== "revoked") void reload()
+    if (st.owner && v.state !== "revoked" && !upgradeOnly) void reload()
     return () => { mounted.current = false }
-  }, [reload, v.id, v.state, st.owner])
+  }, [reload, v.id, v.state, st.owner, upgradeOnly])
 
   const active =
     !!data?.report?.checking ||
     Object.values(data?.runs ?? {}).some((r) => ["running", "waiting", "unknown"].includes(receiptStatus(r) ?? ""))
 
   useEffect(() => {
-    if (!st.owner || v.state === "revoked") return
+    if (!st.owner || v.state === "revoked" || upgradeOnly) return
     const timer = setInterval(() => { if (!document.hidden) void reload() }, active ? 1500 : 10_000)
     const visible = () => { if (!document.hidden) void reload() }
     document.addEventListener("visibilitychange", visible)
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", visible) }
-  }, [reload, active, v.state, st.owner])
+  }, [reload, active, v.state, st.owner, upgradeOnly])
 
   const unavailable = !!data?.error || !!error
 

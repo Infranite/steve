@@ -148,9 +148,7 @@ async fn ignore_group_then_undo_restores_the_graph() {
     settled(&e, &m3, "digest").await;
 
     // undo: the old graph is back (as a new version), the memory is gone
-    steve_modules::changes::undo(&e.env.modules, &caller(WS, ME), &cs)
-        .unwrap()
-        .unwrap();
+    steve_modules::changes::undo(&e.env.modules, &caller(WS, ME), &cs).unwrap();
     let f = flow(&e, &fid).await;
     assert_eq!(f["version"], 3);
     assert_eq!(f["versions"][0]["note"], "撤销纠正");
@@ -232,9 +230,7 @@ async fn an_unhandled_event_gets_a_correction_flow() {
     settled(&e, &m3, "recorded").await;
 
     // undo deletes the flow
-    steve_modules::changes::undo(&e.env.modules, &caller(WS, ME), &cs)
-        .unwrap()
-        .unwrap();
+    steve_modules::changes::undo(&e.env.modules, &caller(WS, ME), &cs).unwrap();
     let (st, _) = call(
         &e.router(),
         Some(&caller(WS, ME)),
@@ -270,9 +266,7 @@ async fn undo_refuses_after_the_flow_was_saved_again() {
     )
     .await;
     assert_eq!(st, 200);
-    let err = steve_modules::changes::undo(&e.env.modules, &caller(WS, ME), &cs)
-        .unwrap()
-        .unwrap_err();
+    let err = steve_modules::changes::undo(&e.env.modules, &caller(WS, ME), &cs).unwrap_err();
     assert!(err.to_string().contains("这次改动已经不能撤销了"), "{err}");
     // the memory stays: the undo was rolled back as a whole
     let n = fixtures::rule_texts(e.env.store()).unwrap().len();

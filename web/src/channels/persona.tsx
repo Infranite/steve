@@ -10,12 +10,13 @@ import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { go, Page, Group, Row, SectionLabel, Empty, BotAvatar, Panel, Chevron, Blank } from "@/ui"
+import { go, Page, Group, Row, SectionLabel, Empty, Panel, Chevron, Blank } from "@/ui"
 import { Select } from "@/view-shared"
 import { st, botName } from "@/store"
-import { useLoad, useBusy } from "@/accounts/load"
+import { useBusy } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { channelsApi, type Persona, type Reveal } from "@/api/channels"
-import { PersonaAvatar } from "@/channels/basis"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { OwnerChip } from "@/people/owner-chip"
 import { t, useT } from "@/i18n"
 import { introOf, newPersonaDefaults, ownerOf } from "@/channels/persona-intro"
@@ -29,10 +30,10 @@ const usedText = (p: Persona) => {
  *  configuration pages lay them out */
 export function PersonasSection({ bot, panel = false }: { bot?: string; panel?: boolean }) {
   const t = useT()
-  const L = useLoad(() => channelsApi.personas(), [], ["persona", "space", "channel"])
+  const L = useHubQuery(["channels", "personas"], () => channelsApi.personas(), { events: ["persona", "space", "channel"] })
   const [busy, act] = useBusy()
-  if (L.s === "loading") return <div className="flex justify-center py-10"><Spinner className="size-5 text-muted-foreground" /></div>
-  if (L.s === "error") return <Empty title={L.err} />
+  if (L.loading) return <div className="flex justify-center py-10"><Spinner className="size-5 text-muted-foreground" /></div>
+  if (L.error || !L.data) return <Empty title={L.error?.message ?? ""} />
   const xs = bot ? L.data.filter((p) => p.bot_id === bot) : L.data
   const create = async () => {
     const p = await act(() => channelsApi.newPersona({ ...newPersonaDefaults(), bot_id: bot ?? "steve" }))
@@ -43,7 +44,7 @@ export function PersonasSection({ bot, panel = false }: { bot?: string; panel?: 
     <section data-personas>
       <SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void create()} data-new-persona><PlusIcon />{t("channels:persona.create")}</Button>}>{t("channels:persona.listLabel", { n: xs.length })}</SectionLabel>
       {xs.length ? <List>{xs.map((p) => (
-        <Row key={p.id} icon={<PersonaAvatar bot={p.bot_id} size={32} />} onClick={() => go("#/channels/personas/" + p.id)} data-persona-row={p.name}
+        <Row key={p.id} icon={<ActorAvatar actorId={p.bot_id} size={32} />} onClick={() => go("#/channels/personas/" + p.id)} data-persona-row={p.name}
           title={<span className="inline-flex items-center gap-1.5">{p.name}{p.is_default && <span className="type-footnote text-muted-foreground">{t("channels:persona.isDefault")}</span>}</span>}
           sub={t("channels:persona.rowSub", { bot: botName(p.bot_id), used: usedText(p) })}><Chevron /></Row>))}</List>
         : <Empty title={t("channels:persona.emptyTitle")} sub={t("channels:persona.emptySub")} />}
@@ -65,15 +66,15 @@ const formOf = (p: Persona): Form => ({ name: p.name, intro: p.intro, soul: p.so
 
 function PersonaView({ id }: { id: string }) {
   const t = useT()
-  const L = useLoad(() => channelsApi.persona(id), [id], ["persona"])
+  const L = useHubQuery(["channels", "persona", id], () => channelsApi.persona(id), { events: ["persona"] })
   const [form, setForm] = useState<Form | null>(null), [reveal, setReveal] = useState<Reveal | null>(null), [del, setDel] = useState(false), [busy, act] = useBusy()
-  const p = L.s === "ok" ? L.data : null
+  const p = L.data ?? null
   /* a change from elsewhere (the stream) replaces the form only when nothing is being edited */
   useEffect(() => { if (p) { setReveal(p.reveal); setForm((f) => (f && dirty(f, p) ? f : formOf(p))) } }, [p?.revision, p?.id])
   const preview = useMemo(() => (p && form && reveal ? introOf({ name: form.name, intro: form.intro, reveal }, ownerOf(p)) : ""), [p, form, reveal])
   const back: [string, string] = ["#/channels/personas", t("channels:persona.title")]
-  if (L.s === "loading") return <Page title={t("channels:persona.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (L.s === "error") return <Page title={t("channels:persona.title")} back={back}><Empty title={L.status === 404 ? t("channels:persona.notFound") : L.err} sub={L.status === 404 ? t("channels:persona.notFoundSub") : undefined} /></Page>
+  if (L.loading) return <Page title={t("channels:persona.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.error) return <Page title={t("channels:persona.title")} back={back}><Empty title={L.status === 404 ? t("channels:persona.notFound") : L.error.message} sub={L.status === 404 ? t("channels:persona.notFoundSub") : undefined} /></Page>
   if (!p || !form || !reveal) return null
   const changed = dirty(form, p)
   const ok = form.name.trim().length >= 1 && form.name.trim().length <= 20 && form.intro.length <= 400 && form.soul.length <= 2000 && form.signature.length <= 60
@@ -95,7 +96,7 @@ function PersonaView({ id }: { id: string }) {
       </AlertDialogContent></AlertDialog>
       <div className="flex flex-col gap-8">
         {/* the intro is the first field below; the head says where this face shows up, which is what a change affects */}
-        <div className="-mt-2 flex items-center gap-4"><PersonaAvatar bot={p.bot_id} size={56} /><div className="min-w-0"><div className="type-body" data-persona-used>{usedText(p)}</div><div className="mt-0.5 type-footnote text-muted-foreground">{t("channels:persona.platformNote")}</div><OwnerChip objectType="persona" objectId={p.id} className="mt-1.5" /></div></div>
+        <div className="-mt-2 flex items-center gap-4"><ActorAvatar actorId={p.bot_id} size={56} /><div className="min-w-0"><div className="type-body" data-persona-used>{usedText(p)}</div><div className="mt-0.5 type-footnote text-muted-foreground">{t("channels:persona.platformNote")}</div><OwnerChip objectType="persona" objectId={p.id} className="mt-1.5" /></div></div>
         <section><SectionLabel>{t("channels:persona.usedIn")}</SectionLabel>
           {accN + p.used_by.spaces.length ? <Group>
             {p.used_by.accounts.map((a) => <Row key={a.account_id} title={a.name} sub={t("channels:persona.usedAccount")} onClick={() => go("#/channels/acc/" + a.account_id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
@@ -104,7 +105,7 @@ function PersonaView({ id }: { id: string }) {
         <form className="contents" onSubmit={(e) => { e.preventDefault(); if (changed && ok && !busy) void save() }}>
           <FieldGroup className="gap-5">
             <F label={t("channels:persona.name")} n={form.name.length} max={20}><Input className="rounded-lg" value={form.name} maxLength={20} onChange={(e) => setForm({ ...form, name: e.target.value })} aria-invalid={!form.name.trim()} data-persona-name /></F>
-            <F label={t("channels:persona.bot")} hint={t("channels:persona.botHint")}><div><Select testId="persona-bot" value={p.bot_id} onChange={(v) => void setBot(v)} options={Object.keys(st.bots).map((k) => ({ v: k, l: <span className="inline-flex items-center gap-1.5"><BotAvatar k={k} size={16} />{botName(k)}</span> }))} /></div></F>
+            <F label={t("channels:persona.bot")} hint={t("channels:persona.botHint")}><div><Select testId="persona-bot" value={p.bot_id} onChange={(v) => void setBot(v)} options={Object.keys(st.bots).map((k) => ({ v: k, l: <span className="inline-flex items-center gap-1.5"><ActorAvatar actorId={k} size={16} tooltip={false} />{botName(k)}</span> }))} /></div></F>
             <F label={t("channels:persona.intro")} hint={t("channels:persona.introHint")} n={form.intro.length} max={400}><Textarea className="min-h-16 rounded-lg" value={form.intro} maxLength={400} onChange={(e) => setForm({ ...form, intro: e.target.value })} data-persona-intro /></F>
             <F label={t("channels:persona.soul")} hint={t("channels:persona.soulHint")} n={form.soul.length} max={2000}><Textarea className="min-h-20 rounded-lg" value={form.soul} maxLength={2000} onChange={(e) => setForm({ ...form, soul: e.target.value })} data-soul /></F>
             <F label={t("channels:persona.signature")} hint={t("channels:persona.signatureHint")} n={form.signature.length} max={60}><Input className="rounded-lg" value={form.signature} maxLength={60} onChange={(e) => setForm({ ...form, signature: e.target.value })} placeholder={t("channels:persona.signaturePlaceholder")} data-persona-sign /></F>

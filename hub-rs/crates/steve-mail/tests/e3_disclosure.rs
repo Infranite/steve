@@ -33,7 +33,7 @@ impl OutboundCheck for NoModelProof {
 }
 
 async fn real() -> H {
-    let check = Disclosure::with_models(vec!["reviewer".into()]);
+    let check = Disclosure::new();
     let h = setup_with(Opts {
         check: Some(Arc::new(check.clone())),
         ..Default::default()

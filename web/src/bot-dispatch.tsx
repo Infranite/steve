@@ -1,11 +1,15 @@
 /* Bot Team configuration and per-Bot execution grants, scoped to the workspace they were loaded in. */
-import { useEffect, useId, useState } from "react"
+import { useId, useState, type ReactNode } from "react"
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
-import { modReq, type ModuleScope, type RItemDetail } from "@/api"
+import { type ModuleScope, type RItemDetail } from "@/api"
+import { botDispatchApi, type BotTeam, type CandidateNode as Candidate, type ItemDispatch, type NodeList, type TeamList, type TeamMember } from "@/api/bot-dispatch"
+import { modelsApi } from "@/api/models"
+import { useHubQuery } from "@/data/use-hub-query"
 import type { BotProposal, PlacementBlocked, PlacementExplanation, PlacementRejection } from "@/gen"
+import { decisionView } from "@/data/sync"
 import { hubBase } from "@/hub"
 import { useT } from "@/i18n"
-import { botName, refresh, st } from "@/store"
+import { botName, refresh, setSetting, st, type Wait } from "@/store"
 import { Badge } from "@/components/affect/badge-clean"
 import { Checkbox } from "@/components/affect/checkbox-clean"
 import { Textarea } from "@/components/ui/textarea"
@@ -16,51 +20,28 @@ import { Card, Section } from "@/ui"
 
 /** The Team choice that asks for no Team, even where the workspace has a default one. */
 export const NO_TEAM = "none"
-export type TeamMember = { bot: string; nodes: string[] | null }
-export type BotTeam = { id: string; name: string; members: TeamMember[] }
-type TeamList = { default: string | null; teams: BotTeam[]; editable: boolean }
-type Candidate = { id: string; name: string | null; state: "candidate" | "pending" | "unavailable"; reason: PlacementRejection | null; checked_at: number | null }
-type NodeList = { editable: boolean; bindings: string[]; candidates: Candidate[]; unavailable_bindings: number }
-export type ItemDispatch = {
-  team: { id: string; name: string; source: "default" | "explicit" | "inherited" } | null
-  blocked?: PlacementBlocked | null
-}
+export type { TeamMember, BotTeam, ItemDispatch }
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e)
-const nodesPath = (id: string) => `/bots/${encodeURIComponent(id)}/execution-nodes`
-const teamsPath = "/bot-teams"
 const activeScope = (): ModuleScope => ({ workspace: st.workspace?.id ?? "", hub: hubBase() })
 const reasonLabel = (t: ReturnType<typeof useT>, reason: string) => t(`manage:dispatch.reason.${reason}`, { defaultValue: t("manage:dispatch.reason.bind_failed") })
 
-function useDispatchLoad<T>(path: string, poll = 0) {
+export function useBotTeams() {
   const scope = activeScope()
-  const key = JSON.stringify([scope, path])
-  const [result, setResult] = useState<{ key: string; value?: T; error?: string }>()
-  const [rev, setRev] = useState(0)
-  useEffect(() => {
-    const cancel = new AbortController()
-    const load = () => modReq<T>("GET", path, undefined, cancel.signal, scope).then(
-      value => { if (!cancel.signal.aborted) setResult({ key, value }) },
-      e => { if (!cancel.signal.aborted) setResult({ key, error: msg(e) }) },
-    )
-    void load()
-    const timer = poll ? window.setInterval(load, poll) : undefined
-    return () => { cancel.abort(); window.clearInterval(timer) }
-  // The key includes every part of scope and the resource.
-  }, [key, rev, poll])
-  return { value: result?.key === key ? result.value : undefined, error: result?.key === key ? result.error : undefined, scope, reload: () => setRev(v => v + 1) }
+  const q = useHubQuery<TeamList>(["bot-teams", scope.workspace, scope.hub], (signal) => botDispatchApi.teams(scope, signal))
+  return { ...q, scope }
 }
-export const useBotTeams = () => useDispatchLoad<TeamList>(teamsPath)
 const nodeLabel = (t: ReturnType<typeof useT>, n: Candidate) => n.name || (n.id === "local" ? t("manage:dispatch.local") : n.id)
 
 export function ExecutionNodes({ bot }: { bot: string }) {
-  const load = useDispatchLoad<NodeList>(nodesPath(bot), 12000)
+  const scope = activeScope()
+  const load = useHubQuery<NodeList>(["bot-execution-nodes", bot, scope.workspace, scope.hub], (signal) => botDispatchApi.executionNodes(bot, scope, signal), { pollMs: 12000 })
   const t = useT()
   const [draft, setDraft] = useState<string[]>()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState("")
   const [saved, setSaved] = useState(false)
-  const { value } = load
-  if (!value) return load.error ? <p role="alert">{load.error}</p> : null
+  const value = load.data
+  if (!value) return load.error ? <p role="alert">{load.error.message}</p> : null
   const ids = draft ?? value.bindings
   const list = value.candidates
   // Prefer the ordered selected list, then the unbound candidates in report order.
@@ -75,13 +56,13 @@ export function ExecutionNodes({ bot }: { bot: string }) {
     if (draft === undefined) return
     setBusy(true); setErr(""); setSaved(false)
     try {
-      await modReq("PUT", nodesPath(bot), { nodes: draft }, undefined, load.scope)
-      setDraft(undefined); load.reload(); setSaved(true)
+      await botDispatchApi.setExecutionNodes(bot, draft, scope)
+      setDraft(undefined); void load.reload(); setSaved(true)
     } catch (e) { setErr(msg(e)) } finally { setBusy(false) }
   }
   const refresh = async () => {
     setBusy(true); setErr("")
-    try { await modReq("GET", "/system/models?fresh=1", undefined, undefined, load.scope); load.reload() }
+    try { await modelsApi.refreshCatalog(scope); void load.reload() }
     catch (e) { setErr(msg(e)) } finally { setBusy(false) }
   }
   return <Section label={t("manage:dispatch.executionNodes")} right={<Button size="xs" variant="ghost" disabled={busy} onClick={() => void refresh()} aria-label={t("manage:dispatch.refresh")}><RefreshCwIcon /></Button>}>
@@ -116,7 +97,8 @@ export function ExecutionNodes({ bot }: { bot: string }) {
 
 function TeamNodeRange({ bot, nodes, update, disabled }: { bot: string; nodes: string[] | null; update: (ids: string[] | null) => void; disabled: boolean }) {
   const t = useT()
-  const { value, error } = useDispatchLoad<NodeList>(nodesPath(bot))
+  const scope = activeScope()
+  const { data: value, error } = useHubQuery<NodeList>(["bot-execution-nodes", bot, scope.workspace, scope.hub], (signal) => botDispatchApi.executionNodes(bot, scope, signal))
   const bound = value?.bindings ?? []
   const ids = [...new Set([...bound, ...(nodes ?? [])])]
   return <div className="flex flex-col gap-2 pl-2">
@@ -129,7 +111,7 @@ function TeamNodeRange({ bot, nodes, update, disabled }: { bot: string; nodes: s
         data-team-node={id} onChange={e => update(e.currentTarget.checked ? [...nodes, id] : nodes.filter(n => n !== id))} />
     })}
     {value && !bound.length && <p className="type-footnote text-muted-foreground">{t("manage:dispatch.reason.no_bindings")}</p>}
-    {error && <p role="alert" className="type-footnote text-destructive">{error}</p>}
+    {error && <p role="alert" className="type-footnote text-destructive">{error.message}</p>}
   </div>
 }
 
@@ -140,15 +122,16 @@ function TeamEditor({ team, scope, onSaved, onCancel }: { team?: BotTeam; scope:
   const [members, setMembers] = useState<TeamMember[]>(team?.members ?? [])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
-  const bots = [...new Set([...Object.keys(st.bots).filter(k => !st.bots[k].main), ...members.map(m => m.bot)])]
+  const bots = [...new Set([...Object.keys(st.bots).filter(k => !st.bots[k].main), ...members.map(m => m.bot).filter(k => !st.bots[k]?.main)])]
   const save = async () => {
     setBusy(true); setError("")
     try {
-      const created = await modReq<BotTeam>(team ? "PUT" : "POST", team ? `${teamsPath}/${encodeURIComponent(team.id)}` : teamsPath, { name: name.trim(), members }, undefined, scope)
+      const created = await botDispatchApi.saveTeam(team?.id, { name: name.trim(), members }, scope)
       onSaved(created.id)
     } catch (e) { setError(msg(e)) } finally { setBusy(false) }
   }
   return <Card className="flex flex-col gap-3 p-4" data-team-editor>
+    <p className="type-footnote text-muted-foreground">{t("manage:dispatch.coordinatorNote")}</p>
     <label htmlFor={id} className="type-label">{t("manage:dispatch.teamName")}</label>
     <TextField id={id} value={name} maxLength={80} onChange={e => setName(e.currentTarget.value)} disabled={busy} />
     {bots.map(k => {
@@ -170,24 +153,40 @@ function TeamEditor({ team, scope, onSaved, onCancel }: { team?: BotTeam; scope:
 /** Share this load with the Bot cards so a Team edit updates both views together. */
 export function TeamsSection({ load }: { load: ReturnType<typeof useBotTeams> }) {
   const t = useT()
-  const { value } = load
+  const value = load.data
   const [edit, setEdit] = useState<string | null>(null)
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
-  if (!value) return load.error ? <p role="alert">{load.error}</p> : null
+  if (!value) return load.error ? <p role="alert">{load.error.message}</p> : null
   const setDefault = async (team: string) => {
     setBusy(true); setError("")
-    try { await modReq("PUT", `${teamsPath}/default`, { team }, undefined, load.scope); load.reload() }
+    try { await botDispatchApi.setDefaultTeam(team, load.scope); void load.reload() }
     catch (e) { setError(msg(e)) } finally { setBusy(false) }
   }
   const current = value.teams.find(o => o.id === edit)
+  const mainBot = Object.values(st.bots).find(b => b.main)
+  const noExecutor = st.cfg.noExecutor === "steve" ? "steve" : "ask"
   return <Section label={t("manage:dispatch.teams")} note={t("manage:dispatch.teamHint")}
     right={value.editable && <Button size="xs" variant="outline" data-new-team onClick={() => setEdit("")}><PlusIcon />{t("manage:dispatch.newTeam")}</Button>}>
     <Card className="flex flex-col gap-3 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      {mainBot && <div className="flex flex-wrap items-center gap-2" data-team-coordinator>
+        <span className="type-callout font-medium">{mainBot.n}</span>
+        <Badge tone="info">{t("manage:dispatch.coordinator")}</Badge>
+        <span className="basis-full type-footnote text-muted-foreground">{t("manage:dispatch.coordinatorNote")}</span>
+      </div>}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-2">
         <span className="type-label">{t("manage:dispatch.defaultTeam")}</span>
         <SetSelect testId="default-team" label={t("manage:dispatch.defaultTeam")} value={value.default ?? NO_TEAM} disabled={busy || !value.editable}
           options={[{ v: NO_TEAM, l: t("manage:dispatch.noTeam") }, ...value.teams.map(v => ({ v: v.id, l: v.name }))]}
           onChange={v => void setDefault(v)} />
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-2" data-no-executor-policy>
+        <div className="min-w-0 flex-1 basis-48">
+          <div className="type-label">{t("manage:items.noExecutor")}</div>
+          <p className="type-footnote text-muted-foreground">{t("manage:items.noExecutorSub")}</p>
+        </div>
+        <SetSelect testId="no-executor-policy" label={t("manage:items.noExecutor")} value={noExecutor} disabled={busy || !value.editable}
+          options={[{ v: "ask", l: t("manage:items.noExecutorAsk") }, { v: "steve", l: t("manage:items.noExecutorSteve") }]}
+          onChange={v => void setSetting({ noExecutor: v })} />
       </div>
       {value.teams.map(team => <div key={team.id} className="flex flex-wrap items-center gap-2 border-t pt-2">
         <span className="type-callout font-medium">{team.name}</span>
@@ -204,11 +203,94 @@ export function TeamsSection({ load }: { load: ReturnType<typeof useBotTeams> })
 export function PlacementWhy({ value, detail = false }: { value: PlacementExplanation; detail?: boolean }) {
   const t = useT()
   const skipped = [...new Set(value.rejected.map(b => b.reason))]
+  if (value.reason === "coordinator_deferred") {
+    const because = [
+      value.fallback && reasonLabel(t, value.fallback),
+      value.deferred_by && t(`manage:dispatch.deferredBy.${value.deferred_by}`),
+    ].filter(Boolean).join(" · ") || t("manage:dispatch.reason.no_candidates")
+    const perBot = value.rejected.map(b => b.bot ? `${botName(b.bot)}: ${reasonLabel(t, b.reason)}` : reasonLabel(t, b.reason))
+    return <div className="min-w-0 break-words type-footnote text-muted-foreground" data-dispatch-reason={value.reason} data-deferred-by={value.deferred_by ?? undefined}>
+      <p>{t("manage:dispatch.coordinatorBecause", { reason: because })}</p>
+      {detail && perBot.length > 0 && <p>{t("manage:dispatch.skipped", { reasons: perBot.join(" · ") })}</p>}
+    </div>
+  }
   return <div className="min-w-0 break-words type-footnote text-muted-foreground" data-dispatch-reason={value.reason}>
     <p>{t(`manage:dispatch.selection.${value.reason}`)}{value.matched.length > 0 && <> · {value.matched.join(" · ")}</>}
       {value.fallback && <> · {reasonLabel(t, value.fallback)}</>}</p>
     {detail && skipped.length > 0 && <p>{t("manage:dispatch.skipped", { reasons: skipped.map(r => reasonLabel(t, r)).join(" · ") })}</p>}
   </div>
+}
+
+export function NoExecutorDecisionBody({ w, act, busy, head, foot }: {
+  w: Wait
+  act: (choice: string, text?: string) => Promise<void>
+  busy: boolean
+  head: (title: ReactNode) => ReactNode
+  foot: (c: ReactNode) => ReactNode
+}) {
+  const t = useT()
+  const view = decisionView(w.decision)
+  const prompt = view?.question.kind === "key" && view.question.template.code === "no_executor"
+    ? view.question.template
+    : undefined
+  const enabledBots = Object.keys(st.bots).filter(k => st.bots[k].on)
+  const [picked, setPicked] = useState(() => enabledBots.find(k => !st.bots[k].main) ?? enabledBots[0] ?? "")
+  const effectiveBot = enabledBots.includes(picked) ? picked : (enabledBots[0] ?? "")
+  const proposal = prompt?.proposal
+  return <>
+    {head(w.q)}
+    <div className="flex flex-col gap-3 px-4 pb-3" data-no-executor-card>
+      {prompt?.team && <div className="flex items-center gap-2 type-footnote text-muted-foreground">
+        <Badge>{prompt.team.name}</Badge>
+      </div>}
+      {prompt && prompt.items.length > 0 && <div className="flex flex-col gap-1">
+        <div className="type-footnote font-medium text-foreground/80">{t("manage:dispatch.noExecutorCard.waitingItems")}</div>
+        <ul className="flex flex-col gap-1" data-no-executor-items>
+          {prompt.items.map(it => <li key={it.id} className="type-footnote">
+            <a href={`#/items/${it.id}`} className="hover:underline"><span className="font-mono tabular-nums">{it.id}</span> {it.title}</a>
+          </li>)}
+        </ul>
+      </div>}
+      {prompt && <div className="rounded-lg bg-muted/60 p-3 type-footnote" data-no-executor-reasons>
+        <div className="mb-1 font-medium text-foreground/80">{t("manage:dispatch.noExecutorCard.rejected")}</div>
+        {prompt.rejected.length > 0
+          ? <ul className="flex flex-col gap-1 text-muted-foreground">
+              {prompt.rejected.map((b, idx) => <li key={`${b.bot ?? ""}:${b.reason}:${idx}`}>
+                {b.bot ? `${botName(b.bot)}: ` : ""}{reasonLabel(t, b.reason)}
+              </li>)}
+            </ul>
+          : <p className="text-muted-foreground">{reasonLabel(t, prompt.reason)}</p>}
+      </div>}
+      <div className="flex flex-col gap-2 border-t pt-3">
+        <div className="type-footnote font-medium text-foreground/80">{t("manage:dispatch.noExecutorCard.assignLabel")}</div>
+        {enabledBots.length > 0 ? <div className="flex flex-wrap items-center gap-2">
+          <SetSelect testId="no-executor-bot" label={t("manage:dispatch.noExecutorCard.pickBot")} value={effectiveBot} disabled={busy} onChange={setPicked}
+            options={enabledBots.map(k => ({ v: k, l: st.bots[k].main ? `${botName(k)} · ${t("manage:dispatch.coordinator")}` : botName(k) }))} />
+          <Button size="sm" disabled={busy || !effectiveBot} data-no-executor-assign onClick={() => void act("assign_bot", effectiveBot)}>
+            {t("manage:dispatch.noExecutorCard.assignAction")}
+          </Button>
+        </div> : <p className="type-footnote text-muted-foreground">{t("manage:dispatch.noExecutorCard.noAvailableBots")}</p>}
+      </div>
+      {proposal && w.options.includes("confirm_proposal") && <div className="flex flex-col gap-2 rounded-lg border p-3" data-no-executor-proposal>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="type-footnote font-medium">{t("manage:dispatch.proposal.title")} · {proposal.name}</span>
+          <Button size="sm" variant="secondary" disabled={busy} data-no-executor-confirm onClick={() => void act("confirm_proposal", JSON.stringify({
+            expected_revision: proposal.revision,
+            name: proposal.name,
+            role: proposal.role,
+            specialties: proposal.specialties,
+            harness: proposal.harness,
+            model: proposal.model,
+          }))}>{t("manage:dispatch.noExecutorCard.proposalAction")}</Button>
+        </div>
+        <p className="type-footnote text-muted-foreground">
+          {[proposal.role, t("manage:dispatch.proposal.node", { node: proposal.node === "local" ? t("manage:dispatch.local") : proposal.node }), proposal.team && t("manage:dispatch.proposal.team", { team: proposal.team.name })].filter(Boolean).join(" · ")}
+        </p>
+      </div>}
+      <p className="type-footnote text-muted-foreground">{t("manage:dispatch.noExecutorCard.laterHint")}</p>
+    </div>
+    {foot(<Button size="sm" variant="outline" disabled={busy} data-no-executor-later onClick={() => void act("later")}>{t("manage:dispatch.noExecutorCard.later")}</Button>)}
+  </>
 }
 
 export function DispatchDetails({ dispatch, placement, unassigned }: { dispatch?: RItemDetail["dispatch"]; placement?: PlacementExplanation; unassigned?: boolean }) {
@@ -251,10 +333,10 @@ export function BotProposalCard({ proposal, onClose }: { proposal: BotProposal; 
     setBusy(true)
     setError(undefined)
     try {
-      await modReq<{ id: string }>("POST", `/bot-proposals/${encodeURIComponent(proposal.id)}/confirm`, {
+      await botDispatchApi.confirmProposal(proposal.id, {
         expected_revision: proposal.revision, name: name.trim(), role, specialties,
         harness: harness.trim(), model: model.trim() || null,
-      }, undefined, scope)
+      }, scope)
       await refresh()
       onClose()
     } catch (e) {

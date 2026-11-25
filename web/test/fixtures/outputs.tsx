@@ -51,7 +51,7 @@ const view = itemView({
 })
 const state: Shell = fixtureShell({
   version: "fixture", web_version: "fixture",
-  bots: [fixtureRawBot({ id: "dev", name: "开发", perm_mode: "default" })],
+  bots: [fixtureRawBot({ id: "dev", name: "开发", perm_mode: "ask" })],
 })
 api.shell = async () => state
 api.item = async () => {

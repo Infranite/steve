@@ -1,12 +1,21 @@
+import type { SnapshotId } from "./gen"
+
 /** Settings · 数据 · Hub 上的数据: the Hub's `/api/system/backup`: where the database and its copies are on the
  * Hub's machine, whether the daily copy is on, and the newest one. */
 export type BackupSettings = { enabled: boolean; keep_days: number }
-export type BackupStatus = { settings: BackupSettings; available: boolean; database: string; dir: string; daily: boolean; keep_days: number; last: { name: string; at: number; bytes: number } | null }
+export type BackupStatus = {
+  settings: BackupSettings
+  available: boolean
+  database: string
+  dir: string
+  last: { snapshot_id: SnapshotId; at: number } | null
+  repository: { bytes: number; available_bytes: number } | null
+  error: string | null
+}
 
-/** what the backup row says of the plan, and the row of the newest daily copy says (no such row when the daily
- *  copy is off and none is left): keys under `manage:data` */
-export const planKey = (s: BackupStatus): "backupDaily" | "backupOff" => (s.daily ? "backupDaily" : "backupOff")
-export const lastKey = (s: BackupStatus): "backupLast" | "backupNone" | null => (s.last ? "backupLast" : s.daily ? "backupNone" : null)
+const daily = (s: BackupStatus) => s.available && s.settings.enabled
+export const planKey = (s: BackupStatus) => daily(s) ? "backupDaily" : "backupOff"
+export const lastKey = (s: BackupStatus) => s.last ? "backupLast" : daily(s) ? "backupNone" : null
 
 /** The owner-only backup endpoint saves both installation settings atomically. */
 export async function saveBackupSettings(

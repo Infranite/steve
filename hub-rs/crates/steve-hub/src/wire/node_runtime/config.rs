@@ -76,13 +76,7 @@ fn rank(p: PermissionMode) -> u8 {
 
 /// Steve's name of a permission mode.
 pub(crate) fn mode_str(p: PermissionMode) -> &'static str {
-    match p {
-        PermissionMode::Plan => "plan",
-        PermissionMode::Ask => "ask",
-        PermissionMode::AcceptEdits => "accept_edits",
-        PermissionMode::Auto => "auto",
-        PermissionMode::FullAccess => "full_access",
-    }
+    p.as_str()
 }
 
 fn describe(c: &HarnessChoice, p: &ExecutionPolicy) -> String {

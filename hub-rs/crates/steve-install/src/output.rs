@@ -69,6 +69,7 @@ fn action_title(action: &str) -> String {
         "doctor" => t!("install.status.title.doctor"),
         "install" => t!("install.status.title.install"),
         "update" => t!("install.status.title.update"),
+        "refresh-env" => t!("install.status.title.refresh_env"),
         "uninstall" => t!("install.status.title.uninstall"),
         "start" | "enable-boot" => t!("install.status.start"),
         "stop" => t!("install.status.title.stop"),
@@ -86,7 +87,7 @@ enum Operation {
 fn operation(action: &str) -> Operation {
     if action == "uninstall" {
         Operation::Unregister
-    } else if matches!(action, "install" | "update") {
+    } else if matches!(action, "install" | "update" | "refresh-env") {
         Operation::Configure
     } else {
         Operation::Inspect
@@ -175,6 +176,50 @@ impl Summary<'_> {
                 &t!("install.status.start"),
                 &t!("install.status.not_started"),
             );
+        } else if report["restarted"] == true {
+            line(
+                out,
+                &t!("install.status.label.process"),
+                &t!("install.status.restarted"),
+            );
+        } else if report["started"] == true {
+            line(
+                out,
+                &t!("install.status.label.process"),
+                &t!("install.status.running"),
+            );
+        }
+        self.render_service_env(out);
+    }
+
+    fn render_service_env(&self, out: &mut String) {
+        let Some(env) = self.report.get("service_env").and_then(Value::as_object) else {
+            return;
+        };
+        if let Some(path) = env
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            line(out, &t!("install.status.label.service_path"), path);
+        }
+        if let Some(source) = env.get("path_source").and_then(Value::as_str) {
+            let source_label = match source {
+                "login_shell" => match env.get("path_shell").and_then(Value::as_str) {
+                    Some(shell) if !shell.is_empty() => {
+                        t!("install.status.path_source.login_shell", shell = shell)
+                    }
+                    _ => t!("install.status.path_source.login_shell_unknown"),
+                },
+                "process_env" => t!("install.status.path_source.process_env"),
+                "default_fallback" => t!("install.status.path_source.default_fallback"),
+                other => other.to_owned(),
+            };
+            let detail = match env.get("path_captured_at").and_then(Value::as_str) {
+                Some(at) if !at.is_empty() => format!("{source_label} · {at}"),
+                _ => source_label,
+            };
+            line(out, &t!("install.status.label.path_source"), &detail);
         }
     }
 
@@ -270,32 +315,58 @@ impl Summary<'_> {
 
     fn render_diagnostics(&self, out: &mut String) {
         let report = self.report;
+        self.render_service_env(out);
         line(
             out,
             &t!("install.status.label.check_scope"),
             &t!("install.status.check_scope"),
         );
-        match report["diagnostics"].as_array() {
-            Some(issues) if issues.is_empty() => line(
-                out,
-                &t!("install.status.label.check_result"),
-                &t!("install.status.no_issues"),
-            ),
-            Some(issues) => {
+        let cmd_diags = report["command_diagnostics"].as_array();
+        let mut rendered: Vec<String> = Vec::new();
+        if let Some(issues) = report["diagnostics"].as_array() {
+            for issue in issues.iter().filter_map(Value::as_str) {
+                rendered.push(diagnostic(issue));
+            }
+        }
+        if let Some(items) = cmd_diags {
+            for item in items {
+                if item["reason"].as_str() == Some("command_not_in_service_path") {
+                    rendered.push(t!(
+                        "install.status.diag.command_not_in_service_path",
+                        command = item["command"].as_str().unwrap_or("?"),
+                        harness = item["harness"].as_str().unwrap_or("?"),
+                        login_path = item["login_shell_path"].as_str().unwrap_or("?"),
+                        service_path = item["service_path"].as_str().unwrap_or("?"),
+                        refresh_command = item["refresh_command"]
+                            .as_str()
+                            .unwrap_or("steve node refresh-env")
+                    ));
+                }
+            }
+        }
+        if report["diagnostics"].is_array() || cmd_diags.is_some() {
+            if rendered.is_empty() {
+                line(
+                    out,
+                    &t!("install.status.label.check_result"),
+                    &t!("install.status.no_issues"),
+                );
+            } else {
                 let _ = writeln!(
                     out,
                     "{}",
-                    t!("install.status.issues_heading", count = issues.len())
+                    t!("install.status.issues_heading", count = rendered.len())
                 );
-                for issue in issues.iter().filter_map(Value::as_str) {
-                    let _ = writeln!(out, "  - {}", visible(&diagnostic(issue)));
+                for text in rendered {
+                    let _ = writeln!(out, "  - {}", visible(&text));
                 }
             }
-            None => line(
+        } else {
+            line(
                 out,
                 &t!("install.status.label.check_result"),
                 &t!("install.status.no_diagnostics"),
-            ),
+            );
         }
     }
 
@@ -309,20 +380,30 @@ impl Summary<'_> {
             installed,
             ..
         } = *self;
-        if matches!(
-            self.report["boot"].as_str(),
-            Some("enable_required" | "migration_required")
-        ) && let Some(command) = command(role, "enable-boot", home, label)
+        if self.report["boot"].as_str() == Some("enable_required")
+            && let Some(command) = command(role, "enable-boot", home, label)
         {
             NextStep::Command(command)
         } else if installed == Some(false) {
             NextStep::Recovery
+        } else if action == "doctor"
+            && self.report["command_diagnostics"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+            && let Some(command) = command(role, "refresh-env", home, label)
+        {
+            NextStep::Command(command)
         } else if action == "doctor" && state["running"] == true {
             NextStep::VerifyApplication
-        } else if state["running"].is_null() && !matches!(action, "install" | "update") {
+        } else if state["running"].is_null()
+            && !matches!(action, "install" | "update" | "refresh-env")
+        {
             NextStep::ReadLogs
         } else {
-            let next = if matches!(action, "install" | "update") || state["running"] == false {
+            let next = if (matches!(action, "install" | "update" | "refresh-env")
+                && self.report["started"] != true)
+                || state["running"] == false
+            {
                 "start"
             } else {
                 "doctor"
@@ -500,8 +581,70 @@ mod tests {
                 "node",
                 "update",
                 json!({"installed":true,"changed":false,"started":false,"build":{"version":"1.2.4"}}),
-                vec!["已是目标配置", "已配置版本：1.2.4"],
+                vec!["已是目标配置", "已配置版本：1.2.4", "steve node start"],
                 vec!["运行版本：1.2.4"],
+            ),
+            (
+                "node",
+                "update",
+                json!({"installed":true,"changed":true,"started":true,"build":{"version":"1.2.5"}}),
+                vec![
+                    "服务配置：已更新",
+                    "服务进程：运行中",
+                    "已配置版本：1.2.5",
+                    "steve node doctor",
+                ],
+                vec!["本次操作未启动服务", "steve node start"],
+            ),
+            (
+                "node",
+                "refresh-env",
+                json!({
+                    "installed": true,
+                    "changed": true,
+                    "restarted": true,
+                    "started": true,
+                    "build": {"version": "1.2.5"},
+                    "service_env": {
+                        "path": "/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
+                        "path_source": "login_shell",
+                        "path_shell": "/bin/zsh",
+                        "path_captured_at": "2026-11-25T11:30:00Z"
+                    }
+                }),
+                vec![
+                    "刷新环境",
+                    "服务配置：已更新",
+                    "服务进程：已重启",
+                    "服务 PATH：/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
+                    "PATH 来源：登录 shell（/bin/zsh） · 2026-11-25T11:30:00Z",
+                    "steve node doctor",
+                ],
+                vec!["本次操作未启动服务", "steve node start"],
+            ),
+            (
+                "node",
+                "doctor",
+                json!({
+                    "service": {"installed": true, "running": true},
+                    "service_env": {"path": "/usr/bin:/bin:/usr/sbin:/sbin"},
+                    "diagnostics": [],
+                    "command_diagnostics": [{
+                        "reason": "command_not_in_service_path",
+                        "harness": "antigravity",
+                        "command": "agy",
+                        "service_path": "/usr/bin:/bin:/usr/sbin:/sbin",
+                        "login_shell_path": "/Users/example/.local/bin/agy",
+                        "refresh_command": "steve node refresh-env"
+                    }]
+                }),
+                vec![
+                    "命令 agy（antigravity）不在服务 PATH 中",
+                    "/Users/example/.local/bin/agy",
+                    "/usr/bin:/bin:/usr/sbin:/sbin",
+                    "steve node refresh-env",
+                ],
+                vec!["未发现问题"],
             ),
             (
                 "hub",

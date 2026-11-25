@@ -20,16 +20,16 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 use steve_store::base::mems::{Mem, MemFilter, MemPatch};
 use steve_store::base::{Level, ObjRef, Viewer};
 use steve_store::knowledge::{
-    CandidateRows, Memories, MemoryChange, MemoryChanges, NewMemoryChange,
+    CandidateRows, Documents, Memories, MemoryChange, MemoryChanges, NewMemoryChange,
 };
-use steve_store::{ItemReads, Members, MemoryIndex, Read, References, W};
+use steve_store::{ItemReads, Members, MemoryIndex, Read, References, W, WorkspaceSettings};
 
 use crate::candidates::{self, NewCandidate, Origin, OriginKind};
 use crate::extract::Names;
@@ -673,22 +673,217 @@ pub fn routes() -> Router<Modules> {
 
 /// Which schedule is the knowledge steward (`kb_marks`): the page sets it up from the Bot and schedule
 /// templates and finds it here again. Only a pointer; the schedule itself is an ordinary one.
-const STEWARD_MARK: &str = "steward:schedule";
+pub const STEWARD_MARK: &str = "steward:schedule";
+/// Watermark of the newest steward run (`kb_marks`).
+pub const LAST_RUN_MARK: &str = "steward:last_run_at";
+/// Workspace setting key for the deterministic steward trigger threshold.
+pub const THRESHOLD_SETTING: &str = "knowledge.steward.threshold";
+/// Default minimum number of new candidates + conflicts before a scheduled tidy creates an item.
+pub const DEFAULT_THRESHOLD: usize = 3;
+pub const MIN_THRESHOLD: usize = 1;
+pub const MAX_THRESHOLD: usize = 100;
+
+/// Signals counted since the last steward run to decide whether a scheduled tidy should fire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct StewardSignals {
+    pub new_candidates: usize,
+    pub conflicts: usize,
+}
+
+impl StewardSignals {
+    pub fn total(self) -> usize {
+        self.new_candidates.saturating_add(self.conflicts)
+    }
+}
+
+/// Deterministic decision of [`check_schedule_trigger`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StewardGate {
+    /// The flow is not the workspace's knowledge steward schedule.
+    NotSteward,
+    /// Proceed with the run (`steward:last_run_at` was advanced to `now`).
+    Run { reason: &'static str },
+    /// Skip this scheduled run (nothing to tidy or below threshold).
+    Skip {
+        reason: &'static str,
+        label: String,
+        signals: StewardSignals,
+        threshold: usize,
+    },
+}
+
+/// Configured threshold for `ws`, falling back to [`DEFAULT_THRESHOLD`].
+pub fn threshold(r: &mut impl Read, ws: &str) -> ApiResult<usize> {
+    let raw = WorkspaceSettings(r).get(ws, THRESHOLD_SETTING)?;
+    let parsed = raw
+        .as_deref()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|n| (MIN_THRESHOLD..=MAX_THRESHOLD).contains(n));
+    Ok(parsed.unwrap_or(DEFAULT_THRESHOLD))
+}
+
+/// Persists a validated trigger threshold for `ws`.
+pub fn set_threshold(w: &mut W<'_>, ws: &str, value: usize, now: i64) -> ApiResult<usize> {
+    if !(MIN_THRESHOLD..=MAX_THRESHOLD).contains(&value) {
+        return Err(ApiError::invalid("threshold"));
+    }
+    WorkspaceSettings(w).set(ws, THRESHOLD_SETTING, &value.to_string(), now)?;
+    Ok(value)
+}
+
+fn last_run_at(r: &mut impl Read, ws: &str, flow_id: Option<&str>) -> ApiResult<i64> {
+    if let Some(mark) = Documents(r).mark(ws, LAST_RUN_MARK)?
+        && let Ok(ts) = mark.trim().parse::<i64>()
+        && ts > 0
+    {
+        return Ok(ts);
+    }
+    if let Some(fid) = flow_id.filter(|s| !s.is_empty())
+        && let Some(ts) = MemoryChanges(r).last_steward_run_at(ws, fid)?
+    {
+        return Ok(ts);
+    }
+    Ok(0)
+}
+
+/// Current pending tidy signals since the last steward run, plus that watermark timestamp.
+pub fn signals(
+    r: &mut impl Read,
+    ws: &str,
+    flow_id: Option<&str>,
+) -> ApiResult<(StewardSignals, i64)> {
+    let since = last_run_at(r, ws, flow_id)?;
+    let new_candidates = Memories(r).new_since(ws, since)?;
+    let conflicts = Memories(r)
+        .conflicting_candidates_since(ws, since)?
+        .saturating_add(MemoryChanges(r).open_flags_since(ws, since)?);
+    Ok((
+        StewardSignals {
+            new_candidates,
+            conflicts,
+        },
+        since,
+    ))
+}
+
+/// Deterministic trigger check invoked by the flow scheduler before starting a schedule run.
+/// - Non-steward schedules return [`StewardGate::NotSteward`].
+/// - Manual runs always proceed and advance `steward:last_run_at`.
+/// - Scheduled runs proceed only when `new_candidates + conflicts >= threshold`; otherwise they
+///   are skipped and metered (`steve_knowledge_steward_runs_total`).
+pub fn check_schedule_trigger(
+    w: &mut W<'_>,
+    ws: &str,
+    flow_id: &str,
+    manual: bool,
+    now: i64,
+) -> ApiResult<StewardGate> {
+    let Some(steward_id) = Documents(w)
+        .mark(ws, STEWARD_MARK)?
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(StewardGate::NotSteward);
+    };
+    if steward_id != flow_id {
+        return Ok(StewardGate::NotSteward);
+    }
+    if manual {
+        Documents(w).set_mark(ws, LAST_RUN_MARK, &now.to_string(), now)?;
+        metrics::counter!(
+            "steve_knowledge_steward_runs_total",
+            "outcome" => "triggered",
+            "reason" => "manual"
+        )
+        .increment(1);
+        return Ok(StewardGate::Run { reason: "manual" });
+    }
+    let th = threshold(w, ws)?;
+    let (sig, _) = signals(w, ws, Some(flow_id))?;
+    let total = sig.total();
+    if total == 0 {
+        metrics::counter!(
+            "steve_knowledge_steward_runs_total",
+            "outcome" => "skipped",
+            "reason" => "nothing_to_tidy"
+        )
+        .increment(1);
+        return Ok(StewardGate::Skip {
+            reason: "nothing_to_tidy",
+            label: steve_i18n::t!("knowledge.steward.skip_nothing"),
+            signals: sig,
+            threshold: th,
+        });
+    }
+    if total < th {
+        metrics::counter!(
+            "steve_knowledge_steward_runs_total",
+            "outcome" => "skipped",
+            "reason" => "below_threshold"
+        )
+        .increment(1);
+        return Ok(StewardGate::Skip {
+            reason: "below_threshold",
+            label: steve_i18n::t!(
+                "knowledge.steward.skip_below",
+                count = total,
+                threshold = th
+            ),
+            signals: sig,
+            threshold: th,
+        });
+    }
+    Documents(w).set_mark(ws, LAST_RUN_MARK, &now.to_string(), now)?;
+    metrics::counter!(
+        "steve_knowledge_steward_runs_total",
+        "outcome" => "triggered",
+        "reason" => "threshold"
+    )
+    .increment(1);
+    Ok(StewardGate::Run {
+        reason: "threshold",
+    })
+}
+
+fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    Ok(Some(Option::deserialize(d)?))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct StewardBody {
+    #[serde(default, deserialize_with = "nullable")]
+    pub schedule_id: Option<Option<String>>,
     #[serde(default)]
-    pub schedule_id: Option<String>,
+    pub threshold: Option<usize>,
+}
+
+fn steward_status(r: &mut impl Read, ws: &str) -> ApiResult<Value> {
+    let schedule_id = Documents(r)
+        .mark(ws, STEWARD_MARK)?
+        .filter(|x| !x.is_empty());
+    let th = threshold(r, ws)?;
+    let (sig, last_run) = signals(r, ws, schedule_id.as_deref())?;
+    let skipped_runs = match schedule_id.as_deref() {
+        Some(id) => MemoryChanges(r).skipped_steward_runs(ws, id)?,
+        None => 0,
+    };
+    Ok(json!({
+        "schedule_id": schedule_id,
+        "threshold": th,
+        "signals": {
+            "new_candidates": sig.new_candidates,
+            "conflicts": sig.conflicts,
+            "total": sig.total(),
+        },
+        "last_run_at": (last_run > 0).then_some(last_run),
+        "skipped_runs": skipped_runs,
+    }))
 }
 
 async fn steward_get(State(m): State<Modules>, who: Caller) -> ApiResult<Json<Value>> {
-    m.blocking(move |m| {
-        let id = m
-            .store
-            .read(|c| steve_store::knowledge::Documents(c).mark(&who.ws, STEWARD_MARK))?;
-        Ok(Json(json!({ "schedule_id": id.filter(|x| !x.is_empty()) })))
-    })
-    .await
+    m.blocking(move |m| crate::read_api(&m.store, |c| steward_status(c, &who.ws)).map(Json))
+        .await
 }
 
 async fn steward_put(
@@ -697,17 +892,23 @@ async fn steward_put(
     Body(b): Body<StewardBody>,
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
-        let id = b.schedule_id.unwrap_or_default();
-        if id.chars().count() > 100 {
+        if let Some(Some(ref id)) = b.schedule_id
+            && id.chars().count() > 100
+        {
             return Err(ApiError::invalid("schedule_id"));
         }
         let now = m.clock.now();
         m.store.write(|tx| {
-            steve_store::knowledge::Documents(tx).set_mark(&who.ws, STEWARD_MARK, &id, now)
+            if let Some(sched) = &b.schedule_id {
+                let val = sched.as_deref().unwrap_or("");
+                Documents(tx).set_mark(&who.ws, STEWARD_MARK, val, now)?;
+            }
+            if let Some(th) = b.threshold {
+                set_threshold(tx, &who.ws, th, now)?;
+            }
+            Ok::<_, ApiError>(())
         })?;
-        Ok(Json(
-            json!({ "schedule_id": (!id.is_empty()).then_some(id) }),
-        ))
+        crate::read_api(&m.store, |c| steward_status(c, &who.ws)).map(Json)
     })
     .await
 }
