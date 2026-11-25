@@ -1227,11 +1227,7 @@ pub(crate) fn bind_permission(
     };
     let action = match fact.category {
         ToolCategory::Steve => Action::Tool {
-            name: fact
-                .name
-                .strip_prefix("mcp__steve__")
-                .unwrap_or(&fact.name)
-                .to_string(),
+            name: fact.name.clone(),
             args: fact.input().clone(),
         },
         ToolCategory::Exec => {
@@ -4625,11 +4621,7 @@ impl Discovery for LocalNode {
         let (op, source, expected) = (c.id.clone(), c.body.source.clone(), c.body.expected);
         let events = tokio::task::spawn_blocking(move || {
             let h = &d.homes;
-            let harness_of_key = match source.key.get(..3) {
-                Some("cc:") => history::CLAUDE_CODE,
-                Some("cx:") => history::CODEX,
-                _ => "",
-            };
+            let harness_of_key = history::harness_of_key(&source.key).unwrap_or("");
             if harness_of_key != source.harness || !history::listed(h, &source.key) {
                 return Err(Error::new(Code::Invalid, "not a history this node lists"));
             }

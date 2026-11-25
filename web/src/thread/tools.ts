@@ -1,20 +1,19 @@
-/* What one tool call of a research run did, for its label and for the run's summary. Told by the category the
- * harness adapter reports for the call (ACP `kind`: every harness has one, whatever it names its tools) and, for
- * Steve's own tools, by their name. Steps stored before the category was kept carry a tool name only. */
+/* What one tool call of a research run did, for its label and for the run's summary. Told by the
+ * unified category the harness adapter reports (ACP `kind`) and, for Steve's own canonical tools,
+ * by their name. */
 export type ToolClass = "read" | "search" | "exec" | "edit" | "fetch" | "kb" | "item" | "meet" | "other"
 export type ToolLike = { name: string; kind?: string; args?: Record<string, unknown> }
 
-/** `mcp__steve__steve_item_get` → `steve_item_get`: the name without the MCP server it came through */
+/** Strip external third-party MCP server prefixes for display (`mcp__server__tool` → `tool`). */
 export const toolShort = (name: string) => name.replace(/^mcp__[^_]+__/, "")
 const BY_KIND: Record<string, ToolClass> = { read: "read", search: "search", exec: "exec", edit: "edit", delete: "edit", move: "edit", fetch: "fetch" }
-const BY_NAME: Record<string, ToolClass> = { Read: "read", Grep: "search", Glob: "search", LS: "search", Bash: "exec" }
 
 export function toolClass(name: string, kind?: string): ToolClass {
   const n = toolShort(name)
   if (n.startsWith("steve_onboard_")) return "meet"
   if (n.includes("knowledge")) return "kb"
   if (n.includes("steve_item")) return "item"
-  return BY_KIND[kind ?? ""] ?? BY_NAME[name] ?? "other"
+  return BY_KIND[kind ?? ""] ?? "other"
 }
 /** `profile` | `models` | `bots` | `done` for a first-meeting tool, else "" */
 export type MeetStep = "profile" | "models" | "bots" | "done"

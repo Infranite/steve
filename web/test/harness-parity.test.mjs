@@ -3,10 +3,10 @@ import { test } from "node:test"
 import { readFileSync, readdirSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
 import { checkCounts } from "./support/guard-ratchet.mjs"
-/* Harness parity guard (S0), in ratchet mode: the web chooses by what an adapter declares, never by a harness's
- * name. Every place that still names one is listed in harness-parity.txt (file, pattern, count); a new one fails,
- * and so does a listed one that is gone, so the list only shrinks. Comments are left out.
- * STEVE_GUARD_BLESS=1 npm run test:web rewrites the list. */
+/* Harness parity guard (S0), in ratchet mode: the web chooses by what an adapter declares in
+ * `steve-harness-spec` (`src/gen/harness-meta.json`), never by a harness's name, brand regex,
+ * MCP transport prefix, or hardcoded CLI template. Comments are left out.
+ * STEVE_GUARD_BLESS=1 node --test web/test/harness-parity.test.mjs rewrites the list. */
 const root = new URL("..", import.meta.url).pathname
 const LIST = join(root, "test/harness-parity.txt")
 const NAMES = [
@@ -19,6 +19,26 @@ const NAMES = [
   "antigravity", "agy",
 ]
 const PATTERNS = NAMES.flatMap((n) => [`"${n}"`, `'${n}'`, `\`${n}\``])
+const SUBSTRINGS = [
+  "mcp__steve__",
+  "claude mcp add",
+  "claude --resume",
+  "codex resume",
+]
+// Catch JS regex literals matching harness brand names used in `.test(` / `.exec(` / `.replace(` / `.match(`.
+const BRAND_REGEX_NAMES = [
+  "claude", "codex", "gemini", "copilot", "cursor", "kimi", "mistral", "opencode", "qwen", "codebuddy",
+]
+const BRAND_REGEXES = BRAND_REGEX_NAMES.map((brand) => {
+  const tok = brand === "cursor" ? "cursor(?!:)" : brand
+  return [
+    `/${brand}/`,
+    new RegExp(
+      `(?:[(,=:&|?!\\s]|^)\\/[^/\\n"'<>]*${tok}[^/\\n"'<>]*\\/[gimsuvy]*(?:\\s*\\.\\s*(?:test|exec)\\(|\\s*,)`,
+      "g",
+    ),
+  ]
+})
 const files = (d) => readdirSync(d).flatMap((n) => { const p = join(d, n); return statSync(p).isDirectory() ? files(p) : /\.(ts|tsx)$/.test(n) ? [p] : [] })
 const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1")
 
@@ -36,13 +56,18 @@ test("NAMES covers every built-in adapter id and binary in steve-harness-spec", 
   }
 })
 
-test("harnesses are not told apart by name in the web", () => {
+test("harnesses are not told apart by name, brand regex, or MCP prefix in the web", () => {
   const now = new Map()
   for (const f of files(join(root, "src"))) {
+    const rel = relative(root, f)
     const c = code(readFileSync(f, "utf8"))
-    for (const p of PATTERNS) {
+    for (const p of [...PATTERNS, ...SUBSTRINGS]) {
       const n = c.split(p).length - 1
-      if (n) now.set(`${relative(root, f)}\t${p}`, n)
+      if (n) now.set(`${rel}\t${p}`, n)
+    }
+    for (const [label, re] of BRAND_REGEXES) {
+      const n = [...c.matchAll(re)].length
+      if (n) now.set(`${rel}\t${label}`, n)
     }
   }
   checkCounts(now, {

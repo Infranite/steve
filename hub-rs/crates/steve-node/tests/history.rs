@@ -80,12 +80,16 @@ fn setup(codex: &str) -> T {
         homes: Homes {
             user_home: root.clone(),
             steve_home: root.join("steve"),
-            claude_dir: root.join(".claude"),
-            codex_home: root.join(".codex"),
+            state_dirs: std::collections::BTreeMap::from([
+                ("claude-code".into(), root.join(".claude")),
+                ("codex".into(), root.join(".codex")),
+            ]),
         },
         binaries: Binaries {
-            claude: root.join("bin/claude"),
-            codex: root.join(codex),
+            bins: std::collections::BTreeMap::from([
+                ("claude-code".into(), root.join("bin/claude")),
+                ("codex".into(), root.join(codex)),
+            ]),
         },
     });
     let cwd = root.join("w/app").display().to_string();

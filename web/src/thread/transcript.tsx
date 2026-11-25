@@ -5,7 +5,7 @@ import { t, useT } from "@/i18n"
 import type { SessionWaiting } from "@/gen"
 import {
   ArrowUpRightIcon, ChevronDownIcon, CircleCheckIcon, CircleSlashIcon, CornerDownRightIcon, FileDiffIcon,
-  FilePlusIcon, FileTextIcon, GitForkIcon, GlobeIcon, InboxIcon, InfoIcon, PencilIcon, SearchIcon, SquareTerminalIcon, TerminalIcon, WrenchIcon,
+  FileTextIcon, GitForkIcon, GlobeIcon, InboxIcon, InfoIcon, PencilIcon, SearchIcon, SquareTerminalIcon, TerminalIcon, WrenchIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
@@ -69,19 +69,20 @@ export function StartingLine({ since, room }: { since?: number; room?: SessionWa
     {slow && <div className="mt-1 type-footnote text-attention" data-starting-slow>{t("core:transcript.startingSlow")}</div>}
   </div>
 }
-const TOOLN = ["ToolSearch", "TodoWrite", "Skill"] as const
-const toolName = (tool: string) => ((TOOLN as readonly string[]).includes(tool) ? t(`core:transcript.tool.${tool as (typeof TOOLN)[number]}`) : undefined)
 type StepView = { I: any; verb: string; subj: string; mono: boolean; full?: string }
-/** icon, verb and subject of one tool call: the command (with the agent's own description), the file, the pattern */
+/** icon, verb and subject of one tool call, chosen by unified tool category rather than harness-specific tool names */
 function stepView(e: any[]): StepView {
   const tool = String(e[9] ?? ""), file = e[3] && e[3] !== "Steve" ? String(e[3]) : ""
   if (e[1] === "steve") return { I: steveToolIcon(tool) ?? WrenchIcon, verb: e[2], subj: e[10] ?? "", mono: false }
   if (e[1] === "read") return { I: FileTextIcon, verb: t("core:transcript.read"), subj: base(file) || e[2], mono: true, full: file }
-  if (e[1] === "edit") return { I: tool === "Write" ? FilePlusIcon : PencilIcon, verb: t(tool === "Write" ? "core:transcript.write" : "core:transcript.edit"), subj: base(file) || e[2], mono: true, full: file }
-  if (e[1] === "search") { const web = /^Web/.test(tool); return { I: web ? GlobeIcon : SearchIcon, verb: t(web ? "core:transcript.webSearch" : "core:transcript.search"), subj: e[11] ?? e[3] ?? "", mono: !web, full: e[11] } }
-  if (tool && tool !== "Bash") return { I: WrenchIcon, verb: toolName(tool) ?? tool.replace(/^mcp__[^_]+__/, ""), subj: e[10] ?? e[11] ?? "", mono: !e[10] && !!e[11] }
-  const cmd = String(e[11] ?? [e[2], e[3]].filter(Boolean).join(" "))
-  return { I: TerminalIcon, verb: e[10] || t("core:transcript.run"), subj: cmd.split("\n")[0], mono: true, full: cmd }
+  if (e[1] === "edit") return { I: PencilIcon, verb: t("core:transcript.edit"), subj: base(file) || e[2], mono: true, full: file }
+  if (e[1] === "fetch") return { I: GlobeIcon, verb: t("core:transcript.webSearch"), subj: e[11] ?? e[3] ?? "", mono: false, full: e[11] }
+  if (e[1] === "search") return { I: SearchIcon, verb: t("core:transcript.search"), subj: e[11] ?? e[3] ?? "", mono: true, full: e[11] }
+  if (e[1] === "run") {
+    const cmd = String(e[11] ?? [e[2], e[3]].filter(Boolean).join(" "))
+    return { I: TerminalIcon, verb: e[10] || t("core:transcript.run"), subj: cmd.split("\n")[0], mono: true, full: cmd }
+  }
+  return { I: WrenchIcon, verb: (tool || String(e[2] ?? "")).replace(/^mcp__[^_]+__/, ""), subj: e[10] ?? e[11] ?? e[3] ?? "", mono: !e[10] && !!e[11] }
 }
 /** "运行 14 条命令 · 读取 3 个文件 · 编辑 2 个文件 · 思考 1 次" */
 function workStats(evs: any[]) {
@@ -99,11 +100,10 @@ function workStats(evs: any[]) {
     if (e[0] !== "tool") continue
     if (e[15] && subtaskIds.has(String(e[15]))) continue
     if (e[8] === 1) n.fail++
-    const v = stepView(e)
-    if (v.I === TerminalIcon) n.run++
+    if (e[1] === "run") n.run++
     else if (e[1] === "read") n.read++
     else if (e[1] === "edit") { n.edit++; if (e[3]) files.add(e[3]) }
-    else if (e[1] === "search") n.search++
+    else if (e[1] === "search" || e[1] === "fetch") n.search++
     else n.other++
   }
   return [n.sub && t("core:transcript.stats.subtask", { count: n.sub }), n.run && t("core:transcript.stats.run", { count: n.run }), n.read && t("core:transcript.stats.read", { count: n.read }), files.size && t("core:transcript.stats.changed", { count: files.size }), n.search && t("core:transcript.stats.search", { count: n.search }), n.other && t("core:transcript.stats.other", { count: n.other }), n.th && t("core:transcript.stats.thought", { count: n.th }), n.fail && t("core:transcript.stats.failed", { count: n.fail })].filter(Boolean) as string[]
@@ -126,13 +126,14 @@ function stepItem(e: any[], j: number, evs: any[], ts: number[], t1: number | un
     const at = ts[j] || 0, next = j + 1 < evs.length ? ts[j + 1] : t1
     return { t: "think", key, text: String(e[1] ?? ""), live: live && j === evs.length - 1, t0: at || undefined, ms: at && next ? next - at : undefined }
   }
-  const v = stepView(e), tool = String(e[9] ?? ""), state = e[5] === 1 ? "run" : e[8] === 1 ? "fail" : "done", web = /^Web/.test(tool)
+  const v = stepView(e), tool = String(e[9] ?? ""), state = e[5] === 1 ? "run" : e[8] === 1 ? "fail" : "done"
   const [verb, group, chip]: [[string, string], string | undefined, Chip | undefined] =
     e[1] === "read" ? [[t("core:trail.live.read"), v.verb], "read", { label: v.subj, title: v.full, mono: true, icon: FileTextIcon }]
-    : e[1] === "edit" ? [[t(tool === "Write" ? "core:trail.live.write" : "core:trail.live.edit"), v.verb], "edit", { label: v.subj, title: v.full, mono: true, icon: v.I }]
-    : e[1] === "search" ? [[t(web ? "core:trail.live.webSearch" : "core:trail.live.search"), v.verb], "search", { label: v.subj, title: v.full, mono: v.mono, icon: v.I }]
-    : v.I === TerminalIcon ? [e[10] ? [v.verb, v.verb] : [t("core:trail.live.run"), v.verb], "run", { label: e[10] || v.subj, title: v.full, mono: !e[10], icon: TerminalIcon }]
-    : [[v.verb, v.verb], e[12]?.length || SAY.includes(tool.replace(/^mcp__steve__/, "")) ? undefined : "tool:" + tool, v.subj ? { label: v.subj, mono: v.mono } : undefined]
+    : e[1] === "edit" ? [[t("core:trail.live.edit"), v.verb], "edit", { label: v.subj, title: v.full, mono: true, icon: v.I }]
+    : e[1] === "fetch" ? [[t("core:trail.live.webSearch"), v.verb], "fetch", { label: v.subj, title: v.full, mono: false, icon: v.I }]
+    : e[1] === "search" ? [[t("core:trail.live.search"), v.verb], "search", { label: v.subj, title: v.full, mono: true, icon: v.I }]
+    : e[1] === "run" ? [e[10] ? [v.verb, v.verb] : [t("core:trail.live.run"), v.verb], "run", { label: e[10] || v.subj, title: v.full, mono: !e[10], icon: TerminalIcon }]
+    : [[v.verb, v.verb], e[12]?.length || SAY.includes(tool) ? undefined : "tool:" + tool, v.subj ? { label: v.subj, mono: v.mono } : undefined]
   const g = group?.startsWith("tool:") ? "tool" : group
   const merged = g ? (calls: number, distinct: number, running: boolean) => g === "tool" ? t("core:trail.group.tool", { name: v.verb, count: calls })
     : t(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : undefined
@@ -142,8 +143,8 @@ function stepItem(e: any[], j: number, evs: any[], ts: number[], t1: number | un
    * and what came back, its time from adapter duration_ms or the update that settled it ([13]) */
   const out = String(e[4] ?? "").trim().replace(/^```[a-z]*\n?/, "").replace(/\n?```$/, "").trim(), t0 = ts[j] || undefined
   const observedMs = toolDurationMs(e) ?? (e[13] && t0 && e[13] > t0 ? e[13] - t0 : undefined)
-  const card = { name: (tool || String(e[2] ?? "")).replace(/^mcp__steve__/, "").replace(/^mcp__[^_]+__/, ""), icon: <v.I strokeWidth={1.5} aria-hidden />,
-    args: e[1] === "steve" ? e[14] ?? (e[10] || undefined) : v.I === TerminalIcon ? v.full ?? v.subj : e[11] ?? (e[3] && e[3] !== "Steve" ? e[3] : undefined),
+  const card = { name: (tool || String(e[2] ?? "")).replace(/^mcp__[^_]+__/, ""), icon: <v.I strokeWidth={1.5} aria-hidden />,
+    args: e[1] === "steve" ? e[14] ?? (e[10] || undefined) : e[1] === "run" ? v.full ?? v.subj : e[11] ?? (e[3] && e[3] !== "Steve" ? e[3] : undefined),
     result: state === "fail" ? undefined : plan ? (j === lastPlan ? undefined : plan.map(([x, d]) => (d ? "✓ " : "○ ") + x).join("\n")) : out || undefined,
     resultView: plan && j !== lastPlan ? <SubSteps steps={plan} live={false} /> : e[1] === "edit" && out ? <Detail text={out} /> : undefined,
     error: state === "fail" ? out || undefined : undefined, t0, ms: observedMs }

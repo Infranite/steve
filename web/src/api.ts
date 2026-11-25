@@ -111,6 +111,7 @@ export type RTailcat = { available: boolean; enabled: boolean; running?: boolean
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
+  brand_mark?: string; model_strip_prefixes?: string[]
   adapter_version?: string | null; default_model?: string | null; efforts?: string[]; effort_mode?: EffortMode; effort_map?: EffortMapping[]; modes?: string[] | null
   /** its adapter declares where it reads skills, so a Bot's skills reach its sessions (absent: not said) */
   skills?: boolean

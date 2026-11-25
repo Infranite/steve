@@ -651,7 +651,7 @@ async fn acp_research_checks_mcp_identity_without_trusting_display_titles() {
                 }]
             );
             assert!(t.bodies().iter().any(|e| matches!(e,
-                EventBody::ToolChanged { tool } if tool.origin == ToolOrigin::Steve && tool.name == "mcp__steve__steve_item_read")));
+                EventBody::ToolChanged { tool } if tool.origin == ToolOrigin::Steve && tool.name == "steve_item_read")));
         } else {
             assert!(
                 matches!(

@@ -79,8 +79,7 @@ pub(crate) fn guard(
         fact.name.clone()
     };
     if fact.origin == ToolOrigin::Steve {
-        let name = fact.name.strip_prefix("mcp__steve__").unwrap_or(&fact.name);
-        return if steve_tools && r::guard::MCP_TOOLS.contains(&name) {
+        return if steve_tools && r::guard::MCP_TOOLS.contains(&fact.name.as_str()) {
             Ok(())
         } else {
             Err(r::Violation::Tool { tool })
@@ -842,28 +841,15 @@ mod tests {
         ));
         let mcp = |name: &str| {
             fact(json!({
-                "sessionUpdate": "tool_call", "toolCallId": "t1", "name": name, "kind": "other"
+                "sessionUpdate": "tool_call",
+                "toolCallId": "t1",
+                "kind": "other",
+                "rawInput": {"server_name": "steve", "tool_name": name}
             }))
         };
-        assert!(
-            guard(
-                &mcp("mcp__steve__steve_knowledge_search"),
-                &scope,
-                true,
-                false
-            )
-            .is_ok()
-        );
-        assert!(
-            guard(
-                &mcp("mcp__steve__steve_knowledge_search"),
-                &scope,
-                false,
-                false
-            )
-            .is_err()
-        );
-        assert!(guard(&mcp("mcp__steve__steve_deliver"), &scope, true, false).is_err());
+        assert!(guard(&mcp("steve_knowledge_search"), &scope, true, false).is_ok());
+        assert!(guard(&mcp("steve_knowledge_search"), &scope, false, false).is_err());
+        assert!(guard(&mcp("steve_deliver"), &scope, true, false).is_err());
     }
 
     #[test]

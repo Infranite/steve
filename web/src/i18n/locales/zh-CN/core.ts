@@ -354,9 +354,7 @@ export default {
   transcript: {
     earlier: "加载更早的回合",
     recentFiles: "已加载回合中改动的文件（{{count}}）",
-    tool: { ToolSearch: "加载工具", TodoWrite: "更新待办", Skill: "技能" },
     read: "读取",
-    write: "写入",
     edit: "编辑",
     webSearch: "联网搜索",
     search: "搜索",
@@ -417,7 +415,7 @@ export default {
     thoughtFor: "思考了 {{time}}",
     finished: "完成",
     more_other: "另有 {{count}} 个",
-    live: { read: "正在读取", write: "正在写入", edit: "正在编辑", search: "正在搜索", webSearch: "正在联网搜索", run: "正在运行" },
+    live: { read: "正在读取", edit: "正在编辑", search: "正在搜索", webSearch: "正在联网搜索", run: "正在运行" },
     group: {
       read_other: "读取了 {{count}} 个文件",
       readLive_other: "正在读取 {{count}} 个文件",

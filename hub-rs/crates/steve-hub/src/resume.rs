@@ -155,22 +155,35 @@ pub fn command(h: &Homes, harness: &str, id: &str, cwd: &str) -> Option<String> 
 
 fn node_homes(
     h: &Homes,
+    harness: &str,
     props: &steve_harness_spec::AdapterProperties,
     principal_state_dir: Option<&Path>,
 ) -> steve_node::history::Homes {
+    let mut state_dirs = BTreeMap::new();
+    for b in steve_harness_spec::builtins() {
+        if let Some(state) = &b.properties.state {
+            match state.env.as_str() {
+                "CLAUDE_CONFIG_DIR" => {
+                    state_dirs.insert(b.id.to_string(), h.claude_dir.clone());
+                }
+                "CODEX_HOME" => {
+                    state_dirs.insert(b.id.to_string(), h.codex_home.clone());
+                }
+                _ => {}
+            }
+        }
+    }
     let mut nh = steve_node::history::Homes {
         user_home: h.home.clone(),
         steve_home: PathBuf::new(),
-        claude_dir: h.claude_dir.clone(),
-        codex_home: h.codex_home.clone(),
+        state_dirs,
     };
     if let (Some(state), Some(pdir)) = (props.state.as_ref(), principal_state_dir) {
         for (k, v) in state.isolation_env(pdir) {
-            match k.to_str() {
-                Some("HOME") => nh.user_home = PathBuf::from(v),
-                Some("CLAUDE_CONFIG_DIR") => nh.claude_dir = PathBuf::from(v),
-                Some("CODEX_HOME") => nh.codex_home = PathBuf::from(v),
-                _ => {}
+            if k == "HOME" {
+                nh.user_home = PathBuf::from(v);
+            } else if !state.env.is_empty() && k == state.env.as_str() {
+                nh.state_dirs.insert(harness.to_string(), PathBuf::from(v));
             }
         }
     }
@@ -262,7 +275,7 @@ pub fn info_for_state(h: &Homes, s: &Obj, state: &SessionState) -> Value {
         | SessionState::RemoteNode => (None, false),
     };
     let found = if check {
-        let nh = node_homes(h, &props, pdir);
+        let nh = node_homes(h, harness, &props, pdir);
         let file = id
             .as_deref()
             .and_then(|id| steve_node::history::find_transcript(&nh, harness, id, cwd));
@@ -359,7 +372,7 @@ pub async fn info_on_state(
 mod tests {
     use super::*;
     use std::fs;
-    use steve_node::history::claude_project;
+    use steve_acp::adapter::claude_code::claude_project;
 
     fn obj(v: Value) -> Obj {
         v.as_object().cloned().unwrap()

@@ -72,8 +72,7 @@ const ICONS: Record<string, LucideIcon> = {
   steve_onboard_done: CircleCheckIcon,
 }
 
-/** MCP server prefixes are transport details; unknown names keep the caller's neutral fallback. */
+/** Look up an icon for a canonical Steve tool name; unknown names keep the caller's fallback. */
 export function steveToolIcon(name: string): LucideIcon | undefined {
-  const short = name.replace(/^mcp__.+?__/, "")
-  return Object.hasOwn(ICONS, short) ? ICONS[short] : undefined
+  return Object.hasOwn(ICONS, name) ? ICONS[name] : undefined
 }

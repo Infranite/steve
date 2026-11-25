@@ -49,7 +49,7 @@ fn router(k: &Kit, f: impl Fn(&str) -> Value + Send + Sync + 'static) {
 /// The script of A1: one knowledge search, three files read, the answer in two parts.
 fn a1_research() -> Arc<FakeResearch> {
     FakeResearch::new(vec![
-        Step::Tool("mcp__steve__steve_knowledge_search", "知识系统"),
+        Step::Tool("steve_knowledge_search", "知识系统"),
         Step::Text("知识系统分三层：入库、检索、注入对话。"),
         Step::Sleep(80),
         Step::Tool("Read", "hub-rs/crates/steve-knowledge/src/lib.rs"),
@@ -122,7 +122,7 @@ async fn a1_a_question_is_researched_in_the_conversation() {
             )
         })
         .collect();
-    assert_eq!(tools[0].0, "mcp__steve__steve_knowledge_search");
+    assert_eq!(tools[0].0, "steve_knowledge_search");
     assert_eq!(tools.iter().filter(|t| t.0 == "Read").count(), 3);
     assert_eq!(st["research"]["tools"], 4);
     assert_eq!(st["research"]["model"], "fake-research");
@@ -1706,7 +1706,7 @@ async fn maintenance_keeps_incoming_chat_durable_and_resumes_it_once() {
 async fn failed_research_tool_keeps_a_safe_diagnostic_in_reply_metadata() {
     let k = Kit::new();
     assert!(k.core.set_researcher(FakeResearch::new(vec![
-        Step::ToolFailure("mcp__steve__steve_item_read", "ST-23", "permission_denied"),
+        Step::ToolFailure("steve_item_read", "ST-23", "permission_denied"),
         Step::Text("暂时无法查询。"),
     ])));
     router(

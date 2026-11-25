@@ -460,6 +460,8 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 "name": name,
                 "builtin": spec.builtin,
                 "custom": !spec.builtin,
+                "brand_mark": spec.properties.brand_mark,
+                "model_strip_prefixes": spec.properties.model_strip_prefixes,
                 "path": path,
                 "version": reported.map(|h| version_of(&h.version)).unwrap_or_default(),
                 "adapter_version": adapter.and_then(|a| a.version.clone()),
@@ -507,7 +509,17 @@ fn version_of(said: &str) -> String {
 
 // ── local harness history ──
 
-pub use steve_node::history::LocalSession;
+/// A local harness session entry surfaced by the Hub import API.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LocalSession {
+    pub key: String,
+    pub harness: String,
+    pub title: String,
+    pub cwd: String,
+    pub when: f64,
+    pub size: u64,
+}
+
 use steve_node_api::{
     Code, Command, Discovery, GrantId, HistoryEntry, HistoryImport, NodeEvent, Observed,
     OperationId, OperationResult, PageRequest, Timestamp,
@@ -771,7 +783,12 @@ mod tests {
 
     use super::*;
     use regex::Regex;
-    use steve_node::history::{claude_rows as claude_events, codex_rows as codex_events};
+    fn claude_events(text: &str) -> Vec<(String, Value)> {
+        steve_node::history::parse_rows("claude-code", text)
+    }
+    fn codex_events(text: &str) -> Vec<(String, Value)> {
+        steve_node::history::parse_rows("codex", text)
+    }
 
     mod setup_node {
         include!(concat!(

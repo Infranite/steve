@@ -336,17 +336,32 @@ pub(crate) fn local_node_extras(node: &steve_node::LocalNode, cfg: &Config, jobs
         ));
     }
     let homes = crate::resume::Homes::of(cfg);
+    let mut state_dirs = std::collections::BTreeMap::new();
+    let mut bins = std::collections::BTreeMap::new();
+    for b in steve_harness_spec::builtins() {
+        if let Some(state) = &b.properties.state {
+            let dir = match state.env.as_str() {
+                "CLAUDE_CONFIG_DIR" => Some(homes.claude_dir.clone()),
+                "CODEX_HOME" => Some(homes.codex_home.clone()),
+                _ => None,
+            };
+            if let Some(dir) = dir {
+                state_dirs.insert(b.id.to_string(), dir);
+            }
+        }
+        if b.properties.executable_env.as_deref() == Some("CLAUDE_CODE_EXECUTABLE") {
+            bins.insert(b.id.to_string(), cfg.claude_executable.clone().into());
+        } else if b.properties.usage_fallback == steve_harness_spec::UsageFallback::CodexRollout {
+            bins.insert(b.id.to_string(), cfg.codex_executable.clone().into());
+        }
+    }
     node.set_discovery(steve_node::history::DiscoveryConfig {
         homes: steve_node::history::Homes {
             user_home: homes.home,
             steve_home: cfg.home.clone(),
-            claude_dir: homes.claude_dir,
-            codex_home: homes.codex_home,
+            state_dirs,
         },
-        binaries: steve_node::history::Binaries {
-            claude: cfg.claude_executable.clone().into(),
-            codex: cfg.codex_executable.clone().into(),
-        },
+        binaries: steve_node::history::Binaries { bins },
     });
 }
 
