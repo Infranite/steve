@@ -178,7 +178,6 @@ pub(crate) fn bindings_on(c: &Connection, ws: &str, bot: &str) -> Result<Vec<Str
 }
 
 pub(crate) fn item_team_on(c: &Connection, item: &str) -> Result<Option<(Team, String)>> {
-    // Workflow children are created by their own repository. The parent's snapshot is their ceiling.
     let row: Option<(String, String)> = c
         .query_row(
             "SELECT d.team,d.source FROM item_team_snapshots d WHERE d.item_id=?1",
@@ -186,16 +185,6 @@ pub(crate) fn item_team_on(c: &Connection, item: &str) -> Result<Option<(Team, S
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let row = match row {
-        Some(row) => Some(row),
-        None => c.query_row(
-            "SELECT d.team,'inherited' FROM workflow_units u JOIN workflows w ON w.item_id=u.workflow_id
-             JOIN item_team_snapshots d ON d.item_id=w.item_id JOIN items p ON p.id=w.item_id
-             JOIN items i ON i.workspace_id=p.workspace_id AND i.id=u.item_id
-             WHERE u.item_id=?1",
-            [item], |r| Ok((r.get(0)?, r.get(1)?)),
-        ).optional()?,
-    };
     row.map(|(s, source)| Ok((serde_json::from_str(&s)?, source)))
         .transpose()
 }

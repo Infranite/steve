@@ -1363,41 +1363,95 @@ pub(crate) async fn system_health(
 
 /// The most samples of each kind one web report carries.
 const WEB_SAMPLES: usize = 500;
+const WEB_NAV_KEYS_MAX: usize = 64;
+const WEB_NAV_COUNT_MAX: u32 = 10_000;
 
-/// `POST /api/system/web-perf` `{page?, long_tasks: [ms], interactions: [ms], patch_apply: [ms], transcript_open: [ms]}`:
-/// what a signed-in web client measured since its last report (`steve_web_*`), on which page (one
-/// of [`crate::metrics::WEB_PAGES`], else `other`). Each list holds at most [`WEB_SAMPLES`]
-/// durations of 0 to 60 000 ms.
-pub async fn system_web_perf(b: Bytes) -> ApiResult {
-    let v = body(&b)?;
-    let seconds = |k: &str| -> Result<Vec<f64>, ApiError> {
+#[derive(Debug, serde::Deserialize)]
+struct WebPerfReport {
+    page: Option<String>,
+    long_tasks: Option<Vec<f64>>,
+    interactions: Option<Vec<f64>>,
+    patch_apply: Option<Vec<f64>>,
+    snapshots: Option<Vec<f64>>,
+    transcript_open: Option<Vec<f64>>,
+    dom_nodes: Option<u64>,
+    nav_opens: Option<std::collections::BTreeMap<String, u32>>,
+}
+
+/// Validates a web telemetry report and records it into the in-memory metrics pipeline.
+/// Returns the bounded menu open counts accepted for `steve_web_nav_opens_total`.
+pub(crate) fn record_web_perf(b: &Bytes) -> Result<Vec<(&'static str, u32)>, ApiError> {
+    let report: WebPerfReport =
+        serde_json::from_slice(b).map_err(|_| ApiError::Invalid(vec!["body".to_string()]))?;
+    let seconds = |k: &str, list: Option<Vec<f64>>| -> Result<Vec<f64>, ApiError> {
         let bad = || ApiError::Invalid(vec![k.to_string()]);
-        let list = match v.get(k) {
-            None | Some(Value::Null) => return Ok(vec![]),
-            Some(Value::Array(a)) if a.len() <= WEB_SAMPLES => a,
-            Some(_) => return Err(bad()),
+        let Some(list) = list else {
+            return Ok(vec![]);
         };
-        list.iter()
-            .map(|x| {
-                x.as_f64()
-                    .filter(|ms| (0.0..=60_000.0).contains(ms))
-                    .map(|ms| ms / 1000.0)
+        if list.len() > WEB_SAMPLES {
+            return Err(bad());
+        }
+        list.into_iter()
+            .map(|ms| {
+                (0.0..=60_000.0)
+                    .contains(&ms)
+                    .then_some(ms / 1000.0)
                     .ok_or_else(bad)
             })
             .collect()
     };
-    let page = v.get("page").and_then(Value::as_str).unwrap_or("other");
-    crate::metrics::web_report(
+    let nav_opens = report.nav_opens.unwrap_or_default();
+    if nav_opens.len() > WEB_NAV_KEYS_MAX
+        || nav_opens.values().any(|&count| count > WEB_NAV_COUNT_MAX)
+    {
+        return Err(ApiError::Invalid(vec!["nav_opens".to_string()]));
+    }
+    let page = report.page.as_deref().unwrap_or("other");
+    Ok(crate::metrics::web_report(
         page,
-        &seconds("long_tasks")?,
-        &seconds("interactions")?,
-        &seconds("patch_apply")?,
-        &seconds("snapshots")?,
-        &seconds("transcript_open")?,
-        v.get("dom_nodes")
-            .and_then(Value::as_u64)
-            .filter(|n| *n <= 1_000_000),
-    );
+        &seconds("long_tasks", report.long_tasks)?,
+        &seconds("interactions", report.interactions)?,
+        &seconds("patch_apply", report.patch_apply)?,
+        &seconds("snapshots", report.snapshots)?,
+        &seconds("transcript_open", report.transcript_open)?,
+        report.dom_nodes.filter(|n| *n <= 1_000_000),
+        &nav_opens,
+    ))
+}
+
+/// `POST /api/system/web-perf` `{page?, long_tasks: [ms], interactions: [ms], patch_apply: [ms], transcript_open: [ms], nav_opens?: {item: count}}`:
+/// what a signed-in web client measured since its last report (`steve_web_*`), on which page (one
+/// of [`crate::metrics::WEB_PAGES`], else `other`). Each list holds at most [`WEB_SAMPLES`]
+/// durations of 0 to 60 000 ms; bounded `nav_opens` are also persisted daily in `telemetry_daily`.
+pub async fn system_web_perf(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    let nav_opens = record_web_perf(&b)?;
+    if !nav_opens.is_empty()
+        && let Some(store) = st.modules.as_ref().map(|m| m.store.clone())
+    {
+        let ws = c.ws;
+        let at = steve_store::now();
+        super::blocking(move || {
+            store
+                .write(|w| {
+                    let tz = steve_stats::refresh::timezone(w, &ws)?;
+                    let day = steve_stats::day::day(at, tz);
+                    steve_store::statistics::TelemetryDaily(w).record_counts(
+                        &ws,
+                        &day,
+                        steve_store::statistics::TelemetryMetric::WebNavOpen,
+                        nav_opens
+                            .iter()
+                            .map(|&(item, count)| (item, i64::from(count))),
+                    )
+                })
+                .map_err(|e| ApiError::internal(e.to_string()))
+        })
+        .await?;
+    }
     ok_true()
 }
 

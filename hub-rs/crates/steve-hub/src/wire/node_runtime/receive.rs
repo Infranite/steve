@@ -174,7 +174,7 @@ impl NodeRuntime {
                     "faulted": true,
                 }),
                 None,
-                now(),
+                received,
             )?;
         }
         Ok(())

@@ -18,6 +18,8 @@ import { getItem, st, useSession, useStoreSelector, start, type Sess } from "@/s
 import { lang, useT } from "@/i18n"
 import { useCommandShortcut, useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
+import { navItemOf } from "@/nav"
+import { recordNavOpen } from "@/perf"
 const CommandPalette = lazyView(() => import("@/command-palette").then((m) => ({ default: m.CommandPalette })))
 const FeedView = lazyView(() => import("@/feed").then((m) => ({ default: m.FeedView })))
 const InboxView = lazyView(() => import("@/inbox").then((m) => ({ default: m.InboxView })))
@@ -108,7 +110,7 @@ function Splash({ children }: { children: React.ReactNode }) {
 }
 
 export default function App({ deliveryId }: { deliveryId?: string }) {
-  const [a = "", b, c] = useRoute()
+  const [a = "", b, c, d] = useRoute()
   const inChat = a === "" || a === "c"
   useEffect(() => {
     if (deliveryId) return
@@ -260,12 +262,15 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     {list ? <HubChooser down className="max-w-xs" /> : <div className="flex gap-2"><Button variant="outline" onClick={() => location.reload()}>{t("common:action.retry")}</Button><Button variant="ghost" onClick={() => setOthers(true)} data-error-change-hub>{t("shell:hub.other")}</Button></div>}
     <HubsOffer className="max-w-xs" /></> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
   if (deliveryId) return <DeliveryPage id={deliveryId} />
-  return <WorkspacePage a={a} b={b} c={c} workspace={workspace?.id ?? ""} session={session} />
+  return <WorkspacePage a={a} b={b} c={c} d={d} workspace={workspace?.id ?? ""} session={session} />
 }
 
-function WorkspacePage({ a, b, c, workspace, session }: { a: string; b?: string; c?: string; workspace: string; session?: Sess }) {
+function WorkspacePage({ a, b, c, d, workspace, session }: { a: string; b?: string; c?: string; d?: string; workspace: string; session?: Sess }) {
   const sh = useStoreSelector(getSheet)
   useStoreSelector(() => a === "" || a === "c" ? (sh ? st.ver : 0) : st.ver)
+  const navPath = a === "contacts" && b === "me" ? "#/contacts/me" : "#/" + a
+  const navKey = navItemOf(navPath)
+  useEffect(() => { if (navKey) recordNavOpen(navPath) }, [navKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const view =
     a.split("?")[0] === "feed" ? <FeedView workspace={workspace} filter={new URLSearchParams(a.split("?")[1]).get("kind") ?? ""} /> :
     a === "inbox" ? <InboxView /> :
@@ -280,7 +285,7 @@ function WorkspacePage({ a, b, c, workspace, session }: { a: string; b?: string;
     a === "capabilities" ? <CapabilitiesView tab={b} /> :
     a === "design" ? (b === "components" ? <DesignShowroom /> : <DesignView />) :
     a.split("?")[0] === "knowledge" ? <KnowledgeView sub={b} id={c} /> :
-    a === "devices" ? <DevicesRoute b={b} c={c} /> :
+    a === "devices" ? <DevicesRoute b={b} c={c} d={d} /> :
     a.split("?")[0] === "github" ? <GitHubView repo={b?.split("?")[0]} /> :
     a === "integrations" ? <IntegrationsRoute id={b} /> :
     a === "channels" ? <ChannelsRoute b={b} id={c} /> :

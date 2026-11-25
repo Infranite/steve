@@ -206,7 +206,7 @@ impl NodeRuntime {
                         active_attempt: None,
                         release_pending: false,
                     },
-                    now(),
+                    self.clock.now(),
                 )?;
                 *changed += 1;
             }

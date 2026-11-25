@@ -119,11 +119,6 @@ impl super::node_runtime::NodeDomain for HubHost {
         self.approval.desired(&self.store, session)
     }
 
-    fn dynamic_workflows(&self) -> bool {
-        self.core
-            .get()
-            .is_some_and(|c| c.config().dynamic_workflows)
-    }
     fn workspace_changed(&self, fact: super::node_runtime::WorkspaceFact) {
         use super::node_runtime::WorkspaceFact;
         let Some(core) = self.core.get().cloned() else {
@@ -297,8 +292,8 @@ fn node_of_strict(
 
 impl RoutedRuntime {
     fn route(&self, session_id: &str) -> Backend {
-        // A proven unbound session holds no process; cancellation can retire it. Adoption has
-        // its own workflow gate. An unreadable binding still parks through node_of.
+        // A proven unbound session holds no process; cancellation can retire it. An unreadable
+        // binding still parks through node_of.
         self.route_to(node_of(&self.store, session_id))
     }
 
@@ -307,43 +302,14 @@ impl RoutedRuntime {
         Ok(self.route_to(node_of_strict(&self.store, session_id)?))
     }
 
-    /// An unbound work unit cannot be adopted before same-principal and Node admission pass.
-    /// Read failures likewise cannot establish that a session is ordinary work.
-    fn workflow_item(&self, session_id: &str) -> Result<Option<String>, steve_store::StoreError> {
-        let Some(item) = self
+    fn check_session_gate(&self, session_id: &str) -> steve_core::Result<()> {
+        if let Some(blocker) = self
             .store
-            .sessions()
-            .get(session_id)?
-            .and_then(|s| s.item_id)
-        else {
-            return Ok(None);
-        };
-        // Reset/replan may detach an old attempt from the live graph. Its durable source marker
-        // still prevents an old child/session from gaining ordinary session adoption.
-        if self.store.workflows().by_child(&item)?.is_some()
-            || self
-                .store
-                .items()
-                .get(&item)?
-                .is_some_and(|i| i.source.1 == "workflow")
+            .read(|c| steve_store::item_gate::session_blocker(c, session_id))?
         {
-            Ok(Some(item))
-        } else {
-            Ok(None)
+            return Err(CoreError::Msg(super::item_gate_reason(blocker)));
         }
-    }
-
-    fn check_workflow_session(&self, session_id: &str) -> steve_core::Result<()> {
-        if let Some(why) = self
-            .store
-            .read(|c| steve_store::workflow_gate::session_blocker(c, session_id))?
-        {
-            return Err(CoreError::Msg(why));
-        }
-        let Some(item) = self.workflow_item(session_id)? else {
-            return Ok(());
-        };
-        steve_core::AgentRuntime::check_workflow_execution(self, &item)
+        Ok(())
     }
 
     fn route_to(&self, node: Option<String>) -> Backend {
@@ -397,7 +363,6 @@ pub(super) fn unbound_why(u: super::node_binding::Unbound) -> Option<String> {
         Unbound::Bot => steve_i18n::t!("hub.node.unbound.bot"),
         Unbound::Mode(m) => steve_i18n::t!("hub.node.unbound.mode", mode = m),
         Unbound::OutsideRoots => steve_i18n::t!("hub.node.unbound.outside_roots"),
-        Unbound::Workflow(why) => why,
     })
 }
 
@@ -437,14 +402,13 @@ impl RoutedRuntime {
             let why = match &self.node {
                 None => steve_i18n::t!("hub.node.unbound.diagnostic"),
                 Some(n) if n.is_stopped() => steve_i18n::t!("hub.node.unbound.stopped"),
-                // a held work unit was never planned
-                Some(_) if self.check_workflow_session(session_id).is_err() => {
-                    steve_i18n::t!("hub.node.unbound.unreadable")
-                }
-                Some(_) => match self.local_plan(session_id) {
-                    Err(u) => unbound_why(u)
-                        .unwrap_or_else(|| steve_i18n::t!("hub.node.unbound.unreadable")),
-                    Ok(_) => steve_i18n::t!("hub.node.unbound.bind_failed"),
+                Some(_) => match self.check_session_gate(session_id) {
+                    Err(e) => e.to_string(),
+                    Ok(()) => match self.local_plan(session_id) {
+                        Err(u) => unbound_why(u)
+                            .unwrap_or_else(|| steve_i18n::t!("hub.node.unbound.unreadable")),
+                        Ok(_) => steve_i18n::t!("hub.node.unbound.bind_failed"),
+                    },
                 },
             };
             steve_i18n::t!("hub.node.refused", why = why)
@@ -477,115 +441,6 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     }
     fn can_run(&self, item_id: &str, bot_id: &str, _harness: &str) -> steve_core::Result<()> {
         self.check_dispatch(item_id, bot_id)
-    }
-    fn check_workflow_execution(&self, item_id: &str) -> steve_core::Result<()> {
-        if !self
-            .host
-            .core
-            .get()
-            .is_some_and(|c| c.config().dynamic_workflows)
-        {
-            return Err(CoreError::Msg(steve_i18n::t!("hub.workflow.disabled")));
-        }
-        if let Some(why) = self
-            .store
-            .read(|c| steve_store::workflow_gate::item_blocker(c, item_id))?
-        {
-            return Err(CoreError::Msg(why));
-        }
-        let item = self
-            .store
-            .items()
-            .get(item_id)?
-            .ok_or_else(|| CoreError::Msg("协作事项不存在。".into()))?;
-        let graph = match self.store.workflows().by_child(item_id)? {
-            Some((parent, _)) => self.store.workflows().get(&parent)?,
-            None => self.store.workflows().get(item_id)?,
-        }
-        .ok_or_else(|| CoreError::Msg("协作工作图不存在，无法确认请求主体。".into()))?;
-        // Use the ordinary principal contract after the strict durable gate has ruled out its
-        // departed-member fallback. NULL requester is an explicit workspace service principal.
-        let principal = self
-            .store
-            .read(|c| super::principal::of_item(c, item_id))?
-            .ok_or_else(|| CoreError::Msg("无法确认协作请求主体。".into()))?;
-        let parent = self
-            .store
-            .read(|c| super::principal::of_item(c, &graph.item_id))?;
-        if parent.as_ref() != Some(&principal) {
-            return Err(CoreError::Msg("工作单元与主事项的请求主体不一致。".into()));
-        }
-        if graph.item_id == item_id {
-            for unit in &graph.units {
-                if matches!(unit.status.as_str(), "dispatching" | "running")
-                    && let Some(child) = unit.item_id.as_deref()
-                {
-                    // Each existing unit keeps its own binding and inherited routing. A usable
-                    // parent Node cannot hide an offline or no-longer-authorized child Node.
-                    self.check_workflow_execution(child)?;
-                }
-            }
-        }
-        if let Some(project) = item.project_id.as_deref() {
-            let project = self
-                .store
-                .projects()
-                .get(project)?
-                .ok_or_else(|| CoreError::Msg("协作项目不存在。".into()))?;
-            if project.device_id != super::workspaces::HUB_DEVICE {
-                return Err(CoreError::Msg(
-                    "当前 Node 路由仅支持本机项目的独立 Git worktree。".into(),
-                ));
-            }
-        }
-        // Before a child exists, prove that its inherited routing constraints have an eligible
-        // Node. Actual sessions still go through ordinary binding, roots, policy and ceiling.
-        let eligible = |node: &str| -> steve_core::Result<bool> {
-            let tag = self
-                .store
-                .read(|c| steve_store::nodes::item_tag(c, item_id))?;
-            if let Some(tag) = tag {
-                let nodes = self.store.read(|c| steve_store::nodes::with_tag(c, &tag))?;
-                if !nodes.iter().any(|n| n == node) {
-                    return Ok(false);
-                }
-            }
-            if node == "local" {
-                return Ok(self.node.as_ref().is_some_and(|n| !n.is_stopped())
-                    && (item.project_id.is_none() || self.worktrees.is_some()));
-            }
-            if item.project_id.is_some() {
-                return Ok(false);
-            }
-            let Some(f) = &self.fleet else {
-                return Ok(false);
-            };
-            let Ok(id) = steve_node_api::NodeId::new(node.to_string()) else {
-                return Ok(false);
-            };
-            Ok(self
-                .store
-                .read(|c| super::node_binding::node_takes(c, node, &item.workspace_id))?
-                && f.remote(&id).generation().is_some())
-        };
-        // Recovery keeps the bound Node; availability on some other Node is no substitute.
-        let mut fixed = false;
-        for session in self.store.sessions().of_item(item_id)? {
-            if session.status != "ended"
-                && let Some(node) = node_of_strict(&self.store, &session.id)?
-            {
-                if !eligible(&node)? {
-                    return Err(CoreError::Msg(steve_i18n::t!(
-                        "hub.workflow.node_unavailable"
-                    )));
-                }
-                fixed = true;
-            }
-        }
-        if fixed {
-            return Ok(());
-        }
-        self.check_dispatch(item_id, item.bot_id.as_deref().unwrap_or("steve"))
     }
     fn propose_bot(
         &self,
@@ -636,10 +491,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     /// planned. Otherwise it is bound nowhere, and [`Self::refusal`] says why. `after` (a
     /// predecessor's release on its way): it opens only once that is done.
     fn created(&self, session_id: &str, after: Option<&str>) {
-        // Workflow coordinates ordinary Node sessions. Confirm its authority before any binding
-        // or preparation; no Hub execution fallback is available.
-        if let Err(e) = self.check_workflow_session(session_id) {
-            tracing::warn!(session_id, "协作运行未就绪：{e}");
+        if let Err(e) = self.check_session_gate(session_id) {
+            tracing::warn!(session_id, "session gate held before binding: {e}");
             return;
         }
         match self.bind_dispatch(session_id, after) {
@@ -688,7 +541,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         via: &str,
         files: &[steve_core::repo::FileRef],
     ) -> steve_core::Result<steve_core::Prompted> {
-        self.check_workflow_session(session_id)?;
+        self.check_session_gate(session_id)?;
         let n = match self.route(session_id) {
             Backend::Node(n) => Some(n),
             Backend::Parked => None,
@@ -730,8 +583,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         session_id: &str,
         text: &str,
     ) -> steve_core::Result<()> {
-        if let Some(why) = steve_store::workflow_gate::session_blocker(w, session_id)? {
-            return Err(CoreError::Msg(why));
+        if let Some(blocker) = steve_store::item_gate::session_blocker(w, session_id)? {
+            return Err(CoreError::Msg(super::item_gate_reason(blocker)));
         }
         if steve_store::node_sessions::principal_state(w, session_id)?.is_none() {
             return Err(CoreError::Msg(self.refused(session_id)));
@@ -866,8 +719,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
         use super::node_runtime::Planned;
-        if let Err(e) = self.check_workflow_session(session_id) {
-            tracing::warn!(session_id, "协作队列等待主体或 Node 准入：{e}");
+        if let Err(e) = self.check_session_gate(session_id) {
+            tracing::warn!(session_id, "session gate held queued flush: {e}");
             return steve_core::Flushed::Held;
         }
         match self.route(session_id) {
@@ -1212,10 +1065,6 @@ impl Domain for CoreDomain {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.diagnostic_snapshot(&id)).await
     }
-    async fn workflow_get(&self, id: &str) -> BResult<Value> {
-        let (c, id) = (self.core.clone(), id.to_string());
-        blocking(move || c.workflow_get(&id)).await
-    }
     async fn dependency_get(&self, id: &str) -> BResult<Value> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.dependency_get(&id)).await
@@ -1235,9 +1084,9 @@ impl Domain for CoreDomain {
         );
         blocking(move || c.dependency_wait(&id, expected_cycle, &resume, &reason)).await
     }
-    async fn workflow_change(&self, id: &str, args: Value, actor: &str) -> BResult<Value> {
-        let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
-        blocking(move || c.workflow_change(&id, args, &actor)).await
+    async fn retire_legacy_workflow_children(&self) -> BResult<usize> {
+        let c = self.core.clone();
+        blocking(move || c.retire_legacy_workflow_children()).await
     }
     async fn lifecycle_tick(&self) -> BResult<usize> {
         let c = self.core.clone();
@@ -1950,16 +1799,12 @@ impl steve_mcp::Backend for CoreMcp {
                                     o.location = Some(location.clone());
                                 }
                             }
-                            // A work unit still needs an output of its own; the coordinator cannot
-                            // satisfy that gate by generating an output for an empty delivery.
-                            if !outputs.is_empty() || store.workflows().by_child(item)?.is_none() {
-                                outputs.push(steve_core::Output {
-                                    kind: "报告".into(),
-                                    title: "交付正文".into(),
-                                    location: Some(location),
-                                    role: Some("result".into()),
-                                });
-                            }
+                            outputs.push(steve_core::Output {
+                                kind: "报告".into(),
+                                title: "交付正文".into(),
+                                location: Some(location),
+                                role: Some("result".into()),
+                            });
                         }
                     }
                     c.tool_deliver(&s, &summary, &outputs, &checks, &unfinished)
@@ -2041,7 +1886,7 @@ mod routed_tests {
     fn an_unreadable_card_or_binding_is_not_an_expired_answer() {
         let dir = tempfile::tempdir().unwrap();
         let rt = routed(dir.path());
-        steve_store::testkit::hub::workflow_cases::seed_open_permission(&rt.store).unwrap();
+        steve_store::testkit::hub::session_cases::seed_open_permission(&rt.store).unwrap();
         // readable, bound to no Node: the harness that asked is gone
         assert_eq!(
             rt.answer_permission(steve_core::PermissionAnswer::resolve(
@@ -2081,7 +1926,7 @@ mod routed_tests {
             None,
         );
         rt.fleet = Some(fleet.clone());
-        steve_store::testkit::hub::workflow_cases::seed_local_binding(&rt.store).unwrap();
+        steve_store::testkit::hub::session_cases::seed_local_binding(&rt.store).unwrap();
         assert_eq!(rt.node_offline("s1").as_deref(), Some("未连接"));
         assert_eq!(rt.node_offline("unbound"), None);
         let home = dir.path().join("node");
@@ -2180,29 +2025,29 @@ mod routed_tests {
     async fn a_session_no_node_can_take_says_why() {
         for (case, why) in [
             (
-                steve_store::testkit::hub::workflow_cases::RefusalCase::UnsupportedMode,
+                steve_store::testkit::hub::session_cases::RefusalCase::UnsupportedMode,
                 "dontAsk",
             ),
             (
-                steve_store::testkit::hub::workflow_cases::RefusalCase::MissingBot,
+                steve_store::testkit::hub::session_cases::RefusalCase::MissingBot,
                 "Bot",
             ),
             (
-                steve_store::testkit::hub::workflow_cases::RefusalCase::ArchivedProject,
+                steve_store::testkit::hub::session_cases::RefusalCase::ArchivedProject,
                 "归档",
             ),
             (
-                steve_store::testkit::hub::workflow_cases::RefusalCase::DetachedItem,
+                steve_store::testkit::hub::session_cases::RefusalCase::DetachedItem,
                 "事项",
             ),
             (
-                steve_store::testkit::hub::workflow_cases::RefusalCase::ReadOnly,
+                steve_store::testkit::hub::session_cases::RefusalCase::ReadOnly,
                 "只读",
             ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let rt = with_node(dir.path());
-            steve_store::testkit::hub::workflow_cases::seed_session_refusal(&rt.store, case)
+            steve_store::testkit::hub::session_cases::seed_session_refusal(&rt.store, case)
                 .unwrap();
             let r = rt.refusal("s1");
             assert!(

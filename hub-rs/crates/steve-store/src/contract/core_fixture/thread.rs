@@ -226,8 +226,11 @@ pub fn important_contact(store: &Store, id: &str) -> bool {
         .unwrap()
 }
 
-pub fn workflow_blocker(store: &crate::Store, session: &str) -> crate::Result<Option<String>> {
-    store.read_conn(|c| crate::workflow_gate::session_blocker_on(c, session))
+pub fn session_blocker(
+    store: &crate::Store,
+    session: &str,
+) -> crate::Result<Option<crate::item_gate::GateBlocker>> {
+    store.read_conn(|c| crate::item_gate::session_blocker_on(c, session))
 }
 
 pub fn attention(

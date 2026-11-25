@@ -293,7 +293,8 @@ impl Progress {
 fn is_response(fact: &Fact) -> bool {
     match fact {
         Fact::Event(EventBody::TextDelta { text, .. }) => !text.is_empty(),
-        Fact::Event(EventBody::ToolChanged { .. }) => true,
+        Fact::Event(EventBody::ToolChanged { .. })
+        | Fact::Event(EventBody::SubtaskChanged { .. }) => true,
         Fact::Event(EventBody::Plan { entries }) => !entries.is_empty(),
         // Usage/diagnostics can come from an independent sampler, and some adapters issue
         // empty/session-status notifications without returning any model work.
@@ -515,6 +516,7 @@ pub async fn run_cancellable(
     let properties = req.cfg.adapter_properties(req.harness);
     let meter = Epoch::new(format!("{}.acp", req.prefix)).map_err(failed)?;
     let mut norm = Normalizer::new(req.cwd, req.prefix, meter.clone())
+        .for_harness(req.harness)
         .input_includes_cache(properties.usage_input_includes_cache);
     let mut out = Output::default();
     let mut sampler = None;
@@ -552,6 +554,7 @@ pub async fn run_cancellable(
                 prompt.insert(0, json!({"type": "text", "text": head}));
             }
             out.session = Some(opened.acp_id.clone());
+            norm.set_root_session(&opened.acp_id);
             sampler = Some(tokio::select! {
                 biased;
                 _ = &mut cancel => return Err(failed("cancelled")),
@@ -655,7 +658,10 @@ fn spawn_job(
     on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),
     admitted_limit: Arc<AtomicBool>,
 ) -> Result<SpawnedJob, OneShotError> {
-    let (mut program, mut args) = req.cfg.adapter_command(req.harness).map_err(failed)?;
+    let (mut program, mut args) = req
+        .cfg
+        .adapter_command_for_mode(req.harness, Some(req.mode))
+        .map_err(failed)?;
     let mut env = req.cfg.adapter_env(req.harness);
     if let Some(wrap) = req.wrap {
         (program, args) = wrap((program, args), &mut env);
@@ -716,6 +722,7 @@ async fn open_job_session(
     let opening = session::open(
         conn,
         OpenConfig {
+            harness: req.harness,
             client_version: &req.cfg.version,
             cwd: &cwd,
             resume: req.resume,

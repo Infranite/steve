@@ -19,10 +19,10 @@ pub mod node_statistics;
 pub mod node_usage;
 pub mod outbox_checks;
 pub mod realtime;
+pub mod session_cases;
 pub mod state;
 pub mod views;
 pub mod wiring;
-pub mod workflow_cases;
 pub mod workspace_cases;
 
 pub fn set_user_role(store: &Store, user: &str, role: &str) -> Result<()> {

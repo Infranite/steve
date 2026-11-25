@@ -245,7 +245,7 @@ pub struct SessionOffer {
 impl SessionOffer {
     /// Reads a `session/new` result with `modes`, the adapter's mode map.
     pub fn from_session(r: &Value, modes: &ModeMap) -> Self {
-        Self::from_session_with(r, modes, false, None)
+        Self::from_session_with(r, modes, false, None, None)
     }
 
     /// Reads a `session/new` result with `modes` and adapter-level mode properties.
@@ -254,6 +254,7 @@ impl SessionOffer {
         modes: &ModeMap,
         blind: bool,
         mode_meta: Option<&BTreeMap<String, Value>>,
+        mode_args: Option<&BTreeMap<String, Vec<String>>>,
     ) -> Self {
         let options = r.get("configOptions").and_then(Value::as_array);
         let option = |category: &str| {
@@ -306,6 +307,7 @@ impl SessionOffer {
                 crate::session::offered_modes(r).as_deref(),
                 blind,
                 mode_meta,
+                mode_args,
             ),
             models,
             default_model: default_model.filter(|m| !m.is_empty()),
@@ -472,13 +474,15 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         Ok(c) => c,
         Err(e) => return Probe::failed(ProbeStatus::AdapterMissing, e.message),
     };
+    let mut client_caps = json!({
+        "fs": { "readTextFile": false, "writeTextFile": false },
+        "terminal": false,
+        "_meta": { "parameterizedModelPicker": true },
+    });
+    crate::adapter::for_harness(id).configure_client_capabilities(&mut client_caps);
     let init = json!({
         "protocolVersion": 1,
-        "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
-            "terminal": false,
-            "_meta": { "parameterizedModelPicker": true },
-        },
+        "clientCapabilities": client_caps,
         "clientInfo": { "name": "steve", "version": cfg.version },
     });
     let r = conn.request("initialize", init, Some(timeout)).await;
@@ -518,6 +522,7 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
                 &props.modes,
                 props.blind_set_mode,
                 Some(&props.mode_meta),
+                Some(&props.mode_args),
             );
             if props.native_execution || props.permission_policy == PermissionPolicy::FullAccessOnly
             {
@@ -645,10 +650,12 @@ impl crate::AcpConfig {
     /// What `session/set_mode` asks of `id`'s adapter for `mode` ([`ModeMap::choice_with`]).
     pub fn mode_choice(&self, id: &str, mode: PermissionMode) -> ModeChoice {
         let props = self.adapter_properties(id);
-        let mut choice =
-            props
-                .modes
-                .choice_with(mode, props.blind_set_mode, Some(&props.mode_meta));
+        let mut choice = props.modes.choice_with(
+            mode,
+            props.blind_set_mode,
+            Some(&props.mode_meta),
+            Some(&props.mode_args),
+        );
         choice.native_execution =
             props.native_execution || props.permission_policy == PermissionPolicy::FullAccessOnly;
         choice
@@ -744,7 +751,7 @@ impl crate::AcpConfig {
             && crate::managed::command(&self.steve_home, id).as_ref() == self.adapters.get(id)
     }
 
-    pub(crate) fn launch_args(&self, id: &str) -> Vec<OsString> {
+    pub(crate) fn launch_args(&self, id: &str, mode: Option<PermissionMode>) -> Vec<OsString> {
         let spec = self.adapter_spec(id);
         let mut args: Vec<OsString> = match spec.properties.launch_extra {
             LaunchExtra::None => vec![],
@@ -753,6 +760,18 @@ impl crate::AcpConfig {
             args.extend(d_args.iter().map(OsString::from));
         } else if let Some(b) = builtin(id) {
             args.extend(b.args.iter().map(OsString::from));
+        }
+        if let Some(mode) = mode {
+            let key = match mode {
+                PermissionMode::Plan => "plan",
+                PermissionMode::Ask => "ask",
+                PermissionMode::AcceptEdits => "accept_edits",
+                PermissionMode::Auto => "auto",
+                PermissionMode::FullAccess => "full_access",
+            };
+            if let Some(extra) = spec.properties.mode_args.get(key) {
+                args.extend(extra.iter().map(OsString::from));
+            }
         }
         args
     }
@@ -1115,7 +1134,7 @@ mod tests {
     #[test]
     fn all_builtins_have_valid_specs_and_mode_resolutions() {
         let ids: Vec<&str> = builtin_ids().collect();
-        assert_eq!(ids.len(), 17);
+        assert_eq!(ids.len(), 18);
         assert_eq!(ids[0], "claude-code");
         assert_eq!(ids[1], "codex");
         assert_eq!(builtin_packages().count(), 13);
@@ -1142,15 +1161,19 @@ mod tests {
                 None,
                 s.properties.blind_set_mode,
                 Some(&s.properties.mode_meta),
+                Some(&s.properties.mode_args),
             );
             assert!(offered_none.contains(&PermissionMode::Plan), "{id}");
             assert!(offered_none.contains(&PermissionMode::Ask), "{id}");
         }
         // grok-build blind_set_mode + mode_meta offers Plan, Ask, Auto, FullAccess even without availableModes
         let grok = c.adapter_spec("grok-build").properties;
-        let grok_modes = grok
-            .modes
-            .offered_with(None, grok.blind_set_mode, Some(&grok.mode_meta));
+        let grok_modes = grok.modes.offered_with(
+            None,
+            grok.blind_set_mode,
+            Some(&grok.mode_meta),
+            Some(&grok.mode_args),
+        );
         assert_eq!(
             grok_modes,
             vec![
@@ -1168,6 +1191,354 @@ mod tests {
             c.session_meta_with_mode("grok-build", false, Some(PermissionMode::FullAccess)),
             Some(json!({"yoloMode": true}))
         );
+        // antigravity: native PATH binary, 4 ACP modes + --dangerously-skip-permissions only for full_access
+        let agy = c.adapter_spec("antigravity");
+        assert_eq!(agy.name, "Antigravity CLI");
+        assert_eq!(
+            agy.properties.native_approval(),
+            Some(steve_harness_spec::NativeApprovalFallback::AskOwner)
+        );
+        let agy_state = agy.properties.state.as_ref().unwrap();
+        assert_eq!(agy_state.arg.as_deref(), Some("--gemini-dir"));
+        assert_eq!(agy_state.default, ".gemini/antigravity-cli");
+        assert_eq!(agy_state.import_into.as_deref(), Some("antigravity-cli"));
+        assert_eq!(
+            agy_state.isolation_args(Path::new("/tmp/state")),
+            vec![OsString::from("--gemini-dir"), OsString::from("/tmp/state")]
+        );
+        assert_eq!(agy.properties.fast_models, ["flash-lite", "flash"]);
+        assert_eq!(
+            agy.properties.resume_cli.as_deref(),
+            Some("agy --resume {id}")
+        );
+        let agy_available: Vec<String> = ["default", "accept-edits", "auto", "plan"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        for (mode, want_set_mode, want_args) in [
+            (PermissionMode::Plan, Some("plan"), vec!["acp"]),
+            (PermissionMode::Ask, Some("default"), vec!["acp"]),
+            (
+                PermissionMode::AcceptEdits,
+                Some("accept-edits"),
+                vec!["acp"],
+            ),
+            (PermissionMode::Auto, Some("auto"), vec!["acp"]),
+            (
+                PermissionMode::FullAccess,
+                None,
+                vec!["acp", "--dangerously-skip-permissions"],
+            ),
+        ] {
+            assert_eq!(
+                c.mode_choice("antigravity", mode)
+                    .resolve(Some(&agy_available)),
+                Ok(want_set_mode.map(String::from)),
+                "{mode:?}"
+            );
+            let (_, args) = c
+                .adapter_command_for_mode("antigravity", Some(mode))
+                .unwrap();
+            assert_eq!(
+                args,
+                want_args
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect::<Vec<_>>(),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_fake_acp_probe_modes_and_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let js = dir.path().join("fake-agy.js");
+        let fake = dir.path().join("agy");
+        let log = dir.path().join("argv.log");
+        let script = format!(
+            r#"const fs = require("fs");
+const rl = require("readline").createInterface({{ input: process.stdin }});
+fs.appendFileSync({log:?}, JSON.stringify(process.argv.slice(2)) + "\n");
+let mode = "default", model = "gemini-4-neon", effort = "high";
+const modes = () => ({{
+  currentModeId: mode,
+  availableModes: [
+    {{ id: "default", name: "Default" }},
+    {{ id: "accept-edits", name: "Accept edits" }},
+    {{ id: "auto", name: "Auto" }},
+    {{ id: "plan", name: "Plan" }}
+  ]
+}});
+const configOptions = () => ([
+  {{ id: "model", category: "model", type: "select", currentValue: model, options: [
+    {{ value: "gemini-4-neon", name: "Gemini 4 Neon" }},
+    {{ value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" }}
+  ] }},
+  {{ id: "thought_level", category: "thought_level", type: "select", currentValue: effort, options: [
+    {{ value: "low" }}, {{ value: "medium" }}, {{ value: "high" }}, {{ value: "xhigh" }}
+  ] }},
+  {{ id: "mode", category: "mode", type: "select", currentValue: mode, options: [
+    {{ value: "default" }}, {{ value: "accept-edits" }}, {{ value: "auto" }}, {{ value: "plan" }}
+  ] }}
+]);
+const send = (o) => process.stdout.write(JSON.stringify({{ jsonrpc: "2.0", ...o }}) + "\n");
+rl.on("line", (line) => {{
+  const m = JSON.parse(line);
+  if (m.method === "initialize") {{
+    send({{ id: m.id, result: {{
+      protocolVersion: 1,
+      agentInfo: {{ name: "Antigravity ACP Server", version: "1.5.16" }},
+      agentCapabilities: {{
+        loadSession: true,
+        promptCapabilities: {{ image: true, audio: false, embeddedContext: true }},
+        sessionCapabilities: {{ load: {{}}, resume: {{}}, close: {{}}, list: {{}} }}
+      }},
+      authMethods: [
+        {{ id: "oauth-personal", name: "Log in with Google" }},
+        {{ id: "gemini-api-key", name: "Gemini API key" }}
+      ]
+    }} }});
+  }} else if (m.method === "session/new") {{
+    send({{ id: m.id, result: {{ sessionId: "agy-sess-1", modes: modes(), configOptions: configOptions() }} }});
+  }} else if (m.method === "session/set_mode") {{
+    if (!["default", "accept-edits", "auto", "plan"].includes(m.params.modeId)) {{
+      send({{ id: m.id, error: {{ code: -32602, message: "Unknown mode: " + m.params.modeId }} }});
+    }} else {{
+      mode = m.params.modeId;
+      send({{ id: m.id, result: {{}} }});
+    }}
+  }} else if (m.method === "session/set_config_option") {{
+    if (m.params.configId === "model") model = m.params.value;
+    if (m.params.configId === "thought_level") effort = m.params.value;
+    if (m.params.configId === "mode") mode = m.params.value;
+    send({{ id: m.id, result: {{ configOptions: configOptions() }} }});
+  }} else if (m.method === "session/prompt") {{
+    send({{
+      id: "perm-1",
+      method: "session/request_permission",
+      params: {{
+        sessionId: m.params.sessionId,
+        toolCall: {{
+          toolCallId: "call_agy_1",
+          name: "run_command",
+          kind: "execute",
+          status: "pending",
+          title: "ls -la",
+          rawInput: {{ CommandLine: "ls -la", WaitMsBeforeAsync: 5000 }}
+        }},
+        options: [
+          {{ optionId: "allow", name: "Allow", kind: "allow_once" }},
+          {{ optionId: "deny", name: "Deny", kind: "reject_once" }}
+        ]
+      }}
+    }});
+    rl.once("line", (ansLine) => {{
+      const ans = JSON.parse(ansLine);
+      const chosen = ans.result?.outcome?.optionId || "cancelled";
+      send({{ method: "session/update", params: {{ sessionId: m.params.sessionId, update: {{
+        sessionUpdate: "agent_message_chunk", content: {{ type: "text", text: "perm=" + chosen }}
+      }} }} }});
+      send({{ id: m.id, result: {{ stopReason: "end_turn", usage: {{ inputTokens: 120, outputTokens: 20, cachedReadTokens: 0, thoughtTokens: 5 }} }} }});
+    }});
+  }}
+}});
+"#
+        );
+        std::fs::write(&js, script).unwrap();
+        // Shell wrapper mimics a native non-Node executable (`is_node_script` is false).
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\nexec node '{}' \"$@\"\n", js.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut c = cfg(dir.path());
+        c.adapters.insert("antigravity".into(), fake.clone());
+
+        // 1. Probe verifies initialize + session/new + all 5 modes + models + efforts
+        let p = probe(&c, "antigravity", dir.path(), Duration::from_secs(10)).await;
+        assert_eq!(p.status, ProbeStatus::Ready, "{p:?}");
+        assert_eq!(p.title.as_deref(), Some("Antigravity ACP Server"));
+        assert_eq!(p.version.as_deref(), Some("1.5.16"));
+        assert!(p.image && p.embedded_context && p.load_session && p.list_sessions);
+        assert_eq!(p.auth.len(), 2);
+        let offer = p.session.expect("session offer");
+        assert_eq!(
+            offer.modes,
+            vec![
+                PermissionMode::Plan,
+                PermissionMode::Ask,
+                PermissionMode::AcceptEdits,
+                PermissionMode::Auto,
+                PermissionMode::FullAccess,
+            ]
+        );
+        assert_eq!(offer.default_model.as_deref(), Some("gemini-4-neon"));
+        assert_eq!(
+            offer
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gemini-4-neon", "gemini-3.8-flash"]
+        );
+        assert_eq!(offer.efforts, ["low", "medium", "high", "xhigh"]);
+
+        // 2. Open session in Auto mode: sends session/set_mode("auto"), switches model + effort,
+        //    and handles Antigravity permission request (`CommandLine` + allow/deny options)
+        let (program, args) = c
+            .adapter_command_for_mode("antigravity", Some(PermissionMode::Auto))
+            .unwrap();
+        assert_eq!(args, vec![OsString::from("acp")]);
+        let seen_perm = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let seen_perm_cb = seen_perm.clone();
+        let cwd_for_cb = dir.path().to_path_buf();
+        let conn = Conn::spawn(
+            Spawn {
+                prefix: None,
+                program,
+                args,
+                cwd: dir.path().to_path_buf(),
+                env: c.adapter_env("antigravity"),
+                log_tag: "[test-agy]".into(),
+                clean_env: false,
+            },
+            move |conn, inc| {
+                if let crate::rpc::Incoming::Request { id, method, params } = inc
+                    && method == "session/request_permission"
+                {
+                    let mut norm = crate::normalize::Normalizer::new(
+                        &cwd_for_cb,
+                        "a1",
+                        steve_node_api::Epoch::new("m1").unwrap(),
+                    );
+                    let asked = crate::permission::asked(&mut norm, &id, &params);
+                    if let steve_node_api::Action::Exec { command, .. } = &asked.action {
+                        *seen_perm_cb.lock().unwrap() = Some(command.clone());
+                    }
+                    conn.respond(
+                        id,
+                        crate::permission::answer(
+                            &asked,
+                            Some(steve_node_api::PermissionDecision::AllowOnce),
+                        ),
+                    );
+                }
+            },
+            || {},
+        )
+        .unwrap();
+        struct NoopReports;
+        impl crate::session::Reports for NoopReports {}
+        let opened = crate::session::open(
+            &conn,
+            crate::session::OpenConfig {
+                harness: "antigravity",
+                client_version: "test",
+                cwd: dir.path().to_str().unwrap(),
+                resume: None,
+                mcp_servers: json!([]),
+                mode: Some(c.mode_choice("antigravity", PermissionMode::Auto)),
+                model: Some("gemini-3.8-flash"),
+                effort: Some("medium"),
+                system_prompt: None,
+            },
+            c.session_meta_with_mode("antigravity", false, Some(PermissionMode::Auto)),
+            &NoopReports,
+        )
+        .await
+        .unwrap();
+        assert_eq!(opened.acp_id, "agy-sess-1");
+        assert_eq!(opened.mode.as_deref(), Some("auto"));
+        let prompt_res = conn
+            .request(
+                "session/prompt",
+                json!({"sessionId": opened.acp_id, "prompt": [{"type": "text", "text": "hi"}]}),
+                Some(Duration::from_secs(10)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prompt_res["stopReason"], "end_turn");
+        assert_eq!(seen_perm.lock().unwrap().as_deref(), Some("ls -la"));
+        conn.kill();
+
+        // 3. Open session in FullAccess mode passes --dangerously-skip-permissions and skips set_mode
+        let (program, args) = c
+            .adapter_command_for_mode("antigravity", Some(PermissionMode::FullAccess))
+            .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("acp"),
+                OsString::from("--dangerously-skip-permissions")
+            ]
+        );
+        let conn = Conn::spawn(
+            Spawn {
+                prefix: None,
+                program,
+                args,
+                cwd: dir.path().to_path_buf(),
+                env: c.adapter_env("antigravity"),
+                log_tag: "[test-agy-full]".into(),
+                clean_env: false,
+            },
+            |_, _| {},
+            || {},
+        )
+        .unwrap();
+        let opened_full = crate::session::open(
+            &conn,
+            crate::session::OpenConfig {
+                harness: "antigravity",
+                client_version: "test",
+                cwd: dir.path().to_str().unwrap(),
+                resume: None,
+                mcp_servers: json!([]),
+                mode: Some(c.mode_choice("antigravity", PermissionMode::FullAccess)),
+                model: None,
+                effort: None,
+                system_prompt: None,
+            },
+            c.session_meta_with_mode("antigravity", false, Some(PermissionMode::FullAccess)),
+            &NoopReports,
+        )
+        .await
+        .unwrap();
+        assert_eq!(opened_full.mode, None);
+        conn.kill();
+
+        let argv_lines: Vec<Vec<String>> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            argv_lines,
+            vec![
+                vec!["acp".to_string()],
+                vec!["acp".to_string()],
+                vec![
+                    "acp".to_string(),
+                    "--dangerously-skip-permissions".to_string()
+                ],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "runs real agy acp binary outside sandbox"]
+    async fn real_antigravity_initialize_probe() {
+        let cfg = crate::AcpConfig::from_env();
+        let dir = tempfile::tempdir().unwrap();
+        let p = probe(&cfg, "antigravity", dir.path(), Duration::from_secs(30)).await;
+        assert_eq!(p.status, ProbeStatus::Ready, "{p:?}");
+        assert_eq!(p.title.as_deref(), Some("Antigravity ACP Server"));
+        assert!(p.load_session && p.list_sessions && p.image);
+        assert!(!p.auth.is_empty());
     }
 
     #[test]

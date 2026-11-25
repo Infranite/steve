@@ -58,6 +58,8 @@ const LITERALS: &[&str] = &[
     "\"vibe-acp\"",
     "\"qoder\"",
     "\"qodercli\"",
+    "\"antigravity\"",
+    "\"agy\"",
 ];
 
 /// Code that branches on a harness by name.
@@ -71,8 +73,18 @@ const CODE: &[&str] = &[
     "codex: bool",
 ];
 
-/// Where the built-in adapters are described as data.
-const ADAPTER_LAYER: &[&str] = &["steve-acp/src/config.rs", "steve-acp/src/adapters.rs"];
+/// Where the built-in adapters and per-harness runtime adapters live.
+const ADAPTER_LAYER: &[&str] = &[
+    "steve-acp/src/config.rs",
+    "steve-acp/src/adapters.rs",
+    "steve-acp/src/adapter/mod.rs",
+    "steve-acp/src/adapter/claude_code.rs",
+    "steve-acp/src/adapter/codex.rs",
+    "steve-acp/src/adapter/antigravity.rs",
+    "steve-acp/src/adapter/kimi.rs",
+    "steve-acp/src/adapter/pi.rs",
+    "steve-acp/src/adapter/generic.rs",
+];
 
 const LIST: &str = "tests/harness_parity.txt";
 

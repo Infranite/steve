@@ -17,7 +17,7 @@
 //! here. A journal that fails puts the Node in a faulted state ([`crate::Inner::fault`]): it
 //! accepts no new work, stops what runs, and retries what it must record.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -49,6 +49,11 @@ pub(crate) enum Msg {
     },
     Cancel {
         target: OperationId,
+    },
+    /// Cancel a single active subtask (e.g. ACP RFD child session) without cancelling the parent turn.
+    CancelSubtask {
+        subtask: CallId,
+        done: oneshot::Sender<ApiResult<bool>>,
     },
     /// Give a journaled answer to the harness (`op` is the resolve command, finished here).
     Answer {
@@ -128,6 +133,7 @@ pub(crate) enum Msg {
     Update {
         generation: u64,
         token: u64,
+        session_id: Option<String>,
         update: Value,
     },
     Permission {
@@ -248,12 +254,55 @@ struct Ctl {
     stall: Duration,
 }
 
+/// ACP session ids belonging to one live adapter process: the root session plus any child
+/// subagent sessions announced via `subagent_update`. Updated synchronously in the reader thread
+/// so follow-up frames on a newly-announced child session are never dropped.
+#[derive(Default)]
+struct SessionRoutes {
+    root: Option<String>,
+    children: HashSet<String>,
+}
+
+impl SessionRoutes {
+    fn accepts(&self, sid: Option<&str>) -> bool {
+        let Some(root) = self.root.as_deref() else {
+            return true;
+        };
+        match sid {
+            Some(s) if s == root => true,
+            Some(s) => self.children.contains(s),
+            None => false,
+        }
+    }
+
+    fn is_root(&self, sid: Option<&str>) -> bool {
+        match (self.root.as_deref(), sid) {
+            (Some(root), Some(s)) => root == s,
+            (None, _) => true,
+            (Some(_), None) => false,
+        }
+    }
+
+    fn register_if_subagent(&mut self, update: &Value) {
+        if update.get("sessionUpdate").and_then(Value::as_str) == Some("subagent_update")
+            && let Some(child_sid) = update
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        {
+            self.children.insert(child_sid.to_string());
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct LiveNew {
     conn: Arc<Conn>,
     retire: Arc<watch::Sender<bool>>,
     generation: u64,
     acp_id: String,
+    routes: Arc<std::sync::Mutex<SessionRoutes>>,
     usage_home: Option<steve_acp::usage::Source>,
     image: bool,
     pgid: i64,
@@ -268,6 +317,7 @@ struct Live {
     retire: Arc<watch::Sender<bool>>,
     generation: u64,
     acp_id: String,
+    _routes: Arc<std::sync::Mutex<SessionRoutes>>,
     usage_home: Option<steve_acp::usage::Source>,
     image: bool,
     pgid: i64,
@@ -289,6 +339,7 @@ impl From<LiveNew> for Live {
             retire: l.retire,
             generation: l.generation,
             acp_id: l.acp_id,
+            _routes: l.routes,
             usage_home: l.usage_home,
             image: l.image,
             pgid: l.pgid,
@@ -492,6 +543,7 @@ impl Actor {
             Msg::Open { op } => self.open(op).await,
             Msg::Start { op, spec, exec } => self.start(op, spec, exec).await,
             Msg::Cancel { target } => self.cancel(&target),
+            Msg::CancelSubtask { subtask, done } => self.cancel_subtask(&subtask, done),
             Msg::Answer { op } => self.answer(op),
             Msg::Bound {
                 generation,
@@ -572,8 +624,12 @@ impl Actor {
                         Msg::Update {
                             generation,
                             token,
+                            session_id,
                             update,
-                        } => self.update(generation, token, &update).await,
+                        } => {
+                            self.update(generation, token, session_id.as_deref(), &update)
+                                .await
+                        }
                         Msg::Permission {
                             generation,
                             token,
@@ -670,8 +726,12 @@ impl Actor {
             Msg::Update {
                 generation,
                 token,
+                session_id,
                 update,
-            } => self.update(generation, token, &update).await,
+            } => {
+                self.update(generation, token, session_id.as_deref(), &update)
+                    .await
+            }
             Msg::Permission {
                 generation,
                 token,
@@ -976,7 +1036,11 @@ impl Actor {
                             row.view.revision = Revision::new(t.revision()?).map_err(internal)?;
                             t.put_session(&row)
                         });
+                        let opened_acp_id = l.acp_id.clone();
                         self.live = Some(l.into());
+                        if let Some(run) = self.run.as_mut() {
+                            run.norm.set_root_session(&opened_acp_id);
+                        }
                         if let Some(baseline) = self
                             .live
                             .as_ref()
@@ -1057,7 +1121,11 @@ impl Actor {
             crate::inline_images::protected(&self.inner.cfg.acp.steve_home, &self.inner.cfg.home),
         );
         let mut norm = Normalizer::new(root, spec.run.attempt.as_str(), meter)
+            .for_harness(&spec.run.choice.harness)
             .input_includes_cache(props.usage_input_includes_cache);
+        if let Some(live) = self.live.as_ref().filter(|l| !l.conn.has_exited()) {
+            norm = norm.root_session(&live.acp_id);
+        }
         if props.usage_prompt_cumulative {
             let baseline = self
                 .live
@@ -1291,6 +1359,29 @@ impl Actor {
         }
     }
 
+    fn cancel_subtask(&mut self, subtask: &CallId, done: oneshot::Sender<ApiResult<bool>>) {
+        let Some(run) = self.run.as_ref().filter(|r| r.phase == Phase::Prompting) else {
+            let _ = done.send(Ok(false));
+            return;
+        };
+        let Some(live) = self.live.as_ref() else {
+            let _ = done.send(Ok(false));
+            return;
+        };
+        if let Some((method, params)) = run.norm.cancel_subtask_request(subtask) {
+            live.conn.notify(method, params);
+            tracing::info!(
+                session = %self.session,
+                subtask = %subtask,
+                method,
+                "node: sent single-subtask cancel notification"
+            );
+            let _ = done.send(Ok(true));
+        } else {
+            let _ = done.send(Ok(false));
+        }
+    }
+
     /// Answer `cancelled` to every waiting request of the running attempt and journal their expiry.
     fn expire_waits(&mut self) {
         let Some(run) = &self.run else { return };
@@ -1331,12 +1422,17 @@ impl Actor {
                 .is_some_and(|r| r.token == token && r.phase == Phase::Prompting)
     }
 
-    async fn update(&mut self, generation: u64, token: u64, u: &Value) {
+    async fn update(&mut self, generation: u64, token: u64, session_id: Option<&str>, u: &Value) {
         let session = self.session.clone();
         let mut evs: Vec<(Subject, EventBody)> = vec![];
         let mut config: Vec<Fact> = vec![];
         if self.attributed(generation, token) {
-            if u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
+            let is_root = self
+                .live
+                .as_ref()
+                .is_some_and(|l| session_id.is_none_or(|sid| sid == l.acp_id));
+            if is_root
+                && u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
                 && let Some(t) = Normalizer::cumulative_tokens_from_usage_update(u)
                 && let Some(live) = self.live.as_mut()
             {
@@ -1344,7 +1440,7 @@ impl Actor {
             }
             let run = self.run.as_mut().expect("checked");
             let process_cost = &mut self.live.as_mut().expect("checked").cumulative_context_cost;
-            for f in run.norm.update(u) {
+            for f in run.norm.update_for_session(session_id, u) {
                 match f {
                     Fact::Event(EventBody::Usage { report })
                         if report.scope == UsageScope::Background =>
@@ -1353,6 +1449,16 @@ impl Actor {
                             Subject::Session {
                                 session: session.clone(),
                             },
+                            EventBody::Usage { report },
+                        ));
+                    }
+                    Fact::Event(EventBody::Usage { report })
+                        if report.scope == UsageScope::Subtask =>
+                    {
+                        // Subtask usage reports are already attempt-local deltas (e.g. per-child
+                        // results); never mix them with the parent process cumulative cost meter.
+                        evs.push((
+                            Subject::Execution(run.exec.clone()),
                             EventBody::Usage { report },
                         ));
                     }
@@ -1383,6 +1489,8 @@ impl Actor {
                                 tool.evidence =
                                     crate::tool_evidence(fact, &run.image_scope.cwd, workspace);
                             }
+                        } else if matches!(e, EventBody::SubtaskChanged { .. }) {
+                            run.acted = true;
                         }
                         let files = self.inner.files.lock().unwrap().clone();
                         for e in run
@@ -1402,7 +1510,12 @@ impl Actor {
             .as_ref()
             .is_some_and(|l| l.generation == generation)
         {
-            if u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
+            let is_root = self
+                .live
+                .as_ref()
+                .is_some_and(|l| session_id.is_none_or(|sid| sid == l.acp_id));
+            if is_root
+                && u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
                 && let Some(t) = Normalizer::cumulative_tokens_from_usage_update(u)
                 && let Some(live) = self.live.as_mut()
             {
@@ -2350,7 +2463,7 @@ async fn open_harness(
     let (program, args) = inner
         .cfg
         .acp
-        .adapter_command(&harness)
+        .adapter_command_for_mode(&harness, Some(row.open.policy.permissions))
         .map_err(|e| Error::new(Code::Unsupported, e))?;
     // the principal's own harness directory, when the Hub asks for one and the adapter can move it
     let declared_state = inner.cfg.acp.adapter_properties(&harness).state;
@@ -2446,6 +2559,9 @@ async fn open_harness(
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
     let adapter_props = inner.cfg.acp.adapter_properties(&harness);
     let mut args = args;
+    if let (Some((dir, _)), Some(sd)) = (&state, &declared_state) {
+        args.extend(sd.isolation_args(dir));
+    }
     if adapter_props.nested_sandbox
         && crate::confine::is_outer_sandbox_active(false, Some(&inner.confine))
     {
@@ -2537,8 +2653,8 @@ async fn open_harness(
         std::path::Path::new(&cwd),
         fresh.is_none(),
     );
-    let active_acp_id = Arc::new(std::sync::Mutex::new(None::<String>));
-    let incoming_acp_id = active_acp_id.clone();
+    let session_routes = Arc::new(std::sync::Mutex::new(SessionRoutes::default()));
+    let incoming_routes = session_routes.clone();
     let conn = Conn::spawn_registered_observed(
         Spawn {
             program,
@@ -2602,19 +2718,21 @@ async fn open_harness(
             let token = gate.0.load(Ordering::SeqCst);
             match inc {
                 Incoming::Notification { method, params } if method == "session/update" => {
-                    if incoming_acp_id
-                        .lock()
-                        .unwrap()
-                        .as_deref()
-                        .is_some_and(|sid| {
-                            params.get("sessionId").and_then(Value::as_str) != Some(sid)
-                        })
-                    {
-                        return None;
-                    }
-                    // counted as it arrives (admission): a flood is stopped before it is all kept
+                    let sid = params.get("sessionId").and_then(Value::as_str);
                     let u = params.get("update")?;
+                    let is_root = {
+                        let mut routes = incoming_routes.lock().unwrap();
+                        if !routes.accepts(sid) {
+                            return None;
+                        }
+                        // Register child subagent sessions synchronously on the reader thread so
+                        // immediately following child updates are never dropped.
+                        routes.register_if_subagent(u);
+                        routes.is_root(sid)
+                    };
+                    // counted as it arrives (admission): a flood is stopped before it is all kept
                     if token == 0
+                        && is_root
                         && u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
                         && let Some(t) = Normalizer::cumulative_tokens_from_usage_update(u)
                     {
@@ -2623,6 +2741,7 @@ async fn open_harness(
                     let update = Msg::Update {
                         generation,
                         token,
+                        session_id: sid.map(String::from),
                         update: u.clone(),
                     };
                     return enqueue(&data_tx, update, token, &ctl);
@@ -2631,7 +2750,12 @@ async fn open_harness(
                 Incoming::Request { id, method, params }
                     if method == "session/request_permission" =>
                 {
-                    if token == 0 {
+                    if token == 0
+                        || !incoming_routes
+                            .lock()
+                            .unwrap()
+                            .accepts(params.get("sessionId").and_then(Value::as_str))
+                    {
                         c.respond(id, json!({"outcome": {"outcome": "cancelled"}}));
                         return None;
                     }
@@ -2688,6 +2812,7 @@ async fn open_harness(
     let handshake = acp_session::open(
         &conn,
         OpenConfig {
+            harness: &harness,
             client_version: &inner.cfg.acp.version,
             cwd: &cwd,
             resume: row.acp_id.as_deref(),
@@ -2717,7 +2842,7 @@ async fn open_harness(
             return Err(Error::new(Code::Unsupported, e.message));
         }
     };
-    *active_acp_id.lock().unwrap() = Some(opened.acp_id.clone());
+    session_routes.lock().unwrap().root = Some(opened.acp_id.clone());
     let (new_id, model, effort) = seen.0.into_inner().unwrap();
     // Tasks return candidates only. The actor commits them against its operation/attempt fence.
     let mut view = row.view;
@@ -2750,6 +2875,7 @@ async fn open_harness(
         retire,
         generation,
         acp_id: opened.acp_id,
+        routes: session_routes,
         usage_home,
         image: opened.image,
         pgid,

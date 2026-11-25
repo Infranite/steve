@@ -1,12 +1,10 @@
-import { getItems } from "@/store"
 /* The items board, on affectUI's Agent Inbox, with Steve's own data: every item's one state (item-state.ts via
  * itemDisplayState) decides its column the way the items page counts and filters it (item-lanes.ts).
  * Plan counts are projected with the list. The plan text is loaded when the item is opened. */
 import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
-import { isWorkflowChild, itemDisplayState, partitionSubtasks } from "@/item-workflow-relation"
 import { besideState, laneOf } from "@/item-lanes"
 import { stepOf } from "@/running-pill"
-import { botName, type Item } from "@/store"
+import { botName, itemDisplayState, type Item } from "@/store"
 import { go, Meta, Tags } from "@/ui"
 import { dueLabel, ProjectChip } from "@/view-shared"
 import { useT } from "@/i18n"
@@ -14,18 +12,14 @@ import { useT } from "@/i18n"
 /** `cap`: the Done column shows this many until you ask for all of them, as the list folds its closed groups */
 export function ItemsBoard({ xs, cap }: { xs: Item[]; cap: number }) {
   const t = useT()
-  const pool = getItems().filter((x) => !x.arch)
   const tasks: AgentTask[] = xs.flatMap((i) => {
     const s = itemDisplayState(i), lane = laneOf(s)
     if (!lane) return []
-    const kids = pool.filter((c) => isWorkflowChild(c) && c.parent?.item === i.id)
-    const sub = kids.length ? partitionSubtasks(i, kids) : null
     const said = t(`views:itemState.${s.kind}`)
     // the line under the title: what it is on, without the state the pill beside it already says
     const desc = besideState(stepOf(i, ""), said)
-    const details = (i.project || i.due || i.tags?.length || sub) ? (
+    const details = (i.project || i.due || i.tags?.length) ? (
       <div className="flex flex-col gap-1.5">
-        {sub && <span className="type-footnote text-muted-foreground" data-board-subtasks={i.id}>{sub.live.length > 0 ? t("views:items.subtasksLive", { live: sub.live.length, done: sub.doneCount }) : t("views:items.subtasksDone", { count: sub.doneCount || sub.total })}</span>}
         {(i.project || i.due) && <Meta>{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>}
         {!!i.tags?.length && <Tags ids={i.tags} />}
       </div>
