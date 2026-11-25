@@ -3,10 +3,10 @@
  */
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { AtSignIcon } from "lucide-react"
-import { Robot } from "@/robot"
 import { st } from "@/store"
 import { people, type Mention, type MentionOptions } from "@/api/people"
-import { ContactAvatar } from "@/people/avatar"
+import { disambiguateActors, formatActorName, partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { useT } from "@/i18n"
 
 export type MentionOpt = { id: string; label: ReactNode; ins: string; mention: Mention }
@@ -31,11 +31,13 @@ export function useMentions(q: string | null, initial: [string, Mention][] = [])
   }, [q])
   /* until the answer for this q arrives, narrow the last one, so Enter never picks an entry the text no longer matches */
   const fits = (n: string) => !res || res.q === q || n.toLowerCase().includes((q ?? "").toLowerCase())
+  const matchedParties = res ? res.parties.filter((p) => fits(p.name)) : []
+  const partyDisambig = disambiguateActors(matchedParties.map((p) => ({ key: p.id, name: p.name, subtitle: p.sub, fallbackId: p.id })))
   const opts: MentionOpt[] | null = q === null || !res ? null : [
     ...res.bots.filter((b) => !st.bots[b.id]?.main && fits(b.name)).map((b) => ({ id: "bot:" + b.id, ins: token(b.name), mention: { kind: "bot" as const, id: b.id },
-      label: <><Robot k={b.id} size={18} /><span className="type-callout">{t("people:mention.bot", { name: b.name })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{st.bots[b.id]?.role ? t("people:mention.handToRole", { role: st.bots[b.id].role }) : t("people:mention.handTo")}</span></> })),
-    ...res.parties.filter((p) => fits(p.name)).map((p) => ({ id: "party:" + p.id, ins: token(p.name), mention: { kind: "party" as const, id: p.id },
-      label: <><ContactAvatar name={p.name} type={p.type} size={18} /><span className="type-callout">{p.name}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{p.sub ? t("people:mention.link", { sub: p.sub }) : t("people:mention.linkHere")}</span></> })),
+      label: <><ActorAvatar actorId={b.id} size={18} tooltip={false} /><span className="type-callout">{t("people:mention.bot", { name: b.name })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{st.bots[b.id]?.role ? t("people:mention.handToRole", { role: st.bots[b.id].role }) : t("people:mention.handTo")}</span></> })),
+    ...matchedParties.map((p) => { const extra = partyDisambig.get(p.id); return { id: "party:" + p.id, ins: token(p.name), mention: { kind: "party" as const, id: p.id },
+      label: <><ActorAvatar actor={partyActor({ id: p.id, name: p.name, type: p.type, avatar: p.avatar, subtitle: p.sub })} disambiguator={extra} size={18} tooltip={false} /><span className="type-callout">{formatActorName(p.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex }))}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{p.sub ? t("people:mention.link", { sub: p.sub }) : t("people:mention.linkHere")}</span></> } }),
   ]
   return {
     opts,

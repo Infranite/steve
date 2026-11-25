@@ -266,8 +266,20 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/125.sql"),
     // 126: remove retired dynamic work-graph tables and steve_workflow tool pins.
     include_str!("../migrations/126.sql"),
-    // 127: installation-wide daily backup policy.
+    // 127: unified WaitContract columns, bounds, and due indexes across durable wait tables.
     include_str!("../migrations/127.sql"),
+    // 128: Steve as coordinator (strip main bot from Teams, migrate steve_fallback, wait queue).
+    include_str!("../migrations/128.sql"),
+    // 129: link workspace members to contact parties, add decisions.resolved_by, backfill legacy actors.
+    include_str!("../migrations/129.sql"),
+    // 130: durable thread submit keys, reply tasks/receipts, dispatch/delivery refs, and typed notices.
+    include_str!("../migrations/130.sql"),
+    // 131: redefine knowledge: project AGENTS.md proposals, reclassify facts, withdraw items/chat.
+    include_str!("../migrations/131.sql"),
+    // 132: per-Bot ordered fallback execution surfaces for automatic handoff.
+    include_str!("../migrations/132.sql"),
+    // 133: installation-wide daily backup policy.
+    include_str!("../migrations/133.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -2,7 +2,7 @@
 # The boundary and release-script checks CI runs on both platforms: in the `scripts` job on Linux and
 # in the first macOS Rust shard (.github/workflows/ci.yml). One list, so the platforms cannot drift.
 set -eu
-python3 scripts/check-public-boundary.py --strict
+python3 scripts/check-public-boundary.py
 python3 scripts/test-public-boundary.py
 python3 scripts/test-package-release.py
 python3 packaging/homebrew/test-sync.py

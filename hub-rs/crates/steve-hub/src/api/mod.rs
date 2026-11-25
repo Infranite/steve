@@ -12,7 +12,7 @@ mod deliveries;
 mod diagnostics;
 pub(crate) mod feed;
 mod files;
-mod harness_updates;
+pub mod harness_updates;
 mod hub_metadata;
 mod items;
 pub(crate) mod misc;
@@ -77,9 +77,9 @@ pub struct Inner {
     pub history: Option<Arc<dyn steve_node_api::Discovery>>,
     /// Where projects' and items' files are (which Node); `None` reads the Hub's own disk.
     pub workspaces: Option<Arc<crate::wire::workspaces::Workspaces>>,
-    /// Single sign-on as configured now (A4b): set up or changed in the settings without a restart.
+    /// Single sign-on as configured now: set up or changed in the settings without a restart.
     pub oidc: Option<Arc<dyn crate::access::OidcSwitch>>,
-    /// Which signed-in clients hold the live stream open now (G6).
+    /// Which signed-in clients hold the live stream open now.
     pub presence: Arc<crate::presence::Presence>,
     pub jobs: Arc<crate::jobs::Tasks>,
     /// The read projection (views, snapshots, patches), on the modules' store.
@@ -815,43 +815,99 @@ pub(crate) fn workspaces_out(mut ws: Vec<Obj>) -> Vec<Obj> {
     ws
 }
 
-/// `botOut`: the bot plus its workspace ids and its memory count in `ws`.
-pub(crate) fn bot_out(r: &dyn Repo, mut b: Obj, ws: &str) -> BResult<Obj> {
+/// Workspace ids the user `me` belongs to.
+pub(crate) fn user_workspace_ids(
+    r: &dyn Repo,
+    me: &str,
+) -> BResult<std::collections::BTreeSet<String>> {
+    Ok(r.workspaces_of_user(me)?
+        .into_iter()
+        .map(|w| str_of(&w, "id"))
+        .filter(|id| !id.is_empty())
+        .collect())
+}
+
+/// `botOut`: the bot plus its workspace ids visible to the caller and its memory count in `ws`.
+pub(crate) fn bot_out(
+    r: &dyn Repo,
+    mut b: Obj,
+    ws: &str,
+    allowed_ws: &std::collections::BTreeSet<String>,
+) -> BResult<Obj> {
     let id = str_of(&b, "id");
     steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
-    b.insert("workspaces".into(), json!(r.bot_workspaces(&id)?));
+    let visible: Vec<String> = r
+        .bot_workspaces(&id)?
+        .into_iter()
+        .filter(|w| allowed_ws.contains(w))
+        .collect();
+    b.insert("workspaces".into(), json!(visible));
     b.insert("memories".into(), json!(r.memories_count(&id, ws)?));
     b.insert("mcp_servers".into(), json!(r.bot_mcp_servers(&id)?));
+    b.insert(
+        "fallback_surfaces".into(),
+        json!(r.bot_fallback_surfaces(&id)?),
+    );
     Ok(b)
 }
 
-/// The workspace ids of a bot, from the batch when there is one.
-fn bot_ws(r: &dyn Repo, x: Option<&crate::backend::BotExtras>, id: &str) -> BResult<Vec<String>> {
-    match x {
-        Some(x) => Ok(x.workspaces.get(id).cloned().unwrap_or_default()),
-        None => r.bot_workspaces(id),
-    }
+/// The workspace ids of a bot, from the batch when there is one, restricted to `allowed_ws`.
+fn bot_ws(
+    r: &dyn Repo,
+    x: Option<&crate::backend::BotExtras>,
+    id: &str,
+    allowed_ws: &std::collections::BTreeSet<String>,
+) -> BResult<Vec<String>> {
+    let raw = match x {
+        Some(x) => x.workspaces.get(id).cloned().unwrap_or_default(),
+        None => r.bot_workspaces(id)?,
+    };
+    Ok(raw.into_iter().filter(|w| allowed_ws.contains(w)).collect())
 }
 
-/// `bots.list(ws).map(botOut)` and `allBots`, batched when the backend can.
-pub(crate) fn bots_out(r: &dyn Repo, ws: &str) -> BResult<(Vec<Obj>, Vec<Value>)> {
+/// `bots.list(ws).map(botOut)` and caller-scoped `allBots` (only bots in the caller's workspaces
+/// or owned by `me`, with workspace lists filtered to `allowed_ws`).
+pub(crate) fn bots_out(
+    r: &dyn Repo,
+    ws: &str,
+    me: &str,
+    allowed_ws: &std::collections::BTreeSet<String>,
+) -> BResult<(Vec<Obj>, Vec<Value>)> {
     let x = r.bot_extras()?;
     let mut bots = vec![];
     for mut b in r.bots_list(Some(ws))? {
         let id = str_of(&b, "id");
         steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
-        b.insert("workspaces".into(), json!(bot_ws(r, x.as_ref(), &id)?));
+        b.insert(
+            "workspaces".into(),
+            json!(bot_ws(r, x.as_ref(), &id, allowed_ws)?),
+        );
         let mcp = match &x {
             Some(x) => x.mcp.get(&id).cloned().unwrap_or_default(),
             None => r.bot_mcp_servers(&id)?,
         };
         b.insert("mcp_servers".into(), json!(mcp));
+        let fallbacks = match &x {
+            Some(x) => x.fallback_surfaces.get(&id).cloned().unwrap_or_default(),
+            None => r.bot_fallback_surfaces(&id)?,
+        };
+        b.insert("fallback_surfaces".into(), json!(fallbacks));
         bots.push(b);
     }
     let mut all = vec![];
     for b in r.bots_list(None)? {
         let id = str_of(&b, "id");
-        all.push(json!({ "id": id, "name": b.get("name").cloned().unwrap_or(Value::Null), "workspaces": bot_ws(r, x.as_ref(), &id)? }));
+        let visible_ws = bot_ws(r, x.as_ref(), &id, allowed_ws)?;
+        let owned = b.get("owner").and_then(Value::as_str) == Some(me);
+        if visible_ws.is_empty() && !owned {
+            continue;
+        }
+        all.push(json!({
+            "id": id,
+            "name": b.get("name").cloned().unwrap_or(Value::Null),
+            "owner": b.get("owner").cloned().unwrap_or(Value::Null),
+            "workspaces": visible_ws,
+        }));
     }
     Ok((bots, all))
 }

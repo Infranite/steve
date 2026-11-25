@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use steve_store::{NoPublisher, Store, db};
 
 /// One table of each module migration, in migration order.
-const NEW_TABLES: [(&str, i64); 30] = [
+const NEW_TABLES: [(&str, i64); 34] = [
     ("connections", 5),
     ("ext_events", 6),
     ("spaces", 7),
@@ -22,9 +22,6 @@ const NEW_TABLES: [(&str, i64); 30] = [
     ("item_marks", 15),
     ("stat_daily", 15),
     ("item_stats", 15),
-    ("route_log", 16),
-    ("thread_runs", 16),
-    ("thread_items", 16),
     ("stewards", 18),
     ("space_prefs", 19),
     ("chan_reactions", 20),
@@ -37,9 +34,16 @@ const NEW_TABLES: [(&str, i64); 30] = [
     ("chan_app_registrations", 23),
     ("session_resume", 24),
     ("session_dispatch", 24),
-    ("thread_resume", 24),
     ("approval_policies", 121),
     ("approval_turns", 121),
+    ("telemetry_daily", 125),
+    ("thread_submit_keys", 130),
+    ("thread_reply_tasks", 130),
+    ("thread_reply_receipts", 130),
+    ("thread_dispatch_refs", 130),
+    ("thread_forwarded", 130),
+    ("thread_delivery_refs", 130),
+    ("thread_notices", 130),
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
@@ -56,8 +60,11 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
     let c = Connection::open(&path).unwrap();
     c.execute_batch("CREATE TABLE schema_version (v INTEGER NOT NULL)")
         .unwrap();
-    for m in &db::MIGRATIONS[..v] {
+    for (idx, m) in db::MIGRATIONS[..v].iter().enumerate() {
         c.execute_batch(m).unwrap();
+        if idx + 1 == 122 {
+            c.execute_batch(db::ITEM_LIFECYCLE).unwrap();
+        }
     }
     c.execute("INSERT INTO schema_version (v) VALUES (?)", [v as i64])
         .unwrap();
@@ -128,7 +135,7 @@ fn usage_ledger_upgrade_preserves_published_device_revision_and_legacy_bill() {
     drop(c);
     let store = Store::open(&path, NoPublisher).unwrap();
     store
-        .fixture_read(|c| {
+        .fixture_read(|c| -> steve_store::Result<()> {
             assert_pre_usage_ledger_facts(c);
             Ok::<_, steve_store::StoreError>(())
         })
@@ -272,12 +279,16 @@ fn rerunning_the_module_migrations_changes_nothing() {
         .find(|m| m.contains("DROP TABLE IF EXISTS lanes;"))
         .unwrap();
     c.execute_batch(dropped).unwrap();
-    // Replaying the early module SQL also recreates the tables retired by 121. Replay only
+    // Replaying the early module SQL also recreates the tables retired by 121 and 127. Replay only
     // their drops here; production never reapplies those migrations to an up-to-date store.
     c.execute_batch(
         "DROP TABLE IF EXISTS yolo_actions;
          DROP TABLE IF EXISTS yolo_windows;
-         DROP TABLE IF EXISTS yolo_scopes;",
+         DROP TABLE IF EXISTS yolo_scopes;
+         DROP TABLE IF EXISTS thread_resume;
+         DROP TABLE IF EXISTS thread_runs;
+         DROP TABLE IF EXISTS route_log;
+         DROP TABLE IF EXISTS thread_items;",
     )
     .unwrap();
     drop(c);
@@ -914,4 +925,298 @@ fn approval_policy_is_an_owner_cas_and_only_emits_changes() {
         }
     }
     assert_eq!(emitted, [1, 2]);
+}
+
+#[test]
+fn migration_130_preserves_history_commits_seq_and_notices() {
+    let before_130 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE thread_submit_keys"))
+        .unwrap();
+    let (_dir, path) = at_version(before_130);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('u1','default','u1','U1','owner',1);
+         INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','u1','owner',1);
+         INSERT INTO items(id,workspace_id,no,title,phase,created,updated) VALUES
+           ('ST-1','default',1,'T1','active',1,1),
+           ('ST-2','default',2,'T2','active',1,1),
+           ('ST-3','default',3,'T3','active',1,1);
+         INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES
+           ('m_done','default','steve','me','done q',10),
+           ('m_done_r','default','steve','steve','done a',11),
+           ('m_run','default','steve','me','running q',12),
+           ('m_route','default','steve','me','route only q',13),
+           ('m_route_r','default','steve','steve','route only a',14),
+           ('m_ans','default','steve','me','ans fallback q',15),
+           ('m_ans_r','default','steve','steve','ans fallback a',16),
+           ('m_dup','default','steve','me','rerun q',17),
+           ('m_dup_r','default','steve','steve','rerun a',18),
+           ('m_item','default','steve','me','item q',19),
+           ('m_item_r','default','steve','steve','item a',19),
+           ('m_supp','default','steve','me','supp q',20),
+           ('m_supp_r','default','steve','steve','supp a',20),
+           ('n_fail_1','default','notify','steve','fail 1',20),
+           ('n_ok_2','default','notify','steve','ok 2',21),
+           ('n_fail_3','default','notify','steve','fail 3',22);
+         UPDATE messages SET item_id='ST-1', meta='{\"notice\":{\"kind\":\"release\",\"level\":\"fail\"}}' WHERE id='n_fail_1';
+         UPDATE messages SET item_id='ST-1', meta='{\"notice\":{\"kind\":\"release\",\"level\":\"success\"}}' WHERE id='n_ok_2';
+         UPDATE messages SET item_id='ST-2', meta='{\"notice\":{\"kind\":\"release\",\"level\":\"fail\"}}' WHERE id='n_fail_3';
+         INSERT INTO messages(id,workspace_id,space,author,text,item_id,meta,created) VALUES
+           ('h_1','default','steve','steve','fail 1','ST-1','{\"notice\":{\"kind\":\"release\",\"level\":\"fail\",\"ref\":\"n_fail_1\"}}',20),
+           ('h_3','default','steve','steve','fail 3','ST-2','{\"notice\":{\"kind\":\"release\",\"level\":\"fail\",\"ref\":\"n_fail_3\"}}',22);
+         INSERT INTO settings(workspace_id,key,value,updated) VALUES
+           ('default','noticeDismissed','[\"n_fail_3\",\"dec_alert_9\"]',25),
+           ('default','thread.pending.m_run','{}',12);
+         INSERT INTO route_log(id,workspace_id,message_id,reply_id,model_kind,kind,item_id,ms,created) VALUES
+           ('rl_1','default','m_done','m_done_r','research','research','ST-2',50,10),
+           ('rl_2','default','m_route','m_route_r','answer','answer',NULL,30,13),
+           ('rl_ans','default','m_ans','m_ans_r','answer','answer',NULL,20,15),
+           ('rl_dup','default','m_dup','m_dup_r','answer','answer',NULL,20,17),
+           ('rl_item','default','m_item','m_item_r','item','item','ST-3',20,19),
+           ('rl_supp','default','m_supp','m_supp_r','supplement','supplement','ST-3',20,20);
+         INSERT INTO thread_runs(id,workspace_id,message_id,reply_id,user_id,status,created,started,ended) VALUES
+           ('tr_done','default','m_done','m_done_r','u1','done',10,10,11),
+           ('tr_run','default','m_run',NULL,'u1','running',12,12,NULL),
+           ('tr_ans','default','m_ans',NULL,'u1','done',15,15,16),
+           ('tr_dup_fail','default','m_dup',NULL,'u1','failed',17,17,17),
+           ('tr_dup_done','default','m_dup',NULL,'u1','done',18,18,18);
+         INSERT INTO thread_resume(run_id,created,attempts) VALUES('tr_run',12,1);
+         INSERT INTO thread_items(item_id,workspace_id,origin_msg,reply_msg,from_question,follow,last_post,created) VALUES
+           ('ST-1','default','m_done','m_done_r',1,1,15,10),
+           ('ST-2','default','m_done',NULL,0,0,NULL,11),
+           ('ST-3','default','m_item','m_item_r',0,1,19,19);
+         INSERT INTO thread_reply_commits(seq,message_id,run_id,workspace_id,user_id) VALUES(7,'m_done_r','tr_done','default','u1');
+         DELETE FROM sqlite_sequence WHERE name='thread_reply_commits';
+         INSERT INTO sqlite_sequence(name,seq) VALUES('thread_reply_commits',19);",
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    store
+        .fixture_read(|c| -> steve_store::Result<()> {
+            assert_eq!(count(c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+            for gone in ["thread_resume", "thread_runs", "route_log", "thread_items"] {
+                assert!(!has_table(c, gone), "{gone} must be dropped");
+            }
+            assert_eq!(
+                c.query_row(
+                    "SELECT outcome FROM thread_reply_receipts WHERE id='tr_done'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "answered"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT outcome FROM thread_reply_receipts WHERE id='tr_run'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "unknown"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT reply_message_id FROM thread_reply_receipts WHERE id='tr_ans'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?
+                .as_deref(),
+                Some("m_ans_r"),
+                "null thread_runs.reply_id falls back to route_log.reply_id"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT reply_message_id FROM thread_reply_receipts WHERE id='tr_dup_done'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?
+                .as_deref(),
+                Some("m_dup_r"),
+                "done rerun wins UNIQUE reply_message_id fallback"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT reply_message_id FROM thread_reply_receipts WHERE id='tr_dup_fail'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?,
+                None,
+                "failed sibling rerun stays NULL after losing UNIQUE fallback"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT dispatch_ref_id FROM thread_reply_receipts WHERE id='tr_done'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?
+                .as_deref(),
+                Some("mig_disp_ST-2"),
+                "multi-item legacy origin prefers the dispatch ref matching receipt item_id"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT dispatch_ref_id FROM thread_reply_receipts WHERE id='mig_route_rl_item'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?
+                .as_deref(),
+                Some("mig_disp_ST-3"),
+                "non-run route_log item receipt backfills dispatch_ref_id"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT dispatch_ref_id FROM thread_reply_receipts WHERE id='mig_route_rl_supp'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )?,
+                None,
+                "supplement targeting an earlier origin's item does not borrow that origin's create_item ref"
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM thread_reply_receipts WHERE origin_message_id='m_route'"
+                ),
+                1
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT seq FROM thread_reply_commits WHERE message_id='m_done_r' AND receipt_id='tr_done'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                7
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT seq FROM sqlite_sequence WHERE name='thread_reply_commits'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                19
+            );
+            assert_eq!(count(c, "SELECT count(*) FROM thread_dispatch_refs"), 3);
+            assert_eq!(count(c, "SELECT count(*) FROM messages WHERE space='notify'"), 0);
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM settings WHERE key='noticeDismissed' OR key LIKE 'thread.pending.%'"
+                ),
+                0
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM thread_notices WHERE id IN ('n_fail_1','n_fail_3') AND closed_at IS NOT NULL"
+                ),
+                2
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM thread_notices WHERE kind='alert' AND causal_key='dec_alert_9' AND closed_at IS NOT NULL"
+                ),
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+    drop(Store::open(&path, NoPublisher).unwrap());
+}
+
+#[test]
+fn migration_128_strips_main_bot_from_teams_and_rewrites_steve_fallback() {
+    let before_128 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE item_placement_waits"))
+        .unwrap();
+    let (_dir, path) = at_version(before_128);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO bots(id,workspace_id,name,main,harness,updated)
+             VALUES ('steve','default','Steve',1,'claude-code',1),
+                    ('dev','default','Dev',0,'claude-code',1);
+           INSERT INTO bot_workspaces(workspace_id,bot_id,created)
+             VALUES ('default','steve',1),('default','dev',1);
+           INSERT INTO bot_teams(id,workspace_id,name,members)
+             VALUES ('team-mixed','default','Mixed','[{"bot":"steve","nodes":null},{"bot":"dev","nodes":["local"]}]'),
+                    ('team-only-main','default','OnlyMain','[{"bot":"steve","nodes":null}]');
+           INSERT INTO items(id,workspace_id,no,title,bot_id,phase,created,updated)
+             VALUES ('ST-1','default',1,'Legacy fallback','steve','active',1,1),
+                    ('ST-2','default',2,'Normal placement','dev','active',1,1);
+           INSERT INTO bot_placements(item_id,session_id,fact,blocked)
+             VALUES ('ST-1',NULL,'{"rule_version":1,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":null,"explanation":{"bot":"steve","reason":"steve_fallback","matched":[],"rejected":[{"bot":"dev","reason":"offline"}],"fallback":"offline"}}',NULL),
+                    ('ST-2',NULL,'{"rule_version":1,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":null,"explanation":{"bot":"dev","reason":"specialty","matched":["rust"],"rejected":[],"fallback":null}}',NULL);"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    // Idempotent re-migration changes nothing.
+    db::migrate_file(&path).unwrap();
+
+    let teams = store
+        .read(|r| steve_store::bot_dispatch::teams(r, "default"))
+        .unwrap();
+    let mixed = teams.iter().find(|t| t.id == "team-mixed").unwrap();
+    assert_eq!(mixed.members.len(), 1);
+    assert_eq!(mixed.members[0].bot, "dev");
+    assert_eq!(mixed.members[0].nodes, Some(vec!["local".into()]));
+    let only_main = teams.iter().find(|t| t.id == "team-only-main").unwrap();
+    assert!(only_main.members.is_empty());
+
+    let migrated = store
+        .read(|r| steve_store::bot_dispatch::initial(r, "ST-1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        migrated.explanation.reason,
+        steve_types::PlacementReason::CoordinatorDeferred
+    );
+    assert_eq!(
+        migrated.explanation.deferred_by,
+        Some(steve_types::CoordinatorDeferSource::Setting)
+    );
+    assert_eq!(
+        migrated.explanation.fallback,
+        Some(steve_types::PlacementRejection::Offline)
+    );
+
+    let untouched = store
+        .read(|r| steve_store::bot_dispatch::initial(r, "ST-2"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        untouched.explanation.reason,
+        steve_types::PlacementReason::Specialty
+    );
+    assert_eq!(untouched.explanation.deferred_by, None);
+
+    // Store contract refuses adding main bot into Team members.
+    let err = store
+        .write(|w| {
+            steve_store::bot_admin::save(
+                w,
+                "default",
+                None,
+                "Bad Team",
+                &[steve_store::bot_dispatch::Member {
+                    bot: "steve".into(),
+                    nodes: None,
+                }],
+            )
+        })
+        .unwrap_err();
+    assert!(matches!(err, steve_store::StoreError::Rejected(_)), "{err}");
+
+    store
+        .fixture_write(|c| {
+            assert!(has_table(c, "item_placement_waits"));
+            assert_eq!(count(c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+            Ok(())
+        })
+        .unwrap();
 }

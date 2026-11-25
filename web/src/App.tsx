@@ -36,6 +36,7 @@ const MyDeliveriesView = lazyView(() => import("@/my-deliveries").then((m) => ({
 const DesignView = lazyView(() => import("@/views").then((m) => ({ default: m.DesignView })))
 const DesignShowroom = lazyView(() => import("@/design-showroom").then((m) => ({ default: m.DesignShowroom })))
 const ForkDialog = lazyView(() => import("@/views").then((m) => ({ default: m.ForkDialog })))
+const HandoffDialog = lazyView(() => import("@/views").then((m) => ({ default: m.HandoffDialog })))
 const NewItemDialog = lazyView(() => import("@/views").then((m) => ({ default: m.NewItemDialog })))
 const GraphDialog = lazyView(() => import("@/views").then((m) => ({ default: m.GraphDialog })))
 const LinkDialog = lazyView(() => import("@/views").then((m) => ({ default: m.LinkDialog })))
@@ -304,6 +305,7 @@ function WorkspacePage({ a, b, c, d, workspace, session }: { a: string; b?: stri
         <SidebarInset className="relative min-w-0 overflow-hidden [view-transition-name:page]" key={currentHub() + "/" + workspace + "/" + a + "/" + (b ?? "") + "/" + (c ?? "")}><HubLostBanner /><HoldBanner /><div className="min-h-0 flex-1">{view}</div></SidebarInset>
         <MobileTabs route={a} />
         {sh?.kind === "fork" && <ForkDialog k={sh.payload.k} at={sh.payload.at} />}
+        {sh?.kind === "handoff" && <HandoffDialog item={sh.payload.item} session={sh.payload.session} />}
         {sh?.kind === "newItem" && <NewItemDialog project={sh.payload?.project} bot={sh.payload?.bot} />}
         {sh?.kind === "newBot" && <NewBotDialog />}
         {sh?.kind === "graph" && <GraphDialog k={sh.payload.k} />}

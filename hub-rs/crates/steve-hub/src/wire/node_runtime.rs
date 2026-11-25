@@ -251,6 +251,8 @@ pub struct NodeRuntime {
     replay_check: OnceLock<ReplayCheck>,
     /// What the Node's usage reports may add to a session's cost ([`Self::set_cost_caps`]).
     cost_caps: Mutex<CostCaps>,
+    /// Peak prompt context tokens observed per in-flight attempt (read-only metric observation).
+    context_peaks: Mutex<HashMap<String, u64>>,
     /// The largest replay page the Node's transport carries (unbounded in process).
     largest_replay: AtomicU32,
     /// What the business side is told of committed transactions, in commit order, by the upkeep
@@ -354,6 +356,7 @@ impl NodeRuntime {
             held: Mutex::new(HashSet::new()),
             replay_check: OnceLock::new(),
             cost_caps: Mutex::new(CostCaps::default()),
+            context_peaks: Mutex::new(HashMap::new()),
             largest_replay: AtomicU32::new(u32::MAX),
             later: Mutex::new(vec![]),
             staged: Mutex::new(vec![]),

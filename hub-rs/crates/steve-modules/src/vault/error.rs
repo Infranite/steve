@@ -31,6 +31,8 @@ pub enum VaultError {
     Denied,
     /// `401`: registering a passkey needs a login from the last 10 minutes.
     StaleLogin,
+    /// `503`: no execution Node is available for this session; Hub never runs secret commands locally.
+    NoExecutionNode,
     Api(ApiError),
 }
 
@@ -48,6 +50,7 @@ impl std::fmt::Display for VaultError {
             Self::KeyMissing => t!("modules.vault.key_missing"),
             Self::Denied => t!("modules.vault.denied"),
             Self::StaleLogin => t!("modules.vault.stale_login"),
+            Self::NoExecutionNode => t!("modules.vault.no_execution_node"),
             Self::Api(e) => return e.fmt(f),
         };
         f.write_str(&m)
@@ -62,7 +65,7 @@ impl VaultError {
             Self::NotInitialized | Self::BadRecoveryCode => 400,
             Self::AlreadyInitialized | Self::KeyExists | Self::Rotating => 409,
             Self::StaleLogin => 401,
-            Self::Locked | Self::KeyMissing | Self::Denied => 503,
+            Self::Locked | Self::KeyMissing | Self::Denied | Self::NoExecutionNode => 503,
             Self::Api(e) => e.status(),
         }
     }
@@ -104,6 +107,15 @@ impl IntoResponse for VaultError {
     fn into_response(self) -> Response {
         match self {
             Self::Api(e) => e.into_response(),
+            Self::NoExecutionNode => {
+                let err = steve_types::VaultReason::execution_node_unavailable(self.to_string());
+                (
+                    StatusCode::from_u16(err.code.http_status())
+                        .unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+                    Json(err.to_http()),
+                )
+                    .into_response()
+            }
             e => {
                 let code =
                     StatusCode::from_u16(e.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

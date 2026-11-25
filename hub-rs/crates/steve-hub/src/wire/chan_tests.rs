@@ -301,10 +301,9 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(items(), before + 1, "exactly one item");
     let answers = models.answers();
-    assert_eq!(
-        answers,
-        ["tool"],
-        "the chat answer is not tried on the next model: it is handed on"
+    assert!(
+        answers.is_empty(),
+        "tool-needing trigger request is preflighted without a tool-less probe: {answers:?}"
     );
     assert_eq!(fixtures::tool_route_count(&store).unwrap(), 1);
     // the conversation of the chat says so, with the item

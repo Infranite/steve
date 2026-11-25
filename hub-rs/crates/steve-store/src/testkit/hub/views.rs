@@ -1,18 +1,34 @@
 use crate::{NewDecision, Result, Store, StoreError, WS};
 use steve_types::{ChannelsEvent, PeopleEvent};
 
+fn owner_party_id(conn: &rusqlite::Connection) -> Result<String> {
+    Ok(conn.query_row(
+        "SELECT p.id FROM parties p
+         JOIN workspace_members wm
+           ON wm.workspace_id = p.workspace_id AND wm.user_id = p.user_id
+         WHERE p.workspace_id = 'default' AND wm.role = 'owner'
+         LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 pub fn seed_channel_tiers(store: &Store) -> Result<()> {
     store.write(|tx| -> Result<_, StoreError> {
+        // Users::create links every workspace member to a contact party; reuse the owner's party.
+        let owner = owner_party_id(tx.conn)?;
         tx.conn.execute_batch(
-            "INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
-               SELECT 'tier-owner', 'default', 'person', 'Me', user_id, 'test', 1, 1
-               FROM workspace_members WHERE workspace_id = 'default' AND role = 'owner' LIMIT 1;
-             INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
+            "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
                VALUES ('tier-star', 'default', 'person', 'A', 'test', 1, 1),
-                      ('tier-quiet', 'default', 'person', 'B', 'test', 1, 1);
-             INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-               VALUES ('tier-account', 'default', 'test', 'test', 'tier-owner', 'personal', 'me', 'me', 'test', 1, 1);
-             INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
+                      ('tier-quiet', 'default', 'person', 'B', 'test', 1, 1);",
+        )?;
+        tx.conn.execute(
+            "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
+               VALUES ('tier-account', 'default', 'test', 'test', ?1, 'personal', 'me', 'me', 'test', 1, 1)",
+            [&owner],
+        )?;
+        tx.conn.execute_batch(
+            "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
                VALUES ('tier-connection', 'default', 'tier-account', 'test', 'none', 'test', 1, 1);
              INSERT INTO spaces (id, workspace_id, system_id, kind, connection_id, external_id, name, created, updated)
                VALUES ('tier-space-a', 'default', 'test', 'dm', 'tier-connection', 'a', 'A', 1, 1),
@@ -54,16 +70,22 @@ pub fn channel_decisions(store: &Store) -> Result<(String, String, String)> {
 
 pub fn star_and_reply(store: &Store) -> Result<()> {
     store.write(|tx| -> Result<_, StoreError> {
-        tx.conn.execute("UPDATE parties SET important = 1 WHERE id = 'tier-star'", [])?;
+        let owner = owner_party_id(tx.conn)?;
+        tx.conn
+            .execute("UPDATE parties SET important = 1 WHERE id = 'tier-star'", [])?;
         tx.emit(steve_types::DomainEvent::from(PeopleEvent::Party {
-            id: "tier-star".into(), ws: WS.into(),
+            id: "tier-star".into(),
+            ws: WS.into(),
         }));
         tx.conn.execute(
             "INSERT INTO chan_messages (id, workspace_id, space_id, direction, sender_party_id, text, created)
-               VALUES ('tier-reply', 'default', 'tier-space-b', 'in', 'tier-owner', 'I replied', 12)", [],
+               VALUES ('tier-reply', 'default', 'tier-space-b', 'in', ?1, 'I replied', 12)",
+            [&owner],
         )?;
         tx.emit(steve_types::DomainEvent::from(ChannelsEvent::ChanMessage {
-            id: "tier-reply".into(), space_id: "tier-space-b".into(), ws: WS.into(),
+            id: "tier-reply".into(),
+            space_id: "tier-space-b".into(),
+            ws: WS.into(),
         }));
         Ok(())
     })

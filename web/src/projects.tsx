@@ -1,10 +1,12 @@
-import { getItems, useDeviceInventory } from "@/store"
+import { getItems, useDeviceInventory, useHubEvents } from "@/store"
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
 import { api, type CloneProgress, type RBrowse, type RNode, type RProject } from "@/api"
+import { kb, type ProjectProposal } from "@/api/knowledge"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { stats, statsSeed } from "@/api/stats"
 import type { GhOverview } from "@/api/github"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
@@ -15,13 +17,15 @@ import { AskSteve } from "@/config-ui"
 import { crumbs, emptyNote, lookUp, nameOf, narrowed, projectNodes } from "@/dir-browse"
 import { GitHubLine, Health, projectRepo, useProjectGitHub } from "@/github/index"
 import { itemDisplayStatus } from "@/store"
+import { errMsg } from "@/knowledge/fields"
+import { MetaLink } from "@/knowledge/origin"
 import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
-import { botName, closedSt, newProject, newWorkspace, patchProject, refresh, st, toast, type Item } from "@/store"
-import { Blank, BotName, Card, closeSheet, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Row, Section, Segmented } from "@/ui"
+import { botName, closedSt, newProject, newWorkspace, patchProject, refresh, st, tm, toast, type Item } from "@/store"
+import { Blank, BotName, Card, closeSheet, DiscChevron, DISC_TRIGGER, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Pill, Row, Section, Segmented } from "@/ui"
 import { ItemRowExport as ItemRow, Select } from "@/view-shared"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
-import { Fragment, useEffect, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useRef, useState } from "react"
 import { useT } from "@/i18n"
 
 const home = (p: string) => p.replace(/^\/Users\/[^/]+/, "~")
@@ -114,9 +118,66 @@ function Overview({ p, gh, ghError, onSettings }: Parts & { onSettings: () => vo
         right={open > 0 ? <Meta inline className="font-normal">{yours > 0 && <span className="text-attention" data-proj-yours>{t("pages:projects.yours", { count: yours })}</span>}<span>{t("pages:projects.running", { count: open })}</span></Meta> : undefined}>
         {list.length ? <Panel>{list.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Panel> : <Blank data-proj-none>{t("pages:projects.noItems")}</Blank>}
       </Section>
+      <AgentsProposals projectId={p.id} />
       <Recent p={p} />
       <Where p={p} gh={gh} ghError={ghError} onSettings={onSettings} />
     </div>
+  )
+}
+
+/** Project-level AGENTS.md proposals extracted from engineering work on this project. */
+function AgentsProposals({ projectId }: { projectId: string }) {
+  const t = useT()
+  const [xs, setXs] = useState<ProjectProposal[] | null>(null), [err, setErr] = useState(""), [busy, setBusy] = useState("")
+  const [showHandled, setShowHandled] = useState(false)
+  const load = useCallback(() => kb.proposals({ project_id: projectId }).then(setXs, (e) => setErr(errMsg(e))), [projectId])
+  useEffect(() => { void load() }, [load])
+  useHubEvents(["kb"], () => void load())
+  const resolve = async (id: string, choice: "yes" | "no") => {
+    if (busy) return
+    setBusy(id)
+    try {
+      await kb.resolveProposal(id, choice)
+      toast(t(choice === "yes" ? "pages:projects.proposals.acceptedToast" : "pages:projects.proposals.dismissedToast"))
+      await load()
+    } catch (e) { toast(errMsg(e)) } finally { setBusy("") }
+  }
+  const pending = (xs ?? []).filter((x) => x.status === "pending")
+  const handled = (xs ?? []).filter((x) => x.status !== "pending")
+  return (
+    <Section label={t("pages:projects.proposals.title")} note={t("pages:projects.proposals.note")} data-proj-proposals
+      right={pending.length > 0 ? <span className="type-footnote font-normal text-attention" data-proj-proposals-pending>{t("pages:projects.proposals.pending", { count: pending.length })}</span> : undefined}>
+      {err ? <Blank>{err}</Blank>
+        : !xs ? <Loading className="py-6" />
+        : !pending.length && !handled.length ? <Blank data-proj-proposals-empty>{t("pages:projects.proposals.empty")}</Blank>
+        : <div className="flex flex-col gap-3">
+          {pending.length > 0 && <Panel>{pending.map((p) => (
+            <Row key={p.id} data-proposal={p.id}
+              title={<span className="break-words">{p.text}</span>}
+              sub={<span className="flex flex-col gap-0.5">
+                {p.reason && <span className="break-words text-foreground/80" data-proposal-reason>{p.reason}</span>}
+                {p.evidence && <span className="break-words" data-proposal-evidence>{t("knowledge:cand.evidence", { evidence: p.evidence })}</span>}
+                <Meta inline>{p.origin_label && <MetaLink href={p.origin_href || undefined}>{p.origin_label}</MetaLink>}<span>{tm(p.updated)}</span></Meta>
+              </span>}>
+              <span className="flex items-center gap-1">
+                <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={!!busy} onClick={() => void resolve(p.id, "no")} data-proposal-no>{t("pages:projects.proposals.dismiss")}</Button>
+                <Button size="xs" variant="outline" disabled={!!busy} onClick={() => void resolve(p.id, "yes")} data-proposal-yes>{t("pages:projects.proposals.accept")}</Button>
+              </span>
+            </Row>))}</Panel>}
+          {handled.length > 0 && <Collapsible open={showHandled} onOpenChange={setShowHandled} data-proj-proposals-handled>
+            <CollapsibleTrigger className={DISC_TRIGGER + " type-footnote"} data-proj-proposals-handled-toggle>
+              <DiscChevron className="size-3" />{t("pages:projects.proposals.handled", { count: handled.length })}
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <Panel className="mt-2">{handled.map((p) => (
+                <Row key={p.id} data-proposal-handled={p.id}
+                  title={<span className="inline-flex flex-wrap items-center gap-2"><span className="break-words">{p.text}</span><Pill tone={p.status === "accepted" ? "success" : "neutral"}>{t(p.status === "accepted" ? "pages:projects.proposals.statusAccepted" : "pages:projects.proposals.statusDismissed")}</Pill></span>}
+                  sub={<Meta inline>{p.origin_label && <MetaLink href={p.origin_href || undefined}>{p.origin_label}</MetaLink>}<span>{tm(p.updated)}</span></Meta>} />
+              ))}</Panel>
+            </CollapsibleContent>
+          </Collapsible>}
+        </div>}
+    </Section>
   )
 }
 

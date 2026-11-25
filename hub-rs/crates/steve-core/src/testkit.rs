@@ -85,6 +85,8 @@ pub struct FakeState {
     pub tidies: Vec<(String, bool)>,
     /// What [`AgentRuntime::mode_state`] says per session (none: it cannot tell).
     pub mode_states: HashMap<String, crate::runtime::ModeState>,
+    /// Optional BotProposal returned by [`AgentRuntime::propose_bot`].
+    pub bot_proposal: Option<steve_types::BotProposal>,
 }
 
 /// acp.ts in miniature: turns are tracked, prompts queue behind a running turn or the hold, and a test
@@ -211,6 +213,89 @@ impl AgentRuntime for FakeRuntime {
             Some(why) => Err(msg(why)),
             None => Ok(()),
         }
+    }
+    fn propose_bot(
+        &self,
+        req: &crate::CreateItem,
+        _blocked: &steve_types::PlacementBlocked,
+    ) -> Result<Option<steve_types::BotProposal>> {
+        let Some(draft) = self.st().bot_proposal.clone() else {
+            return Ok(None);
+        };
+        let actor = req
+            .actor
+            .as_deref()
+            .or(req.requester.as_deref())
+            .unwrap_or("owner");
+        let project = req.project.as_ref().and_then(|p| p.as_deref());
+        self.store.store().write(|w| {
+            if steve_store::bot_dispatch::proposal_by_id(w, &req.ws, &draft.id)?.is_none() {
+                steve_store::bot_dispatch::save_proposal(w, &req.ws, actor, project, &draft)?;
+            }
+            Ok::<_, steve_store::StoreError>(())
+        })?;
+        Ok(Some(draft))
+    }
+    fn confirm_bot_proposal(
+        &self,
+        ws: &str,
+        actor: &str,
+        id: &str,
+        edit: steve_types::ConfirmBotProposal,
+    ) -> Result<String> {
+        self.store.store().write::<_, crate::CoreError>(|w| {
+            let Some(proposal) = steve_store::bot_dispatch::proposal_by_id(w, ws, id)? else {
+                return Err(msg("Bot proposal not found"));
+            };
+            if let Some(bot) = proposal.confirmed_bot {
+                return Ok(bot);
+            }
+            if edit.expected_revision != proposal.draft.revision {
+                return Err(msg("Bot proposal revision mismatch"));
+            }
+            let bot = self
+                .store
+                .store()
+                .bots()
+                .create(
+                    ws,
+                    &steve_store::NewBot {
+                        name: edit.name,
+                        role: Some(edit.role),
+                        specialties: Some(edit.specialties),
+                        harness: edit.harness,
+                        model: edit.model,
+                        perm_mode: Some("default".into()),
+                        ..Default::default()
+                    },
+                    actor,
+                )?
+                .ok_or_else(|| msg("created bot missing"))?;
+            steve_store::bot_admin::set_bindings(
+                w,
+                ws,
+                &bot.id,
+                &[proposal.draft.node.as_str().to_owned()],
+            )?;
+            if let Some(team) = &proposal.draft.team
+                && let Some(mut existing) =
+                    steve_store::bot_dispatch::selected(w, ws, Some(&team.id))?
+            {
+                existing.members.push(steve_store::bot_dispatch::Member {
+                    bot: bot.id.clone(),
+                    nodes: None,
+                });
+                steve_store::bot_admin::save(
+                    w,
+                    ws,
+                    Some(&existing.id),
+                    &existing.name,
+                    &existing.members,
+                )?;
+            }
+            steve_store::bot_dispatch::confirm(w, id, &bot.id)?;
+            Ok(bot.id)
+        })
     }
     fn prompt(
         &self,

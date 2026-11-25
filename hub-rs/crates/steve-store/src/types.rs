@@ -210,6 +210,16 @@ impl Project {
     }
 }
 
+/// One execution surface (`harness + model + reasoning_effort`) a Bot can run on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExecutionSurface {
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
 /// `rowBot`: `project_dir`, `worktree`, `deleted` are dropped; `workspace_id` is the legacy owner.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Bot {
@@ -233,6 +243,7 @@ pub struct Bot {
     pub default_project: Option<String>,
     pub prompt: Option<String>,
     pub device: Option<String>,
+    pub owner: Option<String>,
     pub reasoning_effort: Option<String>,
     pub specialties: Vec<String>,
 }
@@ -247,7 +258,6 @@ impl Bot {
             main: bool_col(r, "main")?,
             harness: r.get("harness")?,
             model: r.get("model")?,
-            reasoning_effort: r.get("reasoning_effort")?,
             rules: r.get("rules")?,
             accept_mode: r.get("accept_mode")?,
             perm_mode: r.get("perm_mode")?,
@@ -260,6 +270,8 @@ impl Bot {
             default_project: r.get("default_project")?,
             prompt: r.get("prompt")?,
             device: r.get("device")?,
+            owner: r.get("owner")?,
+            reasoning_effort: r.get("reasoning_effort")?,
             specialties: json_col(r, "specialties", Vec::new())?,
         })
     }
@@ -594,6 +606,8 @@ pub struct Decision {
     pub revision: i64,
     #[serde(skip_serializing)]
     pub source_revision: Option<crate::DecisionSource>,
+    pub resolved_by: Option<String>,
+    pub wait: steve_types::WaitContract,
 }
 
 impl Decision {
@@ -628,6 +642,8 @@ impl Decision {
             undo: json_col(r, "undo", None)?,
             revision: r.get("revision")?,
             source_revision: json_col(r, "source_revision", None)?,
+            resolved_by: r.get("resolved_by")?,
+            wait: crate::wait_repo::decode_contract_rusqlite(r)?,
         })
     }
 }

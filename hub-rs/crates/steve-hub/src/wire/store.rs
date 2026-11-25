@@ -100,9 +100,21 @@ impl Repo for StoreBackend {
                 Ok((bot, values))
             })
             .collect::<BResult<_>>()?;
+        let fallback_surfaces = extras
+            .fallback_surfaces
+            .into_iter()
+            .map(|(bot, surfaces)| {
+                let values = surfaces
+                    .into_iter()
+                    .map(|s| serde_json::to_value(s).map_err(|e| BackendError::msg(e.to_string())))
+                    .collect::<BResult<_>>()?;
+                Ok((bot, values))
+            })
+            .collect::<BResult<_>>()?;
         Ok(Some(BotExtras {
             workspaces: extras.workspaces,
             mcp,
+            fallback_surfaces,
         }))
     }
 
@@ -145,6 +157,16 @@ impl Repo for StoreBackend {
     }
     fn user_by_session(&self, token: &str) -> BResult<Option<Obj>> {
         opt(self.0.auth_sessions().user(token).map_err(err)?)
+    }
+    fn member_identities(&self, ws: &str) -> BResult<Vec<steve_types::MemberIdentity>> {
+        self.0.users().member_identities(ws).map_err(err)
+    }
+    fn member_identity(
+        &self,
+        ws: &str,
+        user: &str,
+    ) -> BResult<Option<steve_types::MemberIdentity>> {
+        self.0.users().member_identity(ws, user).map_err(err)
     }
     fn audit(
         &self,
@@ -222,6 +244,9 @@ impl Repo for StoreBackend {
     fn bot_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.bots().get(id).map_err(err)?)
     }
+    fn bot_owner(&self, id: &str) -> BResult<Option<Option<String>>> {
+        self.0.bots().owner(id).map_err(err)
+    }
     fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
         Ok(self
             .0
@@ -238,6 +263,17 @@ impl Repo for StoreBackend {
             .map_err(err)?
             .into_iter()
             .map(mcp_value)
+            .collect()
+    }
+    fn bot_fallback_surfaces(&self, id: &str) -> BResult<Vec<Value>> {
+        self.0
+            .bots()
+            .fallback_surfaces(id)
+            .map_err(err)?
+            .into_iter()
+            .map(|surface| {
+                serde_json::to_value(surface).map_err(|e| BackendError::msg(e.to_string()))
+            })
             .collect()
     }
     fn bot_in_workspace(&self, id: &str, ws: &str) -> BResult<bool> {
@@ -269,6 +305,10 @@ impl Repo for StoreBackend {
                 .transpose()
                 .map_err(|e| BackendError::msg(e.to_string()))?,
             default_project: str_field(f, "default_project"),
+            fallback_surfaces: get("fallback_surfaces")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| BackendError::msg(e.to_string()))?,
         };
         self.0
             .bots()
@@ -335,6 +375,12 @@ impl Repo for StoreBackend {
     }
     fn memories_delete_of_bot(&self, bot: &str) -> BResult<()> {
         self.0.memories().remove_of_bot(bot).map_err(err)
+    }
+    fn memories_delete_of_bot_in_workspace(&self, bot: &str, ws: &str) -> BResult<()> {
+        self.0
+            .memories()
+            .remove_of_bot_in_workspace(bot, ws)
+            .map_err(err)
     }
 
     fn tags_list(&self, ws: &str) -> BResult<Vec<Obj>> {
@@ -434,10 +480,9 @@ impl Repo for StoreBackend {
     fn thread_item(&self, item: &str) -> BResult<Option<Value>> {
         Ok(self
             .0
-            .thread()
-            .item(item)
+            .read(|r| s::thread::dispatch_by_item(r, item))
             .map_err(err)?
-            .map(|t| serde_json::json!({"follow": t.follow, "origin_msg": t.origin_msg})))
+            .map(|t| serde_json::json!({"follow": t.follow, "origin_msg": t.origin_message_id})))
     }
     fn timeline_add(
         &self,
@@ -691,6 +736,46 @@ impl Repo for StoreBackend {
             .write(|w| steve_store::WorkspaceSettings(w).set(ws, key, value, steve_store::now()))
             .map_err(err)
     }
+    fn notices_post(
+        &self,
+        ws: &str,
+        kind: &str,
+        level: &str,
+        text: &str,
+        item: Option<&str>,
+        post_host_line: bool,
+    ) -> BResult<String> {
+        self.0
+            .write(|w| {
+                s::thread::post_notice(
+                    w,
+                    ws,
+                    kind,
+                    level,
+                    text,
+                    item,
+                    post_host_line,
+                    steve_store::now(),
+                )
+            })
+            .map(|n| n.id)
+            .map_err(err)
+    }
+    fn notices_dismiss(&self, ws: &str, id_or_host_msg: &str, by: Option<&str>) -> BResult<bool> {
+        self.0
+            .write(|w| s::thread::close_notice(w, ws, id_or_host_msg, by, steve_store::now()))
+            .map_err(err)
+    }
+    fn notices_list(&self, ws: &str, limit: i64) -> BResult<Vec<s::ThreadNotice>> {
+        self.0
+            .read(|r| s::thread::list_notices(r, ws, limit))
+            .map_err(err)
+    }
+    fn notices_dismissed(&self, ws: &str) -> BResult<Vec<String>> {
+        self.0
+            .read(|r| s::thread::dismissed_alert_ids(r, ws))
+            .map_err(err)
+    }
     fn summary_facts(&self, ws: &str) -> BResult<crate::backend::SummaryFacts> {
         self.0
             .read(|r| -> steve_store::Result<_> {
@@ -698,7 +783,7 @@ impl Repo for StoreBackend {
                 let (devices_online, devices_total) = s::state_batches::device_counts(r)?;
                 Ok(crate::backend::SummaryFacts {
                     workspace_name,
-                    pending: s::core_queue::has_pending_in_space(r, ws, steve_core::thread::MAIN)?,
+                    pending: s::thread::has_active_or_queued(r, ws, steve_core::thread::MAIN)?,
                     devices_online: devices_online as usize,
                     devices_total: devices_total as usize,
                 })

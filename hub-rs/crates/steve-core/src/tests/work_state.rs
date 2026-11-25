@@ -144,36 +144,78 @@ fn queued_input_is_left_for_its_session_when_the_node_is_offline() {
     assert_eq!(k.db().queued(&s).unwrap().len(), 1);
 }
 
-/// ST-1/2/3: a 429 that says the quota is back in hours. Continuing at once fails within a second
-/// and spends the continues; the item waits until then instead, and the agent goes on after.
+/// ST-1/2/3 + HANDOFF.md §2:
+/// - A 429 whose reset is within the workspace wait threshold (default 10m) waits automatically
+///   without opening a card or spending continues, and resumes once due.
+/// - A 429 whose reset is beyond the threshold when all of the Bot's execution surfaces are
+///   unavailable opens a coordinator card; choosing `"wait"` arms `quota_wait` and resumes when due.
+/// - A bare 429 with no reset time and no fallbacks stays an ordinary error continued within budget.
 #[test]
 fn a_quota_that_is_back_later_is_waited_for_not_continued() {
     let k = kit(2);
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
     k.rt.prompt(&s, "做吧", "me", &[]).unwrap();
+
+    // 1. Short recovery (5m <= 10m threshold): waits automatically without card.
+    k.rt.end_turn(
+        &k.core,
+        &s,
+        "error",
+        Some("API Error: 429 · upstream account quota exhausted; try again in 5m"),
+    );
+    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued at once");
+    assert!(steve_lines(&k, &i).is_empty(), "no continue spent");
+    assert!(
+        k.open_fails(&i).is_empty(),
+        "short reset waits without card"
+    );
+
+    // the watch leaves it while the quota is out, then wakes once due
+    assert!(k.core.tx().check_stalls(now() + 60_000).unwrap().is_empty());
+    assert_eq!(k.rt.prompts_of(&s).len(), 1);
+    let back_short = now() + 5 * 60_000 + 5_000;
+    assert!(k.core.tx().check_stalls(back_short).unwrap().is_empty());
+    let prompts = k.rt.prompts_of(&s);
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("配额已恢复"), "{}", prompts[1]);
+    assert!(steve_lines(&k, &i).is_empty());
+
+    // 2. Long recovery (2h > 10m threshold) with no available fallback: opens coordinator card;
+    // owner chooses "wait" -> arms quota_wait and wakes when due.
     k.rt.end_turn(
         &k.core,
         &s,
         "error",
         Some("API Error: 429 · upstream account quota exhausted; try again in 2h"),
     );
-    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued at once");
-    assert!(steve_lines(&k, &i).is_empty(), "no continue spent");
-    assert!(k.open_fails(&i).is_empty(), "no card");
-
-    // the watch leaves it while the quota is out
+    let card = k
+        .db()
+        .decisions_of_item(&i)
+        .unwrap()
+        .into_iter()
+        .find(|d| {
+            d.status == steve_types::DecisionStatus::Open
+                && d.subject_type == crate::HANDOFF_UNAVAILABLE_SUBJECT
+        })
+        .expect("coordinator card for long quota wait");
+    assert!(
+        card.options.contains(&"wait".to_string()),
+        "{:?}",
+        card.options
+    );
+    k.core.resolve(&card.id, "wait", "", "me").unwrap();
+    assert!(k.open_fails(&i).is_empty());
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.rt.prompts_of(&s).len(), 1);
-    // the time has come: continued once, still nothing spent
-    let back = now() + 2 * 3_600_000 + 60_000;
-    assert!(k.core.tx().check_stalls(back).unwrap().is_empty());
+    assert_eq!(k.rt.prompts_of(&s).len(), 2);
+    let back_long = now() + 2 * 3_600_000 + 60_000;
+    assert!(k.core.tx().check_stalls(back_long).unwrap().is_empty());
     let prompts = k.rt.prompts_of(&s);
-    assert_eq!(prompts.len(), 2);
-    assert!(prompts[1].contains("配额已恢复"), "{}", prompts[1]);
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts[2].contains("配额已恢复"), "{}", prompts[2]);
     assert!(steve_lines(&k, &i).is_empty());
 
-    // a quota with no time stays an ordinary error: continued within the budget
+    // 3. A bare 429 with no reset time and no fallbacks stays an ordinary error: continued within budget.
     k.rt.end_turn(
         &k.core,
         &s,
@@ -337,7 +379,8 @@ fn a_late_old_turn_end_does_not_undo_your_stop_but_your_message_does() {
     assert!(card.question.contains("你中断了这一回合"));
 
     // your own message: a new turn; it ends without delivering, and Steve continues it
-    core.session_message(&s, "接着做", false, &[]).unwrap();
+    core.session_message(&s, "接着做", false, &[], "me")
+        .unwrap();
     assert_eq!(k.rt.prompts_of(&s).len(), 2);
     k.rt.say(&s, "改了一半");
     k.rt.end_turn(&core, &s, "end_turn", None);
@@ -406,7 +449,8 @@ fn a_replayed_end_after_a_restart_keeps_your_stop() {
     assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
     assert!(steve_lines(&k, &i).is_empty());
 
-    core.session_message(&s, "接着做", false, &[]).unwrap();
+    core.session_message(&s, "接着做", false, &[], "me")
+        .unwrap();
     k.rt.say(&s, "改了一半");
     k.rt.end_turn(&core, &s, "end_turn", None);
     assert!(!crate::turn_wait::held(
@@ -426,7 +470,9 @@ fn old_end_must_not_consume_new_stop_request() {
     k.rt.prompt(&s, "做事", "me", &[]).unwrap();
     let a = k.rt.running(&s).unwrap().attempt;
     over_untold(&k, &s);
-    k.core.session_message(&s, "换个做法", false, &[]).unwrap();
+    k.core
+        .session_message(&s, "换个做法", false, &[], "me")
+        .unwrap();
     let b = k.rt.running(&s).expect("B runs").attempt;
     assert_ne!(a, b);
     assert!(k.core.cancel_turn(&s).unwrap());
@@ -482,7 +528,9 @@ fn a_newer_turns_end_after_your_message_is_not_your_stop() {
     k.rt.prompt(&s, "做事", "me", &[]).unwrap();
     assert!(k.core.cancel_turn(&s).unwrap());
     over_untold(&k, &s);
-    k.core.session_message(&s, "接着做", false, &[]).unwrap();
+    k.core
+        .session_message(&s, "接着做", false, &[], "me")
+        .unwrap();
     k.rt.say(&s, "改了一半");
     k.rt.end_turn(&k.core, &s, "end_turn", None);
     let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();

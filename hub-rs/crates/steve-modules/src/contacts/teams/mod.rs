@@ -120,6 +120,7 @@ pub struct TeamMember {
     pub external: bool,
     /// `manual` | `sync` | `chat`
     pub source: String,
+    pub avatar: serde_json::Value,
 }
 
 /// A team. `members` only on the detail; `depth` only in the org-chart list.
@@ -264,6 +265,7 @@ fn members(r: &mut R<'_>, viewer: &Viewer, team: &str) -> ApiResult<Vec<TeamMemb
             name: m.contact.name,
             role: m.role,
             source: m.source,
+            avatar: m.contact.avatar,
         });
     }
     Ok(out)

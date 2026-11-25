@@ -205,6 +205,7 @@ pub(crate) fn try_node_attempt_finished(
         result: turn_result(c),
         seconds: at.saturating_sub(started).max(0) as f64 / 1000.0,
         usage: store.read(|r| statistics::usage(r, &turn_id))?,
+        context_peak: f.context_peak,
     };
     store.stats().turn_finish(&steve_store::TurnFinish {
         turn_id,

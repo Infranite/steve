@@ -41,10 +41,13 @@ fn setting() -> Setting {
     }
 }
 
+/// Historical leak phrase preserved in offline eval fixture `fx-05-queue-full-leak`.
+const HISTORICAL_QUEUE_FULL: &str = "前面还有 3 个问题在排队，先等等或停掉当前的";
+
 fn system() -> Vec<String> {
     SYSTEM_TEXTS
         .iter()
-        .chain([steve_core::thread::research::QUEUE_FULL].iter())
+        .chain([HISTORICAL_QUEUE_FULL].iter())
         .map(|s| s.to_string())
         .collect()
 }
@@ -262,11 +265,7 @@ fn system_texts_are_recognized_by_provenance_not_by_keywords() {
     let sys = system();
     let sys: Vec<&str> = sys.iter().map(String::as_str).collect();
     // the router's queue sentence and its options, said as you (patterns 4 and 5)
-    assert!(
-        re::check_draft(steve_core::thread::research::QUEUE_FULL, &sys)
-            .leak
-            .is_some()
-    );
+    assert!(re::check_draft(HISTORICAL_QUEUE_FULL, &sys).leak.is_some());
     let routed = case("fx-04-router-ask-bypass");
     let d = re::check_draft(routed.steve["draft_text"].as_str().unwrap(), &sys);
     assert!(d.leak.is_some() && d.option_list, "{d:?}");

@@ -54,7 +54,7 @@ jobs:
   # Apple job builds the web client again on macOS for the apps.
   web:
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -63,15 +63,38 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
-      # A few fast browser tests of the app in headless Chromium (web/test/browser-smoke.mjs lists them): they
-      # answer the API themselves, so they need no Hub. The other web/test/*.browser.mjs tests are run by hand
-      # where they need a test Hub or take minutes.
+      # Fast browser tests (<= CI_SMOKE_THRESHOLD_S = 30 s on CI, SMOKE in web/test/browser-smoke.mjs):
+      # they answer the API themselves and need no Hub. Slow browser tests (> 30 s on CI) run in `browser-extended` below.
       - name: Browser smoke tests
-        timeout-minutes: 6
+        timeout-minutes: 10
         run: |
           npx playwright install --only-shell chromium
           npm run test:web:browser-smoke
-          npm run test:web:browser-smoke -- chat-history stream-resume
+  # Slow browser tests (> CI_SMOKE_THRESHOLD_S = 30 s on CI, EXTENDED in web/test/browser-smoke.mjs):
+  # sharded across parallel Linux runners by test count so each shard stays under 8 minutes; run only when web files change.
+  browser-extended:
+    name: browser-extended (${{ matrix.shard }}/${{ matrix.shards }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' && needs.changes.outputs.web != 'false' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+        shards: [2]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Extended browser tests (${{ matrix.shard }}/${{ matrix.shards }})
+        timeout-minutes: 10
+        run: |
+          npx playwright install --only-shell chromium
+          npm run test:web:browser-extended -- --shard=${{ matrix.shard }}/${{ matrix.shards }}
   # A push or pull request that changed only release notes (cut-release.py's release pull request, and the
   # merge commit that brings it into main) repeats the Rust jobs of the commit it stands on. This job waits for CI on that commit
   # and, when it passed, lets them be skipped. Merge queue runs do not run it, and always run the Rust jobs.
@@ -85,20 +108,32 @@ jobs:
       pull-requests: read
     outputs:
       skip: ${{ steps.decide.outputs.skip }}
-      apple: ${{ steps.apple.outputs.apple }}
+      apple: ${{ steps.paths.outputs.apple }}
+      web: ${{ steps.paths.outputs.web }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Whether the Apple apps need building (always outside pull requests)
-        id: apple
+      - name: Whether the Apple apps or extended browser tests need running
+        id: paths
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then echo "apple=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          if gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate --jq '.[].filename' > files.txt; then
-            if grep -qE '^(apple/|web/|package(-lock)?\.json$|scripts/build-apple-client\.sh$|\.github/workflows/ci\.yml$)' files.txt; then echo "apple=true"; else echo "apple=false"; fi >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate --jq '.[].filename' > files.txt; then
+              if grep -qE '^(apple/|web/|package(-lock)?\.json$|scripts/build-apple-client\.sh$|\.github/workflows/ci\.yml$)' files.txt; then echo "apple=true"; else echo "apple=false"; fi >> "$GITHUB_OUTPUT"
+              if grep -qE '^(web/|package(-lock)?\.json$|\.github/workflows/ci\.yml$)' files.txt; then echo "web=true"; else echo "web=false"; fi >> "$GITHUB_OUTPUT"
+            else
+              echo "apple=true" >> "$GITHUB_OUTPUT"
+              echo "web=true" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "apple=true" >> "$GITHUB_OUTPUT"
+            if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && gh api "repos/${{ github.repository }}/compare/$BEFORE...${{ github.sha }}" --jq '.files[].filename' > files.txt; then
+              if grep -qE '^(web/|package(-lock)?\.json$|\.github/workflows/ci\.yml$)' files.txt; then echo "web=true"; else echo "web=false"; fi >> "$GITHUB_OUTPUT"
+            else
+              echo "web=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
       - name: Skip the Rust jobs when only release notes changed and CI passed on the commit it stands on
         id: decide
@@ -326,7 +361,7 @@ jobs:
     # Always runs, so a cancelled run reports a failed gate: branch rules take a skipped required check
     # as passed. A superseded run's failure stays on its own commit and never touches the newer one's.
     if: ${{ always() }}
-    needs: [changes, scripts, web, rust-plan, rust-test, rust, apple, postgres-contract]
+    needs: [changes, scripts, web, browser-extended, rust-plan, rust-test, rust, apple, postgres-contract]
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -337,15 +372,19 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'changes', 'scripts', 'web', 'rust-plan', 'rust-test', 'rust', 'apple', 'postgres-contract'}, results
+          assert set(results) == {'changes', 'scripts', 'web', 'browser-extended', 'rust-plan', 'rust-test', 'rust', 'apple', 'postgres-contract'}, results
           changes = results.pop('changes')
           assert changes['result'] in ('success', 'skipped'), changes
-          # Rust, PostgreSQL and Apple may skip release-notes-only changes after a successful base run.
+          # Rust, PostgreSQL, Apple and extended browser tests may skip release-notes-only changes after a successful base run.
           if changes['result'] == 'success' and changes['outputs'].get('skip') == 'true':
-              for job in ('rust-test', 'rust', 'apple', 'postgres-contract'):
+              for job in ('rust-test', 'rust', 'apple', 'postgres-contract', 'browser-extended'):
                   assert results.pop(job)['result'] in ('success', 'skipped'), results
-          # A pull request that does not touch the apps skips the Apple job, on the word of `changes` only.
-          elif changes['result'] == 'success' and changes['outputs'].get('apple') == 'false':
-              assert results.pop('apple')['result'] in ('success', 'skipped'), results
+          else:
+              # A pull request that does not touch the apps skips the Apple job, on the word of `changes` only.
+              if changes['result'] == 'success' and changes['outputs'].get('apple') == 'false':
+                  assert results.pop('apple')['result'] in ('success', 'skipped'), results
+              # Extended browser tests (> 30 s) run only when web files change, on the word of `changes` only.
+              if changes['result'] == 'success' and changes['outputs'].get('web') == 'false':
+                  assert results.pop('browser-extended')['result'] in ('success', 'skipped'), results
           assert all(job['result'] == 'success' for job in results.values()), results
           PY

@@ -9,6 +9,14 @@ pub struct MessageEvidence<'a, C>(pub &'a mut C);
 pub struct FileReads<'a, C>(pub &'a mut C);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRef {
+    pub id: String,
+    pub name: String,
+    /// True when the project is bound to a git repository (`projects.kind == "git"` with a path).
+    pub has_repo: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileInfo {
     pub id: String,
     pub workspace_id: String,
@@ -137,15 +145,34 @@ impl<C: Read> References<'_, C> {
             .is_some())
     }
 
-    pub fn projects(&mut self, ws: &str) -> Result<Vec<(String, String)>> {
+    pub fn projects(&mut self, ws: &str) -> Result<Vec<ProjectRef>> {
         self.0.all(
             Query::select()
-                .columns(["id", "name"])
+                .columns(["id", "name", "kind", "path"])
                 .from("projects")
                 .and_where(Expr::col("workspace_id").eq(ws))
                 .order_by("name", Order::Asc)
                 .order_by("id", Order::Asc),
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                let kind: String = r.get(2)?;
+                let path: String = r.get(3)?;
+                Ok(ProjectRef {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    has_repo: kind == "git" && !path.trim().is_empty(),
+                })
+            },
+        )
+    }
+
+    pub fn party_kind(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("type")
+                .from("parties")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(id)),
+            |r| r.get(0),
         )
     }
 
@@ -220,6 +247,15 @@ impl<C: Read> ItemEvidence<'_, C> {
             by_id("items", id).columns(["workspace_id", "title", "cwd", "updated"]),
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
+    }
+
+    pub fn project_id(&mut self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .one(by_id("items", id).column("project_id"), |r| {
+                r.get::<Option<String>>(0)
+            })?
+            .flatten())
     }
 
     pub fn goals(&mut self, id: &str) -> Result<Vec<String>> {

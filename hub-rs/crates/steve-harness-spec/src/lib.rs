@@ -580,14 +580,14 @@ adapter_properties! {
     outer_sandbox_args: Vec<String> = vec![] => Option<Vec<String>>, "Option::is_none", cloned;
 }
 /// What a manifest declares about an adapter besides its command.
+/// Environment variables are never accepted from custom manifests (harness credentials and
+/// provider settings belong to the harness on its Node; user variables belong to `node_env`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Declaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub properties: PropertiesPatch,
     #[serde(default, skip_serializing_if = "Option::is_none")]

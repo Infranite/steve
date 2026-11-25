@@ -175,7 +175,7 @@ pub async fn message(
     let files = super::files::file_ids(&mut k);
     k.finish()?;
     let refs = super::files::refs(&st, &c.ws, files).await?;
-    ok(json!({ "result": st.domain.session_message(&id, &text, &mode, refs).await? }))
+    ok(json!({ "result": st.domain.session_message(&id, &text, &mode, refs, &c.me).await? }))
 }
 
 pub async fn cancel(
@@ -262,6 +262,19 @@ pub async fn continue_new(
     own_session(&st, &c.ws, &id).await?;
     let ns = st.domain.continue_in_new_session(&id, &c.me).await?;
     ok(json!({ "session": ns }))
+}
+
+/// `POST /sessions/{id}/handoff`: hand off an item session to a fresh session (same or different
+/// Bot, harness, and/or model) carrying deterministic working memory through W3.1 placement.
+pub async fn handoff(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    own_session(&st, &c.ws, &id).await?;
+    let target = super::items::parse_handoff_body(&b)?;
+    ok(st.domain.handoff_session(&id, target, &c.me).await?)
 }
 
 pub async fn patch_one(
@@ -367,7 +380,7 @@ pub async fn queued_edit(
     if text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
-    ok(json!(st.domain.queued_edit(&id, &qid, &text).await?))
+    ok(json!(st.domain.queued_edit(&id, &qid, &text, &c.me).await?))
 }
 
 /// `DELETE /api/sessions/:id/queued/:qid` → the row as it was (the composer takes it back).
@@ -377,7 +390,7 @@ pub async fn queued_remove(
     Path((id, qid)): Path<(String, String)>,
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
-    ok(json!(st.domain.queued_remove(&id, &qid).await?))
+    ok(json!(st.domain.queued_remove(&id, &qid, &c.me).await?))
 }
 
 /// `POST /api/sessions/:id/queued/:qid/send-now` → `{result: interrupted | sent | waiting, reason?}`.
@@ -622,6 +635,7 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         )
         .route("/sessions/{id}/end", post(sessions::end))
         .route("/sessions/{id}/continue", post(sessions::continue_new))
+        .route("/sessions/{id}/handoff", post(sessions::handoff))
         .route("/sessions/{id}/fork", post(sessions::fork))
         .route("/sessions/{id}/link", post(sessions::link))
         .route("/sessions/{id}/queued", get(sessions::queued_list))

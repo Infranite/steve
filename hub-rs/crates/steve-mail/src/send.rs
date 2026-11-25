@@ -331,6 +331,37 @@ impl DecisionHandler for MailDraftHandler {
             _ => Ok(()),
         }
     }
+
+    /// An approval card that reached its wait deadline discards the unapproved pending draft.
+    /// Uncertain (`unknown`) reconciliation cards never auto-discard the draft.
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if d.kind != "approve" {
+            return Ok(());
+        }
+        let Some(draft) = repo::draft(tx, &d.subject_id)? else {
+            return Ok(());
+        };
+        if draft.status != "pending" || draft.decision_id.as_deref() != Some(d.id.as_str()) {
+            return Ok(());
+        }
+        let now = self.0.now();
+        if repo::draft_transition(tx, &draft.id, &["pending"], "discarded", now)? {
+            if let Some(t) = &draft.thread_id {
+                repo::set_thread_state(tx, t, "open", now)?;
+            }
+            tx.audit(
+                &draft.workspace_id,
+                "steve",
+                "mail_draft.expire",
+                &draft.id,
+                &json!({"decision": d.id}),
+            )?;
+            if let Some(updated) = repo::draft(tx, &draft.id)? {
+                drafts::emit_draft(tx, &updated);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Approved and still inside the delay → back to `pending`; otherwise 409.
@@ -761,6 +792,7 @@ impl Mail {
                 previous: d.decision_id.clone(),
                 content_hash: format!("unknown:{}:{settled}", d.content_hash),
             }),
+            wait: None,
         })?;
         repo::set_draft_decision(tx, &d.id, Some(&decision.id), &d.content_hash)?;
         Ok(())
@@ -844,6 +876,7 @@ impl Mail {
                     previous: d.decision_id.clone(),
                     content_hash: format!("fail:{}:{settled}", d.content_hash),
                 }),
+                wait: None,
             })?;
             tx.audit(
                 &d.workspace_id,

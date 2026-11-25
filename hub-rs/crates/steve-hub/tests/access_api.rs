@@ -548,7 +548,7 @@ async fn the_owner_lists_and_signs_out_every_members_clients() {
     assert_eq!(s, 401, "the member's client is signed out");
 }
 
-/// A4b: single sign-on set up in the settings takes effect at once and can be turned off; only the owner.
+/// Single sign-on set up in the settings takes effect at once and can be turned off; only the owner.
 #[tokio::test]
 async fn single_sign_on_is_set_up_in_the_settings_without_a_restart() {
     let e = start().await;
@@ -1526,4 +1526,143 @@ async fn summary_is_authenticated_and_conditional() {
             .status(),
         404,
     );
+}
+
+#[tokio::test]
+async fn me_shell_and_decisions_use_linked_person_identity() {
+    let e = start().await;
+    let login = e
+        .http
+        .get(format!("{}/auth/dev", e.base))
+        .send()
+        .await
+        .unwrap();
+    let cookie = login
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let me: Value = e
+        .http
+        .get(format!("{}/api/me", e.base))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me["user"]["id"].as_str().expect("user id").to_string();
+    let login_name = me["user"]["login"].as_str().expect("login").to_string();
+    let party_id = me["user"]["party_id"]
+        .as_str()
+        .expect("linked party_id")
+        .to_string();
+    assert_eq!(me["person"]["user_id"].as_str(), Some(user_id.as_str()));
+    assert_eq!(me["person"]["party_id"].as_str(), Some(party_id.as_str()));
+
+    // Updating the person's display name changes /api/me and /api/shell display names
+    // while preserving the account login handle separately.
+    let patched = e
+        .http
+        .patch(format!("{}/api/contacts/{party_id}", e.base))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({ "name": "Lin Zhi" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), 200);
+
+    let me2: Value = e
+        .http
+        .get(format!("{}/api/me", e.base))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me2["user"]["name"].as_str(), Some("Lin Zhi"));
+    assert_eq!(me2["user"]["login"].as_str(), Some(login_name.as_str()));
+    assert_eq!(me2["person"]["name"].as_str(), Some("Lin Zhi"));
+    assert_eq!(me2["person"]["login"].as_str(), Some(login_name.as_str()));
+
+    let shell: Value = e
+        .http
+        .get(format!("{}/api/shell", e.base))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(shell["me"]["user_id"].as_str(), Some(user_id.as_str()));
+    assert_eq!(shell["me"]["name"].as_str(), Some("Lin Zhi"));
+    assert_eq!(shell["me"]["login"].as_str(), Some(login_name.as_str()));
+    assert_eq!(shell["me"]["party_id"].as_str(), Some(party_id.as_str()));
+    let members = shell["members"].as_array().expect("members array");
+    assert!(
+        members
+            .iter()
+            .any(|m| m["user_id"].as_str() == Some(user_id.as_str())
+                && m["name"].as_str() == Some("Lin Zhi"))
+    );
+
+    // Answering a decision records resolved_by = caller user_id on the DecisionView.
+    let store = e.store();
+    let d = store
+        .decisions()
+        .create(&steve_store::NewDecision {
+            workspace_id: "default".into(),
+            kind: "approve".into(),
+            subject_type: "item".into(),
+            subject_id: "ST-1".into(),
+            item_id: None,
+            session_id: None,
+            question: "Approve deploy?".into(),
+            draft: Some(String::new()),
+            options: Some(vec!["yes".into(), "no".into()]),
+            requested_by: "steve".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .expect("decision created");
+    let dec_res = e
+        .http
+        .post(format!("{}/api/decisions/{}", e.base, d.id))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({ "choice": "yes", "revision": d.revision }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dec_res.status(), 200);
+
+    let list: Value = e
+        .http
+        .get(format!(
+            "{}/api/views/page?kind=decision&status=settled&since=0",
+            e.base
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let found = list["views"]
+        .as_array()
+        .expect("views")
+        .iter()
+        .find(|x| x["id"].as_str() == Some(d.id.as_str()))
+        .expect("resolved decision present");
+    assert_eq!(found["resolved_by"].as_str(), Some(user_id.as_str()));
 }

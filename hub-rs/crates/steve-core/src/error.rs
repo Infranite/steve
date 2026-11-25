@@ -1,11 +1,49 @@
 use thiserror::Error;
 
+/// Typed refusal reasons for session/item handoffs. Core emits only the stable ASCII error code;
+/// the Hub/UI layer localizes user-facing text through `steve-i18n`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffError {
+    NoEligibleSession,
+    ReadonlySession,
+    SessionNotBoundToItem,
+    AutoBotSwitchForbidden,
+}
+
+impl HandoffError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NoEligibleSession => "handoff.no_eligible_session",
+            Self::ReadonlySession => "handoff.readonly_session",
+            Self::SessionNotBoundToItem => "handoff.session_not_bound_to_item",
+            Self::AutoBotSwitchForbidden => "handoff.auto_bot_switch_forbidden",
+        }
+    }
+
+    pub const fn http_status(self) -> u16 {
+        match self {
+            Self::NoEligibleSession | Self::ReadonlySession | Self::SessionNotBoundToItem => 409,
+            Self::AutoBotSwitchForbidden => 400,
+        }
+    }
+}
+
+impl std::fmt::Display for HandoffError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for HandoffError {}
+
 /// Errors of the domain layer. `Msg` carries the user-facing Chinese text the API returns verbatim as
 /// `{"error": msg}` (the TS Hub serves these as 500); the others are infrastructure failures.
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("{0}")]
     Msg(String),
+    #[error("{0}")]
+    Handoff(HandoffError),
     #[error("{0}")]
     Placement(steve_types::PlacementBlocked),
     #[error(transparent)]

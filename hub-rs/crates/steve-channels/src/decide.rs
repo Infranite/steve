@@ -742,6 +742,7 @@ pub fn open_card(w: &mut W<'_>, plan: &Plan, card: &Card) -> ChannelResult<Strin
                 card.reason.code()
             ),
         }),
+        wait: None,
     })?;
     repo::outbound::link_decision(w, &plan.message_id, &d.id)?;
     repo::emit(w, &plan.ws, &plan.space_id, &plan.message_id);

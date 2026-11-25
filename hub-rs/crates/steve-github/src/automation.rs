@@ -952,6 +952,7 @@ pub(crate) async fn comment_draft(
             source: Some(steve_store::DecisionSource::Revision {
                 revision: format!("automation:{item}:{digest}"),
             }),
+            wait: None,
         })?;
         crate::events::emit(tx, ws, &decision.subject_id);
         Ok::<_, ApiError>(decision)

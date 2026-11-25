@@ -234,16 +234,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
     fixtures.insert("steve.tool-full.json".to_owned());
     workliveevent.insert("steve.tool");
     check(
-        WorkEvent::ThreadRun {
-            id: "entity-1".into(),
-            ws: "workspace-a".into(),
-        },
-        "thread.run",
-        Scope::Ws("workspace-a".into()),
-    );
-    fixtures.insert("thread.run.json".to_owned());
-    workevent.insert("thread.run");
-    check(
         DevicesEvent::ReleaseHold { hold: None },
         "release.hold",
         Scope::Hub,

@@ -19,7 +19,9 @@ import { go, Page, Row, Meta, Empty, Tags, ItemNo, Status, Panel } from "@/ui"
 import { AskSteve, type Ctx } from "@/config-ui"
 import { nameOf, people, type AccountBrief, type Attr, type Contact, type Level, type Mem, type ProfileField } from "@/api/people"
 import { channelsApi } from "@/api/channels"
-import { ContactAvatar, LevelSel, Loading, Section, act, codes, day, joinList, label, orgLine, relLabel, useLoad, visLabel } from "@/people/common"
+import { LevelSel, Loading, Section, act, codes, day, joinList, label, orgLine, relLabel, useLoad, visLabel } from "@/people/common"
+import { disambiguateActors, formatActorName, partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { MergeDialog } from "@/people/pending"
 import { HoldingsSection, ResponsibleSection } from "@/people/holdings"
 import { AvatarEdit } from "@/people/avatar-edit"
@@ -111,7 +113,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
         <AskSteve key={c.id} ctx={ctxOf("contact", c.id)} placeholder={c.is_me ? t("people:contact.askMe") : t("people:contact.askOther", { name: first(c.name) })} className="-mt-4" />
         {!c.is_me && !!accts.data?.length && <Section label={t("people:contact.linked")} data-linked><Panel>{accts.data.map((a) => <Row key={a.id} title={<span className="break-all">{a.handle}</span>} sub={t("people:contact.accountSub", { system: a.system.name, source: a.source_label })} onClick={() => go("#/accounts/" + a.id)} data-linked-acct={a.handle}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
         {c.kind === "bot" ? <HoldingsSection person={c.id} name={first(c.name)} isMe={c.is_me} isBot /> : <ResponsibleSection person={c.id} name={first(c.name)} isMe={c.is_me} />}
-        {c.teams.length > 0 && <Section label={t("people:contact.teams", { n: c.teams.length })}><Panel>{c.teams.map((g) => <Row key={g.id} icon={<ContactAvatar name={g.name} type="team" size={28} />} title={g.name} sub={`${label("teamKind", g.kind)} · ${label("role", g.role)}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
+        {c.teams.length > 0 && <Section label={t("people:contact.teams", { n: c.teams.length })}><Panel>{c.teams.map((g) => <Row key={g.id} icon={<ActorAvatar actor={partyActor({ id: g.id, name: g.name, type: "team" })} size={28} />} title={g.name} sub={`${label("teamKind", g.kind)} · ${label("role", g.role)}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
         {!!items.data?.length && <Section label={t("people:shared.relatedItems", { n: items.data.length })}>
           <Panel>{items.data.map((x) => { const i = getItem(x.item_id); return (
             <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={<Meta inline><span>{label("itemRole", x.role)}</span>{x.confidence < 1 && <span>{t("people:shared.inferred")}</span>}</Meta>} onClick={() => go("#/items/" + x.item_id)} data-party-item={x.item_id}>{i && <Status s={itemDisplayStatus(i)} />}</Row>) })}</Panel>
@@ -131,7 +133,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
         {c.merges.length > 0 && <Section label={t("people:contact.merges")}><Panel>{c.merges.map((m) => (
           <Row key={m.id} title={t("people:contact.mergedFrom", { name: m.from_name })} sub={m.splittable ? t("people:contact.mergeSplittable", { day: day(m.created) }) : day(m.created)} data-merge-rec={m.id}>
             {m.splittable && <Button size="xs" variant="outline" onClick={() => void act(people.split(m.id), t("people:contact.splitDone"))} data-split={m.id}>{t("people:contact.split")}</Button>}</Row>))}</Panel></Section>}
-        {mates.length > 0 && <Section label={t("people:contact.mates")}><Panel>{mates.map((x) => <Row key={x.id} icon={<ContactAvatar name={x.name} size={28} />} title={x.name} sub={x.title ?? undefined} onClick={() => go("#/contacts/" + x.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
+        {mates.length > 0 && (() => { const md = disambiguateActors(mates.map((x) => ({ key: x.id, name: x.name, subtitle: x.title, fallbackId: x.id }))); return <Section label={t("people:contact.mates")}><Panel>{mates.map((x) => { const extra = md.get(x.id); return <Row key={x.id} icon={<ActorAvatar actor={partyActor({ id: x.id, name: x.name, avatar: x.avatar, subtitle: x.title })} disambiguator={extra} size={28} />} title={formatActorName(x.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex }))} sub={x.title ?? undefined} onClick={() => go("#/contacts/" + x.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row> })}</Panel></Section> })()}
       </div>
     </Page>
   )
@@ -425,7 +427,7 @@ function JobDialog({ c, onClose, onSaved }: { c: Contact; onClose: () => void; o
   }
   return <Dialog open onOpenChange={(v) => !v && !busy && onClose()}><DialogContent>
     <DialogHeader><DialogTitle>{t("people:job.title")}</DialogTitle><DialogDescription>{t("people:job.desc")}</DialogDescription></DialogHeader>
-    <div className="flex flex-col gap-1.5 type-callout font-medium">{t("people:shared.org")}<Select size="default" label={t("people:job.orgAria")} className="w-full font-normal" value={orgId} onChange={choose} placeholder={t("people:job.pickOrg")} options={(orgs.data ?? []).map((o) => ({ v: o.id, l: o.name }))} /></div>
+    <div className="flex flex-col gap-1.5 type-callout font-medium">{t("people:shared.org")}<Select size="default" label={t("people:job.orgAria")} className="w-full font-normal" value={orgId} onChange={choose} placeholder={t("people:job.pickOrg")} disabled={busy || !orgs.data?.length} options={(orgs.data ?? []).map((o) => ({ v: o.id, l: o.name }))} /></div>
     {orgs.err && <p role="alert" className="type-callout text-destructive">{t("people:job.orgFailed", { msg: orgs.err.message })}</p>}
     <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:job.dept")}<Input aria-label={t("people:job.dept")} value={dept} onChange={(e) => setDept(e.target.value)} maxLength={80} /></label>
     <label className="flex flex-col gap-1.5 type-callout font-medium">{t("people:job.position")}<Input aria-label={t("people:job.position")} value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} /></label>

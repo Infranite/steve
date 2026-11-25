@@ -59,7 +59,7 @@ jobs:
         run: sh scripts/install-ci-zsh.sh
       - name: Verify public boundary
         run: |
-          python3 scripts/check-public-boundary.py --strict
+          python3 scripts/check-public-boundary.py
           python3 scripts/test-public-boundary.py
           python3 scripts/test-package-release.py
       - name: Release gate

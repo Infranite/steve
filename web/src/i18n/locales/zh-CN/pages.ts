@@ -595,6 +595,19 @@ export default {
     projectDescPh: "这个目录是什么、在这里做哪类事",
     gitDetected: "检测到 git 仓库",
     create: "新建",
+    proposals: {
+      title: "AGENTS.md 提议",
+      note: "来自本项目的工程经验建议。确认采纳后记录为待写入，后续由 Steve 通过 PR 更新仓库的 AGENTS.md，不会直接改动仓库。",
+      pending_other: "{{count}} 条待确认",
+      empty: "暂无 AGENTS.md 提议",
+      accept: "采纳",
+      dismiss: "忽略",
+      acceptedToast: "已采纳，后续可通过 PR 写入 AGENTS.md",
+      dismissedToast: "已忽略这条提议",
+      handled_other: "已处理 · {{count}} 条",
+      statusAccepted: "已采纳",
+      statusDismissed: "已忽略",
+    },
   },
   /* 插件 (plugins.tsx) */
   plugins: {

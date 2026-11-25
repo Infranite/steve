@@ -35,6 +35,7 @@ pub struct AuditPage {
 /// the whole workspace's is named only for whoever made it: the trail says that something was
 /// written, not what another member keeps to themselves.
 const NAME_OF: &str = "SELECT COALESCE(
+    (SELECT NULLIF(name, '') FROM parties WHERE user_id = ?1 AND workspace_id = ?3 AND status = 'active' LIMIT 1),
     (SELECT NULLIF(name, '') FROM users WHERE id = ?1),
     (SELECT NULLIF(name, '') FROM bots WHERE id = ?1),
     (SELECT NULLIF(name, '') FROM parties WHERE id = ?1 AND (visibility = 'workspace' OR created_by = ?2)),
@@ -114,7 +115,7 @@ impl Store {
                     if id.is_empty() || names.contains_key(id) {
                         continue;
                     }
-                    if let Some(name) = one(c, NAME_OF, [id, reader], |r| r.get::<_, Option<String>>(0))?.flatten() {
+                    if let Some(name) = one(c, NAME_OF, [id, reader, ws], |r| r.get::<_, Option<String>>(0))?.flatten() {
                         names.insert(id.to_string(), name);
                     }
                 }
@@ -261,6 +262,7 @@ impl Workspaces<'_> {
                 "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, ?, 'owner', ?)",
                 params![id, owner_id, t],
             )?;
+            ensure_member_party(w.c, &id, owner_id, None, t)?;
             initialize_notice_cursor(w.c, &id)?;
             super::kinds::ensure(w, &id)?;
             super::kinds::seed_deliveries(w, &id)?;
@@ -314,6 +316,51 @@ impl Workspaces<'_> {
 
 pub struct Users<'a>(&'a Store);
 
+/// Ensures a workspace member has a linked contact row in `parties` (idempotent).
+fn ensure_member_party(
+    c: &rusqlite::Connection,
+    ws: &str,
+    user_id: &str,
+    fallback_name: Option<&str>,
+    created: i64,
+) -> Result<()> {
+    let exists: Option<String> = one(
+        c,
+        "SELECT id FROM parties WHERE workspace_id = ? AND user_id = ? LIMIT 1",
+        params![ws, user_id],
+        |r| r.get(0),
+    )?;
+    if exists.is_some() {
+        return Ok(());
+    }
+    let name = fallback_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            one(
+                c,
+                "SELECT NULLIF(trim(name), '') FROM users WHERE id = ?",
+                [user_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .flatten()
+        })
+        .unwrap_or_else(|| "我".into());
+    let pid = uid("ct");
+    c.execute(
+        "INSERT INTO parties (
+            id, workspace_id, type, name, aliases, avatar, rels, important, note,
+            contact_kind, org_kind, user_id, visibility, status, merged_into,
+            source, source_ref, revision, created_by, created, updated
+        ) VALUES (?, ?, 'contact', ?, '[]', '{}', '[\"me\"]', 0, '', 'real', NULL, ?, 'workspace', 'active', NULL, 'manual', NULL, 1, ?, ?, ?)",
+        params![pid, ws, name, user_id, user_id, created, created],
+    )?;
+    Ok(())
+}
+
 impl Users<'_> {
     pub fn count(&self) -> Result<i64> {
         self.0
@@ -336,7 +383,26 @@ impl Users<'_> {
             .read_conn(|c| one(c, "SELECT * FROM users WHERE id = ?", [id], User::from_row))
     }
 
-    /// Creates the user in workspace `default` with a membership of the same role; returns the id.
+    /// Person display name for a user in a workspace (linked contact name, fallback to login name).
+    pub fn display_name(&self, ws: &str, id: &str) -> Result<Option<String>> {
+        self.0.read(|r| crate::UserRows(r).display_name(ws, id))
+    }
+
+    /// All workspace members with their unified person identities.
+    pub fn member_identities(&self, ws: &str) -> Result<Vec<steve_types::MemberIdentity>> {
+        self.0.read(|r| crate::UserRows(r).member_identities(ws))
+    }
+
+    /// One workspace member's unified person identity.
+    pub fn member_identity(
+        &self,
+        ws: &str,
+        id: &str,
+    ) -> Result<Option<steve_types::MemberIdentity>> {
+        self.0.read(|r| crate::UserRows(r).member_identity(ws, id))
+    }
+
+    /// Creates the user in workspace `default` with a membership of the same role and a linked contact; returns the id.
     pub fn create(&self, sub: &str, name: &str, email: Option<&str>, role: &str) -> Result<String> {
         self.0.write_conn(|w| {
             let (id, t) = (uid("usr"), now());
@@ -348,6 +414,7 @@ impl Users<'_> {
                 "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, ?, ?, ?)",
                 params![WS, id, role, t],
             )?;
+            ensure_member_party(w.c, WS, &id, Some(name), t)?;
             if role == "owner" {
                 w.publish(steve_types::DomainEvent::from(steve_types::ConfigEvent::Workspace {
                     id: WS.into(),

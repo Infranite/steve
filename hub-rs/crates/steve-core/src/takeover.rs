@@ -170,7 +170,7 @@ impl Tx<'_> {
 
     /// The reasons `steve_deliver` was refused since the last delivery taken in or the last thing you
     /// did on the item, newest first.
-    fn refusals(&self, item_id: &str) -> Result<Vec<String>> {
+    pub(crate) fn refusals(&self, item_id: &str) -> Result<Vec<String>> {
         let answered = self.last_answered(item_id)?;
         let t = self.db().timeline(item_id)?;
         Ok(t.iter()

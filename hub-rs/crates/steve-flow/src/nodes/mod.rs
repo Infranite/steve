@@ -105,6 +105,8 @@ pub struct Effects {
     /// `context.handled_by`.
     pub handled_by: Option<String>,
     pub cost: f64,
+    /// Deterministic gate skipped the action (e.g. `report` with no changes since last run).
+    pub skipped: bool,
 }
 
 /// What a node runs with.

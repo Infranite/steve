@@ -114,6 +114,7 @@ pub struct SenderOut {
     pub name: String,
     pub party_id: Option<String>,
     pub account_id: Option<String>,
+    pub avatar: Value,
 }
 
 /// The `ChanMessage` shape. `basis` is `null` for inbound messages and messages without one.
@@ -148,6 +149,13 @@ pub struct ChanMessage {
 }
 
 fn projected(r: &mut impl Read, row: projection::Message) -> ChannelResult<ChanMessage> {
+    let avatar = match row.sender_party_id.as_deref() {
+        Some(pid) => steve_store::Contacts::new(r)
+            .party(pid)?
+            .map(|p| p.avatar)
+            .unwrap_or_else(|| Value::Object(Default::default())),
+        None => Value::Object(Default::default()),
+    };
     let mut m = ChanMessage {
         id: row.id,
         space_id: row.space_id,
@@ -156,6 +164,7 @@ fn projected(r: &mut impl Read, row: projection::Message) -> ChannelResult<ChanM
             name: row.sender_name,
             party_id: row.sender_party_id,
             account_id: row.sender_account_id,
+            avatar,
         },
         persona_id: row.persona_id,
         on_behalf: row.on_behalf,

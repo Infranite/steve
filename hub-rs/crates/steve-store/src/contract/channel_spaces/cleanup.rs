@@ -202,8 +202,16 @@ pub fn delete(w: &mut W<'_>, plan: Deletion<'_>, now: i64) -> Result<()> {
     let accounts = dialect.text_array(plan.accounts)?;
     retire_decisions(w, plan.workspace, plan.decisions)?;
     detach_signals(w, &spaces, &messages, now)?;
-    for table in ["reply_basis", "route_log", "thread_runs", "chan_reactions"] {
+    for table in ["reply_basis", "chan_reactions"] {
         remove_rows(w, table, "message_id", &messages)?;
+    }
+    for (table, col) in [
+        ("thread_submit_keys", "message_id"),
+        ("thread_reply_receipts", "origin_message_id"),
+        ("thread_reply_tasks", "origin_message_id"),
+        ("thread_delivery_refs", "origin_message_id"),
+    ] {
+        remove_rows(w, table, col, &messages)?;
     }
     remove_deliveries(w, &spaces, &messages)?;
     crate::contract::channel_messages::retention::remove(w, plan.messages)?;

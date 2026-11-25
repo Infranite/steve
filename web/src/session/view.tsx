@@ -1,7 +1,7 @@
 import { SessionApproval } from "@/approval"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "cn"
-import { DownloadIcon, LockIcon, MoreHorizontalIcon, PanelRightIcon, PencilIcon, SquareIcon, TrashIcon, XIcon } from "lucide-react"
+import { ArrowRightLeftIcon, DownloadIcon, LockIcon, MoreHorizontalIcon, PanelRightIcon, PencilIcon, SquareIcon, TrashIcon, XIcon } from "lucide-react"
 import { api } from "@/api"
 import { stats, type SessionTotals } from "@/api/stats"
 import { SessionCards } from "@/thread/decision-card"
@@ -22,7 +22,7 @@ import { lazyView } from "@/lazy"
 import { queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine } from "@/resume"
 import { fmtPct, fmtUsage, fmtUsageCost, fmtUsd, useStats } from "@/stats/format"
-import { hm, interrupt, it, sessPatch, sessRemove, sessSend, st, toast, useSessionQueue, type Sess, useDeviceInventory } from "@/store"
+import { closedSt, hm, interrupt, it, sessPatch, sessRemove, sessSend, st, toast, useSessionQueue, type Sess, useDeviceInventory } from "@/store"
 import { Empty, go, openSheet, Page, PANEL_W, Status } from "@/ui"
 import { Composer, type ComposerHandle } from "@/composer"
 import { RunBar, Transcript } from "@/thread/transcript"
@@ -49,6 +49,7 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
   const activeSubtasks = useMemo(() => activeSubtasksOf(transcript), [transcript])
   if (!s) return <Page title={t("views:session.title")} back={["#/sessions", t("views:sessions.title")]}><Empty title={t("views:session.notFound")} /></Page>
   const i = s.item ? it(s.item) : null, run = s.st === "run"
+  const canHandoff = !s.ro && !!s.item && (!i || !closedSt(i.st))
   const runningTasks: RunningTask[] = !s.ro && run ? activeSubtasks.map(({ subtask, childSteps }) => ({
     id: subtask.id,
     title: subtask.title || t(`core:subtask.origin.${subtask.origin}`),
@@ -86,6 +87,7 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-session-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-40">
+        {canHandoff && <DropdownMenuItem onClick={() => openSheet("handoff", { item: s.item, session: k })} data-handoff><ArrowRightLeftIcon />{t("views:session.handoff")}</DropdownMenuItem>}
         {!s.ro && <DropdownMenuItem onClick={() => setRenaming(true)} data-rename><PencilIcon />{t("views:session.rename")}</DropdownMenuItem>}
         <DropdownMenuItem disabled={exporting} onClick={exportMd} data-export><DownloadIcon />{t("views:session.export")}</DropdownMenuItem>
         {s.item && <DropdownMenuItem onClick={() => setDebugOpen(true)} data-session-debug>{t("views:debug.open")}</DropdownMenuItem>}
@@ -99,7 +101,7 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
       <div className="min-w-0 flex-1">
         <Page key={k} virtual noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} center scrollRef={scroller}
           bar={<div className="flex min-w-0 items-center gap-2" data-session-bar><span className="hidden shrink-0 sm:inline-flex" data-session-mark={s.harness ?? ""}>{mark}</span><span className="truncate type-headline">{s.n ? t("views:session.numberedBar", { n: s.n }) : ""}{renaming ? <Input autoFocus defaultValue={s.title} className="inline-flex h-7 w-56 rounded-md" data-rename-input onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.title) sessPatch(k, { title: v }, t("views:session.renamed")); setRenaming(false) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : s.title}</span><Status s={s.st} sess pill className="hidden sm:inline-flex" />{i && <ProjectChip id={i.project} className="hidden shrink-0 type-footnote text-muted-foreground sm:inline-flex" />}</div>}
-          actions={<>{runningTasks.length > 0 && <RunningNow tasks={runningTasks} align="end" onOpen={focusSubtask} onPause={allCancellable ? cancelSubtask : undefined} labels={{ title: t("core:subtask.runningTitle"), pause: t("core:subtask.cancel") }} />}{!s.ro && <SessionStats totals={totals} ctx={s.contextKnown ? s.ctx : undefined} />}<Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)} data-session-info-wide><PanelRightIcon />{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
+          actions={<>{runningTasks.length > 0 && <RunningNow tasks={runningTasks} align="end" onOpen={focusSubtask} onPause={allCancellable ? cancelSubtask : undefined} labels={{ title: t("core:subtask.runningTitle"), pause: t("core:subtask.cancel") }} />}{!s.ro && <SessionStats totals={totals} ctx={s.contextKnown ? s.ctx : undefined} />}{canHandoff && <Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex" onClick={() => openSheet("handoff", { item: s.item, session: k })} data-session-handoff><ArrowRightLeftIcon />{t("views:session.handoff")}</Button>}<Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)} data-session-info-wide><PanelRightIcon />{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
           footer={
             /* the transcript's column, centred as it is: the composer and the transcript share both edges */
             <div className="mx-auto w-full max-w-[824px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div>
