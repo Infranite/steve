@@ -429,13 +429,15 @@ pub fn extract_login_shell_path(stdout: &str) -> Option<String> {
 pub const NODE_FILE_ACCESS_SOCKET: &str = "services/node-file-access.sock";
 pub const NODE_BOOT_SERVICE_ENV: &str = "STEVE_NODE_BOOT_SERVICE";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum FileAccessStatus {
     Granted,
     Missing,
+    #[default]
     Unknown,
+    NotApplicable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
@@ -454,20 +456,40 @@ pub enum ProtectedLocation {
 pub struct ProtectedAccess {
     pub location: ProtectedLocation,
     pub status: FileAccessStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct FileAccessReport {
     pub status: FileAccessStatus,
+    #[serde(default)]
+    pub full_disk_access: FileAccessStatus,
+    #[serde(default)]
     pub locations: Vec<ProtectedAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub executable_path: Option<String>,
 }
 
 impl FileAccessReport {
     pub fn unknown() -> Self {
         Self {
             status: FileAccessStatus::Unknown,
+            full_disk_access: FileAccessStatus::Unknown,
             locations: Vec::new(),
+            executable_path: None,
+        }
+    }
+
+    pub fn not_applicable() -> Self {
+        Self {
+            status: FileAccessStatus::NotApplicable,
+            full_disk_access: FileAccessStatus::NotApplicable,
+            locations: Vec::new(),
+            executable_path: None,
         }
     }
 }

@@ -3,4 +3,4 @@
 import type { FileAccessStatus } from "./FileAccessStatus";
 import type { ProtectedAccess } from "./ProtectedAccess";
 
-export type FileAccessReport = { status: FileAccessStatus, locations: Array<ProtectedAccess>, };
+export type FileAccessReport = { status: FileAccessStatus, full_disk_access: FileAccessStatus, locations: Array<ProtectedAccess>, executable_path?: string, };

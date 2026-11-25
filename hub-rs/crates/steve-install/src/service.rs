@@ -4153,4 +4153,81 @@ esac
             );
         }
     }
+
+    #[test]
+    fn enable_boot_rejects_legacy_launch_agent_before_sudo_with_actionable_migration_hint() {
+        let f = Fixture::new();
+        let (mut s, manager) = f.service(System::Darwin, "node");
+        s.dispatch("install", Some(&f.release), 0).unwrap();
+        let legacy_dir = f.root.join("Library/LaunchAgents");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_plist = legacy_dir.join(format!("{}.plist", s.label));
+        fs::write(&legacy_plist, b"<plist/>").unwrap();
+
+        manager.lock().unwrap().calls.clear();
+        let err = s.dispatch("enable-boot", None, 0).unwrap_err().to_string();
+        assert!(
+            err.contains("legacy LaunchAgent"),
+            "must name legacy LaunchAgent migration: {err}"
+        );
+        assert!(
+            err.contains("launchctl bootout gui/$(id -u)/")
+                && err.contains("rm -f")
+                && err.contains("steve node enable-boot"),
+            "must include actionable bootout, remove, and retry commands: {err}"
+        );
+        assert!(
+            !manager
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|c| c.first().map(String::as_str) == Some("/usr/bin/sudo")),
+            "must fail before requesting sudo when a legacy LaunchAgent exists"
+        );
+    }
+
+    #[test]
+    fn node_upgrade_keeps_stable_tcc_runner_path_and_signing_identity_across_bundles() {
+        let f = Fixture::new();
+        let (mut s, manager) = f.service(System::Darwin, "node");
+        s.dispatch("install", Some(&f.release), 0).unwrap();
+        s.dispatch("enable-boot", None, 0).unwrap();
+
+        let expected_tcc_path = file_access::tcc_executable_path("node", &f.home);
+        let setup_plist: Value = plist::from_bytes(&fs::read(&s.config).unwrap()).unwrap();
+        assert_eq!(
+            setup_plist["ProgramArguments"][0].as_str(),
+            Some(text(&expected_tcc_path).unwrap().as_str())
+        );
+        let v1_req = s.record["code_requirement"].as_str().unwrap().to_owned();
+        let v1_sig = manager
+            .lock()
+            .unwrap()
+            .node_signatures
+            .get(&f.release.join("bin/steve-node"))
+            .cloned()
+            .unwrap();
+        assert_eq!(v1_sig, v1_req);
+
+        // Upgrade from v1 bundle to v2 bundle: TCC path, identifier and requirement stay identical.
+        let updated = s.dispatch("update", Some(&f.next), 0).unwrap();
+        assert_eq!(updated["changed"], true);
+        let managed_v2 = PathBuf::from(s.record["boot_release"].as_str().unwrap());
+        let v2_req = s.record["code_requirement"].as_str().unwrap().to_owned();
+        assert_eq!(v2_req, v1_req);
+        let v2_sig = manager
+            .lock()
+            .unwrap()
+            .node_signatures
+            .get(&managed_v2.join("bin/steve-node"))
+            .cloned()
+            .unwrap();
+        assert_eq!(v2_sig, v1_sig);
+        let upgrade_plist: Value = plist::from_bytes(&fs::read(&s.config).unwrap()).unwrap();
+        assert_eq!(
+            upgrade_plist["ProgramArguments"][0].as_str(),
+            Some(text(&expected_tcc_path).unwrap().as_str())
+        );
+    }
 }

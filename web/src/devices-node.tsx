@@ -308,17 +308,19 @@ function OverviewNodeTab({
   const contextChoice = v.node?.owner_context == null
     ? (contextDefault ? t("shell:devices.ownerContext.inherit", { value: t(`shell:devices.ownerContext.${contextDefault}`) }) : t("devices:context.inheritPlain"))
     : t(`shell:devices.ownerContext.${v.node.owner_context ? "on" : "off"}`)
-  const isRemoteMac = !v.local && v.node?.host?.os === "macos"
-  const fileAccess = isRemoteMac ? v.node?.host?.file_access : undefined
-  const accessText = v.local
-    ? t("devices:nodeOverview.summaryAccessLocal", { cfg: contextChoice })
-    : fileAccess?.status === "missing"
+  const isMac = v.node?.host?.os === "macos" || (!v.node?.host && hostOf(v).kind === "mac")
+  const fileAccess = isMac && v.linked && v.node?.host?.file_access?.status !== "not_applicable"
+    ? v.node?.host?.file_access
+    : undefined
+  const accessText = isMac && v.node?.host?.file_access?.status !== "not_applicable"
+    ? fileAccess?.status === "missing"
       ? t("devices:nodeOverview.summaryAccessMissing")
       : fileAccess?.status === "granted"
         ? t("devices:nodeOverview.summaryAccessGranted", { cfg: contextChoice })
-        : isRemoteMac
-          ? t("devices:nodeOverview.summaryAccessUnknown", { cfg: contextChoice })
-          : t("devices:nodeOverview.summaryAccessOther", { cfg: contextChoice })
+        : t("devices:nodeOverview.summaryAccessUnknown", { cfg: contextChoice })
+    : v.local
+      ? t("devices:nodeOverview.summaryAccessLocal", { cfg: contextChoice })
+      : t("devices:nodeOverview.summaryAccessOther", { cfg: contextChoice })
   const versionText = up.kind === "running"
     ? t("devices:nodeOverview.summaryVersionUpgrading", { to: up.run.version })
     : up.kind === "failed"
@@ -530,17 +532,63 @@ function AccessNodeTab({
 
 function NodeFileAccess({ v, actions }: { v: NodeView; actions: NodeActions }) {
   const t = useT()
-  const isRemoteMac = !!v.node && !v.local && v.node.host?.os === "macos"
-  const report = v.linked ? v.node?.host?.file_access : undefined
-  const status = report?.status ?? "unknown"
   const host = hostOf(v)
+  const report = v.linked ? v.node?.host?.file_access : undefined
+  const isMac = v.node?.host?.os === "macos" || (!v.node?.host && host.kind === "mac")
 
-  if (!isRemoteMac) {
+  if (!isMac || report?.status === "not_applicable") {
     return (
-      <DCard icon={<FolderIcon />} title={t("devices:fileAccess.title")} data-node-file-access={v.local ? "local" : "not-applicable"}>
+      <DCard icon={<FolderIcon />} title={t("devices:fileAccess.title")} data-node-file-access="not-applicable">
         <p className="px-5 pb-5 type-callout text-muted-foreground">
-          {v.local ? t("devices:fileAccess.localNote") : t("devices:fileAccess.nonMacNote", { os: host.os || "Linux" })}
+          {t("devices:fileAccess.nonMacNote", { os: host.os || "Linux" })}
         </p>
+      </DCard>
+    )
+  }
+
+  const status = report?.status ?? "unknown"
+  const fda = report?.full_disk_access
+  const locations = report?.locations ?? []
+  const repairCmd = v.local ? "steve hub file-access" : "steve node file-access"
+
+  if (status === "granted") {
+    return (
+      <DCard
+        icon={<FolderIcon />}
+        title={t("devices:fileAccess.title")}
+        action={
+          <div className="flex items-center gap-2">
+            <Badge tone="success" size="sm" dot>{t("devices:fileAccess.state.granted")}</Badge>
+            <Button size="xs" variant="ghost" disabled={actions.fileAccessBusy || !v.linked} onClick={() => void actions.recheckFileAccess()} data-node-file-access-recheck>
+              {actions.fileAccessBusy && <Spinner className="size-3" />}{t("devices:fileAccess.recheckShort")}
+            </Button>
+          </div>
+        }
+        data-node-file-access="granted"
+      >
+        <div className="flex flex-wrap items-center gap-2 px-5 pb-4 type-footnote">
+          {fda && fda !== "not_applicable" && (
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-success/8 px-2.5 py-1 text-foreground" data-file-access-fda={fda}>
+              <span>{t("devices:fileAccess.fullDiskAccess")}</span>
+              <Badge tone={fda === "granted" ? "success" : "neutral"} size="sm">{t(`devices:fileAccess.state.${fda}`)}</Badge>
+            </span>
+          )}
+          {locations.map(({ location, status: locStatus, path }, idx) => (
+            <span
+              key={`${location}:${path ?? idx}`}
+              className="inline-flex items-center gap-1.5 rounded-md bg-success/8 px-2.5 py-1 text-foreground"
+              data-file-access-location={location}
+              data-file-access-path={path || undefined}
+              title={path}
+            >
+              <span>{t(`devices:fileAccess.location.${location}`)}</span>
+              <Badge tone="success" size="sm">{t(`devices:fileAccess.state.${locStatus}`)}</Badge>
+            </span>
+          ))}
+          {!locations.length && (!fda || fda === "not_applicable") && (
+            <p className="text-muted-foreground">{t("devices:fileAccess.noneNeeded")}</p>
+          )}
+        </div>
       </DCard>
     )
   }
@@ -549,18 +597,34 @@ function NodeFileAccess({ v, actions }: { v: NodeView; actions: NodeActions }) {
     <DCard
       icon={<FolderIcon />}
       title={t("devices:fileAccess.title")}
-      action={<Badge tone={status === "granted" ? "success" : status === "missing" ? "warning" : "neutral"} size="sm" dot>{t(`devices:fileAccess.state.${status}`)}</Badge>}
+      action={<Badge tone={status === "missing" ? "warning" : "neutral"} size="sm" dot>{t(`devices:fileAccess.state.${status}`)}</Badge>}
       data-node-file-access={status}
     >
       <div className="space-y-3 px-5 pb-5 type-callout">
-        {!report?.locations.length && (
-          <p className="text-muted-foreground">{report?.status === "granted" ? t("devices:fileAccess.noneNeeded") : t(`devices:fileAccess.state.${status}`)}</p>
+        {fda && fda !== "not_applicable" && (
+          <div className="flex items-center justify-between gap-2 rounded-lg bg-muted/50 px-3 py-2" data-file-access-fda={fda}>
+            <span className="text-foreground">{t("devices:fileAccess.fullDiskAccess")}</span>
+            <Badge tone={fda === "granted" ? "success" : fda === "missing" ? "warning" : "neutral"} size="sm">
+              {t(`devices:fileAccess.state.${fda}`)}
+            </Badge>
+          </div>
         )}
-        {!!report?.locations.length && (
+        {!locations.length && (!fda || fda === "not_applicable") && (
+          <p className="text-muted-foreground">{t(`devices:fileAccess.state.${status}`)}</p>
+        )}
+        {!!locations.length && (
           <ul className="flex flex-col gap-1.5 text-muted-foreground">
-            {report.locations.map(({ location, status: locStatus }) => (
-              <li key={location} className="flex items-center justify-between gap-2 rounded-lg bg-muted/50 px-3 py-2" data-file-access-location={location}>
-                <span className="text-foreground">{t(`devices:fileAccess.location.${location}`)}</span>
+            {locations.map(({ location, status: locStatus, path }, idx) => (
+              <li
+                key={`${location}:${path ?? idx}`}
+                className="flex items-center justify-between gap-2 rounded-lg bg-muted/50 px-3 py-2"
+                data-file-access-location={location}
+                data-file-access-path={path || undefined}
+              >
+                <div className="min-w-0">
+                  <div className="text-foreground">{t(`devices:fileAccess.location.${location}`)}</div>
+                  {path && <div className="break-all font-mono type-footnote text-muted-foreground">{path}</div>}
+                </div>
                 <Badge tone={locStatus === "granted" ? "success" : locStatus === "missing" ? "warning" : "neutral"} size="sm">
                   {t(`devices:fileAccess.state.${locStatus}`)}
                 </Badge>
@@ -568,10 +632,16 @@ function NodeFileAccess({ v, actions }: { v: NodeView; actions: NodeActions }) {
             ))}
           </ul>
         )}
+        {report?.executable_path && (
+          <div className="rounded-lg bg-muted/40 px-3 py-2 type-footnote" data-file-access-executable>
+            <div className="text-muted-foreground">{t("devices:fileAccess.executable")}</div>
+            <div className="mt-0.5 break-all font-mono text-foreground">{report.executable_path}</div>
+          </div>
+        )}
         {status === "missing" && (
           <div className="space-y-2">
-            <p className="text-muted-foreground">{t("devices:fileAccess.repair")}</p>
-            <CodeBlock code="steve node file-access" language="bash" />
+            <p className="text-muted-foreground">{t(v.local ? "devices:fileAccess.repairLocal" : "devices:fileAccess.repair")}</p>
+            <CodeBlock code={repairCmd} language="bash" />
           </div>
         )}
         <Button size="sm" variant="outline" disabled={actions.fileAccessBusy || !v.linked} onClick={() => void actions.recheckFileAccess()} data-node-file-access-recheck>

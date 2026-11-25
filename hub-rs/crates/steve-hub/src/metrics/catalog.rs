@@ -583,6 +583,11 @@ pub(super) fn describe() {
         "How long a link lasted. Labels: node."
     );
     describe_counter!(
+        "steve_node_file_access_probes_total",
+        Count,
+        "macOS TCC file-access probes performed by a Node. Label: outcome (granted, missing, unknown, not_applicable, timeout, busy)."
+    );
+    describe_counter!(
         "steve_subtask_updates_total",
         Count,
         "Subtask state updates observed from Nodes. Labels: origin (subagent, background_task, native_workflow), status."
