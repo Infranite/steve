@@ -1,4 +1,4 @@
-/* A remote Node install (A6b) as the steps of a trail: what each step is doing right now, how far it is (bytes and
+/* A remote Node install as the steps of a trail: what each step is doing right now, how far it is (bytes and
  * speed while fetching or sending, the phase of the setup on the target), how long it took, and where it failed.
  * Everything comes from the install the Hub keeps, so a page opened later shows the same. */
 import type { RInstall, RInstallKind, RInstallProgress, RInstallStep } from "@/api"

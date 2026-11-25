@@ -1,7 +1,7 @@
 //! Login for the Steve Hub (replaces `hub/src/auth.ts`).
 //!
-//! OIDC (authorization code + PKCE) against the lab's Authentik, where the owner group is
-//! enforced. Browsers only hold an opaque cookie; the DB keeps its sha256. The first subject to
+//! OIDC (authorization code + PKCE) against a configured OIDC provider, where optional group
+//! restrictions can be enforced. Browsers only hold an opaque cookie; the DB keeps its sha256. The first subject to
 //! log in becomes the workspace owner; later unknown subjects are refused until invited.
 //!
 //! Wiring in the Hub:
@@ -96,7 +96,7 @@ struct Inner<St> {
     store: St,
     config: AuthConfig,
     /// The OIDC client of the configuration in force; replaced whole when single sign-on is set up or
-    /// changed in the settings (A4b), never mutated in place.
+    /// changed in the settings, never mutated in place.
     oidc: std::sync::RwLock<Arc<oidc::Oidc>>,
     oidc_config: std::sync::RwLock<OidcConfig>,
     logins: Mutex<HashMap<String, PendingLogin>>,
@@ -256,7 +256,7 @@ impl<St: UserStore> Auth<St> {
     }
 
     /// Where a finished login may return: a path of this site, or a page on one of its configured
-    /// origins (a web client on a port of its own, A3).
+    /// origins (for example, a standalone web client on its own port).
     fn back_ok(&self, back: &str) -> bool {
         back_allowed(&self.inner.config.public_urls, back)
     }

@@ -102,7 +102,7 @@ const environment = Object.fromEntries(Object.entries(process.env).filter(([key]
 Object.assign(environment, { HOME: home, STEVE_HOME: home, STEVE_HOST: "127.0.0.1", STEVE_PORT: String(port), STEVE_PUBLIC_URL: base,
   STEVE_DEV_LOGIN: "1", STEVE_REPO: resolve(home, "no-source-checkout"), STEVE_VAULT_KEYSTORE: "file", STEVE_FORBID_REAL_HOSTS: "1",
   STEVE_NO_RESUME: "1", STEVE_ADAPTER_CLAUDE: "/usr/bin/false", STEVE_ADAPTER_CODEX: "/usr/bin/false",
-  STEVE_ADAPTER_PI: "/usr/bin/false", STEVE_BACKUP: "off", STEVE_ADAPTER_UPDATES: "off", STEVE_WEB_DIR: resolve(root, "web/dist") })
+  STEVE_ADAPTER_PI: "/usr/bin/false", STEVE_BACKUP: "off", STEVE_WEB_DIR: resolve(root, "web/dist") })
 const log = createWriteStream(home + "/hub.log", { mode: 0o600 })
 const hub = spawn(resolve(binary), [], { env: environment, stdio: ["ignore", "pipe", "pipe"] })
 hub.stdout.pipe(log, { end: false }); hub.stderr.pipe(log, { end: false })

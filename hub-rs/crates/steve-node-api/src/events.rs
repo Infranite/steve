@@ -85,6 +85,11 @@ pub enum EventBody {
     ToolChanged {
         tool: ToolView,
     },
+    /// The whole current view of one subagent, background task, or native workflow run
+    /// (replaces the previous view for `subtask.id`).
+    SubtaskChanged {
+        subtask: SubtaskView,
+    },
     PermissionRequested {
         request: PermissionRequest,
     },
@@ -365,6 +370,88 @@ pub struct ToolView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SubtaskOrigin {
+    Subagent,
+    BackgroundTask,
+    NativeWorkflow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubtaskStatus {
+    Queued,
+    Running,
+    NeedsYou,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+/// Optional per-subtask token/cost/context metrics. Unknown fields stay `None`, never fabricated `0`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtaskUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Money>,
+}
+
+/// Unified, strongly-typed snapshot of a subagent, background task, or native workflow run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtaskView {
+    /// Stable Steve subtask id; child `ToolView.parent` references this id.
+    pub id: CallId,
+    /// Optional parent subtask id for nested subagent trees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<CallId>,
+    /// Harness-side handle used for native operations (e.g. child ACP `sessionId`, task id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    pub origin: SubtaskOrigin,
+    pub status: SubtaskStatus,
+    pub title: String,
+    /// Subagent type/role or executor label (e.g. `"Explore"`, `"worker"`, `"Bash"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// Model running this subtask, when reported by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Bounded current progress or prompt summary while running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    /// Bounded final summary once settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Bounded error message when failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Whether this subtask can currently be cancelled individually via ACP.
+    #[serde(default)]
+    pub can_cancel: bool,
+    /// Duration in milliseconds when measured or reported by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Subtask-level usage when explicitly attributed by the harness; `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SubtaskUsage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Measurement {
     /// Add it.
     Delta,
@@ -380,10 +467,13 @@ pub enum Measurement {
 pub enum UsageScope {
     /// The main loop only.
     Main,
-    /// Everything (sub-agents, compaction): the accounting figure. Never added to `main`.
+    /// Everything (sub-agents, compaction): the accounting figure. Never added to `main` or `subtask`.
     All,
     /// Work the harness did on its own, outside our attempts (the subject is the session).
     Background,
+    /// Explicitly attributed subagent/subtask usage. Added to `main` when no `all` aggregate exists
+    /// for the same meter epoch; covered by `all` (never double-counted) when `all` is present.
+    Subtask,
 }
 
 /// Unknown is `None`, never 0.

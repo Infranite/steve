@@ -33,6 +33,15 @@ pub trait SessionExecutor: Send + Sync {
     async fn session(&self, id: SessionId) -> ApiResult<SessionView>;
     /// Stop an idle harness process; the Steve session goes on (open it again to continue).
     async fn release_session(&self, c: Command<SessionId>) -> ApiResult<Receipt>;
+    /// Cancel a single active subtask (e.g. an ACP RFD subagent child session) without cancelling
+    /// the parent turn. Returns `Ok(true)` if the cancel signal was sent to the harness,
+    /// `Ok(false)` if the subtask is no longer active or not cancellable.
+    async fn cancel_subtask(&self, _c: CancelSubtask) -> ApiResult<bool> {
+        Err(Error::new(
+            Code::Unsupported,
+            "subtask cancellation unsupported",
+        ))
+    }
 }
 
 #[async_trait]

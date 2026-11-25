@@ -36,6 +36,7 @@ export type ToolStep = {
 export type TrailItem = ToolStep
   | { t: "think"; key: string; text: string; live: boolean; /** how long it took; while it runs, when it began */ ms?: number; t0?: number; attrs?: Record<string, string | undefined> }
   | { t: "note"; key: string; text: string }
+  | { t: "block"; key: string; state: StepState; body: ReactNode; attrs?: Record<string, string | undefined> }
   | { t: "line"; key: string; state: StepState; label: ReactNode; detail?: ReactNode; body?: ReactNode; attrs?: Record<string, string | undefined> }
 
 /* ───────── markers on the line ───────── */
@@ -213,6 +214,7 @@ export function Trail({ items, live, end, tail, className }: { items: TrailItem[
         : x.t === "tool" ? <ToolRow key={x.key} s={x} live={live} />
         : x.t === "think" ? <ThinkRow key={x.key} s={x} live={live} />
         : x.t === "note" ? <Row key={x.key} s="done" data-narration><div className="py-0.5 type-callout text-foreground/80"><Markdown text={x.text} replyFiles /></div></Row>
+        : x.t === "block" ? <Row key={x.key} s={live && x.state === "run" ? "run" : x.state === "fail" ? "fail" : "done"} className="py-1" {...attrsOf(x.attrs)}>{x.body}</Row>
         : <Row key={x.key} s={live && x.state === "run" ? "run" : x.state === "fail" ? "fail" : "done"} {...attrsOf(x.attrs)}><Fold head={<>{x.label}{x.detail}</>} body={x.body} /></Row>)}
       {end && <Row s={end.s === "fail" ? "fail" : end.s} data-trail-end={end.s}><div className={HEAD}>{end.label}</div></Row>}
     </ol>

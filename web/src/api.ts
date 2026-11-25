@@ -74,8 +74,8 @@ export type RNode = { node_id: string; name: string; fingerprint: string; state:
 /** A Node's latest sample and day of vitals. Network rates are bytes per second. */
 export type RVitals = import("./gen/NodeVitalsDay").NodeVitalsDay
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
-/** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
-/** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */
+/** remote Nodes over tailcat: `hub_url` is `tailcat:<address>:<port>` once it runs */
+/** a remote install over tailcat's SSH: the command for the target, then its steps */
 export type RInstall = { id: string; state: "waiting" | "running" | "done" | "failed"; command: string; steps: RInstallStep[]; node_id: string | null; error: string | null; failed_step?: RInstallKind | null; address?: string | null; created?: number; transfer_route?: "direct_observed" | "derp_observed" | null }
 export type RInstallKind = "probe" | "fetch" | "send" | "setup" | "done"
 /** fetch: download, cached (a copy fetched before, checked again) or verify; send: send; setup: install, pair, adapters, start */
@@ -83,7 +83,7 @@ export type RInstallProgress = { phase: string; done: number; total: number | nu
 /** a step of a remote install: `elapsed_ms` is up to now while it runs */
 export type RInstallStep = { kind: RInstallKind; at: number; text: string; ended?: number | null; elapsed_ms?: number; progress?: RInstallProgress | null; transfer_ms?: number; unpack_ms?: number }
 export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
-/* `custom`: an adapter the Hub's harness manifest adds (harness parity S1), with `error` and `install_hint` when it has them */
+/* `custom`: an adapter declared by the Hub's harness manifest, with `error` and `install_hint` when it has them */
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
@@ -105,14 +105,58 @@ export type RRuntime = {
     }[]
     can_install: boolean; reason?: string | null; help?: string | null; error?: string | null
   }
-  /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
-  update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
+}
+export type RSubagentCapability = "acp_rfd" | "tool_fallback" | "none"
+export type RBackgroundTaskCapability = "acp_rfd" | "tool_fallback" | "none"
+export type RUsageAttribution = "subtask_scoped" | "turn_and_model_all" | "turn_level" | "context_only" | "none"
+export type RResumeCapability = "session_load" | "cli_only" | "none"
+export type RAdapterUpgradeCapability = "managed_npm" | "external_managed" | "manual"
+export type RAdapterCapabilities = {
+  subagents: RSubagentCapability
+  subagent_cancel: boolean
+  background_tasks: RBackgroundTaskCapability
+  background_task_cancel?: boolean
+  child_tool_nesting: boolean
+  usage_attribution: RUsageAttribution
+  resume: RResumeCapability
+  upgrade?: RAdapterUpgradeCapability
+  verified: boolean
+}
+export type RSubtaskOrigin = "subagent" | "background_task" | "native_workflow"
+export type RSubtaskStatus = "queued" | "running" | "needs_you" | "done" | "failed" | "cancelled"
+export type RSubtaskUsage = {
+  input?: number | null
+  output?: number | null
+  cache_read?: number | null
+  cache_write?: number | null
+  reasoning?: number | null
+  total_tokens?: number | null
+  context_used?: number | null
+  context_limit?: number | null
+  cost?: { decimal: string; currency: string } | null
+}
+export type RSubtaskView = {
+  id: string
+  parent?: string | null
+  external_id?: string | null
+  origin: RSubtaskOrigin
+  status: RSubtaskStatus
+  title: string
+  actor?: string | null
+  model?: string | null
+  progress?: string | null
+  summary?: string | null
+  error?: string | null
+  can_cancel?: boolean
+  duration_ms?: number | null
+  usage?: RSubtaskUsage | null
 }
 /** Read-only report from one particular Node, never the Hub's merged model catalogue. */
 export type RNodeHarness = {
   id: string; name: string; available: boolean | null; version: string; adapter_version: string | null
   degraded_reason: HarnessDegradedReason | null
   models: string[]; error: string | null; setup: RRuntime["setup"] | null
+  capabilities?: RAdapterCapabilities | null
 }
 export type RNodeHarnessReport = {
   state: "reported" | "unreported" | "offline" | "unsupported" | "failed"
@@ -368,7 +412,7 @@ export const api = {
     req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, undefined, undefined, signal),
   transcriptMarks: (id: string) => get<{ marks: number[] }>(`/sessions/${encodeURIComponent(id)}/events/marks`),
   searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
-  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
+  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), cancelSubtask: (id: string, subtaskId: string) => post<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}/subtasks/${encodeURIComponent(subtaskId)}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
   renameSession: (id: string, title: string) => patch(`/sessions/${id}`, { title }), removeSession: (id: string) => del(`/sessions/${id}`), dropQueued: (id: string) => del("/queued/" + id),
   queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`), resumeInfo: (sid: string) => get<RResume>(`/sessions/${sid}/resume`),
   queuedEdit: (sid: string, qid: string, text: string) => patch<RQueued>(`/sessions/${sid}/queued/${qid}`, { text }),
@@ -398,7 +442,10 @@ export const api = {
   /** Installs only this registry entry's declared components, on its Node. */
   installHarness: (id: string) => post<{ accepted: boolean; restart?: boolean }>("/system/harnesses/" + encodeURIComponent(id) + "/install"),
   harnessUpdates: (node: string, fresh = false) => get<import("./harness-update-status").HarnessUpdates>("/node-harness-updates/" + encodeURIComponent(node) + (fresh ? "?fresh=1" : "")),
-  upgradeHarness: (node: string, harness: string, operation: string, versions: Record<string, string>, retry_unknown = false) => post<{ receipt: import("./harness-update-status").HarnessReceipt }>("/node-harness-updates/" + encodeURIComponent(node) + "/" + encodeURIComponent(harness), { operation, versions, retry_unknown }),
+  upgradeHarness: (node: string, harness: string, operation: string, versions: Record<string, string>, retry_unknown = false, self_update: string[] = []) =>
+    post<import("./harness-update-status").UpgradeHarnessResponse>("/node-harness-updates/" + encodeURIComponent(node) + "/" + encodeURIComponent(harness), { operation, versions, self_update, retry_unknown }),
+  setHarnessAutoUpgrade: (node: string, body: import("./harness-update-status").SetHarnessAutoUpgrade) =>
+    req<import("./harness-update-status").HarnessAutoUpgradePolicy>("PUT", "/node-harness-updates/" + encodeURIComponent(node) + "/auto-upgrade", body),
   /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
   addHarness: (p: { id: string; name?: string; command: string; args?: string[]; env?: Record<string, string>; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),

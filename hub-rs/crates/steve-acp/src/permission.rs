@@ -48,7 +48,8 @@ pub fn asked(norm: &mut Normalizer, rpc_id: &Value, params: &Value) -> Asked {
         o.insert("toolCallId".into(), json!(tool_call));
     }
     update["sessionUpdate"] = json!("tool_call_update");
-    let updates = norm.update(&update);
+    let session_id = params.get("sessionId").and_then(Value::as_str);
+    let updates = norm.update_for_session(session_id, &update);
     // the merge always knows the tool now (its id was set above); never panic on a harness's input
     let view = updates
         .iter()

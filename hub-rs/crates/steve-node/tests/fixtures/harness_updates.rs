@@ -154,6 +154,7 @@ for spec in args:
                     .iter()
                     .map(|c| (c.id.into(), target.into()))
                     .collect(),
+                self_update: vec![],
             },
         }
     }
