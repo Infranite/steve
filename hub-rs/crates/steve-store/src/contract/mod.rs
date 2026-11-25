@@ -99,6 +99,7 @@ pub mod vault_items;
 pub mod vault_keys;
 pub mod vault_uses;
 pub mod waits;
+pub mod workflow_runs;
 mod workspace_settings;
 mod workspaces;
 

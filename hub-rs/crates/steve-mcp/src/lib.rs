@@ -135,6 +135,7 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), ToolError>> + Send;
 
     /// `unfinished`: plan steps (exact text) the agent deliberately left open; absent when not sent.
+    /// `result`: optional structured JSON result, required for script-workflow child items.
     fn deliver(
         &self,
         s: &Self::Session,
@@ -142,6 +143,7 @@ pub trait Backend: Send + Sync + 'static {
         outputs: Vec<Output>,
         checks: Vec<Check>,
         unfinished: Option<Vec<String>>,
+        result: Option<serde_json::Value>,
     ) -> impl Future<Output = Result<(), ToolError>> + Send;
 
     fn publish(
@@ -257,6 +259,8 @@ struct DeliverArgs {
     checks: Vec<Check>,
     #[serde(default)]
     unfinished: Option<Vec<String>>,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct PublishArgs {
@@ -309,7 +313,7 @@ pub async fn run<B: Backend>(
         }
         tools::DELIVER => {
             let a: DeliverArgs = parse(args)?;
-            b.deliver(s, a.summary, a.outputs, a.checks, a.unfinished)
+            b.deliver(s, a.summary, a.outputs, a.checks, a.unfinished, a.result)
                 .await
                 .map(|_| format!("Delivered for acceptance. {END}"))
         }

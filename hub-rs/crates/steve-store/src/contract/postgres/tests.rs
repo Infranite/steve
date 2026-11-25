@@ -385,6 +385,188 @@ fn domain_round_trips(f: &mut Fixture) -> Result<()> {
         assert_eq!(prices.etag.as_deref(), Some("etag"));
         assert_eq!(prices.error.as_deref(), Some("unavailable"));
         Ok(())
+    })?;
+    workflow_ledger_round_trip(f)?;
+    Ok(())
+}
+
+fn workflow_ledger_round_trip(f: &mut Fixture) -> Result<()> {
+    use crate::workflow_runs::{
+        NewWfAttempt, NewWfCall, ReviewGateFailure, ReviewGateVerdict, WfAttemptStatus,
+        WfChildOutcome, WorkflowRuns,
+    };
+
+    let (run_id, work_call_id, rev_call_id) = f.write(|w| {
+        let run = WorkflowRuns(w).create_run(
+            "w",
+            "item-pg",
+            1,
+            1,
+            "export default async () => 1",
+            "sha1",
+            None,
+        )?;
+        let (work_call, created) = WorkflowRuns(w).ensure_call(&NewWfCall {
+            run_id: &run.id,
+            workspace_id: "w",
+            identity_hash: "h-work",
+            phase: Some("impl"),
+            title: Some("Implement"),
+            prompt: "do work",
+            options_canonical_json: "{}",
+            schema_json: None,
+            occurrence: 0,
+            is_review: false,
+            mutex_key: None,
+        })?;
+        assert!(created);
+        WorkflowRuns(w).record_version_call(&run.id, 1, 0, &work_call.id, None)?;
+        WorkflowRuns(w).create_attempt(&NewWfAttempt {
+            call_id: &work_call.id,
+            run_id: &run.id,
+            parent_item_id: "item-pg",
+            parent_cycle: 1,
+            attempt_no: 1,
+            child_item_id: Some("child-work"),
+            bot_id: Some("bot-worker"),
+            placement_id: None,
+            harness: Some("claude-code"),
+            model: Some("sonnet"),
+            status: WfAttemptStatus::Dispatched,
+            dispatched_at_revision: run.run_revision,
+            error_code: None,
+            error_message: None,
+        })?;
+        WorkflowRuns(w).stage_attempt_closing("child-work", 1, r#"{"done":true}"#, "[]")?;
+        let fin = WorkflowRuns(w)
+            .finalize_attempt("child-work", 1, WfChildOutcome::Completed, None, None)?
+            .expect("finalized work");
+        let (rev_call, _) = WorkflowRuns(w).ensure_call(&NewWfCall {
+            run_id: &run.id,
+            workspace_id: "w",
+            identity_hash: "h-rev",
+            phase: Some("review"),
+            title: Some("Review"),
+            prompt: "review work",
+            options_canonical_json: r#"{"review":true}"#,
+            schema_json: None,
+            occurrence: 0,
+            is_review: true,
+            mutex_key: None,
+        })?;
+        WorkflowRuns(w).record_version_call(&run.id, 1, 1, &rev_call.id, None)?;
+        WorkflowRuns(w).create_attempt(&NewWfAttempt {
+            call_id: &rev_call.id,
+            run_id: &run.id,
+            parent_item_id: "item-pg",
+            parent_cycle: 1,
+            attempt_no: 1,
+            child_item_id: Some("child-rev"),
+            bot_id: Some("bot-reviewer"),
+            placement_id: None,
+            harness: Some("codex"),
+            model: Some("o3"),
+            status: WfAttemptStatus::Dispatched,
+            dispatched_at_revision: fin.new_run_revision + 1,
+            error_code: None,
+            error_message: None,
+        })?;
+        WorkflowRuns(w).stage_attempt_closing("child-rev", 1, r#"{"approved":true}"#, "[]")?;
+        WorkflowRuns(w).finalize_attempt("child-rev", 1, WfChildOutcome::Completed, None, None)?;
+        Ok((run.id, work_call.id, rev_call.id))
+    })?;
+
+    f.read(|r| {
+        assert_eq!(WorkflowRuns(r).count_cycle_attempts("item-pg", 1)?, 2);
+        assert_eq!(WorkflowRuns(r).count_call_attempts(&work_call_id)?, 1);
+        assert_eq!(
+            WorkflowRuns(r).verify_independent_review(&run_id)?,
+            ReviewGateVerdict::Verified {
+                review_call_id: rev_call_id.clone()
+            }
+        );
+        Ok(())
+    })?;
+
+    // Verify stale/same-bot checks fail cleanly on PG as well.
+    let same_bot_run = f.write(|w| {
+        let run = WorkflowRuns(w).create_run("w", "item-pg-2", 1, 1, "s", "sha2", None)?;
+        let (wc, _) = WorkflowRuns(w).ensure_call(&NewWfCall {
+            run_id: &run.id,
+            workspace_id: "w",
+            identity_hash: "hw",
+            phase: None,
+            title: None,
+            prompt: "w",
+            options_canonical_json: "{}",
+            schema_json: None,
+            occurrence: 0,
+            is_review: false,
+            mutex_key: None,
+        })?;
+        WorkflowRuns(w).create_attempt(&NewWfAttempt {
+            call_id: &wc.id,
+            run_id: &run.id,
+            parent_item_id: "item-pg-2",
+            parent_cycle: 1,
+            attempt_no: 1,
+            child_item_id: Some("c2-w"),
+            bot_id: Some("bot-a"),
+            placement_id: None,
+            harness: None,
+            model: None,
+            status: WfAttemptStatus::Dispatched,
+            dispatched_at_revision: 1,
+            error_code: None,
+            error_message: None,
+        })?;
+        WorkflowRuns(w).stage_attempt_closing("c2-w", 1, r#"{"ok":true}"#, "[]")?;
+        let fin = WorkflowRuns(w)
+            .finalize_attempt("c2-w", 1, WfChildOutcome::Completed, None, None)?
+            .unwrap();
+        let (rc, _) = WorkflowRuns(w).ensure_call(&NewWfCall {
+            run_id: &run.id,
+            workspace_id: "w",
+            identity_hash: "hr",
+            phase: None,
+            title: None,
+            prompt: "r",
+            options_canonical_json: r#"{"review":true}"#,
+            schema_json: None,
+            occurrence: 0,
+            is_review: true,
+            mutex_key: None,
+        })?;
+        WorkflowRuns(w).create_attempt(&NewWfAttempt {
+            call_id: &rc.id,
+            run_id: &run.id,
+            parent_item_id: "item-pg-2",
+            parent_cycle: 1,
+            attempt_no: 1,
+            child_item_id: Some("c2-r"),
+            bot_id: Some("bot-a"),
+            placement_id: None,
+            harness: None,
+            model: None,
+            status: WfAttemptStatus::Dispatched,
+            dispatched_at_revision: fin.new_run_revision + 1,
+            error_code: None,
+            error_message: None,
+        })?;
+        WorkflowRuns(w).stage_attempt_closing("c2-r", 1, r#"{"approved":true}"#, "[]")?;
+        WorkflowRuns(w).finalize_attempt("c2-r", 1, WfChildOutcome::Completed, None, None)?;
+        Ok(run.id)
+    })?;
+    f.read(|r| {
+        assert_eq!(
+            WorkflowRuns(r).verify_independent_review(&same_bot_run)?,
+            ReviewGateVerdict::Blocked {
+                reason: ReviewGateFailure::SameBotAsWorker {
+                    bot_id: "bot-a".into()
+                }
+            }
+        );
+        Ok(())
     })
 }
 
