@@ -130,7 +130,7 @@ await page.route("**/*", async (route) => {
   if (p === "/api/vitals") return json(route, vitals)
   if (p === "/api/node-harnesses") return json(route, { nodes: harnesses })
   if (p === "/api/node-harnesses/n-auth") return json(route, { node_id: "n-auth", report: harnesses["n-auth"] })
-  if (p.startsWith("/api/node-harness-updates/")) return json(route, { report: { node: "n-auth", checking: false, harnesses: [] }, runs: {}, at: NOW, error: null })
+  if (p.startsWith("/api/node-harness-updates/")) return json(route, { report: { node: "n-auth", checking: false, harnesses: [] }, runs: {}, retryable_unknown: [], auto_upgrade: { enabled: false, harnesses: {} }, at: NOW, error: null, code: null })
   if (p === "/api/nodes/n-auth/file-access" && req.method() === "POST") {
     const report = { status: "granted", locations: [{ location: "documents", status: "granted" }] }
     nodes = nodes.map((n) => n.node_id === "n-auth" ? { ...n, host: { ...n.host, file_access: report } } : n)

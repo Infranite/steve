@@ -3,7 +3,7 @@
  * so there is only one implementation of pairing confirmation, file-access recheck, harness probing,
  * Node upgrades, and work settings (pause / resume / session limit). */
 import { useState } from "react"
-import { ArrowUpCircleIcon, ChevronRightIcon, RefreshCwIcon, RotateCcwIcon, ShieldCheckIcon } from "lucide-react"
+import { ArrowUpCircleIcon, ChevronRightIcon, DownloadIcon, RefreshCwIcon, RotateCcwIcon, ShieldCheckIcon } from "lucide-react"
 import { api, type RUpgradePolicy } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
@@ -13,11 +13,13 @@ import { useT } from "@/i18n"
 import type { NodeView } from "@/device-model"
 import { useDevices } from "@/devices-data"
 import { useWorkSettings } from "@/devices-config"
+import { useNodeHarnessUpdates } from "@/devices-harness-updates"
 import type { NodeActionItem, NodeTab } from "@/node-detail-model"
 
 export function useNodeActions(v: NodeView) {
   const t = useT(), { hubVersion, reloadNodes, refreshHarnesses } = useDevices()
   const work = useWorkSettings(v)
+  const harnessUpdates = useNodeHarnessUpdates(v)
   const [fileAccessBusy, setFileAccessBusy] = useState(false)
   const [harnessBusy, setHarnessBusy] = useState(false)
   const [harnessError, setHarnessError] = useState("")
@@ -27,6 +29,7 @@ export function useNodeActions(v: NodeView) {
   const pairable = remote && (v.state === "active" || v.state === "paused")
   const canUpgrade = st.owner && pairable
   const canConfirm = st.owner && remote && v.state === "pending"
+  const canUpgradeHarness = st.owner && v.linked && v.state === "active" && !harnessUpdates.unavailable
 
   const confirmPairing = () => {
     openSheet("addDevice", { kind: "node", node: v.id })
@@ -103,7 +106,9 @@ export function useNodeActions(v: NodeView) {
     pairable,
     canUpgrade,
     canConfirm,
+    canUpgradeHarness,
     work,
+    harnessUpdates,
     confirmPairing,
     fileAccessBusy,
     recheckFileAccess,
@@ -152,6 +157,19 @@ export function NodeActionControls({
             {actions.harnessBusy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("devices:harness.refresh")}
           </Button>
         )
+      case "upgradeHarnesses": {
+        const busy = actions.harnessUpdates.requesting !== null
+        const label = (item.running ?? 0) > 0
+          ? t("devices:nodeOverview.actionUpgradeHarnessesIdle")
+          : (item.count ?? 1) > 1
+            ? t("devices:nodeOverview.actionUpgradeHarnessesAll", { count: item.count ?? 1 })
+            : t("devices:nodeOverview.actionUpgradeHarnessesOne")
+        return (
+          <Button size="xs" disabled={busy || !actions.canUpgradeHarness} onClick={() => void actions.harnessUpdates.upgradeAvailable()} data-node-action-run="upgradeHarnesses">
+            {busy ? <Spinner className="size-3" /> : <DownloadIcon />}{label}
+          </Button>
+        )
+      }
       case "startUpgrade":
         return (
           <Button size="xs" disabled={actions.upgradeBusy} onClick={() => void actions.startUpgrade(false)} data-node-action-run="startUpgrade">

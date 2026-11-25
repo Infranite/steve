@@ -12,7 +12,7 @@ mod deliveries;
 mod diagnostics;
 pub(crate) mod feed;
 mod files;
-mod harness_updates;
+pub mod harness_updates;
 mod hub_metadata;
 mod items;
 pub(crate) mod misc;
