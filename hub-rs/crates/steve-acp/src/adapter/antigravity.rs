@@ -46,6 +46,7 @@ impl HarnessAdapter for AntigravityAdapter {
             usage_attribution: UsageAttribution::TurnLevel,
             resume: ResumeCapability::SessionLoad,
             upgrade: steve_node_api::UpgradeCapability::ExternalManaged,
+            effort_mode: steve_node_api::EffortMode::AcpOption,
             verified: true,
         }
     }

@@ -34,44 +34,40 @@ fn reasoning_effort_persists_and_can_be_reset_to_default() {
             &NewBot {
                 name: "思考".into(),
                 harness: "codex".into(),
-                reasoning_effort: Some("high".into()),
+                reasoning_effort: steve_types::ReasoningEffort::High,
                 ..Default::default()
             },
             "me",
         )
         .unwrap()
         .unwrap();
-    assert_eq!(bot.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(bot.reasoning_effort, steve_types::ReasoningEffort::High);
     let updated = s
         .bots()
         .patch(
             &bot.id,
             &BotPatch {
-                reasoning_effort: Some(Some("low".into())),
+                reasoning_effort: Some(steve_types::ReasoningEffort::Low),
                 ..Default::default()
             },
             "me",
         )
         .unwrap()
         .unwrap();
-    assert_eq!(updated.reasoning_effort.as_deref(), Some("low"));
+    assert_eq!(updated.reasoning_effort, steve_types::ReasoningEffort::Low);
     s.bots()
         .patch(
             &bot.id,
             &BotPatch {
-                reasoning_effort: Some(None),
+                reasoning_effort: Some(steve_types::ReasoningEffort::Default),
                 ..Default::default()
             },
             "me",
         )
         .unwrap();
-    assert!(
-        s.bots()
-            .get(&bot.id)
-            .unwrap()
-            .unwrap()
-            .reasoning_effort
-            .is_none()
+    assert_eq!(
+        s.bots().get(&bot.id).unwrap().unwrap().reasoning_effort,
+        steve_types::ReasoningEffort::Default
     );
 }
 

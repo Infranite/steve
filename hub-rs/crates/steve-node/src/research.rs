@@ -199,7 +199,7 @@ impl LocalNode {
         req.add_dirs = add_dirs;
         req.budget = Some(cfg.budget);
         req.models = Some(vec![model.clone()]);
-        req.effort = run.choice.effort.clone();
+        req.effort = run.choice.effort.map(|e| e.as_str().to_owned());
         req.harness = run.choice.harness.clone();
         if full && req.cwd.is_none() {
             // the user's own home, as a terminal opens there

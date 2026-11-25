@@ -216,8 +216,8 @@ pub struct ExecutionSurface {
     pub harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: steve_types::ReasoningEffort,
 }
 
 /// `rowBot`: `deleted` is omitted from serialized JSON; `workspace_id` is the legacy owner.
@@ -244,8 +244,16 @@ pub struct Bot {
     pub prompt: Option<String>,
     pub device: Option<String>,
     pub owner: Option<String>,
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: steve_types::ReasoningEffort,
     pub specialties: Vec<String>,
+}
+
+pub(crate) fn effort_col(r: &Row, col: &str) -> rusqlite::Result<steve_types::ReasoningEffort> {
+    let raw: Option<String> = r.get(col)?;
+    Ok(raw
+        .as_deref()
+        .and_then(steve_types::ReasoningEffort::parse)
+        .unwrap_or_default())
 }
 
 impl Bot {
@@ -271,7 +279,7 @@ impl Bot {
             prompt: r.get("prompt")?,
             device: r.get("device")?,
             owner: r.get("owner")?,
-            reasoning_effort: r.get("reasoning_effort")?,
+            reasoning_effort: effort_col(r, "reasoning_effort")?,
             specialties: json_col(r, "specialties", Vec::new())?,
         })
     }
@@ -484,7 +492,8 @@ pub struct Session {
     pub source: String,
     pub readonly: i64,
     pub import_key: Option<String>,
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: steve_types::ReasoningEffort,
+    pub effort_mapping: Option<steve_types::EffortMapping>,
 }
 
 impl Session {
@@ -497,7 +506,8 @@ impl Session {
             bot_id: r.get("bot_id")?,
             harness: r.get("harness")?,
             model: r.get("model")?,
-            reasoning_effort: r.get("reasoning_effort")?,
+            reasoning_effort: effort_col(r, "reasoning_effort")?,
+            effort_mapping: json_col(r, "effort_mapping", None)?,
             cwd: r.get("cwd")?,
             acp_session_id: r.get("acp_session_id")?,
             status: r.get("status")?,

@@ -157,7 +157,7 @@ impl Kit {
                 bot_id: Some("dev".into()),
                 harness: "claude-code".into(),
                 model: None,
-                reasoning_effort: None,
+                reasoning_effort: steve_types::ReasoningEffort::Default,
                 cwd: self.home().to_string_lossy().into(),
                 title: "t".into(),
                 token: format!("tok-{item}-{}", crate::util::uid("x")),

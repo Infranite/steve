@@ -23,6 +23,7 @@ fn bot_catalogue(k: &Kit, models: &[&str], efforts: &[&str]) {
             id: id.to_string(),
             name: None,
             description: None,
+            efforts: None,
         })
         .collect();
     h.efforts = efforts.iter().map(|s| s.to_string()).collect();
@@ -81,7 +82,7 @@ async fn new_bot_card_cannot_create_an_unsupported_model() {
 }
 
 #[tokio::test]
-async fn bot_card_apply_checks_effort_but_notes_do_not_revalidate_the_stored_selection() {
+async fn bot_card_apply_accepts_canonical_effort_and_notes_preserve_stored_selection() {
     let k = Kit::new();
     bot_catalogue(&k, &["allowed-model"], &["low", "high"]);
     k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"reasoning_effort","value":"high"}]}"#.into()));
@@ -90,26 +91,17 @@ async fn bot_card_apply_checks_effort_but_notes_do_not_revalidate_the_stored_sel
         .draft(WS, target("bot", Some("dev")), "提高强度")
         .await
         .unwrap();
+    // Canonical effort stays valid even when a harness only offers a subset (adapter maps it).
     bot_catalogue(&k, &["allowed-model"], &["low"]);
-    assert!(
-        k.core
-            .apply(&p.id, "me", WS)
-            .unwrap_err()
-            .to_string()
-            .contains("reasoning_effort")
-    );
-    assert!(
-        k.db()
-            .bot("dev")
-            .unwrap()
-            .unwrap()
-            .reasoning_effort
-            .is_none()
+    k.core.apply(&p.id, "me", WS).unwrap();
+    assert_eq!(
+        k.db().bot("dev").unwrap().unwrap().reasoning_effort,
+        steve_types::ReasoningEffort::High
     );
     k.db()
         .bot_patch(
             "dev",
-            &crate::patch![model: "stored-model", reasoning_effort: "stored-effort"],
+            &crate::patch![model: "stored-model", reasoning_effort: "low"],
             "me",
         )
         .unwrap();
@@ -122,7 +114,7 @@ async fn bot_card_apply_checks_effort_but_notes_do_not_revalidate_the_stored_sel
     k.core.apply(&note.id, "me", WS).unwrap();
     let b = k.db().bot("dev").unwrap().unwrap();
     assert_eq!(b.model.as_deref(), Some("stored-model"));
-    assert_eq!(b.reasoning_effort.as_deref(), Some("stored-effort"));
+    assert_eq!(b.reasoning_effort, steve_types::ReasoningEffort::Low);
     assert_eq!(b.role, "a note");
 }
 
@@ -510,7 +502,7 @@ async fn a_models_draft_sets_lists_effort_and_agent_defaults_and_undoes() {
         assert!(p.contains("  route.harness · 分流（"));
         assert!(p.contains("跟随 Steve（现在是 Claude Code · claude-sonnet-5-5 → claude-opus-5-5）"));
         assert!(p.contains("  route · 分流 · 模型"));
-        assert!(p.contains("  route.effort · 分流 · 推理强度 · enum · 默认|低|中|高|很高|最高|极致 · \"默认\""));
+        assert!(p.contains("  route.effort · 分流 · 推理强度 · enum · 默认|低|中|高|最高 · \"默认\""));
         assert!(p.contains("  agent.claude-code · Claude Code 新会话的默认模型"));
         Ok(r#"{"changes":[{"key":"route","value":"claude-sonnet-5-5，claude-haiku-5-5"},{"key":"chat.harness","value":"Codex"},{"key":"research.effort","value":"最高"},{"key":"agent.codex","value":"gpt-6-sol"},{"key":"yolo","value":"not a model!"}]}"#.into())
     });
@@ -544,7 +536,7 @@ async fn a_models_draft_sets_lists_effort_and_agent_defaults_and_undoes() {
     );
     assert_eq!(m.for_purpose(WS, "chat").harness, "codex");
     let r = m.for_purpose(WS, "research");
-    assert_eq!(r.effort.as_deref(), Some("max"));
+    assert_eq!(r.effort, Some(steve_types::ReasoningEffort::Max));
     assert_eq!(
         r.models,
         ["claude-sonnet-5-5", "claude-opus-5-5"],

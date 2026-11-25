@@ -50,7 +50,7 @@ fn new_session(s: &Store, item: Option<&str>, token: &str) -> Session {
             bot_id: Some("steve".into()),
             harness: "claude-code".into(),
             model: None,
-            reasoning_effort: None,
+            reasoning_effort: steve_types::ReasoningEffort::Default,
             cwd: "/tmp".into(),
             title: "t".into(),
             token: token.into(),

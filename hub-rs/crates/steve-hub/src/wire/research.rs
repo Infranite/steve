@@ -197,7 +197,7 @@ impl ResearchAdapter {
         if !q.models.models.is_empty() {
             req.models = Some(q.models.models.clone());
         }
-        req.effort = q.models.effort.clone();
+        req.effort = q.models.effort.map(|e| e.as_str().to_owned());
         req.harness = q.models.harness.clone();
         /* the question's own files, then the ones of the message it follows up on */
         let own = q.files.iter().map(|f| (f, false));
@@ -360,7 +360,10 @@ impl ResearchAdapter {
             workspace: q.ws.clone(),
             harness: req.harness.clone(),
             model: String::new(),
-            effort: req.effort.clone(),
+            effort: req
+                .effort
+                .as_deref()
+                .and_then(steve_types::ReasoningEffort::parse),
             prompt: String::new(),
             resume: None,
             files: self.files(q),

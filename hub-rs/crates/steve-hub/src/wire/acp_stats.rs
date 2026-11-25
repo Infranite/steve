@@ -280,7 +280,7 @@ mod tests {
                 bot_id: Some("steve".into()),
                 harness: harness.into(),
                 model: None,
-                reasoning_effort: None,
+                reasoning_effort: Default::default(),
                 cwd: t.dir.path().display().to_string(),
                 title: "t".into(),
                 token: "tok".into(),

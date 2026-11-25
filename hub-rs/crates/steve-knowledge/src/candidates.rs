@@ -109,7 +109,7 @@ pub struct NewCandidate {
     pub is_explicit_rule: bool,
 }
 
-/// Line heads of legacy confirm card drafts (retained read-only for pre-140 rows).
+/// Line heads of legacy confirm card drafts (retained read-only for pre-141 rows).
 const WHY: &str = "为什么值得保留：";
 const SCOPE: &str = "适用：";
 

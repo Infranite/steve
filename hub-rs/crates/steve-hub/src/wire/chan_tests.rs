@@ -66,7 +66,7 @@ impl steve_core::OneModel for One {
         &self,
         call: &OneCall<'_>,
         model: &str,
-        _effort: Option<&str>,
+        _effort: Option<steve_types::ReasoningEffort>,
         _on_text: Option<OnText<'_>>,
     ) -> Tried {
         let p = call.prompt;

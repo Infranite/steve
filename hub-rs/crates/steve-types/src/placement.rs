@@ -153,7 +153,8 @@ pub struct BotPlacement {
     pub node_priority: u32,
     pub harness: String,
     pub model: Option<String>,
-    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: crate::ReasoningEffort,
     pub explanation: PlacementExplanation,
 }
 
