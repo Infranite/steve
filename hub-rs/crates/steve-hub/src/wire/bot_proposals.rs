@@ -1,7 +1,7 @@
 //! A blocked automatic request can propose a Bot on a verified route. Confirmation is a
 //! workspace-owner command that creates the Bot and its reviewed grants in one transaction.
 use steve_core::CreateItem;
-use steve_node_api::HarnessChoice;
+use steve_node_api::{HarnessChoice, PermissionMode};
 use steve_store::{Members, NewBot, Read, StoreError, bot_admin, bot_dispatch};
 use steve_types::{
     BotProposal, ConfigEvent, ConfirmBotProposal, PlacementBlocked, PlacementRejection as Reason,
@@ -99,10 +99,9 @@ impl RoutedRuntime {
         node: &str,
         choice: &HarnessChoice,
     ) -> bool {
-        matches!(
-            self.assess_node(ws, project, node, choice, "default"),
-            Ok(None)
-        ) && self.report(node, choice, Some("default")).0.is_none()
+        let mode = PermissionMode::Ask.as_str();
+        matches!(self.assess_node(ws, project, node, choice, mode), Ok(None))
+            && self.report(node, choice, Some(mode)).0.is_none()
     }
 
     pub(super) fn confirm_bot_proposal(
@@ -176,7 +175,7 @@ impl RoutedRuntime {
                         specialties: Some(bot_dispatch::specialties(edit.specialties)),
                         harness: choice.harness,
                         model: choice.model,
-                        perm_mode: Some("ask".into()),
+                        perm_mode: Some(PermissionMode::Ask.as_str().into()),
                         ..Default::default()
                     },
                     actor,
