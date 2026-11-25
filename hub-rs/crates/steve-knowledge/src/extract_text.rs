@@ -64,6 +64,12 @@ pub struct FrontMatter {
     pub level: Option<String>,
     /// `steve.visibility`, raw (validated by the caller against the workspace).
     pub visibility: Option<String>,
+    /// Standard tool-agnostic memory subject type (`me` | `party` | `project` | `repo` | `topic`).
+    pub subject_type: Option<String>,
+    /// Standard tool-agnostic memory subject identifier.
+    pub subject_id: Option<String>,
+    /// Optional `steve.pinned` flag for priority context assembly.
+    pub pinned: Option<bool>,
 }
 
 /// Normalized text of one document.
@@ -374,6 +380,8 @@ fn parse_front(yaml: &str) -> FrontMatter {
         block = "";
         match key {
             "title" if !value.is_empty() => fm.title = Some(unquote(value)),
+            "subject_type" if !value.is_empty() => fm.subject_type = Some(unquote(value)),
+            "subject_id" if !value.is_empty() => fm.subject_id = Some(unquote(value)),
             "tags" => {
                 if let Some(list) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
                     list.split(',').for_each(|v| push_tag(&mut fm, v));
@@ -406,6 +414,8 @@ fn set_steve(fm: &mut FrontMatter, key: &str, v: &str) {
     match key {
         "level" if LEVELS.contains(&v.as_str()) => fm.level = Some(v),
         "visibility" if !v.is_empty() => fm.visibility = Some(v),
+        "pinned" if v == "true" => fm.pinned = Some(true),
+        "pinned" if v == "false" => fm.pinned = Some(false),
         _ => {}
     }
 }

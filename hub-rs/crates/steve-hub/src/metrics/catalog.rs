@@ -1033,6 +1033,36 @@ pub(super) fn describe() {
         "Memory hits injected into or cited by a consumer. Labels: consumer (session, chat, draft, reply, search, flow, other), stage (injected, cited)."
     );
     describe_counter!(
+        "steve_memory_writes_total",
+        Count,
+        "Unified memory ingestion and file write outcomes. Labels: mode (ingest, buffer, read_only, propose, direct_write, non_memory), result."
+    );
+    describe_counter!(
+        "steve_memory_reverted_total",
+        Count,
+        "Silent memory writes deleted or reverted by the owner, plus revert-rate health alerts. Labels: reason."
+    );
+    describe_counter!(
+        "steve_memory_repeat_corrections_total",
+        Count,
+        "Repeated owner corrections to the same memory rule or anchor."
+    );
+    describe_counter!(
+        "steve_memory_synthesis_tokens_total",
+        Count,
+        "Model tokens consumed by event-driven memory overview synthesis. Labels: kind, direction (input, output)."
+    );
+    describe_counter!(
+        "steve_memory_refresh_skipped_total",
+        Count,
+        "Memory overview synthesis evaluations skipped without calling a model. Labels: kind, reason (no_change, below_threshold)."
+    );
+    describe_counter!(
+        "steve_memory_reconcile_total",
+        Count,
+        "File-as-truth memory anchor reconciliations executed. Labels: result."
+    );
+    describe_counter!(
         "steve_security_refusals_total",
         Count,
         "Actions refused at a security or tenant boundary. Labels: boundary, reason."

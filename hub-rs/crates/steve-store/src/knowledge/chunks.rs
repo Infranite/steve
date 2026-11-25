@@ -141,10 +141,20 @@ fn scope(query: &mut SelectStatement, filter: &ChunkFilter<'_>) {
             .from("kb_docs")
             .and_where(Expr::col("source_id").is_in(filter.paused_docs.iter().map(String::as_str)))
             .take();
+        let paused_entries = Query::select()
+            .column("id")
+            .from("memory_entries")
+            .and_where(Expr::col("source_id").is_in(filter.paused_docs.iter().map(String::as_str)))
+            .take();
         query.and_where(
             Expr::col(("c", "obj_type"))
                 .ne("chunk")
                 .or(Expr::col(("c", "obj_id")).not_in_subquery(paused)),
+        );
+        query.and_where(
+            Expr::col(("c", "obj_type"))
+                .ne("memory_entry")
+                .or(Expr::col(("c", "obj_id")).not_in_subquery(paused_entries)),
         );
     }
 }
@@ -185,7 +195,7 @@ impl<C: Read> Chunks<'_, C> {
         scope(&mut q, filter);
         q.and_where(
             Expr::col(("c", "obj_type"))
-                .is_in(["mem", "bot_mem"])
+                .is_in(["mem", "bot_mem", "memory_entry"])
                 .and(dialect.contains(Expr::col(("c", "text")), Expr::value(text)))
                 .or(Expr::col(("c", "obj_type"))
                     .eq("chunk")
@@ -395,6 +405,30 @@ impl Chunks<'_, W<'_>> {
             Query::delete()
                 .from_table("kb_chunks")
                 .and_where(target(kind, id)),
+        )? as usize)
+    }
+
+    /// Removes all FTS / vector / chunk cache rows for a workspace (used for FTS rebuild verification).
+    pub fn clear_workspace(&mut self, ws: &str) -> Result<usize> {
+        let ids = Query::select()
+            .column("id")
+            .from("kb_chunks")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .take();
+        self.0.exec(
+            Query::delete()
+                .from_table("kb_fts")
+                .and_where(Expr::col("rowid").in_subquery(ids.clone())),
+        )?;
+        self.0.exec(
+            Query::delete()
+                .from_table("kb_vectors")
+                .and_where(Expr::col("chunk_id").in_subquery(ids)),
+        )?;
+        Ok(self.0.exec(
+            Query::delete()
+                .from_table("kb_chunks")
+                .and_where(Expr::col("workspace_id").eq(ws)),
         )? as usize)
     }
 

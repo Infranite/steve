@@ -292,6 +292,9 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/138.sql"),
     // 139: add mems.pinned for priority-and-budget personal context assembly.
     include_str!("../migrations/139.sql"),
+    // 140: file-as-truth memory architecture (source role/write_mode, sidecar memory_entries,
+    // evidence, observation buffer, rejected_patterns tombstones, memory_revisions, skill_md proposals).
+    include_str!("../migrations/140.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

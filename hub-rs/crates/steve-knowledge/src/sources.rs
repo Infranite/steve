@@ -7,7 +7,7 @@ pub mod folder_node;
 
 use serde_json::{Value, json};
 use steve_store::base::{Level, Visibility};
-use steve_store::knowledge::{Documents, SourceRow};
+use steve_store::knowledge::{Documents, SourceRole, SourceRow, WriteMode};
 use steve_store::{Read, Result, W, uid};
 
 // Extraction origins (no longer indexed as knowledge documents)
@@ -68,6 +68,11 @@ pub fn ensure_builtin(w: &mut W<'_>, ws: &str, actor: &str, now: i64) -> Result<
         if Documents(w).source_of_kind(ws, kind)?.is_some() {
             continue;
         }
+        let (role, write_mode) = if kind == "mems" {
+            (SourceRole::Memory, WriteMode::DirectWrite)
+        } else {
+            (SourceRole::Knowledge, WriteMode::ReadOnly)
+        };
         let id = uid("ks");
         Documents(w).insert_source(
             &id,
@@ -77,6 +82,8 @@ pub fn ensure_builtin(w: &mut W<'_>, ws: &str, actor: &str, now: i64) -> Result<
             &json!({}),
             &Visibility::from_db(vis),
             Level::from_db(level),
+            role,
+            write_mode,
             actor,
             now,
         )?;
@@ -123,6 +130,8 @@ pub fn source_json(c: &mut impl Read, s: &SourceRow) -> Result<Value> {
         "exclude": list("exclude"),
         "visibility": s.visibility,
         "level": s.level,
+        "role": s.role,
+        "write_mode": s.write_mode,
         "paused": s.paused,
         "status": s.status,
         "error": s.error,

@@ -181,6 +181,15 @@ pub fn text_hash(text: &str) -> String {
 enum After {
     /// A draft answer you discarded: the message it answers loses its “收到” reaction.
     Discarded { message_id: String },
+    /// Owner edited an AI-composed draft before approving it -> unified memory draft-diff ingest.
+    DraftEdited {
+        ws: String,
+        user: String,
+        message_id: String,
+        space_id: String,
+        before: String,
+        after: String,
+    },
 }
 
 struct LinkInner {
@@ -340,17 +349,62 @@ fn knowledge_of(
     let mut out: Vec<KnowledgeUse> = g
         .hits
         .iter()
-        .map(|h| KnowledgeUse {
-            source_type: h.obj_type.clone(),
-            source_id: h.obj_id.clone(),
-            source_label: h.label.clone(),
-            level: h.level,
-            visibility: h.visibility.code(),
-            text: h.text.clone(),
-            seq: Some(h.seq),
+        .map(|h| {
+            let (level, visibility) = if h.obj_type == "memory_entry" {
+                steve_store::knowledge::MemoryEntries(r)
+                    .get(&h.obj_id)
+                    .ok()
+                    .flatten()
+                    .map(|e| (e.level, e.visibility.code()))
+                    .unwrap_or_else(|| (h.level, h.visibility.code()))
+            } else {
+                (h.level, h.visibility.code())
+            };
+            KnowledgeUse {
+                source_type: h.obj_type.clone(),
+                source_id: h.obj_id.clone(),
+                source_label: h.label.clone(),
+                level,
+                visibility,
+                text: h.text.clone(),
+                seq: Some(h.seq),
+            }
         })
         .collect();
     for a in &g.anchors {
+        if let Some(eid) = a
+            .strip_prefix("memory_entry:")
+            .or_else(|| a.strip_prefix("me:"))
+        {
+            if out.iter().any(|k| k.source_id == eid) {
+                continue;
+            }
+            if let Some(entry) = steve_store::knowledge::MemoryEntries(r).get(eid)?
+                && entry.status == steve_store::knowledge::EntryStatus::Active
+            {
+                let text = steve_store::knowledge::Chunks(r)
+                    .disclosure(&entry.workspace_id, "memory_entry", &entry.id, 0)?
+                    .map(|(t, _, _)| t)
+                    .or_else(|| {
+                        steve_knowledge::memory_file::read_entry_text_from_disk(r, &entry)
+                            .ok()
+                            .flatten()
+                    })
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    out.push(KnowledgeUse {
+                        source_type: "memory_entry".into(),
+                        source_id: entry.id.clone(),
+                        source_label: entry.rel_path.clone(),
+                        level: entry.level,
+                        visibility: entry.visibility.code(),
+                        text,
+                        seq: Some(0),
+                    });
+                }
+            }
+            continue;
+        }
         let Some(id) = a.strip_prefix("mem:").or_else(|| a.strip_prefix("mm:")) else {
             continue;
         };
@@ -3193,6 +3247,37 @@ impl Outbox {
         for a in self.link.take() {
             match a {
                 After::Discarded { message_id } => ch.react_discarded(&message_id).await,
+                After::DraftEdited {
+                    ws,
+                    user,
+                    message_id,
+                    space_id,
+                    before,
+                    after,
+                } => {
+                    let policy =
+                        steve_knowledge::ingest::fallback_policy_for_store(&ch.modules().store);
+                    let label = format!("Channel draft {space_id}");
+                    if let Err(e) = steve_knowledge::ingest::submit_draft_diff_with_policy(
+                        ch.modules(),
+                        &policy,
+                        &ws,
+                        &user,
+                        "channel_draft",
+                        &message_id,
+                        &label,
+                        None,
+                        &before,
+                        &after,
+                    )
+                    .await
+                    {
+                        tracing::debug!(
+                            message = %message_id,
+                            "channel draft diff ingest skipped: {e}"
+                        );
+                    }
+                }
             }
         }
         self.convert_due(ch).await;
@@ -4076,6 +4161,16 @@ impl MessageDecisions {
                 }
                 let send_at = now + send_delay_ms(w, &row)?;
                 approve_message_text(w, &row.id, &d.id, &text)?;
+                if edited && text.trim() != row.text.trim() {
+                    self.0.push(After::DraftEdited {
+                        ws: cx.ws.to_string(),
+                        user: cx.actor.to_string(),
+                        message_id: row.id.clone(),
+                        space_id: row.space_id.clone(),
+                        before: row.text.clone(),
+                        after: text.clone(),
+                    });
+                }
                 steve_store::audit_repo::record(
                     w,
                     cx.ws,

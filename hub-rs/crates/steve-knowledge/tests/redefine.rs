@@ -10,15 +10,18 @@
 use axum::Router;
 use serde_json::{Value, json};
 use steve_knowledge::Knowledge;
-use steve_knowledge::candidates::{self, MemDecisions, NewCandidate, Origin, OriginKind};
+use steve_knowledge::candidates::{self, MemDecisions};
 use steve_knowledge::extract::{KIND_PROPOSAL, PROMPT_HEAD};
 use steve_knowledge::proposals::{self, AgentsProposalDecisions};
 use steve_knowledge::retrieve::{Purpose, Query, retrieve};
+use steve_knowledge::sources::folder::FolderPolicy;
 use steve_knowledge::sources::{chat, items};
 use steve_knowledge::steward::{self, DEFAULT_THRESHOLD, StewardGate};
 use steve_modules::decisions;
 use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
-use steve_store::base::{Level, ObjRef, Viewer};
+use steve_store::base::mems::NewMem;
+use steve_store::base::{Level, Viewer};
+use steve_store::knowledge::Memories;
 use steve_store::testkit::knowledge as fixture;
 use steve_store::{DecisionRows, NewProject};
 
@@ -34,6 +37,10 @@ fn setup() -> Env {
         r.decision(proposals::SUBJECT, Box::new(AgentsProposalDecisions));
     });
     let kb = Knowledge::new(|_| {});
+    kb.set_folder_policy(FolderPolicy::new(
+        env.dir.path(),
+        env.dir.path().join("steve_home"),
+    ));
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
     fixture::seed_delivery(env.store()).expect("seed");
     Env { env, kb, app }
@@ -97,53 +104,71 @@ async fn extraction_enforces_about_and_routes_engineering_to_agents_proposals() 
     let reply = json!({
         "items": [
             {
+                "changes_future_behavior": true,
                 "kind": "fact",
                 "text": "缺 scope 的条目会被丢弃",
                 "about": ["Acme"],
                 "evidence": "五行以内",
-                "basis": "verified"
+                "basis": "verified",
+                "when": "client",
+                "why": "test"
             },
             {
+                "changes_future_behavior": true,
                 "kind": "fact",
                 "scope": "organization",
                 "text": "没有主语的孤立事实",
                 "about": [],
                 "evidence": "五行以内",
-                "basis": "verified"
+                "basis": "verified",
+                "when": "client",
+                "why": "test"
             },
             {
+                "changes_future_behavior": true,
                 "kind": "fact",
                 "scope": "person",
                 "text": "王五负责未知业务",
                 "about": ["王五"],
                 "evidence": "五行以内",
-                "basis": "verified"
+                "basis": "verified",
+                "when": "client",
+                "why": "test"
             },
             {
+                "changes_future_behavior": true,
                 "kind": "fact",
                 "scope": "person",
                 "text": "类型不匹配：写 person 却只指了组织",
                 "about": ["Acme"],
                 "evidence": "五行以内",
-                "basis": "verified"
+                "basis": "verified",
+                "when": "client",
+                "why": "test"
             },
             {
+                "changes_future_behavior": false,
                 "kind": "preference",
                 "scope": "person",
                 "text": "用户希望给 Acme 写续签邮件并抄送 Sarah",
                 "about": [],
                 "evidence": "给 Acme 写续签邮件，抄送 Sarah",
-                "basis": "explicit"
+                "basis": "explicit",
+                "when": "this_task",
+                "why": "one-off"
             },
             {
+                "changes_future_behavior": true,
                 "kind": KIND_PROPOSAL,
                 "scope": "codebase",
                 "text": "普通目录项目没有代码仓库，不能接 codebase 提议",
                 "about": ["notes_dir"],
                 "evidence": "五行以内",
-                "basis": "verified"
+                "basis": "verified",
+                "why": "test"
             },
             {
+                "changes_future_behavior": true,
                 "kind": KIND_PROPOSAL,
                 "scope": "codebase",
                 "text": "输入框由原生 textarea 绘制光标",
@@ -153,6 +178,7 @@ async fn extraction_enforces_about_and_routes_engineering_to_agents_proposals() 
                 "why": "避免重复实现光标叠加层"
             },
             {
+                "changes_future_behavior": true,
                 "kind": "fact",
                 "scope": "codebase",
                 "text": "消息列表在流式输出时保持滚动锚定，不要每次重排整段历史",
@@ -162,12 +188,14 @@ async fn extraction_enforces_about_and_routes_engineering_to_agents_proposals() 
                 "why": "避免长对话抖动"
             },
             {
+                "changes_future_behavior": true,
                 "kind": "fact",
                 "scope": "organization",
                 "text": "Acme 的邮件往来统一使用英文",
                 "about": ["Acme"],
                 "evidence": "Acme 的邮件一律用英文",
                 "basis": "verified",
+                "when": "acme_email",
                 "why": "以后给 Acme 发信都要遵守"
             }
         ]
@@ -177,17 +205,25 @@ async fn extraction_enforces_about_and_routes_engineering_to_agents_proposals() 
     let got = items::finished(&e.env.modules, &e.kb, "ST-12")
         .await
         .unwrap();
-    // Only the valid Acme fact enters personal knowledge candidates.
+    // Only the valid Acme fact enters unified memory ingestion (buffered until corroborated,
+    // ZERO Inbox confirmation cards opened for personal memories).
     assert_eq!(got.len(), 1, "{got:#?}");
-    assert_eq!(got[0].kind, "fact");
-    assert_eq!(got[0].text, "Acme 的邮件往来统一使用英文");
-    assert_eq!(got[0].about, vec![ObjRef::new("party", "org_acme")]);
+    assert!(matches!(
+        got[0],
+        steve_knowledge::ingest::IngestOutcome::Buffered { .. }
+            | steve_knowledge::ingest::IngestOutcome::Written { .. }
+    ));
 
-    // Pending candidates endpoint contains ONLY the personal knowledge candidate — never proposals.
+    // Pending candidates endpoint is empty — zero Inbox confirmation cards for memories!
     let (s, cands) = e.me("GET", "/kb/candidates", None).await;
     assert_eq!(s, 200, "{cands}");
-    assert_eq!(cands.as_array().unwrap().len(), 1);
-    assert_eq!(cands[0]["mem"]["id"], got[0].id.as_str());
+    assert_eq!(cands.as_array().unwrap().len(), 0);
+    let open_mem = e
+        .env
+        .store()
+        .read(|r| DecisionRows(r).open_confirmations(WS, candidates::SUBJECT))
+        .unwrap();
+    assert_eq!(open_mem, 0);
 
     // Both engineering conclusions became project AGENTS.md proposals with open decisions.
     let (s, props) = e
@@ -427,35 +463,23 @@ async fn steward_trigger_gates_deterministically_on_configured_threshold() {
         .unwrap();
     assert_eq!(manual, StewardGate::Run { reason: "manual" });
 
-    // Add 1 candidate -> total 1 < threshold 2 -> skipped (`below_threshold`).
+    // Seed 1 candidate row directly in `mems` -> total 1 < threshold 2 -> skipped (`below_threshold`).
     let add_cand = |idx: usize| {
-        let origin = Origin {
-            ws: WS.into(),
-            kind: OriginKind::Item,
-            id: format!("ST-10{idx}"),
-            label: format!("ST-10{idx} 交付时"),
-            user: ME.into(),
-            writer: "steve".into(),
-            default_level: Level::Conclusion,
-            item_id: None,
-            session_id: None,
-        };
         e.env
             .store()
             .write(|tx| {
-                candidates::propose_in(
-                    tx,
-                    &origin,
-                    &NewCandidate {
+                Memories(tx).create(
+                    WS,
+                    &NewMem {
                         kind: "rule".into(),
                         text: format!("候选规则 {idx}"),
-                        about: vec![],
-                        level: Level::Conclusion,
-                        evidence: String::new(),
-                        owner_said: false,
-                        supersedes: None,
-                        why: String::new(),
-                        scope: String::new(),
+                        source_type: "item".into(),
+                        source_label: format!("ST-10{idx} 交付时"),
+                        level: Level::Reasoning,
+                        status: "candidate".into(),
+                        writer: "steve".into(),
+                        created_by: ME.into(),
+                        ..Default::default()
                     },
                 )
             })
