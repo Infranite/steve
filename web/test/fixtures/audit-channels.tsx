@@ -9,9 +9,9 @@ import { seedDecisions } from "./view-data"
 /* `?account`: a bot account's page (its undo window); otherwise a flagged channel draft (“改写后再看”) and an
  * unchecked mail draft (“检查披露”), from the mocked API */
 document.documentElement.classList.toggle("dark", location.search.includes("dark"))
-const chan: Wait = { type: "approve", subject: "chan_message", subjectId: "cm_1", q: "以值班小运发到「运维群」（可能泄露：「30 万」）", draft: "Acme 的预算有 30 万。", since: "刚刚", decision: "dc_chan", session: null, options: ["yes", "no", "rewrite"], by: "steve" }
+const chan: Wait = { type: "approve", subject: "chan_message", subjectId: "cm_1", q: "以值班小运发到「运维群」（可能泄露：「30 万」）", draft: "Acme 的预算有 30 万。", since: "刚刚", decision: "dc_chan", session: null, options: ["yes", "no", "rewrite"], by: "steve", tier: "decide" }
 const plain: Wait = { ...chan, decision: "dc_plain", subjectId: "cm_2", q: "以你本人发到「Steve 开发群」", draft: "周四可以。", options: ["yes", "no"] }
-const mail: Wait = { type: "approve", subject: "mail_draft", subjectId: "md_1", q: "发邮件给 Alice：Re: 预算", draft: "", since: "刚刚", decision: "dc_mail", session: null, options: ["send", "no"], by: "steve" }
+const mail: Wait = { type: "approve", subject: "mail_draft", subjectId: "md_1", q: "发邮件给 Alice：Re: 预算", draft: "", since: "刚刚", decision: "dc_mail", session: null, options: ["send", "no"], by: "steve", tier: "decide" }
 seedDecisions([chan, plain, mail])
 function Fixture() {
   useStore()

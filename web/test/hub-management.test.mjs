@@ -66,8 +66,8 @@ test('native rename uses its own bridge call', async () => {
   } finally { delete globalThis.window }
 })
 
-test('harness setup links open the Hub\'s own Node page, or the Node list when the binding is unknown', () => {
-  assert.equal(runtimeSetupHrefFor([{ id: 'd1', name: 'Studio Mac', node_id: 'local' }]), '#/devices/nodes/local')
+test('harness setup links open the Hub\'s own Node Harness tab, or the Node list when the binding is unknown', () => {
+  assert.equal(runtimeSetupHrefFor([{ id: 'd1', name: 'Studio Mac', node_id: 'local' }]), '#/devices/nodes/local/harness')
   assert.equal(runtimeSetupHrefFor([]), '#/devices/nodes')
   assert.equal(runtimeSetupHrefFor([{ id: 'd1', name: 'A', node_id: 'local' }, { id: 'd2', name: 'B', node_id: 'local' }]), '#/devices/nodes')
 })

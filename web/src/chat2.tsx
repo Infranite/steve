@@ -6,7 +6,7 @@ import { useWorkSummary } from "@/running-pill"
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react"
-import { itemDisplayStatus } from "@/item-workflow-relation"
+import { itemDisplayStatus } from "@/store"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible"

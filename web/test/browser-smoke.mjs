@@ -6,7 +6,7 @@ import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 
 /* full app and its shell first (sign-in, settings with a workspace switch, the native shell's bridge), then pages */
-const SMOKE = ["sign-in", "settings-panes", "notifications", "native-shell", "bots", "node-harnesses", "conversations", "channel-states", "item-card", "message-cards", "reply-preview", "channel-reply", "channel-reply-refresh", "runtime-setup"]
+const SMOKE = ["sign-in", "nav-ia", "settings-panes", "notifications", "native-shell", "bots", "node-harnesses", "conversations", "channel-states", "item-card", "message-cards", "reply-preview", "channel-reply", "channel-reply-refresh", "runtime-setup"]
 const LIMIT_MS = 120_000
 
 const web = fileURLToPath(new URL("..", import.meta.url))
@@ -27,7 +27,7 @@ const run = (name) => new Promise((resolve) => {
   child.on("close", (code) => { clearTimeout(timer); resolve({ name, ok: code === 0, s: ((Date.now() - start) / 1000).toFixed(1), out }) })
 })
 
-SMOKE.push("harness-updates", "markdown-highlight", "person-avatar")
+SMOKE.push("harness-updates", "node-tabs", "markdown-highlight", "person-avatar")
 
 const failed = []
 try {

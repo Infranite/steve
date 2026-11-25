@@ -101,9 +101,6 @@ pub struct ItemView {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(test, ts(as = "Option<Vec<ItemId>>", optional))]
     pub deps: Vec<ItemId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub workflow: Option<ItemWorkflow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(test, ts(as = "Option<Vec<ItemWait>>", optional))]
     pub waits: Vec<ItemWait>,
@@ -140,22 +137,6 @@ pub struct ItemParent {
 pub struct ItemSnooze {
     pub label: String,
     pub until: Millis,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-pub struct ItemWorkflow {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub paused: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub cycle: Option<i64>,
-    pub failed: Vec<ItemId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub attempt: Option<i64>,
-    pub superseded: bool,
 }
 
 /// The discriminator stored for an item cycle. The close request and outcome are its payload.

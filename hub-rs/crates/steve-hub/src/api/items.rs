@@ -161,9 +161,7 @@ const DEP_WAIT_KEYS: &[&str] = &[
     "hub.dep_wait.holding",
     "hub.dep_wait.fallback",
     "hub.dep_wait.item_ending",
-    "hub.dep_wait.owner_only",
     "hub.dep_wait.no_session",
-    "hub.dep_wait.work_running",
 ];
 
 /// A dependency wait view with its fixed reasons in the request's language.
@@ -189,7 +187,6 @@ pub async fn get_one(
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
-    let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     let dispatch = super::bot_dispatch::store(&st).and_then(|s| {
         super::bot_dispatch::item_dispatch(s, &id, &c.ws)
@@ -209,7 +206,6 @@ pub async fn get_one(
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);
         }
-        out.insert("workflow".into(), workflow);
         out.insert("dependency_wait".into(), dependency_wait);
         out.insert("cycles".into(), objs(r.item_cycles(&id)?));
         out.insert("planRounds".into(), objs(r.item_plan_rounds(&id)?));
@@ -268,27 +264,6 @@ pub async fn dependency_wait(
         .await?)
 }
 
-pub async fn workflow_get(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    own_item(&st, &c.ws, &id).await?;
-    ok(st.domain.workflow_get(&id).await?)
-}
-
-pub async fn workflow_change(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path(id): Path<String>,
-    b: Bytes,
-) -> ApiResult {
-    own_item(&st, &c.ws, &id).await?;
-    let args = body(&b)?;
-    // Authenticated user boundary. single_session is deliberately unavailable to Bot/MCP calls.
-    ok(st.domain.workflow_change(&id, args, &c.me).await?)
-}
-
 pub async fn actions(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -308,32 +283,80 @@ pub async fn actions(
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BulkOp {
+    Pause,
+    Resume,
+    Drop,
+    Archive,
+}
+
+impl BulkOp {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pause" => Some(Self::Pause),
+            "resume" => Some(Self::Resume),
+            "drop" => Some(Self::Drop),
+            "archive" => Some(Self::Archive),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Drop => "drop",
+            Self::Archive => "archive",
+        }
+    }
+
+    /// Whether `state` (and `archived`) allows this bulk operation under the W3.2 lifecycle.
+    fn applies(self, state: &steve_types::ItemState, archived: bool) -> bool {
+        use steve_types::{CloseKind, ItemState};
+        match self {
+            Self::Pause => matches!(
+                state,
+                ItemState::Ready
+                    | ItemState::Active
+                    | ItemState::Closing {
+                        request: CloseKind::Complete,
+                        ..
+                    }
+            ),
+            Self::Resume => matches!(state, ItemState::Paused),
+            Self::Drop => matches!(
+                state,
+                ItemState::Ready
+                    | ItemState::Active
+                    | ItemState::Paused
+                    | ItemState::Closing {
+                        request: CloseKind::Complete,
+                        ..
+                    }
+            ),
+            Self::Archive => !archived,
+        }
+    }
+}
+
 pub async fn bulk(State(st): State<AppState>, Extension(c): Extension<Ctx>, b: Bytes) -> ApiResult {
     let v = body(&b)?;
     let mut k = Check::object(&v);
     let ids = k.str_array("ids", Some(1), Some(200));
-    let op = k.enum_("op", &["pause", "resume", "drop", "archive"]);
+    let op_raw = k.enum_("op", &["pause", "resume", "drop", "archive"]);
     k.finish()?;
+    let op = BulkOp::parse(&op_raw).ok_or_else(|| ApiError::Invalid(vec!["op".into()]))?;
     let mut n = 0;
     for id in ids {
-        let i = id.clone();
-        let Some(item) = st.read(move |r| Ok(r.item_get(&i)?)).await? else {
+        let (ws, i) = (c.ws.clone(), id.clone());
+        let Some(item) = st.read(move |r| Ok(r.item_view(&ws, &i)?)).await? else {
             continue;
         };
-        if item.get("workspace_id").and_then(Value::as_str) != Some(c.ws.as_str()) {
+        if !op.applies(&item.state, item.archived) {
             continue;
         }
-        let status = str_of(&item, "status");
-        let skip = match op.as_str() {
-            "pause" => status != "run",
-            "resume" => status != "pause",
-            "drop" => status == "done" || status == "drop",
-            _ => false,
-        };
-        if skip {
-            continue;
-        }
-        st.domain.item_action(&id, &op, &c.me).await?;
+        st.domain.item_action(&id, op.as_str(), &c.me).await?;
         n += 1;
     }
     ok(json!({ "n": n }))
@@ -788,6 +811,66 @@ mod dependency_text_tests {
             v
         );
     }
+
+    #[test]
+    fn bulk_op_matches_typed_item_state() {
+        use steve_types::{CloseKind, ClosedBy, ItemOutcome, ItemState};
+
+        let cases = [
+            (ItemState::Ready, (true, false, true)),
+            (ItemState::Active, (true, false, true)),
+            (ItemState::Paused, (false, true, true)),
+            (
+                ItemState::Closing {
+                    request: CloseKind::Complete,
+                    waits: vec![],
+                },
+                (true, false, true),
+            ),
+            (
+                ItemState::Closing {
+                    request: CloseKind::Cancel,
+                    waits: vec![],
+                },
+                (false, false, false),
+            ),
+            (
+                ItemState::Closing {
+                    request: CloseKind::Fail,
+                    waits: vec![],
+                },
+                (false, false, false),
+            ),
+            (
+                ItemState::Closed {
+                    outcome: ItemOutcome::Finished,
+                    by: ClosedBy::Owner,
+                },
+                (false, false, false),
+            ),
+            (
+                ItemState::Closed {
+                    outcome: ItemOutcome::Cancelled,
+                    by: ClosedBy::Owner,
+                },
+                (false, false, false),
+            ),
+            (
+                ItemState::Closed {
+                    outcome: ItemOutcome::Failed,
+                    by: ClosedBy::Rule,
+                },
+                (false, false, false),
+            ),
+        ];
+        for (state, (pause, resume, drop)) in cases {
+            assert_eq!(BulkOp::Pause.applies(&state, false), pause, "{state:?}");
+            assert_eq!(BulkOp::Resume.applies(&state, false), resume, "{state:?}");
+            assert_eq!(BulkOp::Drop.applies(&state, false), drop, "{state:?}");
+            assert!(BulkOp::Archive.applies(&state, false));
+            assert!(!BulkOp::Archive.applies(&state, true));
+        }
+    }
 }
 
 /// Routes mounted behind the shared API login and body-limit layers.
@@ -803,10 +886,6 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
                 .delete(items::delete_one),
         )
         .route("/items/{id}/actions", post(items::actions))
-        .route(
-            "/items/{id}/workflow",
-            get(items::workflow_get).post(items::workflow_change),
-        )
         .route("/items/{id}/lifecycle", post(items::lifecycle))
         .route(
             "/items/{id}/dependency-wait",

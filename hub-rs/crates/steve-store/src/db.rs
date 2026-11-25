@@ -262,8 +262,12 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/123.sql"),
     // 124: decision revisions, choice receipts, natural keys, prompt templates, and typed undo.
     include_str!("../migrations/124.sql"),
-    // 125: link workspace members to contact parties, add decisions.resolved_by, backfill legacy actors.
+    // 125: durable daily aggregates for low-cardinality telemetry counters.
     include_str!("../migrations/125.sql"),
+    // 126: remove retired dynamic work-graph tables and steve_workflow tool pins.
+    include_str!("../migrations/126.sql"),
+    // 127: link workspace members to contact parties, add decisions.resolved_by, backfill legacy actors.
+    include_str!("../migrations/127.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

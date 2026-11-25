@@ -877,3 +877,93 @@ async fn models_dev_prices() {
     assert!((est(&v) - (4.0 + 1.0)).abs() < 1e-9, "{}", v["spend"]);
     assert_eq!(v["spend"]["priced_by"], json!({"table": 3_000_000}));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nav_usage_persists_across_days_and_filters_by_range() {
+    let e = start().await;
+    let at = steve_store::now();
+    let (today, tz) = steve_store::Store::read_file(&e.db, |r| {
+        let tz = steve_stats::refresh::timezone(r, "default")?;
+        Ok((steve_stats::day::day(at, tz), tz))
+    })
+    .unwrap();
+    let (d7_from, _) = steve_stats::views::range("7d", None, None, &today).unwrap();
+    let (d30_from, _) = steve_stats::views::range("30d", None, None, &today).unwrap();
+    let day_10_ago = steve_stats::day::day(at - 10 * 86_400_000, tz);
+    let day_45_ago = steve_stats::day::day(at - 45 * 86_400_000, tz);
+
+    // Seed older daily rows directly into telemetry_daily (simulating previous Hub runs).
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    store
+        .write(|w| {
+            use steve_store::statistics::{TelemetryDaily, TelemetryMetric};
+            TelemetryDaily(w).record_counts(
+                "default",
+                &day_10_ago,
+                TelemetryMetric::WebNavOpen,
+                [("chat", 4), ("items", 2)],
+            )?;
+            TelemetryDaily(w).record_counts(
+                "default",
+                &day_45_ago,
+                TelemetryMetric::WebNavOpen,
+                [("chat", 10), ("stats", 1)],
+            )?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+    drop(store);
+
+    // Record live opens through POST /api/system/web-perf (unknown keys ignored).
+    let (status, body) = e
+        .call(
+            "POST",
+            "/api/system/web-perf",
+            Some(json!({"page": "inbox", "nav_opens": {"inbox": 3, "chat": 2, "unknown_key": 9}})),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (s, d7) = e.call("GET", "/api/stats/nav?range=7d", None).await;
+    assert_eq!(s, 200, "{d7}");
+    assert_eq!(d7["range"], "7d");
+    assert_eq!(d7["from"], d7_from);
+    assert_eq!(d7["to"], today);
+    assert_eq!(d7["total"], 5);
+    assert_eq!(
+        d7["items"],
+        json!([{"item": "inbox", "opens": 3}, {"item": "chat", "opens": 2}])
+    );
+
+    let (s, d30) = e.call("GET", "/api/stats/nav?range=30d", None).await;
+    assert_eq!(s, 200, "{d30}");
+    assert_eq!(d30["range"], "30d");
+    assert_eq!(d30["from"], d30_from);
+    assert_eq!(d30["total"], 11);
+    assert_eq!(
+        d30["items"],
+        json!([
+            {"item": "chat", "opens": 6},
+            {"item": "inbox", "opens": 3},
+            {"item": "items", "opens": 2},
+        ])
+    );
+
+    let (s, all) = e.call("GET", "/api/stats/nav?range=all", None).await;
+    assert_eq!(s, 200, "{all}");
+    assert_eq!(all["range"], "all");
+    assert_eq!(all["from"], day_45_ago);
+    assert_eq!(all["total"], 22);
+    assert_eq!(
+        all["items"],
+        json!([
+            {"item": "chat", "opens": 16},
+            {"item": "inbox", "opens": 3},
+            {"item": "items", "opens": 2},
+            {"item": "stats", "opens": 1},
+        ])
+    );
+
+    let (s, _) = e.call("GET", "/api/stats/nav?range=90d", None).await;
+    assert_eq!(s, 400);
+}

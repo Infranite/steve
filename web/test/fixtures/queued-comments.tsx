@@ -8,7 +8,8 @@ import type { RQueued } from "../../src/api"
 /* an item page in miniature: the timeline's comments, then the strip that sits above the composer */
 const P = "补充信息："
 const row = (id: string, via: string, text: string): RQueued => ({ id, via, text, created: 1, files: [] })
-const tl: any[] = [
+type TimelineRow = [string, string, string, string?, { s: string; from: number; to: number; text: string; tools: number; live: boolean }?]
+const tl: TimelineRow[] = [
   ["me", "这里不支持markdown渲染。举一反三，都检查下", "23:30", "s1", undefined],
   ["sys", "更新了计划", "23:31"],
   ["me", "已经答复过的评论", "23:32", "s1", { s: "s1", from: 0, to: 1, text: "好", tools: 0, live: false }],

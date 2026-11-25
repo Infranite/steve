@@ -1,7 +1,7 @@
 import { getItem } from "@/store"
 /* #/orgs/:id — one organization (prototype people.tsx OrgView) */
 import { useState } from "react"
-import { itemDisplayStatus } from "@/item-workflow-relation"
+import { itemDisplayStatus } from "@/store"
 import { ChevronRightIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { go, Page, Group, Row, Empty, ItemNo, Status, Meta } from "@/ui"

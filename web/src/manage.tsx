@@ -1,6 +1,6 @@
 import { getItems, nextItemNumber, useRuntimes, useTagUses, useBotMemories } from "@/store"
 /* Bot 菜单与设置：Bot 是独立菜单；设置是分类页。所有改动都写到 Hub，也都可以直接告诉 Steve。 */
-import { itemDisplayStatus } from "@/item-workflow-relation"
+import { itemDisplayStatus } from "@/store"
 import { useT } from "@/i18n"
 import { Trans } from "react-i18next"
 import { WorkspaceDisk } from "@/disk-settings"

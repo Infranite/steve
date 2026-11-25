@@ -1,7 +1,7 @@
 import { getItem } from "@/store"
 /* #/contacts/:id and #/contacts/me — one contact (prototype people.tsx ContactView) */
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
-import { itemDisplayStatus } from "@/item-workflow-relation"
+import { itemDisplayStatus } from "@/store"
 import { cn } from "cn"
 import { CheckIcon, ChevronRightIcon, EllipsisIcon, ListTodoIcon, MailIcon, PencilIcon, MessageSquareIcon, CalendarIcon, PlusIcon, StarIcon, XIcon, ZapIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"

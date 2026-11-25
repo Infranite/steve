@@ -2,6 +2,7 @@
 // Only /api/ and the full app's /auth/hello are intercepted; /src/api/ stays executable source.
 import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
+import { emptySnapshot } from "./fixtures/wire-views.ts"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5211", shots = process.env.STEVE_TEST_SHOTS
@@ -33,7 +34,7 @@ async function open(options = {}) {
     const error = () => json({ error: "fixture unavailable" }, 503)
     if (p === "/auth/hello") return json({ name: "steve", api: 2, version: "fixture", login: { token: true, oidc: false } })
     if (p === "/api/workspaces/ws_2/switch") return json({ ok: true })
-    if (p === "/api/snapshot") return json({ epoch: "e", rev: 1, cursor: "e:1", views: { item: [], session: [], decision: [], message: { views: [], next: null } } })
+    if (p === "/api/snapshot") return json(emptySnapshot({ epoch: "e", withMessage: true }))
     if (p === "/api/summary") return json({ thinking: false, hold: null })
     if (p === "/api/notifications") return json(state.notifications)
     if (p === "/api/shell") {
