@@ -57,6 +57,19 @@ test("parseModelId extracts family, source prefixes, version, and date snapshot 
   assert.equal(localLlama.familyLabel, "Llama")
   assert.equal(localLlama.source, "local")
   assert.deepEqual(localLlama.version, [3, 3])
+
+  const longCtx = parseModelId("claude-opus-4-6[1m]")
+  assert.equal(longCtx.family, "claude")
+  assert.equal(longCtx.baseId, "claude-opus-4-6[1m]")
+  assert.deepEqual(longCtx.version, [4, 6])
+
+  const namespacedSnap = parseModelId("passthrough/anthropic/claude-opus-4-6-20260205")
+  assert.equal(namespacedSnap.family, "claude")
+  assert.equal(namespacedSnap.source, "passthrough")
+  assert.equal(namespacedSnap.namespace, "anthropic")
+  assert.equal(namespacedSnap.baseId, "passthrough/anthropic/claude-opus-4-6")
+  assert.equal(namespacedSnap.snapshotDate, "20260205")
+  assert.deepEqual(namespacedSnap.version, [4, 6])
 })
 
 test("parseModelId auto-groups brand-new future families without a hardcoded model list", () => {

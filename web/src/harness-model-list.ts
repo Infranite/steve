@@ -320,7 +320,7 @@ export function parseModelId(rawInput: string): ParsedModelId {
   const { baseSlugRaw, snapshotDate } = stripDateSnapshot(rawSlug)
   const basePath = [...prefixSegments, ...namespaceSegments, baseSlugRaw].join("/")
   const slug = baseSlugRaw.toLowerCase()
-  const tokens = slug.split(/[-_:]+/).filter(Boolean)
+  const tokens = slug.split(/[-_:\[\]]+/).filter(Boolean)
   const head = tokens[0] ?? ""
 
   let familyCandidate: string | null = null
