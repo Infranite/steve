@@ -90,7 +90,10 @@ const run = async ({ width, height, scheme }) => {
   await membership('dev').getByText('日常', { exact: true }).waitFor()
   assert.deepEqual(await membership('dev').locator('.ui-bdgc').allTextContents(), teams.teams.map(t => t.name))
   assert.match(await membership('doc').innerText(), /未加入 Team/)
-  assert.match(await membership('steve').innerText(), /未加入 Team/)
+  assert.match(await membership('steve').innerText(), /协调者/)
+  assert.doesNotMatch(await membership('steve').innerText(), /未加入 Team/)
+  assert.match(await page.locator('[data-team-coordinator]').innerText(), /Steve[^]*协调者/)
+  assert.equal(await page.locator('[data-no-executor-policy]').count(), 1)
 
   /* Both creation controls belong to their section headers and use the same style. */
   const newBot = page.locator('[data-new-bot]'), newTeam = page.locator('[data-new-team]')
@@ -114,6 +117,7 @@ const run = async ({ width, height, scheme }) => {
   /* Renaming a Team and moving its membership updates both cards without a page reload, even for a disabled Bot. */
   await page.locator('[data-edit-team=daily]').click()
   const editor = page.locator('[data-team-editor]')
+  assert.equal(await editor.locator('[data-team-bot=steve]').count(), 0, 'main bot is excluded from Team editor')
   await editor.getByRole('textbox').fill('日常协作')
   await editor.locator('[data-team-bot=doc]').check()
   await editor.locator('[data-team-bot=dev]').uncheck()

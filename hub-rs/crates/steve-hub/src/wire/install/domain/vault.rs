@@ -9,7 +9,7 @@ install! { prepare(reg, cx) [] => [vault] {
 }}
 
 install! { uses(reg, cx) [mut registry, vault] => [registry, uses, vault] {
-    let Env { core, steve_home, use_nodes, .. } = cx.clone();
+    let Env { core, use_nodes, .. } = cx.clone();
     // what an interrupted rotation of an earlier Hub left `retiring` is finished once, off the start
     {
         let v = vault.clone();
@@ -21,7 +21,6 @@ install! { uses(reg, cx) [mut registry, vault] => [registry, uses, vault] {
     }
     let uses = steve_modules::vault::SecretUses::new(
         vault.clone(),
-        steve_home,
         Arc::new(hp::CoreSessions(core.clone())),
     );
     if let Some(n) = use_nodes {

@@ -100,4 +100,9 @@ export default {
     copied: "Copied",
     optional: "Optional",
   },
+  actor: {
+    kind: { person: "Person", bot: "Bot", system: "System", org: "Organization", team: "Team" },
+    hover: "{{name}} · {{kind}}",
+    disambiguated: "{{name}} ({{extra}})",
+  },
 }

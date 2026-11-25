@@ -371,7 +371,7 @@ fn block(
                 .organization_people(viewer, &p.id)?
                 .into_iter()
                 .take(10)
-                .map(|(_, n, t)| match t.filter(|t| !t.is_empty()) {
+                .map(|(_, n, t, _)| match t.filter(|t| !t.is_empty()) {
                     Some(t) => format!("{n} ({t})"),
                     None => n,
                 })

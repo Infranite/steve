@@ -887,9 +887,13 @@ impl Core {
             }
             steve_store::DispatchClaim::Claimed(d) => d,
         };
-        if let Err(e) =
-            self.supplement(item, text, crate::orchestrator::SupplementMode::Auto, files)
-        {
+        if let Err(e) = self.supplement(
+            item,
+            text,
+            crate::orchestrator::SupplementMode::Auto,
+            files,
+            "me",
+        ) {
             let _ = self
                 .store()
                 .store()
@@ -947,7 +951,11 @@ impl Core {
         let repo = self.config().steve_repo.clone();
         let items = db.items(ws)?;
         Ok(RouteCtx {
-            bots: db.bots(ws)?.into_iter().filter(|b| b.enabled).collect(),
+            bots: db
+                .bots(ws)?
+                .into_iter()
+                .filter(|b| b.enabled && !b.main)
+                .collect(),
             steve_project: projects
                 .iter()
                 .find(|p| crate::config::is_steve_project(&p.path, &repo))

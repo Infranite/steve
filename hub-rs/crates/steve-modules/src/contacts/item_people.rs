@@ -109,6 +109,7 @@ pub struct ItemPerson {
     pub role: String,
     pub source: String,
     pub confidence: f64,
+    pub avatar: serde_json::Value,
 }
 
 fn people_of(c: &mut impl Read, viewer: &Viewer, item: &str) -> ApiResult<Vec<ItemPerson>> {
@@ -125,6 +126,7 @@ fn people_of(c: &mut impl Read, viewer: &Viewer, item: &str) -> ApiResult<Vec<It
                 role: l.predicate,
                 source: l.source,
                 confidence: l.confidence,
+                avatar: p.avatar,
             });
         }
     }

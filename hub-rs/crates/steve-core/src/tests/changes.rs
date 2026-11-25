@@ -421,6 +421,74 @@ async fn global_requests_pick_a_target_and_fall_back_to_general() {
 }
 
 #[tokio::test]
+async fn deterministic_single_setting_change_skips_target_picker_and_draft_model() {
+    let k = Kit::new();
+    k.gw.set(|p, _| panic!("deterministic setting change must not call gateway: {p}"));
+
+    let (ask, drafted) = k
+        .core
+        .config_request(WS, "免打扰：关闭", None)
+        .await
+        .unwrap();
+    assert!(!ask);
+    assert_eq!(drafted.len(), 1);
+    let proposal = drafted[0].proposal.as_ref().expect("proposal");
+    assert_eq!(
+        proposal["target"],
+        json!({"kind": "settings", "id": "notify"})
+    );
+    assert_eq!(
+        proposal["changes"],
+        json!([{"label": "免打扰", "from": "23:00 – 08:00", "to": "关闭"}])
+    );
+
+    let p = k
+        .core
+        .draft(WS, target("global", None), "tz=UTC")
+        .await
+        .unwrap();
+    assert_eq!(p.target, target("settings", Some("general")));
+    assert_eq!(p.patch.get("tz"), Some(&json!("UTC")));
+    k.core.apply(&p.id, "me", WS).unwrap();
+    assert_eq!(k.db().setting(WS, "tz", "system").unwrap(), "UTC");
+
+    let p2 = k
+        .core
+        .draft(WS, target("global", None), "时区 Asia/Tokyo")
+        .await
+        .unwrap();
+    assert_eq!(p2.target, target("settings", Some("general")));
+    assert_eq!(p2.patch.get("tz"), Some(&json!("Asia/Tokyo")));
+}
+
+#[tokio::test]
+async fn prose_question_negation_or_compound_setting_request_still_uses_model_picker() {
+    let k = Kit::new();
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen_cb = seen.clone();
+    k.gw.set(move |p, _| {
+        seen_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if p.starts_with("Which Steve configuration") {
+            Ok(r#"{"targets":["settings:notify"],"ask":true}"#.into())
+        } else {
+            Ok(r#"{"changes":[]}"#.into())
+        }
+    });
+    for req in [
+        "现在免打扰是几点",
+        "免打扰现在是关闭吗",
+        "不要把免打扰改成关闭",
+        "字号太大了",
+        "is tz UTC",
+        "免打扰=关闭，字号=大",
+    ] {
+        let picked = k.core.pick_targets(WS, req, None).await.unwrap();
+        assert!(picked.ask, "request must go through model picker: {req}");
+    }
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 6);
+}
+
+#[tokio::test]
 async fn a_models_draft_sets_lists_effort_and_agent_defaults_and_undoes() {
     let k = Kit::new();
     k.gw.set(|p, _| {
@@ -590,6 +658,7 @@ async fn describe_shows_settings_as_the_user_sees_them() {
     assert_eq!(
         now,
         [
+            ("无人可接时", "问我"),
             ("默认验收方式", "自动验收"),
             ("前置完成后", "自动开始"),
             ("交接阈值", "不换会话"),

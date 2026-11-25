@@ -6,7 +6,7 @@ import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { st, toast, useHubEvents, useStore } from "@/store"
-import { BotAvatar } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { capsApi, type CapKind, type CapUser } from "@/api/caps"
 
 export const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
@@ -40,7 +40,7 @@ export function UsedBy({ users }: { users: CapUser[] }) {
         return (
           <a key={u.id} href={`#/bots/${encodeURIComponent(u.id)}`} title={u.enabled ? undefined : t("caps:use.offFor", { bot: b?.n ?? u.id })}
             className={"inline-flex items-center gap-1 rounded-full bg-muted/70 py-0.5 pr-2 pl-0.5 type-footnote hover:bg-muted " + (u.enabled ? "text-foreground" : "text-muted-foreground line-through decoration-muted-foreground/60")} data-used-bot={u.id}>
-            <BotAvatar k={u.id} size={16} />{b?.n ?? u.id}
+            <ActorAvatar actorId={u.id} size={16} />{b?.n ?? u.id}
           </a>
         )
       })}
@@ -69,7 +69,7 @@ export function AssignMenu({ kind, id, name, users, onChange }: { kind: CapKind;
         <DropdownMenuLabel>{t("caps:use.bots")}</DropdownMenuLabel>
         {bots.map((b) => (
           <DropdownMenuCheckboxItem key={b.id} checked={has.has(b.id)} onCheckedChange={(on) => void flip(b.id, !!on)} data-assign-bot={b.id}>
-            <span className="flex min-w-0 items-center gap-2"><BotAvatar k={b.id} size={18} /><span className="truncate">{b.n}</span></span>
+            <span className="flex min-w-0 items-center gap-2"><ActorAvatar actorId={b.id} size={18} /><span className="truncate">{b.n}</span></span>
           </DropdownMenuCheckboxItem>
         ))}
         </DropdownMenuGroup>

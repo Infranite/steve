@@ -40,7 +40,7 @@ export type Space = {
   persona: PersonaRef | null; duty: string; rules: Rule[] | null; effective_rules: Rule[]; flow_id: string | null; muted: boolean; collab: boolean; memory_scope: "space" | "persona"; disclosure: Level
   item_defaults: { tags: string[]; project_id: string | null; bot_id: string | null }; configured: boolean; teams: string[]; revision: number; last_message: number | null
   attention: Attention; reply_as_you: ReplyAsYou; bot_notices: BotNotices; role: Role; voice: (SpaceIdentity & { chosen: boolean }) | null; identities: SpaceIdentity[]
-  title: string; counterpart: { account_id: string; party_id: string | null; name: string; is_bot: boolean } | null; self_chat: boolean
+  title: string; counterpart: { account_id: string; party_id: string | null; name: string; is_bot: boolean; avatar?: unknown } | null; self_chat: boolean
   suggest_quiet: string | null; conflicts: Conflict[]
   /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none */
   open_url: string | null
@@ -50,7 +50,7 @@ export type BasisEntry = { source_type: string; source_id: string; source_label:
 export type Basis = { verdict: "pass" | "rewritten" | "drafted" | "unchecked" | "checking"; entries: BasisEntry[]; rewrites: { from: string; to: string; reason: string }[] }
 export type ChanMessage = {
   attachments?: ChannelAttachment[]
-  id: string; space_id: string; direction: "in" | "out"; sender: { name: string; party_id: string | null; account_id?: string | null }; persona_id: string | null; on_behalf: "none" | "persona" | "proxy"
+  id: string; space_id: string; direction: "in" | "out"; sender: { name: string; party_id: string | null; account_id?: string | null; avatar?: unknown }; persona_id: string | null; on_behalf: "none" | "persona" | "proxy"
   text: string | null; status: "received" | "draft" | "pending" | "sent" | "failed" | "unknown" | "recalled"; work_item_id: string | null; decision_id: string | null; created: number; sent: number | null; purged: number | null; basis: Basis | null
   /** only recorded as history when it came in: written before the connection was on, or arrived too late (newer Hubs) */
   history?: "before" | "late" | "backfill" | null

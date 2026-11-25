@@ -1,6 +1,6 @@
 /* #/contacts — 联系人、团队、组织、待确认 (prototype people.tsx ContactsView, NewContactDialog) */
 import { useEffect, useState, type ReactNode } from "react"
-import { ChevronRightIcon, PlusIcon, StarIcon, UserRoundIcon } from "lucide-react"
+import { ChevronRightIcon, PlusIcon, StarIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -10,7 +10,9 @@ import { go, Page, Group, Row, Segmented, SectionLabel, Empty, Chips, Tags, Meta
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
 import { nameOf, people, type ContactBrief } from "@/api/people"
-import { ContactAvatar, Loading, act, codes, joinList, label, relLabel, useLoad } from "@/people/common"
+import { Loading, act, codes, joinList, label, relLabel, useLoad } from "@/people/common"
+import { disambiguateActors, formatActorName, partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { t as tr, useT } from "@/i18n"
 import { DirectoryNotes, TeamRow, TeamsTab } from "@/people/teams"
 import { PendingContacts } from "@/people/pending"
@@ -31,7 +33,7 @@ export function ContactsView() {
   const n = pend.data ? pend.data.proposals.length + pend.data.unconfirmed.length : 0
   return (
     <Page title={t("people:shared.contacts")} sub={t("people:contacts.sub")} max={760}
-      actions={<><Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => go("#/contacts/me")} data-my-contact><UserRoundIcon />{t("people:contacts.me")}</Button>
+      actions={<><Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => go("#/contacts/me")} data-my-contact><ActorAvatar actorId="me" size={18} tooltip={false} />{t("people:contacts.me")}</Button>
         <Button size="sm" onClick={() => setNewOpen(true)} data-new-contact><PlusIcon />{t("people:contacts.new")}</Button></>}
       toolbar={<Segmented value={tab} onChange={(v) => { ctab = v; setTab(v) }} options={[["contacts", t("people:contacts.tab.contacts")], ["teams", t("people:contacts.tab.teams")], ["orgs", t("people:contacts.tab.orgs")],
         ["pending", <span key="p" className="inline-flex items-center gap-1">{t("people:contacts.tab.pending")}{n > 0 && <span className="rounded-full bg-attention/14 px-1.5 type-label tabular-nums text-attention" aria-label={t("people:contacts.pendingCount", { count: n })} data-pending-count>{n}</span>}</span>, t("people:contacts.tab.pending")]] as const} />}>
@@ -64,12 +66,13 @@ function ContactList({ q, f, toolbar }: { q: string; f: { rel?: string; kind?: s
   const xs = data.filter((c) => !c.is_me), filtered = !!(q || f.rel || f.kind)
   /* nobody yet: no filters and no search over an empty list, only how people get here */
   if (!xs.length && !filtered) return <Empty title={t("people:shared.noContacts")} sub={t("people:contacts.emptySub")} />
+  const disambig = disambiguateActors(xs.map((c) => ({ key: c.id, name: nameOf(c), subtitle: whoLine(c), fallbackId: c.id })))
   return <>{toolbar}{!xs.length ? <Empty title={t("people:shared.noMatch")} /> : (
-    <Group>{xs.map((c) => (
-      <Row key={c.id} icon={<ContactAvatar name={nameOf(c)} avatar={c.avatar} size={36} />} onClick={() => go("#/contacts/" + c.id)} data-contact-row={c.name}
-        title={<span className="inline-flex items-center gap-1.5">{nameOf(c)}{c.important && <StarIcon className="size-3.5 fill-current text-tertiary" aria-label={t("people:contacts.important")} />}{c.kind === "virtual" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "virtual")}</Badge>}{c.kind === "bot" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "bot")}</Badge>}</span>}
+    <Group>{xs.map((c) => { const display = nameOf(c), extra = disambig.get(c.id); return (
+      <Row key={c.id} icon={<ActorAvatar actor={partyActor({ id: c.id, name: display, contactKind: c.kind, avatar: c.avatar, subtitle: whoLine(c), isMe: c.is_me })} disambiguator={extra} size={36} />} onClick={() => go("#/contacts/" + c.id)} data-contact-row={c.name}
+        title={<span className="inline-flex items-center gap-1.5">{formatActorName(display, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex }))}{c.important && <StarIcon className="size-3.5 fill-current text-tertiary" aria-label={t("people:contacts.important")} />}{c.kind === "virtual" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "virtual")}</Badge>}{c.kind === "bot" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "bot")}</Badge>}</span>}
         sub={<Meta inline>{whoLine(c) && <span className="truncate">{whoLine(c)}</span>}{c.rels.filter((r) => r !== "me").length > 0 && <span>{joinList(c.rels.filter((r) => r !== "me").map(relLabel))}</span>}{!whoLine(c) && !c.rels.some((r) => r !== "me") && <span>{t("people:contacts.accounts", { count: c.accounts })}</span>}</Meta>}>
-        <Tags ids={c.tags} max={2} />{c.items > 0 && <span className="hidden shrink-0 type-footnote tabular-nums text-muted-foreground sm:inline" data-contact-items>{t("people:contacts.items", { count: c.items })}</span>}<ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>)}</>
+        <Tags ids={c.tags} max={2} />{c.items > 0 && <span className="hidden shrink-0 type-footnote tabular-nums text-muted-foreground sm:inline" data-contact-items>{t("people:contacts.items", { count: c.items })}</span>}<ChevronRightIcon className="size-4 text-tertiary" /></Row>) })}</Group>)}</>
 }
 
 function OrgList() {
@@ -83,7 +86,7 @@ function OrgList() {
   return (
     <div className="flex flex-col gap-8">
       <Group>{data.map((o) => (
-        <Row key={o.id} icon={<ContactAvatar name={o.name} type="org" size={36} />} onClick={() => go("#/orgs/" + o.id)} data-org-row={o.name} title={o.name}
+        <Row key={o.id} icon={<ActorAvatar actor={partyActor({ id: o.id, name: o.name, type: "org" })} size={36} />} onClick={() => go("#/orgs/" + o.id)} data-org-row={o.name} title={o.name}
           sub={<Meta inline>{o.kind && <span>{label("orgKind", o.kind)}</span>}<span>{joinList(o.domains) || t("people:shared.noDomain")}</span>{(o.name_state === "placeholder" || o.name_state === "workspace") && <span>{t("people:orgs.unnamed")}</span>}</Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
       {teams.data && (chart.length > 0 || (teams.data.directory?.length ?? 0) > 0) && <section data-dept-tree>
         <SectionLabel>{own ? t("people:orgs.deptsOf", { name: own.name, n: chart.length }) : t("people:orgs.depts", { n: chart.length })}</SectionLabel>

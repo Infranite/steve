@@ -17,6 +17,9 @@ pub struct AcpConfig {
     /// The harness executable, passed to an adapter that declares `CLAUDE_CODE_EXECUTABLE`
     /// (`executable_env`).
     pub claude_executable: PathBuf,
+    /// Explicit `$CLAUDE_CONFIG_DIR` override when configured on the Node; `None` keeps Claude's
+    /// default ambient location without injecting `CLAUDE_CONFIG_DIR`.
+    pub claude_config_dir: Option<PathBuf>,
     /// `STEVE_HOME`; the sanitized Codex catalog goes to `<home>/codex/models.json`.
     pub steve_home: PathBuf,
     /// `$CODEX_HOME` (default `~/.codex`).
@@ -289,6 +292,7 @@ impl AcpConfig {
             claude_executable: var("CLAUDE_CODE_EXECUTABLE")
                 .or_else(|| which("claude"))
                 .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/claude")),
+            claude_config_dir: var("CLAUDE_CONFIG_DIR"),
             steve_home,
             codex_home: var("CODEX_HOME").unwrap_or_else(|| home.join(".codex")),
             user_home: home,

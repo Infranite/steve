@@ -56,6 +56,7 @@
   "modules.vault.key_missing": "The vault can't be opened right now: the master key isn't in the keychain, restore it with the recovery code",
   "modules.vault.denied": "The vault can't be opened right now: the keychain hasn't allowed this version of Steve to read the master key (it wasn't released with a stable signature)",
   "modules.vault.stale_login": "Please sign in again before registering",
+  "modules.vault.no_execution_node": "No execution Node is available for this session; secret-injected commands cannot run on the Hub",
   "modules.changes.stale": "This draft is out of date, please say it again",
   "modules.changes.not_undoable": "This change can no longer be undone",
   "modules.decision.already_handled": "This decision has already been handled",

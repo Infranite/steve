@@ -26,6 +26,7 @@ await page.route("**/*", async route => {
   else if (u.pathname === "/api/updates" && req.method() === "POST") { if (denyExecute) return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "此实例不允许自动升级" }) }); writes.push(req.postDataJSON()); if (unrecordedPost) return route.abort("connectionfailed"); state.operation = { ...operation(), ...req.postDataJSON() }; if (dropPost) return route.abort("connectionfailed"); data = state.operation }
   else if (u.pathname === "/api/updates/up_fixture/reject") { rejections++; state.operation = { ...operation("failed"), error: "实例管理员拒绝了升级请求" }; data = state.operation }
   else if (u.pathname === "/api/updates/up_fixture/approve") { approvals++; state.operation = operation(); data = state.operation }
+  else if (u.pathname === "/api/system/health" && req.method() === "GET") return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "owner only" }) })
   else throw new Error(`unexpected API ${req.method()} ${u.pathname}`)
   await route.fulfill({ contentType: "application/json", body: JSON.stringify(data) })
 })

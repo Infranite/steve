@@ -22,7 +22,7 @@ import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, FoldReason, ItemView, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onViews, messageView, messageViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
@@ -36,6 +36,8 @@ export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
   tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; revision: number; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
+  /** Actor who settled the decision (a user id, "yolo", or undefined for system/expired). */
+  resolvedBy?: string
   /** Historical reason when the retired automatic resolver made this decision. */
   yolo?: string
   /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
@@ -61,7 +63,7 @@ export type Item = {
   placement?: PlacementExplanation
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
-export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
+export type Bot = { id: string; owner?: string | null; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
@@ -177,6 +179,7 @@ export const st = {
   /* the live stream has been broken for a while: what is on screen may be old, and nothing sent will arrive */
   down: false, version: "", webVersion: "", update: null as StateUpdate | null,
   modules: null as Shell["modules"] | null,
+  me: null as MemberIdentity | null, members: [] as MemberIdentity[],
   workspace: null as Shell["workspace"] | null, workspaces: [] as Shell["workspaces"],
   bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
   tags: [] as Tag[],
@@ -268,7 +271,7 @@ const sessionCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("se
 /* ───────── mapping ───────── */
 function botOf(b: RBot): Bot {
   const proj = shell()?.projects.find((p) => p.id === b.default_project)
-  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
+  return { id: b.id, owner: b.owner ?? null, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
     on: b.enabled, acc: ACC[b.accept_mode] ?? ACC.inherit, ws: proj?.name ?? t("core:projectByItem"), project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
     routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
 }
@@ -441,6 +444,11 @@ function choiceLabel(d: DecisionView) {
   if (d.kind === "accept") return r.choice === "pass" ? t("core:choice.pass") : t("core:choice.rework", { text: r.text ?? "" })
   if (d.subject_type === "space") return (r.choice ?? r.answer) === "mute" ? t("core:choice.mute") : t("core:choice.setup")
   if (optionKey(d.subject_type, r.choice)) return optionLabel(d.subject_type, r.choice)
+  if (d.subject_type === "no_executor") {
+    if (r.choice === "later") return t("core:choice.noExecutorLater")
+    if (r.choice === "confirm_proposal") return t("core:choice.noExecutorProposal", { bot: botName(r.bot ?? null) })
+    if (r.choice === "assign_bot") return t("core:choice.noExecutorAssign", { bot: botName(r.bot ?? null) })
+  }
   if (d.kind === "ask") return String(r.answer ?? "")
   if (d.subject_type === "party_merge") return r.choice === "merge" ? t("core:choice.merge") : t("core:choice.notSame")
   if (d.kind === "confirm") return r.choice === "yes" ? t("core:choice.confirmYes") : t("core:choice.confirmNo")
@@ -539,9 +547,10 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
   const after = new Map(blockSlots(rows).flatMap((at, k) => at < 0 ? [] : [[at, k] as const])), tl: any[] = []
   lines.forEach((t, n) => {
     const sid = started(t)
-    /* [8] is the moment itself, for the page's day headings */
+    /* [8] is the moment itself, for the page's day headings; [9] is the Hub actor id */
     const row: any[] = sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : ["sys", t.text, tm(t.ts)]
     row[8] = t.ts
+    row[9] = t.actor
     tl.push(row)
     const k = after.get(n); if (k == null) return
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
@@ -623,6 +632,8 @@ export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" =
 
 function applyShell(s: Shell) {
   st.version = s.version; st.webVersion = s.web_version ?? ""; st.update = s.update ?? null; announceUpdate(st.update); st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
+  st.me = s.me ?? null
+  st.members = s.members ?? []
   waitsByView = new WeakMap(); orphansByView = new WeakMap()
   st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
@@ -789,6 +800,12 @@ function onHub(e: HubEvent) {
   }
   /* Only pages displaying clients subscribe to their presence. */
   if (e.type === "client") return
+  if (e.type === "party" && st.me) {
+    const pid = "id" in e ? e.id : undefined
+    if (!st.me.party_id || !pid || st.me.party_id === pid || st.members.some((m) => m.party_id === pid)) {
+      void refresh()
+    }
+  }
   if (moduleTypes.has(e.type)) return
   e = e as HubEvent
   if (e.type === "workspace" || e.type === "bot" || e.type === "project" || e.type === "tag" || e.type === "settings") {
@@ -987,6 +1004,47 @@ export const snoozed = () => getItems().filter((i) => !!i.wait && !!i.snooze)
 export const active = (i: Item) => i.qs ? getSession(i.qs) : undefined
 export const sidOf = (s: Sess) => s.id
 export const accOf = (i: Item) => (i.acc !== ACC.inherit ? i.acc : st.bots[i.b] && st.bots[i.b].acc !== ACC.inherit ? st.bots[i.b].acc : st.cfg.accDefault)
+export function notePersonIdentity(c: { id?: string; name?: string; avatar?: unknown; is_me?: boolean }) {
+  let changed = false
+  const av = c.avatar && typeof c.avatar === "object" ? (c.avatar as MemberIdentity["avatar"]) : undefined
+  if (st.me && (c.is_me || (c.id && st.me.party_id === c.id))) {
+    const next: MemberIdentity = {
+      ...st.me,
+      party_id: c.id ?? st.me.party_id,
+      name: c.name?.trim() ? c.name : st.me.name,
+      avatar: av ?? st.me.avatar,
+    }
+    if (next.name !== st.me.name || next.party_id !== st.me.party_id || JSON.stringify(next.avatar) !== JSON.stringify(st.me.avatar)) {
+      st.me = next
+      changed = true
+    }
+  }
+  if (c.id && st.members.length) {
+    let hit = false
+    const nextMembers = st.members.map((m) => {
+      if (m.party_id !== c.id && !(c.is_me && st.me && m.user_id === st.me.user_id)) return m
+      const next: MemberIdentity = {
+        ...m,
+        party_id: c.id ?? m.party_id,
+        name: c.name?.trim() ? c.name : m.name,
+        avatar: av ?? m.avatar,
+      }
+      if (next.name !== m.name || next.party_id !== m.party_id || JSON.stringify(next.avatar) !== JSON.stringify(m.avatar)) {
+        hit = true
+        return next
+      }
+      return m
+    })
+    if (hit) { st.members = nextMembers; changed = true }
+  }
+  if (changed) emit()
+}
+
+export function clearStoreMe() {
+  st.me = null
+  st.members = []
+}
+
 export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? (st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot") : k === "agent" ? "Agent" : k)
 export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:unknownModel") })
 export const isThinking = () => chatLive().thinking
@@ -1124,6 +1182,7 @@ const DECIDED_BY_SUBJECT: Record<string, readonly string[] | ((c: string) => str
   mem: ["yes", "no"],
   party_merge: ["merge", "not_same"],
   release: ["no"],
+  no_executor: ["assign_bot", "confirm_proposal", "later"],
   chan_message: OPTION_IDS.chan_message,
 }
 const DECIDED_ANY = ["pass", "rework", "yes", "no", "continue", "delivered", "look", "tosteve", "drop", "deny"]
@@ -1186,6 +1245,7 @@ export async function decide(id: string, c: string, text?: string, decision?: st
     }
     const result = await decisionCall(answer(w.decision, c, text), decidedText(w, c, i?.b ?? null))
     if (result && c === "pass") cue("success")
+    if (result && w.subject === "no_executor" && (c === "later" || c === "confirm_proposal")) void refresh()
   } finally { st.pendingActions.delete(key); emit() }
 }
 /** a reply drafted in an IM conversation, closed in that conversation: not sent, for good (undo from 已处理);
@@ -1215,8 +1275,9 @@ export function done(): Done[] {
   const xs = settled()
   let out = doneLists.get(xs)
   if (!out) {
-    out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
-      how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose", yolo: r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
+    out = xs.map((d) => { const r = resultOf(d); const resolvedBy = d.resolved_by ?? (typeof r.decided_by === "string" ? r.decided_by : undefined); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
+      resolvedBy,
+      how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose", yolo: resolvedBy === "yolo" || r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
       via: typeof r.via?.name === "string" ? r.via.name : undefined } satisfies Done })
     doneLists.set(xs, out)
   }
@@ -1357,10 +1418,18 @@ export async function makeBot(n: string, role: string, harness = defaultHarness(
   return r?.id
 }
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
-export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
-  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
-  if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
-  toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+export function ownsBot(owner: string | null | undefined): boolean {
+  return owner ? owner === st.me?.user_id : st.owner
+}
+export async function deleteBot(k: string, to: string, mem: "delete" | "export") {
+  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem)); if (!r) return
+  if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "export" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+}
+export async function removeBotFromWorkspace(k: string, to: string, mem: "delete" | "export") {
+  const b = st.bots[k]; const r = await shellCall(api.removeBotFromWorkspace(k, to, mem)); if (!r) return
+  if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "export" ? "core:toast.botRemovedFromWorkspaceExported" : "core:toast.botRemovedFromWorkspace", { name: b?.n, count: r.moved.length, to: botName(to) }))
 }
 export async function dupBot(k: string) { const r = await shellCall(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
 export function addMem(k: string, text: string) { void changeBotMemory(k, api.addMemory(k, text), t("core:toast.memoryAdded")) }

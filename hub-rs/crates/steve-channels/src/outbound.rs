@@ -620,6 +620,7 @@ fn open_approval(
                 text_hash(text)
             ),
         }),
+        wait: None,
     })?;
     message_repo::link_decision(w, id, &d.id)?;
     if review {
@@ -687,6 +688,7 @@ fn open_fail(
         requested_by: "steve".into(),
         question_template: None,
         source: Some(source),
+        wait: None,
     })?;
     channel_message_repo::outbound::link_decision(w, &row.id, &d.id)?;
     Ok(d.id)

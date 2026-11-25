@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
-const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE })
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE, args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'] })
 const base = process.env.STEVE_TEST_WEB || 'http://127.0.0.1:5195'
 const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 } })
 page.setDefaultTimeout(10000)
@@ -10,8 +10,8 @@ let pending = Array.from({length: 125}, (_, i) => ({ id: 'p'+i, name: '用户'+i
 let fail = true, orgFail = true, accounts = []
 let org = { id: 'o1', name: '旧组织', name_state: 'workspace', name_reason: 'permission', name_scope: 'tenant:tenant:readonly', kind: 'self', domains: [], aliases: [], tags: [], note: '', attrs: [], people: [], revision: 1 }
 let contact = { id:'c1', name:'同事', kind:'real', aliases:[], rels:[], tags:[], org:null, avatar:null, note:'', status:'active', visibility:'workspace', profile:{checked:1,next_check:null,source:'chat',fields:{name:{state:'known'},org:{state:'missing',reason:'pending'},title:{state:'missing',reason:'external'},email:{state:'missing',reason:'permission',scope:'contact:user.email:readonly'}}},jobs:[], attrs:[{ id:'a1', key:'address', label:'地址', value:'上海市浦东新区世纪大道 100 号 环球金融中心 52 层 5201 室', source_label:'手动', level:'conclusion', status:'confirmed' }], teams:[], merges:[], reports_to:[] }
-await page.route('**/*', async route => {
- const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith('/api/')) return route.continue()
+await page.route(`${base}/api/**`, async route => {
+ const u = new URL(route.request().url())
  let data = [], status = 200; const method = route.request().method(), body = method === 'PATCH' || method === 'POST' ? route.request().postDataJSON() : null
  if (u.pathname === '/api/merges') data = {proposals:[],unconfirmed:pending}
  else if (u.pathname.startsWith('/api/contacts/p') && method === 'PATCH') { const id = u.pathname.split('/').at(-1); if (id === 'p0' && fail) { status=500; data={error:'模拟失败'}; fail=false } else { pending=pending.filter(x=>x.id!==id); data={ok:true} } }
@@ -41,9 +41,12 @@ try {
  await page.getByLabel('搜索待确认联系人').fill('no-match'); await page.getByText('没有匹配的联系人',{exact:true}).waitFor()
  await page.goto(base+'/test/fixtures/people-management.html?org'); await page.getByRole('button',{name:'编辑组织',exact:true}).click()
  assert.equal(await page.getByLabel('组织类型',{exact:true}).isDisabled(),true)
- await page.getByLabel('组织名称',{exact:true}).fill('新组织'); await page.getByRole('button',{name:'保存',exact:true}).click()
- await page.waitForTimeout(200); assert.equal(await page.getByLabel('组织名称',{exact:true}).inputValue(),'新组织')
- await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByRole('heading',{name:'新组织',exact:true}).waitFor(); await fits()
+ await page.getByLabel('组织名称',{exact:true}).fill('新组织')
+ const saveOrg = page.getByRole('button',{name:'保存',exact:true})
+ await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/orgs/o1') && r.request().method() === 'PATCH' && r.status() === 500), saveOrg.click()])
+ await saveOrg.evaluate(el => new Promise(r => { const check = () => !el.disabled ? r() : requestAnimationFrame(check); check() }))
+ assert.equal(await page.getByLabel('组织名称',{exact:true}).inputValue(),'新组织')
+ await saveOrg.click(); await page.getByRole('heading',{name:'新组织',exact:true}).waitFor(); await fits()
  await page.goto(base+'/test/fixtures/people-management.html?contact'); await page.getByText('职位：飞书不向应用提供外部联系人的此项资料',{exact:true}).waitFor(); assert.equal(await page.getByText('资料完整性').count(),0); await page.getByRole('button',{name:'编辑资料',exact:true}).click()
  await page.getByLabel('名字',{exact:true}).fill('新名字'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByRole('heading',{name:'新名字',exact:true}).waitFor()
  await page.getByRole('button',{name:'补充组织',exact:true}).click(); await page.getByLabel('任职组织').click(); await page.getByRole('option',{name:'新组织',exact:true}).click(); await page.getByLabel('部门',{exact:true}).fill('研发部'); await page.getByLabel('职位',{exact:true}).fill('工程师'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.locator('[data-fact=org]').getByText('新组织',{exact:true}).waitFor(); await page.locator('[data-fact=title]').getByText('研发部 · 工程师',{exact:true}).waitFor(); await fits()

@@ -1120,3 +1120,58 @@ async fn intent_refines_an_addressed_message() {
     .await;
     expect(&i, Some(1), Act::Draft);
 }
+
+/// Multiple `When::Intent` rules are batched into a single Fast-tier model call instead of
+/// sending the same message and 5-message context N times.
+#[tokio::test(flavor = "multi_thread")]
+async fn multiple_intent_rules_use_one_batched_model_call() {
+    let h = setup().await;
+    let c = h.oncall.clone();
+    let first = push(
+        &h,
+        &c,
+        msg("C_OPS", "bi0", "uhan", "@值班小运 准备好了", true),
+    )
+    .await;
+    let space = first.space_id.clone();
+    let (s, v) = call(
+        &h.api,
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &format!("/spaces/{space}"),
+        Some(&json!({"rules": [
+            {"when": {"kind": "intent", "text": "需要重启服务"}, "act": "handoff"},
+            {"when": {"kind": "intent", "text": "询问监控数据"}, "act": "draft"},
+            {"when": {"kind": "intent", "text": "日常寒暄"}, "act": "record"},
+            {"when": {"kind": "mention_or_dm"}, "act": "record"}
+        ]})),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    h.env.gateway.reply("{\"match\": 2}");
+    let before = calls(&h);
+    let i = push(
+        &h,
+        &c,
+        msg(
+            "C_OPS",
+            "bi1",
+            "uhan",
+            "@值班小运 查一下 db-2 的 QPS 曲线",
+            true,
+        ),
+    )
+    .await;
+    expect(&i, Some(1), Act::Draft);
+    let (after, prompt) = {
+        let cs = h.env.gateway.calls.lock().unwrap();
+        (cs.len(), cs.last().expect("prompt").1.clone())
+    };
+    assert_eq!(after, before + 1, "3 intent rules must make 1 batched call");
+    assert!(
+        prompt.contains("1. 需要重启服务")
+            && prompt.contains("2. 询问监控数据")
+            && prompt.contains("3. 日常寒暄"),
+        "{prompt}"
+    );
+}

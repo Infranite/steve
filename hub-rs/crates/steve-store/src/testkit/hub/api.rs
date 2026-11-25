@@ -255,3 +255,40 @@ pub fn seed_channel_record(path: &Path, at: i64) -> Result<()> {
     )?;
     Ok(())
 }
+
+/// Seeds a non-owner member user belonging to exactly `workspaces` with an active browser session.
+pub fn seed_member_session(
+    store: &crate::Store,
+    sub: &str,
+    name: &str,
+    workspaces: &[&str],
+    token: &str,
+) -> Result<String> {
+    let user_id = store.users().create(sub, name, None, "member")?;
+    store.auth_sessions().create(&user_id, token, 3_600_000)?;
+    store.write(|tx| -> Result<()> {
+        tx.conn.execute(
+            "DELETE FROM workspace_members WHERE user_id = ?1",
+            [&user_id],
+        )?;
+        for ws in workspaces {
+            tx.conn.execute(
+                "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?1, ?2, 'member', 1)",
+                rusqlite::params![ws, &user_id],
+            )?;
+        }
+        Ok(())
+    })?;
+    Ok(user_id)
+}
+
+/// Seeds a paused (non-closed) item assigned to `bot_id` in `ws` for bot-deletion boundary tests.
+pub fn seed_bot_item(store: &crate::Store, ws: &str, id: &str, bot_id: &str) -> Result<()> {
+    store.write(|tx| -> Result<()> {
+        tx.conn.execute(
+            "INSERT INTO items (id, workspace_id, no, title, phase, bot_id, created, updated) VALUES (?1, ?2, 99, 'secret work', 'paused', ?3, 1, 1)",
+            rusqlite::params![id, ws, bot_id],
+        )?;
+        Ok(())
+    })
+}

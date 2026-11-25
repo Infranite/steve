@@ -55,6 +55,17 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
         nodes.clone(),
         cfg.disk.low,
     )));
+    jobs.push(Job::new(
+        "nodes.harness_auto_upgrade",
+        crate::api::harness_updates::run_auto_upgrade_loop(
+            db.clone(),
+            local_node
+                .clone()
+                .map(|n| n as Arc<dyn steve_node_api::Node>),
+            nodes.clone(),
+            cx.bus.clone(),
+        ),
+    ));
     // Health's Node rollout switch describes agent-session routing, including its rollback.
     // The model-job host still participates in domain shutdown regardless of that switch.
     let local_runtime = node_host.as_ref().map(|h| h.runtime.clone());

@@ -1172,6 +1172,7 @@ mod tests {
                 declared: Default::default(),
                 node: "/usr/bin/false".into(),
                 claude_executable: "/usr/bin/false".into(),
+                claude_config_dir: None,
                 steve_home: root.join("steve"),
                 codex_home: root.join("codex"),
                 user_home: root.into(),

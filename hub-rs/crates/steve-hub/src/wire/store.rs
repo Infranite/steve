@@ -146,6 +146,16 @@ impl Repo for StoreBackend {
     fn user_by_session(&self, token: &str) -> BResult<Option<Obj>> {
         opt(self.0.auth_sessions().user(token).map_err(err)?)
     }
+    fn member_identities(&self, ws: &str) -> BResult<Vec<steve_types::MemberIdentity>> {
+        self.0.users().member_identities(ws).map_err(err)
+    }
+    fn member_identity(
+        &self,
+        ws: &str,
+        user: &str,
+    ) -> BResult<Option<steve_types::MemberIdentity>> {
+        self.0.users().member_identity(ws, user).map_err(err)
+    }
     fn audit(
         &self,
         actor: &str,
@@ -221,6 +231,9 @@ impl Repo for StoreBackend {
     }
     fn bot_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.bots().get(id).map_err(err)?)
+    }
+    fn bot_owner(&self, id: &str) -> BResult<Option<Option<String>>> {
+        self.0.bots().owner(id).map_err(err)
     }
     fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
         Ok(self
@@ -335,6 +348,12 @@ impl Repo for StoreBackend {
     }
     fn memories_delete_of_bot(&self, bot: &str) -> BResult<()> {
         self.0.memories().remove_of_bot(bot).map_err(err)
+    }
+    fn memories_delete_of_bot_in_workspace(&self, bot: &str, ws: &str) -> BResult<()> {
+        self.0
+            .memories()
+            .remove_of_bot_in_workspace(bot, ws)
+            .map_err(err)
     }
 
     fn tags_list(&self, ws: &str) -> BResult<Vec<Obj>> {

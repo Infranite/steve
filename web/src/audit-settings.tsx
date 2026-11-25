@@ -14,6 +14,8 @@ import { Blank, Notice, Loading, go } from "@/ui"
 import { t as tr, useT } from "@/i18n"
 import { date, monthDayTime } from "@/i18n/format"
 import { actionKeys, changed, detailLines, purposeOf, type AuditEntry, type AuditPage } from "@/audit"
+import { disambiguateActors, formatActorName, resolveActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 
 export const AUDIT_CAT = Object.defineProperties(["audit", "", HistoryIcon, ""] as [string, string, any, string], {
   1: { get: () => tr("manage:audit.title"), enumerable: true },
@@ -89,7 +91,7 @@ export function AuditSettingsPane() {
   const [page, setPage] = useState<AuditPage | null>(null)
   const [err, setErr] = useState<string | null>(null), [denied, setDenied] = useState(false), [busy, setBusy] = useState(false)
   const [purposes, setPurposes] = useState<Record<string, string>>({})
-  const [me, setMe] = useState<string | null>(null)
+  const [me, setMe] = useState<string | null>(() => st.me?.user_id ?? null)
   const load = (before?: number) => {
     setBusy(true); setErr(null)
     return modReq<AuditPage>("GET", `/audit?limit=${PAGE}${before ? `&before=${before}` : ""}`)
@@ -102,18 +104,32 @@ export function AuditSettingsPane() {
     /* the purposes by the names the models page gives them; without them an entry says the purpose's key */
     modReq<{ purposes: { key: string; label: string }[] }>("GET", "/settings/models").then((v) => setPurposes(Object.fromEntries(v.purposes.map((p) => [p.key, p.label])))).catch(() => {})
     /* who "you" are, so your own steps say 你 */
-    api.me().then((r) => setMe(r.user.id), () => {})
+    if (!st.me?.user_id) api.me().then((r) => setMe(r.user.id), () => {})
   }, [])
   const w: Words = { names: page?.names ?? {}, purposes }
   const items = useMemo(() => {
     if (!page) return []
+    const meId = st.me?.user_id ?? me
+    const ctx = { me: st.me, members: st.members, bots: st.bots, names: w.names, systemName: tr("manage:audit.by.hub") }
+    const disambig = disambiguateActors([
+      ...st.members.map((m) => { const a = resolveActor(m.user_id, ctx); return { key: a.id ?? m.user_id, name: a.name, subtitle: a.subtitle, fallbackId: m.user_id } }),
+      ...page.entries.map((e) => {
+        const by = whoOf(e, meId)
+        const a = resolveActor(by === "hub" ? "system" : e.actor, ctx)
+        return { key: a.id ?? e.actor, name: a.name, subtitle: a.subtitle, fallbackId: a.id }
+      }),
+    ])
     const one = (e: AuditEntry): ActivityItem => {
-      const by = whoOf(e, me), name = by === "hub" ? tr("manage:audit.by.hub") : w.names[e.actor] ?? st.bots[e.actor]?.n ?? e.actor
+      const by = whoOf(e, meId)
+      const actor = resolveActor(by === "hub" ? "system" : e.actor, ctx)
+      const extra = disambig.get(actor.id ?? e.actor)
+      const name = by === "hub" ? tr("manage:audit.by.hub") : formatActorName(actor.name, extra, (n, ex) => tr("common:actor.disambiguated", { name: n, extra: ex }))
       const item = getItem(e.target)
       return {
         id: String(e.id), at: e.ts, mark: markOf(e.action), text: title(e, w), task: summary(e, w) || undefined, by,
         /* you and YOLO go by the filter's words; a Bot, a member or the Hub by its name when it has one */
         byName: by === "me" || by === "yolo" || by === "hub" ? undefined : name,
+        byAvatar: <ActorAvatar actor={actor} disambiguator={extra} size={16} tooltip={false} />,
         /* why it could, only where the trail says so: YOLO answered for you. Who did it is in the details */
         why: by === "yolo" ? tr("manage:audit.why.yolo") : undefined,
         open: item ? { label: tr("manage:audit.openItem", { id: item.id }), run: () => go("#/items/" + item.id) } : undefined,

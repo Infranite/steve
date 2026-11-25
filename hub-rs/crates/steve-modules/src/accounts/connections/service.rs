@@ -2369,6 +2369,7 @@ impl Connections {
             source: Some(steve_store::DecisionSource::Revision {
                 revision: format!("reauth:{settled}"),
             }),
+            wait: None,
         })?;
         Ok(())
     }

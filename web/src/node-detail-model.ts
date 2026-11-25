@@ -3,6 +3,7 @@
  * and sanitized diagnostic snapshots in one testable module (node --test loads .ts directly). */
 import type { RNodeHarnessReport, RVitals } from "./api.ts"
 import { hostOf, linkRoute, nodeStatus, offlineReason, upgradeCard, type NodeView } from "./device-model.ts"
+import { availableUpgradableHarnesses, type HarnessUpdates } from "./harness-update-status.ts"
 import { harnessState } from "./node-harness-model.ts"
 
 export const NODE_TABS = ["overview", "harness", "work", "access", "version", "diagnostics"] as const
@@ -25,6 +26,7 @@ export type NodeActionKind =
   | "fileAccess"
   | "harnessAuth"
   | "harnessProbeFailed"
+  | "harnessUpdatesAvailable"
   | "upgradeFailed"
   | "upgradeRunning"
   | "upgradeOutdated"
@@ -35,6 +37,7 @@ export type NodeActionCommand =
   | "confirmPairing"
   | "recheckFileAccess"
   | "refreshHarnesses"
+  | "upgradeHarnesses"
   | "startUpgrade"
   | "switchUpgradeNow"
   | "openTab"
@@ -59,9 +62,11 @@ export type NodeActionContext = {
   hubVersion?: string
   harnessReport?: RNodeHarnessReport | null
   harnessesError?: string
+  harnessUpdates?: HarnessUpdates | null
   attentionCount?: number
   canConfirm?: boolean
   canUpgrade?: boolean
+  canUpgradeHarness?: boolean
 }
 
 const TONE_ORDER = { bad: 0, warn: 1, info: 2 } as const
@@ -170,6 +175,19 @@ export function nodeActionItems(v: NodeView, ctx: NodeActionContext = {}): NodeA
         tone: "warn",
         tab: "harness",
         command: "refreshHarnesses",
+      })
+    }
+
+    const upgradableHarnesses = availableUpgradableHarnesses(ctx.harnessUpdates)
+    if (upgradableHarnesses.length > 0) {
+      out.push({
+        kind: "harnessUpdatesAvailable",
+        tone: "warn",
+        tab: "harness",
+        command: ctx.canUpgradeHarness && v.state === "active" ? "upgradeHarnesses" : "openTab",
+        count: upgradableHarnesses.length,
+        names: upgradableHarnesses.map((h) => h.name),
+        running: upgradableHarnesses.reduce((n, h) => n + (h.active_sessions ?? 0), 0),
       })
     }
   }

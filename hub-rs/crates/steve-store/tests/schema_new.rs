@@ -37,13 +37,13 @@ const NEW_TABLES: [(&str, i64); 34] = [
     ("approval_policies", 121),
     ("approval_turns", 121),
     ("telemetry_daily", 125),
-    ("thread_submit_keys", 127),
-    ("thread_reply_tasks", 127),
-    ("thread_reply_receipts", 127),
-    ("thread_dispatch_refs", 127),
-    ("thread_forwarded", 127),
-    ("thread_delivery_refs", 127),
-    ("thread_notices", 127),
+    ("thread_submit_keys", 130),
+    ("thread_reply_tasks", 130),
+    ("thread_reply_receipts", 130),
+    ("thread_dispatch_refs", 130),
+    ("thread_forwarded", 130),
+    ("thread_delivery_refs", 130),
+    ("thread_notices", 130),
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
@@ -928,8 +928,12 @@ fn approval_policy_is_an_owner_cas_and_only_emits_changes() {
 }
 
 #[test]
-fn migration_127_preserves_history_commits_seq_and_notices() {
-    let (_dir, path) = at_version(126);
+fn migration_130_preserves_history_commits_seq_and_notices() {
+    let before_130 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE thread_submit_keys"))
+        .unwrap();
+    let (_dir, path) = at_version(before_130);
     let c = Connection::open(&path).unwrap();
     c.execute_batch(
         "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('u1','default','u1','U1','owner',1);
@@ -1121,4 +1125,98 @@ fn migration_127_preserves_history_commits_seq_and_notices() {
         .unwrap();
     drop(store);
     drop(Store::open(&path, NoPublisher).unwrap());
+}
+
+#[test]
+fn migration_128_strips_main_bot_from_teams_and_rewrites_steve_fallback() {
+    let before_128 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE item_placement_waits"))
+        .unwrap();
+    let (_dir, path) = at_version(before_128);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO bots(id,workspace_id,name,main,harness,updated)
+             VALUES ('steve','default','Steve',1,'claude-code',1),
+                    ('dev','default','Dev',0,'claude-code',1);
+           INSERT INTO bot_workspaces(workspace_id,bot_id,created)
+             VALUES ('default','steve',1),('default','dev',1);
+           INSERT INTO bot_teams(id,workspace_id,name,members)
+             VALUES ('team-mixed','default','Mixed','[{"bot":"steve","nodes":null},{"bot":"dev","nodes":["local"]}]'),
+                    ('team-only-main','default','OnlyMain','[{"bot":"steve","nodes":null}]');
+           INSERT INTO items(id,workspace_id,no,title,bot_id,phase,created,updated)
+             VALUES ('ST-1','default',1,'Legacy fallback','steve','active',1,1),
+                    ('ST-2','default',2,'Normal placement','dev','active',1,1);
+           INSERT INTO bot_placements(item_id,session_id,fact,blocked)
+             VALUES ('ST-1',NULL,'{"rule_version":1,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":null,"explanation":{"bot":"steve","reason":"steve_fallback","matched":[],"rejected":[{"bot":"dev","reason":"offline"}],"fallback":"offline"}}',NULL),
+                    ('ST-2',NULL,'{"rule_version":1,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":null,"explanation":{"bot":"dev","reason":"specialty","matched":["rust"],"rejected":[],"fallback":null}}',NULL);"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    // Idempotent re-migration changes nothing.
+    db::migrate_file(&path).unwrap();
+
+    let teams = store
+        .read(|r| steve_store::bot_dispatch::teams(r, "default"))
+        .unwrap();
+    let mixed = teams.iter().find(|t| t.id == "team-mixed").unwrap();
+    assert_eq!(mixed.members.len(), 1);
+    assert_eq!(mixed.members[0].bot, "dev");
+    assert_eq!(mixed.members[0].nodes, Some(vec!["local".into()]));
+    let only_main = teams.iter().find(|t| t.id == "team-only-main").unwrap();
+    assert!(only_main.members.is_empty());
+
+    let migrated = store
+        .read(|r| steve_store::bot_dispatch::initial(r, "ST-1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        migrated.explanation.reason,
+        steve_types::PlacementReason::CoordinatorDeferred
+    );
+    assert_eq!(
+        migrated.explanation.deferred_by,
+        Some(steve_types::CoordinatorDeferSource::Setting)
+    );
+    assert_eq!(
+        migrated.explanation.fallback,
+        Some(steve_types::PlacementRejection::Offline)
+    );
+
+    let untouched = store
+        .read(|r| steve_store::bot_dispatch::initial(r, "ST-2"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        untouched.explanation.reason,
+        steve_types::PlacementReason::Specialty
+    );
+    assert_eq!(untouched.explanation.deferred_by, None);
+
+    // Store contract refuses adding main bot into Team members.
+    let err = store
+        .write(|w| {
+            steve_store::bot_admin::save(
+                w,
+                "default",
+                None,
+                "Bad Team",
+                &[steve_store::bot_dispatch::Member {
+                    bot: "steve".into(),
+                    nodes: None,
+                }],
+            )
+        })
+        .unwrap_err();
+    assert!(matches!(err, steve_store::StoreError::Rejected(_)), "{err}");
+
+    store
+        .fixture_write(|c| {
+            assert!(has_table(c, "item_placement_waits"));
+            assert_eq!(count(c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+            Ok(())
+        })
+        .unwrap();
 }

@@ -194,7 +194,7 @@ async fn chat_is_answered_with_history_and_can_be_promoted() {
     let item = k.core.promote(WS, &ms[1].id, None).await.unwrap();
     assert_eq!(item.title, "写诗");
     assert_eq!(k.db().goal(&item.id).unwrap(), "写一首关于秋天的诗");
-    assert_eq!(item.bot_id.as_deref(), Some("steve"));
+    assert_eq!(item.bot_id.as_deref(), Some("dev"));
     let last = k.gw.calls.lock().unwrap().last().unwrap().clone();
     assert!(last.contains("The user pressed “做成事项”"));
     assert!(last.contains("  Steve: \"今天挺暖和\"\nUser message: \"聊聊今天的天气\""));
@@ -212,7 +212,7 @@ async fn an_item_with_new_tags_and_a_follow_up_goal() {
     let ms = settle(&k, 2).await;
     assert_eq!(
         ms[1].text,
-        "好，交给 Steve 了，做完请你验收。 标签：feat、生活（新建）。"
+        "好，交给 Steve 开发 Bot 了，做完请你验收。 标签：feat、生活（新建）。"
     );
     let id = ms[1].item_id.clone().unwrap();
     assert_eq!(
@@ -607,7 +607,10 @@ async fn messages_are_handled_in_order() {
         .map(|m| m.text.as_str())
         .collect();
     assert_eq!(steve[0], "现在：0 件等你，0 件在进行，今天完成 0 件。");
-    assert_eq!(steve[1], "好，交给 Steve 了，做完请你验收。 标签：feat。");
+    assert_eq!(
+        steve[1],
+        "好，交给 Steve 开发 Bot 了，做完请你验收。 标签：feat。"
+    );
     assert_eq!(steve[2], "现在：0 件等你，1 件在进行，今天完成 0 件。");
 }
 
@@ -720,7 +723,7 @@ async fn replies_carry_what_steve_did() {
         (Some("create_item"), Some("ok"))
     );
     assert!(t["args"]["bot"].is_null());
-    assert_eq!(t["result"]["bot"], "steve");
+    assert_eq!(t["result"]["bot"], "dev");
     assert_eq!(t["result"]["item"], json!(ms[1].item_id));
     /* a router failure is recorded as the fallback */
     k.gw.set(|_, _| Err(msg("down")));

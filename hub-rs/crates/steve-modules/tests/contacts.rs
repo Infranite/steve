@@ -1392,7 +1392,7 @@ async fn organizations_domains_and_people() {
     let (_, o) = req(&r, &me(), "GET", &format!("/orgs/{}", id(&acme)), None).await;
     assert_eq!(
         o["people"],
-        json!([{"id": id(&sarah), "name": "Sarah", "title": "PM"}])
+        json!([{"id": id(&sarah), "name": "Sarah", "title": "PM", "avatar": {}}])
     );
     let (_, list) = req(&r, &me(), "GET", "/orgs", None).await;
     assert_eq!(list[0]["kind"], "self");

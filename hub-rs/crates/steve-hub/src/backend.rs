@@ -155,6 +155,18 @@ pub trait Repo {
     fn user_by_session(&self, token: &str) -> BResult<Option<Obj>> {
         todo_backend!("user_by_session")
     }
+    /// Workspace members with their unified person identities (display name + avatar).
+    fn member_identities(&self, ws: &str) -> BResult<Vec<steve_types::MemberIdentity>> {
+        Ok(Vec::new())
+    }
+    /// One workspace member's unified person identity.
+    fn member_identity(
+        &self,
+        ws: &str,
+        user: &str,
+    ) -> BResult<Option<steve_types::MemberIdentity>> {
+        Ok(None)
+    }
     fn audit(
         &self,
         actor: &str,
@@ -218,6 +230,10 @@ pub trait Repo {
     /// A non-deleted bot.
     fn bot_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("bot_get")
+    }
+    /// The stored `owner` column of `id`, including soft-deleted bots (`None` if no row exists).
+    fn bot_owner(&self, id: &str) -> BResult<Option<Option<String>>> {
+        todo_backend!("bot_owner")
     }
     /// Workspace ids of the bot's memberships (`bot_workspaces` row order).
     fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
@@ -284,6 +300,10 @@ pub trait Repo {
     /// `DELETE FROM bot_memories WHERE bot_id = ?` (bot deletion with `memory: delete`).
     fn memories_delete_of_bot(&self, bot: &str) -> BResult<()> {
         todo_backend!("memories_delete_of_bot")
+    }
+    /// `DELETE FROM bot_memories WHERE bot_id = ? AND workspace_id = ?`.
+    fn memories_delete_of_bot_in_workspace(&self, bot: &str, ws: &str) -> BResult<()> {
+        todo_backend!("memories_delete_of_bot_in_workspace")
     }
 
     // ── tags ──
@@ -774,11 +794,18 @@ pub trait Domain: Send + Sync + 'static {
     async fn lifecycle_tick(&self) -> BResult<usize> {
         Ok(0)
     }
-    async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
+    async fn revise_goal(&self, id: &str, text: &str, actor: &str) -> BResult<()> {
         todo_backend!("revise_goal")
     }
     /// `files`: FileRefs (`{id, name, mime, size}`) of the current workspace, already checked.
-    async fn supplement(&self, id: &str, text: &str, mode: &str, files: Vec<Value>) -> BResult<()> {
+    async fn supplement(
+        &self,
+        id: &str,
+        text: &str,
+        mode: &str,
+        files: Vec<Value>,
+        actor: &str,
+    ) -> BResult<()> {
         todo_backend!("supplement")
     }
     async fn deliver_queued(&self, id: &str) -> BResult<()> {
@@ -787,10 +814,10 @@ pub trait Domain: Send + Sync + 'static {
     async fn reassign(&self, id: &str, bot: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("reassign")
     }
-    async fn add_dep(&self, id: &str, dep: &str) -> BResult<()> {
+    async fn add_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
         todo_backend!("add_dep")
     }
-    async fn rm_dep(&self, id: &str, dep: &str) -> BResult<()> {
+    async fn rm_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
         todo_backend!("rm_dep")
     }
 
@@ -802,6 +829,7 @@ pub trait Domain: Send + Sync + 'static {
         text: &str,
         mode: &str,
         files: Vec<Value>,
+        actor: &str,
     ) -> BResult<String> {
         todo_backend!("session_message")
     }
@@ -809,11 +837,11 @@ pub trait Domain: Send + Sync + 'static {
         todo_backend!("cancel")
     }
     /// Edit a row still in the session's queue; the row after. 409 once a turn took it.
-    async fn queued_edit(&self, session: &str, id: &str, text: &str) -> BResult<Obj> {
+    async fn queued_edit(&self, session: &str, id: &str, text: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("queued_edit")
     }
     /// Withdraw a row from the session's queue; the row as it was. 409 once a turn took it.
-    async fn queued_remove(&self, session: &str, id: &str) -> BResult<Obj> {
+    async fn queued_remove(&self, session: &str, id: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("queued_remove")
     }
     /// `{result: "interrupted" | "sent" | "waiting", reason?}`. 409 once a turn took it.
@@ -883,9 +911,25 @@ pub trait Domain: Send + Sync + 'static {
     fn bot_prompt(&self, bot: &Obj, ws: &str) -> BResult<String> {
         todo_backend!("bot_prompt")
     }
-    /// `{moved: [itemIds]}`.
-    async fn delete_bot(&self, id: &str, to: &str, actor: &str) -> BResult<Obj> {
+    /// `{moved: [itemIds]}` for owner global deletion within `allowed_workspaces`.
+    async fn delete_bot(
+        &self,
+        id: &str,
+        to: &str,
+        actor: &str,
+        allowed_workspaces: Vec<String>,
+    ) -> BResult<Obj> {
         todo_backend!("delete_bot")
+    }
+    /// `{moved: [itemIds]}` for removing a bot from a single workspace `ws`.
+    async fn remove_bot_from_workspace(
+        &self,
+        ws: &str,
+        id: &str,
+        to: &str,
+        actor: &str,
+    ) -> BResult<Obj> {
+        todo_backend!("remove_bot_from_workspace")
     }
 
     // ── conversation (thread.ts) ──

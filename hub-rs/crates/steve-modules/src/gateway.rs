@@ -197,6 +197,29 @@ pub async fn for_item<F: Future>(item_id: &str, f: F) -> F::Output {
     with_tag(|t| t.item_id = Some(item_id.to_string()), f).await
 }
 
+/// Records gateway token usage attributed to a periodic task's metric series.
+pub fn record_periodic_usage(task: &'static str, usage: &[ModelUsage]) {
+    let mut input = 0u64;
+    let mut output = 0u64;
+    let mut cache_read = 0u64;
+    let mut cache_write = 0u64;
+    for u in usage {
+        if let Some(n) = u.tokens.input.and_then(|n| u64::try_from(n).ok()) {
+            input = input.saturating_add(n);
+        }
+        if let Some(n) = u.tokens.output.and_then(|n| u64::try_from(n).ok()) {
+            output = output.saturating_add(n);
+        }
+        if let Some(n) = u.tokens.cache_read.and_then(|n| u64::try_from(n).ok()) {
+            cache_read = cache_read.saturating_add(n);
+        }
+        if let Some(n) = u.tokens.cache_write.and_then(|n| u64::try_from(n).ok()) {
+            cache_write = cache_write.saturating_add(n);
+        }
+    }
+    steve_runtime::jobs::record_periodic_token_counts(task, input, output, cache_read, cache_write);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,16 +3,17 @@
  * notes for settings that are on but do not apply here. Generic: nothing here knows a provider. */
 import type { ReactNode } from "react"
 import { cn } from "cn"
-import { BanIcon, BellOffIcon, CheckIcon, EllipsisIcon, InfoIcon, TriangleAlertIcon, UserIcon, UsersIcon } from "lucide-react"
+import { BanIcon, BellOffIcon, CheckIcon, EllipsisIcon, InfoIcon, TriangleAlertIcon, UsersIcon } from "lucide-react"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { ContactAvatar } from "@/people/avatar"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { ATTENTION, SPACE_KIND, attentionOf, isDm, spaceTitle, type Attention, type ChannelAccount, type Conflict, type Space } from "@/api/channels"
 import { t, useT } from "@/i18n"
 
-/** group: a group icon; DM: the other party's initials; your chat with yourself: a person */
+/** group: a group icon; DM: the other party's avatar; your chat with yourself: your own avatar */
 export function SpaceAvatar({ s, size = 32 }: { s: Space; size?: number }) {
-  if (s.self_chat || s.kind === "self_dm") return <span className="inline-flex shrink-0 items-center justify-center rounded-full bg-blue/12 text-blue" style={{ width: size, height: size }} aria-hidden><UserIcon style={{ width: size * 0.55, height: size * 0.55 }} strokeWidth={1.75} /></span>
-  if (isDm(s)) return <ContactAvatar name={s.counterpart?.name || spaceTitle(s)} size={size} />
+  if (s.self_chat || s.kind === "self_dm") return <ActorAvatar actorId="me" size={size} />
+  if (isDm(s)) return <ActorAvatar actor={partyActor({ id: s.counterpart?.party_id, name: s.counterpart?.name || spaceTitle(s), contactKind: s.counterpart?.is_bot ? "bot" : undefined, avatar: s.counterpart?.avatar })} size={size} />
   return <span className={cn("inline-flex shrink-0 items-center justify-center bg-muted text-muted-foreground", size >= 48 ? "rounded-xl" : "rounded-lg")} style={{ width: size, height: size }} aria-hidden><UsersIcon style={{ width: size * 0.5, height: size * 0.5 }} strokeWidth={1.5} /></span>
 }
 

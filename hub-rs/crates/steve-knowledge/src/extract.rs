@@ -599,6 +599,12 @@ pub(crate) async fn prepare(
         tracing::warn!(origin = %origin.id, "kb.extract: gateway failed: {e}");
         ApiError::Internal(format!("gateway: {e}"))
     })?;
+    if origin.kind == OriginKind::Chat {
+        steve_modules::gateway::record_periodic_usage(
+            crate::sources::chat::PERIODIC_TASK_EXTRACT,
+            &answer.usage,
+        );
+    }
     let raw = parse(&answer.text);
     let offered = raw.len();
     let ws = origin.ws.clone();

@@ -511,8 +511,11 @@ fn write_update(
             now,
         )?;
     }
+    let digest_bound =
+        w.digest_packets().schedule(&old.workspace_id)?.as_deref() == Some(old.id.as_str());
+    let trigger_enabled = enabled && !digest_bound;
     let retime = spec.cron != old.spec.cron || spec.tz != old.spec.tz || (enabled && !old.enabled);
-    let next_at = match (enabled, retime) {
+    let next_at = match (trigger_enabled, retime) {
         (false, _) => None,
         (true, true) => first_run(spec, now)?,
         (true, false) => old.next_at,
@@ -522,10 +525,44 @@ fn write_update(
         &spec.cron,
         &spec.tz,
         spec.missed.as_str(),
-        enabled,
+        trigger_enabled,
         next_at,
     )?;
     crate::flows::publish(w, &old.workspace_id, &old.id);
+    Ok(())
+}
+
+/// Enables or disables wall-clock cron triggering for a schedule without toggling the schedule's
+/// own `enabled` state (used when a schedule is bound to or unbound from a durable queue source
+/// such as `digest.bot`).
+pub fn set_time_trigger_enabled(
+    w: &mut W<'_>,
+    ws: &str,
+    id: &str,
+    allow_cron: bool,
+    now: i64,
+) -> FlowResult<()> {
+    let Some(s) = get(w, ws, id)? else {
+        return Ok(());
+    };
+    if s.spec.mode == Mode::Brief {
+        return Ok(());
+    }
+    let trigger_enabled = allow_cron && s.enabled;
+    let next_at = if trigger_enabled {
+        first_run(&s.spec, now)?
+    } else {
+        None
+    };
+    FlowTriggers(w).retime(
+        &s.id,
+        &s.spec.cron,
+        &s.spec.tz,
+        s.spec.missed.as_str(),
+        trigger_enabled,
+        next_at,
+    )?;
+    crate::flows::publish(w, ws, &s.id);
     Ok(())
 }
 
