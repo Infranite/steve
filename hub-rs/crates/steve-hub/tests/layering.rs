@@ -34,18 +34,22 @@ fn found() -> BTreeSet<String> {
     let meta: serde_json::Value = serde_json::from_slice(&out.stdout).expect("metadata JSON");
     for package in meta["packages"].as_array().expect("packages") {
         let name = package["name"].as_str().expect("package name");
+        let deps = package["dependencies"].as_array().expect("dependencies");
         // The Node process owns a separate local execution journal.
-        if matches!(name, "steve-store" | "steve-store-sqlite" | "steve-node") {
-            continue;
+        if !matches!(name, "steve-store" | "steve-store-sqlite" | "steve-node") {
+            assert!(
+                deps.iter().all(|dep| dep["name"] != "rusqlite"),
+                "{name} must use the Store contract for Hub data"
+            );
         }
-        assert!(
-            package["dependencies"]
-                .as_array()
-                .expect("dependencies")
-                .iter()
-                .all(|dep| dep["name"] != "rusqlite"),
-            "{name} must use the Store contract for Hub data"
-        );
+        // Only the sandboxed workflow JS engine (and the legacy automation flow script node) may
+        // depend directly on rquickjs; Hub parent code runs JS exclusively via --workflow-step.
+        if !matches!(name, "steve-workflow-js" | "steve-flow") {
+            assert!(
+                deps.iter().all(|dep| dep["name"] != "rquickjs"),
+                "{name} must not depend directly on rquickjs; isolate JS execution in steve-workflow-js"
+            );
+        }
     }
     collect_edges(&meta)
 }
@@ -312,6 +316,29 @@ fn the_store_exposes_only_contract_transactions() {
             assert!(
                 path.starts_with(&storage) || !fixture_calls.is_match(&source),
                 "SQLite engine fixture used outside Store in {}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn hub_uses_workflow_js_only_in_the_subprocess_entrypoint() {
+    let hub_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let allowed = hub_src.join("workflow_step.rs");
+    let mut paths: Vec<PathBuf> = vec![hub_src];
+    while let Some(path) = paths.pop() {
+        if path.is_dir() {
+            paths.extend(
+                std::fs::read_dir(path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+        } else if path.extension().is_some_and(|ext| ext == "rs") && path != allowed {
+            let source = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !source.contains("steve_workflow_js"),
+                "Hub code outside workflow_step.rs must not invoke steve_workflow_js directly: {}",
                 path.display()
             );
         }

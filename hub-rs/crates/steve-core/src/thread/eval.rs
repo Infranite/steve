@@ -66,7 +66,7 @@ fn route_ctx(c: &Ctx) -> RouteCtx {
                 main: s(b, "id") == "steve",
                 harness: "claude-code".into(),
                 model: None,
-                reasoning_effort: None,
+                reasoning_effort: steve_types::ReasoningEffort::Default,
                 rules: String::new(),
                 accept_mode: "inherit".into(),
                 perm_mode: "ask".into(),

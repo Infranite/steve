@@ -14,8 +14,16 @@ pub struct HarnessChoice {
     /// `None` leaves it to the harness's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Canonical Steve reasoning effort (`None` is equivalent to [`crate::ReasoningEffort::Default`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
+    pub effort: Option<crate::ReasoningEffort>,
+}
+
+impl HarnessChoice {
+    /// Canonical reasoning effort requested for this choice (`Default` when omitted).
+    pub fn effective_effort(&self) -> crate::ReasoningEffort {
+        self.effort.unwrap_or_default()
+    }
 }
 
 /// A piece of a prompt or a result.
@@ -680,6 +688,9 @@ pub struct SessionView {
     pub active: Option<crate::common::ExecutionRef>,
     /// What the harness actually uses (it may differ from what was asked).
     pub effective: HarnessChoice,
+    /// Concrete adapter-layer reasoning effort mapping applied to this session, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_mapping: Option<crate::EffortMapping>,
     /// The permission mode and guarantees actually in force (what the audit shows).
     pub effective_permissions: PermissionMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

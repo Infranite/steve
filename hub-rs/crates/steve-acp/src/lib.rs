@@ -16,6 +16,7 @@ steve_i18n::init!();
 
 pub mod adapter;
 pub mod adapters;
+pub use steve_harness_spec::effort;
 mod capacity;
 mod config;
 mod errors;

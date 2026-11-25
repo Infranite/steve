@@ -316,7 +316,10 @@ impl StoreBackend {
                 .transpose()
                 .map_err(|e| BackendError::msg(e.to_string()))?,
             model: str_field(f, "model"),
-            reasoning_effort: str_field(f, "reasoning_effort"),
+            reasoning_effort: str_field(f, "reasoning_effort")
+                .as_deref()
+                .and_then(steve_types::ReasoningEffort::parse)
+                .unwrap_or_default(),
             rules: str_field(f, "rules"),
             persona: str_field(f, "persona"),
             proactive: f.get("proactive").and_then(Value::as_i64),

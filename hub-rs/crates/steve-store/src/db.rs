@@ -292,8 +292,14 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/138.sql"),
     // 139: add mems.pinned for priority-and-budget personal context assembly.
     include_str!("../migrations/139.sql"),
-    // 140: incoming channel reactions (#277), durable reply-to-source links, burst grouping (#268), and [AI] mark preference.
+    // 140: canonicalize reasoning_effort to Steve's five levels and add sessions.effort_mapping.
     include_str!("../migrations/140.sql"),
+    // 141: dynamic script workflow ledger (`wf_runs`, `wf_script_versions`, `wf_calls`, `wf_call_attempts`, `wf_version_calls`).
+    include_str!("../migrations/141.sql"),
+    // 142: one-time retirement of non-terminal legacy dynamic work-graph child items (`source[1] = "workflow"`).
+    include_str!("../migrations/142.sql"),
+    // 143: incoming channel reactions (#277), durable reply-to-source links, burst grouping (#268), and [AI] mark preference.
+    include_str!("../migrations/143.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
@@ -725,9 +731,9 @@ fn run_pending(c: &Connection, cur: i64, progress: Option<&MigrationTracker<'_>>
         if i == 121 {
             ensure_item_lifecycle(&tx)?;
         }
-        if i == 135 {
-            // 136 rebuilds `bots` referencing `reasoning_effort`; ensure the column exists even if
-            // the database started at v120..v135 without having run the i == 119 hook.
+        if i == 135 || i == 137 {
+            // 136 and 138 rebuild `bots` referencing `reasoning_effort`; ensure the column exists
+            // even if the database started at v120..v137 without having run the i == 119 hook.
             add_reasoning_effort(&tx)?;
         }
         tx.execute_batch(m)?;

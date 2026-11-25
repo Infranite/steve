@@ -5612,6 +5612,7 @@ dependencies = [
  "chrono",
  "httpdate",
  "libc",
+ "metrics",
  "regex",
  "rust-i18n",
  "serde",
@@ -5762,6 +5763,7 @@ dependencies = [
  "steve-transcript",
  "steve-types",
  "steve-work-api",
+ "steve-workflow-api",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5929,6 +5931,8 @@ dependencies = [
  "steve-transcript",
  "steve-types",
  "steve-vault",
+ "steve-workflow-api",
+ "steve-workflow-js",
  "syn 2.0.119",
  "tar",
  "tempfile",
@@ -6377,6 +6381,29 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "steve-workflow-api"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "regex",
+ "regex-syntax",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "steve-workflow-js"
+version = "0.1.0"
+dependencies = [
+ "rquickjs",
+ "serde",
+ "serde_json",
+ "steve-workflow-api",
 ]
 
 [[package]]

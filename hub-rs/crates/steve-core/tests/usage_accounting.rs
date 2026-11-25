@@ -73,7 +73,7 @@ fn fixture() -> (tempfile::TempDir, Store, String, String, String) {
             bot_id: Some("dev".into()),
             harness: "test".into(),
             model: None,
-            reasoning_effort: None,
+            reasoning_effort: Default::default(),
             cwd: ".".into(),
             title: "accounting".into(),
             token: "test".into(),

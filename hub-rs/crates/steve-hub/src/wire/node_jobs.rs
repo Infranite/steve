@@ -98,7 +98,7 @@ pub(super) struct Think {
     /// The harness adapter the call runs on.
     harness: String,
     model: String,
-    effort: Option<String>,
+    effort: Option<steve_types::ReasoningEffort>,
     deadline: tokio::time::Instant,
     wire_deadline: Timestamp,
 }
@@ -845,7 +845,7 @@ impl OneModel for NodePrint {
         &self,
         call: &OneCall<'_>,
         model: &str,
-        effort: Option<&str>,
+        effort: Option<steve_types::ReasoningEffort>,
         on_text: Option<OnText<'_>>,
     ) -> Tried {
         // the gateway's errors are stored with the answer: zh-CN, as core's own
@@ -881,7 +881,7 @@ impl OneModel for NodePrint {
             images: call.images.to_vec(),
             harness: call.harness.to_string(),
             model: model.to_string(),
-            effort: effort.map(String::from),
+            effort,
             deadline: call.spec.deadline,
             wire_deadline: Timestamp(
                 self.runtime.clock.now().saturating_add(
@@ -1100,7 +1100,7 @@ pub struct ResearchAttempt {
     pub harness: String,
     /// `""`: Codex's own default.
     pub model: String,
-    pub effort: Option<String>,
+    pub effort: Option<steve_types::ReasoningEffort>,
     pub prompt: String,
     /// The harness session to continue (`--resume`).
     pub resume: Option<String>,

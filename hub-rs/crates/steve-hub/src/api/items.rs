@@ -112,6 +112,8 @@ struct LifecycleBody {
     expected_revision: i64,
     reason: Option<String>,
     goal: Option<String>,
+    #[serde(default)]
+    result: Option<Value>,
 }
 
 /// `own(c, items.get(id), Noun::Item)` on the read pool.
@@ -824,11 +826,18 @@ pub(super) fn parse_handoff_body(b: &Bytes) -> Result<steve_core::HandoffTarget,
         return Err(ApiError::Invalid(bad));
     }
     let clean = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let effort = match clean(req.effort) {
+        None => None,
+        Some(raw) => match steve_types::ReasoningEffort::parse(&raw) {
+            Some(e) => Some(e),
+            None => return Err(ApiError::Invalid(vec!["effort".into()])),
+        },
+    };
     Ok(steve_core::HandoffTarget {
         bot: clean(req.bot),
         harness: clean(req.harness),
         model: clean(req.model),
-        effort: clean(req.effort),
+        effort,
         make_bot_default: req.make_bot_default,
     })
 }
@@ -962,6 +971,7 @@ pub async fn lifecycle(
         expected_revision: revision,
         reason,
         goal,
+        result,
     } = req;
     if command == "finish" && c.user.get("role").and_then(Value::as_str) != Some("owner") {
         return Err(ApiError::Json(
@@ -971,7 +981,7 @@ pub async fn lifecycle(
     }
     match st
         .domain
-        .lifecycle_command(&id, &command, cycle, revision, reason, goal, &c.me)
+        .lifecycle_command(&id, &command, cycle, revision, reason, goal, result, &c.me)
         .await
     {
         Ok(_) => {}

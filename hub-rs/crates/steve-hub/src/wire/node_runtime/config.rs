@@ -18,7 +18,7 @@ use steve_store::{Read, node_commands::config as commands, node_sessions};
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConfigChange {
     pub model: Option<Option<String>>,
-    pub effort: Option<Option<String>>,
+    pub effort: Option<Option<steve_types::ReasoningEffort>>,
     pub permissions: Option<PermissionMode>,
 }
 

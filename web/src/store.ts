@@ -22,13 +22,13 @@ import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, ReasoningEffort, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onEntityView, onViewKinds, messageView, messageViews, openDecisions, resetViews, settle, settled, subscribeItemScope, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork, useItemView, useSessionView, useViewGroup } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
 
 /* ───────── view types (from the prototype) ───────── */
-export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; node?: string; queued: number; busy: boolean; /** its next turn waits for room on its device */ room?: SessionWaiting | null
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: ReasoningEffort | null; effortMapping?: EffortMapping | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; node?: string; queued: number; busy: boolean; /** its next turn waits for room on its device */ room?: SessionWaiting | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number; placement?: PlacementExplanation }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
@@ -65,7 +65,7 @@ export type Item = {
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
 export type ExecutionSurface = RExecutionSurface
 export type Bot = { id: string; owner?: string | null; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; fallbackSurfaces?: ExecutionSurface[]; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
-  reasoningEffort?: string | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
+  reasoningEffort?: ReasoningEffort | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
   /** Steve's welcome that opened the first meeting */
@@ -158,6 +158,8 @@ export const defaultPermMode = (harness: string): string => {
 }
 /** the reasoning efforts `harness` takes, as its adapter reported them */
 export const harnessEfforts = (harness: string): string[] => runtimes().find((r) => r.id === harness)?.efforts ?? []
+/** the 5-level canonical effort mapping `harness` reported for its default model */
+export const harnessEffortMap = (harness: string): EffortMapping[] | undefined => runtimes().find((r) => r.id === harness)?.effort_map
 /** whether `harness` reads a Bot's skills, as its adapter declares (undefined: the Hub did not say) */
 export const harnessSkills = (harness: string): boolean | undefined => runtimes().find((r) => r.id === harness)?.skills
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
@@ -310,7 +312,7 @@ export function sessOf(s: SessionView): Sess {
     get h() { return s.harness ? harnessLabel(s.harness) : undefined },
     placement: s.placement, harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model,
     get st() { return running ? "run" : s.status === "ended" ? "ended" : decisionsForSession(s.id).length ? "wait" : "idle" },
-    title: s.title, get dur() { return dur(s.created, s.updated) }, reasoningEffort: s.reasoning_effort,
+    title: s.title, get dur() { return dur(s.created, s.updated) }, reasoningEffort: s.reasoning_effort ?? null, effortMapping: s.effort_mapping ?? null,
     contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used, ctxSize: s.size,
     ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source ?? "", get up() { return tm(s.updated) }, at: s.updated,
     get queue() { return qc.getQueryData<RQueued[]>(queueKey(s.id)) ?? emptyQueue },
@@ -1369,7 +1371,7 @@ export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v 
 export function reassign(id: string, k: string) { if (k === it(id).b) return; void itemCall(id, api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
 export async function handoff(
   where: { item: string; session?: string },
-  choice: { bot?: string; harness?: string; model?: string; effort?: string; make_bot_default?: boolean },
+  choice: { bot?: string; harness?: string; model?: string; effort?: ReasoningEffort; make_bot_default?: boolean },
   blocked?: (error: BotPlacementError) => void,
 ): Promise<string | undefined> {
   try {
@@ -1470,7 +1472,7 @@ async function changeBotMemory(k: string, action: Promise<unknown>, message?: st
     await qc.invalidateQueries({ queryKey })
   } catch (e) { fail(e) }
 }
-export async function saveBot(k: string, p: { n?: string; role?: string; specialties?: string[]; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; fallbackSurfaces?: ExecutionSurface[]; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
+export async function saveBot(k: string, p: { n?: string; role?: string; specialties?: string[]; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: ReasoningEffort | null; fallbackSurfaces?: ExecutionSurface[]; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
   const b = st.bots[k]
   const q: Partial<RBot> = {}
   if (p.reasoningEffort !== undefined) q.reasoning_effort = p.reasoningEffort

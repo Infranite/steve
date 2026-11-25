@@ -625,7 +625,11 @@ impl ResearchCall<'_> {
                 harness: &req.harness,
                 cwd,
                 model: (!plan.model.is_empty()).then_some(plan.model.as_str()),
-                effort: req.effort.as_deref(),
+                effort: req
+                    .effort
+                    .as_deref()
+                    .and_then(steve_node_api::ReasoningEffort::parse)
+                    .unwrap_or_default(),
                 resume: plan.resume.as_deref(),
                 head: None,
                 tools_off: false,

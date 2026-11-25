@@ -1,47 +1,173 @@
--- Incoming channel reactions (#277), durable reply-to-source links,
--- burst grouping for multi-topic replies (#268), and configurable [AI] mark preference.
+-- Canonicalize reasoning_effort to Steve's five levels (`default`, `low`, `medium`, `high`, `max`)
+-- across bots, bot_fallback_surfaces, sessions, settings (models.*), bot_placements, and
+-- runtime_sessions, and add sessions.effort_mapping to persist adapter mapping outcomes.
+--
+-- Deterministic legacy mapping:
+--   minimal | low                                 -> low
+--   medium | med                                  -> medium
+--   high                                          -> high
+--   xhigh | max | ultra                           -> max
+--   null | empty | none | off | default | unknown -> default
 
-CREATE TABLE chan_message_reactions (
-    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    connection_id TEXT NOT NULL,
-    space_external_id TEXT NOT NULL DEFAULT '',
-    message_external_id TEXT NOT NULL DEFAULT '',
-    message_source_id TEXT NOT NULL DEFAULT '',
-    message_id TEXT REFERENCES chan_messages(id) ON DELETE CASCADE,
-    actor_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    emoji TEXT NOT NULL,
-    origin TEXT NOT NULL CHECK (origin IN ('manual', 'automated', 'unknown')),
-    removed INTEGER NOT NULL CHECK (removed IN (0, 1)),
-    action_at INTEGER NOT NULL,
-    time_source TEXT NOT NULL DEFAULT 'provider' CHECK (time_source IN ('provider', 'observed')),
-    source_revision INTEGER CHECK (source_revision > 0),
-    PRIMARY KEY (
-        workspace_id,
-        connection_id,
-        space_external_id,
-        message_external_id,
-        message_source_id,
-        actor_account_id,
-        emoji
-    )
+CREATE TABLE bots_new (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT '',
+  main INTEGER NOT NULL DEFAULT 0,
+  harness TEXT NOT NULL,
+  model TEXT,
+  rules TEXT NOT NULL DEFAULT '',
+  accept_mode TEXT NOT NULL DEFAULT 'manual',
+  perm_mode TEXT NOT NULL DEFAULT 'ask',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  revision INTEGER NOT NULL DEFAULT 1,
+  updated INTEGER NOT NULL,
+  persona TEXT NOT NULL DEFAULT '',
+  proactive INTEGER NOT NULL DEFAULT 1,
+  avatar TEXT NOT NULL DEFAULT '{}',
+  default_project TEXT,
+  prompt TEXT,
+  device TEXT,
+  deleted INTEGER NOT NULL DEFAULT 0,
+  owner TEXT,
+  reasoning_effort TEXT NOT NULL DEFAULT 'default',
+  specialties TEXT NOT NULL DEFAULT '[]'
 );
-CREATE INDEX chan_message_reactions_message
-    ON chan_message_reactions(message_id, actor_account_id, emoji, action_at);
-CREATE INDEX chan_message_reactions_unresolved
-    ON chan_message_reactions(connection_id, message_external_id, message_source_id)
-    WHERE message_id IS NULL;
 
-CREATE TABLE chan_reply_sources (
-    out_message_id TEXT PRIMARY KEY REFERENCES chan_messages(id) ON DELETE CASCADE,
-    source_message_id TEXT NOT NULL REFERENCES chan_messages(id) ON DELETE CASCADE
+INSERT INTO bots_new (
+  id, workspace_id, name, role, main, harness, model, rules, accept_mode, perm_mode,
+  enabled, revision, updated, persona, proactive, avatar,
+  default_project, prompt, device, deleted, owner, reasoning_effort, specialties
+)
+SELECT
+  id, workspace_id, name, role, main, harness, model, rules, accept_mode, perm_mode,
+  enabled, revision, updated, persona, proactive, avatar,
+  default_project, prompt, device, deleted, owner,
+  CASE lower(trim(coalesce(reasoning_effort, '')))
+    WHEN 'minimal' THEN 'low'
+    WHEN 'low' THEN 'low'
+    WHEN 'medium' THEN 'medium'
+    WHEN 'med' THEN 'medium'
+    WHEN 'high' THEN 'high'
+    WHEN 'xhigh' THEN 'max'
+    WHEN 'max' THEN 'max'
+    WHEN 'ultra' THEN 'max'
+    ELSE 'default'
+  END,
+  specialties
+FROM bots;
+
+DROP TABLE bots;
+PRAGMA legacy_alter_table=ON;
+ALTER TABLE bots_new RENAME TO bots;
+PRAGMA legacy_alter_table=OFF;
+
+CREATE TABLE bot_fallback_surfaces_new (
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL,
+  harness TEXT NOT NULL,
+  model TEXT,
+  reasoning_effort TEXT NOT NULL DEFAULT 'default',
+  PRIMARY KEY (bot_id, ordinal)
 );
-CREATE INDEX chan_reply_sources_source ON chan_reply_sources(source_message_id);
 
--- Multi-topic drafts generated for one burst share a burst_id so sibling drafts
--- are not retired by each other.
-ALTER TABLE chan_messages ADD COLUMN burst_id TEXT;
+INSERT INTO bot_fallback_surfaces_new (bot_id, ordinal, harness, model, reasoning_effort)
+SELECT
+  bot_id,
+  ordinal,
+  harness,
+  model,
+  CASE lower(trim(coalesce(reasoning_effort, '')))
+    WHEN 'minimal' THEN 'low'
+    WHEN 'low' THEN 'low'
+    WHEN 'medium' THEN 'medium'
+    WHEN 'med' THEN 'medium'
+    WHEN 'high' THEN 'high'
+    WHEN 'xhigh' THEN 'max'
+    WHEN 'max' THEN 'max'
+    WHEN 'ultra' THEN 'max'
+    ELSE 'default'
+  END
+FROM bot_fallback_surfaces;
 
--- Owner preference for the [AI] prefix on replies sent from a personal account
--- (1 = on by default, 0 = off). Space preference overrides when non-null.
-ALTER TABLE channel_settings ADD COLUMN ai_mark INTEGER NOT NULL DEFAULT 1 CHECK (ai_mark IN (0, 1));
-ALTER TABLE space_prefs ADD COLUMN ai_mark INTEGER CHECK (ai_mark IN (0, 1));
+DROP TABLE bot_fallback_surfaces;
+PRAGMA legacy_alter_table=ON;
+ALTER TABLE bot_fallback_surfaces_new RENAME TO bot_fallback_surfaces;
+PRAGMA legacy_alter_table=OFF;
+
+UPDATE sessions
+SET reasoning_effort = CASE lower(trim(coalesce(reasoning_effort, '')))
+  WHEN 'minimal' THEN 'low'
+  WHEN 'low' THEN 'low'
+  WHEN 'medium' THEN 'medium'
+  WHEN 'med' THEN 'medium'
+  WHEN 'high' THEN 'high'
+  WHEN 'xhigh' THEN 'max'
+  WHEN 'max' THEN 'max'
+  WHEN 'ultra' THEN 'max'
+  ELSE 'default'
+END;
+
+ALTER TABLE sessions ADD COLUMN effort_mapping TEXT;
+
+UPDATE settings
+SET value = json_set(
+  value,
+  '$.effort',
+  CASE lower(trim(coalesce(json_extract(value, '$.effort'), '')))
+    WHEN 'minimal' THEN 'low'
+    WHEN 'low' THEN 'low'
+    WHEN 'medium' THEN 'medium'
+    WHEN 'med' THEN 'medium'
+    WHEN 'high' THEN 'high'
+    WHEN 'xhigh' THEN 'max'
+    WHEN 'max' THEN 'max'
+    WHEN 'ultra' THEN 'max'
+    ELSE 'default'
+  END
+)
+WHERE key LIKE 'models.%'
+  AND json_valid(value)
+  AND json_type(value) = 'object'
+  AND json_type(value, '$.effort') IS NOT NULL;
+
+UPDATE bot_placements
+SET fact = json_set(
+  fact,
+  '$.reasoning_effort',
+  CASE lower(trim(coalesce(json_extract(fact, '$.reasoning_effort'), '')))
+    WHEN 'minimal' THEN 'low'
+    WHEN 'low' THEN 'low'
+    WHEN 'medium' THEN 'medium'
+    WHEN 'med' THEN 'medium'
+    WHEN 'high' THEN 'high'
+    WHEN 'xhigh' THEN 'max'
+    WHEN 'max' THEN 'max'
+    WHEN 'ultra' THEN 'max'
+    ELSE 'default'
+  END
+)
+WHERE json_valid(fact)
+  AND json_type(fact) = 'object';
+
+UPDATE runtime_sessions
+SET desired_config = json_set(
+  desired_config,
+  '$.choice.effort',
+  CASE lower(trim(coalesce(json_extract(desired_config, '$.choice.effort'), '')))
+    WHEN 'minimal' THEN 'low'
+    WHEN 'low' THEN 'low'
+    WHEN 'medium' THEN 'medium'
+    WHEN 'med' THEN 'medium'
+    WHEN 'high' THEN 'high'
+    WHEN 'xhigh' THEN 'max'
+    WHEN 'max' THEN 'max'
+    WHEN 'ultra' THEN 'max'
+    ELSE 'default'
+  END
+)
+WHERE desired_config IS NOT NULL
+  AND json_valid(desired_config)
+  AND json_type(desired_config, '$.choice.effort') IS NOT NULL
+  AND json_type(desired_config, '$.choice.effort') != 'null';

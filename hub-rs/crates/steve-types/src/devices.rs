@@ -188,6 +188,9 @@ pub struct AdapterCapabilities {
     /// Reserved upgrade strategy capability for Node-side harness upgrades.
     #[serde(default)]
     pub upgrade: UpgradeCapability,
+    /// How this harness adapter maps Steve's canonical [`crate::ReasoningEffort`].
+    #[serde(default)]
+    pub effort_mode: crate::EffortMode,
     /// True only for harnesses verified empirically against real local runs.
     #[serde(default)]
     pub verified: bool,

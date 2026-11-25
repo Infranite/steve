@@ -10,6 +10,15 @@ use serde_json::Value;
 use super::{Sets, all, exists, must, one};
 use crate::types::{double, json_or};
 use crate::{Event, FileRef, Queued, Result, Session, SessionStop, Store, now, sha, uid};
+use steve_types::{EffortMapping, ReasoningEffort};
+
+fn effort_patch<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<ReasoningEffort>, D::Error> {
+    Ok(Some(
+        Option::<ReasoningEffort>::deserialize(d)?.unwrap_or_default(),
+    ))
+}
 
 impl Store {
     pub fn sessions(&self) -> Sessions<'_> {
@@ -30,7 +39,8 @@ pub struct NewSession {
     pub bot_id: Option<String>,
     pub harness: String,
     pub model: Option<String>,
-    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
     pub cwd: String,
     pub title: String,
     /// The MCP bearer token; only its hash is stored.
@@ -73,10 +83,16 @@ pub struct SessionPatch {
     pub model: Option<Option<String>>,
     #[serde(
         default,
+        deserialize_with = "effort_patch",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(
+        default,
         deserialize_with = "double",
         skip_serializing_if = "Option::is_none"
     )]
-    pub reasoning_effort: Option<Option<String>>,
+    pub effort_mapping: Option<Option<EffortMapping>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(
@@ -189,7 +205,7 @@ impl Sessions<'_> {
             };
             w.c.run(
                 "INSERT INTO sessions (id, workspace_id, item_id, no, bot_id, harness, model, reasoning_effort, cwd, status, token_hash, title, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?)",
-                params![id, p.workspace_id, p.item_id, no, p.bot_id, p.harness, p.model, p.reasoning_effort, p.cwd, sha(&p.token), p.title, t, t],
+                params![id, p.workspace_id, p.item_id, no, p.bot_id, p.harness, p.model, p.reasoning_effort.as_str(), p.cwd, sha(&p.token), p.title, t, t],
             )?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Session {
@@ -216,7 +232,17 @@ impl Sessions<'_> {
                     .null("size", p.size)
                     .null("cost", p.cost)
                     .null("model", p.model.clone())
-                    .null("reasoning_effort", p.reasoning_effort.clone())
+                    .val(
+                        "reasoning_effort",
+                        p.reasoning_effort.map(|e| e.as_str().to_owned()),
+                    )
+                    .null(
+                        "effort_mapping",
+                        p.effort_mapping
+                            .as_ref()
+                            .map(|m| m.as_ref().map(serde_json::to_string).transpose())
+                            .transpose()?,
+                    )
                     .val("title", p.title.clone())
                     .null("item_id", p.item_id.clone())
                     .val("no", p.no);

@@ -33,6 +33,7 @@ pub mod backup;
 pub mod channels;
 pub mod config;
 pub mod devices;
+pub mod effort;
 pub mod error;
 pub mod event;
 pub mod fact;
@@ -68,7 +69,7 @@ pub use view::{
     ById, CloseKind, ClosedBy, DecisionPrompt, DecisionStatus, DecisionTier, DecisionView,
     FoldReason, ItemOutcome, ItemParent, ItemPhase, ItemSnooze, ItemState, ItemView, ItemWait,
     MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, Said, SessionView,
-    SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
+    SessionWaiting, Snapshot, SnapshotViews, View, ViewKind, WfBudgetScope,
 };
 pub use wait::{WaitContract, WaitKind, WaitLimits, WaitOwner, WaitTimeoutAction};
 
@@ -80,6 +81,7 @@ pub use autonomy::{ApprovalMode, ApprovalPolicy, AutonomyEvent};
 pub use channels::ChannelsEvent;
 pub use config::{ConfigEvent, ConfigReason};
 pub use devices::DevicesEvent;
+pub use effort::{EffortMapping, EffortMode, EffortStrategy, ReasoningEffort};
 pub use integrations::IntegrationsEvent;
 pub use knowledge::KnowledgeEvent;
 pub use people::{AvatarRef, MemberIdentity, PeopleEvent};

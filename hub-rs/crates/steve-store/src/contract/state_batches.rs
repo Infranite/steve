@@ -111,6 +111,7 @@ pub fn bot_extras(r: &mut impl Read) -> Result<BotExtras> {
             .order_by("bot_id", Order::Asc)
             .order_by("ordinal", Order::Asc),
         |row| {
+            let raw_effort: Option<String> = row.get(3)?;
             extras
                 .fallback_surfaces
                 .entry(row.get(0)?)
@@ -118,7 +119,10 @@ pub fn bot_extras(r: &mut impl Read) -> Result<BotExtras> {
                 .push(crate::ExecutionSurface {
                     harness: row.get(1)?,
                     model: row.get(2)?,
-                    reasoning_effort: row.get(3)?,
+                    reasoning_effort: raw_effort
+                        .as_deref()
+                        .and_then(steve_types::ReasoningEffort::parse)
+                        .unwrap_or_default(),
                 });
             Ok(())
         },

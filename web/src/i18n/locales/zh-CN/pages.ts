@@ -108,7 +108,7 @@ export default {
       retryHint: "将重新发送原消息及附件，已完成的操作可能再次执行。",
     },
     cat: { title: "模型", desc: "Steve 用哪个 harness 和模型做判断、新会话默认" },
-    effort: { none: "关闭", off: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高", ultra: "极致" },
+    effort: { default: "默认", low: "低", medium: "中", high: "高", max: "最高" },
     followModel: "跟随模型默认",
     defaultModel: "默认模型",
     /* the effort after a model choice: "思考高" */

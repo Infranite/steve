@@ -323,7 +323,7 @@ pub trait OneModel: Send + Sync {
         &self,
         call: &OneCall<'_>,
         model: &str,
-        effort: Option<&str>,
+        effort: Option<steve_types::ReasoningEffort>,
         on_text: Option<OnText<'_>>,
     ) -> Tried;
 }
@@ -597,9 +597,7 @@ impl<M: OneModel> SingleModelGateway<M> {
                 .transpose()
                 .map_err(|e| msg(format!("usage ownership: {e}")))?;
             attempts = 1;
-            let run = self
-                .one
-                .once(&call, &model, choice.effort.as_deref(), on_text);
+            let run = self.one.once(&call, &model, choice.effort, on_text);
             let tried = match &account {
                 Some(a) => a.scope(run).await,
                 None => run.await,
@@ -2060,7 +2058,7 @@ mod tests {
             main: id == "steve",
             harness: "claude-code".into(),
             model: None,
-            reasoning_effort: None,
+            reasoning_effort: steve_types::ReasoningEffort::Default,
             rules: String::new(),
             accept_mode: "inherit".into(),
             perm_mode: "ask".into(),
@@ -2626,7 +2624,7 @@ mod tests {
                 &self,
                 _: &OneCall<'_>,
                 _: &str,
-                _: Option<&str>,
+                _: Option<steve_types::ReasoningEffort>,
                 _: Option<OnText<'_>>,
             ) -> Tried {
                 unreachable!()

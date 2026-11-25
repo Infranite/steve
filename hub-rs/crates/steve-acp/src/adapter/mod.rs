@@ -54,6 +54,11 @@ pub trait HarnessAdapter: Send + Sync {
     /// Strongly-typed runtime capabilities advertised to Hub and Web.
     fn capabilities(&self) -> AdapterCapabilities;
 
+    /// Mechanism this adapter uses to apply Steve's canonical reasoning effort.
+    fn effort_mode(&self) -> steve_node_api::EffortMode {
+        self.capabilities().effort_mode
+    }
+
     /// Mutate `initialize.params.clientCapabilities` before sending the ACP handshake.
     /// Must never inject behavior-changing overrides (e.g. compaction thresholds).
     fn configure_client_capabilities(&self, _caps: &mut Value) {}

@@ -3,6 +3,8 @@ import type {
   AdapterCapabilities,
   BackgroundTaskCapability,
   Code,
+  EffortMapping,
+  EffortMode,
   FileAccessReport,
   MissingCommandDiagnostic,
   NodeHarnessRefreshResponse,
@@ -14,6 +16,7 @@ import type {
   NodeProtocolOlder,
   Params,
   Reason,
+  ReasoningEffort,
   ResumeCapability,
   SubagentCapability,
   UpgradeCapability,
@@ -52,8 +55,8 @@ export type RQueued = { id: string; session_id?: string; text: string; via: stri
 /** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
 export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
-export type RExecutionSurface = { harness: string; model?: string | null; reasoning_effort?: string | null }
-export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; owner?: string | null; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; fallback_surfaces?: RExecutionSurface[]; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
+export type RExecutionSurface = { harness: string; model?: string | null; reasoning_effort?: ReasoningEffort | null }
+export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; owner?: string | null; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: ReasoningEffort | null; fallback_surfaces?: RExecutionSurface[]; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string } | null; archived: boolean; created: number; updated: number }
@@ -108,7 +111,7 @@ export type RTailcat = { available: boolean; enabled: boolean; running?: boolean
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
-  adapter_version?: string | null; default_model?: string | null; efforts?: string[]; modes?: string[] | null
+  adapter_version?: string | null; default_model?: string | null; efforts?: string[]; effort_mode?: EffortMode; effort_map?: EffortMapping[]; modes?: string[] | null
   /** its adapter declares where it reads skills, so a Bot's skills reach its sessions (absent: not said) */
   skills?: boolean
   caps?: { sessions: boolean; jobs: boolean; images: boolean; resume: boolean; history: boolean; mcp_http: boolean; system_prompt: boolean; fork?: boolean } | null
@@ -419,8 +422,8 @@ export const api = {
   deleteItem: (id: string) => del(`/items/${id}`),
   supplement: (id: string, text: string, mode: "auto" | "steer" | "new", files: string[] = []) => post(`/items/${id}/supplement`, { text, mode, files }), deliver: (id: string) => post(`/items/${id}/deliver`),
   reassign: (id: string, bot: string) => post(`/items/${id}/reassign`, { bot }),
-  handoffItem: (id: string, p: { bot?: string; harness?: string; model?: string; effort?: string; make_bot_default?: boolean }) =>
-    post<{ session: string; bot_default_updated?: { bot: string; previous: { harness: string; model: string | null; reasoning_effort: string | null } } }>(`/items/${id}/handoff`, p),
+  handoffItem: (id: string, p: { bot?: string; harness?: string; model?: string; effort?: ReasoningEffort; make_bot_default?: boolean }) =>
+    post<{ session: string; bot_default_updated?: { bot: string; previous: { harness: string; model: string | null; reasoning_effort: ReasoningEffort | null } } }>(`/items/${id}/handoff`, p),
   dependencyWait: (id: string) => get<DependencyWait>(`/items/${id}/dependency-wait`),
   saveDependencyWait: (id: string, body: { expected_cycle: number; resume: DependencyWait["resume_override"]; reason: string }) => post<DependencyWait>(`/items/${id}/dependency-wait`, body),
   addDep: (id: string, dep: string) => post(`/items/${id}/deps`, { dep }), rmDep: (id: string, dep: string) => del(`/items/${id}/deps/${dep}`),
@@ -431,7 +434,7 @@ export const api = {
     get<RTranscriptPage>(`/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, signal),
   transcriptMarks: (id: string) => get<{ marks: number[] }>(`/sessions/${encodeURIComponent(id)}/events/marks`),
   searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
-  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), cancelSubtask: (id: string, subtaskId: string) => post<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}/subtasks/${encodeURIComponent(subtaskId)}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`), handoffSession: (id: string, p: { bot?: string; harness?: string; model?: string; effort?: string; make_bot_default?: boolean }) => post<{ session: string; bot_default_updated?: { bot: string; previous: { harness: string; model: string | null; reasoning_effort: string | null } } }>(`/sessions/${id}/handoff`, p),
+  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), cancelSubtask: (id: string, subtaskId: string) => post<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}/subtasks/${encodeURIComponent(subtaskId)}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`), handoffSession: (id: string, p: { bot?: string; harness?: string; model?: string; effort?: ReasoningEffort; make_bot_default?: boolean }) => post<{ session: string; bot_default_updated?: { bot: string; previous: { harness: string; model: string | null; reasoning_effort: ReasoningEffort | null } } }>(`/sessions/${id}/handoff`, p),
   renameSession: (id: string, title: string) => patch(`/sessions/${id}`, { title }), removeSession: (id: string) => del(`/sessions/${id}`), dropQueued: (id: string) => del("/queued/" + id),
   queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`), resumeInfo: (sid: string) => get<RResume>(`/sessions/${sid}/resume`),
   queuedEdit: (sid: string, qid: string, text: string) => patch<RQueued>(`/sessions/${sid}/queued/${qid}`, { text }),

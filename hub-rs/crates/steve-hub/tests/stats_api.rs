@@ -84,7 +84,7 @@ async fn live_accounting_is_the_same_on_session_item_and_summary_http_apis() {
             bot_id: Some("steve".into()),
             harness: "test".into(),
             model: Some("test-model".into()),
-            reasoning_effort: None,
+            reasoning_effort: Default::default(),
             cwd: ".".into(),
             title: "stats".into(),
             token: "test".into(),

@@ -13,12 +13,20 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
     for entry in expected.as_array_mut().unwrap() {
         // #505 adds a fail-closed gateway capability to the extracted registry. Keep the
         // old snapshot intact and check which built-ins explicitly opt in.
-        let reads = matches!(entry["id"].as_str(), Some("claude-code" | "codex"));
+        let id = entry["id"].as_str().unwrap_or_default().to_owned();
+        let reads = matches!(id.as_str(), "claude-code" | "codex");
         entry["properties"]["read_attached"] = json!(reads);
+        entry["properties"]["effort_mode"] = json!("acp_option");
+        if id == "pi" {
+            entry["properties"]["fallback_efforts"] =
+                json!(["low", "medium", "high", "xhigh", "max"]);
+        } else if id == "antigravity" {
+            entry["properties"]["fallback_efforts"] = json!(["low", "medium", "high", "xhigh"]);
+        }
         // Card 1 adds declarative native `append_system_context` for empirically verified harnesses.
-        entry["properties"]["append_system_context"] = match entry["id"].as_str() {
-            Some("claude-code" | "codex") => json!({"kind": "acp_system_prompt"}),
-            Some("antigravity") => json!({"kind": "meta_append", "namespace": "antigravity"}),
+        entry["properties"]["append_system_context"] = match id.as_str() {
+            "claude-code" | "codex" => json!({"kind": "acp_system_prompt"}),
+            "antigravity" => json!({"kind": "meta_append", "namespace": "antigravity"}),
             _ => Value::Null,
         };
         entry["env"]

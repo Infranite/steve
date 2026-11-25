@@ -47,7 +47,7 @@ fn a_cycle_closes_once_and_a_new_cycle_emits_its_own_fact() {
     // only an explicit new cycle does; its close is a new fact, keyed by its cycle
     let expected = k.db().item(&id).unwrap().unwrap().cas_revision;
     k.core
-        .lifecycle_command(&id, "new_cycle", 1, expected, None, None, "me")
+        .lifecycle_command(&id, "new_cycle", 1, expected, None, None, None, "me")
         .unwrap();
     k.finish(&id).unwrap();
     let evs = events(&k, &id);

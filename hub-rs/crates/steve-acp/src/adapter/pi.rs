@@ -41,6 +41,7 @@ impl HarnessAdapter for PiAdapter {
             usage_attribution: UsageAttribution::SubtaskScoped,
             resume: ResumeCapability::SessionLoad,
             upgrade: steve_node_api::UpgradeCapability::ManagedNpm,
+            effort_mode: steve_node_api::EffortMode::AcpOption,
             verified: true,
         }
     }

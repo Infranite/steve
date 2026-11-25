@@ -166,7 +166,7 @@ impl Test {
                 default_project: None,
                 prompt: None,
                 device: None,
-                reasoning_effort: None,
+                reasoning_effort: steve_types::ReasoningEffort::Default,
             },
             context: String::new(),
             project: Some(self.project("hub")),

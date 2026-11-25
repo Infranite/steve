@@ -41,7 +41,8 @@ pub fn tags(event: &BusEvent) -> Tags {
                 WorkEvent::Item { .. }
                 | WorkEvent::Decision { .. }
                 | WorkEvent::Session { .. }
-                | WorkEvent::Message { .. } => {}
+                | WorkEvent::Message { .. }
+                | WorkEvent::WorkflowRun { .. } => {}
             },
             DomainEvent::People(event) => match event {
                 PeopleEvent::Party { .. } | PeopleEvent::Account { .. } => {}

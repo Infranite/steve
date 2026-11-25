@@ -38,7 +38,9 @@ pub use control::{
 pub use probe::{available, bwrap_path, bwrap_works, seatbelt_works};
 #[cfg(test)]
 use profile::*;
-pub use profile::{readonly_profile, seatbelt_rules};
+pub use profile::{
+    pure_compute_bwrap_args, pure_compute_seatbelt_profile, readonly_profile, seatbelt_rules,
+};
 /// Home-relative secrets denied to read-only jobs, shared with Research's tool guard.
 pub const SENSITIVE_HOME_DIRS: [&str; 5] =
     [".ssh", ".steve", ".aws", ".config/gh", "Library/Keychains"];
@@ -570,10 +572,213 @@ pub fn confinement(
 #[derive(Clone)]
 pub struct Sandbox(Confine);
 
+/// Extra OS CPU-time headroom (seconds) above the wall-clock timeout so QuickJS's own interrupt
+/// handler fires cleanly before the kernel sends `SIGXCPU`/`SIGKILL`.
+pub const PURE_COMPUTE_CPU_HEADROOM_SECS: u64 = 2;
+
+/// Maximum open file descriptors for a pure-compute workflow step subprocess (stdin/stdout/stderr
+/// plus dynamic loader headroom).
+pub const PURE_COMPUTE_MAX_OPEN_FILES: u64 = 64;
+
+/// Maximum regular file size writable by a pure-compute subprocess (`0` bytes).
+pub const PURE_COMPUTE_MAX_FILE_SIZE_BYTES: u64 = 0;
+
+/// Maximum core dump size for a pure-compute subprocess (`0` bytes).
+pub const PURE_COMPUTE_MAX_CORE_BYTES: u64 = 0;
+
+/// Virtual address-space ceiling applied on Linux (`512 MiB`, well above QuickJS's 32 MiB heap and
+/// the `steve-hub` executable mapping, while capping native allocation bombs).
+pub const PURE_COMPUTE_LINUX_AS_BYTES: u64 = 512 * 1024 * 1024;
+
+/// OS resource limits (`setrlimit`) enforced on pure-compute workflow step subprocesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PureComputeLimits {
+    pub cpu_seconds: u64,
+    pub max_file_size_bytes: u64,
+    pub max_core_bytes: u64,
+    pub max_open_files: u64,
+    pub max_address_space_bytes: Option<u64>,
+}
+
+impl PureComputeLimits {
+    /// Builds conservative OS rlimits derived from the step's wall-clock budget.
+    pub fn for_wall_time(wall_time: std::time::Duration) -> Self {
+        Self {
+            cpu_seconds: wall_time
+                .as_secs()
+                .max(1)
+                .saturating_add(PURE_COMPUTE_CPU_HEADROOM_SECS),
+            max_file_size_bytes: PURE_COMPUTE_MAX_FILE_SIZE_BYTES,
+            max_core_bytes: PURE_COMPUTE_MAX_CORE_BYTES,
+            max_open_files: PURE_COMPUTE_MAX_OPEN_FILES,
+            #[cfg(target_os = "linux")]
+            max_address_space_bytes: Some(PURE_COMPUTE_LINUX_AS_BYTES),
+            #[cfg(not(target_os = "linux"))]
+            max_address_space_bytes: None,
+        }
+    }
+
+    /// Applies these resource limits to the current process (used both in `pre_exec` and at the
+    /// start of `steve-hub --workflow-step`). Clamps requested limits to existing hard ceilings so
+    /// unprivileged processes never fail with `EPERM`.
+    pub fn apply_self(&self) {
+        apply_rlimit_capped(libc::RLIMIT_CPU, self.cpu_seconds);
+        apply_rlimit_capped(libc::RLIMIT_FSIZE, self.max_file_size_bytes);
+        apply_rlimit_capped(libc::RLIMIT_CORE, self.max_core_bytes);
+        apply_rlimit_capped(libc::RLIMIT_NOFILE, self.max_open_files);
+        if let Some(as_bytes) = self.max_address_space_bytes {
+            apply_rlimit_capped(libc::RLIMIT_AS, as_bytes);
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+type RlimitResource = libc::c_int;
+
+fn apply_rlimit_capped(resource: RlimitResource, limit: u64) {
+    // SAFETY: `getrlimit`/`setrlimit` operate solely on a stack-allocated POD `rlimit` struct
+    // with no heap allocations or locks (async-signal-safe for `pre_exec`).
+    unsafe {
+        let mut cur = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(resource, &mut cur) != 0 {
+            return;
+        }
+        let target = limit as libc::rlim_t;
+        let next_max = if cur.rlim_max == libc::RLIM_INFINITY {
+            target
+        } else {
+            cur.rlim_max.min(target)
+        };
+        let next = libc::rlimit {
+            rlim_cur: next_max,
+            rlim_max: next_max,
+        };
+        let _ = libc::setrlimit(resource, &next);
+    }
+}
+
+fn standalone_pure_compute_backend() -> &'static Option<StandalonePureBackend> {
+    static DETECTED: std::sync::OnceLock<Option<StandalonePureBackend>> =
+        std::sync::OnceLock::new();
+    DETECTED.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        {
+            if seatbelt_works() {
+                return Some(StandalonePureBackend::Seatbelt);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // `bwrap_path()` already runs the shared `probe::detect(None)` availability check.
+            if let Some(bwrap) = bwrap_path() {
+                return Some(StandalonePureBackend::Bwrap(bwrap));
+            }
+        }
+        None
+    })
+}
+
+enum StandalonePureBackend {
+    #[cfg(target_os = "macos")]
+    Seatbelt,
+    #[cfg(target_os = "linux")]
+    Bwrap(PathBuf),
+}
+
 impl Sandbox {
     /// The sandbox for a Steve with these homes, tried once (`STEVE_CONFINE` as for runs).
     pub fn open(steve_home: &Path, node_home: &Path) -> Sandbox {
         Sandbox(Confine::open(steve_home, node_home))
+    }
+
+    /// Starts a pure-compute subprocess (`steve-hub --workflow-step`) inside a read-only,
+    /// no-network OS sandbox (`seatbelt` on macOS, `bubblewrap` on Linux) with an empty temporary
+    /// `cwd`, cleared environment, process-group SIGKILL cleanup on Drop, and OS `setrlimit` caps.
+    pub fn spawn_pure_compute(
+        sandbox: Option<&Self>,
+        program: PathBuf,
+        args: Vec<std::ffi::OsString>,
+        limits: PureComputeLimits,
+    ) -> std::io::Result<CapabilityProcess> {
+        let cwd = tempfile::Builder::new()
+            .prefix("steve-wf-step-")
+            .tempdir()?;
+        let user_home = std::env::var_os("HOME").map(PathBuf::from);
+        let (wrapped_program, wrapped_args) = match sandbox.map(|s| &s.0.sandbox) {
+            Some(Backend::Seatbelt(rules)) => {
+                let profile =
+                    profile::pure_compute_seatbelt_with_rules(Some(rules), user_home.as_deref());
+                let mut a = vec!["-p".into(), profile.into(), program.into()];
+                a.extend(args);
+                (PathBuf::from(SANDBOX_EXEC), a)
+            }
+            Some(Backend::Bwrap {
+                bwrap,
+                steve_home,
+                node_home,
+            }) => {
+                let plan = bwrap_plan(steve_home, node_home);
+                let a = profile::pure_compute_bwrap_args(
+                    Some(&plan),
+                    user_home.as_deref(),
+                    cwd.path(),
+                    program,
+                    args,
+                );
+                (bwrap.clone(), a)
+            }
+            Some(Backend::Off(_)) => (program, args),
+            None => match standalone_pure_compute_backend() {
+                #[cfg(target_os = "macos")]
+                Some(StandalonePureBackend::Seatbelt) => {
+                    let profile =
+                        profile::pure_compute_seatbelt_with_rules(None, user_home.as_deref());
+                    let mut a = vec!["-p".into(), profile.into(), program.into()];
+                    a.extend(args);
+                    (PathBuf::from(SANDBOX_EXEC), a)
+                }
+                #[cfg(target_os = "linux")]
+                Some(StandalonePureBackend::Bwrap(bwrap)) => {
+                    let a = profile::pure_compute_bwrap_args(
+                        None,
+                        user_home.as_deref(),
+                        cwd.path(),
+                        program,
+                        args,
+                    );
+                    (bwrap.clone(), a)
+                }
+                None => (program, args),
+            },
+        };
+
+        let mut command = tokio::process::Command::new(wrapped_program);
+        command
+            .args(wrapped_args)
+            .env_clear()
+            .current_dir(cwd.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true);
+
+        // SAFETY: `PureComputeLimits::apply_self` calls only async-signal-safe `getrlimit` and
+        // `setrlimit` on stack POD structs (zero heap allocation, zero locks).
+        unsafe {
+            command.pre_exec(move || {
+                limits.apply_self();
+                Ok(())
+            });
+        }
+
+        let child = command.spawn()?;
+        Ok(CapabilityProcess { child, _cwd: cwd })
     }
 
     /// Starts a local capability server with private temporary cwd, piped MCP stdio and this
@@ -1451,4 +1656,137 @@ fn pre_extraction_level_one_bwrap_is_byte_identical() {
         at += 1;
     }
     assert_eq!(actual, serde_json::to_value((program, expected)).unwrap());
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn review_08_pure_compute_confinement_enforces_ro_nonet_empty_cwd_and_rlimits() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let steve_home = root.join("steve");
+    let node_home = steve_home.join("data/node");
+    let user_home = root.join("user");
+    let empty_cwd = root.join("empty-cwd");
+    std::fs::create_dir_all(steve_home.join("signing")).unwrap();
+    std::fs::create_dir_all(node_home.join("secrets")).unwrap();
+    std::fs::create_dir_all(user_home.join(".steve")).unwrap();
+    std::fs::create_dir_all(user_home.join(".ssh")).unwrap();
+    std::fs::create_dir_all(&empty_cwd).unwrap();
+    std::fs::write(steve_home.join("signing/key"), "secret").unwrap();
+
+    // 1. Seatbelt policy must deny network, deny writes (except /dev/null), deny fork, and hide Steve/user secrets.
+    let sb = pure_compute_seatbelt_profile(Some((&steve_home, &node_home)), Some(&user_home))
+        .expect("pure-compute seatbelt profile");
+    assert!(sb.contains("(deny network*)"), "{sb}");
+    assert!(sb.contains("(deny file-write*)"), "{sb}");
+    assert!(sb.contains("(deny process-fork)"), "{sb}");
+    assert!(sb.contains(&steve_home.display().to_string()), "{sb}");
+    assert!(
+        sb.contains(&user_home.join(".steve").display().to_string()),
+        "{sb}"
+    );
+    assert!(
+        sb.contains(&user_home.join(".ssh").display().to_string()),
+        "{sb}"
+    );
+
+    // 2. Bubblewrap policy must unshare network, mount root read-only, mask Steve/user secrets, and chdir into empty temp dir.
+    let plan = bwrap_plan(&steve_home, &node_home);
+    let bwrap_args = pure_compute_bwrap_args(
+        Some(&plan),
+        Some(&user_home),
+        &empty_cwd,
+        PathBuf::from("/usr/bin/steve-hub"),
+        vec!["--workflow-step".into()],
+    );
+    let args: Vec<String> = bwrap_args
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    assert!(args.contains(&"--unshare-net".to_owned()), "{args:?}");
+    assert!(args.contains(&"--die-with-parent".to_owned()), "{args:?}");
+    assert!(
+        args.windows(3).any(|w| w == ["--ro-bind", "/", "/"]),
+        "{args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w[0] == "--chdir" && w[1] == empty_cwd.to_string_lossy()),
+        "{args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w[0] == "--tmpfs" && w[1] == steve_home.to_string_lossy()),
+        "{args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w[0] == "--tmpfs" && w[1] == user_home.join(".steve").to_string_lossy()),
+        "{args:?}"
+    );
+
+    // 3. Real spawned process gets cleared env, empty temp cwd, and OS rlimits (CPU/FSIZE/CORE).
+    let limits = PureComputeLimits::for_wall_time(std::time::Duration::from_secs(5));
+    let mut proc = Sandbox::spawn_pure_compute(
+        None,
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".into(),
+            "pwd; ulimit -t; ulimit -f; ulimit -c; echo HOME=${HOME:-empty}".into(),
+        ],
+        limits,
+    )
+    .unwrap();
+    let mut out_bytes = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut proc.child.stdout.take().unwrap(), &mut out_bytes)
+        .await
+        .unwrap();
+    let status = proc.child.wait().await.unwrap();
+    assert!(status.success(), "probe failed: {status:?}");
+    let stdout = String::from_utf8_lossy(&out_bytes);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines.len() >= 5, "unexpected output:\n{stdout}");
+    assert!(
+        lines[0].contains("steve-wf-step-"),
+        "expected empty temp cwd, got: {}",
+        lines[0]
+    );
+    assert_eq!(
+        lines[1].trim(),
+        "7",
+        "expected RLIMIT_CPU=5+2s, got: {}",
+        lines[1]
+    );
+    assert_eq!(
+        lines[2].trim(),
+        "0",
+        "expected RLIMIT_FSIZE=0, got: {}",
+        lines[2]
+    );
+    assert_eq!(
+        lines[3].trim(),
+        "0",
+        "expected RLIMIT_CORE=0, got: {}",
+        lines[3]
+    );
+    assert_eq!(
+        lines[4].trim(),
+        "HOME=empty",
+        "expected env_clear, got: {}",
+        lines[4]
+    );
+
+    // 4. Attempting to write a file is killed by SIGXFSZ (RLIMIT_FSIZE=0) or denied by RO sandbox.
+    let mut write_proc = Sandbox::spawn_pure_compute(
+        None,
+        PathBuf::from("/bin/sh"),
+        vec!["-c".into(), "echo leak > leak.txt".into()],
+        limits,
+    )
+    .unwrap();
+    let write_status = write_proc.child.wait().await.unwrap();
+    assert!(
+        !write_status.success(),
+        "writing a file inside pure-compute sandbox must fail, got {write_status:?}"
+    );
 }

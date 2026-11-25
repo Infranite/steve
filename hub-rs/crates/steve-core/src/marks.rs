@@ -33,6 +33,8 @@ pub mod reject {
     pub const DESIGN_FILE: &str = "design_file";
     /// A check names a scope that does not exist.
     pub const SCOPE: &str = "scope";
+    /// An active or unverified script workflow run blocks parent delivery.
+    pub const WORKFLOW_OPEN: &str = "workflow_open";
 }
 
 impl Tx<'_> {

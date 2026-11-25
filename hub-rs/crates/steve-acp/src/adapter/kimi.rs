@@ -42,6 +42,7 @@ impl HarnessAdapter for KimiAdapter {
             usage_attribution: UsageAttribution::ContextOnly,
             resume: ResumeCapability::SessionLoad,
             upgrade: steve_node_api::UpgradeCapability::ExternalManaged,
+            effort_mode: steve_node_api::EffortMode::AcpOption,
             verified: true,
         }
     }

@@ -59,7 +59,7 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
                 0_i64.into(),
                 b.harness.as_str().into(),
                 b.model.as_deref().into(),
-                b.reasoning_effort.as_deref().into(),
+                b.reasoning_effort.as_str().into(),
                 rules.as_str().into(),
                 persona.as_str().into(),
                 proactive.into(),
@@ -79,13 +79,13 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
             w.exec(
                 Query::insert()
                     .into_table("bot_fallback_surfaces")
-                    .columns(["bot_id", "position", "harness", "model", "reasoning_effort"])
+                    .columns(["bot_id", "ordinal", "harness", "model", "reasoning_effort"])
                     .values_panic([
                         id.as_str().into(),
                         (idx as i64).into(),
                         surface.harness.as_str().into(),
                         surface.model.as_deref().into(),
-                        surface.reasoning_effort.as_deref().into(),
+                        surface.reasoning_effort.as_str().into(),
                     ]),
             )?;
         }
@@ -404,7 +404,7 @@ pub fn pristine_harness(c: &mut impl Read, id: &str) -> Result<Option<SeededHarn
             .and_where(Expr::col("deleted").eq(0_i64))
             .and_where(Expr::col("revision").eq(1_i64))
             .and_where(Expr::col("model").is_null())
-            .and_where(Expr::col("reasoning_effort").is_null()),
+            .and_where(Expr::col("reasoning_effort").eq("default")),
         |r| {
             Ok(SeededHarness {
                 harness: r.get(0)?,

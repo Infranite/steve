@@ -1,7 +1,8 @@
 /* Model settings, Steve primary model setup, and Hub harness model catalog. */
 import { modReq, type ModuleScope } from "@/api"
+import type { EffortMapping, EffortMode, ReasoningEffort } from "@/gen"
 
-export type ModelChoice = { harness: string; models: string[]; effort?: string | null }
+export type ModelChoice = { harness: string; models: string[]; effort?: ReasoningEffort | null }
 export type ModelUsedRow = { harness: string; model: string; calls: number; failed: number; at: number }
 export type ModelRecent = { last: { harness: string; model: string; at: number } | null; used: ModelUsedRow[] }
 export type ModelPurpose = {
@@ -21,14 +22,14 @@ export type ModelSteve = {
   name: string
   harness: string
   model: string | null
-  bot_effort: string | null
+  bot_effort: ReasoningEffort | null
   runs_on: string
   models: string[]
-  effort: string | null
+  effort: ReasoningEffort | null
   note: string | null
   model_note: string | null
 }
-export type ModelHarness = { id: string; name: string; efforts: { key: string; label: string }[]; default_models: string[] }
+export type ModelHarness = { id: string; name: string; efforts: { key: ReasoningEffort; label: string }[]; effort_mode?: EffortMode; effort_map?: EffortMapping[]; default_models: string[] }
 export type ModelAgent = { harness: string; name: string; models: string[]; default: string | null; value: string | null }
 export type ModelsSettingsView = {
   lightweight?: ModelChoice | null
@@ -50,8 +51,8 @@ export type ModelSetupView = {
 }
 
 export type Used = { calls: number; ok_at: number | null; failed_at: number | null }
-export type CatalogModel = { id: string; label: string; family: string; via: string | null; note: string | null; efforts: string[]; used?: Used }
-export type Catalog = { harness: string; name: string; source: string; default: string | null; families: string[]; models: CatalogModel[] }
+export type CatalogModel = { id: string; label: string; family: string; via: string | null; note: string | null; efforts: string[]; effort_map?: EffortMapping[]; used?: Used }
+export type Catalog = { harness: string; name: string; source: string; default: string | null; efforts?: string[]; effort_mode?: EffortMode; effort_map?: EffortMapping[]; families: string[]; models: CatalogModel[] }
 
 export const modelsApi = {
   get: () => modReq<ModelsSettingsView>("GET", "/settings/models"),
