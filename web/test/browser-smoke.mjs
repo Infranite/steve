@@ -54,6 +54,7 @@ export const SMOKE = [
   "external-write-gates",
   "feishu",
   "feishu-proxy",
+  "harness-tab",
   "harness-updates",
   "item-card",
   "item-feed",

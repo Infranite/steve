@@ -8,11 +8,11 @@ const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1360, h
 const errors = [], writes = []
 page.on("pageerror", e => errors.push(e.message))
 const node = (id, extra = {}) => ({ node_id: id, name: id, fingerprint: "1234", state: "active", linked: true, local: id === "local", max_sessions: 4, running: 0, waiting: 0, ...extra })
-const h = (version, model, extra = {}) => ({ id: "fixture-adapter", name: "Fixture adapter", available: true, version, adapter_version: "adapter-2", models: [model], setup: null, error: null, ...extra })
+const h = (version, model, extra = {}) => ({ id: "fixture-adapter", name: "Fixture adapter", available: true, version, adapter_version: "adapter-2", models: [model], degraded_reason: null, installed: true, setup: null, error: null, ...extra })
 const r = (harnesses = [], extra = {}) => ({ state: "reported", checked_at: Date.now(), attempted_at: Date.now(), stale: false, refreshing: false, error: null, harnesses, ...extra })
 let nodes = [node("local"), node("remote"), node("empty"), node("old"), node("offline", { linked: false }), node("failed"), node("pending-report")]
 let reports = {
-  local: r([h("local-cli", "local/model")]), remote: r([h("remote-cli", "remote/model"), h("auth-cli", "", { id: "auth", name: "Auth adapter", available: false, models: [], degraded_reason: "authentication_required" }), h("", "", { id: "absent", name: "Absent adapter", available: false, models: [], setup: { state: "not_installed", components: [{ id: "cli", name: "CLI", package: "fixture", status: "missing" }], can_install: false, reason: "fixture missing binary" } })]),
+  local: r([h("local-cli", "local/model")]), remote: r([h("remote-cli", "remote/model"), h("auth-cli", "", { id: "auth", name: "Auth adapter", available: false, installed: true, models: [], degraded_reason: "authentication_required" }), h("", "", { id: "absent", name: "Absent adapter", available: false, installed: false, models: [], setup: { state: "not_installed", components: [{ id: "cli", name: "CLI", package: "fixture", status: "missing" }], can_install: false, reason: "fixture missing binary" } })]),
   empty: r(), old: r([], { state: "unsupported", checked_at: null, error: "fixture unsupported method" }),
   offline: r([h("cached-cli", "cached/model")], { state: "offline", stale: true }),
   failed: r([h("last-cli", "last/model")], { state: "failed", stale: true, error: "fixture probe failed" }),
@@ -64,10 +64,14 @@ try {
   await detail.locator('[data-node-harness-models]').getByText("remote/model", { exact: true }).waitFor()
   assert.doesNotMatch(await detail.innerText(), /local-cli|local\/model|Hub-only harness/)
   assert.match(await detail.locator("[data-node-harness-versions]").first().innerText(), /CLI remote-cli[\s\S]*ACP adapter-2/)
+  await detail.locator('[data-node-harness-id="auth"] [data-node-harness-degraded]').waitFor()
   const auth = detail.locator('[data-node-harness-id="auth"]')
   await auth.getByText("需要身份验证", { exact: true }).waitFor()
   assert.match(await auth.locator("[data-node-harness-degraded]").innerText(), /非交互凭据/)
-  await detail.locator('[data-node-harness-id="absent"] [data-node-harness-state="not_installed"]').waitFor()
+  // Uninstalled harnesses stay folded in the Not installed section until expanded.
+  assert.equal(await detail.locator('[data-node-harness-id="absent"]').count(), 0)
+  await detail.locator('[data-harness-section-toggle="not_installed"]').click()
+  await detail.locator('[data-node-harness-id="absent"][data-node-harness-state="not_installed"]').waitFor()
   assert.equal(await detail.locator("[data-node-harness-manage]").count(), 0, "remote inspection has no local maintenance actions")
   assert.equal(await detail.getByText("fixture missing binary", { exact: true }).isVisible(), false)
   await detail.locator('[data-node-harness-id="absent"] summary').click()
@@ -81,15 +85,17 @@ try {
   assert.equal(refreshes, 1)
   assert.match(await detail.innerText(), /refreshed-cli/)
   if (process.env.STEVE_TEST_SHOTS) await page.screenshot({ path: process.env.STEVE_TEST_SHOTS + "/node-harnesses-detail.png", fullPage: true, animations: "disabled" })
-  // Losing the connection retains evidence, marked as an old report; no green current badge.
+  // Losing the connection retains evidence, marked as an old report; stale models tuck into Details.
   nodes = nodes.map(n => n.node_id === "remote" ? { ...n, linked: false } : n)
   reports.remote = { ...reports.remote, state: "offline", stale: true }
   await reread()
   await detail.getByText("Node 离线，harness 数据可能过期", { exact: true }).waitFor()
   await detail.locator('[data-node-harness-state="stale"]').waitFor()
   assert.equal(await refresh.isDisabled(), true)
-  assert.match(await detail.innerText(), /上次报告的模型/)
-  assert.match(await detail.innerText(), /new\/model/)
+  await detail.locator('[data-node-harness-id="fixture-adapter"] [data-node-harness-details] summary').click()
+  await detail.locator('[data-node-harness-reported-models]').waitFor()
+  assert.match(await detail.locator('[data-node-harness-reported-models]').innerText(), /上次报告的模型/)
+  assert.match(await detail.locator('[data-node-harness-reported-models]').innerText(), /new\/model/)
   failedRead = true
   await reread()
   await detail.locator("[data-node-harness-error]").waitFor()

@@ -220,7 +220,12 @@ try {
   await open("remote")
   assert.match(await panel().innerText(), /1\.5\.0/)
   assert.doesNotMatch(await panel().innerText(), /1\.0\.0/)
-  assert.match(await panel().innerText(), /Homebrew Cask/)
+  // Secondary component install sources & unsupported details live inside the card's Details fold
+  await panel().locator("[data-harness-update=fixture] [data-node-harness-details] summary").click()
+  await panel().locator("[data-harness-update=fixture] [data-component-source=homebrew_cask]").waitFor()
+  assert.match(await panel().locator("[data-harness-update=fixture] [data-node-harness-details]").innerText(), /Homebrew Cask/)
+  await panel().locator("[data-harness-update=readonly_ext] [data-node-harness-details] summary").click()
+  await panel().locator("[data-harness-update=readonly_ext] [data-component-unsupported]").waitFor()
   assert.match(await panel().locator("[data-harness-update=readonly_ext] [data-component-unsupported]").innerText(), /自定义路径或系统包装脚本/)
   assert.equal(await panel().locator("[data-harness-upgrade=readonly_ext]").count(), 0, "unsupported external wrapper has no upgrade button")
 
@@ -289,7 +294,13 @@ try {
   await panel().locator("[data-harness-update-error]").waitFor()
   failPost = false
 
-  // 7. Auto-upgrade switches: Node-level (default OFF) + per-harness override + inherit reset; check_on_upgrade disabled
+  // 7. Auto-upgrade switches: Node-level (default OFF) + per-harness override inside Details + inherit reset; check_on_upgrade disabled
+  const ensureDetailsOpen = async (id) => {
+    const det = panel().locator(`[data-harness-update=${id}] [data-node-harness-details]`)
+    if (!(await det.evaluate((el) => el.open))) await det.locator("summary").click()
+  }
+  await ensureDetailsOpen("fixture")
+  await ensureDetailsOpen("self_updater")
   const nodeSwitch = page.locator("[data-harness-auto-upgrade-node]")
   const fixtureSwitch = page.locator("[data-harness-auto-upgrade=fixture]")
   const selfSwitch = page.locator("[data-harness-auto-upgrade=self_updater]")

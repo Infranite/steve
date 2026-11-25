@@ -136,11 +136,11 @@ export type MergedNodeHarness = {
   receipt: HarnessUpgradeReceipt | null
 }
 
-/** Combine probe observations and component update inventory into one card per harness. */
+/** Combine probe observations and component update inventory into one unified list per harness. */
 export function mergeNodeHarnesses(
   probeReport?: RNodeHarnessReport | null,
   updates?: HarnessUpdatesResponse | null,
-): { shown: MergedNodeHarness[]; other: MergedNodeHarness[] } {
+): MergedNodeHarness[] {
   const probeList = probeReport?.harnesses ?? []
   const updateList = updates?.report?.harnesses ?? []
   const runs = updates?.runs ?? {}
@@ -176,12 +176,5 @@ export function mergeNodeHarnesses(
     all.push({ id, name: id, probe: null, update: null, receipt })
   }
 
-  const shown: MergedNodeHarness[] = []
-  const other: MergedNodeHarness[] = []
-  for (const entry of all) {
-    const installedInUpdate = !!entry.update?.components.some((c) => c.state !== "not_installed" || !!c.installed)
-    if (entry.probe || entry.receipt || installedInUpdate) shown.push(entry)
-    else other.push(entry)
-  }
-  return { shown, other }
+  return all
 }
