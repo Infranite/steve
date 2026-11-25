@@ -1782,7 +1782,21 @@ fn prepare_send(ch: &Channels, row: &OutRow) -> ChannelResult<PreparedSend> {
                 steve_store::StoreError::Storage("sending connection disappeared".into())
             })?;
         let text = Outbox::final_text(r, &row)?;
-        let marked = trigger.as_ref().is_some_and(|t| t.mark);
+        let marked = match mode {
+            Mode::Own if row.on_behalf == "proxy" => trigger.as_ref().is_some_and(|t| t.mark),
+            Mode::Own => {
+                let per_send = match row.decision_id.as_deref() {
+                    Some(did) => steve_store::decision_repo::get(r, did)?
+                        .and_then(|d| d.result["ai_mark"].as_bool()),
+                    None => None,
+                };
+                match per_send {
+                    Some(v) => v,
+                    None => spaces::effective_ai_mark(r, &row.ws, &space.id, &space.connection_id)?,
+                }
+            }
+            Mode::Bot => false,
+        };
         let text = if marked {
             b1::with_ai_prefix(&text)
         } else {
@@ -2624,6 +2638,9 @@ impl DeliveryWrite<'_> {
             },
             now,
         )?;
+        if let Some(burst) = t.burst_id.as_deref() {
+            channel_message_repo::outbound::set_burst_id(w, &id, burst)?;
+        }
         if let Some(e) = envelope {
             crate::pipeline::record(w, e, req, &id, now)?;
         }

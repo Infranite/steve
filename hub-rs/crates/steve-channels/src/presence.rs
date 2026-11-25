@@ -62,8 +62,16 @@ pub const OWNER_LIVE_MS: i64 = 180_000;
 /// separate questions a minute and a half apart were answered as one, from 7.5 min an unrelated later
 /// message took over one that needed you. 1 min sits inside.
 pub const BURST_GAP_MS: i64 = 60_000;
+/// Maximum total time span of a single burst from its first message to its last (3 min), so a slow
+/// trickle of messages separated by < [`BURST_GAP_MS`] cannot coalesce indefinitely (#268).
+pub const BURST_MAX_SPAN_MS: i64 = 180_000;
 /// At most this many messages make one turn (the newest).
 pub const BURST_MAX: usize = 10;
+/// Live debounce settle window for rapid multi-message bursts from the same sender in a space
+/// before invoking the composer (#268).
+pub const BURST_SETTLE_MS: u64 = 2_500;
+/// Maximum number of topic-split replies produced for a single multi-topic burst (#268).
+pub const MAX_TOPIC_SPLITS: usize = 3;
 /// Lines read around a message to decide (a busy group's minutes).
 const AROUND_MAX: usize = 400;
 
@@ -309,23 +317,51 @@ pub fn engaged(
 }
 
 /// The ids of the turn `target` ends, oldest first: it and the messages right before it from the same
-/// sender, while nobody else spoke between, each follows the last within `gap_ms` and none was
-/// answered in your name already (at most [`BURST_MAX`]). `before`: the space's messages before it,
-/// any order.
+/// sender, while nobody else spoke between, each follows the last within `gap_ms`, total span is
+/// within [`BURST_MAX_SPAN_MS`], explicit reply targets or multi-message threads do not diverge,
+/// and none was answered in your name already (at most [`BURST_MAX`]). `before`: the space's
+/// messages before it, any order.
 pub fn burst(target: &Said, before: &[Said], gap_ms: i64) -> Vec<String> {
     let mut earlier: Vec<&Said> = before
         .iter()
         .filter(|s| s.id != target.id && s.at <= target.at)
         .collect();
     earlier.sort_by_key(|s| std::cmp::Reverse(s.at));
+    // A provider thread key splits bursts only when it actually groups multiple messages (not
+    // per-message synthetic thread keys that platforms assign to unthreaded chat lines).
+    let is_real_thread = |key: Option<&str>| -> bool {
+        let Some(k) = key.filter(|k| !k.is_empty()) else {
+            return false;
+        };
+        let mut count = usize::from(target.thread_key.as_deref() == Some(k));
+        for s in before {
+            if s.id != target.id && s.thread_key.as_deref() == Some(k) {
+                count += 1;
+                if count >= 2 {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    let target_in_real_thread = is_real_thread(target.thread_key.as_deref());
     let mut out = vec![target.id.clone()];
     let mut next = target.at;
     for s in earlier {
+        let distinct_reply = target.reply_to.is_some()
+            && s.reply_to.is_some()
+            && target.reply_to != s.reply_to
+            && target.reply_to != s.external_id;
+        let distinct_thread = target.thread_key != s.thread_key
+            && (target_in_real_thread || is_real_thread(s.thread_key.as_deref()));
         if out.len() >= BURST_MAX
             || s.owner
             || s.answered
             || s.sender != target.sender
             || next - s.at > gap_ms
+            || target.at - s.at > BURST_MAX_SPAN_MS
+            || distinct_reply
+            || distinct_thread
         {
             break;
         }

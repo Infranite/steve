@@ -81,6 +81,65 @@ pub fn list_visible(r: &mut impl Read, message: &str, mask: i64) -> Result<Vec<S
     Ok(rows)
 }
 
+/// Active visible incoming reactions for a batch of message ids (eliminating N+1 queries when
+/// building conversation context).
+pub fn list_for_messages(
+    r: &mut impl Read,
+    ids: &[String],
+    mask: i64,
+) -> Result<Vec<(String, StoredReaction)>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let json_ids = serde_json::to_string(ids)?;
+    let mut rows = Vec::new();
+    r.db().query(
+        "WITH target_ids AS (
+           SELECT value AS id FROM json_each(?1)
+         ),
+         scoped AS (
+           SELECT r.*, row_number() OVER (PARTITION BY r.message_id, r.connection_id, r.actor_account_id, r.emoji
+              ORDER BY (r.source_revision IS NOT NULL) DESC, r.source_revision DESC,
+                       r.action_at DESC, r.removed DESC, (r.origin <> 'manual') DESC) AS connection_rank
+             FROM chan_message_reactions r
+             JOIN target_ids t ON t.id = r.message_id
+             JOIN chan_messages m ON m.id = r.message_id
+             JOIN space_identities i ON i.space_id = m.space_id AND i.connection_id = r.connection_id
+            WHERE (?2 = -1 OR (i.ordinal IS NOT NULL AND ((1 << i.ordinal) & ?2) <> 0))),
+         ranked AS (
+           SELECT r.*, row_number() OVER (PARTITION BY r.message_id, r.actor_account_id, r.emoji
+              ORDER BY r.action_at DESC, r.removed DESC, (r.origin <> 'manual') DESC) AS rank
+             FROM scoped r WHERE r.connection_rank = 1)
+         SELECT r.message_id, r.actor_account_id, a.party_id,
+                coalesce(nullif(a.display_name, ''), p.name, ''),
+                r.emoji, r.origin, r.action_at, r.time_source, r.source_revision
+           FROM ranked r
+           JOIN accounts a ON a.id = r.actor_account_id
+           LEFT JOIN parties p ON p.id = a.party_id
+          WHERE r.rank = 1 AND r.removed = 0
+          ORDER BY r.message_id, r.action_at, r.actor_account_id, r.emoji",
+        &Values(vec![json_ids.into(), mask.into()]),
+        &mut |row| {
+            let mid: String = row.get(0)?;
+            rows.push((
+                mid,
+                StoredReaction {
+                    actor_account_id: row.get(1)?,
+                    actor_party_id: row.get(2)?,
+                    actor_name: row.get(3)?,
+                    emoji: row.get(4)?,
+                    origin: row.get(5)?,
+                    at: row.get(6)?,
+                    time_source: row.get(7)?,
+                    revision: row.get(8)?,
+                },
+            ));
+            Ok(())
+        },
+    )?;
+    Ok(rows)
+}
+
 /// Resolve a reaction's target message among messages seen by `conn`. Returns `Some(id)` only when
 /// the target identifies a unique stored message.
 pub fn resolve_target(

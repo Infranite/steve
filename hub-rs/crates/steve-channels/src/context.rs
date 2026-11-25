@@ -23,7 +23,7 @@
 //! [`arrange`] and the renderers are pure, so the offline replay (`crate::reply_eval`) builds the
 //! same context from a case as [`load`] does from the store.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Datelike, TimeZone};
 use serde_json::Value;
@@ -74,6 +74,23 @@ pub enum Side {
     Persona,
 }
 
+/// A structured `@`-mention carried by a channel message (#258).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MentionedPerson {
+    pub account_id: Option<String>,
+    pub name: String,
+    pub is_owner: bool,
+}
+
+/// An active incoming emoji reaction shown inline on a message in context (#258 / #277).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MsgReaction {
+    pub who: String,
+    pub emoji: String,
+    pub is_owner: bool,
+    pub origin: String,
+}
+
 /// One message as the context reads it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Msg {
@@ -91,6 +108,16 @@ pub struct Msg {
     pub thread_key: Option<String>,
     pub external_id: Option<String>,
     pub reply_to: Option<String>,
+    /// Structured `@`-mentions parsed deterministically from the channel event (#258).
+    pub mentions: Vec<MentionedPerson>,
+    /// Whether structured mentions explicitly address one of the owner's accounts.
+    pub mentions_owner: bool,
+    /// Display label of the sender of the quoted `reply_to` message, when resolved.
+    pub reply_to_sender: Option<String>,
+    /// Whether the quoted `reply_to` message was written by the owner.
+    pub reply_to_is_owner: bool,
+    /// Active incoming emoji reactions on this message.
+    pub reactions: Vec<MsgReaction>,
 }
 
 /// One line of the rendered conversation.
@@ -290,6 +317,9 @@ pub struct Occasion {
     pub why: Why,
     /// When the message was written (ms).
     pub at: i64,
+    /// Other people explicitly `@`-mentioned on this message (populated deterministically from
+    /// structured mentions, never guessed from prose; #258).
+    pub mentions_others: Vec<String>,
 }
 
 const WEEKDAYS: [&str; 7] = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -326,6 +356,16 @@ pub fn occasion_block(o: &Occasion, mode: Mode, clock: &Clock) -> String {
         Why::TriggerWords => "为什么轮到你：我用触发词叫你回这条。".to_string(),
         Why::Other => format!("为什么轮到你：{} 在这里说话，没有直接找{me}。", o.sender),
     });
+    if !o.dm && !o.mentions_others.is_empty() {
+        let extra = match o.why {
+            Why::Mentioned => format!("同时还 @ 了：{}。", o.mentions_others.join("、")),
+            _ => format!(
+                "这条消息明确 @ 了：{}（没有 @ {me}）。",
+                o.mentions_others.join("、")
+            ),
+        };
+        lines.push(extra);
+    }
     if let Some(n) = local(clock.now, clock.tz) {
         lines.push(format!(
             "现在是 {} {} {}（本地时间）；这条消息的时间：{}。",
@@ -462,6 +502,11 @@ pub fn typed_target(text: &str, attachments: &Value) -> String {
     }
 }
 
+/// Whether `t` is solely a provider media/non-text placeholder (`[image]`, `[图片]`, etc.).
+pub(crate) fn is_placeholder(t: &str) -> bool {
+    placeholder(t).is_some()
+}
+
 /// The message itself cannot be read: its text is only a provider placeholder (a card, a system
 /// message, an image …), no image of it reached the model (`images_read`), and it carries no file
 /// whose text could be read instead.
@@ -479,12 +524,20 @@ pub fn unreadable(text: &str, attachments: &Value, images_read: bool) -> bool {
 // ---------------------------------------------------------------- arranging
 
 /// The ids of `before` in the target's reply chain: the same provider thread when it holds more
-/// than the target, and the messages it answers (`reply_to`, followed up).
+/// than the target, sibling replies quoting the same parent, and the messages it answers
+/// (`reply_to`, followed up).
 fn chain_of(target: &Msg, before: &[Msg]) -> HashSet<String> {
     let mut ids = HashSet::new();
     if let Some(k) = target.thread_key.as_deref().filter(|k| !k.is_empty()) {
         for m in before {
             if m.thread_key.as_deref() == Some(k) {
+                ids.insert(m.id.clone());
+            }
+        }
+    }
+    if let Some(parent) = target.reply_to.as_deref().filter(|r| !r.is_empty()) {
+        for m in before {
+            if m.reply_to.as_deref() == Some(parent) {
                 ids.insert(m.id.clone());
             }
         }
@@ -506,6 +559,29 @@ fn chain_of(target: &Msg, before: &[Msg]) -> HashSet<String> {
         up = m.reply_to.clone();
     }
     ids
+}
+
+fn format_line_text(m: &Msg) -> String {
+    let mut text = if let Some(ref to) = m.reply_to_sender
+        && !to.is_empty()
+    {
+        format!("[回复 {to}] {}", m.text)
+    } else {
+        m.text.clone()
+    };
+    if !m.reactions.is_empty() {
+        let parts: Vec<String> = m
+            .reactions
+            .iter()
+            .take(8)
+            .map(|r| {
+                let who = if r.is_owner { "我" } else { r.who.as_str() };
+                format!("{who}:{}", r.emoji)
+            })
+            .collect();
+        text.push_str(&format!(" [表情：{}]", parts.join("、")));
+    }
+    text
 }
 
 /// Lines from messages (oldest first): runs of two or more bot messages fold into one line, and a
@@ -553,7 +629,7 @@ fn lines(
         out.push(Shown::Line {
             when: relative(m.at, clock),
             who: label(m),
-            text: m.text.clone(),
+            text: format_line_text(m),
             chain: chain.contains(&m.id),
         });
         last = Some(m.at);
@@ -653,6 +729,37 @@ pub fn owner_names(r: &mut impl Read, mine: &Mine, address: &str) -> ChannelResu
     Ok(out)
 }
 
+fn parse_mentions(raw: &Value, mine: &Mine) -> (Vec<MentionedPerson>, bool) {
+    let mut out = Vec::new();
+    let mut mentions_owner = false;
+    for entry in raw.as_array().into_iter().flatten() {
+        let account_id = entry["account_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let name = entry["name"]
+            .as_str()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let is_owner = account_id
+            .as_deref()
+            .is_some_and(|a| mine.accounts.iter().any(|m| m == a));
+        if is_owner {
+            mentions_owner = true;
+        }
+        if account_id.is_some() || !name.is_empty() {
+            out.push(MentionedPerson {
+                account_id,
+                name,
+                is_owner,
+            });
+        }
+    }
+    (out, mentions_owner)
+}
+
 fn msg_of(row: dialogue::Record, mine: &Mine, mode: Mode) -> Msg {
     let dialogue::Record {
         direction: dir,
@@ -662,6 +769,7 @@ fn msg_of(row: dialogue::Record, mine: &Mine, mode: Mode) -> Msg {
         on_behalf,
         text,
         attachments,
+        mentions: raw_mentions,
         display_name: display,
         party_name,
         handle,
@@ -697,6 +805,7 @@ fn msg_of(row: dialogue::Record, mine: &Mine, mode: Mode) -> Msg {
     } else {
         shown_name([display.as_str(), party_name.as_str(), handle.as_str()])
     };
+    let (mentions, mentions_owner) = parse_mentions(&raw_mentions, mine);
     Msg {
         id,
         at,
@@ -708,6 +817,11 @@ fn msg_of(row: dialogue::Record, mine: &Mine, mode: Mode) -> Msg {
         thread_key: thread,
         external_id: external,
         reply_to,
+        mentions,
+        mentions_owner,
+        reply_to_sender: None,
+        reply_to_is_owner: false,
+        reactions: Vec::new(),
     }
 }
 
@@ -734,7 +848,7 @@ pub fn load(
         return Ok(None);
     };
     let t_created = target.created;
-    let t = msg_of(target, mine, mode);
+    let mut t = msg_of(target, mine, mode);
     let mut rows: Vec<_> = records
         .into_iter()
         .map(|row| {
@@ -742,13 +856,100 @@ pub fn load(
             (msg_of(row, mine, mode), created)
         })
         .collect();
+    // Deterministically fetch an out-of-window quoted parent so group quotes never lose context (#258).
+    if let Some(ref parent_ext) = t.reply_to
+        && !parent_ext.is_empty()
+        && !rows
+            .iter()
+            .any(|(m, _)| m.external_id.as_deref() == Some(parent_ext.as_str()))
+        && let Some(parent_row) = dialogue::by_external(r, space, parent_ext)?
+        && parent_row.id != t.id
+    {
+        let created = parent_row.created;
+        rows.push((msg_of(parent_row, mine, mode), created));
+    }
     rows.sort_by(|(a, ac), (b, bc)| (a.at, *ac, &a.id).cmp(&(b.at, *bc, &b.id)));
     let (before, after): (Vec<_>, Vec<_>) = rows
         .into_iter()
         .partition(|(m, created)| (m.at, *created) <= (t.at, t_created));
     let skip = before.len().saturating_sub(SCAN);
-    let before = before.into_iter().skip(skip).map(|(m, _)| m).collect();
-    let after = after.into_iter().take(AFTER).map(|(m, _)| m).collect();
+    let mut before: Vec<Msg> = before.into_iter().skip(skip).map(|(m, _)| m).collect();
+    let mut after: Vec<Msg> = after.into_iter().take(AFTER).map(|(m, _)| m).collect();
+
+    // Resolve quote targets (`reply_to_sender`, `reply_to_is_owner`) deterministically by external_id.
+    let mut by_ext: HashMap<String, (String, bool)> = HashMap::new();
+    for m in before.iter().chain(std::iter::once(&t)).chain(after.iter()) {
+        if let Some(ref ext) = m.external_id
+            && !ext.is_empty()
+        {
+            let owner_side = matches!(m.side, Side::Owner | Side::OwnerViaSteve);
+            let who = if owner_side {
+                "我".to_string()
+            } else if m.name.is_empty() {
+                "某人".to_string()
+            } else {
+                m.name.clone()
+            };
+            by_ext.insert(ext.clone(), (who, owner_side));
+        }
+    }
+    let resolve_quote = |m: &mut Msg| {
+        if let Some(ref parent) = m.reply_to
+            && let Some((who, is_owner)) = by_ext.get(parent)
+        {
+            m.reply_to_sender = Some(who.clone());
+            m.reply_to_is_owner = *is_owner;
+        }
+    };
+    resolve_quote(&mut t);
+    for m in &mut before {
+        resolve_quote(m);
+    }
+    for m in &mut after {
+        resolve_quote(m);
+    }
+
+    // Batch-load active incoming reactions for the target and recent window (single query).
+    let mut ids: Vec<String> = vec![t.id.clone()];
+    for m in before.iter().rev().take(40) {
+        ids.push(m.id.clone());
+    }
+    for m in after.iter().take(AFTER) {
+        ids.push(m.id.clone());
+    }
+    let mut rx_map: HashMap<String, Vec<MsgReaction>> = HashMap::new();
+    for (mid, rx) in
+        steve_store::channel_message_repo::incoming_reactions::list_for_messages(r, &ids, -1)?
+    {
+        let is_owner = mine.accounts.iter().any(|a| a == &rx.actor_account_id);
+        let who = if is_owner {
+            "我".to_string()
+        } else if raw_name(&rx.actor_name) {
+            "某人".to_string()
+        } else {
+            rx.actor_name
+        };
+        rx_map.entry(mid).or_default().push(MsgReaction {
+            who,
+            emoji: rx.emoji,
+            is_owner,
+            origin: rx.origin,
+        });
+    }
+    if let Some(rx) = rx_map.remove(&t.id) {
+        t.reactions = rx;
+    }
+    for m in &mut before {
+        if let Some(rx) = rx_map.remove(&m.id) {
+            m.reactions = rx;
+        }
+    }
+    for m in &mut after {
+        if let Some(rx) = rx_map.remove(&m.id) {
+            m.reactions = rx;
+        }
+    }
+
     Ok(Some((t, before, after)))
 }
 
@@ -1136,6 +1337,7 @@ mod tests {
             sender: "B".into(),
             why: Why::of(&serde_json::json!({"mentioned": true}), false),
             at: at("2026-01-05T10:01:00+08:00"),
+            mentions_others: Vec::new(),
         };
         let b = occasion_block(&o, Mode::Own, &c);
         assert_eq!(

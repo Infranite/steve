@@ -70,6 +70,8 @@ pub const STARRED: &str = "⭐ 星标联系人";
 pub const LABEL_NO_CONTENT: &str = "没有要回的内容，只记录";
 /// … a nudge added to the open card (G5).
 pub const LABEL_NUDGE: &str = "对方在催，加到了之前的卡片上";
+/// … a group message explicitly `@`-mentioning only other people, not the owner (G6, #258).
+pub const LABEL_ADDRESSED_TO_OTHERS: &str = "群里明确 @ 了其他人，不替你起草";
 /// … a bot's notice proposed as an item (G0).
 pub const LABEL_BOT_ITEM: &str = "机器人的通知，提成事项";
 /// … a bot's notice whose action link was proposed already.
@@ -108,10 +110,14 @@ pub enum Reason {
     Rule,
     /// Your instruction did not come out as a reply.
     Instruction,
+    /// Current harness/model or format does not support reading the attached image/file (#278).
+    MediaUnsupported,
+    /// Attached image/file could not be retrieved or parsed (#278).
+    MediaUnavailable,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 9] = [
+    pub const ALL: [Reason; 11] = [
         Self::Commitment,
         Self::OwnerFact,
         Self::Substantive,
@@ -121,6 +127,8 @@ impl Reason {
         Self::MeantForOwner,
         Self::Rule,
         Self::Instruction,
+        Self::MediaUnsupported,
+        Self::MediaUnavailable,
     ];
 
     pub fn code(self) -> &'static str {
@@ -134,6 +142,8 @@ impl Reason {
             Self::MeantForOwner => "meant_for_owner",
             Self::Rule => "rule",
             Self::Instruction => "instruction",
+            Self::MediaUnsupported => "media_unsupported",
+            Self::MediaUnavailable => "media_unavailable",
         }
     }
 
@@ -145,6 +155,8 @@ impl Reason {
             | "privacy" | "relationship" => Some(Self::Commitment),
             "owner_fact" | "fact" | "owner_only" => Some(Self::OwnerFact),
             "substantive" | "long" => Some(Self::Substantive),
+            "media_unsupported" => Some(Self::MediaUnsupported),
+            "media_unavailable" => Some(Self::MediaUnavailable),
             _ => None,
         }
     }
@@ -168,6 +180,8 @@ impl Reason {
             Self::MeantForOwner => "这条要你自己回",
             Self::Rule => "这里的规则把消息转给你",
             Self::Instruction => "按你说的没能写出回复",
+            Self::MediaUnsupported => "当前模型或格式不支持读取这条消息里的图片/附件，需要你查看",
+            Self::MediaUnavailable => "这条消息里的图片/文件没能读出内容，需要你查看",
         }
     }
 }
@@ -186,6 +200,8 @@ pub struct Answer {
     pub needs_commitment: bool,
     pub summary: String,
     pub draft: String,
+    /// Optional topic-split replies for a multi-topic burst (#268).
+    pub replies: Vec<crate::deliver::TopicReply>,
 }
 
 /// What the gates know about the message an answer is for.
@@ -321,13 +337,13 @@ pub fn keep_composed(
     message: &str,
     g: &crate::deliver::Generation,
 ) -> ChannelResult<()> {
-    let v = json!({
+    let mut v = json!({
         "outcome": g.outcome.code(),
         "reason": g.reason,
+        "why": g.why,
         "needs_commitment": g.needs_commitment || g.needs_approval,
         "model": g.model,
     });
-    let mut v = v;
     // what the composer was shown of how you talk, for the disclosure check that runs later
     if !g.style_samples.is_empty() {
         v["style_samples"] = json!(g.style_samples);
@@ -338,13 +354,15 @@ pub fn keep_composed(
 
 // ---------------------------------------------------------------- the gates before the model
 
-/// What the gates before the model decided for a message (G4, G5).
+/// What the gates before the model decided for a message (G4, G5, G6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gate {
     /// Nothing to answer: recorded.
     NoContent,
     /// They asked again: the open card `decision` says so, no new one.
     Nudge { decision: String },
+    /// In a group chat, structured mentions explicitly address only other people, not the owner (#258).
+    AddressedToOthers,
 }
 
 /// A Unicode emoji, its joiners and selectors.
@@ -451,6 +469,28 @@ pub fn gate(
     }
     let space = &first.space_id;
     let before = first.created;
+    // G6 (#258): deterministic group addressee gate — when a group message carries explicit
+    // structured `@`-mentions exclusively naming other people (never the owner and not `@all`),
+    // and is not replying to the owner, never misread it as directed at the owner.
+    if !starred
+        && let Some((said_target, _, dm)) = crate::presence::said(r, ws, target)?
+        && !dm
+    {
+        let facts = crate::context::facts_of(r, target)?;
+        let mentioned_me =
+            said_target.mentions_owner || facts["mentioned"].as_bool().unwrap_or(false);
+        let reply_to_me = facts["reply_to_me"].as_bool().unwrap_or(false);
+        let structured_others = !said_target.mentions.is_empty() && !mentioned_me && !reply_to_me;
+        if structured_others {
+            metrics::counter!(
+                "steve_channel_group_gate_total",
+                "result" => "addressed_to_others",
+            )
+            .increment(1);
+            return Ok(Some(Gate::AddressedToOthers));
+        }
+        metrics::counter!("steve_channel_group_gate_total", "result" => "pass").increment(1);
+    }
     if messages
         .iter()
         .all(|msg| nudge_only(msg.text.as_deref().unwrap_or_default(), &msg.attachments))
@@ -562,7 +602,13 @@ impl Card {
             Reason::OwnerFact
         });
         let note = match mode {
-            Mode::Own => (reason == Reason::Voice).then(|| g.why.clone()),
+            Mode::Own => match reason {
+                Reason::Voice => Some(g.why.clone()),
+                Reason::MediaUnsupported | Reason::MediaUnavailable => {
+                    Some(text.trim().to_string()).filter(|t| !t.is_empty())
+                }
+                _ => None,
+            },
             Mode::Bot => Some(text.trim().to_string()).filter(|t| !t.is_empty()),
         };
         Self {

@@ -631,6 +631,27 @@ pub struct SpaceSettings {
     pub reply_as_you: ReplyAsYou,
     /// What a bot's message here becomes on your own account (097).
     pub bot_notices: BotNotices,
+    /// Per-space override of the `[AI]` prefix preference (`None` = follow account setting; 140).
+    pub ai_mark: Option<bool>,
+}
+
+/// Resolves whether outgoing replies sent on `Mode::Own` in `space` carry the `[AI]` prefix:
+/// space override (`space_prefs.ai_mark`), else account setting (`channel_settings.ai_mark`,
+/// default `true`). Always `false` for `Mode::Bot`.
+pub fn effective_ai_mark(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    space: &str,
+    conn: &str,
+) -> ChannelResult<bool> {
+    let (_, mode) = crate::bindings::connection_account(r, ws, conn)?;
+    if mode != Mode::Own {
+        return Ok(false);
+    }
+    if let Some(override_v) = prefs::settings(r, space)?.and_then(|s| s.ai_mark) {
+        return Ok(override_v);
+    }
+    Ok(channel_settings(r, ws, conn)?.map_or(true, |s| s.ai_mark))
 }
 
 pub fn settings(r: &mut impl steve_store::Read, space: &str) -> ChannelResult<SpaceSettings> {
@@ -661,6 +682,7 @@ pub fn settings(r: &mut impl steve_store::Read, space: &str) -> ChannelResult<Sp
             .as_deref()
             .and_then(BotNotices::parse)
             .unwrap_or_default(),
+        ai_mark: row.ai_mark,
     })
 }
 
@@ -689,6 +711,7 @@ pub fn settings_or_defaults(
             attention: Attention::Realtime,
             reply_as_you: ReplyAsYou::Draft,
             bot_notices: BotNotices::Auto,
+            ai_mark: None,
         }),
         r => r,
     }
@@ -733,6 +756,10 @@ pub struct SpaceOut {
     pub reply_as_you: ReplyAsYou,
     /// What a bot's message here becomes on your own account: `auto|item|record`.
     pub bot_notices: BotNotices,
+    /// Per-space `[AI]` mark override (`null` = follow account setting).
+    pub ai_mark: Option<bool>,
+    /// Effective `[AI]` mark for replies sent from this space.
+    pub effective_ai_mark: bool,
     /// Steve's role here (derived from the voice's rules and `muted`).
     pub role: Role,
     /// The identity that speaks for Steve here, `null` when none sees it any more.
@@ -1147,6 +1174,10 @@ pub fn out(r: &mut impl steve_store::Read, s: &SpaceRow) -> ChannelResult<SpaceO
         Some(SpaceKind::Channel) => "topic_group".to_string(),
         _ => s.kind.clone(),
     };
+    let account_ai_mark = account.as_ref().map_or(true, |x| x.ai_mark);
+    let effective_ai_mark = voice.as_ref().is_some_and(|v| v.mode == Mode::Own)
+        && set.ai_mark.unwrap_or(account_ai_mark);
+    let open = crate::open_link::space_link(r, s)?;
     Ok(SpaceOut {
         id: s.id.clone(),
         connection_id: s.connection_id.clone(),
@@ -1172,6 +1203,8 @@ pub fn out(r: &mut impl steve_store::Read, s: &SpaceRow) -> ChannelResult<SpaceO
         attention: set.attention,
         reply_as_you: set.reply_as_you,
         bot_notices: set.bot_notices,
+        ai_mark: set.ai_mark,
+        effective_ai_mark,
         role,
         voice,
         identities: ids,
@@ -1180,10 +1213,8 @@ pub fn out(r: &mut impl steve_store::Read, s: &SpaceRow) -> ChannelResult<SpaceO
         self_chat,
         suggest_quiet,
         conflicts,
-        open_url: crate::open_link::space_link(r, s)?
-            .as_ref()
-            .map(|l| l.url.clone()),
-        open_provider: crate::open_link::space_link(r, s)?.map(|l| l.provider),
+        open_url: open.as_ref().map(|l| l.url.clone()),
+        open_provider: open.map(|l| l.provider),
     })
 }
 
@@ -1213,6 +1244,9 @@ pub struct SpacePatch {
     pub memory_scope: Option<String>,
     pub disclosure: Option<String>,
     pub item_defaults: Option<ItemDefaults>,
+    /// Absent = unchanged; `null` = follow account setting; `true|false` = override `[AI]` mark here.
+    #[serde(default, deserialize_with = "some_nullable_bool")]
+    pub ai_mark: Option<Option<bool>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -1237,6 +1271,12 @@ fn some_nullable_value<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Option<Option<Value>>, D::Error> {
     Option::<Value>::deserialize(d).map(|v| Some(v.filter(|v| !v.is_null())))
+}
+
+fn some_nullable_bool<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<bool>>, D::Error> {
+    Option::<bool>::deserialize(d).map(Some)
 }
 
 pub const MEMORY_SCOPES: [&str; 2] = ["space", "persona"];
@@ -1347,6 +1387,9 @@ pub fn patch(
     if let Some(a) = p.bot_notices.as_deref().and_then(BotNotices::parse) {
         after.bot_notices = a;
     }
+    if let Some(v) = p.ai_mark {
+        after.ai_mark = v;
+    }
     if let Some(v) = p.collab {
         after.collab = v;
     }
@@ -1406,6 +1449,9 @@ pub fn patch(
     }
     if after.bot_notices != before.bot_notices {
         write_bot_notices(w, ws, id, after.bot_notices, now)?;
+    }
+    if after.ai_mark != before.ai_mark {
+        prefs::set(w, ws, id, Preference::AiMark(after.ai_mark), now)?;
     }
     let voice_after = prefs::chosen_voice(w, id)?;
     let snap = |x: &SpaceSettings, persona: &Option<String>, voice: &Option<String>| {

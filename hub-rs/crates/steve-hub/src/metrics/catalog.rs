@@ -1043,4 +1043,54 @@ pub(super) fn describe() {
         Count,
         "Incoming channel reaction events processed. Labels: change (created, removed), origin (manual, automated, unknown), matched (yes, pending), superseded (yes, no)."
     );
+    describe_histogram!(
+        "steve_channel_context_assembly_seconds",
+        Seconds,
+        "Time spent assembling deterministic conversation context for a channel reply."
+    );
+    describe_counter!(
+        "steve_channel_group_gate_total",
+        Count,
+        "Group chat addressee gate decisions before invoking the composer. Labels: result (addressed_to_others, pass)."
+    );
+    describe_histogram!(
+        "steve_channel_burst_messages",
+        Count,
+        "Number of inbound messages grouped into one reply burst."
+    );
+    describe_counter!(
+        "steve_channel_burst_coalesced_total",
+        Count,
+        "Inbound messages coalesced into a later message within the burst settle window."
+    );
+    describe_counter!(
+        "steve_channel_reply_splits_total",
+        Count,
+        "Burst reply deliveries split vs single. Labels: split (single, multi)."
+    );
+    describe_counter!(
+        "steve_channel_cross_context_hits_total",
+        Count,
+        "Cross-context entries assembled for owner-voice replies. Labels: source (me_mem, other_chat, main_thread, item)."
+    );
+    describe_histogram!(
+        "steve_channel_cross_context_seconds",
+        Seconds,
+        "Time spent assembling owner-voice cross-context."
+    );
+    describe_counter!(
+        "steve_channel_media_prepare_total",
+        Count,
+        "Channel media preparation outcomes. Labels: outcome (ok, cached, unsupported, failed, timeout)."
+    );
+    describe_histogram!(
+        "steve_channel_media_prepare_seconds",
+        Seconds,
+        "Time spent fetching and extracting media attachments for a channel reply."
+    );
+    describe_counter!(
+        "steve_gateway_multimodal_reroute_total",
+        Count,
+        "Image-bearing gateway calls rerouted to a multimodal-capable harness. Labels: from, to."
+    );
 }

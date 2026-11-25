@@ -222,7 +222,9 @@ async fn setup_full(as_user: Option<Arc<dyn ActAsUser>>, decl: Option<ChannelDec
     }
     let ch = ch.build();
     late.set(&ch);
-    let api = api::routes(ch.clone()).with_state(env.modules.clone());
+    let api = api::routes(ch.clone())
+        .merge(steve_channels::channels_api::routes(ch.clone()))
+        .with_state(env.modules.clone());
 
     let (me, _) =
         FakeChannel::seed_connection(env.store(), &caller(WS, ME), Some("upx")).expect("you");
@@ -438,8 +440,8 @@ async fn your_own_account_always_drafts_and_sends_the_edited_text_after_the_dela
     let s = sent(&h);
     assert_eq!(s.len(), 1);
     assert_eq!(
-        s[0].1, "周四可以，我下午确认。",
-        "no signature, no mark on your own text"
+        s[0].1, "[AI] 周四可以，我下午确认。",
+        "default Mode::Own replies carry the [AI] prefix unless disabled"
     );
     assert_eq!(status(&h, &m), "sent");
     assert_eq!(h.outbox.send_due(&h.ch).await, 0, "once");
@@ -1765,17 +1767,30 @@ impl ActAsUser for AsUser {
         content: &OutContent,
         key: &SendKey,
     ) -> Result<Sent, AdapterError> {
+        let mut calls = self.0.lock().unwrap();
+        let n = calls.len();
         let (at, in_thread, id) = match to {
-            ActTarget::Space { ext_id } => (ext_id.clone(), false, "om_u1"),
-            ActTarget::Reply { to, in_thread } => {
-                (to.id().unwrap_or_default().to_string(), *in_thread, "om_u2")
-            }
+            ActTarget::Space { ext_id } => (
+                ext_id.clone(),
+                false,
+                if n == 0 {
+                    "om_u1".to_string()
+                } else {
+                    format!("om_u1_{n}")
+                },
+            ),
+            ActTarget::Reply { to, in_thread } => (
+                to.id().unwrap_or_default().to_string(),
+                *in_thread,
+                if n == 0 {
+                    "om_u2".to_string()
+                } else {
+                    format!("om_u2_{n}")
+                },
+            ),
         };
         assert_eq!(content.uuid.as_deref(), Some(key.0.as_str()));
-        self.0
-            .lock()
-            .unwrap()
-            .push((at, content.text.clone(), Some(key.0.clone()), in_thread));
+        calls.push((at, content.text.clone(), Some(key.0.clone()), in_thread));
         Ok(Sent::id(id).created(1_700_000_000_000))
     }
 
@@ -1808,7 +1823,12 @@ async fn your_own_messages_go_out_with_your_user_token_once_approved() {
     let calls = u.0.lock().unwrap().clone();
     assert_eq!(
         calls,
-        vec![("d1".to_string(), "在的".to_string(), Some(m.clone()), false)]
+        vec![(
+            "d1".to_string(),
+            "[AI] 在的".to_string(),
+            Some(m.clone()),
+            false
+        )]
     );
     nothing_sent(&h);
     assert_eq!(
@@ -2067,7 +2087,8 @@ async fn the_thread_a_send_reports_never_replaces_one() {
     assert_eq!(thread(&h), json!("t_own"));
 }
 
-/// An own-account draft waits for human approval; an edited approval strips a forged AI mark.
+/// An own-account draft waits for human approval; by default it carries the `[AI]` mark, and when
+/// `ai_mark` is turned off an edited approval strips a forged `[AI]` prefix.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_own_account_send_waits_for_approval_and_cannot_forge_an_ai_mark() {
     let u = Arc::new(AsUser::default());
@@ -2087,12 +2108,40 @@ async fn an_own_account_send_waits_for_approval_and_cannot_forge_an_ai_mark() {
     assert!(u.0.lock().unwrap().is_empty());
     nothing_sent(&h);
 
-    decide(&h, &d, "yes", "[AI] 在的").unwrap();
+    // Default preference on Mode::Own: `[AI]` prefix is applied automatically.
+    decide(&h, &d, "yes", "在的").unwrap();
     h.env.clock.advance(11_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
     let calls = u.0.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].1, "在的");
+    assert_eq!(calls[0].1, "[AI] 在的");
+    nothing_sent(&h);
+
+    // Turn off `ai_mark` on the account: a forged `[AI]` prefix in an edited approval is stripped.
+    let (s, v) = call_as_me(
+        &h,
+        "PATCH",
+        &format!("/channels/{me}"),
+        Some(json!({"ai_mark": false})),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["ai_mark"], json!(false));
+
+    h.env.clock.advance(5 * 60_000);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let r2 = push(&h, &me, msg("C_DEV", "d2", "ulilei", "@你 还在吗", true))
+        .await
+        .response
+        .unwrap();
+    let d2 = r2.decision_id.unwrap();
+    checked(&h).await;
+    decide(&h, &d2, "yes", "[AI] 还在").unwrap();
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    let calls = u.0.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].1, "还在");
     nothing_sent(&h);
 }
 
@@ -2441,7 +2490,7 @@ async fn owner_voice_cards_name_the_counterpart_instead_of_the_provider_dm_name(
         h.fake.sent.lock().unwrap()[0].1.space_ext_id.as_deref(),
         Some("D_LI")
     );
-    assert_eq!(sent(&h)[0].1, "周四可以");
+    assert_eq!(sent(&h)[0].1, "[AI] 周四可以");
 }
 
 /// Fallback approvals and handoffs must also re-read the title, rather than trust a cached Plan or
@@ -3352,7 +3401,7 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
     decide(&h, &again, "yes", "").expect("yes");
     h.env.clock.advance(11_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
-    assert_eq!(sent(&h)[0].1, "下周开会再细聊。");
+    assert_eq!(sent(&h)[0].1, "[AI] 下周开会再细聊。");
 }
 
 /// Y4: the connection is checked when the message goes out, not when it was approved: approved

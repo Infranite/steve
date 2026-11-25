@@ -18,6 +18,7 @@ pub struct Record {
     pub on_behalf: String,
     pub text: String,
     pub attachments: Value,
+    pub mentions: Value,
     pub thread: Option<String>,
     pub external: Option<String>,
     pub reply_to: Option<String>,
@@ -33,6 +34,7 @@ pub struct Record {
 fn decode(row: &Row<'_>) -> Result<Record> {
     let text = |i| Ok::<_, crate::StoreError>(row.get::<Option<String>>(i)?.unwrap_or_default());
     let raw_attachments = row.get::<Option<String>>(8)?;
+    let raw_mentions = row.get::<Option<String>>(9)?;
     Ok(Record {
         id: row.get(0)?,
         at: row.get(1)?,
@@ -48,16 +50,20 @@ fn decode(row: &Row<'_>) -> Result<Record> {
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok())
             .unwrap_or_else(|| serde_json::json!([])),
-        thread: row.get(9)?,
-        external: row.get(10)?,
-        reply_to: row.get(11)?,
-        display_name: text(12)?,
-        party_name: text(13)?,
-        handle: text(14)?,
-        account_kind: text(15)?,
-        contact_kind: text(16)?,
-        persona_name: text(17)?,
-        created: row.get(18)?,
+        mentions: raw_mentions
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_else(|| serde_json::json!([])),
+        thread: row.get(10)?,
+        external: row.get(11)?,
+        reply_to: row.get(12)?,
+        display_name: text(13)?,
+        party_name: text(14)?,
+        handle: text(15)?,
+        account_kind: text(16)?,
+        contact_kind: text(17)?,
+        persona_name: text(18)?,
+        created: row.get(19)?,
     })
 }
 
@@ -73,6 +79,7 @@ fn records(space: &str) -> SelectStatement {
             ("m", "on_behalf"),
             ("m", "text"),
             ("m", "attachments"),
+            ("m", "mentions"),
             ("m", "thread_key"),
             ("m", "external_id"),
             ("m", "reply_to"),
@@ -156,6 +163,22 @@ pub fn window(
         )?,
     );
     Ok(Some((target, nearby)))
+}
+
+/// Fetches a single message in `space` by its provider `external_id` (used to pull an
+/// out-of-window quoted parent into the conversation context deterministically).
+pub fn by_external(r: &mut impl Read, space: &str, external_id: &str) -> Result<Option<Record>> {
+    if external_id.trim().is_empty() {
+        return Ok(None);
+    }
+    r.one(
+        records(space)
+            .and_where(Expr::col(("m", "external_id")).eq(external_id))
+            .and_where(Expr::col(("m", "status")).is_in(["received", "sent"]))
+            .order_by_columns([(("m", "created"), Order::Asc), (("m", "id"), Order::Asc)])
+            .limit(1),
+        decode,
+    )
 }
 
 pub fn pending(r: &mut impl Read, space: &str, limit: u64) -> Result<Vec<(i64, String)>> {

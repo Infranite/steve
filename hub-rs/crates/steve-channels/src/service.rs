@@ -66,6 +66,8 @@ struct Inner {
     names: Names,
     /// Bounded TTL cache for channel intent rule judgements keyed by input hash.
     intent_cache: crate::rules::IntentCache,
+    /// Burst coalescing gate for rapid multi-message turns (#268).
+    burst_gate: crate::burst::BurstGate,
     /// Where replies' knowledge is searched (the Hub sets the workspace's store; SQLite until then).
     knowledge: std::sync::OnceLock<Arc<dyn steve_knowledge::port::KnowledgeStore>>,
 }
@@ -102,9 +104,16 @@ pub struct ChannelsBuilder {
     party_hooks: Vec<Arc<dyn PartyHooks>>,
     links: Vec<Arc<dyn PlatformLinks>>,
     syntaxes: Vec<Arc<dyn PlatformSyntax>>,
+    burst_settle: std::time::Duration,
 }
 
 impl ChannelsBuilder {
+    /// Sets the live burst settle window for coalescing rapid messages from one sender (#268).
+    pub fn burst_settle(mut self, settle: std::time::Duration) -> Self {
+        self.burst_settle = settle;
+        self
+    }
+
     pub fn links(mut self, l: Arc<dyn PlatformLinks>) -> Self {
         self.links.push(l);
         self
@@ -236,6 +245,7 @@ impl ChannelsBuilder {
             party_hooks: self.party_hooks,
             names,
             intent_cache: crate::rules::IntentCache::new(),
+            burst_gate: crate::burst::BurstGate::new(self.burst_settle),
             knowledge: std::sync::OnceLock::new(),
         }))
     }
@@ -266,7 +276,12 @@ impl Channels {
             party_hooks: vec![Arc::new(steve_modules::accounts::AccountHooks)],
             links: Vec::new(),
             syntaxes: Vec::new(),
+            burst_settle: std::time::Duration::ZERO,
         }
+    }
+
+    pub fn burst_gate(&self) -> &crate::burst::BurstGate {
+        &self.0.burst_gate
     }
 
     pub fn downgrade(&self) -> WeakChannels {

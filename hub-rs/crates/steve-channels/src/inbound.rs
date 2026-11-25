@@ -2130,6 +2130,7 @@ impl Channels {
             rule: None,
             muted: set.muted,
             trigger: None,
+            burst_message_ids: Vec::new(),
         };
 
         Ok(ResponseContext {

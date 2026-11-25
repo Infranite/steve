@@ -103,6 +103,9 @@ pub struct AccountOut {
     /// Messages only recorded as history: `{before, late, at}` (written before the connection was
     /// on, arrived too late, the last one's time).
     pub history: Value,
+    /// On your own account: whether replies sent from this account carry the `[AI]` prefix by
+    /// default (can be turned off per account or per space; always false on bot accounts).
+    pub ai_mark: bool,
 }
 
 /// `system` and `provider` of an adapter: its provider's integration (the adapters of one provider
@@ -238,9 +241,18 @@ pub fn out(
     let settings = spaces::channel_settings(r, ws, conn)?;
     let send_delay_s = settings.as_ref().and_then(|s| s.send_delay_s);
     let card_ttl_h = settings.as_ref().and_then(|s| s.card_ttl_h);
-    let (late_ms, before, late, at) = settings.as_ref().map_or((None, 0, 0, None), |s| {
-        (s.late_ms, s.before, s.late, s.history_at)
-    });
+    let (late_ms, before, late, at, ai_mark) =
+        settings
+            .as_ref()
+            .map_or((None, 0, 0, None, mode == Mode::Own), |s| {
+                (
+                    s.late_ms,
+                    s.before,
+                    s.late,
+                    s.history_at,
+                    mode == Mode::Own && s.ai_mark,
+                )
+            });
     let (duty, rules, trigger, revision) = match settings {
         Some(s) => (s.duty, s.rules, s.trigger, s.revision),
         None => (
@@ -314,6 +326,7 @@ pub fn out(
         card_ttl_h,
         late_minutes,
         history: json!({"before": before, "late": late, "at": at}),
+        ai_mark,
     })
 }
 
@@ -392,6 +405,8 @@ pub struct ChannelPatch {
     /// (1 … [`crate::decide::CARD_TTL_MAX_H`]); `null`: never on time (the default).
     #[serde(default, deserialize_with = "present")]
     pub card_ttl_h: Option<Option<i64>>,
+    /// Only on your own account: whether outgoing replies carry the `[AI]` prefix by default.
+    pub ai_mark: Option<bool>,
 }
 
 /// A key that is there, `null` included (`Some(None)`); absent stays `None`.
@@ -495,6 +510,7 @@ impl ChannelPatch {
             ("send_delay_s", self.send_delay_s.is_some()),
             ("late_minutes", self.late_minutes.is_some()),
             ("card_ttl_h", self.card_ttl_h.is_some()),
+            ("ai_mark", self.ai_mark.is_some()),
         ]
         .into_iter()
         .filter_map(|(k, on)| on.then_some(k))
@@ -531,9 +547,12 @@ pub fn patch(
             "channels.error.trigger_self_only"
         )));
     }
-    // a card's lifetime is about cards on your own account; a bot's hand-offs are left alone
+    // a card's lifetime and `[AI]` mark preference belong to your own account; bots speak as bots
     if matches!(p.card_ttl_h, Some(Some(_))) && mode == Mode::Bot {
         return Err(ApiError::invalid("card_ttl_h"));
+    }
+    if p.ai_mark.is_some() && mode == Mode::Bot {
+        return Err(ApiError::invalid("ai_mark"));
     }
     let fields = p.fields();
     if fields.is_empty() {
@@ -665,7 +684,7 @@ pub fn patch(
         revision,
         card_ttl_h: p.card_ttl_h,
         late_ms: p.late_minutes.map(|m| m * 60_000),
-        ai_mark: None,
+        ai_mark: p.ai_mark,
     };
     steve_store::channel_spaces::account_settings::patch(tx, conn, &fields_patch, now)?;
     let snap = |persona: &Option<String>,
