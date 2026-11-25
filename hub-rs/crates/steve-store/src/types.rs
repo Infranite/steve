@@ -215,7 +215,6 @@ impl Project {
 pub struct Bot {
     pub id: String,
     pub workspace_id: String,
-    pub owner: Option<String>,
     pub name: String,
     pub role: String,
     pub main: bool,
@@ -234,6 +233,7 @@ pub struct Bot {
     pub default_project: Option<String>,
     pub prompt: Option<String>,
     pub device: Option<String>,
+    pub owner: Option<String>,
     pub reasoning_effort: Option<String>,
     pub specialties: Vec<String>,
 }
@@ -243,13 +243,11 @@ impl Bot {
         Ok(Self {
             id: r.get("id")?,
             workspace_id: r.get("workspace_id")?,
-            owner: r.get("owner")?,
             name: r.get("name")?,
             role: r.get("role")?,
             main: bool_col(r, "main")?,
             harness: r.get("harness")?,
             model: r.get("model")?,
-            reasoning_effort: r.get("reasoning_effort")?,
             rules: r.get("rules")?,
             accept_mode: r.get("accept_mode")?,
             perm_mode: r.get("perm_mode")?,
@@ -262,6 +260,8 @@ impl Bot {
             default_project: r.get("default_project")?,
             prompt: r.get("prompt")?,
             device: r.get("device")?,
+            owner: r.get("owner")?,
+            reasoning_effort: r.get("reasoning_effort")?,
             specialties: json_col(r, "specialties", Vec::new())?,
         })
     }

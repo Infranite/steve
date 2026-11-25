@@ -197,12 +197,14 @@ impl Home {
             .or(h.claude_executable)
             .or_else(|| steve_acp::default_claude_executable(path_env))
             .unwrap_or_default();
+        let claude_config_dir = var("CLAUDE_CONFIG_DIR");
         let codex_home = var("CODEX_HOME").unwrap_or_else(|| user_home.join(".codex"));
         Ok(steve_acp::AcpConfig {
             declared,
             adapters,
             node,
             claude_executable,
+            claude_config_dir,
             steve_home,
             codex_home,
             user_home,

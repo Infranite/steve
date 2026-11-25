@@ -582,6 +582,7 @@ mod tests {
                     adapters: Default::default(),
                     node: "node".into(),
                     claude_executable: "/usr/bin/false".into(),
+                    claude_config_dir: None,
                     steve_home: root.join("steve"),
                     codex_home: root.join("codex"),
                     user_home: root.to_path_buf(),

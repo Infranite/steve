@@ -1358,15 +1358,15 @@ export async function draftBot(desc: string) { const r = await call(api.draftBot
 export function ownsBot(owner: string | null | undefined): boolean {
   return owner ? owner === st.me?.id : st.owner
 }
-export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
-  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
-  if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
-  toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+export async function deleteBot(k: string, to: string, mem: "delete" | "export") {
+  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem)); if (!r) return
+  if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "export" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
 }
-export async function removeBotFromWorkspace(k: string, to: string, mem: "删除" | "导出") {
-  const b = st.bots[k]; const r = await shellCall(api.removeBotFromWorkspace(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
-  if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
-  toast(t(mem === "导出" ? "core:toast.botRemovedFromWorkspaceExported" : "core:toast.botRemovedFromWorkspace", { name: b?.n, count: r.moved.length, to: botName(to) }))
+export async function removeBotFromWorkspace(k: string, to: string, mem: "delete" | "export") {
+  const b = st.bots[k]; const r = await shellCall(api.removeBotFromWorkspace(k, to, mem)); if (!r) return
+  if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "export" ? "core:toast.botRemovedFromWorkspaceExported" : "core:toast.botRemovedFromWorkspace", { name: b?.n, count: r.moved.length, to: botName(to) }))
 }
 export async function dupBot(k: string) { const r = await shellCall(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
 export function addMem(k: string, text: string) { void changeBotMemory(k, api.addMemory(k, text), t("core:toast.memoryAdded")) }

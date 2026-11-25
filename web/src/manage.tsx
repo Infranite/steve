@@ -146,7 +146,7 @@ export function DeleteBotDialog({ k }: { k: string }) {
   const canDeleteGlobally = b ? ownsBot(b.owner) : false
   const multiWorkspace = (b?.workspaces.length ?? 0) > 1
   const [scope, setScope] = useState<"workspace" | "global">(() => (canDeleteGlobally && !multiWorkspace ? "global" : "workspace"))
-  const [to, setTo] = useState("steve"), [mem, setMem] = useState<"删除" | "导出">("导出")
+  const [to, setTo] = useState("steve"), [mem, setMem] = useState<"delete" | "export">("export")
   if (!b) return null
   const effectiveScope: "workspace" | "global" = canDeleteGlobally ? scope : "workspace"
   const mine = getItems().filter((i) => i.b === k && !closedSt(i.st))
@@ -168,7 +168,7 @@ export function DeleteBotDialog({ k }: { k: string }) {
           )}
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.handTo")}</FieldLabel>
             <SetSelect testId="del-to" label={t("manage:del.handTo")} value={to} onChange={setTo} options={Object.keys(st.bots).filter((x) => x !== k && st.bots[x].on).map((x) => ({ v: x, l: botName(x) }))} /></Field>
-          <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.itsMemories", { count: memories?.length ?? 0 })}</FieldLabel><Segmented size="sm" value={mem} onChange={setMem} options={[["导出", t("manage:del.export")], ["删除", t("common:action.delete")]] as const} /></Field>
+          <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.itsMemories", { count: memories?.length ?? 0 })}</FieldLabel><Segmented size="sm" value={mem} onChange={setMem} options={[["export", t("manage:del.export")], ["delete", t("common:action.delete")]] as const} /></Field>
         </FieldGroup>
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
           <AlertDialogAction variant="destructive" data-del-bot-confirm onClick={confirm}>{effectiveScope === "global" ? t("common:action.delete") : t("manage:del.removeAction")}</AlertDialogAction></AlertDialogFooter>

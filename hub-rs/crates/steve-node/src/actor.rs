@@ -2984,6 +2984,7 @@ mod journal_regressions {
                 adapters: Default::default(),
                 node: "node".into(),
                 claude_executable: "claude".into(),
+                claude_config_dir: None,
                 steve_home: dir.join("steve"),
                 codex_home: dir.join("codex"),
                 user_home: dir.into(),

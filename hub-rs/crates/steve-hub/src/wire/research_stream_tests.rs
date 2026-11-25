@@ -53,6 +53,7 @@ impl Test {
                 .collect(),
                 node: "node".into(),
                 claude_executable: "unused".into(),
+                claude_config_dir: None,
                 steve_home: root.join("state"),
                 codex_home: root.join("adapter-state"),
                 user_home: root.clone(),

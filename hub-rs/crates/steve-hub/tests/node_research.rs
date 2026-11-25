@@ -294,6 +294,7 @@ impl Hub {
                     adapters: HashMap::from([(id, w.adapter.clone())]),
                     node: "node".into(),
                     claude_executable: "claude".into(),
+                    claude_config_dir: None,
                     steve_home: base.join("steve"),
                     codex_home: base.join("codex-home"),
                     user_home: w.root.clone(),

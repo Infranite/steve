@@ -1025,6 +1025,12 @@ impl crate::AcpConfig {
                 self.codex_home.clone().into_os_string(),
             ));
         }
+        if spec.properties.usage_fallback == UsageFallback::ClaudeTranscript
+            && let Some(dir) = &self.claude_config_dir
+            && !dir.as_os_str().is_empty()
+        {
+            env.push(("CLAUDE_CONFIG_DIR".into(), dir.clone().into_os_string()));
+        }
         if let Some(var) = &spec.properties.executable_env
             && var == "CLAUDE_CODE_EXECUTABLE"
             && !self.claude_executable.as_os_str().is_empty()
@@ -1242,6 +1248,7 @@ mod tests {
             declared: HashMap::new(),
             node: "node".into(),
             claude_executable: "/bin/claude-x".into(),
+            claude_config_dir: None,
             steve_home: dir.join("steve"),
             codex_home: dir.join("codex"),
             user_home: dir.to_path_buf(),
@@ -1460,6 +1467,14 @@ mod tests {
             "declared manifest env must not inject variables: {:?}",
             c.adapter_env("mine")
         );
+        // Operator-configured claude_config_dir reaches only ClaudeTranscript adapters, never
+        // arbitrary custom adapters without ClaudeTranscript.
+        c.claude_config_dir = Some(dir.path().join("claude-cfg"));
+        assert!(c.adapter_env("mine").is_empty());
+        assert!(c.adapter_env("claude-code").contains(&(
+            OsString::from("CLAUDE_CONFIG_DIR"),
+            dir.path().join("claude-cfg").into_os_string(),
+        )));
     }
 
     #[test]
