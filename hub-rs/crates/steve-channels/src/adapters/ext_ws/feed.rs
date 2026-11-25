@@ -292,12 +292,24 @@ impl Feed<'_> {
                 },
                 "push.status" => {
                     let st = note.params.get("status").and_then(Value::as_str);
+                    self.s.set_upstream_connected(st == Some("ok"));
                     if st != Some("ok") {
                         tracing::warn!(
                             conn = self.conn(),
                             status = st.unwrap_or("?"),
                             "ext_ws: the channel service's upstream is not ok; gaps are expected"
                         );
+                    }
+                    Ok(())
+                }
+                "metrics.report" => {
+                    match wire::PluginMeters::parse(&note.params) {
+                        Ok(meters) => self.s.record_plugin_meters(&meters),
+                        Err(why) => tracing::debug!(
+                            conn = self.conn(),
+                            why,
+                            "ext_ws: invalid metrics.report ignored"
+                        ),
                     }
                     Ok(())
                 }

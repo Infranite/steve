@@ -63,6 +63,8 @@ install! { start(reg, _cx) [conns, mut jobs] => [jobs] {
     // `vault.token_refresh` (5 min) and `vault.health` (15 min)
     {
         let conns = conns;
-        jobs.push(Job::new("connections.maintenance", conns.run_jobs()));
+        jobs.push(Job::supervised("connections.maintenance", move || {
+            conns.clone().run_jobs()
+        }));
     }
 }}

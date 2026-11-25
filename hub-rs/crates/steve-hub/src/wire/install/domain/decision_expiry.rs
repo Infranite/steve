@@ -14,19 +14,22 @@ install! { install(reg, _cx) [mut jobs, modules, tools] => [jobs, modules, tools
     };
     let clock = modules.clock.clone();
     let wake = modules.store.commit_wake(&["runtime_permissions", "secret_uses", "mems", "mem_candidates"]);
-    jobs.push(Job::new("decisions.expire", due_loop(
-        Arc::new(source),
-        clock,
-        wake,
-        Backoff {
-            base: Duration::from_secs(1),
-            max: FALLBACK,
-            factor: 2,
-            jitter: Jitter::None,
-            attempts: None,
-            reset_after: None,
-        },
-    )));
+    let source = Arc::new(source);
+    jobs.push(Job::supervised("decisions.expire", move || {
+        due_loop(
+            source.clone(),
+            clock.clone(),
+            wake.clone(),
+            Backoff {
+                base: Duration::from_secs(1),
+                max: FALLBACK,
+                factor: 2,
+                jitter: Jitter::None,
+                attempts: None,
+                reset_after: None,
+            },
+        )
+    }));
 }}
 
 struct Source {

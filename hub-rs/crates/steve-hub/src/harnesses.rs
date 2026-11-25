@@ -314,16 +314,33 @@ impl HubHarnesses {
     pub async fn follow(self: Arc<Self>, node: Arc<dyn steve_node_api::Node>) {
         self.follow_all(Some(node), None).await;
     }
+    pub fn follow_task(
+        self: Arc<Self>,
+        local: Option<Arc<dyn steve_node_api::Node>>,
+        svc: Option<Arc<crate::nodes::NodeService>>,
+    ) -> steve_runtime::Task {
+        steve_runtime::every_after(
+            "harnesses.follow",
+            Arc::new(steve_runtime::SystemClock),
+            REFRESH,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let me = self.clone();
+                let local = local.clone();
+                let svc = svc.clone();
+                async move {
+                    me.refresh_all(local.as_deref(), svc.as_deref(), false)
+                        .await;
+                }
+            },
+        )
+    }
     pub async fn follow_all(
         self: Arc<Self>,
         local: Option<Arc<dyn steve_node_api::Node>>,
         svc: Option<Arc<crate::nodes::NodeService>>,
     ) {
-        loop {
-            self.refresh_all(local.as_deref(), svc.as_deref(), false)
-                .await;
-            tokio::time::sleep(REFRESH).await;
-        }
+        self.follow_task(local, svc).await;
     }
 }
 

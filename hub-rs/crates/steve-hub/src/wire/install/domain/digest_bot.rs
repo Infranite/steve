@@ -7,5 +7,7 @@ install! { routes(reg, _cx) [flow, mut module_routes] => [flow, module_routes] {
 install! { jobs(reg, _cx) [flow, mut jobs, modules] => [flow, jobs, modules] {
     let m = modules.clone();
     let f = flow.clone();
-    jobs.push(Job::new("digest.bot", crate::wire::digest_bot::run(m, f)));
+    jobs.push(Job::supervised("digest.bot", move || {
+        crate::wire::digest_bot::run(m.clone(), f.clone())
+    }));
 }}

@@ -218,7 +218,24 @@ impl NodeRuntime {
                 if outcome != "owner_decision" {
                     self.wake_send.notify_one();
                 }
-                metrics::counter!("steve_approval_requests_total", "resolver" => resolver, "outcome" => outcome).increment(1);
+                thread_local! {
+                    static APPROVAL_REQUESTS: std::cell::RefCell<
+                        std::collections::HashMap<(&'static str, &'static str), metrics::Counter>,
+                    > = std::cell::RefCell::new(std::collections::HashMap::new());
+                }
+                APPROVAL_REQUESTS.with(|cache| {
+                    cache
+                        .borrow_mut()
+                        .entry((resolver, outcome))
+                        .or_insert_with(|| {
+                            metrics::counter!(
+                                "steve_approval_requests_total",
+                                "resolver" => resolver,
+                                "outcome" => outcome
+                            )
+                        })
+                        .increment(1);
+                });
             }
             After::Started {
                 session,

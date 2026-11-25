@@ -322,16 +322,20 @@ impl Workspaces {
     /// `project` and `kb` events. A burst is one rebuild.
     pub async fn follow(
         self: Arc<Self>,
+        job: &'static str,
         mut events: tokio::sync::mpsc::Receiver<steve_types::Notification>,
     ) {
         while events.recv().await.is_some() {
             while events.try_recv().is_ok() {}
-            let me = self.clone();
-            match tokio::task::spawn_blocking(move || me.refresh_roots()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::error!("local Node roots: {e}"),
-                Err(e) => tracing::error!("local Node roots: {e}"),
-            }
+            steve_runtime::round(job, async {
+                let me = self.clone();
+                match tokio::task::spawn_blocking(move || me.refresh_roots()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::error!("local Node roots: {e}"),
+                    Err(e) => tracing::error!("local Node roots: {e}"),
+                }
+            })
+            .await;
         }
     }
 }
@@ -846,7 +850,7 @@ mod tests {
     async fn a_project_added_after_boot_is_prepared_without_a_restart() {
         let t = local(false);
         let (tx, rx) = tokio::sync::mpsc::channel(16);
-        tokio::spawn(t.ws.clone().follow(rx));
+        tokio::spawn(t.ws.clone().follow("workspaces.follow", rx));
         let p = t.dir.path().join("later");
         std::fs::create_dir_all(&p).unwrap();
         project(&t, "p9", "hub", p.to_str().unwrap());

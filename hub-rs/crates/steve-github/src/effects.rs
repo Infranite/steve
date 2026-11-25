@@ -325,7 +325,10 @@ impl GitHub {
             let wake = {
                 let Some(inner) = weak.upgrade() else { break };
                 let gh = GitHub(inner);
-                while gh.run_effects().await > 0 {}
+                steve_runtime::round("github.effects", async {
+                    while gh.run_effects().await > 0 {}
+                })
+                .await;
                 gh.0.effect_wake.clone()
             };
             tokio::select! {

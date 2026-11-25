@@ -64,27 +64,40 @@ impl Refresher {
         Ok(n)
     }
 
-    pub async fn run(mut self, store: Store) {
-        let mut tick = tokio::time::interval(EVERY);
-        loop {
-            tick.tick().await;
-            let s = store.clone();
-            let mut me = std::mem::take(&mut self);
-            match tokio::task::spawn_blocking(move || {
-                let r = me.tick(&s, BATCH);
-                (me, r)
-            })
-            .await
-            {
-                Ok((me, r)) => {
-                    self = me;
-                    if let Err(e) = r {
-                        tracing::error!("stats refresh {e}");
+    pub fn task(self, store: Store) -> steve_runtime::Task {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(self));
+        steve_runtime::every(
+            "stats.refresh",
+            std::sync::Arc::new(steve_runtime::SystemClock),
+            EVERY,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let s = store.clone();
+                let state = state.clone();
+                async move {
+                    let mut me =
+                        std::mem::take(&mut *state.lock().unwrap_or_else(|e| e.into_inner()));
+                    match tokio::task::spawn_blocking(move || {
+                        let r = me.tick(&s, BATCH);
+                        (me, r)
+                    })
+                    .await
+                    {
+                        Ok((me, r)) => {
+                            *state.lock().unwrap_or_else(|e| e.into_inner()) = me;
+                            if let Err(e) = r {
+                                tracing::error!("stats refresh {e}");
+                            }
+                        }
+                        Err(e) => tracing::error!("stats refresh task {e}"),
                     }
                 }
-                Err(e) => tracing::error!("stats refresh task {e}"),
-            }
-        }
+            },
+        )
+    }
+
+    pub async fn run(self, store: Store) {
+        self.task(store).await;
     }
 }
 

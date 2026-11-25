@@ -39,14 +39,34 @@ install! { mount(reg, cx) [channels, declared, jobs, module_routes, started] => 
     });
 }}
 
-install! { start(reg, _cx) [ext_jobs, mut jobs, pending_lifecycle] => [jobs, lifecycle] {
+install! { start(reg, cx) [ext_jobs, mut jobs, pending_lifecycle] => [jobs, lifecycle] {
+    let Env { bus, .. } = cx.clone();
     // the extensions' (built in: Feishu app registrations resumed) and the connection runtime
     // (built in: the Feishu long connections and self pollers)
     jobs.extend(ext_jobs);
     let lifecycle = pending_lifecycle.map(|(rt, events)| {
         let run = rt.clone();
-        jobs.push(Job::new("channels.lifecycle", async move {
-            let _ = run.start(events).await;
+        let bus = bus.clone();
+        let initial = std::sync::Arc::new(std::sync::Mutex::new(Some(events)));
+        jobs.push(Job::supervised("channels.lifecycle", move || {
+            let run = run.clone();
+            let events = initial
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .unwrap_or_else(|| {
+                    bus.tap(|event| {
+                        matches!(
+                            event.as_domain(),
+                            Some(steve_types::DomainEvent::Channels(
+                                steve_types::ChannelsEvent::Connection { .. }
+                            ))
+                        )
+                    })
+                });
+            async move {
+                run.run(events).await;
+            }
         }));
         rt
     });
