@@ -1215,12 +1215,12 @@ fn migration_137_drops_legacy_project_dir_and_worktree_columns() {
 }
 
 #[test]
-fn migration_138_adds_mems_pinned_and_orders_anchors_by_pin_and_kind_priority() {
-    let before_138 = db::MIGRATIONS
+fn migration_139_adds_mems_pinned_and_orders_anchors_by_pin_and_kind_priority() {
+    let before_139 = db::MIGRATIONS
         .iter()
         .position(|sql| sql.contains("ALTER TABLE mems ADD COLUMN pinned"))
         .unwrap();
-    let (_dir, path) = at_version(before_138);
+    let (_dir, path) = at_version(before_139);
     let c = Connection::open(&path).unwrap();
     c.execute_batch(
         r#"INSERT INTO mems(id,workspace_id,kind,text,source_type,source_label,visibility,level,status,writer,created_by,created,updated)

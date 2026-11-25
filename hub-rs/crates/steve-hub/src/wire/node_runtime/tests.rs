@@ -1125,3 +1125,111 @@ async fn open_session_carries_system_context_and_preserves_it_across_reopen() {
         Some("[K1] Owner rule: keep changes focused.")
     );
 }
+
+#[tokio::test]
+async fn upgrade_only_node_skips_reconcile_until_normal_link() {
+    use steve_node_api::upgrade_v1;
+    use steve_node_wire::{Conn, ConnOptions, Handler, NodeServer, RemoteNode};
+
+    struct CountCalls(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Handler for CountCalls {
+        async fn handle(&self, _method: &str, _params: Value) -> ApiResult<Value> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({}))
+        }
+    }
+
+    let (_dir, fake, original, seen) = retry_fixture();
+    let clock = Arc::new(FakeClock::new(steve_store::now()));
+    let remote = RemoteNode::new(NodeId::new("n_upgrade").unwrap());
+
+    let (up_hub, up_peer) = steve_node_wire::testkit::pair();
+    let upgrade_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let up_peer_conn = Conn::spawn(
+        up_peer.sink,
+        up_peer.stream,
+        1,
+        Arc::new(CountCalls(upgrade_calls.clone())),
+        ConnOptions {
+            heartbeat: Duration::from_secs(600),
+            dead_after: Duration::from_secs(600),
+            side: "n",
+            mode: upgrade_v1::Mode::Upgrade,
+        },
+    );
+    let up_hub_conn = Conn::spawn(
+        up_hub.sink,
+        up_hub.stream,
+        1,
+        Arc::new(CountCalls(Arc::new(std::sync::atomic::AtomicUsize::new(0)))),
+        ConnOptions {
+            heartbeat: Duration::from_secs(600),
+            dead_after: Duration::from_secs(600),
+            side: "h",
+            mode: upgrade_v1::Mode::Upgrade,
+        },
+    );
+    assert!(remote.attach(up_hub_conn.clone(), false));
+    assert!(remote.is_upgrade_only());
+
+    let rt = NodeRuntime::with_clock(original.store.clone(), remote.clone(), seen, clock.clone());
+    rt.start();
+
+    // Advance past several 5s reconcile ticks while the link is upgrade-only.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+        clock.advance(5_000);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !rt.is_reconciled(),
+        "upgrade-only node must stay unreconciled"
+    );
+    assert_eq!(
+        upgrade_calls.load(Ordering::SeqCst),
+        0,
+        "upgrade-only node must not invoke ordinary snapshot/reconcile RPCs"
+    );
+
+    // Once the Node upgrades and reconnects normally, reconciliation completes on the next tick.
+    let (norm_hub, norm_peer) = steve_node_wire::testkit::pair();
+    let norm_peer_conn = Conn::spawn(
+        norm_peer.sink,
+        norm_peer.stream,
+        2,
+        NodeServer::new(fake),
+        ConnOptions {
+            heartbeat: Duration::from_secs(600),
+            dead_after: Duration::from_secs(600),
+            side: "n",
+            mode: upgrade_v1::Mode::Normal,
+        },
+    );
+    let norm_hub_conn = Conn::spawn(
+        norm_hub.sink,
+        norm_hub.stream,
+        2,
+        Arc::new(CountCalls(Arc::new(std::sync::atomic::AtomicUsize::new(0)))),
+        ConnOptions {
+            heartbeat: Duration::from_secs(600),
+            dead_after: Duration::from_secs(600),
+            side: "h",
+            mode: upgrade_v1::Mode::Normal,
+        },
+    );
+    assert!(remote.attach(norm_hub_conn.clone(), false));
+    assert!(!remote.is_upgrade_only());
+
+    clock.advance(5_000);
+    until("reconciled after switching to normal link", || {
+        rt.is_reconciled()
+    })
+    .await;
+
+    up_hub_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
+    up_peer_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
+    norm_hub_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
+    norm_peer_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
+}

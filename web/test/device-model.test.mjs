@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
   nodeViews, findNode, nodeStatus, offlineReason, statusText, loadPct, memPct, disks, fillTone, agoText, routeOf, routeLabel, ageOf, clientKind, one,
-  hostOf, hostLine, linkRoute, rttOf, upgradeCard, nodeAlerts, UPGRADE_STEPS,
+  hostOf, hostLine, linkRoute, rttOf, upgradeCard, manualUpdateCommand, nodeAlerts, UPGRADE_STEPS,
   FILL_WARN, FILL_BAD, CLIENT_STALE_MS, CLIENT_UNUSED_MS, LOCAL_NODE,
 } from "../src/device-model.ts"
 import i18n from "../src/i18n/index.ts"
@@ -197,4 +197,57 @@ test("a card leads with at most two lines, what went wrong first", () => {
   assert.deepEqual(off.map((a) => a.kind), ["offline"]); assert.match(off[0].text, /3 小时前.*connection refused/)
   assert.deepEqual(nodeAlerts(view({ state: "pending" })).map((a) => a.kind), ["pending"])
   assert.deepEqual(nodeAlerts(up({ latest: run("draining") }), "0.2.112"), [], "an upgrade under way is the badge's to say")
+})
+
+test("upgrade_only link_mode carries Node and Hub versions and surfaces upgrade required", async () => {
+  const stale = node("n-stale", {
+    link_mode: "upgrade_only",
+    protocol: 12,
+    protocol_older: "node",
+    node_version: "0.9.0",
+    hub_version: "0.11.1",
+    upgrade: { build: { version: "0.9.0", commit: "abc", target: "aarch64-apple-darwin" }, policy: "notify", can: true, reason: "outdated" },
+  })
+  const [v] = nodeViews([], [stale], "0.11.1")
+  assert.equal(v.linkMode, "upgrade_only")
+  assert.equal(v.version, "0.9.0")
+  assert.equal(v.hubVersion, "0.11.1")
+  assert.equal(nodeStatus(v, "0.11.1").kind, "outdated")
+  const alerts = nodeAlerts(v, "0.11.1", NOW)
+  assert.equal(alerts[0].tone, "bad")
+  assert.match(alerts[0].text, /0\.9\.0.*0\.11\.1/)
+  try {
+    await i18n.changeLanguage("en")
+    assert.match(nodeAlerts(v, "0.11.1", NOW)[0].text, /0\.9\.0.*0\.11\.1/)
+  } finally {
+    await i18n.changeLanguage("zh-CN")
+  }
+})
+
+test("manual fallback commands use the installer archive and explicit --release path", () => {
+  const mac = nodeViews([], [node("n-mac", {
+    link_mode: "upgrade_only",
+    protocol: 12,
+    protocol_older: "node",
+    hub_version: "0.11.1",
+    host: { os: "macos", arch: "aarch64" },
+    upgrade: { build: null, policy: "notify", can: false, reason: "manual" },
+  })], "0.11.1")[0]
+  assert.equal(upgradeCard(mac, "0.11.1").kind, "manual")
+  assert.equal(upgradeCard(mac, "0.11.1").behind, true, "upgrade_only with older node protocol is behind even when build is unreported")
+  const macCmd = manualUpdateCommand(mac, "0.11.1")
+  assert.match(macCmd, /steve-0\.11\.1-aarch64-apple-darwin-installer\.tar\.gz/)
+  assert.match(macCmd, /bin\/steve" node update --home "\$HOME\/\.steve-node" --release/)
+  assert.match(macCmd, /node enable-boot/)
+
+  const linux = nodeViews([], [node("n-linux", {
+    hub_version: "0.11.1",
+    host: { os: "linux", arch: "x86_64" },
+    upgrade: { build: { version: "0.9.0", commit: "abc", target: "x86_64-unknown-linux-gnu" }, policy: "notify", can: false, reason: "manual" },
+  })], "0.11.1")[0]
+  const linuxCmd = manualUpdateCommand(linux, "0.11.1")
+  assert.match(linuxCmd, /steve-0\.11\.1-x86_64-unknown-linux-gnu-installer\.tar\.gz/)
+  assert.match(linuxCmd, /node stop --home "\$HOME\/\.steve-node"/)
+  assert.match(linuxCmd, /node update --home "\$HOME\/\.steve-node" --release/)
+  assert.match(linuxCmd, /node start --home "\$HOME\/\.steve-node"/)
 })
