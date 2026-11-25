@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::{Value, json};
 use steve_node_api::testkit::FakeNode;
 
 #[path = "../../../tests/node_harness/mod.rs"]
@@ -12,7 +13,8 @@ fn cap(version: &str, model: &str) -> HarnessCapability {
         "models":["declared-only"], "resume":true, "cancel":true, "permissions":true,
         "images":false, "enforcement":[],
         "adapter":{"title":"Fixture adapter", "status":"ready", "version":"adapter-2",
-            "session":{"models":[{"id":model}]}},
+            "install_hint":"@example/fixture-acp",
+            "session":{"models":[{"id":model}], "default_model":model}},
         "setup":{"state":"ready", "components":[], "can_install":false}
     }))
     .unwrap()
@@ -33,16 +35,21 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
     let c = cap("cli-1", "actual/model");
     let h = harness(c.clone());
     assert_eq!(h.available, Some(true));
+    assert!(h.installed);
     assert_eq!(h.version, "cli-1");
     assert_eq!(h.adapter_version.as_deref(), Some("adapter-2"));
+    assert_eq!(h.default_model.as_deref(), Some("actual/model"));
+    assert_eq!(h.install_hint.as_deref(), Some("@example/fixture-acp"));
     assert_eq!(h.models, ["actual/model"]);
     let mut unprobed = c.clone();
     unprobed.adapter = None;
     unprobed.setup = None;
+    let u = harness(unprobed);
     assert!(
-        harness(unprobed).available.is_none(),
+        u.available.is_none(),
         "a declaration without an adapter report is unknown"
     );
+    assert_eq!(u.degraded_reason, Some(HarnessDegradedReason::ProbeUnknown));
     let mut missing = c.clone();
     missing.setup.as_mut().unwrap().state = SetupState::NotInstalled;
     assert_eq!(harness(missing).available, Some(false));
@@ -107,6 +114,149 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
     );
 }
 
+#[test]
+fn typed_installed_and_degraded_reasons_distinguish_uninstalled_outdated_and_broken() {
+    // Built-in PATH binary installed in login shell but missing from service PATH (e.g. agy).
+    let path_mismatch_builtin: HarnessCapability = serde_json::from_value(json!({
+        "name": "antigravity", "version": "", "sessions": false, "jobs": false,
+        "models": [], "resume": true, "cancel": true, "permissions": true,
+        "images": false, "enforcement": [],
+        "adapter": {
+            "title": "Antigravity CLI",
+            "builtin": true,
+            "status": "adapter_missing",
+            "missing_command": {
+                "command": "agy",
+                "service_path": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "login_shell_path": "/Users/example/.local/bin/agy",
+                "login_shell": "/bin/zsh",
+                "refresh_command": "steve node refresh-env"
+            }
+        },
+        "setup": null
+    }))
+    .unwrap();
+    let v = harness(path_mismatch_builtin);
+    assert!(
+        v.installed,
+        "login-shell hit proves the command is installed"
+    );
+    assert_eq!(v.available, Some(false));
+    assert_eq!(
+        v.degraded_reason,
+        Some(HarnessDegradedReason::CommandNotInServicePath)
+    );
+    assert_eq!(
+        v.missing_command
+            .as_ref()
+            .and_then(|m| m.login_shell_path.as_deref()),
+        Some("/Users/example/.local/bin/agy")
+    );
+
+    // Truly uninstalled built-in path-only adapter (no setup, empty version, adapter missing).
+    let absent_builtin: HarnessCapability = serde_json::from_value(json!({
+        "name": "cursor", "version": "", "sessions": false, "jobs": false,
+        "models": [], "resume": true, "cancel": true, "permissions": true,
+        "images": false, "enforcement": [],
+        "adapter": { "title": "Cursor", "builtin": true, "status": "adapter_missing" },
+        "setup": null
+    }))
+    .unwrap();
+    let v = harness(absent_builtin);
+    assert_eq!(v.available, Some(false));
+    assert!(!v.installed);
+    assert_eq!(v.degraded_reason, None);
+    assert!(
+        v.install_hint
+            .as_deref()
+            .is_some_and(|s| s.contains("cursor.com"))
+    );
+
+    // Managed harness with no installed/detected components -> not installed.
+    let absent_managed: HarnessCapability = serde_json::from_value(json!({
+        "name": "codebuddy-code", "version": "", "sessions": false, "jobs": false,
+        "models": [], "resume": true, "cancel": true, "permissions": true,
+        "images": false, "enforcement": [],
+        "adapter": { "title": "CodeBuddy Code", "builtin": true, "status": "adapter_missing" },
+        "setup": {
+            "state": "not_installed",
+            "components": [{ "id": "adapter", "name": "CodeBuddy", "package": "@tencent-ai/codebuddy-code", "status": "missing" }],
+            "can_install": true
+        }
+    }))
+    .unwrap();
+    let v = harness(absent_managed);
+    assert!(!v.installed);
+    assert_eq!(v.degraded_reason, None);
+
+    // Managed harness with detected binary but missing managed adapter -> installed & adapter_missing.
+    let partial_managed: HarnessCapability = serde_json::from_value(json!({
+        "name": "codebuddy-code", "version": "", "sessions": false, "jobs": false,
+        "models": [], "resume": true, "cancel": true, "permissions": true,
+        "images": false, "enforcement": [],
+        "adapter": { "title": "CodeBuddy Code", "builtin": true, "status": "adapter_missing" },
+        "setup": {
+            "state": "not_installed",
+            "components": [{ "id": "adapter", "name": "CodeBuddy", "package": "@tencent-ai/codebuddy-code", "status": "missing", "detected": { "path": "/usr/local/bin/codebuddy", "version": "1.0.0" } }],
+            "can_install": true
+        }
+    }))
+    .unwrap();
+    let v = harness(partial_managed);
+    assert!(v.installed);
+    assert_eq!(
+        v.degraded_reason,
+        Some(HarnessDegradedReason::AdapterMissing)
+    );
+
+    // Installed component below minimum required version (uses spec minimum without parsing English).
+    let outdated: HarnessCapability = serde_json::from_value(json!({
+        "name": "pi", "version": "1.0.0", "sessions": true, "jobs": true,
+        "models": [], "resume": true, "cancel": true, "permissions": true,
+        "images": false, "enforcement": [],
+        "adapter": { "title": "Pi", "builtin": true, "status": "ready", "session": { "models": [] } },
+        "setup": {
+            "state": "unavailable",
+            "components": [{ "id": "pi", "name": "Pi SDK", "package": "@earendil-works/pi-coding-agent", "version": "1.0.0", "status": "installed" }],
+            "can_install": true
+        }
+    }))
+    .unwrap();
+    let v = harness(outdated);
+    assert!(v.installed);
+    assert_eq!(v.available, Some(false));
+    assert_eq!(
+        v.degraded_reason,
+        Some(HarnessDegradedReason::VersionOutdated)
+    );
+
+    // Failed managed install -> InstallFailed.
+    let mut failed_install = cap("1.2.0", "m");
+    let setup = failed_install.setup.as_mut().unwrap();
+    setup.state = SetupState::Unavailable;
+    setup.error = Some("npm exit 1".into());
+    assert_eq!(
+        harness(failed_install).degraded_reason,
+        Some(HarnessDegradedReason::InstallFailed)
+    );
+
+    // Host runtime incompatibility (unavailable setup with ready adapter and no error/outdated).
+    let mut bad_runtime = cap("1.2.0", "m");
+    bad_runtime.setup.as_mut().unwrap().state = SetupState::Unavailable;
+    assert_eq!(
+        harness(bad_runtime).degraded_reason,
+        Some(HarnessDegradedReason::RuntimeIncompatible)
+    );
+
+    // Installing -> Installing.
+    let mut installing = cap("1.2.0", "m");
+    installing.setup.as_mut().unwrap().state = SetupState::Installing;
+    assert_eq!(
+        harness(installing).degraded_reason,
+        Some(HarnessDegradedReason::Installing)
+    );
+}
+
 #[tokio::test]
 async fn empty_success_failure_unsupported_and_offline_remain_distinct() {
     let inv = Inventory::new(Arc::new(steve_runtime::cache::Caches::new(
@@ -116,29 +266,32 @@ async fn empty_success_failure_unsupported_and_offline_remain_distinct() {
     fake.set_harnesses(vec![cap("1", "local/model")]);
     let node = setup_node::Delayed::new(fake.clone());
     let mut t = local(node.clone());
-    assert_eq!(inv.view(&t).await.state, "unreported");
+    assert_eq!(inv.view(&t).await.state, NodeHarnessReportState::Unreported);
     inv.refresh(&t, false).await;
     let success = inv.view(&t).await;
-    assert_eq!(success.state, "reported");
+    assert_eq!(success.state, NodeHarnessReportState::Reported);
     node.disconnect(Code::Internal);
     inv.refresh(&t, true).await;
     let failure = inv.view(&t).await;
-    assert_eq!(failure.state, "failed");
+    assert_eq!(failure.state, NodeHarnessReportState::Failed);
     assert!(failure.stale);
     assert_eq!(failure.checked_at, success.checked_at);
     assert_eq!(failure.harnesses, success.harnesses);
     node.disconnect(Code::Unsupported);
     inv.refresh(&t, true).await;
-    assert_eq!(inv.view(&t).await.state, "unsupported");
+    assert_eq!(
+        inv.view(&t).await.state,
+        NodeHarnessReportState::Unsupported
+    );
     node.reconnect();
     fake.set_harnesses(vec![]);
     inv.refresh(&t, true).await;
     let empty = inv.view(&t).await;
-    assert_eq!(empty.state, "reported");
+    assert_eq!(empty.state, NodeHarnessReportState::Reported);
     assert!(empty.harnesses.is_empty());
     assert!(!empty.stale);
     t.node = None;
-    assert_eq!(inv.view(&t).await.state, "offline");
+    assert_eq!(inv.view(&t).await.state, NodeHarnessReportState::Offline);
     assert!(inv.view(&t).await.stale);
     assert!(
         !inv.view(&Target {
@@ -211,7 +364,7 @@ async fn timeout_and_cancellation_release_the_refresh_slot() {
     tokio::time::advance(PROBE_TIMEOUT + Duration::from_secs(1)).await;
     a.await.unwrap();
     let r = inv.view(&t).await;
-    assert_eq!(r.state, "failed");
+    assert_eq!(r.state, NodeHarnessReportState::Failed);
     assert!(r.stale);
     assert!(!r.refreshing);
     assert!(r.error.unwrap().contains("timed out"));
@@ -225,7 +378,7 @@ async fn timeout_and_cancellation_release_the_refresh_slot() {
     let _ = a.await;
     assert!(!inv.view(&t).await.refreshing);
     inv.refresh(&t, true).await;
-    assert_eq!(inv.view(&t).await.state, "reported");
+    assert_eq!(inv.view(&t).await.state, NodeHarnessReportState::Reported);
 }
 
 #[tokio::test]
@@ -264,7 +417,7 @@ async fn an_answer_with_another_identity_cannot_contaminate_the_cache() {
     t.id = "local".into();
     inv.refresh(&t, true).await;
     let r = inv.view(&t).await;
-    assert_eq!(r.state, "failed");
+    assert_eq!(r.state, NodeHarnessReportState::Failed);
     assert!(r.harnesses.is_empty());
 }
 
@@ -433,10 +586,13 @@ async fn off_returns_the_probe_response_without_retaining_a_report() {
     node.set_harnesses(vec![cap("direct", "direct/model")]);
     let target = local(node);
     let report = inv.refresh(&target, false).await;
-    assert_eq!(report.state, "reported");
+    assert_eq!(report.state, NodeHarnessReportState::Reported);
     assert_eq!(report.harnesses[0].models, ["direct/model"]);
     assert!(inv.cache.peek(&target.id).await.is_none());
-    assert_eq!(inv.view(&target).await.state, "unreported");
+    assert_eq!(
+        inv.view(&target).await.state,
+        NodeHarnessReportState::Unreported
+    );
 }
 
 #[tokio::test]
@@ -454,7 +610,7 @@ async fn upgrade_only_target_returns_upgrade_required_without_calling_probe() {
         upgrade_only: true,
     };
     let report = inv.refresh(&target, true).await;
-    assert_eq!(report.state, "upgrade_required");
+    assert_eq!(report.state, NodeHarnessReportState::UpgradeRequired);
     assert!(report.error.is_none());
     assert!(!report.refreshing);
     assert!(

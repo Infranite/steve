@@ -265,47 +265,44 @@ export function NodeAutoUpgradeBar({ state }: { state: NodeHarnessUpdatesState }
   )
 }
 
-/** Component version list, one-click upgrade controls, visible error alert, and per-harness auto-upgrade override. */
-export function HarnessUpgradeSections({
+/** Compact on-card upgrade bar: shown only when an upgrade is actionable, active, blocked, or has a receipt. */
+export function HarnessUpgradeBanner({
   h,
-  policy,
   receipt,
   requesting,
-  savingAuto,
   disabled,
-  canEditAuto,
   retry,
+  showButton = true,
   upgrade,
-  onAutoMode,
 }: {
   h: HarnessUpdate
-  policy: HarnessAutoUpgradePolicy
   receipt?: HarnessReceipt | null
   requesting: boolean
-  savingAuto: boolean
   disabled: boolean
-  canEditAuto: boolean
   retry: boolean
+  showButton?: boolean
   upgrade: (retry: boolean) => void
-  onAutoMode: (mode: HarnessAutoUpgradeMode) => void
 }) {
   const t = useT()
   const status = receiptStatus(receipt)
   const versions = updateTargets(h)
   const selfTargets = selfUpdateTargets(h)
-  const canAction = hasUpgradeAction(h)
+  const canAction = showButton && hasUpgradeAction(h)
   const available = Object.keys(versions).length > 0
   const selfOnly = !available && selfTargets.length > 0
   const activeSessions = h.active_sessions ?? 0
-  const autoSupported = supportsAutoUpgrade(h)
-  const autoEffective = effectiveAutoUpgrade(policy, h.harness)
-  const autoOverridden = isAutoUpgradeOverridden(policy, h.harness)
   const detail =
     receipt?.state.state === "unknown"
       ? receipt.state.reason
       : receipt?.state.state === "finished"
         ? receipt.state.error?.safe_detail
         : null
+
+  if (!canAction && !receipt && !requesting && !h.blocked_reason) return null
+
+  const upgradableSummary = h.components
+    .filter((c) => c.can_upgrade && c.state === "available" && c.latest && c.latest !== c.installed)
+    .map((c) => `${c.name} ${c.installed ?? "—"} → ${c.latest}`)
 
   const buttonLabel = requesting
     ? t("devices:harnessUpdates.requesting")
@@ -321,6 +318,88 @@ export function HarnessUpgradeSections({
               ? t("devices:harnessUpdates.checkAndUpgrade")
               : t("devices:harnessUpdates.upgrade")
 
+  return (
+    <IntegrationSection>
+      <div className="flex flex-col gap-2">
+        {activeSessions > 0 && canAction && status !== "waiting" && status !== "running" && (
+          <p className="type-footnote text-attention" data-harness-active-sessions={activeSessions}>
+            {t("devices:harnessUpdates.activeSessionsNotice", { count: activeSessions })}
+          </p>
+        )}
+        {h.blocked_reason && status !== "waiting" && status !== "running" && (
+          <p className="type-footnote text-muted-foreground" data-harness-blocked-reason={h.blocked_reason}>
+            {t(`devices:harnessUpdates.blockReason.${h.blocked_reason}`)}
+          </p>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {upgradableSummary.length > 0 && (
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 type-footnote text-muted-foreground">
+              {upgradableSummary.map((line) => (
+                <span key={line} className="font-mono text-foreground">{line}</span>
+              ))}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {canAction && (
+              <Button
+                size="sm"
+                disabled={disabled || !h.can_upgrade || status === "running" || status === "waiting" || (status === "unknown" && !retry)}
+                onClick={() => upgrade(status === "unknown")}
+                data-harness-upgrade={h.harness}
+              >
+                {requesting || status === "running" || status === "waiting" ? <Spinner /> : <DownloadIcon />}
+                {buttonLabel}
+              </Button>
+            )}
+            {status && (
+              <span
+                role="status"
+                className={status === "failed" || status === "unknown" ? "type-footnote text-attention" : "type-footnote text-muted-foreground"}
+                data-harness-upgrade-result={status}
+              >
+                {t(`devices:harnessUpdates.result.${status}`)}
+              </span>
+            )}
+          </div>
+        </div>
+        {status === "unknown" && (
+          <p className="type-footnote text-muted-foreground">
+            {t(retry ? "devices:harnessUpdates.unknownRetry" : "devices:harnessUpdates.unknown")}
+          </p>
+        )}
+        {(status === "failed" || status === "unknown") && detail && (
+          <p
+            className="rounded-lg bg-attention/10 px-2.5 py-1.5 type-footnote text-attention break-words whitespace-pre-wrap"
+            role="alert"
+            data-harness-upgrade-detail
+          >
+            {detail}
+          </p>
+        )}
+      </div>
+    </IntegrationSection>
+  )
+}
+
+/** Secondary component version breakdown and per-harness auto-upgrade override, tucked inside Details. */
+export function HarnessUpgradeDetails({
+  h,
+  policy,
+  savingAuto,
+  canEditAuto,
+  onAutoMode,
+}: {
+  h: HarnessUpdate
+  policy: HarnessAutoUpgradePolicy
+  savingAuto: boolean
+  canEditAuto: boolean
+  onAutoMode: (mode: HarnessAutoUpgradeMode) => void
+}) {
+  const t = useT()
+  const autoSupported = supportsAutoUpgrade(h)
+  const autoEffective = effectiveAutoUpgrade(policy, h.harness)
+  const autoOverridden = isAutoUpgradeOverridden(policy, h.harness)
+
   const autoHint = !autoSupported
     ? t("devices:harnessUpdates.autoUnsupported")
     : autoOverridden
@@ -333,110 +412,62 @@ export function HarnessUpgradeSections({
   }
 
   return (
-    <>
-      <IntegrationSection label={t("devices:harnessUpdates.versionsLabel")}>
-        <ul className="flex flex-col gap-2.5 type-footnote">
-          {h.components.map((c) => {
-            const reasonText = c.reason ? formatComponentReason(c.reason) : null
-            return (
-              <li key={c.id} data-harness-update-component={c.id}>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium text-foreground">{c.name}</span>
-                  <span className="font-mono text-muted-foreground">
-                    {c.installed ?? "—"}
-                    {c.latest && c.latest !== c.installed ? " → " + c.latest : ""}
-                  </span>
-                  <Badge
-                    tone={
-                      c.state === "available" || c.state === "check_failed"
-                        ? "warning"
-                        : c.state === "current"
-                          ? "success"
-                          : c.state === "check_on_upgrade"
-                            ? "info"
-                            : "neutral"
-                    }
-                  >
-                    {t(`devices:harnessUpdates.state.${c.state}`)}
-                  </Badge>
-                  {c.state !== "not_installed" && (
-                    <Badge tone="neutral" data-component-source={c.source}>
-                      {t(`devices:harnessUpdates.source.${c.source}`)}
+    <div className="flex flex-col gap-3">
+      {!!h.components.length && (
+        <div className="flex flex-col gap-2">
+          <span className="type-footnote font-medium text-foreground">{t("devices:harnessUpdates.versionsLabel")}</span>
+          <ul className="flex flex-col gap-2 type-footnote">
+            {h.components.map((c) => {
+              const reasonText = c.reason ? formatComponentReason(c.reason) : null
+              return (
+                <li key={c.id} data-harness-update-component={c.id}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-foreground">{c.name}</span>
+                    <span className="font-mono text-muted-foreground">
+                      {c.installed ?? "—"}
+                      {c.latest && c.latest !== c.installed ? " → " + c.latest : ""}
+                    </span>
+                    <Badge
+                      tone={
+                        c.state === "available" || c.state === "check_failed"
+                          ? "warning"
+                          : c.state === "current"
+                            ? "success"
+                            : c.state === "check_on_upgrade"
+                              ? "info"
+                              : "neutral"
+                      }
+                    >
+                      {t(`devices:harnessUpdates.state.${c.state}`)}
                     </Badge>
+                    {c.state !== "not_installed" && (
+                      <Badge tone="neutral" data-component-source={c.source}>
+                        {t(`devices:harnessUpdates.source.${c.source}`)}
+                      </Badge>
+                    )}
+                  </div>
+                  {c.upgrade_method === "unsupported" && c.state !== "not_installed" && (
+                    <p className="mt-1 text-muted-foreground" data-component-unsupported>
+                      {reasonText || t("devices:harnessUpdates.external")}
+                    </p>
                   )}
-                </div>
-                {c.upgrade_method === "unsupported" && c.state !== "not_installed" && (
-                  <p className="mt-1 text-muted-foreground" data-component-unsupported>
-                    {reasonText || t("devices:harnessUpdates.external")}
-                  </p>
-                )}
-                {c.state === "check_failed" && reasonText && (
-                  <p className="mt-1 text-attention" data-component-check-failed>
-                    {reasonText}
-                  </p>
-                )}
-                {c.state === "check_on_upgrade" && (
-                  <p className="mt-1 text-muted-foreground">{t("devices:harnessUpdates.checkOnUpgradeNote")}</p>
-                )}
-              </li>
-            )
-          })}
-        </ul>
-
-        {(canAction || receipt || requesting || h.blocked_reason) && (
-          <div className="mt-3 flex flex-col gap-2">
-            {activeSessions > 0 && canAction && status !== "waiting" && status !== "running" && (
-              <p className="type-footnote text-attention" data-harness-active-sessions={activeSessions}>
-                {t("devices:harnessUpdates.activeSessionsNotice", { count: activeSessions })}
-              </p>
-            )}
-            {h.blocked_reason && status !== "waiting" && status !== "running" && (
-              <p className="type-footnote text-muted-foreground" data-harness-blocked-reason={h.blocked_reason}>
-                {t(`devices:harnessUpdates.blockReason.${h.blocked_reason}`)}
-              </p>
-            )}
-            <div className="flex flex-wrap items-center gap-2">
-              {canAction && (
-                <Button
-                  size="sm"
-                  disabled={disabled || !h.can_upgrade || status === "running" || status === "waiting" || (status === "unknown" && !retry)}
-                  onClick={() => upgrade(status === "unknown")}
-                  data-harness-upgrade={h.harness}
-                >
-                  {requesting || status === "running" || status === "waiting" ? <Spinner /> : <DownloadIcon />}
-                  {buttonLabel}
-                </Button>
-              )}
-              {status && (
-                <span
-                  role="status"
-                  className={status === "failed" || status === "unknown" ? "type-footnote text-attention" : "type-footnote text-muted-foreground"}
-                  data-harness-upgrade-result={status}
-                >
-                  {t(`devices:harnessUpdates.result.${status}`)}
-                </span>
-              )}
-            </div>
-            {status === "unknown" && (
-              <p className="type-footnote text-muted-foreground">
-                {t(retry ? "devices:harnessUpdates.unknownRetry" : "devices:harnessUpdates.unknown")}
-              </p>
-            )}
-            {(status === "failed" || status === "unknown") && detail && (
-              <p
-                className="rounded-lg bg-attention/10 px-2.5 py-1.5 type-footnote text-attention break-words whitespace-pre-wrap"
-                role="alert"
-                data-harness-upgrade-detail
-              >
-                {detail}
-              </p>
-            )}
-          </div>
-        )}
-      </IntegrationSection>
+                  {c.state === "check_failed" && reasonText && (
+                    <p className="mt-1 text-attention" data-component-check-failed>
+                      {reasonText}
+                    </p>
+                  )}
+                  {c.state === "check_on_upgrade" && (
+                    <p className="mt-1 text-muted-foreground">{t("devices:harnessUpdates.checkOnUpgradeNote")}</p>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
 
       {canEditAuto && (
-        <IntegrationSection>
+        <div className="border-t border-border/60 pt-2">
           <IntegrationRow title={t("devices:harnessUpdates.autoHarnessTitle")} hint={autoHint}>
             {autoSupported && autoOverridden && (
               <Button
@@ -458,8 +489,8 @@ export function HarnessUpgradeSections({
               data-harness-auto-upgrade={h.harness}
             />
           </IntegrationRow>
-        </IntegrationSection>
+        </div>
       )}
-    </>
+    </div>
   )
 }

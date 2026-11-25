@@ -102,7 +102,7 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
     else return route.fulfill({ status: 404, json: {} })
     return route.fulfill({ json: data })
   })
-  f.open = async (hash = "#/devices/nodes/local/harness") => { await page.goto(base + "/" + hash); await page.locator(hash.startsWith("#/devices") ? "[data-panel=runtimes]" : "[data-slot=sidebar]").first().waitFor() }
+  f.open = async (hash = "#/devices/nodes/local/harness") => { await page.goto(base + "/" + hash); await page.locator(hash.startsWith("#/devices") ? "[data-runtime-inventory], [data-runtime-empty]" : "[data-slot=sidebar]").first().waitFor() }
   return f
 }
 
