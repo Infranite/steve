@@ -1215,12 +1215,12 @@ fn migration_137_drops_legacy_project_dir_and_worktree_columns() {
 }
 
 #[test]
-fn migration_138_canonicalizes_reasoning_effort_and_adds_effort_mapping() {
-    let before_138 = db::MIGRATIONS
+fn migration_139_canonicalizes_reasoning_effort_and_adds_effort_mapping() {
+    let before_139 = db::MIGRATIONS
         .iter()
         .position(|sql| sql.contains("ALTER TABLE sessions ADD COLUMN effort_mapping TEXT"))
         .unwrap();
-    let (_dir, path) = at_version(before_138);
+    let (_dir, path) = at_version(before_139);
     let c = Connection::open(&path).unwrap();
     c.execute_batch(
         r#"INSERT INTO bots(id,workspace_id,name,harness,reasoning_effort,updated)

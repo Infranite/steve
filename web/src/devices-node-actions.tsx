@@ -10,7 +10,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { openSheet } from "@/ui"
 import { st, toast } from "@/store"
 import { useT } from "@/i18n"
-import type { NodeView } from "@/device-model"
+import { isUpgradeOnlyLink, type NodeView } from "@/device-model"
 import { useDevices } from "@/devices-data"
 import { useWorkSettings } from "@/devices-config"
 import { useNodeHarnessUpdates } from "@/devices-harness-updates"
@@ -50,7 +50,7 @@ export function useNodeActions(v: NodeView) {
   }
 
   const probeHarnesses = async () => {
-    if (harnessBusy || !v.linked || v.state === "pending" || v.state === "revoked") return
+    if (harnessBusy || !v.linked || isUpgradeOnlyLink(v) || v.state === "pending" || v.state === "revoked") return
     setHarnessBusy(true)
     setHarnessError("")
     try {
@@ -170,13 +170,22 @@ export function NodeActionControls({
           </Button>
         )
       }
-      case "startUpgrade":
+      case "startUpgrade": {
+        const targetVersion = item.version ?? actions.hubVersion
+        const label = item.kind === "upgradeFailed"
+          ? t("devices:upgrade.retry")
+          : item.kind === "upgradeRequired"
+            ? targetVersion
+              ? t("devices:upgrade.nodeTo", { version: targetVersion })
+              : t("devices:upgrade.nodeAction")
+            : t("devices:upgrade.to", { version: targetVersion })
         return (
           <Button size="xs" disabled={actions.upgradeBusy} onClick={() => void actions.startUpgrade(false)} data-node-action-run="startUpgrade">
             {actions.upgradeBusy ? <Spinner className="size-3" /> : item.kind === "upgradeFailed" ? <RotateCcwIcon /> : <ArrowUpCircleIcon />}
-            {item.kind === "upgradeFailed" ? t("devices:upgrade.retry") : t("devices:upgrade.to", { version: item.version ?? actions.hubVersion })}
+            {label}
           </Button>
         )
+      }
       case "switchUpgradeNow":
         return (
           <Button size="xs" variant="outline" className="text-destructive" disabled={actions.upgradeBusy} onClick={() => void actions.switchUpgradeNow()} data-node-action-run="switchUpgradeNow">

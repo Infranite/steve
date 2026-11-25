@@ -71,6 +71,36 @@ let nodes = [
     host: { hostname: "imac.local", os: "macos", os_version: "15.6", arch: "x86_64", cpus: 8, mem_total: 16 * GIB },
     upgrade: { build: { version: "0.2.109", commit: "def67890", target: "x86_64-apple-darwin" }, policy: "notify", own_policy: null, can: false, reason: "unknown", latest: null },
   },
+  {
+    node_id: "n-stale",
+    name: "MacBook Pro",
+    fingerprint: FP,
+    state: "active",
+    linked: true,
+    local: false,
+    link_mode: "upgrade_only",
+    protocol: 12,
+    protocol_older: "node",
+    node_version: "0.9.0",
+    hub_version: HUB,
+    max_sessions: 4,
+    running: 0,
+    waiting: 0,
+    last_seen: NOW - 5_000,
+    offline: null,
+    link: { route: "lan", via: "direct", tls: false, since: NOW - HOUR, latency_ms: null, latency_at: null },
+    host: null,
+    upgrade: {
+      build: { version: "0.9.0", commit: "9999aaaa", target: "aarch64-apple-darwin" },
+      policy: "notify",
+      own_policy: null,
+      can: true,
+      reason: "outdated",
+      link_mode: "upgrade_only",
+      protocol_older: "node",
+      latest: null,
+    },
+  },
 ]
 
 // Matches web/src/gen/VitalsResponse.ts & NodeVitalsDay.ts
@@ -116,7 +146,17 @@ const harnesses = {
       { id: "ready-adapter", name: "Ready Adapter", available: true, version: "2.0.0", adapter_version: "0.9.0", degraded_reason: null, models: ["fixture/model"], error: null, setup: null },
     ],
   },
+  "n-stale": {
+    state: "upgrade_required",
+    checked_at: null,
+    attempted_at: null,
+    stale: false,
+    refreshing: false,
+    error: null,
+    harnesses: [],
+  },
 }
+let staleUpdateReads = 0
 
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) })
 
@@ -130,7 +170,16 @@ await page.route("**/*", async (route) => {
   if (p === "/api/vitals") return json(route, vitals)
   if (p === "/api/node-harnesses") return json(route, { nodes: harnesses })
   if (p === "/api/node-harnesses/n-auth") return json(route, { node_id: "n-auth", report: harnesses["n-auth"] })
+  if (p === "/api/node-harness-updates/n-stale") {
+    staleUpdateReads += 1
+    return json(route, { report: null, runs: {}, retryable_unknown: [], auto_upgrade: { enabled: false, harnesses: {} }, at: 0, error: "upgrade required", code: "upgrade_required" })
+  }
   if (p.startsWith("/api/node-harness-updates/")) return json(route, { report: { node: "n-auth", checking: false, harnesses: [] }, runs: {}, retryable_unknown: [], auto_upgrade: { enabled: false, harnesses: {} }, at: NOW, error: null, code: null })
+  if (p === "/api/nodes/n-stale/upgrade" && req.method() === "POST") {
+    const latest = { operation_id: "nup_stale", version: HUB, from_version: "0.9.0", phase: "staging", error: null, requested_by: "owner", force: false, created: NOW, updated: NOW }
+    nodes = nodes.map((n) => n.node_id === "n-stale" ? { ...n, upgrade: { ...n.upgrade, can: false, reason: "busy", latest } } : n)
+    return json(route, { operation: "nup_stale" }, 202)
+  }
   if (p === "/api/nodes/n-auth/file-access" && req.method() === "POST") {
     const report = { status: "granted", locations: [{ location: "documents", status: "granted" }] }
     nodes = nodes.map((n) => n.node_id === "n-auth" ? { ...n, host: { ...n.host, file_access: report } } : n)
@@ -210,6 +259,19 @@ try {
   await page.locator('[data-node-action="offline"] [data-node-action-goto="diagnostics"]').click()
   await page.waitForFunction(() => location.hash === "#/devices/nodes/n-offline/diagnostics")
   await page.locator("[data-node-link-error]").getByText("connection refused: tcp connect").waitFor()
+
+  // 6b. Upgrade-only Node shows single upgradeRequired prompt on Overview and Harness tab without probe failure
+  await page.goto(base + "/test/fixtures/devices.html?strict#/devices/nodes/n-stale")
+  await page.locator('[data-node-action="upgradeRequired"]').waitFor()
+  assert.equal(await page.locator('[data-node-action="harnessProbeFailed"]').count(), 0)
+  await page.locator('[data-node-tab="harness"]').click()
+  await page.locator('[data-node-harness-upgrade-required="n-stale"]').waitFor()
+  assert.match(await page.locator('[data-node-harness-upgrade-required="n-stale"]').innerText(), /0\.9\.0.*0\.2\.112/)
+  assert.equal(await page.locator("[data-node-harness-error]").count(), 0)
+  assert.equal(staleUpdateReads, 0, "upgrade_only Node does not poll harness updates")
+  await page.locator('[data-harness-upgrade-node="n-stale"]').click()
+  await page.waitForFunction(() => document.querySelector('[data-harness-upgrade-node="n-stale"]') === null)
+  assert.ok(writes.includes("POST /api/nodes/n-stale/upgrade"))
 
   // 7. Mobile viewport fits without horizontal page overflow
   await page.setViewportSize({ width: 390, height: 844 })

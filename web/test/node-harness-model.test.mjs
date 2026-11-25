@@ -27,8 +27,21 @@ test("missing, unsupported, failed and offline reports are distinct from an empt
 test("installation and unknown availability have separate labels", () => {
   assert.equal(harnessState(harness("h", null)), "unknown")
   assert.equal(harnessState(harness("h", false, { degraded_reason: "authentication_required" })), "authentication_required")
+  assert.equal(harnessState(harness("h", false, { degraded_reason: "command_not_in_service_path" })), "unavailable")
   assert.equal(harnessState(harness("h", false, { setup: { state: "not_installed" } })), "not_installed")
   assert.equal(harnessState(harness("h", false, { setup: { state: "installing" } })), "installing")
   assert.equal(harnessState(harness("h", false)), "unavailable")
   assert.equal(harnessState(harness("h")), "ready")
+})
+
+test("upgrade_only link explains version mismatch instead of probe failure", () => {
+  const stale = { linked: true, linkMode: "upgrade_only", version: "0.9.0", hubVersion: "0.11.1", protocolOlder: "node" }
+  assert.equal(
+    harnessSummary(stale, report([], { state: "upgrade_required" })),
+    "Node 版本 0.9.0 低于 Hub 0.11.1，升级后才能探测 harness",
+  )
+  assert.equal(
+    harnessSummary(stale, report([], { state: "failed" })),
+    "Node 版本 0.9.0 低于 Hub 0.11.1，升级后才能探测 harness",
+  )
 })

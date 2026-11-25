@@ -68,12 +68,16 @@ pub async fn sample_once(local: Option<&Arc<dyn Node>>, svc: Option<&Arc<NodeSer
     if let Some(svc) = svc {
         for id in svc.registry.linked() {
             if let Ok(node) = NodeId::new(id.clone()) {
-                targets.push((id, svc.fleet.remote(&node), true));
+                let remote = svc.fleet.remote(&node);
+                if !remote.is_upgrade() {
+                    targets.push((id, remote, true));
+                }
             }
         }
     }
     // The service Node and the in-process jobs Node share a machine. Sample it once.
     if let Some(local) = local
+        && !local.is_upgrade_only()
         && !targets.iter().any(|(id, _, _)| id == "local")
     {
         targets.push(("local".into(), local.clone(), false));

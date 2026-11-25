@@ -3,6 +3,8 @@
  * one status a Node shows, and the figures the pages print. Pure, so the overview, the lists, a Node's page and the
  * map all say the same thing; web/test/device-model.test.mjs pins it. Imports use .ts so node --test loads it. */
 import type { RDevice, RNode, RNodeUpgradeRun, RVitals } from "./api.ts"
+import type { NodeLinkMode } from "./gen/NodeLinkMode.ts"
+import type { NodeProtocolOlder } from "./gen/NodeProtocolOlder.ts"
 import { t } from "./i18n/index.ts"
 import { longDur } from "./i18n/format.ts"
 
@@ -32,6 +34,8 @@ export type NodeView = {
   node?: RNode
   state: RNode["state"]
   linked: boolean
+  linkMode?: NodeLinkMode
+  protocolOlder?: NodeProtocolOlder | null
   paused: boolean
   running?: number
   waiting?: number
@@ -40,7 +44,14 @@ export type NodeView = {
   linkError?: { at: number; error: string } | null
   /** the release it runs, when it said */
   version?: string | null
+  /** the Hub release reported alongside this Node */
+  hubVersion?: string | null
   fingerprint?: string
+}
+
+/** True when this Node's live link only serves the frozen upgrade channel due to protocol mismatch. */
+export function isUpgradeOnlyLink(v: Pick<NodeView, "linked" | "linkMode" | "node">): boolean {
+  return v.linked && (v.linkMode === "upgrade_only" || v.node?.link_mode === "upgrade_only")
 }
 
 /** One NodeView per Node: the Hub's own first, then the paired ones as the registry lists them. A device row is
@@ -54,10 +65,13 @@ export function nodeViews(devices: readonly RDevice[], nodes: readonly RNode[] |
     out.push({
       id: LOCAL_NODE, name: localDevice?.name ?? localNode!.name, local: true, device: localDevice, node: localNode,
       state: localNode?.state ?? "active", linked: localNode ? localNode.linked : localDevice?.connected !== false,
+      linkMode: localNode?.link_mode ?? "normal", protocolOlder: localNode?.protocol_older ?? null,
       paused: localNode ? localNode.state === "paused" : localDevice?.status === "暂停接活",
       running: localDevice?.running ?? localNode?.running, waiting: localDevice?.waiting ?? localNode?.waiting,
       max: localDevice?.max_sessions ?? localNode?.max_sessions, lastSeen: localNode?.last_seen, linkError: localNode?.link_error ?? null,
-      version: localNode?.upgrade?.build?.version ?? (hubVersion || localDevice?.version || null), fingerprint: localNode?.fingerprint,
+      version: localNode?.node_version ?? localNode?.upgrade?.build?.version ?? (hubVersion || localDevice?.version || null),
+      hubVersion: localNode?.hub_version ?? (hubVersion || null),
+      fingerprint: localNode?.fingerprint,
     })
   }
   const seen = new Set<string>([LOCAL_NODE])
@@ -66,9 +80,12 @@ export function nodeViews(devices: readonly RDevice[], nodes: readonly RNode[] |
     seen.add(n.node_id)
     const device = devices.find((d) => d.node_id === n.node_id)
     out.push({
-      id: n.node_id, name: n.name, local: false, device, node: n, state: n.state, linked: n.linked, paused: n.state === "paused",
+      id: n.node_id, name: n.name, local: false, device, node: n, state: n.state, linked: n.linked,
+      linkMode: n.link_mode ?? "normal", protocolOlder: n.protocol_older ?? null, paused: n.state === "paused",
       running: n.running, waiting: n.waiting, max: n.max_sessions, lastSeen: n.last_seen, linkError: n.link_error ?? null,
-      version: n.upgrade?.build?.version ?? null, fingerprint: n.fingerprint,
+      version: n.node_version ?? n.upgrade?.build?.version ?? null,
+      hubVersion: n.hub_version ?? (hubVersion || null),
+      fingerprint: n.fingerprint,
     })
   }
   return out
@@ -100,9 +117,11 @@ export function nodeStatus(n: NodeView, hubVersion = ""): NodeStatus {
   const u = n.node?.upgrade, latest = u?.latest
   if (latest && !SETTLED.has(latest.phase)) return { kind: "upgrading", tone: "info", phase: latest.phase, version: latest.version }
   if (latest && stillRolledBack(n, latest, hubVersion)) return { kind: "rolledBack", tone: "bad", version: latest.version, from: latest.from_version ?? n.version ?? null }
+  const effectiveHub = n.hubVersion || hubVersion
   if (n.paused) return { kind: "paused", tone: "neutral" }
-  const target = u?.reason === "outdated" ? hubVersion || undefined : undefined
-  if (u?.reason === "outdated" || (!u && !n.local && n.version && hubVersion && n.version !== hubVersion)) return { kind: "outdated", tone: "warn", version: target ?? hubVersion }
+  if (isUpgradeOnlyLink(n)) return { kind: "outdated", tone: u?.reason === "manual" ? "bad" : "warn", version: u?.can === false ? undefined : effectiveHub || undefined }
+  const target = u?.reason === "outdated" ? effectiveHub || undefined : undefined
+  if (u?.reason === "outdated" || (!u && !n.local && n.version && effectiveHub && n.version !== effectiveHub)) return { kind: "outdated", tone: "warn", version: target ?? effectiveHub }
   if ((n.waiting ?? 0) > 0) return { kind: "queued", tone: "warn", n: n.waiting }
   return { kind: "online", tone: "ok" }
 }
@@ -264,9 +283,52 @@ export function upgradeCard(v: NodeView, hubVersion = ""): UpgradeCard {
   if (latest && stillRolledBack(v, latest, hubVersion)) return { kind: "failed", run: latest, steps: latest.phase === "rolled_back" ? ["done", "done", "done", "bad", "back"] : null }
   const to = hubVersion || u.build?.version || ""
   if (u.reason === "outdated" && u.can) return { kind: "outdated", from: v.version ?? null, to }
-  if (u.reason === "manual") return { kind: "manual", from: v.version ?? null, to, behind: !!v.version && !!hubVersion && v.version !== hubVersion }
+  if (u.reason === "manual") {
+    const behind = (!!v.version && !!hubVersion && v.version !== hubVersion)
+      || (isUpgradeOnlyLink(v) && (v.protocolOlder ?? v.node?.protocol_older) !== "hub")
+    return { kind: "manual", from: v.version ?? null, to, behind }
+  }
   if (u.reason === "current") return { kind: "current", last: latest?.phase === "succeeded" ? latest : null }
   return { kind: u.reason === "hub_dev_build" ? "devHub" : "unknown" }
+}
+
+/** Rust release target triple inferred from a Node's reported host info, or a clear placeholder when unknown. */
+export function manualUpdateTarget(v: NodeView): string {
+  const host = v.node?.host
+  const os = host?.os?.toLowerCase() ?? ""
+  const arch = host?.arch?.toLowerCase() ?? ""
+  if (os === "macos" && arch === "aarch64") return "aarch64-apple-darwin"
+  if (os === "linux" && (arch === "x86_64" || arch === "amd64")) return "x86_64-unknown-linux-gnu"
+  if (os === "linux" && (arch === "aarch64" || arch === "arm64")) return "aarch64-unknown-linux-gnu"
+  return "<target>"
+}
+
+/** Complete, executable fallback steps for updating a Node manually from its verified installer archive
+ *  (which bundles `bin/steve` alongside `bin/steve-node`, unlike the runtime archive). */
+export function manualUpdateCommand(v: NodeView, hubVersion = ""): string {
+  const ver = (hubVersion || v.hubVersion || "").trim() || "<version>"
+  const target = manualUpdateTarget(v)
+  const archive = `steve-${ver}-${target}-installer.tar.gz`
+  const dir = `$HOME/.steve-node/releases/${ver}`
+  const isMac = hostOf(v).kind === "mac"
+  const lines = [
+    `mkdir -p "${dir}"`,
+    `tar -xzf "${archive}" -C "${dir}"`,
+  ]
+  if (isMac) {
+    lines.push(
+      `"${dir}/bin/steve" node update --home "$HOME/.steve-node" --release "${dir}"`,
+      `# LaunchAgent → boot service (run once if not yet migrated):`,
+      `# "${dir}/bin/steve" node enable-boot --home "$HOME/.steve-node"`,
+    )
+  } else {
+    lines.push(
+      `"${dir}/bin/steve" node stop --home "$HOME/.steve-node"`,
+      `"${dir}/bin/steve" node update --home "$HOME/.steve-node" --release "${dir}"`,
+      `"${dir}/bin/steve" node start --home "$HOME/.steve-node"`,
+    )
+  }
+  return lines.join("\n")
 }
 
 export type NodeAlert = { tone: "bad" | "warn"; kind: "rolledBack" | "manual" | "outdated" | "pending" | "offline"; text: string }
@@ -275,12 +337,26 @@ export type NodeAlert = { tone: "bad" | "warn"; kind: "rolledBack" | "manual" | 
  *  fingerprint to confirm, offline). An upgrade under way is the status badge's to say. Nothing to say: none. */
 export function nodeAlerts(v: NodeView, hubVersion = "", now = Date.now()): NodeAlert[] {
   const out: NodeAlert[] = []
-  const s = nodeStatus(v, hubVersion), card = upgradeCard(v, hubVersion)
+  const effectiveHub = v.hubVersion || hubVersion
+  const s = nodeStatus(v, effectiveHub), card = upgradeCard(v, effectiveHub)
   if (s.kind === "rolledBack") out.push({ tone: "bad", kind: "rolledBack", text: t("devices:upgrade.failedTitle", { to: s.version ?? "", from: s.from ?? "" }) })
-  if (card.kind === "manual" && card.behind) out.push({ tone: "bad", kind: "manual", text: t("devices:card.manual", { v: card.from ?? "", hub: card.to }) })
-  if (s.kind === "pending") out.push({ tone: "warn", kind: "pending", text: t("devices:card.pending") })
-  if (s.kind === "offline") out.push({ tone: "warn", kind: "offline", text: s.reason ? offlineReason(v) : v.linkError ? t("devices:card.offlineWhy", { ago: agoText(v.linkError.at, now), why: v.linkError.error }) : t("devices:node.offlineNote") })
-  if (card.kind === "outdated") out.push({ tone: "warn", kind: "outdated", text: t("devices:card.outdated", { v: card.from ?? "?", hub: card.to }) })
+  if (isUpgradeOnlyLink(v) && s.kind !== "upgrading" && s.kind !== "rolledBack") {
+    const older = v.protocolOlder ?? v.node?.protocol_older ?? null
+    out.push({
+      tone: "bad",
+      kind: card.kind === "manual" ? "manual" : "outdated",
+      text: older === "hub"
+        ? t("devices:card.upgradeRequiredHub", { from: v.version ?? "?", to: effectiveHub || "?" })
+        : v.version && effectiveHub
+          ? t("devices:card.upgradeRequired", { from: v.version, to: effectiveHub })
+          : t("devices:card.upgradeRequiredUnknown"),
+    })
+  } else {
+    if (card.kind === "manual" && card.behind) out.push({ tone: "bad", kind: "manual", text: t("devices:card.manual", { v: card.from ?? "", hub: card.to }) })
+    if (s.kind === "pending") out.push({ tone: "warn", kind: "pending", text: t("devices:card.pending") })
+    if (s.kind === "offline") out.push({ tone: "warn", kind: "offline", text: s.reason ? offlineReason(v) : v.linkError ? t("devices:card.offlineWhy", { ago: agoText(v.linkError.at, now), why: v.linkError.error }) : t("devices:node.offlineNote") })
+    if (card.kind === "outdated") out.push({ tone: "warn", kind: "outdated", text: t("devices:card.outdated", { v: card.from ?? "?", hub: card.to }) })
+  }
   return out.slice(0, 2)
 }
 

@@ -229,6 +229,9 @@ pub async fn run(home: &Home) -> Result<()> {
         tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
     };
     let node = LocalNode::open(home.node_config(node_id)?).map_err(|e| anyhow!("{e}"))?;
+    if let Some(build) = crate::upgrade::own_build() {
+        node.set_build(build);
+    }
     #[cfg(target_os = "macos")]
     let _setup_probe = match crate::file_access::SetupProbe::start(&home.0, node.clone()) {
         Ok(probe) => probe,
@@ -277,6 +280,9 @@ pub async fn serve_until_stopped(
     trust: &Trust,
     retired: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
+    if let Some(build) = crate::upgrade::own_build() {
+        node.set_build(build);
+    }
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("installing the termination signal handler")?;

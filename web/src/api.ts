@@ -1,5 +1,5 @@
 import type { MessageView } from "@/gen"
-import type { Code, Reason, Params, NodeOffline, HarnessDegradedReason, FileAccessReport, ReasoningEffort, EffortMode, EffortMapping } from "./gen"
+import type { Code, Reason, Params, NodeLinkMode, NodeProtocolOlder, NodeOffline, HarnessDegradedReason, MissingCommandDiagnostic, FileAccessReport, ReasoningEffort, EffortMode, EffortMapping } from "./gen"
 import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked, MemberIdentity } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
@@ -60,7 +60,7 @@ export type RUpgradeDefault = { policy: RUpgradePolicy; hub?: RBuild | null; dra
 /** one Hub-managed upgrade of a Node, as the Hub records it */
 export type RNodeUpgradeRun = { operation_id: string; version: string; from_version?: string | null; phase: string; error?: string | null; requested_by: string; force: boolean; created: number; updated: number }
 /** what the Hub knows of a Node's build and whether it can upgrade it (`reason`: outdated | current | manual | unknown | hub_dev_build) */
-export type RNodeUpgrade = { build?: RBuild | null; policy: RUpgradePolicy; own_policy?: RUpgradePolicy | null; can: boolean; reason: string; latest?: RNodeUpgradeRun | null }
+export type RNodeUpgrade = { build?: RBuild | null; policy: RUpgradePolicy; own_policy?: RUpgradePolicy | null; can: boolean; reason: string; link_mode?: NodeLinkMode; protocol_older?: NodeProtocolOlder | null; latest?: RNodeUpgradeRun | null }
 /** how a Node's latest link reached the Hub, as the Hub saw it arrive (kept while it is away; `linked` says whether it is up):
  * `route` where its machine is, `via` what it came through, `latency_ms` the latest round trip of a call while it is linked */
 export type RNodeLink = { route: "loopback" | "lan" | "tailnet" | "public" | "unknown"; tls: boolean; via: "direct" | "proxy" | "tailcat"; peer?: string; since: number; latency_ms: number | null; latency_at: number | null }
@@ -72,7 +72,7 @@ export type RNodeRemovalRun = { operation_id: string; phase: string; error?: str
 /** whether the Hub can ask a Node to remove itself from its machine (`reason`: ok | offline | manual | unknown | local |
  * unpaired), its latest removal, and the command to run on its machine instead */
 export type RNodeRemoval = { reason: string; latest?: RNodeRemovalRun | null; command: string; grace_secs?: number }
-export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; offline?: NodeOffline | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; removal?: RNodeRemoval; link?: RNodeLink | null; host?: RNodeHost | null }
+export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; link_mode?: NodeLinkMode; protocol?: number | null; protocol_older?: NodeProtocolOlder | null; node_version?: string | null; hub_version?: string | null; last_seen?: number | null; offline?: NodeOffline | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; removal?: RNodeRemoval; link?: RNodeLink | null; host?: RNodeHost | null }
 /** A Node's latest sample and day of vitals. Network rates are bytes per second. */
 export type RVitals = import("./gen/NodeVitalsDay").NodeVitalsDay
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
@@ -158,10 +158,11 @@ export type RNodeHarness = {
   id: string; name: string; available: boolean | null; version: string; adapter_version: string | null
   degraded_reason: HarnessDegradedReason | null
   models: string[]; error: string | null; setup: RRuntime["setup"] | null
+  missing_command?: MissingCommandDiagnostic | null
   capabilities?: RAdapterCapabilities | null
 }
 export type RNodeHarnessReport = {
-  state: "reported" | "unreported" | "offline" | "unsupported" | "failed"
+  state: "reported" | "unreported" | "offline" | "unsupported" | "failed" | "upgrade_required"
   checked_at: number | null; attempted_at: number | null; stale: boolean; refreshing: boolean
   error: string | null; harnesses: RNodeHarness[]
 }
@@ -468,7 +469,7 @@ export const api = {
   addHarness: (p: { id: string; name?: string; command: string; args?: string[]; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),
   /** `off`: this Hub does not listen for remote Nodes (STEVE_NODE_LISTEN=0, or a read-only copy) */
-  nodes: () => get<{ nodes: RNode[]; off?: boolean }>("/nodes"),
+  nodes: () => get<{ nodes: RNode[]; off?: boolean; hub_version?: string }>("/nodes"),
   nodeHarnesses: () => get<{ nodes: Record<string, RNodeHarnessReport> }>("/node-harnesses"),
   refreshNodeHarnesses: (id: string) => get<{ node_id: string; report: RNodeHarnessReport }>(`/node-harnesses/${encodeURIComponent(id)}?fresh=1`),
   createPairing: () => post<RPairing>("/nodes/pairings"),

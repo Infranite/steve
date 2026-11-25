@@ -19,11 +19,11 @@
 //!   build is restarted once it has no turn running.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::json;
-use steve_node_api::{Discovery, Node, NodeId};
+use steve_node_api::{Node, NodeId};
 use steve_node_wire::Identity;
 use steve_store::Store;
 
@@ -38,6 +38,9 @@ const KEY: &str = "service-identity.key";
 const LINK: &str = "service.json";
 const PID: &str = "service.pid";
 const INSTALLATION_CHECK: Duration = Duration::from_secs(1);
+/// Maximum consecutive restarts before assuming the newly spawned binary still fails to match
+/// the Hub and refusing to enter a kill loop.
+const MAX_CONSECUTIVE_RESTARTS: u32 = 3;
 
 /// The Hub's side of its service Node: what routing and workspaces use.
 pub(crate) struct ServiceHost {
@@ -217,6 +220,146 @@ fn read_service(home: &Path) -> (Option<u32>, Option<String>) {
     (pid, version)
 }
 
+/// The running local service Node's version from `service.pid`, when that process is still alive.
+pub(crate) fn running_version(home: &Path) -> Option<String> {
+    let (pid, built) = read_service(home);
+    pid.filter(|p| pid_alive(*p))?;
+    built
+}
+
+fn send_sigterm(pid: u32) -> std::io::Result<()> {
+    // SAFETY: a plain signal to the Node's process, which shuts down as on Ctrl-C
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[derive(Default)]
+struct SuperviseState {
+    /// PID already sent SIGTERM, so each mismatched process is signaled at most once.
+    signaled_pid: Option<u32>,
+    /// Consecutive restart signals issued since the last healthy normal link.
+    consecutive_restarts: u32,
+    /// True once we logged the restart-cap error for the current unhealthy streak.
+    restart_cap_logged: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuperviseAction {
+    Idle,
+    Spawned,
+    SpawnFailed,
+    WaitingForTurns,
+    Signaled(u32),
+    SignalFailed(u32),
+    AwaitingExit(u32),
+    RestartCapReached(u32),
+}
+
+struct SuperviseObservation {
+    linked: bool,
+    upgrade_only: bool,
+    running_turns: usize,
+    pid: Option<u32>,
+    built: Option<String>,
+}
+
+/// Deterministic supervision step: restarts the local service Node without touching ordinary
+/// protocol RPCs whenever its link is upgrade-only or its recorded build differs from the Hub.
+fn supervise_step(
+    state: &mut SuperviseState,
+    obs: SuperviseObservation,
+    hub_version: &str,
+    signal_term: impl FnOnce(u32) -> std::io::Result<()>,
+    spawn_node: impl FnOnce() -> std::io::Result<()>,
+) -> SuperviseAction {
+    if state.signaled_pid.is_some_and(|old| obs.pid != Some(old)) {
+        state.signaled_pid = None;
+    }
+
+    if !obs.linked && obs.pid.is_none() {
+        return match spawn_node() {
+            Ok(()) => SuperviseAction::Spawned,
+            Err(e) => {
+                tracing::error!(error = %e, "starting the local Node failed");
+                SuperviseAction::SpawnFailed
+            }
+        };
+    }
+
+    let version_mismatch = obs.built.as_deref() != Some(hub_version);
+    let needs_restart = obs.upgrade_only || version_mismatch;
+    if !needs_restart {
+        if obs.linked {
+            state.consecutive_restarts = 0;
+            state.restart_cap_logged = false;
+        }
+        return SuperviseAction::Idle;
+    }
+
+    let Some(pid) = obs.pid else {
+        return SuperviseAction::Idle;
+    };
+    if obs.running_turns > 0 {
+        return SuperviseAction::WaitingForTurns;
+    }
+    if state.signaled_pid == Some(pid) {
+        return SuperviseAction::AwaitingExit(pid);
+    }
+    if state.consecutive_restarts >= MAX_CONSECUTIVE_RESTARTS {
+        if !state.restart_cap_logged {
+            state.restart_cap_logged = true;
+            tracing::error!(
+                pid,
+                built = obs.built.as_deref().unwrap_or("unknown"),
+                hub = hub_version,
+                upgrade_only = obs.upgrade_only,
+                restarts = state.consecutive_restarts,
+                "local Node still mismatches Hub after repeated restarts; stopping restart loop"
+            );
+        }
+        return SuperviseAction::RestartCapReached(pid);
+    }
+
+    state.signaled_pid = Some(pid);
+    state.consecutive_restarts += 1;
+    tracing::info!(
+        pid,
+        built = obs.built.as_deref().unwrap_or("unknown"),
+        hub = hub_version,
+        linked = obs.linked,
+        upgrade_only = obs.upgrade_only,
+        attempt = state.consecutive_restarts,
+        "restarting the local Node to match this Hub"
+    );
+    if let Err(e) = signal_term(pid) {
+        tracing::error!(pid, error = %e, "failed to signal the local Node to restart");
+        return SuperviseAction::SignalFailed(pid);
+    }
+    SuperviseAction::Signaled(pid)
+}
+
+fn observe_local_service(
+    home: &Path,
+    svc: &crate::nodes::NodeService,
+    runtime: &NodeRuntime,
+    is_alive: impl FnOnce(u32) -> bool,
+) -> SuperviseObservation {
+    let conn = svc.registry.conn(NODE_ID).filter(|c| !c.is_closed());
+    let linked = conn.is_some();
+    let upgrade_only = conn.is_some_and(|c| c.is_upgrade());
+    let (pid, built) = read_service(home);
+    SuperviseObservation {
+        linked,
+        upgrade_only,
+        running_turns: runtime.running_turns(),
+        pid: pid.filter(|p| is_alive(*p)),
+        built,
+    }
+}
+
 /// Starts the Node's process when none runs, and replaces one of another build once it is idle.
 fn keep_running_task(
     home: PathBuf,
@@ -224,7 +367,7 @@ fn keep_running_task(
     runtime: Arc<NodeRuntime>,
     version: String,
 ) -> steve_runtime::Task {
-    let node_id = NodeId::new(NODE_ID).expect("constant node id");
+    let state = Arc::new(Mutex::new(SuperviseState::default()));
     // a moment for a Node still running from before this Hub to link again
     steve_runtime::every_after(
         "node.service.supervise",
@@ -232,47 +375,17 @@ fn keep_running_task(
         Duration::from_secs(10),
         steve_runtime::FirstRun::After(Duration::from_secs(3)),
         move || {
-            let (home, svc, runtime, version, node_id) = (
+            let (home, svc, runtime, version, state) = (
                 home.clone(),
                 svc.clone(),
                 runtime.clone(),
                 version.clone(),
-                node_id.clone(),
+                state.clone(),
             );
             async move {
-                let linked = svc.registry.current(NODE_ID).is_some();
-                let (pid, built) = read_service(&home);
-                let pid = pid.filter(|p| pid_alive(*p));
-                if !linked && pid.is_none() {
-                    if let Err(e) = spawn(&home) {
-                        tracing::error!("starting the local Node: {e}");
-                    }
-                } else if !linked
-                    && let Some(pid) = pid
-                    && built.as_deref() != Some(version.as_str())
-                {
-                    // A Node of another build cannot link to this Hub once their protocols differ, so
-                    // waiting for it to link first would leave it running forever.
-                    tracing::info!(
-                        "the local Node runs {}, this Hub {version}, and it is not linked: restarting it",
-                        built.as_deref().unwrap_or("an unknown build")
-                    );
-                    // SAFETY: a plain signal to the Node's process, which shuts down as on Ctrl-C
-                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-                } else if linked
-                    && runtime.running_turns() == 0
-                    && let Some(pid) = pid
-                    && let Ok(caps) = svc.fleet.remote(&node_id).probe(false).await
-                    && !caps.version.is_empty()
-                    && caps.version != version
-                {
-                    tracing::info!(
-                        "the local Node runs {}, this Hub {version}: restarting it while it is idle",
-                        caps.version
-                    );
-                    // SAFETY: a plain signal to the Node's process, which shuts down as on Ctrl-C
-                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-                }
+                let obs = observe_local_service(&home, &svc, &runtime, pid_alive);
+                let mut guard = state.lock().unwrap();
+                supervise_step(&mut guard, obs, &version, send_sigterm, || spawn(&home));
             }
         },
     )
@@ -418,4 +531,210 @@ pub async fn run(cfg: &Config) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(home.join(PID));
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use steve_node_api::{PROTOCOL, upgrade_v1};
+    use steve_node_wire::{Conn, ConnOptions, NodeServer};
+
+    struct NoopDomain;
+    impl crate::wire::node_runtime::NodeDomain for NoopDomain {
+        fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
+    }
+
+    #[tokio::test]
+    async fn upgrade_only_local_service_node_is_restarted_once_and_respawned_after_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let node_home = dir.path().join("node");
+        std::fs::create_dir_all(&node_home).unwrap();
+        std::fs::write(node_home.join(PID), "4242\n0.9.0\n").unwrap();
+
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        let fleet =
+            crate::nodes::NodeFleet::new(store.clone(), dir.path().to_path_buf(), None, None);
+        let svc = crate::nodes::NodeService::new(store.clone(), fleet.clone(), None).unwrap();
+        let node_id = NodeId::new(NODE_ID).unwrap();
+        let remote = fleet.remote(&node_id);
+        let runtime = NodeRuntime::new(store, remote.clone(), Arc::new(NoopDomain));
+
+        // Link the local service Node on an older protocol so Conn enters upgrade-only mode.
+        let (hub, peer) = steve_node_wire::testkit::pair();
+        let fake = steve_node_api::testkit::FakeNode::new(NODE_ID);
+        let mode = upgrade_v1::Mode::between(PROTOCOL, PROTOCOL - 1);
+        assert_eq!(mode, upgrade_v1::Mode::Upgrade);
+        let hub_conn = Conn::spawn(
+            hub.sink,
+            hub.stream,
+            1,
+            NodeServer::new(fake.clone()),
+            ConnOptions {
+                side: "h",
+                mode,
+                ..Default::default()
+            },
+        );
+        let _peer_conn = Conn::spawn(
+            peer.sink,
+            peer.stream,
+            1,
+            NodeServer::new(fake),
+            ConnOptions {
+                side: "n",
+                mode,
+                ..Default::default()
+            },
+        );
+        assert!(svc.registry.install(NODE_ID, 1, hub_conn.clone()));
+        assert!(remote.attach(hub_conn.clone(), false));
+
+        let mut state = SuperviseState::default();
+        let signals = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let spawns = Arc::new(AtomicUsize::new(0));
+
+        // First tick: linked in upgrade-only mode, idle -> SIGTERM sent without calling probe().
+        let obs = observe_local_service(&node_home, &svc, &runtime, |p| p == 4242);
+        assert!(obs.linked && obs.upgrade_only);
+        let s1 = signals.clone();
+        let sp1 = spawns.clone();
+        assert_eq!(
+            supervise_step(
+                &mut state,
+                obs,
+                "0.11.1",
+                move |pid| {
+                    s1.lock().unwrap().push(pid);
+                    Ok(())
+                },
+                move || {
+                    sp1.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
+            SuperviseAction::Signaled(4242)
+        );
+        assert_eq!(*signals.lock().unwrap(), vec![4242]);
+
+        // Second tick while old PID 4242 is still alive -> debounced, no duplicate SIGTERM.
+        let obs = observe_local_service(&node_home, &svc, &runtime, |p| p == 4242);
+        let s2 = signals.clone();
+        assert_eq!(
+            supervise_step(
+                &mut state,
+                obs,
+                "0.11.1",
+                move |pid| {
+                    s2.lock().unwrap().push(pid);
+                    Ok(())
+                },
+                || Ok(()),
+            ),
+            SuperviseAction::AwaitingExit(4242)
+        );
+        assert_eq!(*signals.lock().unwrap(), vec![4242]);
+
+        // Old process exits and link closes -> existing spawn path brings up the new version.
+        hub_conn.close(None, steve_node_wire::close::GOODBYE, "restarting");
+        svc.registry.remove(NODE_ID, 1);
+        remote.detach(1);
+        let obs = observe_local_service(&node_home, &svc, &runtime, |_| false);
+        assert!(!obs.linked && obs.pid.is_none());
+        let sp2 = spawns.clone();
+        assert_eq!(
+            supervise_step(
+                &mut state,
+                obs,
+                "0.11.1",
+                |_| panic!("must not signal when process is gone"),
+                move || {
+                    sp2.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
+            SuperviseAction::Spawned
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn supervise_waits_for_running_turns_reports_spawn_errors_and_caps_restart_loops() {
+        let mut state = SuperviseState::default();
+
+        // Active turns defer restart even when upgrade-only or mismatched.
+        assert_eq!(
+            supervise_step(
+                &mut state,
+                SuperviseObservation {
+                    linked: true,
+                    upgrade_only: true,
+                    running_turns: 2,
+                    pid: Some(100),
+                    built: Some("0.9.0".into()),
+                },
+                "0.11.1",
+                |_| panic!("must not signal while turns are running"),
+                || panic!("must not spawn while old process runs"),
+            ),
+            SuperviseAction::WaitingForTurns
+        );
+
+        // Spawn failure reports error without panicking or looping kills.
+        assert_eq!(
+            supervise_step(
+                &mut state,
+                SuperviseObservation {
+                    linked: false,
+                    upgrade_only: false,
+                    running_turns: 0,
+                    pid: None,
+                    built: None,
+                },
+                "0.11.1",
+                |_| panic!("no pid to signal"),
+                || Err(std::io::Error::other("exec failed")),
+            ),
+            SuperviseAction::SpawnFailed
+        );
+
+        // Repeated restarts of distinct mismatched PIDs stop at MAX_CONSECUTIVE_RESTARTS.
+        for i in 0..MAX_CONSECUTIVE_RESTARTS {
+            let pid = 200 + i;
+            assert_eq!(
+                supervise_step(
+                    &mut state,
+                    SuperviseObservation {
+                        linked: true,
+                        upgrade_only: true,
+                        running_turns: 0,
+                        pid: Some(pid),
+                        built: Some("0.9.0".into()),
+                    },
+                    "0.11.1",
+                    |_| Ok(()),
+                    || Ok(()),
+                ),
+                SuperviseAction::Signaled(pid)
+            );
+        }
+        assert_eq!(
+            supervise_step(
+                &mut state,
+                SuperviseObservation {
+                    linked: true,
+                    upgrade_only: true,
+                    running_turns: 0,
+                    pid: Some(999),
+                    built: Some("0.9.0".into()),
+                },
+                "0.11.1",
+                |_| panic!("must not keep killing past the restart cap"),
+                || Ok(()),
+            ),
+            SuperviseAction::RestartCapReached(999)
+        );
+    }
 }

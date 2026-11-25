@@ -72,6 +72,7 @@ impl RemoteNode {
             return false;
         }
         slot.reconciling |= restarted;
+        let upgrade_only = conn.is_upgrade();
         let old = slot.link.replace(Link {
             conn,
             since: std::time::Instant::now(),
@@ -82,7 +83,11 @@ impl RemoteNode {
         }
         let node = self.id.to_string();
         metrics::counter!("steve_node_link_connects_total", "node" => node.clone()).increment(1);
-        metrics::gauge!("steve_node_link_up", "node" => node).set(1.0);
+        metrics::gauge!("steve_node_link_up", "node" => node.clone()).set(1.0);
+        metrics::gauge!("steve_node_link_mode", "node" => node.clone(), "mode" => "normal")
+            .set(if upgrade_only { 0.0 } else { 1.0 });
+        metrics::gauge!("steve_node_link_mode", "node" => node, "mode" => "upgrade_only")
+            .set(if upgrade_only { 1.0 } else { 0.0 });
         self.connected.send_replace(Some(generation));
         true
     }
@@ -104,7 +109,12 @@ impl RemoteNode {
             if let Some(old) = old {
                 self.link_ended(old);
             }
-            metrics::gauge!("steve_node_link_up", "node" => self.id.to_string()).set(0.0);
+            let node = self.id.to_string();
+            metrics::gauge!("steve_node_link_up", "node" => node.clone()).set(0.0);
+            metrics::gauge!("steve_node_link_mode", "node" => node.clone(), "mode" => "normal")
+                .set(0.0);
+            metrics::gauge!("steve_node_link_mode", "node" => node, "mode" => "upgrade_only")
+                .set(0.0);
             self.connected.send_replace(None);
         }
     }
@@ -360,6 +370,10 @@ impl WorkspaceExecutor for RemoteNode {
 impl Discovery for RemoteNode {
     fn execution_generation(&self) -> Option<u64> {
         self.ready_generation()
+    }
+
+    fn is_upgrade_only(&self) -> bool {
+        self.is_upgrade()
     }
 
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
