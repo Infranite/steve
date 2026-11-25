@@ -2452,7 +2452,7 @@ async fn model_and_effort_changes_go_through_configure() {
             S,
             &ConfigChange {
                 model: Some(Some("m2".into())),
-                effort: Some(Some("high".into())),
+                effort: Some(Some(steve_types::ReasoningEffort::High)),
                 ..Default::default()
             },
         )
@@ -4772,6 +4772,7 @@ async fn startup_preflight_uses_the_actual_node_offer_and_preserves_defaults() {
             models: vec![],
             default_model: None,
             efforts: vec![],
+            variant_models: vec![],
         }),
     });
     h.node.set_harnesses(caps);

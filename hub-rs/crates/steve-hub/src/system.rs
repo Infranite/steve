@@ -454,6 +454,7 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 })
             });
             let ok = ok && setup.as_ref().is_none_or(|s| s.state == steve_node_api::SetupState::Ready);
+            let merged = crate::harnesses::merge(id, declared, reported);
             let mut row=json!({
                 "id": id,
                 "name": name,
@@ -466,6 +467,8 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 "models": models,
                 "default_model": session.and_then(|o| o.default_model.clone()),
                 "efforts": session.map_or_else(|| spec.properties.fallback_efforts.clone(), |o| o.efforts.clone()),
+                "effort_mode": merged.effort_mode,
+                "effort_map": merged.effort_map(None),
                 "modes": modes,
                 "caps": reported.map(|h| json!({
                     "sessions": h.sessions, "jobs": h.jobs, "images": h.images, "resume": h.resume,
@@ -1285,9 +1288,11 @@ mod tests {
                         id: "m1".into(),
                         name: None,
                         description: None,
+                        efforts: None,
                     }],
                     default_model: Some("m1".into()),
                     efforts: vec![],
+                    variant_models: vec![],
                 }),
                 session_error: None,
                 session_auth_required: None,

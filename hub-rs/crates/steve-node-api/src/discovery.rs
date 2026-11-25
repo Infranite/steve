@@ -233,6 +233,9 @@ pub struct AdapterCapabilities {
     /// Reserved upgrade strategy capability for Node-side harness upgrades.
     #[serde(default)]
     pub upgrade: UpgradeCapability,
+    /// How this harness adapter maps Steve's canonical [`crate::ReasoningEffort`].
+    #[serde(default)]
+    pub effort_mode: crate::EffortMode,
     /// True only for harnesses verified empirically against real local runs.
     #[serde(default)]
     pub verified: bool,
@@ -266,9 +269,13 @@ pub struct AdapterOffer {
     /// What it runs when no model is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
-    /// The reasoning efforts it takes.
+    /// Native reasoning effort option ids reported for the session's default model.
     #[serde(default)]
     pub efforts: Vec<String>,
+    /// Full concrete model variant ids from `models.availableModels`, when the adapter reports
+    /// parameterized base models separately from effort-suffixed variants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variant_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +285,10 @@ pub struct AdapterModel {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Native reasoning effort option ids reported by the adapter specifically for this model.
+    /// `Some([])` means probed and confirmed unsupported; `None` means not probed per model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efforts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -403,18 +403,17 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
         too_long("persona", persona.as_deref(), 400)?;
         let harness = text(b, "harness")?.unwrap_or_else(|| steve.clone());
         let model = text(b, "model")?;
-        let Some(adapter) = core.models().harness(&harness) else {
+        let Some(_adapter) = core.models().harness(&harness) else {
             return Err(format!("{name}: there is no harness `{harness}` here."));
         };
-        let reasoning_effort = text(b, "reasoning_effort")?;
-        if let Some(effort) = &reasoning_effort
-            && !adapter.efforts.contains(effort)
-        {
-            return Err(format!(
-                "{name}: `{effort}` is not a thinking effort of `{harness}`. Its efforts: {}.",
-                adapter.efforts.join(", ")
-            ));
-        }
+        let reasoning_effort = match text(b, "reasoning_effort")? {
+            None => steve_types::ReasoningEffort::Default,
+            Some(effort) => steve_types::ReasoningEffort::parse(&effort).ok_or_else(|| {
+                format!(
+                    "{name}: `{effort}` is not a valid thinking effort. Allowed: default, low, medium, high, max."
+                )
+            })?,
+        };
         if let Some(m) = &model {
             known_model(core, &harness, m).map_err(|e| format!("{name}: {e}"))?;
         }

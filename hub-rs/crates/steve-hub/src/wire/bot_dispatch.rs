@@ -91,13 +91,6 @@ fn compatible(
         // The actual default of an opaque offer is not known.
         return Some(Reason::Pending);
     }
-    if choice
-        .effort
-        .as_ref()
-        .is_some_and(|e| !offer.efforts.contains(e))
-    {
-        return Some(Reason::Effort);
-    }
     let Some(modes) = &adapter.execution_modes else {
         return Some(Reason::Pending);
     };
@@ -229,7 +222,7 @@ impl RoutedRuntime {
                     .get()
                     .and_then(|c| c.models().agent_model(ws, &bot.harness))
             }),
-            effort: bot.reasoning_effort.clone(),
+            effort: bot.reasoning_effort.non_default(),
         }
     }
 
@@ -477,7 +470,7 @@ impl RoutedRuntime {
         let choice = HarnessChoice {
             harness: s.harness.clone(),
             model: s.model.clone(),
-            effort: s.reasoning_effort.clone(),
+            effort: s.reasoning_effort.non_default(),
         };
         let mode = self.perm_mode(session);
         let target = Target {
@@ -608,7 +601,7 @@ impl Routes {
             node_priority: priority as u32,
             harness: choice.harness.clone(),
             model: choice.model.clone(),
-            reasoning_effort: choice.effort.clone(),
+            reasoning_effort: choice.effective_effort(),
             explanation,
         }
     }
@@ -645,7 +638,7 @@ mod tests {
         let mut choice = HarnessChoice {
             harness: "fixture".into(),
             model: Some("work".into()),
-            effort: Some("high".into()),
+            effort: Some(steve_types::ReasoningEffort::High),
         };
         let check = |cap: &HarnessCapability, choice: &HarnessChoice, mode| {
             compatible(Some(cap), choice, Some(mode))
@@ -679,12 +672,10 @@ mod tests {
             check(&cap, &choice, PermissionMode::Ask),
             Some(Reason::Model)
         );
+        // Canonical reasoning effort never blocks placement: adapter layer maps or falls back to default.
         choice.model = None;
-        choice.effort = Some("max".into());
-        assert_eq!(
-            check(&cap, &choice, PermissionMode::Ask),
-            Some(Reason::Effort)
-        );
+        choice.effort = Some(steve_types::ReasoningEffort::Max);
+        assert_eq!(check(&cap, &choice, PermissionMode::Ask), None);
         choice.effort = None;
         assert_eq!(check(&cap, &choice, PermissionMode::Ask), None);
         // an adapter listing no models cannot verify one, nor refuse it

@@ -1440,7 +1440,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
         .iter()
         .find(|b| b["name"] == "写文档")
         .unwrap();
-    assert!(docs["reasoning_effort"].is_null());
+    assert_eq!(docs["reasoning_effort"], "default");
     assert_eq!(
         store
             .bots()
@@ -1449,9 +1449,8 @@ async fn the_first_meeting_writes_through_its_own_tools() {
             .iter()
             .find(|b| b.name == "代码审查")
             .unwrap()
-            .reasoning_effort
-            .as_deref(),
-        Some("high")
+            .reasoning_effort,
+        steve_types::ReasoningEffort::High
     );
     let (said, failed) = tool(
         "meet-token-1",

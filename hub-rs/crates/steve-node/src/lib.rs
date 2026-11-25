@@ -2510,6 +2510,7 @@ impl SessionExecutor for LocalNode {
                 phase: SessionPhase::Opening,
                 active: None,
                 effective: o.choice.clone(),
+                effort_mapping: None,
                 effective_permissions: o.policy.permissions,
                 guarantees: vec![],
                 resume: acp_id.clone().map(id).transpose()?,

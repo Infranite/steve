@@ -903,7 +903,7 @@ impl crate::OneModel for ModelScript {
         &self,
         call: &crate::gateway::OneCall<'_>,
         model: &str,
-        effort: Option<&str>,
+        effort: Option<steve_types::ReasoningEffort>,
         on_text: Option<crate::gateway::OnText<'_>>,
     ) -> crate::gateway::Tried {
         use crate::gateway::Tried;
@@ -913,7 +913,7 @@ impl crate::OneModel for ModelScript {
         self.runs.lock().unwrap().push(serde_json::json!({
             "harness": call.harness,
             "model": (!model.is_empty()).then_some(model),
-            "effort": effort,
+            "effort": effort.map(|e| e.as_str()),
             "prompt": call.prompt,
             "images": call.images.iter().map(crate::gateway::Image::block).collect::<Vec<_>>(),
         }));

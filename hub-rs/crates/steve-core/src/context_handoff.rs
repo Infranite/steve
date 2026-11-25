@@ -86,9 +86,9 @@ pub struct HandoffTarget {
     /// Target model ID (`None` uses target harness/Bot default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Target reasoning effort (`None` keeps Bot effort if harness unchanged, else `None`).
+    /// Target reasoning effort (`None` keeps Bot effort if harness unchanged, else `default`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
+    pub effort: Option<steve_types::ReasoningEffort>,
     /// Manual only ("以后这个 Bot 都用这个"): explicitly update the receiving Bot's default
     /// execution surface (`harness`, `model`, `reasoning_effort`) as a reversible change.
     #[serde(default)]
@@ -107,7 +107,7 @@ impl HandoffTarget {
             bot: clean(&self.bot),
             harness: clean(&self.harness),
             model: clean(&self.model),
-            effort: clean(&self.effort),
+            effort: self.effort,
             make_bot_default: self.make_bot_default,
         }
     }
@@ -126,7 +126,7 @@ impl HandoffTarget {
 pub struct BotDefaultSnapshot {
     pub harness: String,
     pub model: Option<String>,
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: steve_types::ReasoningEffort,
 }
 
 /// Audit/undo receipt when a manual handoff explicitly updated a Bot's default execution surface.
@@ -278,7 +278,7 @@ impl Tx<'_> {
                 bot: None,
                 harness: Some(surface.harness),
                 model: surface.model,
-                effort: surface.reasoning_effort,
+                effort: surface.reasoning_effort.non_default(),
                 make_bot_default: false,
             };
             match self.execute_handoff(item, prev, &target, reason, "steve", attempt) {
@@ -908,21 +908,22 @@ impl Tx<'_> {
         )?;
 
         // Optional explicit default update ("以后这个 Bot 都用这个"), audited and reversible.
+        let effective_effort = choice.effective_effort();
         let bot_default_updated = if target.make_bot_default
             && matches!(reason, HandoffReason::OwnerRequest)
             && (next_bot.harness.as_str().ne(choice.harness.as_str())
                 || next_bot.model != choice.model
-                || next_bot.reasoning_effort != choice.effort)
+                || next_bot.reasoning_effort != effective_effort)
         {
             let previous = BotDefaultSnapshot {
                 harness: next_bot.harness.clone(),
                 model: next_bot.model.clone(),
-                reasoning_effort: next_bot.reasoning_effort.clone(),
+                reasoning_effort: next_bot.reasoning_effort,
             };
             let mut patch = serde_json::Map::new();
             patch.insert("harness".into(), json!(choice.harness));
             patch.insert("model".into(), json!(choice.model));
-            patch.insert("reasoning_effort".into(), json!(choice.effort));
+            patch.insert("reasoning_effort".into(), json!(effective_effort));
             self.db().bot_patch(&next_bot.id, &patch, actor)?;
             self.db().audit(
                 actor,
@@ -935,7 +936,7 @@ impl Tx<'_> {
                     "after": {
                         "harness": choice.harness,
                         "model": choice.model,
-                        "reasoning_effort": choice.effort,
+                        "reasoning_effort": effective_effort,
                     },
                 }),
                 &item.workspace_id,
@@ -1080,7 +1081,7 @@ impl Tx<'_> {
         let prev_placed_model = prev_placement.as_ref().and_then(|p| p.model.as_deref());
         let prev_placed_effort = prev_placement
             .as_ref()
-            .and_then(|p| p.reasoning_effort.as_deref());
+            .and_then(|p| p.reasoning_effort.non_default());
 
         let (bot_filter, rt_filter, model_filter, effort_filter) = match target.bot.as_deref() {
             // Explicit Bot switch (OwnerRequest): use that Bot's surface unless overridden.
@@ -1088,7 +1089,7 @@ impl Tx<'_> {
                 bot_id,
                 target.harness.as_deref(),
                 target.model.as_deref(),
-                target.effort.as_deref(),
+                target.effort,
             ),
             // Default: keep the SAME Bot; switch only execution surface for this item.
             None => match target.harness.as_deref() {
@@ -1096,7 +1097,7 @@ impl Tx<'_> {
                     cur_bot_id,
                     Some(req_rt),
                     target.model.as_deref(),
-                    target.effort.as_deref(),
+                    target.effort,
                 ),
                 None => (
                     cur_bot_id,
@@ -1104,9 +1105,8 @@ impl Tx<'_> {
                     target.model.as_deref().or(prev_placed_model),
                     target
                         .effort
-                        .as_deref()
                         .or(prev_placed_effort)
-                        .or(prev.reasoning_effort.as_deref()),
+                        .or_else(|| prev.reasoning_effort.non_default()),
                 ),
             },
         };
@@ -1146,7 +1146,7 @@ impl Tx<'_> {
         let choice = HarnessChoice {
             harness: placement.harness.clone(),
             model: placement.model.clone(),
-            effort: placement.reasoning_effort.clone(),
+            effort: placement.reasoning_effort.non_default(),
         };
         Ok((bot, choice, placement))
     }

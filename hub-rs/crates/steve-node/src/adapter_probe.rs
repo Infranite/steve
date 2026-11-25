@@ -119,10 +119,12 @@ pub(crate) fn info(cfg: &AcpConfig, id: &str, p: &Probe) -> AdapterInfo {
                     id: m.id.clone(),
                     name: m.name.clone(),
                     description: m.description.clone(),
+                    efforts: m.efforts.clone(),
                 })
                 .collect(),
             default_model: o.default_model.clone(),
             efforts: o.efforts.clone(),
+            variant_models: o.variant_models.clone(),
         }),
         session_error: p.session_error.clone(),
         session_auth_required: p.session_auth_required.then_some(true),
@@ -189,19 +191,35 @@ mod tests {
             Some("agy --resume {id}")
         );
 
-        // Installed ACP binary: Ready with modes, models, efforts
+        // Installed ACP binary: Ready with modes, models, per-model efforts, and variant models
         let fake = dir.path().join("agy");
         std::fs::write(
             &fake,
             r#"#!/usr/bin/env node
 const rl = require("readline").createInterface({ input: process.stdin });
 const send = (o) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...o }) + "\n");
+const optsFor = (model) => {
+  const base = [{
+    id: "model", category: "model", type: "select", currentValue: model,
+    options: [
+      { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+      { value: "gemini-pro-orchestrator-neon", name: "Gemini Pro Orchestrator Neon" }
+    ]
+  }];
+  if (model === "gemini-4-neon") {
+    base.push({
+      id: "thought_level", category: "thought_level", type: "select", currentValue: "high",
+      options: [{ value: "low" }, { value: "medium" }, { value: "high" }, { value: "xhigh" }]
+    });
+  }
+  return base;
+};
 rl.on("line", (line) => {
   const m = JSON.parse(line);
   if (m.method === "initialize") {
     send({ id: m.id, result: {
       protocolVersion: 1,
-      agentInfo: { name: "Antigravity ACP Server", version: "1.5.16" },
+      agentInfo: { name: "Antigravity ACP Server", version: "1.5.17" },
       agentCapabilities: { loadSession: true, promptCapabilities: { image: true, embeddedContext: true }, sessionCapabilities: { list: {} } },
       authMethods: [{ id: "oauth-personal", name: "Log in with Google" }]
     }});
@@ -209,11 +227,20 @@ rl.on("line", (line) => {
     send({ id: m.id, result: {
       sessionId: "s1",
       modes: { currentModeId: "default", availableModes: [{ id: "default" }, { id: "accept-edits" }, { id: "auto" }, { id: "plan" }] },
-      configOptions: [
-        { id: "model", category: "model", type: "select", currentValue: "gemini-4-neon", options: [{ value: "gemini-4-neon", name: "Gemini 4 Neon" }, { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" }] },
-        { id: "thought_level", category: "thought_level", type: "select", currentValue: "high", options: [{ value: "low" }, { value: "high" }] }
-      ]
+      models: {
+        currentModelId: "gemini-4-neon-high",
+        availableModels: [
+          { modelId: "gemini-4-neon-low" },
+          { modelId: "gemini-4-neon-medium" },
+          { modelId: "gemini-4-neon-high" },
+          { modelId: "gemini-4-neon-xhigh" },
+          { modelId: "gemini-pro-orchestrator-neon" }
+        ]
+      },
+      configOptions: optsFor("gemini-4-neon")
     }});
+  } else if (m.method === "session/set_config_option" && m.params.configId === "model") {
+    send({ id: m.id, result: { configOptions: optsFor(m.params.value) } });
   }
 });
 "#,
@@ -240,8 +267,11 @@ rl.on("line", (line) => {
         };
         apply(&ready_cfg, &mut cap, got.get("antigravity"));
         assert!(cap.images && cap.resume);
-        assert_eq!(cap.version, "1.5.16");
-        assert_eq!(cap.models, ["gemini-4-neon", "gemini-3.8-flash"]);
+        assert_eq!(cap.version, "1.5.17");
+        assert_eq!(
+            cap.models,
+            ["gemini-4-neon", "gemini-pro-orchestrator-neon"]
+        );
         let ad = cap.adapter.expect("adapter info");
         assert_eq!(ad.status, AdapterStatus::Ready);
         let offer = ad.session.expect("session offer");
@@ -256,6 +286,20 @@ rl.on("line", (line) => {
             ]
         );
         assert_eq!(offer.default_model.as_deref(), Some("gemini-4-neon"));
-        assert_eq!(offer.efforts, ["low", "high"]);
+        assert_eq!(offer.efforts, ["low", "medium", "high", "xhigh"]);
+        assert_eq!(
+            offer.models[0].efforts.as_deref(),
+            Some(
+                ["low", "medium", "high", "xhigh"]
+                    .map(String::from)
+                    .as_slice()
+            )
+        );
+        assert_eq!(offer.models[1].efforts.as_deref(), Some(&[][..]));
+        assert!(
+            offer
+                .variant_models
+                .contains(&"gemini-4-neon-xhigh".to_string())
+        );
     }
 }

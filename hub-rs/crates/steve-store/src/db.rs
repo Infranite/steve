@@ -288,6 +288,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/136.sql"),
     // 137: drop retired bots.project_dir, bots.worktree, and items.project_dir columns.
     include_str!("../migrations/137.sql"),
+    // 138: canonicalize reasoning_effort to Steve's five levels and add sessions.effort_mapping.
+    include_str!("../migrations/138.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
@@ -719,9 +721,9 @@ fn run_pending(c: &Connection, cur: i64, progress: Option<&MigrationTracker<'_>>
         if i == 121 {
             ensure_item_lifecycle(&tx)?;
         }
-        if i == 135 {
-            // 136 rebuilds `bots` referencing `reasoning_effort`; ensure the column exists even if
-            // the database started at v120..v135 without having run the i == 119 hook.
+        if i == 135 || i == 137 {
+            // 136 and 138 rebuild `bots` referencing `reasoning_effort`; ensure the column exists
+            // even if the database started at v120..v137 without having run the i == 119 hook.
             add_reasoning_effort(&tx)?;
         }
         tx.execute_batch(m)?;

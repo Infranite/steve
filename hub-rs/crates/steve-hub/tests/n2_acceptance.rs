@@ -911,6 +911,7 @@ async fn another_nodes_session_is_refused() {
                         model: Some("spoofed-model".into()),
                         effort: None,
                     },
+                    effort_mapping: None,
                     effective_permissions: PermissionMode::Ask,
                     guarantees: vec![],
                     resume: None,

@@ -27,7 +27,7 @@ pub fn reply_route(path: &Path, ws: &str) -> Result<Route> {
                         Ok((
                             Some(row.get(0)?),
                             row.get::<Option<String>>(1)?
-                                .filter(|effort| !effort.is_empty()),
+                                .filter(|effort| !effort.is_empty() && effort != "default"),
                         ))
                     },
                 )?

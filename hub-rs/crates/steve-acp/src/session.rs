@@ -3,14 +3,176 @@
 //!
 //! What the adapter reports comes back through [`Reports`] at the moment it is known. A mode or
 //! model that could not be set is an error: the Hub asked for a configuration and must not get
-//! another one silently.
+//! another one silently. Reasoning effort is mapped deterministically through the adapter layer
+//! ([`steve_harness_spec::effort`]) using three strategies (`acp_option`, `model_variant`,
+//! `unsupported`) so an unsupported model runs at its own default with an explicit record rather
+//! than failing the turn.
 
+use std::fmt;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use steve_harness_spec::{
+    EffortContext, EffortMapping, EffortMode, EffortStrategy, ModeChoice, ReasoningEffort,
+    parse_model_variant, resolve_for_model,
+};
+use steve_i18n::t;
 
 use crate::rpc::{Conn, RpcError};
 use crate::util::{coalesce, truthy};
+
+/// Timeout for ACP `initialize` handshake.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Timeout for ACP `session/new` or `session/load`.
+const SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(120);
+/// Timeout for ACP `session/set_mode`, `session/set_model`, and `session/set_config_option`.
+const CONFIG_OPTION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Strongly-typed errors produced while opening and configuring an ACP session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionOpenError {
+    MissingSessionId,
+    ModeUnresolvable {
+        detail: String,
+    },
+    ModeApplyFailed {
+        mode: String,
+        detail: String,
+    },
+    ModelApplyFailed {
+        model: String,
+        detail: String,
+    },
+    ModelMismatch {
+        requested: String,
+        actual: String,
+    },
+    EffortApplyFailed {
+        requested: ReasoningEffort,
+        applied: String,
+        detail: String,
+    },
+    EffortMismatch {
+        requested: ReasoningEffort,
+        expected: String,
+        actual: Option<String>,
+    },
+}
+
+impl SessionOpenError {
+    /// Stable machine-readable error kind for telemetry and structured RPC data.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::MissingSessionId => "missing_session_id",
+            Self::ModeUnresolvable { .. } => "mode_unresolvable",
+            Self::ModeApplyFailed { .. } => "mode_apply_failed",
+            Self::ModelApplyFailed { .. } => "model_apply_failed",
+            Self::ModelMismatch { .. } => "model_mismatch",
+            Self::EffortApplyFailed { .. } => "effort_apply_failed",
+            Self::EffortMismatch { .. } => "effort_mismatch",
+        }
+    }
+
+    /// Convert into an [`RpcError`] carrying localized user text and typed metadata.
+    pub fn into_rpc_error(self) -> RpcError {
+        let message = self.to_string();
+        let data = match &self {
+            Self::MissingSessionId => json!({ "kind": self.code() }),
+            Self::ModeUnresolvable { detail } => {
+                json!({ "kind": self.code(), "detail": detail })
+            }
+            Self::ModeApplyFailed { mode, detail } => {
+                json!({ "kind": self.code(), "mode": mode, "detail": detail })
+            }
+            Self::ModelApplyFailed { model, detail } => {
+                json!({ "kind": self.code(), "model": model, "detail": detail })
+            }
+            Self::ModelMismatch { requested, actual } => {
+                json!({ "kind": self.code(), "requested": requested, "actual": actual })
+            }
+            Self::EffortApplyFailed {
+                requested,
+                applied,
+                detail,
+            } => json!({
+                "kind": self.code(),
+                "requested": requested.as_str(),
+                "applied": applied,
+                "detail": detail,
+            }),
+            Self::EffortMismatch {
+                requested,
+                expected,
+                actual,
+            } => json!({
+                "kind": self.code(),
+                "requested": requested.as_str(),
+                "expected": expected,
+                "actual": actual,
+            }),
+        };
+        RpcError {
+            message,
+            data: Some(data),
+        }
+    }
+}
+
+impl fmt::Display for SessionOpenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingSessionId => f.write_str(&t!("acp.session.missing_session_id")),
+            Self::ModeUnresolvable { detail } => f.write_str(detail),
+            Self::ModeApplyFailed { mode, detail } => f.write_str(&t!(
+                "acp.session.mode_apply_failed",
+                mode = mode,
+                detail = detail
+            )),
+            Self::ModelApplyFailed { model, detail } => f.write_str(&t!(
+                "acp.session.model_apply_failed",
+                model = model,
+                detail = detail
+            )),
+            Self::ModelMismatch { requested, actual } => f.write_str(&t!(
+                "acp.session.model_mismatch",
+                requested = requested,
+                actual = actual
+            )),
+            Self::EffortApplyFailed {
+                requested,
+                applied,
+                detail,
+            } => f.write_str(&t!(
+                "acp.session.effort_apply_failed",
+                requested = requested.as_str(),
+                applied = applied,
+                detail = detail
+            )),
+            Self::EffortMismatch {
+                requested,
+                expected,
+                actual,
+            } => {
+                let unknown = t!("acp.session.unknown");
+                let actual = actual.as_deref().unwrap_or(unknown.as_ref());
+                f.write_str(&t!(
+                    "acp.session.effort_mismatch",
+                    requested = requested.as_str(),
+                    expected = expected,
+                    actual = actual
+                ))
+            }
+        }
+    }
+}
+
+impl std::error::Error for SessionOpenError {}
+
+impl From<SessionOpenError> for RpcError {
+    fn from(e: SessionOpenError) -> Self {
+        e.into_rpc_error()
+    }
+}
 
 /// Whether a `configOptions` entry represents the session model (`id == "model"` or
 /// `category == "model"`).
@@ -48,15 +210,6 @@ pub fn effort_option(config: &Value) -> Option<&Value> {
     })
 }
 
-fn option_supports(options: &Value, effort: &str) -> bool {
-    options.as_array().is_some_and(|os| {
-        os.iter().any(|o| {
-            o.get("value").and_then(Value::as_str) == Some(effort)
-                || o.get("options").is_some_and(|v| option_supports(v, effort))
-        })
-    })
-}
-
 /// What to open.
 pub struct OpenConfig<'a> {
     /// Harness adapter id (used to select per-harness client capabilities during `initialize`).
@@ -70,13 +223,14 @@ pub struct OpenConfig<'a> {
     /// The permission mode to set (`None`: leave the adapter's).
     pub mode: Option<ModeChoice>,
     pub model: Option<&'a str>,
-    pub effort: Option<&'a str>,
+    /// Steve's canonical reasoning effort (`default | low | medium | high | max`).
+    pub effort: ReasoningEffort,
+    /// Adapter-declared effort mechanism (`acp_option | model_variant | unsupported`).
+    pub effort_mode: EffortMode,
     /// Steve's instructions as the session's system prompt, sent only to an adapter that
     /// advertises `sessionCapabilities.systemPrompt` ([`Opened::system_prompt`] says whether).
     pub system_prompt: Option<SystemPrompt<'a>>,
 }
-
-use steve_harness_spec::ModeChoice;
 
 fn available_modes(r: &Value) -> Option<Vec<String>> {
     r.pointer("/modes/availableModes")?
@@ -109,6 +263,65 @@ pub fn offered_modes(r: &Value) -> Option<Vec<String>> {
     })
 }
 
+fn collect_available_model_ids(r: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut push_unique = |raw: &str| {
+        let s = raw.trim();
+        if !s.is_empty() && !out.iter().any(|existing: &String| existing == s) {
+            out.push(s.to_owned());
+        }
+    };
+    if let Some(avail) = r
+        .pointer("/models/availableModels")
+        .and_then(Value::as_array)
+    {
+        for entry in avail {
+            if let Some(id) = entry.get("modelId").and_then(Value::as_str) {
+                push_unique(id);
+            }
+        }
+    }
+    if let Some(opt) = model_option(r)
+        && let Some(options) = opt.get("options")
+    {
+        let mut vals = Vec::new();
+        collect_option_values(options, &mut vals);
+        for v in vals {
+            push_unique(&v);
+        }
+    }
+    out
+}
+
+fn effort_option_values(config: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(opt) = effort_option(config)
+        && let Some(options) = opt.get("options")
+    {
+        collect_option_values(options, &mut out);
+    }
+    out
+}
+
+fn strategy_label(s: EffortStrategy) -> &'static str {
+    match s {
+        EffortStrategy::AcpOption => "acp_option",
+        EffortStrategy::ModelVariant => "model_variant",
+        EffortStrategy::Unsupported => "unsupported",
+    }
+}
+
+fn record_effort_metric(harness: &str, mapping: &EffortMapping) {
+    metrics::counter!(
+        "steve_acp_effort_mapped_total",
+        "harness" => harness.to_owned(),
+        "strategy" => strategy_label(mapping.strategy),
+        "requested" => mapping.requested.as_str(),
+        "supported" => if mapping.supported { "true" } else { "false" },
+    )
+    .increment(1);
+}
+
 /// A system prompt for the session (ACP `systemPrompt` on `session/new`).
 #[derive(Debug, Clone, Copy)]
 pub struct SystemPrompt<'a> {
@@ -123,8 +336,10 @@ pub trait Reports: Sync {
     fn new_session(&self, _acp_id: &str) {}
     /// The model the adapter runs (reported on open, then after setting one).
     fn model(&self, _model: &str) {}
-    /// The reasoning effort in force.
-    fn effort(&self, _effort: &str) {}
+    /// The effective canonical reasoning effort in force.
+    fn effort(&self, _effort: ReasoningEffort) {}
+    /// How Steve's requested effort mapped onto this harness and model.
+    fn effort_mapping(&self, _mapping: &EffortMapping) {}
 }
 
 #[derive(Debug, Clone)]
@@ -136,13 +351,8 @@ pub struct Opened {
     pub image: bool,
     /// The session has [`OpenConfig::system_prompt`] as its system prompt.
     pub system_prompt: bool,
-}
-
-fn err(message: String) -> RpcError {
-    RpcError {
-        message,
-        data: None,
-    }
+    /// Deterministic record of how [`OpenConfig::effort`] was applied (or fell back to default).
+    pub effort_mapping: Option<EffortMapping>,
 }
 
 /// initialize + session/new|load + mode + model + effort, with `meta` as the `_meta` of
@@ -185,7 +395,7 @@ pub async fn open(
         None => None,
         Some(choice) => match choice.resolve(offered_modes(&r).as_deref()) {
             Ok(id) => id,
-            Err(e) => return Err(err(e)),
+            Err(detail) => return Err(SessionOpenError::ModeUnresolvable { detail }.into()),
         },
     };
     let mut config = r.clone();
@@ -201,58 +411,140 @@ pub async fn open(
                 }
             }
             Ok(None) => {}
-            Err(e) => return Err(err(format!("权限模式 {mode} 没能生效：{}", e.message))),
+            Err(e) => {
+                return Err(SessionOpenError::ModeApplyFailed {
+                    mode: mode.clone(),
+                    detail: e.message,
+                }
+                .into());
+            }
         }
     }
-    if let Some(model) = model {
-        apply_requested_model(
-            l,
-            &acp_id,
-            model,
-            model_opt_id.as_deref(),
-            &mut config,
-            reports,
-        )
-        .await?;
-    }
-    let effort_opt = effort_option(&config);
-    if let Some(effort) = c.effort.filter(|e| !e.is_empty()) {
-        let option = effort_opt.ok_or_else(|| {
-            err(format!(
-                "当前 harness 未报告可设置的思考强度，无法应用 {effort}"
-            ))
-        })?;
-        if !option
-            .get("options")
-            .is_some_and(|v| option_supports(v, effort))
-        {
-            return Err(err(format!("当前模型不支持思考强度 {effort}")));
-        }
-        let updated = l
-            .request(
-                "session/set_config_option",
-                json!({"sessionId": acp_id, "configId": option["id"], "value": effort}),
-                Some(Duration::from_secs(30)),
+
+    let effort_mapping = if c.effort_mode == EffortMode::ModelVariant && !c.effort.is_default() {
+        let available_models = collect_available_model_ids(&config);
+        let base_model = model.or(reported);
+        let mapping = resolve_for_model(
+            c.effort,
+            &EffortContext {
+                mode: EffortMode::ModelVariant,
+                model: base_model,
+                acp_options: &[],
+                available_models: &available_models,
+            },
+        );
+        let target_model = mapping.target_model.as_deref().or(model);
+        if let Some(target) = target_model {
+            apply_requested_model(
+                l,
+                &acp_id,
+                target,
+                model_opt_id.as_deref(),
+                &mut config,
+                reports,
             )
             .await?;
-        let actual = effort_option(&updated).and_then(|o| o["currentValue"].as_str());
-        if let Some(actual) = actual {
-            reports.effort(actual);
         }
-        if actual != Some(effort) {
-            return Err(err(format!(
-                "思考强度未生效：请求 {effort}，实际 {}",
-                actual.unwrap_or("未知")
-            )));
+        if !mapping.supported {
+            tracing::info!(
+                harness = c.harness,
+                model = ?base_model,
+                requested = c.effort.as_str(),
+                "model_variant effort unsupported for model; running with model default"
+            );
         }
-    } else if let Some(actual) = effort_opt.and_then(|o| o["currentValue"].as_str()) {
-        reports.effort(actual);
-    }
+        record_effort_metric(c.harness, &mapping);
+        reports.effort(mapping.effective);
+        reports.effort_mapping(&mapping);
+        mapping
+    } else {
+        if let Some(model) = model {
+            apply_requested_model(
+                l,
+                &acp_id,
+                model,
+                model_opt_id.as_deref(),
+                &mut config,
+                reports,
+            )
+            .await?;
+        }
+        let raw_options = effort_option_values(&config);
+        let mapping = resolve_for_model(
+            c.effort,
+            &EffortContext {
+                mode: c.effort_mode,
+                model: model.or(reported),
+                acp_options: &raw_options,
+                available_models: &[],
+            },
+        );
+        if c.effort.is_default() {
+            if c.resume.is_some()
+                && let Some(opt) = effort_option(&config)
+                && raw_options
+                    .iter()
+                    .any(|v| v.eq_ignore_ascii_case("default"))
+                && opt["currentValue"].as_str() != Some("default")
+            {
+                let _ = l
+                    .request(
+                        "session/set_config_option",
+                        json!({"sessionId": acp_id, "configId": opt["id"], "value": "default"}),
+                        Some(CONFIG_OPTION_TIMEOUT),
+                    )
+                    .await;
+            }
+            reports.effort(ReasoningEffort::Default);
+        } else if let Some(target) = mapping.native_effort.as_deref() {
+            let config_id = effort_option(&config)
+                .and_then(|o| o.get("id"))
+                .cloned()
+                .expect("acp_option mapping requires effort_option");
+            let updated = l
+                .request(
+                    "session/set_config_option",
+                    json!({"sessionId": acp_id, "configId": config_id, "value": target}),
+                    Some(CONFIG_OPTION_TIMEOUT),
+                )
+                .await
+                .map_err(|e| {
+                    RpcError::from(SessionOpenError::EffortApplyFailed {
+                        requested: c.effort,
+                        applied: target.to_owned(),
+                        detail: e.message,
+                    })
+                })?;
+            let actual = effort_option(&updated).and_then(|o| o["currentValue"].as_str());
+            if actual != Some(target) {
+                return Err(SessionOpenError::EffortMismatch {
+                    requested: c.effort,
+                    expected: target.to_owned(),
+                    actual: actual.map(str::to_owned),
+                }
+                .into());
+            }
+            reports.effort(mapping.effective);
+        } else {
+            tracing::info!(
+                harness = c.harness,
+                model = ?model.or(reported),
+                requested = c.effort.as_str(),
+                "reasoning effort unsupported on this model; running with model default"
+            );
+            reports.effort(mapping.effective);
+        }
+        record_effort_metric(c.harness, &mapping);
+        reports.effort_mapping(&mapping);
+        mapping
+    };
+
     Ok(Opened {
         acp_id,
         mode,
         image,
         system_prompt,
+        effort_mapping: Some(effort_mapping),
     })
 }
 
@@ -275,7 +567,7 @@ async fn initialize_session(l: &Conn, c: &OpenConfig<'_>) -> Result<Initialized,
         "clientInfo": { "name": "steve", "version": c.client_version },
     });
     let init = l
-        .request("initialize", init, Some(Duration::from_secs(60)))
+        .request("initialize", init, Some(INITIALIZE_TIMEOUT))
         .await?;
     // image content blocks only go to adapters that say they take them; attachments always also go by path
     let image = init
@@ -316,7 +608,7 @@ async fn open_session_request(
                 p["systemPrompt"] = sp.clone();
             }
             let r = l
-                .request("session/load", p, Some(Duration::from_secs(120)))
+                .request("session/load", p, Some(SESSION_OPEN_TIMEOUT))
                 .await?;
             (r, id.to_string())
         }
@@ -329,14 +621,14 @@ async fn open_session_request(
                 p["systemPrompt"] = sp;
             }
             let r = l
-                .request("session/new", p, Some(Duration::from_secs(120)))
+                .request("session/new", p, Some(SESSION_OPEN_TIMEOUT))
                 .await?;
             let id = r
                 .get("sessionId")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| err("adapter returned no sessionId on session/new".into()))?
+                .ok_or_else(|| RpcError::from(SessionOpenError::MissingSessionId))?
                 .to_owned();
             reports.new_session(&id);
             (r, id)
@@ -358,7 +650,7 @@ async fn apply_requested_model(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .or(model_opt_id);
-    match apply_model(l, &acp_id, model, opt_id).await {
+    match apply_model(l, acp_id, model, opt_id).await {
         Ok(updated) => {
             let actual = updated
                 .pointer("/models/currentModelId")
@@ -370,12 +662,22 @@ async fn apply_requested_model(
                 // (on a loaded session, say). That is the asked model only when the adapter's
                 // own list says so: the entry it reports as current is named what was asked.
                 Some(actual) if named(&updated, actual, model) => reports.model(model),
+                // Empirically verified on `agy acp`: sending a concrete variant id such as
+                // `gemini-4-neon-xhigh` normalizes `model.currentValue` to the family base
+                // `gemini-4-neon` while setting `thought_level.currentValue` to `xhigh`.
+                Some(actual) if variant_normalized(&updated, actual, model) => {
+                    reports.model(model);
+                }
                 // Nothing in the answer relates the two ids, so this is another model as far
                 // as anyone can tell, and the open fails rather than run on it. No table of
                 // known aliases here: which ids mean the same model is the adapter's to say.
                 Some(actual) => {
                     reports.model(actual);
-                    return Err(err(format!("模型没能生效：请求 {model}，实际 {actual}")));
+                    return Err(SessionOpenError::ModelMismatch {
+                        requested: model.to_owned(),
+                        actual: actual.to_owned(),
+                    }
+                    .into());
                 }
                 // the adapter took it without saying what it runs: what was asked and accepted
                 // is in force
@@ -385,9 +687,30 @@ async fn apply_requested_model(
                 *config = updated;
             }
         }
-        Err(e) => return Err(err(format!("模型 {model} 没能生效：{}", e.message))),
+        Err(e) => {
+            return Err(SessionOpenError::ModelApplyFailed {
+                model: model.to_owned(),
+                detail: e.message,
+            }
+            .into());
+        }
     }
     Ok(())
+}
+
+/// Whether `asked` is an effort-suffixed variant of `actual` and the adapter confirmed that
+/// exact effort token in its updated effort `configOption`.
+fn variant_normalized(answer: &Value, actual: &str, asked: &str) -> bool {
+    let Some(parsed) = parse_model_variant(asked) else {
+        return false;
+    };
+    if parsed.family_base != actual {
+        return false;
+    }
+    effort_option(answer)
+        .and_then(|o| o.get("currentValue"))
+        .and_then(Value::as_str)
+        .is_some_and(|cur| cur.eq_ignore_ascii_case(parsed.raw_token))
 }
 
 /// Whether the adapter's own model list in `answer` calls the entry with id `actual` by the name
@@ -425,7 +748,7 @@ async fn apply_mode(
     config_id: Option<&str>,
     prefer_set_mode: bool,
 ) -> Result<Option<Value>, RpcError> {
-    let t = Some(Duration::from_secs(30));
+    let t = Some(CONFIG_OPTION_TIMEOUT);
     let by_set_mode = || {
         l.request(
             "session/set_mode",
@@ -466,7 +789,7 @@ async fn apply_model(
     model: &str,
     option_id: Option<&str>,
 ) -> Result<Value, RpcError> {
-    let t = Some(Duration::from_secs(30));
+    let t = Some(CONFIG_OPTION_TIMEOUT);
     let cid = option_id.unwrap_or("model");
     let by_option = || {
         l.request(
@@ -494,7 +817,9 @@ async fn apply_model(
         .and_then(|o| o.get("currentValue"))
         .and_then(Value::as_str);
     // its own short id for the asked model is no news
-    if let Some(cur) = current.filter(|c| *c != model && !named(&r, c, model)) {
+    if let Some(cur) =
+        current.filter(|c| *c != model && !named(&r, c, model) && !variant_normalized(&r, c, model))
+    {
         tracing::warn!("set model {model}: the adapter runs {cur}");
     }
     Ok(r)
@@ -529,5 +854,48 @@ mod tests {
             {"value": "quick", "name": "Big 2"},
         ]}]});
         assert!(!named(&shown, "quick", "big-2"));
+    }
+
+    #[test]
+    fn agy_variant_model_normalization_is_recognized() {
+        let answer = json!({"configOptions": [
+            {"id": "model", "category": "model", "currentValue": "gemini-4-neon"},
+            {"id": "thought_level", "category": "thought_level", "currentValue": "xhigh"}
+        ]});
+        assert!(variant_normalized(
+            &answer,
+            "gemini-4-neon",
+            "gemini-4-neon-xhigh"
+        ));
+        assert!(!variant_normalized(
+            &answer,
+            "gemini-4-neon",
+            "gemini-4-neon-low"
+        ));
+        assert!(!variant_normalized(
+            &answer,
+            "gemini-4-carbon",
+            "gemini-4-neon-xhigh"
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_open_errors_localize_in_en_and_zh_and_carry_structured_code() {
+        let e = SessionOpenError::EffortMismatch {
+            requested: ReasoningEffort::High,
+            expected: "xhigh".into(),
+            actual: Some("low".into()),
+        };
+        let rpc = e.clone().into_rpc_error();
+        assert_eq!(rpc.data.as_ref().unwrap()["kind"], "effort_mismatch");
+        assert_eq!(rpc.data.as_ref().unwrap()["requested"], "high");
+        assert_eq!(rpc.data.as_ref().unwrap()["expected"], "xhigh");
+        assert_eq!(rpc.data.as_ref().unwrap()["actual"], "low");
+
+        let en = steve_i18n::scope(steve_i18n::EN, async { e.to_string() }).await;
+        assert!(en.contains("high") && en.contains("xhigh") && en.contains("low"));
+        let zh = steve_i18n::scope(steve_i18n::ZH_CN, async { e.to_string() }).await;
+        assert!(zh.contains("high") && zh.contains("xhigh") && zh.contains("low"));
+        assert_ne!(en, zh);
     }
 }

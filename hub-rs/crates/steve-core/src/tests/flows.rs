@@ -771,7 +771,7 @@ fn itemless_session(k: &Kit, status: &str) -> crate::repo::Session {
             bot_id: None,
             harness: "claude-code".into(),
             model: None,
-            reasoning_effort: None,
+            reasoning_effort: steve_types::ReasoningEffort::Default,
             cwd: "/tmp".into(),
             title: "".into(),
             token: crate::util::uid("t"),

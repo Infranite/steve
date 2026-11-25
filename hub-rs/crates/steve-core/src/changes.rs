@@ -109,28 +109,18 @@ fn text_field(key: &str, label: &str, current: &str) -> BotField {
     }
 }
 
-const STANDARD_EFFORTS: &[&str] = &[
-    "none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-];
-
-fn encode_effort_value(s: &str, offered: &[(String, String)]) -> Option<String> {
+fn encode_effort_value(s: &str) -> steve_types::ReasoningEffort {
     let s = s.trim();
     if s.is_empty() || s == "默认" {
-        return None;
+        return steve_types::ReasoningEffort::Default;
     }
-    if let Some((k, _)) = offered.iter().find(|(k, l)| l == s || k == s) {
-        return Some(k.clone());
+    if let Some(e) = steve_types::ReasoningEffort::parse(s) {
+        return e;
     }
-    if let Some(&k) = STANDARD_EFFORTS
-        .iter()
-        .find(|&&k| crate::models::effort_label(k) == Some(s) || k == s)
-    {
-        return Some(k.to_string());
-    }
-    // Never persist localized CJK labels into `bots.reasoning_effort`.
-    s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || "_.:-".contains(c))
-        .then(|| s.to_string())
+    steve_types::ReasoningEffort::ALL
+        .into_iter()
+        .find(|e| crate::models::effort_label(*e) == s)
+        .unwrap_or_default()
 }
 
 fn sanitize_bot_for_harness(
@@ -170,21 +160,19 @@ fn sanitize_bot_for_harness(
     }
 
     if let Some(val) = patch.get("reasoning_effort") {
-        if let Some(eff) = val.as_str()
-            && !target.takes_effort(eff)
+        if val.is_null() {
+            patch.insert(
+                "reasoning_effort".into(),
+                json!(steve_types::ReasoningEffort::Default),
+            );
+        } else if val
+            .as_str()
+            .and_then(steve_types::ReasoningEffort::parse)
+            .is_none()
         {
-            if switched && cur.and_then(|b| b.reasoning_effort.as_ref()).is_some() {
-                patch.insert("reasoning_effort".into(), Value::Null);
-            } else {
-                patch.remove("reasoning_effort");
-                dropped.push("reasoning_effort".into());
-            }
+            patch.remove("reasoning_effort");
+            dropped.push("reasoning_effort".into());
         }
-    } else if switched
-        && let Some(eff) = cur.and_then(|b| b.reasoning_effort.as_deref())
-        && !target.takes_effort(eff)
-    {
-        patch.insert("reasoning_effort".into(), Value::Null);
     }
 
     if switched && !patch.contains_key("model") && cur.and_then(|b| b.model.as_ref()).is_some() {
@@ -213,31 +201,7 @@ fn bot_fields(
         .collect();
     let ps2 = ps.clone();
     let ps3 = ps.clone();
-    let cur_h = harnesses.iter().find(|h| h.id == b.harness);
-    let mut efforts: Vec<(String, String)> = Vec::new();
-    for h in cur_h.into_iter().chain(harnesses.iter()) {
-        for e in &h.efforts {
-            let lbl = crate::models::effort_label(e)
-                .map(str::to_string)
-                .unwrap_or_else(|| e.clone());
-            if !efforts.iter().any(|(k, l)| k == e || l == &lbl) {
-                efforts.push((e.clone(), lbl));
-            }
-        }
-    }
-    let efforts_enc = efforts.clone();
-    let efforts_dec = efforts.clone();
-    let cur_effort = b.reasoning_effort.as_deref().map_or_else(
-        || "默认".to_string(),
-        |e| {
-            efforts
-                .iter()
-                .find(|(k, _)| k == e)
-                .map(|(_, l)| l.clone())
-                .or_else(|| crate::models::effort_label(e).map(str::to_string))
-                .unwrap_or_else(|| e.to_string())
-        },
-    );
+    let cur_effort = crate::models::effort_label(b.reasoning_effort).to_string();
     let perms: Vec<(&'static str, &'static str)> = steve_node_api::PermissionMode::ALL
         .iter()
         .copied()
@@ -316,31 +280,23 @@ fn bot_fields(
                 label: "思考强度".into(),
                 ty: "enum".into(),
                 values: Some(
-                    std::iter::once("默认".to_string())
-                        .chain(efforts.iter().map(|(_, l)| l.clone()))
+                    steve_types::ReasoningEffort::ALL
+                        .into_iter()
+                        .map(|e| crate::models::effort_label(e).to_string())
                         .collect(),
                 ),
                 current: json!(cur_effort),
             },
             enc: Some(Box::new(move |v| {
                 let s = jstr(v);
-                match encode_effort_value(&s, &efforts_enc) {
-                    Some(k) => json!(k),
-                    None => Value::Null,
-                }
+                json!(encode_effort_value(&s))
             })),
             dec: Some(Box::new(move |v| {
-                if v.is_null() {
-                    json!("默认")
-                } else {
-                    let s = v.as_str().unwrap_or("");
-                    efforts_dec
-                        .iter()
-                        .find(|(k, _)| k == s)
-                        .map(|(_, l)| json!(l))
-                        .or_else(|| crate::models::effort_label(s).map(|l| json!(l)))
-                        .unwrap_or_else(|| v.clone())
-                }
+                let eff = v
+                    .as_str()
+                    .and_then(steve_types::ReasoningEffort::parse)
+                    .unwrap_or_default();
+                json!(crate::models::effort_label(eff))
             })),
         },
         BotField {
@@ -477,7 +433,7 @@ fn blank_bot(ws: &str, name: &str, m: &crate::models::Models) -> Bot {
         default_project: None,
         prompt: None,
         device: None,
-        reasoning_effort: None,
+        reasoning_effort: steve_types::ReasoningEffort::Default,
     }
 }
 
@@ -701,15 +657,10 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
     let mut fs = vec![];
     let steve = m.steve();
     let harnesses = m.harnesses();
-    let label = |e: &String| crate::models::effort_label(e).map_or_else(|| e.clone(), String::from);
-    let effort_labels: Vec<String> = std::iter::once("默认".to_string())
-        .chain(harnesses.iter().flat_map(|h| h.efforts.iter().map(label)))
-        .fold(vec![], |mut v, l| {
-            if !v.contains(&l) {
-                v.push(l);
-            }
-            v
-        });
+    let effort_labels: Vec<String> = steve_types::ReasoningEffort::ALL
+        .into_iter()
+        .map(|e| crate::models::effort_label(e).to_string())
+        .collect();
     for p in &PURPOSES {
         let c = m.custom(ws, p.key);
         fs.push(FieldSpec {
@@ -752,7 +703,7 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
             label: format!("{} · 推理强度", p.label),
             ty: "enum".into(),
             values: Some(effort_labels.clone()),
-            current: json!(c.effort.as_ref().map_or_else(|| "默认".to_string(), label)),
+            current: json!(crate::models::effort_label(c.effort.unwrap_or_default())),
         });
     }
     for h in &harnesses {
@@ -818,28 +769,12 @@ fn model_patch(
             None => cur.models.clone(),
         };
         let h = harness.clone().unwrap_or_else(|| m.steve().runs_on);
-        let target_h = harnesses.iter().find(|x| x.id == h);
         let effort = match get(&ek) {
-            Some(v) => {
-                let s = jstr(v);
-                if s.trim().is_empty() || s == "默认" {
-                    None
-                } else {
-                    target_h
-                        .and_then(|x| {
-                            x.efforts.iter().find(|e| {
-                                crate::models::effort_label(e).unwrap_or(e.as_str()) == s
-                                    || **e == s
-                            })
-                        })
-                        .cloned()
-                }
-            }
+            Some(v) => encode_effort_value(&jstr(v)).non_default(),
             None if explicit_follow => None,
             None => cur
                 .effort
-                .clone()
-                .filter(|e| target_h.is_none_or(|x| x.takes_effort(e))),
+                .and_then(steve_types::ReasoningEffort::non_default),
         };
         let follows = harness.is_none() && models.is_empty() && effort.is_none();
         let was = stored.is_none();
@@ -865,8 +800,8 @@ fn model_patch(
                 let desc = c.describe_shown_with(&harnesses);
                 match c
                     .effort
-                    .as_deref()
-                    .map(|e| crate::models::effort_shown(e).unwrap_or_else(|| e.to_string()))
+                    .and_then(steve_types::ReasoningEffort::non_default)
+                    .map(crate::models::effort_shown)
                 {
                     Some(e) => {
                         steve_i18n::t!("core.draft.models.choice_effort", choice = desc, effort = e)

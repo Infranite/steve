@@ -677,6 +677,10 @@ pub struct ModelOption {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Per-model native ACP effort options probed via `session/set_config_option`.
+    /// `None` = not probed per model; `Some([])` = probed and confirmed no effort option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efforts: Option<Vec<String>>,
 }
 
 /// What a scratch `session/new` said: the modes, models and efforts on offer.
@@ -687,9 +691,19 @@ pub struct SessionOffer {
     pub models: Vec<ModelOption>,
     /// The model it runs when none is set.
     pub default_model: Option<String>,
-    /// The reasoning efforts it takes (`thought_level`).
+    /// The reasoning efforts it takes (`thought_level`) on the default model.
     pub efforts: Vec<String>,
+    /// Concrete model variant ids reported in `models.availableModels` (or model options), used
+    /// by rule-based `ModelVariant` effort mapping.
+    pub variant_models: Vec<String>,
 }
+
+/// Per-model `session/set_config_option` probe timeout during scratch session discovery.
+const PER_MODEL_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Total wall-clock budget for per-model effort discovery across all models of one adapter.
+const PER_MODEL_PROBE_BUDGET: Duration = Duration::from_secs(3);
+/// Upper bound on models probed per adapter scratch session.
+const PER_MODEL_PROBE_LIMIT: usize = 128;
 
 impl SessionOffer {
     /// Reads a `session/new` result with `modes`, the adapter's mode map.
@@ -725,6 +739,7 @@ impl SessionOffer {
                         id: id.into(),
                         name: text("name"),
                         description: text("description"),
+                        efforts: None,
                     });
                 }
             }
@@ -742,14 +757,45 @@ impl SessionOffer {
                         id: id.into(),
                         name: text("name"),
                         description: text("description"),
+                        efforts: None,
                     });
                 }
             }
             default_model = m["currentModelId"].as_str().map(String::from);
         }
-        let mut efforts = vec![];
-        if let Some(o) = crate::session::effort_option(r) {
-            values(&o["options"], &mut efforts);
+        let mut variant_models = vec![];
+        if let Some(avail) = r
+            .pointer("/models/availableModels")
+            .and_then(Value::as_array)
+        {
+            for a in avail {
+                if let Some(id) = a
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    && !variant_models
+                        .iter()
+                        .any(|existing: &String| existing == id)
+                {
+                    variant_models.push(id.to_owned());
+                }
+            }
+        }
+        if variant_models.is_empty() {
+            for m in &models {
+                if !variant_models.iter().any(|existing| existing == &m.id) {
+                    variant_models.push(m.id.clone());
+                }
+            }
+        }
+        let efforts = extract_explicit_efforts(r);
+        let default_model = default_model.filter(|m| !m.is_empty());
+        if let Some(def) = &default_model
+            && r.get("configOptions").is_some()
+            && let Some(m) = models.iter_mut().find(|m| m.id == *def)
+        {
+            m.efforts = Some(efforts.clone());
         }
         Self {
             modes: modes.offered_with(
@@ -759,15 +805,28 @@ impl SessionOffer {
                 mode_args,
             ),
             models,
-            default_model: default_model.filter(|m| !m.is_empty()),
-            // `default` is no effort of its own: what runs when none is set
-            efforts: efforts
-                .into_iter()
-                .map(|e| e.id)
-                .filter(|e| e != "default")
-                .collect(),
+            default_model,
+            efforts,
+            variant_models,
         }
     }
+}
+
+fn extract_explicit_efforts(r: &Value) -> Vec<String> {
+    let mut raw = Vec::new();
+    if let Some(o) = crate::session::effort_option(r) {
+        fn collect(v: &Value, out: &mut Vec<String>) {
+            for entry in v.as_array().into_iter().flatten() {
+                if let Some(group) = entry.get("options") {
+                    collect(group, out);
+                } else if let Some(val) = entry.get("value").and_then(Value::as_str) {
+                    out.push(val.to_owned());
+                }
+            }
+        }
+        collect(&o["options"], &mut raw);
+    }
+    steve_harness_spec::explicit_acp_options(&raw)
 }
 
 /// What `initialize` (and a scratch `session/new`) said.
@@ -976,6 +1035,66 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
             if props.native_execution || props.permission_policy == PermissionPolicy::FullAccessOnly
             {
                 offer.modes = vec![PermissionMode::FullAccess];
+            }
+            // Empirically, ACP adapters (agy, claude-agent-acp, codex-acp, pi-acp) report
+            // different effort options per model — including omitting effort entirely on models
+            // such as `gemini-pro-orchestrator-neon` or `claude-haiku-4-5-20251001`. Switch the
+            // scratch session across models (no prompt is ever sent) within a tight wall-clock
+            // budget so Hub/Web know exact per-model support.
+            if props.effort_mode == steve_node_api::EffortMode::AcpOption
+                && offer.models.len() > 1
+                && let Some(sid) = r
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                && let Some(model_opt_id) = crate::session::model_option(&r)
+                    .and_then(|o| o.get("id"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+            {
+                let started = std::time::Instant::now();
+                let mut probed = 0usize;
+                for m in &mut offer.models {
+                    if m.efforts.is_some() {
+                        continue;
+                    }
+                    if probed >= PER_MODEL_PROBE_LIMIT
+                        || started.elapsed() >= PER_MODEL_PROBE_BUDGET
+                    {
+                        break;
+                    }
+                    probed += 1;
+                    let req = json!({
+                        "sessionId": sid,
+                        "configId": model_opt_id,
+                        "value": m.id,
+                    });
+                    match conn
+                        .request(
+                            "session/set_config_option",
+                            req,
+                            Some(PER_MODEL_PROBE_TIMEOUT),
+                        )
+                        .await
+                    {
+                        Ok(updated) => {
+                            if updated.get("configOptions").is_some() {
+                                m.efforts = Some(extract_explicit_efforts(&updated));
+                            }
+                        }
+                        Err(e) => {
+                            let not_found = e
+                                .data
+                                .as_ref()
+                                .and_then(|d| d.get("code"))
+                                .and_then(Value::as_i64)
+                                == Some(-32601);
+                            if not_found || e.message.contains("timed out") {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
             p.session = Some(offer);
         }
@@ -1917,7 +2036,8 @@ rl.on("line", (line) => {{
                 mcp_servers: json!([]),
                 mode: Some(c.mode_choice("antigravity", PermissionMode::Auto)),
                 model: Some("gemini-3.8-flash"),
-                effort: Some("medium"),
+                effort: steve_node_api::ReasoningEffort::Medium,
+                effort_mode: steve_node_api::EffortMode::AcpOption,
                 system_prompt: None,
             },
             c.session_meta_with_mode("antigravity", false, Some(PermissionMode::Auto)),
@@ -1974,7 +2094,8 @@ rl.on("line", (line) => {{
                 mcp_servers: json!([]),
                 mode: Some(c.mode_choice("antigravity", PermissionMode::FullAccess)),
                 model: None,
-                effort: None,
+                effort: steve_node_api::ReasoningEffort::Default,
+                effort_mode: steve_node_api::EffortMode::AcpOption,
                 system_prompt: None,
             },
             c.session_meta_with_mode("antigravity", false, Some(PermissionMode::FullAccess)),

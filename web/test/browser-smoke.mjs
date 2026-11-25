@@ -51,6 +51,7 @@ export const SMOKE = [
   "devices-install",
   "devices-map",
   "disk",
+  "effort-mapping",
   "external-write-gates",
   "feishu",
   "feishu-proxy",
