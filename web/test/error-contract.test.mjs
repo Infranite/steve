@@ -75,7 +75,7 @@ test("unified transport records x-steve-rev and preserves BotPlacementError", as
 
 test("homeTilde collapses both macOS and Linux home directories", async () => {
   const { homeTilde } = await import("../src/lib/path.ts")
-  assert.equal(homeTilde("/Users/alice/work/repo"), "~/work/repo")
-  assert.equal(homeTilde("/home/bob/work/repo"), "~/work/repo")
+  assert.equal(homeTilde("/Users/example/work/repo"), "~/work/repo")
+  assert.equal(homeTilde("/home/example/work/repo"), "~/work/repo")
   assert.equal(homeTilde("/opt/steve/repo"), "/opt/steve/repo")
 })
