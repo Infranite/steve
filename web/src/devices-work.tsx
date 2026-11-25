@@ -8,7 +8,8 @@ import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DecisionCard } from "@/thread/decision-card"
 import { go } from "@/ui"
-import { deviceDecision, deviceWorkEvidence, st, useStore } from "@/store"
+import { deviceDecision, deviceWorkEvidence, st, useShellStore } from "@/store"
+import { useViewKinds } from "@/data/sync"
 import { groupDeviceWork, type DeviceWork } from "@/device-work"
 import { useT } from "@/i18n"
 import { elapsed } from "@/i18n/format"
@@ -44,7 +45,8 @@ function WorkRow({ row, ask }: { row: DeviceWork; ask: (id: string) => void }) {
 /** the sessions on a device: answer-first, then current; the recent ones folded */
 export function RunningCard({ id, offline }: { id: string | null; offline: boolean }) {
   const t = useT()
-  useStore()
+  useShellStore()
+  useViewKinds(["item", "session", "decision"])
   const [request, setRequest] = useState<string | null>(null)
   const loaded = deviceWorkEvidence().loaded
   const g = id && loaded ? deviceGroups(id) : null

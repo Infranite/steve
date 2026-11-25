@@ -2,9 +2,10 @@ import { ApprovalSwitch, SessionApproval } from "@/approval"
 import type { BotPlacementError } from "@/api"
 import { useTranscript } from "@/data/transcript"
 import { SessionIdentity } from "@/components/session-identity"
-import { useItemState } from "@/data/sync"
-import { useItemDetail, useNotices, useSessionQueue } from "@/store"
+import { useItemState, useViewKinds } from "@/data/sync"
+import { useItemDetail, useNotices, useSessionQueue, useShellStore } from "@/store"
 import { getItem, getItems, getSession, itemDisplayStatus } from "@/store"
+import { VirtualList } from "@/components/virtual-list"
 import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
 import { BlockedPlacement, BotProposalCard, DispatchDetails, PlacementWhy, NO_TEAM, useBotTeams } from "@/bot-dispatch"
@@ -46,7 +47,7 @@ import { cn } from "cn"
 import { t as tr, useT } from "@/i18n"
 import { dayHeading, hm as clock, num } from "@/i18n/format"
 import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SettingsIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, XIcon, ZapIcon, BlocksIcon, UploadIcon, NewspaperIcon, WorkflowIcon } from "lucide-react"
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
 const GraphLegend = lazyView(() => import("@/graph").then((m) => ({ default: m.GraphLegend })))
@@ -90,6 +91,7 @@ export function ForkDialog({ k, at }: { k: string; at?: number }) {
   )
 }
 export function NewItemDialog({ project: pre, bot: preBot }: { project?: string; bot?: string } = {}) {
+  useShellStore()
   const t = useT()
   const [g, setG] = useState(""), [mode, setMode] = useState<"start" | "propose">("start"), [bot, setBot] = useState(preBot ?? "auto"), [proj, setProj] = useState(pre ?? "auto"), [busy, setBusy] = useState(false)
   const { value: teams } = useBotTeams()
@@ -144,6 +146,7 @@ export function GraphDialog({ k }: { k: string }) {
   return <Modal open wide title={t("views:graph.title")}><GraphLegend /><RelationGraph focus={k} scope="comp" height={520} onOpen={(n) => { closeSheet(); openNode(n) }} /></Modal>
 }
 export function LinkDialog({ k }: { k: string }) {
+  useViewKinds(["item", "session", "decision"])
   const t = useT()
   return (
     <Modal open title={t("views:link.title")} desc={t("views:link.desc")}>
@@ -197,8 +200,26 @@ function byDay<T extends { e: any[] }>(groups: (T | T[])[]): [string, (T | T[])[
   }
   return out
 }
+/** Short timelines stay flat in the DOM (and preserve direct-child queries in small fixtures); longer logs window with VirtualList. */
+const WORKLOG_VIRTUALIZE_THRESHOLD = 40
+type WorklogEntry = { e: any[]; n: number }
+type WorklogRow =
+  | { id: string; kind: "day"; day: string; first: boolean }
+  | { id: string; kind: "run"; items: WorklogEntry[] }
+  | { id: string; kind: "entry"; item: WorklogEntry }
+
+function estimateWorklogRow(row: WorklogRow): number {
+  if (row.kind === "day") return row.first ? 24 : 44
+  if (row.kind === "run") return 32
+  const k = row.item.e[0]
+  if (k === "me") return 88
+  if (k === "sess") return 44
+  if (k === "reply") return 96
+  return 28
+}
+
 /* a folded run of process lines: how many and the latest one; opens in place */
-function ProcessRun({ count, last, children }: { count: number; last: any[]; children: ReactNode }) {
+function ProcessRun({ count, last, renderChildren }: { count: number; last: any[]; renderChildren: () => ReactNode }) {
   const t = useT(), [open, setOpen] = useState(false)
   return <Collapsible open={open} onOpenChange={setOpen} data-process-run={count}>
     <CollapsibleTrigger className="flex w-full min-w-0 items-center gap-2 py-1 text-left type-footnote text-muted-foreground hover:text-foreground">
@@ -207,7 +228,7 @@ function ProcessRun({ count, last, children }: { count: number; last: any[]; chi
       <span className={cn("min-w-0 truncate text-tertiary transition-opacity duration-180", open && "opacity-0")}>· {clip(String(last[1] ?? ""), 120)}</span>
       <span className="ml-auto shrink-0 tabular-nums text-tertiary">{when(last)}</span>
     </CollapsibleTrigger>
-    <CollapsibleContent className="ml-2.5 border-l pl-2">{children}</CollapsibleContent>
+    <CollapsibleContent className="ml-2.5 border-l pl-2">{open && renderChildren()}</CollapsibleContent>
   </Collapsible>
 }
 /* a long goal (a pasted brief) folds to its first lines so the page still opens on what is happening */
@@ -308,8 +329,10 @@ function Plan({ i }: { i: Item }) {
   )
 }
 export function ItemView({ id }: { id: string }) {
+  useShellStore()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const t = useT()
+  const scroll = useRef<HTMLDivElement>(null)
   const [target, setTarget] = useState<"auto" | "steer" | "new">("auto")
   const [editing, setEditing] = useState(false), [gtxt, setG] = useState("")
   const [confirmDrop, setConfirmDrop] = useState(false), [confirmDel, setConfirmDel] = useState(false)
@@ -326,18 +349,41 @@ export function ItemView({ id }: { id: string }) {
   useSessionQueue(i?.qs)
   /* the one state the page states: what is happening and whose move it is (item-state.ts) */
   const rootState = i ? itemState(i, work.running) : null
+  /* queued supplements show on their comments; the strip above the composer keeps only rows no comment claims */
+  const queued = useMemo(
+    () => (i ? queuedComments(i.tl, i.qs, i.q, "补充信息：") : { byComment: new Map<number, never>(), rest: [] }),
+    [i?.tl, i?.qs, i?.q],
+  )
+  /* activity: everything, in order; runs of process lines fold where they are shown */
+  const worklogRows = useMemo<WorklogRow[]>(() => {
+    if (!i) return []
+    const feed = i.tl.map((e, n) => ({ e, n }))
+    const days = byDay(foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n)))
+    const out: WorklogRow[] = []
+    days.forEach(([day, gs], dayIndex) => {
+      if (day) out.push({ id: `day:${day}:${dayIndex}`, kind: "day", day, first: dayIndex === 0 })
+      for (const g of gs) {
+        if (Array.isArray(g)) {
+          out.push({ id: `run:${g[0].n}`, kind: "run", items: g })
+        } else {
+          const e = g.e
+          const rowId = e[0] === "sess" ? `sess:${e[1]}` : e[0] === "reply" ? `reply:${e[1].s}:${e[1].turn}` : `row:${g.n}`
+          out.push({ id: rowId, kind: "entry", item: g })
+        }
+      }
+    })
+    return out
+  }, [i?.tl, queued.byComment])
   if (!i) return <Page title={t("views:item.title")} back={["#/items", t("views:items.title")]}><Empty title={t("views:item.notFound")} sub={t("views:item.notFoundSub")} /></Page>
   const designReview = i.waits.find((w) => w.subject === "design_implementation")
   const dependents = [...new Set([...i.dependents, ...getItems().filter((x) => x.deps?.includes(i.id)).map((x) => x.id)])].flatMap((id) => getItem(id) ?? [])
   const a = active(i)
   const targetLabel = { auto: t("views:item.targetAuto"), steer: t("views:item.targetSteer"), new: t("views:item.targetNew") }
   const targets = (a && a.st === "run" ? ["auto", "steer", "new"] : ["auto", "new"]) as ("auto" | "steer" | "new")[]
-  /* queued supplements show on their comments; the strip above the composer keeps only rows no comment claims */
-  const queued = queuedComments(i.tl, i.qs, i.q, "补充信息：")
   const qSess = getSession(i.qs ?? "") ?? null
   const qNote = a ? queueNote(qSess) : t("views:item.queueNewSession")
-  /* activity: everything, in order; runs of process lines fold where they are shown */
-  const feed = i.tl.map((e, n) => ({ e, n }))
+  const activityTab = dtab === "动态"
+  const virtualizeWorklog = activityTab && worklogRows.length > WORKLOG_VIRTUALIZE_THRESHOLD
   const actions = <>
     <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("views:item.star")} data-star onClick={() => star(i.id)} className="text-muted-foreground" />}><StarIcon className={cn(i.star && "fill-current text-foreground")} /></TooltipTrigger><TooltipContent>{i.star ? t("views:item.unstar") : t("views:item.star")}</TooltipContent></Tooltip>
     <DropdownMenu>
@@ -409,8 +455,13 @@ export function ItemView({ id }: { id: string }) {
     )
     return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground"><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span><span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span></div>
   }
+  const renderWorklogRow = (row: WorklogRow) => {
+    if (row.kind === "day") return <h3 className={cn("mb-1 type-label text-tertiary", !row.first && "mt-5")} data-day>{row.day}</h3>
+    if (row.kind === "run") return <ProcessRun count={row.items.length} last={row.items[row.items.length - 1].e} renderChildren={() => row.items.map(entry)} />
+    return entry(row.item)
+  }
   return (
-    <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg type-title" data-title-input
+    <Page scrollRef={scroll} virtual={virtualizeWorklog} small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg type-title" data-title-input
         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== i.t) patchItem(i.id, { t: v }); setTitleEdit(false) }} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setTitleEdit(false) }} />
       : <span className="cursor-text" onDoubleClick={() => setTitleEdit(true)} data-title>{i.t}</span>} back={["#/items", t("views:items.title")]} actions={actions} toolbar={quick} toolbarTop max={1080}
       footer={<div className="w-full shrink-0 border-t bg-background/85 backdrop-blur-xl"><div className="mx-auto w-full px-4 pb-[76px] pt-3 sm:px-8 md:pb-4" style={{ maxWidth: 1040 + 64 }}><div className="lg:pr-[340px]">
@@ -462,14 +513,11 @@ export function ItemView({ id }: { id: string }) {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <Segmented size="sm" value={dtab} onChange={(v) => { dtab = v; r() }} options={[["动态", t("views:item.tabActivity")], ["产出", t("views:item.tabOutputs")]] as const} />
             </div>
-            {dtab === "动态" && (
+            {activityTab && (
               <div key="activity" className="anim-in flex flex-col" data-worklog>
-                {byDay(foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n))).map(([day, gs]) => <Fragment key={day}>
-                  {day && <h3 className="mb-1 mt-5 type-label text-tertiary first:mt-0" data-day>{day}</h3>}
-                  {gs.map((g) => Array.isArray(g)
-                    ? <ProcessRun key={"run:" + g[0].n} count={g.length} last={g[g.length - 1].e}>{g.map(entry)}</ProcessRun>
-                    : entry(g))}
-                </Fragment>)}
+                {virtualizeWorklog
+                  ? <VirtualList rows={worklogRows} scroll={scroll} render={renderWorklogRow} estimate={estimateWorklogRow} />
+                  : worklogRows.map((row) => <Fragment key={row.id}>{renderWorklogRow(row)}</Fragment>)}
               </div>
             )}
             {dtab === "产出" && <div key="outputs" className="anim-in"><OutList outs={i.outs} anns={i.anns} open={(o) => setPreview({ o })} /></div>}
@@ -546,6 +594,7 @@ function MeRow() {
   return <Panel><Row icon={<Tile I={UserRoundIcon} />} title={t("views:more.me")} sub={t("views:more.meSub")} onClick={() => go("#/contacts/me")} data-more-me><Chevron /></Row></Panel>
 }
 export function MoreView() {
+  useShellStore()
   const t = useT()
   const groups = [
     { key: "primary", name: "", rows: [["projects", t("views:more.projects"), t("views:more.projectsSub", { name: st.workspace?.name }), FolderIcon], ["publications", t("views:more.publications"), t("views:more.publicationsSub"), UploadIcon]] },
@@ -575,6 +624,7 @@ export function MoreView() {
 export { DesignView } from "@/design-view"
 
 export function ImportDialog() {
+  useShellStore()
   const t = useT()
   const [pick, setPick] = useState<string[]>([]), [busy, setBusy] = useState(false)
   useEffect(() => { void loadLocalSessions() }, [])

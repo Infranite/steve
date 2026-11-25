@@ -14,7 +14,9 @@
     "test:web": "node --test web/test/*.test.mjs",
     "test:web:browser-smoke": "node web/test/browser-smoke.mjs",
     "test:web:browser-extended": "node web/test/browser-smoke.mjs --extended",
-    "bench:web:chat": "node web/bench/chat-stream.mjs"
+    "bench:web:chat": "node web/bench/chat-stream.mjs",
+    "bench:web:smoothness": "node web/test/perf-smoothness.bench.mjs",
+    "bench:web:micro": "node web/test/perf-micro.mjs"
   },
   "devDependencies": {
     "playwright": "1.65.1"

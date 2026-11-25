@@ -217,16 +217,16 @@ function remarkRebase(resolve: (ref: string) => string | null) {
   }
 }
 
-// Static mode doesn't consume blocks; avoid running the splitter before its one document parse.
+// Static mode is the default and skips incremental block splitting; only active streams parse tail blocks.
 const noBlocks = () => []
-export default function MarkdownImpl({ text, className, streaming, resolve, replyFiles, settled }: { text: string; className?: string; streaming?: boolean; settled?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
+export default function MarkdownImpl({ text, className, streaming, resolve, replyFiles }: { text: string; className?: string; streaming?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
   const source = String(text ?? "")
-  const parseTail = useMemo(() => streamingBlockParser(parseMarkdownIntoBlocks), [])
+  const parseBlocks = useMemo(() => streaming ? streamingBlockParser(parseMarkdownIntoBlocks) : noBlocks, [streaming])
   const remark = useMemo(() => resolve ? [...remarkPlugins, remarkRebase(resolve)] : replyFiles ? [...remarkPlugins, remarkUnresolvedReplyFiles] : remarkPlugins, [resolve, replyFiles])
   return (
     <Streamdown className={cn("md", className)} plugins={plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
-      mode={!streaming && settled ? "static" : "streaming"}
-      parseMarkdownIntoBlocksFn={streaming ? parseTail : settled ? noBlocks : undefined}
+      mode={streaming ? "streaming" : "static"}
+      parseMarkdownIntoBlocksFn={parseBlocks}
       shikiTheme={shikiTheme} controls={controls} tableMaxHeight="none"
       isAnimating={!!streaming} caret={streaming ? "circle" : undefined}>{source}</Streamdown>
   )
