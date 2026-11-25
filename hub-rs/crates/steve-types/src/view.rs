@@ -396,6 +396,26 @@ pub enum Said {
     Key { template: DecisionPrompt },
 }
 
+/// Budget scope reported by [`DecisionPrompt::WorkflowBudgetExhausted`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum WfBudgetScope {
+    PerCall,
+    CycleTotal,
+    ScriptVersions,
+}
+
+impl WfBudgetScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PerCall => "per_call",
+            Self::CycleTotal => "cycle_total",
+            Self::ScriptVersions => "script_versions",
+        }
+    }
+}
+
 /// Machine-authored prompts carry their arguments separately from the UI text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
@@ -423,6 +443,21 @@ pub enum DecisionPrompt {
         wait_kind: WaitKind,
         subject: String,
     },
+    WorkflowScriptFault {
+        fault_code: String,
+    },
+    WorkflowNonDeterministicReplay,
+    WorkflowBudgetExhausted {
+        scope: WfBudgetScope,
+        #[cfg_attr(test, ts(type = "number"))]
+        used: i64,
+        #[cfg_attr(test, ts(type = "number"))]
+        limit: i64,
+    },
+    WorkflowReviewBlocked {
+        reason: String,
+    },
+    WorkflowSingleSessionOverride,
 }
 
 /// The current state of a decision. An answer receipt survives reopening.

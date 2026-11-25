@@ -1,85 +1,109 @@
--- 141: attribute usage_records, agent_turns, gateway_calls, and stat_daily to Node (`node_id`).
+-- Dynamic script workflow ledger (WF-3): 2 core aggregates (`wf_runs`, `wf_calls`) plus 3 strict
+-- subordinate tables (`wf_script_versions`, `wf_call_attempts`, `wf_version_calls`).
+-- Written in portable SQLite / PostgreSQL DDL; zero cached budget counters or separate audit tables.
 
-ALTER TABLE agent_turns ADD COLUMN node_id TEXT NOT NULL DEFAULT '';
-ALTER TABLE gateway_calls ADD COLUMN node_id TEXT NOT NULL DEFAULT '';
-ALTER TABLE usage_records ADD COLUMN node_id TEXT NOT NULL DEFAULT '';
-
--- Backfill historical node_id from runtime_sessions and gateway_job_accounts; unknown history stays ''.
-UPDATE agent_turns
-SET node_id = COALESCE(
-  (SELECT r.node_id FROM runtime_sessions r WHERE r.session_id = agent_turns.session_id),
-  ''
-)
-WHERE node_id = '';
-
-UPDATE gateway_calls
-SET node_id = COALESCE(
-  (SELECT g.node_id
-   FROM gateway_job_accounts g
-   JOIN gateway_attempts a ON a.attempt_id = g.attempt_id
-   WHERE a.call_id = gateway_calls.call_id AND g.node_id IS NOT NULL AND g.node_id <> ''
-   ORDER BY a.ordinal DESC LIMIT 1),
-  ''
-)
-WHERE node_id = '';
-
-UPDATE usage_records
-SET node_id = COALESCE(
-  (SELECT r.node_id FROM runtime_sessions r WHERE r.session_id = usage_records.session_id),
-  (SELECT gc.node_id FROM gateway_calls gc WHERE gc.call_id = usage_records.live_call_id),
-  ''
-)
-WHERE node_id = '';
-
-CREATE INDEX IF NOT EXISTS usage_ws_day_node ON usage_records(workspace_id, day, node_id);
-CREATE INDEX IF NOT EXISTS usage_node_day ON usage_records(node_id, day);
-
--- Rebuild stat_daily with node_id in its primary key.
-CREATE TABLE stat_daily_141 (
-  workspace_id TEXT NOT NULL, day TEXT NOT NULL,
-  source TEXT NOT NULL, purpose TEXT NOT NULL, harness TEXT NOT NULL, model TEXT NOT NULL,
-  bot_id TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL DEFAULT '',
-  node_id TEXT NOT NULL DEFAULT '',
-  input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
-  cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0, reasoning INTEGER NOT NULL DEFAULT 0,
-  hit_base INTEGER NOT NULL DEFAULT 0,
-  cost_reported REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, failed_calls INTEGER NOT NULL DEFAULT 0,
-  turns INTEGER NOT NULL DEFAULT 0, turn_ms INTEGER NOT NULL DEFAULT 0, turn_errors INTEGER NOT NULL DEFAULT 0,
-  retries INTEGER NOT NULL DEFAULT 0, interrupted INTEGER NOT NULL DEFAULT 0,
-  tools INTEGER NOT NULL DEFAULT 0, tool_errors INTEGER NOT NULL DEFAULT 0, tool_kinds TEXT NOT NULL DEFAULT '{}',
-  PRIMARY KEY (workspace_id, day, source, purpose, harness, model, bot_id, project_id, node_id)
+CREATE TABLE wf_runs (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    parent_item_id TEXT NOT NULL,
+    parent_cycle BIGINT NOT NULL,
+    goal_version BIGINT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('running','paused','completed','failed','cancelled','superseded')),
+    pause_reason_code TEXT,
+    active_script_version BIGINT NOT NULL DEFAULT 1,
+    run_revision BIGINT NOT NULL DEFAULT 1,
+    single_session_override BIGINT NOT NULL DEFAULT 0 CHECK(single_session_override IN (0,1)),
+    review_verified_call_id TEXT,
+    extra_attempts_budget BIGINT NOT NULL DEFAULT 0,
+    result_json TEXT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    UNIQUE(workspace_id, parent_item_id, parent_cycle, goal_version)
 );
 
--- Preserve single-node attribution when all matching usage_records agree on one non-empty node_id;
--- multi-node or pre-detail legacy aggregates remain intact under node_id = '' (splittable via rebuild).
-INSERT INTO stat_daily_141 (
-  workspace_id, day, source, purpose, harness, model, bot_id, project_id, node_id,
-  input, output, cache_read, cache_write, reasoning, hit_base,
-  cost_reported, calls, failed_calls,
-  turns, turn_ms, turn_errors, retries, interrupted,
-  tools, tool_errors, tool_kinds
-)
-SELECT
-  s.workspace_id, s.day, s.source, s.purpose, s.harness, s.model, s.bot_id, s.project_id,
-  COALESCE(
-    (SELECT CASE WHEN COUNT(DISTINCT u.node_id) = 1 THEN MAX(u.node_id) ELSE '' END
-     FROM usage_records u
-     WHERE u.workspace_id = s.workspace_id
-       AND u.day = s.day
-       AND u.source = s.source
-       AND u.purpose = s.purpose
-       AND u.harness = s.harness
-       AND u.model = s.model
-       AND COALESCE(u.bot_id, '') = s.bot_id
-       AND COALESCE(u.project_id, '') = s.project_id
-       AND u.node_id <> ''),
-    ''
-  ),
-  s.input, s.output, s.cache_read, s.cache_write, s.reasoning, s.hit_base,
-  s.cost_reported, s.calls, s.failed_calls,
-  s.turns, s.turn_ms, s.turn_errors, s.retries, s.interrupted,
-  s.tools, s.tool_errors, s.tool_kinds
-FROM stat_daily s;
+CREATE INDEX wf_runs_active ON wf_runs(status, workspace_id);
+CREATE INDEX wf_runs_parent_cycle ON wf_runs(parent_item_id, parent_cycle);
 
-DROP TABLE stat_daily;
-ALTER TABLE stat_daily_141 RENAME TO stat_daily;
+CREATE TABLE wf_script_versions (
+    run_id TEXT NOT NULL REFERENCES wf_runs(id) ON DELETE CASCADE,
+    version BIGINT NOT NULL,
+    script_source TEXT NOT NULL,
+    script_sha256 TEXT NOT NULL,
+    created_by_session_id TEXT,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (run_id, version)
+);
+
+CREATE TABLE wf_calls (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES wf_runs(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL,
+    identity_hash TEXT NOT NULL,
+    phase TEXT,
+    title TEXT,
+    prompt TEXT NOT NULL,
+    options_canonical_json TEXT NOT NULL,
+    schema_json TEXT,
+    occurrence BIGINT NOT NULL,
+    is_review BIGINT NOT NULL DEFAULT 0 CHECK(is_review IN (0,1)),
+    mutex_key TEXT,
+    status TEXT NOT NULL CHECK(status IN ('queued','dispatched','completed','failed','cancelled')),
+    result_json TEXT,
+    artifact_ids_json TEXT,
+    git_head TEXT,
+    git_tree TEXT,
+    git_cwd TEXT,
+    settled_at_revision BIGINT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    UNIQUE(run_id, identity_hash)
+);
+
+CREATE INDEX wf_calls_run_status ON wf_calls(run_id, status);
+CREATE INDEX wf_calls_mutex ON wf_calls(workspace_id, mutex_key)
+    WHERE mutex_key IS NOT NULL AND status = 'dispatched';
+
+CREATE TABLE wf_call_attempts (
+    id TEXT PRIMARY KEY,
+    call_id TEXT NOT NULL REFERENCES wf_calls(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES wf_runs(id) ON DELETE CASCADE,
+    parent_item_id TEXT NOT NULL,
+    parent_cycle BIGINT NOT NULL,
+    attempt_no BIGINT NOT NULL,
+    child_item_id TEXT UNIQUE,
+    bot_id TEXT,
+    placement_id TEXT,
+    harness TEXT,
+    model TEXT,
+    status TEXT NOT NULL CHECK(status IN ('blocked','dispatched','closing','succeeded','failed','cancelled')),
+    dispatched_at_revision BIGINT NOT NULL,
+    closing_delivery_revision BIGINT,
+    candidate_result_json TEXT,
+    candidate_artifact_ids_json TEXT,
+    candidate_git_head TEXT,
+    candidate_git_tree TEXT,
+    candidate_git_cwd TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at BIGINT NOT NULL,
+    settled_at BIGINT,
+    UNIQUE(call_id, attempt_no)
+);
+
+CREATE UNIQUE INDEX wf_call_attempts_one_active ON wf_call_attempts(call_id)
+    WHERE status IN ('blocked','dispatched','closing');
+CREATE UNIQUE INDEX wf_call_attempts_one_succeeded ON wf_call_attempts(call_id)
+    WHERE status = 'succeeded';
+CREATE INDEX wf_call_attempts_cycle_budget ON wf_call_attempts(parent_item_id, parent_cycle);
+CREATE INDEX wf_call_attempts_run_status ON wf_call_attempts(run_id, status);
+
+CREATE TABLE wf_version_calls (
+    run_id TEXT NOT NULL REFERENCES wf_runs(id) ON DELETE CASCADE,
+    script_version BIGINT NOT NULL,
+    seq_no BIGINT NOT NULL,
+    call_id TEXT NOT NULL REFERENCES wf_calls(id) ON DELETE CASCADE,
+    hydrated_from_version BIGINT,
+    PRIMARY KEY (run_id, script_version, seq_no)
+);
+
+CREATE INDEX wf_version_calls_call ON wf_version_calls(call_id);

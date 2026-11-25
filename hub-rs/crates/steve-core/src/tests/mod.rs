@@ -64,6 +64,7 @@ fn finish_owner(core: &crate::Core, id: &str) -> crate::Result<crate::repo::Item
         item.cas_revision,
         None,
         None,
+        None,
         "me",
     )
 }
@@ -233,8 +234,16 @@ impl Kit {
 
     pub fn new_cycle(&self, item: &str) -> crate::Result<crate::repo::Item> {
         let i = self.db().item(item)?.unwrap();
-        self.core
-            .lifecycle_command(item, "new_cycle", i.cycle, i.cas_revision, None, None, "me")
+        self.core.lifecycle_command(
+            item,
+            "new_cycle",
+            i.cycle,
+            i.cas_revision,
+            None,
+            None,
+            None,
+            "me",
+        )
     }
 
     pub fn phase(&self, item: &str) -> String {

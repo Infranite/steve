@@ -31,6 +31,9 @@ pub(super) fn target(e: &DomainEvent) -> Dirty<'_> {
                 Dirty::One(ws.as_str(), ViewKind::Message, id.as_str())
             }
             WorkEvent::Message { .. } => Dirty::None,
+            WorkEvent::WorkflowRun { item_id, ws, .. } => {
+                Dirty::One(ws.as_str(), ViewKind::Item, item_id.as_str())
+            }
         },
         DomainEvent::Config(e) => match e {
             ConfigEvent::Workspace { ws, .. } => Dirty::Chats(ws.as_str()),

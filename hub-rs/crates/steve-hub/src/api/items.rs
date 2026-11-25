@@ -112,6 +112,8 @@ struct LifecycleBody {
     expected_revision: i64,
     reason: Option<String>,
     goal: Option<String>,
+    #[serde(default)]
+    result: Option<Value>,
 }
 
 /// `own(c, items.get(id), Noun::Item)` on the read pool.
@@ -969,6 +971,7 @@ pub async fn lifecycle(
         expected_revision: revision,
         reason,
         goal,
+        result,
     } = req;
     if command == "finish" && c.user.get("role").and_then(Value::as_str) != Some("owner") {
         return Err(ApiError::Json(
@@ -978,7 +981,7 @@ pub async fn lifecycle(
     }
     match st
         .domain
-        .lifecycle_command(&id, &command, cycle, revision, reason, goal, &c.me)
+        .lifecycle_command(&id, &command, cycle, revision, reason, goal, result, &c.me)
         .await
     {
         Ok(_) => {}

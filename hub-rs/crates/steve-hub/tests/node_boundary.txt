@@ -102,7 +102,7 @@ Harness	steve-hub/src/wire/research.rs	1
 Spawn	steve-acp/src/config.rs	1
 Spawn	steve-acp/src/managed.rs	1
 Spawn	steve-acp/src/rpc.rs	1
-Spawn	steve-confine/src/lib.rs	2
+Spawn	steve-confine/src/lib.rs	3
 Spawn	steve-confine/src/probe.rs	1
 Spawn	steve-core/src/git.rs	1
 Spawn	steve-core/src/release.rs	1

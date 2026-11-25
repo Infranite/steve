@@ -108,6 +108,11 @@ pub use contract::thread::{
 };
 pub use contract::vault_uses as vault_use_repo;
 pub use contract::waits as wait_repo;
+pub use contract::workflow_runs::{
+    self, FinalizedAttempt, NewWfAttempt, NewWfCall, ReviewGateFailure, ReviewGateVerdict,
+    WfAttemptStatus, WfCall, WfCallAttempt, WfCallStatus, WfRun, WfRunStatus, WfScriptVersion,
+    WfVersionCall, WorkflowRuns,
+};
 pub use contract::{
     AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
     DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,

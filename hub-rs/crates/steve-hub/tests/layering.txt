@@ -14,6 +14,7 @@ edge steve-core steve-node-api	1
 edge steve-core steve-runtime	1
 edge steve-core steve-types	1
 edge steve-core steve-work-api	1
+edge steve-core steve-workflow-api	1
 edge steve-digest steve-runtime	1
 edge steve-digest steve-types	1
 edge steve-flow steve-runtime	1
@@ -34,6 +35,8 @@ edge steve-hub steve-node-api	1
 edge steve-hub steve-runtime	1
 edge steve-hub steve-types	1
 edge steve-hub steve-vault	1
+edge steve-hub steve-workflow-api	1
+edge steve-hub steve-workflow-js	1
 edge steve-install steve-harness-spec	1
 edge steve-install steve-i18n	1
 edge steve-install steve-store	1
@@ -62,4 +65,5 @@ edge steve-stats steve-runtime	1
 edge steve-store-sqlite steve-types	1
 edge steve-transcript steve-node-api	1
 edge steve-vault steve-confine	1
+edge steve-workflow-js steve-workflow-api	1
 rusqlite steve-store-sqlite	1

@@ -180,6 +180,7 @@ export type { WaitKind } from "./WaitKind";
 export type { WaitLimits } from "./WaitLimits";
 export type { WaitOwner } from "./WaitOwner";
 export type { WaitTimeoutAction } from "./WaitTimeoutAction";
+export type { WfBudgetScope } from "./WfBudgetScope";
 export type { WorkEvent } from "./WorkEvent";
 export type { WorkLiveEvent } from "./WorkLiveEvent";
 export type { WorkspaceId } from "./WorkspaceId";

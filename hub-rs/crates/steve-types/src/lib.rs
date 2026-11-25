@@ -69,7 +69,7 @@ pub use view::{
     ById, CloseKind, ClosedBy, DecisionPrompt, DecisionStatus, DecisionTier, DecisionView,
     FoldReason, ItemOutcome, ItemParent, ItemPhase, ItemSnooze, ItemState, ItemView, ItemWait,
     MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, Said, SessionLiveVitals,
-    SessionView, SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
+    SessionView, SessionWaiting, Snapshot, SnapshotViews, View, ViewKind, WfBudgetScope,
 };
 pub use wait::{WaitContract, WaitKind, WaitLimits, WaitOwner, WaitTimeoutAction};
 

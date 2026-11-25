@@ -70,11 +70,13 @@ impl Backend for Recorder {
         outputs: Vec<Output>,
         checks: Vec<Check>,
         unfinished: Option<Vec<String>>,
+        result: Option<serde_json::Value>,
     ) -> Result<(), ToolError> {
-        self.rec(format!(
-            "{s} deliver {}",
-            serde_json::json!({"summary": summary, "outputs": outputs, "checks": checks, "unfinished": unfinished})
-        ))
+        let mut payload = serde_json::json!({"summary": summary, "outputs": outputs, "checks": checks, "unfinished": unfinished});
+        if let Some(res) = result {
+            payload["result"] = res;
+        }
+        self.rec(format!("{s} deliver {payload}"))
     }
     async fn publish(&self, s: &String, branch: String, summary: String) -> Result<(), ToolError> {
         self.rec(format!(
