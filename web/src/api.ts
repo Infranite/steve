@@ -108,11 +108,57 @@ export type RRuntime = {
   /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
   update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
 }
+export type RSubagentCapability = "acp_rfd" | "tool_fallback" | "none"
+export type RBackgroundTaskCapability = "acp_rfd" | "tool_fallback" | "none"
+export type RUsageAttribution = "subtask_scoped" | "turn_and_model_all" | "turn_level" | "context_only" | "none"
+export type RResumeCapability = "session_load" | "cli_only" | "none"
+export type RAdapterUpgradeCapability = "managed_npm" | "external_managed" | "manual"
+export type RAdapterCapabilities = {
+  subagents: RSubagentCapability
+  subagent_cancel: boolean
+  background_tasks: RBackgroundTaskCapability
+  background_task_cancel?: boolean
+  child_tool_nesting: boolean
+  usage_attribution: RUsageAttribution
+  resume: RResumeCapability
+  upgrade?: RAdapterUpgradeCapability
+  verified: boolean
+}
+export type RSubtaskOrigin = "subagent" | "background_task" | "native_workflow"
+export type RSubtaskStatus = "queued" | "running" | "needs_you" | "done" | "failed" | "cancelled"
+export type RSubtaskUsage = {
+  input?: number | null
+  output?: number | null
+  cache_read?: number | null
+  cache_write?: number | null
+  reasoning?: number | null
+  total_tokens?: number | null
+  context_used?: number | null
+  context_limit?: number | null
+  cost?: { decimal: string; currency: string } | null
+}
+export type RSubtaskView = {
+  id: string
+  parent?: string | null
+  external_id?: string | null
+  origin: RSubtaskOrigin
+  status: RSubtaskStatus
+  title: string
+  actor?: string | null
+  model?: string | null
+  progress?: string | null
+  summary?: string | null
+  error?: string | null
+  can_cancel?: boolean
+  duration_ms?: number | null
+  usage?: RSubtaskUsage | null
+}
 /** Read-only report from one particular Node, never the Hub's merged model catalogue. */
 export type RNodeHarness = {
   id: string; name: string; available: boolean | null; version: string; adapter_version: string | null
   degraded_reason: HarnessDegradedReason | null
   models: string[]; error: string | null; setup: RRuntime["setup"] | null
+  capabilities?: RAdapterCapabilities | null
 }
 export type RNodeHarnessReport = {
   state: "reported" | "unreported" | "offline" | "unsupported" | "failed"
@@ -368,7 +414,7 @@ export const api = {
     req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, undefined, undefined, signal),
   transcriptMarks: (id: string) => get<{ marks: number[] }>(`/sessions/${encodeURIComponent(id)}/events/marks`),
   searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
-  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
+  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), cancelSubtask: (id: string, subtaskId: string) => post<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}/subtasks/${encodeURIComponent(subtaskId)}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
   renameSession: (id: string, title: string) => patch(`/sessions/${id}`, { title }), removeSession: (id: string) => del(`/sessions/${id}`), dropQueued: (id: string) => del("/queued/" + id),
   queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`), resumeInfo: (sid: string) => get<RResume>(`/sessions/${sid}/resume`),
   queuedEdit: (sid: string, qid: string, text: string) => patch<RQueued>(`/sessions/${sid}/queued/${qid}`, { text }),

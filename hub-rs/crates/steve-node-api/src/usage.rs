@@ -247,9 +247,17 @@ pub fn accounting_usage(totals: &[UsageMeter], fallback_model: &str) -> Vec<Usag
         owners[i] = j;
     }
     let mut emitted = std::collections::HashSet::new();
+    let epochs_with_all: std::collections::HashSet<_> = rows
+        .iter()
+        .filter(|r| r.scope == UsageScope::All)
+        .map(|r| r.meter_epoch.clone())
+        .collect();
     let materialized: Vec<_> = owners
         .into_iter()
         .filter_map(|j| emitted.insert(j).then(|| rows[j].clone()))
+        // When an epoch reports an `All` aggregate (which already includes subagents), drop
+        // `Subtask` rows in that same epoch so subagent tokens are never double-counted.
+        .filter(|r| !(r.scope == UsageScope::Subtask && epochs_with_all.contains(&r.meter_epoch)))
         .collect();
     materialized
         .into_iter()
@@ -287,6 +295,13 @@ pub fn merged_usage(
 /// A context cost companion is not another token meter. An anonymous Main cost accompanying
 /// the same epoch's All bill has the same role; a separate named cost-only model stays missing.
 pub fn accounting_tokens(r: &UsageReport, batch: &[UsageReport]) -> bool {
+    if r.scope == UsageScope::Subtask
+        && batch
+            .iter()
+            .any(|all| all.scope == UsageScope::All && all.meter_epoch == r.meter_epoch)
+    {
+        return false;
+    }
     [
         r.tokens.input,
         r.tokens.output,
@@ -302,4 +317,137 @@ pub fn accounting_tokens(r: &UsageReport, batch: &[UsageReport]) -> bool {
                 && batch
                     .iter()
                     .any(|all| all.scope == UsageScope::All && all.meter_epoch == r.meter_epoch)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Epoch;
+
+    fn rep(
+        id: &str,
+        model: Option<&str>,
+        scope: UsageScope,
+        measurement: Measurement,
+        input: Option<u64>,
+        output: Option<u64>,
+    ) -> UsageReport {
+        UsageReport {
+            report_id: id.into(),
+            model: model.map(String::from),
+            meter_epoch: Epoch::new("ep1").unwrap(),
+            scope,
+            measurement,
+            tokens: Tokens {
+                input,
+                output,
+                ..Default::default()
+            },
+            context_used: None,
+            context_limit: None,
+            cost: None,
+        }
+    }
+
+    #[test]
+    fn subtask_usage_adds_to_main_without_all_and_dedups_with_all() {
+        // Without `All` (e.g. Pi + pi-subagents): Main and Subtask deltas both survive cleanly.
+        let rows = merged_usage(
+            [
+                rep(
+                    "r1",
+                    Some("m1"),
+                    UsageScope::Main,
+                    Measurement::Final,
+                    Some(100),
+                    Some(20),
+                ),
+                rep(
+                    "r2",
+                    Some("m1"),
+                    UsageScope::Subtask,
+                    Measurement::Delta,
+                    Some(40),
+                    Some(10),
+                ),
+                rep(
+                    "r3",
+                    Some("m1"),
+                    UsageScope::Subtask,
+                    Measurement::Delta,
+                    Some(30),
+                    Some(5),
+                ),
+                // Replay of r2 is ignored by report_id.
+                rep(
+                    "r2",
+                    Some("m1"),
+                    UsageScope::Subtask,
+                    Measurement::Delta,
+                    Some(40),
+                    Some(10),
+                ),
+                // Background is excluded from attempt accounting.
+                rep(
+                    "r4",
+                    Some("m1"),
+                    UsageScope::Background,
+                    Measurement::Final,
+                    Some(999),
+                    Some(999),
+                ),
+            ],
+            "fallback",
+        );
+        assert_eq!(rows.len(), 2);
+        let main = rows.iter().find(|r| r.scope == UsageScope::Main).unwrap();
+        let sub = rows
+            .iter()
+            .find(|r| r.scope == UsageScope::Subtask)
+            .unwrap();
+        assert_eq!(
+            (main.tokens.input, main.tokens.output),
+            (Some(100), Some(20))
+        );
+        assert_eq!((sub.tokens.input, sub.tokens.output), (Some(70), Some(15)));
+
+        // With `All` in the same epoch (e.g. Claude / Codex quota model_usage): `All` covers
+        // both `Main` and `Subtask` so nothing is double-counted.
+        let with_all = merged_usage(
+            [
+                rep(
+                    "r1",
+                    None,
+                    UsageScope::Main,
+                    Measurement::Final,
+                    Some(100),
+                    Some(20),
+                ),
+                rep(
+                    "r2",
+                    Some("m1"),
+                    UsageScope::Subtask,
+                    Measurement::Delta,
+                    Some(40),
+                    Some(10),
+                ),
+                rep(
+                    "r3",
+                    Some("m1"),
+                    UsageScope::All,
+                    Measurement::Final,
+                    Some(140),
+                    Some(30),
+                ),
+            ],
+            "fallback",
+        );
+        assert_eq!(with_all.len(), 1);
+        assert_eq!(with_all[0].scope, UsageScope::All);
+        assert_eq!(
+            (with_all[0].tokens.input, with_all[0].tokens.output),
+            (Some(140), Some(30))
+        );
+        assert_eq!(with_all[0].tokens.cache_read, None, "unknown stays None");
+    }
 }
