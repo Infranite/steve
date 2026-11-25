@@ -12,7 +12,7 @@ const h = (version, model, extra = {}) => ({ id: "fixture-adapter", name: "Fixtu
 const r = (harnesses = [], extra = {}) => ({ state: "reported", checked_at: Date.now(), attempted_at: Date.now(), stale: false, refreshing: false, error: null, harnesses, ...extra })
 let nodes = [node("local"), node("remote"), node("empty"), node("old"), node("offline", { linked: false }), node("failed"), node("pending-report")]
 let reports = {
-  local: r([h("local-cli", "local/model")]), remote: r([h("remote-cli", "remote/model"), h("auth-cli", "", { id: "auth", name: "Auth adapter", available: false, models: [], degraded_reason: "authentication_required" }), h("", "", { id: "absent", name: "Absent adapter", available: false, models: [], setup: { state: "not_installed", components: [{ id: "cli", name: "CLI", package: "fixture", status: "missing" }], can_install: false, reason: "fixture missing binary" } })]),
+  local: r([h("local-cli", "local/model")]), remote: r([h("remote-cli", "remote/model"), h("auth-cli", "", { id: "auth", name: "Auth adapter", available: false, models: [], degraded_reason: "authentication_required" }), h("", "", { id: "path-mismatch", name: "Path mismatch adapter", available: false, models: [], degraded_reason: "command_not_in_service_path", missing_command: { command: "agy", service_path: "/usr/bin:/bin:/usr/sbin:/sbin", login_shell_path: "/Users/example/.local/bin/agy", login_shell: "/bin/zsh", refresh_command: "steve node refresh-env" } }), h("", "", { id: "absent", name: "Absent adapter", available: false, models: [], setup: { state: "not_installed", components: [{ id: "cli", name: "CLI", package: "fixture", status: "missing" }], can_install: false, reason: "fixture missing binary" } })]),
   empty: r(), old: r([], { state: "unsupported", checked_at: null, error: "fixture unsupported method" }),
   offline: r([h("cached-cli", "cached/model")], { state: "offline", stale: true }),
   failed: r([h("last-cli", "last/model")], { state: "failed", stale: true, error: "fixture probe failed" }),
@@ -67,6 +67,12 @@ try {
   const auth = detail.locator('[data-node-harness-id="auth"]')
   await auth.getByText("需要身份验证", { exact: true }).waitFor()
   assert.match(await auth.locator("[data-node-harness-degraded]").innerText(), /非交互凭据/)
+  const pathMismatch = detail.locator('[data-node-harness-id="path-mismatch"]')
+  await pathMismatch.locator("[data-node-harness-missing-command]").waitFor()
+  assert.match(await pathMismatch.locator("[data-node-harness-degraded]").innerText(), /服务 PATH 中找不到该命令/)
+  assert.equal(await pathMismatch.locator("[data-missing-command-login-path]").innerText(), "/Users/example/.local/bin/agy")
+  assert.equal(await pathMismatch.locator("[data-missing-command-service-path]").innerText(), "/usr/bin:/bin:/usr/sbin:/sbin")
+  assert.equal(await pathMismatch.locator("[data-missing-command-refresh]").innerText(), "steve node refresh-env")
   await detail.locator('[data-node-harness-id="absent"] [data-node-harness-state="not_installed"]').waitFor()
   assert.equal(await detail.locator("[data-node-harness-manage]").count(), 0, "remote inspection has no local maintenance actions")
   assert.equal(await detail.getByText("fixture missing binary", { exact: true }).isVisible(), false)

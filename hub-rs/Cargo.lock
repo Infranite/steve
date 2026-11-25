@@ -5972,6 +5972,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "shlex",
+ "steve-harness-spec",
  "steve-i18n",
  "steve-runtime",
  "steve-store",

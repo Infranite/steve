@@ -1,5 +1,5 @@
 import type { MessageView } from "@/gen"
-import type { Code, Reason, Params, NodeLinkMode, NodeProtocolOlder, NodeOffline, HarnessDegradedReason, FileAccessReport } from "./gen"
+import type { Code, Reason, Params, NodeLinkMode, NodeProtocolOlder, NodeOffline, HarnessDegradedReason, MissingCommandDiagnostic, FileAccessReport } from "./gen"
 import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
@@ -157,6 +157,7 @@ export type RNodeHarness = {
   id: string; name: string; available: boolean | null; version: string; adapter_version: string | null
   degraded_reason: HarnessDegradedReason | null
   models: string[]; error: string | null; setup: RRuntime["setup"] | null
+  missing_command?: MissingCommandDiagnostic | null
   capabilities?: RAdapterCapabilities | null
 }
 export type RNodeHarnessReport = {

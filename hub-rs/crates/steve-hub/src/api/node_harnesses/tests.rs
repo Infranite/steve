@@ -62,6 +62,49 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
         Some(HarnessDegradedReason::AuthenticationRequired)
     );
     assert!(h.error.is_none());
+
+    let mut path_mismatch = cap("cli-1", "actual/model");
+    path_mismatch.setup = None;
+    let a = path_mismatch.adapter.as_mut().unwrap();
+    a.status = AdapterStatus::AdapterMissing;
+    a.session = None;
+    a.error = Some("the adapter's command is missing".into());
+    a.missing_command = Some(steve_node_api::MissingCommandDiagnostic {
+        command: "agy".into(),
+        service_path: "/usr/bin:/bin:/usr/sbin:/sbin".into(),
+        login_shell_path: Some("/Users/example/.local/bin/agy".into()),
+        login_shell: Some("/bin/zsh".into()),
+        refresh_command: "steve node refresh-env".into(),
+    });
+    let h = harness(path_mismatch.clone());
+    assert_eq!(h.available, Some(false));
+    assert_eq!(
+        h.degraded_reason,
+        Some(HarnessDegradedReason::CommandNotInServicePath)
+    );
+    let diag = h.missing_command.expect("missing command forwarded");
+    assert_eq!(diag.command, "agy");
+    assert_eq!(diag.service_path, "/usr/bin:/bin:/usr/sbin:/sbin");
+    assert_eq!(
+        diag.login_shell_path.as_deref(),
+        Some("/Users/example/.local/bin/agy")
+    );
+    assert_eq!(diag.refresh_command, "steve node refresh-env");
+
+    path_mismatch
+        .adapter
+        .as_mut()
+        .unwrap()
+        .missing_command
+        .as_mut()
+        .unwrap()
+        .login_shell_path = None;
+    let h = harness(path_mismatch);
+    assert_eq!(h.available, Some(false));
+    assert_eq!(
+        h.degraded_reason,
+        Some(HarnessDegradedReason::AdapterMissing)
+    );
 }
 
 #[tokio::test]

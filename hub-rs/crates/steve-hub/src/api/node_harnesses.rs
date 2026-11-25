@@ -15,7 +15,7 @@ use steve_node_api::{
     AdapterCapabilities, AdapterStatus, Code, HarnessCapability, HarnessSetup, Node, NodeId,
     SetupState,
 };
-use steve_types::devices::HarnessDegradedReason;
+use steve_types::devices::{HarnessDegradedReason, MissingCommandDiagnostic};
 
 use super::AppState;
 use crate::error::ApiError;
@@ -102,6 +102,8 @@ struct Harness {
     models: Vec<String>,
     degraded_reason: Option<HarnessDegradedReason>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    missing_command: Option<MissingCommandDiagnostic>,
     setup: Option<HarnessSetup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     capabilities: Option<AdapterCapabilities>,
@@ -115,7 +117,16 @@ fn harness(c: HarnessCapability) -> Harness {
             return Some(AuthenticationRequired);
         }
         match a.status {
-            AdapterStatus::AdapterMissing => Some(AdapterMissing),
+            AdapterStatus::AdapterMissing => {
+                if a.missing_command
+                    .as_ref()
+                    .is_some_and(|m| m.login_shell_path.is_some())
+                {
+                    Some(CommandNotInServicePath)
+                } else {
+                    Some(AdapterMissing)
+                }
+            }
             AdapterStatus::InitializeFailed => Some(InitializeFailed),
             AdapterStatus::Ready if a.session.is_none() => Some(SessionUnavailable),
             _ => None,
@@ -162,6 +173,7 @@ fn harness(c: HarnessCapability) -> Harness {
         } else {
             a.and_then(|a| a.session_error.clone().or_else(|| a.error.clone()))
         },
+        missing_command: a.and_then(|a| a.missing_command.clone()),
         setup: c.setup,
         capabilities: a.and_then(|a| a.capabilities.clone()),
     }

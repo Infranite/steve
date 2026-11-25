@@ -371,9 +371,50 @@ function UnifiedHarnessCard({
     >
       {probe?.degraded_reason && (
         <IntegrationSection>
-          <p className="type-footnote text-muted-foreground" data-node-harness-degraded>
-            {t(`devices:harness.degraded.${probe.degraded_reason}`)}
-          </p>
+          <div className="flex flex-col gap-2" data-node-harness-degraded>
+            <p className="type-footnote text-muted-foreground">
+              {t(`devices:harness.degraded.${probe.degraded_reason}`)}
+            </p>
+            {probe.missing_command && (
+              <div
+                className="flex flex-col gap-1.5 rounded-md border border-border/70 bg-muted/40 px-3 py-2 type-footnote"
+                data-node-harness-missing-command
+              >
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground">
+                    {probe.missing_command.login_shell_path
+                      ? probe.missing_command.login_shell
+                        ? t("devices:harness.missingCommand.loginShellFoundWithShell", {
+                            shell: probe.missing_command.login_shell,
+                          })
+                        : t("devices:harness.missingCommand.loginShellFound")
+                      : t("devices:harness.missingCommand.loginShellMissing")}
+                  </span>
+                  {probe.missing_command.login_shell_path && (
+                    <code className="break-all font-mono text-foreground" data-missing-command-login-path>
+                      {probe.missing_command.login_shell_path}
+                    </code>
+                  )}
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground">
+                    {t("devices:harness.missingCommand.servicePath")}
+                  </span>
+                  <code className="break-all font-mono text-foreground/90" data-missing-command-service-path>
+                    {probe.missing_command.service_path || t("devices:harness.missingCommand.emptyPath")}
+                  </code>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground">
+                    {t("devices:harness.missingCommand.refreshHint")}
+                  </span>
+                  <code className="break-all font-mono text-foreground" data-missing-command-refresh>
+                    {probe.missing_command.refresh_command}
+                  </code>
+                </div>
+              </div>
+            )}
+          </div>
         </IntegrationSection>
       )}
 

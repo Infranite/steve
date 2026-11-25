@@ -4391,6 +4391,20 @@ impl Discovery for LocalNode {
             }
         };
         let (probed, adapters) = tokio::join!(binaries, adapters);
+        let any_adapter_missing = adapters
+            .values()
+            .any(|p| p.status == steve_acp::adapters::ProbeStatus::AdapterMissing);
+        let login_env = if any_adapter_missing {
+            adapter_probe::probe_login_shell_env().await
+        } else {
+            None
+        };
+        let service_path = std::env::var("PATH").unwrap_or_default();
+        let refresh_command = if self.0.cfg.node.as_str() == "local" {
+            "steve hub refresh-env"
+        } else {
+            "steve node refresh-env"
+        };
         let mut requirements = HashMap::new();
         for id in self.0.cfg.acp.adapters.keys() {
             if !steve_harness_spec::components(id).is_empty() {
@@ -4446,7 +4460,14 @@ impl Discovery for LocalNode {
                     adapter: None,
                     setup: None,
                 };
-                adapter_probe::apply(&self.0.cfg.acp, &mut c, adapters.get(h));
+                adapter_probe::apply(
+                    &self.0.cfg.acp,
+                    &mut c,
+                    adapters.get(h),
+                    &service_path,
+                    login_env.as_ref(),
+                    refresh_command,
+                );
                 if let Some(a) = c.adapter.as_mut() {
                     let ceiling = &self.0.cfg.ceiling;
                     a.execution_modes = a.session.as_ref().map(|o| {

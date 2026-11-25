@@ -77,14 +77,104 @@ pub struct NodeOffline {
     pub duration_ms: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum HarnessDegradedReason {
     AuthenticationRequired,
     AdapterMissing,
+    CommandNotInServicePath,
     InitializeFailed,
     SessionUnavailable,
+}
+
+/// Where a service definition's `PATH` was captured from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ServicePathSource {
+    LoginShell,
+    ProcessEnv,
+    DefaultFallback,
+}
+
+/// Strongly-typed reason emitted by `steve node doctor` for service environment mismatches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ServiceEnvDiagnosticReason {
+    CommandNotInServicePath,
+}
+
+/// Diagnostic evidence when a harness command cannot be resolved from the running service's `PATH`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MissingCommandDiagnostic {
+    /// Executable name or path the Node attempted to start (for example `agy`, `claude`).
+    pub command: String,
+    /// `PATH` currently active in the running Node service process.
+    pub service_path: String,
+    /// Full executable path found via the user's login shell `$PATH`, when installed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub login_shell_path: Option<String>,
+    /// Login shell inspected to resolve `login_shell_path` (for example `/bin/zsh`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub login_shell: Option<String>,
+    /// Operator command to refresh the service environment (for example `steve node refresh-env`).
+    pub refresh_command: String,
+}
+
+/// Structured command-vs-PATH mismatch reported by `steve node doctor`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ServiceCommandDiagnostic {
+    pub reason: ServiceEnvDiagnosticReason,
+    pub harness: String,
+    pub command: String,
+    pub service_path: String,
+    pub login_shell_path: String,
+    pub refresh_command: String,
+}
+
+pub const LOGIN_SHELL_PATH_BEGIN: &str = "__STEVE_LOGIN_PATH_BEGIN__";
+pub const LOGIN_SHELL_PATH_END: &str = "__STEVE_LOGIN_PATH_END__";
+
+/// Shell snippet executed via `<shell> -l -c <script>` to emit `$PATH` framed by sentinels so
+/// profile banners or MOTD output cannot corrupt the captured value.
+pub fn login_shell_path_script(shell: &std::path::Path) -> String {
+    let is_fish = shell
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("fish"));
+    if is_fish {
+        format!(
+            "printf '\\n%s\\n%s\\n%s\\n' '{LOGIN_SHELL_PATH_BEGIN}' (string join : $PATH) '{LOGIN_SHELL_PATH_END}'"
+        )
+    } else {
+        format!(
+            "printf '\\n%s\\n%s\\n%s\\n' '{LOGIN_SHELL_PATH_BEGIN}' \"$PATH\" '{LOGIN_SHELL_PATH_END}'"
+        )
+    }
+}
+
+/// Extracts the `PATH` printed by [`login_shell_path_script`], ignoring any startup noise before
+/// the start sentinel or after the end sentinel.
+pub fn extract_login_shell_path(stdout: &str) -> Option<String> {
+    let lines: Vec<&str> = stdout.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let end_idx = lines.iter().rposition(|l| *l == LOGIN_SHELL_PATH_END)?;
+    let start_idx = lines[..end_idx]
+        .iter()
+        .rposition(|l| *l == LOGIN_SHELL_PATH_BEGIN)?;
+    if end_idx != start_idx + 2 {
+        return None;
+    }
+    let path = lines[start_idx + 1].trim();
+    if path.is_empty() || path.contains(['\0', '\n', '\r']) {
+        return None;
+    }
+    Some(path.to_owned())
 }
 
 pub const NODE_FILE_ACCESS_SOCKET: &str = "services/node-file-access.sock";
@@ -567,4 +657,42 @@ pub struct HarnessUpdatesResponse {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct UpgradeHarnessResponse {
     pub receipt: HarnessUpgradeReceipt,
+}
+
+#[cfg(test)]
+mod login_shell_path_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn login_shell_path_script_and_extractor_ignore_startup_noise() {
+        let zsh_script = login_shell_path_script(Path::new("/bin/zsh"));
+        assert!(zsh_script.contains("\"$PATH\""));
+        assert!(zsh_script.contains(LOGIN_SHELL_PATH_BEGIN));
+        assert!(zsh_script.contains(LOGIN_SHELL_PATH_END));
+
+        let fish_script = login_shell_path_script(Path::new("/opt/homebrew/bin/fish"));
+        assert!(fish_script.contains("string join : $PATH"));
+
+        let noisy = format!(
+            "Welcome to macOS!\r\nwarning: nvm loaded\n\n{LOGIN_SHELL_PATH_BEGIN}\r\n/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin\r\n{LOGIN_SHELL_PATH_END}\nbye\n"
+        );
+        assert_eq!(
+            extract_login_shell_path(&noisy).as_deref(),
+            Some("/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin")
+        );
+        assert_eq!(extract_login_shell_path("no markers at all"), None);
+        assert_eq!(
+            extract_login_shell_path(&format!(
+                "{LOGIN_SHELL_PATH_BEGIN}\n   \n{LOGIN_SHELL_PATH_END}\n"
+            )),
+            None
+        );
+        assert_eq!(
+            extract_login_shell_path(&format!(
+                "{LOGIN_SHELL_PATH_BEGIN}\nline1\nline2\n{LOGIN_SHELL_PATH_END}\n"
+            )),
+            None
+        );
+    }
 }

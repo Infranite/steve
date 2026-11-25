@@ -1294,6 +1294,7 @@ mod tests {
                 resume_command: None,
                 fork_command: None,
                 capabilities: None,
+                missing_command: None,
             }),
         };
         let mut no_session = reported.clone();

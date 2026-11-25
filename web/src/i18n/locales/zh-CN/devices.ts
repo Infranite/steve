@@ -116,7 +116,21 @@ export default {
     models: "可用模型", reportedModels: "上次报告的模型（当前可用性未确认）", noModels: "未报告模型列表",
     componentInstalled: "已安装", manageLocal: "管理本机运行环境",
     state: { authentication_required: "需要身份验证", ready: "可用", not_installed: "未安装", installing: "安装中", unavailable: "不可用", unknown: "可用性未知" },
-    degraded: { authentication_required: "适配器未能完成身份验证。请在此节点配置非交互凭据后刷新；桌面登录前，登录钥匙串或交互提示可能不可用。", adapter_missing: "找不到适配器命令。", initialize_failed: "适配器未能初始化。", session_unavailable: "适配器未能开启探测会话。" },
+    degraded: {
+      authentication_required: "适配器未能完成身份验证。请在此节点配置非交互凭据后刷新；桌面登录前，登录钥匙串或交互提示可能不可用。",
+      adapter_missing: "找不到适配器命令。",
+      command_not_in_service_path: "服务 PATH 中找不到该命令，但登录 shell 里已安装。刷新服务环境后重新探测即可。",
+      initialize_failed: "适配器未能初始化。",
+      session_unavailable: "适配器未能开启探测会话。",
+    },
+    missingCommand: {
+      loginShellFound: "登录 shell 找到的位置",
+      loginShellFoundWithShell: "登录 shell（{{shell}}）找到的位置",
+      loginShellMissing: "登录 shell PATH 中也未找到该命令",
+      servicePath: "服务当前 PATH",
+      emptyPath: "（空）",
+      refreshHint: "在该设备上运行以下命令刷新服务环境，然后点「重新探测」：",
+    },
   },
 
   map: {

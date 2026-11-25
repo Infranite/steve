@@ -12,13 +12,18 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use steve_types::devices::{
+    ServiceCommandDiagnostic, ServiceEnvDiagnosticReason, ServicePathSource,
+    extract_login_shell_path, login_shell_path_script,
+};
 use uuid::Uuid;
 use wait_timeout::ChildExt;
 
@@ -41,6 +46,65 @@ type BootRegistrar =
 const MANAGED_RELEASE_COMMIT_PREFIX_LEN: usize = 8;
 const NODE_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const LINUX_UPDATE_STOP_WAIT_MIN_SECS: u64 = 15;
+const DARWIN_DEFAULT_SERVICE_PATH: &str =
+    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+const LINUX_DEFAULT_SERVICE_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ServicePath {
+    pub path: String,
+    pub source: ServicePathSource,
+    pub shell: Option<String>,
+    pub captured_at: String,
+}
+
+impl ServicePath {
+    pub(super) fn to_json(&self) -> Value {
+        json!({
+            "path": self.path,
+            "path_source": self.source,
+            "path_shell": self.shell,
+            "path_captured_at": self.captured_at,
+        })
+    }
+}
+
+fn utc_now_rfc3339() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as libc::time_t;
+    let mut utc: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::gmtime_r(&seconds, &mut utc);
+    }
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        utc.tm_year + 1900,
+        utc.tm_mon + 1,
+        utc.tm_mday,
+        utc.tm_hour,
+        utc.tm_min,
+        utc.tm_sec
+    )
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+fn which_in_path(command: &str, path_env: &str) -> Option<PathBuf> {
+    if command.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(command);
+    if candidate.is_absolute() || candidate.components().count() > 1 {
+        return is_executable_file(candidate).then(|| candidate.to_path_buf());
+    }
+    std::env::split_paths(OsStr::new(path_env))
+        .map(|dir| dir.join(command))
+        .find(|p| is_executable_file(p))
+}
 
 /// Manages only one OS user's registered Hub or Node service.
 pub struct Service {
@@ -1068,13 +1132,205 @@ impl Service {
         self.bundle(&managed)
     }
 
-    fn definition(&self, release: &Path) -> Result<Vec<u8>> {
+    pub(super) fn resolve_user_shell(&self) -> String {
+        if let Some(shell) = std::env::var_os("SHELL")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && is_executable_file(p))
+            && let Some(text) = shell.to_str()
+        {
+            return text.to_owned();
+        }
+        // SAFETY: `getpwuid` returns the account record for our current UID; copy immediately.
+        let pw = unsafe { libc::getpwuid(libc::getuid()) };
+        if !pw.is_null() && !unsafe { (*pw).pw_shell }.is_null() {
+            let cstr = unsafe { std::ffi::CStr::from_ptr((*pw).pw_shell) };
+            if let Ok(text) = cstr.to_str() {
+                let p = Path::new(text);
+                if p.is_absolute() && is_executable_file(p) {
+                    return text.to_owned();
+                }
+            }
+        }
+        if self.system == System::Darwin && is_executable_file(Path::new("/bin/zsh")) {
+            "/bin/zsh".to_owned()
+        } else {
+            "/bin/sh".to_owned()
+        }
+    }
+
+    pub(super) fn probe_login_shell_path(&self) -> Option<(String, String)> {
+        let shell = self.resolve_user_shell();
+        let script = login_shell_path_script(Path::new(&shell));
+        let out = self
+            .command(vec![shell.clone(), "-l".into(), "-c".into(), script], false)
+            .ok()?;
+        if out.code != 0 {
+            return None;
+        }
+        let path = extract_login_shell_path(&out.stdout)?;
+        Some((shell, path))
+    }
+
+    pub(super) fn resolve_service_path(&self) -> ServicePath {
+        let captured_at = utc_now_rfc3339();
+        if let Some((shell, path)) = self.probe_login_shell_path() {
+            return ServicePath {
+                path,
+                source: ServicePathSource::LoginShell,
+                shell: Some(shell),
+                captured_at,
+            };
+        }
+        if let Ok(path) = std::env::var("PATH")
+            && !path.trim().is_empty()
+        {
+            return ServicePath {
+                path,
+                source: ServicePathSource::ProcessEnv,
+                shell: None,
+                captured_at,
+            };
+        }
+        let default = if self.system == System::Darwin {
+            DARWIN_DEFAULT_SERVICE_PATH
+        } else {
+            LINUX_DEFAULT_SERVICE_PATH
+        };
+        ServicePath {
+            path: default.to_owned(),
+            source: ServicePathSource::DefaultFallback,
+            shell: None,
+            captured_at,
+        }
+    }
+
+    pub(super) fn configured_service_path(&self) -> Option<String> {
+        if exists(&self.config) {
+            if self.system == System::Darwin {
+                if let Ok(bytes) = self.definition_bytes()
+                    && let Ok(def) = plist::from_bytes::<Value>(&bytes)
+                    && let Some(path) = def["EnvironmentVariables"]["PATH"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                {
+                    return Some(path.to_owned());
+                }
+            } else if let Ok(bytes) = regular(&self.config)
+                && let Ok(content) = std::str::from_utf8(&bytes)
+            {
+                for line in content.lines() {
+                    if let Some(assignments) = line.strip_prefix("Environment=")
+                        && let Some(items) = shlex::split(assignments)
+                    {
+                        for item in items {
+                            if let Some(value) = item.strip_prefix("PATH=")
+                                && !value.is_empty()
+                            {
+                                return Some(value.replace("%%", "%"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.record["service_env"]["path"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
+    fn refresh_env_command(&self) -> String {
+        let default_home = self.user_home.join(if self.component == "hub" {
+            ".steve"
+        } else {
+            ".steve-node"
+        });
+        let default_label = format!("io.github.infranite.steve.{}", self.component);
+        let mut cmd = format!("steve {} refresh-env", self.component);
+        if self.home != default_home
+            && let Ok(home) = text(&self.home)
+        {
+            cmd.push_str(&format!(" --home {}", shell_quote(&home)));
+        }
+        if self.label != default_label {
+            cmd.push_str(&format!(" --label {}", shell_quote(&self.label)));
+        }
+        cmd
+    }
+
+    fn doctor_command_diagnostics(
+        &self,
+        service_path: &str,
+        login_shell_path: &str,
+    ) -> Vec<ServiceCommandDiagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut checked = std::collections::BTreeSet::new();
+        let refresh_command = self.refresh_env_command();
+
+        for builtin in steve_harness_spec::builtins() {
+            let mut candidates = vec![builtin.cli_bin];
+            candidates.extend(builtin.detect_bins.iter().copied());
+            let in_service = candidates
+                .iter()
+                .any(|bin| which_in_path(bin, service_path).is_some());
+            if in_service {
+                continue;
+            }
+            if let Some((bin, found)) = candidates
+                .iter()
+                .find_map(|bin| which_in_path(bin, login_shell_path).map(|p| (*bin, p)))
+                && checked.insert((builtin.id.to_owned(), bin.to_owned()))
+            {
+                diagnostics.push(ServiceCommandDiagnostic {
+                    reason: ServiceEnvDiagnosticReason::CommandNotInServicePath,
+                    harness: builtin.id.to_owned(),
+                    command: bin.to_owned(),
+                    service_path: service_path.to_owned(),
+                    login_shell_path: found.to_string_lossy().into_owned(),
+                    refresh_command: refresh_command.clone(),
+                });
+            }
+        }
+
+        if let Ok(harness_cfg) = read_json(&self.home.join("harness.json"))
+            && let Some(adapters) = harness_cfg["adapters"].as_object()
+        {
+            for (harness, entry) in adapters {
+                let raw_cmd = entry
+                    .as_str()
+                    .or_else(|| entry.get("command").and_then(Value::as_str));
+                let Some(cmd) = raw_cmd.filter(|c| !c.is_empty()) else {
+                    continue;
+                };
+                let path = Path::new(cmd);
+                if path.is_absolute() || path.components().count() > 1 {
+                    continue;
+                }
+                if which_in_path(cmd, service_path).is_some() {
+                    continue;
+                }
+                if let Some(found) = which_in_path(cmd, login_shell_path)
+                    && checked.insert((harness.clone(), cmd.to_owned()))
+                {
+                    diagnostics.push(ServiceCommandDiagnostic {
+                        reason: ServiceEnvDiagnosticReason::CommandNotInServicePath,
+                        harness: harness.clone(),
+                        command: cmd.to_owned(),
+                        service_path: service_path.to_owned(),
+                        login_shell_path: found.to_string_lossy().into_owned(),
+                        refresh_command: refresh_command.clone(),
+                    });
+                }
+            }
+        }
+
+        diagnostics
+    }
+
+    fn definition(&self, release: &Path, path_env: &str) -> Result<Vec<u8>> {
         let mut env = BTreeMap::from([
             ("STEVE_HOME", text(&self.home)?),
-            (
-                "PATH",
-                std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into()),
-            ),
+            ("PATH", path_env.to_owned()),
         ]);
         let command = if self.component == "hub" {
             let script = if self.signed {
@@ -1176,7 +1432,8 @@ impl Service {
         } else {
             (source, info)
         };
-        let data = self.definition(&release)?;
+        let service_path = self.resolve_service_path();
+        let data = self.definition(&release, &service_path.path)?;
         let same = self.config.is_file() && fs::read(&self.config)? == data;
         if !same {
             if was_running {
@@ -1247,7 +1504,8 @@ impl Service {
         } else {
             self.record["previous"].clone()
         };
-        self.record = json!({"component":self.component,"label":self.label,"release":text(&release)?,"build":info,"previous":previous});
+        let service_env = service_path.to_json();
+        self.record = json!({"component":self.component,"label":self.label,"release":text(&release)?,"build":info,"previous":previous,"service_env":service_env});
         atomic(&self.record_path, &json_bytes(&self.record)?)?;
         if self.system == System::Linux {
             self.systemctl(&["daemon-reload"], true)?;
@@ -1257,8 +1515,75 @@ impl Service {
             }
         }
         Ok(
-            json!({"installed":true,"changed":!same,"started":was_running,"release":text(&release)?,"build":info}),
+            json!({"installed":true,"changed":!same,"started":was_running,"release":text(&release)?,"build":info,"service_env":service_env}),
         )
+    }
+
+    fn refresh_env(&mut self) -> Result<Value> {
+        self.require_registration("refresh-env")?;
+        ensure!(
+            self.config.is_file(),
+            "service is not installed; run steve setup first"
+        );
+        self.check_owner()?;
+        let state = self.state()?;
+        ensure!(
+            state["running"].is_boolean(),
+            "service state is unknown{}; no files changed",
+            state["diagnostic"]
+                .as_str()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default()
+        );
+        let release_raw = if self.component == "hub" {
+            self.home.join("current")
+        } else {
+            PathBuf::from(
+                configured_release(&self.record).context("service has no configured release")?,
+            )
+        };
+        let (release, info) = self.bundle(&release_raw)?;
+        let service_path = self.resolve_service_path();
+        let data = self.definition(&release, &service_path.path)?;
+        let current_bytes = regular(&self.config)?;
+        let same = current_bytes == data;
+        let was_running = state["running"] == true;
+        if !same {
+            atomic(
+                &self.config.with_extension(format!(
+                    "{}.previous",
+                    self.config.extension().unwrap().to_string_lossy()
+                )),
+                &current_bytes,
+            )?;
+            atomic(&self.config, &data)?;
+        }
+        let service_env = service_path.to_json();
+        self.record["service_env"] = service_env.clone();
+        atomic(&self.record_path, &json_bytes(&self.record)?)?;
+        let mut restarted = false;
+        if !same {
+            if self.system == System::Linux {
+                self.systemctl(&["daemon-reload"], true)?;
+                self.systemctl(&["enable", &self.unit()], true)?;
+                if was_running {
+                    self.systemctl(&["restart", &self.unit()], true)?;
+                    restarted = true;
+                }
+            } else if was_running {
+                self.action("restart")?;
+                restarted = true;
+            }
+        }
+        Ok(json!({
+            "installed": true,
+            "changed": !same,
+            "restarted": restarted,
+            "started": was_running,
+            "release": text(&release)?,
+            "build": info,
+            "service_env": service_env,
+        }))
     }
 
     fn require_registration(&self, action: &str) -> Result<()> {
@@ -1546,6 +1871,19 @@ impl Service {
                 "node_id":pairing["node_id"],"hub_url":pairing["hub_url"]});
             report["sessions"] = json!("unknown; inspect Hub Devices before stopping");
         }
+        let configured_path = self.configured_service_path();
+        let mut service_env = self
+            .record
+            .get("service_env")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(path) = &configured_path {
+            service_env.insert("path".into(), json!(path));
+        }
+        if !service_env.is_empty() {
+            report["service_env"] = Value::Object(service_env);
+        }
         if let Some(candidate) = candidate {
             let (path, info) = self.bundle(candidate)?;
             report["candidate"] = json!({"release":text(&path)?,"build":info});
@@ -1599,6 +1937,27 @@ impl Service {
                 issues
                     .push("connection and active sessions require Hub Devices verification".into());
             }
+            let login_env = self.probe_login_shell_path();
+            let mut command_diagnostics = Vec::new();
+            if let Some((login_shell, login_path)) = &login_env {
+                let mut env_obj = report
+                    .get("service_env")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                env_obj.insert("login_shell".into(), json!(login_shell));
+                env_obj.insert("login_shell_path".into(), json!(login_path));
+                if let Some(svc_path) = &configured_path {
+                    env_obj.insert("path_outdated".into(), json!(svc_path != login_path));
+                    if self.component == "node" {
+                        command_diagnostics = self.doctor_command_diagnostics(svc_path, login_path);
+                    }
+                }
+                report["service_env"] = Value::Object(env_obj);
+            }
+            if !command_diagnostics.is_empty() {
+                report["command_diagnostics"] = json!(command_diagnostics);
+            }
             if report["automatic_upgrade"]["supported"] == false {
                 issues.push(
                     report["automatic_upgrade"]["reason"]
@@ -1625,6 +1984,7 @@ impl Service {
                 self.install(&release, action == "update", wait)
             }
             "status" | "doctor" => self.status(release, action == "doctor"),
+            "refresh-env" => self.refresh_env(),
             "uninstall" => self.uninstall(),
             "start" | "stop" | "restart" => self.action(action),
             _ => bail!("unsupported service action: {action}"),
@@ -1659,6 +2019,7 @@ mod tests {
         signing_failure: bool,
         lsof_pids: Option<Vec<u32>>,
         ps_commands: BTreeMap<u32, String>,
+        login_shell_path: Option<String>,
     }
 
     struct FakeNodeSigner(Arc<Mutex<Manager>>);
@@ -1813,6 +2174,20 @@ mod tests {
             {
                 result.code = 1;
                 result.stderr = "fake manager failure".into();
+            } else if args.len() == 4
+                && args[1] == "-l"
+                && args[2] == "-c"
+                && args[3].contains(steve_types::devices::LOGIN_SHELL_PATH_BEGIN)
+            {
+                if let Some(path) = &self.login_shell_path {
+                    result.stdout = format!(
+                        "welcome banner\n{}\n{path}\n{}\n",
+                        steve_types::devices::LOGIN_SHELL_PATH_BEGIN,
+                        steve_types::devices::LOGIN_SHELL_PATH_END
+                    );
+                } else {
+                    result.code = 1;
+                }
             } else if args[0] == "/usr/bin/id" {
                 assert_eq!(args, &["/usr/bin/id", "-un"]);
                 result.stdout = "fixture-node\n".into();
@@ -2038,6 +2413,9 @@ mod tests {
             }
             let boot_manager = manager.clone();
             service.boot_registrar = Arc::new(move |args, finish| {
+                let is_refresh = args.get(4).map(String::as_str) == Some("steve-node-refresh-env");
+                let refresh_reload =
+                    is_refresh && args.get(8).map(String::as_str) == Some("reload");
                 {
                     let mut m = boot_manager.lock().unwrap();
                     m.calls.push(args.to_vec());
@@ -2047,8 +2425,15 @@ mod tests {
                         m.failure.as_deref() != Some("-v"),
                         "fake authorization denied"
                     );
-                    for legacy in &args[8..] {
-                        m.legacy.remove(legacy);
+                    if is_refresh {
+                        if refresh_reload {
+                            m.loaded = false;
+                            m.running = false;
+                        }
+                    } else {
+                        for legacy in &args[8..] {
+                            m.legacy.remove(legacy);
+                        }
                     }
                 }
                 finish()?;
@@ -2059,8 +2444,10 @@ mod tests {
                 );
                 fs::create_dir_all(m.config.parent().unwrap())?;
                 fs::write(&m.config, &args[5])?;
-                m.loaded = true;
-                m.running = true;
+                if !is_refresh || refresh_reload {
+                    m.loaded = true;
+                    m.running = true;
+                }
                 Ok(())
             });
             service.node_signer = Arc::new(FakeNodeSigner(manager.clone()));
@@ -2131,7 +2518,9 @@ esac
                     let f = Fixture::new();
                     let (mut s, manager) = f.service(system, component);
                     fs::create_dir_all(s.config.parent().unwrap()).unwrap();
-                    let definition = s.definition(&f.release).unwrap();
+                    let definition = s
+                        .definition(&f.release, LINUX_DEFAULT_SERVICE_PATH)
+                        .unwrap();
                     fs::write(&s.config, &definition).unwrap();
                     if condition != "missing" {
                         atomic(
@@ -2527,7 +2916,9 @@ esac
             f.service_at(System::Darwin, "node", &f.home, Some("example.boot-node"));
         let agent = s.legacy_config();
         fs::create_dir_all(agent.parent().unwrap()).unwrap();
-        let old = s.definition(&f.release).unwrap();
+        let old = s
+            .definition(&f.release, DARWIN_DEFAULT_SERVICE_PATH)
+            .unwrap();
         fs::write(&agent, &old).unwrap();
         let (_, info) = s.bundle(&f.release).unwrap();
         atomic(
@@ -2627,7 +3018,9 @@ esac
         let (mut s, manager) = f.service(System::Darwin, "node");
         let agent = s.legacy_config();
         fs::create_dir_all(agent.parent().unwrap()).unwrap();
-        let old = s.definition(&f.release).unwrap();
+        let old = s
+            .definition(&f.release, DARWIN_DEFAULT_SERVICE_PATH)
+            .unwrap();
         fs::write(&agent, &old).unwrap();
         let (_, info) = s.bundle(&f.release).unwrap();
         atomic(
@@ -2682,7 +3075,12 @@ esac
             fs::remove_file(incomplete.join("bin/steve-node")).unwrap();
             let agent = s.legacy_config();
             fs::create_dir_all(agent.parent().unwrap()).unwrap();
-            fs::write(&agent, s.definition(&f.release).unwrap()).unwrap();
+            fs::write(
+                &agent,
+                s.definition(&f.release, DARWIN_DEFAULT_SERVICE_PATH)
+                    .unwrap(),
+            )
+            .unwrap();
             let (_, build) = s.bundle(&f.release).unwrap();
             atomic(
                 &s.record_path,
@@ -2893,7 +3291,12 @@ cd "${0%/*}"
         let (_, info) = s.bundle(&f.release).unwrap();
         // Simulate a pre-0.10.1 ad-hoc boot Node: daemon installed, unsigned runner, null code_requirement.
         fs::create_dir_all(s.config.parent().unwrap()).unwrap();
-        fs::write(&s.config, s.boot_definition("fixture-node").unwrap()).unwrap();
+        fs::write(
+            &s.config,
+            s.boot_definition("fixture-node", DARWIN_DEFAULT_SERVICE_PATH)
+                .unwrap(),
+        )
+        .unwrap();
         directory(&f.home.join("services")).unwrap();
         atomic_mode(&f.home.join(boot::RUNNER), b"adhoc-supervisor", 0o700).unwrap();
         atomic(
@@ -3735,6 +4138,196 @@ esac
             assert!(
                 err.contains("binary /") && !err.contains("binary unknown"),
                 "expected resolved binary path, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_and_enable_boot_capture_login_shell_path_with_source_and_timestamp() {
+        let login_path = "/Users/example/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+        for system in [System::Darwin, System::Linux] {
+            let f = Fixture::new();
+            let (mut s, manager) = f.service(system, "node");
+            manager.lock().unwrap().login_shell_path = Some(login_path.into());
+
+            s.dispatch("install", Some(&f.release), 0).unwrap();
+            if s.boot_node() {
+                s.dispatch("enable-boot", None, 0).unwrap();
+                let plist: Value = plist::from_bytes(&fs::read(&s.config).unwrap()).unwrap();
+                assert_eq!(plist["EnvironmentVariables"]["PATH"], login_path);
+            } else {
+                let unit = fs::read_to_string(&s.config).unwrap();
+                assert!(unit.contains(&format!("PATH={login_path}")), "{unit}");
+            }
+            assert_eq!(s.configured_service_path().as_deref(), Some(login_path));
+            let receipt = object(&s.record_path).unwrap();
+            assert_eq!(receipt["service_env"]["path"], login_path, "{system:?}");
+            assert_eq!(
+                receipt["service_env"]["path_source"], "login_shell",
+                "{system:?}"
+            );
+            assert!(
+                receipt["service_env"]["path_shell"]
+                    .as_str()
+                    .is_some_and(|sh| sh.starts_with('/')),
+                "{system:?}: {:?}",
+                receipt["service_env"]
+            );
+            assert!(
+                receipt["service_env"]["path_captured_at"]
+                    .as_str()
+                    .is_some_and(|ts| ts.ends_with('Z') && ts.len() == 20),
+                "{system:?}: {:?}",
+                receipt["service_env"]
+            );
+            // Verify the shell was invoked with `-l -c`.
+            assert!(
+                manager
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .any(|c| c.len() == 4 && c[1] == "-l" && c[2] == "-c"),
+                "{system:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_env_and_rerun_enable_boot_update_path_and_restart_when_running() {
+        let initial_path = "/usr/bin:/bin:/usr/sbin:/sbin";
+        let refreshed_path = "/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin";
+        let rerun_path =
+            "/Users/example/.local/bin:/Users/example/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin";
+
+        for system in [System::Darwin, System::Linux] {
+            let f = Fixture::new();
+            let (mut s, manager) = f.service(system, "node");
+            manager.lock().unwrap().login_shell_path = Some(initial_path.into());
+            s.dispatch("install", Some(&f.release), 0).unwrap();
+            if s.boot_node() {
+                s.dispatch("enable-boot", None, 0).unwrap();
+            } else {
+                s.dispatch("start", None, 0).unwrap();
+            }
+            assert_eq!(s.configured_service_path().as_deref(), Some(initial_path));
+
+            // No PATH change -> changed=false, no restart.
+            manager.lock().unwrap().calls.clear();
+            let unchanged = s.dispatch("refresh-env", None, 0).unwrap();
+            assert_eq!(unchanged["changed"], false, "{system:?}");
+            assert_eq!(unchanged["restarted"], false, "{system:?}");
+            assert_eq!(unchanged["started"], true, "{system:?}");
+            assert!(
+                !manager
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .any(|c| c[0] == "/usr/bin/sudo" || c.iter().any(|a| a == "restart")),
+                "{system:?}"
+            );
+
+            // New CLI directory added to login shell -> refresh-env updates definition and restarts running service.
+            manager.lock().unwrap().login_shell_path = Some(refreshed_path.into());
+            manager.lock().unwrap().calls.clear();
+            let updated = s.dispatch("refresh-env", None, 0).unwrap();
+            assert_eq!(updated["changed"], true, "{system:?}");
+            assert_eq!(updated["restarted"], true, "{system:?}");
+            assert_eq!(updated["started"], true, "{system:?}");
+            assert_eq!(updated["service_env"]["path"], refreshed_path, "{system:?}");
+            assert_eq!(
+                s.configured_service_path().as_deref(),
+                Some(refreshed_path),
+                "{system:?}"
+            );
+            assert!(manager.lock().unwrap().running, "{system:?}");
+
+            // Re-running enable-boot on macOS also refreshes the plist when login-shell PATH changed.
+            if s.boot_node() {
+                manager.lock().unwrap().login_shell_path = Some(rerun_path.into());
+                s.dispatch("enable-boot", None, 0).unwrap();
+                assert_eq!(s.configured_service_path().as_deref(), Some(rerun_path));
+                assert!(manager.lock().unwrap().running);
+            }
+
+            // Stopped service -> refresh-env updates definition without starting it.
+            s.dispatch("stop", None, 0).unwrap();
+            assert!(!manager.lock().unwrap().running, "{system:?}");
+            let stopped_path = "/Users/example/bin:/usr/bin:/bin";
+            manager.lock().unwrap().login_shell_path = Some(stopped_path.into());
+            let stopped_refresh = s.dispatch("refresh-env", None, 0).unwrap();
+            assert_eq!(stopped_refresh["changed"], true, "{system:?}");
+            assert_eq!(stopped_refresh["restarted"], false, "{system:?}");
+            assert_eq!(stopped_refresh["started"], false, "{system:?}");
+            assert_eq!(
+                s.configured_service_path().as_deref(),
+                Some(stopped_path),
+                "{system:?}"
+            );
+            assert!(!manager.lock().unwrap().running, "{system:?}");
+            f.preserved();
+        }
+    }
+
+    #[test]
+    fn node_doctor_reports_missing_command_with_service_path_login_shell_location_and_refresh_hint()
+    {
+        for system in [System::Darwin, System::Linux] {
+            let f = Fixture::new();
+            let minimal_bin = f.root.join("minimal-bin");
+            let user_bin = f.root.join("user-local-bin");
+            fs::create_dir(&minimal_bin).unwrap();
+            fs::create_dir(&user_bin).unwrap();
+            let agy = user_bin.join("agy");
+            fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let (mut s, manager) = f.service(system, "node");
+            let svc_path = minimal_bin.to_str().unwrap().to_owned();
+            manager.lock().unwrap().login_shell_path = Some(svc_path.clone());
+            s.dispatch("install", Some(&f.release), 0).unwrap();
+            if s.boot_node() {
+                s.dispatch("enable-boot", None, 0).unwrap();
+            }
+
+            let login_path = format!("{}:{}", user_bin.display(), minimal_bin.display());
+            manager.lock().unwrap().login_shell_path = Some(login_path.clone());
+            let report = s.dispatch("doctor", None, 0).unwrap();
+            assert_eq!(report["service_env"]["path"], svc_path, "{system:?}");
+            assert_eq!(
+                report["service_env"]["login_shell_path"], login_path,
+                "{system:?}"
+            );
+            assert_eq!(report["service_env"]["path_outdated"], true, "{system:?}");
+
+            let diags = report["command_diagnostics"]
+                .as_array()
+                .expect("command_diagnostics present");
+            let agy_diag = diags
+                .iter()
+                .find(|d| d["harness"] == "antigravity" && d["command"] == "agy")
+                .unwrap_or_else(|| panic!("{system:?}: expected agy diagnostic in {diags:?}"));
+            assert_eq!(agy_diag["reason"], "command_not_in_service_path");
+            assert_eq!(agy_diag["service_path"], svc_path);
+            assert_eq!(agy_diag["login_shell_path"], text(&agy).unwrap());
+            assert!(
+                agy_diag["refresh_command"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("steve node refresh-env"),
+                "{agy_diag:?}"
+            );
+
+            // After refresh-env, doctor reports no missing-command mismatch for agy.
+            s.dispatch("refresh-env", None, 0).unwrap();
+            let clean = s.dispatch("doctor", None, 0).unwrap();
+            assert_eq!(clean["service_env"]["path_outdated"], false, "{system:?}");
+            assert!(
+                clean["command_diagnostics"]
+                    .as_array()
+                    .is_none_or(|d| !d.iter().any(|x| x["command"] == "agy")),
+                "{clean:?}"
             );
         }
     }

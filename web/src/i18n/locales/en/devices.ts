@@ -120,7 +120,21 @@ export default {
     models: "Available models", reportedModels: "Last reported models (current availability unconfirmed)", noModels: "No model list reported",
     componentInstalled: "Installed", manageLocal: "Manage local runtimes",
     state: { authentication_required: "Authentication required", ready: "Available", not_installed: "Not installed", installing: "Installing", unavailable: "Unavailable", unknown: "Availability unknown" },
-    degraded: { authentication_required: "The adapter could not authenticate. Configure a non-interactive credential on this Node and refresh. A login Keychain or desktop prompt may be unavailable before sign-in.", adapter_missing: "The adapter command is missing.", initialize_failed: "The adapter could not initialize.", session_unavailable: "The adapter did not open a probe session." },
+    degraded: {
+      authentication_required: "The adapter could not authenticate. Configure a non-interactive credential on this Node and refresh. A login Keychain or desktop prompt may be unavailable before sign-in.",
+      adapter_missing: "The adapter command is missing.",
+      command_not_in_service_path: "The command is missing from the Node service PATH, even though the login shell can find it. Refresh the service environment and probe again.",
+      initialize_failed: "The adapter could not initialize.",
+      session_unavailable: "The adapter did not open a probe session.",
+    },
+    missingCommand: {
+      loginShellFound: "Found in login shell",
+      loginShellFoundWithShell: "Found in login shell ({{shell}})",
+      loginShellMissing: "Not found in the login shell PATH either",
+      servicePath: "Current service PATH",
+      emptyPath: "(empty)",
+      refreshHint: "Run this on the device to refresh its service PATH, then click Probe again:",
+    },
   },
 
   map: {

@@ -196,6 +196,39 @@ printf '%s' "$definition" > "$temp"
 /bin/launchctl bootstrap system "$config" >&2
 "#;
 
+// One sudo command to atomically update an existing LaunchDaemon definition (for example after
+// refreshing the user's login-shell PATH) and reload it when it was running.
+const UPDATE_BOOT_DEFINITION: &str = r#"set -eu
+export LC_ALL=C
+definition=$1 config=$2 target=$3 mode=$4
+[ -f "$config" ] && [ ! -L "$config" ] || exit 1
+if [ "$mode" = reload ]; then
+    if ! /bin/launchctl bootout "$target" >&2; then
+        rc=0
+        state=$(/bin/launchctl print "$target" 2>&1) || rc=$?
+        [ "$rc" -ne 0 ] || exit 1
+        case "$rc" in
+            3|113) ;;
+            *) printf '%s\n' "$state" >&2; exit 1 ;;
+        esac
+    fi
+fi
+printf '%s\n' detached
+IFS= read -r ack && [ "$ack" = ready ] || exit 1
+temp=$(/usr/bin/mktemp "${config%/*}/.steve-node.XXXXXXXX")
+trap '/bin/rm -f -- "$temp"' EXIT
+printf '%s' "$definition" > "$temp"
+/usr/bin/plutil -lint -- "$temp" >&2
+/usr/sbin/chown root:wheel "$temp"
+/bin/chmod 0644 "$temp"
+[ -f "$config" ] && [ ! -L "$config" ] || exit 1
+/bin/mv -f -- "$temp" "$config"
+if [ "$mode" = reload ]; then
+    /bin/launchctl enable "$target" >&2
+    /bin/launchctl bootstrap system "$config" >&2
+fi
+"#;
+
 pub(super) fn execute_register(
     args: &[String],
     finish: &mut dyn FnMut() -> Result<()>,
@@ -398,6 +431,7 @@ impl Service {
         );
         match action {
             "enable-boot" => self.enable_boot(),
+            "refresh-env" => self.refresh_boot_env(),
             "install" | "update" => self.prepare_boot(release, action == "update", wait),
             "start" | "restart" | "stop" => {
                 self.require_no_agent()?;
@@ -530,7 +564,7 @@ impl Service {
             } else {
                 self.record["previous"].clone()
             };
-            self.write_boot_record(&release, &info, previous, requirement)?;
+            self.write_boot_record(&release, &info, previous, requirement, None)?;
         }
         let started = update && installed && was_running;
         Ok(
@@ -592,6 +626,7 @@ impl Service {
         info: &Value,
         previous: Value,
         requirement: String,
+        service_env: Option<&ServicePath>,
     ) -> Result<()> {
         // Deliberately not "release": an old Node can run here for migration/rollback but
         // must not advertise remote maintenance via its old gui-domain service helper.
@@ -600,8 +635,13 @@ impl Service {
             !release.contains(['\r', '\n']),
             "macOS Node release paths cannot contain newlines"
         );
-        let record = json!({"component":"node","label":self.label,"boot_release":release,
+        let mut record = json!({"component":"node","label":self.label,"boot_release":release,
             "build":info,"previous":previous,"code_requirement":requirement});
+        if let Some(env) = service_env {
+            record["service_env"] = env.to_json();
+        } else if let Some(existing_env) = self.record.get("service_env").filter(|v| !v.is_null()) {
+            record["service_env"] = existing_env.clone();
+        }
         atomic(&self.record_path, &json_bytes(&record)?)?;
         self.record = record;
         Ok(())
@@ -695,7 +735,7 @@ impl Service {
         Ok(name.into())
     }
 
-    pub(super) fn boot_definition(&self, account: &str) -> Result<Vec<u8>> {
+    pub(super) fn boot_definition(&self, account: &str, path_env: &str) -> Result<Vec<u8>> {
         let mut output = Vec::new();
         plist::to_writer_xml(
             &mut output,
@@ -704,7 +744,7 @@ impl Service {
                 "ProgramArguments":self.boot_arguments()?,
                 "EnvironmentVariables":{
                     "HOME":text(&self.user_home)?, "STEVE_HOME":text(&self.home)?,
-                    "PATH":std::env::var("PATH").unwrap_or_else(|_| "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()),
+                    "PATH":path_env,
                 },
                 "RunAtLoad":true, "KeepAlive":true, "ExitTimeOut":600,
             }),
@@ -714,6 +754,92 @@ impl Service {
 
     pub(super) fn boot_arguments(&self) -> Result<Value> {
         Ok(json!([text(&self.home.join(RUNNER))?, RUNNER_ARG]))
+    }
+
+    fn replace_boot_definition(
+        &mut self,
+        account: &str,
+        service_path: &ServicePath,
+        reload: bool,
+    ) -> Result<()> {
+        let data = self.boot_definition(account, &service_path.path)?;
+        let mode = if reload { "reload" } else { "static" };
+        let args = vec![
+            "/usr/bin/sudo".into(),
+            "/bin/sh".into(),
+            "-c".into(),
+            UPDATE_BOOT_DEFINITION.into(),
+            "steve-node-refresh-env".into(),
+            std::str::from_utf8(&data)?.into(),
+            text(&self.config)?,
+            format!("system/{}", self.label),
+            mode.into(),
+        ];
+        let env_json = service_path.to_json();
+        let register = self.boot_registrar.clone();
+        register(&args, &mut || {
+            if reload {
+                self.wait_unloaded("system", &self.config, 15)?;
+                self.wait_node_exit(self.node_exit_wait)?;
+            }
+            self.record["service_env"] = env_json.clone();
+            atomic(&self.record_path, &json_bytes(&self.record)?)?;
+            Ok(())
+        })?;
+        ensure!(
+            self.definition_bytes()? == data,
+            "boot definition did not verify after environment refresh"
+        );
+        Ok(())
+    }
+
+    fn refresh_boot_env(&mut self) -> Result<Value> {
+        self.require_no_agent()?;
+        ensure!(
+            self.record["uninstalled"] != true && self.record.get("uninstall").is_none(),
+            "finish uninstall and prepare an installation before refreshing the service environment"
+        );
+        ensure!(
+            exists(&self.config),
+            "macOS Node boot service is not installed; run steve node enable-boot"
+        );
+        self.check_owner()?;
+        let state = self.state()?;
+        ensure!(
+            state["running"].is_boolean(),
+            "cannot determine macOS Node service state: {}",
+            state["diagnostic"]
+                .as_str()
+                .unwrap_or("unknown launchctl failure")
+        );
+        let account = self.account()?;
+        let service_path = self.resolve_service_path();
+        let expected = self.boot_definition(&account, &service_path.path)?;
+        let same = self.definition_bytes()? == expected;
+        let was_running = state["running"] == true;
+        let was_loaded = state["loaded"] == true;
+        let mut restarted = false;
+        if same {
+            self.record["service_env"] = service_path.to_json();
+            atomic(&self.record_path, &json_bytes(&self.record)?)?;
+        } else {
+            let reload = was_running || was_loaded;
+            self.replace_boot_definition(&account, &service_path, reload)?;
+            restarted = reload;
+        }
+        let release = configured_release(&self.record)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        Ok(json!({
+            "installed": true,
+            "changed": !same,
+            "restarted": restarted,
+            "started": was_running || restarted,
+            "boot": "registered",
+            "release": release,
+            "build": self.record["build"],
+            "service_env": service_path.to_json(),
+        }))
     }
 
     fn enable_boot(&mut self) -> Result<Value> {
@@ -726,6 +852,7 @@ impl Service {
             configured_release(&self.record).context("Node has no prepared release")?,
         );
         self.check_owner()?;
+        let service_path = self.resolve_service_path();
         if exists(&self.config) {
             self.require_no_agent()?;
             let (release, info) = self.bundle(&release)?;
@@ -752,7 +879,21 @@ impl Service {
                     &info,
                     self.record["previous"].clone(),
                     requirement,
+                    None,
                 )?;
+            }
+            let expected = self.boot_definition(&account, &service_path.path)?;
+            if self.definition_bytes()? != expected {
+                let state = self.state()?;
+                ensure!(
+                    state["running"].is_boolean(),
+                    "cannot determine macOS Node service state: {}",
+                    state["diagnostic"]
+                        .as_str()
+                        .unwrap_or("unknown launchctl failure")
+                );
+                let reload = state["running"] == true || state["loaded"] == true;
+                self.replace_boot_definition(&account, &service_path, reload)?;
             }
         } else {
             self.wait_unloaded("system", &self.config, 0)?;
@@ -773,7 +914,7 @@ impl Service {
                 &self.home.join("services"),
                 &identity,
             )?);
-            let data = self.boot_definition(&account)?;
+            let data = self.boot_definition(&account, &service_path.path)?;
             let args = [
                 "/usr/bin/sudo".into(),
                 "/bin/sh".into(),
@@ -791,16 +932,13 @@ impl Service {
             register(&args, &mut || {
                 self.retire_agent(legacy.definition.as_deref())?;
                 self.wait_node_exit(self.node_exit_wait)?;
-                if self.record["boot_release"].is_null()
-                    || self.record["code_requirement"].as_str() != Some(requirement.as_str())
-                {
-                    self.write_boot_record(
-                        &release,
-                        &info,
-                        self.record["previous"].clone(),
-                        requirement.clone(),
-                    )?;
-                }
+                self.write_boot_record(
+                    &release,
+                    &info,
+                    self.record["previous"].clone(),
+                    requirement.clone(),
+                    Some(&service_path),
+                )?;
                 directory(&self.home.join("logs"))?;
                 staged_runner.install_to(self.node_signer.as_ref(), &self.home.join(RUNNER))?;
                 Ok(())
@@ -1164,13 +1302,15 @@ mod tests {
 
     #[test]
     fn privileged_registration_requires_both_authorization_and_user_ready() {
-        assert!(
-            Command::new("/bin/sh")
-                .args(["-n", "-c", REGISTER])
-                .status()
-                .unwrap()
-                .success()
-        );
+        for script in [REGISTER, UPDATE_BOOT_DEFINITION] {
+            assert!(
+                Command::new("/bin/sh")
+                    .args(["-n", "-c", script])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
         let fixture = |script: &str| vec!["/bin/sh".into(), "-c".into(), script.into()];
         // A failed sudo/bootout writes no marker and must not reach owner-owned files.
         assert!(execute_register(&fixture("exit 1"), &mut || panic!("not authorized")).is_err());
