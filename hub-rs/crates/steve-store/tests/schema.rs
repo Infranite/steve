@@ -248,7 +248,7 @@ fn row_types_follow_column_order() {
     assert_eq!(keys(&item), columns);
     assert_eq!(
         keys(&s.bots().get("steve").unwrap().unwrap()),
-        without("bots", &["project_dir", "worktree", "deleted", "owner"])
+        without("bots", &["deleted", "owner"])
     );
     let prj = s
         .projects()

@@ -210,7 +210,7 @@ impl Project {
     }
 }
 
-/// `rowBot`: `project_dir`, `worktree`, `deleted` are dropped; `workspace_id` is the legacy owner.
+/// `rowBot`: `deleted` is omitted from serialized JSON; `workspace_id` is the legacy owner.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Bot {
     pub id: String,
@@ -320,7 +320,7 @@ impl Tag {
     }
 }
 
-/// `rowItem`. `project_dir` (legacy, always null today) stays in the JSON like in TS.
+/// `rowItem`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Item {
     pub id: String,
@@ -330,7 +330,6 @@ pub struct Item {
     pub kind: String,
     pub title: String,
     pub bot_id: Option<String>,
-    pub project_dir: Option<String>,
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub plan: Vec<PlanStep>,
@@ -384,7 +383,6 @@ impl Item {
             kind: r.get("kind")?,
             title: r.get("title")?,
             bot_id: r.get("bot_id")?,
-            project_dir: r.get("project_dir")?,
             cwd: r.get("cwd")?,
             branch: r.get("branch")?,
             plan: json_col(r, "plan", Vec::new())?,

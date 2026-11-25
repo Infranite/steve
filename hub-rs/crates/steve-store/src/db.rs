@@ -271,6 +271,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/128.sql"),
     // 129: normalize lingering retired Bot perm_mode values to default.
     include_str!("../migrations/129.sql"),
+    // 130: drop retired bots.project_dir, bots.worktree, and items.project_dir columns.
+    include_str!("../migrations/130.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

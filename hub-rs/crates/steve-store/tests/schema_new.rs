@@ -1050,3 +1050,35 @@ fn migration_129_normalizes_retired_bot_perm_modes() {
         })
         .unwrap();
 }
+
+#[test]
+fn migration_130_drops_legacy_project_dir_and_worktree_columns() {
+    let (_dir, path) = at_version(129);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO bots(id,workspace_id,name,harness,project_dir,worktree,updated)
+             VALUES ('b1','default','Bot1','claude-code','/old',1,1);
+           INSERT INTO items(id,workspace_id,no,title,phase,bot_id,project_dir,created,updated)
+             VALUES ('ST-1','default',1,'Item','active','b1','/old',1,1);"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    store
+        .fixture_write(|c| {
+            let bot_cols = columns(c, "bots");
+            assert!(!bot_cols.contains(&"project_dir".to_string()));
+            assert!(!bot_cols.contains(&"worktree".to_string()));
+            let item_cols = columns(c, "items");
+            assert!(!item_cols.contains(&"project_dir".to_string()));
+            assert_eq!(count(c, "SELECT COUNT(*) FROM bots WHERE id='b1'"), 1);
+            assert_eq!(count(c, "SELECT COUNT(*) FROM items WHERE id='ST-1'"), 1);
+            assert_eq!(count(c, "SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+            Ok(())
+        })
+        .unwrap();
+    let item = store.items().get("ST-1").unwrap().unwrap();
+    let j = serde_json::to_value(&item).unwrap();
+    assert!(j.get("project_dir").is_none());
+}
