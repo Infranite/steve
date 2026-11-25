@@ -33,6 +33,8 @@ pub struct FakeState {
     pub release_answers: HashMap<String, Released>,
     /// `created` calls: (session, the release it waits for)
     pub created: Vec<(String, Option<String>)>,
+    /// Personal `system_context` passed to `created_with_placement` per session.
+    pub system_contexts: HashMap<String, String>,
     /// A Node starts only after another thread can read the committed session (ST-174).
     pub starts_require_commit: bool,
     /// decision id → still answerable
@@ -402,6 +404,20 @@ impl AgentRuntime for FakeRuntime {
     }
     fn is_busy(&self, sid: &str) -> bool {
         self.st().turning.contains(sid)
+    }
+    fn created_with_placement(
+        &self,
+        sid: &str,
+        after: Option<&str>,
+        _explanation: Option<&steve_types::PlacementExplanation>,
+        system_context: Option<&str>,
+    ) {
+        if let Some(ctx) = system_context {
+            self.st()
+                .system_contexts
+                .insert(sid.to_string(), ctx.to_string());
+        }
+        self.created(sid, after);
     }
     fn created(&self, sid: &str, after: Option<&str>) {
         if self.st().starts_require_commit {

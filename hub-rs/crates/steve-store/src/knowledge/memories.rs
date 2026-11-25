@@ -10,9 +10,25 @@ use crate::base::{
 use crate::contract::Row;
 use crate::{Read, Result, W, now, uid};
 
+/// Upper bound on SQL rows fetched for anchor memory assembly; actual selection is bounded by
+/// caller character/token budgets (`L1_ME_MAX_CHARS`, `L1_ENTITY_MAX_CHARS`,
+/// `SESSION_CONTEXT_MAX_TOKENS`) rather than a fixed small count.
+pub const ANCHOR_QUERY_MAX_ROWS: usize = 200;
+
+/// Options for reading active anchor memories (`status = 'confirmed'`, `level != 'never'`,
+/// unexpired) ordered by `pinned DESC`, kind priority (`rule` > `preference` > `summary` >
+/// `fact` > `event`), `updated DESC`, `id ASC`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AnchorQuery {
+    /// Restrict to `visibility = 'workspace'` (multi-member workspaces or service audiences).
+    pub workspace_only: bool,
+    /// Hard SQL row ceiling (`0` defaults to [`ANCHOR_QUERY_MAX_ROWS`]).
+    pub max_rows: usize,
+}
+
 pub struct Memories<'a, C>(pub &'a mut C);
 
-const COLUMNS: [&str; 16] = [
+const COLUMNS: [&str; 17] = [
     "id",
     "workspace_id",
     "kind",
@@ -29,6 +45,7 @@ const COLUMNS: [&str; 16] = [
     "created_by",
     "created",
     "updated",
+    "pinned",
 ];
 
 fn row(r: &Row<'_>) -> Result<Mem> {
@@ -49,6 +66,7 @@ fn row(r: &Row<'_>) -> Result<Mem> {
         created_by: r.get(13)?,
         created: r.get(14)?,
         updated: r.get(15)?,
+        pinned: r.get::<i64>(16)? != 0,
         about: Vec::new(),
     })
 }
@@ -207,16 +225,25 @@ impl<C: Read> Memories<'_, C> {
         )
     }
 
+    /// Active confirmed memories about any of `anchors`, ordered by `pinned DESC`, kind priority
+    /// (`rule` > `preference` > `summary` > `fact` > `event`), `updated DESC`, `id ASC`.
+    /// Never filters out `fact`/`summary`/`event` and never truncates at 5 rows; callers enforce
+    /// named character/token budgets.
     pub fn anchors(
         &mut self,
         viewer: &Viewer,
         anchors: &[ObjRef],
-        limit: usize,
         at: i64,
+        opts: AnchorQuery,
     ) -> Result<Vec<Mem>> {
-        if limit == 0 || anchors.is_empty() {
+        if anchors.is_empty() {
             return Ok(Vec::new());
         }
+        let max_rows = if opts.max_rows == 0 {
+            ANCHOR_QUERY_MAX_ROWS
+        } else {
+            opts.max_rows
+        };
         let targets = anchors.iter().fold(Condition::any(), |condition, anchor| {
             condition.add(
                 Expr::col("object_type")
@@ -230,23 +257,33 @@ impl<C: Read> Memories<'_, C> {
             .and_where(Expr::col("mem_id").equals(("m", "id")))
             .cond_where(targets)
             .take();
-        self.list(
-            query(
-                viewer,
-                &MemFilter {
-                    statuses: vec!["confirmed".into()],
-                    limit: limit as i64,
-                    ..Default::default()
-                },
-            )
-            .and_where(Expr::col(("m", "kind")).is_in(["rule", "preference"]))
+        let kind_priority = Expr::case(Expr::col(("m", "kind")).eq("rule"), 0_i64)
+            .case(Expr::col(("m", "kind")).eq("preference"), 1_i64)
+            .case(Expr::col(("m", "kind")).eq("summary"), 2_i64)
+            .case(Expr::col(("m", "kind")).eq("fact"), 3_i64)
+            .case(Expr::col(("m", "kind")).eq("event"), 4_i64)
+            .finally(5_i64);
+        let mut q = Query::select();
+        q.columns(COLUMNS.map(|col| ("m", col)))
+            .from_as("mems", "m")
+            .and_where(Expr::col(("m", "workspace_id")).eq(viewer.ws.as_str()))
+            .and_where(Expr::col(("m", "status")).eq("confirmed"))
+            .and_where(Expr::col(("m", "level")).ne("never"))
             .and_where(
                 Expr::col(("m", "valid_until"))
                     .is_null()
                     .or(Expr::col(("m", "valid_until")).gt(at)),
             )
-            .and_where(Expr::exists(about)),
-        )
+            .and_where(Expr::exists(about));
+        if viewer.is_service() || opts.workspace_only {
+            q.and_where(Expr::col(("m", "visibility")).eq("workspace"));
+        }
+        q.order_by(("m", "pinned"), Order::Desc)
+            .order_by_expr(kind_priority.into(), Order::Asc)
+            .order_by(("m", "updated"), Order::Desc)
+            .order_by(("m", "id"), Order::Asc)
+            .limit(max_rows as u64);
+        self.list(&q)
     }
 
     fn candidate_age(&mut self) -> Expr {
@@ -435,6 +472,7 @@ impl Memories<'_, W<'_>> {
                     m.created_by.as_str().into(),
                     at.into(),
                     at.into(),
+                    i64::from(m.pinned).into(),
                 ]),
         )?;
         for a in &m.about {
@@ -465,7 +503,7 @@ impl Memories<'_, W<'_>> {
         };
         let mut q = Query::update();
         q.table("mems").and_where(Expr::col("id").eq(id));
-        let fields: [(&str, Option<sea_query::Value>); 6] = [
+        let fields: [(&str, Option<sea_query::Value>); 7] = [
             ("text", patch.text.as_deref().map(Into::into)),
             ("level", patch.level.map(|level| level.code().into())),
             ("status", patch.status.as_deref().map(Into::into)),
@@ -478,6 +516,7 @@ impl Memories<'_, W<'_>> {
                 patch.decision_id.as_ref().map(|id| id.as_deref().into()),
             ),
             ("valid_until", patch.valid_until.map(Into::into)),
+            ("pinned", patch.pinned.map(|p| i64::from(p).into())),
         ];
         if fields.iter().all(|(_, value)| value.is_none()) {
             return Ok(Some(old));

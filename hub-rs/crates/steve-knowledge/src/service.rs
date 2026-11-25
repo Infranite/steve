@@ -512,7 +512,7 @@ fn mem_json_with(c: &mut impl Read, viewer: Option<&Viewer>, m: &Mem) -> Value {
     json!({
         "id": m.id, "kind": m.kind, "text": m.text, "source_type": m.source_type,
         "source_label": crate::sources::label_shown(&m.source_label), "level": m.level, "status": m.status,
-        "visibility": m.visibility, "about": about, "created": m.created, "updated": m.updated,
+        "visibility": m.visibility, "pinned": m.pinned, "about": about, "created": m.created, "updated": m.updated,
         "origin": origin,
     })
 }
@@ -584,6 +584,8 @@ pub struct MemBody {
     #[serde(default)]
     pub visibility: Option<Visibility>,
     #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
     pub about: Vec<ObjRef>,
 }
 
@@ -612,6 +614,7 @@ pub fn create_mem(m: &Modules, who: &Caller, b: MemBody) -> ApiResult<Value> {
                 status: "confirmed".into(),
                 writer: "me".into(),
                 created_by: who.me.clone(),
+                pinned: b.pinned,
                 about: b.about.clone(),
                 ..Default::default()
             },

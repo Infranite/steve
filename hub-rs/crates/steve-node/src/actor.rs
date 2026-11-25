@@ -309,6 +309,10 @@ pub(crate) struct LiveNew {
     started: Option<u64>,
     view: SessionView,
     cumulative_prompt_tokens: Option<(u64, u64, u64, u64, u64)>,
+    /// Personal user context that could not be delivered via the adapter's native channel on a
+    /// fresh session (e.g. legacy adapter binary); prepended once on the first prompt as
+    /// `## User Context`.
+    pending_system_context: Option<String>,
 }
 
 struct Live {
@@ -324,6 +328,7 @@ struct Live {
     started: Option<u64>,
     cumulative_prompt_tokens: Option<(u64, u64, u64, u64, u64)>,
     cumulative_context_cost: f64,
+    pending_system_context: Option<String>,
 }
 
 impl Drop for Live {
@@ -346,6 +351,7 @@ impl From<LiveNew> for Live {
             started: l.started,
             cumulative_prompt_tokens: l.cumulative_prompt_tokens,
             cumulative_context_cost: 0.0,
+            pending_system_context: l.pending_system_context,
         }
     }
 }
@@ -1236,7 +1242,7 @@ impl Actor {
                 .unwrap_or_else(cancelled);
             return self.end(completion);
         }
-        let prompt = match result {
+        let mut prompt = match result {
             Ok(p) => p,
             Err(e) => return self.end(failure(Outcome::Failed, e, false)),
         };
@@ -1255,13 +1261,16 @@ impl Actor {
                 false,
             ));
         }
-        let Some(l) = self.live.as_ref() else {
+        let Some(l) = self.live.as_mut() else {
             return self.end(failure(
                 Outcome::Interrupted,
                 NodeStop::HarnessGone.error(),
                 false,
             ));
         };
+        if let Some(ctx) = l.pending_system_context.take() {
+            prepend_user_context(&mut prompt, &ctx);
+        }
         let (conn, acp_id, home) = (l.conn.clone(), l.acp_id.clone(), l.usage_home.clone());
         let r = self.run.as_ref().expect("run");
         let prefix = r.spec.run.attempt.as_str().to_owned();
@@ -2555,7 +2564,21 @@ async fn open_harness(
         .flatten();
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
     let adapter_props = inner.cfg.acp.adapter_properties(&harness);
+    let system_context = row
+        .open
+        .system_context
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut cli_system_context_applied = false;
     let mut args = args;
+    if let (Some(ctx), Some(steve_harness_spec::AppendSystemContext::CliFlag { flag })) =
+        (system_context, adapter_props.append_system_context.as_ref())
+    {
+        args.push(flag.into());
+        args.push(ctx.into());
+        cli_system_context_applied = true;
+    }
     if let (Some((dir, _)), Some(sd)) = (&state, &declared_state) {
         args.extend(sd.isolation_args(dir));
     }
@@ -2816,7 +2839,22 @@ async fn open_harness(
             .acp
             .session_meta_with_mode(&harness, false, Some(row.open.policy.permissions));
     let mcp_servers = crate::mcp_servers(inner, session);
-    let effort_mode = inner.cfg.acp.adapter_properties(&harness).effort_mode;
+    let effort_mode = adapter_props.effort_mode;
+    let acp_system_prompt = match (system_context, adapter_props.append_system_context.as_ref()) {
+        (Some(ctx), Some(steve_harness_spec::AppendSystemContext::AcpSystemPrompt)) => {
+            Some(acp_session::SystemPrompt {
+                text: ctx,
+                mode: acp_session::SystemPromptMode::AcpAppend,
+            })
+        }
+        (Some(ctx), Some(steve_harness_spec::AppendSystemContext::MetaAppend { namespace })) => {
+            Some(acp_session::SystemPrompt {
+                text: ctx,
+                mode: acp_session::SystemPromptMode::MetaAppend(namespace.as_str()),
+            })
+        }
+        _ => None,
+    };
     let handshake = acp_session::open(
         &conn,
         OpenConfig {
@@ -2829,7 +2867,7 @@ async fn open_harness(
             model: row.open.choice.model.as_deref(),
             effort: row.open.choice.effective_effort(),
             effort_mode,
-            system_prompt: None,
+            system_prompt: acp_system_prompt,
         },
         meta,
         &seen,
@@ -2880,6 +2918,10 @@ async fn open_harness(
         return Err(NodeStop::AdapterExited.error());
     }
     let cumulative_prompt_tokens = *seen_tokens.lock().unwrap();
+    let system_context_delivered = cli_system_context_applied || opened.system_prompt;
+    let pending_system_context = system_context
+        .filter(|_| !system_context_delivered && row.acp_id.is_none())
+        .map(str::to_owned);
     Ok(LiveNew {
         conn,
         retire,
@@ -2892,7 +2934,23 @@ async fn open_harness(
         started,
         view,
         cumulative_prompt_tokens,
+        pending_system_context,
     })
+}
+
+fn prepend_user_context(prompt: &mut Value, ctx: &str) {
+    let header = format!("## User Context\n\n{ctx}");
+    let Some(arr) = prompt.as_array_mut() else {
+        return;
+    };
+    if let Some(first) = arr.first_mut()
+        && first.get("type").and_then(Value::as_str) == Some("text")
+        && let Some(existing) = first.get("text").and_then(Value::as_str)
+    {
+        first["text"] = Value::String(format!("{header}\n\n{existing}"));
+    } else {
+        arr.insert(0, json!({ "type": "text", "text": header }));
+    }
 }
 
 fn op_changed(op: &OperationId, state: Observed) -> (Subject, EventBody) {

@@ -242,6 +242,7 @@ fn open_body(session: &str) -> OpenSession {
         state: Default::default(),
         artifact_view: None,
         skills: vec![],
+        system_context: None,
     }
 }
 
@@ -5712,4 +5713,182 @@ async fn pruning_failure_does_not_prevent_opening_or_reading_the_node() {
     let n = LocalNode::open(t.config()).expect("optional pruning cannot fail Node startup");
     assert!(n.streams().await.unwrap().is_empty());
     n.shutdown().await;
+}
+
+#[tokio::test]
+async fn append_system_context_delivers_natively_with_fallback_and_leaves_user_files_untouched() {
+    use serde_json::{Value, json};
+    // 1. Native ACP systemPrompt append (claude-code shape) + user's CLAUDE.md / AGENTS.md untouched.
+    let t = T::new(&[("FAKE_ACP_SYSTEM_PROMPT", "acp")]);
+    let claude_dir = t.root.join(".claude");
+    let codex_dir = t.root.join(".codex");
+    let proj_dir = t.root.join("work/proj");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let user_claude = claude_dir.join("CLAUDE.md");
+    let user_agents = codex_dir.join("AGENTS.md");
+    let repo_claude = proj_dir.join("CLAUDE.md");
+    let repo_agents = proj_dir.join("AGENTS.md");
+    let original_files = [
+        (
+            &user_claude,
+            "# My personal CLAUDE instructions\nKeep untouched.\n",
+        ),
+        (
+            &user_agents,
+            "# My personal AGENTS instructions\nKeep untouched.\n",
+        ),
+        (&repo_claude, "# Project CLAUDE instructions\n"),
+        (&repo_agents, "# Project AGENTS instructions\n"),
+    ];
+    let mut before_mtimes = Vec::new();
+    for (path, content) in original_files {
+        std::fs::write(path, content).unwrap();
+        before_mtimes.push(std::fs::metadata(path).unwrap().modified().unwrap());
+    }
+
+    let n = t.node();
+    n.prepare_workspace(now_cmd("prep-acp", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "prep-acp").await));
+
+    let mut open = open_body("s-acp");
+    open.state = Some(HarnessState {
+        dir: "w/me/bot/claude".into(),
+        import_owner: true,
+        owner_context: true,
+    });
+    open.system_context = Some("[K1] Owner rule: keep diffs minimal.".into());
+    n.open_session(now_cmd("open-acp", open)).await.unwrap();
+    assert!(ok(&finished(&n, "open-acp").await));
+
+    n.start_turn(now_cmd("t-acp", turn("s-acp", "t1", "a1", "@say ok")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "t-acp").await));
+    n.shutdown().await;
+
+    let log_lines: Vec<Value> = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let new_req = log_lines
+        .iter()
+        .find(|m| m.get("method").and_then(Value::as_str) == Some("session/new"))
+        .expect("session/new logged");
+    assert_eq!(
+        new_req["params"]["systemPrompt"],
+        json!({
+            "mode": "append",
+            "content": [{"type": "text", "text": "[K1] Owner rule: keep diffs minimal."}]
+        })
+    );
+    let prompt_req = log_lines
+        .iter()
+        .find(|m| m.get("method").and_then(Value::as_str) == Some("session/prompt"))
+        .expect("session/prompt logged");
+    let sent_prompt = prompt_req["params"]["prompt"][0]["text"].as_str().unwrap();
+    assert!(
+        !sent_prompt.contains("## User Context"),
+        "native delivery must not duplicate ## User Context in prompt: {sent_prompt}"
+    );
+
+    // Every CLAUDE.md and AGENTS.md keeps identical content and mtime.
+    for ((path, expected_content), before_mtime) in original_files.iter().zip(before_mtimes.iter())
+    {
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            *expected_content,
+            "content changed for {}",
+            path.display()
+        );
+        assert_eq!(
+            std::fs::metadata(path).unwrap().modified().unwrap(),
+            *before_mtime,
+            "mtime changed for {}",
+            path.display()
+        );
+    }
+
+    // 2. MetaAppend channel (antigravity shape) delivers via `_meta.<ns>.systemPrompt.append`.
+    let t_meta = T::new(&[("FAKE_ACP_SYSTEM_PROMPT", "meta:antigravity")]);
+    let mut cfg_meta = t_meta.config();
+    cfg_meta
+        .acp
+        .adapters
+        .insert("antigravity".into(), t_meta.adapter.clone());
+    let n_meta = LocalNode::open(cfg_meta).unwrap();
+    n_meta.connect(t_meta.sink.clone(), None);
+    n_meta
+        .prepare_workspace(now_cmd("prep-meta", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n_meta, "prep-meta").await));
+    let mut open_meta = open_body("s-meta");
+    open_meta.choice.harness = "antigravity".into();
+    open_meta.choice.model = None;
+    open_meta.system_context = Some("[K1] Meta append rule.".into());
+    n_meta
+        .open_session(now_cmd("open-meta", open_meta))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n_meta, "open-meta").await));
+    n_meta.shutdown().await;
+
+    let meta_lines: Vec<Value> = std::fs::read_to_string(&t_meta.log)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let meta_new = meta_lines
+        .iter()
+        .find(|m| m.get("method").and_then(Value::as_str) == Some("session/new"))
+        .expect("meta session/new logged");
+    assert_eq!(
+        meta_new["params"]["_meta"]["antigravity"]["systemPrompt"]["append"],
+        "[K1] Meta append rule."
+    );
+
+    // 3. Legacy adapter without systemPrompt capability falls back cleanly to `## User Context`
+    //    on the first turn so personal context is never silently dropped.
+    let t_legacy = T::new(&[]);
+    let n_legacy = t_legacy.node();
+    n_legacy
+        .prepare_workspace(now_cmd("prep-leg", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n_legacy, "prep-leg").await));
+    let mut open_leg = open_body("s-leg");
+    open_leg.system_context = Some("[K1] Legacy fallback rule.".into());
+    n_legacy
+        .open_session(now_cmd("open-leg", open_leg))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n_legacy, "open-leg").await));
+    n_legacy
+        .start_turn(now_cmd("t-leg", turn("s-leg", "t1", "a1", "@say ok")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n_legacy, "t-leg").await));
+    n_legacy.shutdown().await;
+
+    let leg_lines: Vec<Value> = std::fs::read_to_string(&t_legacy.log)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let leg_prompt = leg_lines
+        .iter()
+        .find(|m| m.get("method").and_then(Value::as_str) == Some("session/prompt"))
+        .expect("legacy session/prompt logged");
+    let leg_text = leg_prompt["params"]["prompt"][0]["text"].as_str().unwrap();
+    assert!(
+        leg_text.starts_with("## User Context\n\n[K1] Legacy fallback rule.\n\n"),
+        "legacy fallback prompt must prepend ## User Context: {leg_text}"
+    );
 }

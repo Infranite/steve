@@ -322,12 +322,24 @@ fn record_effort_metric(harness: &str, mapping: &EffortMapping) {
     .increment(1);
 }
 
-/// A system prompt for the session (ACP `systemPrompt` on `session/new`).
+/// How a system prompt is delivered on `session/new|load`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemPromptMode<'a> {
+    /// Standard ACP `systemPrompt` with `mode = "append"`.
+    AcpAppend,
+    /// Standard ACP `systemPrompt` with `mode = "override"`.
+    AcpOverride,
+    /// Adapter `_meta.<namespace>.systemPrompt = { "append": text }` when
+    /// `agentCapabilities._meta.<namespace>.systemPrompt.append` is truthy.
+    MetaAppend(&'a str),
+}
+
+/// A system prompt for the session (ACP `systemPrompt` or `_meta.<ns>.systemPrompt` on
+/// `session/new|load`).
 #[derive(Debug, Clone, Copy)]
 pub struct SystemPrompt<'a> {
     pub text: &'a str,
-    /// In place of the harness's own (`override`), else after it (`append`).
-    pub replace: bool,
+    pub mode: SystemPromptMode<'a>,
 }
 
 /// Facts as they become known.
@@ -368,7 +380,16 @@ pub async fn open(
         image,
         system_prompt,
         system_prompt_json,
+        system_prompt_meta,
     } = initialize_session(l, &c).await?;
+    let meta = match (meta, system_prompt_meta) {
+        (Some(mut base), Some(extra)) => {
+            merge_json(&mut base, extra);
+            Some(base)
+        }
+        (None, Some(extra)) => Some(extra),
+        (base, None) => base,
+    };
     let (r, acp_id) = open_session_request(l, &c, meta, system_prompt_json, reports).await?;
     // Claude Code reports models in `models`; Codex and other ACP adapters as a model configOption
     let model_opt = model_option(&r);
@@ -548,10 +569,24 @@ pub async fn open(
     })
 }
 
+fn merge_json(base: &mut Value, extra: Value) {
+    if let (Value::Object(dst), Value::Object(src)) = (base, extra) {
+        for (k, v) in src {
+            match dst.get_mut(&k) {
+                Some(existing) if existing.is_object() && v.is_object() => merge_json(existing, v),
+                _ => {
+                    dst.insert(k, v);
+                }
+            }
+        }
+    }
+}
+
 struct Initialized {
     image: bool,
     system_prompt: bool,
     system_prompt_json: Option<Value>,
+    system_prompt_meta: Option<Value>,
 }
 
 async fn initialize_session(l: &Conn, c: &OpenConfig<'_>) -> Result<Initialized, RpcError> {
@@ -573,21 +608,65 @@ async fn initialize_session(l: &Conn, c: &OpenConfig<'_>) -> Result<Initialized,
     let image = init
         .pointer("/agentCapabilities/promptCapabilities/image")
         .is_some_and(truthy);
-    // a system prompt of the client's own, in the mode the adapter advertises
-    let system_prompt = c.system_prompt.filter(|sp| {
-        let mode = if sp.replace { "override" } else { "append" };
-        init.pointer("/agentCapabilities/sessionCapabilities/systemPrompt/mode")
-            .and_then(|m| m.get(mode))
-            .is_some_and(|v| !v.is_null() && v != &Value::Bool(false))
-    });
-    let system_prompt_json = system_prompt.map(|sp| {
-        json!({"mode": if sp.replace { "override" } else { "append" },
-            "content": [{"type": "text", "text": sp.text}]})
-    });
+    // System prompt channel advertised by the adapter:
+    // - ACP `append` is the baseline mode whenever `sessionCapabilities.systemPrompt` is present
+    //   (non-null, non-false) unless `mode.append` is explicitly `false`.
+    // - ACP `override` requires `sessionCapabilities.systemPrompt.mode.override`.
+    // - `_meta.<namespace>.systemPrompt.append` requires truthy capability under `_meta`.
+    let (system_prompt_json, system_prompt_meta) = match c.system_prompt {
+        Some(sp) => match sp.mode {
+            SystemPromptMode::AcpAppend => {
+                let cap = init.pointer("/agentCapabilities/sessionCapabilities/systemPrompt");
+                let supported = cap.is_some_and(|v| {
+                    !v.is_null()
+                        && v != &Value::Bool(false)
+                        && v.pointer("/mode/append") != Some(&Value::Bool(false))
+                });
+                let payload = supported.then(|| {
+                    json!({
+                        "mode": "append",
+                        "content": [{"type": "text", "text": sp.text}],
+                    })
+                });
+                (payload, None)
+            }
+            SystemPromptMode::AcpOverride => {
+                let supported = init
+                    .pointer("/agentCapabilities/sessionCapabilities/systemPrompt/mode/override")
+                    .is_some_and(|v| !v.is_null() && v != &Value::Bool(false));
+                let payload = supported.then(|| {
+                    json!({
+                        "mode": "override",
+                        "content": [{"type": "text", "text": sp.text}],
+                    })
+                });
+                (payload, None)
+            }
+            SystemPromptMode::MetaAppend(namespace) => {
+                let supported = init
+                    .pointer(&format!(
+                        "/agentCapabilities/_meta/{namespace}/systemPrompt/append"
+                    ))
+                    .is_some_and(truthy);
+                let payload = supported.then(|| {
+                    json!({
+                        namespace: {
+                            "systemPrompt": {
+                                "append": sp.text,
+                            }
+                        }
+                    })
+                });
+                (None, payload)
+            }
+        },
+        None => (None, None),
+    };
     Ok(Initialized {
         image,
-        system_prompt: system_prompt.is_some(),
+        system_prompt: system_prompt_json.is_some() || system_prompt_meta.is_some(),
         system_prompt_json,
+        system_prompt_meta,
     })
 }
 

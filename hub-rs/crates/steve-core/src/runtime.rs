@@ -231,6 +231,11 @@ pub trait AgentRuntime: Send + Sync {
     ) -> Result<()> {
         self.can_run(item_id, bot_id, &choice.harness)
     }
+    /// Whether `harness` declares a native `append_system_context` channel for personal context.
+    fn supports_append_system_context(&self, harness: &str) -> bool {
+        steve_harness_spec::builtin(harness)
+            .is_some_and(|b| b.properties.append_system_context.is_some())
+    }
     /// A session was just created (before its first prompt): the runtime may fix its backend now.
     /// Only new sessions are ever bound here; existing ones keep the backend they have. `after`: it
     /// takes over from a session whose release is still on its way ([`Released::Pending`]); its
@@ -239,14 +244,16 @@ pub trait AgentRuntime: Send + Sync {
         let _ = (session_id, after);
     }
     /// Like [`Self::created`], carrying the W3.1 [`steve_types::PlacementExplanation`] recorded by
-    /// placement selection when a session switches Bot, harness, or model.
+    /// placement selection and optional personal `system_context` when the session's harness
+    /// declares native `append_system_context`.
     fn created_with_placement(
         &self,
         session_id: &str,
         after: Option<&str>,
         explanation: Option<&steve_types::PlacementExplanation>,
+        system_context: Option<&str>,
     ) {
-        let _ = explanation;
+        let _ = (explanation, system_context);
         self.created(session_id, after);
     }
     /// Why nothing can run `session_id` (stored text, zh-CN), asked once [`Self::created`] had its

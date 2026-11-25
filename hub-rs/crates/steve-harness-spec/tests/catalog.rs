@@ -23,6 +23,12 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
         } else if id == "antigravity" {
             entry["properties"]["fallback_efforts"] = json!(["low", "medium", "high", "xhigh"]);
         }
+        // Card 1 adds declarative native `append_system_context` for empirically verified harnesses.
+        entry["properties"]["append_system_context"] = match id.as_str() {
+            "claude-code" | "codex" => json!({"kind": "acp_system_prompt"}),
+            "antigravity" => json!({"kind": "meta_append", "namespace": "antigravity"}),
+            _ => Value::Null,
+        };
         entry["env"]
             .as_array_mut()
             .unwrap()
@@ -222,4 +228,56 @@ fn only_declared_native_approval_modes_are_offered() {
             (mode == "custom-reviewed").then_some(NativeApprovalFallback::Reject)
         );
     }
+}
+
+#[test]
+fn verified_append_system_context_declarations_match_contract() {
+    let claude = builtin("claude-code").unwrap();
+    assert_eq!(
+        claude.properties.append_system_context,
+        Some(AppendSystemContext::AcpSystemPrompt)
+    );
+    let codex = builtin("codex").unwrap();
+    assert_eq!(
+        codex.properties.append_system_context,
+        Some(AppendSystemContext::AcpSystemPrompt)
+    );
+    let agy = builtin("antigravity").unwrap();
+    assert_eq!(
+        agy.properties.append_system_context,
+        Some(AppendSystemContext::MetaAppend {
+            namespace: "antigravity".into(),
+        })
+    );
+    // Unverified or unsupported harnesses must NOT declare native append_system_context.
+    assert_eq!(
+        builtin("kimi-code")
+            .unwrap()
+            .properties
+            .append_system_context,
+        None
+    );
+    assert_eq!(
+        builtin("pi").unwrap().properties.append_system_context,
+        None
+    );
+
+    // Custom manifest declarations can specify cli_flag or meta_append.
+    let decl: Declaration = serde_json::from_value(json!({
+        "properties": {
+            "append_system_context": {
+                "kind": "cli_flag",
+                "flag": "--append-system-prompt"
+            }
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        spec("custom-cli", Some(&decl))
+            .properties
+            .append_system_context,
+        Some(AppendSystemContext::CliFlag {
+            flag: "--append-system-prompt".into(),
+        })
+    );
 }

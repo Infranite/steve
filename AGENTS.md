@@ -26,7 +26,7 @@ Read the "Development checks" and "Changes and releases" sections of `CONTRIBUTI
 - Keep model backends, Git hosting, CI, artifact stores, service managers, and credential stores behind documented contracts. Optional integrations must not become mandatory dependencies of core workflows.
 - Ordinary installations consume trusted release artifacts without a source checkout, compiler, or upstream publishing credentials. Source modification and publication belong to an explicitly configured maintainer workflow.
 - Keep diagnosis and recovery usable when the Hub or model backend is unavailable. Acceptance must include clean supported installations with no access to a contributor's private services.
-- Keep implemented public contracts and operator instructions in the README, `docs/deployment.md`, release notes and code comments, following `CONTRIBUTING.md`. Private design notes must not be required to operate the software. Self-improvement remains a later direction, not a claim of implemented functionality.
+- Keep implemented public contracts and operator instructions in the README, `docs/architecture.md`, `docs/concepts.md`, `docs/deployment.md`, release notes and code comments, following `CONTRIBUTING.md`. Private design notes must not be required to operate the software. Self-improvement remains a later direction, not a claim of implemented functionality.
 
 ## UI components
 

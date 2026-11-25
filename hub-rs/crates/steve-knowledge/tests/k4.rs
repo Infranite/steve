@@ -90,6 +90,7 @@ impl Env {
         r.prompt_context(Box::new(self.provider()));
         r.contexts()
             .session(self.env.store(), &item.workspace_id, item)
+            .into_protocol_text()
     }
 
     fn viewer(&self, ws: &str, who: &str) -> Viewer {
@@ -128,7 +129,10 @@ async fn empty_knowledge_base_leaves_the_opening_prompt_unchanged() {
     let (item, sid) = e.item(WS2, "W2-1", "部署脚本改造", "把部署脚本改成幂等的", None);
     // no provider registered and the knowledge provider on an empty base say exactly the same: ""
     let without = Registry::new();
-    let before = without.contexts().session(e.env.store(), WS2, &item);
+    let before = without
+        .contexts()
+        .session(e.env.store(), WS2, &item)
+        .into_protocol_text();
     assert_eq!(before, "");
     assert_eq!(e.session_text(&item), before);
     let p = e.provider();

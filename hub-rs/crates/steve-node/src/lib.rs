@@ -2503,6 +2503,7 @@ impl SessionExecutor for LocalNode {
             self.check_harness(&o.choice.harness)?;
             self.check_harness_policy(&o.choice.harness, &o.policy)?;
             Skill::check_all(&o.skills)?;
+            check_system_context(o.system_context.as_deref())?;
             let w = t
                 .workspace(&o.workspace.id)?
                 .ok_or_else(|| Error::new(Code::Invalid, "no such workspace"))?;

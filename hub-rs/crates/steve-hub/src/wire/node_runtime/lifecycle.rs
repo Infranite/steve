@@ -31,7 +31,16 @@ impl NodeRuntime {
     /// open) waits until `after`, that one's `release_session`, is done, so the two harnesses are
     /// never open at once (they share the item's worktree).
     pub fn bind_after(&self, b: &Binding, after: Option<&str>) -> Result<(), StoreError> {
-        self.bind_new(b, after, None).map(|_| ())
+        self.bind_new(b, after, None, None).map(|_| ())
+    }
+
+    pub(crate) fn bind_after_with_context(
+        &self,
+        b: &Binding,
+        after: Option<&str>,
+        system_context: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.bind_new(b, after, None, system_context).map(|_| ())
     }
 
     pub(crate) fn bind_after_scoped(
@@ -39,8 +48,10 @@ impl NodeRuntime {
         b: &Binding,
         after: Option<&str>,
         placement: &steve_types::BotPlacement,
+        system_context: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.bind_new(b, after, Some(placement)).map(|_| ())
+        self.bind_new(b, after, Some(placement), system_context)
+            .map(|_| ())
     }
 
     /// [`Self::bind_after`]. Whether the binding is new.
@@ -49,6 +60,7 @@ impl NodeRuntime {
         b: &Binding,
         after: Option<&str>,
         placement: Option<&steve_types::BotPlacement>,
+        system_context: Option<&str>,
     ) -> Result<bool, StoreError> {
         self.running()?;
         let workspace = WorkspaceRef {
@@ -66,6 +78,10 @@ impl NodeRuntime {
             state: None,
             artifact_view: None,
             skills: vec![],
+            system_context: system_context
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
         };
         let fresh = self.write(|tx| {
             if self.ended_in(&b.session)? {

@@ -334,6 +334,7 @@ mod tests {
             created_by: "u".into(),
             created: 0,
             updated: 0,
+            pinned: false,
             about: Vec::new(),
         }
     }
