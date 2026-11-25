@@ -222,6 +222,9 @@ impl Repo for StoreBackend {
     fn bot_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.bots().get(id).map_err(err)?)
     }
+    fn bot_owner(&self, id: &str) -> BResult<Option<Option<String>>> {
+        self.0.bots().owner(id).map_err(err)
+    }
     fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
         Ok(self
             .0
@@ -336,6 +339,12 @@ impl Repo for StoreBackend {
     fn memories_delete_of_bot(&self, bot: &str) -> BResult<()> {
         self.0.memories().remove_of_bot(bot).map_err(err)
     }
+    fn memories_delete_of_bot_in_workspace(&self, bot: &str, ws: &str) -> BResult<()> {
+        self.0
+            .memories()
+            .remove_of_bot_in_workspace(bot, ws)
+            .map_err(err)
+    }
 
     fn tags_list(&self, ws: &str) -> BResult<Vec<Obj>> {
         objs(self.0.tags().list(ws).map_err(err)?)
@@ -389,6 +398,16 @@ impl Repo for StoreBackend {
 
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.items().get(id).map_err(err)?)
+    }
+    fn item_view(&self, ws: &str, id: &str) -> BResult<Option<steve_types::ItemView>> {
+        use s::Views;
+        let id = id.to_string();
+        Ok(self
+            .0
+            .read(|r| r.item_views().of(ws, std::slice::from_ref(&id)))
+            .map_err(err)?
+            .into_iter()
+            .next())
     }
     fn item_patch(&self, id: &str, p: &Obj) -> BResult<Option<Obj>> {
         opt(self.0.items().patch(id, &patch(p)?).map_err(err)?)

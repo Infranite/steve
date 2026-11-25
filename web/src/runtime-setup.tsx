@@ -9,7 +9,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Panel } from "@/panel"
 import { RuntimeBadge } from "@/runtime-access"
 import { canInstallRuntime, supportsPermission } from "@/runtime-status"
-import { setRuntimes, st, tm, toast, useRuntimes } from "@/store"
+import { setRuntimes, st, toast, useRuntimes } from "@/store"
 import { go, openSheet } from "@/ui"
 import { useT } from "@/i18n"
 
@@ -144,7 +144,6 @@ function RuntimeCard({ runtime: r, pending, error, restart, install }: { runtime
           {!r.ok && !setup?.reason && !setup?.error && !r.error && <span>{t("shell:runtimeSetup.probeUnavailable")}</span>}
           {help && <span className="break-words whitespace-pre-wrap" data-runtime-help>{help}</span>}
           {setup?.state === "ready" && !r.ok && <span className="text-attention">{t("shell:runtimeSetup.probeUnavailable")}</span>}
-          <AdapterUpdate runtime={r} />
           <RuntimeChips runtime={r} />
         </div>
       </IntegrationSection>
@@ -166,16 +165,6 @@ function RuntimeCard({ runtime: r, pending, error, restart, install }: { runtime
       </IntegrationSection>}
     </div>
   </IntegrationSettings>
-}
-
-function AdapterUpdate({ runtime: r }: { runtime: RRuntime }) {
-  const t = useT(), u = r.update
-  if (!u || u.policy === "off") return null
-  const newer = !!u.latest && u.latest !== u.installed
-  const text = u.error ? t("shell:devices.harness.updateError", { error: u.error }) : !u.latest ? t("shell:devices.harness.updateUnchecked")
-    : !newer ? t("shell:devices.harness.upToDate", { version: u.installed ?? "", at: u.checked ? tm(u.checked) : "" })
-    : u.policy === "auto" ? t("shell:devices.harness.updatePending", { from: u.installed ?? "—", to: u.latest }) : t("shell:devices.harness.updateAvailable", { to: u.latest })
-  return <span className={newer || u.error ? "text-attention" : undefined} data-adapter-update>{text}</span>
 }
 
 function RuntimeChips({ runtime: r }: { runtime: RRuntime }) {

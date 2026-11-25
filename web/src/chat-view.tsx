@@ -42,6 +42,7 @@ import { cn } from "cn"
 import { ArrowDownIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
 import { Component, lazy, memo, startTransition, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { lang, t as tr, useT } from "@/i18n"
+import { hubBase } from "@/hub"
 
 
 /* ═════════ 对话 ═════════ */
@@ -219,7 +220,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
   useShellSelector(() => st.bots.steve)
   const focusId = useShellSelector(() => st.focus?.item)
   useItemView(focusId)
-  useShellSelector(() => `${st.ready}|${st.onboard}|${st.quote ?? ""}|${focusId ?? ""}|${st.hold?.item ?? ""}|${st.workspace?.id ?? ""}`)
+  useShellSelector(() => `${st.ready}|${st.onboard}|${st.quote ?? ""}|${focusId ?? ""}|${st.hold?.item ?? ""}|${hubBase()}|${st.workspace?.id ?? ""}`)
   const S = st.bots.steve, away = useAway()
   const t = useT()
   const { more, ended, loading } = useHistory()

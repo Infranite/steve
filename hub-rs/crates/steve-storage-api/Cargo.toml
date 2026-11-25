@@ -9,7 +9,7 @@ description = "Steve's storage contract: domain stores, data-only units of work,
 conformance = []
 
 # No rusqlite, no tokio runtime and no serde_json::Value here: a plugin backend implements this
-# contract out of process (W2a §1).
+# contract out of process.
 [dependencies]
 steve-types = { path = "../steve-types" }
 serde = { version = "=1.0.229", features = ["derive"] }

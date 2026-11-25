@@ -219,6 +219,10 @@ pub trait Repo {
     fn bot_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("bot_get")
     }
+    /// The stored `owner` column of `id`, including soft-deleted bots (`None` if no row exists).
+    fn bot_owner(&self, id: &str) -> BResult<Option<Option<String>>> {
+        todo_backend!("bot_owner")
+    }
     /// Workspace ids of the bot's memberships (`bot_workspaces` row order).
     fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
         todo_backend!("bot_workspaces")
@@ -285,6 +289,10 @@ pub trait Repo {
     fn memories_delete_of_bot(&self, bot: &str) -> BResult<()> {
         todo_backend!("memories_delete_of_bot")
     }
+    /// `DELETE FROM bot_memories WHERE bot_id = ? AND workspace_id = ?`.
+    fn memories_delete_of_bot_in_workspace(&self, bot: &str, ws: &str) -> BResult<()> {
+        todo_backend!("memories_delete_of_bot_in_workspace")
+    }
 
     // ── tags ──
     fn tags_list(&self, ws: &str) -> BResult<Vec<Obj>> {
@@ -332,6 +340,10 @@ pub trait Repo {
     /// Every task item of the workspace, updated DESC.
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("item_get")
+    }
+    /// One task item's read view (`steve_types::ItemView`) in `ws`.
+    fn item_view(&self, ws: &str, id: &str) -> BResult<Option<steve_types::ItemView>> {
+        todo_backend!("item_view")
     }
     /// `items.patch`: present keys only (booleans → 0/1, `plan`/`snooze` JSON-encoded), bumps `updated` and
     /// publishes `item` unless `patch` is empty. Returns the item as read back.
@@ -859,9 +871,25 @@ pub trait Domain: Send + Sync + 'static {
     fn bot_prompt(&self, bot: &Obj, ws: &str) -> BResult<String> {
         todo_backend!("bot_prompt")
     }
-    /// `{moved: [itemIds]}`.
-    async fn delete_bot(&self, id: &str, to: &str, actor: &str) -> BResult<Obj> {
+    /// `{moved: [itemIds]}` for owner global deletion within `allowed_workspaces`.
+    async fn delete_bot(
+        &self,
+        id: &str,
+        to: &str,
+        actor: &str,
+        allowed_workspaces: Vec<String>,
+    ) -> BResult<Obj> {
         todo_backend!("delete_bot")
+    }
+    /// `{moved: [itemIds]}` for removing a bot from a single workspace `ws`.
+    async fn remove_bot_from_workspace(
+        &self,
+        ws: &str,
+        id: &str,
+        to: &str,
+        actor: &str,
+    ) -> BResult<Obj> {
+        todo_backend!("remove_bot_from_workspace")
     }
 
     // ── conversation (thread.ts) ──

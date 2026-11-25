@@ -50,6 +50,8 @@ async fn bind(
     m.blocking(move |m| {
         owner(m, &who)?;
         m.store.write(|w| {
+            let now = m.clock.now();
+            let previous = w.digest_packets().schedule(&who.ws)?;
             if let Some(id) = &b.schedule_id {
                 let s = schedules::own(w, &who.ws, id)?;
                 schedules::check_refs(w, &who.ws, &s.spec)?;
@@ -58,7 +60,16 @@ async fn bind(
                     return Err(ApiError::rule("Bind an item-mode schedule with requester set to your user id and overlap=skip"));
                 }
             }
-            w.digest_packets().bind_schedule(&who.ws, b.schedule_id.as_deref(), m.clock.now())?;
+            w.digest_packets().bind_schedule(&who.ws, b.schedule_id.as_deref(), now)?;
+            if let Some(prev) = previous.as_deref()
+                && previous.as_deref() != b.schedule_id.as_deref()
+            {
+                schedules::set_time_trigger_enabled(w, &who.ws, prev, true, now)?;
+            }
+            if let Some(id) = b.schedule_id.as_deref() {
+                // Queue-driven starts via `digest.bot` replace blind wall-clock cron polling.
+                schedules::set_time_trigger_enabled(w, &who.ws, id, false, now)?;
+            }
             Ok::<_, ApiError>(())
         })?;
         flow.wake();
@@ -73,6 +84,8 @@ struct Runner(
 );
 const BOT_SOURCE: &str = "digest.bot";
 const START_LIMIT: i64 = 3;
+/// Minimum cooldown between consecutive Digest Bot starts so failed/empty runs cannot spin.
+const MIN_START_GAP_MS: i64 = 60_000;
 
 impl Runner {
     fn new(flow: Arc<FlowCx>) -> Self {
@@ -135,7 +148,9 @@ impl Runner {
         // A skipped/failed/empty run must not immediately start again while packets still wait.
         // All runs (including cron/manual starts) share this minute, using durable run history.
         let last = RunRows(c).latest_start(ws, id)?;
-        Ok(Some(last.map_or(i64::MIN, |at| at.saturating_add(60_000))))
+        Ok(Some(last.map_or(i64::MIN, |at| {
+            at.saturating_add(MIN_START_GAP_MS)
+        })))
     }
 }
 
@@ -1066,5 +1081,103 @@ mod tests {
                 fixtures::damaged_run_columns(e.env.store(), &old).unwrap();
             assert_eq!(original, ("broken".into(), "blob".into()));
         }
+    }
+
+    #[tokio::test]
+    async fn bound_digest_schedule_suppresses_cron_and_runs_only_when_packets_are_due() {
+        use steve_runtime::{Clock, due::DueSource};
+        let (e, id) = bound().await;
+        // Binding disables the wall-clock time trigger immediately.
+        assert_eq!(
+            flow_fixture::enabled_trigger_count(e.env.store(), &id).unwrap(),
+            0
+        );
+        assert_eq!(
+            flow_fixture::trigger_next_at(e.env.store(), &id).unwrap(),
+            None
+        );
+        // Advancing across multiple 30-minute intervals starts zero idle runs.
+        let triggers = steve_flow::scheduler::Triggers::new(e.flow.clone());
+        let bot_source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
+        for _ in 0..4 {
+            e.env.clock.advance(30 * 60_000);
+            let now = e.env.clock.now();
+            triggers.run_due(now).await.unwrap();
+            bot_source.run_due(now).await.unwrap();
+        }
+        assert!(
+            e.env
+                .store()
+                .read(|c| runs::page(c, WS, &id, None, 10))
+                .unwrap()
+                .is_empty(),
+            "idle digest bot must not start runs on wall-clock cron"
+        );
+        // Editing the bound schedule keeps its wall-clock trigger disabled.
+        let (st, v) = call(
+            &e.router(),
+            Some(&caller(WS, ME)),
+            "PATCH",
+            &format!("/schedules/{id}"),
+            Some(&json!({"what": "Organize updated"})),
+        )
+        .await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(
+            flow_fixture::enabled_trigger_count(e.env.store(), &id).unwrap(),
+            0
+        );
+        // Even if an upgraded installation still has an enabled cron trigger on the bound
+        // schedule, the scheduler suppresses and disables it instead of launching an empty run.
+        let now = e.env.clock.now();
+        e.env
+            .store()
+            .write(|w| schedules::set_time_trigger_enabled(w, WS, &id, true, now))
+            .unwrap();
+        assert_eq!(
+            flow_fixture::enabled_trigger_count(e.env.store(), &id).unwrap(),
+            1
+        );
+        e.env.clock.advance(30 * 60_000);
+        triggers.run_due(e.env.clock.now()).await.unwrap();
+        assert!(
+            e.env
+                .store()
+                .read(|c| runs::page(c, WS, &id, None, 10))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            flow_fixture::enabled_trigger_count(e.env.store(), &id).unwrap(),
+            0
+        );
+        // Queueing a real digest packet starts the Digest Bot via BotSource.
+        let now = e.env.clock.now();
+        packet(&e, WS, now);
+        assert!(bot_source.next_due().await.unwrap().is_some());
+        bot_source.run_due(now).await.unwrap();
+        assert_eq!(
+            e.env
+                .store()
+                .read(|c| runs::page(c, WS, &id, None, 10))
+                .unwrap()
+                .len(),
+            1
+        );
+        // Unbinding restores the schedule's normal wall-clock time trigger.
+        let api = routes(e.flow.clone()).with_state(e.env.modules.clone());
+        let (st, v) = call(
+            &api,
+            Some(&caller(WS, ME)),
+            "PUT",
+            "/digest/bot",
+            Some(&json!({"schedule_id": null})),
+        )
+        .await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(
+            flow_fixture::enabled_trigger_count(e.env.store(), &id).unwrap(),
+            1
+        );
     }
 }

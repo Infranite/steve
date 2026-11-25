@@ -1,11 +1,17 @@
-//! Lexical baseline on the evaluation corpus: `seg` bigrams in the spec's
+//! Lexical baseline on the evaluation corpus: `seg` bigrams in the
 //! `kb_fts` table, `fts_query`, `bm25(kb_fts, 1.0, 2.0)`, best chunk per document. No anchor,
-//! memory or recency weighting — that is `retrieve` (K1), which must score at least this.
+//! memory or recency weighting — `retrieve` must score at least this.
 //!
 //! `cargo test -p steve-knowledge --test eval_fts -- --nocapture` prints recall@k and misses.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+/// Minimum chunks expected from the synthetic corpus (80 docs; currently 156 chunks after
+/// replacing the oversized internal wiki proposals with compact neutral fixtures).
+const MIN_CORPUS_CHUNKS: usize = 140;
+const MIN_EVAL_CASES: usize = 40;
+const MIN_RECALL_AT_5: f64 = 0.8;
 
 use steve_knowledge::eval::{evaluate, load_cases, load_corpus};
 use steve_knowledge::seg::{fts_query, fts_query_relaxed, seg};
@@ -38,10 +44,10 @@ fn recall_on_eval_corpus() {
         cases.len()
     );
     assert!(
-        chunks >= 180,
-        "corpus should be about 200 chunks, got {chunks}"
+        chunks >= MIN_CORPUS_CHUNKS,
+        "corpus should have at least {MIN_CORPUS_CHUNKS} chunks, got {chunks}"
     );
-    assert!(cases.len() >= 40);
+    assert!(cases.len() >= MIN_EVAL_CASES);
     for c in &cases {
         for e in &c.expect {
             assert!(
@@ -90,8 +96,8 @@ fn recall_on_eval_corpus() {
     let f5 = evaluate(&cases, 5, with_fallback);
     eprintln!("strict + relaxed fallback: {f5}");
     assert!(
-        r5.recall >= 0.8,
-        "recall@5 {:.3} below the phase-1 bar 0.8",
+        r5.recall >= MIN_RECALL_AT_5,
+        "recall@5 {:.3} below the bar {MIN_RECALL_AT_5}",
         r5.recall
     );
     assert!(f5.recall >= r5.recall);

@@ -55,21 +55,22 @@ function flush(sid: string, slot: Active) {
 
 function recover(sid: string, slot: Active): Promise<void> {
   if (slot.request) return slot.request
-  const signal = () => AbortSignal.any([slot.controller.signal, AbortSignal.timeout(30_000)])
+  const controller = slot.controller
+  const signal = () => AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)])
   clearTimeout(slot.retry)
-  slot.request = (async () => {
+  const request = (async () => {
     do {
       slot.gap = false
       const data = getTranscript(sid)
       if (!data) {
         const page = await api.transcript(sid, undefined, signal())
-        if (slot.controller.signal.aborted) return
+        if (controller.signal.aborted) return
         update(sid, () => ({ turns: mapTurns(page.events), oldest: page.next, newest: page.events.at(-1)?.seq ?? 0 }))
       } else {
         let after: number | null = data.newest
         while (after != null) {
           const page = await api.transcriptAfter(sid, after, undefined, signal())
-          if (slot.controller.signal.aborted) return
+          if (controller.signal.aborted) return
           update(sid, (cached) => cached && appendEvents(cached, page.events))
           after = page.next
         }
@@ -77,7 +78,7 @@ function recover(sid: string, slot: Active): Promise<void> {
     } while (slot.gap)
     slot.attempts = 0
   })().catch((error) => {
-    if (slot.controller.signal.aborted || error instanceof Unauthenticated) return
+    if (controller.signal.aborted || error instanceof Unauthenticated) return
     slot.gap = true
     slot.attempts++
     if (slot.attempts === 3) {
@@ -86,10 +87,11 @@ function recover(sid: string, slot: Active): Promise<void> {
     }
     slot.retry = setTimeout(() => void recover(sid, slot), Math.min(30_000, 1000 * 2 ** slot.attempts))
   }).finally(() => {
-    slot.request = undefined
-    if (!slot.controller.signal.aborted) flush(sid, slot)
+    if (slot.request === request) slot.request = undefined
+    if (!controller.signal.aborted) flush(sid, slot)
   })
-  return slot.request
+  slot.request = request
+  return request
 }
 
 export function observeTranscript(sid: string): () => void {
@@ -116,11 +118,11 @@ export function observeTranscript(sid: string): () => void {
 }
 
 export function useTranscriptDemand(ids: readonly string[]) {
-  const scope = scopeKey(), language = i18n.language, idsKey = JSON.stringify(ids)
+  const scope = scopeKey(), idsKey = JSON.stringify(ids)
   useEffect(() => {
     const releases = (JSON.parse(idsKey) as string[]).map(observeTranscript)
     return () => releases.forEach((release) => release())
-  }, [scope, language, idsKey])
+  }, [scope, idsKey])
 }
 
 export function useTranscripts(ids: readonly string[], load: readonly string[] = ids) {
@@ -218,7 +220,24 @@ export function resetTranscripts() {
   for (const set of transcriptListeners.values()) set.forEach((fn) => fn())
 }
 
-i18n.on("languageChanged", resetTranscripts)
+function reloadTranscripts() {
+  idle.clear()
+  older.clear()
+  qc.removeQueries({ queryKey: prefix })
+  for (const set of transcriptListeners.values()) set.forEach((fn) => fn())
+  for (const [sid, slot] of active) {
+    slot.controller.abort()
+    clearTimeout(slot.retry)
+    slot.controller = new AbortController()
+    slot.buffered.clear()
+    slot.gap = false
+    slot.request = undefined
+    slot.attempts = 0
+    void recover(sid, slot)
+  }
+}
+
+i18n.on("languageChanged", reloadTranscripts)
 
 export async function readFullTranscript(sid: string) {
   const { marks } = await api.transcriptMarks(sid)
