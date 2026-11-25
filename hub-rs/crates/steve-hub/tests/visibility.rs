@@ -15,21 +15,11 @@ use steve_hub::{
         AppState, Ctx,
         stream::{self, StreamQuery},
     },
-    backend::{BResult, Backend, NoDomain, Repo},
     bus::Bus,
     config::Config,
+    wire::{core::CoreDomain, store::StoreBackend},
 };
 use steve_types::{DevicesEvent, PeopleEvent, RawJson, WorkLiveEvent};
-
-struct NoStorage;
-impl Backend for NoStorage {
-    fn reader(&self) -> BResult<Box<dyn Repo + '_>> {
-        panic!("SSE must not read storage for scope")
-    }
-    fn writer(&self) -> BResult<Box<dyn Repo + '_>> {
-        panic!("SSE must not write storage for scope")
-    }
-}
 
 async fn read_until_barrier(body: Body) -> BTreeSet<String> {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -79,13 +69,17 @@ async fn actual_sse_filter_preserves_workspace_and_hub_audiences() {
         vars.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone())
     })
     .unwrap();
+    let cfg = Arc::new(cfg);
+    let store =
+        steve_store::Store::open(home.path().join("unused.sqlite3"), steve_store::NoPublisher)
+            .unwrap();
     let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
         Default::default(),
     )));
     let state = AppState::new(
-        Arc::new(cfg),
-        Arc::new(NoStorage),
-        Arc::new(NoDomain),
+        cfg.clone(),
+        StoreBackend(store.clone()),
+        CoreDomain::for_test(&cfg, store, &bus, None),
         bus.clone(),
     );
     let mut streams = vec![];

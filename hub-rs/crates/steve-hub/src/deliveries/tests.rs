@@ -53,6 +53,7 @@ fn workspaces(svc: &Service) -> Arc<crate::wire::workspaces::Workspaces> {
                 adapters: Default::default(),
                 node: "node".into(),
                 claude_executable: "/usr/bin/false".into(),
+                claude_config_dir: None,
                 steve_home: svc.home.clone(),
                 codex_home: svc.home.join("codex"),
                 user_home: svc.home.clone(),

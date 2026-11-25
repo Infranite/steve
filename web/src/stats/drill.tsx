@@ -122,7 +122,7 @@ function Timeline({ d }: { d: ItemDetail }) {
                 onMouseEnter={() => {
                   const v = { kind: decision[c.kind] ?? c.kind, time: time(c.created) }
                   if (!c.resolved) return show(c.created, cy, waiting ? t("stats:drill.decOpen", v) : t("stats:drill.decExpired", v))
-                  const done = t(c.by === "yolo" ? "stats:drill.decResolvedYolo" : "stats:drill.decResolved", { ...v, dur: fmtMs(c.resolved - c.created) })
+                  const done = t(c.by === "steve" ? "stats:drill.decResolvedSteve" : "stats:drill.decResolved", { ...v, dur: fmtMs(c.resolved - c.created) })
                   show(c.created, cy, c.choice && choice[c.choice] ? t("stats:drill.decChoice", { text: done, choice: choice[c.choice] }) : done)
                 }} />
             </g>

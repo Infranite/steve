@@ -1,4 +1,4 @@
-//! Task workspaces (ST-45): how much disk the items' worktrees take, giving space back, and the floor below
+//! Task workspaces: how much disk the items' worktrees take, giving space back, and the floor below
 //! which no new worktree is made.
 //!
 //! A worktree is the item's sources (small; the git objects are shared with the project) plus rebuildable

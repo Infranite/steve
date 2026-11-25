@@ -33,7 +33,7 @@ export function eventLabel(e: StatEvent) {
   if (e.kind === "turn") return e.open ? t("stats:events.turnRunning") : t("stats:events.turn", { what: STOP()[e.what] ?? (e.what || "—") })
   if (e.kind === "decision") {
     const kind = DECISION()[e.what] ?? e.what
-    const state = e.open ? t("stats:events.decOpen") : e.by === "yolo" ? t("stats:events.decYolo") : e.by === "me" ? t("stats:events.decMe") : t("stats:events.decExpired")
+    const state = e.open ? t("stats:events.decOpen") : e.by === "steve" ? t("stats:events.decSteve") : e.by === "me" ? t("stats:events.decMe") : t("stats:events.decExpired")
     return t("stats:events.decision", { kind, state })
   }
   if (e.what === "status") return t("stats:events.status", { to: e.to === "fail" ? t("stats:events.failed") : ST[e.to ?? ""]?.[0] ?? e.to ?? "—" })

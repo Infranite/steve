@@ -504,7 +504,10 @@ async fn a_link_taken_over_again_and_again_pauses_the_node() {
         1
     );
     assert_eq!(
-        node_checks::messages_count_by_space(&h.store, "notify").unwrap(),
+        h.store
+            .read(|r| steve_store::thread::list_notices(r, steve_store::WS, 10))
+            .unwrap()
+            .len(),
         1
     );
 }

@@ -23,7 +23,7 @@ test("each other installation gets its own way, never another's script", () => {
   assert.ok(script.steps.some(s => s.command === `zsh ${repo}/ops/release.sh main`))
   assert.match(script.recovery.join("\n"), /release\.sh --rollback/)
   const source = upgradeGuide({ kind: "source", home, repo }, "0.2.20")
-  assert.match(source.steps[0].command, /sqlite3 .*\.backup .*before-0\.2\.20\.sqlite3/, "source runs back up before anything else")
+  assert.match(source.steps[0].command, /steve-hub --admin backup --reason pre-upgrade/, "source runs back up before anything else")
   assert.ok(source.steps.some(s => s.command?.includes("git -C /Users/example/Agents/steve checkout v0.2.20")))
   const external = upgradeGuide({ kind: "external", home }, "0.2.20")
   assert.equal(external.steps.filter(s => s.command).length, 0, "nothing to run when Steve can't tell who owns the files")

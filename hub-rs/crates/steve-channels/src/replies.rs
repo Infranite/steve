@@ -103,7 +103,7 @@ impl Replies {
         self
     }
 
-    /// The generator (e.g. with a [`compose::PinnedModel`]).
+    /// The generator.
     pub fn composer(mut self, c: Composer) -> Self {
         self.composer = c;
         self

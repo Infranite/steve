@@ -702,16 +702,16 @@ test("defaultHarness, permModes, defaultPermMode and makeBot adapt across hetero
   await s.refresh()
   assert.equal(s.defaultHarness(), "cursor")
 
-  // permModes maps Hub mode names to store keys and never returns empty
-  assert.deepEqual([...s.permModes("cursor")], ["plan", "default"])
+  // permModes returns Steve mode keys and never returns empty
+  assert.deepEqual([...s.permModes("cursor")], ["plan", "ask"])
   assert.deepEqual([...s.permModes("opencode")], ["plan"])
   assert.equal(s.permModes("custom-empty").length, 1)
-  assert.deepEqual([...s.permModes("custom-exotic")], ["default"])
+  assert.deepEqual([...s.permModes("custom-exotic")], ["ask"])
 
-  // defaultPermMode picks a compatible mode in priority order (default -> plan, with full access only for a native-only runtime)
-  assert.equal(s.defaultPermMode("cursor"), "default")
+  // defaultPermMode picks a compatible mode in priority order (ask -> plan, with full_access only for a native-only runtime)
+  assert.equal(s.defaultPermMode("cursor"), "ask")
   assert.equal(s.defaultPermMode("opencode"), "plan")
-  assert.equal(s.defaultPermMode("custom-exotic"), "default")
+  assert.equal(s.defaultPermMode("custom-exotic"), "ask")
 
   // makeBot sends a compatible perm_mode for the selected harness
   const id1 = await s.makeBot("Worker A", "coder", "opencode")
@@ -722,7 +722,7 @@ test("defaultHarness, permModes, defaultPermMode and makeBot adapt across hetero
   const id2 = await s.makeBot("Worker B", "coder")
   assert.equal(id2, "bot-2")
   assert.equal(created[1].harness, "cursor")
-  assert.equal(created[1].perm_mode, "default")
+  assert.equal(created[1].perm_mode, "ask")
 })
 
 test("decision patches change the cards and their item without reading /api/shell again", async () => {

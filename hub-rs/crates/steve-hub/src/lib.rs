@@ -1,7 +1,6 @@
 //! Steve Hub: the HTTP API, the event stream, configuration, system checks and housekeeping.
 //!
-//! The HTTP layer is written against [`backend::Backend`] (storage) and [`backend::Domain`] (steve-core);
-//! [`wire`] is where the integrator plugs in steve-store, steve-core, steve-auth and steve-mcp;
+//! [`wire`] connects steve-store, steve-core, steve-auth and steve-mcp;
 //! [`extension`] is the public entry other binaries assemble a Hub with ([`run`] an [`Assembly`]).
 
 steve_i18n::init!();
@@ -16,7 +15,6 @@ mod admin;
 pub mod api;
 pub mod app;
 pub mod avatar;
-pub mod backend;
 pub mod backup;
 pub mod bus;
 pub mod cache_tags;
@@ -43,7 +41,6 @@ pub mod recovery;
 pub mod resume;
 pub mod stats_snapshot;
 pub mod system;
-pub mod validate;
 pub mod web;
 pub mod wire;
 

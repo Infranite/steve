@@ -23,7 +23,7 @@ use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
 use steve_modules::contacts::people_repo;
 use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::outbound::Verdict;
-use steve_modules::outbound::{legacy_automatic_decision, strip_ai_prefix};
+use steve_modules::outbound::strip_ai_prefix;
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
 use steve_store::{Decision, NewDecision, uid};
 
@@ -331,6 +331,37 @@ impl DecisionHandler for MailDraftHandler {
             _ => Ok(()),
         }
     }
+
+    /// An approval card that reached its wait deadline discards the unapproved pending draft.
+    /// Uncertain (`unknown`) reconciliation cards never auto-discard the draft.
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if d.kind != "approve" {
+            return Ok(());
+        }
+        let Some(draft) = repo::draft(tx, &d.subject_id)? else {
+            return Ok(());
+        };
+        if draft.status != "pending" || draft.decision_id.as_deref() != Some(d.id.as_str()) {
+            return Ok(());
+        }
+        let now = self.0.now();
+        if repo::draft_transition(tx, &draft.id, &["pending"], "discarded", now)? {
+            if let Some(t) = &draft.thread_id {
+                repo::set_thread_state(tx, t, "open", now)?;
+            }
+            tx.audit(
+                &draft.workspace_id,
+                "steve",
+                "mail_draft.expire",
+                &draft.id,
+                &json!({"decision": d.id}),
+            )?;
+            if let Some(updated) = repo::draft(tx, &draft.id)? {
+                drafts::emit_draft(tx, &updated);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Approved and still inside the delay → back to `pending`; otherwise 409.
@@ -518,7 +549,7 @@ impl Mail {
             let approval = steve_store::decision_repo::send_approval(tx, &d.workspace_id, id)?;
             let current = content_hash(&d);
             let ok = approval.as_ref().is_some_and(|a| {
-                !legacy_automatic_decision(&a.result) && a.result.get("content_hash").and_then(Value::as_str)
+                a.result.get("content_hash").and_then(Value::as_str)
                     == Some(d.content_hash.as_str())
             }) && current == d.content_hash;
             let Some(a) = approval.filter(|_| ok) else {
@@ -761,6 +792,7 @@ impl Mail {
                 previous: d.decision_id.clone(),
                 content_hash: format!("unknown:{}:{settled}", d.content_hash),
             }),
+            wait: None,
         })?;
         repo::set_draft_decision(tx, &d.id, Some(&decision.id), &d.content_hash)?;
         Ok(())
@@ -844,6 +876,7 @@ impl Mail {
                     previous: d.decision_id.clone(),
                     content_hash: format!("fail:{}:{settled}", d.content_hash),
                 }),
+                wait: None,
             })?;
             tx.audit(
                 &d.workspace_id,

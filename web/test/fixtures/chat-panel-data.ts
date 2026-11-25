@@ -15,7 +15,7 @@ export function chatPanelState(large = false): ChatPanelFixtureState {
   const workspace: RWorkspace = { id: "panel-fixture", name: "Panel fixture", description: "", item_prefix: "ST", sort: 0, created }
   const bot: RBot = {
     id: "steve", name: "Steve", role: "Assistant", main: true, harness: "fixture", model: null,
-    rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "default", avatar: {},
+    rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "ask", avatar: {},
     default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: created,
     workspaces: [workspace.id],
   }
@@ -33,7 +33,7 @@ export function chatPanelState(large = false): ChatPanelFixtureState {
     modules: { feishuRegistration: false }, version: "fixture", web_version: "fixture",
     workspace, workspaces: [workspace],
     bots: [bot], allBots: [{ id: bot.id, name: bot.name, workspaces: bot.workspaces }],
-    projects: [], tags: [], settings: { onboard: "1" },
+    projects: [], tags: [], settings: { onboard: "1" }, notifySeen: created,
   }
   const snapshot = snapshotViews({
     item: items, session: [], decision: [],
@@ -62,6 +62,9 @@ export async function routeChatPanelHub(page: PageLike, state: ChatPanelFixtureS
     if (p === "/api/summary") return route.fulfill({ json: { ws: state.shell.workspace.id, workspace_name: state.shell.workspace.name, thinking: false, hold: null } })
     if (p === "/api/snapshot") return route.fulfill({ json: state.snapshot })
     if (p === "/api/views") return route.fulfill({ json: viewsResponse([], 1) })
+    if (p === "/api/notifications") return route.fulfill({ json: [] })
+    if (p === "/api/me") return route.fulfill({ json: { user: { id: "u1", name: "Fixture", email: null, role: "owner" }, version: "fixture", web_version: "fixture" } })
+    if (p === "/api/conversations/channels") return route.fulfill({ json: { channels: [] } })
     // Keep the event-stream request pending until the page closes. A fulfilled finite SSE body
     // would reconnect and rebuild /api/shell periodically, contaminating the panel-only timings.
     if (p === "/api/stream") return

@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn schema_is_well_formed_and_round_trips() {
-        assert_eq!(specs().len(), 14);
+        assert_eq!(specs().len(), 17);
         let mut keys = BTreeSet::new();
         for spec in specs() {
             assert!(keys.insert(&spec.key), "duplicate setting key {}", spec.key);
@@ -193,6 +193,15 @@ mod tests {
         }
         assert!(allowed("tz", "UTC"));
         assert!(!allowed("tz", "Mars/Base"));
+        assert!(allowed("noExecutor", "ask"));
+        assert!(allowed("noExecutor", "steve"));
+        assert!(!allowed("noExecutor", "auto"));
+        assert!(allowed("quotaAutoHandoff", "on"));
+        assert!(allowed("quotaAutoHandoff", "off"));
+        assert!(!allowed("quotaAutoHandoff", "maybe"));
+        assert!(allowed("quotaWaitMinutes", "0"));
+        assert!(allowed("quotaWaitMinutes", "15"));
+        assert!(!allowed("quotaWaitMinutes", "7"));
         assert!(allowed("handoff", "70"));
         assert!(!allowed("handoff", "75"));
         assert!(!allowed("nope", "x"));

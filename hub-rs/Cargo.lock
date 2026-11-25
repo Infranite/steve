@@ -5888,6 +5888,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
+ "jiff",
  "jsonschema",
  "libc",
  "markdown",
@@ -5924,7 +5925,6 @@ dependencies = [
  "steve-runtime",
  "steve-stats",
  "steve-store",
- "steve-store-sqlite",
  "steve-transcript",
  "steve-types",
  "steve-vault",
@@ -6004,6 +6004,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "html2text",
+ "metrics",
  "pdf-extract",
  "pulldown-cmark",
  "quick-xml 0.42.0",
@@ -6096,6 +6097,7 @@ dependencies = [
  "getrandom 0.4.3",
  "jsonwebtoken",
  "libc",
+ "metrics",
  "rand 0.10.3",
  "regex",
  "reqwest",
@@ -6284,19 +6286,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "steve-storage-api"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "steve-types",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "steve-store"
 version = "0.1.0"
 dependencies = [
@@ -6334,7 +6323,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "steve-storage-api",
  "steve-store",
  "steve-types",
  "tempfile",

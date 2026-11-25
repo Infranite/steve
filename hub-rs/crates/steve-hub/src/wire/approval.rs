@@ -39,7 +39,10 @@ impl ApprovalModes {
             .map(|id| db.bots().get(id))
             .transpose()?
             .flatten();
-        let configured = bot.as_ref().map(|b| b.perm_mode.as_str()).unwrap_or("ask");
+        let configured = bot
+            .as_ref()
+            .map(|b| b.perm_mode.as_str())
+            .unwrap_or(PermissionMode::Ask.as_str());
         let native_only = spec.properties.native_execution
             || spec.properties.permission_policy == PermissionPolicy::FullAccessOnly;
         let policy = db
@@ -47,9 +50,9 @@ impl ApprovalModes {
             .mode;
         // Plan is a read-only capability and never widened. Native-only adapters keep their
         // separately explicit admission requirement; the workspace switch cannot admit them.
-        let mode = if configured == "plan" {
+        let mode = if configured == PermissionMode::Plan.as_str() {
             PermissionMode::Plan
-        } else if native_only && configured == "bypassPermissions" {
+        } else if native_only && configured == PermissionMode::FullAccess.as_str() {
             PermissionMode::FullAccess
         } else if native.is_some() && policy == ApprovalMode::HarnessAuto {
             PermissionMode::Auto

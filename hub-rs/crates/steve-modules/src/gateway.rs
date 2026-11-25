@@ -90,6 +90,20 @@ pub trait Gateway: Send + Sync {
         timeout: Duration,
     ) -> Result<GatewayOut, GatewayError>;
 
+    /// Like [`Gateway::run`], asking the model selector to avoid `exclude_model` when another
+    /// candidate exists (used by the `disclosure` audit so a draft is not audited by the same
+    /// model that wrote it).
+    async fn run_excluding(
+        &self,
+        tier: Tier,
+        prompt: &str,
+        exclude_model: Option<&str>,
+        timeout: Duration,
+    ) -> Result<GatewayOut, GatewayError> {
+        let _ = exclude_model;
+        self.run(tier, prompt, timeout).await
+    }
+
     /// Image-aware calls must never silently discard the supplied image blocks.
     async fn run_with_images(
         &self,
@@ -195,6 +209,29 @@ pub async fn tagged<F: Future>(purpose: &'static str, ws: &str, f: F) -> F::Outp
 /// Books the gateway calls made by `f` to an item (for instance, a flow's item node).
 pub async fn for_item<F: Future>(item_id: &str, f: F) -> F::Output {
     with_tag(|t| t.item_id = Some(item_id.to_string()), f).await
+}
+
+/// Records gateway token usage attributed to a periodic task's metric series.
+pub fn record_periodic_usage(task: &'static str, usage: &[ModelUsage]) {
+    let mut input = 0u64;
+    let mut output = 0u64;
+    let mut cache_read = 0u64;
+    let mut cache_write = 0u64;
+    for u in usage {
+        if let Some(n) = u.tokens.input.and_then(|n| u64::try_from(n).ok()) {
+            input = input.saturating_add(n);
+        }
+        if let Some(n) = u.tokens.output.and_then(|n| u64::try_from(n).ok()) {
+            output = output.saturating_add(n);
+        }
+        if let Some(n) = u.tokens.cache_read.and_then(|n| u64::try_from(n).ok()) {
+            cache_read = cache_read.saturating_add(n);
+        }
+        if let Some(n) = u.tokens.cache_write.and_then(|n| u64::try_from(n).ok()) {
+            cache_write = cache_write.saturating_add(n);
+        }
+    }
+    steve_runtime::jobs::record_periodic_token_counts(task, input, output, cache_read, cache_write);
 }
 
 #[cfg(test)]

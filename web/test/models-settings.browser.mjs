@@ -65,29 +65,29 @@ const run = async ({ width, height, scheme, flow }) => {
     await page.locator('[data-models-lightweight]').waitFor()
     assert.match(await page.locator('[data-lightweight-mode]').innerText(), /跟随主力模型/)
     await page.locator('[data-models-allocation-toggle]').click()
-    assert.equal(await page.locator('[data-actual-purpose]').count(),11)
+    assert.equal(await page.locator('[data-actual-purpose]').count(), 10)
     await page.locator('[data-models-allocation-toggle]').click()
     assert.equal(await page.locator('[data-models-advanced-toggle]').getAttribute('aria-expanded'), 'false')
     await shot('models-role-overview')
     await page.locator('[data-models-advanced-toggle]').click()
-    // 默认配置 + 4 exceptions; the 7 followers folded; history not in the config list
+    // 默认配置 + 4 exceptions; the 6 followers folded; history not in the config list
     assert.match(await page.locator('[data-models-default]').innerText(), /Codex · gpt-6-astra/)
     assert.equal(await page.locator('[data-models-overrides] [data-custom]').count(), 4)
-    assert.equal(await page.locator('[data-follows-toggle]').innerText(), '其余 7 项跟随默认')
+    assert.equal(await page.locator('[data-follows-toggle]').innerText(), '其余 6 项跟随默认')
     assert.equal(await page.locator('[data-models-overrides] [data-follows]').count(), 0)
     assert.equal(await page.locator('[data-models-overrides]').getByText('最近 7 天').count(), 1, 'only the failure notice mentions history')
     assert.equal(await page.getByText('推荐', { exact: false }).count(), 0)
-    assert.match(await page.locator('[data-purpose=route] [data-brief]').innerText(), /Claude Code · haiku-5-5 · 备用 1 个/)
+    assert.match(await page.locator('[data-purpose=route] [data-brief]').innerText(), /Claude Code · haiku-5-5 · 另有 1 个模型/)
     assert.match(await page.locator('[data-models-failures]').innerText(), /5 次调用失败（分流 1、就地研究 4）/)
     assert.equal(await page.locator('[data-models-log]').getAttribute('data-models-log'), 'closed')
     await fits(); await shot('models')
-    await page.locator('[data-follows-toggle]').click(); assert.equal(await page.locator('[data-models-overrides] [data-follows]').count(), 7); await fits()
+    await page.locator('[data-follows-toggle]').click(); assert.equal(await page.locator('[data-models-overrides] [data-follows]').count(), 6); await fits()
     await page.locator('[data-follows-toggle]').click()
 
     // the side panel: fallback models are under 高级选项
     await page.locator('[data-purpose=route]').click(); await sheet.waitFor()
     assert.equal(await sheet.locator('[data-model-item]').count(), 0, 'fallbacks hidden until 高级选项 opens')
-    assert.match(await sheet.locator('[data-adv-toggle]').innerText(), /备用 1 个/)
+    assert.match(await sheet.locator('[data-adv-toggle]').innerText(), /另有 1 个模型/)
     await fits(); await shot('models-sheet')
     await sheet.locator('[data-adv-toggle]').click(); await sheet.locator('[data-model-item="claude-sonnet-5-5"]').waitFor(); await shot('models-sheet-advanced')
     if (!flow) { assert.deepEqual(errors, []); return }
@@ -104,7 +104,7 @@ const run = async ({ width, height, scheme, flow }) => {
     await sheet.locator('[data-models-save]').click(); await sheet.waitFor({ state: 'detached' })
     assert.deepEqual(patches.at(-1), { purposes: { chat: { harness: 'codex', models: [], effort: 'high' } } })
     assert.equal(await page.locator('[data-purpose=chat] [data-brief]').innerText(), 'Codex · gpt-6-astra · 思考高')
-    assert.equal(await page.locator('[data-follows-toggle]').innerText(), '其余 6 项跟随默认')
+    assert.equal(await page.locator('[data-follows-toggle]').innerText(), '其余 5 项跟随默认')
 
     // change the default: followers and the model-less override move with it, explicit overrides do not
     steve.model = 'gpt-7'; steve.models = ['gpt-7']; await page.reload(); await page.locator('[data-models-default]').waitFor(); await page.locator('[data-models-advanced-toggle]').click()
@@ -119,7 +119,7 @@ const run = async ({ width, height, scheme, flow }) => {
     await sheet.locator('[data-seg=follow]').click(); await sheet.locator('[data-models-save]').click(); await sheet.waitFor({ state: 'detached' })
     assert.deepEqual(patches.at(-1), { purposes: { title: null } })
     assert.equal(await page.locator('[data-models-overrides] [data-custom][data-purpose=title]').count(), 0)
-    assert.equal(await page.locator('[data-follows-toggle]').innerText(), '其余 7 项跟随默认')
+    assert.equal(await page.locator('[data-follows-toggle]').innerText(), '其余 6 项跟随默认')
 
     // 运行记录: the failure notice opens it; history on a harness/model no longer configured is marked
     await page.locator('[data-models-failures]').click(); await page.locator('[data-models-log=open]').waitFor()

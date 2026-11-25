@@ -81,6 +81,7 @@ rpc_table! {
     TURN_START = "turn.start": HubToNode Control Command true;
     SESSION_INSPECT = "session.inspect": HubToNode Control Read false;
     SESSION_RELEASE = "session.release": HubToNode Control Command true;
+    SESSION_CANCEL_SUBTASK = "session.cancel_subtask": HubToNode Control Command false;
     // JobExecutor
     JOB_START = "job.start": HubToNode Control Command true;
     // ExecutionControl

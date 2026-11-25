@@ -12,8 +12,6 @@ use steve_modules::{ApiResult, Caller, Modules};
 use steve_store::Result;
 use steve_store::base::mems::{Mem, MemFilter};
 
-use steve_store::knowledge::Documents;
-
 /// What kind of origin a memory has, as the page names it: `you` (written by you), `conversation`
 /// (a day of the main conversation), `item` (an item's delivery or its agent), `agent` (an agent
 /// session without an item), `mail`, `space` (a chat space), `event` (a correction of an event
@@ -49,38 +47,24 @@ pub fn writer_name(c: &mut impl Read, writer: &str) -> Result<Option<String>> {
 }
 
 /// The link to where a memory came from (empty when there is nothing to open).
-fn origin_href(
-    c: &mut impl Read,
-    m: &Mem,
-    cand: Option<&(String, String, String)>,
-) -> Result<String> {
+fn origin_href(m: &Mem, cand: Option<&(String, String, String)>) -> String {
     let id = m.source_id.clone().unwrap_or_default();
     if let Some((origin, oid, _)) = cand {
         match origin.as_str() {
-            "mail" if !oid.is_empty() => return Ok(format!("#/mail/t/{oid}")),
-            "space" if !oid.is_empty() => return Ok(format!("#/channels/space/{oid}")),
+            "mail" if !oid.is_empty() => return format!("#/mail/t/{oid}"),
+            "space" if !oid.is_empty() => return format!("#/channels/space/{oid}"),
             _ => {}
         }
     }
     if id.is_empty() {
-        return Ok(String::new());
+        return String::new();
     }
-    Ok(match m.source_type.as_str() {
+    match m.source_type.as_str() {
         "item" => format!("#/items/{id}"),
-        "message" if id.starts_with("chat:") => {
-            match Documents(c).source_of_kind(&m.workspace_id, crate::sources::chat::KIND)? {
-                Some(s) => Documents(c)
-                    .doc_by_ref(&s.id, &id)?
-                    .filter(|d| d.status != "deleted")
-                    .map(|d| format!("#/knowledge/doc/{}", d.id))
-                    .unwrap_or_default(),
-                None => String::new(),
-            }
-        }
         "steve" | "message" if id.starts_with("ses_") => format!("#/sessions/{id}"),
         "event" => format!("#/signals?e={id}"),
         _ => String::new(),
-    })
+    }
 }
 
 /// `Mem.origin`: `{kind, type, id, label, href, writer, writer_name, evidence}`. `label` is the
@@ -88,7 +72,7 @@ fn origin_href(
 /// `evidence` the words it was based on, when it was a candidate first.
 pub fn origin(c: &mut impl Read, m: &Mem) -> Result<Value> {
     let cand = candidate_of(c, &m.id)?;
-    let href = origin_href(c, m, cand.as_ref())?;
+    let href = origin_href(m, cand.as_ref());
     Ok(json!({
         "kind": origin_kind(m, cand.as_ref().map(|x| x.0.as_str())),
         "type": m.source_type,

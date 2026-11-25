@@ -140,7 +140,6 @@ fn spawn_hub(h: &Home) -> Hub {
         .env("STEVE_REPO", "/nonexistent")
         .env("STEVE_VAULT_KEYSTORE", "file")
         .env("STEVE_FORBID_REAL_HOSTS", "1")
-        .env("STEVE_ADAPTER_UPDATES", "off")
         .env("STEVE_VERSION", VERSION)
         .env("STEVE_WEB_DIR", &h.web)
         .env("STEVE_NODE_LISTEN", "1")
@@ -398,7 +397,6 @@ impl NodeHome {
             .env("HOME", self.path())
             .env("STEVE_HOME", self.path())
             .env("STEVE_NODE_LOOPBACK_PLAINTEXT", "1")
-            .env("STEVE_ADAPTER_UPDATES", "off")
             .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
             .env_remove("STEVE_HARNESS_MANIFEST")
             .env_remove("STEVE_PAIR_CODE")
@@ -552,7 +550,7 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
             "POST",
             "/api/bots",
             Some(json!({"name": REMOTE_BOT, "harness": "claude-code",
-                        "model": "kiro/claude-opus-5-5", "perm_mode": "default"})),
+                        "model": "kiro/claude-opus-5-5", "perm_mode": "ask"})),
         )
         .await;
     assert_eq!(st, 200, "{bot}");
@@ -1014,7 +1012,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
             "/api/bots",
             Some(json!({
                 "name":"Team worker", "harness":"claude-code",
-                "model":"kiro/claude-opus-5-5", "perm_mode":"default"
+                "model":"kiro/claude-opus-5-5", "perm_mode":"ask"
             })),
         )
         .await;

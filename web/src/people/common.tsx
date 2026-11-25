@@ -22,8 +22,6 @@ export const LEVELS = codes("level") as Level[]
 export const joinList = (xs: string[]) => xs.join(t("people:shared.list"))
 export const visLabel = (v: Visibility) => (v === "workspace" ? t("people:vis.workspace") : v === "private" ? t("people:vis.private") : v.startsWith("team:") ? t("people:vis.team") : v.startsWith("space:") ? t("people:vis.space") : v)
 
-export { ContactAvatar } from "@/people/avatar"
-
 export function LevelSel({ v, on, testId }: { v: Level; on: (l: Level) => void; testId?: string }) {
   return <Select align="end" quiet testId={testId} value={v} onChange={(x) => on(x as Level)} options={LEVELS.map((l) => ({ v: l, l: <span className="type-footnote">{label("level", l)}</span> }))} />
 }

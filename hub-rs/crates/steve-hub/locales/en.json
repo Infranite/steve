@@ -7,6 +7,7 @@
   "hub.dispatch.not_candidate": "Only Nodes with a current compatible report can be newly bound.",
   "hub.dispatch.not_bound": "A Team can only narrow the Nodes already bound to its Bot.",
   "hub.dispatch.owner_only": "Only this workspace’s owner can change Bot dispatch settings.",
+  "hub.dispatch.team_member_main_bot": "Steve is the workspace coordinator and cannot be added to a Team’s member list.",
   "hub.dispatch.invalid": "Invalid Bot Team or Node list.",
   "hub.dispatch.outside_team": "This Bot is not an enabled member of the selected Team.",
   "hub.dispatch.no_bindings": "No bound execution Node is allowed by this Bot and Team.",
@@ -220,6 +221,10 @@
   "hub.node.unbound.unreadable": "its records could not be read just now",
   "hub.node.unbound.bind_failed": "binding it to the Node failed",
   "hub.node.disk_low": "Device “%{name}” has only %{free} left on its project disk. Free some space on that machine, or check it on the devices page.",
+  "hub.node.harness_auto_upgraded": "%{harness} on “%{node}” auto-upgraded to %{versions}.",
+  "hub.node.harness_auto_upgrade_failed": "%{harness} auto-upgrade on “%{node}” failed: %{error}",
+  "hub.node.harness_upgraded": "%{harness} on “%{node}” upgraded to %{versions}.",
+  "hub.node.harness_upgrade_failed": "%{harness} upgrade on “%{node}” failed: %{error}",
   "hub.node.tags_owner_only": "Only the instance owner can change device tags",
   "hub.node.context_owner_only": "Only the instance owner can change the Hub's default for personal agent config",
   "hub.node.context_bad": "Choose on or off",
@@ -343,5 +348,9 @@
   "hub.models.invalid_selection": "Invalid model selection.",
   "hub.node.workspace_conflict": "The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
   "hub.node.workspace_conflict_question": "Could not start the session: The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
-  "hub.preflight.harness_not_ready": "%{harness} is not installed, not ready or not signed in on any device, so it cannot run now. Install it or sign it in on the device itself (Steve uses the harness's own sign-in there), then check the Devices page."
+  "hub.preflight.harness_not_ready": "%{harness} is not installed, not ready or not signed in on any device, so it cannot run now. Install it or sign it in on the device itself (Steve uses the harness's own sign-in there), then check the Devices page.",
+  "hub.handoff.no_eligible_session": "This item has no session eligible for handoff yet",
+  "hub.handoff.readonly_session": "Read-only or externally imported sessions cannot be handed off",
+  "hub.handoff.session_not_bound_to_item": "Only sessions linked to an item can be handed off",
+  "hub.handoff.auto_bot_switch_forbidden": "Automatic handoff does not switch Bots; it only switches the current Bot's execution surface"
 }

@@ -12,8 +12,8 @@
 //! The batch eval routes the 20 synthetic cases (no history) in bursts of [`BURST`], one call each
 //! ([`gateway::route_many`]), outputs in `tests/batch_outputs.json`. Same bar as one at a time.
 
-use super::decide::{DecideCtx, decide, for_main, now_while_answering, without_router};
-use crate::gateway::{self, FocusItem, RouteCtx};
+use super::decide::{DecideCtx, decide};
+use crate::gateway::{self, RouteCtx};
 use crate::repo::{Bot, Project, Tag};
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,8 +21,6 @@ use std::collections::BTreeMap;
 
 const CASES: &str = include_str!("tests/route_cases.json");
 const OUTPUTS: &str = include_str!("tests/route_outputs.json");
-const AHEAD: &str = include_str!("tests/ahead_cases.json");
-const AHEAD_OUTPUTS: &str = include_str!("tests/ahead_outputs.json");
 const BATCH_OUTPUTS: &str = include_str!("tests/batch_outputs.json");
 
 #[derive(Deserialize)]
@@ -62,6 +60,7 @@ fn route_ctx(c: &Ctx) -> RouteCtx {
                 specialties: vec![],
                 id: s(b, "id"),
                 workspace_id: "default".into(),
+                owner: None,
                 name: s(b, "id"),
                 role: s(b, "role"),
                 main: s(b, "id") == "steve",
@@ -70,7 +69,7 @@ fn route_ctx(c: &Ctx) -> RouteCtx {
                 reasoning_effort: None,
                 rules: String::new(),
                 accept_mode: "inherit".into(),
-                perm_mode: "default".into(),
+                perm_mode: "ask".into(),
                 enabled: true,
                 revision: 1,
                 updated: 0,
@@ -251,98 +250,6 @@ fn an_item_happy_router_is_held_back_by_the_guards() {
     );
     assert_eq!((d.kind.as_str(), d.guard), ("research", Some("4")));
 }
-
-#[derive(Deserialize)]
-struct Ahead {
-    focus: Vec<Value>,
-    cases: Vec<AheadCase>,
-}
-
-#[derive(Deserialize, Clone)]
-struct AheadCase {
-    id: String,
-    pending: Vec<String>,
-    text: String,
-    now: bool,
-}
-
-/// The router's context for an ahead case: route_cases' workspace, the open items, what is being answered.
-fn ahead_ctx(a: &Ahead, x: &AheadCase) -> RouteCtx {
-    let c: Cases = serde_json::from_str(CASES).unwrap();
-    RouteCtx {
-        focus: a
-            .focus
-            .iter()
-            .map(|f| FocusItem {
-                id: s(f, "id"),
-                title: s(f, "title"),
-                status: s(f, "status"),
-                origin: s(f, "origin"),
-            })
-            .collect(),
-        pending: x.pending.clone(),
-        ..route_ctx(&c.ctx)
-    }
-}
-
-/// Whether an ahead case goes ahead with this router reply, as the lane decides it ([`Core::ahead`]):
-/// a plain question waits without the router.
-fn goes_ahead(ctx: &RouteCtx, x: &AheadCase, raw: Option<&str>) -> bool {
-    if without_router(&x.text, false, false, &[]).is_some() {
-        return false;
-    }
-    let Some(r) = raw.and_then(|raw| gateway::parse_route(ctx, &x.text, raw, false)) else {
-        return false;
-    };
-    let d = decide(
-        &r,
-        &x.text,
-        DecideCtx {
-            named_bot: x.text.starts_with("@dev"),
-        },
-    );
-    now_while_answering(&r, &for_main(d, &r))
-}
-
-/// Scores the ahead cases: (messages that needed the answer but went ahead, share of standalone ones
-/// that went ahead).
-fn ahead_report(a: &Ahead, out: &BTreeMap<String, Value>) -> (usize, f64) {
-    let (mut wrong, mut now, mut standalone) = (0, 0, 0);
-    for x in &a.cases {
-        let raw = out.get(&x.id).and_then(|v| v["raw"].as_str());
-        let went = goes_ahead(&ahead_ctx(a, x), x, raw);
-        wrong += usize::from(went && !x.now);
-        standalone += usize::from(x.now);
-        now += usize::from(went && x.now);
-        println!(
-            "{} {:<18} {} {}",
-            if went == x.now { "✓" } else { "✗" },
-            x.id,
-            if went { "now " } else { "wait" },
-            raw.map(|r| crate::util::js_head(r, 90).to_string())
-                .unwrap_or_default()
-        );
-    }
-    let rate = now as f64 / standalone.max(1) as f64;
-    println!(
-        "went ahead wrongly: {wrong}; standalone that went ahead: {now}/{standalone} = {:.0}%",
-        rate * 100.0
-    );
-    (wrong, rate)
-}
-
-#[test]
-fn recorded_ahead_outputs_never_go_ahead_of_an_answer_they_need() {
-    let a: Ahead = serde_json::from_str(AHEAD).unwrap();
-    let out: BTreeMap<String, Value> = serde_json::from_str(AHEAD_OUTPUTS).unwrap();
-    assert_eq!(out.len(), a.cases.len());
-    let (wrong, rate) = ahead_report(&a, &out);
-    assert_eq!(wrong, 0, "a message went ahead of the answer it needs");
-    assert!(rate >= AHEAD_BAR, "standalone ahead {rate}");
-}
-
-/// The share of standalone messages that must go ahead of the answer.
-const AHEAD_BAR: f64 = 0.7;
 
 /// How many synthetic cases the batch eval routes in one call.
 const BURST: usize = 5;

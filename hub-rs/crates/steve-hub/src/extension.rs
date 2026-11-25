@@ -24,12 +24,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::Router;
 use serde_json::Value;
-use steve_channels::channel::ActAsUser;
+use steve_channels::channel::{ActAsUser, InboundMessage, SpaceEvent};
 use steve_channels::ext::{ChannelDecl, ChannelSide, ConnectionHook, MediaFetch, Queries};
-use steve_channels::{ChannelAdapter, MessageSink, ProfileAdapter};
-use steve_modules::Modules;
-use steve_modules::accounts::connections::{ConnectionProvider, Connections};
+use steve_channels::{ChannelAdapter, Inbound, MessageSink, ProfileAdapter, SpaceChange};
+use steve_modules::accounts::connections::{ConnCx, ConnectionProvider, Connections};
 use steve_modules::contacts::PartyHooks;
+use steve_types::{Scope, Scoped};
 
 use crate::bus::Bus;
 use crate::config::Config;
@@ -208,6 +208,7 @@ impl Assembly {
             ext: String::new(),
             owners: BTreeMap::new(),
             decls: BTreeMap::new(),
+            capabilities: BTreeMap::new(),
             providers: Vec::new(),
             channel_adapters: Vec::new(),
             profiles: Vec::new(),
@@ -230,20 +231,31 @@ impl Assembly {
         Ok(d)
     }
 
-    /// Step two for every extension: their routes merged into `routes` (an overlap names the
-    /// extension), their jobs and their connection hooks (each for an adapter the extension
-    /// registered, at most one per adapter).
+    /// Step two for every extension: each extension receives its own scoped [`Started`] handle
+    /// limited to its registered adapters, declared capabilities and authorized workspaces.
+    /// Stateless routes are merged into `routes` (an overlap names the extension), alongside jobs
+    /// and connection hooks (each for an adapter the extension registered, at most one per adapter).
     pub(crate) fn start(
         &self,
-        s: &Started,
+        channels: &steve_channels::Channels,
+        bus: &Bus,
+        vars: &Vars,
         d: &Declare<'_>,
-        mut routes: Router<Modules>,
+        mut routes: Router,
     ) -> Result<StartedAll, ExtensionError> {
         let mut jobs = Vec::new();
         let mut hooks: Vec<Lifecycle> = Vec::new();
         for e in &self.list {
             let id = e.ext.id();
-            let m = e.ext.start(s).map_err(|err| err.of(id))?;
+            let owned_adapters: BTreeSet<String> = d
+                .owners
+                .iter()
+                .filter_map(|(adapter, owner)| (owner == id).then(|| adapter.clone()))
+                .collect();
+            let caps = d.capabilities.get(id).cloned().unwrap_or_default();
+            let started =
+                Started::for_extension(id, channels, bus, vars, owned_adapters, caps, e.builtin);
+            let m = e.ext.start(&started).map_err(|err| err.of(id))?;
             jobs.extend(m.jobs);
             for (adapter, hook) in m.lifecycle {
                 if d.owners.get(&adapter).map(String::as_str) != Some(id) {
@@ -283,7 +295,7 @@ impl Assembly {
 
 /// What step two collected from every extension.
 pub(crate) struct StartedAll {
-    pub(crate) routes: Router<Modules>,
+    pub(crate) routes: Router,
     pub(crate) jobs: Vec<Job>,
     pub(crate) hooks: Vec<Lifecycle>,
 }
@@ -297,10 +309,7 @@ pub(crate) struct Lifecycle {
 
 /// `routes` with `mine` merged in. axum refuses an overlapping route by panicking; this turns it
 /// into an error.
-fn merge_routes(
-    routes: Router<Modules>,
-    mine: Router<Modules>,
-) -> Result<Router<Modules>, ExtensionError> {
+fn merge_routes(routes: Router, mine: Router) -> Result<Router, ExtensionError> {
     std::panic::catch_unwind(AssertUnwindSafe(move || routes.merge(mine))).map_err(|p| {
         let why = p
             .downcast_ref::<String>()
@@ -322,6 +331,8 @@ pub struct Declare<'a> {
     owners: BTreeMap<String, String>,
     /// Adapter id → its declaration, for the channel sides.
     decls: BTreeMap<String, ChannelDecl>,
+    /// Extension id → granted event/read capabilities.
+    capabilities: BTreeMap<String, BTreeSet<EventCapability>>,
     pub(crate) providers: Vec<Arc<dyn ConnectionProvider>>,
     pub(crate) channel_adapters: Vec<Arc<dyn ChannelAdapter>>,
     pub(crate) profiles: Vec<Arc<dyn ProfileAdapter>>,
@@ -350,12 +361,30 @@ impl Declare<'_> {
         Ok(())
     }
 
+    fn grant_capability(&mut self, cap: EventCapability) {
+        self.capabilities
+            .entry(self.ext.clone())
+            .or_default()
+            .insert(cap);
+    }
+
+    /// Declares explicit domain event/read capabilities for this extension.
+    /// Workspace authorization is still enforced dynamically from active connections of adapters
+    /// registered by this extension; vault events are never exposed.
+    pub fn event_capabilities(&mut self, caps: impl IntoIterator<Item = EventCapability>) {
+        self.capabilities
+            .entry(self.ext.clone())
+            .or_default()
+            .extend(caps);
+    }
+
     /// A channel-side adapter: its provider goes to `Connections`, its other views to
     /// `Channels` (channel adapter, profiles, media) and the outbox (acting as you).
     pub fn channel(&mut self, side: ChannelSide) -> Result<(), ExtensionError> {
         side.check().map_err(ExtensionError::new)?;
         let id = side.decl.adapter.clone();
         self.claim(&id)?;
+        self.grant_capability(EventCapability::Channels);
         self.decls.insert(id.clone(), side.decl);
         self.providers.push(side.provider);
         self.channel_adapters.extend(side.adapter);
@@ -455,6 +484,7 @@ impl Declare<'_> {
     /// A mailbox adapter: a provider for `Connections` and an adapter for the mail module.
     pub fn mail(&mut self, a: Arc<dyn steve_mail::MailAdapter>) -> Result<(), ExtensionError> {
         self.claim(a.id())?;
+        self.grant_capability(EventCapability::Mail);
         self.providers.push(a.clone());
         self.mail.push(a);
         Ok(())
@@ -468,6 +498,7 @@ impl Declare<'_> {
         T: ConnectionProvider + steve_calendar::CalendarSource + 'static,
     {
         self.claim(ConnectionProvider::id(a.as_ref()))?;
+        self.grant_capability(EventCapability::Calendar);
         self.providers.push(a.clone());
         self.calendars.push(a);
         Ok(())
@@ -495,9 +526,423 @@ impl Declare<'_> {
     }
 }
 
-/// Subscribing to the Hub's bus; publishing is not offered.
+/// Domain event and read capabilities granted to a compile-time extension.
+/// Vault events (`"vault"`) are intentionally excluded and always forbidden at the plugin boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EventCapability {
+    Channels,
+    Work,
+    Config,
+    People,
+    Automation,
+    Knowledge,
+    Calendar,
+    Mail,
+    Github,
+    Devices,
+    Autonomy,
+    Stats,
+}
+
+impl EventCapability {
+    /// Maps a `steve_types::WIRE_TYPES` tag to its required capability.
+    /// Returns `Err(EventTypeRefusal::VaultForbidden)` for `"vault"` and
+    /// `Err(EventTypeRefusal::Unknown)` for any unrecognized or internal-only tag.
+    fn for_wire_type(ty: &str) -> Result<Self, EventTypeRefusal> {
+        match ty {
+            "vault" => Err(EventTypeRefusal::VaultForbidden),
+            "space" | "chan_message" | "channel" | "persona" | "connection" => Ok(Self::Channels),
+            "item" | "decision" | "session" | "event" | "message" | "steve.thinking"
+            | "steve.draft" | "steve.tool" | "thread.run" => Ok(Self::Work),
+            "bot" | "project" | "tag" | "workspace" | "settings" | "mm" | "changeset" => {
+                Ok(Self::Config)
+            }
+            "party" | "account" => Ok(Self::People),
+            "signal" | "flow" | "run" | "digest" => Ok(Self::Automation),
+            "kb" => Ok(Self::Knowledge),
+            "calendar" => Ok(Self::Calendar),
+            "mail" => Ok(Self::Mail),
+            "gh" => Ok(Self::Github),
+            "device" | "node" | "client" | "release.hold" => Ok(Self::Devices),
+            "approval_policy" => Ok(Self::Autonomy),
+            "stats" => Ok(Self::Stats),
+            _ => Err(EventTypeRefusal::Unknown),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventTypeRefusal {
+    VaultForbidden,
+    Unknown,
+}
+
+/// Strongly typed refusal at the compile-time extension boundary ([`BusTap`], [`DomainViews`],
+/// [`DomainCommands`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExtensionBoundaryError {
+    #[error("extension {extension}: vault events are forbidden across the extension boundary")]
+    VaultEventForbidden { extension: String },
+    #[error("extension {extension}: unknown or unexposed event type `{event_type}`")]
+    UnknownEventType {
+        extension: String,
+        event_type: String,
+    },
+    #[error("extension {extension}: missing capability {capability:?} for event/view `{target}`")]
+    CapabilityDenied {
+        extension: String,
+        capability: EventCapability,
+        target: String,
+    },
+    #[error("extension {extension}: not authorized for workspace `{workspace}`")]
+    UnauthorizedWorkspace {
+        extension: String,
+        workspace: String,
+    },
+    #[error("extension {extension}: does not own adapter `{adapter}`")]
+    UnauthorizedAdapter { extension: String, adapter: String },
+    #[error("extension {extension}: {resource} not found")]
+    NotFound {
+        extension: String,
+        resource: &'static str,
+    },
+    #[error("extension {extension}: domain command failed: {detail}")]
+    CommandFailed { extension: String, detail: String },
+    #[error("extension {extension}: store read failed: {detail}")]
+    StoreReadFailed { extension: String, detail: String },
+}
+
+fn record_extension_refusal(boundary: &'static str, reason: &'static str) {
+    metrics::counter!(
+        "steve_security_refusals_total",
+        "boundary" => boundary,
+        "reason" => reason
+    )
+    .increment(1);
+}
+
 #[derive(Clone)]
-pub struct BusTap(Bus);
+enum WorkspaceAuth {
+    /// Production: authorized workspaces are exactly those with an active (non-revoked) connection
+    /// for one of the adapters registered by this extension.
+    ConnectedAdapters {
+        store: steve_store::Store,
+        adapters: Arc<Vec<String>>,
+    },
+    #[cfg(test)]
+    Static(Arc<BTreeSet<String>>),
+}
+
+impl WorkspaceAuth {
+    fn allows(&self, ws: &str) -> bool {
+        if ws.is_empty() {
+            return false;
+        }
+        match self {
+            Self::ConnectedAdapters { store, adapters } => {
+                if adapters.is_empty() {
+                    return false;
+                }
+                let refs: Vec<&str> = adapters.iter().map(String::as_str).collect();
+                store
+                    .read(|r| {
+                        steve_store::connections::Connections::new(r).has_active_adapter(ws, &refs)
+                    })
+                    .unwrap_or(false)
+            }
+            #[cfg(test)]
+            Self::Static(allowed) => allowed.contains(ws),
+        }
+    }
+
+    fn workspaces(&self) -> Result<BTreeSet<String>, steve_store::StoreError> {
+        match self {
+            Self::ConnectedAdapters { store, adapters } => {
+                if adapters.is_empty() {
+                    return Ok(BTreeSet::new());
+                }
+                let refs: Vec<&str> = adapters.iter().map(String::as_str).collect();
+                let list = store.read(|r| {
+                    steve_store::connections::Connections::new(r)
+                        .active_workspaces_for_adapters(&refs)
+                })?;
+                Ok(list.into_iter().collect())
+            }
+            #[cfg(test)]
+            Self::Static(allowed) => Ok((**allowed).clone()),
+        }
+    }
+}
+
+/// Read-only view of a connection owned by an extension's registered adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionView {
+    pub id: String,
+    pub workspace_id: String,
+    pub account_id: String,
+    pub adapter: String,
+    pub status: String,
+    pub caps: Vec<String>,
+}
+
+/// Read-only summary of a Bot in an authorized workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BotView {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub enabled: bool,
+}
+
+/// Read-only domain view facade handed to extensions in [`Started`].
+/// Never exposes a writable [`steve_store::Store`] or [`steve_modules::Modules`].
+#[derive(Clone)]
+pub struct DomainViews {
+    extension_id: Arc<str>,
+    store: steve_store::Store,
+    adapters: Arc<BTreeSet<String>>,
+    capabilities: Arc<BTreeSet<EventCapability>>,
+    auth: WorkspaceAuth,
+}
+
+impl DomainViews {
+    /// Workspaces where this extension currently has an active (non-revoked) adapter connection.
+    pub fn authorized_workspaces(&self) -> Result<BTreeSet<String>, ExtensionBoundaryError> {
+        self.auth
+            .workspaces()
+            .map_err(|e| ExtensionBoundaryError::StoreReadFailed {
+                extension: self.extension_id.to_string(),
+                detail: e.to_string(),
+            })
+    }
+
+    /// Read-only list of this extension's active connections in `ws`.
+    pub fn connections_in_workspace(
+        &self,
+        ws: &str,
+    ) -> Result<Vec<ConnectionView>, ExtensionBoundaryError> {
+        if !self.auth.allows(ws) {
+            record_extension_refusal("extension_views", "workspace_denied");
+            return Err(ExtensionBoundaryError::UnauthorizedWorkspace {
+                extension: self.extension_id.to_string(),
+                workspace: ws.to_owned(),
+            });
+        }
+        let adapter_list: Vec<&str> = self.adapters.iter().map(String::as_str).collect();
+        let rows = self
+            .store
+            .read(|r| {
+                steve_store::connections::Connections::new(r)
+                    .sources_in_workspace_for_adapters(ws, &adapter_list)
+            })
+            .map_err(|e| ExtensionBoundaryError::StoreReadFailed {
+                extension: self.extension_id.to_string(),
+                detail: e.to_string(),
+            })?;
+        Ok(rows
+            .into_iter()
+            .map(|c| ConnectionView {
+                id: c.id,
+                workspace_id: c.workspace_id,
+                account_id: c.account_id,
+                adapter: c.adapter,
+                status: c.status,
+                caps: c.caps,
+            })
+            .collect())
+    }
+
+    /// Read-only view of one connection in `ws`, only when `ws` is authorized for this extension
+    /// and the connection's adapter belongs to this extension.
+    pub fn connection(
+        &self,
+        ws: &str,
+        connection_id: &str,
+    ) -> Result<ConnectionView, ExtensionBoundaryError> {
+        if !self.auth.allows(ws) {
+            record_extension_refusal("extension_views", "workspace_denied");
+            return Err(ExtensionBoundaryError::UnauthorizedWorkspace {
+                extension: self.extension_id.to_string(),
+                workspace: ws.to_owned(),
+            });
+        }
+        let Some(row) = self
+            .store
+            .read(|r| steve_store::connections::Connections::new(r).source(ws, connection_id))
+            .map_err(|e| ExtensionBoundaryError::StoreReadFailed {
+                extension: self.extension_id.to_string(),
+                detail: e.to_string(),
+            })?
+        else {
+            return Err(ExtensionBoundaryError::NotFound {
+                extension: self.extension_id.to_string(),
+                resource: "connection",
+            });
+        };
+        if !self.adapters.contains(&row.adapter) {
+            record_extension_refusal("extension_views", "adapter_denied");
+            return Err(ExtensionBoundaryError::UnauthorizedAdapter {
+                extension: self.extension_id.to_string(),
+                adapter: row.adapter,
+            });
+        }
+        Ok(ConnectionView {
+            id: row.id,
+            workspace_id: row.workspace_id,
+            account_id: row.account_id,
+            adapter: row.adapter,
+            status: row.status,
+            caps: row.caps,
+        })
+    }
+
+    /// Read-only list of Bots in `ws`. Requires [`EventCapability::Config`] and workspace
+    /// authorization.
+    pub fn workspace_bots(&self, ws: &str) -> Result<Vec<BotView>, ExtensionBoundaryError> {
+        if !self.capabilities.contains(&EventCapability::Config) {
+            record_extension_refusal("extension_views", "capability_denied");
+            return Err(ExtensionBoundaryError::CapabilityDenied {
+                extension: self.extension_id.to_string(),
+                capability: EventCapability::Config,
+                target: "workspace_bots".into(),
+            });
+        }
+        if !self.auth.allows(ws) {
+            record_extension_refusal("extension_views", "workspace_denied");
+            return Err(ExtensionBoundaryError::UnauthorizedWorkspace {
+                extension: self.extension_id.to_string(),
+                workspace: ws.to_owned(),
+            });
+        }
+        let bots = self.store.bots().list(Some(ws)).map_err(|e| {
+            ExtensionBoundaryError::StoreReadFailed {
+                extension: self.extension_id.to_string(),
+                detail: e.to_string(),
+            }
+        })?;
+        Ok(bots
+            .into_iter()
+            .map(|b| BotView {
+                id: b.id,
+                name: b.name,
+                role: b.role,
+                enabled: b.enabled,
+            })
+            .collect())
+    }
+}
+
+/// Authorized domain command facade handed to extensions in [`Started`].
+/// Every mutation passes through core domain rules and verifies adapter ownership.
+#[derive(Clone)]
+pub struct DomainCommands {
+    extension_id: Arc<str>,
+    adapters: Arc<BTreeSet<String>>,
+    inbound: Arc<dyn MessageSink>,
+    queries: Queries,
+}
+
+impl DomainCommands {
+    fn check_adapter(&self, cx: &ConnCx) -> Result<(), ExtensionBoundaryError> {
+        if !self.adapters.contains(cx.adapter()) {
+            record_extension_refusal("extension_commands", "adapter_denied");
+            return Err(ExtensionBoundaryError::UnauthorizedAdapter {
+                extension: self.extension_id.to_string(),
+                adapter: cx.adapter().to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Delivers an inbound channel message for a connection owned by this extension.
+    pub async fn ingest_message(
+        &self,
+        cx: &ConnCx,
+        msg: InboundMessage,
+    ) -> Result<Inbound, ExtensionBoundaryError> {
+        self.check_adapter(cx)?;
+        self.inbound
+            .inbound(cx.ws(), cx.id(), msg)
+            .await
+            .map_err(|e| ExtensionBoundaryError::CommandFailed {
+                extension: self.extension_id.to_string(),
+                detail: e.to_string(),
+            })
+    }
+
+    /// Delivers a channel space lifecycle event for a connection owned by this extension.
+    pub async fn ingest_space_event(
+        &self,
+        cx: &ConnCx,
+        ev: SpaceEvent,
+    ) -> Result<Option<SpaceChange>, ExtensionBoundaryError> {
+        self.check_adapter(cx)?;
+        self.inbound
+            .space_event(cx.ws(), cx.id(), ev)
+            .await
+            .map_err(|e| ExtensionBoundaryError::CommandFailed {
+                extension: self.extension_id.to_string(),
+                detail: e.to_string(),
+            })
+    }
+
+    /// Persists an adapter cursor scoped to a connection owned by this extension.
+    pub fn save_cursor(
+        &self,
+        cx: &ConnCx,
+        container: &str,
+        cursor: &str,
+    ) -> Result<(), ExtensionBoundaryError> {
+        self.check_adapter(cx)?;
+        self.queries
+            .for_cx(cx)
+            .save_cursor(container, cursor)
+            .map_err(|e| ExtensionBoundaryError::CommandFailed {
+                extension: self.extension_id.to_string(),
+                detail: e.to_string(),
+            })
+    }
+}
+
+fn allow_tap_event(
+    allowed_types: &[String],
+    auth: &WorkspaceAuth,
+    allow_hub_scope: bool,
+    event: &steve_types::BusEvent,
+) -> bool {
+    if !allowed_types.iter().any(|ty| ty == event.wire_type()) {
+        return false;
+    }
+    match event.scope() {
+        Scope::Ws(ws) => {
+            if auth.allows(ws.as_str()) {
+                true
+            } else {
+                record_extension_refusal("extension_bus", "workspace_denied");
+                false
+            }
+        }
+        Scope::Hub => {
+            if allow_hub_scope {
+                true
+            } else {
+                record_extension_refusal("extension_bus", "hub_scope_denied");
+                false
+            }
+        }
+    }
+}
+
+/// Subscribing to the Hub's bus, filtered by the extension's granted capabilities and authorized
+/// workspaces; publishing is never offered.
+#[derive(Clone)]
+pub struct BusTap {
+    bus: Bus,
+    extension_id: Arc<str>,
+    capabilities: Arc<BTreeSet<EventCapability>>,
+    auth: WorkspaceAuth,
+    allow_hub_scope: bool,
+}
 
 /// Plugin boundary view over the original bounded typed tap. Encoding is lazy, so it adds
 /// no queue, reorder point or overflow policy of its own.
@@ -519,41 +964,132 @@ impl PluginEvents {
     }
 }
 impl BusTap {
-    /// The plugin's declared wire tags, encoded only when the plugin reads each frame.
-    pub fn tap(&self, types: &[&str]) -> PluginEvents {
-        let types: Vec<String> = types.iter().map(|ty| (*ty).to_owned()).collect();
+    #[cfg(test)]
+    fn scoped_for_test(
+        bus: Bus,
+        extension_id: &str,
+        workspaces: impl IntoIterator<Item = &'static str>,
+        capabilities: impl IntoIterator<Item = EventCapability>,
+        allow_hub_scope: bool,
+    ) -> Self {
+        Self {
+            bus,
+            extension_id: Arc::from(extension_id),
+            capabilities: Arc::new(capabilities.into_iter().collect()),
+            auth: WorkspaceAuth::Static(Arc::new(
+                workspaces.into_iter().map(str::to_owned).collect(),
+            )),
+            allow_hub_scope,
+        }
+    }
+
+    /// Subscribes to `types` on the Hub bus.
+    /// Refuses vault events, unknown tags, and any tag whose [`EventCapability`] was not granted
+    /// to this extension. At delivery time, workspace-scoped events are delivered only for
+    /// workspaces authorized for this extension, and Hub-scoped events require explicit Hub scope.
+    pub fn tap(&self, types: &[&str]) -> Result<PluginEvents, ExtensionBoundaryError> {
+        let mut allowed_types = Vec::with_capacity(types.len());
+        for &ty in types {
+            let cap = match EventCapability::for_wire_type(ty) {
+                Ok(cap) => cap,
+                Err(EventTypeRefusal::VaultForbidden) => {
+                    record_extension_refusal("extension_bus", "vault_forbidden");
+                    return Err(ExtensionBoundaryError::VaultEventForbidden {
+                        extension: self.extension_id.to_string(),
+                    });
+                }
+                Err(EventTypeRefusal::Unknown) => {
+                    record_extension_refusal("extension_bus", "unknown_event_type");
+                    return Err(ExtensionBoundaryError::UnknownEventType {
+                        extension: self.extension_id.to_string(),
+                        event_type: ty.to_owned(),
+                    });
+                }
+            };
+            if !self.capabilities.contains(&cap) {
+                record_extension_refusal("extension_bus", "capability_denied");
+                return Err(ExtensionBoundaryError::CapabilityDenied {
+                    extension: self.extension_id.to_string(),
+                    capability: cap,
+                    target: ty.to_owned(),
+                });
+            }
+            allowed_types.push(ty.to_owned());
+        }
+        let auth = self.auth.clone();
+        let allow_hub_scope =
+            self.allow_hub_scope && self.capabilities.contains(&EventCapability::Devices);
         let inner = self
-            .0
-            .tap(move |event| types.iter().any(|ty| ty == event.wire_type()));
-        PluginEvents { inner }
+            .bus
+            .tap(move |event| allow_tap_event(&allowed_types, &auth, allow_hub_scope, event));
+        Ok(PluginEvents { inner })
     }
 }
 
-/// What step two gets: the built services. `Channels` itself and the store's write transactions
-/// are not part of it; inbound messages go through `inbound` (or a connection hook's own sink).
+/// What step two gets: read-only domain views, authorized domain commands, connection-scoped
+/// queries, and a capability/workspace-filtered bus tap. `Channels`, `Modules`, `Connections` and
+/// writable `Store` handles are never exposed across the public extension boundary.
 #[non_exhaustive]
 pub struct Started {
-    pub modules: Modules,
-    pub connections: Connections,
-    /// The channels' inbound entry point.
-    pub inbound: Arc<dyn MessageSink>,
-    /// Read views, bound to one connection with [`Queries::for_cx`].
+    /// Read-only domain views scoped to this extension's adapters and authorized workspaces.
+    pub views: DomainViews,
+    /// Authorized domain commands scoped to this extension's adapters.
+    pub commands: DomainCommands,
+    /// Connection-scoped read views, bound to one connection with [`Queries::for_cx`].
     pub queries: Queries,
+    /// Capability- and workspace-filtered bus subscription handle.
     pub bus: BusTap,
     /// Environment variables (a map in tests).
     pub vars: Vars,
+    pub(crate) connections: Connections,
     pub(crate) channels: steve_channels::Channels,
 }
 
 impl Started {
-    pub(crate) fn new(channels: &steve_channels::Channels, bus: &Bus, vars: &Vars) -> Self {
+    pub(crate) fn for_extension(
+        extension_id: &str,
+        channels: &steve_channels::Channels,
+        bus: &Bus,
+        vars: &Vars,
+        owned_adapters: BTreeSet<String>,
+        capabilities: BTreeSet<EventCapability>,
+        allow_hub_scope: bool,
+    ) -> Self {
+        let ext: Arc<str> = Arc::from(extension_id);
+        let adapters = Arc::new(owned_adapters);
+        let adapter_vec = Arc::new(adapters.iter().cloned().collect::<Vec<_>>());
+        let caps = Arc::new(capabilities);
+        let store = channels.store().clone();
+        let auth = WorkspaceAuth::ConnectedAdapters {
+            store: store.clone(),
+            adapters: adapter_vec,
+        };
+        let queries = Queries::new(channels.clone());
+        let inbound: Arc<dyn MessageSink> = Arc::new(channels.clone());
         Self {
-            modules: channels.modules().clone(),
-            connections: channels.connections().clone(),
-            inbound: Arc::new(channels.clone()),
-            queries: Queries::new(channels.clone()),
-            bus: BusTap(bus.clone()),
+            views: DomainViews {
+                extension_id: ext.clone(),
+                store,
+                adapters: adapters.clone(),
+                capabilities: caps.clone(),
+                auth: auth.clone(),
+            },
+            commands: DomainCommands {
+                extension_id: ext.clone(),
+                adapters,
+                inbound,
+                queries: queries.clone(),
+            },
+            queries,
+            bus: BusTap {
+                bus: bus.clone(),
+                extension_id: ext,
+                capabilities: caps,
+                auth,
+                allow_hub_scope,
+            },
             vars: vars.clone(),
+            connections: channels.connections().clone(),
             channels: channels.clone(),
         }
     }
@@ -563,9 +1099,9 @@ impl Started {
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Mounted {
-    /// Merged under `/api` behind `require_user` and the `Caller` layer (an extension that is not
-    /// built in: under `/api/channels/ext/{id}`).
-    pub api_routes: Router<Modules>,
+    /// Stateless routes merged under `/api` behind `require_user` and the `Caller` layer (an
+    /// extension that is not built in: under `/api/channels/ext/{id}`).
+    pub api_routes: Router,
     pub jobs: Vec<Job>,
     /// What runs for each connection of an adapter (`connections.adapter`, hook).
     pub lifecycle: Vec<(String, Arc<dyn ConnectionHook>)>,
@@ -573,7 +1109,7 @@ pub struct Mounted {
 
 impl Mounted {
     /// Routes merged with the ones given before.
-    pub fn routes(mut self, r: Router<Modules>) -> Self {
+    pub fn routes(mut self, r: Router) -> Self {
         self.api_routes = self.api_routes.merge(r);
         self
     }
@@ -707,7 +1243,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     };
     let cfg = Arc::new(cfg);
     // collection is on from here; exporting it is optional (`metrics::start`)
-    crate::metrics::install();
+    crate::metrics::install_with_backup(cfg.home.clone(), cfg.db_path());
     let supervised_state: Arc<std::sync::Mutex<Option<crate::api::AppState>>> =
         Arc::new(std::sync::Mutex::new(None));
     if std::env::var("STEVE_MANAGED").as_deref() == Ok("1") {
@@ -871,9 +1407,22 @@ mod tests {
         let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
             Default::default(),
         )));
-        let mut events = BusTap(bus.clone()).tap(&["project", "steve.thinking"]);
+        let mut events = BusTap::scoped_for_test(
+            bus.clone(),
+            "test.ext",
+            ["a"],
+            [EventCapability::Config, EventCapability::Work],
+            false,
+        )
+        .tap(&["project", "steve.thinking"])
+        .unwrap();
         assert_eq!(events.inner.max_capacity(), Bus::TAP_CAPACITY);
         bus.publish_batch(vec![
+            steve_types::ConfigEvent::Project {
+                id: "p_other".into(),
+                ws: "b".into(),
+            }
+            .into(),
             steve_types::ConfigEvent::Project {
                 id: "p".into(),
                 ws: "a".into(),
@@ -895,6 +1444,10 @@ mod tests {
             assert_eq!(event["ws"], "a");
             assert_eq!(event["rev"], 1);
         }
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
@@ -904,19 +1457,40 @@ mod tests {
         let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
             Default::default(),
         )));
-        let mut plugin = BusTap(bus.clone()).tap(&["event"]);
+        let mut plugin = BusTap::scoped_for_test(
+            bus.clone(),
+            "test.ext",
+            ["a"],
+            [EventCapability::Work],
+            false,
+        )
+        .tap(&["event"])
+        .unwrap();
         let mut typed = bus.tap(|event| event.wire_type() == "event");
         let mut sse = bus.subscribe();
         let long = "😀".repeat(2500);
         let diff = "line\n".repeat(5000);
         let data = serde_json::json!({
-            "rawOutput": long,
-            "_meta": {"claudeCode": {"toolName": "Read", "toolResponse": "private"}},
-            "rawInput": {"command": "cat file", "timeout": 5},
-            "content": [
-                {"type": "image", "data": "base64", "mimeType": "image/png"},
-                {"type": "diff", "oldText": diff, "newText": diff}
-            ]
+            "tool": {
+                "id": "t1",
+                "origin": "harness",
+                "name": "Read",
+                "category": "read",
+                "title": "Read file",
+                "phase": "succeeded",
+                "action": {
+                    "type": "tool",
+                    "name": "steve_update",
+                    "args": {
+                        "now": long,
+                        "image": {"type": "image", "data": "base64", "mimeType": "image/png"}
+                    }
+                },
+                "result": [
+                    {"type": "text", "text": long},
+                    {"type": "diff", "path": "a.rs", "old": diff, "new": diff, "added": 5000, "removed": 5000}
+                ]
+            }
         });
         for seq in 1..=2 {
             bus.live(
@@ -946,22 +1520,21 @@ mod tests {
             assert_eq!(event["ws"], "a");
             assert_eq!(event["rev"], 0);
             assert!(frame.id.is_none());
-            assert!(event["data"].get("_meta").is_none());
-            assert_eq!(event["data"]["tool"], "Read");
+            assert_eq!(event["data"]["tool"]["name"], "Read");
             assert_eq!(
-                event["data"]["rawInput"],
-                serde_json::json!({"command": "cat file"})
+                event["data"]["tool"]["action"]["args"]["now"],
+                format!("{}…", "😀".repeat(2000))
             );
             assert_eq!(
-                event["data"]["content"][0],
+                event["data"]["tool"]["action"]["args"]["image"],
                 serde_json::json!({"type": "image"})
             );
             assert_eq!(
-                event["data"]["rawOutput"],
+                event["data"]["tool"]["result"][0]["text"],
                 format!("{}…", "😀".repeat(2000))
             );
-            assert_eq!(event["data"]["content"][1]["oldText"], diff);
-            assert_eq!(event["data"]["content"][1]["newText"], diff);
+            assert_eq!(event["data"]["tool"]["result"][1]["old"], diff);
+            assert_eq!(event["data"]["tool"]["result"][1]["new"], diff);
             assert_eq!(
                 serde_json::to_value(&*typed.recv().await.unwrap()).unwrap()["data"],
                 data
@@ -987,8 +1560,135 @@ mod tests {
     }
 
     #[test]
+    fn every_wire_type_maps_to_a_capability_or_explicit_vault_refusal() {
+        for ty in steve_types::WIRE_TYPES {
+            let mapped = EventCapability::for_wire_type(ty);
+            if ty == "vault" {
+                assert_eq!(mapped, Err(EventTypeRefusal::VaultForbidden));
+            } else {
+                assert!(mapped.is_ok(), "unmapped wire type: {ty}");
+            }
+        }
+        assert_eq!(
+            EventCapability::for_wire_type("patch"),
+            Err(EventTypeRefusal::Unknown)
+        );
+        assert_eq!(
+            EventCapability::for_wire_type("not_a_real_event"),
+            Err(EventTypeRefusal::Unknown)
+        );
+    }
+
+    #[tokio::test]
+    async fn bus_tap_refusals_return_typed_errors_and_increment_metrics() {
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
+        let tap = BusTap::scoped_for_test(
+            bus.clone(),
+            "ext.demo",
+            ["ws_allowed"],
+            [EventCapability::Config],
+            false,
+        );
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut sub = metrics::with_local_recorder(&recorder, || {
+            assert_eq!(
+                tap.tap(&["vault"]).err(),
+                Some(ExtensionBoundaryError::VaultEventForbidden {
+                    extension: "ext.demo".into()
+                })
+            );
+            assert_eq!(
+                tap.tap(&["bogus"]).err(),
+                Some(ExtensionBoundaryError::UnknownEventType {
+                    extension: "ext.demo".into(),
+                    event_type: "bogus".into()
+                })
+            );
+            assert_eq!(
+                tap.tap(&["item"]).err(),
+                Some(ExtensionBoundaryError::CapabilityDenied {
+                    extension: "ext.demo".into(),
+                    capability: EventCapability::Work,
+                    target: "item".into()
+                })
+            );
+            tap.tap(&["project"]).unwrap()
+        });
+        // Authorized workspace passes; unauthorized workspace is dropped and counted.
+        metrics::with_local_recorder(&recorder, || {
+            bus.publish_batch(vec![
+                steve_types::ConfigEvent::Project {
+                    id: "p_denied".into(),
+                    ws: "ws_other".into(),
+                }
+                .into(),
+                steve_types::ConfigEvent::Project {
+                    id: "p_ok".into(),
+                    ws: "ws_allowed".into(),
+                }
+                .into(),
+            ]);
+        });
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got["id"], "p_ok");
+        assert_eq!(got["ws"], "ws_allowed");
+        assert!(matches!(
+            sub.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        // Verify workspace and Hub-scope refusal metrics synchronously through the predicate.
+        metrics::with_local_recorder(&recorder, || {
+            let denied_ws: steve_types::BusEvent = steve_types::ConfigEvent::Project {
+                id: "p_denied".into(),
+                ws: "ws_other".into(),
+            }
+            .into();
+            let denied_hub: steve_types::BusEvent = steve_types::DevicesEvent::Node {
+                id: "node_1".into(),
+                user: "usr_dev".into(),
+            }
+            .into();
+            assert!(!allow_tap_event(
+                &["project".into()],
+                &tap.auth,
+                false,
+                &denied_ws
+            ));
+            assert!(!allow_tap_event(
+                &["node".into()],
+                &tap.auth,
+                false,
+                &denied_hub
+            ));
+        });
+        let text = handle.render();
+        for reason in [
+            "vault_forbidden",
+            "unknown_event_type",
+            "capability_denied",
+            "workspace_denied",
+            "hub_scope_denied",
+        ] {
+            assert!(
+                text.lines()
+                    .any(|line| line.starts_with("steve_security_refusals_total{")
+                        && line.contains("boundary=\"extension_bus\"")
+                        && line.contains(&format!("reason=\"{reason}\""))
+                        && line.ends_with(" 1")),
+                "missing {reason} in:\n{text}"
+            );
+        }
+    }
+
+    #[test]
     fn overlapping_routes_are_an_error_not_a_panic() {
-        let one = || Router::<Modules>::new().route("/a", axum::routing::get(|| async { "a" }));
+        let one = || Router::new().route("/a", axum::routing::get(|| async { "a" }));
         let merged = merge_routes(
             one(),
             Router::new().route("/b", axum::routing::get(|| async { "b" })),

@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::backend::{BResult, BackendError, Obj, Repo};
+use crate::error::{BResult, BackendError};
 use crate::js;
+use crate::wire::store::{Obj, StoreBackend};
 
 pub const MAX_FILE: usize = 20 * 1024 * 1024;
 pub const MAX_FILES: usize = 10;
@@ -228,7 +229,7 @@ pub struct NewFile {
 /// A stored copy whose length differs from the row (cut short by a power loss before blobs were written
 /// atomically) is written again from these bytes, which have the same hash.
 pub fn store(
-    r: &dyn Repo,
+    r: &StoreBackend,
     data_dir: &Path,
     ws: &str,
     b: &[u8],
@@ -328,7 +329,7 @@ pub fn file_ref(f: &Obj) -> Value {
 }
 
 /// Attachment ids from a request → FileRefs; every id must be a file of this workspace (404 `没有这个附件`).
-pub fn refs(r: &dyn Repo, ws: &str, ids: Option<&[String]>) -> BResult<Vec<Value>> {
+pub fn refs(r: &StoreBackend, ws: &str, ids: Option<&[String]>) -> BResult<Vec<Value>> {
     let mut seen: Vec<&String> = vec![];
     for id in ids.unwrap_or_default() {
         if !seen.contains(&id) {

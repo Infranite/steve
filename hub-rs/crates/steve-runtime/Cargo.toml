@@ -17,7 +17,7 @@ policy = ["dep:backon", "dep:governor", "dep:rand"]
 due = ["policy", "dep:metrics", "dep:tracing"]
 # The shared DueSource contract check, for each source's tests (a dev-dependency feature).
 due-contract = ["due"]
-# The cache (R10, DESIGN §6): the Hub turns it on, a Node does not.
+# In-process cache: the Hub turns it on, a Node does not.
 cache = ["dep:moka", "dep:metrics"]
 jobs = ["dep:metrics", "dep:tracing", "tokio/rt"]
 # What a process or a process group uses (CPU, memory, descriptors, threads, disk): Hub and Node.

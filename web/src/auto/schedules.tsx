@@ -10,7 +10,8 @@ import { Textarea } from "@/components/ui/textarea"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { Empty, StatusDot, BotAvatar, go, Panel, Tile, Pill, Notice } from "@/ui"
+import { Empty, StatusDot, go, Panel, Tile, Pill, Notice } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { cn } from "@/lib/utils"
 import { st, botName, toast } from "@/store"
 import { flowApi, errText, type Parsed, type Schedule, type ScheduleBody, type ScheduleMode, type ScheduleRun } from "@/api/flow"
@@ -78,7 +79,7 @@ function ScheduleDetail({ s, busy, onRun, onEdit, onDelete }: { s: Schedule; bus
   const rows: [string, ReactNode][] = [
     [t("auto:schedule.rowWhat"), <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{brief ? t("auto:schedule.briefWhat") : s.what}</span>],
     [t("auto:schedule.rowTime"), <>{s.describe} <span className="type-footnote text-muted-foreground">{s.tz} · <span className="font-mono">{s.cron}</span></span></>],
-    [t("auto:schedule.rowRun"), brief ? <span>{modeLabel(s.mode)}</span> : <span className="inline-flex items-center gap-1.5"><BotAvatar k={s.bot} size={16} />{botName(s.bot)} · {modeLabel(s.mode)}</span>],
+    [t("auto:schedule.rowRun"), brief ? <span>{modeLabel(s.mode)}</span> : <span className="inline-flex items-center gap-1.5"><ActorAvatar actorId={s.bot} size={16} />{botName(s.bot)} · {modeLabel(s.mode)}</span>],
     [t("auto:schedule.rowRules"), <span className="text-muted-foreground">{brief ? t("auto:schedule.briefRules") : t("auto:schedule.rules", { missed: t(`auto:schedule.missed.${s.missed}`), overlap: t(`auto:schedule.overlap.${s.overlap}`), budget: usd(s.budget_usd) })}</span>],
   ]
   return (

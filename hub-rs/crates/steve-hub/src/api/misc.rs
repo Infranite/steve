@@ -8,13 +8,142 @@ use axum::response::IntoResponse;
 use serde_json::{Value, json};
 
 use super::{
-    ApiResult, AppState, Ctx, Noun, body, objs, ok, ok_true, opt_obj, own, set_cookie, str_of,
+    ApiResult, AppState, Ctx, Noun, body, check_file_ids, check_len, from_body, json_body, objs,
+    ok, ok_true, opt_obj, own, set_cookie, str_of,
 };
-use crate::backend::{Obj, Tier};
 use crate::error::ApiError;
-use crate::validate::{Check, Num, Str};
+use crate::wire::core::Tier;
+use crate::wire::store::Obj;
 
-const WS_PREFIX: Str = Str::pattern(r"^[A-Z]{1,6}$");
+fn valid_ws_prefix(s: &str) -> bool {
+    (1..=6).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_uppercase())
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceBody {
+    name: Option<String>,
+    description: Option<String>,
+    item_prefix: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SayBody {
+    text: String,
+    files: Option<Vec<String>>,
+    mentions: Option<Value>,
+    item: Option<String>,
+    reply_to: Option<String>,
+    client_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct TextBody {
+    text: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ReadBody {
+    at: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct RerouteBody {
+    to: String,
+}
+
+#[derive(serde::Deserialize)]
+struct OfferBody {
+    take: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestBody {
+    choice: String,
+}
+
+#[derive(serde::Deserialize)]
+struct A2uiBody {
+    block: String,
+    #[serde(rename = "surfaceId")]
+    surface_id: String,
+    #[serde(rename = "sourceComponentId")]
+    source_component_id: String,
+    name: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    timestamp: String,
+    context: Option<Value>,
+    data: Option<Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct FollowBody {
+    follow: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct ResolveBody {
+    revision: Option<i64>,
+    choice: String,
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+enum TagCat {
+    #[serde(rename = "项目")]
+    Project,
+    #[serde(rename = "类型")]
+    Kind,
+    #[serde(rename = "领域")]
+    Domain,
+    #[serde(rename = "客户")]
+    Client,
+    #[serde(rename = "主题")]
+    Topic,
+}
+
+#[derive(serde::Deserialize)]
+struct TagBody {
+    name: Option<String>,
+    cat: Option<TagCat>,
+    description: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct MergeBody {
+    into: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ConfigTargetIn {
+    kind: String,
+    id: Option<String>,
+    field: Option<String>,
+    base: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ConfigDraftBody {
+    target: ConfigTargetIn,
+    text: String,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+enum DeviceStatus {
+    #[serde(rename = "正常")]
+    Normal,
+    #[serde(rename = "暂停接活")]
+    Paused,
+}
+
+#[derive(serde::Deserialize)]
+struct DevicePatchBody {
+    name: Option<String>,
+    status: Option<DeviceStatus>,
+    max_sessions: Option<i64>,
+}
 
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -30,7 +159,23 @@ pub async fn me(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> Api
     let web_version = crate::web::web_version(&st.cfg);
     st.read(move |r| {
         let ws = super::workspaces_out(r.workspaces_of_user(&c.me)?);
-        ok(json!({ "user": c.user, "version": version, "web_version": web_version, "workspaces": objs(ws), "workspace": c.ws, "client": c.client }))
+        let person = r.member_identity(&c.ws, &c.me)?;
+        let mut user = c.user;
+        if let Some(ref p) = person {
+            user.insert("login".into(), json!(p.login));
+            user.insert("name".into(), json!(p.name));
+            if let Some(ref pid) = p.party_id {
+                user.insert("party_id".into(), json!(pid));
+            }
+            user.insert(
+                "avatar".into(),
+                serde_json::to_value(&p.avatar).unwrap_or(Value::Null),
+            );
+            if let Some(ref sub) = p.subtitle {
+                user.insert("subtitle".into(), json!(sub));
+            }
+        }
+        ok(json!({ "user": user, "person": person, "version": version, "web_version": web_version, "workspaces": objs(ws), "workspace": c.ws, "client": c.client }))
     })
     .await
 }
@@ -75,7 +220,8 @@ struct Shell {
     #[serde(skip_serializing_if = "Option::is_none")]
     update: Option<UpdateNotice>,
     owner: bool,
-    me: Obj,
+    me: Option<steve_types::MemberIdentity>,
+    members: Vec<steve_types::MemberIdentity>,
     workspace: Option<Obj>,
     workspaces: Vec<Obj>,
     bots: Vec<Obj>,
@@ -86,6 +232,7 @@ struct Shell {
     harness_names: std::collections::BTreeMap<String, String>,
     modules: steve_types::integrations::OptionalModules,
     notify_seen: i64,
+    dismissed_alerts: Vec<String>,
 }
 
 /// Workspace configuration and the shell's navigation catalogue.
@@ -114,7 +261,13 @@ pub async fn shell(
         if let Some(w) = workspace.as_mut() {
             steve_store::seeded::show(w, steve_store::seeded::WORKSPACE);
         }
-        let (bots, all_bots) = super::bots_out(r, ws)?;
+        let my_workspaces = r.workspaces_of_user(&c.me)?;
+        let allowed_ws: std::collections::BTreeSet<String> = my_workspaces
+            .iter()
+            .map(|w| str_of(w, "id"))
+            .filter(|id| !id.is_empty())
+            .collect();
+        let (bots, all_bots) = super::bots_out(r, ws, &c.me, &allowed_ws)?;
         let mut projects = r.projects_list(ws)?;
         for p in &mut projects {
             steve_store::seeded::show(p, steve_store::seeded::PROJECT);
@@ -123,6 +276,12 @@ pub async fn shell(
             .map(|(k, v)| (k.into(), json!(v)))
             .collect();
         settings.extend(r.settings_all(ws)?);
+        let members = r.member_identities(ws)?;
+        let me = members
+            .iter()
+            .find(|m| m.user_id.as_str() == c.me)
+            .cloned()
+            .or(r.member_identity(ws, &c.me)?);
         conditional_json(
             &headers,
             &Shell {
@@ -130,9 +289,10 @@ pub async fn shell(
                 web_version,
                 update,
                 owner,
-                me: c.user,
+                me,
+                members,
                 workspace,
-                workspaces: super::workspaces_out(r.workspaces_of_user(&c.me)?),
+                workspaces: super::workspaces_out(my_workspaces),
                 bots,
                 all_bots,
                 projects,
@@ -141,6 +301,7 @@ pub async fn shell(
                 harness_names,
                 modules,
                 notify_seen: crate::notify::seen(r, ws)?,
+                dismissed_alerts: crate::notify::dismissed(r, ws)?,
             },
         )
     })
@@ -266,23 +427,34 @@ pub async fn tags(
 
 /// `{name, description?, item_prefix?}`; `name` required unless `partial`.
 fn workspace_in(v: &Value, partial: bool) -> Result<Obj, ApiError> {
-    let mut c = Check::object(v);
+    let req: WorkspaceBody = from_body(v.clone())?;
+    let mut bad = Vec::new();
     let mut p = Obj::new();
-    let name = if partial {
-        c.opt_str("name", Str::len(1, 40))
-    } else {
-        Some(c.str("name", Str::len(1, 40)))
-    };
-    if let Some(n) = name {
-        p.insert("name".into(), json!(n));
+    match req.name {
+        Some(n) if check_len(&n, 1, 40) => {
+            p.insert("name".into(), json!(n));
+        }
+        Some(_) => bad.push("name".into()),
+        None if !partial => bad.push("name".into()),
+        None => {}
     }
-    if let Some(d) = c.opt_str("description", Str::max(400)) {
-        p.insert("description".into(), json!(d));
+    if let Some(d) = req.description {
+        if check_len(&d, 0, 400) {
+            p.insert("description".into(), json!(d));
+        } else {
+            bad.push("description".into());
+        }
     }
-    if let Some(x) = c.opt_str("item_prefix", WS_PREFIX) {
-        p.insert("item_prefix".into(), json!(x));
+    if let Some(x) = req.item_prefix {
+        if valid_ws_prefix(&x) {
+            p.insert("item_prefix".into(), json!(x));
+        } else {
+            bad.push("item_prefix".into());
+        }
     }
-    c.finish()?;
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
     steve_store::seeded::store(&mut p, steve_store::seeded::WORKSPACE);
     Ok(p)
 }
@@ -370,15 +542,40 @@ pub async fn thread_say(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let text = k.str("text", Str::len(1, 20000));
-    let files = super::files::file_ids(&mut k);
-    let mentions = k.raw("mentions").cloned();
-    let item = k.opt_str("item", Str::len(1, 40));
-    let reply_to = k.opt_str("reply_to", Str::len(1, 80));
-    let client_id = k.opt_str("client_id", Str::len(1, 80));
-    k.finish()?;
+    let req: SayBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if !check_len(&req.text, 1, 20000) {
+        bad.push("text".into());
+    }
+    if req.item.as_deref().is_some_and(|s| !check_len(s, 1, 40)) {
+        bad.push("item".into());
+    }
+    if req
+        .reply_to
+        .as_deref()
+        .is_some_and(|s| !check_len(s, 1, 80))
+    {
+        bad.push("reply_to".into());
+    }
+    if req
+        .client_id
+        .as_deref()
+        .is_some_and(|s| !check_len(s, 1, 80))
+    {
+        bad.push("client_id".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    check_file_ids(&req.files)?;
+    let SayBody {
+        text,
+        files,
+        mentions,
+        item,
+        reply_to,
+        client_id,
+    } = req;
     // `@` mentions (contacts P3): checked like the module does before anything happens
     let mut checked = Vec::new();
     if let Some(ms) = mentions.filter(|v| !v.is_null()) {
@@ -392,21 +589,13 @@ pub async fn thread_say(
         }
         checked = ms;
     }
-    // a retry of the same draft (`client_id`) answers like the first send and sends nothing; the
-    // send runs on even if this request goes away, so it needs its own state
-    let (st2, c2) = (st.clone(), c.clone());
-    let v = st
-        .dedupe
-        .once(&c.ws, &c.me, "thread", client_id, move || async move {
-            let (st, c) = (st2, c2);
-            let refs = super::files::refs(&st, &c.ws, files).await?;
-            st.domain
-                .say_to(&c.ws, &c.me, &text, refs, checked, item, reply_to)
-                .await?;
-            Ok::<_, ApiError>(json!({ "ok": true }))
-        })
+    let refs = super::files::refs(&st, &c.ws, files).await?;
+    st.domain
+        .say_to(
+            &c.ws, &c.me, &text, refs, checked, item, reply_to, client_id,
+        )
         .await?;
-    ok(v)
+    ok(json!({ "ok": true }))
 }
 
 pub async fn thread_stop(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
@@ -444,11 +633,11 @@ pub async fn thread_queued_edit(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let text = k.str("text", Str::len(1, 20000));
-    k.finish()?;
-    let text = text.trim().to_string();
+    let req: TextBody = json_body(&b)?;
+    if !check_len(&req.text, 1, 20000) {
+        return Err(ApiError::Invalid(vec!["text".into()]));
+    }
+    let text = req.text.trim().to_string();
     if text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
@@ -477,20 +666,12 @@ pub async fn notifications_read(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let at = k.opt_num(
-        "at",
-        Num {
-            int: true,
-            min: None,
-            max: None,
-            gt: Some(0.0),
-        },
-    );
-    k.finish()?;
+    let req: ReadBody = json_body(&b)?;
+    if req.at.is_some_and(|a| a <= 0) {
+        return Err(ApiError::Invalid(vec!["at".into()]));
+    }
     let now = now_ms();
-    let at = at.map(|a| (a as i64).min(now)).unwrap_or(now);
+    let at = req.at.map(|a| a.min(now)).unwrap_or(now);
     let bus = st.bus.clone();
     st.write(move |r| ok(json!({ "seen": crate::notify::mark_seen(r, &bus, &c.ws, at)? })))
         .await
@@ -537,11 +718,12 @@ pub async fn thread_reroute(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let to = k.str("to", Str::len(1, 40));
-    k.finish()?;
-    if !(to == "inline" || to == "item" || to.strip_prefix("item:").is_some_and(|i| !i.is_empty()))
+    let req: RerouteBody = json_body(&b)?;
+    let to = req.to;
+    if !check_len(&to, 1, 40)
+        || !(to == "inline"
+            || to == "item"
+            || to.strip_prefix("item:").is_some_and(|i| !i.is_empty()))
     {
         return Err(ApiError::Invalid(vec!["to".into()]));
     }
@@ -555,14 +737,8 @@ pub async fn thread_offer(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let take = k.opt_bool("take");
-    k.finish()?;
-    let Some(take) = take else {
-        return Err(ApiError::Invalid(vec!["take".into()]));
-    };
-    thread_result(st.domain.offer(&c.ws, &id, take, &c.me).await?)
+    let req: OfferBody = json_body(&b)?;
+    thread_result(st.domain.offer(&c.ws, &id, req.take, &c.me).await?)
 }
 
 /// `POST /api/thread/:id/suggest {choice: "here" | "item" | "new"}`.
@@ -572,11 +748,11 @@ pub async fn thread_suggest(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let choice = k.enum_("choice", &["here", "item", "new"]);
-    k.finish()?;
-    thread_result(st.domain.suggest(&c.ws, &id, &choice, &c.me).await?)
+    let req: SuggestBody = json_body(&b)?;
+    if !matches!(req.choice.as_str(), "here" | "item" | "new") {
+        return Err(ApiError::Invalid(vec!["choice".into()]));
+    }
+    thread_result(st.domain.suggest(&c.ws, &id, &req.choice, &c.me).await?)
 }
 
 /// `POST /api/thread/:id/a2ui` (ST-46): a button of an A2UI interface in Steve's reply. Answers the record
@@ -587,26 +763,35 @@ pub async fn thread_a2ui(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let block = k.str("block", Str::len(1, 16));
-    let surface = k.str("surfaceId", Str::len(1, 120));
-    let component = k.str("sourceComponentId", Str::len(1, 120));
-    let name = k.str("name", Str::len(1, 64));
-    let label = k.opt_str("label", Str::ANY);
-    let timestamp = k.opt_str("timestamp", Str::len(0, 40));
-    let context = k.raw("context").cloned();
-    let data = k.raw("data").cloned();
-    k.finish()?;
+    let req: A2uiBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if !check_len(&req.block, 1, 16) {
+        bad.push("block".into());
+    }
+    if !check_len(&req.surface_id, 1, 120) {
+        bad.push("surfaceId".into());
+    }
+    if !check_len(&req.source_component_id, 1, 120) {
+        bad.push("sourceComponentId".into());
+    }
+    if !check_len(&req.name, 1, 64) {
+        bad.push("name".into());
+    }
+    if !check_len(&req.timestamp, 0, 40) {
+        bad.push("timestamp".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
     let action = steve_core::thread::A2uiAction {
-        block,
-        surface,
-        component,
-        name,
-        label: label.unwrap_or_default(),
-        context: context.unwrap_or_else(|| json!({})),
-        data: data.unwrap_or(Value::Null),
-        timestamp: timestamp.unwrap_or_default(),
+        block: req.block,
+        surface: req.surface_id,
+        component: req.source_component_id,
+        name: req.name,
+        label: req.label,
+        context: req.context.unwrap_or_else(|| json!({})),
+        data: req.data.unwrap_or(Value::Null),
+        timestamp: req.timestamp,
     };
     ok(Value::Object(
         st.domain.a2ui_action(&c.ws, &c.me, &id, action).await?,
@@ -630,14 +815,8 @@ pub async fn item_thread_follow(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let follow = k.opt_bool("follow");
-    k.finish()?;
-    let Some(follow) = follow else {
-        return Err(ApiError::Invalid(vec!["follow".into()]));
-    };
-    if !st.domain.thread_follow(&c.ws, &id, follow).await? {
+    let req: FollowBody = json_body(&b)?;
+    if !st.domain.thread_follow(&c.ws, &id, req.follow).await? {
         return Err(ApiError::not_found(Noun::Item.missing()));
     }
     ok_true()
@@ -679,14 +858,15 @@ pub async fn decision_resolve(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let revision = decision_revision(&v)?;
-    let mut k = Check::object(&v);
-    let choice = k.str("choice", Str::ANY);
-    let text = k.opt_str("text", Str::ANY).unwrap_or_default();
-    k.finish()?;
-    let command = steve_core::DecisionCommand::Resolve { choice, text };
-    let done = settle_decision(&st, &c, id.clone(), revision, command).await?;
+    let req: ResolveBody = json_body(&b)?;
+    if req.revision.is_some_and(|r| r <= 0) {
+        return Err(ApiError::Invalid(vec!["revision".into()]));
+    }
+    let command = steve_core::DecisionCommand::Resolve {
+        choice: req.choice,
+        text: req.text,
+    };
+    let done = settle_decision(&st, &c, id.clone(), req.revision, command).await?;
     if let Some(revision) = done.get("revision").and_then(Value::as_i64) {
         crate::access::note_via(&st, &id, revision, &c);
     }
@@ -725,32 +905,36 @@ pub async fn decision_undo(
 
 // ── tags ──
 
-const TAG_CATS: &[&str] = &["项目", "类型", "领域", "客户", "主题"];
-
 /// `TagIn` (or `TagIn.partial()`), as the parsed object with only the present keys.
 fn tag_in(v: &Value, partial: bool) -> Result<Obj, ApiError> {
-    let mut c = Check::object(v);
+    let req: TagBody = from_body(v.clone())?;
+    let mut bad = Vec::new();
     let mut p = Obj::new();
-    let name = if partial {
-        c.opt_str("name", Str::len(1, 20))
-    } else {
-        Some(c.str("name", Str::len(1, 20)))
-    };
-    let cat = if partial {
-        c.opt_enum("cat", TAG_CATS)
-    } else {
-        Some(c.enum_("cat", TAG_CATS))
-    };
-    let desc = if partial {
-        c.opt_str("description", Str::len(1, 400))
-    } else {
-        Some(c.str("description", Str::len(1, 400)))
-    };
-    c.finish()?;
-    for (k, x) in [("name", name), ("cat", cat), ("description", desc)] {
-        if let Some(x) = x {
-            p.insert(k.into(), json!(x));
+    match req.name {
+        Some(n) if check_len(&n, 1, 20) => {
+            p.insert("name".into(), json!(n));
         }
+        Some(_) => bad.push("name".into()),
+        None if !partial => bad.push("name".into()),
+        None => {}
+    }
+    match req.cat {
+        Some(cat) => {
+            p.insert("cat".into(), json!(cat));
+        }
+        None if !partial => bad.push("cat".into()),
+        None => {}
+    }
+    match req.description {
+        Some(desc) if check_len(&desc, 1, 400) => {
+            p.insert("description".into(), json!(desc));
+        }
+        Some(_) => bad.push("description".into()),
+        None if !partial => bad.push("description".into()),
+        None => {}
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
     }
     Ok(p)
 }
@@ -812,13 +996,10 @@ pub async fn tag_merge(
     let (i, ws) = (id.clone(), c.ws.clone());
     st.read(move |r| Ok(own(r.tag_get(&i)?, &ws, Noun::Tag)?))
         .await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let into = k.str("into", Str::ANY);
-    k.finish()?;
+    let req: MergeBody = json_body(&b)?;
     st.write(move |r| {
-        own(r.tag_get(&into)?, &c.ws, Noun::Tag)?;
-        r.tag_merge(&id, &into)?;
+        own(r.tag_get(&req.into)?, &c.ws, Noun::Tag)?;
+        r.tag_merge(&id, &req.into)?;
         ok_true()
     })
     .await
@@ -839,11 +1020,9 @@ pub async fn settings_patch(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let k = Check::object(&v);
-    let p = k.map().cloned();
-    k.finish()?;
-    let p = p.unwrap_or_default();
+    let Value::Object(p) = body(&b)? else {
+        return Err(ApiError::Invalid(vec![String::new()]));
+    };
     let mut values = Obj::new();
     for (key, val) in &p {
         let s = crate::js::string(val);
@@ -854,6 +1033,28 @@ pub async fn settings_patch(
                 "hub.settings.bad_key",
                 key = key
             )));
+        }
+    }
+    if values.contains_key(steve_store::bot_dispatch::NO_EXECUTOR_SETTING)
+        && let Some(store) = super::bot_dispatch::store(&st).cloned()
+    {
+        let ws = c.ws.clone();
+        let me = c.me.clone();
+        let owner = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                Ok::<_, steve_store::StoreError>(
+                    steve_store::Members::new(r).role(&ws, &me)?.as_deref() == Some("owner"),
+                )
+            })
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+        if !owner {
+            return Err(ApiError::Json(
+                403,
+                steve_i18n::t!("hub.dispatch.owner_only"),
+            ));
         }
     }
     st.write(move |r| {
@@ -937,40 +1138,50 @@ pub async fn config_draft(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let mut target = Obj::new();
-    // the TS kinds plus every module target (`schedule`, …)
+    let req: ConfigDraftBody = json_body(&b)?;
     let mut kinds = vec!["bot", "project", "settings", "models", "tags", "global"];
     if let Some(m) = &st.modules {
         kinds.extend(m.registry.target_kinds());
     }
-    if let Some(mut t) = k.sub("target", false) {
-        let kind = t.enum_("kind", &kinds);
-        let id = t.opt_str("id", Str::ANY);
-        // a bot's long text (its working rules or its own system prompt) drafted on its own, from
-        // `base`, the text the editor shows
-        let field = t.opt_enum("field", &["rules", "prompt"]);
-        let base = t.opt_str("base", Str::max(40000));
-        k.absorb(t);
-        target.insert("kind".into(), json!(kind));
-        if let Some(id) = id {
-            target.insert("id".into(), json!(id));
-        }
-        if let Some(f) = field {
-            target.insert("field".into(), json!(f));
-        }
-        if let Some(b) = base {
-            target.insert("base".into(), json!(b));
-        }
+    let mut bad = Vec::new();
+    if !kinds.contains(&req.target.kind.as_str()) {
+        bad.push("target.kind".into());
     }
-    let text = k.str("text", Str::len(1, 4000));
-    k.finish()?;
-    let kind = target
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    if req
+        .target
+        .field
+        .as_deref()
+        .is_some_and(|f| !matches!(f, "rules" | "prompt"))
+    {
+        bad.push("target.field".into());
+    }
+    if req
+        .target
+        .base
+        .as_deref()
+        .is_some_and(|base| !check_len(base, 0, 40000))
+    {
+        bad.push("target.base".into());
+    }
+    if !check_len(&req.text, 1, 4000) {
+        bad.push("text".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    let mut target = Obj::new();
+    let kind = req.target.kind;
+    target.insert("kind".into(), json!(kind));
+    if let Some(id) = req.target.id {
+        target.insert("id".into(), json!(id));
+    }
+    if let Some(f) = req.target.field {
+        target.insert("field".into(), json!(f));
+    }
+    if let Some(base) = req.target.base {
+        target.insert("base".into(), json!(base));
+    }
+    let text = req.text;
     if let Some(m) = st
         .modules
         .as_ref()
@@ -1108,22 +1319,23 @@ pub async fn system_models(
     ok(crate::catalog::with_usage(list, &used))
 }
 
-/// `POST /api/system/harnesses` `{id, name?, command, args?, env?, properties?}`: declares a
+/// `POST /api/system/harnesses` `{id, name?, command, args?, properties?}`: declares a custom
 /// harness adapter in the Hub's manifest (the instance's owner only); in force once the Hub
-/// restarts, when its Node asks the adapter what it supports.
+/// restarts, when its Node asks the adapter what it supports. Built-in harness ids and `env`
+/// injection are refused.
 pub async fn system_harness_add(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
     instance_owner(&c)?;
-    let h: crate::harnesses::NewHarness =
-        serde_json::from_value(body(&b)?).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let h = crate::harnesses::parse_new_harness(body(&b)?)
+        .map_err(crate::harnesses::HarnessError::into_api_error)?;
     let path = st.cfg.harness_manifest.clone();
     tokio::task::spawn_blocking(move || crate::harnesses::declare(&path, h))
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?
-        .map_err(ApiError::bad_request)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(crate::harnesses::HarnessError::into_api_error)?;
     ok(json!({"saved": true, "restart": true}))
 }
 
@@ -1159,8 +1371,8 @@ pub async fn system_harness_install(
     ok(json!({"accepted": true, "restart": false}))
 }
 
-/// `DELETE /api/system/harnesses/:id`: removes an adapter from the Hub's manifest (the
-/// instance's owner only); in force once the Hub restarts.
+/// `DELETE /api/system/harnesses/:id`: removes a custom adapter from the Hub's manifest (the
+/// instance's owner only); in force once the Hub restarts. Built-in harness ids are refused.
 pub async fn system_harness_remove(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -1170,12 +1382,12 @@ pub async fn system_harness_remove(
     let path = st.cfg.harness_manifest.clone();
     let removed = tokio::task::spawn_blocking(move || crate::harnesses::undeclare(&path, &id))
         .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?
-        .map_err(ApiError::bad_request)?;
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(crate::harnesses::HarnessError::into_api_error)?;
     ok(json!({"removed": removed, "restart": true}))
 }
 
-// ── task workspaces (ST-45) ──
+// ── task workspaces ──
 
 /// Paths and sizes on this machine are the instance manager's.
 fn instance_owner(c: &Ctx) -> Result<(), ApiError> {
@@ -1209,6 +1421,16 @@ pub async fn system_workspaces_reclaim(
     ok(st.domain.reclaim_workspaces().await?)
 }
 
+#[derive(serde::Serialize)]
+struct BackupStatus {
+    settings: crate::backup::DailySettings,
+    available: bool,
+    database: std::path::PathBuf,
+    dir: std::path::PathBuf,
+    #[serde(flatten)]
+    inventory: crate::backup::Inventory,
+}
+
 /// `GET /api/system/backup`: where the database and its copies are on the Hub's machine, whether the
 /// daily copy is on, and the newest one.
 pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
@@ -1220,22 +1442,20 @@ pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<C
         .ok_or_else(|| ApiError::internal("storage unavailable"))?
         .store
         .clone();
-    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<BackupStatus> {
         let settings = crate::backup::daily_settings(&store)?;
-        let mut status = crate::daily_backup::status(
-            &cfg.home,
-            &cfg.db_path(),
-            cfg.backup && !cfg.diagnostic() && settings.enabled,
-            settings.keep_days,
-        );
-        status["settings"] = serde_json::to_value(settings)?;
-        status["available"] = json!(cfg.backup && !cfg.diagnostic());
-        Ok(status)
+        Ok(BackupStatus {
+            settings,
+            available: cfg.backup && !cfg.diagnostic(),
+            database: cfg.db_path(),
+            dir: crate::backup::root(&cfg.home),
+            inventory: crate::backup::inventory(&cfg.home),
+        })
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?
     .map_err(|e| ApiError::internal(e.to_string()))?;
-    ok(v)
+    ok(serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))?)
 }
 
 /// Installation owner settings; stored atomically through the existing Settings repository.
@@ -1273,11 +1493,7 @@ pub async fn system_backup_now(
     instance_owner(&c)?;
     let cfg = st.cfg.clone();
     let manifest = tokio::task::spawn_blocking(move || {
-        crate::admin::client::backup::run(
-            &cfg.home,
-            &cfg.db_path(),
-            steve_store_sqlite::backup::Reason::Manual,
-        )
+        crate::backup::create(&cfg.home, &cfg.db_path(), crate::backup::Purpose::Manual)
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?
@@ -1530,33 +1746,36 @@ pub async fn device_patch(
         .and_then(Value::as_i64)
         .filter(|r| *r >= 0)
         .ok_or_else(|| ApiError::Json(400, "device_revision_required_refresh_or_upgrade".into()))?;
-    let mut k = Check::object(&v);
+    let req: DevicePatchBody = from_body(v)?;
+    let mut bad = Vec::new();
     let mut p = Obj::new();
     p.insert("revision".into(), json!(revision));
-    if let Some(n) = k.opt_str("name", Str::len(1, 60)) {
-        p.insert("name".into(), json!(n));
+    if let Some(n) = req.name {
+        if check_len(&n, 1, 60) {
+            p.insert("name".into(), json!(n));
+        } else {
+            bad.push("name".into());
+        }
     }
-    if let Some(s) = k.opt_enum("status", &["正常", "暂停接活"]) {
+    if let Some(s) = req.status {
         p.insert("status".into(), json!(s));
     }
-    if let Some(m) = k.opt_num(
-        "max_sessions",
-        Num {
-            int: true,
-            min: Some(1.0),
-            max: Some(steve_store::runtime::SESSIONS_MAX as f64),
-            gt: None,
-        },
-    ) {
-        if id != steve_store::runtime::HUB_DEVICE {
-            return Err(ApiError::bad_request(steve_i18n::t!(
-                "hub.devices.limit_node_api"
-            )));
+    if let Some(m) = req.max_sessions {
+        if (1..=steve_store::runtime::SESSIONS_MAX as i64).contains(&m) {
+            if id != steve_store::runtime::HUB_DEVICE {
+                return Err(ApiError::bad_request(steve_i18n::t!(
+                    "hub.devices.limit_node_api"
+                )));
+            }
+            owner_or(&c, || steve_i18n::t!("hub.devices.limit_owner_only"))?;
+            p.insert("max_sessions".into(), json!(m));
+        } else {
+            bad.push("max_sessions".into());
         }
-        owner_or(&c, || steve_i18n::t!("hub.devices.limit_owner_only"))?;
-        p.insert("max_sessions".into(), js_num(m));
     }
-    k.finish()?;
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
     let store = st
         .modules
         .as_ref()

@@ -10,8 +10,8 @@ pub mod approval;
 
 mod items;
 pub use items::{
-    DecisionReads, DecisionRow, HUMAN_KINDS, ItemFacts, ItemHistory, ItemInput, ItemStats, MarkRow,
-    ModelTokens, TurnReads, TurnRow, UsageReads,
+    DecisionReads, DecisionRow, DecisionSettler, HUMAN_KINDS, ItemFacts, ItemHistory, ItemInput,
+    ItemStats, MarkRow, ModelTokens, TurnReads, TurnRow, UsageReads,
 };
 
 mod cube;

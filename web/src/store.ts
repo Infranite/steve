@@ -11,7 +11,7 @@ import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { OPTION_IDS, optionKey } from "./decision-options"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, setPageWorkspace, stream, Unauthenticated, BotPlacementError, type Shell, type ConversationMessage, type RItemDetail, type RBot, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type RRuntime, type RDevice, type DecisionAnswer } from "./api"
+import { api, setPageWorkspace, stream, Unauthenticated, BotPlacementError, type Shell, type ConversationMessage, type RItemDetail, type RBot, type RExecutionSurface, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type RRuntime, type RDevice, type DecisionAnswer } from "./api"
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
@@ -20,9 +20,9 @@ import { decisionText } from "./i18n/decision"
 import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
-import { permissionModes, canConfigurePermission } from "./runtime-status"
+import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, FoldReason, ItemView, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onViews, messageView, messageViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
@@ -36,8 +36,8 @@ export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
   tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; revision: number; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
-  /** Historical reason when the retired automatic resolver made this decision. */
-  yolo?: string
+  /** Actor who settled the decision (a user id, "steve", "me", or undefined for system/expired). */
+  resolvedBy?: string
   /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
   via?: string }
 /** what became of an approved release (hub decision.result.outcome): the card says this, never a bare "approved" */
@@ -61,7 +61,8 @@ export type Item = {
   placement?: PlacementExplanation
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
-export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
+export type ExecutionSurface = RExecutionSurface
+export type Bot = { id: string; owner?: string | null; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; fallbackSurfaces?: ExecutionSurface[]; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
@@ -143,15 +144,15 @@ export const defaultHarness = (): string => {
 export const permModes = (harness: string): string[] => {
   const r = runtimes().find(r => r.id === harness)
   // Session-native auto is a workspace decision, not a Bot preference.
-  const supported = Object.keys(permissionModes).filter(k => canConfigurePermission(r, k))
-  if (supported.length === 1 && supported[0] === "bypassPermissions") return supported
-  const offered = supported.filter(k => k === "plan" || k === "default")
-  return offered.length ? offered : ["default"]
+  const supported = PERMISSION_MODES.filter(k => canConfigurePermission(r, k))
+  if (supported.length === 1 && supported[0] === "full_access") return supported
+  const offered = supported.filter(k => k === "plan" || k === "ask")
+  return offered.length ? offered : ["ask"]
 }
 /** a compatible permission mode for `harness`, in priority order */
 export const defaultPermMode = (harness: string): string => {
   const ms = permModes(harness)
-  return (["default", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
+  return (["ask", "plan", "full_access"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "ask"
 }
 /** the reasoning efforts `harness` takes, as its adapter reported them */
 export const harnessEfforts = (harness: string): string[] => runtimes().find((r) => r.id === harness)?.efforts ?? []
@@ -159,7 +160,7 @@ export const harnessEfforts = (harness: string): string[] => runtimes().find((r)
 export const harnessSkills = (harness: string): boolean | undefined => runtimes().find((r) => r.id === harness)?.skills
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
-export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))
+export const PERM: Record<string, string> = live(PERMISSION_MODES, (k) => t(`core:perm.${k}`))
 /* a label in the current language, or the Hub value itself */
 export const accKey = (label: string) => Object.keys(ACC).find((k) => ACC[k] === label) ?? (label in ACC ? label : "inherit")
 
@@ -177,17 +178,15 @@ export const st = {
   /* the live stream has been broken for a while: what is on screen may be old, and nothing sent will arrive */
   down: false, version: "", webVersion: "", update: null as StateUpdate | null,
   modules: null as Shell["modules"] | null,
+  me: null as MemberIdentity | null, members: [] as MemberIdentity[],
   workspace: null as Shell["workspace"] | null, workspaces: [] as Shell["workspaces"],
   bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
   tags: [] as Tag[],
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>,
   localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
   noticeSeen: 0,
+  dismissedAlerts: [] as string[],
   quote: null as string | null, focus: null as { item: string; until: number } | null,
-  /* modules that are not wired to a backend yet: always empty, never sample data */
-  SIG: [] as any[], rules: [] as any[], schedules: [] as any[], sources: [] as any[], plugins: [] as any[],
-  ch: { personas: [] as any[], spaces: [] as any[], accounts: [] as any[], providers: [] as any[], notify: { acc: "" }, disclosureDefaults: [] as any[] },
-  pp: { contacts: [] as any[], orgs: [] as any[], teams: [] as any[], vault: [] as any[], itemPeople: [] as any[], accounts: [] as any[] },
   pendingActions: new Set<string>(),
   /** An accepted channel recovery must not be submitted again while state readback is stale or unavailable. */
   submittedChannelDecisions: new Set<string>(),
@@ -267,7 +266,7 @@ const sessionCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("se
 /* ───────── mapping ───────── */
 function botOf(b: RBot): Bot {
   const proj = shell()?.projects.find((p) => p.id === b.default_project)
-  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
+  return { id: b.id, owner: b.owner ?? null, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort, fallbackSurfaces: b.fallback_surfaces ?? [],
     on: b.enabled, acc: ACC[b.accept_mode] ?? ACC.inherit, ws: proj?.name ?? t("core:projectByItem"), project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
     routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
 }
@@ -399,12 +398,11 @@ const isRelease = (d: DecisionView) => d.kind === "approve" && d.subject_type ==
 let releaseHistory: DecisionView[] | undefined, releases = new Map<string, DecisionView>()
 /* ── alerts that are over ──
  * a failure asks for attention only while it is current: a later release took its place (only the newest counts), the item
- * went on or finished, or you closed it. Closed ones are remembered by the Hub with the closed notifications (setting
- * noticeDismissed: notification ids and decision ids), so a refresh or another device does not bring them back.
+ * went on or finished, or you closed it. Closed ones are remembered by the Hub in `thread_notices` (returned in
+ * `shell.dismissedAlerts`), so a refresh or another device does not bring them back.
  * The failure itself stays in the item's timeline and in the notifications. */
 export function alertClosed(key?: string) {
-  const xs = st.settings.noticeDismissed as unknown
-  return !!key && Array.isArray(xs) && xs.includes(key)
+  return !!key && st.dismissedAlerts.includes(key)
 }
 /** the failed release still worth showing on the item, or undefined */
 function liveRel(i: ItemView, r?: Rel): Rel | undefined {
@@ -417,10 +415,10 @@ function liveRel(i: ItemView, r?: Rel): Rel | undefined {
 /** close alerts by hand: decision ids, notification ids or their lines in the conversation */
 export function closeAlerts(keys: string[]) {
   const s = shell(), xs = keys.filter(Boolean); if (!s || !xs.length) return
-  const was = Array.isArray(s.settings.noticeDismissed as unknown) ? (s.settings.noticeDismissed as unknown as string[]) : []
-  const settings = { ...s.settings, noticeDismissed: [...was, ...xs] as unknown as string }
-  qc.setQueryData(shellKey(), { ...s, settings })
-  applyShell({ ...s, settings })
+  const was = s.dismissedAlerts ?? []
+  const dismissedAlerts = [...new Set([...was, ...xs])]
+  qc.setQueryData(shellKey(), { ...s, dismissedAlerts })
+  applyShell({ ...s, dismissedAlerts })
   qc.setQueryData(noticeKey(), noticeList().map((n) => xs.includes(n.id) ? { ...n, closed: true } : n))
   emit()
   void call(Promise.all(xs.map((x) => api.dismissNotice(x))))
@@ -441,19 +439,27 @@ function choiceLabel(d: DecisionView) {
   if (d.kind === "accept") return r.choice === "pass" ? t("core:choice.pass") : t("core:choice.rework", { text: r.text ?? "" })
   if (d.subject_type === "space") return (r.choice ?? r.answer) === "mute" ? t("core:choice.mute") : t("core:choice.setup")
   if (optionKey(d.subject_type, r.choice)) return optionLabel(d.subject_type, r.choice)
+  if (d.subject_type === "no_executor") {
+    if (r.choice === "later") return t("core:choice.noExecutorLater")
+    if (r.choice === "confirm_proposal") return t("core:choice.noExecutorProposal", { bot: botName(r.bot ?? null) })
+    if (r.choice === "assign_bot") return t("core:choice.noExecutorAssign", { bot: botName(r.bot ?? null) })
+  }
   if (d.kind === "ask") return String(r.answer ?? "")
   if (d.subject_type === "party_merge") return r.choice === "merge" ? t("core:choice.merge") : t("core:choice.notSame")
   if (d.kind === "confirm") return r.choice === "yes" ? t("core:choice.confirmYes") : t("core:choice.confirmNo")
   if (d.kind === "propose") return r.choice === "yes" ? t("core:choice.proposeYes") : t("core:choice.proposeNo")
   if (MODULE_CHOICE_SUBJECTS.has(d.subject_type)) return MODULE_CHOICE[r.choice] ?? String(r.choice ?? t("core:choice.handled"))
   if (d.subject_type === "session_start" && r.choice === "retry") return t("core:card.retrySession")
-  if (d.kind === "fail") return FAIL_CHOICE[r.choice] ?? r.choice
+  if (d.kind === "fail") {
+    if (typeof r.choice === "string" && r.choice.startsWith("bot:")) return t("core:fail.handoffBot", { bot: botName(r.choice.slice(4)) })
+    return FAIL_CHOICE[r.choice] ?? r.choice
+  }
   if (d.subject_type === "tool_call") return r.optionId ? t("core:choice.allow") : t("core:choice.deny")
   if (d.subject_type === "release") return r.approved ? t("core:choice.release") : t("core:choice.noRelease")
   return r.approved ? t("core:choice.approve") : t("core:choice.deny")
 }
 /** the choices on a card about something that went wrong, by the Hub's choice id */
-export const FAIL_CHOICE: Record<string, string> = live(["continue", "delivered", "look", "tosteve", "drop", "release_waive", "release_retry", "retry", "release_live"] as const, (k) => t(`core:fail.${k}`))
+export const FAIL_CHOICE: Record<string, string> = live(["wait", "continue", "delivered", "look", "tosteve", "drop", "release_waive", "release_retry", "retry", "release_live"] as const, (k) => t(`core:fail.${k}`))
 /* ── which agent turn answered a comment in the work log ──
  * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
  * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
@@ -539,9 +545,10 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
   const after = new Map(blockSlots(rows).flatMap((at, k) => at < 0 ? [] : [[at, k] as const])), tl: any[] = []
   lines.forEach((t, n) => {
     const sid = started(t)
-    /* [8] is the moment itself, for the page's day headings */
+    /* [8] is the moment itself, for the page's day headings; [9] is the Hub actor id */
     const row: any[] = sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : ["sys", t.text, tm(t.ts)]
     row[8] = t.ts
+    row[9] = t.actor
     tl.push(row)
     const k = after.get(n); if (k == null) return
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
@@ -623,10 +630,13 @@ export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" =
 
 function applyShell(s: Shell) {
   st.version = s.version; st.webVersion = s.web_version ?? ""; st.update = s.update ?? null; announceUpdate(st.update); st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
+  st.me = s.me ?? null
+  st.members = s.members ?? []
   waitsByView = new WeakMap(); orphansByView = new WeakMap()
   st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
   st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
+  st.dismissedAlerts = s.dismissedAlerts ?? []
   st.settings = s.settings
   st.modules = s.modules
   applyLook(s.settings)
@@ -788,6 +798,12 @@ function onHub(e: HubEvent) {
   }
   /* Only pages displaying clients subscribe to their presence. */
   if (e.type === "client") return
+  if (e.type === "party" && st.me) {
+    const pid = "id" in e ? e.id : undefined
+    if (!st.me.party_id || !pid || st.me.party_id === pid || st.members.some((m) => m.party_id === pid)) {
+      void refresh()
+    }
+  }
   if (moduleTypes.has(e.type)) return
   e = e as HubEvent
   if (e.type === "workspace" || e.type === "bot" || e.type === "project" || e.type === "tag" || e.type === "settings") {
@@ -816,7 +832,6 @@ function onHub(e: HubEvent) {
       updateChat({ live: researchEvent(chatLive().live, e) }, "frame")
     return
   }
-  if (e.type === "thread.run") return
   if (e.type === "steve.thinking") {
     if (e.on && !chatLive().thinking) nextDraft = true
     updateChat({ thinking: e.on, phase: e.on ? e.phase ?? "" : "" })
@@ -835,7 +850,10 @@ function onHub(e: HubEvent) {
     appendTranscript(e.session_id, { seq: e.seq, ts: Date.now(), kind: e.kind, data: e.data })
     return
   }
-  if (e.type === "message" && e.space === "notify") void qc.invalidateQueries({ queryKey: noticeKey() })
+  if (e.type === "message" && e.space === "notify") {
+    void qc.invalidateQueries({ queryKey: noticeKey() })
+    void refresh()
+  }
 }
 /* the stream is bound to the workspace it was opened in: reopen it after a switch */
 let closeStream = () => {}
@@ -984,6 +1002,47 @@ export const snoozed = () => getItems().filter((i) => !!i.wait && !!i.snooze)
 export const active = (i: Item) => i.qs ? getSession(i.qs) : undefined
 export const sidOf = (s: Sess) => s.id
 export const accOf = (i: Item) => (i.acc !== ACC.inherit ? i.acc : st.bots[i.b] && st.bots[i.b].acc !== ACC.inherit ? st.bots[i.b].acc : st.cfg.accDefault)
+export function notePersonIdentity(c: { id?: string; name?: string; avatar?: unknown; is_me?: boolean }) {
+  let changed = false
+  const av = c.avatar && typeof c.avatar === "object" ? (c.avatar as MemberIdentity["avatar"]) : undefined
+  if (st.me && (c.is_me || (c.id && st.me.party_id === c.id))) {
+    const next: MemberIdentity = {
+      ...st.me,
+      party_id: c.id ?? st.me.party_id,
+      name: c.name?.trim() ? c.name : st.me.name,
+      avatar: av ?? st.me.avatar,
+    }
+    if (next.name !== st.me.name || next.party_id !== st.me.party_id || JSON.stringify(next.avatar) !== JSON.stringify(st.me.avatar)) {
+      st.me = next
+      changed = true
+    }
+  }
+  if (c.id && st.members.length) {
+    let hit = false
+    const nextMembers = st.members.map((m) => {
+      if (m.party_id !== c.id && !(c.is_me && st.me && m.user_id === st.me.user_id)) return m
+      const next: MemberIdentity = {
+        ...m,
+        party_id: c.id ?? m.party_id,
+        name: c.name?.trim() ? c.name : m.name,
+        avatar: av ?? m.avatar,
+      }
+      if (next.name !== m.name || next.party_id !== m.party_id || JSON.stringify(next.avatar) !== JSON.stringify(m.avatar)) {
+        hit = true
+        return next
+      }
+      return m
+    })
+    if (hit) { st.members = nextMembers; changed = true }
+  }
+  if (changed) emit()
+}
+
+export function clearStoreMe() {
+  st.me = null
+  st.members = []
+}
+
 export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? (st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot") : k === "agent" ? "Agent" : k)
 export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:unknownModel") })
 export const isThinking = () => chatLive().thinking
@@ -1121,6 +1180,7 @@ const DECIDED_BY_SUBJECT: Record<string, readonly string[] | ((c: string) => str
   mem: ["yes", "no"],
   party_merge: ["merge", "not_same"],
   release: ["no"],
+  no_executor: ["assign_bot", "confirm_proposal", "later"],
   chan_message: OPTION_IDS.chan_message,
 }
 const DECIDED_ANY = ["pass", "rework", "yes", "no", "continue", "delivered", "look", "tosteve", "drop", "deny"]
@@ -1183,6 +1243,7 @@ export async function decide(id: string, c: string, text?: string, decision?: st
     }
     const result = await decisionCall(answer(w.decision, c, text), decidedText(w, c, i?.b ?? null))
     if (result && c === "pass") cue("success")
+    if (result && w.subject === "no_executor" && (c === "later" || c === "confirm_proposal")) void refresh()
   } finally { st.pendingActions.delete(key); emit() }
 }
 /** a reply drafted in an IM conversation, closed in that conversation: not sent, for good (undo from 已处理);
@@ -1212,8 +1273,9 @@ export function done(): Done[] {
   const xs = settled()
   let out = doneLists.get(xs)
   if (!out) {
-    out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
-      how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose", yolo: r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
+    out = xs.map((d) => { const r = resultOf(d); const resolvedBy = d.resolved_by ?? (typeof r.decided_by === "string" ? r.decided_by : undefined); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
+      resolvedBy,
+      how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose",
       via: typeof r.via?.name === "string" ? r.via.name : undefined } satisfies Done })
     doneLists.set(xs, out)
   }
@@ -1260,6 +1322,35 @@ export async function qSendNow(sid: string, qid: string) {
 }
 export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void itemCall(id, api.goal(id, v), t("core:toast.goalUpdated")) }
 export function reassign(id: string, k: string) { if (k === it(id).b) return; void itemCall(id, api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
+export async function handoff(
+  where: { item: string; session?: string },
+  choice: { bot?: string; harness?: string; model?: string; effort?: string; make_bot_default?: boolean },
+  blocked?: (error: BotPlacementError) => void,
+): Promise<string | undefined> {
+  try {
+    const r = where.session
+      ? await api.handoffSession(where.session, choice)
+      : await api.handoffItem(where.item, choice)
+    if (r.bot_default_updated) {
+      const { bot, previous } = r.bot_default_updated
+      toast(t("core:toast.handedOffAndSavedDefault", { bot: botName(bot) }), {
+        action: {
+          label: t("core:toast.undo"),
+          onClick: () => void call(api.patchBot(bot, { harness: previous.harness, model: previous.model, reasoning_effort: previous.reasoning_effort }), t("core:toast.undone")),
+        },
+      })
+    } else {
+      toast(t("core:toast.handedOff"))
+    }
+    await settle(r, "session", [r.session])
+    await qc.invalidateQueries({ queryKey: detailKey(where.item) })
+    return r.session
+  } catch (error) {
+    if (error instanceof BotPlacementError && blocked) blocked(error)
+    else fail(error)
+    return undefined
+  }
+}
 export function actOnItem(id: string, action: "pause" | "resume" | "drop") {
   void itemCall(id, api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", resume: "core:toast.resumed" } as const)[action]))
 }
@@ -1334,10 +1425,11 @@ async function changeBotMemory(k: string, action: Promise<unknown>, message?: st
     await qc.invalidateQueries({ queryKey })
   } catch (e) { fail(e) }
 }
-export async function saveBot(k: string, p: { n?: string; role?: string; specialties?: string[]; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
+export async function saveBot(k: string, p: { n?: string; role?: string; specialties?: string[]; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; fallbackSurfaces?: ExecutionSurface[]; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
   const b = st.bots[k]
   const q: Partial<RBot> = {}
   if (p.reasoningEffort !== undefined) q.reasoning_effort = p.reasoningEffort
+  if (p.fallbackSurfaces !== undefined) q.fallback_surfaces = p.fallbackSurfaces
   if (p.specialties !== undefined) q.specialties = p.specialties
   if (p.n !== undefined) q.name = p.n; if (p.role !== undefined) q.role = p.role; if (p.pers !== undefined) q.persona = p.pers; if (p.pro !== undefined) q.proactive = p.pro; if (p.rule !== undefined) q.rules = p.rule
   if (p.acc !== undefined) q.accept_mode = accKey(p.acc); if (p.harness !== undefined) q.harness = p.harness; if (p.model !== undefined) q.model = p.model; if (p.permMode !== undefined) q.perm_mode = p.permMode
@@ -1354,10 +1446,18 @@ export async function makeBot(n: string, role: string, harness = defaultHarness(
   return r?.id
 }
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
-export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
-  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
-  if (mem === "导出" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
-  toast(t(mem === "导出" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+export function ownsBot(owner: string | null | undefined): boolean {
+  return owner ? owner === st.me?.user_id : st.owner
+}
+export async function deleteBot(k: string, to: string, mem: "delete" | "export") {
+  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem)); if (!r) return
+  if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "export" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+}
+export async function removeBotFromWorkspace(k: string, to: string, mem: "delete" | "export") {
+  const b = st.bots[k]; const r = await shellCall(api.removeBotFromWorkspace(k, to, mem)); if (!r) return
+  if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
+  toast(t(mem === "export" ? "core:toast.botRemovedFromWorkspaceExported" : "core:toast.botRemovedFromWorkspace", { name: b?.n, count: r.moved.length, to: botName(to) }))
 }
 export async function dupBot(k: string) { const r = await shellCall(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
 export function addMem(k: string, text: string) { void changeBotMemory(k, api.addMemory(k, text), t("core:toast.memoryAdded")) }
@@ -1459,36 +1559,6 @@ export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
   }
   return { N, E }
 }
-export function gBuild() {
-  const N: Record<string, GNode> = {}, E: GEdge[] = []
-  getItems().filter((i) => !i.arch).forEach((i) => {
-    N[i.id] = { id: i.id, k: "item", title: i.t, st: i.st, b: i.b, project: i.project }
-    let prev: string | null = null
-    i.ss.forEach((k) => {
-      const s = getSession(k); if (!s) return
-      N[k] = { id: k, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b }
-      E.push(prev ? [prev, k, "交接"] : [i.id, k, ""]); prev = k
-    })
-    ;(i.deps || []).forEach((d) => E.push([d, i.id, "依赖"]))
-    if (i.parent) {
-      const origin = i.parent.s && getSession(i.parent.s) ? i.parent.s : i.parent.item
-      if (origin) E.push([origin, i.id, "派生"])
-    }
-  })
-  getSessions().forEach((s) => { if (!s.item) N[s.id] = { id: s.id, k: "sess", title: s.title, st: s.st, n: s.n, b: s.b } })
-  return { N, E: E.filter((e) => N[e[0]] && N[e[1]]) }
-}
-/** the projects of the shown items, as extra roots; kept out of gBuild so a project doesn't merge all its items into one component */
-export function gProjects(ids: string[], N: Record<string, GNode>) {
-  const P: Record<string, GNode> = {}, E: GEdge[] = []
-  for (const k of ids) {
-    const n = N[k], p = n?.k === "item" && n.project ? st.projects.find((x) => x.id === n.project) : undefined
-    if (!p) continue
-    P[p.id] ??= { id: p.id, k: "proj", title: p.name, st: "", n: getItems().filter((i) => i.project === p.id && !i.arch).length }
-    E.push([p.id, k, "项目"])
-  }
-  return { P, E }
-}
 export function gComps(N: Record<string, GNode>, E: GEdge[]) {
   const p: Record<string, string> = {}; const f = (x: string): string => (p[x] === x ? x : (p[x] = f(p[x])))
   Object.keys(N).forEach((k) => (p[k] = k)); E.forEach(([a, b]) => { p[f(a)] = f(b) })
@@ -1498,16 +1568,4 @@ export function gNear(f: string, E: GEdge[]) {
   const up = new Set([f]); let ch = true
   while (ch) { ch = false; E.forEach(([a, b]) => { if (up.has(b) && !up.has(a)) { up.add(a); ch = true } }) }
   E.forEach(([a, b]) => { if (a === f) up.add(b) }); return [...up]
-}
-export function gRank(ids: string[], E: GEdge[]) {
-  const set = new Set(ids), es = E.filter((e) => set.has(e[0]) && set.has(e[1])), r: Record<string, number> = {}
-  ids.forEach((k) => (r[k] = 0))
-  for (let n = 0; n < ids.length; n++) es.forEach(([a, b]) => { if (r[b] < r[a] + 1) r[b] = r[a] + 1 })
-  const rows: string[][] = []; ids.forEach((k) => (rows[r[k]] = rows[r[k]] || []).push(k))
-  const ord: Record<string, number> = {}
-  rows.forEach((c, ri) => {
-    if (ri > 0) { const bc = (k: string) => { const ps = es.filter((e) => e[1] === k).map((e) => ord[e[0]]); return ps.length ? ps.reduce((a, b) => a + b) / ps.length : 99 }; c.sort((a, b) => bc(a) - bc(b)) }
-    c.forEach((k, o) => (ord[k] = o))
-  })
-  return { rows, es, ord }
 }

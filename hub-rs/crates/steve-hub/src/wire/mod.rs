@@ -54,9 +54,9 @@ use std::sync::Arc;
 
 use axum::Router;
 
-use crate::backend::{Backend, BackendError, Domain};
 use crate::bus::Bus;
 use crate::config::Config;
+use crate::error::BackendError;
 
 /// Localize a persisted item-gate blocker at the Hub edge.
 pub(crate) fn item_gate_reason(b: steve_store::item_gate::GateBlocker) -> String {
@@ -75,11 +75,11 @@ pub(crate) fn item_gate_reason(b: steve_store::item_gate::GateBlocker) -> String
 
 /// Everything the binary needs from the sibling crates.
 pub struct Wired {
-    pub backend: Arc<dyn Backend>,
-    pub domain: Arc<dyn Domain>,
+    pub backend: store::StoreBackend,
+    pub domain: Arc<core::CoreDomain>,
     /// steve-auth's `/auth` router (login, callback, logout, dev).
     pub auth: Router,
-    /// Single sign-on's switch: the settings put a configuration in force through it (A4b).
+    /// Single sign-on's switch: the settings put a configuration in force through it.
     pub oidc: Option<Arc<dyn crate::access::OidcSwitch>>,
     /// steve-mcp's streamable HTTP service, mounted behind the loopback gate.
     pub mcp: Option<Router>,
@@ -146,6 +146,9 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     if let Some(n) = cfg.takeover_same_refusals {
         c.takeover_same_refusals = n;
     }
+    if let Some(n) = cfg.provider_error_handoff_threshold {
+        c.provider_error_handoff_threshold = n;
+    }
     if let Some(g) = &cfg.gh {
         c.gh = g.clone();
     }
@@ -166,6 +169,7 @@ fn acp_config(cfg: &Config) -> steve_acp::AcpConfig {
             .collect(),
         node: cfg.node.clone().into(),
         claude_executable: cfg.claude_executable.clone().into(),
+        claude_config_dir: cfg.claude_config_dir.clone(),
         steve_home: cfg.home.clone(),
         codex_home: cfg.codex_home.clone(),
         user_home: crate::config::home_dir(),

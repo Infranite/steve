@@ -189,13 +189,9 @@ impl KnowledgeStore for SqliteStore {
 mod tests {
     use super::*;
 
-    fn scope(user: &str, scopes: &[&str], workspace_only: bool) -> Scope {
+    fn scope(user: &str, workspace_only: bool) -> Scope {
         Scope {
-            viewer: Viewer {
-                ws: "default".into(),
-                user: user.into(),
-                scopes: scopes.iter().map(|s| s.to_string()).collect(),
-            },
+            viewer: Viewer::bare("default", user),
             workspace_only,
             kinds: None,
             paused_docs: Vec::new(),
@@ -226,12 +222,8 @@ mod tests {
     /// The Hub's second filter is `Viewer::sees` plus `never` and the purpose's rule.
     #[test]
     fn admits_what_the_viewer_sees_and_never_never() {
-        let viewer = Viewer {
-            ws: "default".into(),
-            user: "usr_me".into(),
-            scopes: vec!["team:t1".into()],
-        };
-        let s = scope("usr_me", &["team:t1"], false);
+        let viewer = Viewer::bare("default", "usr_me");
+        let s = scope("usr_me", false);
         for vis in [
             Visibility::Workspace,
             Visibility::Private,
@@ -249,7 +241,7 @@ mod tests {
             }
         }
         // a shared main thread's chat: workspace objects only, also one's own private ones out
-        let w = scope("usr_me", &["team:t1"], true);
+        let w = scope("usr_me", true);
         assert!(w.admits(&cand(Visibility::Workspace, "usr_other", Level::Public)));
         assert!(!w.admits(&cand(Visibility::Private, "usr_me", Level::Public)));
         assert!(!w.admits(&cand(
@@ -259,14 +251,14 @@ mod tests {
         )));
         for user in ["", "svc:default"] {
             // Even without an extra audience flag, the shared Viewer rejects its own private data.
-            let service = scope(user, &["team:t1"], false);
+            let service = scope(user, false);
             assert!(!service.admits(&cand(Visibility::Private, user, Level::Reasoning)));
             assert!(service.admits(&cand(Visibility::Workspace, user, Level::Reasoning)));
         }
     }
     #[test]
     fn source_and_disclosure_constraints_are_independent_of_member_visibility() {
-        let mut s = scope("usr_me", &[], false);
+        let mut s = scope("usr_me", false);
         let mut candidate = cand(Visibility::Private, "usr_other", Level::Reasoning);
         assert!(s.admits(&candidate));
         s.kinds = Some(vec!["folder".into()]);

@@ -453,8 +453,6 @@ async fn people_join_contacts_you_already_have() {
             .party_id,
         wang
     );
-    // Directory membership remains stored, but read viewers no longer load its scopes.
-    assert!(fx.t.modules.viewer(&me()).unwrap().scopes.is_empty());
     // the own organization's app bot account is not a person
     assert_eq!(
         fixtures::party_count(fx.t.store(), "contact", Some(WS), None).unwrap(),

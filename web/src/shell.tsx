@@ -7,7 +7,6 @@
 import { useEffect, useState } from "react"
 import { cn } from "cn"
 import { api } from "@/api"
-import { useMyAvatar } from "@/api/people"
 import { nativeBridge } from "@/hub"
 import { nativeHubChrome } from "@/native-shell"
 import { HubSwitcher } from "@/hub-ui"
@@ -15,7 +14,9 @@ import { useT } from "@/i18n"
 import { MOBILE_TAB_KEYS, SIDEBAR_NAV, SIDEBAR_SCROLL_GROUPS, type SidebarNavKey } from "@/nav"
 import { RunningNowPill } from "@/running-pill"
 import { LOADED_WEB_VERSION, decisionBadgeCount, st, useStoreSelector } from "@/store"
-import { Initials, useMe } from "@/mine"
+import { memberActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
+import { useMe } from "@/mine"
 import { useMinute, useTodos } from "@/todos/data"
 import { dueCount } from "@/todos/model"
 import { useNextMeetingAt } from "@/calendar/data"
@@ -80,10 +81,11 @@ function ThemeCycle({ className }: { className?: string }) {
 /** The account at the bottom of the sidebar: who is signed in, and behind it (affectUI Profile Menu) the places that are
  *  theirs – 我, devices, accounts, settings – and signing out. Its row is marked while one of those places is open. */
 function Account({ route, meOn }: { route: string; meOn: boolean }) {
-  const t = useT(), me = useMe(), pic = useMyAvatar(), { state, isMobile } = useSidebar()
+  const t = useT(), me = useMe(), { state, isMobile } = useSidebar()
   const [open, setOpen] = useState(false)
   const leave = (h: string) => { setOpen(false); go(h) }
   const name = me?.name || t("core:sidebar.account")
+  const actor = me ? memberActor(me, true) : { kind: "person" as const, name }
   /* the role in the workspace open now (a workspace switch does not reload the page), the instance role until it is known */
   const r = st.workspaces.find((w) => w.id === st.workspace?.id)?.role ?? me?.role ?? ""
   const role = r === "owner" || r === "member" ? t(`core:sidebar.role.${r}`) : r
@@ -100,15 +102,15 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
   return (
     <SidebarMenuItem className="min-w-0 flex-1">
       <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger render={<SidebarMenuButton isActive={on} tooltip={open ? undefined : name} className={cn(ROW, "h-8 font-medium")} data-account={me ? r : ""} />}>
-          <Initials name={me?.name ?? ""} src={pic} className="size-5 type-label leading-none" />
+        <PopoverTrigger render={<SidebarMenuButton isActive={on} tooltip={open ? undefined : `${name} · ${t("common:actor.kind.person")}`} className={cn(ROW, "h-8 font-medium")} data-account={me ? r : ""} />}>
+          <ActorAvatar actor={actor} size={20} tooltip={false} account />
           <span className="min-w-0 flex-1 truncate">{name}</span>
           <ChevronsUpDownIcon className="size-3.5! text-tertiary" />
         </PopoverTrigger>
         <PopoverContent side={state === "collapsed" && !isMobile ? "right" : "top"} align="start" sideOffset={6}
           className="w-60 gap-0 rounded-xl bg-transparent p-0 shadow-none ring-0" data-account-menu>
           <ProfileMenu className="max-w-none" name={name} email={me?.email || role} menuLabel={t("core:sidebar.account")}
-            avatar={<Initials name={me?.name ?? ""} src={pic} className="flex! type-callout" />} items={items} />
+            avatar={<ActorAvatar actor={actor} size={36} tooltip={false} />} items={items} />
         </PopoverContent>
       </Popover>
     </SidebarMenuItem>

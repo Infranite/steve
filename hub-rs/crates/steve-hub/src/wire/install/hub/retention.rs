@@ -180,10 +180,9 @@ fn source(
                     return Ok(false);
                 }
                 tokio::task::spawn_blocking(move || {
-                    // retain records the whole sweep's failures for /system/backup before
-                    // this adapter returns only the continuation bit to the shared Source.
+                    // Repository maintenance reports failures through backup telemetry.
                     crate::backup::retain(&store, &home, now.max(0) as u64)
-                        .map(|report| report.more)
+                        .map(|()| false)
                         .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))
                 })
                 .await
@@ -270,62 +269,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_no_resume_cleans_rows_but_never_backup_directories() {
+    async fn diagnostic_retention_does_not_open_the_backup_repository() {
         let home = tempfile::tempdir().unwrap();
-        let db = steve_store::Store::open(home.path().join("db.sqlite3"), steve_store::NoPublisher)
-            .unwrap();
-        let old = crate::daily_backup::make(home.path(), db.path(), "old").unwrap();
-        let latest = crate::daily_backup::make(home.path(), db.path(), "latest").unwrap();
-        let path = old.database.parent().unwrap().join("manifest.json");
-        let mut manifest: steve_store_sqlite::backup::Manifest =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        manifest.created_ms = 0;
-        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        // A pending retirement must also remain untouched on a copied installation.
-        let retiring = crate::backup::root(home.path()).join("foreign.retiring");
-        std::fs::create_dir(&retiring).unwrap();
-        let pending = steve_store_sqlite::backup::backup(
-            db.path(),
-            &crate::backup::plan(home.path(), steve_store_sqlite::backup::Reason::Diagnostic),
-            &|_| {},
-            &steve_store_sqlite::backup::CancelFlag::default(),
+        let path = crate::backup::root(home.path());
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "foreign file").unwrap();
+        let db = steve_store::Store::open(
+            home.path().join("fixture.sqlite3"),
+            steve_store::NoPublisher,
         )
         .unwrap();
-        let pending_path =
-            crate::backup::root(home.path()).join(format!("{}.retiring", pending.id));
-        std::fs::rename(&pending.directory, &pending_path).unwrap();
-        steve_store::testkit::hub::hub_fixtures::seed_expired_tool_usage(&db).unwrap();
-        let now = 100 * 86_400_000;
-        source(db.clone(), home.path().to_owned(), true, now)
-            .run_due(now)
-            .await
-            .unwrap();
-        let remaining: i64 = steve_store::testkit::hub::hub_fixtures::tool_usage_count(&db).unwrap();
-        assert_eq!(
-            remaining, 0,
-            "NO_RESUME must not disable database row policies"
-        );
-        assert!(
-            old.database.exists()
-                && latest.database.exists()
-                && retiring.exists()
-                && pending_path.exists()
-        );
-        assert_eq!(
-            crate::daily_backup::status(home.path(), db.path(), false, 7)["retention"]["failures"],
-            0
-        );
-        source(db, home.path().to_owned(), false, now)
-            .run_due(now)
-            .await
-            .unwrap();
-        assert!(!old.database.exists() && latest.database.exists() && retiring.exists());
-        assert!(
-            !pending_path.exists(),
-            "normal mode retries retired backups too"
-        );
-        // This is produced by the real Source adapter, which previously dropped failures.
-        assert_eq!(crate::backup::retention_failures(home.path()), 1);
+        source(db.clone(), home.path().into(), true, 0)
+            .run_due(0).await.unwrap();
+        assert!(source(db, home.path().into(), false, 0).run_due(0).await.is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "foreign file");
     }
 
     #[tokio::test]

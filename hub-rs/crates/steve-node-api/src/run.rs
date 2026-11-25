@@ -114,40 +114,37 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
-    /// Stored bot `perm_mode` key (`default`, `plan`, `acceptEdits`, `auto`, `bypassPermissions`).
-    pub fn from_bot_key(key: &str) -> Option<Self> {
-        Some(match key {
-            "plan" => Self::Plan,
-            "default" => Self::Ask,
-            "acceptEdits" => Self::AcceptEdits,
-            "auto" => Self::Auto,
-            "bypassPermissions" => Self::FullAccess,
-            _ => return None,
-        })
-    }
+    /// Every Steve permission mode, in ascending autonomy order.
+    pub const ALL: [Self; 5] = [
+        Self::Plan,
+        Self::Ask,
+        Self::AcceptEdits,
+        Self::Auto,
+        Self::FullAccess,
+    ];
 
-    /// Accepts both stored bot keys ([`Self::from_bot_key`]) and snake_case wire names
-    /// (`ask`, `accept_edits`, `full_access`). Unknown keys fail closed (`None`).
-    pub fn from_key(key: &str) -> Option<Self> {
-        Self::from_bot_key(key).or_else(|| {
-            Some(match key {
-                "ask" => Self::Ask,
-                "accept_edits" => Self::AcceptEdits,
-                "full_access" => Self::FullAccess,
-                _ => return None,
-            })
-        })
-    }
-
-    /// Canonical stored bot `perm_mode` key for this permission mode.
-    pub const fn bot_key(self) -> &'static str {
+    /// Canonical snake_case wire/storage name (matches `#[serde(rename_all = "snake_case")]`).
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Plan => "plan",
-            Self::Ask => "default",
-            Self::AcceptEdits => "acceptEdits",
+            Self::Ask => "ask",
+            Self::AcceptEdits => "accept_edits",
             Self::Auto => "auto",
-            Self::FullAccess => "bypassPermissions",
+            Self::FullAccess => "full_access",
         }
+    }
+
+    /// Parses Steve's canonical snake_case permission mode name. Harness-specific wire names belong
+    /// in `steve-harness-spec`, never in Steve's Bot or Node policy vocabulary.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "plan" => Self::Plan,
+            "ask" => Self::Ask,
+            "accept_edits" => Self::AcceptEdits,
+            "auto" => Self::Auto,
+            "full_access" => Self::FullAccess,
+            _ => return None,
+        })
     }
 }
 
@@ -663,28 +660,13 @@ mod tests {
 
     #[test]
     fn permission_mode_keys_round_trip_and_fail_closed() {
-        for mode in [
-            PermissionMode::Plan,
-            PermissionMode::Ask,
-            PermissionMode::AcceptEdits,
-            PermissionMode::Auto,
-            PermissionMode::FullAccess,
-        ] {
-            let key = mode.bot_key();
-            assert_eq!(PermissionMode::from_bot_key(key), Some(mode));
-            assert_eq!(PermissionMode::from_key(key), Some(mode));
+        for mode in PermissionMode::ALL {
+            assert_eq!(PermissionMode::parse(mode.as_str()), Some(mode));
         }
-        assert_eq!(PermissionMode::from_key("ask"), Some(PermissionMode::Ask));
-        assert_eq!(
-            PermissionMode::from_key("accept_edits"),
-            Some(PermissionMode::AcceptEdits)
-        );
-        assert_eq!(
-            PermissionMode::from_key("full_access"),
-            Some(PermissionMode::FullAccess)
-        );
-        assert_eq!(PermissionMode::from_bot_key("ask"), None);
-        assert_eq!(PermissionMode::from_key(""), None);
-        assert_eq!(PermissionMode::from_key("dontAsk"), None);
+        assert_eq!(PermissionMode::parse(""), None);
+        assert_eq!(PermissionMode::parse("default"), None);
+        assert_eq!(PermissionMode::parse("acceptEdits"), None);
+        assert_eq!(PermissionMode::parse("bypassPermissions"), None);
+        assert_eq!(PermissionMode::parse("dontAsk"), None);
     }
 }

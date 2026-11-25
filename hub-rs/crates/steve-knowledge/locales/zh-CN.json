@@ -73,16 +73,15 @@
   "knowledge.source.syncing_now": "正在同步",
   "knowledge.files.taken": "这个附件已经被别人加进知识库了",
   "knowledge.doc.delete_folder": "这篇来自文件夹，请在原处删除或在来源里排除",
-  "knowledge.doc.delete_item": "这篇跟随事项，不能单独删除，可以把级别改成“不可使用”",
-  "knowledge.doc.delete_chat": "这篇跟随对话，不能单独删除，可以把级别改成“不可使用”",
   "knowledge.doc.delete_other": "这篇不能单独删除",
   "knowledge.uses.deleted": "已删除",
   "knowledge.mem.already_handled": "这条记忆已经处理过了",
   "knowledge.mem.deleted_no_undo": "这条记忆已经删除，不能撤销",
+  "knowledge.proposal.already_handled": "这条提议已经处理过了",
+  "knowledge.steward.skip_nothing": "没有新的候选或冲突，跳过本次整理",
+  "knowledge.steward.skip_below": "新候选与冲突共 %{count} 条，未达阈值（%{threshold}），跳过本次整理",
   "knowledge.builtin.notes": "我的笔记",
   "knowledge.builtin.files": "上传的文件",
-  "knowledge.builtin.items": "事项交付",
-  "knowledge.builtin.chat": "主线对话",
   "knowledge.builtin.mems": "记忆",
   "knowledge.builtin.bot_mems": "Bot 记忆",
   "knowledge.chat.day": "%{day} 的对话",
@@ -97,7 +96,5 @@
   "knowledge.change.not_undoable": "这项改动已经撤销过，或者还没有可撤销的内容",
   "knowledge.change.answered": "这个冲突已经处理过了",
   "knowledge.doc_prefix.notes": "笔记",
-  "knowledge.doc_prefix.files": "文件",
-  "knowledge.doc_prefix.items": "事项记录",
-  "knowledge.doc_prefix.chat": "会话记录"
+  "knowledge.doc_prefix.files": "文件"
 }

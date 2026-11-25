@@ -63,6 +63,8 @@ pub enum BackupError {
     InvalidOptions,
     #[error("backup database is busy or locked; retry the operation")]
     Busy,
+    #[error("backup database checksum mismatch")]
+    ChecksumMismatch,
     #[error("backup quick_check failed: {0}")]
     QuickCheckFailed(String),
     #[error(transparent)]
@@ -209,18 +211,7 @@ fn backup_with_elapsed(
     source.close().map_err(|(_, error)| error)?;
     checkpoint(elapsed(), opts, cancel)?;
     file.rewind()?;
-    let mut hash = Sha256::new();
-    let mut bytes = 0u64;
-    let mut buffer = [0u8; 65_536];
-    loop {
-        checkpoint(elapsed(), opts, cancel)?;
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&buffer[..count]);
-        bytes += count as u64;
-    }
+    let (sha256, bytes) = checksum(&mut file, || checkpoint(elapsed(), opts, cancel))?;
     file.sync_all()?;
     checkpoint(elapsed(), opts, cancel)?;
     publish(&partial, &destination)?;
@@ -232,11 +223,64 @@ fn backup_with_elapsed(
     Ok(CopiedFile {
         path: destination,
         bytes,
-        sha256: hash.finalize().iter().map(|b| format!("{b:02x}")).collect(),
+        sha256,
         pages,
         quick_check: "ok".into(),
         elapsed: elapsed(),
     })
+}
+
+fn checksum(
+    mut file: impl Read,
+    check: impl Fn() -> Result<(), BackupError>,
+) -> Result<(String, u64), BackupError> {
+    let mut hash = Sha256::new();
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 65_536];
+    loop {
+        check()?;
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+        bytes += count as u64;
+    }
+    Ok((
+        hash.finalize().iter().map(|b| format!("{b:02x}")).collect(),
+        bytes,
+    ))
+}
+
+/// Check a closed standalone SQLite snapshot without opening or creating WAL sidecars.
+pub fn verify_file(path: &Path, expected_sha256: &str) -> Result<(), BackupError> {
+    let (actual, _) = checksum(File::open(path)?, || Ok(()))?;
+    if actual != expected_sha256 {
+        return Err(BackupError::ChecksumMismatch);
+    }
+    let encoded: String = path
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .map(|byte| format!("%{byte:02X}"))
+        .collect();
+    let connection = Connection::open_with_flags(
+        format!("file:{encoded}?immutable=1"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    quick_check(&connection)
+}
+
+/// Close out WAL while offline so the original database stays usable until replacement.
+pub fn close_wal(path: &Path) -> Result<(), BackupError> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let mode: String =
+        connection.query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))?;
+    if mode != "delete" {
+        return Err(BackupError::Busy);
+    }
+    connection.close().map_err(|(_, error)| error)?;
+    Ok(())
 }
 
 fn quick_check(target: &Connection) -> Result<(), BackupError> {

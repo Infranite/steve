@@ -566,10 +566,7 @@ async fn sources_list_and_doc_rules() {
         .iter()
         .map(|x| x["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        kinds,
-        ["notes", "files", "items", "chat", "mems", "bot_mems"]
-    );
+    assert_eq!(kinds, ["notes", "files", "mems", "bot_mems"]);
     let notes = &list[0];
     assert_eq!(notes["name"], "我的笔记");
     assert_eq!(notes["builtin"], true);
@@ -580,17 +577,7 @@ async fn sources_list_and_doc_rules() {
     );
     // A second call does not duplicate them.
     let (_, again) = e.me("GET", "/kb/sources", None).await;
-    assert_eq!(again.as_array().unwrap().len(), 6);
-
-    // Documents that follow an item cannot be deleted on their own.
-    let items_src = list[2]["id"].as_str().unwrap().to_string();
-    fixture::seed_item_doc(e.env.store(), &items_src).unwrap();
-    let (s, v) = e.me("DELETE", "/kb/docs/kd_item", None).await;
-    assert_eq!(s, 400);
-    assert_eq!(
-        v["error"],
-        "这篇跟随事项，不能单独删除，可以把级别改成“不可使用”"
-    );
+    assert_eq!(again.as_array().unwrap().len(), 4);
 
     // Validation.
     let (s, v) = e.me("POST", "/kb/notes", Some(json!({"title": ""}))).await;
@@ -894,22 +881,12 @@ fn single_user_mail_reference_reads_do_not_need_membership_scopes() {
         .store()
         .read(|c| {
             let bare = Viewer::bare(WS, ME);
-            let scoped = Viewer {
-                scopes: vec!["team:team1".into(), "space:s1".into()],
-                ..bare.clone()
-            };
             for id in ["team_mail", "space_mail"] {
                 let r = ObjRef::new("mail_thread", id);
                 assert!(steve_store::References(c).exists(&bare, &r)?);
-                assert!(steve_store::References(c).exists(&scoped, &r)?);
                 assert!(
                     steve_store::References(c)
                         .in_workspace(&bare, &r)?
-                        .is_some()
-                );
-                assert!(
-                    steve_store::References(c)
-                        .in_workspace(&scoped, &r)?
                         .is_some()
                 );
                 // A viewer-free persistent index must not copy source-private subjects.

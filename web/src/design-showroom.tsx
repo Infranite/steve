@@ -40,7 +40,8 @@ import { Spinner } from "@/components/ui/spinner"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Separator } from "@/components/ui/separator"
 import { CodeBlock } from "@/components/ui/code-block"
-import { ContactAvatar } from "@/people/avatar"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { AvatarGroup, Avatar } from "@/components/ui/avatar"
 import { NumberTicker } from "@/components/affect/number-ticker"
 
@@ -333,7 +334,7 @@ export function DesignShowroom() {
             <Skeleton className="h-5 w-40" /><Skeleton className="h-3 w-full" /><Skeleton className="h-3 w-3/4" /><Separator label={S(t, "yesterday")} /><Skeleton className="h-16 w-full rounded-lg" />
           </Card></State>
           <State label={L(t, "dpAvatars")}><Card className="flex flex-wrap items-center gap-3">
-            <ContactAvatar name="Mara Lindqvist" size={40} /><ContactAvatar name={S(t, "dpName1")} size={32} /><ContactAvatar name={S(t, "dpName2")} size={28} unconfirmed /><ContactAvatar name="Globex" type="org" size={32} /><ContactAvatar name="Infra" type="team" size={32} />
+            <ActorAvatar actor={partyActor({ id: "ct_demo_1", name: "Mara Lindqvist" })} size={40} /><ActorAvatar actor={partyActor({ id: "ct_demo_2", name: S(t, "dpName1") })} size={32} /><ActorAvatar actor={partyActor({ id: "ct_demo_3", name: S(t, "dpName2"), unconfirmed: true })} size={28} /><ActorAvatar actor={partyActor({ id: "org_demo", name: "Globex", type: "org" })} size={32} /><ActorAvatar actor={partyActor({ id: "tm_demo", name: "Infra", type: "team" })} size={32} /><ActorAvatar actorId="steve" size={32} /><ActorAvatar actorId="system" size={32} />
             <AvatarGroup size={24} max={3} total={6}><Avatar name="Mara Lindqvist" /><Avatar name={S(t, "dpName1")} /><Avatar name="Tom Okafor" /></AvatarGroup>
           </Card></State>
           <State label={L(t, "dpCode")}><div className="flex flex-col gap-3">

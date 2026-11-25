@@ -1,8 +1,5 @@
 use super::*;
 
-// G2-T7: the installer list still names this step; no visibility providers remain.
-install! { scopes(_reg, _cx) [] => [] {} }
-
 install! { prepare(reg, _cx) [mut registry] => [registry] {
     // C8: the `space`, `persona` and `channel` draft targets; capi: the “新群” card
     steve_channels::drafts::register(&mut registry, Arc::new(steve_modules::SystemClock));

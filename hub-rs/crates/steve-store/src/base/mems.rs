@@ -169,32 +169,30 @@ pub fn visible(c: &Connection, viewer: &Viewer, id: &str) -> Result<Option<Mem>>
 
 /// Memories about one object visible to `viewer`, newest first.
 pub fn about(c: &Connection, viewer: &Viewer, object: &ObjRef, f: &MemFilter) -> Result<Vec<Mem>> {
-    let scope = viewer.sql("m");
-    let mut sql = format!(
+    let mut sql = String::from(
         "SELECT m.* FROM mems m JOIN mem_about a ON a.mem_id = m.id
-         WHERE a.workspace_id = ? AND a.object_type = ? AND a.object_id = ? AND m.workspace_id = ? AND {}",
-        scope.sql
+         WHERE a.workspace_id = ? AND a.object_type = ? AND a.object_id = ? AND m.workspace_id = ?",
     );
+    if viewer.is_service() {
+        sql.push_str(" AND m.visibility = 'workspace'");
+    }
     let mut p: Vec<Sql> = vec![
         viewer.ws.clone().into(),
         object.kind.clone().into(),
         object.id.clone().into(),
         viewer.ws.clone().into(),
     ];
-    p.extend(scope.params);
     filter_tail(&mut sql, &mut p, f);
     list(c, &sql, p)
 }
 
 /// All memories of the workspace visible to `viewer`, newest first.
 pub fn all(c: &Connection, viewer: &Viewer, f: &MemFilter) -> Result<Vec<Mem>> {
-    let scope = viewer.sql("m");
-    let mut sql = format!(
-        "SELECT m.* FROM mems m WHERE m.workspace_id = ? AND {}",
-        scope.sql
-    );
+    let mut sql = String::from("SELECT m.* FROM mems m WHERE m.workspace_id = ?");
+    if viewer.is_service() {
+        sql.push_str(" AND m.visibility = 'workspace'");
+    }
     let mut p: Vec<Sql> = vec![viewer.ws.clone().into()];
-    p.extend(scope.params);
     filter_tail(&mut sql, &mut p, f);
     list(c, &sql, p)
 }

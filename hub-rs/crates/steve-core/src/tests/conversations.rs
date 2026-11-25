@@ -91,8 +91,15 @@ fn guest(research: bool, items: bool) -> Conv {
 }
 
 fn turn(k: &Kit, text: &str, c: Conv) -> String {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     k.core
-        .say_in(WS, c, text, &json!({"chan": {"message": "cm_x", "space_name": "运维群", "sender": "李雷", "provider": "飞书"}}))
+        .say_in(
+            WS,
+            c,
+            text,
+            &json!({"chan": {"message": format!("cm_x_{n}"), "space_name": "运维群", "sender": "李雷", "provider": "飞书"}}),
+        )
         .unwrap()
 }
 
@@ -158,19 +165,20 @@ async fn main_channel_turns_report_outcomes_without_using_the_hosts_voice() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_origin() {
-    for stop_kind in ["routing", "queued", "queued_run"] {
-        let queued = stop_kind != "routing";
+    for stop_kind in ["routing", "queued_run"] {
+        let queued = stop_kind == "queued_run";
         let k = Kit::new();
         let host = Arc::new(Host::default());
         k.core.set_conv_host(host.clone());
         let store = k.db().store().clone();
-        router(&k, Arc::new(Mutex::new(vec![])), move |_| {
-            if queued {
-                store.maintenance_set(true).unwrap();
-            }
-            json!({"kind": "answer", "confidence": 1})
-        });
-        if !queued {
+        router(
+            &k,
+            Arc::new(Mutex::new(vec![])),
+            move |_| json!({"kind": "answer", "confidence": 1}),
+        );
+        if queued {
+            store.maintenance_set(true).unwrap();
+        } else {
             *k.gw.slow.lock().unwrap() = Some(("You are the router", Duration::from_secs(30)));
         }
         let origin = k
@@ -179,33 +187,28 @@ async fn stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_ori
                 WS,
                 Conv::main(),
                 "慢慢答",
-                &json!({"chan": {"message": "cm_web", "web": true}}),
+                &json!({"chan": {"message": format!("cm_web_{stop_kind}"), "web": true}}),
             )
             .unwrap();
-        let description = if queued {
-            "The router has finished and the inline answer is in progress."
+        if queued {
+            let task = store
+                .read(|r| steve_store::thread::tasks_of_origin(r, &origin))
+                .unwrap()
+                .remove(0);
+            assert!(k.core.stop_run(WS, &task.id).unwrap());
+            assert!(!k.core.stop_run(WS, &task.id).unwrap());
         } else {
-            "The gateway has received the routing request."
-        };
-        steve_runtime::testkit::eventually_sync(description, || {
-            if queued {
-                k.core.inline_busy(WS) && !k.core.routing(WS)
-            } else {
-                k.gw.calls
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|p| p.starts_with("You are the router"))
-            }
-        })
-        .await;
-        if stop_kind == "queued_run" {
-            let run = k.db().store().thread().runs_of_message(&origin).unwrap()[0]
-                .id
-                .clone();
-            assert!(k.core.stop_run(WS, &run).unwrap());
-            assert!(!k.core.stop_run(WS, &run).unwrap());
-        } else {
+            steve_runtime::testkit::eventually_sync(
+                "The gateway has received the routing request.",
+                || {
+                    k.gw.calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|p| p.starts_with("You are the router"))
+                },
+            )
+            .await;
             assert!(k.core.stop(WS).unwrap());
         }
         let ms = settle(&k, crate::thread::MAIN, 2).await;
@@ -300,8 +303,13 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
     let mid = turn(&k, "把告警脚本修一下", guest(true, true));
     let ms = settle(&k, SPACE, 4).await;
     let id = ms[3].item_id.clone().expect("an item");
-    let ti = k.db().store().thread().item(&id).unwrap().unwrap();
-    assert_eq!(ti.origin_msg, mid);
+    let ti = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_item(r, &id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(ti.origin_message_id, mid);
     // someone else asked: a proposal that waits for you, from a source YOLO doesn't take for yours
     let it = k.db().item(&id).unwrap().unwrap();
     assert_eq!(it.source.1, "chat_proposal");
@@ -371,14 +379,13 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
     assert_eq!(
         k.db()
             .store()
-            .thread()
-            .item(&own)
+            .read(|r| steve_store::thread::dispatch_by_item(r, &own))
             .unwrap()
             .unwrap()
-            .origin_msg,
+            .origin_message_id,
         mine
     );
-    assert_eq!(ti.reply_msg.as_deref(), Some(ms[3].id.as_str()));
+    assert_eq!(ti.reply_message_id.as_deref(), Some(ms[3].id.as_str()));
     assert!(
         host.said
             .lock()
@@ -501,7 +508,8 @@ async fn only_the_owner_alone_gets_a_run_with_their_own_access() {
         owner_only: true,
         ..guest(true, true)
     };
-    let private = json!({"chan": {"message": "cm_me", "owner_only": true}});
+    let private1 = json!({"chan": {"message": "cm_me_1", "owner_only": true}});
+    let private2 = json!({"chan": {"message": "cm_me_2", "owner_only": true}});
 
     /* an instance with one user: whoever writes in Steve's own conversation is the owner */
     assert!(k.db().store().users().count().unwrap() <= 1);
@@ -512,7 +520,7 @@ async fn only_the_owner_alone_gets_a_run_with_their_own_access() {
     assert!(full(0));
     assert_eq!(told("归到一个文件夹"), Some(true));
     k.core
-        .say_in(WS, mine(), "把桌面上的截图也归进去", &private)
+        .say_in(WS, mine(), "把桌面上的截图也归进去", &private1)
         .unwrap();
     settle(&k, SPACE, 2).await;
     assert!(full(1), "the owner's private chat");
@@ -548,7 +556,7 @@ async fn only_the_owner_alone_gets_a_run_with_their_own_access() {
     k.core.say(WS, "装一下 jq", &[]).unwrap();
     settle(&k, MAIN, 8).await;
     assert!(!full(5), "nobody in particular is not the owner");
-    k.core.say_in(WS, mine(), "装一下 bat", &private).unwrap();
+    k.core.say_in(WS, mine(), "装一下 bat", &private2).unwrap();
     settle(&k, SPACE, 6).await;
     assert!(!full(6));
     assert_eq!(fr.seen.lock().unwrap().len(), 7);
@@ -607,7 +615,11 @@ async fn an_answer_that_needs_tools_is_handed_to_an_item_once() {
     };
     let mid = turn(&k, "看下我现在磁盘情况", mine);
     let ms = settle(&k, SPACE, 2).await;
-    assert_eq!(*host.answered.lock().unwrap(), 1);
+    assert_eq!(
+        *host.answered.lock().unwrap(),
+        0,
+        "tool-needing trigger request is preflighted without a tool-less probe"
+    );
     let id = ms[1].item_id.clone().expect("handed to an item");
     assert_eq!(k.db().items(WS).unwrap().len(), before + 1);
     assert!(
@@ -633,15 +645,19 @@ async fn an_answer_that_needs_tools_is_handed_to_an_item_once() {
     assert_eq!(
         k.db()
             .store()
-            .thread()
-            .item(&id)
+            .read(|r| steve_store::thread::dispatch_by_item(r, &id))
             .unwrap()
             .unwrap()
-            .origin_msg,
+            .origin_message_id,
         mid
     );
-    let log = k.db().store().thread().route_of(&mid).unwrap().unwrap();
-    assert_eq!(log.outcome.as_deref(), Some("needs_tools"));
+    let log = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::receipt_by_origin(r, &mid))
+        .unwrap()
+        .unwrap();
+    assert_eq!(log.route_outcome.as_deref(), Some("needs_tools"));
     assert_eq!(log.item_id.as_deref(), Some(id.as_str()));
     // the announcement reaches the chat through the host, like any item made there
     steve_runtime::testkit::eventually_sync("The host receives the handoff announcement.", || {
@@ -660,26 +676,25 @@ async fn an_answer_that_needs_tools_is_handed_to_an_item_once() {
             .any(|(_, m)| m == &ms[1].id)
     );
 
-    // once: the same question failing again does not make a second item
-    let job = crate::thread::research::InlineJob {
-        kind: crate::thread::research::Inline::Answer,
-        origin: mid.clone(),
-        question: "看下我现在磁盘情况".into(),
-        files: vec![],
-        earlier: vec![],
-        user: None,
-        project: None,
-        route: None,
-        offer: None,
-        reply_to: None,
-        run: None,
-        stop: crate::thread::Stop::default(),
-        t0: crate::util::now(),
-        resume: None,
-        space: SPACE.into(),
-        to_item: Some(true),
-    };
-    assert_eq!(k.core.hand_off(WS, &job).await.unwrap(), None);
+    // once: durable dispatch ref prevents creating a second item for the same origin
+    let existing = k
+        .db()
+        .store()
+        .write(|w| {
+            steve_store::thread::claim_dispatch(
+                w,
+                WS,
+                &mid,
+                "create_item",
+                false,
+                crate::util::now(),
+            )
+        })
+        .unwrap();
+    assert!(matches!(
+        existing,
+        steve_store::DispatchClaim::Existing(ref d) if d.target_item_id.as_deref() == Some(id.as_str())
+    ));
     assert_eq!(k.db().items(WS).unwrap().len(), before + 1);
 }
 
@@ -741,7 +756,12 @@ async fn an_answer_that_needs_tools_in_a_bots_chat_is_not_made_an_item() {
     assert_eq!(ms[1].item_id, None);
     assert_eq!(ms[1].text, crate::thread::handoff::NEEDS_TOOLS_HERE);
     assert_eq!(ms[1].meta["error"], true);
-    let log = k.db().store().thread().route_of(&mid).unwrap().unwrap();
+    let log = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::receipt_by_origin(r, &mid))
+        .unwrap()
+        .unwrap();
     assert_eq!(log.item_id, None);
 }
 
@@ -762,65 +782,6 @@ async fn a_guest_never_gets_the_routers_question() {
     assert_eq!(ms[1].meta["origin"], json!(a));
     assert!(ms[1].meta.get("ask").is_none(), "{:?}", ms[1].meta);
     assert_eq!(*host.answered.lock().unwrap(), std::slice::from_ref(&a));
-}
-
-/// A host whose answers wait until released.
-#[derive(Default)]
-struct SlowHost {
-    go: tokio::sync::Notify,
-}
-
-#[async_trait::async_trait]
-impl ConvHost for SlowHost {
-    async fn answer(
-        &self,
-        _ws: &str,
-        _space: &str,
-        _origin: &str,
-    ) -> Result<String, steve_modules::gateway::GatewayError> {
-        self.go.notified().await;
-        Ok("答".into())
-    }
-    fn research_context(&self, _ws: &str, _space: &str, _origin: &str) -> String {
-        String::new()
-    }
-    fn said(&self, _ws: &str, _space: &str, _id: &str) {}
-}
-
-/// The queue's “前面还有 3 个问题在排队…” is the thread's own state: marked as a system text, which a
-/// guest conversation's host never says in the chat.
-#[tokio::test]
-async fn a_full_queue_is_marked_as_a_system_text() {
-    let k = Kit::new();
-    let host = Arc::new(SlowHost::default());
-    assert!(k.core.set_conv_host(host.clone()));
-    router(
-        &k,
-        Arc::new(Mutex::new(vec![])),
-        |_| json!({"kind": "answer", "confidence": 0.9, "signals": ["question"], "title": "", "goal": "", "bot": "steve"}),
-    );
-    // one answering, MAX_WAITING waiting: the next turn of the conversation finds the queue full
-    for i in 0..=crate::thread::research::MAX_WAITING + 1 {
-        turn(&k, &format!("在吗 {i}"), guest(true, true));
-    }
-    let mut full = None;
-    steve_runtime::testkit::eventually_sync(
-        "A full conversation queue records its system reply.",
-        || {
-            full = k
-                .db()
-                .messages_in(WS, SPACE, 200)
-                .unwrap()
-                .into_iter()
-                .find(|m| m.author == "steve");
-            full.is_some()
-        },
-    )
-    .await;
-    let m = full.expect("the queue filled up");
-    assert_eq!(m.text, crate::thread::research::QUEUE_FULL);
-    assert_eq!(m.meta[crate::thread::research::SYSTEM], json!(true));
-    host.go.notify_waiters();
 }
 
 struct PreparingResearch(tokio::sync::Semaphore);
@@ -867,8 +828,7 @@ async fn stopping_during_research_preparation_keeps_the_result_without_sending_a
     let run = k
         .db()
         .store()
-        .thread()
-        .runs_of_message(&origin)
+        .read(|r| steve_store::thread::tasks_of_origin(r, &origin))
         .unwrap()
         .remove(0);
     assert!(k.core.stop_run(WS, &run.id).unwrap());
@@ -886,12 +846,9 @@ async fn stopping_during_research_preparation_keeps_the_result_without_sending_a
     steve_runtime::testkit::eventually_sync("The stopped research run settles durably.", || {
         k.db()
             .store()
-            .thread()
-            .run(&run.id)
+            .read(|r| steve_store::thread::receipt_by_origin(r, &origin))
             .unwrap()
-            .unwrap()
-            .status
-            == "stopped"
+            .is_some_and(|rcpt| rcpt.outcome == "stopped")
     })
     .await;
 }

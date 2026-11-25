@@ -235,6 +235,7 @@ impl Tx<'_> {
             "resume_fallback_reason":if fallback {Some("本次等待已转为提醒开始，请查看待处理卡片")} else {None},
             "waiting":wait.as_ref().is_some_and(|w|w.state=="waiting"),
             "wait_state":wait.as_ref().map(|w|&w.state),
+            "wait":wait.as_ref().map(|w|&w.wait),
             "reason":wait.as_ref().map(|w|&w.reason),"active_turn":busy,
             "can_register":register_blocker.is_none(),"register_blocker":register_blocker,
         }))

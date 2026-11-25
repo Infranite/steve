@@ -24,6 +24,10 @@ install! { prepare(reg, cx) [mut registry] => [kb, kb_hooks, kstore, ov, registr
         steve_knowledge::candidates::SUBJECT,
         Box::new(steve_knowledge::candidates::MemDecisions),
     );
+    registry.decision(
+        steve_knowledge::proposals::SUBJECT,
+        Box::new(steve_knowledge::proposals::AgentsProposalDecisions),
+    );
     registry.item_hooks(Box::new(kb_hooks.clone()));
     registry.prompt_context(steve_knowledge::context::provider(
         store.clone(),

@@ -59,7 +59,7 @@ pub(crate) struct HubRegistry {
     routed: Option<Arc<crate::wire::core::RoutedRuntime>>,
     core: Option<steve_core::Core>,
     auth_cfg: Option<steve_auth::AuthConfig>,
-    backend: Option<Arc<dyn Backend>>,
+    backend: Option<store::StoreBackend>,
     built: Option<crate::wire::modules::Built>,
     jobs: Option<Vec<crate::wire::modules::Job>>,
     auth: Option<steve_auth::Auth<crate::wire::auth::AuthStore>>,

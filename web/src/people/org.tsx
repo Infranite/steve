@@ -11,7 +11,9 @@ import { Textarea } from "@/components/ui/textarea"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { people, type Org } from "@/api/people"
 import { useHubQuery } from "@/data/use-hub-query"
-import { ContactAvatar, Loading, PEOPLE_EVENTS, Section, act, codes, joinList, label } from "@/people/common"
+import { Loading, PEOPLE_EVENTS, Section, act, codes, joinList, label } from "@/people/common"
+import { disambiguateActors, formatActorName, partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { useT } from "@/i18n"
 import { AttrRow, MemSection, NewAttr, ctxOf } from "@/people/contact"
 import { Select } from "@/view-shared"
@@ -34,7 +36,7 @@ export function OrgView({ id }: { id: string }) {
         {o.tenant && <div className="-mt-4 break-all type-footnote text-muted-foreground">{t("people:org.tenant", { key: o.tenant.key })}</div>}
         {o.note && <p className="-mt-2 whitespace-pre-wrap type-body text-muted-foreground">{o.note}</p>}
         <AskSteve key={o.id} ctx={ctxOf("org", o.id)} placeholder={t("people:org.ask", { name: o.name })} />
-        <Section label={t("people:org.people", { n: ps.length })}>{ps.length ? <Group>{ps.map((c) => <Row key={c.id} icon={<ContactAvatar name={c.name} size={28} />} title={c.name} sub={c.title ?? undefined} onClick={() => go("#/contacts/" + c.id)} data-org-person={c.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group> : <Empty title={t("people:shared.noContacts")} />}</Section>
+        <Section label={t("people:org.people", { n: ps.length })}>{ps.length ? (() => { const pd = disambiguateActors(ps.map((c) => ({ key: c.id, name: c.name, subtitle: c.title, fallbackId: c.id }))); return <Group>{ps.map((c) => { const extra = pd.get(c.id); return <Row key={c.id} icon={<ActorAvatar actor={partyActor({ id: c.id, name: c.name, avatar: c.avatar, subtitle: c.title })} disambiguator={extra} size={28} />} title={formatActorName(c.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex }))} sub={c.title ?? undefined} onClick={() => go("#/contacts/" + c.id)} data-org-person={c.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row> })}</Group> })() : <Empty title={t("people:shared.noContacts")} />}</Section>
         <Section label={t("people:shared.info")} right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setNewAttr(true)} data-add-attr><PlusIcon />{t("common:action.add")}</Button>}>
           <Group>
             <Row title={t("people:org.domains")} sub={t("people:org.domainsSub")}><span className="type-callout">{joinList(o.domains) || "—"}</span></Row>

@@ -1,11 +1,12 @@
 //! Vault uses on the Node a session works on (N0e-E7), and the Hub's side of the secrets channel
 //! ([`HubSecrets`]).
 //!
-//! [`VaultNodes`] is the vault's [`UseNodes`]: a session bound to a Node runs its approved command
-//! in its workspace there; a session bound to none runs nothing. The command is written to the Node's ledger under
+//! [`VaultNodes`] is the vault's [`UseNodes`]: every secret-injected command executes exclusively on
+//! the session's Node in its workspace. The command is written to the Node's ledger under
 //! `vault_use:<use>` before it is sent and is never sent twice. Its secrets are references only
 //! ([`SecretRef`], the field's label as the id): what the ledger, the Node's journal and every log
-//! hold. With the Hub's local Node off nothing here is used ([`UseNodes::place`] answers `None`).
+//! hold. With no execution Node available (`PlacementError::LocalOff`), [`UseNodes::place`] refuses
+//! with [`steve_modules::vault::VaultError::NoExecutionNode`]; the Hub never executes commands locally.
 //!
 //! [`NodeSecrets`] holds what each such command may take, by operation: the Node takes each value
 //! once, right before the command runs; it is decrypted then and nowhere kept. A second take is
@@ -354,9 +355,18 @@ async fn abilities(node: &Arc<dyn Node>) -> Result<(bool, bool), String> {
     ))
 }
 
+fn record_vault_exec_refusal(reason: &'static str) {
+    metrics::counter!(
+        "steve_security_refusals_total",
+        "boundary" => "vault_exec",
+        "reason" => reason
+    )
+    .increment(1);
+}
+
 #[async_trait]
 impl UseNodes for VaultNodes {
-    async fn place(&self, ws: &str, session: &str) -> VaultResult<Option<NodePlace>> {
+    async fn place(&self, ws: &str, session: &str) -> VaultResult<NodePlace> {
         let rule = |m: String| -> steve_modules::vault::VaultError {
             steve_modules::ApiError::rule(m).into()
         };
@@ -365,21 +375,27 @@ impl UseNodes for VaultNodes {
             .read(|r| steve_store::session_repo::device(r, ws, session))
             .map_err(|e| rule(e.to_string()))?;
         if in_ws.is_none() {
-            // the vault answers a session it does not know itself
-            return Ok(None);
+            return Err(steve_modules::ApiError::not_found("会话").into());
         }
         match self.workspaces.placement_of(Subject::Session(session)) {
-            Err(PlacementError::LocalOff) => Ok(None),
-            Err(e) => Err(rule(e.to_string())),
+            Err(PlacementError::LocalOff) => {
+                record_vault_exec_refusal("local_node_off");
+                Err(steve_modules::vault::VaultError::NoExecutionNode)
+            }
+            Err(e) => {
+                record_vault_exec_refusal("placement_unavailable");
+                Err(rule(e.to_string()))
+            }
             Ok(p) => {
                 let (execs, files) = abilities(&p.node).await.map_err(rule)?;
                 if !execs {
+                    record_vault_exec_refusal("exec_disabled");
                     return Err(rule(NO_EXECS.into()));
                 }
-                Ok(Some(NodePlace {
+                Ok(NodePlace {
                     device: p.node_id.as_str().to_string(),
                     files,
-                }))
+                })
             }
         }
     }
@@ -566,6 +582,7 @@ mod tests {
                     adapters: Default::default(),
                     node: "node".into(),
                     claude_executable: "/usr/bin/false".into(),
+                    claude_config_dir: None,
                     steve_home: root.join("steve"),
                     codex_home: root.join("codex"),
                     user_home: root.to_path_buf(),
@@ -799,17 +816,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_node_off_refuses_placement_with_typed_error_and_metric() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(tmp.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_sessions_for_hub_at(
+            &store,
+            &SESSION,
+            work.to_str().unwrap(),
+        )
+        .unwrap();
+        let ws = Workspaces::new(store.clone(), None, None, vec![]);
+        let uses = VaultNodes::new(store, ws, NodeSecrets::new());
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let err = metrics::with_local_recorder(&recorder, || {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(uses.place("default", SESSION))
+            })
+        })
+        .unwrap_err();
+        assert_eq!(err, steve_modules::vault::VaultError::NoExecutionNode);
+        assert_eq!(err.status(), 503);
+        let text = handle.render();
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("steve_security_refusals_total{")
+                    && line.contains("boundary=\"vault_exec\"")
+                    && line.contains("reason=\"local_node_off\"")
+                    && line.ends_with(" 1")),
+            "{text}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_use_runs_once_on_the_sessions_node_and_keeps_no_value() {
         let tmp = tempfile::tempdir().unwrap();
         let t = hub_at(tmp.path()).await;
         assert_eq!(
             t.uses.place("default", SESSION).await.unwrap(),
-            Some(NodePlace {
+            NodePlace {
                 device: "local".into(),
                 files: true,
-            })
+            }
         );
-        assert_eq!(t.uses.place("other", SESSION).await.unwrap(), None);
+        assert_eq!(
+            t.uses.place("other", SESSION).await.unwrap_err().status(),
+            404
+        );
         let count = t.root.join("count");
         let values = Arc::new(Values::default());
         let u = use_of(

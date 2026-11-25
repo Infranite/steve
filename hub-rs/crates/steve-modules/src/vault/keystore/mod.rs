@@ -321,7 +321,8 @@ fn secret_service() -> Result<Arc<dyn KeyStore>, KeyStoreError> {
     ))
 }
 
-pub(crate) fn encode(key: &Kek) -> zeroize::Zeroizing<String> {
+/// Base64 representation used by the key store and by pipe-only consumers.
+pub fn encode(key: &Kek) -> zeroize::Zeroizing<String> {
     zeroize::Zeroizing::new(data_encoding::BASE64.encode(key.bytes()))
 }
 

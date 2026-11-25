@@ -94,7 +94,8 @@ pub async fn sample_once(local: Option<&Arc<dyn Node>>, svc: Option<&Arc<NodeSer
             .into_iter()
             .flatten()
             .collect(),
-    );
+    )
+    .await;
 }
 
 /// Warn once per low-disk episode on a remote Node. The Hub already watches its own disk.

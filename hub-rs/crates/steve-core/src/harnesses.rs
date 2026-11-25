@@ -184,11 +184,15 @@ impl Harness {
             PermissionMode::FullAccess,
         ];
         ORDER
-            .into_iter()
-            .find(|m| self.offers_bot_mode(*m))
-            .unwrap_or(PermissionMode::Ask)
-            .bot_key()
+            .iter()
+            .find(|&&m| self.offers_bot_mode(m))
+            .map_or(PermissionMode::Ask.as_str(), |m| m.as_str())
     }
+}
+
+/// Maps a stored Steve Bot `perm_mode` key to its `PermissionMode`.
+pub fn perm_mode_of_key(k: &str) -> Option<PermissionMode> {
+    PermissionMode::parse(k)
 }
 
 /// Default `(harness_id, perm_mode)` for a new bot: `preferred` (e.g. the main bot's harness) when
@@ -205,7 +209,7 @@ pub fn default_bot_choice(list: &[Harness], preferred: Option<&str>) -> (String,
         Some(h) => (h.id.clone(), h.default_perm_mode().into()),
         None => (
             steve_harness_spec::DEFAULT_ADAPTER.0.into(),
-            "default".into(),
+            PermissionMode::Ask.as_str().into(),
         ),
     }
 }

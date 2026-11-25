@@ -1,19 +1,15 @@
 //! Workspace notifications: things that happened (a release went out, items were archived,
 //! a system/security alert fired) rather than conversation.
 //!
-//! They are stored as `messages` rows in space [`SPACE`] (`"notify"`) with
-//! `meta.notice = { kind, level }`. A failure without an item (`level == "fail" && item.is_none()`)
+//! Backed by typed `thread_notices` rows ([`crate::thread::post_notice`] /
+//! [`crate::thread::list_notices`]). A failure without an item (`level == "fail" && item.is_none()`)
 //! also leaves one line in the main conversation ([`MAIN_SPACE`]) pointing back at the notice via
 //! `meta.notice.ref`. An item's failure is already represented by its own failure card, so it does
 //! not post a second line in the main conversation.
 
 use serde::Serialize;
-use serde_json::{Value, json};
 
-use crate::{Result, Store, W, append_message};
-
-/// Message space holding workspace notifications.
-pub const SPACE: &str = "notify";
+use crate::{Result, Store, W};
 
 /// Message space for the workspace's main conversation.
 pub const MAIN_SPACE: &str = "steve";
@@ -31,7 +27,7 @@ pub struct Notice {
     pub created: i64,
 }
 
-/// Record a workspace notification in its own transaction. Returns the notification's message id.
+/// Record a workspace notification in its own transaction. Returns the notification's id.
 pub fn notify(
     store: &Store,
     ws: &str,
@@ -53,53 +49,32 @@ pub fn notify_in(
     text: &str,
     item: Option<&str>,
 ) -> Result<String> {
-    let id = append_message(
+    let post_host_line = level == "fail" && item.is_none();
+    let row = crate::thread::post_notice(
         tx,
         ws,
-        "steve",
+        kind,
+        level,
         text,
         item,
-        &json!({ "notice": { "kind": kind, "level": level } }),
-        SPACE,
+        post_host_line,
+        crate::now(),
     )?;
-    if level == "fail" && item.is_none() {
-        append_message(
-            tx,
-            ws,
-            "steve",
-            text,
-            None,
-            &json!({ "notice": { "kind": kind, "level": level, "ref": id } }),
-            MAIN_SPACE,
-        )?;
-    }
-    Ok(id)
+    Ok(row.id)
 }
 
 /// Recent workspace notifications, newest first (ties: later insert first), at most `limit`.
 pub fn list_recent(store: &Store, ws: &str, limit: i64) -> Result<Vec<Notice>> {
-    let limit = limit.max(0);
-    let mut rows = store.messages().list(ws, SPACE, limit)?;
-    rows.reverse();
-    rows.sort_by_key(|m| std::cmp::Reverse(m.created));
+    let rows = store.read(|r| crate::thread::list_notices(r, ws, limit.max(0)))?;
     Ok(rows
         .into_iter()
-        .take(limit as usize)
-        .map(|m| {
-            let n = m.meta.get("notice");
-            let field = |k: &str| {
-                n.and_then(|n| n.get(k))
-                    .and_then(Value::as_str)
-                    .map(String::from)
-            };
-            Notice {
-                kind: field("kind").unwrap_or_else(|| "release".into()),
-                level: field("level").unwrap_or_else(|| "success".into()),
-                id: m.id,
-                text: m.text,
-                item_id: m.item_id,
-                created: m.created,
-            }
+        .map(|n| Notice {
+            id: n.id,
+            kind: n.kind,
+            level: n.level,
+            text: n.text,
+            item_id: n.item_id,
+            created: n.created,
         })
         .collect())
 }
@@ -108,6 +83,7 @@ pub fn list_recent(store: &Store, ws: &str, limit: i64) -> Result<Vec<Notice>> {
 mod tests {
     use super::*;
     use crate::{NoPublisher, WS};
+    use serde_json::json;
 
     #[test]
     fn only_itemless_failures_mirror_into_main_conversation() {

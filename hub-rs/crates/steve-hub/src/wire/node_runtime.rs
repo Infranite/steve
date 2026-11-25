@@ -253,6 +253,8 @@ pub struct NodeRuntime {
     replay_check: OnceLock<ReplayCheck>,
     /// What the Node's usage reports may add to a session's cost ([`Self::set_cost_caps`]).
     cost_caps: Mutex<CostCaps>,
+    /// Peak prompt context tokens observed per in-flight attempt (read-only metric observation).
+    context_peaks: Mutex<HashMap<String, u64>>,
     /// The largest replay page the Node's transport carries (unbounded in process).
     largest_replay: AtomicU32,
     /// What the business side is told of committed transactions, in commit order, by the upkeep
@@ -357,6 +359,7 @@ impl NodeRuntime {
             held: Mutex::new(HashSet::new()),
             replay_check: OnceLock::new(),
             cost_caps: Mutex::new(CostCaps::default()),
+            context_peaks: Mutex::new(HashMap::new()),
             largest_replay: AtomicU32::new(u32::MAX),
             later: Mutex::new(vec![]),
             staged: Mutex::new(vec![]),
@@ -731,6 +734,29 @@ impl NodeRuntime {
     /// Its faces, for what needs no ledger (discovery: probing, listing and reading history).
     pub fn node(&self) -> Arc<dyn Node> {
         self.node.clone()
+    }
+
+    /// Cancel a single active subtask on this Node without cancelling the parent turn.
+    pub async fn cancel_subtask(&self, session: &str, subtask: &str) -> ApiResult<bool> {
+        let session =
+            SessionId::new(session).map_err(|e| Error::new(Code::Invalid, e.to_string()))?;
+        let subtask = CallId::new(subtask).map_err(|e| Error::new(Code::Invalid, e.to_string()))?;
+        let res = self
+            .node
+            .cancel_subtask(CancelSubtask { session, subtask })
+            .await;
+        let outcome = match &res {
+            Ok(true) => "cancelled",
+            Ok(false) => "noop",
+            Err(_) => "error",
+        };
+        metrics::counter!(
+            "steve_subtask_cancels_total",
+            "node" => self.node_id.to_string(),
+            "outcome" => outcome,
+        )
+        .increment(1);
+        res
     }
 }
 

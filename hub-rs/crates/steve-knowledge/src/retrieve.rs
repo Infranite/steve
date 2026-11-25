@@ -2,10 +2,12 @@
 //! paused sources in SQL, then re-ranked, deduplicated, numbered and given citation links.
 //!
 //! Ranking: `bm25(kb_fts, 1.0, 2.0)` (title weight 2), then ×1.5 when the hit is about one of the
-//! anchors, ×1.2 for memories (short and precise), and a 30-day half-life for the main-thread
-//! chat source. The strict query (short CJK runs as phrases) goes first; when it finds fewer
-//! than 5 documents, the relaxed query (every bigram on its own, so typos still match) fills in
-//! after it — K0's evaluation showed this lifts recall@5 without hurting the strict ranking.
+//! anchors, ×1.2 for memories (short and precise). The strict query (short CJK runs as phrases)
+//! goes first; when it finds fewer than 5 documents, the relaxed query (every bigram on its own,
+//! so typos still match) fills in after it.
+//!
+//! Work items and main-thread chat messages are NOT indexed into knowledge; [`search_records`]
+//! searches them separately as records without mixing them into knowledge recall.
 //!
 //! Visibility and `never` are filtered only here and in the list functions: callers never
 //! build their own conditions.
@@ -14,7 +16,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
-use steve_store::knowledge::{BotMemories, Chunks, Documents, KnowledgeUses, Memories};
+use steve_store::knowledge::{
+    BotMemories, Chunks, Documents, KnowledgeUses, Memories, RecordSearch,
+};
 use steve_store::{R, Read, Result, W};
 
 use crate::port::{Candidate, KnowledgeStore, Pass, Scope};
@@ -32,8 +36,7 @@ pub const PER_DOC: usize = 2;
 
 const ANCHOR_BOOST: f64 = 1.5;
 const MEM_BOOST: f64 = 1.2;
-const CHAT_HALF_LIFE_DAYS: f64 = 30.0;
-const DAY_MS: f64 = 86_400_000.0;
+const RECORD_SNIPPET_CHARS: usize = 400;
 
 /// Who is asking, which decides extra filters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -131,9 +134,6 @@ fn href(c: &Candidate, about: &[ObjRef]) -> String {
             Some(b) => format!("#/bots/{}", b.id),
             None => "#/bots".into(),
         },
-        _ if c.source_kind == "items" => {
-            format!("#/items/{}", c.doc_ref.as_deref().unwrap_or(&c.obj_id))
-        }
         _ => format!("#/knowledge/doc/{}?seq={}", c.obj_id, c.seq),
     }
 }
@@ -155,11 +155,85 @@ fn boosted(c: &Candidate, about: &[ObjRef], q: &Query) -> f64 {
     if c.obj_type == "mem" {
         s *= MEM_BOOST;
     }
-    if c.source_kind == "chat" {
-        let age = ((q.now - c.updated) as f64 / DAY_MS).max(0.0);
-        s *= 0.5f64.powf(age / CHAT_HALF_LIFE_DAYS);
-    }
     s
+}
+
+/// One record result from direct search over work items and main-thread conversations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordHit {
+    /// `"item"` | `"chat"`
+    pub record_kind: String,
+    pub id: String,
+    pub title: String,
+    pub text: String,
+    pub label: String,
+    pub href: String,
+    pub updated: i64,
+}
+
+fn clip_record(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= RECORD_SNIPPET_CHARS {
+        trimmed.to_string()
+    } else {
+        let cut: String = trimmed.chars().take(RECORD_SNIPPET_CHARS).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Searches work items and main-thread conversation messages as a separate record category
+/// without mixing them into knowledge recall.
+pub fn search_records(
+    c: &mut impl Read,
+    viewer: &Viewer,
+    text: &str,
+    limit: usize,
+) -> Result<Vec<RecordHit>> {
+    let terms: Vec<String> = text
+        .split_whitespace()
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if terms.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = limit.clamp(1, MAX_K);
+    let zone = crate::sources::chat::workspace_zone(c, &viewer.ws)?;
+    let mut out = Vec::new();
+    for item in RecordSearch(c).items(&viewer.ws, &terms, limit)? {
+        let body = if !item.summary.trim().is_empty() {
+            &item.summary
+        } else if !item.goal.trim().is_empty() {
+            &item.goal
+        } else {
+            &item.title
+        };
+        out.push(RecordHit {
+            record_kind: "item".into(),
+            title: format!("{} {}", item.id, item.title),
+            text: clip_record(body),
+            label: item.id.clone(),
+            href: format!("#/items/{}", item.id),
+            id: item.id,
+            updated: item.updated,
+        });
+    }
+    for msg in RecordSearch(c).chat(&viewer.ws, crate::sources::chat::SPACE, &terms, limit)? {
+        let day = crate::sources::chat::day_of(msg.created, zone);
+        let label = steve_i18n::t!("knowledge.chat.day", day = day);
+        out.push(RecordHit {
+            record_kind: "chat".into(),
+            id: msg.id,
+            title: label.clone(),
+            text: clip_record(&msg.text),
+            label,
+            href: "#/".into(),
+            updated: msg.created,
+        });
+    }
+    out.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
+    out.truncate(limit);
+    Ok(out)
 }
 
 /// The note that goes with hits found without the meaning search (the store's semantic pass

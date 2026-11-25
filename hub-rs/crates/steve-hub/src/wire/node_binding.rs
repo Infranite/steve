@@ -138,12 +138,12 @@ pub fn plan(
     // migration resets former widening settings; malformed data still fails closed on binding.
     if let Some(b) = &bot
         && !b.perm_mode.is_empty()
-        && PermissionMode::from_key(&b.perm_mode).is_none()
+        && PermissionMode::parse(&b.perm_mode).is_none()
     {
         return Err(Mode(b.perm_mode.clone()));
     }
-    let mode = perm.unwrap_or("default");
-    let permissions = PermissionMode::from_key(mode).ok_or_else(|| Mode(mode.to_string()))?;
+    let mode = perm.unwrap_or(PermissionMode::Ask.as_str());
+    let permissions = PermissionMode::parse(mode).ok_or_else(|| Mode(mode.to_string()))?;
     let cwd = if !s.cwd.is_empty() {
         Some(s.cwd.as_str())
     } else {
@@ -861,30 +861,21 @@ mod host_tests {
 
     #[test]
     fn permission_modes_map_and_unknown_ones_fail_closed() {
-        assert_eq!(PermissionMode::from_key("plan"), Some(PermissionMode::Plan));
+        assert_eq!(PermissionMode::parse("plan"), Some(PermissionMode::Plan));
+        assert_eq!(PermissionMode::parse("ask"), Some(PermissionMode::Ask));
         assert_eq!(
-            PermissionMode::from_key("default"),
-            Some(PermissionMode::Ask)
-        );
-        assert_eq!(PermissionMode::from_key("ask"), Some(PermissionMode::Ask));
-        assert_eq!(
-            PermissionMode::from_key("acceptEdits"),
+            PermissionMode::parse("accept_edits"),
             Some(PermissionMode::AcceptEdits)
         );
+        assert_eq!(PermissionMode::parse("auto"), Some(PermissionMode::Auto));
         assert_eq!(
-            PermissionMode::from_key("accept_edits"),
-            Some(PermissionMode::AcceptEdits)
-        );
-        assert_eq!(
-            PermissionMode::from_key("bypassPermissions"),
+            PermissionMode::parse("full_access"),
             Some(PermissionMode::FullAccess)
         );
-        assert_eq!(
-            PermissionMode::from_key("full_access"),
-            Some(PermissionMode::FullAccess)
-        );
-        assert_eq!(PermissionMode::from_key("auto"), Some(PermissionMode::Auto));
-        assert_eq!(PermissionMode::from_key(""), None);
-        assert_eq!(PermissionMode::from_key("dontAsk"), None);
+        assert_eq!(PermissionMode::parse(""), None);
+        assert_eq!(PermissionMode::parse("default"), None);
+        assert_eq!(PermissionMode::parse("acceptEdits"), None);
+        assert_eq!(PermissionMode::parse("bypassPermissions"), None);
+        assert_eq!(PermissionMode::parse("dontAsk"), None);
     }
 }

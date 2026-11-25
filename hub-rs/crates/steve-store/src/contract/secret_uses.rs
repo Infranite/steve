@@ -175,7 +175,7 @@ impl<C: Read> SecretUses<'_, C> {
         for row in &mut rows {
             row.actor_name = match row.u.actor_type.as_str() {
                 "bot" => BotRows(self.0).name(&row.u.actor_id)?,
-                "me" => UserRows(self.0).name(&row.u.actor_id)?,
+                "me" => UserRows(self.0).display_name(&row.u.workspace_id, &row.u.actor_id)?,
                 _ => None,
             };
         }

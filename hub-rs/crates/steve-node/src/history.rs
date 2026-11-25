@@ -800,6 +800,10 @@ pub struct Probed {
 pub(crate) struct Probes(tokio::sync::Mutex<Option<(Instant, HashMap<String, Probed>)>>);
 
 impl Probes {
+    pub(crate) async fn forget(&self) {
+        *self.0.lock().await = None;
+    }
+
     pub(crate) async fn get(&self, d: &DiscoveryConfig, fresh: bool) -> HashMap<String, Probed> {
         let mut last = self.0.lock().await;
         if !fresh

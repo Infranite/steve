@@ -10,28 +10,27 @@ use steve_core::harnesses::{Harness, HarnessModel};
 use tower::ServiceExt;
 
 use super::*;
-use crate::backend::{BResult, Domain};
 use crate::bus::Bus;
 use crate::config::Config;
-use crate::wire::store::StoreBackend;
+use crate::wire::{core::CoreDomain, store::StoreBackend};
 
 struct Catalogue(RwLock<Vec<Harness>>);
 
+struct DraftGateway;
+
 #[async_trait::async_trait]
-impl Domain for Catalogue {
-    async fn harnesses(&self, fresh: bool) -> BResult<Vec<Harness>> {
-        assert!(!fresh, "saving configuration must not start a probe");
-        Ok(self.0.read().unwrap().clone())
-    }
-    async fn claude_print(
+impl steve_core::ModelGateway for DraftGateway {
+    async fn call(
         &self,
-        _: &'static str,
         _: &str,
-        _: &str,
-        _: crate::backend::Tier,
-        _: u64,
-    ) -> Result<String, crate::error::ApiError> {
-        Ok(json!({"name":"Draft", "model":"claude-opus-5-5"}).to_string())
+        _: steve_core::Tier,
+        _: std::time::Duration,
+        _: &steve_core::gateway::ThinkTools,
+    ) -> steve_core::Result<steve_core::gateway::Printed> {
+        Ok(steve_core::gateway::Printed {
+            text: json!({"name":"Draft", "model":"claude-opus-5-5"}).to_string(),
+            ..Default::default()
+        })
     }
 }
 
@@ -92,14 +91,16 @@ impl Env {
                 &["low", "high", "ultra"],
             ),
         ])));
-        let st = AppState::new(
-            cfg,
-            Arc::new(StoreBackend(store.clone())),
-            catalogue.clone(),
-            Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-                Default::default(),
-            ))),
-        );
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
+        let domain = CoreDomain::for_test(&cfg, store.clone(), &bus, Some(Arc::new(DraftGateway)));
+        let cat = catalogue.clone();
+        domain
+            .core
+            .models()
+            .set_bot_harnesses(Arc::new(move |_| cat.0.read().unwrap().clone()));
+        let st = AppState::new(cfg, StoreBackend(store.clone()), domain, bus);
         let ctx = Ctx {
             user: Obj::new(),
             ws: "default".into(),

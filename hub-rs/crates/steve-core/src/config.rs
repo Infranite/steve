@@ -8,6 +8,8 @@ use std::time::Duration;
 /// The default of [`CoreConfig::takeover_same_refusals`]: the second refusal for the same reason is
 /// the user's (decided by the user on 2026-11-17).
 pub const TAKEOVER_SAME_REFUSALS: u32 = 2;
+/// Default consecutive provider/execution failures on the same surface before switching fallback.
+pub const PROVIDER_ERROR_HANDOFF_THRESHOLD: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
@@ -46,6 +48,8 @@ pub struct CoreConfig {
     /// How many refusals of `steve_deliver` in a row for the same reason hand the item to the user
     /// instead of another continue (`takeover`); 0: never.
     pub takeover_same_refusals: u32,
+    /// Consecutive execution errors on one surface before auto-handoff to a Bot fallback (`0`: disabled).
+    pub provider_error_handoff_threshold: u32,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds.
     pub gh: PathBuf,
     /// The version this Hub runs (`dev` when unknown): what an item whose goal asks for its result to
@@ -102,6 +106,7 @@ impl CoreConfig {
             no_resume: false,
             takeover_continues: 2,
             takeover_same_refusals: TAKEOVER_SAME_REFUSALS,
+            provider_error_handoff_threshold: PROVIDER_ERROR_HANDOFF_THRESHOLD,
             gh: gh_cli(),
             version: "dev".into(),
             commit: None,

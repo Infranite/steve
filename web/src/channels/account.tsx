@@ -21,7 +21,7 @@ import { channelsApi, TRIGGER_ALL_DMS, TRIGGER_EVERYWHERE, attentionOf, isDm, sp
 import { SpaceAvatar, kindLine } from "@/channels/space-bits"
 import { GroupedSpaces } from "@/channels/space-groups"
 import { Rules, ruleOk } from "@/channels/rules"
-import { PersonaAvatar } from "@/channels/basis"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { PermissionList, SelfButtons } from "@/integrations/feishu"
 import { integrationsApi, type IAdapter } from "@/api/integrations"
 import { receiveNote, selfSidesFor } from "@/integrations/sides"
@@ -72,7 +72,7 @@ export function AccountView({ id }: { id: string }) {
           <GroupedSpaces a={a} empty={t(me ? "channels:account.noSessions" : "channels:account.noGroups")} onChanged={() => void L.reload()} />
         </section>
         <section><SectionLabel>{t("channels:account.defaultRules")}</SectionLabel>
-          {!me && <Group className="mb-2"><Row icon={<PersonaAvatar bot={a.personaBot} size={32} />} title={t("channels:account.defaultPersona", { name: a.persona?.name ?? "—" })} sub={t("channels:account.defaultPersonaSub")}>
+          {!me && <Group className="mb-2"><Row icon={<ActorAvatar actorId={a.personaBot ?? "me"} size={32} />} title={t("channels:account.defaultPersona", { name: a.persona?.name ?? "—" })} sub={t("channels:account.defaultPersonaSub")}>
               <Select align="end" testId="acc-default-persona" value={a.persona?.id ?? ""} onChange={(v) => void patch({ persona_id: v }, t("channels:account.personaChanged"))} options={personas.map((p) => ({ v: p.id, l: p.name }))} /></Row></Group>}
           {me && <div className="mb-2 type-footnote text-muted-foreground">{t("channels:account.selfSub")}</div>}
           <Rules rules={rulesNow} self={me} onChange={setRules} note={t("channels:account.rulesNote")} />
@@ -84,7 +84,7 @@ export function AccountView({ id }: { id: string }) {
         </section>
         {me && <TriggerSection a={a} onSave={(x) => patch({ trigger: x }, t("channels:account.triggerSaved"))} busy={busy} />}
         {side && <section><SectionLabel>{t("channels:word.you")}</SectionLabel>
-          {self.length ? <Group>{self.map((s) => <Row key={s.id} icon={<PersonaAvatar bot={null} size={28} />} title={t("channels:account.selfAuthorized")} sub={t("channels:account.selfAuthorizedSub", { status: CONN_STATUS[s.status]?.[0] ?? s.status })} onClick={() => go("#/channels/acc/" + s.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
+          {self.length ? <Group>{self.map((s) => <Row key={s.id} icon={<ActorAvatar actorId="me" size={28} />} title={t("channels:account.selfAuthorized")} sub={t("channels:account.selfAuthorizedSub", { status: CONN_STATUS[s.status]?.[0] ?? s.status })} onClick={() => go("#/channels/acc/" + s.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group>
             : <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-self-auth>
               <div className="type-callout text-muted-foreground">{t("channels:account.selfAuthHint")}</div>
               <div className="flex flex-wrap justify-end gap-2"><SelfButtons app={c.id} side={side} /></div></div>}</section>}

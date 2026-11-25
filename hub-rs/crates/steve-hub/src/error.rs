@@ -12,7 +12,31 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-use crate::backend::BackendError;
+pub type BResult<T> = Result<T, BackendError>;
+
+/// An error from storage or the domain (`status` defaults to 500, or 404 for workspace-scoped misses).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct BackendError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl BackendError {
+    pub fn msg(message: impl Into<String>) -> Self {
+        BackendError {
+            status: 500,
+            message: message.into(),
+        }
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        BackendError {
+            status: 404,
+            message: message.into(),
+        }
+    }
+}
 
 /// Every failure a handler can return, mapped to the TS Hub's status and body.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

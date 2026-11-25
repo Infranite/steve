@@ -58,7 +58,13 @@ fn a_message_to_the_reopened_item_makes_it_run_and_progress_keeps_it_so() {
     let k = Kit::new();
     let (id, sid) = reopened(&k);
     k.core
-        .session_message(&sid, "这明明构建失败了，任务咋还完成了呢？", false, &[])
+        .session_message(
+            &sid,
+            "这明明构建失败了，任务咋还完成了呢？",
+            false,
+            &[],
+            "me",
+        )
         .unwrap();
     let status = k.item_label(&id);
     assert_eq!(k.phase(&id), "active");
@@ -78,7 +84,7 @@ fn a_supplement_to_the_reopened_item_makes_it_run() {
     let k = Kit::new();
     let (id, _) = reopened(&k);
     k.core
-        .supplement(&id, "再看看", crate::SupplementMode::Auto, &[])
+        .supplement(&id, "再看看", crate::SupplementMode::Auto, &[], "me")
         .unwrap();
     assert_eq!(k.item_label(&id), "run");
     assert_eq!(k.phase(&id), "active");
@@ -88,7 +94,9 @@ fn a_supplement_to_the_reopened_item_makes_it_run() {
 fn only_an_open_card_makes_the_new_cycle_wait_on_you_and_answering_it_runs_again() {
     let k = Kit::new();
     let (id, sid) = reopened(&k);
-    k.core.session_message(&sid, "修一下", false, &[]).unwrap();
+    k.core
+        .session_message(&sid, "修一下", false, &[], "me")
+        .unwrap();
     let s = k.db().session(&sid).unwrap().unwrap();
     k.core
         .tool_request_approval(&s, "推送到 main", "git push")

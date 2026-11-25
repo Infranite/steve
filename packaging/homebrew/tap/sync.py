@@ -25,6 +25,7 @@ LOCK_NAME = "steve-installer.lock.json"
 VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 INSTALLER_OPS = {"run.sh", "run-managed.sh", "sign-setup.sh", "release-lib.sh"}
 REQUIRED = {"release.json", "LICENSE", "bin/steve", "bin/steve-hub", "bin/steve-node", "bin/steve-keyhelper",
+            "bin/restic", "bin/restic.LICENSE",
             "web/dist/index.html", "web/dist/release.json", *("ops/" + name for name in INSTALLER_OPS)}
 
 
@@ -129,6 +130,10 @@ def check_manifest(manifest, *, legacy_lock=False):
     require(manifest.get("hub_version") == version and manifest.get("web_version") == version
             and type(manifest.get("api_protocol")) is int and manifest["api_protocol"] == 1,
             "installer component identity is inconsistent")
+    if not legacy_lock:
+        restic_version = manifest.get("restic_version")
+        require(isinstance(restic_version, str) and bool(restic_version.strip()),
+                "installer manifest is missing restic_version")
     schema = manifest.get("schema")
     require(isinstance(schema, dict) and all(type(schema.get(k)) is int and schema[k] > 0
             for k in ("min_read", "max_read", "target"))
@@ -223,7 +228,7 @@ def verify_bundle(path, manifest, target):
             require(member.size >= 0 and total <= MAX_BUNDLE, "installer exceeds unpacked size limit")
             if name in REQUIRED:
                 require(member.size > 0, "empty required installer file: " + name)
-            if name.startswith(("bin/", "ops/")):
+            if name.startswith(("bin/", "ops/")) and name != "bin/restic.LICENSE":
                 require(member.mode & 0o111, "installer runtime file is not executable: " + name)
             if name == "bin/steve":
                 header = archive.extractfile(member).read(20)

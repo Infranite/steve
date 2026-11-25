@@ -152,8 +152,7 @@ pub(super) fn scope(store: &Store, session: &Session) -> Result<(Session, ItemSc
     }
     let own = ItemScope::Conversation([id.to_string()].into_iter().collect());
     let origin = store
-        .thread()
-        .item(id)
+        .read(|r| steve_store::thread::dispatch_by_item(r, id))
         .map_err(|e| e.to_string())?
         .filter(|t| t.workspace_id == s.workspace_id);
     let Some(origin) = origin else {
@@ -161,13 +160,13 @@ pub(super) fn scope(store: &Store, session: &Session) -> Result<(Session, ItemSc
     };
     let message = store
         .messages()
-        .get(&origin.origin_msg)
+        .get(&origin.origin_message_id)
         .map_err(|e| e.to_string())?
         .filter(|m| m.workspace_id == s.workspace_id);
     if message.is_none() {
         return Ok((s, own));
     }
-    let scope = ItemScope::of(store, &origin.origin_msg)?;
+    let scope = ItemScope::of(store, &origin.origin_message_id)?;
     Ok((s, scope))
 }
 

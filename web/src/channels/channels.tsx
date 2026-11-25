@@ -16,7 +16,7 @@ import { CONN_STATUS } from "@/api/accounts"
 import { channelsApi, attentionOf, spaceTitle, type Attention, type ChannelAccount, type Space } from "@/api/channels"
 import { useBusy } from "@/accounts/load"
 import { AttentionMenu, Name, SpaceAvatar, doingLine } from "@/channels/space-bits"
-import { PersonaAvatar } from "@/channels/basis"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { SpaceView } from "@/channels/space"
 import { AccountView } from "@/channels/account"
 import { PersonasRoute, PersonasSection } from "@/channels/persona"
@@ -101,7 +101,7 @@ function AccountRow({ a }: { a: ChannelAccount }) {
   const [s, dot] = CONN_STATUS[a.connection.status] ?? [a.connection.status, "idle"]
   const as = a.mode === "self" ? t("channels:list.rowAsYou") : t("channels:list.rowAsPersona", { persona: a.persona?.name ?? t("channels:word.defaultPersona") })
   return (
-    <Row icon={<PersonaAvatar bot={a.mode === "self" ? null : a.personaBot} size={32} />} onClick={() => go("#/channels/acc/" + a.connection.id)} data-channel-row={a.connection.id}
+    <Row icon={<ActorAvatar actorId={a.mode === "self" ? "me" : (a.personaBot ?? "me")} size={32} />} onClick={() => go("#/channels/acc/" + a.connection.id)} data-channel-row={a.connection.id}
       title={<span className="flex min-w-0 items-center gap-1.5"><Name>{a.name}</Name><Pill className="font-normal">{t(a.mode === "self" ? "channels:word.you" : "channels:word.bot")}</Pill></span>}
       sub={<span className="block truncate">{[a.provider.name, as, t("channels:list.rowCount", { count: a.spaces.length })].join(" · ")}</span>}>
       {a.connection.status !== "ok" && <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span>}

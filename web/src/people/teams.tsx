@@ -17,14 +17,16 @@ import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
 import { people, type DirectoryStatus, type Team } from "@/api/people"
 import { useHubQuery } from "@/data/use-hub-query"
-import { ContactAvatar, Loading, PEOPLE_EVENTS, Section, act, codes, label, visLabel } from "@/people/common"
+import { Loading, PEOPLE_EVENTS, Section, act, codes, label, visLabel } from "@/people/common"
+import { disambiguateActors, formatActorName, partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { useT } from "@/i18n"
 import { MemSection, ctxOf } from "@/people/contact"
 
 export function TeamRow({ g, indent = 0, spaces }: { g: Team; indent?: number; spaces?: { id: string; name: string }[] | null }) {
   const t = useT()
   const sp = g.space_id ? spaces?.find((x) => x.id === g.space_id) : undefined
-  return <Row icon={<span style={{ marginLeft: Math.min(indent, 6) * 20 }}><ContactAvatar name={g.name} type="team" size={32} /></span>} onClick={() => go("#/teams/" + g.id)} data-team-row={g.name}
+  return <Row icon={<span style={{ marginLeft: Math.min(indent, 6) * 20 }}><ActorAvatar actor={partyActor({ id: g.id, name: g.name, type: "team" })} size={32} /></span>} onClick={() => go("#/teams/" + g.id)} data-team-row={g.name}
     title={<span className="inline-flex items-center gap-1.5">{g.name}{g.visibility !== "workspace" && <span className="type-footnote text-muted-foreground">{visLabel(g.visibility)}</span>}</span>}
     sub={<Meta inline><span>{t("people:teams.headcount", { count: g.headcount })}</span>{sp && <span>{t("people:teams.bound", { name: sp.name })}</span>}{g.purpose && <span className="max-w-[320px] truncate">{g.purpose}</span>}</Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
 }
@@ -90,11 +92,11 @@ export function TeamView({ id }: { id: string }) {
         <AskSteve key={g.id} ctx={ctxOf("team", g.id)} placeholder={v ? t("people:team.askVirtual", { name: g.name }) : t("people:team.askChart", { name: g.name })} />
         <Section label={t("people:team.purpose")}><Input className="rounded-lg" aria-label={t("people:team.purposeAria")} maxLength={400} value={purpose ?? g.purpose} onChange={(e) => setPurpose(e.target.value)} onBlur={savePurpose} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) (e.target as HTMLInputElement).blur() }} placeholder={t("people:team.purposePh")} data-team-purpose /></Section>
         <Section label={t("people:team.members", { n: members.length })} right={v ? <AddMember have={members.map((m) => m.contact_id)} onPick={(cid) => put([...cur, { contact_id: cid, role: "member" }])} /> : undefined}>
-          {members.length ? <Group>{members.map((m) => (
-            <Row key={m.contact_id} icon={<ContactAvatar name={m.name} size={28} />} title={<span className="inline-flex items-center gap-1.5"><a href={"#/contacts/" + m.contact_id} className="hover:underline">{m.name}</a>{m.external && <Badge variant="secondary" className="text-muted-foreground">{t("people:team.external")}</Badge>}</span>} data-member={m.name}>
+          {members.length ? (() => { const md = disambiguateActors(members.map((m) => ({ key: m.contact_id, name: m.name, subtitle: label("role", m.role), fallbackId: m.contact_id }))); return <Group>{members.map((m) => { const extra = md.get(m.contact_id); return (
+            <Row key={m.contact_id} icon={<ActorAvatar actor={partyActor({ id: m.contact_id, name: m.name, avatar: m.avatar })} disambiguator={extra} size={28} />} title={<span className="inline-flex items-center gap-1.5"><a href={"#/contacts/" + m.contact_id} className="hover:underline">{formatActorName(m.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex }))}</a>{m.external && <Badge variant="secondary" className="text-muted-foreground">{t("people:team.external")}</Badge>}</span>} data-member={m.name}>
               {v && m.source !== "sync" ? <><span><Select align="end" quiet testId={"role-" + m.name} value={m.role} onChange={(x) => put(cur.map((c) => (c.contact_id === m.contact_id ? { ...c, role: x } : c)))} options={codes("role").map((x) => ({ v: x, l: <span className="type-footnote">{label("role", x)}</span> }))} /></span>
                 <Button variant="ghost" size="icon-xs" aria-label={t("people:team.removeMember", { name: m.name })} className="text-muted-foreground" onClick={() => put(cur.filter((c) => c.contact_id !== m.contact_id))} data-rm-member={m.name}><XIcon /></Button></>
-                : <span className="type-footnote text-muted-foreground">{label("role", m.role)}</span>}</Row>))}</Group> : <Empty title={t("people:team.noMembers")} />}
+                : <span className="type-footnote text-muted-foreground">{label("role", m.role)}</span>}</Row>) })}</Group> })() : <Empty title={t("people:team.noMembers")} />}
           {!v && <div className="mt-3 type-footnote text-muted-foreground">{t("people:team.syncedMembers")}</div>}
         </Section>
         {subs.length > 0 && <Section label={t("people:team.subs")}><Group>{subs.map((x) => <TeamRow key={x.id} g={x} spaces={spaces.data} />)}</Group></Section>}
@@ -118,7 +120,7 @@ function AddMember({ have, onPick }: { have: string[]; onPick: (cid: string) => 
       <DropdownMenuTrigger render={<Button size="xs" variant="ghost" className="text-muted-foreground" data-add-member />}><PlusIcon />{t("common:action.add")}</DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="max-h-72 min-w-56">
         {!cs.data ? <div className="px-2 py-1.5 type-footnote text-muted-foreground">{t("people:shared.loading")}</div> : !xs.length ? <div className="px-2 py-1.5 type-footnote text-muted-foreground">{t("people:team.noCandidates")}</div>
-          : xs.map((c) => <DropdownMenuItem key={c.id} onClick={() => onPick(c.id)} data-member-opt={c.name}><ContactAvatar name={c.name} size={18} />{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}<span className="ml-auto type-footnote text-muted-foreground">{c.org?.name}</span></DropdownMenuItem>)}
+          : xs.map((c) => <DropdownMenuItem key={c.id} onClick={() => onPick(c.id)} data-member-opt={c.name}><ActorAvatar actor={partyActor({ id: c.id, name: c.name, contactKind: c.kind, avatar: c.avatar, isMe: c.is_me })} size={18} tooltip={false} />{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}<span className="ml-auto type-footnote text-muted-foreground">{c.org?.name}</span></DropdownMenuItem>)}
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -144,7 +146,7 @@ export function NewTeamDialog({ onClose }: { onClose: () => void }) {
           <Field><FieldLabel htmlFor="nt-purpose">{t("people:newTeam.purpose")}</FieldLabel><Input id="nt-purpose" className="rounded-lg" maxLength={400} value={pur} onChange={(e) => setPur(e.target.value)} placeholder={t("people:newTeam.purposePh")} /></Field>
           <Field><FieldLabel>{t("people:team.members", { n: pick.length })}</FieldLabel>
             <div className="max-h-52 overflow-y-auto rounded-xl bg-muted/60 p-1" role="group" aria-label={t("people:newTeam.pick")}>{!cs.data ? <Loading /> : xs.map((c) => (
-              <label key={c.id} className="flex cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 hover:bg-accent" data-nt-pick={c.name}><Checkbox checked={pick.includes(c.id)} onCheckedChange={(v) => setPick(v ? [...pick, c.id] : pick.filter((x) => x !== c.id))} /><ContactAvatar name={c.name} size={20} /><span className="type-callout">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span><span className="ml-auto type-footnote text-muted-foreground">{c.org?.name}</span></label>))}</div></Field>
+              <label key={c.id} className="flex cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 hover:bg-accent" data-nt-pick={c.name}><Checkbox checked={pick.includes(c.id)} onCheckedChange={(v) => setPick(v ? [...pick, c.id] : pick.filter((x) => x !== c.id))} /><ActorAvatar actor={partyActor({ id: c.id, name: c.name, contactKind: c.kind, avatar: c.avatar, isMe: c.is_me })} size={20} tooltip={false} /><span className="type-callout">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span><span className="ml-auto type-footnote text-muted-foreground">{c.org?.name}</span></label>))}</div></Field>
         </FieldGroup>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!n.trim() || pick.length < 2 || busy} data-testid="nt-go" onClick={() => void create()}>{t("people:shared.create")}</Button></DialogFooter>
       </DialogContent>

@@ -369,11 +369,19 @@ async fn resolve_flag_stale_and_about_are_listed_and_undoable() {
 async fn the_page_remembers_which_schedule_is_the_steward() {
     let e = setup();
     let (_, v) = e.me("GET", "/kb/steward", None).await;
-    assert_eq!(v, json!({"schedule_id": null}));
+    assert!(v["schedule_id"].is_null());
+    assert_eq!(v["threshold"], 3);
+    assert_eq!(v["skipped_runs"], 0);
+    assert_eq!(v["signals"]["total"], 0);
     let (s, _) = e
-        .me("PUT", "/kb/steward", Some(json!({"schedule_id": "fl_1"})))
+        .me(
+            "PUT",
+            "/kb/steward",
+            Some(json!({"schedule_id": "fl_1", "threshold": 5})),
+        )
         .await;
     assert_eq!(s, 200);
     let (_, v) = e.me("GET", "/kb/steward", None).await;
     assert_eq!(v["schedule_id"], "fl_1");
+    assert_eq!(v["threshold"], 5);
 }

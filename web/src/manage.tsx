@@ -8,7 +8,7 @@ import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, FilePenIcon, ZapIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon } from "lucide-react"
+import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon, ArrowUpIcon, ArrowDownIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -25,11 +25,12 @@ import { Badge } from "@/components/affect/badge-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
-  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
-  setSetting, toast, emit, closedSt,
+  st, botName, ownsBot, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, removeBotFromWorkspace, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  setSetting, toast, emit, closedSt, type ExecutionSurface,
 } from "@/store"
 import { api } from "@/api"
-import { go, Page, BotAvatar, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
+import { go, Page, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
 import { Select } from "@/view-shared"
@@ -68,11 +69,11 @@ const proLabel = (t: T, i: number) => (PRO_KEYS[i] ? t(`manage:pro.${PRO_KEYS[i]
 const ACC_KEYS = ["inherit", "manual", "auto"] as const
 /** an accept mode by backend key as shown; unknown keys fall back to the store's label */
 const accLabel = (t: T, k: string) => ((ACC_KEYS as readonly string[]).includes(k) ? t(`manage:acc.${k as (typeof ACC_KEYS)[number]}`) : ACC[k] ?? k)
-const PERM_KEYS = ["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const
+const PERM_KEYS = ["plan", "ask", "accept_edits", "auto", "full_access"] as const
 const permLabel = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:perm.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
 /** a permission mode in a word or two (the tile's name); its sentence is permLabel */
 const permName = (t: T, k: string) => ((PERM_KEYS as readonly string[]).includes(k) ? t(`manage:form.permName.${k as (typeof PERM_KEYS)[number]}`) : PERM[k] ?? k)
-const PERM_ICON: Record<string, ReactNode> = { plan: <EyeIcon />, default: <HandIcon />, acceptEdits: <FilePenIcon />, auto: <ZapIcon />, bypassPermissions: <ShieldOffIcon /> }
+const PERM_ICON: Record<string, ReactNode> = { plan: <EyeIcon />, ask: <HandIcon />, accept_edits: <PencilIcon />, auto: <SparklesIcon />, full_access: <ShieldOffIcon /> }
 const ACC_ICON: Record<string, ReactNode> = { inherit: <SlidersHorizontalIcon />, manual: <UserCheckIcon />, auto: <CheckCheckIcon /> }
 /* tag categories are stored as Chinese words (store TAG_CATS); only the label is translated */
 const TAG_CAT_KEYS: Record<string, "all" | "project" | "kind" | "delivery" | "domain" | "client" | "topic"> = { 全部: "all", 项目: "project", 类型: "kind", 交付: "delivery", 领域: "domain", 客户: "client", 主题: "topic" }
@@ -103,7 +104,7 @@ export function BotsView() {
           : <Empty title={Object.keys(st.bots).length > 1 ? t("manage:list.noMatch") : t("manage:list.onlySteve")} sub={t("manage:list.emptySub")} />}
       </Section>
       {others.length > 0 && <Section label={t("manage:list.elsewhere", { n: others.length })}>
-        <Panel>{others.map((b) => <Row key={b.id} title={t("manage:bot.name", { name: b.name })} sub={t("manage:list.inWorkspaces", { count: b.workspaces.length })}><Button size="xs" variant="outline" onClick={() => setBotWorkspaces(b.id, [...b.workspaces, st.workspace!.id])}><PlusIcon />{t("manage:list.joinHere")}</Button></Row>)}</Panel></Section>}
+        <Panel>{others.map((b) => <Row key={b.id} title={t("manage:bot.name", { name: b.name })} sub={t("manage:list.inWorkspaces", { count: b.workspaces.length })}>{ownsBot(b.owner) && <Button size="xs" variant="outline" onClick={() => setBotWorkspaces(b.id, [...b.workspaces, st.workspace!.id])}><PlusIcon />{t("manage:list.joinHere")}</Button>}</Row>)}</Panel></Section>}
       </div>
     </Page>
   )
@@ -112,17 +113,22 @@ export function BotsView() {
  *  and what it runs on underneath; the switch and the menu stay their own buttons above the card's target */
 function BotCard({ k, teams, title, sub, meta, action, off, size = 36, as }: { k: string; teams: ReturnType<typeof useBotTeams>; title: ReactNode; sub: string; meta: (string | false | null | undefined)[]; action: ReactNode; off?: boolean; size?: number; as?: "li" }) {
   const t = useT()
+  const isMain = !!st.bots[k]?.main
   const joined = teams.data?.teams.filter(team => team.members.some(member => member.bot === k)) ?? []
   return (
     <ACard as={as} interactive className="anim-in" data-bot-card={k} data-off={off || undefined}>
-      <CardHeader icon={<BotAvatar k={k} size={size} className={cn("transition-[opacity,filter]", EASE, off && "opacity-40 grayscale")} />} action={action}
+      <CardHeader icon={<ActorAvatar actorId={k} size={size} className={cn("transition-[opacity,filter]", EASE, off && "opacity-40 grayscale")} />} action={action}
         title={<button type="button" onClick={() => go("#/bots/" + k)} data-bot-row={k}>{title}</button>}
         description={<span className="line-clamp-2">{sub || t("manage:detail.noRole")}</span>} />
       <Meta>{meta.filter(Boolean).map((x, i) => <span key={i}>{x}</span>)}</Meta>
       <div className="flex min-w-0 flex-wrap items-center gap-1.5 type-footnote text-muted-foreground" data-bot-teams>
-        <span>{t("manage:list.joinedTeams")}</span>
-        {teams.error ? <span>{t("manage:list.teamsLoadFailed")}</span> : !teams.data ? <span>{t("manage:list.teamsLoading")}</span>
-          : joined.length ? joined.map(team => <Badge key={team.id} title={team.name}>{team.name}</Badge>) : <span>{t("manage:list.noTeams")}</span>}
+        {isMain
+          ? <Badge tone="info">{t("manage:dispatch.coordinatorAlwaysOn")}</Badge>
+          : <>
+              <span>{t("manage:list.joinedTeams")}</span>
+              {teams.error ? <span>{t("manage:list.teamsLoadFailed")}</span> : !teams.data ? <span>{t("manage:list.teamsLoading")}</span>
+                : joined.length ? joined.map(team => <Badge key={team.id} title={team.name}>{team.name}</Badge>) : <span>{t("manage:list.noTeams")}</span>}
+            </>}
       </div>
     </ACard>
   )
@@ -145,21 +151,35 @@ export function DeleteBotDialog({ k }: { k: string }) {
   const memories = useBotMemories(k)
   const t = useT()
   const b = st.bots[k]
-  const [to, setTo] = useState("steve"), [mem, setMem] = useState<"删除" | "导出">("导出")
+  const canDeleteGlobally = b ? ownsBot(b.owner) : false
+  const multiWorkspace = (b?.workspaces.length ?? 0) > 1
+  const [scope, setScope] = useState<"workspace" | "global">(() => (canDeleteGlobally && !multiWorkspace ? "global" : "workspace"))
+  const [to, setTo] = useState("steve"), [mem, setMem] = useState<"delete" | "export">("export")
   if (!b) return null
+  const effectiveScope: "workspace" | "global" = canDeleteGlobally ? scope : "workspace"
   const mine = getItems().filter((i) => i.b === k && !closedSt(i.st))
+  const confirm = () => {
+    closeSheet()
+    go("#/bots")
+    if (effectiveScope === "global") void deleteBot(k, to, mem)
+    else void removeBotFromWorkspace(k, to, mem)
+  }
   return (
     <AlertDialog open onOpenChange={(o) => !o && closeSheet()}>
       <AlertDialogContent className="sm:max-w-[480px]!">
-        <AlertDialogHeader><AlertDialogTitle>{t("manage:del.title", { name: b.n })}</AlertDialogTitle>
-          <AlertDialogDescription>{t("manage:del.desc", { count: mine.length })}</AlertDialogDescription></AlertDialogHeader>
+        <AlertDialogHeader><AlertDialogTitle>{effectiveScope === "global" ? t("manage:del.title", { name: b.n }) : t("manage:del.removeTitle", { name: b.n })}</AlertDialogTitle>
+          <AlertDialogDescription>{effectiveScope === "global" ? t("manage:del.desc", { count: mine.length }) : t("manage:del.removeDesc", { count: mine.length })}</AlertDialogDescription></AlertDialogHeader>
         <FieldGroup className="gap-4">
+          {canDeleteGlobally && (
+            <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.scope")}</FieldLabel>
+              <Segmented size="sm" value={effectiveScope} onChange={setScope} options={[["workspace", t("manage:del.scopeWorkspace")], ["global", t("manage:del.scopeGlobal")]] as const} /></Field>
+          )}
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.handTo")}</FieldLabel>
             <SetSelect testId="del-to" label={t("manage:del.handTo")} value={to} onChange={setTo} options={Object.keys(st.bots).filter((x) => x !== k && st.bots[x].on).map((x) => ({ v: x, l: botName(x) }))} /></Field>
-          <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.itsMemories", { count: memories?.length ?? 0 })}</FieldLabel><Segmented size="sm" value={mem} onChange={setMem} options={[["导出", t("manage:del.export")], ["删除", t("common:action.delete")]] as const} /></Field>
+          <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("manage:del.itsMemories", { count: memories?.length ?? 0 })}</FieldLabel><Segmented size="sm" value={mem} onChange={setMem} options={[["export", t("manage:del.export")], ["delete", t("common:action.delete")]] as const} /></Field>
         </FieldGroup>
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
-          <AlertDialogAction variant="destructive" data-del-bot-confirm onClick={() => { closeSheet(); go("#/bots"); void deleteBot(k, to, mem) }}>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogAction variant="destructive" data-del-bot-confirm onClick={confirm}>{effectiveScope === "global" ? t("common:action.delete") : t("manage:del.removeAction")}</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
   )
@@ -172,7 +192,7 @@ const tplText = (t: T, id: TplId) => ({ name: t(`manage:tpl.${id}Name`), role: t
 export function NewBotDialog() {
   const t = useT()
   const [mode, setMode] = useState<"tpl" | "desc" | "blank">("tpl"), [tpl, setTpl] = useState<TplId>(TEMPLATES[0]), [desc, setDesc] = useState(""), [busy, setBusy] = useState(false)
-  const [harness, setHarness] = useState(defaultHarness), [perm, setPerm] = useState("default")
+  const [harness, setHarness] = useState(defaultHarness), [perm, setPerm] = useState("ask")
   const runtimes = useRuntimes()
   useEffect(() => { if (!harness && runtimes.length) setHarness(defaultHarness()) }, [harness, runtimes])
   const runtime = runtimes.find(r => r.id === harness)
@@ -245,6 +265,59 @@ export function editBot(k: string) { botTab = "设置"; lastBot = k; go("#/bots/
 const BOT_TABS = [["概览", "tabOverview"], ["设置", "tabSettings"], ["能力", "tabCaps"], ["系统提示词", "tabPrompt"], ["记忆", "tabMemory"], ["对外身份", "tabPersona"], ["定时与流程", "tabSchedule"]] as const
 const EFFORT_KEYS = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const
 const isEffortKey = (v: string): v is (typeof EFFORT_KEYS)[number] => (EFFORT_KEYS as readonly string[]).includes(v)
+function FallbackSurfacesEditor({ value, onChange }: { value: ExecutionSurface[]; onChange: (next: ExecutionSurface[]) => void }) {
+  const t = useT()
+  const runtimes = useRuntimes()
+  const updateAt = (idx: number, patch: Partial<ExecutionSurface>) =>
+    onChange(value.map((s, n) => (n === idx ? { ...s, ...patch } : s)))
+  const move = (idx: number, delta: -1 | 1) => {
+    const to = idx + delta
+    if (to < 0 || to >= value.length) return
+    const next = [...value]
+    ;[next[idx], next[to]] = [next[to], next[idx]]
+    onChange(next)
+  }
+  const add = () => {
+    if (value.length >= 8) return
+    const pick = runtimes.find((r) => r.ok)?.id ?? runtimes[0]?.id ?? defaultHarness()
+    if (!pick) return
+    onChange([...value, { harness: pick, model: null, reasoning_effort: null }])
+  }
+  return (
+    <F label={t("manage:form.fallbackSurfaces")} hint={t("manage:form.fallbackSurfacesHint")}>
+      <div className="flex flex-col gap-2" data-bot-fallbacks>
+        {value.length === 0 && <div className="type-footnote text-muted-foreground">{t("manage:form.fallbackSurfacesEmpty")}</div>}
+        {value.map((s, idx) => {
+          const efforts = harnessEfforts(s.harness)
+          const eff = s.reasoning_effort ?? ""
+          return (
+            <div key={idx} className="flex flex-col gap-2 rounded-lg border border-border/70 p-3" data-bot-fallback-row={idx}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="type-footnote font-medium text-muted-foreground">#{idx + 1}</span>
+                <div className="flex items-center gap-1">
+                  <Button type="button" size="icon-xs" variant="ghost" disabled={idx === 0} aria-label={t("manage:form.fallbackSurfaceMoveUp")} onClick={() => move(idx, -1)}><ArrowUpIcon className="size-3.5" /></Button>
+                  <Button type="button" size="icon-xs" variant="ghost" disabled={idx === value.length - 1} aria-label={t("manage:form.fallbackSurfaceMoveDown")} onClick={() => move(idx, 1)}><ArrowDownIcon className="size-3.5" /></Button>
+                  <Button type="button" size="icon-xs" variant="ghost" aria-label={t("manage:form.fallbackSurfaceRemove")} onClick={() => onChange(value.filter((_, n) => n !== idx))} data-bot-fallback-remove={idx}><TrashIcon className="size-3.5" /></Button>
+                </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <RuntimeSelect testId={`bot-fallback-harness-${idx}`} value={s.harness} onChange={(h) => updateAt(idx, { harness: h, model: null, reasoning_effort: null })} />
+                <ModelPicker field testId={`bot-fallback-model-${idx}`} harness={s.harness} value={s.model ?? ""} allowDefault onChange={(m) => updateAt(idx, { model: m || null })} />
+                {efforts.length > 0 && (
+                  <SetSelect wide testId={`bot-fallback-effort-${idx}`} label={t("manage:form.effort")} value={eff || "default"} onChange={(v) => updateAt(idx, { reasoning_effort: v === "default" ? null : v })}
+                    options={[{ v: "default", l: t("manage:effort.default") }, ...efforts.map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v })), ...(eff && !efforts.includes(eff) ? [{ v: eff, l: isEffortKey(eff) ? t(`manage:effort.${eff}`) : eff }] : [])]} />
+                )}
+              </div>
+            </div>
+          )
+        })}
+        {value.length < 8 && (
+          <div><Button type="button" size="sm" variant="outline" onClick={add} data-bot-fallback-add><PlusIcon className="size-3.5" />{t("manage:form.fallbackSurfacesAdd")}</Button></div>
+        )}
+      </div>
+    </F>
+  )
+}
 export function BotView({ k }: { k: string }) {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
@@ -253,7 +326,7 @@ export function BotView({ k }: { k: string }) {
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   const runtimes = useRuntimes(!!b)
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
-  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, specialties: b.specialties?.join("\n") ?? "", pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
+  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, specialties: b.specialties?.join("\n") ?? "", pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", fallbackSurfaces: b.fallbackSurfaces ?? [], color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
   const allowedEfforts = harnessEfforts(fm.harness)
   const rawEffort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
   const effort = rawEffort && (!runtimes.some(x => x.id === fm.harness) || allowedEfforts.includes(rawEffort)) ? rawEffort : ""
@@ -307,6 +380,7 @@ export function BotView({ k }: { k: string }) {
               <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><SetSelect wide testId="bot-effort" label={t("manage:form.effort")} value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...allowedEfforts.map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v })), ...(effort && !allowedEfforts.includes(effort) ? [{ v: effort, l: isEffortKey(effort) ? t(`manage:effort.${effort}`) : effort }] : [])]} /></F>
             </div>
             <RuntimeAvailability harness={fm.harness} />
+            <FallbackSurfacesEditor value={fm.fallbackSurfaces ?? []} onChange={(fallbackSurfaces) => set({ fallbackSurfaces })} />
             {b.main && <SteveJudges harness={fm.harness} model={fm.model ?? ""} />}
             <F label={t("manage:form.project")} hint={t("manage:form.projectHint")}><SetSelect wide testId="bot-project" label={t("manage:form.project")} value={fm.project} onChange={(v) => set({ project: v })} options={[{ v: "none", l: t("manage:form.projectInfer") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} /></F>
             {!b.main && <F label={t("manage:form.workspaces")} hint={t("manage:form.workspacesHint")}>
@@ -314,7 +388,7 @@ export function BotView({ k }: { k: string }) {
           </Card></Section>
           {!b.main && <ExecutionNodes key={`${st.workspace?.id}:${k}`} bot={k} />}
           <div className="flex gap-2"><Button data-save-bot disabled={!modeSupported || !specialtiesValid} onClick={async () => {
-            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
+            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, fallbackSurfaces: fm.fallbackSurfaces ?? [], color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
             if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)
             setForm(null); botTab = "概览"; r() }}>{t("common:action.save")}</Button><Button variant="ghost" onClick={() => { setForm(null); botTab = "概览"; r() }}>{t("common:action.cancel")}</Button></div>
         </FieldGroup>
@@ -449,7 +523,7 @@ function Pane({ id }: { id: string }) {
       v === "0" ? t("manage:general.awayNever") : t("common:dur.hours", { count: Number(v) }),
     ])
     return <div className="flex flex-col gap-8">
-      <Section label={t("manage:general.assistant")}><Panel><Row icon={<BotAvatar k="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>
+      <Section label={t("manage:general.assistant")}><Panel><Row icon={<ActorAvatar actorId="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>
       <Panel>
         <Row title={t("manage:general.home")} sub={t("manage:general.homeSub")}><Sel label={t("manage:general.home")} testId="home" v={c.home} o={homeOpts} on={(v) => setSetting({ home: v })} /></Row>
         <Row title={t("manage:general.away")} sub={t("manage:general.awaySub")}><Sel label={t("manage:general.away")} testId="away" v={c.awayH} o={awayOpts} on={(v) => setSetting({ awayH: v })} /></Row>
@@ -461,12 +535,24 @@ function Pane({ id }: { id: string }) {
     </div>
   }
   if (id === "items") {
+    const noExecOpts = WORKSPACE_SETTING_VALUES.noExecutor.map((v) => ({
+      v,
+      l: v === "steve" ? t("manage:items.noExecutorSteve") : t("manage:items.noExecutorAsk"),
+    }))
     const accOpts = WORKSPACE_SETTING_VALUES.accDefault.map((v): [string, string] => [v, v === "manual" ? t("manage:acc.manual") : t("manage:acc.auto")])
     const depsLabels = [t("manage:items.depsAuto"), t("manage:items.depsRemind")]
     const depsOpts: [string, string][] = WORKSPACE_SETTING_VALUES.depsAfter.map((v, i) => [v, depsLabels[i] ?? v])
     const archOpts: [string, string][] = WORKSPACE_SETTING_VALUES.archDays.map((v) => [
       v,
       v === "0" ? t("manage:items.archNever") : t("common:dur.days", { count: Number(v) }),
+    ])
+    const quotaAutoOpts: [string, string][] = WORKSPACE_SETTING_VALUES.quotaAutoHandoff.map((v) => [
+      v,
+      v === "off" ? t("manage:items.quotaAutoHandoffOff") : t("manage:items.quotaAutoHandoffOn"),
+    ])
+    const quotaWaitOpts: [string, string][] = WORKSPACE_SETTING_VALUES.quotaWaitMinutes.map((v) => [
+      v,
+      v === "0" ? t("manage:items.quotaWaitMinutesOff") : t("manage:items.quotaWaitMinutesMin", { minutes: Number(v) }),
     ])
     const handoffOpts: [string, string][] = WORKSPACE_SETTING_VALUES.handoff.map((v) => [
       v,
@@ -475,12 +561,15 @@ function Pane({ id }: { id: string }) {
     return <div className="flex flex-col gap-8">
       {/* the pane's title already says 事项: the first group goes without a label; the number prefix lives in 工作空间 */}
       <Panel>
+        <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.noExecutor")} sub={t("manage:items.noExecutorSub")}><SetSelect testId="settings-no-executor" label={t("manage:items.noExecutor")} value={c.noExecutor === "steve" ? "steve" : WORKSPACE_SETTING_DEFAULTS.noExecutor} disabled={!st.owner} options={noExecOpts} onChange={(v) => setSetting({ noExecutor: v })} /></Row>
         <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : WORKSPACE_SETTING_DEFAULTS.accDefault} onChange={(v) => setSetting({ accDefault: v })} options={accOpts} /></Row>
         <Row title={t("manage:items.depsAfter")} sub={t("manage:items.depsAfterSub")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={depsOpts} on={(v) => setSetting({ depsAfter: v })} /></Row>
         <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={archOpts} on={(v) => setSetting({ archDays: v })} /></Row>
         {/* the personal agent config default is the Hub's (a Node serves every workspace): set on Devices · Hub */}
         <Row title={t("manage:items.ownerContext")} sub={t("manage:items.ownerContextSub")}><Button size="sm" variant="outline" onClick={() => go("#/devices/hub")} data-owner-context-link>{t("manage:items.ownerContextOpen")}</Button></Row></Panel>
       <Section label={t("manage:items.sessions")}><Panel>
+        <Row title={t("manage:items.quotaAutoHandoff")} sub={t("manage:items.quotaAutoHandoffSub")}><Sel label={t("manage:items.quotaAutoHandoff")} testId="quota-auto-handoff" v={c.quotaAutoHandoff ?? WORKSPACE_SETTING_DEFAULTS.quotaAutoHandoff} o={quotaAutoOpts} on={(v) => setSetting({ quotaAutoHandoff: v })} /></Row>
+        <Row title={t("manage:items.quotaWaitMinutes")} sub={t("manage:items.quotaWaitMinutesSub")}><Sel label={t("manage:items.quotaWaitMinutes")} testId="quota-wait-minutes" v={c.quotaWaitMinutes ?? WORKSPACE_SETTING_DEFAULTS.quotaWaitMinutes} o={quotaWaitOpts} on={(v) => setSetting({ quotaWaitMinutes: v })} /></Row>
         <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? WORKSPACE_SETTING_DEFAULTS.handoff} o={handoffOpts} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
     </div>
   }

@@ -70,12 +70,12 @@ fn snapshot(a: &Args) -> Result<serde_json::Value> {
             None => tempfile::tempdir(),
         }
         .context("cannot make a scratch directory for the migrated copy")?;
-        let copy = steve_store_sqlite::backup::offline::backup_file(
+        let copy = steve_store::backup::backup_file(
             &a.db,
             dir.path(),
-            &steve_store_sqlite::backup::offline::CopyOptions::default(),
+            &steve_store::backup::CopyOptions::default(),
             &|_| {},
-            &steve_store_sqlite::backup::CancelFlag::default(),
+            &steve_store::backup::CancelFlag::default(),
         )?;
         db::migrate_file(&copy.path).context("cannot migrate the copy")?;
         scratch = Some(dir);

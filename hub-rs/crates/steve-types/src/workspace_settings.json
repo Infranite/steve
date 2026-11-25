@@ -49,6 +49,17 @@
   ],
   "items": [
     {
+      "key": "noExecutor",
+      "label": "无人可接时",
+      "values": ["ask", "steve"],
+      "def": "ask",
+      "live": true,
+      "labels": {
+        "ask": "问我",
+        "steve": "Steve 自己做"
+      }
+    },
+    {
       "key": "accDefault",
       "label": "默认验收方式",
       "values": ["manual", "auto"],
@@ -65,6 +76,31 @@
       "values": ["自动开始", "提醒我开始"],
       "def": "自动开始",
       "live": true
+    },
+    {
+      "key": "quotaAutoHandoff",
+      "label": "额度受限时自动交接",
+      "values": ["on", "off"],
+      "def": "on",
+      "live": true,
+      "labels": {
+        "on": "开启",
+        "off": "关闭"
+      }
+    },
+    {
+      "key": "quotaWaitMinutes",
+      "label": "等待后交接",
+      "values": ["0", "5", "10", "15", "30"],
+      "def": "10",
+      "live": true,
+      "labels": {
+        "0": "不等待",
+        "5": "5 分钟",
+        "10": "10 分钟",
+        "15": "15 分钟",
+        "30": "30 分钟"
+      }
     },
     {
       "key": "handoff",

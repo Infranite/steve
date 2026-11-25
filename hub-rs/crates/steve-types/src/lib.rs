@@ -29,6 +29,7 @@ pub use item_delivery::{
 };
 pub mod automation;
 pub mod autonomy;
+pub mod backup;
 pub mod channels;
 pub mod config;
 pub mod devices;
@@ -48,6 +49,7 @@ pub mod stats;
 pub mod stream;
 pub mod vault;
 pub mod view;
+pub mod wait;
 pub mod work;
 
 pub use error::{
@@ -68,6 +70,7 @@ pub use view::{
     MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, Said, SessionView,
     SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
 };
+pub use wait::{WaitContract, WaitKind, WaitLimits, WaitOwner, WaitTimeoutAction};
 
 #[cfg(test)]
 mod r#gen;
@@ -79,8 +82,8 @@ pub use config::{ConfigEvent, ConfigReason};
 pub use devices::DevicesEvent;
 pub use integrations::IntegrationsEvent;
 pub use knowledge::KnowledgeEvent;
-pub use people::PeopleEvent;
+pub use people::{AvatarRef, MemberIdentity, PeopleEvent};
 pub use stats::StatsEvent;
-pub use vault::VaultEvent;
+pub use vault::{VaultEvent, VaultReason};
 pub use work::WorkEvent;
 pub use work::WorkLiveEvent;

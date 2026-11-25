@@ -52,6 +52,7 @@ fn local_config(root: &Path, node: &NodeId) -> (NodeConfig, PathBuf) {
                 adapters: HashMap::from([("claude-code".to_string(), adapter)]),
                 node: "node".into(),
                 claude_executable: "claude".into(),
+                claude_config_dir: None,
                 steve_home: root.join("steve"),
                 codex_home: root.join("codex"),
                 user_home: root.to_path_buf(),

@@ -487,7 +487,7 @@ async fn feishu_self_wires_without_feishu_bot() {
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["ext_ws", "ext_ws.bot", "feishu_user"]);
     // Base jobs and the connection runtime; no legacy approval sweeps.
-    assert_eq!(w.jobs.len(), 21 + 17);
+    assert_eq!(w.jobs.len(), 22 + 17);
     // without both, the rest still wires
     let h = home();
     let asm = Assembly::builtin()
@@ -596,7 +596,7 @@ async fn an_extension_runs_its_own_connection_hook() {
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["github_pat"]);
     // Base jobs and the connection runtime; no legacy approval sweeps.
-    assert_eq!(w.jobs.len(), 21 + 17);
+    assert_eq!(w.jobs.len(), 22 + 17);
 }
 
 #[tokio::test]
@@ -637,7 +637,7 @@ async fn an_assembly_registers_only_its_extensions() {
     );
     assert_eq!(w.tools.outbox.as_user_ids(), ["ext_ws"]);
     // Built-in jobs with this extension set, plus the probe's.
-    assert_eq!(w.jobs.len(), 23 + 17);
+    assert_eq!(w.jobs.len(), 24 + 17);
     // the device flow and the OAuth start of you on Feishu went with it; the bot's stayed, and
     // another extension's routes are under its own prefix
     let paths: BTreeSet<String> = [
@@ -679,7 +679,7 @@ async fn an_empty_assembly_still_wires_the_hub() {
     // the built-in extensions' two (registrations resumed, the connection runtime) are gone;
     // library MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync and the
     // alarm clock remain in the base wiring.
-    assert_eq!(w.jobs.len(), 20 + 17);
+    assert_eq!(w.jobs.len(), 21 + 17);
     assert!(w.lifecycle.is_none());
 }
 
@@ -820,6 +820,7 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
         "mail.sync",
         "mail.send",
         "mail.mailboxes",
+        "nodes.harness_auto_upgrade",
         "nodes.vitals",
         "outbox.dispatch",
         "plugins.supervise",
@@ -860,56 +861,4 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
     st.jobs.start("late", || {
         panic!("a stopped Hub must not start another task")
     });
-}
-
-#[tokio::test]
-async fn shutdown_stops_app_tasks_when_domain_has_no_task_bag() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use steve_hub::backend::Domain;
-
-    struct NoTasks(Arc<AtomicBool>);
-    #[async_trait::async_trait]
-    impl Domain for NoTasks {
-        async fn shutdown(&self) {
-            assert!(
-                self.0.load(Ordering::SeqCst),
-                "consumers outlive domain shutdown"
-            );
-        }
-    }
-    struct Running(Arc<AtomicBool>);
-    impl Drop for Running {
-        fn drop(&mut self) {
-            self.0.store(false, Ordering::SeqCst);
-        }
-    }
-
-    let h = home();
-    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-        Default::default(),
-    )));
-    let w = steve_hub::wire::wire_with(&h.cfg, &bus, h.vars.clone()).expect("wire");
-    let running = Arc::new(AtomicBool::new(false));
-    let domain = Arc::new(NoTasks(running.clone()));
-    assert!(domain.background_tasks().is_none());
-    let st = steve_hub::api::AppState::new(h.cfg.clone(), w.backend, domain, bus);
-    let (started, ready) = tokio::sync::oneshot::channel();
-    let flag = running.clone();
-    st.jobs.start("app.consumer", || {
-        steve_runtime::spawn("app.consumer", async move {
-            let _running = Running(flag.clone());
-            flag.store(true, Ordering::SeqCst);
-            started.send(()).unwrap();
-            std::future::pending::<()>().await;
-        })
-    });
-    ready.await.unwrap();
-    st.shutdown().await;
-    assert!(
-        !running.load(Ordering::SeqCst),
-        "shutdown awaited cancellation"
-    );
-    assert!(st.jobs.names().is_empty());
-    st.jobs
-        .start("late", || panic!("shutdown must reject late tasks"));
 }

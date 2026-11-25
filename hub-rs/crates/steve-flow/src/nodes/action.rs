@@ -17,6 +17,11 @@ use crate::{FlowCx, FlowResult};
 use steve_modules::Tier;
 use steve_modules::outbound::quote_untrusted;
 
+/// Maximum changed items included in a single scheduled report prompt.
+pub const REPORT_CHANGED_ITEMS_LIMIT: u64 = 30;
+/// Metric task label for scheduled/flow report actions.
+const PERIODIC_TASK_REPORT: &str = "flow.report";
+
 /// What one action did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActionOutcome {
@@ -28,6 +33,12 @@ pub enum ActionOutcome {
         label: String,
         item_id: Option<String>,
         cost: f64,
+    },
+    /// Deterministic gate skipped the action because no new inputs arrived (zero model cost).
+    Skip {
+        output: Value,
+        outcome: &'static str,
+        label: String,
     },
     /// Worth one more try later (the model gateway failed).
     Retry {
@@ -205,7 +216,7 @@ async fn report(cx: &FlowCx, run: &RunRow, node: &str, cfg: &Value) -> FlowResul
             .unwrap_or(0);
         let entries = steve_store::DigestNotes(r).pending(&ws, since)?;
         let items = steve_store::ItemReads(r)
-            .changed_since(&ws, since, 30)?
+            .changed_since(&ws, since, REPORT_CHANGED_ITEMS_LIMIT)?
             .into_iter()
             .map(|(id, title, now)| format!("{id} · {title} · {now}"))
             .collect();
@@ -215,6 +226,29 @@ async fn report(cx: &FlowCx, run: &RunRow, node: &str, cfg: &Value) -> FlowResul
         let cost = output["cost_usd"].as_f64().unwrap_or(0.0);
         return Ok(report_done(output, cost));
     }
+    if entries.is_empty() && items.is_empty() {
+        steve_runtime::jobs::record_periodic_skipped(
+            PERIODIC_TASK_REPORT,
+            steve_runtime::jobs::SkipReason::NoChange,
+        );
+        steve_runtime::jobs::record_model_calls_avoided(
+            PERIODIC_TASK_REPORT,
+            steve_runtime::jobs::AvoidReason::NoChange,
+            1,
+        );
+        return Ok(ActionOutcome::Skip {
+            output: json!({
+                "skipped": true,
+                "reason": "no_change",
+                "digest": 0,
+                "items": 0,
+                "cost_usd": 0.0,
+            }),
+            outcome: "skipped",
+            label: steve_i18n::t!("flow.report.no_change"),
+        });
+    }
+    steve_runtime::jobs::record_periodic_triggered(PERIODIC_TASK_REPORT);
     let digest_text = cx.core.digest_text(&ws).await.unwrap_or_else(|e| {
         tracing::warn!("digest_text: {e}");
         String::new()
@@ -228,7 +262,10 @@ async fn report(cx: &FlowCx, run: &RunRow, node: &str, cfg: &Value) -> FlowResul
     )
     .await
     {
-        Ok(o) => o,
+        Ok(o) => {
+            steve_modules::gateway::record_periodic_usage(PERIODIC_TASK_REPORT, &o.usage);
+            o
+        }
         Err(e) => {
             return Ok(ActionOutcome::Retry {
                 error: format!("写汇报失败：{e}"),
@@ -559,6 +596,16 @@ fn from_schedule(cx: &mut RunCx<'_>, o: ActionOutcome) -> NodeOutcome {
             }
             NodeOutcome::next(output)
         }
+        ActionOutcome::Skip {
+            output,
+            outcome,
+            label,
+        } => {
+            cx.effects.outcome = Some(outcome.into());
+            cx.effects.label = Some(label);
+            cx.effects.skipped = true;
+            NodeOutcome::next(output)
+        }
         ActionOutcome::Retry { error, cost } => {
             cx.effects.cost += cost;
             NodeOutcome::Retry(error)
@@ -883,6 +930,7 @@ impl Action for Notify {
             source: Some(steve_store::DecisionSource::Revision {
                 revision: format!("notify:{}:{}:{}", cx.run.id, cx.node.id, cx.run.attempts),
             }),
+            wait: None,
         };
         let opened = cx
             .flow

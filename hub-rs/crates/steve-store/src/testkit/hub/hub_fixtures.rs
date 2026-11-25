@@ -55,7 +55,13 @@ pub fn job_count(store: &Store) -> Result<i64> {
 }
 
 pub fn messages_count_default_notify(store: &Store, text: &str) -> Result<i64> {
-    store.sqlite_read(|db| Ok(db.query_row("SELECT count(*) FROM messages WHERE workspace_id = 'default' AND space = 'notify' AND text = ?", rusqlite::params![text], |r| r.get(0))?))
+    store.sqlite_read(|db| {
+        Ok(db.query_row(
+            "SELECT count(*) FROM thread_notices WHERE workspace_id = 'default' AND text = ?",
+            rusqlite::params![text],
+            |r| r.get(0),
+        )?)
+    })
 }
 
 pub fn node_count(store: &Store) -> Result<i64> {

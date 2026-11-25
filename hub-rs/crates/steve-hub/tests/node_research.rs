@@ -46,12 +46,12 @@ impl Service for Tools {
     async fn call(&self, _: steve_store::Session, _: &str, _: Value) -> Result<String, String> {
         Ok("session tool".into())
     }
-    async fn research_catalog(&self, _: &steve_store::ThreadRun) -> Vec<ToolDescriptor> {
+    async fn research_catalog(&self, _: &steve_store::ThreadTask) -> Vec<ToolDescriptor> {
         steve_hub::wire::research_mcp::descriptors()
     }
     async fn research_call(
         &self,
-        run: steve_store::ThreadRun,
+        run: steve_store::ThreadTask,
         name: &str,
         _: Value,
     ) -> Result<String, String> {
@@ -294,6 +294,7 @@ impl Hub {
                     adapters: HashMap::from([(id, w.adapter.clone())]),
                     node: "node".into(),
                     claude_executable: "claude".into(),
+                    claude_config_dir: None,
                     steve_home: base.join("steve"),
                     codex_home: base.join("codex-home"),
                     user_home: w.root.clone(),
@@ -384,6 +385,7 @@ fn bot() -> steve_core::repo::Bot {
         specialties: vec![],
         id: "steve".into(),
         workspace_id: "default".into(),
+        owner: None,
         name: "Steve".into(),
         role: "r".into(),
         main: true,
@@ -392,7 +394,7 @@ fn bot() -> steve_core::repo::Bot {
         reasoning_effort: None,
         rules: "说重点。".into(),
         accept_mode: "inherit".into(),
-        perm_mode: "default".into(),
+        perm_mode: "ask".into(),
         enabled: true,
         revision: 1,
         updated: 0,

@@ -6,7 +6,11 @@ use sea_query::{Expr, ExprTrait, JoinType, OnConflict, Order, Query};
 pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> {
     let id = crate::uid("bot");
     let now = crate::now();
-    let owner = crate::settings::workspace_owner(w, ws)?;
+    let owner = if !author.is_empty() {
+        Some(author.to_string())
+    } else {
+        crate::settings::workspace_owner(w, ws)?
+    };
     let role = b.role.clone().unwrap_or_default();
     let rules = b.rules.clone().unwrap_or_default();
     let persona = b.persona.clone().unwrap_or_default();
@@ -15,7 +19,7 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
         .accept_mode
         .clone()
         .unwrap_or_else(|| "inherit".to_string());
-    let perm_mode = b.perm_mode.clone().unwrap_or_else(|| "default".to_string());
+    let perm_mode = b.perm_mode.clone().unwrap_or_else(|| "ask".to_string());
     let avatar = b.avatar.clone().unwrap_or_else(Avatar::default);
     let specialties = b.specialties.clone().unwrap_or_default();
     let enabled = b.enabled.unwrap_or(true);
@@ -70,6 +74,22 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
                 owner.as_deref().into(),
             ]),
     )?;
+    if let Some(fallbacks) = b.fallback_surfaces.as_deref() {
+        for (idx, surface) in fallbacks.iter().enumerate() {
+            w.exec(
+                Query::insert()
+                    .into_table("bot_fallback_surfaces")
+                    .columns(["bot_id", "position", "harness", "model", "reasoning_effort"])
+                    .values_panic([
+                        id.as_str().into(),
+                        (idx as i64).into(),
+                        surface.harness.as_str().into(),
+                        surface.model.as_deref().into(),
+                        surface.reasoning_effort.as_deref().into(),
+                    ]),
+            )?;
+        }
+    }
     w.exec(
         Query::insert()
             .into_table("bot_workspaces")
@@ -77,6 +97,18 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
             .values_panic([id.as_str().into(), ws.into(), now.into()])
             .on_conflict(
                 OnConflict::columns(["bot_id", "workspace_id"])
+                    .do_nothing()
+                    .to_owned(),
+            ),
+    )?;
+    let default_nodes = serde_json::to_string(crate::bot_dispatch::DEFAULT_NODES)?;
+    w.exec(
+        Query::insert()
+            .into_table("bot_node_bindings")
+            .columns(["workspace_id", "bot_id", "nodes"])
+            .values_panic([ws.into(), id.as_str().into(), default_nodes.as_str().into()])
+            .on_conflict(
+                OnConflict::columns(["workspace_id", "bot_id"])
                     .do_nothing()
                     .to_owned(),
             ),
@@ -112,6 +144,7 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
         default_project: b.default_project.clone(),
         prompt: None,
         device: None,
+        owner,
         reasoning_effort: b.reasoning_effort.clone(),
         specialties,
     })
@@ -198,6 +231,34 @@ pub fn remove(w: &mut W<'_>, id: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Remove a non-main bot's membership from one workspace without deleting the bot itself.
+pub fn remove_workspace(w: &mut W<'_>, id: &str, ws: &str) -> Result<bool> {
+    use crate::contract::Q;
+    let is_main: Option<bool> = w.one(
+        Query::select()
+            .column("main")
+            .from("bots")
+            .and_where(Expr::col("id").eq(id)),
+        |row| row.get(0),
+    )?;
+    if is_main == Some(true) {
+        return Ok(false);
+    }
+    let deleted = w.exec(
+        Query::delete()
+            .from_table("bot_workspaces")
+            .and_where(Expr::col("bot_id").eq(id))
+            .and_where(Expr::col("workspace_id").eq(ws)),
+    )?;
+    if deleted > 0 {
+        w.emit(steve_types::ConfigEvent::Bot {
+            ws: ws.into(),
+            id: id.into(),
+        });
+    }
+    Ok(deleted > 0)
 }
 
 pub fn named_bots(c: &mut impl Read, ws: &str, name: &str) -> Result<Vec<String>> {

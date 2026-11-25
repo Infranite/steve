@@ -5,7 +5,8 @@ import { PlusIcon, RefreshCwIcon, WorkflowIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
-import { Page, Row, Empty, StatusDot, BotAvatar, go, Panel, Section, SectionLabel, Blank, Chevron, Tile, Pill, Notice, ConnectPrompt } from "@/ui"
+import { Page, Row, Empty, StatusDot, go, Panel, Section, SectionLabel, Blank, Chevron, Tile, Pill, Notice, ConnectPrompt } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { tm, toast, botName } from "@/store"
 import { flowApi, errText, type ScopeMode, type SourcePatch } from "@/api/flow"
 import { useHubQuery } from "@/data/use-hub-query"
@@ -65,7 +66,7 @@ export function SourceView({ adapter }: { adapter: string }) {
         </Section>
         {on && <Section label={t("auto:source.settings")} data-source-settings>
           <div className="flex flex-col gap-4">
-            <Panel><Row icon={<BotAvatar k={triage} size={28} />} title={t("auto:source.triage")} sub={t("auto:source.triageSub")}>
+            <Panel><Row icon={<ActorAvatar actorId={triage} size={28} />} title={t("auto:source.triage")} sub={t("auto:source.triageSub")}>
               <Pick label={t("auto:source.triage")} testId="src-bot" value={s.triage_bot ?? "_"} disabled={busy} options={[{ v: "_", l: t("auto:source.mainBot", { name: botName(mainBot()) }) }, ...botOptions()]} onChange={(v) => void patch({ triage_bot: v === "_" ? null : v }, t("auto:source.triageSet", { name: botName(v === "_" ? mainBot() : v) }))} /></Row></Panel>
             {s.scopes.length > 0 && <div>
               <SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void refresh()}><RefreshCwIcon />{t("common:action.refresh")}</Button>}>{t("auto:source.scopes")}</SectionLabel>

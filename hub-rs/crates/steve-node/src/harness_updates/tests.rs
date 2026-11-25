@@ -1,5 +1,6 @@
 use super::*;
 use crate::{NodeConfig, PolicyCeiling, Storage};
+use std::collections::BTreeMap;
 use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 #[path = "../../tests/fixtures/harness_updates.rs"]
@@ -415,14 +416,32 @@ async fn policy_active_work_prefix_locks_and_unchecked_targets_block_installatio
     let active = f.command("active_exec", "2.0.0");
     n.accept("exec", &active, |_| Ok(Decided::accepted()))
         .unwrap();
-    assert_eq!(
-        n.upgrade_harness(f.command("busy", "2.0.0"))
-            .await
-            .unwrap_err()
-            .code,
-        Code::Busy
+    let queued = f.command("queued_while_exec_active", "2.0.0");
+    let queued_receipt = n.upgrade_harness(queued.clone()).await.unwrap();
+    assert!(
+        matches!(queued_receipt.state, Observed::Waiting { .. }),
+        "active work queues the upgrade until idle: {queued_receipt:?}"
     );
+    assert_eq!(f.installs(), 0, "must not start installer while busy");
     n.0.j.tx(|t| t.set_state(&active.id, &succeeded())).unwrap();
+    n.0.wake.notify_one();
+    assert!(matches!(
+        finished(&n, queued.id).await.state,
+        Observed::Finished {
+            outcome: Outcome::Succeeded,
+            ..
+        }
+    ));
+    assert_eq!(f.installs(), 1);
+    // Reset installed versions back to 1.0.0 so we can test external prefix lock and node upgrade.
+    for c in steve_harness_spec::components("pi") {
+        std::fs::write(
+            managed::root(&f.home).join(c.package).join("package.json"),
+            serde_json::json!({"name":c.package,"version":"1.0.0"}).to_string(),
+        )
+        .unwrap();
+    }
+    checked(&n).await;
     let prefix = managed::prefix_lock(&f.home, false).unwrap();
     assert_eq!(
         n.upgrade_harness(f.command("prefix_locked", "2.0.0"))
@@ -441,7 +460,7 @@ async fn policy_active_work_prefix_locks_and_unchecked_targets_block_installatio
         Code::Busy
     );
     n.0.node_upgrading.store(false, Ordering::SeqCst);
-    assert_eq!(f.installs(), 0);
+    assert_eq!(f.installs(), 1);
     n.shutdown().await;
     let mut denied = Fixture::new("denied", "1.0.0", "1.0.0", "2.0.0");
     denied.cfg.ceiling.exec = false;
@@ -543,6 +562,454 @@ async fn external_and_symlinked_components_are_read_only() {
     assert_eq!(
         std::fs::read_to_string(package.join("package.json")).unwrap(),
         r#"{"version":"1.0.0"}"#
+    );
+    n.shutdown().await;
+}
+
+#[test]
+fn brew_info_json_extracts_cask_and_formula_versions() {
+    let cask = r#"{"formulae":[],"casks":[{"token":"claude-code","version":"2.1.315,abc"}]}"#;
+    assert_eq!(
+        parse_brew_latest_json(BrewKind::Cask, cask).as_deref(),
+        Some("2.1.315")
+    );
+    let formula = r#"{"formulae":[{"versions":{"stable":"0.171.0"}}],"casks":[]}"#;
+    assert_eq!(
+        parse_brew_latest_json(BrewKind::Formula, formula).as_deref(),
+        Some("0.171.0")
+    );
+    assert_eq!(parse_brew_latest_json(BrewKind::Cask, "{}"), None);
+}
+
+fn put_active_session(n: &LocalNode, sid: &str, harness: &str, active: bool) {
+    let session = SessionId::new(sid).unwrap();
+    let ws = WorkspaceRef {
+        node: n.id().clone(),
+        id: WorkspaceId::new("ws_1").unwrap(),
+    };
+    let rev = Revision::new("rev_1").unwrap();
+    let choice = HarnessChoice {
+        harness: harness.into(),
+        model: None,
+        effort: None,
+    };
+    let open = OpenSession {
+        session: session.clone(),
+        workspace: ws,
+        choice: choice.clone(),
+        policy: ExecutionPolicy {
+            revision: rev.clone(),
+            permissions: PermissionMode::Ask,
+            sandbox: SandboxRequirement::None,
+            readable: vec![],
+            network: NetworkScope::Unrestricted,
+            tools: GrantId::new("g").unwrap(),
+        },
+        resume: None,
+        env: vec![],
+        state: None,
+        artifact_view: None,
+        skills: vec![],
+    };
+    let view = SessionView {
+        id: session.clone(),
+        revision: rev,
+        phase: if active {
+            SessionPhase::Active
+        } else {
+            SessionPhase::Ready
+        },
+        active: active.then(|| ExecutionRef::Turn {
+            session,
+            turn: TurnId::new("turn_1").unwrap(),
+            attempt: AttemptId::new("att_1").unwrap(),
+        }),
+        effective: choice,
+        effective_permissions: PermissionMode::Ask,
+        guarantees: vec![],
+        resume: None,
+    };
+    n.0.j
+        .tx(|t| {
+            t.put_session(&crate::journal::SessionRow {
+                open,
+                view,
+                incarnation: n.0.incarnation,
+                acp_id: None,
+            })
+        })
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn external_homebrew_cask_upgrade_handles_success_failure_unknown_and_active_session_queue() {
+    let mut f = Fixture::new("brew-node", "1.0.0", "1.0.0", "2.0.0");
+    let cask_bin = f
+        .dir
+        .path()
+        .join("homebrew/Caskroom/claude-code/2.1.310/claude");
+    let brew_link = f.dir.path().join("homebrew/bin/claude");
+    let ver_file = f.dir.path().join("claude-version");
+    let brew_log = f.dir.path().join("brew.log");
+    std::fs::write(&ver_file, "2.1.310").unwrap();
+    fixture::executable(
+        &cask_bin,
+        &format!(
+            "#!/bin/sh\necho \"$(cat '{}') (Claude Code)\"\n",
+            ver_file.display()
+        ),
+    );
+    std::fs::create_dir_all(brew_link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&cask_bin, &brew_link).unwrap();
+
+    // Fake `brew` placed next to `cfg.acp.node` so PATH is untouched.
+    let base_json = serde_json::to_string(&f.dir.path()).unwrap();
+    fixture::executable(
+        &f.dir.path().join("brew"),
+        &format!(
+            r#"#!/usr/bin/env python3
+import json, pathlib, sys
+base = pathlib.Path({base_json})
+args = sys.argv[1:]
+with (base / 'brew.log').open('a') as fp: fp.write(json.dumps(args) + '\n')
+if args[:3] == ['info', '--json=v2', '--cask']:
+    latest = (base / 'brew-latest').read_text().strip()
+    print(json.dumps({{"formulae": [], "casks": [{{"token": args[3], "version": latest}}]}}))
+    sys.exit(0)
+if args[:2] == ['upgrade', '--cask']:
+    if (base / 'brew-fail').exists():
+        print('fixture-secret-brew-token', file=sys.stderr)
+        sys.exit(23)
+    latest = (base / 'brew-latest').read_text().strip()
+    (base / 'claude-version').write_text(latest)
+    sys.exit(0)
+sys.exit(1)
+"#
+        ),
+    );
+    std::fs::write(f.dir.path().join("brew-latest"), "2.1.315").unwrap();
+
+    f.cfg.acp.adapters = HashMap::from([(
+        "claude-code".into(),
+        managed::command(&f.home, "claude-code").unwrap(),
+    )]);
+    f.cfg.acp.claude_executable = brew_link.clone();
+
+    let n = f.node();
+    let report = checked(&n).await;
+    let claude = report
+        .harnesses
+        .iter()
+        .find(|h| h.harness == "claude-code")
+        .unwrap();
+    let cli = claude.components.iter().find(|c| c.id == "cli").unwrap();
+    assert_eq!(cli.source, ComponentInstallSource::HomebrewCask);
+    assert_eq!(cli.upgrade_method, UpgradeMethod::HomebrewCask);
+    assert_eq!(
+        cli.upgrade_command.as_deref(),
+        Some("brew upgrade --cask claude-code")
+    );
+    assert!(cli.can_upgrade);
+    assert_eq!(cli.state, ComponentUpdateState::Available);
+    assert_eq!(cli.installed.as_deref(), Some("2.1.310"));
+    assert_eq!(cli.latest.as_deref(), Some("2.1.315"));
+    assert!(claude.can_upgrade);
+
+    // 1. Failure hides stderr secrets and surfaces a visible safe detail.
+    f.mark("brew-fail");
+    let fail_cmd = Command {
+        id: OperationId::new("brew_fail").unwrap(),
+        issued_at: Timestamp(1),
+        accept_before: Timestamp(i64::MAX),
+        grant: GrantId::new("owner").unwrap(),
+        body: UpgradeHarness {
+            harness: "claude-code".into(),
+            versions: BTreeMap::from([("cli".into(), "2.1.315".into())]),
+            self_update: vec![],
+        },
+    };
+    n.upgrade_harness(fail_cmd.clone()).await.unwrap();
+    let fail_receipt = finished(&n, fail_cmd.id).await;
+    match &fail_receipt.state {
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            error: Some(err),
+            ..
+        } => {
+            assert!(err.safe_detail.contains("Homebrew cask upgrade"));
+            assert!(!err.safe_detail.contains("fixture-secret-brew-token"));
+        }
+        other => panic!("expected failed receipt, got {other:?}"),
+    }
+    f.unmark("brew-fail");
+
+    // 2. Active session on claude-code queues the upgrade in Waiting until idle.
+    put_active_session(&n, "sess_claude_1", "claude-code", true);
+    let busy_report = n.harness_updates(false).await.unwrap();
+    let busy_claude = busy_report
+        .harnesses
+        .iter()
+        .find(|h| h.harness == "claude-code")
+        .unwrap();
+    assert_eq!(busy_claude.active_sessions, 1);
+    assert!(
+        busy_claude.can_upgrade,
+        "harness with active sessions stays clickable to queue until idle"
+    );
+
+    let upgrades_before = std::fs::read_to_string(&brew_log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("\"upgrade\""))
+        .count();
+    let queued_cmd = Command {
+        id: OperationId::new("brew_queued").unwrap(),
+        issued_at: Timestamp(2),
+        accept_before: Timestamp(i64::MAX),
+        grant: GrantId::new("owner").unwrap(),
+        body: UpgradeHarness {
+            harness: "claude-code".into(),
+            versions: BTreeMap::from([("cli".into(), "2.1.315".into())]),
+            self_update: vec![],
+        },
+    };
+    let queued_receipt = n.upgrade_harness(queued_cmd.clone()).await.unwrap();
+    assert!(
+        matches!(queued_receipt.state, Observed::Waiting { .. }),
+        "expected Waiting while session active, got {queued_receipt:?}"
+    );
+    // Duplicate click while queued returns Busy.
+    let dup_cmd = Command {
+        id: OperationId::new("brew_queued_dup").unwrap(),
+        ..queued_cmd.clone()
+    };
+    assert_eq!(
+        n.upgrade_harness(dup_cmd).await.unwrap_err().code,
+        Code::Busy
+    );
+    let upgrades_while_busy = std::fs::read_to_string(&brew_log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("\"upgrade\""))
+        .count();
+    assert_eq!(
+        upgrades_while_busy, upgrades_before,
+        "brew upgrade must not run while a session is active"
+    );
+
+    // End the session -> queued upgrade runs and verifies 2.1.315.
+    put_active_session(&n, "sess_claude_1", "claude-code", false);
+    n.0.wake.notify_one();
+    let ok_receipt = finished(&n, queued_cmd.id).await;
+    assert!(
+        matches!(
+            ok_receipt.state,
+            Observed::Finished {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ),
+        "{ok_receipt:?}"
+    );
+    let after = n.harness_updates(false).await.unwrap();
+    let after_cli = after
+        .harnesses
+        .iter()
+        .find(|h| h.harness == "claude-code")
+        .unwrap()
+        .components
+        .iter()
+        .find(|c| c.id == "cli")
+        .unwrap();
+    assert_eq!(after_cli.installed.as_deref(), Some("2.1.315"));
+    assert_eq!(after_cli.state, ComponentUpdateState::Current);
+
+    // 3. Restart while queued/running becomes Unknown without replaying.
+    std::fs::write(f.dir.path().join("brew-latest"), "2.1.316").unwrap();
+    checked(&n).await;
+    let interrupted = Command {
+        id: OperationId::new("brew_interrupted").unwrap(),
+        issued_at: Timestamp(3),
+        accept_before: Timestamp(i64::MAX),
+        grant: GrantId::new("owner").unwrap(),
+        body: UpgradeHarness {
+            harness: "claude-code".into(),
+            versions: BTreeMap::from([("cli".into(), "2.1.316".into())]),
+            self_update: vec![],
+        },
+    };
+    n.accept("upgrade_harness", &interrupted, |t| {
+        t.set_installation("upgrade:claude-code", &interrupted.id)?;
+        let mut d = Decided::accepted();
+        d.state = Observed::Waiting { on: vec![] };
+        Ok(d)
+    })
+    .unwrap();
+    drop(n);
+    let n = f.node();
+    assert!(matches!(
+        n.upgrade_harness(interrupted).await.unwrap().state,
+        Observed::Unknown { .. }
+    ));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn external_standalone_self_update_runs_without_npm_or_brew() {
+    let mut f = Fixture::new("standalone-node", "1.0.0", "1.0.0", "2.0.0");
+    // Remove fake npm so this proves standalone self-update needs neither npm nor brew.
+    std::fs::remove_file(f.dir.path().join("npm")).unwrap();
+    let agy_bin = f.cfg.acp.user_home.join(".local/bin/agy");
+    let agy_ver = f.dir.path().join("agy-version");
+    std::fs::write(&agy_ver, "1.5.16").unwrap();
+    fixture::executable(
+        &agy_bin,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then cat '{}'; echo; exit 0; fi\nif [ \"$1\" = \"update\" ]; then printf '1.6.0' > '{}'; exit 0; fi\nexit 1\n",
+            agy_ver.display(),
+            agy_ver.display()
+        ),
+    );
+    f.cfg.acp.adapters = HashMap::from([("antigravity".into(), agy_bin)]);
+    let n = f.node();
+    let report = checked(&n).await;
+    let agy = report
+        .harnesses
+        .iter()
+        .find(|h| h.harness == "antigravity")
+        .unwrap();
+    let cli = agy.components.iter().find(|c| c.id == "cli").unwrap();
+    assert_eq!(cli.source, ComponentInstallSource::Standalone);
+    assert_eq!(cli.upgrade_method, UpgradeMethod::SelfUpdate);
+    assert_eq!(cli.upgrade_command.as_deref(), Some("agy update"));
+    assert_eq!(cli.state, ComponentUpdateState::CheckOnUpgrade);
+    assert_eq!(cli.installed.as_deref(), Some("1.5.16"));
+    assert!(cli.can_upgrade);
+    assert!(agy.can_upgrade);
+
+    let cmd = Command {
+        id: OperationId::new("agy_self_update").unwrap(),
+        issued_at: Timestamp(1),
+        accept_before: Timestamp(i64::MAX),
+        grant: GrantId::new("owner").unwrap(),
+        body: UpgradeHarness {
+            harness: "antigravity".into(),
+            versions: BTreeMap::new(),
+            self_update: vec!["cli".into()],
+        },
+    };
+    n.upgrade_harness(cmd.clone()).await.unwrap();
+    let r = finished(&n, cmd.id).await;
+    assert!(
+        matches!(
+            r.state,
+            Observed::Finished {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ),
+        "{r:?}"
+    );
+    let after = n.harness_updates(false).await.unwrap();
+    let after_cli = after.harnesses[0]
+        .components
+        .iter()
+        .find(|c| c.id == "cli")
+        .unwrap();
+    assert_eq!(after_cli.installed.as_deref(), Some("1.6.0"));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn global_npm_component_is_upgraded_via_npm_global_prefix() {
+    let mut f = Fixture::new("global-npm-node", "1.0.0", "1.0.0", "2.0.0");
+    let global_prefix = f.dir.path().join("global-npm");
+    let pkg_dir = global_prefix.join("lib/node_modules/@openai/codex");
+    let entry = pkg_dir.join("bin/codex.js");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(
+        pkg_dir.join("package.json"),
+        r#"{"name":"@openai/codex","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fixture::executable(&entry, "#!/bin/sh\necho codex-cli 1.0.0\n");
+
+    // Override fake npm to also handle `-g --prefix <p>` (writes into `<p>/lib/node_modules`).
+    let base = serde_json::to_string(&f.dir.path()).unwrap();
+    fixture::executable(
+        &f.dir.path().join("npm"),
+        &format!(
+            r#"#!/usr/bin/env python3
+import json, pathlib, sys
+base = pathlib.Path({base})
+args = sys.argv[1:]
+if args[0] == 'view':
+    print(json.dumps('2.0.0'))
+    sys.exit(0)
+prefix = pathlib.Path(args[args.index('--prefix') + 1])
+root = (prefix / 'lib' / 'node_modules') if '-g' in args else (prefix / 'node_modules')
+for spec in args:
+    if not spec.startswith('@') or '@' not in spec[1:]: continue
+    pkg, ver = spec.rsplit('@', 1)
+    d = root / pkg
+    d.mkdir(parents=True, exist_ok=True)
+    (d / 'package.json').write_text(json.dumps({{'name': pkg, 'version': ver}}))
+"#
+        ),
+    );
+
+    // Point codex CLI via PATH? Better: put codex adapter on a single-package kimi-code in global npm.
+    let kimi_pkg = global_prefix.join("lib/node_modules/@moonshot-ai/kimi-code");
+    let kimi_entry = kimi_pkg.join("dist/main.mjs");
+    std::fs::create_dir_all(kimi_entry.parent().unwrap()).unwrap();
+    std::fs::write(
+        kimi_pkg.join("package.json"),
+        r#"{"name":"@moonshot-ai/kimi-code","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(&kimi_entry, "// kimi\n").unwrap();
+    f.cfg.acp.adapters = HashMap::from([("kimi-code".into(), kimi_entry)]);
+
+    let n = f.node();
+    let report = checked(&n).await;
+    let kimi = report
+        .harnesses
+        .iter()
+        .find(|h| h.harness == "kimi-code")
+        .unwrap();
+    let comp = &kimi.components[0];
+    assert_eq!(comp.source, ComponentInstallSource::NpmGlobal);
+    assert_eq!(comp.upgrade_method, UpgradeMethod::NpmGlobal);
+    assert!(comp.can_upgrade);
+    assert_eq!(comp.state, ComponentUpdateState::Available);
+
+    let cmd = Command {
+        id: OperationId::new("kimi_global_npm").unwrap(),
+        issued_at: Timestamp(1),
+        accept_before: Timestamp(i64::MAX),
+        grant: GrantId::new("owner").unwrap(),
+        body: UpgradeHarness {
+            harness: "kimi-code".into(),
+            versions: BTreeMap::from([(comp.id.clone(), "2.0.0".into())]),
+            self_update: vec![],
+        },
+    };
+    n.upgrade_harness(cmd.clone()).await.unwrap();
+    assert!(matches!(
+        finished(&n, cmd.id).await.state,
+        Observed::Finished {
+            outcome: Outcome::Succeeded,
+            ..
+        }
+    ));
+    let after = n.harness_updates(false).await.unwrap();
+    assert_eq!(
+        after.harnesses[0].components[0].installed.as_deref(),
+        Some("2.0.0")
+    );
+    assert_eq!(
+        after.harnesses[0].components[0].state,
+        ComponentUpdateState::Current
     );
     n.shutdown().await;
 }

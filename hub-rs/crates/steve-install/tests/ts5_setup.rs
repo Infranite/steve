@@ -30,7 +30,7 @@ fn installer(root: &Path) -> PathBuf {
     fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
     let manifest = json!({
         "format_version":1, "version":"1.2.3", "commit":"a".repeat(40),
-        "hub_version":"1.2.3", "web_version":"1.2.3", "schema":{"target":54}
+        "hub_version":"1.2.3", "web_version":"1.2.3", "restic_version":"0.19.1", "schema":{"target":54}
     });
     for path in [
         package.join("release.json"),
@@ -58,12 +58,14 @@ fn installer(root: &Path) -> PathBuf {
     // These cannot initialize a keychain or start a service even if cancellation regresses.
     for relative in [
         "bin/steve-keyhelper",
+        "bin/restic",
         "ops/run.sh",
         "ops/sign-setup.sh",
         "ops/release-lib.sh",
     ] {
         executable(&package.join(relative), "#!/bin/sh\nexit 95\n");
     }
+    fs::write(package.join("bin/restic.LICENSE"), "BSD-2-Clause\n").unwrap();
     cli
 }
 

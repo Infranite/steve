@@ -105,7 +105,9 @@ try {
     assert.equal(await choose.locator('[data-a2ui-option="b"] input').isChecked(), true)
 
     /* old messages, a broken description and an unknown component */
+    await page.locator("[data-chat-scroll]").evaluate((el) => { el.scrollTop = 0 })
     await page.locator('[data-msg="old"] [data-streamdown="code-block"]').waitFor()
+    await page.locator("[data-chat-scroll]").evaluate((el) => { el.scrollTop = el.scrollHeight })
     const bad = page.locator('[data-msg="bad"]')
     await bad.getByText("这条的界面写坏了，文字还在。").waitFor()
     await bad.locator("[data-a2ui-broken]").getByText(/界面描述不是有效的 JSON/).waitFor()

@@ -415,10 +415,15 @@ async fn research_token_response(
     t: String,
 ) -> Option<Response> {
     let store = x.store.clone();
-    let run = tokio::task::spawn_blocking(move || store.thread().run_by_token(&t).ok().flatten())
-        .await
-        .ok()
-        .flatten();
+    let run = tokio::task::spawn_blocking(move || {
+        store
+            .read(|r| steve_store::thread::active_task_by_token(r, &t))
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten();
     let run = run?;
     if parts.method != axum::http::Method::POST {
         return Some(StatusCode::METHOD_NOT_ALLOWED.into_response());

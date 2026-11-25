@@ -139,10 +139,11 @@ pub fn open_thread_item(r: &mut impl Read, ws: &str, message: &str) -> Result<Op
              FROM chan_messages cm WHERE cm.space_id = ?1 AND cm.thread_key = ?2
                 AND cm.id <> ?3 AND cm.work_item_id IS NOT NULL
            UNION ALL
-           SELECT t.item_id, cm.sender_party_id, t.created
-             FROM thread_items t JOIN messages m ON m.id = t.origin_msg
+           SELECT t.target_item_id, cm.sender_party_id, t.created
+             FROM thread_dispatch_refs t JOIN messages m ON m.id = t.origin_message_id
              JOIN chan_messages cm ON cm.id = json_extract(m.meta, '$.chan.message')
-            WHERE t.workspace_id = ?4 AND json_valid(m.meta)
+            WHERE t.workspace_id = ?4 AND t.effect_kind = 'create_item' AND t.target_item_id IS NOT NULL
+                AND json_valid(m.meta)
                 AND cm.space_id = ?1 AND cm.thread_key = ?2 AND cm.id <> ?3)
           WHERE EXISTS (SELECT 1 FROM items i WHERE i.id = item AND i.workspace_id = ?4 AND i.phase != 'closed')
           ORDER BY at DESC LIMIT 1",

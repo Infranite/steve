@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use chrono::{Datelike, Timelike};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use steve_flow::graph::{Edge, Graph, Node};
 use steve_modules::{ApiError, Gateway, Tier};
 
@@ -40,6 +41,34 @@ pub const INTENT_START: &str = "判断一条聊天消息是否符合条件。";
 /// The message text an `intent` prompt carries at most, in characters.
 const INTENT_TEXT_MAX: usize = 2000;
 const CONTEXT_LINE_MAX: usize = 300;
+/// Capacity of the per-Hub intent judgement cache keyed by SHA-256 of normalized input.
+pub const INTENT_CACHE_CAPACITY: u64 = 512;
+/// TTL of cached intent judgements so identical retries or repeated contexts reuse results.
+pub const INTENT_CACHE_TTL: Duration = Duration::from_secs(300);
+/// Metric task label for channel intent rule evaluation.
+const INTENT_METRIC_TASK: &str = "channels.intent";
+/// Maximum consecutive `When::Intent` rules batched into one compiled `bot` flow node
+/// (reserving one branch for "none matched").
+const COMPILE_INTENT_BATCH_MAX: usize = steve_flow::nodes::bot::BRANCHES_MAX - 1;
+
+/// Bounded TTL cache for channel intent judgements keyed by SHA-256 of normalized input.
+#[derive(Clone)]
+pub struct IntentCache(steve_runtime::cache::TtlCache<[u8; 32], Option<usize>>);
+
+impl IntentCache {
+    pub fn new() -> Self {
+        Self(steve_runtime::cache::TtlCache::new(
+            INTENT_CACHE_CAPACITY,
+            INTENT_CACHE_TTL,
+        ))
+    }
+}
+
+impl Default for IntentCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// `when.kind`, with its parameters.
 #[derive(Debug, Clone, PartialEq)]
@@ -490,6 +519,31 @@ impl Gate {
 pub trait IntentJudge: Send + Sync {
     /// Does the message fit `text`? A failure counts as no.
     async fn judge(&self, text: &str) -> bool;
+
+    /// Returns the 0-based index of the first condition in `conditions` that holds, or `None`.
+    /// Model-backed implementations evaluate all conditions in one call rather than resending the
+    /// same message and conversation context N times.
+    async fn judge_first(&self, conditions: &[&str]) -> Option<usize> {
+        for (idx, text) in conditions.iter().enumerate() {
+            if self.judge(text).await {
+                return Some(idx);
+            }
+        }
+        None
+    }
+}
+
+/// Returns `true` only when at least one `When::Intent` rule is reachable before the first
+/// matching deterministic rule, so callers can skip loading intent context when unused.
+pub fn needs_intent_judge(rules: &[Rule], f: &Facts) -> bool {
+    for r in rules {
+        match holds(&r.when, f) {
+            Some(true) => return false,
+            Some(false) => continue,
+            None => return true,
+        }
+    }
+    false
 }
 
 /// What the rules decided.
@@ -503,25 +557,62 @@ pub struct Verdict {
     pub muted: bool,
 }
 
+fn verdict_for(rules: &[Rule], index: usize, muted: bool) -> Verdict {
+    let raw = rules[index].act;
+    let act = if muted { quiet_action(raw) } else { raw };
+    Verdict {
+        rule: Some(index),
+        act,
+        muted: act != raw,
+    }
+}
+
 /// The first rule that holds decides; none = `record`. Muted: everything but `handoff`
-/// becomes `record`. `intent` rules ask `judge`, only when reached.
+/// becomes `record`. Reachable `intent` rules before the first deterministic match are
+/// deduplicated and evaluated together in a single `judge_first` call.
 pub async fn evaluate(rules: &[Rule], f: &Facts, muted: bool, judge: &dyn IntentJudge) -> Verdict {
+    let mut first_det: Option<usize> = None;
+    let mut unique_texts: Vec<&str> = Vec::new();
+    let mut text_to_rule: Vec<usize> = Vec::new();
+    let mut deduped: u64 = 0;
+
     for (i, r) in rules.iter().enumerate() {
-        let hit = match holds(&r.when, f) {
-            Some(h) => h,
-            None => match &r.when {
-                When::Intent { text } => judge.judge(text).await,
-                _ => false,
-            },
-        };
-        if hit {
-            let act = if muted { quiet_action(r.act) } else { r.act };
-            return Verdict {
-                rule: Some(i),
-                act,
-                muted: act != r.act,
-            };
+        match holds(&r.when, f) {
+            Some(true) => {
+                first_det = Some(i);
+                break;
+            }
+            Some(false) => {}
+            None => {
+                if let When::Intent { text } = &r.when {
+                    if unique_texts.contains(&text.as_str()) {
+                        deduped += 1;
+                    } else {
+                        unique_texts.push(text.as_str());
+                        text_to_rule.push(i);
+                    }
+                }
+            }
         }
+    }
+
+    if deduped > 0 {
+        steve_runtime::jobs::record_model_calls_avoided(
+            INTENT_METRIC_TASK,
+            steve_runtime::jobs::AvoidReason::Deduplicated,
+            deduped,
+        );
+    }
+
+    if !unique_texts.is_empty()
+        && let Some(pos) = judge.judge_first(&unique_texts).await
+        && let Some(&rule_idx) = text_to_rule.get(pos)
+    {
+        return verdict_for(rules, rule_idx, muted);
+    }
+
+    if let Some(i) = first_det {
+        return verdict_for(rules, i, muted);
     }
     Verdict {
         rule: None,
@@ -545,6 +636,8 @@ pub struct GatewayJudge<'a> {
     pub space: &'a str,
     /// Oldest first.
     pub context: &'a [ContextLine],
+    /// Optional per-Hub bounded TTL cache keyed by SHA-256 of normalized input.
+    pub cache: Option<&'a IntentCache>,
 }
 
 fn cut(s: &str, n: usize) -> String {
@@ -555,10 +648,31 @@ fn cut(s: &str, n: usize) -> String {
     }
 }
 
+fn hash_str(h: &mut Sha256, s: &str) {
+    h.update((s.len() as u64).to_le_bytes());
+    h.update(s.as_bytes());
+}
+
 impl GatewayJudge<'_> {
-    /// The prompt for condition `text`.
-    pub fn prompt(&self, text: &str) -> String {
-        let mut p = format!("{INTENT_START}\n条件：{text}\n\n");
+    /// Stable input hash covering space, sender, truncated message, context lines, and conditions.
+    fn cache_key(&self, conditions: &[&str]) -> [u8; 32] {
+        let mut h = Sha256::new();
+        hash_str(&mut h, self.space);
+        hash_str(&mut h, self.sender);
+        hash_str(&mut h, &cut(self.message, INTENT_TEXT_MAX));
+        h.update((self.context.len() as u64).to_le_bytes());
+        for l in self.context {
+            hash_str(&mut h, &l.who);
+            hash_str(&mut h, &cut(&l.text, CONTEXT_LINE_MAX));
+        }
+        h.update((conditions.len() as u64).to_le_bytes());
+        for c in conditions {
+            hash_str(&mut h, c);
+        }
+        h.finalize().into()
+    }
+
+    fn push_context(&self, p: &mut String) {
         p.push_str(&format!("空间：{}\n", self.space));
         if !self.context.is_empty() {
             p.push_str("最近的消息（从早到晚）：\n");
@@ -575,7 +689,33 @@ impl GatewayJudge<'_> {
             self.sender,
             cut(self.message, INTENT_TEXT_MAX)
         ));
+    }
+
+    /// The prompt for a single condition `text`.
+    pub fn prompt(&self, text: &str) -> String {
+        let mut p = format!("{INTENT_START}\n条件：{text}\n\n");
+        self.push_context(&mut p);
         p.push_str("只回答 JSON：{\"match\": true} 或 {\"match\": false}。");
+        p
+    }
+
+    /// The batched prompt for multiple ordered conditions evaluated in a single model call.
+    pub fn batch_prompt(&self, conditions: &[&str]) -> String {
+        if conditions.len() == 1 {
+            return self.prompt(conditions[0]);
+        }
+        let mut p = format!(
+            "{INTENT_START}\n按顺序判断以下条件，只选出第一个符合的条件编号（都不符合答 null）：\n"
+        );
+        for (i, text) in conditions.iter().enumerate() {
+            p.push_str(&format!("{}. {text}\n", i + 1));
+        }
+        p.push('\n');
+        self.push_context(&mut p);
+        p.push_str(&format!(
+            "只回答 JSON：{{\"match\": 1}}（1 到 {} 中第一个符合的编号）或 {{\"match\": null}}。",
+            conditions.len()
+        ));
         p
     }
 }
@@ -591,20 +731,96 @@ pub fn parse_judgement(answer: &str) -> bool {
     a.starts_with('是') || a.starts_with("yes") || a.starts_with("true")
 }
 
+/// Reads a batched judgement: `{"match": <1-based index> | null}` -> 0-based index.
+pub fn parse_batch_judgement(answer: &str, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    if let Some(v) = steve_runtime::json::first_json_opt(answer)
+        && let Some(m) = v.get("match")
+    {
+        return match m {
+            Value::Number(n) => n
+                .as_u64()
+                .and_then(|idx| usize::try_from(idx).ok())
+                .filter(|&idx| (1..=count).contains(&idx))
+                .map(|idx| idx - 1),
+            Value::String(s) => s
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|&idx| (1..=count).contains(&idx))
+                .map(|idx| idx - 1),
+            Value::Bool(true) if count == 1 => Some(0),
+            Value::Null | Value::Bool(_) => None,
+            _ => None,
+        };
+    }
+    let trimmed = answer.trim();
+    let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() {
+        return digits
+            .parse::<usize>()
+            .ok()
+            .filter(|&idx| (1..=count).contains(&idx))
+            .map(|idx| idx - 1);
+    }
+    None
+}
+
 #[async_trait::async_trait]
 impl IntentJudge for GatewayJudge<'_> {
     async fn judge(&self, text: &str) -> bool {
+        self.judge_first(&[text]).await.is_some()
+    }
+
+    async fn judge_first(&self, conditions: &[&str]) -> Option<usize> {
+        if conditions.is_empty() {
+            return None;
+        }
+        let key = self.cache.map(|_| self.cache_key(conditions));
+        if let (Some(cache), Some(k)) = (self.cache, key)
+            && let Some(hit) = cache.0.get(&k).await
+        {
+            steve_runtime::jobs::record_model_calls_avoided(
+                INTENT_METRIC_TASK,
+                steve_runtime::jobs::AvoidReason::Cached,
+                conditions.len() as u64,
+            );
+            return hit;
+        }
+        let prompt = if conditions.len() == 1 {
+            self.prompt(conditions[0])
+        } else {
+            self.batch_prompt(conditions)
+        };
         match steve_modules::gateway::purpose(
             "intent",
-            self.gateway
-                .run(Tier::Fast, &self.prompt(text), INTENT_TIMEOUT),
+            self.gateway.run(Tier::Fast, &prompt, INTENT_TIMEOUT),
         )
         .await
         {
-            Ok(o) => parse_judgement(&o.text),
+            Ok(o) => {
+                if conditions.len() > 1 {
+                    steve_runtime::jobs::record_model_calls_avoided(
+                        INTENT_METRIC_TASK,
+                        steve_runtime::jobs::AvoidReason::Batched,
+                        (conditions.len() - 1) as u64,
+                    );
+                }
+                let matched = if conditions.len() == 1 {
+                    parse_judgement(&o.text).then_some(0)
+                } else {
+                    parse_batch_judgement(&o.text, conditions.len())
+                };
+                if let (Some(cache), Some(k)) = (self.cache, key) {
+                    cache.0.insert(k, matched).await;
+                }
+                matched
+            }
             Err(e) => {
                 tracing::warn!("channel rules: intent not judged: {e}");
-                false
+                None
             }
         }
     }
@@ -903,29 +1119,82 @@ pub fn compile(rules: &[Rule], space_id: &str, muted: bool, owner: &str) -> Grap
     let mut i = 0;
     while i < rules.len() {
         let Some(from) = open.take() else { break };
-        if let When::Intent { text } = &rules[i].when {
-            let id = format!("b{}", i + 1);
-            nodes.push(Node {
-                id: id.clone(),
-                kind: "bot".into(),
-                title: cut(&format!("判断：{text}"), 50),
-                note: String::new(),
-                config: json!({
-                    "instruction": format!("这条消息是否符合：{text}"),
-                    "branches": ["是", "否"],
-                }),
-                // a failed judgement counts as no, when there is something after it
-                on_fail: (i + 1 < rules.len()).then(|| "branch:否".to_string()),
-            });
-            link(&mut edges, &from, &id);
-            let act = if muted {
-                quiet_action(rules[i].act)
+        if matches!(rules[i].when, When::Intent { .. }) {
+            let start = i;
+            while i < rules.len()
+                && i - start < COMPILE_INTENT_BATCH_MAX
+                && matches!(rules[i].when, When::Intent { .. })
+            {
+                i += 1;
+            }
+            let id = format!("b{}", start + 1);
+            if i - start == 1 {
+                let When::Intent { text } = &rules[start].when else {
+                    unreachable!()
+                };
+                nodes.push(Node {
+                    id: id.clone(),
+                    kind: "bot".into(),
+                    title: cut(&format!("判断：{text}"), 50),
+                    note: String::new(),
+                    config: json!({
+                        "instruction": format!("这条消息是否符合：{text}"),
+                        "branches": ["是", "否"],
+                    }),
+                    // a failed judgement counts as no, when there is something after it
+                    on_fail: (i < rules.len()).then(|| "branch:否".to_string()),
+                });
+                link(&mut edges, &from, &id);
+                let act = if muted {
+                    quiet_action(rules[start].act)
+                } else {
+                    rules[start].act
+                };
+                push_act(
+                    &mut nodes,
+                    &mut edges,
+                    (&id, "是"),
+                    start,
+                    act,
+                    muted,
+                    owner,
+                );
+                open = Some((id, "否".into()));
             } else {
-                rules[i].act
-            };
-            push_act(&mut nodes, &mut edges, (&id, "是"), i, act, muted, owner);
-            open = Some((id, "否".into()));
-            i += 1;
+                // Batch consecutive intent rules into a single bot node so one model call
+                // evaluates all of them without repeating the message context.
+                let mut instruction = String::from(
+                    "按顺序判断这条消息最先符合哪一条条件（都不符合选「都不符合」）：",
+                );
+                let mut branches: Vec<String> = Vec::with_capacity(i - start + 1);
+                for (k, r) in rules.iter().enumerate().take(i).skip(start) {
+                    let When::Intent { text } = &r.when else {
+                        unreachable!()
+                    };
+                    let label = format!("规则{}", k + 1);
+                    instruction.push_str(&format!("\n- {label}：{text}"));
+                    branches.push(label);
+                }
+                branches.push("都不符合".into());
+                nodes.push(Node {
+                    id: id.clone(),
+                    kind: "bot".into(),
+                    title: format!("判断规则 {}–{}", start + 1, i),
+                    note: String::new(),
+                    config: json!({
+                        "instruction": instruction,
+                        "branches": branches,
+                    }),
+                    on_fail: (i < rules.len()).then(|| "branch:都不符合".to_string()),
+                });
+                link(&mut edges, &from, &id);
+                for (k, r) in rules.iter().enumerate().take(i).skip(start) {
+                    let act = if muted { quiet_action(r.act) } else { r.act };
+                    let label = format!("规则{}", k + 1);
+                    push_act(&mut nodes, &mut edges, (&id, &label), k, act, muted, owner);
+                }
+                open = Some((id, "都不符合".into()));
+            }
             continue;
         }
         let start = i;
@@ -1482,5 +1751,150 @@ mod tests {
         let m = compile(&r, "spc_1", true, "Alice");
         let ids: Vec<&str> = m.nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, ["t", "f1", "b3", "f4", "a4"]);
+    }
+
+    #[test]
+    fn batch_judgement_answers() {
+        assert_eq!(parse_batch_judgement("{\"match\": 1}", 3), Some(0));
+        assert_eq!(parse_batch_judgement("好的：{\"match\": 3}", 3), Some(2));
+        assert_eq!(parse_batch_judgement("{\"match\": \"2\"}", 3), Some(1));
+        assert_eq!(parse_batch_judgement("{\"match\": null}", 3), None);
+        assert_eq!(parse_batch_judgement("{\"match\": 0}", 3), None);
+        assert_eq!(parse_batch_judgement("{\"match\": 4}", 3), None);
+        assert_eq!(parse_batch_judgement("2", 3), Some(1));
+        assert_eq!(parse_batch_judgement("", 3), None);
+    }
+
+    #[tokio::test]
+    async fn evaluate_batches_reachable_intents_dedupes_and_skips_after_det_match() {
+        use std::sync::Mutex;
+
+        struct SpyJudge {
+            batches: Mutex<Vec<Vec<String>>>,
+            reply: Option<usize>,
+        }
+        #[async_trait::async_trait]
+        impl IntentJudge for SpyJudge {
+            async fn judge(&self, _text: &str) -> bool {
+                panic!("evaluate must batch through judge_first")
+            }
+            async fn judge_first(&self, conditions: &[&str]) -> Option<usize> {
+                self.batches
+                    .lock()
+                    .unwrap()
+                    .push(conditions.iter().map(|s| (*s).to_string()).collect());
+                self.reply
+            }
+        }
+
+        let rs = rules(json!([
+            {"when": {"kind": "keyword", "words": ["紧急"]}, "act": "handoff"},
+            {"when": {"kind": "intent", "text": "需要排查故障"}, "act": "create_item"},
+            {"when": {"kind": "intent", "text": "需要排查故障"}, "act": "reply"},
+            {"when": {"kind": "intent", "text": "询问报价"}, "act": "draft"},
+            {"when": {"kind": "mention_or_dm"}, "act": "reply"},
+            {"when": {"kind": "intent", "text": "不可达条件"}, "act": "handoff"}
+        ]));
+
+        // Case 1: Deterministic rule 0 matches -> zero judge calls, needs_intent_judge = false.
+        let urgent = Facts {
+            text: "紧急故障".into(),
+            mentioned: true,
+            ..Facts::default()
+        };
+        assert!(!needs_intent_judge(&rs, &urgent));
+        let spy = SpyJudge {
+            batches: Mutex::new(vec![]),
+            reply: Some(0),
+        };
+        let v = evaluate(&rs, &urgent, false, &spy).await;
+        assert_eq!((v.rule, v.act), (Some(0), Act::Handoff));
+        assert!(spy.batches.lock().unwrap().is_empty());
+
+        // Case 2: Rules 1..3 reachable before deterministic rule 4; duplicate rule 2 deduped;
+        // rule 5 unreachable after rule 4; one batched call receives ["需要排查故障", "询问报价"].
+        let normal = Facts {
+            text: "发一下报价单".into(),
+            mentioned: true,
+            ..Facts::default()
+        };
+        assert!(needs_intent_judge(&rs, &normal));
+        let spy = SpyJudge {
+            batches: Mutex::new(vec![]),
+            reply: Some(1),
+        };
+        let v = evaluate(&rs, &normal, false, &spy).await;
+        assert_eq!((v.rule, v.act), (Some(3), Act::Draft));
+        assert_eq!(
+            *spy.batches.lock().unwrap(),
+            vec![vec!["需要排查故障".to_string(), "询问报价".to_string()]]
+        );
+
+        // Case 3: No intent matches -> falls through to deterministic rule 4.
+        let spy = SpyJudge {
+            batches: Mutex::new(vec![]),
+            reply: None,
+        };
+        let v = evaluate(&rs, &normal, false, &spy).await;
+        assert_eq!((v.rule, v.act), (Some(4), Act::Reply));
+    }
+
+    #[tokio::test]
+    async fn gateway_judge_batches_once_and_reuses_input_hash_cache() {
+        let gw = steve_modules::testkit::FakeGateway::new();
+        gw.reply("{\"match\": 2}");
+        let cache = IntentCache::new();
+        let ctx = [ContextLine {
+            who: "Alice".into(),
+            text: "昨天刚聊过".into(),
+        }];
+        let judge = GatewayJudge {
+            gateway: gw.as_ref(),
+            message: "麻烦帮我查一下部署日志",
+            sender: "Bob",
+            space: "运维群",
+            context: &ctx,
+            cache: Some(&cache),
+        };
+        let conds = ["询问报价", "需要排查故障", "请假申请"];
+        assert_eq!(judge.judge_first(&conds).await, Some(1));
+        assert_eq!(gw.calls.lock().unwrap().len(), 1);
+        let prompt = gw.last_prompt().unwrap();
+        assert!(prompt.starts_with(INTENT_START));
+        assert!(prompt.contains("1. 询问报价\n2. 需要排查故障\n3. 请假申请"));
+
+        // Identical input reuses cached verdict with zero extra gateway calls.
+        assert_eq!(judge.judge_first(&conds).await, Some(1));
+        assert_eq!(gw.calls.lock().unwrap().len(), 1);
+
+        // Changed message misses cache and queries gateway again.
+        gw.reply("{\"match\": null}");
+        let other = GatewayJudge {
+            message: "今天天气真好",
+            ..judge
+        };
+        assert_eq!(other.judge_first(&conds).await, None);
+        assert_eq!(gw.calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn compile_batches_consecutive_intent_rules_into_one_bot_node() {
+        let r = rules(json!([
+            {"when": {"kind": "intent", "text": "需要排查故障"}, "act": "create_item"},
+            {"when": {"kind": "intent", "text": "询问报价"}, "act": "draft"},
+            {"when": {"kind": "mention"}, "act": "reply"}
+        ]));
+        let g = compile(&r, "spc_1", false, "Alice");
+        let bot_nodes: Vec<&Node> = g.nodes.iter().filter(|n| n.kind == "bot").collect();
+        assert_eq!(
+            bot_nodes.len(),
+            1,
+            "consecutive intents compile to one bot node"
+        );
+        assert_eq!(
+            bot_nodes[0].config["branches"],
+            json!(["规则1", "规则2", "都不符合"])
+        );
+        assert_eq!(bot_nodes[0].on_fail.as_deref(), Some("branch:都不符合"));
     }
 }

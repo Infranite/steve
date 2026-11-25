@@ -347,10 +347,7 @@ async fn single_user_reads_private_events_without_crossing_workspaces_or_connect
     for visibility in ["private", "team:unjoined", "space:unjoined"] {
         steve_store::testkit::flow::signal_without_connection(e.env.store(), pid, visibility)
             .unwrap();
-        let viewer = steve_store::base::Viewer {
-            scopes: vec!["team:extra".into(), "space:extra".into()],
-            ..steve_store::base::Viewer::bare(WS, ME)
-        };
+        let viewer = steve_store::base::Viewer::bare(WS, ME);
         e.env
             .store()
             .read::<_, steve_store::StoreError>(|r| {

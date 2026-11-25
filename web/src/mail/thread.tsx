@@ -12,7 +12,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { fileUrl } from "@/api"
 import { Page, Empty, Meta, SectionLabel, ItemRef, ItemNo, go } from "@/ui"
 import { refresh, tm } from "@/store"
-import { ContactAvatar } from "@/people/avatar"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { size } from "@/attach"
 import { useBusy } from "@/accounts/load"
 import { useHubQuery } from "@/data/use-hub-query"
@@ -70,7 +71,9 @@ function MessageBlock({ m, open, onToggle }: { m: Message; open: boolean; onTogg
   const line = (m.text_new ?? m.text ?? "").replace(/\s+/g, " ").trim()
   const head = (
     <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-start gap-3 px-4 py-3.5 text-left hover:bg-accent/60" data-message-toggle={m.id}>
-      <ContactAvatar name={who(m.from)} size={28} className="mt-0.5" />
+      {m.direction === "out"
+        ? <ActorAvatar actorId="me" size={28} className="mt-0.5" tooltip={false} />
+        : <ActorAvatar actor={partyActor({ id: m.from.party_id ?? m.from.addr, name: who(m.from), subtitle: m.from.addr })} size={28} className="mt-0.5" tooltip={false} />}
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-2"><span className="min-w-0 truncate type-body font-medium">{m.direction === "out" ? t("mail:thread.me") : who(m.from)}</span>
           {open && m.direction === "in" && m.from.name && <span className="hidden min-w-0 truncate type-footnote text-muted-foreground sm:inline">{m.from.addr}</span>}

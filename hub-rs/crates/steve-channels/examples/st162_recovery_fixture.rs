@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         w.forbidden_targets.insert("fixture-chat".into());
     });
     let flow_setup = FlowSetup::new(Arc::new(FakeCore::default()));
-    let disclosure = Disclosure::with_models(Vec::new());
+    let disclosure = Disclosure::new();
     let link = OutLink::new();
     let late = steve_channels::flow_actions::LateChannels::new();
     let env = TestEnv::new(|r| {
