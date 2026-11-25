@@ -280,7 +280,7 @@ impl NodeRuntime {
             Advance::ChangedConfig,
         )?;
         let op = key.op().to_string();
-        let (req, digest) = command(
+        let (req, digest) = self.command(
             &op,
             ConfigureSession {
                 session: idv(session.to_string())?,
@@ -315,7 +315,7 @@ impl NodeRuntime {
                 active_attempt: None,
                 release_pending: false,
             },
-            now(),
+            self.clock.now(),
         )? {
             return Err(conflict("the session changed while configuring"));
         }
@@ -473,7 +473,7 @@ impl NodeRuntime {
                         active_attempt: None,
                         release_pending: false,
                     },
-                    now(),
+                    self.clock.now(),
                 )?;
                 if let Some(d) = desired_in(&self.store, &session)?
                     && same_config((&d.choice, &d.policy), (&sent.choice, &sent.policy))
@@ -562,7 +562,7 @@ impl NodeRuntime {
                     active_attempt: None,
                     release_pending: false,
                 },
-                now(),
+                self.clock.now(),
             )?;
             Ok(())
         };
@@ -622,7 +622,7 @@ impl NodeRuntime {
                 active_attempt: None,
                 release_pending: false,
             },
-            now(),
+            self.clock.now(),
         )?;
         let text = if narrowing && !node_released {
             format!("未能切换：{detail}，已释放会话，下次打开时按新配置")

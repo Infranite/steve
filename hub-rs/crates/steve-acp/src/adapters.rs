@@ -474,13 +474,15 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         Ok(c) => c,
         Err(e) => return Probe::failed(ProbeStatus::AdapterMissing, e.message),
     };
+    let mut client_caps = json!({
+        "fs": { "readTextFile": false, "writeTextFile": false },
+        "terminal": false,
+        "_meta": { "parameterizedModelPicker": true },
+    });
+    crate::adapter::for_harness(id).configure_client_capabilities(&mut client_caps);
     let init = json!({
         "protocolVersion": 1,
-        "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
-            "terminal": false,
-            "_meta": { "parameterizedModelPicker": true },
-        },
+        "clientCapabilities": client_caps,
         "clientInfo": { "name": "steve", "version": cfg.version },
     });
     let r = conn.request("initialize", init, Some(timeout)).await;
@@ -1444,6 +1446,7 @@ rl.on("line", (line) => {{
         let opened = crate::session::open(
             &conn,
             crate::session::OpenConfig {
+                harness: "antigravity",
                 client_version: "test",
                 cwd: dir.path().to_str().unwrap(),
                 resume: None,
@@ -1500,6 +1503,7 @@ rl.on("line", (line) => {{
         let opened_full = crate::session::open(
             &conn,
             crate::session::OpenConfig {
+                harness: "antigravity",
                 client_version: "test",
                 cwd: dir.path().to_str().unwrap(),
                 resume: None,

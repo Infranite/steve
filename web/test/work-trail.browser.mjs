@@ -17,21 +17,27 @@ try {
 
     /* live: the run's trail ends on the call running now, with a spinner and the present tense */
     await page.goto(`${base}/test/fixtures/work-trail.html${dark ? "?dark" : ""}`)
-    const run = page.locator('[data-fixture="run"] [data-work="live"] [data-trail]')
+    const run = page.locator('[data-fixture="run"] [data-work="live"] [data-trail]').first()
     await run.waitFor()
     const live = await lines(run)
     assert.match(live.at(-1), /^正在运行 · 第 2 条命令/, JSON.stringify(live))
     assert.equal(await run.locator(':scope > li:last-child > [data-trail-marker="run"]').count(), 1)
     assert.ok(live.some((l) => /^读取了 5 个文件/.test(l)), JSON.stringify(live))
-    assert.ok(live.some((l) => /^交给了品牌研究员/.test(l)), JSON.stringify(live))
     assert.equal(await run.locator('[data-plan-step="run"]').count(), 1)
     assert.equal(await run.locator("[data-trail-end]").count(), 0)
+    /* unified subtask view: subagent with nested child steps + cancel button, and non-cancellable background task */
+    const sub = run.locator('[data-subtask-id="sub-brand"]')
+    await sub.waitFor()
+    assert.equal(await run.locator('[data-subtask-cancel="sub-brand"]').count(), 1)
+    assert.equal(await run.locator('[data-subtask-id="bg-report-check"]').count(), 1)
+    assert.equal(await run.locator('[data-subtask-cancel="bg-report-check"]').count(), 0)
+    assert.equal(await run.locator('[data-subtask-detail="sub-brand"] [data-subtask-children="2"]').count(), 1)
     /* a single call is a Tool Call Card: the tool's own name, Steve's words as its summary, and opened what went in */
-    const task = run.locator('[data-tool-card="Task"]')
-    assert.equal(await task.locator(".ui-tclc__name").textContent(), "Task")
-    await task.locator(".ui-tclc__head").click()
+    const skill = run.locator('[data-tool-card="Skill"]')
+    assert.equal(await skill.locator(".ui-tclc__name").textContent(), "Skill")
+    await skill.locator(".ui-tclc__head").click()
     await settle(page)
-    assert.match(await task.locator(".ui-tclc__body").innerText(), /参数[\s\S]*品牌研究员：扫描瑞典竞品品牌/)
+    assert.match(await skill.locator(".ui-tclc__body").innerText(), /sweden-brief|加载瑞典上线调研模板/)
 
     /* Chat uses affectUI Thinking State; the agent transcript above still uses the detailed trail. */
     const steps = page.locator("[data-fixture-steps] .ui-thinkc")
@@ -52,7 +58,7 @@ try {
     /* finished: thinking folds to its time, the trail closes with a check */
     await page.goto(`${base}/test/fixtures/work-trail.html?done${dark ? "&dark" : ""}`)
     await page.locator('[data-fixture="run"] [data-work="done"] > button').click()
-    const fin = page.locator('[data-fixture="run"] [data-work="done"] [data-trail]')
+    const fin = page.locator('[data-fixture="run"] [data-work="done"] [data-trail]').first()
     await fin.waitFor()
     const f = await lines(fin)
     assert.match(f[0], /^思考了 6 秒/, JSON.stringify(f))
@@ -61,14 +67,14 @@ try {
     await fin.locator('[data-step-kind="th"] button').click()
     await fin.locator("[data-thought-body]").waitFor()
 
-    /* the same turn on a timeline: the turn and every step as a bar, no cost or tokens where the Hub has none */
+    /* the same turn on a timeline: subtasks nest their child tool calls and surface reported tokens/cost */
     await page.locator('[data-fixture="run"] [data-work="done"] [data-seg="timeline"] >> visible=true').click()
     const trace = page.locator('[data-fixture="run"] [data-turn-trace="done"]')
     await trace.waitFor()
-    assert.equal(await trace.locator('[role="treeitem"]').count(), 17)
-    assert.equal(await trace.locator('[role="treeitem"][data-kind="subagent"]').count(), 1)
+    assert.equal(await trace.locator('[role="treeitem"]').count(), 21)
+    assert.equal(await trace.locator('[role="treeitem"][data-kind="subagent"]').count(), 2)
     assert.equal(await trace.locator('[role="treeitem"][data-kind="llm"]').count(), 2)
-    assert.deepEqual(await trace.locator(".ui-trwc__stat dt").allTextContents(), ["用时", "思考", "工具调用", "失败"])
+    assert.deepEqual(await trace.locator(".ui-trwc__stat dt").allTextContents(), ["用时", "估算花费", "Token", "思考", "工具调用", "失败"])
     assert.equal((await trace.locator(".ui-trwc__bar-head .ui-trwc__pill").textContent()).trim(), "完成")
     assert.match(await trace.locator(".ui-trwc__task").textContent(), /让我们在瑞典上线/)
 

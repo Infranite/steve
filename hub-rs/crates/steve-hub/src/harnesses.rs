@@ -687,6 +687,7 @@ pub(crate) async fn ready_locally(harnesses: &[&str], models: &[&str]) -> Arc<Hu
                 update: None,
                 resume_command: None,
                 fork_command: None,
+                capabilities: None,
             }),
         })
         .collect();
@@ -733,6 +734,7 @@ mod tests {
                 update: None,
                 resume_command: None,
                 fork_command: None,
+                capabilities: None,
             }),
         }
     }
