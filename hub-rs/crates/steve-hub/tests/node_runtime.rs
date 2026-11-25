@@ -4760,13 +4760,13 @@ async fn startup_preflight_uses_the_actual_node_offer_and_preserves_defaults() {
         auth: vec![],
         install_hint: None,
         system_prompt: false,
-        update: None,
         resume_command: None,
         fork_command: None,
         error: None,
         session_error: None,
         session_auth_required: None,
         execution_modes: None,
+        capabilities: None,
         session: Some(AdapterOffer {
             modes: vec![PermissionMode::Ask],
             models: vec![],
@@ -4850,3 +4850,6 @@ async fn native_fallback_never_allows_and_only_the_declared_owner_route_asks() {
         assert_eq!(stats.permissions_by_resolver["harness_native"][result], 1);
     }
 }
+
+#[path = "node_runtime/restart_matrix.rs"]
+mod restart_matrix;

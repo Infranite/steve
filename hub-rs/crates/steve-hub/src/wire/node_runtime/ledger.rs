@@ -69,7 +69,7 @@ impl NodeRuntime {
             return Err(conflict(format!("not a ledger subject: {subject}")));
         }
         let body = serde_json::to_value(body).map_err(conflict)?;
-        let (mut request, _) = command(op, body.clone())?;
+        let (mut request, _) = self.command(op, body.clone())?;
         // the subject is the Hub's: it stays in the stored request and never reaches the Node
         // (the sender parses the request back into the Node's command)
         request["subject"] = Value::from(subject);

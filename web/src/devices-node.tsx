@@ -7,7 +7,7 @@
  * - Diagnostics: sanitized diagnostic copy, local log/status commands, link/sampling diagnostics, identity, raw JSON. */
 import { useMemo, useState, type ReactNode } from "react"
 import {
-  ActivityIcon, ArrowUpCircleIcon, CheckCircle2Icon, ChevronRightIcon, CopyIcon, CpuIcon, FolderIcon,
+  ActivityIcon, ArrowUpCircleIcon, CheckCircle2Icon, ChevronRightIcon, CopyIcon, CpuIcon, DownloadIcon, FolderIcon,
   KeyRoundIcon, LoaderIcon, LockIcon, MessageCircleIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlusIcon,
   RotateCcwIcon, ShieldAlertIcon, ShieldCheckIcon, StethoscopeIcon, TerminalIcon, WifiOffIcon,
 } from "lucide-react"
@@ -41,7 +41,6 @@ import { NodeUpgradeHistory, NodeVersion, UpgradeSteps } from "@/devices-upgrade
 import { RunningCard, deviceGroups } from "@/devices-work"
 import { TakeWork } from "@/devices-config"
 import { NodeContext } from "@/devices-context"
-import { NodeHarnessUpdates } from "@/devices-harness-updates"
 import { LeaveCard, RemoveDialog } from "@/devices-remove-dialog"
 import { NodeHarnesses } from "@/devices-harnesses"
 import { NodeActionControls, useNodeActions, type NodeActions } from "@/devices-node-actions"
@@ -80,11 +79,23 @@ function NodeDetail({ v, tab }: { v: NodeView; tab: NodeTab }) {
       hubVersion,
       harnessReport,
       harnessesError,
+      harnessUpdates: actions.harnessUpdates.data,
       attentionCount,
       canConfirm: actions.canConfirm,
       canUpgrade: actions.canUpgrade,
+      canUpgradeHarness: actions.canUpgradeHarness,
     }),
-    [v, hubVersion, harnessReport, harnessesError, attentionCount, actions.canConfirm, actions.canUpgrade],
+    [
+      v,
+      hubVersion,
+      harnessReport,
+      harnessesError,
+      actions.harnessUpdates.data,
+      attentionCount,
+      actions.canConfirm,
+      actions.canUpgrade,
+      actions.canUpgradeHarness,
+    ],
   )
   const tabBadges = useMemo(
     () => nodeTabBadges(v, actionItems, { activeSessions, harnessReadyCount }),
@@ -187,6 +198,7 @@ const ACTION_ICON: Record<NodeActionItem["kind"], typeof ShieldAlertIcon> = {
   fileAccess: FolderIcon,
   harnessAuth: KeyRoundIcon,
   harnessProbeFailed: CpuIcon,
+  harnessUpdatesAvailable: DownloadIcon,
   upgradeFailed: RotateCcwIcon,
   upgradeRunning: LoaderIcon,
   upgradeOutdated: ArrowUpCircleIcon,
@@ -226,6 +238,16 @@ function ActionText({ v, item }: { v: NodeView; item: NodeActionItem }) {
       return <>{t("devices:nodeOverview.actionHarnessAuth", { names: (item.names ?? []).join(" · ") })}</>
     case "harnessProbeFailed":
       return <>{t("devices:nodeOverview.actionHarnessProbeFailed")}</>
+    case "harnessUpdatesAvailable": {
+      const names = (item.names ?? []).join(" · ")
+      return (
+        <>
+          {(item.running ?? 0) > 0
+            ? t("devices:nodeOverview.actionHarnessUpdatesBusy", { names, running: item.running })
+            : t("devices:nodeOverview.actionHarnessUpdates", { names })}
+        </>
+      )
+    }
     case "upgradeFailed":
       return <>{t("devices:nodeOverview.actionUpgradeFailed", { to: item.version ?? "?", from: item.from ?? "?" })}</>
     case "upgradeRunning":
@@ -387,7 +409,11 @@ function OverviewNodeTab({
 
       <DCard title={t("devices:nodeOverview.summaryTitle")} data-node-overview-summary>
         <div className="border-t border-border/70">
-          <DRow icon={<CpuIcon />} title={t("devices:nodeTab.harness")} sub={harnessText} onClick={() => onOpenTab("harness")} data-overview-link="harness" />
+          <DRow icon={<CpuIcon />} title={t("devices:nodeTab.harness")} sub={harnessText} onClick={() => onOpenTab("harness")} data-overview-link="harness">
+            {actionItems.some((a) => a.kind === "harnessUpdatesAvailable") && (
+              <Badge tone="warning" size="sm">{t("devices:harnessUpdates.available")}</Badge>
+            )}
+          </DRow>
           <DRow icon={<ActivityIcon />} title={t("devices:nodeTab.work")} sub={workSummaryParts} onClick={() => onOpenTab("work")} data-overview-link="work" />
           <DRow icon={<LockIcon />} title={t("devices:nodeTab.access")} sub={accessText} onClick={() => onOpenTab("access")} data-overview-link="access">
             {fileAccess?.status === "missing" && <Badge tone="warning" size="sm">{t("devices:fileAccess.state.missing")}</Badge>}
@@ -416,17 +442,19 @@ function HarnessNodeTab({
   const harnessActions = actionItems.filter((a) => a.tab === "harness")
   return (
     <>
-      {harnessActions.map((item) => (
-        <div key={item.kind} className="flex flex-wrap items-center gap-3 rounded-xl bg-attention/10 px-4 py-3" role="status" data-tab-action={item.kind}>
-          <KeyRoundIcon className="size-4 shrink-0 text-attention" aria-hidden />
-          <span className="min-w-0 flex-1 type-callout text-foreground"><ActionText v={v} item={item} /></span>
-          <NodeActionControls item={item} actions={actions} onOpenTab={onOpenTab} showTabLink={false} />
-        </div>
-      ))}
+      {harnessActions.map((item) => {
+        const Icon = ACTION_ICON[item.kind]
+        return (
+          <div key={item.kind} className="flex flex-wrap items-center gap-3 rounded-xl bg-attention/10 px-4 py-3" role="status" data-tab-action={item.kind}>
+            <Icon className="size-4 shrink-0 text-attention" aria-hidden />
+            <span className="min-w-0 flex-1 type-callout text-foreground"><ActionText v={v} item={item} /></span>
+            <NodeActionControls item={item} actions={actions} onOpenTab={onOpenTab} showTabLink={false} />
+          </div>
+        )
+      })}
       <NodeHarnesses v={v} actions={actions}>
         {v.local && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}
       </NodeHarnesses>
-      <NodeHarnessUpdates v={v} />
     </>
   )
 }

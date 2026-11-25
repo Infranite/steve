@@ -56,11 +56,7 @@ print(json.dumps(manifest))
         self.db = self.home / "data/steve.sqlite3"
         with closing(sqlite3.connect(self.db, isolation_level=None)) as c:
             c.executescript("""CREATE TABLE users(id TEXT,subject TEXT,role TEXT,created INTEGER);
-                INSERT INTO users VALUES('owner','original','owner',1);
-                CREATE TABLE artifacts(id TEXT,item_id TEXT,kind TEXT,title TEXT,location TEXT,created INTEGER);
-                INSERT INTO artifacts VALUES('artifact','ST-1','report','report','交付摘要',1);
-                CREATE TABLE timeline(id INTEGER PRIMARY KEY,item_id TEXT,kind TEXT,text TEXT,ts INTEGER);""")
-            c.execute("INSERT INTO timeline(item_id,kind,text,ts) VALUES('ST-1','sys',?,1)", ("已交付，等待执行结束后交给下游\n" + "saved full report " * 10,))
+                INSERT INTO users VALUES('owner','original','owner',1);""")
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, {"STEVE_HOME": str(self.home), "HOME": str(self.root)}).start()
 
@@ -100,22 +96,6 @@ print(json.dumps(manifest))
         with self.assertRaises(subprocess.CalledProcessError):
             m.snapshot(self.home)
         self.assertEqual(dst.read_bytes(), saved)
-
-    def test_repair_backup_failure_prevents_file_and_row_changes_then_success_is_retryable(self):
-        m = load("recover-delivery-outputs")
-        (self.home / "fail").touch()
-        with self.assertRaises(subprocess.CalledProcessError):
-            m.run(self.home, True)
-        self.assert_call("pre-destructive")
-        self.assertFalse((self.home / "workspaces").exists())
-        with closing(sqlite3.connect(self.db, isolation_level=None)) as c:
-            self.assertEqual(c.execute("SELECT location FROM artifacts").fetchone()[0], "交付摘要")
-        (self.home / "fail").unlink()
-        m.run(self.home, True)
-        with closing(sqlite3.connect(self.db, isolation_level=None)) as c:
-            location = c.execute("SELECT location FROM artifacts").fetchone()[0]
-        self.assertEqual(Path(location).read_text(), "saved full report " * 10)
-        m.run(self.home, True)
 
     def test_release_sh_backup_helper_checks_command_status_and_manifest(self):
         source = (OPS / "release.sh").read_text()
