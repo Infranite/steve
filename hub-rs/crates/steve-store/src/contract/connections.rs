@@ -94,6 +94,62 @@ impl<'a, C: Read> Connections<'a, C> {
         self.0.all(&Self::live_query(), source)
     }
 
+    /// Whether `ws` has at least one non-revoked connection belonging to `adapters`.
+    pub fn has_active_adapter(&mut self, ws: &str, adapters: &[&str]) -> Result<bool> {
+        if adapters.is_empty() {
+            return Ok(false);
+        }
+        let found: Option<i64> = self.0.one(
+            Query::select()
+                .expr(Expr::cust("1"))
+                .from("connections")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("adapter").is_in(adapters.iter().copied()))
+                .and_where(Expr::col("status").ne("revoked"))
+                .limit(1),
+            |r| r.get(0),
+        )?;
+        Ok(found.is_some())
+    }
+
+    /// Distinct workspaces where at least one of `adapters` has a non-revoked connection.
+    pub fn active_workspaces_for_adapters(&mut self, adapters: &[&str]) -> Result<Vec<String>> {
+        if adapters.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.0.all(
+            Query::select()
+                .distinct()
+                .column("workspace_id")
+                .from("connections")
+                .and_where(Expr::col("adapter").is_in(adapters.iter().copied()))
+                .and_where(Expr::col("status").ne("revoked"))
+                .order_by("workspace_id", Order::Asc),
+            |r| r.get(0),
+        )
+    }
+
+    /// Non-revoked connections in `ws` belonging to `adapters`.
+    pub fn sources_in_workspace_for_adapters(
+        &mut self,
+        ws: &str,
+        adapters: &[&str],
+    ) -> Result<Vec<ConnectionSource>> {
+        if adapters.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.0.all(
+            Query::select()
+                .columns(COLUMNS)
+                .from("connections")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("adapter").is_in(adapters.iter().copied()))
+                .and_where(Expr::col("status").ne("revoked"))
+                .order_by_columns([("created", Order::Asc), ("id", Order::Asc)]),
+            source,
+        )
+    }
+
     fn live_query() -> sea_query::SelectStatement {
         Query::select()
             .columns(COLUMNS)

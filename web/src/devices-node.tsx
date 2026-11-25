@@ -747,21 +747,19 @@ function Rename({ v, onClose, onDone }: { v: NodeView; onClose: () => void; onDo
   </DialogContent></Dialog>
 }
 
-/** declares a harness adapter of one's own in the Hub's manifest: an id, a name, its command, its arguments and variables, and
+/** declares a harness adapter of one's own in the Hub's manifest: an id, a name, its command, its arguments, and
  * (advanced) its declared properties as JSON. It is used once the Hub restarts. */
 function AddHarness() {
   const t = useT()
   const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("")
-  const [id, setId] = useState(""), [name, setName] = useState(""), [command, setCommand] = useState(""), [args, setArgs] = useState(""), [env, setEnv] = useState(""), [props, setProps] = useState("")
+  const [id, setId] = useState(""), [name, setName] = useState(""), [command, setCommand] = useState(""), [args, setArgs] = useState(""), [props, setProps] = useState("")
   if (!open) return <Button size="sm" variant="outline" onClick={() => setOpen(true)} data-add-harness><PlusIcon />{t("shell:devices.harness.add")}</Button>
   const save = async () => {
     setBusy(true); setError("")
     try {
-      const envMap: Record<string, string> = {}
-      for (const l of env.split("\n").map((x) => x.trim()).filter(Boolean)) { const i = l.indexOf("="); if (i <= 0) throw new Error(t("shell:devices.harness.badEnv", { line: l })); envMap[l.slice(0, i)] = l.slice(i + 1) }
       let properties: Record<string, unknown> | undefined
       if (props.trim()) { try { properties = JSON.parse(props) } catch { throw new Error(t("shell:devices.harness.badJson")) } }
-      await api.addHarness({ id: id.trim(), name: name.trim() || undefined, command: command.trim(), args: args.split(/\s+/).filter(Boolean), env: envMap, properties })
+      await api.addHarness({ id: id.trim(), name: name.trim() || undefined, command: command.trim(), args: args.split(/\s+/).filter(Boolean), properties })
       toast(t("shell:devices.harness.saved")); setOpen(false); await refresh()
     } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
@@ -771,7 +769,6 @@ function AddHarness() {
     <Input placeholder={t("shell:devices.harness.name")} value={name} onChange={(e) => setName(e.target.value)} />
     <Input placeholder={t("shell:devices.harness.command")} value={command} onChange={(e) => setCommand(e.target.value)} className="font-mono" data-harness-command />
     <Input placeholder={t("shell:devices.harness.args")} value={args} onChange={(e) => setArgs(e.target.value)} className="font-mono" />
-    <Textarea placeholder={t("shell:devices.harness.env")} value={env} onChange={(e) => setEnv(e.target.value)} className="min-h-14 font-mono" />
     <details><summary className="cursor-pointer type-callout text-muted-foreground hover:text-foreground">{t("shell:devices.harness.advanced")}</summary>
       <Textarea placeholder='{"modes": {"ask": "default"}, "nested_sandbox": true}' value={props} onChange={(e) => setProps(e.target.value)} className="mt-1 min-h-20 font-mono" /></details>
     {error && <div className="type-callout text-attention" role="alert">{error}</div>}

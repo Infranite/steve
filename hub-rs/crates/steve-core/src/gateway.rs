@@ -1961,6 +1961,7 @@ mod tests {
         Bot {
             id: id.into(),
             workspace_id: "default".into(),
+            owner: None,
             name: id.into(),
             role: "r".into(),
             specialties: vec![],

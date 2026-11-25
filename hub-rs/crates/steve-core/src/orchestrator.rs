@@ -861,9 +861,27 @@ impl Core {
     ) -> Result<Forked> {
         self.tx().fork(ws, session_id, seq, goal, as_session, actor)
     }
-    /// Soft-delete a bot; its open items move to `to` (or the main bot where `to` isn't a member). Returns moved item ids.
-    pub fn delete_bot(&self, id: &str, to: &str, actor: &str) -> Result<Vec<String>> {
-        self.tx().delete_bot(id, to, actor)
+    /// Globally soft-delete a bot owned by the caller; every workspace the bot belongs to must be
+    /// within `allowed_workspaces` and contain `to`. Returns moved item ids.
+    pub fn delete_bot(
+        &self,
+        id: &str,
+        to: &str,
+        actor: &str,
+        allowed_workspaces: &[String],
+    ) -> Result<Vec<String>> {
+        self.tx().delete_bot(id, to, actor, allowed_workspaces)
+    }
+    /// Remove a non-main bot's membership from a single workspace `ws`, handing over open items in
+    /// `ws` to `to` (which must belong to `ws`). Other workspaces are untouched.
+    pub fn remove_bot_from_workspace(
+        &self,
+        ws: &str,
+        id: &str,
+        to: &str,
+        actor: &str,
+    ) -> Result<Vec<String>> {
+        self.tx().remove_bot_from_workspace(ws, id, to, actor)
     }
     /// Boot: report a landed release, expire stale cards, and durably prepare interrupted turns.
     /// Only `ready` starts them after the listener is bound.
@@ -4821,68 +4839,140 @@ impl Tx<'_> {
     }
 
     /* ── bots ── */
-    pub(crate) fn delete_bot(&mut self, id: &str, to: &str, actor: &str) -> Result<Vec<String>> {
+    fn handoff_bot_items(
+        &mut self,
+        ws: &str,
+        from: &Bot,
+        target: &Bot,
+        actor: &str,
+        note: &str,
+    ) -> Result<Vec<String>> {
+        let mut moved = vec![];
+        for i in self
+            .db()
+            .items(ws)?
+            .into_iter()
+            .filter(|x| x.bot_id.as_deref() == Some(from.id.as_str()) && !x.is_closed())
+        {
+            self.db().timeline_add(&i.id, "steve", "sys", note, None)?;
+            moved.push(i.id.clone());
+            /* running items continue with the heir (a new session with a handoff); the rest just change hands */
+            if i.phase == crate::cycle::ACTIVE && !self.waits_on_user(Some(&i.id))? {
+                self.reassign(&i.id, &target.id, actor)?;
+                continue;
+            }
+            self.db()
+                .item_patch(&i.id, patch![bot_id: target.id.as_str()])?;
+            if let Some(s) = self.active_session(&i.id)? {
+                self.end_and_release(&s.id)?;
+            }
+        }
+        Ok(moved)
+    }
+
+    pub(crate) fn delete_bot(
+        &mut self,
+        id: &str,
+        to: &str,
+        actor: &str,
+        allowed_workspaces: &[String],
+    ) -> Result<Vec<String>> {
         let b = self
             .db()
             .bot(id)?
             .filter(|b| !b.main)
             .ok_or_else(|| msg(steve_i18n::t!("core.bot.main_undeletable")))?;
-        let target0 = self
+        let target = self
             .db()
             .bot(to)?
             .filter(|_| to != id)
             .ok_or_else(|| msg(steve_i18n::t!("core.bot.no_heir")))?;
-        let mut moved = vec![];
-        let mut heirs: Vec<(String, String)> = vec![];
-        for w in self.db().bot_workspaces(id)? {
-            /* the heir may not be in every workspace the bot served: there the main bot takes over */
-            let target = if self.db().bot_in_workspace(to, &w)? {
-                target0.clone()
-            } else {
-                self.db().main_bot()?
-            };
-            heirs.push((w.clone(), target.id.clone()));
-            for i in self
-                .db()
-                .items(&w)?
-                .into_iter()
-                .filter(|x| x.bot_id.as_deref() == Some(id) && !x.is_closed())
-            {
-                self.db().timeline_add(
-                    &i.id,
-                    "steve",
-                    "sys",
-                    &format!("{} Bot 已删除，交给 {}", b.name, target.display()),
-                    None,
-                )?;
-                moved.push(i.id.clone());
-                /* running items continue with the heir (a new session with a handoff); the rest just change hands */
-                if i.phase == crate::cycle::ACTIVE && !self.waits_on_user(Some(&i.id))? {
-                    self.reassign(&i.id, &target.id, actor)?;
-                    continue;
-                }
-                self.db()
-                    .item_patch(&i.id, patch![bot_id: target.id.as_str()])?;
-                if let Some(s) = self.active_session(&i.id)? {
-                    self.end_and_release(&s.id)?;
-                }
+        let wss = self.db().bot_workspaces(id)?;
+        if wss.iter().any(|w| !allowed_workspaces.contains(w)) {
+            return Err(CoreError::Contract(
+                steve_types::ConfigReason::bot_foreign_workspaces(
+                    "bot belongs to workspaces outside caller scope",
+                ),
+            ));
+        }
+        for w in &wss {
+            if !self.db().bot_in_workspace(to, w)? {
+                return Err(CoreError::Contract(
+                    steve_types::ConfigReason::bot_heir_outside_workspace(
+                        "handover bot must be a member of every affected workspace",
+                    ),
+                ));
             }
+        }
+        let mut moved = vec![];
+        let note = format!("{} Bot 已删除，交给 {}", b.name, target.display());
+        for w in &wss {
+            moved.extend(self.handoff_bot_items(w, &b, &target, actor, &note)?);
         }
         self.db().store().write(|w| -> Result<()> {
             steve_store::bots::remove(w, id)?;
             if let Some(m) = self.c.modules() {
                 let now = now();
-                for (ws, heir) in &heirs {
+                for ws in &wss {
                     m.registry
-                        .on_bot_deleted(w, ws, id, heir, now)
+                        .on_bot_deleted(w, ws, id, &target.id, now)
                         .map_err(|e| msg(e.to_string()))?;
                 }
             }
             steve_store::audit_repo::record(
                 w,
-                WS,
+                &b.workspace_id,
                 actor,
                 "bot.delete",
+                id,
+                &json!({"to": to, "moved": moved}),
+            )?;
+            Ok(())
+        })?;
+        Ok(moved)
+    }
+
+    pub(crate) fn remove_bot_from_workspace(
+        &mut self,
+        ws: &str,
+        id: &str,
+        to: &str,
+        actor: &str,
+    ) -> Result<Vec<String>> {
+        let b = self
+            .db()
+            .bot(id)?
+            .filter(|b| !b.main)
+            .ok_or_else(|| msg(steve_i18n::t!("core.bot.main_undeletable")))?;
+        if !self.db().bot_in_workspace(id, ws)? {
+            return Err(CoreError::Status(404, steve_i18n::t!("core.bot.no_heir")));
+        }
+        let target = self
+            .db()
+            .bot(to)?
+            .filter(|_| to != id)
+            .ok_or_else(|| msg(steve_i18n::t!("core.bot.no_heir")))?;
+        if !self.db().bot_in_workspace(to, ws)? {
+            return Err(CoreError::Contract(
+                steve_types::ConfigReason::bot_heir_outside_workspace(
+                    "handover bot must belong to the target workspace",
+                ),
+            ));
+        }
+        let note = format!("{} Bot 已移出本工作空间，交给 {}", b.name, target.display());
+        let moved = self.handoff_bot_items(ws, &b, &target, actor, &note)?;
+        self.db().store().write(|w| -> Result<()> {
+            steve_store::bots::remove_workspace(w, id, ws)?;
+            if let Some(m) = self.c.modules() {
+                m.registry
+                    .on_bot_deleted(w, ws, id, &target.id, now())
+                    .map_err(|e| msg(e.to_string()))?;
+            }
+            steve_store::audit_repo::record(
+                w,
+                ws,
+                actor,
+                "bot.remove_workspace",
                 id,
                 &json!({"to": to, "moved": moved}),
             )?;

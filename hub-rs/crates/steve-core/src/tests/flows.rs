@@ -1460,14 +1460,14 @@ fn deleting_a_bot_hands_its_items_over() {
     let k = Kit::new();
     assert_eq!(
         k.core
-            .delete_bot("steve", "dev", "me")
+            .delete_bot("steve", "dev", "me", &[WS.into()])
             .unwrap_err()
             .to_string(),
         "主 Bot 不能删除"
     );
     assert_eq!(
         k.core
-            .delete_bot("dev", "dev", "me")
+            .delete_bot("dev", "dev", "me", &[WS.into()])
             .unwrap_err()
             .to_string(),
         "没有接手的 Bot"
@@ -1495,7 +1495,10 @@ fn deleting_a_bot_hands_its_items_over() {
     k.core
         .item_action(&paused.id, ItemAction::Pause, "me")
         .unwrap();
-    let moved = k.core.delete_bot("dev", "steve", "me").unwrap();
+    let moved = k
+        .core
+        .delete_bot("dev", "steve", "me", &[WS.into()])
+        .unwrap();
     assert_eq!(moved.len(), 2);
     assert_eq!(
         last_session(&k, &running.id).bot_id.as_deref(),
@@ -1517,6 +1520,107 @@ fn deleting_a_bot_hands_its_items_over() {
     assert!(
         k.timeline_texts(&running.id)
             .contains(&"Steve 开发 Bot 已删除，交给 Steve".to_string())
+    );
+}
+
+#[test]
+fn removing_bot_from_one_workspace_preserves_other_workspaces_and_refuses_foreign_global_delete() {
+    let k = Kit::new();
+    let owner_id = k
+        .db()
+        .store()
+        .users()
+        .create("sub_owner", "Owner", None, "owner")
+        .unwrap();
+    let ws2 = k
+        .db()
+        .store()
+        .workspaces()
+        .create(
+            &steve_store::NewWorkspace {
+                name: "Second".into(),
+                ..Default::default()
+            },
+            &owner_id,
+        )
+        .unwrap()
+        .id;
+    let mut steve_wss = k.db().bot_workspaces("steve").unwrap();
+    steve_wss.push(ws2.clone());
+    k.db()
+        .store()
+        .bots()
+        .set_workspaces("steve", &steve_wss)
+        .unwrap();
+    k.db()
+        .store()
+        .bots()
+        .set_workspaces("dev", &[WS.to_string(), ws2.clone()])
+        .unwrap();
+
+    let item_ws1 = k
+        .core
+        .create_item(CreateItem {
+            ws: WS.into(),
+            goal: "g1".into(),
+            title: "x1".into(),
+            bot: Some("dev".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let item_ws2 = k
+        .core
+        .create_item(CreateItem {
+            ws: ws2.clone(),
+            goal: "g2".into(),
+            title: "x2".into(),
+            bot: Some("dev".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Global delete must refuse if allowed_workspaces does not cover every workspace of the bot.
+    let err = k
+        .core
+        .delete_bot("dev", "steve", "me", &[WS.to_string()])
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::CoreError::Contract(ref e)
+                if e.reason
+                    .as_ref()
+                    .is_some_and(|r| r.is(steve_types::ConfigReason::BotForeignWorkspaces))
+        ),
+        "unexpected err: {err:?}"
+    );
+
+    // Removing `dev` from `ws2` only hands over `item_ws2` and leaves `WS` untouched.
+    let moved = k
+        .core
+        .remove_bot_from_workspace(&ws2, "dev", "steve", "me")
+        .unwrap();
+    assert_eq!(moved, vec![item_ws2.id.clone()]);
+    assert!(k.db().bot("dev").unwrap().is_some());
+    assert!(!k.db().bot_in_workspace("dev", &ws2).unwrap());
+    assert!(k.db().bot_in_workspace("dev", WS).unwrap());
+    assert_eq!(
+        k.db()
+            .item(&item_ws1.id)
+            .unwrap()
+            .unwrap()
+            .bot_id
+            .as_deref(),
+        Some("dev")
+    );
+    assert_eq!(
+        k.db()
+            .item(&item_ws2.id)
+            .unwrap()
+            .unwrap()
+            .bot_id
+            .as_deref(),
+        Some("steve")
     );
 }
 
