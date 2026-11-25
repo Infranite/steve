@@ -283,6 +283,9 @@ pub(crate) fn open_draft_as(
             created: now,
         },
     )?;
+    if let Some(src) = t.source_message_id.as_deref() {
+        repo::incoming_reactions::record_reply_source(w, &id, src)?;
+    }
     let name = spaces::display_title(w, &space)?;
     let question = match (&persona, t.mode) {
         (Some(p), _) => format!("以{}发到「{name}」", p.name),

@@ -177,25 +177,27 @@ pub fn owned_party(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<Strin
     )
 }
 
-/// The earliest Open ID learned for a Feishu account.
-pub fn feishu_open_id(r: &mut impl Read, account: &str) -> Result<Option<String>> {
+/// The earliest handle of `account` matching `prefix` (an adapter-specific handle family prefix).
+pub fn scoped_handle(r: &mut impl Read, account: &str, prefix: &str) -> Result<Option<String>> {
     r.one(
-        feishu_handles(account)
+        handles_with_prefix(account, Some(prefix))
             .order_by("created", Order::Asc)
             .limit(1),
         |row| row.get(0),
     )
 }
 
-/// Prefer the Open ID the sending connection learned for this account.
-pub fn feishu_mention_handle(
+/// Prefer the handle learned through `connection` for mentioning `account` in a channel.
+/// When `prefix` is supplied by the channel adapter, only handles with that prefix are considered.
+pub fn connection_mention_handle(
     r: &mut impl Read,
     ws: &str,
     connection: &str,
     account: &str,
+    prefix: Option<&str>,
 ) -> Result<Option<String>> {
     r.one(
-        feishu_handles(account)
+        handles_with_prefix(account, prefix)
             .and_where(Expr::col("workspace_id").eq(ws))
             .order_by_expr(
                 Expr::case(Expr::col("connection_id").eq(connection), 2_i64)
@@ -210,13 +212,19 @@ pub fn feishu_mention_handle(
     )
 }
 
-fn feishu_handles(account: &str) -> sea_query::SelectStatement {
-    Query::select()
-        .column("handle")
+fn handles_with_prefix(account: &str, prefix: Option<&str>) -> sea_query::SelectStatement {
+    let mut q = Query::select();
+    q.column("handle")
         .from("account_handles")
-        .and_where(Expr::col("account_id").eq(account))
-        .and_where(Expr::col("handle").like(LikeExpr::new(r"ou\_%").escape('\\')))
-        .take()
+        .and_where(Expr::col("account_id").eq(account));
+    if let Some(prefix) = prefix {
+        let escaped = prefix
+            .replace('\\', r"\\")
+            .replace('%', r"\%")
+            .replace('_', r"\_");
+        q.and_where(Expr::col("handle").like(LikeExpr::new(format!("{escaped}%")).escape('\\')));
+    }
+    q.take()
 }
 
 pub(crate) fn app_bot_ids() -> SelectStatement {

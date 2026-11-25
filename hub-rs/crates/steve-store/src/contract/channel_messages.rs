@@ -11,6 +11,7 @@ pub mod duplicates;
 pub mod fixtures;
 pub mod handoffs;
 pub mod history;
+pub mod incoming_reactions;
 pub mod ingress;
 pub mod media;
 pub mod outbound;

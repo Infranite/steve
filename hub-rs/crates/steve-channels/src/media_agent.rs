@@ -28,9 +28,9 @@ pub trait MediaSource: Send + Sync {
 }
 
 /// Production source: the same bound, authenticated fetcher used by the resource HTTP endpoint.
-pub struct FeishuMediaSource;
+pub struct ChannelMediaSource;
 #[async_trait]
-impl MediaSource for FeishuMediaSource {
+impl MediaSource for ChannelMediaSource {
     async fn load(&self, ch: &Channels, plan: &Plan, index: usize) -> Result<Resource, String> {
         let fetched = crate::media::fetch_bound(
             ch,

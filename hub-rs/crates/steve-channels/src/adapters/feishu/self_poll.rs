@@ -723,7 +723,7 @@ fn facts(
     let enabled = matches!(source.status.as_str(), "ok" | "error")
         && source.caps.iter().any(|cap| cap == "msg.receive");
     let mut ids = Ids {
-        me_open_id: accounts::feishu_open_id(r, &source.account_id)?.unwrap_or_default(),
+        me_open_id: accounts::scoped_handle(r, &source.account_id, "ou_")?.unwrap_or_default(),
         ..Ids::default()
     };
     if let Some(app) = app_conn

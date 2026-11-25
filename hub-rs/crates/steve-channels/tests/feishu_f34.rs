@@ -636,7 +636,9 @@ async fn member_and_chat_events_over_the_long_connection() {
     let at = h
         .env
         .store()
-        .read(|r| steve_store::accounts::feishu_mention_handle(r, WS, &h.con, &alice))
+        .read(|r| {
+            steve_store::accounts::connection_mention_handle(r, WS, &h.con, &alice, Some("ou_"))
+        })
         .unwrap();
     assert_eq!(at.as_deref(), Some(ids::ALICE.open_id));
     lc.stop().await.unwrap();
@@ -734,7 +736,7 @@ async fn authenticated_provider_bytes_reach_the_channel_composer() {
         r#"{"outcome":"reply","text":"已读取附件","needs_approval":false,"why":"基于原件"}"#,
     );
     let composer = steve_channels::compose::Composer::new()
-        .media(Arc::new(steve_channels::media_agent::FeishuMediaSource));
+        .media(Arc::new(steve_channels::media_agent::ChannelMediaSource));
     composer
         .generate(
             &h.ch,

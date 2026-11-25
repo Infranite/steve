@@ -751,9 +751,11 @@ pub struct SpaceOut {
     /// Settings that are on but do not apply here, and why (屏蔽 > `/bot` >
     /// 不提醒 > role rules), so the page shows it next to the setting.
     pub conflicts: Vec<Conflict>,
-    /// The link that opens the chat in its platform's own client (“在飞书中打开”); `null` when its
-    /// platform has none ([`crate::open_link`]).
+    /// The link that opens the chat in its platform's own client; `null` when its platform has
+    /// none ([`crate::open_link`]).
     pub open_url: Option<String>,
+    /// Platform id owning [`Self::open_url`] (e.g. `feishu`).
+    pub open_provider: Option<String>,
 }
 
 /// [`SpaceOut::voice`].
@@ -1178,7 +1180,10 @@ pub fn out(r: &mut impl steve_store::Read, s: &SpaceRow) -> ChannelResult<SpaceO
         self_chat,
         suggest_quiet,
         conflicts,
-        open_url: crate::open_link::space_url(r, s)?,
+        open_url: crate::open_link::space_link(r, s)?
+            .as_ref()
+            .map(|l| l.url.clone()),
+        open_provider: crate::open_link::space_link(r, s)?.map(|l| l.provider),
     })
 }
 

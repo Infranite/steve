@@ -28,12 +28,15 @@ use super::ws::{self, WsError, WsHandle, WsHandler, WsOptions};
 use super::{chats, send};
 use crate::channel::{
     ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, Mention,
-    OutContent, ReactionKind, SendKey, Sender, Sent, SpaceEvent, SpaceInfo, SpaceKind,
+    OutContent, ReactionEvent, ReactionKind, ReactionOrigin, ReactionTimeSource, SendKey, Sender,
+    Sent, SpaceEvent, SpaceInfo, SpaceKind,
 };
 use crate::service::MessageSink;
 
 /// The message event this module maps; member and chat events are [`chats::parse_chat_event`]'s.
 pub const RECEIVE: &str = "im.message.receive_v1";
+pub const REACTION_CREATED: &str = "im.message.reaction.created_v1";
+pub const REACTION_DELETED: &str = "im.message.reaction.deleted_v1";
 /// `event_id`s remembered at most …
 pub const SEEN_MAX: usize = 10_000;
 /// … and for this long.
@@ -385,6 +388,7 @@ pub(crate) fn reparse(raw: &Value) -> Option<(String, Vec<Value>)> {
 /// Maps one `im.message.receive_v1` envelope (schema 2.0). `Ok(None)` for other event types;
 /// `Err` for a receive event without the fields every message has.
 pub fn parse_receive(env: &Value, bot_open_id: &str) -> Result<Option<InboundMessage>, String> {
+    super::register_platform();
     let header = &env["header"];
     if s(header, "event_type") != RECEIVE {
         return Ok(None);
@@ -503,6 +507,41 @@ impl SeenEvents {
 pub enum Queued {
     Message(Box<InboundMessage>),
     Space(SpaceEvent),
+    Reaction(ReactionEvent),
+}
+
+/// Parse a native Feishu reaction created/deleted event into a channel-neutral [`ReactionEvent`].
+/// Native Feishu identifies user vs app operators; user events carry [`ReactionOrigin::Unknown`]
+/// (which counts as owner-handled under Steve's policy), while app operators are [`ReactionOrigin::Automated`].
+pub fn parse_reaction(env: &Value) -> Option<ReactionEvent> {
+    let removed = match s(&env["header"], "event_type") {
+        REACTION_CREATED => false,
+        REACTION_DELETED => true,
+        _ => return None,
+    };
+    let e = &env["event"];
+    let (actor, origin) = match s(e, "operator_type") {
+        "user" => (handle_of(&e["user_id"], false)?, ReactionOrigin::Unknown),
+        "app" => (
+            HandleRef::new(APP_SYSTEM, opt(e, "app_id")?),
+            ReactionOrigin::Automated,
+        ),
+        _ => return None,
+    };
+    Some(ReactionEvent {
+        space_ext_id: opt(e, "chat_id"),
+        message_ext_id: Some(opt(e, "message_id")?),
+        message_source_id: None,
+        actor,
+        actor_name: None,
+        actor_is_bot: origin == ReactionOrigin::Automated,
+        origin,
+        emoji: opt(&e["reaction_type"], "emoji_type")?,
+        at: s(e, "action_time").parse::<i64>().ok().filter(|t| *t > 0)?,
+        time_source: ReactionTimeSource::Provider,
+        revision: None,
+        removed,
+    })
 }
 
 /// The ws handler of one bot connection.
@@ -577,13 +616,16 @@ impl FeishuInbound {
             Some(m) => ("message", Queued::Message(Box::new(m))),
             None => match chats::parse_chat_event(&env) {
                 Some(e) => ("space", Queued::Space(e)),
-                None => {
-                    if let Some((ch, ws, conn)) = &self.others {
-                        ch.other_event(ws, conn, &env);
+                None => match parse_reaction(&env) {
+                    Some(r) => ("reaction", Queued::Reaction(r)),
+                    None => {
+                        if let Some((ch, ws, conn)) = &self.others {
+                            ch.other_event(ws, conn, &env);
+                        }
+                        record_feishu_inbound("other", "ok", started.elapsed().as_secs_f64());
+                        return Ok(());
                     }
-                    record_feishu_inbound("other", "ok", started.elapsed().as_secs_f64());
-                    return Ok(());
-                }
+                },
             },
         };
         match self.queue.send(item) {
@@ -643,6 +685,11 @@ impl Queued {
         match self {
             Self::Message(m) => &m.space_ext_id,
             Self::Space(ev) => ev.space_ext_id(),
+            Self::Reaction(ev) => ev
+                .space_ext_id
+                .as_deref()
+                .or(ev.message_ext_id.as_deref())
+                .unwrap_or(""),
         }
     }
 }
@@ -719,6 +766,12 @@ async fn run_lane(
                 let ext = ev.space_ext_id().to_string();
                 if let Err(e) = sink.space_event(&ws, &conn, ev).await {
                     tracing::warn!(conn, space = ext, "feishu ws: space event failed: {e}");
+                }
+            }
+            Queued::Reaction(ev) => {
+                let msg = ev.message_ext_id.clone().unwrap_or_default();
+                if let Err(e) = sink.reaction(&ws, &conn, ev).await {
+                    tracing::warn!(conn, message = msg, "feishu ws: reaction failed: {e}");
                 }
             }
         }

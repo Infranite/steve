@@ -814,9 +814,13 @@ impl Channels {
         };
         let first = input.find_existing_message(self, w, space, &identity, &key)?;
         if let Some(written) = input.duplicate_message(w, &prepared, &identity, &trigger, first)? {
+            if !written.inbound.message_id.is_empty() {
+                crate::incoming_reactions::attach(w, ws, conn, &written.inbound.message_id)?;
+            }
             return Ok(written);
         }
         let message_id = input.insert_message(w, space, &identity, &key, mentions, &trigger)?;
+        crate::incoming_reactions::attach(w, ws, conn, &message_id)?;
         let type_key = input.message_type(w, space)?;
         let set = crate::spaces::settings(w, &space.id)?;
         let (sender_is_ours, from_owner, own) = input.settle_authorship(w, &identity)?;

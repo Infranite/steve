@@ -66,6 +66,9 @@ fn setup(personal: Option<&str>) -> H {
         .build(env.modules.clone(), Arc::new(LinearExecutor));
     let ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow))
         .adapter(fake.clone())
+        .links(Arc::new(
+            steve_channels::adapters::feishu::links::FeishuLinks,
+        ))
         .build();
     let api = api::routes(ch.clone()).with_state(env.modules.clone());
     let (con, _) =

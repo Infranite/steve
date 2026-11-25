@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::channel::{InboundMessage, SpaceEvent};
+use crate::channel::{InboundMessage, ReactionEvent, SpaceEvent};
 use crate::ext::ChannelDecl;
 use crate::inbound::Inbound;
 use crate::membership::SpaceChange;
@@ -146,6 +146,12 @@ impl ConnSink {
         self.open()?;
         self.channels.on_space_event(&self.ws, &self.conn, ev).await
     }
+
+    /// An incoming reaction creation or removal on a message.
+    pub async fn reaction(&self, ev: ReactionEvent) -> ChannelResult<()> {
+        self.open()?;
+        self.channels.on_reaction(&self.ws, &self.conn, ev)
+    }
 }
 
 /// As a [`MessageSink`] for code written against it: only for its own workspace and connection.
@@ -168,6 +174,13 @@ impl MessageSink for ConnSink {
             return Err(ChannelError::not_found("连接"));
         }
         ConnSink::space_event(self, ev).await
+    }
+
+    async fn reaction(&self, ws: &str, conn: &str, ev: ReactionEvent) -> ChannelResult<()> {
+        if ws != self.ws || conn != self.conn {
+            return Err(ChannelError::not_found("连接"));
+        }
+        ConnSink::reaction(self, ev).await
     }
 }
 

@@ -12,15 +12,17 @@ use steve_modules::accounts::connections::Connections;
 use steve_store::Store;
 
 use crate::ChannelResult;
-use crate::channel::{ChannelAdapter, InboundMessage, ProfileAdapter, SpaceEvent};
+use crate::channel::{ChannelAdapter, InboundMessage, ProfileAdapter, ReactionEvent, SpaceEvent};
 use crate::conversations::Thread;
 use crate::ext::ChannelDecl;
 use crate::inbound::Inbound;
 use crate::media::MediaFetch;
 use crate::membership::SpaceChange;
 use crate::names::Names;
+use crate::open_link::PlatformLinks;
 use crate::reactions::{AdapterReactor, Locks, Reactor};
 use crate::respond::{Fallback, Responder};
+use crate::syntax::PlatformSyntax;
 use steve_modules::contacts::PartyHooks;
 
 /// Shared state of the channel module. Cheap to clone.
@@ -98,9 +100,20 @@ pub struct ChannelsBuilder {
     connectors: BTreeMap<String, Arc<dyn crate::connector::ConnectorTools>>,
     decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
+    links: Vec<Arc<dyn PlatformLinks>>,
+    syntaxes: Vec<Arc<dyn PlatformSyntax>>,
 }
 
 impl ChannelsBuilder {
+    pub fn links(mut self, l: Arc<dyn PlatformLinks>) -> Self {
+        self.links.push(l);
+        self
+    }
+
+    pub fn syntax(mut self, s: Arc<dyn PlatformSyntax>) -> Self {
+        self.syntaxes.push(s);
+        self
+    }
     pub fn connector(mut self, c: Arc<dyn crate::connector::ConnectorTools>) -> Self {
         self.connectors.insert(c.adapter_id().to_string(), c);
         self
@@ -190,6 +203,12 @@ impl ChannelsBuilder {
         for m in self.media.values() {
             crate::media::publish(m);
         }
+        for l in self.links {
+            crate::open_link::register(l);
+        }
+        for s in self.syntaxes {
+            crate::syntax::register(s);
+        }
         // who can look people up, for the contact pages' “can be looked up” (by declared system)
         for id in self.profiles.keys() {
             if let Some(d) = self.decls.get(id) {
@@ -245,6 +264,8 @@ impl Channels {
             connectors: BTreeMap::new(),
             decls: BTreeMap::new(),
             party_hooks: vec![Arc::new(steve_modules::accounts::AccountHooks)],
+            links: Vec::new(),
+            syntaxes: Vec::new(),
         }
     }
 
@@ -411,6 +432,12 @@ pub trait MessageSink: Send + Sync {
         let _ = (ws, conn, ev);
         Ok(None)
     }
+
+    /// [`Channels::on_reaction`]. Sinks that only take messages ignore it.
+    async fn reaction(&self, ws: &str, conn: &str, ev: ReactionEvent) -> ChannelResult<()> {
+        let _ = (ws, conn, ev);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -427,5 +454,9 @@ impl MessageSink for Channels {
         ev: SpaceEvent,
     ) -> ChannelResult<Option<SpaceChange>> {
         self.on_space_event(ws, conn, ev).await
+    }
+
+    async fn reaction(&self, ws: &str, conn: &str, ev: ReactionEvent) -> ChannelResult<()> {
+        self.on_reaction(ws, conn, ev)
     }
 }

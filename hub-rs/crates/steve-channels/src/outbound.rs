@@ -55,7 +55,6 @@ use steve_store::base::DecisionKind;
 use steve_store::channel_message_repo::queue as queue_repo;
 use steve_store::{Decision, Item, NewDecision, W, uid};
 
-use crate::adapters::feishu::send::reply_in_thread;
 use crate::basis::{self, NewBasis, Rewrite};
 use crate::channel::{ActAsUser, ActTarget, MessageRef, OutContent, SendKey, Sent, SpaceKind};
 use crate::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Outbound, Purpose};
@@ -412,6 +411,9 @@ fn insert_out(w: &mut steve_store::W<'_>, n: &NewOut, now: i64) -> ChannelResult
             created: now,
         },
     )?;
+    if let Some(src) = n.t.source_message_id.as_deref() {
+        steve_store::channel_message_repo::incoming_reactions::record_reply_source(w, &id, src)?;
+    }
     Ok(id)
 }
 
@@ -1790,7 +1792,7 @@ fn prepare_send(ch: &Channels, row: &OutRow) -> ChannelResult<PreparedSend> {
         // a private chat has no threads to speak of: a quoting reply there
         let in_thread = match &trigger {
             Some(t) => t.reply == crate::rules::ReplyStyle::Thread && kind != SpaceKind::Dm,
-            None => reply_in_thread(kind, row.thread_key.as_deref()),
+            None => crate::syntax::reply_in_thread(&adapter, kind, row.thread_key.as_deref()),
         };
         // @ the person replied to in a group (bot accounts)
         let mut at = Vec::new();
@@ -1803,11 +1805,12 @@ fn prepare_send(ch: &Channels, row: &OutRow) -> ChannelResult<PreparedSend> {
                 reply_to,
             )?
             .filter(|sender| *sender != account)
-            && let Some(h) = steve_store::accounts::feishu_mention_handle(
+            && let Some(h) = steve_store::accounts::connection_mention_handle(
                 r,
                 &row.ws,
                 &space.connection_id,
                 &sender,
+                crate::syntax::mention_handle_prefix(&adapter),
             )?
         {
             at.push(h);

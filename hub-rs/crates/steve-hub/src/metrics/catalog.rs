@@ -1037,4 +1037,10 @@ pub(super) fn describe() {
         Count,
         "Actions refused at a security or tenant boundary. Labels: boundary, reason."
     );
+    // Channel reply pipeline (#258, #268, #275, #277, #278)
+    describe_counter!(
+        "steve_channel_incoming_reactions_total",
+        Count,
+        "Incoming channel reaction events processed. Labels: change (created, removed), origin (manual, automated, unknown), matched (yes, pending), superseded (yes, no)."
+    );
 }

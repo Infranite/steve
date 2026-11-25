@@ -354,36 +354,22 @@ fn emoji(c: char) -> bool {
         | 0xFE00..=0xFE0F | 0x200D | 0x20E3 | 0xE0020..=0xE007F)
 }
 
-/// Placeholders the adapters and the external channel write for a message that has no words: a
-/// sticker, a system message (someone joined, a call ended), a card with nothing readable, and the
-/// external channel's text for a message it could not render at all (when its raw form could not be
-/// read either, [`crate::adapters::ext_ws`]). Never the generic `[<类型>消息]` of a type the Feishu
-/// reader does not parse ([`crate::adapters::feishu::inbound::placeholder`]): a forwarded chat, a
-/// task, a shared chat or a location carry something to read.
+/// Generic placeholders for messages with no textual content: a sticker, a system message, an
+/// empty card, or an unsupported message placeholder. Platform-specific emoji names and wordless
+/// message types are checked via [`crate::syntax::is_wordless_token`].
 pub const WORDLESS_PLACEHOLDERS: [&str; 6] = [
     "[sticker]",
     crate::media::STICKER_NOTE,
     "[system message]",
     "[系统消息]",
-    crate::adapters::feishu::card::EMPTY,
+    "[卡片]",
     "[unsupported message]",
 ];
 
-/// A placeholder of something without words ([`WORDLESS_PLACEHOLDERS`], the Feishu reader's
-/// wordless message types) or one of the platform's emoji names
-/// ([`crate::adapters::feishu::emoji::is_emoji`]).
+/// A placeholder of something without words ([`WORDLESS_PLACEHOLDERS`] or a registered platform's
+/// wordless message types / emoji names via [`crate::syntax::is_wordless_token`]).
 fn wordless_token(t: &str) -> bool {
-    use crate::adapters::feishu::{emoji, inbound};
-    if WORDLESS_PLACEHOLDERS.contains(&t)
-        || inbound::WORDLESS_TYPES
-            .iter()
-            .any(|w| inbound::placeholder(w) == t)
-    {
-        return true;
-    }
-    t.strip_prefix('[')
-        .and_then(|t| t.strip_suffix(']'))
-        .is_some_and(emoji::is_emoji)
+    WORDLESS_PLACEHOLDERS.contains(&t) || crate::syntax::is_wordless_token(t)
 }
 
 /// An attachment without words: a sticker (as the Feishu reader stores it, `{"type": "file",
@@ -1088,6 +1074,7 @@ mod tests {
 
     #[test]
     fn what_has_no_words_to_answer() {
+        crate::adapters::feishu::register_platform();
         let none = json!([]);
         for t in [
             "",
@@ -1157,6 +1144,7 @@ mod tests {
 
     #[test]
     fn the_feishu_readers_own_shapes() {
+        crate::adapters::feishu::register_platform();
         use crate::adapters::feishu::inbound::parse_receive;
         let env = |ty: &str, content: &str| {
             let mut e = crate::fake::feishu::fixture("message_p2p_text").expect("fixture");

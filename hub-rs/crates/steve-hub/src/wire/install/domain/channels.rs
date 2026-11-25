@@ -52,6 +52,12 @@ install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, mod
     for d in declared.decls() {
         channels = channels.decl(d.clone());
     }
+    for l in &declared.links {
+        channels = channels.links(l.clone());
+    }
+    for s in &declared.syntaxes {
+        channels = channels.syntax(s.clone());
+    }
     let channels = channels
         .party_hooks(ports.hooks.clone())
         .flow(flow.clone())

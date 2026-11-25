@@ -55,8 +55,12 @@ async fn open_url(
 ) -> ApiResult<Json<Value>> {
     let v = viewer(&ch, &who)?;
     let ids = [id.clone()];
-    let mut urls = crate::open_link::message_urls(ch.store(), &v, &ids)?;
-    Ok(Json(json!({ "url": urls.remove(&id) })))
+    let mut links = crate::open_link::message_links(ch.store(), &v, &ids)?;
+    let link = links.remove(&id);
+    Ok(Json(json!({
+        "url": link.as_ref().map(|l| l.url.as_str()),
+        "provider": link.as_ref().map(|l| l.provider.as_str()),
+    })))
 }
 
 async fn authorization(
@@ -202,7 +206,7 @@ fn sender_name(
         Some(id) => steve_store::accounts::display_name(db, id)?,
         None => None,
     };
-    let visible_name = |n: &String| !n.trim().is_empty() && !n.starts_with("ou_");
+    let visible_name = |n: &String| !crate::context::raw_name(n);
     Ok(by_party
         .filter(visible_name)
         .or(by_account.filter(visible_name))

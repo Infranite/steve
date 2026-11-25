@@ -757,9 +757,9 @@ pub(crate) fn inbound(
 }
 
 /// A text the remote could not render (empty, or a bracketed placeholder such as
-/// `[unsupported message]`) read again from `raw` when that is a Feishu / Lark message as its message
-/// API or receive event gives it (§6): rich text and cards keep their words. Only a card's read-only
-/// `card` attachment comes along: media keys in `raw` are the platform's, not this protocol's (§8).
+/// `[unsupported message]`) read again from `raw` via registered platform syntax hooks (§6):
+/// rich text and cards keep their words. Only a card's read-only `card` attachment comes along:
+/// media keys in `raw` are the platform's, not this protocol's (§8).
 fn body_from_raw(text: &str, raw: &Value) -> Option<(String, Vec<Value>)> {
     let t = text.trim();
     let placeholder = t.is_empty()
@@ -767,7 +767,7 @@ fn body_from_raw(text: &str, raw: &Value) -> Option<(String, Vec<Value>)> {
     if !placeholder {
         return None;
     }
-    let (body, atts) = crate::adapters::feishu::inbound::reparse(raw)?;
+    let (body, atts) = crate::syntax::reparse_raw(raw)?;
     if body.trim().is_empty() {
         return None;
     }
@@ -1371,6 +1371,7 @@ mod tests {
     /// `raw` of another shape, is left alone.
     #[test]
     fn a_placeholder_is_read_again_from_a_feishu_raw() {
+        crate::adapters::feishu::register_platform();
         let post = json!({"msg_type": "post", "body": {"content": json!({"title": "周报", "content": [
             [{"tag": "text", "text": "本周完成迁移"}],
             [{"tag": "img", "image_key": "img_k"}]

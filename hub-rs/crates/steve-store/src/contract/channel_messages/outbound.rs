@@ -62,7 +62,28 @@ pub fn insert(w: &mut W<'_>, n: &NewMessage<'_>) -> Result<()> {
         Some(account) => super::super::channel_spaces::account_identity_mask(w, n.space, account)?,
         None => 0,
     };
-    insert_with_provenance(w, n, mask, None, None, None)
+    insert_with_provenance(w, n, mask, None, None, None, None)
+}
+
+pub fn set_burst_id(w: &mut W<'_>, id: &str, burst_id: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("chan_messages")
+            .value("burst_id", burst_id)
+            .and_where(Expr::col("id").eq(id)),
+    )?;
+    Ok(())
+}
+
+pub fn burst_id_of(r: &mut impl Read, id: &str) -> Result<Option<String>> {
+    Ok(r.one(
+        Query::select()
+            .column("burst_id")
+            .from("chan_messages")
+            .and_where(Expr::col("id").eq(id)),
+        |row| row.get::<Option<String>>(0),
+    )?
+    .flatten())
 }
 
 fn insert_with_provenance(
@@ -72,6 +93,7 @@ fn insert_with_provenance(
     basis_id: Option<&str>,
     composed: Option<&str>,
     answer_to: Option<&str>,
+    burst_id: Option<&str>,
 ) -> Result<()> {
     w.exec(
         Query::insert()
@@ -93,6 +115,7 @@ fn insert_with_provenance(
                 "basis_id",
                 "composed",
                 "answer_to",
+                "burst_id",
             ])
             .values_panic([
                 n.id.into(),
@@ -111,6 +134,7 @@ fn insert_with_provenance(
                 basis_id.into(),
                 composed.into(),
                 answer_to.into(),
+                burst_id.into(),
             ]),
     )?;
     digest::sync_message(w.conn, Source::ChanMessage, n.id, None)?;
@@ -130,6 +154,7 @@ struct RecoverySource {
     basis_id: Option<String>,
     composed: Option<String>,
     answer_to: Option<String>,
+    burst_id: Option<String>,
 }
 
 /// A rewritten payload must have a fresh id. Copy its basis and composer provenance with it.
@@ -150,6 +175,7 @@ pub fn copy_for_recovery(w: &mut W<'_>, id: &str, next: &str, now: i64) -> Resul
                     "basis_id",
                     "composed",
                     "answer_to",
+                    "burst_id",
                 ])
                 .from("chan_messages")
                 .and_where(Expr::col("id").eq(id))
@@ -168,6 +194,7 @@ pub fn copy_for_recovery(w: &mut W<'_>, id: &str, next: &str, now: i64) -> Resul
                     basis_id: r.get(9)?,
                     composed: r.get(10)?,
                     answer_to: r.get(11)?,
+                    burst_id: r.get(12)?,
                 })
             },
         )?
@@ -191,7 +218,9 @@ pub fn copy_for_recovery(w: &mut W<'_>, id: &str, next: &str, now: i64) -> Resul
         source.basis_id.as_deref(),
         source.composed.as_deref(),
         source.answer_to.as_deref(),
-    )
+        source.burst_id.as_deref(),
+    )?;
+    super::incoming_reactions::copy_reply_source(w, id, next)
 }
 
 /// One outbound `chan_messages` row as the sender needs it.
@@ -280,6 +309,11 @@ pub fn draft_source(r: &mut impl Read, row: &OutRow) -> Result<Option<String>> {
         .from("chan_messages")
         .and_where(Expr::col("id").eq(row.id.as_str()))
         .take();
+    let reply_src = Query::select()
+        .column("source_message_id")
+        .from("chan_reply_sources")
+        .and_where(Expr::col("out_message_id").eq(row.id.as_str()))
+        .take();
     let delivery = Query::select()
         .column("source_message_id")
         .from("output_deliveries")
@@ -296,6 +330,7 @@ pub fn draft_source(r: &mut impl Read, row: &OutRow) -> Result<Option<String>> {
             .and_where(
                 Expr::col("id")
                     .in_subquery(answer)
+                    .or(Expr::col("id").in_subquery(reply_src))
                     .or(Expr::col("id").in_subquery(delivery))
                     .or(Expr::col("external_id").eq(row.reply_to.as_deref())),
             )

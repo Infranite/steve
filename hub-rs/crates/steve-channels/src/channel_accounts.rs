@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use steve_modules::{ApiError, Check};
 use steve_store::base::Viewer;
 
-use crate::adapters::feishu;
 use crate::bindings::{self, PersonaRef};
 use crate::channel::ChannelFeatures;
 use crate::ext::{ChannelDecl, Receive};
@@ -130,21 +129,20 @@ fn features_of(ch: &Channels, adapter: &str) -> ChannelFeatures {
         .unwrap_or_default()
 }
 
-/// The channel providers: Feishu always (installed or not), then every provider with a declared
-/// channel side or a channel adapter. A provider is installed when one of its sides has a channel
-/// adapter and a connection provider; its features are that side's.
+/// The channel providers: every provider with a declared channel side, a channel adapter, or a
+/// connection provider supporting `msg.receive`. A provider is installed when one of its sides has
+/// a channel adapter (or act-as-user side) and a connection provider; its features are that side's.
 pub fn providers(ch: &Channels) -> Vec<ProviderOut> {
-    let mut out = vec![ProviderOut {
-        system: feishu::auth::PROVIDER.into(),
-        name: feishu::auth::PROVIDER_NAME.into(),
-        features: ChannelFeatures::default(),
-        adapter_installed: false,
-        sides: Vec::new(),
-    }];
+    let mut out: Vec<ProviderOut> = Vec::new();
     let mut ids: Vec<String> = ch.decls().map(|d| d.adapter.clone()).collect();
     for a in ch.adapters() {
         if !ids.iter().any(|x| x == a.id()) {
             ids.push(a.id().to_string());
+        }
+    }
+    for p in ch.connections().providers() {
+        if p.caps().contains(&"msg.receive") && !ids.iter().any(|x| x == p.id()) {
+            ids.push(p.id().to_string());
         }
     }
     for id in ids {
@@ -667,6 +665,7 @@ pub fn patch(
         revision,
         card_ttl_h: p.card_ttl_h,
         late_ms: p.late_minutes.map(|m| m * 60_000),
+        ai_mark: None,
     };
     steve_store::channel_spaces::account_settings::patch(tx, conn, &fields_patch, now)?;
     let snap = |persona: &Option<String>,

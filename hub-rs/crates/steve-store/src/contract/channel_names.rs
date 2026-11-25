@@ -52,54 +52,91 @@ pub fn direct_names(r: &mut impl Read, ws: &str) -> Result<Vec<DirectName>> {
     )
 }
 
-pub struct TenantEvidence {
-    pub account: String,
-    pub tenant: Option<String>,
+pub struct RawEventEvidence {
+    pub sender_account: Option<String>,
+    pub sender_party: Option<String>,
+    pub sender_actor: Option<String>,
+    pub sender_unlinked_human: bool,
     pub space: String,
+    pub payload: serde_json::Value,
+}
+
+/// Stored raw channel event payloads for adapter-side organization/tenant extraction.
+pub fn raw_event_evidence(r: &mut impl Read, ws: &str) -> Result<Vec<RawEventEvidence>> {
+    workspace_rows(
+        r,
+        ws,
+        "SELECT m.sender_account_id, p.id, p.created_by,
+                (a.id IS NOT NULL
+                 AND a.kind NOT IN ('bot', 'app_bot')
+                 AND coalesce(p.contact_kind, '') <> 'bot'
+                 AND NOT EXISTS (SELECT 1 FROM links l WHERE l.subject_id = a.party_id
+                                  AND l.predicate = 'works_at' AND l.workspace_id = ?1)),
+                s.name, e.payload
+           FROM chan_messages m
+           JOIN ext_events e ON e.id = m.event_id
+           JOIN spaces s ON s.id = m.space_id
+           LEFT JOIN accounts a ON a.id = m.sender_account_id
+           LEFT JOIN parties p ON p.id = a.party_id
+          WHERE m.workspace_id = ?1 AND m.direction = 'in' AND e.payload IS NOT NULL
+          ORDER BY m.created DESC",
+        |row| {
+            Ok(RawEventEvidence {
+                sender_account: row.get(0)?,
+                sender_party: row.get(1)?,
+                sender_actor: row.get(2)?,
+                sender_unlinked_human: row.get::<i64>(3)? != 0,
+                space: row.get(4)?,
+                payload: row
+                    .get::<Option<String>>(5)?
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
+            })
+        },
+    )
+}
+
+pub struct UnlinkedHandleAccount {
+    pub handle: String,
+    pub account: String,
     pub party: String,
     pub actor: Option<String>,
 }
 
-pub fn sender_tenants(r: &mut impl Read, ws: &str) -> Result<Vec<TenantEvidence>> {
-    let rows = workspace_rows(r, ws, "SELECT m.sender_account_id,
-                coalesce(json_extract(e.payload, '$.raw.event.sender.tenant_key'), json_extract(e.payload, '$.raw.sender.tenant_key')),
-                coalesce(json_extract(e.payload, '$.raw.event.sender.sender_type'), json_extract(e.payload, '$.raw.sender.sender_type')),
-                s.name, p.id, p.created_by
-           FROM chan_messages m JOIN ext_events e ON e.id = m.event_id JOIN spaces s ON s.id = m.space_id
-           JOIN accounts a ON a.id = m.sender_account_id JOIN parties p ON p.id = a.party_id
-          WHERE m.workspace_id = ?1 AND m.direction = 'in' AND e.payload IS NOT NULL
-            AND a.kind NOT IN ('bot', 'app_bot') AND coalesce(p.contact_kind, '') <> 'bot'
+/// Human accounts with no `works_at` link yet, indexed by handle for adapter-extracted mentions.
+pub fn unlinked_handle_accounts(
+    r: &mut impl Read,
+    ws: &str,
+    handles: &[String],
+) -> Result<Vec<UnlinkedHandleAccount>> {
+    if handles.is_empty() {
+        return Ok(Vec::new());
+    }
+    let json_handles = serde_json::to_string(handles)?;
+    let mut rows = Vec::new();
+    r.db().query(
+        "SELECT h.handle, h.account_id, p.id, p.created_by
+           FROM account_handles h
+           JOIN accounts a ON a.id = h.account_id
+           JOIN parties p ON p.id = a.party_id
+          WHERE h.workspace_id = ?1
+            AND h.handle IN (SELECT value FROM json_each(?2))
+            AND a.kind NOT IN ('bot', 'app_bot')
+            AND coalesce(p.contact_kind, '') <> 'bot'
             AND NOT EXISTS (SELECT 1 FROM links l WHERE l.subject_id = a.party_id
-                             AND l.predicate = 'works_at' AND l.workspace_id = ?1)
-          ORDER BY m.created DESC", |row| Ok((
-        row.get::<Option<String>>(2)?,
-        TenantEvidence {
-            account: row.get(0)?, tenant: row.get(1)?, space: row.get(3)?,
-            party: row.get(4)?, actor: row.get(5)?,
-        }
-    )))?;
-    Ok(rows
-        .into_iter()
-        .filter(|(kind, _)| kind.as_deref() != Some("app"))
-        .map(|(_, row)| row)
-        .collect())
-}
-
-pub fn mentioned_tenants(r: &mut impl Read, ws: &str) -> Result<Vec<TenantEvidence>> {
-    workspace_rows(r, ws, "SELECT h.account_id, json_extract(j.value, '$.tenant_key'), s.name, p.id, p.created_by
-           FROM chan_messages m JOIN ext_events e ON e.id = m.event_id JOIN spaces s ON s.id = m.space_id,
-                json_each(coalesce(json_extract(e.payload, '$.raw.event.message.mentions'), json_extract(e.payload, '$.raw.mentions'), '[]')) j
-           JOIN account_handles h ON h.workspace_id = m.workspace_id
-            AND h.handle = coalesce(json_extract(j.value, '$.id.open_id'), json_extract(j.value, '$.id'))
-           JOIN accounts a ON a.id = h.account_id JOIN parties p ON p.id = a.party_id
-          WHERE m.workspace_id = ?1 AND e.payload IS NOT NULL AND json_type(j.value, '$.id') IS NOT NULL
-            AND a.kind NOT IN ('bot', 'app_bot') AND coalesce(p.contact_kind, '') <> 'bot'
-            AND NOT EXISTS (SELECT 1 FROM links l WHERE l.subject_id = a.party_id
-                             AND l.predicate = 'works_at' AND l.workspace_id = ?1)
-          ORDER BY m.created DESC", |row| Ok(TenantEvidence {
-        account: row.get(0)?, tenant: row.get(1)?, space: row.get(2)?,
-        party: row.get(3)?, actor: row.get(4)?,
-    }))
+                             AND l.predicate = 'works_at' AND l.workspace_id = ?1)",
+        &Values(vec![ws.into(), json_handles.into()]),
+        &mut |row| {
+            rows.push(UnlinkedHandleAccount {
+                handle: row.get(0)?,
+                account: row.get(1)?,
+                party: row.get(2)?,
+                actor: row.get(3)?,
+            });
+            Ok(())
+        },
+    )?;
+    Ok(rows)
 }
 
 pub struct SeenSpace {
