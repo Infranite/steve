@@ -615,6 +615,9 @@ pub(crate) fn merge(
         h.efforts.clear();
         return h;
     }
+    if let Some(caps) = &adapter.capabilities {
+        h.effort_mode = caps.effort_mode;
+    }
     if let Some(o) = &adapter.session {
         h.modes = Some(o.modes.clone());
         h.models = o
@@ -624,12 +627,14 @@ pub(crate) fn merge(
                 id: m.id.clone(),
                 name: m.name.clone(),
                 description: m.description.clone(),
+                efforts: m.efforts.clone(),
             })
             .collect();
         h.default_model = o.default_model.clone();
         // An answered, empty list is authoritative too: fallback efforts must not make an
         // adapter that offers no reasoning control appear to accept one.
         h.efforts = o.efforts.clone();
+        h.variant_models = o.variant_models.clone();
     }
     h
 }
@@ -692,10 +697,12 @@ pub(crate) async fn ready_locally(harnesses: &[&str], models: &[&str]) -> Arc<Hu
                             id: m.to_string(),
                             name: None,
                             description: None,
+                            efforts: None,
                         })
                         .collect(),
                     default_model: Some("default".into()),
                     efforts: vec![],
+                    variant_models: vec![],
                 }),
                 session_error: None,
                 session_auth_required: None,
@@ -888,9 +895,11 @@ mod tests {
                 id: "m-1".into(),
                 name: Some("One".into()),
                 description: None,
+                efforts: None,
             }],
             default_model: Some("m-1".into()),
             efforts: vec!["low".into()],
+            variant_models: vec![],
         };
         let h = merge("mine", None, Some(&reported("mine", Some(offer))));
         assert_eq!(h.name, "Mine (adapter)");
@@ -921,6 +930,7 @@ mod tests {
             models: vec![],
             default_model: None,
             efforts: vec![],
+            variant_models: vec![],
         };
         let h = merge(
             "claude-code",
@@ -1018,9 +1028,11 @@ mod tests {
                 id: model.into(),
                 name: None,
                 description: None,
+                efforts: None,
             }],
             default_model: Some(model.into()),
             efforts: vec![],
+            variant_models: vec![],
         };
         hs.update(vec![reported("claude-code", Some(offer("local-model")))])
             .await;
@@ -1086,10 +1098,12 @@ mod tests {
                     id: id.into(),
                     name: None,
                     description: None,
+                    efforts: None,
                 })
                 .collect(),
             default_model: Some("default".into()),
             efforts: vec![],
+            variant_models: vec![],
         };
         hs.update(vec![reported("claude-code", Some(offer))]).await;
         assert_eq!(

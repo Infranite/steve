@@ -390,7 +390,7 @@ impl OneModel for ScriptedOneModel {
         &self,
         _call: &OneCall<'_>,
         _model: &str,
-        _effort: Option<&str>,
+        _effort: Option<steve_types::ReasoningEffort>,
         _on_text: Option<crate::gateway::OnText<'_>>,
     ) -> Tried {
         self.calls.fetch_add(1, Ordering::SeqCst);

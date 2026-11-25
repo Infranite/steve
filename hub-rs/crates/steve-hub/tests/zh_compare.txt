@@ -256,7 +256,7 @@ steve-core/src/changes.rs	"需要你验收"	1
 steve-core/src/changes.rs	"项目"	2
 steve-core/src/changes.rs	"领域"	2
 steve-core/src/changes.rs	"高"	1
-steve-core/src/changes.rs	"默认"	3
+steve-core/src/changes.rs	"默认"	2
 steve-core/src/changes.rs	"（值："	1
 steve-core/src/changes.rs	"（空）"	2
 steve-core/src/changes.rs	"（追加）"	1

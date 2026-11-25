@@ -1572,7 +1572,10 @@ impl Actor {
                 for fact in config {
                     match fact {
                         Fact::Model(model) => row.view.effective.model = Some(model.clone()),
-                        Fact::Effort(effort) => row.view.effective.effort = Some(effort.clone()),
+                        Fact::Effort(effort) => {
+                            let canonical = steve_harness_spec::reverse_map_native(effort, &[]);
+                            row.view.effective.effort = Some(canonical);
+                        }
                         _ => {}
                     }
                 }
@@ -2800,7 +2803,14 @@ async fn open_harness(
     let pgid = conn.pid() as i64;
     let started = registered_start;
     #[derive(Default)]
-    struct Seen(std::sync::Mutex<(Option<String>, Option<String>, Option<String>)>);
+    struct Seen(
+        std::sync::Mutex<(
+            Option<String>,
+            Option<String>,
+            Option<ReasoningEffort>,
+            Option<EffortMapping>,
+        )>,
+    );
     impl Reports for Seen {
         fn new_session(&self, acp_id: &str) {
             self.0.lock().unwrap().0 = Some(acp_id.into());
@@ -2808,8 +2818,11 @@ async fn open_harness(
         fn model(&self, m: &str) {
             self.0.lock().unwrap().1 = Some(m.into());
         }
-        fn effort(&self, e: &str) {
-            self.0.lock().unwrap().2 = Some(e.into());
+        fn effort(&self, e: ReasoningEffort) {
+            self.0.lock().unwrap().2 = Some(e);
+        }
+        fn effort_mapping(&self, m: &EffortMapping) {
+            self.0.lock().unwrap().3 = Some(m.clone());
         }
     }
     let seen = Seen::default();
@@ -2826,6 +2839,7 @@ async fn open_harness(
             .acp
             .session_meta_with_mode(&harness, false, Some(row.open.policy.permissions));
     let mcp_servers = crate::mcp_servers(inner, session);
+    let effort_mode = adapter_props.effort_mode;
     let acp_system_prompt = match (system_context, adapter_props.append_system_context.as_ref()) {
         (Some(ctx), Some(steve_harness_spec::AppendSystemContext::AcpSystemPrompt)) => {
             Some(acp_session::SystemPrompt {
@@ -2851,7 +2865,8 @@ async fn open_harness(
             mcp_servers,
             mode,
             model: row.open.choice.model.as_deref(),
-            effort: row.open.choice.effort.as_deref(),
+            effort: row.open.choice.effective_effort(),
+            effort_mode,
             system_prompt: acp_system_prompt,
         },
         meta,
@@ -2875,7 +2890,7 @@ async fn open_harness(
         }
     };
     session_routes.lock().unwrap().root = Some(opened.acp_id.clone());
-    let (new_id, model, effort) = seen.0.into_inner().unwrap();
+    let (new_id, model, effort, effort_mapping) = seen.0.into_inner().unwrap();
     // Tasks return candidates only. The actor commits them against its operation/attempt fence.
     let mut view = row.view;
     view.effective = row.open.choice;
@@ -2885,6 +2900,7 @@ async fn open_harness(
     if effort.is_some() {
         view.effective.effort = effort;
     }
+    view.effort_mapping = effort_mapping.or(opened.effort_mapping);
     view.effective_permissions = row.open.policy.permissions;
     view.resume = new_id
         .or(Some(opened.acp_id.clone()))

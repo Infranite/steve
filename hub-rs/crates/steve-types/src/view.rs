@@ -268,9 +268,12 @@ pub struct SessionView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "ReasoningEffort::is_default")]
+    #[cfg_attr(test, ts(as = "Option<ReasoningEffort>", optional))]
+    pub reasoning_effort: ReasoningEffort,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
-    pub reasoning_effort: Option<String>,
+    pub effort_mapping: Option<EffortMapping>,
     pub cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]

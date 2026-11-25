@@ -105,7 +105,7 @@ export default {
       retryHint: "Resends the original message and attachments. Operations already completed may run again.",
     },
     cat: { title: "Models", desc: "Which harness and model Steve judges with, and defaults for new conversations" },
-    effort: { none: "off", off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "very high", max: "max", ultra: "ultra" },
+    effort: { default: "default", low: "low", medium: "medium", high: "high", max: "max" },
     followModel: "Model default",
     defaultModel: "Default model",
     thinking: "thinking {{effort}}",

@@ -23,7 +23,7 @@ pub(crate) struct DispatchRequest<'a> {
     /// Optional model override (for handoff model switching); `None` uses Bot/workspace default for the chosen runtime.
     pub model: Option<&'a str>,
     /// Optional reasoning effort override (for handoff execution-surface switching).
-    pub effort: Option<&'a str>,
+    pub effort: Option<steve_types::ReasoningEffort>,
     pub team: Option<&'a Team>,
     pub project: &'a Option<Option<String>>,
     pub goal: &'a str,
@@ -248,6 +248,7 @@ fn select_inner(
         bot: Some(best.bot.id.clone().into()),
         reason,
     }));
+    let reasoning_effort = best.choice.effective_effort();
     Ok((
         BotPlacement {
             rule_version: RULE_VERSION,
@@ -258,7 +259,7 @@ fn select_inner(
             node_priority: best.priority,
             harness: best.choice.harness,
             model: best.choice.model,
-            reasoning_effort: best.choice.effort,
+            reasoning_effort,
             explanation: PlacementExplanation {
                 bot: best.bot.id.into(),
                 reason,
@@ -313,6 +314,7 @@ pub(crate) fn select_coordinator(
         bot: Some(best.bot.id.clone().into()),
         reason,
     }));
+    let reasoning_effort = best.choice.effective_effort();
     Ok((
         BotPlacement {
             rule_version: RULE_VERSION,
@@ -323,7 +325,7 @@ pub(crate) fn select_coordinator(
             node_priority: best.priority,
             harness: best.choice.harness,
             model: best.choice.model,
-            reasoning_effort: best.choice.effort,
+            reasoning_effort,
             explanation: PlacementExplanation {
                 bot: best.bot.id.into(),
                 reason: PlacementReason::CoordinatorDeferred,
@@ -388,8 +390,8 @@ fn candidate(
         .or_else(|| default_model(runtime_id));
     let effort = req
         .effort
-        .map(str::to_owned)
-        .or_else(|| same_runtime.then(|| bot.reasoning_effort.clone()).flatten());
+        .or_else(|| same_runtime.then_some(bot.reasoning_effort))
+        .and_then(steve_types::ReasoningEffort::non_default);
     let choice = HarnessChoice {
         harness: runtime_id.to_string(),
         model,

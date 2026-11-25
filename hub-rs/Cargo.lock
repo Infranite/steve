@@ -5612,6 +5612,7 @@ dependencies = [
  "chrono",
  "httpdate",
  "libc",
+ "metrics",
  "regex",
  "rust-i18n",
  "serde",

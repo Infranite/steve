@@ -20,9 +20,10 @@ import {
 } from "@/api/models"
 import { st, toast, useStore, useRuntimes } from "@/store"
 import { Row, Segmented, Panel, Section, Card, Blank, Notice, Pill, Chevron, Loading, Reveal, Turn } from "@/ui"
-import { Select } from "@/view-shared"
 import { Robot } from "@/robot"
 import { ModelPicker, harnessName } from "@/model-picker"
+import { CANONICAL_EFFORTS, EffortPicker, normalizeEffort } from "@/effort-picker"
+import type { ReasoningEffort } from "@/gen"
 import { HarnessMark } from "@/components/harness-mark"
 import { SteveModelControl } from "@/steve-model"
 import { RuntimeAvailability, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
@@ -36,8 +37,8 @@ export const MODELS_CAT = Object.defineProperties(["models", "", CpuIcon, ""], {
 
 /** the name of a model without its provider path or family prefix: `claude/claude-haiku-5-5` → `haiku-5-5` */
 const short = (m: string) => m.replace(/^.*\//, "").replace(/^claude-/, "")
-const EFFORTS = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const
-const effortName = (e?: string | null) => !e ? tr("pages:models.followModel") : (EFFORTS as readonly string[]).includes(e) ? tr(`pages:models.effort.${e as (typeof EFFORTS)[number]}`) : e
+const effortName = (e?: ReasoningEffort | null) => !e || e === "default" ? tr("pages:models.followModel") : (CANONICAL_EFFORTS as readonly string[]).includes(e) ? tr(`pages:models.effort.${e}`) : e
+const hasExplicitEffort = (e?: ReasoningEffort | null): e is Exclude<ReasoningEffort, "default"> => !!e && e !== "default"
 const defaultModel = () => tr("pages:models.defaultModel")
 const listOf = (xs: string[]) => xs.join(tr("pages:listSep"))
 /** `Claude Code · claude-haiku-5-5 → claude-sonnet-5-5 · 思考高` */
@@ -47,7 +48,7 @@ export function ChoiceLine({ c, className, wrap }: { c: Choice; className?: stri
       <span className="font-medium text-foreground">{harnessName(c.harness)}</span>
       <span className="text-muted-foreground"> · </span>
       <span className="type-code text-foreground/85">{c.models.length ? c.models.join(" → ") : defaultModel()}</span>
-      {c.effort && <span className="text-muted-foreground"> · {tr("pages:models.thinking", { effort: effortName(c.effort) })}</span>}
+      {hasExplicitEffort(c.effort) && <span className="text-muted-foreground"> · {tr("pages:models.thinking", { effort: effortName(c.effort) })}</span>}
     </span>
   )
 }
@@ -56,11 +57,11 @@ function Brief({ c }: { c: Choice }) {
   return (
     <span className="block min-w-0 truncate" data-brief title={`${harnessName(c.harness)} · ${c.models.join(" → ") || defaultModel()}`}>
       {harnessName(c.harness)} · <span className="type-code">{c.models[0] ? short(c.models[0]) : defaultModel()}</span>
-      {c.models.length > 1 && ` · ${tr("pages:models.backups", { count: c.models.length - 1 })}`}{c.effort && ` · ${tr("pages:models.thinking", { effort: effortName(c.effort) })}`}
+      {c.models.length > 1 && ` · ${tr("pages:models.backups", { count: c.models.length - 1 })}`}{hasExplicitEffort(c.effort) && ` · ${tr("pages:models.thinking", { effort: effortName(c.effort) })}`}
     </span>
   )
 }
-const same = (a: Choice | null, b: Choice | null) => !!a && !!b && a.harness === b.harness && a.models.join() === b.models.join() && (a.effort ?? null) === (b.effort ?? null)
+const same = (a: Choice | null, b: Choice | null) => !!a && !!b && a.harness === b.harness && a.models.join() === b.models.join() && (hasExplicitEffort(a.effort) ? a.effort : null) === (hasExplicitEffort(b.effort) ? b.effort : null)
 const ago = (t: number) => fmtAgo(t, { justNow: false })
 const failedOf = (p: Purpose) => p.recent?.used.reduce((n, u) => n + u.failed, 0) ?? 0
 const callsOf = (p: Purpose) => p.recent?.used.reduce((n, u) => n + u.calls, 0) ?? 0
@@ -220,29 +221,26 @@ function Editor({ p, v, steve, roleDefault, startOwn, onSave, onCancel }: { p: P
   const t = useT()
   const initRawHarness = p.value?.harness ?? roleDefault.harness
   const initHarness = v.harnesses.some((x) => x.id === initRawHarness) ? initRawHarness : (v.harnesses.find((x) => x.id === steve.harness) ?? v.harnesses[0])?.id ?? initRawHarness
-  const initH = v.harnesses.find((x) => x.id === initHarness)
-  const initRawEffort = initHarness === initRawHarness ? (p.value?.effort ?? "") : ""
-  const initEffort = initRawEffort && initH && (initH.efforts.length === 0 ? false : initH.efforts.some((e) => e.key === initRawEffort)) ? initRawEffort : ""
+  const initEffort: ReasoningEffort = initHarness === initRawHarness ? normalizeEffort(p.value?.effort) : "default"
   const [mode, setMode] = useState<"follow" | "own">(!p.follows || startOwn ? "own" : "follow")
   const [harness, setHarness] = useState(initHarness)
   const [list, setList] = useState<string[]>(initHarness === initRawHarness ? (p.value?.models ?? (p.role === "lightweight" ? roleDefault.models : [])) : [])
-  const [effort, setEffort] = useState<string>(initEffort)
+  const [effort, setEffort] = useState<ReasoningEffort>(initEffort)
   const [adv, setAdv] = useState(false)
   const [busy, setBusy] = useState(false)
   const h = v.harnesses.find((x) => x.id === harness)
   const onSteve = harness === steve.harness
-  const switchHarness = (x: string) => { setHarness(x); setEffort(""); setList([]) }
+  const switchHarness = (x: string) => { setHarness(x); setList([]) }
   const primary = list[0] ?? ""
   const backups = list.slice(1)
   const setPrimary = (m: string) => setList(m ? [m, ...backups.filter((x) => x !== m)] : [])
   const move = (i: number, d: number) => { const n = [...backups]; const [x] = n.splice(i, 1); n.splice(i + d, 0, x); setList([primary, ...n]) }
-  const next: Choice | null = mode === "follow" ? null : { harness, models: list, effort: effort || null }
+  const next: Choice | null = mode === "follow" ? null : { harness, models: list, effort: effort === "default" ? null : effort }
   const dirty = mode === "follow" ? !p.follows : p.follows || !same(next, p.value)
   const run = async (c: Choice | null, ok: string) => { setBusy(true); await onSave(c, ok); setBusy(false) }
   const inherited = onSteve ? t("pages:models.editor.inheritSteve", { model: steve.models[0] ?? defaultModel() }) : t("pages:models.editor.inheritHarness", { harness: harnessName(harness), model: h?.default_models[0] ?? t("pages:models.editor.itsOwn") })
-
-
-  const effortOpts = [{ v: "default", l: onSteve && steve.effort ? t("pages:models.editor.followDefaultEffort", { effort: effortName(steve.effort) }) : t("pages:models.followModel") }, ...(h?.efforts ?? []).map((e) => ({ v: e.key, l: e.label })), ...(effort && !(h?.efforts ?? []).some((e) => e.key === effort) ? [{ v: effort, l: effortName(effort) }] : [])]
+  const effectiveModel = primary || (onSteve ? steve.models[0] : h?.default_models[0]) || null
+  const defaultEffortLabel = onSteve && hasExplicitEffort(steve.effort) ? t("pages:models.editor.followDefaultEffort", { effort: effortName(steve.effort) }) : t("pages:models.followModel")
   return (
     <div className="flex min-h-full flex-col" data-models-editor={p.key}>
       <SheetHeader className="gap-1 px-5 pb-4 pt-5 pr-14">
@@ -260,8 +258,7 @@ function Editor({ p, v, steve, roleDefault, startOwn, onSave, onCancel }: { p: P
           <Field id="Harness" label="Harness"><RuntimeSelect value={harness} testId={`harness-${p.key}`} onChange={switchHarness} eligible={v.harnesses.map(x => x.id)} /><RuntimeSetupLink /></Field>
           <RuntimeAvailability harness={harness} />
           <Field id="model" label={t("pages:models.editor.model")}><ModelPicker harness={harness} value={primary} allowDefault defaultLabel={inherited} testId={`model-${p.key}`} onChange={setPrimary} /></Field>
-          <Field id="effort" label={t("pages:models.editor.effort")}><Select className="w-full" value={effort || "default"} testId={`effort-${p.key}`} onChange={(x) => setEffort(x === "default" ? "" : x)}
-            options={effortOpts} /></Field>
+          <Field id="effort" label={t("pages:models.editor.effort")}><EffortPicker wide harness={harness} model={effectiveModel} value={effort} defaultLabel={defaultEffortLabel} harnessEffortMap={h?.effort_map} testId={`effort-${p.key}`} label={t("pages:models.editor.effort")} onChange={setEffort} /></Field>
           <div className="border-t pt-3 anim-in" data-models-adv={adv ? "open" : "closed"}>
             <button type="button" className="flex w-full items-center gap-1.5 py-1 text-left type-callout text-muted-foreground hover:text-foreground" onClick={() => setAdv(!adv)} aria-expanded={adv} data-adv-toggle>
               <Turn open={adv} className="text-current" />
@@ -286,7 +283,7 @@ function Editor({ p, v, steve, roleDefault, startOwn, onSave, onCancel }: { p: P
               </div>
               {p.recommended && <div className="flex flex-wrap items-center gap-2 type-footnote text-muted-foreground" data-models-recommended-line>
                 <span className="min-w-0 flex-1">{t("pages:models.editor.recommended")}<ChoiceLine c={p.recommended} wrap className="inline" /></span>
-                {!same(next, p.recommended) && <Button size="xs" variant="outline" onClick={() => { setHarness(p.recommended!.harness); setList(p.recommended!.models); setEffort(p.recommended!.effort ?? "") }} data-models-recommended>{t("pages:models.editor.fillRecommended")}</Button>}
+                {!same(next, p.recommended) && <Button size="xs" variant="outline" onClick={() => { setHarness(p.recommended!.harness); setList(p.recommended!.models); setEffort(normalizeEffort(p.recommended!.effort)) }} data-models-recommended>{t("pages:models.editor.fillRecommended")}</Button>}
               </div>}
             </div></Reveal>
           </div>

@@ -626,6 +626,7 @@ fn put_active_session(n: &LocalNode, sid: &str, harness: &str, active: bool) {
             attempt: AttemptId::new("att_1").unwrap(),
         }),
         effective: choice,
+        effort_mapping: None,
         effective_permissions: PermissionMode::Ask,
         guarantees: vec![],
         resume: None,

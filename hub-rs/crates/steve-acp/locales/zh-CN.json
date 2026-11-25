@@ -12,5 +12,12 @@
   "acp.managed.installing": "正在安装 ACP 适配器到 %{dir}：%{packages}",
   "acp.managed.install_failed": "安装失败：%{error}",
   "acp.managed.usage": "用法：adapters status [--json] | list --json | install [--only] [<id>…] | upgrade",
-  "acp.managed.npm_missing": "没有找到 npm：ACP 适配器需要 Node.js。macOS 上运行 brew install node，Linux 上用发行版的包或 https://nodejs.org 安装，然后再运行 steve adapters install。"
+  "acp.managed.npm_missing": "没有找到 npm：ACP 适配器需要 Node.js。macOS 上运行 brew install node，Linux 上用发行版的包或 https://nodejs.org 安装，然后再运行 steve adapters install。",
+  "acp.session.missing_session_id": "适配器在 session/new 中未返回 sessionId。",
+  "acp.session.mode_apply_failed": "权限模式 %{mode} 没能生效：%{detail}",
+  "acp.session.model_apply_failed": "模型 %{model} 没能生效：%{detail}",
+  "acp.session.model_mismatch": "模型没能生效：请求 %{requested}，实际 %{actual}",
+  "acp.session.effort_apply_failed": "思考强度 %{requested}（映射为 %{applied}）没能生效：%{detail}",
+  "acp.session.effort_mismatch": "思考强度未生效：请求 %{requested}（预期 %{expected}），实际 %{actual}",
+  "acp.session.unknown": "未知"
 }

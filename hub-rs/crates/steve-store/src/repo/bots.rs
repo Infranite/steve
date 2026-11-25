@@ -10,6 +10,17 @@ use crate::types::double;
 use crate::{
     Avatar, Bot, BotWorkspace, ExecutionSurface, Memory, Result, Store, StoreError, now, uid,
 };
+use steve_types::ReasoningEffort;
+
+/// Deserialize an optional patch field where explicit JSON `null` maps to `Some(ReasoningEffort::Default)`.
+fn effort_patch<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<ReasoningEffort>, D::Error> {
+    use serde::Deserialize;
+    Ok(Some(
+        Option::<ReasoningEffort>::deserialize(d)?.unwrap_or_default(),
+    ))
+}
 
 impl Store {
     pub fn bots(&self) -> Bots<'_> {
@@ -30,7 +41,8 @@ pub struct NewBot {
     pub role: Option<String>,
     pub specialties: Option<Vec<String>>,
     pub model: Option<String>,
-    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
     pub rules: Option<String>,
     pub persona: Option<String>,
     pub proactive: Option<i64>,
@@ -62,10 +74,10 @@ pub struct BotPatch {
     pub model: Option<Option<String>>,
     #[serde(
         default,
-        deserialize_with = "double",
+        deserialize_with = "effort_patch",
         skip_serializing_if = "Option::is_none"
     )]
-    pub reasoning_effort: Option<Option<String>>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,7 +270,10 @@ impl Bots<'_> {
                 )
                 .val("harness", p.harness.clone())
                 .null("model", p.model.clone())
-                .null("reasoning_effort", p.reasoning_effort.clone())
+                .val(
+                    "reasoning_effort",
+                    p.reasoning_effort.map(|e| e.as_str().to_owned()),
+                )
                 .val("rules", p.rules.clone())
                 .val("persona", p.persona.clone())
                 .val("proactive", p.proactive)
@@ -370,10 +385,14 @@ fn fallback_surfaces_on(c: &rusqlite::Connection, id: &str) -> Result<Vec<Execut
         "SELECT harness, model, reasoning_effort FROM bot_fallback_surfaces WHERE bot_id = ? ORDER BY ordinal ASC",
         [id],
         |r| {
+            let raw: Option<String> = r.get(2)?;
             Ok(ExecutionSurface {
                 harness: r.get(0)?,
                 model: r.get(1)?,
-                reasoning_effort: r.get(2)?,
+                reasoning_effort: raw
+                    .as_deref()
+                    .and_then(ReasoningEffort::parse)
+                    .unwrap_or_default(),
             })
         },
     )
@@ -393,7 +412,7 @@ fn write_fallback_surfaces(
                 ordinal as i64,
                 surface.harness,
                 surface.model,
-                surface.reasoning_effort,
+                surface.reasoning_effort.as_str(),
             ],
         )?;
     }
@@ -415,7 +434,7 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
             main as i64,
             b.harness,
             b.model,
-            b.reasoning_effort,
+            b.reasoning_effort.as_str(),
             b.rules.as_deref().unwrap_or(""),
             b.persona.as_deref().unwrap_or(""),
             b.proactive.unwrap_or(1),

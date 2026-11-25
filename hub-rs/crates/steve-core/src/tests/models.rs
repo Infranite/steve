@@ -125,7 +125,7 @@ async fn the_setting_picks_the_research_models() {
         .models()
         .apply(
             WS,
-            &json!({"purposes": {"research": {"models": ["claude-opus-5-5", "claude-sonnet-5-5"], "effort": "xhigh"}}}),
+            &json!({"purposes": {"research": {"models": ["claude-opus-5-5", "claude-sonnet-5-5"], "effort": "max"}}}),
             "me",
         )
         .unwrap();
@@ -139,7 +139,7 @@ async fn the_setting_picks_the_research_models() {
         .unwrap();
     let c = ask(2).await;
     assert_eq!(c.models, ["claude-opus-5-5", "claude-sonnet-5-5"]);
-    assert_eq!(c.effort.as_deref(), Some("xhigh"));
+    assert_eq!(c.effort, Some(steve_types::ReasoningEffort::Max));
 }
 
 #[tokio::test]
@@ -512,7 +512,7 @@ async fn primary_and_lightweight_models_cover_all_purposes_and_respect_overrides
         lightweight: Some(crate::models::Choice {
             harness: "claude-code".into(),
             models: vec!["small-model".into()],
-            effort: Some("low".into()),
+            effort: Some(steve_types::ReasoningEffort::Low),
         }),
     };
     let view = models.select_steve(WS, &choice, "me").unwrap();

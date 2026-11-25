@@ -33,6 +33,7 @@ import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd } from "@/stats/format"
 import { briefHead, type Item, type Out, type Sess } from "@/store"
 import { BotName, DiscChevron, ItemNo, openSheet, SectionLabel, Status, StatusDot } from "@/ui"
 import { useNow } from "@/thread/transcript"
+import { formatEffortMapping } from "@/effort-picker"
 import { filesOf, outputsOf, turnsOf, workedMs, type Turn } from "./data"
 
 const find = (id: string | null | undefined) => (id ? getItem(id) : undefined)
@@ -319,7 +320,7 @@ const Runtime = memo(function Runtime({ s }: { s: Sess }) {
           {s.b && <Row k={t("views:sessionPanel.row.bot")}><BotName k={s.b} /></Row>}
           <Row k={t("views:sessionPanel.row.harness")}><span className="inline-flex min-w-0 items-center gap-1.5"><HarnessMark harness={s.harness ?? s.h} className="size-3.5" /><span className="truncate">{s.h ?? t("core:unknownHarness")}</span></span></Row>
           <Row k={t("views:sessionPanel.row.model")}><span className="inline-flex min-w-0 items-center gap-1.5"><ModelMark model={s.m} className="size-3.5" /><span className="truncate font-mono type-footnote">{s.m ?? t("core:unknownModel")}</span></span></Row>
-          <Row k={t("views:sessionPanel.row.effort")}>{s.reasoningEffort ?? t("views:session.effortInherit")}</Row>
+          <Row k={t("views:sessionPanel.row.effort")}><span data-session-panel-effort-mapping>{formatEffortMapping(t, s.effortMapping, s.h, s.reasoningEffort)}</span></Row>
           <Row k={t("views:sessionPanel.row.device")}>{device ? <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hover:underline">{device.name}</a> : s.node ?? t("core:unknownNode")}</Row>
           <Row k={t("views:sessionPanel.row.source")}>{s.src}</Row>
           {s.cwd && <Row k={t("views:sessionPanel.row.cwd")}><span className="break-all font-mono type-footnote text-muted-foreground">{homeTilde(s.cwd)}</span></Row>}

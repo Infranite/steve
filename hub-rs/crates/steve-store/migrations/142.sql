@@ -1,4 +1,4 @@
--- 141: one-time retirement of non-terminal child items left behind by the retired dynamic
+-- 142: one-time retirement of non-terminal child items left behind by the retired dynamic
 -- work-graph engine (`source[1] = "workflow"`). Replaces the per-startup runtime scan while
 -- keeping closed history, artifacts, and script-workflow (`source[1] = "script"`) items intact.
 

@@ -2274,7 +2274,7 @@ impl Tx<'_> {
             steve_node_api::HarnessChoice {
                 harness: bot.harness.clone(),
                 model,
-                effort: bot.reasoning_effort.clone(),
+                effort: bot.reasoning_effort.non_default(),
             }
         });
         self.rt().can_run_choice(item_id, &bot.id, &choice)?;
@@ -2307,13 +2307,14 @@ impl Tx<'_> {
             patch![cwd: cwd.as_str(), branch: branch.as_deref()],
         )?;
         let tok = token();
+        let reasoning_effort = choice.effective_effort();
         let s = self.db().session_create(&NewSession {
             workspace_id: item.workspace_id.clone(),
             item_id: Some(item_id.into()),
             bot_id: Some(bot.id.clone()),
             harness: choice.harness,
             model: choice.model,
-            reasoning_effort: choice.effort,
+            reasoning_effort,
             cwd,
             title: item.title.clone(),
             token: tok.clone(),
@@ -3997,7 +3998,7 @@ impl Tx<'_> {
                             .models()
                             .agent_model(&session.workspace_id, &session.harness)
                     }),
-                    effort: bot.reasoning_effort,
+                    effort: bot.reasoning_effort.non_default(),
                 };
                 let i = iid()?;
                 let db = self.db().clone();

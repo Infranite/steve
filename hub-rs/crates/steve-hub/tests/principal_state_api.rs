@@ -144,7 +144,7 @@ fn new_session(store: &Store, ws: &str, harness: &str) -> String {
             bot_id: None,
             harness: harness.into(),
             model: None,
-            reasoning_effort: None,
+            reasoning_effort: Default::default(),
             cwd: "/tmp".into(),
             title: "principal-state test".into(),
             token: format!("tok_{}", steve_store::uid("t")),

@@ -377,6 +377,25 @@ impl NodeRuntime {
                         )?;
                     }
                 }
+                // Record adapter effort mapping in the session transcript when a non-default
+                // effort takes effect or changes, deduplicated against the last stored mapping.
+                if let Some(mapping) = &view.effort_mapping
+                    && !mapping.requested.is_default()
+                    && observations::current_effort_mapping(w, &session)?.as_ref() != Some(mapping)
+                {
+                    let text = format_effort_mapping_event(&view.effective.harness, mapping);
+                    event_in(
+                        w,
+                        &session,
+                        "system",
+                        json!({
+                            "code": "effort_mapped",
+                            "text": text,
+                            "harness": view.effective.harness,
+                            "effort_mapping": mapping,
+                        }),
+                    )?;
+                }
                 // the resume handle is the harness's own session id (ACP `sessionId`), what ST-28
                 // shows and the legacy runner keeps too
                 observations::effective(w, &session, view, self.clock.now())?;
@@ -872,4 +891,29 @@ fn tools_missing_in(w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
         )?;
     }
     Ok(())
+}
+
+/// Human-readable session-log entry for an adapter effort mapping (stored in zh-CN alongside the
+/// typed `effort_mapping` payload so the UI can also render localized chips).
+fn format_effort_mapping_event(harness: &str, mapping: &steve_types::EffortMapping) -> String {
+    let req = mapping.requested.as_str();
+    match mapping.strategy {
+        steve_types::EffortStrategy::AcpOption => {
+            if let Some(native) = mapping.native_effort.as_deref() {
+                format!("思考强度：{req} → {harness} {native}")
+            } else {
+                format!("思考强度：{req} → 由模型自己决定")
+            }
+        }
+        steve_types::EffortStrategy::ModelVariant => {
+            if let Some(target) = mapping.target_model.as_deref() {
+                format!("思考强度：{req} → {target}")
+            } else {
+                format!("思考强度：{req} → 由模型自己决定")
+            }
+        }
+        steve_types::EffortStrategy::Unsupported => {
+            format!("思考强度：{req} → 由模型自己决定")
+        }
+    }
 }

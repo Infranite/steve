@@ -541,12 +541,12 @@ mod tests {
             &self,
             call: &crate::gateway::OneCall<'_>,
             model: &str,
-            effort: Option<&str>,
+            effort: Option<steve_types::ReasoningEffort>,
             on_text: Option<crate::gateway::OnText<'_>>,
         ) -> crate::gateway::Tried {
             self.tries.lock().unwrap().push((
                 model.to_string(),
-                effort.map(str::to_string),
+                effort.map(|e| e.as_str().to_string()),
                 call.harness.to_string(),
                 call.spec
                     .deadline
@@ -817,7 +817,7 @@ mod tests {
             &self,
             _: &crate::gateway::OneCall<'_>,
             model: &str,
-            _: Option<&str>,
+            _: Option<steve_types::ReasoningEffort>,
             _: Option<OnText<'_>>,
         ) -> crate::gateway::Tried {
             use steve_node_api::{Epoch, Measurement, Money, Tokens, UsageReport, UsageScope};

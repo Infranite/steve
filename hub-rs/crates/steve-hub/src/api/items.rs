@@ -826,11 +826,18 @@ pub(super) fn parse_handoff_body(b: &Bytes) -> Result<steve_core::HandoffTarget,
         return Err(ApiError::Invalid(bad));
     }
     let clean = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let effort = match clean(req.effort) {
+        None => None,
+        Some(raw) => match steve_types::ReasoningEffort::parse(&raw) {
+            Some(e) => Some(e),
+            None => return Err(ApiError::Invalid(vec!["effort".into()])),
+        },
+    };
     Ok(steve_core::HandoffTarget {
         bot: clean(req.bot),
         harness: clean(req.harness),
         model: clean(req.model),
-        effort: clean(req.effort),
+        effort,
         make_bot_default: req.make_bot_default,
     })
 }

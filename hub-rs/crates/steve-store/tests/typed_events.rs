@@ -121,7 +121,7 @@ fn real_work_producers_keep_scope_through_mutation_and_deletion() {
                 title: "Session".into(),
                 token: uid("token"),
                 model: None,
-                reasoning_effort: None,
+                reasoning_effort: steve_types::ReasoningEffort::Default,
             })
             .unwrap();
         let decision = s

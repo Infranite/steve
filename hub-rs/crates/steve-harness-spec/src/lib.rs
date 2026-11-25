@@ -7,6 +7,14 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use steve_node_api::PermissionMode;
 
+pub mod effort;
+pub use effort::{
+    EffortContext, EffortToken, MIN_VARIANT_SIBLINGS, ParsedVariant, SiblingVariant,
+    explicit_acp_options, ordinal_index, parse_model_variant, resolve_all_levels,
+    resolve_for_model, reverse_map_native, sibling_variants,
+};
+pub use steve_node_api::{EffortMapping, EffortMode, EffortStrategy, ReasoningEffort};
+
 /// The ACP mode ids Steve's permission modes are set as. Without a declaration an adapter gets the
 /// ids most ACP adapters use (`default`, `plan`, `acceptEdits`, `auto`, `bypassPermissions`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -572,6 +580,8 @@ adapter_properties! {
     fallback_models: Vec<String> = vec![] => Option<Vec<String>>, "Option::is_none", cloned;
     /// The reasoning efforts to offer before (or without) a probe of the adapter.
     fallback_efforts: Vec<String> = vec![] => Option<Vec<String>>, "Option::is_none", cloned;
+    /// How this adapter maps Steve's canonical [`steve_node_api::ReasoningEffort`].
+    effort_mode: EffortMode = EffortMode::AcpOption => Option<EffortMode>, "Option::is_none", copied;
     /// Steve's judgments fall back down Steve's model lists (`STEVE_MODELS_SMART`) after the bot's
     /// model; without it they try the bot's model, else the adapter's own default.
     model_fallback: bool = false => Option<bool>, "Option::is_none", copied;
