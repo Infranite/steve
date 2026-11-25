@@ -474,14 +474,6 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
         .await?
         .map_err(|e| boot_err("ensure workspace", e))?;
     st.domain.seed().await.map_err(|e| boot_err("seed", e))?;
-    match st.domain.retire_legacy_workflow_children().await {
-        Ok(0) => {}
-        Ok(n) => tracing::info!(
-            count = n,
-            "retired non-terminal legacy workflow child items"
-        ),
-        Err(e) => return Err(boot_err("retire legacy workflow children", e)),
-    }
     // registerHub runs scutil/sw_vers/sysctl: in the background, so the Hub listens at once
     let dev = st.clone();
     st.jobs.start("hub.device", || {

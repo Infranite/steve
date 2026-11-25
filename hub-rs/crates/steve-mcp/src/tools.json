@@ -197,6 +197,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "result": {
+          "description": "structured JSON result required when delivering a script-workflow child item (validated against the call's JSON Schema, <= 32 KiB)"
         }
       },
       "required": [

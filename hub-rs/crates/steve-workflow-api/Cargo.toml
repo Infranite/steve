@@ -1,0 +1,16 @@
+[package]
+name = "steve-workflow-api"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Typed workflow script contract: host primitives, deterministic CallIdentity, step frames, budgets and closed JSON Schema 2020-12 validator"
+
+# Pure contract crate: zero database, network, async runtime, or JS engine dependencies.
+[dependencies]
+hex = "=0.4.3"
+regex = "=1.13.1"
+regex-syntax = "=0.8.11"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.11.1"
+thiserror = "=2.0.21"

@@ -567,6 +567,7 @@ fn a_late_release_result_is_recorded_on_its_original_approval() {
             closed.cas_revision,
             None,
             None,
+            None,
             "me",
         )
         .unwrap();

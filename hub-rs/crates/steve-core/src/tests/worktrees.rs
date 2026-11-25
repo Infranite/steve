@@ -491,6 +491,7 @@ fn every_close_path_stops_sessions_and_cleans_worktree_and_merged_branch() {
             expected,
             Some("out of scope"),
             None,
+            None,
             "me",
         )
         .unwrap();
@@ -564,7 +565,7 @@ fn closed_item_removes_clean_worktree_and_preserves_and_marks_unmerged_branch() 
     // Reopening via a new cycle recreates the worktree from the preserved branch.
     let rev = k.db().item(&id).unwrap().unwrap().cas_revision;
     k.core
-        .lifecycle_command(&id, "new_cycle", 1, rev, None, Some("继续"), "me")
+        .lifecycle_command(&id, "new_cycle", 1, rev, None, Some("继续"), None, "me")
         .unwrap();
     assert!(wt.join("unmerged.txt").exists());
 }

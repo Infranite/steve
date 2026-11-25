@@ -150,7 +150,7 @@ fn a_new_message_on_a_closed_item_is_refused_until_a_new_cycle() {
     // an explicit new cycle: the first cycle stays as it closed
     let expected = k.db().item(&x.id).unwrap().unwrap().cas_revision;
     k.core
-        .lifecycle_command(&x.id, "new_cycle", 1, expected, None, None, "me")
+        .lifecycle_command(&x.id, "new_cycle", 1, expected, None, None, None, "me")
         .unwrap();
     k.core
         .session_message(&x.session, "再改一下", false, &[], "me")
@@ -870,7 +870,16 @@ fn a_dropped_item_gives_back_its_clean_worktree_and_a_new_message_brings_it_back
     );
     let expected = k.db().item(&i).unwrap().unwrap().cas_revision;
     k.core
-        .lifecycle_command(&i, "new_cycle", 1, expected, None, Some("还是要做"), "me")
+        .lifecycle_command(
+            &i,
+            "new_cycle",
+            1,
+            expected,
+            None,
+            Some("还是要做"),
+            None,
+            "me",
+        )
         .unwrap();
     assert_eq!(k.phase(&i), "active");
     assert!(
