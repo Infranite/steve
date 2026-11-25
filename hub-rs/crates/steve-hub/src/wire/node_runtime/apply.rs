@@ -351,13 +351,13 @@ impl NodeRuntime {
                                 active_attempt: None,
                                 release_pending: false,
                             },
-                            now(),
+                            self.clock.now(),
                         )?;
                     }
                 }
                 // the resume handle is the harness's own session id (ACP `sessionId`), what ST-28
                 // shows and the legacy runner keeps too
-                observations::effective(w, &session, view, now())?;
+                observations::effective(w, &session, view, self.clock.now())?;
             }
             (EventBody::AttemptStarted, Some(a)) => {
                 if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
@@ -375,7 +375,7 @@ impl NodeRuntime {
                         out.push(After::AutoTurn);
                     }
                     let ordinal = node_turns::ordinal(w, a)?;
-                    node_sessions::set_status(w, &session, "running", now())?;
+                    node_sessions::set_status(w, &session, "running", self.clock.now())?;
                     // The turn's first message follows the last completed turn.
                     let user_seq = observations::first_user_since_turn(w, &session)?;
                     super::super::acp_stats::try_node_attempt_started(
@@ -478,7 +478,7 @@ impl NodeRuntime {
                 report.context_limit.and_then(cost::context),
             )
         };
-        observations::context(w, session, ctx_used, ctx_limit, delta, now())?;
+        observations::context(w, session, ctx_used, ctx_limit, delta, self.clock.now())?;
         Ok(if delta.is_some_and(|d| d > 0.0) {
             vec![After::Cost {
                 session: session.to_string(),
@@ -544,7 +544,7 @@ impl NodeRuntime {
                         "running",
                         None,
                         None,
-                        now(),
+                        self.clock.now(),
                     )? {
                         self.observe_attempt_start(w, x.attempt().as_str())?;
                     }
@@ -771,6 +771,7 @@ impl NodeRuntime {
     ) -> Result<(), StoreError> {
         let rev = self.turn_revision(turn)?;
         let ordinal = self.store.read(|r| node_turns::retry_ordinal(r, turn))?;
+        let at = self.clock.now();
         node_write::turn_cas_in(
             tx,
             turn,
@@ -781,7 +782,7 @@ impl NodeRuntime {
                 retry_ordinal: ordinal,
                 applied: true,
             },
-            now(),
+            at,
         )?;
         node_write::dispatch_receipt_in(
             tx,
@@ -792,7 +793,7 @@ impl NodeRuntime {
                 Outcome::Interrupted | Outcome::TimedOut => "interrupted",
                 Outcome::Failed => "error",
             },
-            now(),
+            at,
         )?;
         event_in(
             tx,
@@ -813,7 +814,7 @@ impl NodeRuntime {
                 active_attempt: None,
                 release_pending: false,
             },
-            now(),
+            at,
         )?;
         Ok(())
     }
