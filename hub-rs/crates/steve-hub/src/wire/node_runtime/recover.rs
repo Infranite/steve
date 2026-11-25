@@ -130,7 +130,7 @@ impl NodeRuntime {
             .map_err(conflict)?
             .digest(method)
             .map_err(conflict)?;
-        let (req, digest) = command(
+        let (req, digest) = self.command(
             &op,
             Recover {
                 target: idv(target.to_string())?,
@@ -302,7 +302,7 @@ impl NodeRuntime {
                 active_attempt: None,
                 release_pending: false,
             },
-            now(),
+            self.clock.now(),
         )?;
         system_in(
             tx,
@@ -330,7 +330,7 @@ impl NodeRuntime {
                 ReceiptState::Rejected,
                 false,
                 &json!({ "reason": "its prepare was retired with an unknown outcome" }),
-                now(),
+                self.clock.now(),
             )?;
         }
         system_in(

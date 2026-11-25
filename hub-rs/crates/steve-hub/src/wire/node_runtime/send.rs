@@ -164,7 +164,7 @@ impl NodeRuntime {
                     ReceiptState::Rejected,
                     false,
                     &serde_json::to_value(e).map_err(conflict)?,
-                    now(),
+                    at,
                 )?;
                 // refused before it was accepted: it certainly did not run
                 if let Some(attempt) = self
@@ -415,7 +415,7 @@ impl NodeRuntime {
             state,
             success,
             &serde_json::to_value(receipt).map_err(conflict)?,
-            now(),
+            self.clock.now(),
         )?;
         if !moved || !rt::is_intent_head_in(tx, op)? {
             return Ok(None);
@@ -502,7 +502,15 @@ impl NodeRuntime {
                     .filter(|a| a.state != "finished")
                 {
                     let (attempt, rev, s) = (a.id, a.revision, a.session);
-                    node_write::attempt_cas_in(tx, &attempt, rev, "unknown", None, None, now())?;
+                    node_write::attempt_cas_in(
+                        tx,
+                        &attempt,
+                        rev,
+                        "unknown",
+                        None,
+                        None,
+                        self.clock.now(),
+                    )?;
                     system_in(
                         tx,
                         &s,
@@ -577,7 +585,7 @@ impl NodeRuntime {
                 active_attempt: None,
                 release_pending: false,
             },
-            now(),
+            self.clock.now(),
         )?;
         if success {
             self.plan_after_in(tx, s)?;
@@ -633,7 +641,7 @@ impl NodeRuntime {
                     active_attempt: None,
                     release_pending: false,
                 },
-                now(),
+                self.clock.now(),
             )?;
             // an item paused while its session was opening (its workspace being prepared, say)
             // starts nothing: what is queued waits for it to continue
@@ -692,7 +700,7 @@ impl NodeRuntime {
                 active_attempt: None,
                 release_pending: false,
             },
-            now(),
+            self.clock.now(),
         )?;
         system_in(
             tx,
@@ -737,7 +745,7 @@ impl NodeRuntime {
                     )?;
                 }
             }
-            startup::record_stop(w, session, detail, now())?;
+            startup::record_stop(w, session, detail, self.clock.now())?;
             if !startup::already_open(w, session, &question)? {
                 steve_store::DecisionRows(w).open(&steve_store::NewDecision {
                     workspace_id: scope.workspace.clone(), kind: "fail".into(), subject_type: reason.into(),
@@ -752,7 +760,7 @@ impl NodeRuntime {
                 })?;
             }
             if let Some(item) = scope.item {
-                startup::hold_item(w, &scope.workspace, &item, now())?;
+                startup::hold_item(w, &scope.workspace, &item, self.clock.now())?;
             }
             Ok(())
         })
@@ -809,6 +817,7 @@ impl NodeRuntime {
             acted: false,
             job: None,
         };
+        let at = self.clock.now();
         node_write::attempt_cas_in(
             tx,
             &attempt,
@@ -816,7 +825,7 @@ impl NodeRuntime {
             "finished",
             None,
             Some(&serde_json::to_value(&completion).map_err(conflict)?),
-            now(),
+            at,
         )?;
         self.close_cards_of_attempt_in(tx, &attempt)?;
         if reopen {
@@ -833,7 +842,7 @@ impl NodeRuntime {
                     retry_ordinal: ordinal,
                     applied: false,
                 },
-                now(),
+                at,
             )?;
             self.reopen_in(tx, &session)?;
             return Ok(None);

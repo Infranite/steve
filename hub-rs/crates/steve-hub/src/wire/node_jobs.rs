@@ -180,7 +180,7 @@ impl NodeRuntime {
             job: spec.job.clone(),
             attempt: spec.run.attempt.clone(),
         };
-        let (req, digest) = command(&op, spec.clone())?;
+        let (req, digest) = self.command(&op, spec.clone())?;
         self.write(|tx| {
             if tokio::time::Instant::now() >= t.deadline || !self.jobs.has(&attempt) {
                 return Err(conflict(
@@ -210,7 +210,7 @@ impl NodeRuntime {
                     request: &req,
                     digest: &digest,
                 },
-                now(),
+                self.clock.now(),
             )?;
             self.store
                 .stats()
@@ -321,7 +321,7 @@ impl NodeRuntime {
                     AttemptState::Running,
                     None,
                     None,
-                    now(),
+                    self.clock.now(),
                 )?;
             }
             EventBody::Usage { report } => {
@@ -402,20 +402,21 @@ impl NodeRuntime {
             return Ok(());
         }
         let completion = serde_json::to_value(c).map_err(conflict)?;
+        let at = self.clock.now();
         job_commands::apply_attempt_in(
             tx,
             attempt,
             AttemptState::Finished,
             None,
             Some(&completion),
-            now(),
+            at,
         )?;
-        job_commands::finish_job_in(tx, &row.job, now())?;
+        job_commands::finish_job_in(tx, &row.job, at)?;
         self.store.stats().gateway_job_end(
             attempt,
             c.outcome == Outcome::Succeeded,
             c.error.as_ref().map(|e| e.safe_detail.as_str()),
-            now(),
+            at,
         )?;
         let terminal = self
             .store
@@ -436,7 +437,7 @@ impl NodeRuntime {
                 state,
                 success,
                 &serde_json::to_value(&receipt).map_err(conflict)?,
-                now(),
+                at,
             )?;
         }
         self.staged_job_events.lock().unwrap().push((
@@ -468,7 +469,14 @@ impl NodeRuntime {
                 } else {
                     AttemptState::Running
                 };
-                job_commands::apply_attempt_in(tx, attempt, s, Some(&value), None, now())?;
+                job_commands::apply_attempt_in(
+                    tx,
+                    attempt,
+                    s,
+                    Some(&value),
+                    None,
+                    self.clock.now(),
+                )?;
                 // a cancel held back while the start's send was uncertain goes now
                 if job_commands::attempt_in(tx, attempt)?
                     .is_some_and(|a| a.cancel_requested && a.state != AttemptState::Unknown)
@@ -483,7 +491,7 @@ impl NodeRuntime {
                     AttemptState::Unknown,
                     Some(&value),
                     None,
-                    now(),
+                    self.clock.now(),
                 )?;
             }
             ("start_job", ReceiptState::Finished) => {
@@ -567,7 +575,7 @@ impl NodeRuntime {
         };
         let target = idv(target.to_string())?;
         let (req, digest) = if method == "abandon" {
-            command(
+            self.command(
                 &op,
                 Abandon {
                     target,
@@ -575,7 +583,7 @@ impl NodeRuntime {
                 },
             )?
         } else {
-            command(
+            self.command(
                 &op,
                 Cancel {
                     target,
@@ -592,7 +600,7 @@ impl NodeRuntime {
                 request: &req,
                 digest: &digest,
             },
-            now(),
+            self.clock.now(),
         )?;
         self.wake_send.notify_one();
         Ok(())
@@ -609,7 +617,7 @@ impl NodeRuntime {
         if row.state == AttemptState::Finished {
             return Ok(());
         }
-        job_commands::cancel_attempt_in(tx, attempt, now())?;
+        job_commands::cancel_attempt_in(tx, attempt, self.clock.now())?;
         let job_commands::Start {
             operation: op,
             state,
@@ -663,7 +671,7 @@ impl NodeRuntime {
             ReceiptState::Rejected,
             false,
             &json!({ "reason": "cancelled before it was sent" }),
-            now(),
+            self.clock.now(),
         )?;
         self.job_ended_in(tx, attempt, &ended(Outcome::Cancelled, "cancelled", None))
     }
@@ -850,7 +858,7 @@ impl OneModel for NodePrint {
             effort: effort.map(String::from),
             deadline: call.spec.deadline,
             wire_deadline: Timestamp(
-                now().saturating_add(
+                self.runtime.clock.now().saturating_add(
                     i64::try_from(
                         call.spec
                             .deadline
@@ -1152,7 +1160,7 @@ impl NodeRuntime {
             job: spec.job.clone(),
             attempt: spec.run.attempt.clone(),
         };
-        let (req, digest) = command(&op, spec.clone())?;
+        let (req, digest) = self.command(&op, spec.clone())?;
         self.write(|tx| {
             job_commands::create_job_in(
                 tx,
@@ -1177,7 +1185,7 @@ impl NodeRuntime {
                     request: &req,
                     digest: &digest,
                 },
-                now(),
+                self.clock.now(),
             )?;
             self.store
                 .stats()

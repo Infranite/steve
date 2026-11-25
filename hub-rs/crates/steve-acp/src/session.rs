@@ -59,6 +59,8 @@ fn option_supports(options: &Value, effort: &str) -> bool {
 
 /// What to open.
 pub struct OpenConfig<'a> {
+    /// Harness adapter id (used to select per-harness client capabilities during `initialize`).
+    pub harness: &'a str,
     pub client_version: &'a str,
     pub cwd: &'a str,
     /// `session/load` this one; `None` starts a new session.
@@ -261,13 +263,15 @@ struct Initialized {
 }
 
 async fn initialize_session(l: &Conn, c: &OpenConfig<'_>) -> Result<Initialized, RpcError> {
+    let mut client_caps = json!({
+        "fs": { "readTextFile": false, "writeTextFile": false },
+        "terminal": false,
+        "_meta": { "parameterizedModelPicker": true },
+    });
+    crate::adapter::for_harness(c.harness).configure_client_capabilities(&mut client_caps);
     let init = json!({
         "protocolVersion": 1,
-        "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
-            "terminal": false,
-            "_meta": { "parameterizedModelPicker": true },
-        },
+        "clientCapabilities": client_caps,
         "clientInfo": { "name": "steve", "version": c.client_version },
     });
     let init = l
