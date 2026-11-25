@@ -44,8 +44,8 @@ const NEW_TABLES: [(&str, i64); 36] = [
     ("thread_forwarded", 130),
     ("thread_delivery_refs", 130),
     ("thread_notices", 130),
-    ("chan_message_reactions", 140),
-    ("chan_reply_sources", 140),
+    ("chan_message_reactions", 143),
+    ("chan_reply_sources", 143),
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
