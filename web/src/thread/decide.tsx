@@ -309,27 +309,28 @@ export function ToolApproval({ i, w, showItem }: { i: Item; w: Wait; showItem: b
 /** Outbound channel-message approval: uses affectUI ApprovalCard so send approvals are visually distinct from ordinary DecisionCards (#213). */
 export function ChannelApproval({ i, w, showItem }: { i: Item; w: Wait; showItem: boolean }) {
   const t = useT()
-  const [ctx, setCtx] = useState<ROutContext | null | undefined>(undefined)
+  const [ctx, setCtx] = useState<ROutContext | "loading" | "unavailable">(() => (w.subjectId ? "loading" : "unavailable"))
   useEffect(() => {
-    if (!w.subjectId) { setCtx(null); return }
+    if (!w.subjectId) { setCtx("unavailable"); return }
     let live = true
-    setCtx(undefined)
-    outContext(w.subjectId).then((x) => { if (live) setCtx(x) }, () => { if (live) setCtx(null) })
+    setCtx("loading")
+    outContext(w.subjectId).then((x) => { if (live) setCtx(x) }, () => { if (live) setCtx("unavailable") })
     return () => { live = false }
   }, [w.subjectId])
+  const ready = typeof ctx === "object" ? ctx : null
   const busy = busyOf(w) && !channelAnswer(w)
-  const risk: ApprovalRisk = ctx?.space.external ? "high" : ctx?.as_you ? "medium" : "low"
+  const risk: ApprovalRisk = ready?.space.external ? "high" : ready?.as_you ? "medium" : "low"
   return <ApprovalCard
     className="steve-ap anim-in"
     icon={<SendIcon className="size-4" />}
-    risk={ctx ? risk : undefined}
+    risk={ready ? risk : undefined}
     title={w.q}
     description={showItem ? <TaskLink i={i} w={w} /> : botName(w.by === "steve" ? "steve" : w.by)}
     label={<span className="flex w-full min-w-0 items-center justify-between gap-2"><span className="truncate">{kindLabel(w)}</span><CardTools i={i} w={w} /></span>}
     preview={<div className="flex min-w-0 flex-col gap-2">
       {w.escalated && <div><Pill tone="attention" data-draft-escalated>{t("channels:reply.escalated")}</Pill></div>}
-      <OutContext id={w.subjectId} context={ctx === undefined ? undefined : ctx} />
-      <MessageOpenInSourceApp message={w.subjectId} provider={ctx?.open_provider} className="-ml-2 self-start" />
+      <OutContext context={ctx} />
+      <MessageOpenInSourceApp message={w.subjectId} provider={ready?.open_provider} className="-ml-2 self-start" />
       {w.busy && <div role="status" className="flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><span className="size-1.5 rounded-full bg-blue dot-running" aria-hidden />{t("core:card.agentBusy")}</div>}
       {st.pendingActions.has("decision:" + w.decision) && !channelAnswer(w) && <div role="status" className="type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}
     </div>}

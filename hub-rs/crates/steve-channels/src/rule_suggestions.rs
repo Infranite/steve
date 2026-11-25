@@ -102,10 +102,16 @@ pub fn on_message_ignored(
     let Some(space) = steve_store::channel_spaces::rows::get_in_workspace(w, ws, space_id)? else {
         return Ok(None);
     };
-    let set = spaces::settings(w, space_id)?;
-    let voice_mode = (!space.connection_id.is_empty())
-        .then(|| crate::bindings::connection_account(w, ws, &space.connection_id).ok())
-        .flatten()
+    if space.connection_id.is_empty() {
+        return Ok(None);
+    }
+    let set = match spaces::settings(w, space_id) {
+        Ok(set) => set,
+        Err(steve_modules::ApiError::NotFound(_)) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let voice_mode = crate::bindings::connection_account(w, ws, &space.connection_id)
+        .ok()
         .map(|(_, mode)| mode);
     let already_record_only = set.muted
         || set.attention >= Attention::Quiet
@@ -408,5 +414,26 @@ mod tests {
             open_space_suggestion(&h, &space).is_none(),
             "keep resets the window until 3 new ignores occur"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dismiss_drafts_ignores_spaces_without_settings_or_connection() {
+        let h = harness();
+        steve_store::testkit::hub::views::seed_channel_tiers(h.env.store()).unwrap();
+        let (star, quiet, failed) =
+            steve_store::testkit::hub::views::channel_decisions(h.env.store()).unwrap();
+        steve_store::testkit::hub::views::star_and_reply(h.env.store()).unwrap();
+        steve_store::testkit::hub::views::remove_reply(h.env.store()).unwrap();
+
+        // `seed_channel_tiers` inserts minimal spaces without `space_settings`: bulk-dismissing
+        // quiet drafts must succeed instead of failing with NotFound in `on_message_ignored`.
+        let dismissed = decisions::dismiss_drafts(
+            &h.env.modules,
+            &caller(WS, ME),
+            &[star, quiet.clone(), failed],
+        )
+        .unwrap();
+        assert_eq!(dismissed, vec![quiet]);
+        assert!(open_space_suggestion(&h, "tier-space-b").is_none());
     }
 }

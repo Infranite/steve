@@ -20,14 +20,22 @@ const DISCLOSURE_KEY = {
   leak: "channels:out.disclosureLeak",
 } as const
 
-export function OutContext({ id, context }: { id?: string; context?: ROutContext | null }) {
+export type OutContextProp = ROutContext | "loading" | "unavailable" | null
+
+export function OutContext({ id, context }: { id?: string; context?: OutContextProp }) {
   const t = useT()
   const [c, setC] = useState<ROutContext | null>(null)
   const [open, setOpen] = useState(false)
   const [loaded, setLoaded] = useState<string | undefined>()
-  useEffect(() => { if (!id || context !== undefined) return; let live = true; setC(null); setLoaded(undefined); setOpen(false); outContext(id).then((x) => { if (live) { setC(x); setLoaded(id) } }, () => { if (live) { setC(null); setLoaded(id) } }); return () => { live = false } }, [id, context])
-  const shown = context === undefined ? (loaded === id ? c : null) : context
-  if (!shown) return context !== undefined ? null : <div role="status" className="type-footnote text-muted-foreground" data-out-context-state={id && loaded !== id ? "loading" : "unavailable"}>{t(id && loaded !== id ? "common:state.loading" : "channels:reply.contextUnavailable")}</div>
+  const replyToId = context && typeof context === "object" ? context.reply_to?.id : undefined
+  useEffect(() => { setOpen(false) }, [id, replyToId])
+  useEffect(() => { if (!id || context !== undefined) return; let live = true; setC(null); setLoaded(undefined); outContext(id).then((x) => { if (live) { setC(x); setLoaded(id) } }, () => { if (live) { setC(null); setLoaded(id) } }); return () => { live = false } }, [id, context])
+  const shown = context === undefined ? (loaded === id ? c : null) : (typeof context === "object" ? context : null)
+  if (!shown) {
+    const state = typeof context === "string" ? context : context === undefined ? (id && loaded !== id ? "loading" : "unavailable") : null
+    if (!state) return null
+    return <div role="status" className="type-footnote text-muted-foreground" data-out-context-state={state}>{t(state === "loading" ? "common:state.loading" : "channels:reply.contextUnavailable")}</div>
+  }
   const aiMark = shown.as_you ? (shown.ai_mark ?? true) : false
   const who = shown.as_you
     ? t(aiMark ? "channels:out.asYou" : "channels:out.asYouNoAi")
