@@ -171,7 +171,7 @@ async fn setup_with(as_user: Option<Arc<dyn ActAsUser>>) -> H {
 async fn setup_full(as_user: Option<Arc<dyn ActAsUser>>, decl: Option<ChannelDecl>) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
-    let disclosure = Disclosure::with_models(Vec::new());
+    let disclosure = Disclosure::new();
     let link = OutLink::new();
     let reg_disclosure = disclosure.clone();
     let reg_link = link.clone();
@@ -3048,7 +3048,7 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
         CHECK_HEAD,
         r#"{"verdict": "leak", "spans": [{"text": "运行在你的电脑上", "reason": "内部细节", "basis": "internal_detail"}]}"#,
     );
-    let d = Disclosure::with_models(Vec::new());
+    let d = Disclosure::new();
     d.bind(h.env.store().clone(), h.env.gateway.clone());
     let cx = CheckCx {
         ws: WS.into(),
@@ -3128,7 +3128,7 @@ async fn the_workspaces_own_people_with_public_knowledge_skip_the_model() {
         CHECK_HEAD,
         r#"{"verdict": "leak", "spans": [{"text": "周四", "reason": "内部细节", "basis": "internal_detail"}]}"#,
     );
-    let d = Disclosure::with_models(Vec::new());
+    let d = Disclosure::new();
     d.bind(h.env.store().clone(), h.env.gateway.clone());
     let cx = CheckCx {
         ws: WS.into(),

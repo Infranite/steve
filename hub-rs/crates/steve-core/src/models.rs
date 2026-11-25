@@ -675,6 +675,88 @@ impl Models {
         self.resolve(ws, purpose, &st)
     }
 
+    /// Like [`Models::for_call`], excluding `exclude_model` when another configured or offered
+    /// model is available (used by the `disclosure` purpose so cross-model auditing does not run
+    /// on the same model that drafted the reply).
+    pub fn for_call_excluding(
+        &self,
+        ws: &str,
+        purpose: &str,
+        _tier: Tier,
+        exclude_model: Option<&str>,
+    ) -> Choice {
+        let st = self.steve();
+        let mut choice = self.resolve(ws, purpose, &st);
+        let Some(excluded) = exclude_model.map(str::trim).filter(|m| !m.is_empty()) else {
+            return choice;
+        };
+        let excluded_is_first = match choice.models.first() {
+            Some(m) => m == excluded,
+            None => {
+                self.harness(&choice.harness)
+                    .and_then(|h| h.default_model)
+                    .as_deref()
+                    == Some(excluded)
+            }
+        };
+        if !excluded_is_first {
+            choice.models.retain(|m| m != excluded);
+            return choice;
+        }
+        choice.models.retain(|m| m != excluded);
+        if !choice.models.is_empty() {
+            return choice;
+        }
+        let without = |candidate: Option<Choice>| -> Option<Choice> {
+            let mut c = candidate?;
+            c.models.retain(|m| m != excluded);
+            (!c.models.is_empty()).then_some(c)
+        };
+        if let Some(p) = purpose_of(purpose)
+            && let Some(c) = without(self.recommended(p))
+        {
+            return c;
+        }
+        if let Some(c) = without(self.lightweight_effective(ws)) {
+            return c;
+        }
+        if let Some(alt) = st.models.iter().find(|m| m.as_str() != excluded) {
+            return Choice {
+                harness: st.runs_on.clone(),
+                models: vec![alt.clone()],
+                effort: None,
+            };
+        }
+        if let Some(h) = self.harness(&choice.harness) {
+            if let Some(fast) = h.fast_model().filter(|m| m != excluded) {
+                return Choice {
+                    harness: h.id,
+                    models: vec![fast],
+                    effort: None,
+                };
+            }
+            if let Some(alt) = h
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .find(|m| valid_model(m) && *m != excluded)
+            {
+                return Choice {
+                    harness: h.id,
+                    models: vec![alt.to_string()],
+                    effort: None,
+                };
+            }
+        }
+        tracing::warn!(
+            purpose,
+            excluded,
+            harness = %choice.harness,
+            "no alternate model available for exclude_model; using configured choice"
+        );
+        self.resolve(ws, purpose, &st)
+    }
+
     fn resolve(&self, ws: &str, purpose: &str, st: &Steve) -> Choice {
         if let Some(p) = purpose_of(purpose) {
             if let Some(c) = self.custom(ws, p.key) {
@@ -1658,5 +1740,43 @@ mod tests {
         assert_eq!(y["effective"]["harness"], json!("codex"));
         assert_eq!(v["purposes"].as_array().unwrap().len(), PURPOSES.len());
         assert_eq!(v["harnesses"][1]["efforts"][0]["key"], json!("low"));
+    }
+
+    #[test]
+    fn for_call_excluding_avoids_drafting_model_for_disclosure() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        steve_bot(&s, CLAUDE_CODE, Some("claude-sonnet-5-5"));
+        let m = Models::new(s.clone(), Defaults::default());
+        probed(&m, CLAUDE_CODE, &["claude-sonnet-5-5", "claude-haiku-5-5"]);
+        m.apply(
+            "default",
+            &json!({"purposes": {"disclosure": {"models": ["claude-sonnet-5-5", "claude-haiku-5-5"]}}}),
+            "u1",
+        )
+        .unwrap();
+
+        let excluded = m.for_call_excluding(
+            "default",
+            "disclosure",
+            Tier::Fast,
+            Some("claude-sonnet-5-5"),
+        );
+        assert_eq!(excluded.models, vec!["claude-haiku-5-5"]);
+
+        // Single-model override matching the excluded model falls back to another harness candidate.
+        m.apply(
+            "default",
+            &json!({"purposes": {"disclosure": {"models": ["claude-sonnet-5-5"]}}}),
+            "u1",
+        )
+        .unwrap();
+        let alt = m.for_call_excluding(
+            "default",
+            "disclosure",
+            Tier::Fast,
+            Some("claude-sonnet-5-5"),
+        );
+        assert_eq!(alt.models, vec!["claude-haiku-5-5"]);
     }
 }

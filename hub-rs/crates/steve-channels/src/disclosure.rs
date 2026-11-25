@@ -8,9 +8,9 @@
 //! 2. the rule check: names of contacts and organizations (and their aliases) not in the audience,
 //!    amounts and numbers with units, URLs, file names, other spaces' names and item numbers that are
 //!    in the reply *and* only in `conclusion` / `reasoning` / `never` knowledge → a span each;
-//! 3. the model check on a model other than the drafting one (`STEVE_MODELS_CHECK`, default the first
-//!    of `STEVE_MODELS_FAST` that differs; without a pinned runner the gateway's fast tier): the whole
-//!    reply, the audience, each piece of knowledge with its effective level →
+//! 3. the model check on the gateway's `disclosure` purpose, passing `exclude_model` (the drafting
+//!    model) so cross-model auditing avoids the model that wrote the reply: the whole reply, the
+//!    audience, each piece of knowledge with its effective level →
 //!    `{"verdict":"pass|leak","spans":[…]}`. It also catches combinations and “根据之前和 Acme 的讨论”.
 //!
 //! Step 3 is skipped for a fixed receipt ([`CheckCx::skip_model`]) and, for a bot's own message whose
@@ -54,8 +54,6 @@ use steve_modules::{Gateway, Tier};
 use steve_store::Store;
 use steve_store::base::Level;
 
-use crate::compose::PinnedModel;
-
 /// The check prompt starts with this (tests script the gateway by it).
 pub const CHECK_HEAD: &str = "【披露检查】";
 /// The rewrite prompt starts with this.
@@ -63,10 +61,6 @@ pub const REWRITE_HEAD: &str = "【改写回复】";
 /// Rewrites before a leaking reply that could go out directly becomes a draft (one that waits for the
 /// owner anyway is not rewritten: the card offers it).
 pub const MAX_REWRITES: usize = 1;
-/// The check model list (comma separated).
-pub const ENV_CHECK: &str = "STEVE_MODELS_CHECK";
-/// The fast list, the default source of check models.
-pub const ENV_FAST: &str = "STEVE_MODELS_FAST";
 /// The check model's time limit when the text waits on it.
 pub const TIMEOUT: Duration = Duration::from_secs(20);
 /// The check model's time limit for a draft that awaits approval ([`CheckCx::patient`]).
@@ -123,9 +117,6 @@ pub fn not_run(r: &CheckResult) -> bool {
 
 struct Inner {
     bound: OnceLock<(Store, Arc<dyn Gateway>)>,
-    pinned: OnceLock<Arc<dyn PinnedModel>>,
-    /// Candidate check models, in order (from the environment unless set).
-    models: Vec<String>,
 }
 
 /// C5's disclosure check. Cheap to clone; register one clone, bind another.
@@ -138,31 +129,10 @@ impl Default for Disclosure {
     }
 }
 
-fn env_list(key: &str) -> Vec<String> {
-    std::env::var(key)
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 impl Disclosure {
-    /// Check models from `STEVE_MODELS_CHECK`, else `STEVE_MODELS_FAST`.
     pub fn new() -> Self {
-        let mut models = env_list(ENV_CHECK);
-        if models.is_empty() {
-            models = env_list(ENV_FAST);
-        }
-        Self::with_models(models)
-    }
-
-    /// Explicit check models (tests).
-    pub fn with_models(models: Vec<String>) -> Self {
         Self(Arc::new(Inner {
             bound: OnceLock::new(),
-            pinned: OnceLock::new(),
-            models,
         }))
     }
 
@@ -172,22 +142,7 @@ impl Disclosure {
         let _ = self.0.bound.set((store, gateway));
     }
 
-    /// Runs the check on a specific model (when the gateway can pin one).
-    pub fn pinned(&self, p: Arc<dyn PinnedModel>) {
-        let _ = self.0.pinned.set(p);
-    }
-
-    /// The model the check uses for a draft written by `draft_model`: the first candidate that
-    /// differs. `None`: the gateway's fast tier decides.
-    pub fn check_model(&self, draft_model: Option<&str>) -> Option<String> {
-        self.0
-            .models
-            .iter()
-            .find(|m| Some(m.as_str()) != draft_model)
-            .cloned()
-    }
-
-    /// One check on the selected model, or the gateway's fast tier.
+    /// One check on the gateway's `disclosure` purpose, excluding `cx.draft_model` when possible.
     async fn run_model(
         &self,
         cx: &CheckCx,
@@ -197,25 +152,27 @@ impl Disclosure {
         let Some((_, gw)) = self.0.bound.get() else {
             return Err((R_UNBOUND.into(), String::new()));
         };
-        let model = self.check_model(cx.draft_model.as_deref());
-        let tried = model.clone().unwrap_or_else(|| "tier:fast".into());
-        let out = match (self.0.pinned.get(), &model) {
-            (Some(p), Some(m)) => p
-                .run(m, prompt, timeout)
-                .await
-                .map_err(steve_modules::gateway::GatewayError::from),
-            _ => {
-                steve_modules::gateway::purpose("disclosure", gw.run(Tier::Fast, prompt, timeout))
-                    .await
-            }
-        };
+        let fallback_name = "tier:fast".to_string();
+        let out = steve_modules::gateway::tagged(
+            "disclosure",
+            &cx.ws,
+            gw.run_excluding(Tier::Fast, prompt, cx.draft_model.as_deref(), timeout),
+        )
+        .await;
         match out {
             Ok(o) => {
-                let name = if o.model.is_empty() { tried } else { o.model };
+                let name = if o.model.is_empty() {
+                    fallback_name
+                } else {
+                    o.model
+                };
                 Ok((o.text, name))
             }
             Err(e) => {
-                tracing::warn!(model = tried, "disclosure: check model failed: {e}");
+                tracing::warn!(
+                    draft_model = cx.draft_model.as_deref().unwrap_or(""),
+                    "disclosure: check model failed: {e}"
+                );
                 let why = match &e {
                     steve_modules::gateway::GatewayError::Timeout(phase) => {
                         format!("超时：{phase}")
@@ -225,7 +182,7 @@ impl Disclosure {
                         e.to_string().chars().take(80).collect::<String>()
                     ),
                 };
-                Err((why, tried))
+                Err((why, fallback_name))
             }
         }
     }
@@ -1509,11 +1466,31 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn check_models_differ_from_the_draft_model() {
-        let d = Disclosure::with_models(vec!["haiku".into(), "sonnet".into()]);
-        assert_eq!(d.check_model(Some("haiku")).as_deref(), Some("sonnet"));
-        assert_eq!(d.check_model(Some("opus")).as_deref(), Some("haiku"));
-        assert_eq!(Disclosure::with_models(vec![]).check_model(None), None);
+    #[tokio::test]
+    async fn check_forwards_draft_model_as_exclude_model_to_gateway() {
+        let env = steve_modules::testkit::TestEnv::new(|_| {});
+        env.gateway.script_out(
+            CHECK_HEAD,
+            steve_modules::GatewayOut {
+                text: r#"{"verdict":"pass","spans":[]}"#.into(),
+                model: "sonnet".into(),
+                ..Default::default()
+            },
+        );
+        let d = Disclosure::new();
+        d.bind(env.store().clone(), env.gateway.clone());
+        let cx = CheckCx {
+            ws: steve_modules::testkit::WS.into(),
+            actor: "steve".into(),
+            draft_model: Some("haiku".into()),
+            ..Default::default()
+        };
+        let res = d.check(&cx, &Audience::default(), "好的", &[]).await;
+        assert_eq!(res.verdict, Verdict::Pass);
+        assert_eq!(res.check_model.as_deref(), Some("sonnet"));
+        assert_eq!(
+            *env.gateway.excluded_models.lock().unwrap(),
+            vec![Some("haiku".to_string())]
+        );
     }
 }

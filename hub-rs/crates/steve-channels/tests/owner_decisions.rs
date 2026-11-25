@@ -54,7 +54,7 @@ async fn setup() -> H {
 async fn setup_with(check: &str) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
-    let disclosure = Disclosure::with_models(Vec::new());
+    let disclosure = Disclosure::new();
     let link = OutLink::new();
     let (reg_disclosure, reg_link) = (disclosure.clone(), link.clone());
     let env = TestEnv::new(|r| {

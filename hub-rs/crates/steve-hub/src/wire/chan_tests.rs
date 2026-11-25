@@ -196,7 +196,7 @@ fn channel_fixture(gateway: Arc<dyn steve_core::ModelGateway>) -> ChannelFixture
     core.seed().unwrap();
 
     let flow_setup = FlowSetup::new(Arc::new(FakeCore::default()));
-    let disclosure = Disclosure::with_models(Vec::new());
+    let disclosure = Disclosure::new();
     let link = OutLink::new();
     let mut registry = Registry::new();
     flow_setup.register(&mut registry);

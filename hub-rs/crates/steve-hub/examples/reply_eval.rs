@@ -855,7 +855,7 @@ async fn disclose(a: &Args, scratch: &Path) {
     )
     .unwrap_or_else(|e| fail(&format!("names store: {e}")));
     names.ensure_workspace().expect("workspace");
-    let check = Disclosure::with_models(Vec::new());
+    let check = Disclosure::new();
     check.bind(names, gw);
     let sem = Arc::new(tokio::sync::Semaphore::new(
         one(a, "concurrency")

@@ -72,7 +72,7 @@ async fn setup_with_ids(ids: steve_channels::ext::MessageIds) -> H {
     let fake = FakeExtWs::start().await.expect("fake service");
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core);
-    let disclosure = steve_channels::disclosure::Disclosure::with_models(Vec::new());
+    let disclosure = steve_channels::disclosure::Disclosure::new();
     let env = TestEnv::new(|r| {
         flow_setup.register(r);
         connections::register(r);

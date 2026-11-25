@@ -90,6 +90,20 @@ pub trait Gateway: Send + Sync {
         timeout: Duration,
     ) -> Result<GatewayOut, GatewayError>;
 
+    /// Like [`Gateway::run`], asking the model selector to avoid `exclude_model` when another
+    /// candidate exists (used by the `disclosure` audit so a draft is not audited by the same
+    /// model that wrote it).
+    async fn run_excluding(
+        &self,
+        tier: Tier,
+        prompt: &str,
+        exclude_model: Option<&str>,
+        timeout: Duration,
+    ) -> Result<GatewayOut, GatewayError> {
+        let _ = exclude_model;
+        self.run(tier, prompt, timeout).await
+    }
+
     /// Image-aware calls must never silently discard the supplied image blocks.
     async fn run_with_images(
         &self,
