@@ -476,3 +476,95 @@ fn upgrades_a_version_2_database_with_attachments() {
         columns(&Connection::open(&path).unwrap(), "files")
     );
 }
+
+#[test]
+fn migration_141_backfills_node_id_and_preserves_stat_daily() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v140.sqlite3");
+    {
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE schema_version (v INTEGER NOT NULL);
+             CREATE TABLE schema_compat (min_reader INTEGER NOT NULL);
+             INSERT INTO schema_version VALUES (140);
+             INSERT INTO schema_compat VALUES (140);",
+        )
+        .unwrap();
+        for (i, m) in db::MIGRATIONS[..140].iter().enumerate() {
+            if i == 119 || i == 135 || i == 137 {
+                for table in ["bots", "sessions"] {
+                    let present: bool = c
+                        .query_row(
+                            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'reasoning_effort')"),
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    if !present {
+                        c.execute_batch(&format!(
+                            "ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT"
+                        ))
+                        .unwrap();
+                    }
+                }
+            }
+            if i == 121 {
+                let phase: bool = c
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('items') WHERE name = 'phase')",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                if !phase {
+                    c.execute_batch(db::ITEM_LIFECYCLE).unwrap();
+                }
+            }
+            c.execute_batch(m).unwrap();
+        }
+        c.execute_batch(
+            "INSERT INTO workspaces(id,name,created) VALUES('default','Personal',1);
+             INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES('ses_1','default','claude-code','.','idle',1,1);
+             INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
+               VALUES('ses_1','node_a','ws','ns_1','1','idle',1);
+             INSERT INTO agent_turns(id,workspace_id,session_id,harness,started,ended)
+               VALUES('tn_1','default','ses_1','claude-code',10,20);
+             INSERT INTO usage_records(workspace_id,ts,day,source,purpose,harness,model,turn_id,session_id,input,output)
+               VALUES('default',20,'2026-11-01','agent','turn','claude-code','opus','tn_1','ses_1',100,50);
+             INSERT INTO stat_daily(workspace_id,day,source,purpose,harness,model,bot_id,project_id,input,output,calls,turns)
+               VALUES('default','2026-11-01','agent','turn','claude-code','opus','','',100,50,1,1);
+             INSERT INTO stat_daily(workspace_id,day,source,purpose,harness,model,bot_id,project_id,input,output,calls,turns)
+               VALUES('default','2026-10-01','gateway','route','claude-code','haiku','','',10,5,1,0);",
+        )
+        .unwrap();
+    }
+    let s = Store::open(&path, NoPublisher).unwrap();
+    assert_eq!(schema_of(&path), schema_of(fresh().store.path()));
+    s.fixture_write(|c| {
+        let turn_node: String =
+            c.query_row("SELECT node_id FROM agent_turns WHERE id='tn_1'", [], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(turn_node, "node_a");
+        let usage_node: String = c.query_row(
+            "SELECT node_id FROM usage_records WHERE turn_id='tn_1'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(usage_node, "node_a");
+        let daily_node: String = c.query_row(
+            "SELECT node_id FROM stat_daily WHERE day='2026-11-01'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(daily_node, "node_a");
+        let legacy_node: String = c.query_row(
+            "SELECT node_id FROM stat_daily WHERE day='2026-10-01'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(legacy_node, "");
+        Ok(())
+    })
+    .unwrap();
+}

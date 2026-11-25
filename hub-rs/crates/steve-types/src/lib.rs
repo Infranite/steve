@@ -68,8 +68,8 @@ pub use stream::StreamControl;
 pub use view::{
     ById, CloseKind, ClosedBy, DecisionPrompt, DecisionStatus, DecisionTier, DecisionView,
     FoldReason, ItemOutcome, ItemParent, ItemPhase, ItemSnooze, ItemState, ItemView, ItemWait,
-    MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, Said, SessionView,
-    SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
+    MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, Said, SessionLiveVitals,
+    SessionView, SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
 };
 pub use wait::{WaitContract, WaitKind, WaitLimits, WaitOwner, WaitTimeoutAction};
 

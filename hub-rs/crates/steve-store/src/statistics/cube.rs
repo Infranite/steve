@@ -11,8 +11,17 @@ pub struct TurnFacts<'a, C>(pub &'a mut C);
 pub struct GatewayCalls<'a, C>(pub &'a mut C);
 pub struct StatsSettings<'a, C>(pub &'a mut C);
 
-/// A day, source, purpose, harness, model, Bot and project.
-pub type DailyKey = (String, String, String, String, String, String, String);
+/// A day, source, purpose, harness, model, Bot, project, and Node.
+pub type DailyKey = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 
 #[derive(Debug, Default, Clone)]
 pub struct Measures {
@@ -44,6 +53,7 @@ pub struct DailyFilter<'a> {
     pub bot: Option<&'a str>,
     pub model: Option<&'a str>,
     pub source: Option<&'a str>,
+    pub node: Option<&'a str>,
 }
 
 pub struct UsageFact {
@@ -55,8 +65,10 @@ pub struct UsageFact {
     pub harness: String,
     pub model: String,
     pub turn: Option<String>,
+    pub session: Option<String>,
     pub bot: String,
     pub project: String,
+    pub node: String,
     pub tokens: Tokens,
     pub cost_reported: f64,
     pub ok: bool,
@@ -64,9 +76,11 @@ pub struct UsageFact {
 
 pub struct TurnFact {
     pub id: String,
+    pub session: String,
     pub harness: String,
     pub bot: String,
     pub project: String,
+    pub node: String,
     pub attempt: i64,
     pub started: i64,
     pub ended: i64,
@@ -79,7 +93,7 @@ pub struct TurnFact {
     pub model: Option<String>,
 }
 
-const DIMENSIONS: [&str; 7] = [
+const DIMENSIONS: [&str; 8] = [
     "day",
     "source",
     "purpose",
@@ -87,6 +101,7 @@ const DIMENSIONS: [&str; 7] = [
     "model",
     "bot_id",
     "project_id",
+    "node_id",
 ];
 const MEASURES: [&str; 17] = [
     "input",
@@ -124,25 +139,26 @@ fn read_daily(r: &Row<'_>) -> Result<(DailyKey, Measures)> {
             r.get(4)?,
             r.get(5)?,
             r.get(6)?,
+            r.get(7)?,
         ),
         Measures {
-            input: r.get(7)?,
-            output: r.get(8)?,
-            cache_read: r.get(9)?,
-            cache_write: r.get(10)?,
-            reasoning: r.get(11)?,
-            hit_base: r.get(12)?,
-            cost_reported: r.get(13)?,
-            calls: r.get(14)?,
-            failed_calls: r.get(15)?,
-            turns: r.get(16)?,
-            turn_ms: r.get(17)?,
-            turn_errors: r.get(18)?,
-            retries: r.get(19)?,
-            interrupted: r.get(20)?,
-            tools: r.get(21)?,
-            tool_errors: r.get(22)?,
-            tool_kinds: r.get::<Json<_>>(23)?.0,
+            input: r.get(8)?,
+            output: r.get(9)?,
+            cache_read: r.get(10)?,
+            cache_write: r.get(11)?,
+            reasoning: r.get(12)?,
+            hit_base: r.get(13)?,
+            cost_reported: r.get(14)?,
+            calls: r.get(15)?,
+            failed_calls: r.get(16)?,
+            turns: r.get(17)?,
+            turn_ms: r.get(18)?,
+            turn_errors: r.get(19)?,
+            retries: r.get(20)?,
+            interrupted: r.get(21)?,
+            tools: r.get(22)?,
+            tool_errors: r.get(23)?,
+            tool_kinds: r.get::<Json<_>>(24)?.0,
         },
     ))
 }
@@ -160,6 +176,7 @@ impl<C: Read> DailyRows<'_, C> {
             ("bot_id", f.bot),
             ("model", f.model),
             ("source", f.source),
+            ("node_id", f.node),
         ] {
             filter(&mut q, Expr::col(field), value);
         }
@@ -181,6 +198,41 @@ impl<C: Read> DailyRows<'_, C> {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
     }
+
+    /// Cumulative per-(node_id, model, day) token totals and adapter-reported USD for a workspace.
+    pub fn node_model_days(
+        &mut self,
+        ws: &str,
+    ) -> Result<Vec<(String, String, String, Tokens, f64)>> {
+        let mut q = Query::select();
+        q.columns(["node_id", "model", "day"])
+            .expr(Func::sum(Expr::col("input")))
+            .expr(Func::sum(Expr::col("output")))
+            .expr(Func::sum(Expr::col("cache_read")))
+            .expr(Func::sum(Expr::col("cache_write")))
+            .expr(Func::sum(Expr::col("cost_reported")))
+            .from("stat_daily")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("node_id").ne(""))
+            .group_by_col("node_id")
+            .group_by_col("model")
+            .group_by_col("day");
+        self.0.all(&q, |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                Tokens {
+                    input: r.get(3)?,
+                    output: r.get(4)?,
+                    cache_read: r.get(5)?,
+                    cache_write: r.get(6)?,
+                    reasoning: None,
+                },
+                r.get::<Option<f64>>(7)?.unwrap_or_default(),
+            ))
+        })
+    }
 }
 
 impl DailyRows<'_, W<'_>> {
@@ -195,7 +247,7 @@ impl DailyRows<'_, W<'_>> {
                 .and_where(Expr::col("workspace_id").eq(ws)),
         )?;
         let mut n = 0;
-        for ((day, source, purpose, harness, model, bot, project), m) in cells {
+        for ((day, source, purpose, harness, model, bot, project, node), m) in cells {
             self.0.exec(
                 Query::insert()
                     .into_table("stat_daily")
@@ -213,6 +265,7 @@ impl DailyRows<'_, W<'_>> {
                         model.into(),
                         bot.into(),
                         project.into(),
+                        node.into(),
                         m.input.into(),
                         m.output.into(),
                         m.cache_read.into(),
@@ -248,17 +301,19 @@ fn usage_row(r: &Row<'_>) -> Result<UsageFact> {
         harness: r.get(5)?,
         model: r.get(6)?,
         turn: r.get(7)?,
-        bot: r.get::<Option<String>>(8)?.unwrap_or_default(),
-        project: r.get::<Option<String>>(9)?.unwrap_or_default(),
+        session: r.get(8)?,
+        bot: r.get::<Option<String>>(9)?.unwrap_or_default(),
+        project: r.get::<Option<String>>(10)?.unwrap_or_default(),
+        node: r.get::<Option<String>>(11)?.unwrap_or_default(),
         tokens: Tokens {
-            input: r.get(10)?,
-            output: r.get(11)?,
-            cache_read: r.get(12)?,
-            cache_write: r.get(13)?,
-            reasoning: r.get(14)?,
+            input: r.get(12)?,
+            output: r.get(13)?,
+            cache_read: r.get(14)?,
+            cache_write: r.get(15)?,
+            reasoning: r.get(16)?,
         },
-        cost_reported: r.get::<Option<f64>>(15)?.unwrap_or_default(),
-        ok: r.get(16)?,
+        cost_reported: r.get::<Option<f64>>(17)?.unwrap_or_default(),
+        ok: r.get(18)?,
     })
 }
 
@@ -282,8 +337,10 @@ impl<C: Read> UsageFacts<'_, C> {
             "harness",
             "model",
             "turn_id",
+            "session_id",
             "bot_id",
             "project_id",
+            "node_id",
             "input",
             "output",
             "cache_read",
@@ -357,9 +414,11 @@ impl<C: Read> TurnFacts<'_, C> {
         q.columns(
             [
                 "id",
+                "session_id",
                 "harness",
                 "bot_id",
                 "project_id",
+                "node_id",
                 "attempt",
                 "started",
                 "ended",
@@ -396,25 +455,27 @@ impl<C: Read> TurnFacts<'_, C> {
         filter(&mut q, Expr::col(("t", "bot_id")), bot);
         self.0.scan(&q, |r| {
             let fallback_model = r
-                .get::<Option<String>>(12)?
+                .get::<Option<String>>(14)?
                 .filter(|s| !s.is_empty())
-                .or(r.get::<Option<String>>(13)?.filter(|s| !s.is_empty()))
+                .or(r.get::<Option<String>>(15)?.filter(|s| !s.is_empty()))
                 .unwrap_or_default();
             visit(TurnFact {
                 id: r.get(0)?,
-                harness: r.get(1)?,
-                bot: r.get::<Option<String>>(2)?.unwrap_or_default(),
-                project: r.get::<Option<String>>(3)?.unwrap_or_default(),
-                attempt: r.get(4)?,
-                started: r.get(5)?,
-                ended: r.get(6)?,
-                reason: r.get(7)?,
-                transient: r.get(8)?,
-                tools: r.get(9)?,
-                tool_errors: r.get(10)?,
-                tool_kinds: r.get::<Json<_>>(11)?.0,
+                session: r.get(1)?,
+                harness: r.get(2)?,
+                bot: r.get::<Option<String>>(3)?.unwrap_or_default(),
+                project: r.get::<Option<String>>(4)?.unwrap_or_default(),
+                node: r.get::<Option<String>>(5)?.unwrap_or_default(),
+                attempt: r.get(6)?,
+                started: r.get(7)?,
+                ended: r.get(8)?,
+                reason: r.get(9)?,
+                transient: r.get(10)?,
+                tools: r.get(11)?,
+                tool_errors: r.get(12)?,
+                tool_kinds: r.get::<Json<_>>(13)?.0,
                 fallback_model,
-                model: r.get(14)?,
+                model: r.get(16)?,
             })
         })
     }

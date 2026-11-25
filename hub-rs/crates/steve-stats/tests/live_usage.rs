@@ -339,6 +339,7 @@ fn standalone_cost_only_and_other_models_stay_missing() {
                     item_id: None,
                     bot_id: None,
                     project_id: None,
+                    node_id: None,
                     usage: steve_store::ModelUsage {
                         model: "B".into(),
                         tokens: steve_store::Tokens {
@@ -370,6 +371,7 @@ fn standalone_cost_only_and_other_models_stay_missing() {
                 item_id: None,
                 bot_id: None,
                 project_id: None,
+                node_id: None,
                 usage: steve_store::ModelUsage {
                     model: "A".into(),
                     tokens: Default::default(),

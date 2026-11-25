@@ -93,6 +93,9 @@ fn row(r: &Row<'_>) -> Result<SessionView> {
         queued: r.get::<i64>(23)? as u32,
         busy: r.get(24)?,
         waiting,
+        tokens: None,
+        cost_usd: None,
+        vitals: None,
     })
 }
 

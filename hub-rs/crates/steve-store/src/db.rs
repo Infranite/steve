@@ -294,6 +294,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/139.sql"),
     // 140: canonicalize reasoning_effort to Steve's five levels and add sessions.effort_mapping.
     include_str!("../migrations/140.sql"),
+    // 141: attribute usage_records, agent_turns, gateway_calls, and stat_daily to Node (`node_id`).
+    include_str!("../migrations/141.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -313,6 +313,29 @@ pub struct SessionView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub waiting: Option<SessionWaiting>,
+    /// Cumulative tokens across all turns recorded for this session (enriched at read time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub tokens: Option<i64>,
+    /// Cumulative estimated (or reported) USD cost across this session (enriched at read time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    #[cfg_attr(test, ts(as = "Option<f64>"))]
+    pub cost_usd: Option<serde_json::Number>,
+    /// Latest live CPU, memory, and disk-write snapshot for an active session (enriched in memory).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub vitals: Option<SessionLiveVitals>,
+}
+
+/// Live OS process-group snapshot for an active session on its Node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SessionLiveVitals {
+    #[cfg_attr(test, ts(as = "f64"))]
+    pub cpu_seconds: serde_json::Number,
+    pub resident_bytes: u64,
+    pub disk_written_bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

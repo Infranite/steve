@@ -703,10 +703,22 @@ pub(crate) fn latest_node(id: &str, since: i64) -> Option<NodeVitalsLatest> {
     history.nodes.latest(id, since).cloned()
 }
 
-pub(crate) fn node_days(
+/// Live CPU, memory, and disk-write snapshots across all recently sampled Nodes, keyed by session id.
+pub(crate) fn latest_session_vitals(
+    since: i64,
+) -> std::collections::HashMap<String, steve_types::devices::NodeSessionVitals> {
+    let Some(i) = INSTALLED.get() else {
+        return std::collections::HashMap::new();
+    };
+    let history = i.history.lock().unwrap_or_else(|e| e.into_inner());
+    history.nodes.active_session_vitals(since)
+}
+
+pub fn node_days(
     ids: impl IntoIterator<Item = String>,
     now: i64,
     mut tokens: BTreeMap<String, (i64, i64)>,
+    mut costs: BTreeMap<String, (f64, f64)>,
 ) -> BTreeMap<String, NodeVitalsDay> {
     let Some(i) = INSTALLED.get() else {
         return BTreeMap::new();
@@ -715,9 +727,17 @@ pub(crate) fn node_days(
     ids.into_iter()
         .filter_map(|id| {
             let (per_minute, today) = tokens.remove(&id).unwrap_or_default();
-            let day = history
-                .nodes
-                .day(&id, now, VitalsTokens { per_minute, today })?;
+            let (total_cost_usd, today_cost_usd) = costs.remove(&id).unwrap_or_default();
+            let day = history.nodes.day(
+                &id,
+                now,
+                VitalsTokens {
+                    per_minute,
+                    today,
+                    total_cost_usd,
+                    today_cost_usd,
+                },
+            )?;
             Some((id, day))
         })
         .collect()
@@ -1016,6 +1036,17 @@ fn node_figures(node: &str, latest: &NodeVitalsLatest, point: NodeVitalsPoint) {
     set(
         "steve_node_network_sent_bytes_per_second",
         point.network.map(|v| v.tx_bytes_per_second),
+    );
+    let process_written = latest
+        .process
+        .as_ref()
+        .and_then(|p| p.disk_written_bytes)
+        .unwrap_or(0);
+    let total_written = process_written.saturating_add(latest.adapter_disk_written_bytes);
+    set("steve_node_disk_written_bytes", Some(total_written as f64));
+    set(
+        "steve_node_adapter_disk_written_bytes",
+        Some(latest.adapter_disk_written_bytes as f64),
     );
 }
 

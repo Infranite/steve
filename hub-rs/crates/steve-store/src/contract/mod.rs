@@ -156,6 +156,7 @@ use crate::{BusEvent, Result, Store, StoreError};
 pub struct R<'a> {
     db: &'a mut dyn Backend,
     conn: &'a Connection,
+    windows: Option<&'a crate::repo::window_cache::WindowCaches>,
 }
 
 /// The write transaction (or a scope of it).
@@ -258,16 +259,18 @@ impl Store {
             return f(&mut R {
                 db: &mut Sqlite(c),
                 conn: c,
+                windows: Some(&self.inner.windows),
             });
         }
         if let Some(c) = self.active_snapshot() {
             return f(&mut R {
                 db: &mut Sqlite(c.conn()),
                 conn: c.conn(),
+                windows: Some(&self.inner.windows),
             });
         }
         let c = Rc::new(self.acquire_reader()?);
-        read_snapshot(c.conn(), |r| {
+        read_snapshot(c.conn(), Some(&self.inner.windows), |r| {
             let id = Arc::as_ptr(&self.inner) as usize;
             READ_SNAPSHOTS.with_borrow_mut(|snapshots| snapshots.push((id, Rc::clone(&c))));
             let _snapshot = ReadSnapshot(id);
@@ -282,12 +285,13 @@ impl Store {
     ) -> Result<T> {
         let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         c.pragma_update(None, "query_only", true)?;
-        read_snapshot(&c, f)
+        read_snapshot(&c, None, f)
     }
 }
 
 fn read_snapshot<T, E: From<StoreError>>(
     c: &Connection,
+    windows: Option<&crate::repo::window_cache::WindowCaches>,
     f: impl FnOnce(&mut R<'_>) -> Result<T, E>,
 ) -> Result<T, E> {
     let mut db = Sqlite(c);
@@ -296,6 +300,7 @@ fn read_snapshot<T, E: From<StoreError>>(
     let out = f(&mut R {
         db: &mut db,
         conn: c,
+        windows,
     });
     let end = db.batch("COMMIT");
     let v = out?;
@@ -368,6 +373,8 @@ mod sealed {
         fn connection(&self) -> &Connection;
 
         fn db(&mut self) -> &mut dyn Backend;
+
+        fn window_caches(&self) -> Option<&crate::repo::window_cache::WindowCaches>;
 
         fn scan<S: QueryStatementWriter>(
             &mut self,
@@ -442,6 +449,10 @@ impl sealed::Q for R<'_> {
     fn db(&mut self) -> &mut dyn Backend {
         self.db
     }
+
+    fn window_caches(&self) -> Option<&crate::repo::window_cache::WindowCaches> {
+        self.windows
+    }
 }
 impl Read for R<'_> {}
 
@@ -452,6 +463,10 @@ impl sealed::Q for W<'_> {
 
     fn db(&mut self) -> &mut dyn Backend {
         self.db
+    }
+
+    fn window_caches(&self) -> Option<&crate::repo::window_cache::WindowCaches> {
+        Some(&self.store.inner.windows)
     }
 }
 impl Read for W<'_> {}

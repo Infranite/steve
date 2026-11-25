@@ -82,6 +82,7 @@ export const SMOKE = [
   "running-pill",
   "runtime-evidence",
   "session-panel",
+  "sessions-cost",
   "settings-panes",
   "sidebar-versions",
   "sign-in",

@@ -664,6 +664,16 @@ pub(super) fn describe() {
         "Resident memory of their live processes. Labels: node."
     );
     describe_gauge!(
+        "steve_node_adapter_disk_written_bytes",
+        Bytes,
+        "Bytes written to disk across all live harness adapter process groups on the Node. Labels: node."
+    );
+    describe_gauge!(
+        "steve_node_disk_written_bytes",
+        Bytes,
+        "Total bytes written to disk by the Node process and its live harness adapters. Labels: node."
+    );
+    describe_gauge!(
         "steve_node_process_cpu_seconds",
         Seconds,
         "The Node process's CPU time since it started. Labels: node."
@@ -1036,5 +1046,20 @@ pub(super) fn describe() {
         "steve_security_refusals_total",
         Count,
         "Actions refused at a security or tenant boundary. Labels: boundary, reason."
+    );
+    describe_counter!(
+        "steve_window_cache_requests_total",
+        Count,
+        "In-process read-projection window cache lookups and issuances. Labels: cache (attention, feed), result (hit, reuse, issue, miss, expired)."
+    );
+    describe_counter!(
+        "steve_window_cache_evictions_total",
+        Count,
+        "Entries evicted by LRU capacity from in-process window caches. Labels: cache (attention, feed)."
+    );
+    describe_gauge!(
+        "steve_window_cache_entries",
+        Count,
+        "Current entries in each bounded in-process window cache. Labels: cache (attention, feed)."
     );
 }

@@ -503,6 +503,14 @@ export default {
       perItemDef: "The average estimated cost of the items done in this range, from start to done, including what was spent before this range.",
       perItemFoot: "Median {{usd}}",
     },
+    infra: {
+      diskWrites: "Node disk written",
+      diskWritesSub: "Process {{proc}} · Active sessions {{sessions}}",
+      diskWritesEmpty: "No Node disk write samples yet",
+      topNode: "Top Node",
+      topNodeSub: "{{tokens}} tokens · est. {{usd}}",
+      topNodeEmpty: "No Node spend recorded in this range",
+    },
     daily: {
       section: "Daily output",
       sectionSub: "How many items got done each day, and at what cost. Click a day for the items done and created that day.",
@@ -526,10 +534,12 @@ export default {
     },
     where: {
       section: "Where the money and time went",
-      sectionSub: "Cost and agent time split by item, Bot, model, harness or purpose; below, the most expensive items. Click one to see where its cost went.",
+      sectionSub: "Cost and agent time split by item, Bot, model, harness, Node, conversation or purpose; below, the most expensive items. Click one to see where its cost went.",
       tab: {
         item: "Items",
         model: "Model",
+        node: "Node",
+        session: "Conversation",
         purpose: "Purpose",
       },
       tabAria: "Split by",

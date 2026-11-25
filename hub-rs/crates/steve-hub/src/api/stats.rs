@@ -46,6 +46,8 @@ const GROUPS: &[&str] = &[
     "harness",
     "bot",
     "project",
+    "node",
+    "session",
     "source",
     "purpose",
     "token_type",
@@ -299,6 +301,7 @@ fn query(c: &mut R<'_>, ws: &str, p: &Params) -> Result<StatsQuery, ApiError> {
         bot: get("bot").map(str::to_string),
         model: get("model").map(str::to_string),
         source: get("source").map(str::to_string),
+        node: get("node").map(str::to_string),
     })
 }
 
@@ -431,15 +434,22 @@ async fn breakdown(
                 let names = views::Names::load(db, &c.ws)
                     .map_err(serr)?
                     .with_harnesses(harnesses);
-                let daily = match hour {
-                    // one hour of the day: the hourly cells of that bucket, as the hourly series has them
-                    Some(h) => {
-                        let b = format!("{}T{h:02}:00", q.from);
-                        let mut v = metrics::hourly(db, &q).map_err(serr)?;
-                        v.retain(|d| d.day == b);
+                let daily = match (b, hour) {
+                    (By::Session, Some(h)) => {
+                        let bucket = format!("{}T{h:02}:00", q.from);
+                        let mut v = metrics::by_session(db, &q, true).map_err(serr)?;
+                        v.retain(|d| d.day == bucket);
                         v
                     }
-                    None => metrics::daily(db, &q).map_err(serr)?,
+                    (By::Session, None) => metrics::by_session(db, &q, false).map_err(serr)?,
+                    // one hour of the day: the hourly cells of that bucket, as the hourly series has them
+                    (_, Some(h)) => {
+                        let bucket = format!("{}T{h:02}:00", q.from);
+                        let mut v = metrics::hourly(db, &q).map_err(serr)?;
+                        v.retain(|d| d.day == bucket);
+                        v
+                    }
+                    (_, None) => metrics::daily(db, &q).map_err(serr)?,
                 };
                 let prices = metrics::book_of(db, &c.ws, daily.iter().map(|row| row.model.as_str())).map_err(serr)?;
                 /* by purpose: also the models each purpose actually ran on */

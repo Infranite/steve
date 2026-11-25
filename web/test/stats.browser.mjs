@@ -102,7 +102,12 @@ try {
         : p.by === "bot" ? [usageRow("dev", "dev"), usageRow("rev", "评审")]
         : p.by === "model" ? [usageRow("opus", "opus"), usageRow("sonnet", "sonnet")]
         : p.by === "harness" ? [usageRow("claude-code", "Claude Code")]
+        : p.by === "node" ? [usageRow("node_gpu", "GPU Box"), { ...usageRow("local", "本机 Node"), est: 4.2, total: 1_200_000 }]
+        : p.by === "session" ? [usageRow("s1", "重整统计页图表"), { ...usageRow("", "非会话调用（网关 / 研究）"), est: 2.4, total: 600_000 }]
         : [usageRow("agent", "Agent"), usageRow("gateway", "网关")] }
+      else if (u.pathname === "/api/vitals") {
+        data = { nodes: { local: { sampling: { interval_ms: 60_000, stale_after_ms: 180_000, now: Date.now() }, latest: { at: Date.now() - 10_000, sampled_at: Date.now() - 10_000, roots: [], sessions: 1, process: { cpu_seconds: 3.2, resident_bytes: 67_108_864, disk_written_bytes: 10_485_760 }, adapter_disk_written_bytes: 52_428_800, session_vitals: [{ session_id: "s1", cpu_seconds: 5.1, resident_bytes: 268_435_456, disk_written_bytes: 52_428_800 }], rtt_ms: null }, tokens: { per_minute: 5000, today: 100_000, total_cost_usd: 18.4, today_cost_usd: 4.2 }, series: [] } } }
+      }
       else if (u.pathname === "/api/stats/items") {
         const rows = p.hour != null ? Array.from({ length: (p.only === "done" ? hDone : hCreated)[Number(p.hour)] ?? 0 }, (_, i) => itemRow(40 + i, p.only === "done" ? "done" : "run"))
           : p.only === "done" && p.range === "custom" ? [itemRow(21, "done")] : p.only === "done" ? Array.from({ length: sum(done) }, (_, i) => (i === 0 ? { ...itemRow(20, "done"), tokens: 7_400_000, est: 0.004, unpriced_tokens: 7_390_000 } : i === 1 ? { ...itemRow(21, "done"), unpriced_tokens: 50_000 } : itemRow(20 + i, "done"))) : p.only === "created" ? [itemRow(30, "run"), itemRow(31, "wait")] : [itemRow(1, "run"), itemRow(8, "done")]
@@ -148,6 +153,10 @@ try {
     assert.match(await kpi("waiting"), /^等你的时间 9 小时/)
     assert.match(await kpi("first_pass"), /一次通过率 66%/)
     assert.match(await kpi("per_item"), /^每件平均费用\s*估 \$2\.60/)
+    /* overview infra strip: disk written across Nodes and Top Node spend */
+    await page.locator("[data-stats-infra]").waitFor()
+    assert.match((await page.locator("[data-stats-disk-writes]").innerText()).replace(/\s+/g, " "), /节点磁盘写入 60 MB 进程 10 MB · 活跃会话 50 MB/)
+    assert.match((await page.locator("[data-stats-top-node]").innerText()).replace(/\s+/g, " "), /开销最高的 Node GPU Box 6M tokens · 估 \$18\.40/)
 
     /* daily output: done per day as bars, the cost as a line on its own axis; a day drills to that day's items */
     const daily = page.locator("[data-daily]")
@@ -197,6 +206,12 @@ try {
     assert.match((await split.locator('[data-where-part="dev"]').innerText()).replace(/\s+/g, " "), /Steve 开发 Bot \$18\.40 50%/)
     await page.locator('[data-where] [data-seg="model"]').click()
     await page.waitForFunction(() => document.querySelector("[data-where-split]")?.getAttribute("data-where-split") === "model" && document.querySelector('[data-where-part="opus"]'))
+    await page.locator('[data-where] [data-seg="node"]').click()
+    await page.waitForFunction(() => document.querySelector("[data-where-split]")?.getAttribute("data-where-split") === "node" && document.querySelector('[data-where-part="node_gpu"]'))
+    assert.match((await split.locator('[data-where-part="node_gpu"]').innerText()).replace(/\s+/g, " "), /GPU Box \$18\.40/)
+    await page.locator('[data-where] [data-seg="session"]').click()
+    await page.waitForFunction(() => document.querySelector("[data-where-split]")?.getAttribute("data-where-split") === "session" && document.querySelector('[data-where-part="s1"]'))
+    assert.match((await split.locator('[data-where-part="s1"]').innerText()).replace(/\s+/g, " "), /重整统计页图表 \$18\.40/)
     await page.locator('[data-where] [data-seg="time"]').click()
     await page.waitForFunction(() => document.querySelector("[data-where-split]")?.getAttribute("data-where-measure") === "time")
     await page.waitForFunction(() => /小时|天/.test(document.querySelector("[data-where-split] .ui-cbc__big")?.textContent ?? ""))
@@ -277,7 +292,7 @@ try {
       await page.waitForFunction(() => !document.querySelector('[data-events] [data-zoom-level]'))
     }
     assert.ok(!calls.slice(c0).some((c) => c.includes("bucket=hour")), "7 天 goes by day")
-    const wide7 = await page.evaluate(() => [...document.querySelectorAll("[data-chart] svg, [data-kpi], [data-chart-head], [data-run-state], [data-top-item], [data-where-split], [data-compare]")].filter((e) => e.getBoundingClientRect().right > innerWidth + 1).map((e) => e.outerHTML.slice(0, 80)))
+    const wide7 = await page.evaluate(() => [...document.querySelectorAll("[data-chart] svg, [data-kpi], [data-stats-infra], [data-chart-head], [data-run-state], [data-top-item], [data-where-split], [data-compare]")].filter((e) => e.getBoundingClientRect().right > innerWidth + 1).map((e) => e.outerHTML.slice(0, 80)))
     assert.deepEqual(wide7, [], "pieces past the right edge")
     if (shots) {
       await page.mouse.move(0, 0)

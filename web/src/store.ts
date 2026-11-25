@@ -22,7 +22,7 @@ import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, ReasoningEffort, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onEntityView, onViewKinds, messageView, messageViews, openDecisions, resetViews, settle, settled, subscribeItemScope, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork, useItemView, useSessionView, useViewGroup } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
@@ -30,7 +30,11 @@ import { itemDisplayStatusOf, itemState } from "./item-state"
 /* ───────── view types (from the prototype) ───────── */
 export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: ReasoningEffort | null; effortMapping?: EffortMapping | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; node?: string; queued: number; busy: boolean; /** its next turn waits for room on its device */ room?: SessionWaiting | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
-  starting?: boolean; since?: number; placement?: PlacementExplanation }
+  starting?: boolean; since?: number; placement?: PlacementExplanation
+  /** cumulative tokens & estimated USD cost (read-time enriched) */
+  tokens?: number; costUsd?: number
+  /** latest live CPU, memory, and disk-write snapshot for an active session */
+  vitals?: SessionLiveVitals }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
   recovery?: SendRecoveryInfo
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
@@ -316,6 +320,7 @@ export function sessOf(s: SessionView): Sess {
     get queue() { return qc.getQueryData<RQueued[]>(queueKey(s.id)) ?? emptyQueue },
     ro: s.readonly, device: s.device_id ?? "", node: s.node_id, queued: s.queued ?? 0,
     busy: s.busy ?? false, room: running ? s.waiting ?? null : null, starting: s.status === "starting", since: s.created,
+    tokens: s.tokens, costUsd: s.cost_usd, vitals: s.vitals,
   }
   sessionModels.set(s, model)
   return model
