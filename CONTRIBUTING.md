@@ -86,8 +86,24 @@ Versions and release notes are generated automatically from commits at release t
   - Every commit subject and pull request title uses `type(scope): imperative summary` (or `type: imperative summary`), where `type` is one of `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`.
   - Mark incompatible public-contract changes with `!` after the type/scope (for example `feat(api)!: ...`) or a `BREAKING CHANGE: <why>` trailer.
   - When operators must act before or after upgrading, add a trailer `Upgrade: <what to do>` (may span multiple lines) in the commit message or pull request description. When a pull request description carries `Upgrade:` (or `BREAKING CHANGE:`), it takes precedence over commit trailers inside that PR so each PR's upgrade notice is not duplicated; identical notices are deduplicated across the section.
-  - Pull requests merge into `main` with merge commits; when multiple pull requests land together through an integration pull request, `ops/cut-release.py` still resolves each merged pull request from its commits. Add an optional `## Release note` section to the PR description for user-facing context; when omitted, the PR title is used. Direct commits without a merged PR use their commit subject.
-  - CI rejects pull requests whose title does not follow this format, whose release trailers are empty, or that add/modify files under `docs/releases/` (except a `chore(release): vX.Y.Z` release PR adding `docs/releases/X.Y.Z.md` alone), via `ops/cut-release.py lint --github-event`. Locally, `python3 ops/cut-release.py lint` enforces the same rules on the current branch (use `--range A..B` to check any commit range).
+  - Pull requests merge into `main` with merge commits; when multiple pull requests land together through an integration pull request, `ops/cut-release.py` still resolves each merged pull request from its commits. Add an optional `## Release note` section to the PR description for user-facing context; when omitted, the PR title is used. `## Release note` runs until the next Markdown heading, so place sections in this order (keeping test summaries and any trailing signature out of `## Release note`):
+
+    ```markdown
+    ## Release note
+
+    Concise user-facing summary of what changed.
+
+    Upgrade: optional operator action before or after upgrading.
+
+    ## Checks
+
+    Checks and tests run for this pull request.
+
+    <!-- Optional attribution / signature line goes after ## Checks -->
+    ```
+
+    Direct commits without a merged PR use their commit subject.
+  - CI rejects pull requests whose title does not follow this format, whose release trailers are empty, whose `## Release note` section contains a `Checks:` paragraph or a signature/attribution line (move them under a separate heading such as `## Checks`), or that add/modify files under `docs/releases/` (except a `chore(release): vX.Y.Z` release PR adding `docs/releases/X.Y.Z.md` alone), via `ops/cut-release.py lint --github-event`. Locally, `python3 ops/cut-release.py lint` enforces the same rules on the current branch (use `--range A..B` to check any commit range, or `--pr-title`/`--pr-body` to check a PR description).
 - **Automatic version calculation and release notes.**
   - `ops/cut-release.py` walks all commits since the highest `vX.Y.Z` tag, resolves every commit's merged pull requests via GitHub (`commits/{sha}/pulls`, so pull requests landed via an integration branch are included alongside direct merges), fetches live PR titles and descriptions from GitHub (so editing a merged PR's title or description on GitHub takes effect immediately), and computes the next version automatically across all resolved PRs and direct commits:
     - `!` or `BREAKING CHANGE:` → **MAJOR** after `1.0`, **MINOR** before `1.0`;

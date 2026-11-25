@@ -308,7 +308,69 @@ Ran cargo nextest.
     assert rn == "Marking an item finished closes its cycle immediately.\n\n- Handles paused and running items.", rn
     assert m.extract_release_note("## Summary\nNothing else.") is None
     assert m.extract_release_note("## Release note\n<!-- only comment -->\n") is None
-    ok("## Release note extraction strips comments and trailing Upgrade: lines cleanly")
+    # Stops at any next Markdown heading (including ### Checks), while preserving headings inside code fences.
+    pr_subhead = (
+        "## Release note\n\nUser summary.\n\n"
+        "```md\n### Example heading inside fence\n```\n\n"
+        "### Checks\n\nChecks: npm run check\n\n"
+        "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
+    )
+    assert m.extract_release_note(pr_subhead) == "User summary.\n\n```md\n### Example heading inside fence\n```", m.extract_release_note(pr_subhead)
+    ok("## Release note extraction stops at any next heading and strips comments and trailing Upgrade: lines")
+
+    # lint_pr rejects Checks: paragraphs and signature lines inside ## Release note, and accepts them after ## Checks.
+    m.lint_pr(
+        "feat(web): split Node page",
+        "## Release note\n\nReorganized the Node page.\n\n## Checks\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+    )
+    m.lint_pr(
+        "feat(web): split Node page",
+        "## Release note\n\nReorganized the Node page.\n\n### Checks\n\nLocal checks: npm run check\n\nCo-Authored-By: Gemini <noreply@google.com>\n",
+    )
+    # Without ## Release note, Checks: and signature lines in PR body are allowed.
+    m.lint_pr(
+        "refactor(core): tidy helper",
+        "## Summary\n\nInternal cleanup.\n\nChecks: cargo test\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+    )
+    # Checks: / signature inside fenced code blocks or HTML comments within ## Release note are allowed.
+    m.lint_pr(
+        "docs(release): document example",
+        "## Release note\n\n<!-- Checks: comment ignored -->\n```\nChecks: example\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n```\n",
+    )
+    # Checks: variants inside ## Release note (no separating heading) are refused with ## Checks guidance.
+    for bad_checks in (
+        "Checks: npm run check, test:web 361/361",
+        "Local checks: steve-types, guards",
+        "Local focused checks: cargo check",
+        "**Checks:** npm run check",
+    ):
+        try:
+            m.lint_pr("feat(web): split Node page", f"## Release note\n\nUser summary.\n\n{bad_checks}\n")
+            raise AssertionError(f"checks paragraph passed lint: {bad_checks}")
+        except m.Refused as e:
+            assert "## Checks" in str(e) and "checks paragraph" in str(e), e
+    # Signature / attribution lines inside ## Release note are refused with ## Checks guidance.
+    for bad_sig in (
+        "🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+        "Generated with [Claude Code](https://claude.com/claude-code)",
+        "Co-Authored-By: Gemini <noreply@google.com>",
+        "Signed-off-by: Maintainer <m@example.com>",
+    ):
+        try:
+            m.lint_pr("feat(web): split Node page", f"## Release note\n\nUser summary.\n\n{bad_sig}\n")
+            raise AssertionError(f"signature line passed lint: {bad_sig}")
+        except m.Refused as e:
+            assert "## Checks" in str(e) and "signature/attribution line" in str(e), e
+    # Both Checks: and signature in the same ## Release note report both violations together.
+    try:
+        m.lint_pr(
+            "feat(web): split Node page",
+            "## Release note\n\nUser summary.\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+        )
+        raise AssertionError("combined Checks: + signature passed lint")
+    except m.Refused as e:
+        assert "checks paragraph" in str(e) and "signature/attribution line" in str(e) and "## Checks" in str(e), e
+    ok("lint rejects Checks: paragraphs and signature lines inside ## Release note with ## Checks guidance")
 
     # Version computation: pre-1.0 vs post-1.0, PATCH/MINOR/MAJOR, triggers.
     def mk(ct, *, breaking=False, upgrades=(), pr=None, title=None):
@@ -394,6 +456,20 @@ Ran cargo nextest.
             refresh=lambda repo, num, tok, base: ("fix(ci): edited title", "Upgrade: restart Hub"),
             fetch_files=lambda repo, num, tok, base: [{"filename": "ops/cut-release.py", "status": "modified"}],
         )
+        # Live PR body with Checks: or signature inside ## Release note is refused in lint --github-event.
+        try:
+            m.lint_github_event(
+                str(ev),
+                env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+                refresh=lambda repo, num, tok, base: (
+                    "feat(web): regroup sidebar",
+                    "## Release note\n\nRegrouped sidebar.\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+                ),
+                fetch_files=lambda repo, num, tok, base: [{"filename": "web/src/nav.tsx", "status": "modified"}],
+            )
+            raise AssertionError("dirty ## Release note passed lint_github_event")
+        except m.Refused as e:
+            assert "## Checks" in str(e) and "checks paragraph" in str(e) and "signature/attribution line" in str(e), e
         # Ordinary PR adding or modifying any file under docs/releases/ is refused.
         for bad_files in (
             [{"filename": "docs/releases/0.11.0.md", "status": "added"}],
@@ -644,9 +720,16 @@ def integration_checks():
         git(a, "checkout", "-q", "-b", "release/v0.4.0", "origin/main")
         commit(a, {"docs/releases/0.4.0.md": "# Steve v0.4.0\n"}, "chore(release): v0.4.0")
         assert cut(a, "lint").returncode == 0
-        # --pr-title check.
+        # --pr-title and --pr-body check.
         assert cut(a, "lint", "--pr-title", "fix(hub): handle EOF").returncode == 0
         assert cut(a, "lint", "--pr-title", "Handle EOF").returncode == 1
+        bad_body = Path(tmp, "bad-pr-body.md")
+        bad_body.write_text("## Release note\n\nFixed EOF.\n\nChecks: cargo test\n", encoding="utf-8")
+        r = cut(a, "lint", "--pr-title", "fix(hub): handle EOF", "--pr-body", str(bad_body))
+        assert r.returncode == 1 and "## Checks" in r.stderr, r
+        good_body = Path(tmp, "good-pr-body.md")
+        good_body.write_text("## Release note\n\nFixed EOF.\n\n## Checks\n\nChecks: cargo test\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n", encoding="utf-8")
+        assert cut(a, "lint", "--pr-title", "fix(hub): handle EOF", "--pr-body", str(good_body)).returncode == 0
         # --range check on main skips release PR merges and validates commits.
         assert cut(a, "lint", "--range", "v0.3.0..origin/main").returncode == 0
         ok("lint validates branch commits, PR titles, ranges, and enforces docs/releases/ cut-only rule")

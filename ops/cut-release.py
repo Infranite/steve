@@ -63,6 +63,19 @@ TRAILER_STOP_RE = re.compile(
     r"|[A-Za-z][A-Za-z0-9-]*:\s|BREAKING[ -]CHANGE:\s|(?i:Closes|Fixes|Resolves|Refs)\s+#\d+)"
 )
 RELEASE_NOTE_HEADING_RE = re.compile(r"^##\s+Release notes?\s*$", re.I)
+NEXT_HEADING_RE = re.compile(r"^#{1,6}\s+")
+RELEASE_NOTE_CHECKS_RE = re.compile(
+    r"^(?:[*_]{1,2})?(?:local(?:\s+[a-z-]+)?\s+)?checks(?:[*_]{1,2})?[:：](?!:)",
+    re.I,
+)
+RELEASE_NOTE_SIGNATURE_RE = re.compile(
+    r"^(?:"
+    r"🤖"
+    r"|(?:[*_]{1,2})?Generated\s+(?:with|by)\s+\[[^\]]+\]\(https?://[^)]+\)(?:[*_]{1,2})?\s*$"
+    r"|(?:Co-Authored-By|Signed-off-by):\s*\S"
+    r")",
+    re.I,
+)
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
@@ -251,10 +264,10 @@ def _strip_trailers_outside_fences(lines):
     return out
 
 
-def extract_release_note(pr_body):
-    """Return the optional `## Release note` section from a PR description, or None."""
+def _extract_release_note_lines(pr_body):
+    """Return cleaned lines inside `## Release note` (up to the next Markdown heading), or []."""
     if not pr_body:
-        return None
+        return []
     lines = pr_body.splitlines()
     collected, in_section, fence = [], False, None
     for line in lines:
@@ -267,11 +280,11 @@ def extract_release_note(pr_body):
             if RELEASE_NOTE_HEADING_RE.match(line.strip()):
                 in_section = True
             continue
-        if re.match(r"^#{1,2}\s+", line):
+        if NEXT_HEADING_RE.match(line.strip()):
             break
         collected.append(line)
     if not collected:
-        return None
+        return []
     cleaned = _strip_trailers_outside_fences(collected)
     # Strip HTML comments only outside code fences.
     out, fence = [], None
@@ -279,7 +292,7 @@ def extract_release_note(pr_body):
 
     def flush_buf():
         if buf:
-            out.extend(HTML_COMMENT_RE.sub("", "\n".join(buf)).splitlines())
+            out.extend(HTML_COMMENT_RE.sub("", "\n".join(buf)).split("\n"))
             buf.clear()
 
     for line in cleaned:
@@ -290,8 +303,46 @@ def extract_release_note(pr_body):
         else:
             buf.append(line)
     flush_buf()
-    result = "\n".join(out).strip()
+    return out
+
+
+def extract_release_note(pr_body):
+    """Return the optional `## Release note` section from a PR description, or None."""
+    lines = _extract_release_note_lines(pr_body)
+    if not lines:
+        return None
+    result = "\n".join(lines).strip()
     return result or None
+
+
+def validate_release_note(pr_body):
+    """Refuse `Checks:` paragraphs or signature/attribution lines inside `## Release note`."""
+    lines = _extract_release_note_lines(pr_body)
+    if not lines:
+        return
+    errors = []
+    fence = None
+    for line in lines:
+        fence, toggled = _fence_toggle(line, fence)
+        if toggled or fence is not None:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if RELEASE_NOTE_CHECKS_RE.match(stripped):
+            preview = stripped[:80]
+            errors.append(
+                f"`## Release note` contains a checks paragraph ({preview!r}); "
+                "move check/test summaries into a separate section after `## Release note` (for example `## Checks`)."
+            )
+        elif RELEASE_NOTE_SIGNATURE_RE.match(stripped):
+            preview = stripped[:80]
+            errors.append(
+                f"`## Release note` contains a signature/attribution line ({preview!r}); "
+                "move it after a separate heading (for example `## Checks`) because `## Release note` runs until the next Markdown heading."
+            )
+    if errors:
+        raise Refused("\n".join(errors))
 
 
 def dedupe_texts(items):
@@ -1412,6 +1463,7 @@ def validate_release_dir_files(all_files, added_or_modified, added_only, release
 def lint_pr(title, body="", files=None):
     validate_header(title, label="PR title")
     parse_trailers(body, validate=True)
+    validate_release_note(body)
     if files is not None:
         all_files, added_or_modified, added_only = [], [], []
         for item in files:
