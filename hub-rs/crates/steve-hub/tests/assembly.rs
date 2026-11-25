@@ -487,7 +487,7 @@ async fn feishu_self_wires_without_feishu_bot() {
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["ext_ws", "ext_ws.bot", "feishu_user"]);
     // Base jobs and the connection runtime; no legacy approval sweeps.
-    assert_eq!(w.jobs.len(), 21 + 17);
+    assert_eq!(w.jobs.len(), 22 + 17);
     // without both, the rest still wires
     let h = home();
     let asm = Assembly::builtin()
@@ -596,7 +596,7 @@ async fn an_extension_runs_its_own_connection_hook() {
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["github_pat"]);
     // Base jobs and the connection runtime; no legacy approval sweeps.
-    assert_eq!(w.jobs.len(), 21 + 17);
+    assert_eq!(w.jobs.len(), 22 + 17);
 }
 
 #[tokio::test]
@@ -679,7 +679,7 @@ async fn an_empty_assembly_still_wires_the_hub() {
     // the built-in extensions' two (registrations resumed, the connection runtime) are gone;
     // library MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync and the
     // alarm clock remain in the base wiring.
-    assert_eq!(w.jobs.len(), 20 + 17);
+    assert_eq!(w.jobs.len(), 21 + 17);
     assert!(w.lifecycle.is_none());
 }
 
@@ -820,6 +820,7 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
         "mail.sync",
         "mail.send",
         "mail.mailboxes",
+        "nodes.harness_auto_upgrade",
         "nodes.vitals",
         "outbox.dispatch",
         "plugins.supervise",
