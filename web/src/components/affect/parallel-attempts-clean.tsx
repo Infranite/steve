@@ -391,7 +391,7 @@ const css = /* css */ `
 
 /* ----- Steve: a list of steps (no race): figures on the right, one action at the end, a row picked for its details ----- */
 .ui-pac[data-steps] .ui-pac__panel { gap: 6px; }
-.ui-pac[data-steps] .ui-pac__row { grid-template-columns: 28px minmax(0, 1fr) minmax(72px, 20%) minmax(60px, auto) 60px; column-gap: 12px; padding: 10px 12px 10px 12px; }
+.ui-pac[data-steps] .ui-pac__row { grid-template-columns: 28px minmax(0, 1fr) minmax(72px, 20%) minmax(60px, auto) minmax(var(--ui-pac-act-min, 80px), max-content); column-gap: 12px; padding: 10px 12px 10px 12px; }
 .ui-pac__hit { position: absolute; inset: 0; z-index: 0; border-radius: inherit; }
 .ui-pac[data-steps] .ui-pac__row > :not(.ui-pac__hit) { position: relative; z-index: 1; pointer-events: none; }
 .ui-pac[data-steps] .ui-pac__row > .ui-pac__act { pointer-events: auto; }
@@ -400,12 +400,13 @@ const css = /* css */ `
 .ui-pac__row[data-selected], .ui-pac__row[data-selected]:hover { box-shadow: var(--ui-pac-shadow), 0 0 0 1.5px var(--ui-pac-focus); }
 .ui-pac__fig { font-size: calc(12px * var(--type-scale, 1)); line-height: 18px; color: var(--ui-pac-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ui-pac[data-steps] .ui-pac__meta:empty::before, .ui-pac__fig:empty::before { content: "\\200b"; }
-.ui-pac__act { display: flex; justify-content: flex-end; align-items: center; min-width: 0; }
+.ui-pac__act { display: flex; justify-content: flex-end; align-items: center; flex-shrink: 0; white-space: nowrap; }
+.ui-pac__act > * { flex-shrink: 0; white-space: nowrap; }
 /* Steve: steps read as one quiet list, not a stack of cards – no panel or shadow per row, a hover wash instead; a thin
  * bar only where something is still moving (running, waiting, failed), none on a finished step; the row's action shows
  * when you point at it (always on touch screens) */
 .ui-pac[data-steps] .ui-pac__panel { gap: 0; }
-.ui-pac[data-steps] .ui-pac__row { background: transparent; box-shadow: none; border-radius: var(--aui-radius, 8px); padding: 8px 10px; grid-template-columns: 24px minmax(0, 1fr) minmax(72px, 18%) minmax(60px, auto) 56px; animation: none; }
+.ui-pac[data-steps] .ui-pac__row { background: transparent; box-shadow: none; border-radius: var(--aui-radius, 8px); padding: 8px 10px; grid-template-columns: 24px minmax(0, 1fr) minmax(68px, 18%) minmax(60px, auto) minmax(var(--ui-pac-act-min, 80px), max-content); animation: none; }
 .ui-pac[data-steps] .ui-pac__row[data-clickable]:hover { box-shadow: none; background: var(--aui-subtle); }
 .ui-pac[data-steps] .ui-pac__row[data-selected], .ui-pac[data-steps] .ui-pac__row[data-selected]:hover { box-shadow: none; background: var(--aui-subtle); }
 .ui-pac[data-steps] .ui-pac__icon { width: 24px; height: 24px; background: transparent; box-shadow: none; }
@@ -437,7 +438,7 @@ const css = /* css */ `
 }
 
 @container ui-pac (max-width: 560px) {
-  .ui-pac[data-steps] .ui-pac__row { grid-template-columns: 28px minmax(0, 1fr) minmax(56px, auto); grid-template-areas: "icon who end" "lane lane act"; row-gap: 8px; column-gap: 10px; padding: 10px 12px; }
+  .ui-pac[data-steps] .ui-pac__row { grid-template-columns: 28px minmax(0, 1fr) minmax(max-content, auto); grid-template-areas: "icon who end" "lane lane act"; row-gap: 8px; column-gap: 10px; padding: 10px 12px; }
   .ui-pac[data-steps] .ui-pac__row:has(.ui-pac__act:empty) { grid-template-areas: "icon who end" "lane lane lane"; }
   .ui-pac[data-steps] .ui-pac__line { display: block; min-height: 0; white-space: nowrap; }
   /* who ran the step stays: on its own line under the step's name */

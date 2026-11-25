@@ -8,14 +8,17 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Deserialize;
 use steve_modules::Caller;
 use steve_node_api::{
-    AdapterCapabilities, AdapterStatus, Code, HarnessCapability, HarnessSetup, Node, NodeId,
-    SetupState,
+    AdapterStatus, Code, ComponentStatus, HarnessCapability, HarnessSetup, Node, NodeId, SetupState,
 };
-use steve_types::devices::{HarnessDegradedReason, MissingCommandDiagnostic};
+use steve_types::devices::{
+    HarnessDegradedReason, NodeHarnessComponentStatus, NodeHarnessComponentView,
+    NodeHarnessDetectedView, NodeHarnessRefreshResponse, NodeHarnessReportState,
+    NodeHarnessReportView, NodeHarnessSetupState, NodeHarnessSetupView, NodeHarnessView,
+    NodeHarnessesResponse,
+};
 
 use super::AppState;
 use crate::error::ApiError;
@@ -23,16 +26,7 @@ use crate::error::ApiError;
 const MAX_AGE: Duration = Duration::from_secs(60);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
-#[derive(Clone, Default, Serialize)]
-pub struct Report {
-    state: &'static str,
-    checked_at: Option<i64>,
-    attempted_at: Option<i64>,
-    stale: bool,
-    refreshing: bool,
-    error: Option<String>,
-    harnesses: Vec<Harness>,
-}
+pub type Report = NodeHarnessReportView;
 
 #[derive(Clone)]
 struct ProbedReport {
@@ -92,27 +86,67 @@ impl Target {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct Harness {
-    id: String,
-    name: String,
-    available: Option<bool>,
-    version: String,
-    adapter_version: Option<String>,
-    models: Vec<String>,
-    degraded_reason: Option<HarnessDegradedReason>,
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    missing_command: Option<MissingCommandDiagnostic>,
-    setup: Option<HarnessSetup>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    capabilities: Option<AdapterCapabilities>,
+fn setup_view(s: HarnessSetup) -> NodeHarnessSetupView {
+    NodeHarnessSetupView {
+        state: match s.state {
+            SetupState::NotInstalled => NodeHarnessSetupState::NotInstalled,
+            SetupState::Installing => NodeHarnessSetupState::Installing,
+            SetupState::Ready => NodeHarnessSetupState::Ready,
+            SetupState::Unavailable => NodeHarnessSetupState::Unavailable,
+            SetupState::Unknown => NodeHarnessSetupState::Unknown,
+        },
+        components: s
+            .components
+            .into_iter()
+            .map(|comp| NodeHarnessComponentView {
+                id: comp.id,
+                name: comp.name,
+                package: comp.package,
+                version: comp.version,
+                path: comp.path,
+                status: match comp.status {
+                    ComponentStatus::Installed => NodeHarnessComponentStatus::Installed,
+                    ComponentStatus::Missing => NodeHarnessComponentStatus::Missing,
+                    ComponentStatus::Unknown => NodeHarnessComponentStatus::Unknown,
+                },
+                detected: comp.detected.map(|d| NodeHarnessDetectedView {
+                    path: d.path,
+                    version: d.version,
+                }),
+            })
+            .collect(),
+        can_install: s.can_install,
+        reason: s.reason,
+        help: s.help,
+        error: s.error,
+    }
 }
 
-fn harness(c: HarnessCapability) -> Harness {
+fn component_outdated(id: &str, setup: &HarnessSetup) -> bool {
+    steve_harness_spec::components(id).iter().any(|spec| {
+        let Some(min) = spec.minimum else {
+            return false;
+        };
+        let Ok(min_ver) = semver::Version::parse(min) else {
+            return false;
+        };
+        setup.components.iter().any(|comp| {
+            comp.id == spec.id
+                && comp
+                    .version
+                    .as_deref()
+                    .and_then(|v| semver::Version::parse(v.trim_start_matches('v')).ok())
+                    .is_some_and(|v| v < min_ver)
+        })
+    })
+}
+
+fn harness(c: HarnessCapability) -> NodeHarnessView {
     use HarnessDegradedReason::*;
     let a = c.adapter.as_ref();
-    let degraded_reason = a.and_then(|a| {
+    let s = c.setup.as_ref();
+    let auth = a.is_some_and(|a| a.session_auth_required == Some(true));
+    let adapter_reason = a.and_then(|a| {
         if a.session_auth_required == Some(true) {
             return Some(AuthenticationRequired);
         }
@@ -132,30 +166,90 @@ fn harness(c: HarnessCapability) -> Harness {
             _ => None,
         }
     });
-    let auth = degraded_reason == Some(AuthenticationRequired);
+    let has_login_shell_cmd = a.is_some_and(|a| {
+        a.missing_command
+            .as_ref()
+            .is_some_and(|m| m.login_shell_path.is_some())
+    });
+    let has_partial_install = !c.version.is_empty()
+        || has_login_shell_cmd
+        || s.is_some_and(|s| {
+            s.components
+                .iter()
+                .any(|comp| comp.installed() || comp.detected.is_some())
+        });
     let available = if auth {
         Some(false)
-    } else if c
-        .setup
-        .as_ref()
-        .is_some_and(|s| s.state == SetupState::Unknown)
-    {
+    } else if s.is_some_and(|s| s.state == SetupState::Unknown) {
         None
-    } else if c
-        .setup
-        .as_ref()
-        .is_some_and(|s| s.state != SetupState::Ready)
-    {
+    } else if s.is_some_and(|s| s.state != SetupState::Ready) {
         Some(false)
     } else {
         // A declared capability is not a probe: without an adapter report readiness is unknown.
         a.map(|a| a.status == AdapterStatus::Ready && a.session.is_some())
     };
-    let models: Vec<String> = match a.and_then(|a| a.session.as_ref()) {
+    let installed = if available == Some(true) {
+        true
+    } else if let Some(s) = s {
+        match s.state {
+            SetupState::NotInstalled => has_partial_install || s.error.is_some(),
+            SetupState::Installing
+            | SetupState::Ready
+            | SetupState::Unavailable
+            | SetupState::Unknown => true,
+        }
+    } else if let Some(a) = a {
+        match a.status {
+            AdapterStatus::AdapterMissing => {
+                !a.builtin || !c.version.is_empty() || has_login_shell_cmd
+            }
+            AdapterStatus::Ready | AdapterStatus::InitializeFailed => true,
+        }
+    } else {
+        c.sessions || !c.version.is_empty()
+    };
+    let degraded_reason = if available == Some(true) {
+        None
+    } else if auth {
+        Some(AuthenticationRequired)
+    } else if !installed {
+        None
+    } else if let Some(s) = s {
+        match s.state {
+            SetupState::Installing => Some(Installing),
+            SetupState::Unknown => Some(ProbeUnknown),
+            SetupState::NotInstalled => adapter_reason.or(Some(AdapterMissing)),
+            SetupState::Unavailable => {
+                if s.error.is_some() {
+                    Some(InstallFailed)
+                } else if component_outdated(&c.name, s) {
+                    Some(VersionOutdated)
+                } else if let Some(r) = adapter_reason {
+                    Some(r)
+                } else {
+                    Some(RuntimeIncompatible)
+                }
+            }
+            SetupState::Ready => adapter_reason.or(Some(ProbeUnknown)),
+        }
+    } else {
+        adapter_reason.or_else(|| available.is_none().then_some(ProbeUnknown))
+    };
+    let session = a.and_then(|a| a.session.as_ref());
+    let default_model = session.and_then(|s| s.default_model.clone());
+    let models: Vec<String> = match session {
         Some(s) => s.models.iter().map(|m| m.id.clone()).collect(),
         None => c.models,
     };
-    Harness {
+    let install_hint = a
+        .and_then(|a| a.install_hint.clone())
+        .filter(|hint| !hint.trim().is_empty())
+        .or_else(|| {
+            steve_harness_spec::builtin(&c.name)
+                .map(|b| b.install_hint.to_owned())
+                .filter(|hint| !hint.trim().is_empty())
+        });
+    NodeHarnessView {
         name: a
             .map(|a| a.title.as_str())
             .filter(|s| !s.is_empty())
@@ -165,8 +259,11 @@ fn harness(c: HarnessCapability) -> Harness {
         available,
         version: c.version,
         adapter_version: a.and_then(|a| a.version.clone()),
+        default_model,
         models,
         degraded_reason,
+        install_hint,
+        installed,
         // The authentication code is enough. Adapter text can include account data.
         error: if auth {
             None
@@ -174,7 +271,7 @@ fn harness(c: HarnessCapability) -> Harness {
             a.and_then(|a| a.session_error.clone().or_else(|| a.error.clone()))
         },
         missing_command: a.and_then(|a| a.missing_command.clone()),
-        setup: c.setup,
+        setup: c.setup.map(setup_view),
         capabilities: a.and_then(|a| a.capabilities.clone()),
     }
 }
@@ -196,18 +293,18 @@ impl Inventory {
         );
         let linked = t.node.is_some() && t.current();
         if t.upgrade_only && linked {
-            report.state = "upgrade_required";
+            report.state = NodeHarnessReportState::UpgradeRequired;
             report.error = None;
             report.refreshing = false;
             report.stale = report.checked_at.is_some();
             return report;
         }
-        report.stale =
-            report.checked_at.is_some() && (!linked || !current || report.state != "reported");
+        report.stale = report.checked_at.is_some()
+            && (!linked || !current || report.state != NodeHarnessReportState::Reported);
         if !linked {
-            report.state = "offline";
+            report.state = NodeHarnessReportState::Offline;
         } else if !current {
-            report.state = "unreported";
+            report.state = NodeHarnessReportState::Unreported;
         }
         report
     }
@@ -235,7 +332,7 @@ impl Inventory {
                     let mut report = old.as_ref().map(|v| v.report.clone()).unwrap_or_default();
                     let result = tokio::time::timeout(PROBE_TIMEOUT, node.probe(fresh)).await;
                     if !t.current() {
-                        report.state = "offline";
+                        report.state = NodeHarnessReportState::Offline;
                         report.stale = report.checked_at.is_some();
                         return Ok::<_, ()>(ProbedReport {
                             report,
@@ -249,25 +346,29 @@ impl Inventory {
                         Ok(Ok(c)) if c.node.as_str() == t.id => {
                             report.checked_at = report.attempted_at;
                             report.harnesses = c.harnesses.into_iter().map(harness).collect();
-                            ("reported", None)
+                            (NodeHarnessReportState::Reported, None)
                         }
                         Ok(Ok(_)) => (
-                            "failed",
+                            NodeHarnessReportState::Failed,
                             Some("probe returned a different Node identity".into()),
                         ),
                         Ok(Err(e)) => (
                             if e.code == Code::Unsupported {
-                                "unsupported"
+                                NodeHarnessReportState::Unsupported
                             } else {
-                                "failed"
+                                NodeHarnessReportState::Failed
                             },
                             Some(e.safe_detail),
                         ),
-                        Err(_) => ("failed", Some("Node harness probe timed out".into())),
+                        Err(_) => (
+                            NodeHarnessReportState::Failed,
+                            Some("Node harness probe timed out".into()),
+                        ),
                     };
                     report.state = state;
                     report.error = error;
-                    report.stale = state != "reported" && report.checked_at.is_some();
+                    report.stale =
+                        state != NodeHarnessReportState::Reported && report.checked_at.is_some();
                     Ok(ProbedReport {
                         report,
                         connection: t.generation,
@@ -342,7 +443,10 @@ async fn targets(st: &AppState, caller: Caller) -> Result<Vec<Target>, ApiError>
 
 /// Fast cached list; slow probes run independently per machine. Polling cannot queue duplicate
 /// work behind a slow Node. Reconnection changes its generation and bypasses the one-minute TTL.
-pub async fn list(State(st): State<AppState>, caller: Caller) -> Result<Json<Value>, ApiError> {
+pub async fn list(
+    State(st): State<AppState>,
+    caller: Caller,
+) -> Result<Json<NodeHarnessesResponse>, ApiError> {
     let targets = targets(&st, caller).await?;
     let mut nodes = BTreeMap::new();
     for t in targets {
@@ -370,7 +474,7 @@ pub async fn list(State(st): State<AppState>, caller: Caller) -> Result<Json<Val
             });
         }
     }
-    Ok(Json(json!({ "nodes": nodes })))
+    Ok(Json(NodeHarnessesResponse { nodes }))
 }
 
 #[derive(Default, Deserialize)]
@@ -384,7 +488,7 @@ pub async fn get(
     caller: Caller,
     Path(id): Path<String>,
     Query(q): Query<Refresh>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<NodeHarnessRefreshResponse>, ApiError> {
     let t = targets(&st, caller)
         .await?
         .into_iter()
@@ -394,7 +498,10 @@ pub async fn get(
         .node_harnesses
         .refresh(&t, q.fresh.as_deref() == Some("1"))
         .await;
-    Ok(Json(json!({ "node_id": id, "report": report })))
+    Ok(Json(NodeHarnessRefreshResponse {
+        node_id: id,
+        report,
+    }))
 }
 
 #[cfg(test)]

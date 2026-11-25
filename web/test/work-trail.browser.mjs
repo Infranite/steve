@@ -28,7 +28,14 @@ try {
     /* unified subtask view: subagent with nested child steps + cancel button, and non-cancellable background task */
     const sub = run.locator('[data-subtask-id="sub-brand"]')
     await sub.waitFor()
-    assert.equal(await run.locator('[data-subtask-cancel="sub-brand"]').count(), 1)
+    const cancelBtn = run.locator('[data-subtask-cancel="sub-brand"]')
+    assert.equal(await cancelBtn.count(), 1)
+    assert.equal(await cancelBtn.evaluate((btn) => {
+      const row = btn.closest('[data-subtask-id]')
+      const br = btn.getBoundingClientRect()
+      const rr = row ? row.getBoundingClientRect() : br
+      return btn.scrollWidth <= btn.clientWidth + 1 && br.right <= rr.right + 1
+    }), true, `subtask cancel button must not clip at width ${width}`)
     assert.equal(await run.locator('[data-subtask-id="bg-report-check"]').count(), 1)
     assert.equal(await run.locator('[data-subtask-cancel="bg-report-check"]').count(), 0)
     assert.equal(await run.locator('[data-subtask-detail="sub-brand"] [data-subtask-children="2"]').count(), 1)

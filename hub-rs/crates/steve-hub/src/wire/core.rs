@@ -597,19 +597,20 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     /// planned. Otherwise it is bound nowhere, and [`Self::refusal`] says why. `after` (a
     /// predecessor's release on its way): it opens only once that is done.
     fn created(&self, session_id: &str, after: Option<&str>) {
-        self.created_with_placement(session_id, after, None);
+        self.created_with_placement(session_id, after, None, None);
     }
     fn created_with_placement(
         &self,
         session_id: &str,
         after: Option<&str>,
         explanation: Option<&steve_types::PlacementExplanation>,
+        system_context: Option<&str>,
     ) {
         if let Err(e) = self.check_session_gate(session_id) {
             tracing::warn!(session_id, "session gate held before binding: {e}");
             return;
         }
-        match self.bind_dispatch(session_id, after, explanation) {
+        match self.bind_dispatch(session_id, after, explanation, system_context) {
             Ok(true) => return,
             // a session of no item
             Ok(false) => {}
@@ -624,7 +625,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         let Some(n) = &self.node else { return };
         match self.local_binding(session_id) {
             Some(b) => {
-                if let Err(e) = n.bind_after(&b, after) {
+                if let Err(e) = n.bind_after_with_context(&b, after, system_context) {
                     n.fell_back();
                     tracing::error!("bind {session_id} to the Node: {e}; refused");
                 }

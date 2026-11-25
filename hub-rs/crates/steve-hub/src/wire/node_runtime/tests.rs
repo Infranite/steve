@@ -1074,6 +1074,59 @@ async fn one_turn_shares_four_starts_and_sixteen_sends_across_failures() {
 }
 
 #[tokio::test]
+async fn open_session_carries_system_context_and_preserves_it_across_reopen() {
+    let (_dir, node, original, seen) = retry_fixture();
+    let clock = Arc::new(FakeClock::new(steve_store::now()));
+    let store = original.store.clone();
+    let rt = NodeRuntime::with_clock(store.clone(), node.clone(), seen, clock);
+    rt.reconciled.store(true, Ordering::SeqCst);
+    node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+
+    steve_store::testkit::hub::workspace_cases::seed_item_and_active_session(
+        &store, "ST-CTX", "s-ctx",
+    )
+    .unwrap();
+    rt.bind_after_with_context(
+        &Binding {
+            session: "s-ctx".into(),
+            resource: "item:ST-CTX".into(),
+            prepare: serde_json::from_value(
+                json!({"type":"existing", "dir":{"root":"root","rel":"proj"}}),
+            )
+            .unwrap(),
+            choice: build::choice(),
+            policy: build::policy(),
+        },
+        None,
+        Some("[K1] Owner rule: keep changes focused."),
+    )
+    .unwrap();
+    while rt.send_one().await {}
+
+    let first_open = rt.open_of("s-ctx").unwrap();
+    assert_eq!(
+        first_open.system_context.as_deref(),
+        Some("[K1] Owner rule: keep changes focused.")
+    );
+    assert!(
+        node.log()
+            .iter()
+            .any(|(method, _)| *method == "open_session")
+    );
+
+    // Release and reopen (new prompt): persisted system_context stays intact on the reopen command.
+    rt.release("s-ctx").unwrap();
+    while rt.send_one().await {}
+    rt.prompt("s-ctx", "follow up", "user", &[]).unwrap();
+    while rt.send_one().await {}
+    let reopen_open = rt.open_of("s-ctx").unwrap();
+    assert_eq!(
+        reopen_open.system_context.as_deref(),
+        Some("[K1] Owner rule: keep changes focused.")
+    );
+}
+
+#[tokio::test]
 async fn upgrade_only_node_skips_reconcile_until_normal_link() {
     use steve_node_api::upgrade_v1;
     use steve_node_wire::{Conn, ConnOptions, Handler, NodeServer, RemoteNode};

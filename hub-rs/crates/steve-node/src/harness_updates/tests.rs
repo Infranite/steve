@@ -610,6 +610,7 @@ fn put_active_session(n: &LocalNode, sid: &str, harness: &str, active: bool) {
         state: None,
         artifact_view: None,
         skills: vec![],
+        system_context: None,
     };
     let view = SessionView {
         id: session.clone(),

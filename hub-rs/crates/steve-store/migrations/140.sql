@@ -1,103 +1,109 @@
--- 140: one-time retirement of non-terminal child items left behind by the retired dynamic
--- work-graph engine (`source[1] = "workflow"`). Replaces the per-startup runtime scan while
--- keeping closed history, artifacts, and script-workflow (`source[1] = "script"`) items intact.
+-- Dynamic script workflow ledger (WF-3): 2 core aggregates (`wf_runs`, `wf_calls`) plus 3 strict
+-- subordinate tables (`wf_script_versions`, `wf_call_attempts`, `wf_version_calls`).
+-- Written in portable SQLite / PostgreSQL DDL; zero cached budget counters or separate audit tables.
 
-CREATE TEMP TABLE legacy_wf_children AS
- SELECT id, workspace_id, cycle, revision, updated
- FROM items
- WHERE phase <> 'closed'
-   AND json_valid(source)
-   AND json_extract(source, '$[1]') = 'workflow';
+CREATE TABLE wf_runs (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    parent_item_id TEXT NOT NULL,
+    parent_cycle BIGINT NOT NULL,
+    goal_version BIGINT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('running','paused','completed','failed','cancelled','superseded')),
+    pause_reason_code TEXT,
+    active_script_version BIGINT NOT NULL DEFAULT 1,
+    run_revision BIGINT NOT NULL DEFAULT 1,
+    single_session_override BIGINT NOT NULL DEFAULT 0 CHECK(single_session_override IN (0,1)),
+    review_verified_call_id TEXT,
+    extra_attempts_budget BIGINT NOT NULL DEFAULT 0,
+    result_json TEXT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    UNIQUE(workspace_id, parent_item_id, parent_cycle, goal_version)
+);
 
-INSERT INTO item_cycles (item_id, cycle, revision, outcome, acceptance, reason, closed, source)
- SELECT id, cycle, revision, 'cancelled', NULL, 'legacy_workflow_retired', updated, 'migrated'
- FROM legacy_wf_children
- WHERE true
- ON CONFLICT(item_id, cycle) DO NOTHING;
+CREATE INDEX wf_runs_active ON wf_runs(status, workspace_id);
+CREATE INDEX wf_runs_parent_cycle ON wf_runs(parent_item_id, parent_cycle);
 
-UPDATE items
- SET phase = 'closed',
-     outcome = 'cancelled',
-     acceptance = NULL,
-     closed_reason = 'legacy_workflow_retired',
-     closed_at = COALESCE(closed_at, updated),
-     closing = NULL
- WHERE id IN (SELECT id FROM legacy_wf_children);
+CREATE TABLE wf_script_versions (
+    run_id TEXT NOT NULL REFERENCES wf_runs(id) ON DELETE CASCADE,
+    version BIGINT NOT NULL,
+    script_source TEXT NOT NULL,
+    script_sha256 TEXT NOT NULL,
+    created_by_session_id TEXT,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (run_id, version)
+);
 
-UPDATE decisions
- SET status = 'expired',
-     resolved = COALESCE(resolved, (SELECT updated FROM legacy_wf_children l WHERE l.id = decisions.item_id)),
-     result = '{"closed":"cancelled","reason":"legacy_workflow_retired"}'
- WHERE status = 'open'
-   AND item_id IN (SELECT id FROM legacy_wf_children);
+CREATE TABLE wf_calls (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES wf_runs(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL,
+    identity_hash TEXT NOT NULL,
+    phase TEXT,
+    title TEXT,
+    prompt TEXT NOT NULL,
+    options_canonical_json TEXT NOT NULL,
+    schema_json TEXT,
+    occurrence BIGINT NOT NULL,
+    is_review BIGINT NOT NULL DEFAULT 0 CHECK(is_review IN (0,1)),
+    mutex_key TEXT,
+    status TEXT NOT NULL CHECK(status IN ('queued','dispatched','completed','failed','cancelled')),
+    result_json TEXT,
+    artifact_ids_json TEXT,
+    git_head TEXT,
+    git_tree TEXT,
+    git_cwd TEXT,
+    settled_at_revision BIGINT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    UNIQUE(run_id, identity_hash)
+);
 
-INSERT INTO session_dispatch (id, session_id, text, via, created, files, state, updated)
- SELECT q.id, q.session_id, q.text, q.via, q.created, q.files, 'cancelled', l.updated
- FROM queued q
- JOIN sessions s ON s.id = q.session_id
- JOIN legacy_wf_children l ON l.id = s.item_id
- WHERE q.via NOT IN ('steve', 'resumed:steve')
- ON CONFLICT(id) DO UPDATE SET state = 'cancelled', updated = excluded.updated
- WHERE session_dispatch.state = 'claimed';
+CREATE INDEX wf_calls_run_status ON wf_calls(run_id, status);
+CREATE INDEX wf_calls_mutex ON wf_calls(workspace_id, mutex_key)
+    WHERE mutex_key IS NOT NULL AND status = 'dispatched';
 
-DELETE FROM queued
- WHERE session_id IN (
-   SELECT s.id FROM sessions s JOIN legacy_wf_children l ON l.id = s.item_id
- );
+CREATE TABLE wf_call_attempts (
+    id TEXT PRIMARY KEY,
+    call_id TEXT NOT NULL REFERENCES wf_calls(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES wf_runs(id) ON DELETE CASCADE,
+    parent_item_id TEXT NOT NULL,
+    parent_cycle BIGINT NOT NULL,
+    attempt_no BIGINT NOT NULL,
+    child_item_id TEXT UNIQUE,
+    bot_id TEXT,
+    placement_id TEXT,
+    harness TEXT,
+    model TEXT,
+    status TEXT NOT NULL CHECK(status IN ('blocked','dispatched','closing','succeeded','failed','cancelled')),
+    dispatched_at_revision BIGINT NOT NULL,
+    closing_delivery_revision BIGINT,
+    candidate_result_json TEXT,
+    candidate_artifact_ids_json TEXT,
+    candidate_git_head TEXT,
+    candidate_git_tree TEXT,
+    candidate_git_cwd TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at BIGINT NOT NULL,
+    settled_at BIGINT,
+    UNIQUE(call_id, attempt_no)
+);
 
-DELETE FROM session_resume
- WHERE session_id IN (
-   SELECT s.id FROM sessions s JOIN legacy_wf_children l ON l.id = s.item_id
- );
+CREATE UNIQUE INDEX wf_call_attempts_one_active ON wf_call_attempts(call_id)
+    WHERE status IN ('blocked','dispatched','closing');
+CREATE UNIQUE INDEX wf_call_attempts_one_succeeded ON wf_call_attempts(call_id)
+    WHERE status = 'succeeded';
+CREATE INDEX wf_call_attempts_cycle_budget ON wf_call_attempts(parent_item_id, parent_cycle);
+CREATE INDEX wf_call_attempts_run_status ON wf_call_attempts(run_id, status);
 
-UPDATE runtime_attempts
- SET cancel_requested = 1,
-     revision = revision + 1,
-     updated = COALESCE((
-       SELECT l.updated FROM runtime_turns t
-       JOIN sessions s ON s.id = t.session_id
-       JOIN legacy_wf_children l ON l.id = s.item_id
-       WHERE t.turn_id = runtime_attempts.turn_id
-     ), updated)
- WHERE state <> 'finished'
-   AND cancel_requested = 0
-   AND turn_id IN (
-     SELECT t.turn_id FROM runtime_turns t
-     JOIN sessions s ON s.id = t.session_id
-     JOIN legacy_wf_children l ON l.id = s.item_id
-   );
+CREATE TABLE wf_version_calls (
+    run_id TEXT NOT NULL REFERENCES wf_runs(id) ON DELETE CASCADE,
+    script_version BIGINT NOT NULL,
+    seq_no BIGINT NOT NULL,
+    call_id TEXT NOT NULL REFERENCES wf_calls(id) ON DELETE CASCADE,
+    hydrated_from_version BIGINT,
+    PRIMARY KEY (run_id, script_version, seq_no)
+);
 
-UPDATE gh_effects
- SET state = CASE WHEN state = 'pending' THEN 'failed' ELSE state END,
-     next_at = NULL,
-     last_error = 'legacy_workflow_retired'
- WHERE state IN ('pending', 'unknown')
-   AND kind IN ('open', 'merge')
-   AND decision_id IN (
-     SELECT id FROM decisions WHERE item_id IN (SELECT id FROM legacy_wf_children)
-   );
-
-UPDATE sessions
- SET status = 'ended'
- WHERE status <> 'ended'
-   AND item_id IN (SELECT id FROM legacy_wf_children);
-
-DELETE FROM item_dependency_waits
- WHERE state = 'waiting'
-   AND EXISTS (
-     SELECT 1 FROM legacy_wf_children l
-     WHERE l.id = item_dependency_waits.item_id AND l.cycle = item_dependency_waits.cycle
-   );
-
-DELETE FROM item_placement_waits
- WHERE item_id IN (SELECT id FROM legacy_wf_children);
-
-UPDATE item_operations
- SET required = 0,
-     status = CASE WHEN status IN ('pending', 'running') THEN 'waived' ELSE status END
- WHERE EXISTS (
-   SELECT 1 FROM legacy_wf_children l
-   WHERE l.id = item_operations.item_id AND l.cycle = item_operations.cycle
- );
-
-DROP TABLE legacy_wf_children;
+CREATE INDEX wf_version_calls_call ON wf_version_calls(call_id);

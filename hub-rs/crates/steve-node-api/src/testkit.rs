@@ -2594,6 +2594,7 @@ pub mod build {
             state: Default::default(),
             artifact_view: None,
             skills: vec![],
+            system_context: None,
         }
     }
 

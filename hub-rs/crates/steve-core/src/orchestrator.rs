@@ -1116,7 +1116,7 @@ impl Tx<'_> {
             None => self.db().main_bot()?,
         };
         // No fresh retrieval here: policy refresh must not refill the session with old conversations.
-        let protocol = self.protocol_body(&item, &bot, &session, false)?;
+        let protocol = self.protocol_body(&item, &bot, &session, None)?;
         let hash = crate::util::sha(&protocol);
         Ok((previous != hash).then_some((protocol, hash)))
     }
@@ -1225,12 +1225,13 @@ impl Tx<'_> {
             + &mem_text)
     }
 
-    /// The working protocol every session starts with.
-    pub(crate) fn protocol(&self, item: &Item, bot: &Bot, s: &Session) -> Result<String> {
-        self.protocol_body(item, bot, s, true)
-    }
-
-    fn protocol_body(&self, item: &Item, bot: &Bot, s: &Session, context: bool) -> Result<String> {
+    fn protocol_body(
+        &self,
+        item: &Item,
+        bot: &Bot,
+        s: &Session,
+        context: Option<steve_modules::context::SessionPrompt>,
+    ) -> Result<String> {
         let p = self.db().project(item.project_id.as_deref())?;
         let known = if p.is_some() {
             vec![]
@@ -1307,9 +1308,10 @@ impl Tx<'_> {
         } else {
             lines.push("If this item must wait on another item, verify the id via steve_items_search/steve_item_read, register it with steve_item_dependencies (see tool schema), and end your turn when end_turn=true.".into());
         }
-        /* module context (knowledge, contact cards); "" when there is none and is dropped below */
-        if context {
-            lines.push(self.c.session_context(item));
+        /* module context (personal user context when not sent natively, plus contact cards and
+         * task knowledge); "" when there is none and is dropped below */
+        if let Some(ctx) = context {
+            lines.push(ctx.into_protocol_text());
         }
         lines.extend([
             "How to work with Steve — use the steve MCP tools:",
@@ -2323,8 +2325,26 @@ impl Tx<'_> {
         if core_makes {
             self.unplan_on_err(&item, &s.id, self.prepare_cwd(&item))?;
         }
-        self.rt()
-            .created_with_placement(&s.id, after.as_deref(), start.placement.as_ref());
+        let session_ctx = self.c.session_context(&item);
+        let native_system_context = self.rt().supports_append_system_context(&s.harness);
+        let (open_system_context, protocol_ctx) =
+            if native_system_context && !session_ctx.user_context.is_empty() {
+                (
+                    Some(session_ctx.user_context),
+                    steve_modules::context::SessionPrompt {
+                        user_context: String::new(),
+                        task_context: session_ctx.task_context,
+                    },
+                )
+            } else {
+                (None, session_ctx)
+            };
+        self.rt().created_with_placement(
+            &s.id,
+            after.as_deref(),
+            start.placement.as_ref(),
+            open_system_context.as_deref(),
+        );
         if let Some(why) = self.rt().refusal(&s.id) {
             /* nothing would ever run it: it ends now, said in it and on the item, rather than wait */
             self.db().session_patch(&s.id, patch![status: "ended"])?;
@@ -2355,13 +2375,13 @@ impl Tx<'_> {
             Some(&s.id),
         )?;
         let it = self.item(item_id)?;
-        let head = self.protocol(&it, &bot, &s)?;
+        let head = self.protocol_body(&it, &bot, &s, Some(protocol_ctx))?;
         let text = match start.opening.filter(|o| !o.is_empty()) {
             Some(o) => format!("{head}\n\n{o}"),
             None => head,
         };
         self.rt().prompt(&s.id, &text, "steve", start.files)?;
-        let hash = crate::util::sha(&self.protocol_body(&it, &bot, &s, false)?);
+        let hash = crate::util::sha(&self.protocol_body(&it, &bot, &s, None)?);
         self.db()
             .event_add(&s.id, "system", json!({"steve_protocol_hash": hash}))?;
         Ok(s)

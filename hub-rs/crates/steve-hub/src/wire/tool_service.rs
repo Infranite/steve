@@ -523,11 +523,15 @@ impl steve_modules::context::PromptContext for CatalogContext {
         store: &steve_store::Store,
         _ws: &str,
         item: &steve_store::Item,
-    ) -> Option<String> {
+    ) -> Option<steve_modules::context::SessionPrompt> {
         store
             .read(|c| Ok::<_, steve_store::StoreError>(self.session_summary(c, item)))
             .ok()
             .flatten()
+            .map(|task_context| steve_modules::context::SessionPrompt {
+                user_context: String::new(),
+                task_context,
+            })
     }
 }
 

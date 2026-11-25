@@ -1,5 +1,24 @@
 import type { MessageView } from "@/gen"
-import type { Code, Reason, Params, NodeLinkMode, NodeProtocolOlder, NodeOffline, HarnessDegradedReason, MissingCommandDiagnostic, FileAccessReport } from "./gen"
+import type {
+  AdapterCapabilities,
+  BackgroundTaskCapability,
+  Code,
+  FileAccessReport,
+  MissingCommandDiagnostic,
+  NodeHarnessRefreshResponse,
+  NodeHarnessReportView,
+  NodeHarnessesResponse,
+  NodeHarnessView,
+  NodeLinkMode,
+  NodeOffline,
+  NodeProtocolOlder,
+  Params,
+  Reason,
+  ResumeCapability,
+  SubagentCapability,
+  UpgradeCapability,
+  UsageAttribution,
+} from "./gen"
 import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked, MemberIdentity } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
@@ -108,22 +127,12 @@ export type RRuntime = {
     can_install: boolean; reason?: string | null; help?: string | null; error?: string | null
   }
 }
-export type RSubagentCapability = "acp_rfd" | "tool_fallback" | "none"
-export type RBackgroundTaskCapability = "acp_rfd" | "tool_fallback" | "none"
-export type RUsageAttribution = "subtask_scoped" | "turn_and_model_all" | "turn_level" | "context_only" | "none"
-export type RResumeCapability = "session_load" | "cli_only" | "none"
-export type RAdapterUpgradeCapability = "managed_npm" | "external_managed" | "manual"
-export type RAdapterCapabilities = {
-  subagents: RSubagentCapability
-  subagent_cancel: boolean
-  background_tasks: RBackgroundTaskCapability
-  background_task_cancel?: boolean
-  child_tool_nesting: boolean
-  usage_attribution: RUsageAttribution
-  resume: RResumeCapability
-  upgrade?: RAdapterUpgradeCapability
-  verified: boolean
-}
+export type RSubagentCapability = SubagentCapability
+export type RBackgroundTaskCapability = BackgroundTaskCapability
+export type RUsageAttribution = UsageAttribution
+export type RResumeCapability = ResumeCapability
+export type RAdapterUpgradeCapability = UpgradeCapability
+export type RAdapterCapabilities = AdapterCapabilities
 export type RSubtaskOrigin = "subagent" | "background_task" | "native_workflow"
 export type RSubtaskStatus = "queued" | "running" | "needs_you" | "done" | "failed" | "cancelled"
 export type RSubtaskUsage = {
@@ -154,18 +163,9 @@ export type RSubtaskView = {
   usage?: RSubtaskUsage | null
 }
 /** Read-only report from one particular Node, never the Hub's merged model catalogue. */
-export type RNodeHarness = {
-  id: string; name: string; available: boolean | null; version: string; adapter_version: string | null
-  degraded_reason: HarnessDegradedReason | null
-  models: string[]; error: string | null; setup: RRuntime["setup"] | null
-  missing_command?: MissingCommandDiagnostic | null
-  capabilities?: RAdapterCapabilities | null
-}
-export type RNodeHarnessReport = {
-  state: "reported" | "unreported" | "offline" | "unsupported" | "failed" | "upgrade_required"
-  checked_at: number | null; attempted_at: number | null; stale: boolean; refreshing: boolean
-  error: string | null; harnesses: RNodeHarness[]
-}
+export type RNodeHarness = NodeHarnessView
+export type RNodeHarnessReport = NodeHarnessReportView
+export type RMissingCommandDiagnostic = MissingCommandDiagnostic
 export type RTranscriptPage = { events: REvent[]; next: number | null }
 export type REvent = { seq: number; ts: number; kind: string; data: any }
 export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[]; patch?: Record<string, unknown> }
@@ -470,8 +470,8 @@ export const api = {
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),
   /** `off`: this Hub does not listen for remote Nodes (STEVE_NODE_LISTEN=0, or a read-only copy) */
   nodes: () => get<{ nodes: RNode[]; off?: boolean; hub_version?: string }>("/nodes"),
-  nodeHarnesses: () => get<{ nodes: Record<string, RNodeHarnessReport> }>("/node-harnesses"),
-  refreshNodeHarnesses: (id: string) => get<{ node_id: string; report: RNodeHarnessReport }>(`/node-harnesses/${encodeURIComponent(id)}?fresh=1`),
+  nodeHarnesses: () => get<NodeHarnessesResponse>("/node-harnesses"),
+  refreshNodeHarnesses: (id: string) => get<NodeHarnessRefreshResponse>(`/node-harnesses/${encodeURIComponent(id)}?fresh=1`),
   createPairing: () => post<RPairing>("/nodes/pairings"),
   vitals: () => get<import("./gen/VitalsResponse").VitalsResponse>("/vitals"),
   nodeTags: () => get<{ tags: Record<string, string[]> }>("/node-tags"),

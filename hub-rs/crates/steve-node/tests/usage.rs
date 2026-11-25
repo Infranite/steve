@@ -180,6 +180,7 @@ impl Fixture {
                     }),
                     artifact_view: None,
                     skills: vec![],
+                    system_context: None,
                 },
             ))
             .await

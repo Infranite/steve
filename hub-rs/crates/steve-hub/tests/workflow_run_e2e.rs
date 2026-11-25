@@ -20,7 +20,6 @@ use steve_hub::wire::workspaces::Workspaces;
 use steve_hub::workflow_step::StepRunner;
 use steve_mcp::Backend as _;
 use steve_modules::Caller;
-use steve_store::testkit::SqliteFixtures;
 use steve_store::workflow_runs::{
     ReviewGateFailure, ReviewGateVerdict, WfAttemptStatus, WfCallStatus, WfChildOutcome,
     WfPauseReason, WfRunStatus, WorkflowRuns,
@@ -541,6 +540,10 @@ fn git_run(dir: &Path, args: &[&str]) -> String {
 }
 
 fn init_git_project(env: &Env, name: &str) -> (String, PathBuf) {
+    init_git_project_with_worktree(env, name, true)
+}
+
+fn init_git_project_with_worktree(env: &Env, name: &str, worktree: bool) -> (String, PathBuf) {
     let repo = env.dir.path().join(name);
     std::fs::create_dir_all(&repo).unwrap();
     git_run(&repo, &["init", "-b", "main"]);
@@ -556,7 +559,7 @@ fn init_git_project(env: &Env, name: &str) -> (String, PathBuf) {
                 name: name.into(),
                 path: repo.to_string_lossy().into(),
                 kind: "git".into(),
-                worktree: true,
+                worktree,
                 ..Default::default()
             },
         )
@@ -2485,14 +2488,7 @@ async fn review_12_corrupt_options_json_errors_instead_of_silently_defaulting() 
     env.store
         .write(|w| WorkflowRuns(w).requeue_call_for_retry(&call_id))
         .unwrap();
-    env.store
-        .fixture_write(|c| {
-            c.execute(
-                "UPDATE wf_calls SET options_canonical_json = '{corrupt' WHERE id = ?1",
-                [&call_id],
-            )?;
-            Ok(())
-        })
+    steve_store::testkit::workflow_runs::corrupt_call_options(&env.store, &call_id, "{corrupt")
         .unwrap();
 
     let res = env.core.step_workflow_run(&run_id).await;
@@ -2571,10 +2567,10 @@ async fn review_01_workflow_steps_offload_blocking_and_cap_concurrency() {
             let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
             let blocker = std::thread::spawn(move || {
                 store_blocker
-                    .fixture_write(|_| {
+                    .write(|_| {
                         let _ = locked_tx.send(());
                         std::thread::sleep(Duration::from_millis(160));
-                        Ok(())
+                        Ok::<(), StoreError>(())
                     })
                     .unwrap();
             });
@@ -2626,13 +2622,7 @@ async fn review_03_shared_repo_and_remote_node_git_hydration_preserve_valid_comm
     // which MUST NOT invalidate step A's already-committed output when revising to v2.
     {
         let env = Env::new(false);
-        let (proj_id, repo_path) = init_git_project(&env, "wf3-shared-repo");
-        env.store
-            .fixture_write(|c| {
-                c.execute("UPDATE projects SET worktree = 0 WHERE id = ?1", [&proj_id])?;
-                Ok(())
-            })
-            .unwrap();
+        let (proj_id, repo_path) = init_git_project_with_worktree(&env, "wf3-shared-repo", false);
         let (_parent_id, coord) = env.create_parent(Some(proj_id.clone()));
 
         let script_v1 = r#"
@@ -2802,15 +2792,14 @@ async fn review_03_shared_repo_and_remote_node_git_hydration_preserve_valid_comm
         // Deliver step A, then record a remote-only git fingerprint whose cwd does NOT exist on Hub.
         env.deliver_child(&child_a, json!({ "remote": true })).await;
         env.wait_for_dispatched_count(&run_id, 2).await;
-        env.store
-            .fixture_write(|c| {
-                c.execute(
-                    "UPDATE wf_calls SET git_head = ?1, git_tree = ?2, git_cwd = '/nonexistent/remote-node/wt' WHERE id = ?3",
-                    [&remote_head, &remote_tree, &call_a_id],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::workflow_runs::set_call_git_fingerprint(
+            &env.store,
+            &call_a_id,
+            &remote_head,
+            &remote_tree,
+            "/nonexistent/remote-node/wt",
+        )
+        .unwrap();
 
         // Revise to v2 keeping remote step A -> NodeGit verifies commit+tree -> hydrates (1 attempt)!
         facts_calls.store(0, Ordering::SeqCst);
@@ -3049,17 +3038,11 @@ async fn review_11_workflow_child_uses_create_item_from_and_owner_finish_api() {
         .to_owned();
 
     // 1. Unified create_item_from invariants: item.create audit entry, workspace tag_ids, requested_by.
-    let audit_count: i64 = env
-        .store
-        .fixture_read(|c| {
-            let n: i64 = c.query_row(
-                "SELECT COUNT(*) FROM audit WHERE workspace_id = ?1 AND action = 'item.create' AND target = ?2",
-                [WS, &child_id],
-                |row| row.get(0),
-            )?;
-            Ok::<i64, StoreError>(n)
-        })
-        .unwrap();
+    let audit_count = steve_store::testkit::modules::audit_actions(&env.store, &child_id)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a == "item.create")
+        .count();
     assert_eq!(
         audit_count, 1,
         "workflow child must be created via create_item_from and emit item.create audit"

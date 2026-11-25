@@ -13,7 +13,7 @@ use crate::repo::{Decision, Item};
 use crate::{Core, Inner, Tx};
 use std::sync::{Arc, Weak};
 use steve_modules::Modules;
-use steve_modules::context::{ChatCtx, ChatDone};
+use steve_modules::context::{ChatCtx, ChatDone, SessionPrompt};
 use tokio::sync::mpsc;
 
 /// One lifecycle point, with the item as it was right after the step's own writes.
@@ -55,10 +55,10 @@ impl Core {
         Arc::new(SharedGateway(self.0.gateway.clone()))
     }
 
-    /// Extra context for a session's opening prompt (`""` = none).
-    pub(crate) fn session_context(&self, item: &Item) -> String {
+    /// Extra context for a session (split into personal user context and task context).
+    pub(crate) fn session_context(&self, item: &Item) -> SessionPrompt {
         let Some(m) = self.modules() else {
-            return String::new();
+            return SessionPrompt::default();
         };
         let cx = m.registry.contexts();
         cx.session(self.store().store(), &item.workspace_id, item)

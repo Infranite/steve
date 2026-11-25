@@ -199,8 +199,11 @@ const shell = () => qc.getQueryData<Shell>(shellKey())
 const runtimeKey = ["runtimes"] as const
 const emptyRuntimes: RRuntime[] = []
 export const runtimes = () => qc.getQueryData<RRuntime[]>(runtimeKey) ?? emptyRuntimes
+export function useRuntimesQuery(enabled = true) {
+  return useQuery({ queryKey: runtimeKey, queryFn: () => api.runtimes(), staleTime: 5 * 60_000, enabled }, qc)
+}
 export function useRuntimes(enabled = true) {
-  return useQuery({ queryKey: runtimeKey, queryFn: () => api.runtimes(), staleTime: 5 * 60_000, enabled }, qc).data ?? emptyRuntimes
+  return useRuntimesQuery(enabled).data ?? emptyRuntimes
 }
 export function setRuntimes(next: RRuntime[]) { qc.setQueryData(runtimeKey, next) }
 const deviceKey = ["device-inventory"] as const

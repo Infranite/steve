@@ -2,471 +2,207 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/banner-en-dark.svg">
-  <img src="docs/assets/art/banner-en.svg" alt="Steve: say it once, it gets done" width="100%">
+  <img src="docs/assets/art/banner-en.svg" alt="Steve — Say it once. It gets done." width="100%">
 </picture>
 
-[![Release](https://img.shields.io/github/v/release/Infranite/steve?sort=semver&style=for-the-badge&label=release&color=7aa7c7)](https://github.com/Infranite/steve/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-8c7ae6?style=for-the-badge)](LICENSE) [![Rust](https://img.shields.io/badge/hub-Rust-5fb39a?style=for-the-badge&logo=rust&logoColor=white)](hub-rs) [![React](https://img.shields.io/badge/web-React-7aa7c7?style=for-the-badge&logo=react&logoColor=white)](web) [![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux-self--hosted-8c7ae6?style=for-the-badge)](#requirements)
+<p><strong>Say it once. It gets done.</strong><br/>A self-hosted workspace that coordinates coding agents across worktrees, tools, and machines — with one inbox for every human decision.</p>
+
+[![Release](https://img.shields.io/github/v/release/Infranite/steve?sort=semver&style=for-the-badge&label=release&color=7aa7c7)](https://github.com/Infranite/steve/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-8c7ae6?style=for-the-badge)](LICENSE) [![Rust](https://img.shields.io/badge/hub-Rust-5fb39a?style=for-the-badge&logo=rust&logoColor=white)](hub-rs) [![React](https://img.shields.io/badge/web-React-7aa7c7?style=for-the-badge&logo=react&logoColor=white)](web) [![Platforms](https://img.shields.io/badge/macOS%20arm64%20%7C%20Linux%20x86__64-self--hosted-8c7ae6?style=for-the-badge)](#requirements)
 
 English · [简体中文](README.zh-CN.md)
 
-[Principles](#design-principles) · [Features](#features) · [Extending](#extending-steve) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Deployment](docs/deployment.md) · [Contributing](CONTRIBUTING.md)
+[Why Steve](#why-steve) · [Architecture](#architecture) · [Capabilities](#core-capabilities) · [Harnesses](#supported-harnesses) · [Quick start](#quick-start) · [Concepts](#concepts-at-a-glance) · [Security](#security-and-privacy) · [Deployment](docs/deployment.md)
 
-<br>
+</div>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/chat-dark.webp">
-  <img src="docs/assets/screenshots/chat.webp" alt="Steve's main conversation: a research answer with a suggested follow-up item, and items waiting on you" width="100%">
+  <img src="docs/assets/screenshots/chat.webp" alt="Steve main conversation showing inline read-only research with citations, a tracked item card, and items waiting on you" width="100%">
 </picture>
 
-</div>
-
----
-
-## Why Steve
-
-Coding agents are good at the work itself. Run more than two or three of them and the bookkeeping falls apart: a dozen terminal tabs, context lost between sessions, permission prompts nobody answered, and no record of what was actually delivered or whether the checks passed.
-
-Steve sits above Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, OpenCode, Cursor, Antigravity CLI and eleven other ACP coding CLIs and keeps that record. It is one Rust binary on your own machine, with a SQLite database and an encrypted vault. You talk to it in a single chat. For each message it decides whether to answer directly, research your code and documents read-only, open a tracked item, or pass the message on to work already in progress. Items go to bots, and each item runs in its own git worktree.
-
-| | 😵 Agents in terminal tabs | ✨ With Steve |
-|---|---|---|
-| **Keeping track** | Tabs, scrollback and memory | Items with a goal, plan, stage and delivery |
-| **Isolation** | Agents share one checkout | One git worktree and `steve/<id>` branch per item |
-| **Permission prompts** | Whichever tab you happen to look at | One Inbox, or the harness's native approval |
-| **"Done"** | The agent says so | Checks passed, plan closed, proof from the goal |
-| **Merging** | By hand, one branch at a time | A pull request per item from the latest default branch; the host's CI checks it, Steve merges the accepted head |
-| **Secrets** | Pasted into the prompt | Kept in the vault, injected into the command |
-
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/flow-en-dark.svg">
-  <img src="docs/assets/art/flow-en.svg" alt="You say it, Steve routes it, an item is created, a bot works, it delivers with checks, it is accepted, merged through a lane and shipped" width="100%">
-</picture>
-
-</div>
-
-Approvals, acceptances and agents' questions come to one Inbox. If the workspace owner turns on YOLO, supported harnesses handle local tool approval in their own native mode. Questions and Steve decisions still go to the Inbox. Feishu/Lark, email, GitHub, contacts and a knowledge base feed the same workspace, so agents work with real context. Each piece of knowledge has a disclosure level, so it isn't repeated where it shouldn't be.
-
-## Design principles
-
-<table>
-<tr>
-<td width="33%" valign="top">
-
-#### ⚖️ The model proposes, code decides
-
-Routing guards stop a question from quietly turning into an item. Steve coordinates the agents and does not second-guess them: a delivery with open plan steps or missing evidence is shown to you as such, never refused, and the harness's own permissions are respected.
-
-</td>
-<td width="33%" valign="top">
-
-#### 🔁 Nothing runs twice
-
-Agent tools send and end the turn, so nothing waits in memory. External effects carry stable ids, and flows commit each step before the next one runs. After a crash, an uncertain result is marked for reconciliation and never re-run blindly.
-
-</td>
-<td width="33%" valign="top">
-
-#### 🛑 Autonomy has hard limits
-
-YOLO does not grant any new access to Steve tools, credentials, publishing, money or the vault. Personal sends retain their human approval.
-
-</td>
-</tr>
-<tr>
-<td width="33%" valign="top">
-
-#### 🗝️ Agents use secrets without reading the vault
-
-Steve runs the command with the secret in its environment, stdin or a temporary file, and hands the agent the command's output as it is. Steve never masks or filters what you type or what a model says.
-
-</td>
-<td width="33%" valign="top">
-
-#### 🙊 Knowledge has a disclosure level
-
-Public, paraphrase only, reasoning only, or never. Messages to the outside pass a rule check and a second model's review before they are sent.
-
-</td>
-<td width="33%" valign="top">
-
-#### ↩️ Changes can be undone
-
-Configuration done through chat, corrections to automations, contact merges are all stored as changesets you can revert.
-
-</td>
-</tr>
-</table>
-
-## Features
-
-### 💬 Chat and routing
-
-Each message is sorted into one of nine routes: answer, research, item, suggest, ask, supplement, status, config or reroute. Code-level guards can overrule the model, and CI runs a routing eval built from real messages. When Steve can't tell whether a message is new work or belongs to an existing item, it asks.
-
-Mentioning an item number (including `#ST-n`) supplies context. A new request creates new work; only clear supplements go to unfinished items. Finished items remain available for questions, and a proposed supplement to one offers separate work or discussion in the conversation. A reference does not focus later messages on that item.
-
-- **Inline research** answers questions about your code and documents in the chat, citing `path:line`. Read-only is enforced three times: a tool allowlist (Read, Grep, Glob), a Hub guard that stops the run at the first non-read tool, and a read-only OS sandbox (`sandbox-exec` on macOS, bubblewrap on Linux). The instance owner's own main conversation is the exception: asked to look at, tidy, install or fix something on the Hub's machine, Steve does it with that OS user's access, while its own keys, database and programs stay out of reach.
-- An answer can end with *"Make it an item: …"*. Click it or just reply "do it".
-- Each item has one card in the chat. It updates in place (running, waiting, delivered, released) and only moves to the bottom when it needs you.
-- Choose a primary model and an optional lightweight model for internal judgments before the first meeting, or skip and configure them later. The main conversation keeps a model shortcut available when a provider is out of quota; failed answers offer a model change and explicit retry. Saving the choice needs no inference.
-- You can configure Steve by talking to it: *"Use Opus for the frontend bot."* It drafts field-level changes to bots, projects, models, tags, flows and contacts. You apply them with one click and can undo for 24 hours.
-- Replies can render A2UI surfaces: forms, choices, tabs and charts. Nothing the agent writes runs as code, and a form is submitted once, even across tabs and reloads.
-
-### 📋 Items
-
-An item moves from ready to active to closing to closed. Closing is a gate: it freezes the result, waits for running turns and external operations to finish, and commits only if nothing changed in between. Another round opens a new cycle and keeps the earlier ones. A small edit to the goal goes to the running session; a rewrite starts a fresh session with a handoff summary, and the replaced plan stays visible.
-
-Acceptance is auto by default, or manual or waived. Auto takes the delivery as it is, with failed checks and open steps on the card, and you can send it back. What counts as done is read from the goal: if it says "deploy", the item closes only once the running Hub contains the commit. When an agent stops without delivering, Steve checks the remote against the completion rule (merged, or merged and tagged) and reminds the agent that its tools still work, so it delivers or asks. A turn the harness failed is continued too. Only after that does a card come to you.
-
-Each task has a private, persistent `<home>/workspaces/<item>/outputs` directory for reports, designs, images and other deliverables outside Git. A Node's delivered files are copied there before the worktree can be cleaned up. Code and documents committed to Git remain in the repository. The item page opens files from this directory; the database stores their paths and status, not their contents. Multi-select **交付** tags (方案, 代码, 报告, 内容, 数据, 操作) describe the outcome separately from the item's single **类型** tag. When a goal asks for a design without already asking for implementation, or explicitly defers implementation until review, the delivered design waits for your decision: implement it, keep the design only, or request a revision. YOLO cannot answer that decision.
-
-**Preview links.** A Bot's `steve_deliver_file` (in an item, a chat or a scheduled run) and your own `steve publish <file|folder>` keep an immutable copy on the Hub and give a link that opens on any device through the Hub's public address: HTML pages, Markdown with its images, PDF, images, audio, video and code. HTML is static by default; an interactive prototype can be switched to run its scripts in an isolated sandbox with no access to Steve and no network. Your publications are listed in **我的发布**. See [file delivery and sharing](docs/deployment.md#file-delivery-and-independent-sharing).
-
-- **Dependencies** are checked for cycles. Pass `deps` to `POST /api/items` or `steve_item_create` to save prerequisites before any session starts. A blocked item waits for every prerequisite to complete successfully, then starts with the Hub's summary (or asks to start, according to the workspace policy); it does not ask for wider item access to check progress. Any point of a session can be **forked** into a new session or a child item, and the relation graph shows runs, handoffs, dependencies and forks.
-- **Child item cleanup** follows a completed or abandoned parent: unfinished descendants stop and are archived with the parent's reason. Completed, independently cancelled and manually archived records keep their history; running work and unknown external effects must settle before cleanup hides a child.
-- **Outputs** are versioned and open in their own viewers: rendered documents, highlighted code, CSV tables, PDFs, media, folders and branch diffs. Annotate a region, a passage or a whole file, then send all the notes as one message.
-- **Each session has a message queue.** While the agent works, a message without attachments reaches it with the result of its next Steve tool call, without stopping the turn. Edit or withdraw a queued message, *send now* to interrupt the running turn, or send it to a new session. Messages delivered just before a restart come back marked "check, don't redo".
-- **Local reply images are retained by the Hub.** Markdown images in an assistant's reply can outlive the Node's source file: Steve captures permitted raster images before its execution cleanup and serves them as authenticated workspace attachments. See [the image contract](docs/deployment.md#inline-reply-images) for limits and temporary-file scope.
-- **Item debugging.** New items start one 30-minute window of detailed capture automatically; existing items are not enabled retroactively. Open Debug in an item's or session's menu to inspect blockers and recorded events. The owner can stop capture or start a new limited window; reads, restarts and continuing work do not extend it. Agents can query the same evidence with the read-only `steve_debug` tool. See [diagnostic capture and queries](docs/deployment.md#diagnostic-capture-and-queries) for access, retention and evidence limits.
-- **Worktrees.** Every item gets the branch `steve/<id>` in its own worktree. Build caches are given back when items close or sit idle, no new worktree is made below a free-space floor, and deletion is crash-safe.
-- List and board views, with filters, bulk actions, tags, snooze, stars, due dates and automatic archiving. Categories are picked by the router or a keyword guesser, and unsure picks go to a review list.
-
-<table>
-<tr>
-<td width="50%"><img src="docs/assets/screenshots/item.webp" alt="An item: goal, stage, plan and a delivery with its checks"><br><sub><b>An item</b>: goal, stage, plan and a delivery with its checks</sub></td>
-<td width="50%"><img src="docs/assets/screenshots/graph.webp" alt="Relation graph: runs, handoffs, dependencies and forks"><br><sub><b>Relation graph</b>: runs, handoffs, dependencies and forks</sub></td>
-</tr>
-</table>
-
-### 🤖 Bots
-
-A bot is a harness (18 built-in ACP coding CLIs, plus any custom ACP adapter in `harness.json`) plus a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe one in a sentence and Steve drafts it. `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and only sees the data of the one it is working in.
-
-**Execution Nodes and Bot Teams:** Inspect a worker Bot’s compatibility on paired Nodes, then explicitly bind the Nodes it may use. Workspace Teams reuse existing Bots with optional narrower Node lists; choose a workspace default or override it for one new item. The item shows its placement or blocker, and active sessions stay where they started. See [Bot execution Nodes and Teams](docs/deployment.md#bot-execution-nodes-and-teams).
-
-**Pi setup:** Devices reports the Pi coding agent and its ACP adapter separately. The instance owner can install the built-in components on the Hub's Node through `POST /api/system/harnesses/pi/install` (no installation arguments), then refresh Devices to see the result. Steve installs the official `@earendil-works/pi-coding-agent` and the HTTP MCP-capable `@openma/pi-acp` in its own adapter prefix; Node.js ≥22.19.0 and npm are required for this managed installation. An external executable that passes the real ACP/session probe can run independently of these installer requirements. Devices distinguishes verified, missing and unknown component integrity and reports other PATH installations separately without changing the managed launch target. Existing installations do not acquire Pi in the background. Configure Pi's model provider in the state directory used by the session before choosing it for a bot. Pi currently supports **full access only**: its thinking levels are not tool permission modes, and its built-in tools do not ask Steve for approval. See [Pi installation and sessions](docs/deployment.md#pi-installation-and-sessions) for status, credentials, custom commands and separate Nodes.
-
-Bot saves and configuration-card applies check model IDs and thinking efforts against the target Nodes' own recent harness reports. Every open or reopen also checks the actual target Node before starting the harness. Changing only the harness also checks the values it would keep; reset incompatible values explicitly to default (`null`) or select supported ones. An unavailable catalogue remains unknown, and editing a role or note does not require repairing an old model selection. A failed session open stops automatic retries and leaves one durable card with **Fix Bot configuration** and **Retry session startup**. Ending or reassigning a session discards its unsent queue; an ended session never reopens. See [Bot model validation](docs/deployment.md#bot-model-validation) for defaults and recovery.
-
-**Harness updates:** open **Devices → Nodes → a Node → CLI and ACP updates** to check that device's CLI and adapter versions and upgrade its installed, managed components. This works for local and paired remote Nodes; only the instance owner can request upgrades, and the target Node's execution policy still applies. External installations stay operator-managed. Progress and final receipts survive page refreshes and reconnects; providers and sign-in stay on the Node. See [component updates](docs/deployment.md#harness-component-updates).
-
-**Capabilities** in the sidebar is the workspace's library of what bots can use, each defined once and chosen per bot on the bot's own **Capabilities** tab: MCP servers (a local command, or an HTTP or SSE endpoint, with environment variables or headers), skills (`SKILL.md` instructions written where the harness reads skills) and remote agents spoken to over A2A, each of which a bot gets as one Steve tool. Every harness reaches enabled MCP servers through the Hub's single Steve tool endpoint, never a separate plugin server per session. Sessions list eight core tools plus their Bot's pins, discover other tools with `steve_tools_search`, and run them with schema-checked `steve_tool_call`; a short catalog in the brief describes the available areas. In **Bot → Capabilities → Tool loading**, search known tools and assigned providers, manage up to 32 pins and see 30-day search/call counts. Pins change loading, not permissions. MCP connections are shared by the Hub, which resolves their vault credentials only when connecting; local commands run on the Hub host through the Node sandbox API. Skills still go where the harness adapter declares it reads them. Steve itself is an MCP server too: Claude Desktop, Cursor or another agent can connect to it with an access token and find items, hand Steve work and search your knowledge base, and other agents can hand Steve tasks over A2A by its Agent Card. See [Capabilities](docs/deployment.md#capabilities-mcp-servers-skills-and-remote-agents).
-
-An adapter's model list and a successful text reply do not verify that a model can call MCP tools. Check session startup, text and a read-only tool round trip separately before using a replacement model; see [Diagnose model tool failures](docs/deployment.md#diagnose-model-tool-failures) for evidence and reversible configuration changes. The maintainer probe records cleanup receipts for each tracked process and fails on surviving or unverifiable descendants.
-
-Steve stays out of your harness settings. It answers a permission prompt for that one call and never writes "always allow". It never edits your harness config. Every session shows the command to resume (and, where supported, fork) it in the harness itself, and you can import your local Claude Code and Codex history.
-
-- **Memories** are proposed from finished items, chat days, mail and agents, each with the quote it came from and the memory it would replace. Nothing takes effect until you confirm it.
-- **Models per purpose.** Routing, chat, research, titles, extraction, drafting, flows and mail each have their own model and effort. Short gateway calls use the first configured model without automatically trying another. Prices sync daily from Models.dev, and past estimates keep the prices of their day.
-
-<p align="center"><img src="docs/assets/screenshots/session.webp" alt="Agent session: changed files, tools, cost and context, and the command to resume it in the harness" width="85%"><br><sub><b>Agent session</b>: changed files, tools, cost and context, and the command to resume it in the harness</sub></p>
-
-### 🟢 YOLO: native harness approval
-
-In **More → Native approval (YOLO)**, the workspace owner can turn on the harness's native approval mode. The switch defaults to off and does not expire. Running turns finish in their applied mode; the new setting takes effect at the next idle boundary or session open. Unsupported harnesses do not get a simulated mode. Item and session views show the requested setting and the mode the Node has confirmed. [Permission modes and adapter mappings](docs/deployment.md#native-harness-approval).
-
-<p align="center"><img src="docs/assets/screenshots/inbox.webp" alt="Inbox: acceptances, approvals and questions in one place" width="85%"><br><sub><b>Inbox</b>: acceptances, approvals and questions in one place</sub></p>
-
-### 🚚 Merging and releases
-
-A git project whose completion rule is *merged* (or *merged and tagged*) lands every change the way a contributor does. Each item's branch starts from the remote's latest default branch, fetched when its worktree is made. The agent commits there, pushes the branch and opens a pull request before it delivers; for a bug it opens an issue first and links it. It never pushes the default branch or merges itself. Once you accept the delivery and approve the merge card, Steve merges the pull request once every check passed, at exactly the accepted head (`gh pr merge --match-head-commit`, with the first merge method the repository allows); it never turns on the host's auto-merge, so a delivery that was voided after its acceptance is never merged. The accepted head is the worktree's commit only when the whole accepted result is committed there: an accepted edit left uncommitted goes back to the agent and nothing is merged in part. If a delivery is voided while Steve's merge call is already running, the merge is still recorded and becomes a card for you. Merging the pull request on the host yourself completes the item too. A failed check, a conflict, a draft, or a branch the host requires to be up to date goes back to the agent to fix on the same branch. A pull request that merged or closed for an earlier delivery of the item does not count for a new one, so the agent is asked to open a new one; a pull request closed without merging, a merge that keeps failing (it is retried with growing waits) or a host that cannot be asked is a card for you. The item is done when the remote's default branch has the change (and, for *merged and tagged*, a pushed tag contains it). Merging, CI and branch protection stay with the host, so nothing queues on your machine. Steve follows pull requests through the GitHub CLI (`gh`); on another host the agent opens the host's merge request and the completion rule still decides from the remote.
-
-Human merge approval is recorded for the exact GitHub repository, PR number and full head SHA shown on the card. A report update or a newly accepted delivery of that same target in the item's current cycle retains a verifiable approval across Hub restarts, without another approval card. A different head (including a rebase), PR, repository or item cycle needs its own approval. Unanswered, revoked, expired or older approvals without an exact target cannot authorize a merge. A new delivery still needs acceptance, CI must pass, and Steve rechecks consent before its SHA-pinned merge call; unreadable PR or worktree state never authorizes a merge.
-
-The item list, details and activity show the closeout snapshot from the Hub: PR head, checks for that head, last successful GitHub sync, and whose move it is. A sync error labels the last known data as stale, not as passing. Routine polls refresh the card in place; check failures, decisions and confirmed merges are brought back to the originating conversation without repeating the same result.
-
-On GitHub, Steve asks before opening a PR after you accept, and again before merging. For a private repository you can let accepting the item open a draft PR from its own branch without asking, once its commits pass a leak check. Effects go through a durable queue that reconciles with GitHub before retrying. Projects on the Hub's own machine, Steve included, can be released by script: build, drain running work, restart, and report the outcome once it's back. Rollback is refused when the old version can't read the current database.
-
-### 🔌 Connections
-
-Every outgoing message takes the same path: disclosure check, authorization, the send itself, a record of which knowledge was used at what level, and an audit entry. Your own account never sends without approval, and messages sent on your behalf say so.
-
-- **Feishu / Lark.** Create a bot by scanning one QR code. Steve works as the bot or, through OAuth, as you, and receives messages over the long connection. Each chat becomes a space with an attention level (live, muted, blocked) and response rules (mention, DM, keyword, intent…) that can turn into flows. Personas set how much a reply reveals: name, role, that it's an AI, that it's Steve, who the owner is. Once a message has become an item, replies in its thread from whoever raised it, or from you, go straight to that item.
-- **Blocked channel sends.** Review the complete pending text and the verified refusal source/scope. Restore a locally managed send capability through a reviewable, undoable change, or follow the external service’s recovery instructions, then explicitly retry. Editing creates a new review that requires your approval even with YOLO on; discarding keeps the message discarded. See [send recovery](docs/deployment.md#channel-send-recovery).
-- **Personal external-channel writes.** The existing Accounts switch controls sends, replies, recalls and reactions as you. Accounts and Connections show the Hub permission separately from the service's last reported write policy. Both must permit an operation; enabling the Hub switch neither removes upstream restrictions nor replays history. See [external channel services](docs/deployment.md#an-external-channel-service).
-- **Channel reply review.** Simple questions use the configured outward identity within its authorization. When approval is required, the card shows the original message, destination, sending identity and final draft. Approve it, edit and approve, leave it unanswered, or turn its source into an item without sending the draft. A queued approval is not a delivery receipt; check the channel record for the actual outcome.
-- **Email** over IMAP/SMTP, with presets. IDLE push sync, and views for *needs action*, *waiting on them* and drafts. HTML renders in a sandbox with remote images blocked. Sending always goes through an approval card bound to the content, and the server computes the recipients, so agents can't add any. Every send and retry checks the final recipients, subject and body against disclosure rules and a second model, including after edits. Failed, unreadable, timed-out or stale checks keep the draft unsent. Your first mailbox comes with a triage flow that drops notification mail before any model call.
-- **GitHub** through a GitHub App (manifest flow) or a fine-grained token. Webhooks are HMAC-verified and deduplicated, with polling as a fallback. PRs link to items automatically, issues can become items, and a *PR checks failed* flow feeds failures back into the item. Comments and reviews on a linked PR, inline ones included, reach the item too when their author is an owner, member or collaborator of the repository. Agents get status, CI logs, comments (behind time-boxed grants) and `open_pr`.
-- **Disconnecting** shows a dry run first, backs up the database and removes everything in one transaction.
-
-**Output intents.** The existing `steve_reply_source` tool and `POST /api/deliveries` use deterministic routing into the channel outbox and a persistent, per-requester idempotency ledger. Replies stay in the original conversation unless a reachable destination is explicitly selected; new messages to a person use their manual channel preference before a learned one. Structured content has a Markdown/text fallback with labelled action links; platform rendering stays in adapters. Personal sends retain the existing approval path, while an explicitly requested bot send does not use the personal-send approval tier. Duplicate submissions report the original delivery, including an uncertain outcome, rather than sending again. See [the contract and current limits](docs/deployment.md#output-intents). The first personal-notification slice connects durable `work.item.done` events to this same pipeline: explicit member opt-in, bot DMs, now/digest/log policy, time-zone-aware quiet hours and member-private read state. Digest/log only record inbox entries; they do not send summaries. Configure your policy in **Settings → Notifications** and read personal entries in **Feed**. It starts disabled, explicitly consents from the moment you save (no old-event backfill), and uses your own linked identity. Immediate mode requires choosing a currently verified reachable bot DM; digest/log accumulate only, with no scheduled summaries. Feed read state is personal, separate from workspace notices and provider receipts. See the [personal notification contract](docs/deployment.md#personal-work-completion-notifications); scheduled digest subscriptions and other personal event types remain unimplemented.
-
-### 📚 Knowledge and people
-
-The knowledge base takes notes, files, items, chat, memories and read-only folders such as a wiki or an Obsidian vault. Chunking follows headings, and search handles Chinese and English. A citation like `[K1]` highlights the exact passage, and any citation that wasn't actually given to the model is removed. Each entry's disclosure level decides whether it can be quoted, paraphrased, used only for reasoning, or not used at all. Secrets and *never* entries aren't indexed.
-
-The conversation digest works on **already stored** channel messages and mail threads. Each conversation has its own profile and cursor: a 50-message window by default, with larger windows such as 500 split into budgeted chunks. Deterministic extraction supplies Steve message/contact/item IDs, replies, topics, mentions, references and association candidates. An opt-in **ordinary Digest Bot**, with an installed harness and a personal schedule authorized by the data owner, leases multiple conversations and judges summaries, cross-conversation matters, personal todos and candidate memories through tools. Chunk writes are validated atomically, finished chunks survive retries and later sessions, and each complete window publishes one summary while preserving rule-based alert counts. Persisted change reports support guarded undo; new/replacement memories retain the existing confirmation flow. No history or attachment bodies are downloaded automatically. This includes input organization, **not** output delivery or a dedicated messages UI. See [setup, tools and recovery](docs/deployment.md#conversation-digest-base).
-
-Steve keeps contacts, organizations and teams. Identities are matched by handle, then email, then name. A name match only *proposes* a merge, and a merge can be split back exactly. Teams can be virtual or synced from the Feishu org chart, and a team can serve as a visibility scope. *Holdings* and *stewards* record who owns which bot, mailbox or device.
-
-Your own contact page groups identity, work, contact details and preferences, showing each fact's source and keeping original notes intact. A missing email can come from your Hub user record; manual edits and rejected facts are not overwritten. **Steve calls you** and **Introduce you as** are separate names, with optional persona or conversation overrides for the latter. The knowledge steward can propose personal memories for confirmation, rather than silently rewriting your profile.
-
-### 🔐 Vault
-
-Each workspace has a master key in the OS key store (macOS Keychain, Linux Secret Service, or a protected directory). Each item has its own data key, and fields are encrypted with XChaCha20-Poly1305. Templates cover logins, cards, API credentials, SSH keys and more, and the template, not the client, decides which fields are secret. Revealing a secret takes a passkey (Touch ID or Face ID) with a single-use challenge bound to that field.
-
-Bots use secrets through `steve_secret_use` without reading them. Each use needs an approval or a time-boxed grant, is recorded, and returns the command's exit code and output. Cards and high-sensitivity items can never be granted. Steve does not scan, mask or refuse content: what you type reaches the model as typed, and a model that repeats a secret is a reason to switch harness or model.
-
-### ⚡ Automation
-
-A flow is a graph of 11 node kinds: trigger, filter, decision table, sub-flow, wait, approve, action, script, command, HTTP and bot. Each step is committed before the next, so a restart picks up where the run stopped.
-
-- Effects need an upstream approval or a stored grant. Scripts run in a QuickJS sandbox with no network or files. HTTP is protected against SSRF across redirects and DNS, and secrets go only into headers and body. Command arguments are shell-quoted. Every run has a cost budget.
-- Draft a flow from a sentence, ask Steve to change it on the canvas, or edit it from the chat. Saves are versioned and dry runs touch nothing. The canvas lights up the path a run took.
-- Incoming events are deduplicated and grouped into signals. One click (*remind me / ignore / make an item*) applies the correction, adds an exception filter to the flow and remembers the rule, and the whole change can be undone.
-- Schedules are written in plain language ("every weekday at 9"), with daylight-saving handling, catch-up policies and overlap protection.
-
-<p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/flow-dark.webp">
-  <img src="docs/assets/screenshots/flow.webp" alt="Mail triage flow on the canvas: notifications are filtered out before any model call, and a bot node branches the rest" width="100%">
-</picture>
-<br><sub><b>Mail triage flow</b> on the canvas: notifications are filtered out before any model call, and a bot node branches the rest</sub>
-</p>
-
-### Feed: a place to read
-
-Steve is not just for work. **Feed** keeps scheduled reports and opted-in personal completion notifications out of the conversation so you can read them together. New scheduled reports appear here instead of adding their full text to chat; existing chat history stays where it is. Reports are visible to the workspace's members, with separate read state for each person. Personal notifications remain private to their recipient.
-
-Filter unread entries and sources, open the full Markdown, select entries to mark read, or load more without a 100-entry reading limit. “Mark all read” covers the selected filter's snapshot, not new entries that arrive while you read. Feed does not replace the Inbox: reading is not approving or completing a decision. Browsing does not invoke a model or send an external notification. RSS collection, personal report subscriptions and scheduled digest generation are not implemented by this reading surface. See [Feed](docs/deployment.md#feed).
-
-### 📊 Stats and the rest
-
-The stats page counts tokens (cache and reasoning included), cache hit rate, estimated cost next to what the harness reports, money the cache saved, items started and finished, lead, cycle and wait time, first-pass rate and rework. Filter by project, bot, model and source. Session and one-shot token reports share the Node's accounting path: declared rollout and transcript meters are sampled during a call and settled on success, cancellation or error. Context occupancy stays separate from consumption; unreported fields stay unknown, and reasoning is part of output. See [harness usage accounting](docs/deployment.md#harness-usage-accounting).
-
-Session, item and statistics views share a durable usage ledger: reported increments appear during a run, cumulative snapshots replace earlier figures, and final settlement replaces the running total. Report identities prevent replay from charging twice, including after a Hub restart or cancellation. Missing usage is shown as not reported, unavailable or partial coverage; an explicitly reported zero stays zero. All/Main selection preserves independent models and missing fields. Context-only updates do not finalize tokens; historical cost rows without stable call ownership remain explicitly uncertain. Accounting totals are not live token-per-second samples. See [usage accounting and recovery](docs/deployment.md#usage-accounting-and-recovery) for the API contract and recovery limits.
-
-One-shot Think and research usage is persisted while calls run. Cancelling or stopping on a budget first stops execution, then awaits bounded source settlement into the same Job journal before acknowledging its end; already-persisted tails do not depend on another live poll. Stable call/attempt ownership keeps item and statistics totals recoverable after a cancelled waiter or Hub restart; late final reports replace the same bill, including after a timeout. Result projection retries use a persistent bounded FIFO, so a failing call cannot indefinitely block a healthy call, even without new usage or after restart. See [usage accounting](docs/deployment.md#durable-one-shot-bills) for collection and historical recovery limits.
-
-The [realtime statistics API](docs/deployment.md#realtime-output-statistics) exposes a ten-second output TPS window and a sixty-point trend, independently of historical dates. Current ACP adapters supply streamed-text estimates, explicitly labeled and persisted for readback; missing or stale collection is reported as unknown. Collection baselines and Node-confirmed stops are separate: upgrades and Hub status changes cannot fabricate zero output, and invalid stop clocks preserve recent output and missing coverage. Upgrades recover bounded unknown intervals from persisted applied Node stops or matching terminal receipts, while proven unsent cancellations add no execution coverage. No registered harness currently has a verified timed output-token contract; a usage-bearing chunk may still be a completed-message bill.
-
-Sign-in is a user name and an access token the Hub issues, a single-use pairing QR code that any signed-in client shows and a phone's camera, browser or the iOS app opens, or optionally OIDC with PKCE. The web client keeps a list of Hubs and switches between them from the sidebar, in a browser and inside the apps alike. Native **macOS** and **iOS** apps (`apple/`) wrap the same web client, connect to the local Hub by default, keep each Hub's credential in the Keychain, prefer a Hub's public URL and fall back to LAN, and provide a macOS menu bar status icon with live Hub metrics. Each client is known by its kind and the route it comes by. Workspaces are data boundaries, each with its own item prefix. The UI stays live over one SSE stream with resumable cursors, and a phone reconnects as soon as the page is visible again. There are in-place upgrades with backup and rollback, [daily and manual backups](docs/deployment.md#backups) made by the Hub itself, signed macOS releases that keep the vault key across rebuilds, a <kbd>⌘</kbd> <kbd>K</kbd> command palette, light and dark themes, and English or 简体中文.
-
-<sub>Screenshots come from a demo workspace on the real Hub and web UI, with scripted agents. The UI is shown in Chinese; switch to English in Settings → Appearance.</sub>
-
-## Extending Steve
-
-There are two ways to add to Steve.
-
-**Plugins** are programs that are not part of Steve, installed while the Hub runs. The instance's owner adds a *plugin library* in Settings → Plugins (a GitHub repository, the address of an index file, or a directory on the Hub's machine), Steve reads the library's `steve-store.json` and lists what it offers, and the owner installs from it. A plugin is a prebuilt archive checked against the sha256 its library names; it runs as a process of its own beside the Hub and is reached through one of Steve's documented contracts, so no compiler is involved and a plugin that crashes or is removed leaves the Hub as it was. Connector operations join the unified tool registry: discover them with `steve_tools_search`, call with `steve_tool_call`, or pin exact tools on a Bot. Original content and history are read only when explicitly requested (see the deployment guide). There are three kinds: a **connector**, an external service for conversations, events and explicitly requested search/history/original reads or writes; a **channel**, a messaging system Steve has no built-in adapter for, connected as you or explicitly as a bot; and a **theme**, a skin for the web client that is only data and becomes a choice in Settings → Appearance. The official library, [Infranite/steve-extensions](https://github.com/Infranite/steve-extensions), is listed on a new installation and read only when the owner asks; everything that is not installed by default lives there. Installing a plugin runs its program as the Hub's user, so add only libraries you trust. The library format and what a plugin has to implement are in [docs/deployment.md](docs/deployment.md#plugins).
-
-External services use `ext_ws` for your own identity and explicitly select `ext_ws.bot` for a bot. A plugin's `identity: "bot"` selects the bot provider, and both its hello and account response must agree. Bot accounts stay separate from “me”, receive bot-mode response rules and send through the ordinary bot outbox, never the send-as-you path. Omitting identity keeps the existing self behavior. This generic contract does not move any built-in platform adapter or change notification defaults.
-
-**Extension points** are for what is built into a Hub binary:
-
-| Extension point | What you can add |
-|---|---|
-| **Hub Extension API** (`steve-hub/src/extension.rs`) | Connection providers, channel adapters, mail adapters, flow event sources, API routes and background jobs. Build a binary with `Assembly::builtin().with(MyExt)`. Conflicts stop the Hub at startup, naming the extension. Feishu, IMAP mail and GitHub are built this way. |
-| **Flow seams** (`FlowSetup`) | Custom node kinds, actions, item finders and event adapters. |
-| **Module seams** (`steve-modules`) | Item lifecycle hooks, declarative **item panels** in the sidebar (GitHub's *PR & checks* and the mail panel use them), prompt context and outbound checks. |
-| **MCP tools for agents** | One `steve` MCP server, with tokens scoped to a single item (from the Hub's machine only). It covers progress, questions, approvals, delivery and publishing, plus knowledge, mail, GitHub, contacts and secrets. Clients outside Steve reach a scoped part of it with an access token. |
-| **Webhooks** | `POST /hooks/:connection_id`, signature-checked before anything is written. |
-| **Knowledge store port** | SQLite FTS by default. [OpenViking](ops/openviking) is an optional vector backend (`STEVE_KB_STORE=openviking`). Every hit is re-checked against the Hub's own access rules. |
-
-Manage the connected Hub on **Devices** (Hub menu → **Devices & connections**, or the
-phone's **Me** page): one page with tabs for the Hub, its Nodes and the signed-in clients. The instance owner can save a shared name and purpose note;
-other members see the same values. A personal display alias belongs only to that browser
-or Apple client and can be cleared without changing the connection. Devices puts open
-requests before other current work, with recent sessions, monitoring and configuration
-available below. Pausing admission or lowering concurrency affects new turns and leaves
-accepted attempts and retries running. Missing device associations, occupancy and remote
-capabilities remain unknown. See the [Hub management contract](docs/deployment.md#hub-management-and-personal-aliases)
-and [device work and monitoring](docs/deployment.md#device-work-and-monitoring) for permissions,
-conflicts, compatibility and sampling limits.
-
-## Experimental and planned
-
-- **Sessions run on Nodes.** The Hub's own Node handles sessions by default. Set `STEVE_NO_RESUME=1` when opening a diagnostic copy to disable Node connections and model execution.
-- **Multiple devices** (experimental). A `steve-node` on another machine can pair with the Hub and run harnesses there. The listener is on by default; `STEVE_NODE_LISTEN=0` or diagnostic mode disables it. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Devices are not automatically registered or assigned work: the owner generates a code and confirms the device in Devices; the Node claims the code through its CLI. A paired Node takes work only once the workspace owner binds it among a Bot's execution Nodes ([docs/deployment.md](docs/deployment.md#bot-execution-nodes-and-teams)).
-- **Each Node's harnesses.** Devices shows each machine's own harness availability, known CLI and ACP versions, and models. Open a Node to probe it again or inspect missing, unavailable, older unsupported and offline reports. Provider configuration and sign-in stay on that Node ([report contract](docs/deployment.md#per-node-harness-reports)).
-- **Not built yet:** plugin kinds other than channels and themes, quiet hours and a daily digest (marked *Works once push is connected* in Settings), Gmail and Outlook API mail adapters, Feishu docs, calendar and approvals, and external vault backends (1Password, Bitwarden).
-
-## How it works
-
-```mermaid
-flowchart LR
-    subgraph Clients
-        W[Web UI<br/>React]
-    end
-    subgraph Channels
-        F[Feishu / Lark]
-        M[Email]
-        G[GitHub]
-    end
-    subgraph Hub["Steve Hub · Rust"]
-        C[Chat routing<br/>items · decisions]
-        A[Automation<br/>knowledge · people]
-        S[(SQLite)]
-        V[(Vault)]
-    end
-    subgraph Node["Agent runtime · local, or a paired Node (experimental)"]
-        CC[Claude Code · Codex]
-        CX[Gemini · Copilot · +12 ACP CLIs]
-        WT[[git worktrees]]
-    end
-    W <-->|REST + SSE| C
-    F & M & G <--> C
-    C --- A
-    C --- S
-    C --- V
-    C <-->|Steve protocol| Node
-    CC & CX --- WT
-```
-
-- **Hub.** The single source of truth and the only place decisions are made: what runs, on which model, which permissions are granted, what's next in the queue. Authentication, the vault, channels and stats live here too.
-- **Runtime drivers.** Agent protocols (ACP, MCP, stream-json) stop at the driver. The rest of Steve only deals in sessions, turns, events, tool calls and approvals, so a new harness should need one more driver and nothing else.
-- **Modules.** Channels, mail, GitHub, knowledge, flows and the vault register through the [extension points above](#extending-steve). Events between modules go through a durable outbox.
-- **Clients.** Everyone in a workspace, on every device, sees the same state live.
-
-## Quick start
-
-Install the precompiled Hub, Node, Web and command-line tools with Homebrew:
+- **One chat for all your coding agents** — Coordinate Claude Code, Codex, Antigravity CLI (`agy`), Gemini CLI, Copilot, OpenCode, Cursor, Pi, and 10 more CLIs from one thread.
+- **Isolated worktrees with real delivery records** — Every task runs in its own git branch with a tracked goal, plan, check evidence, and reviewable outputs.
+- **One inbox for every human decision** — Reviews, questions, secret grants, and PR merges land in **Decisions**, with hard safety limits even in YOLO mode.
+- **Restarts and upgrades never interrupt active runs** — Your local runner stays alive across Hub updates, and you can pair extra Macs or Linux machines anytime.
+- **Your data and secrets stay on your own machines** — Local storage, automatic encrypted backups, and OS-keystore secrets, without ever editing your CLI configs.
 
 ```sh
 brew install infranite/tap/steve
 steve setup
 ```
 
-On a terminal, setup is a wizard: it asks whether this machine is a Hub or Node, who may reach the Hub (it listens on `0.0.0.0:8440` by default and derives the browser URL from that; `--public-url` names another) and which ACP adapters to install, then prepares the private runtime directory and macOS signing identity, checks the configuration, issues the owner's first access token, registers a user service, and offers to start the Hub and open the browser. For a Node it accepts the Hub's HTTPS address and reads the one-time pairing code from stdin; confirm the fingerprint in Hub **Devices**. The wizard and every `steve` command speak Chinese or English (`--lang zh-CN|en`, else `STEVE_LANG`, the locale, then the system language). Off a terminal (a pipe, `TERM=dumb`, `STEVE_PLAIN=1`) setup prints plain lines and does not start the service; start the role you configured:
+## Why Steve
+
+Coding agents handle single tasks well, but running several at once breaks down on bookkeeping: scattered terminal tabs, lost context, missed permission prompts, and no clear record of what passed or shipped.
+
+| | Agents in terminal tabs | With Steve |
+|---|---|---|
+| **Tracking** | Tabs, scrollback, and memory | Tracked items with goals, plans, delivery tags, and check proof |
+| **Isolation** | Agents share one working tree | One git worktree and isolated build cache per item, plus OS sandboxing |
+| **Approvals** | Whichever tab you notice | One **Decisions** inbox, or each CLI's own native approval mode |
+| **Subagents & tasks** | Buried in raw terminal logs | Structured subagents and background tasks with per-subagent cancel |
+| **Merging** | Manual branch juggling | One PR per item; merged only after CI and exact-commit human approval |
+| **Secrets** | Pasted into prompts or `.env` | Stored in an encrypted vault and injected into commands without exposing keys |
+
+## Architecture
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/arch-en-dark.svg">
+  <img src="docs/assets/art/arch-en.svg" alt="Steve architecture: Clients connected to Steve Hub, which coordinates local and paired remote steve-node execution hosts" width="100%">
+</picture>
+
+- **Hub (`steve-hub`)** — Holds workspace state, routes conversations, enforces approvals and secrets, and serves the live API and backups.
+- **Node (`steve-node`)** — Runs coding CLIs in isolated worktrees with OS sandboxing in a separate process, so Hub restarts never interrupt active work.
+- **Clients (`web/`, `apple/`)** — Multi-Hub web app plus native macOS 14+ (menu bar status) and iOS 17+ apps that stay synced in real time.
+
+See **[docs/architecture.md](docs/architecture.md)** for protocol, storage, projection, confinement, and crate internals.
+
+## Core capabilities
+
+### Coordinator and chat routing
+- **Coordinator, not a silent worker**: Steve answers directly, runs read-only code research with `path:line` citations, or dispatches tracked items to worker Bots and Teams.
+- **Deterministic rules first**: Commands (`/汇报`), `@Bot` mentions, quoted items, and confirmations skip the router model; code guards stop questions from becoming items.
+- **Chat-driven config**: Adjust bots, projects, models, tags, and flows in plain language with 24-hour undo and interactive A2UI forms ([details](docs/concepts.md#chat-routing-and-durable-threads)).
+
+### Tracked items and delivery
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/item-dark.webp">
+  <img src="docs/assets/screenshots/item.webp" alt="Steve item view showing versioned goal, multi-round plan, actor avatars, native approval state, and SHA-pinned merge approval" width="100%">
+</picture>
+
+- **Verified closeout**: Track versioned goals (`vN`), multi-round plans, Type vs Delivery tags, and check evidence; design-only tasks pause at a human **design gate**.
+- **Previewable outputs**: Open non-code deliverables in built-in viewers or publish immutable Hub preview links (`steve publish <file|folder>`) with revocable share tokens.
+- **Safe PR merging**: Agents open pull requests and never push to your default branch; Steve merges only after acceptance, green CI, and exact-commit approval ([details](docs/concepts.md#items-and-delivery-semantics)).
+
+### One Decisions inbox and native YOLO
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/inbox-dark.webp">
+  <img src="docs/assets/screenshots/inbox.webp" alt="Steve Decisions inbox consolidating delivery reviews, SHA-pinned PR merge approvals, agent questions, and drafts" width="100%">
+</picture>
+
+- **Single inbox**: Delivery reviews, PR merges, tool permissions, agent questions, secret grants, and outbound drafts land in **Decisions**, with snooze and 24-hour undo.
+- **Native harness approval (YOLO)**: Enables each supported CLI's own auto-approval mode (`claude-code`, `codex`, `goose`, `mistral-vibe`, `antigravity`) without simulating it elsewhere.
+- **Hard boundaries**: Questions, Steve tools, vault secrets, personal sends, design gates, and PR merges always require your confirmation ([details](docs/concepts.md#decisions-single-entry)).
+
+### Sessions, subagents, and handoff
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/session-dark.webp">
+  <img src="docs/assets/screenshots/session.webp" alt="Steve session view displaying nested subagents, background tasks, live cancel controls, context bar, usage cost, and resume command" width="100%">
+</picture>
+
+- **Subagents & background tasks**: Child tool calls nest under each subagent with live status, cost, and per-subagent **Cancel** where supported.
+- **Same-Bot handoff**: On quota limits, repeated provider errors, or your request, Steve keeps the same Bot and switches only to its fallback `harness + model + effort`.
+- **Full transparency**: Inspect context usage, estimated vs reported cost, changed files, message queues, and the exact local CLI resume command ([details](docs/concepts.md#deterministic-session-handoff)).
+
+### Multi-machine Nodes and Devices
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/node-dark.webp">
+  <img src="docs/assets/screenshots/node.webp" alt="Steve tabbed Node detail page showing Overview, Harnesses, Work and Resources, Access, Version, and Diagnostics" width="100%">
+</picture>
+
+- **Tabbed Node inspection**: Prioritized alerts, live CPU/memory/disk/token vitals, 24-hour trends, harness status, and copyable diagnostics per machine.
+- **Queues & binding**: Tune per-Node concurrency (default 32, adjustable 1–256 live) and bind worker Bots or Teams explicitly to paired machines.
+- **Updates & boot-time macOS Nodes**: Upgrade managed adapters and verified CLIs from **Devices**, and use `steve node enable-boot` so secondary Macs run without desktop login ([guide](docs/deployment.md#pairing-a-separate-node)).
+
+### Navigation, knowledge, and integrations
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/menu-dark.webp">
+  <img src="docs/assets/screenshots/menu.webp" alt="Steve sidebar navigation architecture, open Account profile menu with unified actor avatars, and grouped Items list" width="100%">
+</picture>
+
+- **Clear navigation & identity**: Unified actor avatars for people, Bots, Teams, and orgs (separate from harness/model marks), five-section sidebar, pinned **Stats**, and `<kbd>⌘K</kbd>` search.
+- **Connected context**: Built-in **Feishu / Lark**, **Email** (IMAP/SMTP), **GitHub**, and read-only **Calendar** bring team context in without sending on your behalf.
+- **Knowledge, flows, & stats**: Personal knowledge stores people, projects, preferences, and notes (code lessons become `AGENTS.md` proposals), alongside durable flows, **Feed**, and **Stats** ([details](docs/concepts.md#knowledge-digest-and-people)).
+
+## Supported harnesses
+
+**18 built-in ACP harnesses** ([`builtins.toml`](hub-rs/crates/steve-harness-spec/src/builtins.toml)) plus custom ACP adapters via `harness.json`.
+
+| Harness | ID | Installation | Native YOLO | Runtime adapter |
+|---|---|---|---|---|
+| **Claude Code** | `claude-code` | npm (`@agentclientprotocol/claude-agent-acp`) | Yes (`auto`) | Verified — subagents + cancel, bg tasks, CLI updates |
+| **Codex** | `codex` | npm (`@agentclientprotocol/codex-acp`) | Yes (`agent`) | Verified — subagents + cancel, rollout usage, CLI updates |
+| **Antigravity CLI** | `antigravity` | `PATH` (`agy`) | Yes (`auto`) | Verified — subagents, bg tasks, workflows, `agy update` |
+| **Kimi Code** | `kimi-code` | npm (`@moonshot-ai/kimi-code`) | — | Verified — subagents, bg tasks, CLI updates |
+| **Pi** | `pi` | npm (`@openma/pi-acp` + `@earendil-works/pi-coding-agent`) | Full-access only | Verified — optional `pi-subagents`, CLI updates |
+| **Gemini CLI** | `gemini` | npm (`@google/gemini-cli`) | — | Generic ACP |
+| **GitHub Copilot CLI** | `github-copilot-cli` | npm (`@github/copilot`) | — | Generic ACP |
+| **OpenCode** | `opencode` | npm (`@opencode/cli`) | — | Generic ACP |
+| **Qwen Code** | `qwen-code` | npm (`@qwen-code/qwen-code`) | — | Generic ACP |
+| **goose** | `goose` | npm (`@aaif/goose-acp`) | Yes (`smart_approve`) | Generic ACP |
+| **Grok Build** | `grok-build` | npm (`@xai-official/grok`) | — | Generic ACP |
+| **Kilo Code** | `kilo` | npm (`@kilocode/cli`) | — | Generic ACP |
+| **Factory Droid** | `factory-droid` | npm (`droid`) | — | Generic ACP |
+| **CodeBuddy Code** | `codebuddy-code` | npm (`@tencent-ai/codebuddy-code`) | — | Generic ACP |
+| **Cursor** | `cursor` | `PATH` (`cursor-agent`) | — | Generic ACP |
+| **Kiro CLI** | `kiro` | `PATH` (`kiro-cli`) | — | Generic ACP |
+| **Mistral Vibe** | `mistral-vibe` | `PATH` (`vibe-acp`) | Yes (`smart-approve`) | Generic ACP |
+| **Qoder CLI** | `qoder` | `PATH` (`qodercli`) | — | Generic ACP |
+
+## Quick start
 
 ```sh
-steve hub start       # on the Hub
-steve node start      # on Linux, after fingerprint confirmation
-steve node enable-boot # on macOS, after fingerprint confirmation
+brew install infranite/tap/steve
+steve setup          # guided Hub or Node setup (--lang en|zh-CN)
+steve hub start      # start Hub (or steve node start / steve node enable-boot)
+steve hub doctor     # offline health & config check
 ```
-
-On macOS, `enable-boot` asks for administrator approval once to [register the Node at boot](docs/deployment.md#macos-node-boot-service) as its original account, without a desktop login. Use the same command to migrate an existing LaunchAgent. A signed boot Node can upgrade from Devices without a desktop login or sudo. To select a bundle locally, finish work and use `steve node update --release <bundle>`, then verify the new running build in Devices. Service commands show a readable summary in a terminal. Use `steve hub status --json` or `steve node status --json` for machine-readable output. The summary separates service state, configured build and running identity. `doctor` checks the local installation and service configuration. Verify the Hub's `/healthz`, browser login and Node connection separately.
-
-Homebrew verifies and installs the published native binaries; no Python runtime, Steve source checkout, Cargo or npm build is needed. Setup preserves existing data and does not import harness logins. Running Agent tasks additionally requires the selected harness and its ACP adapter on the Node that executes them; the service and diagnostics remain available without these tools. Hub-driven Linux Node upgrades include the matching maintenance CLI; `steve adapters --home <node-home>` uses that Node's registered release. See [deployment](docs/deployment.md#homebrew-installation) for supported platforms, configuration, lifecycle commands and upgrades. The source-build instructions below are for development.
 
 ### Requirements
+- **Prebuilt (Homebrew / release archive)**: Apple Silicon macOS 14+ or Linux `x86_64` (glibc 2.35+, `systemd --user`). Windows is not supported. Sign in to any coding CLI you plan to use on the executing machine.
+- **From source**: Git, Rust (`edition = 2024`, CI `1.99.1`), Node.js 24 LTS, Python 3.11+.
 
-| | |
-|---|---|
-| **Homebrew install** | Homebrew; no Python runtime dependency. Apple Silicon macOS, or Linux x86_64 with glibc 2.35+. Homebrew's own OS support policy also applies. |
-| **Source build** | Git, stable Rust/Cargo, Node.js 24 LTS with npm |
-| **Run** | Apple Silicon macOS 14+, or Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+, Debian 12+). Windows isn't supported. |
-| **Agent execution** | Any of the 18 built-in ACP coding CLIs (or a custom ACP adapter in `harness.json`) and authentication on the executing Node |
-
-### 1. Build from source *(development)*
+<details><summary>Build and run from source (development)</summary>
 
 ```sh
-git clone https://github.com/Infranite/steve.git
-cd steve
-npm ci
-npm run build:web
+git clone https://github.com/Infranite/steve.git && cd steve
+npm ci && npm run build:web
 cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
-```
-
-### 2. Install the adapters
-
-Steve talks to harnesses over ACP. Thirteen of the 18 built-in harnesses (`claude-code`, `codex`, `pi`, `gemini`, `github-copilot-cli`, `opencode`, `qwen-code`, `goose`, `kimi-code`, `grok-build`, `kilo`, `factory-droid`, `codebuddy-code`) can be installed and kept up to date with npm under the home's `adapters` directory; five (`cursor`, `kiro`, `mistral-vibe`, `qoder`, `antigravity`) are discovered on `PATH` from their own installers. `steve setup` offers the npm-managed ones and pre-ticks those whose CLI is already on `PATH`; for a development Hub, install the ones you use the same way:
-
-```sh
 STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install claude-code codex
+STEVE_HOME="$HOME/.steve-dev" STEVE_DEV_LOGIN=1 STEVE_HOST=127.0.0.1 STEVE_PORT=8440 STEVE_WEB_DIR="$PWD/web/dist" hub-rs/target/debug/steve-hub
 ```
+Open **http://127.0.0.1:8440** (or run `python3 ops/dev.py up` for Vite HMR on `127.0.0.1:18441`). See [docs/deployment.md](docs/deployment.md#homebrew-installation).
+</details>
 
-An adapter already on `PATH` or installed globally with npm is used when `<steve-home>/adapters` has none. If `claude` isn't at `/opt/homebrew/bin/claude`, set `CLAUDE_CODE_EXECUTABLE`. To point at an adapter elsewhere, set its `STEVE_ADAPTER_*` variable (see [Harness setup](docs/deployment.md#harness-setup)) or declare it in `harness.json`.
-
-Bot and model settings label runtime status and model catalogs as Hub-local samples. A missing local runtime does not prevent configuration or proposals. Keep the target default or enter a model ID when its catalog is unavailable; the backend checks the actual execution target and permissions at startup. Local setup actions remain on the Hub device page.
-
-### 3. Run
-
-```sh
-STEVE_HOME="$HOME/.steve-dev" \
-STEVE_DEV_LOGIN=1 \
-STEVE_HOST=127.0.0.1 STEVE_PORT=8440 \
-STEVE_WEB_DIR="$PWD/web/dist" \
-  hub-rs/target/debug/steve-hub
-```
-
-Open **http://127.0.0.1:8440** and sign in. `STEVE_DEV_LOGIN=1` adds a one-click owner login that only works **from loopback**. It's for trying Steve out. For anything long-lived, issue an access token with `steve-hub --access token create` and sign in with your user name and that token. OIDC is optional (below).
-
-> [!TIP]
-> `STEVE_HOME` keeps this instance's data separate from `~/.steve`, the default. On Linux without a desktop keyring (Secret Service), the vault refuses to start: set `STEVE_VAULT_KEYSTORE=dir` and point `STEVE_VAULT_KEY_DIR` at a `0700` directory outside `STEVE_HOME`.
-
-## Configuration
-
-Steve reads its settings from the environment. For a service, put them in `$STEVE_HOME/steve.env` (template: [`ops/steve.env.example`](ops/steve.env.example)). Keep secrets out of the checkout and reference them with `*_FILE` variables.
-
-Each Node defaults to **32 concurrent session turns**. Change the per-device setting (1–256) in **Devices → device details → Concurrent sessions**; it is saved on the Hub, not in an environment variable. Eligible excess turns queue durably and start automatically. Changes apply at the next dispatch without restarting; lowering the setting leaves current turns running. Idle sessions, model jobs and commands have separate accounting. See [capacity queues and Node versions](docs/deployment.md#concurrent-sessions-and-capacity-queues).
-
-For an existing Hub that completed managed setup, run `steve setup --reconfigure` (or add `--home /absolute/path/to/hub`) to edit its listening addresses, browser URL and, when one is configured, its OIDC issuer/client ID. It reads the current literal `steve.env`, preserves other lines and comments, and keeps the existing secret file and installation identity. Review the proposed changes and explicitly confirm before configuration checks, private backups and saving. It does not restart the service; use `steve hub restart` with the original home and service label when ready. See [reconfiguring an installed Hub](docs/deployment.md#reconfiguring-an-installed-hub) for checks and interruption recovery. This command does not reconfigure or re-pair Nodes.
-
-| Variable | Purpose |
+## Concepts at a glance
+| Concept | Meaning |
 |---|---|
-| `STEVE_HOME` | Data directory (default `~/.steve`) |
-| `STEVE_HOST`, `STEVE_PORT` | Listen addresses, comma-separated, on one port (bare-binary default `127.0.0.1:8440`; `steve setup` writes `0.0.0.0:8440` and enables wildcard listening); for a proxy on another machine add the address it reaches, e.g. `127.0.0.1,100.64.0.2`. `0.0.0.0`/`::` is refused unless `STEVE_ALLOW_ANY_HOST=1` |
-| `LISTEN_FDS`, `LISTEN_PID`, `LISTEN_FDNAMES` | Optional socket activation (as systemd sets them): listening sockets handed to the Hub at start are served instead of binding. One per `STEVE_HOST` address, each on `STEVE_PORT`; one named `local-node` serves as the Hub's own Node listener instead of `STEVE_LOCAL_NODE_PORT`. Whoever holds the sockets keeps the ports across Hub restarts. Processes the Hub starts do not inherit them |
-| `STEVE_WEB_DIR` | The built web UI the Hub serves |
-| `STEVE_WEB_PORT` | Serve the web UI on this port of its own; the Hub's port then answers the API only (new installations: Hub port + 1) |
-| `STEVE_CLIENT_ORIGINS` | Extra web origins that may call the Hub across origins (signed-in web clients are allowed already) |
-| `STEVE_PUBLIC_URL` | The address the Hub is reached by from outside (default `http://127.0.0.1:<STEVE_PORT>`): used for callbacks from your integrations and offered first when pairing a device. No shared hosted endpoint is provided. |
-| `STEVE_OIDC_ISSUER`, `STEVE_OIDC_CLIENT_ID`, `STEVE_OIDC_CLIENT_SECRET_FILE` | Optional single sign-on through your OIDC provider |
-| `STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`, `STEVE_WORKTREE_IDLE_HOURS` | Disk guards for item worktrees |
-| `STEVE_UPDATE_CHECK` | `0` turns off the periodic release check. Debug builds don't check unless it is `1` |
-| `STEVE_BACKUP` | `off` turns off the Hub's daily copy of the database and files under `<home>/backups` ([details](docs/deployment.md#backups)); the copies before an upgrade are made either way |
-| `STEVE_PLUGIN_LIBRARY` | The plugin library a new installation lists instead of the official one (a GitHub repository, an index address or a directory), or `off` for none; it applies until the owner changes the list in Settings → Plugins ([details](docs/deployment.md#plugins)) |
-| `STEVE_KB_STORE` | `openviking` to use the optional vector backend (default: SQLite FTS) |
-| `STEVE_VAULT_KEYSTORE` | `auto` (Keychain / Secret Service), `dir` with `STEVE_VAULT_KEY_DIR`, or `file` for tests |
-| `STEVE_NODE_MODE` | `service` (default) runs the Hub's own Node in a process of its own, so a Hub restart or upgrade leaves running turns going ([details](docs/deployment.md#the-hubs-own-node-in-a-process-of-its-own)); `local` runs it in the Hub's process |
-| `STEVE_LOCAL_NODE_PORT` | With `STEVE_NODE_MODE=service`, the loopback port the Hub's own Node links on (default: Hub port + 3) |
-| `STEVE_TOOLCHAINS` | Default `on` (on a Node) sets each detected toolchain's places for a session whose principal is known: cargo's `target/` goes into the item's own `.steve/build/cargo`, and download and build caches that are only caches (npm, bun, pip, uv, poetry, conda, Go, NuGet, Bundler) into that person's own cache on the Node. A tool's home, config or credentials are never moved. Toolchains are data (23 built in); a moved build starts cold. Explicit `off` keeps the original places |
-| `STEVE_PRINCIPAL_STATE` | Default `on` gives each new session's principal their own harness directory on its Node (through the adapter's declared state variable or XDG directories, e.g. `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`). Every principal's session uses the harness's own sign-in on that Node (its credential files linked, never copied, or its credential store, and the sign-in entries of its settings kept the Node's own), so sign each harness in on the Node itself; Steve never configures a model provider or key. The Node's owner also starts from their own settings files, copied as they are; nobody else gets the owner's settings or personal instructions ([harness setup](docs/deployment.md#harness-setup)). Existing sessions keep their recorded state; explicit `off` uses shared state for new sessions |
-| `STEVE_CONFINE` | The OS sandbox of what a Node starts for a run: seatbelt on macOS, bubblewrap on Linux. Levels:<br>`0`/`off`: no sandbox.<br>`1`/`on` (the default): Steve's secrets, keys, databases and programs are out of reach, and a run in a workspace writes only there and in its repository, harness and toolchain directories, temporary directories, the usual tool caches and the harnesses' homes. Reads stay open, except that a session of someone other than the Node's owner does not see the owner's harness homes (logins, tokens, history), as the adapters declare them; the environment is left as the user's system sets it.<br>`2`: level 1, with runs starting from a fresh login environment of the user plus what Steve sets for them.<br>A harness with its own seatbelt sandbox (Codex) keeps that one, and tools that start their own `sandbox-exec` fail inside it |
-| `STEVE_CONFINE_WRITABLE` | Extra places (`:`-separated absolute paths) a run may write at level 1 or 2 |
-| `STEVE_NODE_LISTEN` | Experimental multi-device listener defaults to `1`; explicit `0` disables it. `STEVE_NO_RESUME=1` always disables remote execution |
-| `STEVE_TAILCAT`, `STEVE_TAILCAT_PORT` | Remote Nodes over tailcat (optional, turned on in Devices): the `tailcat` program when it is not on `PATH`, and the loopback port its Node-only listener uses (default: Hub port + 2) |
-| `STEVE_NODE_INSTALLERS` | A local directory with the release's `steve-installer.json` and installer archives, for remote Node installs from a Hub without access to GitHub |
-| `STEVE_ADAPTER_*`, `STEVE_DEFAULT_MODEL_*` | Override a built-in harness's ACP adapter path (`STEVE_ADAPTER_CLAUDE`, `STEVE_ADAPTER_CODEX`, `STEVE_ADAPTER_GEMINI`, …) or default model (`STEVE_DEFAULT_MODEL_CLAUDE`, …); full table in [Harness setup](docs/deployment.md#harness-setup) |
-| `STEVE_NODE_HANDOFF_MIN` | Minutes a device may be offline while messages wait for its session before Steve continues the item in a new session elsewhere (default 30; `0` never) |
-| `STEVE_NODE_PROXY_PEERS` | Optional exact IPs of TLS-terminating proxies for remote Node ingress; default is loopback only |
+| **Coordinator vs Worker Bot** | Steve routes, researches, and coordinates; tracked items run on worker Bots or Teams. |
+| **Item & Delivery** | Tracked work with its own git worktree, plan, tags, outputs, and verified closeout. |
+| **Decisions (`#/inbox`)** | Single inbox for reviews, PR merges, tool approvals, questions, secret grants, and reply drafts. |
+| **Native approval (YOLO)** | Uses each CLI's native auto-approval mode without weakening Steve-level gates. |
+| **Same-Bot handoff** | Switches a Bot to its fallback `harness + model + effort` on quota or provider errors. |
+
+Full domain rules live in **[docs/concepts.md](docs/concepts.md)**.
+
+## Security and privacy
+- **Access control**: Access tokens, single-use QR pairing, or optional OIDC; bare `steve-hub` listens on localhost only unless explicitly opened.
+- **Encrypted vault**: Master keys live in your OS keystore; viewing secrets requires a Passkey check, and agents inject secrets into commands without reading the vault.
+- **Sandboxing & isolation**: OS confinement blocks Steve's own keys, database, and binaries, alongside per-user harness state and isolated build caches.
+- **Outbound checks**: Knowledge carries disclosure levels (`public`, `conclusion`, `reasoning`, `never`), and external sends pass rule checks plus a cross-model audit ([details](docs/architecture.md#security-confinement-and-backups)).
 
 > [!IMPORTANT]
-> Review authentication before you expose the listener beyond localhost. Agents running under Steve act with your local user's permissions; the Node's sandbox keeps only Steve's own control files out of their reach so far.
+> Review authentication before exposing the Hub beyond localhost; coding agents act with the executing OS user's permissions outside confined paths.
 
-## Deployment
+## Deployment and operations
+- **Install & upgrade**: Homebrew or release archives; upgrade signed Hubs via `steve upgrade` or **Settings → About**, and Nodes from **Devices**.
+- **Automatic encrypted backups**: Every release bundles `restic` for daily, pre-upgrade, pre-destructive, and manual snapshots (`steve-hub --admin backup|backup-list|restore`).
+- **Guides ([docs/deployment.md](docs/deployment.md))**: [Homebrew & reconfigure](docs/deployment.md#homebrew-installation) · [Backups](docs/deployment.md#backups) · [Upgrades](docs/deployment.md#managed-release-bundles-and-automatic-upgrades) · [Remote & boot Nodes](docs/deployment.md#pairing-a-separate-node) · [Harnesses & MCP](docs/deployment.md#harness-setup) · [Auth & Apple apps](docs/deployment.md#access-tokens-and-clients) · [Metrics](docs/deployment.md#metrics-and-health).
 
-| Path | Best for | Automatic upgrades |
-|---|---|---|
-| **Local build** (above) | Trying Steve, development | Check only |
-| **Source-based macOS service** — `zsh ops/install.sh` | A personal always-on Mac with a Keychain-backed vault | Through `ops/local-release.py` |
-| **Managed Release bundle** — `steve-hub --supervise` | macOS or Linux servers under launchd/systemd | ✅ From Settings → About |
+## Extending Steve
+- **Runtime plugins**: Install verified `connector`, `channel`, and `theme` packages live from [`Infranite/steve-extensions`](https://github.com/Infranite/steve-extensions) ([docs/deployment.md#plugins](docs/deployment.md#plugins)).
+- **MCP & A2A**: One Hub `/mcp` endpoint serves Bot sessions and external MCP clients; `POST /a2a` exposes standard A2A task endpoints.
+- **Compile-time seams**: Custom extensions, flow nodes, module hooks, webhooks, and optional OpenViking vector knowledge store ([docs/architecture.md#extensibility](docs/architecture.md#extensibility)).
 
-Installation steps, vault backends, service-manager settings and the upgrade lifecycle are in **[docs/deployment.md](docs/deployment.md)**.
-
-Upgrade probes allow long SQLite migrations while actual migration progress continues, with a 60-second idle timeout and a 15-minute total limit. An older installed runner still uses its old timeout; see the [deployment instructions](docs/deployment.md) for the first upgrade through that runner and the pre-commit backup/rollback boundary.
-
-## Repository layout
-
-```text
-hub-rs/          Rust workspace: the Hub binary and its crates
-  crates/steve-hub        HTTP server (axum), REST + SSE, extensions, upgrades, background jobs
-  crates/steve-core       items, lifecycle, chat routing, pull request follow-up, model gateway
-  crates/steve-modules    module seams (hooks, panels, changesets), contacts, accounts, vault
-  crates/steve-acp        harness adapters over ACP: sessions and one-shot calls, the adapter registry
-  crates/steve-research   read-only inline research (run policy, guard, sandbox)
-  crates/steve-mcp        the `steve` MCP server agents talk to
-  crates/steve-channels   Feishu/Lark, spaces, personas, disclosure checks
-  crates/steve-mail       IMAP/SMTP accounts, sync, drafts, triage
-  crates/steve-github     GitHub App/token, webhooks, PRs, checks, effects
-  crates/steve-knowledge  knowledge base, retrieval, citations, memories
-  crates/steve-flow       signals, flows, schedules
-  crates/steve-vault      what a launched harness may not read; steve-keyhelper holds the macOS key
-  crates/steve-stats      usage, cost and delivery metrics
-  crates/steve-node*      the Hub–Node protocol and the Node runtime that runs every session
-  crates/steve-store      SQLite schema and migrations
-web/             React + Vite + Tailwind interface
-ops/             install, release, backup, service and OpenViking scripts
-docs/            architecture, protocol and release notes
-```
+## Status and roadmap
+Steve is **pre-1.0 (`0.x`)**. Public APIs, protocols, and on-disk formats may change on `MINOR` releases until `1.0.0` ([versioning](CONTRIBUTING.md#changes-and-releases)).
+- **Experimental**: Paired remote `steve-node` hosts (enabled by default, actively hardening).
+- **Planned *(not yet implemented)***: Pluggable storage/cache/export/backup drivers (remote restic targets, production PostgreSQL), expanded Feed/RSS/digest notifications, Gmail/Outlook API & Feishu docs/calendar/approvals adapters, external vaults (1Password/Bitwarden), deny-by-default view sandbox, and streaming A2A.
 
 ## Contributing
-
-Issues and pull requests are welcome. Before you open a PR, read **[CONTRIBUTING.md](CONTRIBUTING.md)**. It has the development checks, commit and pull-request conventions for automatic release notes, and how versions and migrations are assigned at release time.
+Issues and PRs are welcome. Read **[CONTRIBUTING.md](CONTRIBUTING.md)** for local checks, Conventional Commits, and automated releases via `ops/cut-release.py` (never pick versions or edit `docs/releases/`).
 
 ## License
+**[MIT License](LICENSE)**. External coding CLIs and integrations remain under their own terms; affectUI Pro components in `web/src/components/affect/` keep their affectUI license header.
 
-[MIT](LICENSE). External agents, model providers and integrations are separate products with their own terms, and you install and configure them yourself.
+<sub>All screenshots are rendered from the real Steve web UI using synthetic fixtures — no production data is used.</sub>

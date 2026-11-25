@@ -64,7 +64,14 @@ pub(super) fn related(
     anchors: &[ObjRef],
     now: i64,
 ) -> MailResult<Related> {
-    let mut hits = anchor_mems(c, viewer, anchors, ANCHOR_MEMS, now)?;
+    let mut hits = anchor_mems(
+        c,
+        viewer,
+        anchors,
+        steve_knowledge::context::L1_ENTITY_MAX_CHARS,
+        false,
+        now,
+    )?;
     // layer 7: retrieve(subject + new text, k=8, Draft)
     let query = steve_knowledge::context::query_text(&format!(
         "{} {}",

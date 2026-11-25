@@ -40,7 +40,6 @@ pub const CONTEXT_MESSAGES: usize = 5;
 pub const CONTEXT_MAX: usize = 12_000;
 /// Retrieved knowledge.
 pub const DRAFT_K: usize = 8;
-pub const ANCHOR_MEMS: usize = 5;
 pub const TIMEOUT: Duration = Duration::from_secs(90);
 
 /// `POST /mail/threads/:id/draft`.

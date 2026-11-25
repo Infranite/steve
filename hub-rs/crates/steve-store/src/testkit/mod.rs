@@ -8,6 +8,7 @@ pub mod stats;
 pub mod hub;
 pub mod modules;
 pub mod vault;
+pub mod workflow_runs;
 
 /// The active write connection for driver-level tests in this crate.
 pub fn sqlite_writer<'a>(write: &crate::W<'a>) -> &'a rusqlite::Connection {

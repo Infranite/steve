@@ -74,10 +74,12 @@ impl Scope {
         let visible = self.viewer.sees(&c.visibility, &c.created_by);
         // Service and shared-conversation audiences are independent of member read access.
         let audience_ok = !self.workspace_only || c.visibility == Visibility::Workspace;
-        let kind_ok = self
-            .kinds
-            .as_ref()
-            .is_none_or(|k| k.contains(&c.source_kind));
+        let kind_ok = match &self.kinds {
+            Some(k) => k.contains(&c.source_kind),
+            None => {
+                !steve_store::knowledge::EXCLUDED_KNOWLEDGE_KINDS.contains(&c.source_kind.as_str())
+            }
+        };
         let paused = (self.paused_mems && c.obj_type == "mem")
             || (self.paused_bot_mems && c.obj_type == "bot_mem");
         visible && audience_ok && kind_ok && !paused

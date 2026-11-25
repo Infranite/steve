@@ -295,6 +295,7 @@ fn a_running_operation_of_an_older_revision_holds_a_failure_ruling() {
             i.cas_revision,
             Some("做不成"),
             None,
+            None,
             "me",
         )
         .unwrap();
@@ -343,7 +344,8 @@ fn commands_check_the_version_and_the_phase() {
                 i.cas_revision,
                 Some(" "),
                 None,
-                "me"
+                None,
+                "me",
             )
             .is_err()
     );
@@ -410,6 +412,7 @@ fn commands_check_the_version_and_the_phase() {
                 done.cycle,
                 done.cas_revision,
                 Some("晚了"),
+                None,
                 None,
                 "me",
             )

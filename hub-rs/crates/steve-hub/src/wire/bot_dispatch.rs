@@ -438,6 +438,7 @@ impl RoutedRuntime {
         session: &str,
         after: Option<&str>,
         explanation: Option<&PlacementExplanation>,
+        system_context: Option<&str>,
     ) -> Result<bool> {
         let Some(s) = self.store.sessions().get(session)? else {
             return Ok(true);
@@ -450,7 +451,7 @@ impl RoutedRuntime {
             .items()
             .get(item_id)?
             .ok_or(StoreError::NotFound("Item"))?;
-        let error = match self.bind_item_session(&item, &s, after, explanation) {
+        let error = match self.bind_item_session(&item, &s, after, explanation, system_context) {
             Ok(()) => return Ok(true),
             Err(CoreError::Placement(error)) => error,
             Err(other) => return Err(other),
@@ -470,6 +471,7 @@ impl RoutedRuntime {
         s: &steve_store::Session,
         after: Option<&str>,
         explanation: Option<&PlacementExplanation>,
+        system_context: Option<&str>,
     ) -> Result<()> {
         let session = s.id.as_str();
         let bot = s.bot_id.as_deref().unwrap_or("steve");
@@ -522,7 +524,7 @@ impl RoutedRuntime {
                 continue;
             }
             let receipt = routes.placement(node, *priority, &choice, &rejected, explanation);
-            match rt.bind_after_scoped(&plan, after, &receipt) {
+            match rt.bind_after_scoped(&plan, after, &receipt, system_context) {
                 Ok(()) => return Ok(()),
                 Err(e) => tracing::info!(session, node, "scoped binding refused: {e}"),
             }

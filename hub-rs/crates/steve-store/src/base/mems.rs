@@ -34,6 +34,8 @@ pub struct Mem {
     pub created_by: String,
     pub created: i64,
     pub updated: i64,
+    /// Pinned memories are assembled ahead of unpinned entries within the context budget.
+    pub pinned: bool,
     pub about: Vec<ObjRef>,
 }
 
@@ -56,12 +58,13 @@ impl Mem {
             created_by: r.get("created_by")?,
             created: r.get("created")?,
             updated: r.get("updated")?,
+            pinned: r.get::<_, i64>("pinned")? != 0,
             about: Vec::new(),
         })
     }
 }
 
-/// A new memory. Defaults follow the table: `private`, `conclusion`, `confirmed`.
+/// A new memory. Defaults follow the table: `private`, `conclusion`, `confirmed`, unpinned.
 #[derive(Debug, Clone)]
 pub struct NewMem {
     pub kind: String,
@@ -76,6 +79,7 @@ pub struct NewMem {
     pub writer: String,
     pub decision_id: Option<String>,
     pub created_by: String,
+    pub pinned: bool,
     pub about: Vec<ObjRef>,
 }
 
@@ -94,6 +98,7 @@ impl Default for NewMem {
             writer: "me".into(),
             decision_id: None,
             created_by: String::new(),
+            pinned: false,
             about: Vec::new(),
         }
     }
@@ -108,6 +113,7 @@ pub struct MemPatch {
     pub visibility: Option<Visibility>,
     pub decision_id: Option<Option<String>>,
     pub valid_until: Option<Option<i64>>,
+    pub pinned: Option<bool>,
 }
 
 /// Which memories a list returns.
@@ -228,8 +234,8 @@ pub fn create(tx: &mut W<'_>, ws: &str, m: &NewMem) -> Result<Mem> {
     let id = uid("mm");
     let t = now();
     tx.conn.prepare_cached(
-        "INSERT INTO mems (id, workspace_id, kind, text, source_type, source_id, source_label, visibility, level, status, valid_until, writer, decision_id, created_by, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO mems (id, workspace_id, kind, text, source_type, source_id, source_label, visibility, level, status, valid_until, writer, decision_id, created_by, created, updated, pinned)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?
     .execute(params![
         id,
@@ -247,7 +253,8 @@ pub fn create(tx: &mut W<'_>, ws: &str, m: &NewMem) -> Result<Mem> {
         m.decision_id,
         m.created_by,
         t,
-        t
+        t,
+        i64::from(m.pinned)
     ])?;
     for a in &m.about {
         tx.conn.prepare_cached(
@@ -275,7 +282,8 @@ pub fn patch(tx: &mut W<'_>, id: &str, p: &MemPatch) -> Result<Option<Mem>> {
         .val("status", p.status.clone())
         .val("visibility", p.visibility.as_ref().map(Visibility::code))
         .null("decision_id", p.decision_id.clone())
-        .null("valid_until", p.valid_until);
+        .null("valid_until", p.valid_until)
+        .val("pinned", p.pinned.map(i64::from));
     if !s.is_empty() {
         s.val("updated", Some(now()));
         tx.conn.run(

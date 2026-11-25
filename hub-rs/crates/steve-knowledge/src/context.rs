@@ -13,29 +13,69 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use steve_modules::contacts::{self, ContactCard};
-use steve_modules::context::{ChatCtx, ChatDone, Cite, PromptContext};
+use steve_modules::context::{ChatCtx, ChatDone, Cite, PromptContext, SessionPrompt};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::base::{Level, ObjRef, Viewer};
 use steve_store::{Contacts, Item, ItemEvidence, Members, R, Read, SessionEvidence, Store};
 
 use crate::cite;
 use crate::retrieve::{
-    Hit, Purpose, Query, Retrieved, SEMANTIC_DOWN_NOTE, anchor_mems, record_use, retrieve_all,
+    Hit, MEM_HREF_PREFIX, Purpose, Query, Retrieved, SEMANTIC_DOWN_NOTE, anchor_mems, record_use,
+    retrieve_all,
 };
 use crate::state::Knowledge;
+use crate::uses::{MemoryUseStage, record_memory_uses};
 
 /// Retrieved hits per scene.
 pub const SESSION_K: usize = 8;
 pub const CHAT_K: usize = 6;
 pub const REPLY_K: usize = 10;
-/// Rules and preferences about the anchors (layer 6), before the retrieved hits.
-pub const ANCHOR_MEMS: usize = 5;
-/// The whole session context, in characters; entries are dropped from the end beyond it.
+/// Always-loaded personal context (`me`) character budget (L1).
+pub const L1_ME_MAX_CHARS: usize = 1500;
+/// Non-`me` anchor memories (item, project, people, space) character budget (L1).
+pub const L1_ENTITY_MAX_CHARS: usize = 800;
+/// Fixed personal-context injection budget per session, in estimated tokens.
+pub const SESSION_CONTEXT_MAX_TOKENS: usize = 1200;
+/// Conservative token estimate per non-ASCII (CJK) character (~1 token/char).
+const TOKENS_PER_NON_ASCII_CHAR: usize = 1;
+/// Conservative ASCII characters per token (~4 chars/token, ceiling division).
+const ASCII_CHARS_PER_TOKEN: usize = 4;
+/// The whole task-context block in a session, in characters; entries are dropped from the end beyond it.
 pub const SESSION_MAX: usize = 6000;
 /// One entry's text, in characters.
 pub const SNIPPET_MAX: usize = 600;
 /// The search text built from an item or a message, in characters.
 pub const QUERY_MAX: usize = 500;
+
+/// Deterministic conservative token estimator for prompt budget enforcement.
+/// Non-ASCII (CJK) characters count at 1 token/char and ASCII at 4 chars/token (rounded up).
+pub fn estimate_tokens(text: &str) -> usize {
+    let mut ascii = 0usize;
+    let mut non_ascii = 0usize;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            ascii += 1;
+        } else {
+            non_ascii += 1;
+        }
+    }
+    non_ascii * TOKENS_PER_NON_ASCII_CHAR + ascii.div_ceil(ASCII_CHARS_PER_TOKEN)
+}
+
+fn cut_to_token_budget(text: &str, max_tokens: usize) -> String {
+    if estimate_tokens(text) <= max_tokens {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        out.push(ch);
+        if estimate_tokens(&out) > max_tokens {
+            out.pop();
+            break;
+        }
+    }
+    out
+}
 
 /// The block head, verbatim.
 pub const SESSION_HEAD: &str =
@@ -136,22 +176,32 @@ pub fn latest_session(c: &mut impl Read, item_id: &str) -> ApiResult<Option<Stri
     Ok(SessionEvidence(c).latest(item_id)?)
 }
 
-/// What an opening prompt gets: `text` (`""` = nothing at all) and the numbered hits in it, for
+/// What an opening prompt gets: split personal [`Self::user_context`] and [`Self::task_context`],
+/// their combined [`Self::text`] (`""` = nothing at all), and the numbered hits in them for
 /// `kb_uses(session)`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionCtx {
+    /// Fixed personal context for the requester (`me` memories + address), bounded by
+    /// [`L1_ME_MAX_CHARS`] and [`SESSION_CONTEXT_MAX_TOKENS`]. Delivered via native
+    /// `append_system_context` or `## User Context` in the opening prompt.
+    pub user_context: String,
+    /// Task-specific context (contact cards, entity anchors, retrieved knowledge, semantic note).
+    pub task_context: String,
+    /// Combined text (`## User Context` + `task_context`, or just one when the other is empty).
     pub text: String,
     /// The search text (title + latest goal, whitespace collapsed).
     pub query: String,
     pub hits: Vec<Hit>,
     pub cards: Vec<ContactCard>,
-    /// The hits were found by keywords only ([`Retrieved::semantic_down`]); `text` says so.
+    /// The hits were found by keywords only ([`Retrieved::semantic_down`]); `task_context` says so.
     pub semantic_down: bool,
 }
 
-/// Layers 6 and 7 for an Agent session on `item`: the cards of the item's people, the rules
-/// and preferences about the item, its project and those people, and `retrieve(title + latest goal,
-/// k=8, Agent)`; all as the item's user sees them. ≤[`SESSION_MAX`] characters.
+/// Layers 6 and 7 for an Agent session on `item`: `me` personal context (priority-and-budget
+/// bounded by [`L1_ME_MAX_CHARS`] and [`SESSION_CONTEXT_MAX_TOKENS`], workspace-filtered in
+/// multi-member workspaces), contact cards of the item's people, active anchor memories about the
+/// item/project/people (bounded by [`L1_ENTITY_MAX_CHARS`]), and `retrieve(title + latest goal,
+/// k=8, Agent)`; all as the item's user sees them.
 pub fn session_context(
     store: &Store,
     kb: &Knowledge,
@@ -175,12 +225,82 @@ fn session_snippets(
     cards: Vec<ContactCard>,
 ) -> ApiResult<SessionCtx> {
     let ws = item.workspace_id.as_str();
-    let mut anchors = vec![ObjRef::new("item", &item.id)];
+    let multi_member = Members::new(c).count(ws)? > 1;
+    let me_party = if !viewer.user.is_empty() {
+        Contacts::new(c).user_party(ws, &viewer.user)?
+    } else {
+        None
+    };
+
+    let mut entity_anchors = vec![ObjRef::new("item", &item.id)];
     if let Some(p) = item.project_id.as_deref().filter(|p| !p.is_empty()) {
-        anchors.push(ObjRef::new("project", p));
+        entity_anchors.push(ObjRef::new("project", p));
     }
-    anchors.extend(cards.iter().map(|k| ObjRef::new("party", &k.party_id)));
-    let rules = anchor_mems(c, &viewer, &anchors, ANCHOR_MEMS, now)?;
+    for k in &cards {
+        if me_party.as_deref() != Some(k.party_id.as_str()) {
+            entity_anchors.push(ObjRef::new("party", &k.party_id));
+        }
+    }
+    let mut all_anchors = entity_anchors.clone();
+    if let Some(ref me) = me_party {
+        all_anchors.push(ObjRef::new("party", me));
+    }
+
+    let mut me_hits = match me_party.as_deref() {
+        Some(me) => anchor_mems(
+            c,
+            &viewer,
+            &[ObjRef::new("party", me)],
+            L1_ME_MAX_CHARS,
+            multi_member,
+            now,
+        )?,
+        None => Vec::new(),
+    };
+    for (i, h) in me_hits.iter_mut().enumerate() {
+        h.n = i + 1;
+    }
+
+    let address = if !multi_member && !viewer.user.is_empty() {
+        Contacts::new(c)
+            .internal_address(ws, &viewer.user)?
+            .map(|name| {
+                format!("对本人说话时称呼：{name}。对外介绍须使用对外称呼，不沿用这个昵称。")
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let build_user = |hits: &[Hit]| -> String {
+        let mut parts = Vec::new();
+        if !address.is_empty() {
+            parts.push(address.clone());
+        }
+        if !hits.is_empty() {
+            let mut lines: Vec<String> = hits.iter().map(|h| snippet_line("K", h)).collect();
+            lines.push(SESSION_RULES.to_string());
+            parts.push(lines.join("\n"));
+        }
+        parts.join("\n\n")
+    };
+    let mut user_context = build_user(&me_hits);
+    while estimate_tokens(&user_context) > SESSION_CONTEXT_MAX_TOKENS && !me_hits.is_empty() {
+        me_hits.pop();
+        user_context = build_user(&me_hits);
+    }
+    if estimate_tokens(&user_context) > SESSION_CONTEXT_MAX_TOKENS {
+        user_context = cut_to_token_budget(&user_context, SESSION_CONTEXT_MAX_TOKENS);
+    }
+
+    let entity_hits = anchor_mems(
+        c,
+        &viewer,
+        &entity_anchors,
+        L1_ENTITY_MAX_CHARS,
+        multi_member,
+        now,
+    )?;
 
     let query = query_text(&format!(
         "{} {}",
@@ -188,31 +308,37 @@ fn session_snippets(
         ItemEvidence(c).latest_goal(&item.id)?.unwrap_or_default()
     ));
     let mut q = Query::new(kb.store(), &viewer, &query, Purpose::Agent);
-    q.anchors = &anchors;
+    q.anchors = &all_anchors;
     q.k = SESSION_K;
     q.now = now;
     let found = retrieve_all(c, &q)?;
     let semantic_down = found.semantic_down;
-    let mut hits = merge(rules, found.hits);
+    let mut task_hits: Vec<Hit> = merge(entity_hits, found.hits)
+        .into_iter()
+        .filter(|h| {
+            !me_hits
+                .iter()
+                .any(|m| m.obj_type == h.obj_type && m.obj_id == h.obj_id && m.seq == h.seq)
+        })
+        .collect();
+    let offset = me_hits.len();
+    for (i, h) in task_hits.iter_mut().enumerate() {
+        h.n = offset + i + 1;
+    }
+
     let note = if semantic_down {
         SEMANTIC_DOWN_NOTE
     } else {
         ""
     };
-
     let cards_text = contacts::cards::render(&cards);
     let cards_block = if cards_text.is_empty() {
         String::new()
     } else {
         format!("{CARDS_HEAD}\n{cards_text}")
     };
-    let address = Contacts::new(c)
-        .internal_address(ws, &viewer.user)?
-        .map(|name| format!("对本人说话时称呼：{name}。对外介绍须使用对外称呼，不沿用这个昵称。"))
-        .unwrap_or_default();
-    let build = |hits: &[Hit]| {
+    let build_task = |hits: &[Hit]| {
         [
-            address.clone(),
             cards_block.clone(),
             render_snippets(SESSION_HEAD, SESSION_RULES, "K", hits),
             note.to_string(),
@@ -222,15 +348,24 @@ fn session_snippets(
         .collect::<Vec<_>>()
         .join("\n\n")
     };
-    let mut text = build(&hits);
-    while text.chars().count() > SESSION_MAX && !hits.is_empty() {
-        hits.pop();
-        text = build(&hits);
+    let mut task_context = build_task(&task_hits);
+    while task_context.chars().count() > SESSION_MAX && !task_hits.is_empty() {
+        task_hits.pop();
+        task_context = build_task(&task_hits);
     }
-    if text.chars().count() > SESSION_MAX {
-        text = text.chars().take(SESSION_MAX).collect();
+    if task_context.chars().count() > SESSION_MAX {
+        task_context = task_context.chars().take(SESSION_MAX).collect();
     }
+
+    let hits: Vec<Hit> = me_hits.into_iter().chain(task_hits).collect();
+    let text = SessionPrompt {
+        user_context: user_context.clone(),
+        task_context: task_context.clone(),
+    }
+    .into_protocol_text();
     Ok(SessionCtx {
+        user_context,
+        task_context,
         text,
         query,
         hits,
@@ -259,9 +394,10 @@ pub fn cite_of(h: &Hit) -> Cite {
     }
 }
 
-/// Layers 6 and 7 for Steve's answer to `text` from `viewer`: rules and preferences about
-/// “我”, then `retrieve(text, k=6, Chat)`; numbered `[1] [2]`. In a workspace with more than
-/// one member only workspace-visible knowledge is used. `None` = nothing found.
+/// Layers 6 and 7 for Steve's answer to `text` from `viewer`: active memories about “我”
+/// (priority-and-budget assembled up to [`L1_ME_MAX_CHARS`]), then `retrieve(text, k=6, Chat)`;
+/// numbered `[1] [2]`. In a workspace with more than one member only workspace-visible knowledge
+/// is used. `None` = nothing found.
 pub fn chat_context(
     c: &mut R<'_>,
     kb: &Knowledge,
@@ -270,15 +406,19 @@ pub fn chat_context(
     now: i64,
 ) -> ApiResult<Option<ChatKnowledge>> {
     let query = query_text(text);
+    let multi_member = Members::new(c).count(&viewer.ws)? > 1;
     let mut rules = Vec::new();
     if !viewer.user.is_empty()
         && let Some(me) = Contacts::new(c).user_party(&viewer.ws, &viewer.user)?
     {
-        rules = anchor_mems(c, viewer, &[ObjRef::new("party", &me)], ANCHOR_MEMS, now)?;
-        // anchor memories ignore the query, so the shared-thread rule is applied here too
-        if Members::new(c).count(&viewer.ws)? > 1 {
-            rules.retain(|h| h.visibility == steve_store::base::Visibility::Workspace);
-        }
+        rules = anchor_mems(
+            c,
+            viewer,
+            &[ObjRef::new("party", &me)],
+            L1_ME_MAX_CHARS,
+            multi_member,
+            now,
+        )?;
     }
     let mut q = Query::new(kb.store(), viewer, &query, Purpose::Chat);
     q.k = CHAT_K;
@@ -287,7 +427,7 @@ pub fn chat_context(
     let hits = merge(rules, found.hits);
     // This context is used by the shared workspace chat. Keep its existing workspace-only
     // rule for multi-member workspaces: a member's private nickname must not enter it.
-    let address = if Members::new(c).count(&viewer.ws)? <= 1 {
+    let address = if !multi_member {
         Contacts::new(c).internal_address(&viewer.ws, &viewer.user)?
     } else {
         None
@@ -317,8 +457,15 @@ pub fn chat_context(
 }
 
 /// `cite::finish` and the reply's extra `meta`: `cites` with only what was cited.
+/// Also emits `steve_memory_uses_total{consumer="chat", stage="cited"}` for cited memories.
 pub fn chat_finish(answer: &str, cx: &ChatCtx) -> ChatDone {
     let f = cite::finish(answer, &cx.cites);
+    let cited_mems = f
+        .used
+        .iter()
+        .filter(|c| c.href.starts_with(MEM_HREF_PREFIX))
+        .count() as u64;
+    record_memory_uses("chat", MemoryUseStage::Cited, cited_mems);
     let mut meta = serde_json::Map::new();
     meta.insert(
         "cites".into(),
@@ -356,7 +503,10 @@ pub fn reply_hits(
     q.anchors = anchors;
     q.k = REPLY_K;
     q.now = now;
-    retrieve_all(c, &q)
+    let found = retrieve_all(c, &q)?;
+    let mem_hits = found.hits.iter().filter(|h| h.obj_type == "mem").count() as u64;
+    record_memory_uses("reply", MemoryUseStage::Injected, mem_hits);
+    Ok(found)
 }
 
 // ---------------------------------------------------------------- the B1 provider
@@ -397,7 +547,7 @@ impl KnowledgeContext {
 }
 
 impl PromptContext for KnowledgeContext {
-    fn session(&self, store: &Store, _ws: &str, item: &Item) -> Option<String> {
+    fn session(&self, store: &Store, _ws: &str, item: &Item) -> Option<SessionPrompt> {
         let cx = session_context(store, &self.kb, item, steve_store::now())
             .map_err(|e: ApiError| tracing::warn!(item = %item.id, "session knowledge: {e}"))
             .ok()?;
@@ -410,7 +560,11 @@ impl PromptContext for KnowledgeContext {
                 Err(e) => tracing::warn!(item = %item.id, "session of item: {e}"),
             }
         }
-        Some(cx.text).filter(|t| !t.is_empty())
+        let prompt = SessionPrompt {
+            user_context: cx.user_context,
+            task_context: cx.task_context,
+        };
+        Some(prompt).filter(|p| !p.is_empty())
     }
 
     fn chat(&self, store: &Store, _ws: &str, viewer: &Viewer, text: &str) -> Option<ChatCtx> {
