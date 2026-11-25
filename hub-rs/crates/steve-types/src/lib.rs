@@ -82,6 +82,6 @@ pub use integrations::IntegrationsEvent;
 pub use knowledge::KnowledgeEvent;
 pub use people::PeopleEvent;
 pub use stats::StatsEvent;
-pub use vault::VaultEvent;
+pub use vault::{VaultEvent, VaultReason};
 pub use work::WorkEvent;
 pub use work::WorkLiveEvent;

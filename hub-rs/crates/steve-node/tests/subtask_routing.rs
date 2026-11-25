@@ -170,6 +170,7 @@ async fn child_session_updates_are_routed_and_single_subtask_cancel_keeps_parent
             adapters: HashMap::from([("claude-code".to_string(), PathBuf::from(&adapter))]),
             node: "node".into(),
             claude_executable: "claude".into(),
+            claude_config_dir: None,
             steve_home: root.join("steve"),
             codex_home: root.join("codex"),
             user_home: root.to_path_buf(),

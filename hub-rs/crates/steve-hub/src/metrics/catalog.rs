@@ -621,4 +621,9 @@ pub(super) fn describe() {
         Count,
         "Figures that could not be collected. Labels: source."
     );
+    describe_counter!(
+        "steve_security_refusals_total",
+        Count,
+        "Actions refused at a security or tenant boundary. Labels: boundary, reason."
+    );
 }
