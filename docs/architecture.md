@@ -51,6 +51,8 @@ flowchart LR
 
 By default (`STEVE_NODE_MODE=service`), the Hub runs its own local Node in a separate `steve-hub --local-node` process over loopback (`STEVE_LOCAL_NODE_PORT`, default Hub port + 3). Hub restarts and in-place upgrades therefore leave active agent turns running. Setting `STEVE_NODE_MODE=local` runs the local Node in-process.
 
+Default directories and ports: `~/.steve` (Hub) and `~/.steve-node` (separate Node), overridable with `STEVE_HOME` / `--home`; Hub API `8440` (`STEVE_PORT`), separate Web UI `8441` (`STEVE_WEB_PORT`, Hub + 1 on `steve setup`), optional tailcat Node listener `8442` (`STEVE_TAILCAT_PORT`, Hub + 2), local service Node `8443` (`STEVE_LOCAL_NODE_PORT`, Hub + 3), and optional Prometheus metrics `127.0.0.1:9464` (`STEVE_METRICS=prometheus`).
+
 ## Hub–Node protocol
 
 Communication between Hub and Node uses `steve-node-api` (`PROTOCOL = 14`, `EVENT_SCHEMA = 1`) over `steve-node-wire`:
