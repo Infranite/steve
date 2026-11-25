@@ -80,7 +80,7 @@ export default {
     request: "请求内容",
     toolArgs: "工具参数",
     title: "权限请求",
-    goInbox: "前往待处理审批 →",
+    goInbox: "前往待我决定审批 →",
     status: {
       history: "历史请求",
       open: "待审批",

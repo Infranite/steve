@@ -27,7 +27,7 @@ fn child(k: &Kit, parent: &str) -> String {
 #[test]
 fn completed_and_abandoned_parents_retire_children_without_claiming_their_success() {
     for finish in [true, false] {
-        let k = Kit::with(|c| c.dynamic_workflows = false);
+        let k = Kit::new();
         let parent = k.item("run", "执行", None);
         let open = child(&k, &parent);
         let failed = child(&k, &parent);
@@ -102,7 +102,6 @@ fn completed_and_abandoned_parents_retire_children_without_claiming_their_succes
 #[test]
 fn upgrade_reconciles_nested_retired_attempts_idempotently_even_with_resume_disabled() {
     let k = Kit::with(|c| {
-        c.dynamic_workflows = false;
         c.no_resume = true;
     });
     // Fixture represents a database from an older installation, with no in-memory graph.
@@ -178,4 +177,97 @@ fn a_child_turn_or_unknown_effect_must_settle_before_parent_cleanup_hides_it() {
         .unwrap();
     k.core.lifecycle_tick().unwrap();
     assert!(k.db().item(&other).unwrap().unwrap().archived);
+}
+
+#[test]
+fn startup_retires_open_legacy_workflow_children_and_preserves_closed_history() {
+    let k = Kit::new();
+    let legacy = |phase: &str| {
+        let id = k.item(phase, "执行", None);
+        steve_store::core_fixture::item(
+            k.db().store(),
+            &id,
+            steve_store::core_fixture::ItemState::Source(r#"["协作工作","workflow"]"#),
+        );
+        id
+    };
+    let active = legacy("run");
+    let paused = legacy("pause");
+    let running = legacy("run");
+    let sid = k.session(&running, "idle");
+    k.rt.prompt(&sid, "legacy work", "steve", &[]).unwrap();
+    let delivered = legacy("run");
+    let delivered_sid = k.session(&delivered, "idle");
+    let accept = k.decision(
+        &delivered,
+        Some(&delivered_sid),
+        "accept",
+        "item",
+        &["pass"],
+    );
+    k.core
+        .tx()
+        .request_delivery_close(
+            &delivered,
+            "dev",
+            crate::cycle::ClosePolicy::Human,
+            false,
+            "legacy delivery",
+            Some(accept),
+            vec![],
+        )
+        .unwrap();
+    let closed_done = legacy("done");
+    k.db()
+        .timeline_add(&closed_done, "dev", "deliver", "kept artifact", None)
+        .unwrap();
+    let before_closed = k.db().item(&closed_done).unwrap().unwrap();
+    let ordinary = k.item("run", "执行", None);
+
+    assert_eq!(k.core.retire_legacy_workflow_children().unwrap(), 4);
+    assert_eq!(k.core.retire_legacy_workflow_children().unwrap(), 0);
+
+    for id in [&active, &paused, &delivered] {
+        let i = k.db().item(id).unwrap().unwrap();
+        assert_eq!(
+            (
+                i.phase.as_str(),
+                i.outcome.as_deref(),
+                i.closed_reason.as_deref()
+            ),
+            ("closed", Some("cancelled"), Some("legacy_workflow_retired")),
+            "{id}"
+        );
+    }
+    let r = k.db().item(&running).unwrap().unwrap();
+    assert_eq!(r.phase.as_str(), "closing");
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    let r = k.db().item(&running).unwrap().unwrap();
+    assert_eq!(
+        (r.phase.as_str(), r.outcome.as_deref()),
+        ("closed", Some("cancelled"))
+    );
+
+    let after_closed = k.db().item(&closed_done).unwrap().unwrap();
+    assert_eq!(
+        (
+            after_closed.phase,
+            after_closed.outcome,
+            after_closed.closed_reason
+        ),
+        (
+            before_closed.phase,
+            before_closed.outcome,
+            before_closed.closed_reason
+        )
+    );
+    assert!(
+        k.timeline_texts(&closed_done)
+            .iter()
+            .any(|t| t == "kept artifact")
+    );
+    assert_eq!(
+        k.db().item(&ordinary).unwrap().unwrap().phase.as_str(),
+        "active"
+    );
 }

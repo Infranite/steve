@@ -140,7 +140,6 @@ fn steve_meta(name: &str) -> (&'static [&'static str], bool) {
     let res: &'static [&'static str] = match n {
         "update" | "ask" | "request_approval" | "deliver" => &["item", "turn"],
         "publish" => &["item", "release", "git"],
-        "workflow" => &["workflow", "item"],
         "sessions_list" => &["session"],
         "devices" => &["device"],
         "debug" => &["diagnostics", "session"],
@@ -313,14 +312,14 @@ pub fn mcp_entry(id: &str, server: &str, t: &super::library_mcp::RemoteTool) -> 
 pub fn search_tool() -> ToolDescriptor {
     ToolDescriptor {
         name: SEARCH.into(),
-        description: "Find a tool that is not in your tool list: Steve's own (items, work graph, knowledge, memories, contacts, secrets, GitHub, mail, chats, devices, diagnostics), the MCP servers and remote agents your Bot uses. Give words for what you want to do and, if you like, filters. Returns the best matches with name, a one-line description and inputSchema; run one with steve_tool_call. Deterministic keyword search: an empty query with filters lists everything that matches.".into(),
+        description: "Find a tool that is not in your tool list: Steve's own (items, knowledge, memories, contacts, secrets, GitHub, mail, chats, devices, diagnostics), the MCP servers and remote agents your Bot uses. Give words for what you want to do and, if you like, filters. Returns the best matches with name, a one-line description and inputSchema; run one with steve_tool_call. Deterministic keyword search: an empty query with filters lists everything that matches.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "words for what you want to do, e.g. \"comment on a pull request\""},
                 "source": {"type": "string", "description": "steve, mcp, a2a, connector, or the name of one MCP server, agent or connector"},
                 "kind": {"type": "string", "enum": ["read", "write"]},
-                "resource": {"type": "string", "description": "what it acts on, e.g. item, workflow, knowledge, memory, contact, secret, github, mail, chat, device"},
+                "resource": {"type": "string", "description": "what it acts on, e.g. item, knowledge, memory, contact, secret, github, mail, chat, device"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "at most this many (default 8)"}
             },
             "additionalProperties": false
@@ -439,8 +438,6 @@ const ALIASES: &[(&str, &str)] = &[
     ("事项", "item"),
     ("任务", "item"),
     ("会话", "session"),
-    ("工作图", "workflow"),
-    ("协作", "workflow"),
     ("知识", "knowledge"),
     ("文档", "document"),
     ("记忆", "memory"),
@@ -698,7 +695,7 @@ pub fn validate(schema: &Value, v: &Value) -> Result<(), Vec<String>> {
 }
 
 /// What Steve's own tools cover, by kind, for the catalog summary.
-const STEVE_AREAS: &str = "items, sessions, workflows, releases, knowledge, memories, contacts, secrets, GitHub, mail, chats, events, devices, diagnostics, upgrades";
+const STEVE_AREAS: &str = "items, sessions, releases, knowledge, memories, contacts, secrets, GitHub, mail, chats, events, devices, diagnostics, upgrades";
 
 /// The catalog summary that goes into a session's brief (about 200 tokens): how tools are found and
 /// run, what each source offers. `servers`: each library server's name and its tools' names when
@@ -807,11 +804,7 @@ mod tests {
                 "Draft a mail for the user to send.",
                 false,
             ),
-            steve(
-                "steve_workflow",
-                "Read or replan this item's shared work graph.",
-                false,
-            ),
+            steve("steve_item_read", "Read one item's details.", true),
             steve("steve_items_search", "Search items.", true),
             steve("steve_contacts_find", "Find people in the contacts.", true),
         ];
@@ -867,7 +860,7 @@ mod tests {
                 ..q("")
             },
         );
-        assert_eq!(total, 3);
+        assert_eq!(total, 4);
         assert!(found.iter().all(|e| e.read_only));
         let (found, _) = search(&e, &[], &q("给同事发邮件"));
         assert_eq!(
@@ -1002,7 +995,7 @@ mod tests {
             },
             steve_store::caps::tools::Pin {
                 kind: "tool".into(),
-                target: "steve_workflow".into(),
+                target: "steve_item_read".into(),
             },
             steve_store::caps::tools::Pin {
                 kind: "tool".into(),
@@ -1016,7 +1009,7 @@ mod tests {
                 SEARCH,
                 CALL,
                 "linear__create_issue",
-                "steve_workflow"
+                "steve_item_read"
             ]
         );
     }

@@ -13,6 +13,7 @@ import * as format from "../src/i18n/format.ts"
 import * as i18n from "../src/i18n/index.ts"
 import * as composerDraft from "../src/composer-draft.ts"
 import * as runtimeStatus from "../src/runtime-status.ts"
+import * as itemState from "../src/item-state.ts"
 
 import * as chatProgress from "../src/thread/chat-progress.ts"
 import * as tbl from "../src/data/table.ts"
@@ -99,6 +100,7 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./i18n" || id === "../i18n") return { __esModule: true, ...i18n }
       if (id === "./composer-draft") return composerDraft
       if (id === "./runtime-status") return runtimeStatus
+      if (id === "./item-state") return itemState
       if (id === "./lib/motion") return { applyLook: (x) => looks.push({ fontSize: x.fontSize, reduceMotion: x.reduceMotion }) }
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "./components/ui/toaster" || id === "../components/ui/toaster") return { toast: (x) => notices.push(x) }

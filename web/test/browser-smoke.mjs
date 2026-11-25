@@ -105,6 +105,7 @@ export const EXTENDED = [
   "handoff-card",
   "hub-management",
   "model-recovery",
+  "nav-ia",
   "native-shell",
   "notifications",
   "outputs",

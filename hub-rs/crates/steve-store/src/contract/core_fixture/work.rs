@@ -131,38 +131,6 @@ pub fn closing_fingerprint(store: &Store, item: &str, fingerprint: Option<&str>)
         .unwrap();
 }
 
-pub fn reviewed_workflow(
-    store: &Store,
-    item: &str,
-    cycle: i64,
-    goal: i64,
-    units: &[(&str, String)],
-) {
-    use rusqlite::params;
-
-    store.write::<_, crate::StoreError>(|tx| {
-        tx.conn.execute(
-            "INSERT INTO workflows (item_id, revision, cycle, goal_version, paused, max_parallel, max_attempts, created, updated)
-             VALUES (?1, 1, ?2, ?3, 0, 1, 3, 0, 0)",
-            params![item, cycle, goal],
-        )?;
-        for (position, (id, spec)) in units.iter().enumerate() {
-            tx.conn.execute(
-                "INSERT INTO workflow_units (workflow_id, id, position, spec, status, attempt)
-                 VALUES (?1, ?2, ?3, ?4, 'succeeded', 1)",
-                params![item, id, position as i64, spec],
-            )?;
-        }
-        tx.conn.execute(
-            "INSERT INTO workflow_history (workflow_id, revision, action, reason, detail, created)
-             VALUES (?1, 1, 'plan', '评审', '{}', 0)",
-            [item],
-        )?;
-        tx.conn.execute("UPDATE items SET closing=json_set(closing,'$.workflow_revision',1) WHERE id=?", [item])?;
-        Ok(())
-    }).unwrap();
-}
-
 pub fn remove_decision(store: &Store, id: &str) {
     store
         .write(|w| {
@@ -186,45 +154,6 @@ pub fn operation_cycle(store: &Store, id: &str, cycle: i64) {
             )
         })
         .unwrap();
-}
-
-pub fn reject_workflow_deliveries(store: &Store) {
-    store
-        .write_locked(|c| {
-            c.execute_batch(
-                "CREATE TRIGGER fail_workflow_delivery BEFORE INSERT ON workflow_history
-            WHEN NEW.action='deliver' BEGIN SELECT RAISE(ABORT,'simulated failure'); END;",
-            )?;
-            Ok(())
-        })
-        .unwrap();
-}
-
-pub fn reserve_workflow_unit(store: &Store, workflow: &str, unit: &str) {
-    store
-        .write(|w| {
-            w.exec(
-                Query::update()
-                    .table("workflow_units")
-                    .values([
-                        ("status", "dispatching".into()),
-                        ("session_id", None::<String>.into()),
-                    ])
-                    .and_where(Expr::col("workflow_id").eq(workflow))
-                    .and_where(Expr::col("id").eq(unit)),
-            )
-        })
-        .unwrap();
-}
-
-pub fn retire_as_cancelled(store: &Store, item: &str) {
-    store.write_locked(|c| {
-        c.execute(
-            "UPDATE workflow_attempts SET snapshot=json_set(snapshot,'$.status','cancelled','$.reason','尝试已失效：调整') WHERE item_id=?",
-            [item],
-        )?;
-        Ok(())
-    }).unwrap();
 }
 
 pub struct Audit {
