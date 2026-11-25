@@ -183,32 +183,26 @@ export class Unauthenticated extends Error { login: string | null; constructor(l
  * and the page sees only a failed fetch, never the 401. When the Hub still answers `hello` (open to any origin), the
  * page is not signed in there rather than cut off: it is shown how to sign in, by token, which lets its origin in. */
 async function refused(e: unknown): Promise<never> {
-  if (hubBase() && e instanceof TypeError) {
+  if (typeof hubBase === "function" && hubBase() && e instanceof TypeError) {
     const h = await hello(hubBase(), 4000).catch(() => null)
     if (h) { signIn.refused = true; throw new Unauthenticated(null, h.login.token) }
   }
   throw e
 }
-const CUT = {}
-async function apiResponse(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
+async function apiFetch(method: string, path: string, body?: unknown, signal?: AbortSignal, scope?: ModuleScope): Promise<Response> {
   /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever; a delete (no body) is
    * keepalive so one sent as the page goes away, like a forget whose Undo ran out, still reaches the Hub */
-  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined), keepalive: method === "DELETE" }).catch(refused)
-  if (r.status === 401) { const j = await r.json().catch(() => ({})); if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j.login ?? null, j.token === true) }
-  return r
-}
-async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void, signal?: AbortSignal): Promise<T> {
-  const r = await apiResponse(method, path, body, signal)
-  const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
-  if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
-  if (!r.ok) {
-    if (j.placement) throw new BotPlacementError(j.error, j.placement, j.proposal)
-    throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
-  }
-  seen?.(r)
-  const rev = Number(r.headers.get("x-steve-rev"))
-  if (rev > 0 && j && typeof j === "object") writeRevs.set(j, rev)
-  return j as T
+  const headers = { ...wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), ...(scope ? { "x-steve-ws": scope.workspace } : {}) }
+  const p = fetch(scope ? scope.hub + "/api" + path : hubUrl("/api" + path), {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    credentials: "include",
+    cache: "no-store",
+    signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined),
+    keepalive: method === "DELETE",
+  })
+  return scope ? p : p.catch(refused)
 }
 /** what a command on a decision answers: the decision as it now stands */
 export type DecisionAnswer = { id: string; revision: number; status: string; kind: string; subject_type: string; result?: any }
@@ -225,8 +219,13 @@ async function snapshot(kinds: string, etag?: string): Promise<{ snapshot: Snaps
 }
 async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => void): Promise<RProject> {
   const interrupted = () => new Error(t("pages:projects.setupInterrupted"))
-  const r = await apiResponse("POST", "/projects/setup", p, AbortSignal.timeout(660_000))
+  const r = await apiFetch("POST", "/projects/setup", p, AbortSignal.timeout(660_000))
     .catch((e) => { throw e instanceof Unauthenticated ? e : interrupted() })
+  if (r.status === 401) {
+    const j = await r.json().catch(() => ({}))
+    if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true
+    throw new Unauthenticated(j.login ?? null, j.token === true)
+  }
   if (!r.ok) {
     const answer = await r.json().catch(() => ({}))
     throw new Error(answer.error ?? t("shell:http.failed", { status: r.status }))
@@ -281,24 +280,36 @@ export class HubError extends Error {
 
 /** A resource that outlives a workspace/Hub switch can bind requests to the scope it was loaded in. */
 export type ModuleScope = { workspace: string; hub: string }
+/** Single JSON HTTP transport for both core and module Hub API endpoints. */
 export async function modReq<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, scope?: ModuleScope): Promise<T> {
-  const headers = { ...wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), ...(scope ? { "x-steve-ws": scope.workspace } : {}) }
-  const r = await fetch(scope ? scope.hub + "/api" + path : hubUrl("/api" + path), { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
+  const r = await apiFetch(method, path, body, signal, scope)
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
   /* the session's own 401 carries `login`; a 401 from a module (e.g. 请重新登录后再登记) is an ordinary error */
-  if (r.status === 401 && j?.error === "unauthenticated" && "login" in j) { if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j?.login ?? null, j?.token === true) }
-  if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code, j?.reason, j?.params)
+  if (r.status === 401 && (r.headers.get("x-steve-origin") === "refused" || (j?.error === "unauthenticated" && "login" in j))) {
+    if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true
+    throw new Unauthenticated(j?.login ?? null, j?.token === true)
+  }
+  if (!r.ok) {
+    if (j?.placement) throw new BotPlacementError(j.error, j.placement, j.proposal)
+    throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code, j?.reason, j?.params)
+  }
   if (!json && method !== "GET" && (await r.text()) === "") return {} as T
   if (j === undefined) throw new Error(t("shell:http.incomplete"))
+  const rev = Number(r.headers.get("x-steve-rev"))
+  if (rev > 0 && j && typeof j === "object") writeRevs.set(j, rev)
   return j as T
 }
 /** `?a=1&b=2` from the defined, non-empty values */
 export const qs = (o: Record<string, string | number | boolean | undefined | null>) => { const s = new URLSearchParams(); for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== "") s.set(k, String(v)); const x = s.toString(); return x ? "?" + x : "" }
-const get = <T>(p: string) => req<T>("GET", p), post = <T = any>(p: string, b: unknown = {}) => req<T>("POST", p, b), patch = <T = any>(p: string, b: unknown) => req<T>("PATCH", p, b), del = <T = any>(p: string, b?: unknown) => req<T>("DELETE", p, b)
+const get = <T>(p: string, signal?: AbortSignal) => modReq<T>("GET", p, undefined, signal)
+const post = <T = any>(p: string, b: unknown = {}, signal?: AbortSignal) => modReq<T>("POST", p, b, signal)
+const put = <T = any>(p: string, b: unknown) => modReq<T>("PUT", p, b)
+const patch = <T = any>(p: string, b: unknown) => modReq<T>("PATCH", p, b)
+const del = <T = any>(p: string, b?: unknown) => modReq<T>("DELETE", p, b)
 export const api = {
   snapshot,
-  messagePage: (before: string, signal?: AbortSignal) => req<PageOf<MessageView>>("GET", `/views/page${qs({ kind: "message", before })}`, undefined, undefined, signal),
+  messagePage: (before: string, signal?: AbortSignal) => get<PageOf<MessageView>>(`/views/page${qs({ kind: "message", before })}`, signal),
   archivedItems: (before?: string) => get<PageOf<ItemView>>(`/views/page${qs({ kind: "item", status: "archived", before })}`),
   endedSessions: (before?: string) => get<PageOf<SessionView>>(`/views/page${qs({ kind: "session", status: "ended", before })}`),
   itemSessions: (items: string[]) => get<ById>(`/views${qs({ kind: "session", items: items.join(",") })}`),
@@ -308,7 +319,7 @@ export const api = {
   editReplyDraft: (id: string, previous: string, text: string) => patch(`/decisions/${encodeURIComponent(id)}/draft`, { previous, text }),
   /** the link that opens a chat message in its platform's own client, asked when its card shows */
   messageOpenUrl: (id: string) => get<{ url: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
-  shell: (signal?: AbortSignal) => req<Shell>("GET", "/shell", undefined, undefined, signal),
+  shell: (signal?: AbortSignal) => get<Shell>("/shell", signal),
   summary: () => get<Summary>("/summary"),
   notifications: () => get<RNotice[]>("/notifications"),
   runtimes: (fresh = false) => get<RRuntime[]>(`/runtimes${qs({ fresh: fresh ? 1 : undefined })}`),
@@ -333,7 +344,7 @@ export const api = {
   threadFollow: (item: string, follow: boolean) => patch(`/items/${item}/thread`, { follow }),
   readNotifications: (at?: number) => post<{ seen: number }>("/notifications/read", { at }),
   dismissNotice: (id: string) => post<{ ok: true }>(`/notifications/${encodeURIComponent(id)}/dismiss`, {}),
-  item: (id: string, signal?: AbortSignal) => req<RItemDetail>("GET", "/items/" + id, undefined, undefined, signal),
+  item: (id: string, signal?: AbortSignal) => get<RItemDetail>("/items/" + id, signal),
   outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
   delivery: (id: string) => get<Delivery>(`/file-deliveries/${encodeURIComponent(id)}`),
   /** "我的发布": the deliveries this user manages in the current workspace, newest first */
@@ -354,7 +365,7 @@ export const api = {
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),
   /* only the instance's owner switches it; nothing else writes it */
-  designGate: (id: string, on: boolean) => req<{ id: string }>("PUT", `/items/${encodeURIComponent(id)}/design-gate`, { on }),
+  designGate: (id: string, on: boolean) => put<{ id: string }>(`/items/${encodeURIComponent(id)}/design-gate`, { on }),
   deleteItem: (id: string) => del(`/items/${id}`),
   supplement: (id: string, text: string, mode: "auto" | "steer" | "new", files: string[] = []) => post(`/items/${id}/supplement`, { text, mode, files }), deliver: (id: string) => post(`/items/${id}/deliver`),
   reassign: (id: string, bot: string) => post(`/items/${id}/reassign`, { bot }),
@@ -363,9 +374,9 @@ export const api = {
   addDep: (id: string, dep: string) => post(`/items/${id}/deps`, { dep }), rmDep: (id: string, dep: string) => del(`/items/${id}/deps/${dep}`),
   snooze: (id: string, label: string | null, until: number | null) => post(`/items/${id}/snooze`, { label, until }),
   transcript: (id: string, before?: number, signal?: AbortSignal) =>
-    req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?align=turn${before == null ? "" : "&before=" + before}`, undefined, undefined, signal),
+    get<RTranscriptPage>(`/sessions/${encodeURIComponent(id)}/events?align=turn${before == null ? "" : "&before=" + before}`, signal),
   transcriptAfter: (id: string, after: number, through?: number, signal?: AbortSignal) =>
-    req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, undefined, undefined, signal),
+    get<RTranscriptPage>(`/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, signal),
   transcriptMarks: (id: string) => get<{ marks: number[] }>(`/sessions/${encodeURIComponent(id)}/events/marks`),
   searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
   sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
@@ -381,11 +392,11 @@ export const api = {
   undo: (id: string, revision: number) => post<DecisionAnswer>(`/decisions/${id}/undo`, { revision }),
   dismiss: (id: string, revision: number) => post<DecisionAnswer>(`/decisions/${id}/dismiss`, { revision }),
   newBot: (p: Partial<RBot> & { name: string }) => post<RBot>("/bots", p), draftBot: (desc: string) => post<RBot>("/bots/draft", { desc }), patchBot: (id: string, p: Partial<RBot>) => patch<RBot>("/bots/" + id, p),
-  botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
+  botWorkspaces: (id: string, ids: string[]) => put(`/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
   botPrompt: (id: string) => get<{ generated: string; custom: string | null }>(`/bots/${id}/prompt`), memories: (id: string) => get<{ id: string; text: string; source: string; created: number }[]>(`/bots/${id}/memories`),
   addMemory: (id: string, text: string) => post(`/bots/${id}/memories`, { text }), editMemory: (id: string, text: string) => patch(`/memories/${id}`, { text }), deleteMemory: (id: string) => del(`/memories/${id}`), clearMemories: () => del("/memories"),
   newProject: (p: NewProjectInput) => post<RProject>("/projects", p),
-  projectDestination: (p: ProjectDestination, signal: AbortSignal) => req<{ path: string }>("POST", "/projects/setup/preview", p, undefined, signal),
+  projectDestination: (p: ProjectDestination, signal: AbortSignal) => post<{ path: string }>("/projects/setup/preview", p, signal),
   setupProject,
    patchProject: (id: string, p: Partial<RProject>) => patch<RProject>("/projects/" + id, p),
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }),
@@ -393,7 +404,7 @@ export const api = {
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
   settings: (p: Record<string, string>) => patch("/settings", p),
   /** `field` + `base` (bot targets): draft only the bot's working rules or own system prompt, from the text the editor shows */
-  draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
+  draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post<{ ok: boolean; kept?: string[] }>(`/config/${encodeURIComponent(id)}/apply`), undoConfig: (id: string) => post<{ ok: boolean; kept?: string[] }>(`/config/${encodeURIComponent(id)}/undo`), dropConfig: (id: string) => post<{ ok: boolean; kept?: string[] }>(`/config/${encodeURIComponent(id)}/drop`),
   devices: () => get<{ devices: RDevice[] }>("/devices"),
   /** Installs only this registry entry's declared components, on its Node. */
   installHarness: (id: string) => post<{ accepted: boolean; restart?: boolean }>("/system/harnesses/" + encodeURIComponent(id) + "/install"),
@@ -409,10 +420,10 @@ export const api = {
   createPairing: () => post<RPairing>("/nodes/pairings"),
   vitals: () => get<import("./gen/VitalsResponse").VitalsResponse>("/vitals"),
   nodeTags: () => get<{ tags: Record<string, string[]> }>("/node-tags"),
-  setNodeTags: (node: string, tags: string[]) => req<{ tags: string[] }>("PUT", `/node-tags/${encodeURIComponent(node)}`, { tags }),
-  setItemNodeTag: (item: string, tag: string | null) => req<{ ok: boolean }>("PUT", `/items/${encodeURIComponent(item)}/node-tag`, { tag }),
+  setNodeTags: (node: string, tags: string[]) => put<{ tags: string[] }>(`/node-tags/${encodeURIComponent(node)}`, { tags }),
+  setItemNodeTag: (item: string, tag: string | null) => put<{ ok: boolean }>(`/items/${encodeURIComponent(item)}/node-tag`, { tag }),
   nodesTailcat: () => get<RTailcat>("/nodes/tailcat"),
-  setNodesTailcat: (enabled: boolean) => req<RTailcat>("PUT", "/nodes/tailcat", { enabled }),
+  setNodesTailcat: (enabled: boolean) => put<RTailcat>("/nodes/tailcat", { enabled }),
   createInstall: () => post<RInstall>("/nodes/installs"),
   /** the caller's installs, newest first */
   installs: () => get<{ installs: RInstall[] }>("/nodes/installs"),
@@ -437,10 +448,10 @@ export const api = {
   switchNodeUpgrade: (id: string) => post<{ operation: string }>(`/nodes/${encodeURIComponent(id)}/upgrade/switch`, {}),
   /** `drain_secs`: how long an upgrade waits for running turns; `health_secs`: how long the new release has to link before the Node goes back */
   nodeUpgradeDefault: () => get<RUpgradeDefault>("/nodes/upgrade-default"),
-  setNodeUpgradeDefault: (policy: RUpgradePolicy) => req<{ policy: RUpgradePolicy }>("PUT", "/nodes/upgrade-default", { policy }),
+  setNodeUpgradeDefault: (policy: RUpgradePolicy) => put<{ policy: RUpgradePolicy }>("/nodes/upgrade-default", { policy }),
   /** the Hub's default for whether a Node owner's sessions load the owner's personal agent config there (a Node may choose for itself) */
   nodeContextDefault: () => get<{ owner_context: "on" | "off" }>("/node-context"),
-  setNodeContextDefault: (owner_context: "on" | "off") => req<{ owner_context: "on" | "off" }>("PUT", "/node-context", { owner_context }),
+  setNodeContextDefault: (owner_context: "on" | "off") => put<{ owner_context: "on" | "off" }>("/node-context", { owner_context }),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
     const r = await fetch(hubUrl("/api/files?name=" + encodeURIComponent(name)), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "include" })

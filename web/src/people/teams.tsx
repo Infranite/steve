@@ -12,7 +12,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { tm } from "@/store"
-import { modReq as req } from "@/api"
 import { go, Page, Group, Row, SectionLabel, Empty, ItemNo, Status, Meta } from "@/ui"
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
@@ -28,13 +27,10 @@ export function TeamRow({ g, indent = 0, spaces }: { g: Team; indent?: number; s
     title={<span className="inline-flex items-center gap-1.5">{g.name}{g.visibility !== "workspace" && <span className="type-footnote text-muted-foreground">{visLabel(g.visibility)}</span>}</span>}
     sub={<Meta inline><span>{t("people:teams.headcount", { count: g.headcount })}</span>{sp && <span>{t("people:teams.bound", { name: sp.name })}</span>}{g.purpose && <span className="max-w-[320px] truncate">{g.purpose}</span>}</Meta>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>
 }
-/** the channels module's groups; `null` when it is not installed (the bound-group parts hide) */
-const loadSpaces = () => req<{ id: string; name: string }[]>("GET", "/spaces").catch(() => null)
-
 export function TeamsTab() {
   const t = useT()
   const { data, err } = useLoad(() => people.teams(), [])
-  const spaces = useLoad(loadSpaces, [], [])
+  const spaces = useLoad(people.spaces, [], [])
   const [open, setOpen] = useState(false), [syncing, setSyncing] = useState(false)
   if (err) return <Empty title={t("people:teams.loadFailed")} sub={err.message} />
   if (!data) return <Loading />
@@ -70,7 +66,7 @@ export function TeamView({ id }: { id: string }) {
   const all = useLoad(() => people.teams(), [])
   const items = useLoad(() => people.items(id), [id], ["party", "item"])
   const mems = useLoad(() => people.memories(id), [id])
-  const spaces = useLoad(loadSpaces, [], [])
+  const spaces = useLoad(people.spaces, [], [])
   const [del, setDel] = useState(false), [purpose, setPurpose] = useState<string | null>(null)
   useEffect(() => setPurpose(null), [g?.purpose])
   const back: [string, string] = ["#/contacts", t("people:shared.contacts")]

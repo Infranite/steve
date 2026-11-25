@@ -105,6 +105,8 @@ export const people = {
   clearAvatar: (id: string) => del<Contact>(`/contacts/${e(id)}/avatar`).then(noteMine),
   accounts: (party: string) => get<AccountBrief[]>("/accounts" + qs({ party })),
   addAccount: (b: { system_id: string; party_id: string; kind: string; handle: string }) => post<AccountBrief>("/accounts", b),
+  /** the channels module's groups; `null` when it is not installed (the bound-group parts hide) */
+  spaces: () => get<{ id: string; name: string }[]>("/spaces").catch(() => null),
 }
 
 let meAvatar: string | undefined

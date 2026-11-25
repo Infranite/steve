@@ -22,9 +22,9 @@ import { ItemRowExport as ItemRow, Select } from "@/view-shared"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
 import { Fragment, useEffect, useRef, useState } from "react"
+import { homeTilde } from "@/lib/path"
 import { useT } from "@/i18n"
 
-const home = (p: string) => p.replace(/^\/Users\/[^/]+/, "~")
 export const projectIcon = (kind: string) => (kind === "git" ? FolderGit2Icon : FolderIcon)
 export function NewWorkspaceDialog() {
   const t = useT()
@@ -56,7 +56,7 @@ export function ProjectsView() {
       {ps.length ? <Group>{ps.map((p) => { const I = projectIcon(p.kind); return (
         <Row key={p.id} icon={<span className="flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground"><I className="size-4.5" strokeWidth={1.5} /></span>} onClick={() => go("#/projects/" + p.id)} data-project-row={p.name}
           title={<span className="type-body font-medium">{p.name}</span>}
-          sub={<Meta><span className="font-mono">{home(p.path)}</span><span>{p.kind === "git" ? (p.worktree ? t("pages:projects.gitWorktree") : "git") : t("pages:projects.plainDir")}</span>{p.default_bot && <span>{t("pages:projects.defaultBotIs", { bot: botName(p.default_bot) })}</span>}<span>{t("pages:projects.running", { count: running(p.id) })}</span>{p.release && <span>{t("pages:projects.releasable")}</span>}</Meta>}>
+          sub={<Meta><span className="font-mono">{homeTilde(p.path)}</span><span>{p.kind === "git" ? (p.worktree ? t("pages:projects.gitWorktree") : "git") : t("pages:projects.plainDir")}</span>{p.default_bot && <span>{t("pages:projects.defaultBotIs", { bot: botName(p.default_bot) })}</span>}<span>{t("pages:projects.running", { count: running(p.id) })}</span>{p.release && <span>{t("pages:projects.releasable")}</span>}</Meta>}>
           <ChevronRightIcon className="size-4 text-tertiary" /></Row>) })}</Group>
         : <Empty title={t("pages:projects.empty")} sub={t("pages:projects.emptySub")} />}
       <div className="mt-4 type-footnote text-tertiary">{t("pages:projects.hint")}</div>
@@ -153,10 +153,10 @@ function Where({ p, gh, ghError, onSettings }: Parts & { onSettings: () => void 
   const device = useDeviceInventory().find((x) => x.id === p.device_id)?.name ?? "Hub"
   const repo = gh ? projectRepo(gh, p.id) : undefined
   const code = "font-mono text-[13px] break-all"
-  const cmd = p.release?.cmd ? <span className={cn("mt-0.5 block text-muted-foreground", code)}>{home(p.release.cmd)}</span> : null
+  const cmd = p.release?.cmd ? <span className={cn("mt-0.5 block text-muted-foreground", code)}>{homeTilde(p.release.cmd)}</span> : null
   const facts = [
     <Fact key="dir" label={t("pages:projects.dir")} testId="dir">
-      <span className={cn("block", code)}>{home(p.path)}</span>
+      <span className={cn("block", code)}>{homeTilde(p.path)}</span>
       <Meta className="mt-0.5"><span>{git ? (p.worktree ? t("pages:projects.gitWorktree") : t("pages:projects.gitRepo")) : t("pages:projects.plainDir")}</span><span>{t("pages:projects.onDevice", { device })}</span></Meta>
     </Fact>,
     git && ghError && <Fact key="gh-error" label="GitHub" testId="github-error"><span role="alert" className="text-destructive">{ghError}</span></Fact>,

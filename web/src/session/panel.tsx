@@ -26,6 +26,7 @@ import { clockDur, longDur, nearTime, pastTime } from "@/i18n/format"
 import { OutDialog, type OutOpen } from "@/item-outputs"
 import { itemDisplayStatus } from "@/store"
 import { SessionKnowledge } from "@/knowledge/parts"
+import { homeTilde } from "@/lib/path"
 import { ResumeCard } from "@/resume"
 import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, useStats } from "@/stats/format"
 import { briefHead, type Item, type Out, type Sess } from "@/store"
@@ -288,7 +289,7 @@ function Runtime({ s }: { s: Sess }) {
           <Row k={t("views:sessionPanel.row.effort")}>{s.reasoningEffort ?? t("views:session.effortInherit")}</Row>
           <Row k={t("views:sessionPanel.row.device")}>{device ? <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hover:underline">{device.name}</a> : s.node ?? t("core:unknownNode")}</Row>
           <Row k={t("views:sessionPanel.row.source")}>{s.src}</Row>
-          {s.cwd && <Row k={t("views:sessionPanel.row.cwd")}><span className="break-all font-mono type-footnote text-muted-foreground">{s.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Row>}
+          {s.cwd && <Row k={t("views:sessionPanel.row.cwd")}><span className="break-all font-mono type-footnote text-muted-foreground">{homeTilde(s.cwd)}</span></Row>}
         </Rows>
         <Collapsible className="mt-3" data-session-resume>
           <CollapsibleTrigger className={cn(LINK, "group/disc inline-flex items-center gap-1 type-callout")}>{t("views:session.resume")}<DiscChevron className="size-3" /></CollapsibleTrigger>

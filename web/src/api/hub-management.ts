@@ -1,8 +1,8 @@
-import { modReq } from "./api"
-import { setSharedHubName } from "./hub"
+import { modReq } from "@/api"
+import { setSharedHubName } from "@/hub"
 
-import { parseHubInfo, normalizeHubDraft, type HubInfo, type HubDraft } from "./hub-management-model.ts"
-export * from "./hub-management-model.ts"
+import { parseHubInfo, normalizeHubDraft, type HubInfo, type HubDraft } from "../hub-management-model.ts"
+export * from "../hub-management-model.ts"
 
 export async function readHubInfo(): Promise<HubInfo> {
   const raw = await modReq<unknown>("GET", "/hub-metadata", undefined, AbortSignal.timeout(8000))

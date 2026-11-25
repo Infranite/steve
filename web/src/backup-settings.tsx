@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react"
-import { HubError, modReq } from "@/api"
+import { HubError } from "@/api"
+import { systemApi } from "@/api/system"
 import { Row, Panel, Section } from "@/ui"
 import { useT } from "@/i18n"
 import { monthDayTime } from "@/i18n/format"
 import { bytes } from "@/disk"
 import { SetSelect, SetSwitch } from "@/settings-controls"
-import { saveBackupSettings, lastKey, planKey, type BackupSettings, type BackupStatus } from "@/backup"
+import { lastKey, planKey, type BackupSettings, type BackupStatus } from "@/backup"
 
 /** Settings · 数据 · Hub 上的数据: where this Hub keeps its database and the copies of it, as the Hub says (an
  * installation's directory is its own), and when the last daily copy was made, a row each (a row's second line is cut after two lines). The Hub answers the instance owner
@@ -16,14 +17,14 @@ export function HubData() {
   const [saving, setSaving] = useState(false)
   const [hidden, setHidden] = useState(false), t = useT()
   useEffect(() => {
-    modReq<BackupStatus>("GET", "/system/backup").then(setS)
+    systemApi.backup().then(setS)
       .catch((e) => { if (e instanceof HubError && e.status === 403) setHidden(true); else setErr(e instanceof Error ? e.message : String(e)) })
   }, [])
   const save = async (patch: Partial<BackupSettings>) => {
     if (!s || saving) return
     setSaving(true); setErr(null)
     try {
-      const settings = await saveBackupSettings({ ...s.settings, ...patch }, (method, path, body) => modReq<BackupSettings>(method, path, body))
+      const settings = await systemApi.saveBackup({ ...s.settings, ...patch })
       setS({ ...s, settings, daily: s.available && settings.enabled, keep_days: settings.keep_days })
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
     finally { setSaving(false) }

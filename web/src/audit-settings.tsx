@@ -6,7 +6,9 @@ import { getItems, getItem } from "@/store"
  * no words for goes by its code. */
 import { useEffect, useMemo, useState } from "react"
 import { BotIcon, BrainIcon, CircleCheckIcon, ContactRoundIcon, FolderIcon, HistoryIcon, KeyRoundIcon, ListTodoIcon, LockIcon, SettingsIcon, SparklesIcon, WorkflowIcon, ZapIcon } from "lucide-react"
-import { api, HubError, modReq } from "@/api"
+import { api, HubError } from "@/api"
+import { modelsApi } from "@/api/models"
+import { systemApi } from "@/api/system"
 import { Button } from "@/components/ui/button"
 import { ActivityList, type ActivityItem, type ActivityWho } from "@/components/affect/agent-activity"
 import { st, useStore } from "@/store"
@@ -92,7 +94,7 @@ export function AuditSettingsPane() {
   const [me, setMe] = useState<string | null>(null)
   const load = (before?: number) => {
     setBusy(true); setErr(null)
-    return modReq<AuditPage>("GET", `/audit?limit=${PAGE}${before ? `&before=${before}` : ""}`)
+    return systemApi.audit(PAGE, before)
       .then((p) => setPage((old) => (before && old ? { entries: [...old.entries, ...p.entries], names: { ...old.names, ...p.names }, more: p.more } : p)))
       .catch((e) => { if (e instanceof HubError && e.status === 403) setDenied(true); else setErr(e instanceof Error ? e.message : String(e)) })
       .finally(() => setBusy(false))
@@ -100,7 +102,7 @@ export function AuditSettingsPane() {
   useEffect(() => {
     void load()
     /* the purposes by the names the models page gives them; without them an entry says the purpose's key */
-    modReq<{ purposes: { key: string; label: string }[] }>("GET", "/settings/models").then((v) => setPurposes(Object.fromEntries(v.purposes.map((p) => [p.key, p.label])))).catch(() => {})
+    modelsApi.get().then((v) => setPurposes(Object.fromEntries(v.purposes.map((p) => [p.key, p.label])))).catch(() => {})
     /* who "you" are, so your own steps say 你 */
     api.me().then((r) => setMe(r.user.id), () => {})
   }, [])

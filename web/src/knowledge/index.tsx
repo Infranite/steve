@@ -27,6 +27,7 @@ import { SubjectsTab, SubjectView } from "@/knowledge/subjects"
 import { StewardTab } from "@/knowledge/steward"
 import { OriginLine, originText, parseSubject, savedLine } from "@/knowledge/origin"
 import { MemoryPanel, type Memory, type PanelText } from "@/components/affect/memory-panel"
+import { homeTilde } from "@/lib/path"
 import { t as tt, useT } from "@/i18n"
 
 /* tab values are ids (also data-seg / data-kb-tab); the labels come from knowledge:tab.* */
@@ -348,7 +349,7 @@ function SourcesTab() {
           <Panel>{xs.map((s) => { const [dot, state] = sourceState(s); return (
             <Row key={s.id} data-source={s.id} data-source-kind={s.kind} data-source-state={s.paused ? "paused" : s.status} className={cn(STACK, s.paused && "opacity-70")}
               title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{s.name}<span className="type-footnote text-muted-foreground">{SOURCE_KIND[s.kind] ?? s.kind}</span></span>}
-              sub={<span className="flex flex-col gap-0.5"><span className="inline-flex flex-wrap items-center gap-x-1.5"><span className="inline-flex items-center gap-1" data-source-status><StatusDot s={dot} />{state}</span><span aria-hidden>·</span><span data-source-stats>{statsLine(s)}</span></span>{s.path && <span className="truncate font-mono">{s.path.replace(/^\/Users\/[^/]+/, "~")}</span>}{s.error && <span className="break-words text-destructive" data-source-error>{s.error}</span>}</span>}>
+              sub={<span className="flex flex-col gap-0.5"><span className="inline-flex flex-wrap items-center gap-x-1.5"><span className="inline-flex items-center gap-1" data-source-status><StatusDot s={dot} />{state}</span><span aria-hidden>·</span><span data-source-stats>{statsLine(s)}</span></span>{s.path && <span className="truncate font-mono">{homeTilde(s.path)}</span>}{s.error && <span className="break-words text-destructive" data-source-error>{s.error}</span>}</span>}>
               <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
                 <LevelSel v={s.level} on={(l) => l && void patch(s, { level: l }, t("knowledge:sources.levelChanged"))} testId={"src-level-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
                 <VisSel v={s.visibility} on={(x) => void patch(s, { visibility: x })} testId={"src-vis-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />

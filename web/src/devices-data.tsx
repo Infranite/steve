@@ -8,7 +8,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { api, type RDevice, type RNodeHarnessReport, type RUpgradeDefault, type RVitals } from "@/api"
-import { access, type AccessView } from "@/access-api"
+import { access, type AccessView } from "@/api/access"
 import { qc, scopeKey } from "@/data/sync"
 import { nodeViews, type NodeView } from "@/device-model"
 import { st, useHubEvents, useStore } from "@/store"

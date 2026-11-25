@@ -1,7 +1,9 @@
 /* Bot Team configuration and per-Bot execution grants, scoped to the workspace they were loaded in. */
 import { useEffect, useId, useState } from "react"
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
-import { modReq, type ModuleScope, type RItemDetail } from "@/api"
+import { type ModuleScope, type RItemDetail } from "@/api"
+import { botDispatchApi, type BotTeam, type CandidateNode as Candidate, type ItemDispatch, type NodeList, type TeamList, type TeamMember } from "@/api/bot-dispatch"
+import { modelsApi } from "@/api/models"
 import type { BotProposal, PlacementBlocked, PlacementExplanation, PlacementRejection } from "@/gen"
 import { hubBase } from "@/hub"
 import { useT } from "@/i18n"
@@ -16,29 +18,19 @@ import { Card, Section } from "@/ui"
 
 /** The Team choice that asks for no Team, even where the workspace has a default one. */
 export const NO_TEAM = "none"
-export type TeamMember = { bot: string; nodes: string[] | null }
-export type BotTeam = { id: string; name: string; members: TeamMember[] }
-type TeamList = { default: string | null; teams: BotTeam[]; editable: boolean }
-type Candidate = { id: string; name: string | null; state: "candidate" | "pending" | "unavailable"; reason: PlacementRejection | null; checked_at: number | null }
-type NodeList = { editable: boolean; bindings: string[]; candidates: Candidate[]; unavailable_bindings: number }
-export type ItemDispatch = {
-  team: { id: string; name: string; source: "default" | "explicit" | "inherited" } | null
-  blocked?: PlacementBlocked | null
-}
+export type { TeamMember, BotTeam, ItemDispatch }
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e)
-const nodesPath = (id: string) => `/bots/${encodeURIComponent(id)}/execution-nodes`
-const teamsPath = "/bot-teams"
 const activeScope = (): ModuleScope => ({ workspace: st.workspace?.id ?? "", hub: hubBase() })
 const reasonLabel = (t: ReturnType<typeof useT>, reason: string) => t(`manage:dispatch.reason.${reason}`, { defaultValue: t("manage:dispatch.reason.bind_failed") })
 
-function useDispatchLoad<T>(path: string, poll = 0) {
+function useDispatchLoad<T>(resourceKey: string, loadFn: (scope: ModuleScope, signal: AbortSignal) => Promise<T>, poll = 0) {
   const scope = activeScope()
-  const key = JSON.stringify([scope, path])
+  const key = JSON.stringify([scope, resourceKey])
   const [result, setResult] = useState<{ key: string; value?: T; error?: string }>()
   const [rev, setRev] = useState(0)
   useEffect(() => {
     const cancel = new AbortController()
-    const load = () => modReq<T>("GET", path, undefined, cancel.signal, scope).then(
+    const load = () => loadFn(scope, cancel.signal).then(
       value => { if (!cancel.signal.aborted) setResult({ key, value }) },
       e => { if (!cancel.signal.aborted) setResult({ key, error: msg(e) }) },
     )
@@ -49,11 +41,11 @@ function useDispatchLoad<T>(path: string, poll = 0) {
   }, [key, rev, poll])
   return { value: result?.key === key ? result.value : undefined, error: result?.key === key ? result.error : undefined, scope, reload: () => setRev(v => v + 1) }
 }
-export const useBotTeams = () => useDispatchLoad<TeamList>(teamsPath)
+export const useBotTeams = () => useDispatchLoad<TeamList>("bot-teams", botDispatchApi.teams)
 const nodeLabel = (t: ReturnType<typeof useT>, n: Candidate) => n.name || (n.id === "local" ? t("manage:dispatch.local") : n.id)
 
 export function ExecutionNodes({ bot }: { bot: string }) {
-  const load = useDispatchLoad<NodeList>(nodesPath(bot), 12000)
+  const load = useDispatchLoad<NodeList>(`execution-nodes:${bot}`, (scope, signal) => botDispatchApi.executionNodes(bot, scope, signal), 12000)
   const t = useT()
   const [draft, setDraft] = useState<string[]>()
   const [busy, setBusy] = useState(false)
@@ -75,13 +67,13 @@ export function ExecutionNodes({ bot }: { bot: string }) {
     if (draft === undefined) return
     setBusy(true); setErr(""); setSaved(false)
     try {
-      await modReq("PUT", nodesPath(bot), { nodes: draft }, undefined, load.scope)
+      await botDispatchApi.setExecutionNodes(bot, draft, load.scope)
       setDraft(undefined); load.reload(); setSaved(true)
     } catch (e) { setErr(msg(e)) } finally { setBusy(false) }
   }
   const refresh = async () => {
     setBusy(true); setErr("")
-    try { await modReq("GET", "/system/models?fresh=1", undefined, undefined, load.scope); load.reload() }
+    try { await modelsApi.refreshCatalog(load.scope); load.reload() }
     catch (e) { setErr(msg(e)) } finally { setBusy(false) }
   }
   return <Section label={t("manage:dispatch.executionNodes")} right={<Button size="xs" variant="ghost" disabled={busy} onClick={() => void refresh()} aria-label={t("manage:dispatch.refresh")}><RefreshCwIcon /></Button>}>
@@ -116,7 +108,7 @@ export function ExecutionNodes({ bot }: { bot: string }) {
 
 function TeamNodeRange({ bot, nodes, update, disabled }: { bot: string; nodes: string[] | null; update: (ids: string[] | null) => void; disabled: boolean }) {
   const t = useT()
-  const { value, error } = useDispatchLoad<NodeList>(nodesPath(bot))
+  const { value, error } = useDispatchLoad<NodeList>(`execution-nodes:${bot}`, (scope, signal) => botDispatchApi.executionNodes(bot, scope, signal))
   const bound = value?.bindings ?? []
   const ids = [...new Set([...bound, ...(nodes ?? [])])]
   return <div className="flex flex-col gap-2 pl-2">
@@ -144,7 +136,7 @@ function TeamEditor({ team, scope, onSaved, onCancel }: { team?: BotTeam; scope:
   const save = async () => {
     setBusy(true); setError("")
     try {
-      const created = await modReq<BotTeam>(team ? "PUT" : "POST", team ? `${teamsPath}/${encodeURIComponent(team.id)}` : teamsPath, { name: name.trim(), members }, undefined, scope)
+      const created = await botDispatchApi.saveTeam(team?.id, { name: name.trim(), members }, scope)
       onSaved(created.id)
     } catch (e) { setError(msg(e)) } finally { setBusy(false) }
   }
@@ -176,7 +168,7 @@ export function TeamsSection({ load }: { load: ReturnType<typeof useBotTeams> })
   if (!value) return load.error ? <p role="alert">{load.error}</p> : null
   const setDefault = async (team: string) => {
     setBusy(true); setError("")
-    try { await modReq("PUT", `${teamsPath}/default`, { team }, undefined, load.scope); load.reload() }
+    try { await botDispatchApi.setDefaultTeam(team, load.scope); load.reload() }
     catch (e) { setError(msg(e)) } finally { setBusy(false) }
   }
   const current = value.teams.find(o => o.id === edit)
@@ -251,10 +243,10 @@ export function BotProposalCard({ proposal, onClose }: { proposal: BotProposal; 
     setBusy(true)
     setError(undefined)
     try {
-      await modReq<{ id: string }>("POST", `/bot-proposals/${encodeURIComponent(proposal.id)}/confirm`, {
+      await botDispatchApi.confirmProposal(proposal.id, {
         expected_revision: proposal.revision, name: name.trim(), role, specialties,
         harness: harness.trim(), model: model.trim() || null,
-      }, undefined, scope)
+      }, scope)
       await refresh()
       onClose()
     } catch (e) {
