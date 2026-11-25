@@ -15,7 +15,7 @@ export function chatPanelState(large = false): ChatPanelFixtureState {
   const workspace: RWorkspace = { id: "panel-fixture", name: "Panel fixture", description: "", item_prefix: "ST", sort: 0, created }
   const bot: RBot = {
     id: "steve", name: "Steve", role: "Assistant", main: true, harness: "fixture", model: null,
-    rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "default", avatar: {},
+    rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "ask", avatar: {},
     default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: created,
     workspaces: [workspace.id],
   }

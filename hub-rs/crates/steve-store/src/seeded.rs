@@ -45,25 +45,6 @@ pub fn persona_intro() -> String {
     text(PERSONA_INTRO)
 }
 
-/// Exact historical default templates. The captured name may be stale; never compare it to the
-/// current profile, and never replace names in arbitrary user-written introductions.
-pub fn is_legacy_persona_intro(intro: &str) -> bool {
-    [
-        ("我是 Steve，", " 的 AI 助手，帮他接收和分派事情。"),
-        (
-            "I'm Steve, ",
-            "'s AI assistant; I take in and hand out their work.",
-        ),
-    ]
-    .into_iter()
-    .any(|(prefix, suffix)| {
-        intro
-            .strip_prefix(prefix)
-            .and_then(|rest| rest.strip_suffix(suffix))
-            .is_some_and(|owner| !owner.is_empty())
-    })
-}
-
 /// A stored value that is still one of `keys`' seeds, in the request's language; `None` in zh-CN or for
 /// anything else.
 pub fn shown(stored: &str, keys: &[&str]) -> Option<String> {
@@ -152,22 +133,6 @@ mod tests {
             zh,
             "stored in zh-CN whatever the request"
         );
-    }
-
-    #[test]
-    fn only_exact_historical_persona_templates_match() {
-        for legacy in [
-            "我是 Steve，Old name 的 AI 助手，帮他接收和分派事情。",
-            "I'm Steve, Old name's AI assistant; I take in and hand out their work.",
-        ] {
-            assert!(is_legacy_persona_intro(legacy));
-            assert!(!is_legacy_persona_intro(&format!("{legacy} Custom role.")));
-            assert!(!is_legacy_persona_intro(&format!("Custom. {legacy}")));
-        }
-        assert!(!is_legacy_persona_intro(&persona_intro()));
-        assert!(!is_legacy_persona_intro(
-            "我是 Steve， 的 AI 助手，帮他接收和分派事情。"
-        ));
     }
 
     #[test]

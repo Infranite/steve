@@ -1,5 +1,5 @@
 //! Ordered domain installation. Slots are concrete startup dependencies, not runtime services.
-use crate::backend::BackendError;
+use crate::error::BackendError;
 use crate::wire::modules::*;
 use crate::wire::modules::{Env, knowledge};
 use crate::wire::ports as hp;
@@ -25,7 +25,6 @@ ordered_installers! { MODULES: Install;
     mod contacts; prepare,
     mod flow; prepare,
     mod connections; prepare,
-    mod channels; scopes,
     flow::hooks,
     mod knowledge; prepare,
     mod vault; prepare,
@@ -34,7 +33,7 @@ ordered_installers! { MODULES: Install;
     mod mail; prepare,
     mod github; prepare,
     mail::targets,
-    channels::prepare,
+    mod channels; prepare,
     mod extensions; prepare,
     channels::outbound,
     mod gateway; install,

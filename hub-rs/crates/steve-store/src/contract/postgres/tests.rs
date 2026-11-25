@@ -16,7 +16,7 @@ use crate::{
     Workspaces, channel_write_policy as policy, stats_changed,
 };
 
-const MIGRATIONS: &[&str] = &[include_str!("001.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("001.sql"), include_str!("002.sql")];
 
 fn migrate(db: &mut Pg) -> Result<()> {
     db.batch(
@@ -386,4 +386,31 @@ fn domain_round_trips(f: &mut Fixture) -> Result<()> {
         assert_eq!(prices.error.as_deref(), Some("unavailable"));
         Ok(())
     })
+}
+
+#[test]
+#[ignore = "requires an isolated PostgreSQL server"]
+fn postgres_contract_backup_policy() -> Result<()> {
+    use crate::backup_policy::{DailySettings, daily, set_daily};
+    let url = std::env::var("STEVE_TEST_POSTGRES_URL").expect("isolated PostgreSQL URL");
+    let mut f = Fixture::open(&url)?;
+    migrate(&mut f.pg)?;
+    f.write(|w| {
+        w.db()
+            .batch("INSERT INTO workspaces (id, name, created) VALUES ('default','Default',0)")
+    })?;
+    assert_eq!(f.read(|r| daily(r))?, DailySettings::default());
+    let policy = DailySettings {
+        enabled: false,
+        keep_days: 19,
+    };
+    f.write(|w| set_daily(w, policy, "owner"))?;
+    assert_eq!(f.read(|r| daily(r))?, policy);
+    let updated = DailySettings {
+        enabled: true,
+        ..policy
+    };
+    f.write(|w| set_daily(w, updated, "owner"))?;
+    assert_eq!(f.read(|r| daily(r))?, updated);
+    Ok(())
 }

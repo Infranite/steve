@@ -12,7 +12,8 @@ import { toast } from "@/store"
 import { Group, Notice, Row, SectionLabel } from "@/ui"
 import { t, useT } from "@/i18n"
 import { num } from "@/i18n/format"
-import { fmtN, time, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtN, time } from "@/stats/format"
 
 /** the settings category: [id, title, icon, subtitle]. The title and subtitle are getters, so whoever reads them
  *  while rendering gets the current language (the tuple itself is built once, at import). */
@@ -76,15 +77,16 @@ const badField = (msg: string): [number, string] | null => { const m = msg.match
 
 export function StatsSettingsPane() {
   const t = useT()
-  const [d, reload] = useStats(() => stats.prices(), [], false)
+  const d = useHubQuery(["stats", "prices"], () => stats.prices())
+  const reload = d.reload
   const [rows, setRows] = useState<Draft[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [bad, setBad] = useState<[number, string] | null>(null)
   const [err, setErr] = useState("")
-  useEffect(() => { if (d.s === "ok") setRows(d.v.prices.map(toDraft)) }, [d])
-  if (d.s === "loading" || (d.s === "ok" && !rows)) return <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
-  if (d.s === "error") return <div className="type-callout text-muted-foreground" role="alert">{d.msg}</div>
-  const v = d.v, list = rows!, cols = COLS()
+  useEffect(() => { if (d.data) setRows(d.data.prices.map(toDraft)) }, [d.data])
+  if (d.loading || (d.data && !rows)) return <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
+  if (d.error || !d.data) return <div className="type-callout text-muted-foreground" role="alert">{d.error?.message ?? ""}</div>
+  const v = d.data, list = rows!, cols = COLS()
   const set = (i: number, k: keyof Draft, val: string) => { setBad(null); setErr(""); setRows(list.map((r, n) => (n === i ? { ...r, [k]: val } : r))) }
   const dirty = JSON.stringify(list) !== JSON.stringify(v.prices.map(toDraft))
   const save = async (prices: Price[] | null, ok: string) => {

@@ -37,19 +37,20 @@ class ExternalBackup(unittest.TestCase):
         self.binary.write_text(f'''#!{sys.executable}
 import json,os,pathlib,shutil,sys
 home=pathlib.Path(os.environ["STEVE_HOME"])
-(home/"called.json").write_text(json.dumps(dict(args=sys.argv[1:],home=str(home))))
+args=sys.argv[1:]
+if args[1]=="restore":
+    assert args[2:] == ["a"*64, "--to", args[4]]
+    stage=pathlib.Path(args[4]).resolve()/"restored"
+    (stage/"data").mkdir(parents=True)
+    shutil.copyfile(home/"data/steve.sqlite3",stage/"data/steve.sqlite3")
+    print(stage)
+    sys.exit(0)
+(home/"called.json").write_text(json.dumps(dict(args=args,home=str(home))))
 if (home/"fail").exists():
     print("fixture refuses backup",file=sys.stderr)
     sys.exit(7)
-directory=home/"backups/pre-upgrade-fixture"
-directory.mkdir(parents=True,exist_ok=True)
-os.chmod(directory,0o700)
-shutil.copyfile(home/"data/steve.sqlite3",directory/"steve.sqlite3")
-os.chmod(directory/"steve.sqlite3",0o600)
-manifest=dict(completed=not (home/"incomplete").exists(),directory=str(directory),
-              database=dict(name="steve.sqlite3",quick_check="ok"))
-(directory/"manifest.json").write_text(json.dumps(manifest))
-print(json.dumps(manifest))
+print(json.dumps(dict(snapshot_id="a"*64,purpose=args[3],
+                      database=dict(sha256="b"*64,bytes=0 if (home/"incomplete").exists() else 1))))
 ''')
         self.binary.chmod(0o700)
         (self.home / "current").symlink_to(self.candidate)
@@ -60,16 +61,14 @@ print(json.dumps(manifest))
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, {"STEVE_HOME": str(self.home), "HOME": str(self.root)}).start()
 
-    def assert_call(self, reason):
+    def assert_call(self, reason, offline=False):
         call = json.loads((self.home / "called.json").read_text())
-        self.assertEqual(call, dict(args=["--admin", "backup", "--reason", reason], home=str(self.home)))
+        self.assertEqual(call, dict(args=["--admin", "backup", "--reason", reason] + (["--offline"] if offline else []), home=str(self.home)))
 
-    def test_local_release_uses_candidate_manifest_and_rejects_failed_or_incomplete_backup(self):
+    def test_local_release_uses_candidate_receipt_and_rejects_failed_or_incomplete_backup(self):
         m = load("local-release")
-        directory, database = m.hub_backup(self.candidate)
-        self.assert_call("pre-upgrade")
-        self.assertEqual(database, directory / "steve.sqlite3")
-        self.assertEqual(database.read_bytes(), self.db.read_bytes())
+        self.assertEqual(m.hub_backup(self.candidate), "a" * 64)
+        self.assert_call("pre-upgrade", offline=True)
         (self.home / "fail").touch()
         with self.assertRaisesRegex(m.Refused, "fixture refuses"):
             m.hub_backup(self.candidate)
@@ -97,7 +96,7 @@ print(json.dumps(manifest))
             m.snapshot(self.home)
         self.assertEqual(dst.read_bytes(), saved)
 
-    def test_release_sh_backup_helper_checks_command_status_and_manifest(self):
+    def test_source_release_helper_checks_command_status_and_receipt(self):
         source = (OPS / "release.sh").read_text()
         helper = source[source.index("hub_backup() {"):source.index("\nschema() {")]
         def invoke():
@@ -106,7 +105,7 @@ print(json.dumps(manifest))
                                   text=True, capture_output=True, timeout=10)
         result = invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), str(self.home / "backups/pre-upgrade-fixture"))
+        self.assertEqual(result.stdout.strip(), "a" * 64)
         self.assert_call("pre-upgrade")
         (self.home / "fail").touch()
         self.assertNotEqual(invoke().returncode, 0)

@@ -13,11 +13,14 @@ import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, Panel, Section, Note, Notice, Blank, Disclosure } from "@/ui"
 import { Select } from "@/view-shared"
 import { botName, st, tm } from "@/store"
-import { useLoad, useBusy, report } from "@/accounts/load"
+import { useBusy, report } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { channelsApi, ATTENTION, BOT_NOTICES, LEVEL, MSG_STATUS, REPLY_AS_YOU, ROLE, attentionOf, spaceTitle, type Attention, type BotNotices, type ChanMessage, type Level, type ReplyAsYou, type Rule, type SpacePatch } from "@/api/channels"
 import { Conflicts, SpaceAvatar, kindLine } from "@/channels/space-bits"
 import { Rules, ruleText, ruleOk } from "@/channels/rules"
-import { BasisView, PersonaAvatar } from "@/channels/basis"
+import { BasisView } from "@/channels/basis"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { useT } from "@/i18n"
 
 /** how many recent messages the page shows before “全部 N 条” */
@@ -25,18 +28,18 @@ const MSG_PREVIEW = 5
 
 export function SpaceView({ id }: { id: string }) {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["channels", "space", id], async () => {
     const s = await channelsApi.space(id)
     const [acc, personas] = await Promise.all([channelsApi.account(s.connection_id), channelsApi.personas()])
     return { s, acc, personas }
-  }, [id], ["space", "chan_message", "persona", "channel"])
+  }, { events: ["space", "chan_message", "persona", "channel"] })
   const [busy, act] = useBusy()
   const [duty, setDuty] = useState<string | null>(null), [rules, setRules] = useState<Rule[] | null>(null)
   const [older, setOlder] = useState<ChanMessage[]>([]), [more, setMore] = useState<"idle" | "loading" | "end">("idle"), [allMsgs, setAllMsgs] = useState(false)
   useEffect(() => { setOlder([]); setMore("idle") }, [id])
   const home: [string, string] = ["#/channels", t("channels:list.title")]
-  if (L.s === "loading") return <Page title={t("channels:space.title")} back={home}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (L.s === "error") return <Page title={t("channels:space.title")} back={home}><Empty title={L.status === 404 ? t("channels:space.notFound") : L.err} sub={L.status === 404 ? t("channels:space.notFoundSub") : undefined} /></Page>
+  if (L.loading) return <Page title={t("channels:space.title")} back={home}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.error || !L.data) return <Page title={t("channels:space.title")} back={home}><Empty title={L.status === 404 ? t("channels:space.notFound") : (L.error?.message ?? "")} sub={L.status === 404 ? t("channels:space.notFoundSub") : undefined} /></Page>
   const { s, acc, personas } = L.data
   const me = acc?.mode === "self", accName = acc?.name ?? t("channels:space.account")
   const persona = s.persona ? personas.find((p) => p.id === s.persona!.id) : undefined
@@ -76,8 +79,8 @@ export function SpaceView({ id }: { id: string }) {
             {s.bot_notices !== undefined && s.voice?.mode === "self" && s.counterpart?.is_bot && <Row title={t("channels:space.botNotices")} sub={BOT_NOTICES[s.bot_notices][1]} data-bot-notices>
               <Segmented size="sm" value={s.bot_notices} onChange={(v: BotNotices) => v !== s.bot_notices && void save({ bot_notices: v }, t("channels:space.botNoticesSaved", { level: BOT_NOTICES[v][0] }))} options={(Object.keys(BOT_NOTICES) as BotNotices[]).map((a) => [a, BOT_NOTICES[a][0]] as const)} /></Row>}
             <Row title={t("channels:word.recordOnly")} sub={t("channels:space.mutedSub")}><Switch checked={s.muted} disabled={busy} onCheckedChange={(v) => void save({ muted: v }, t(v ? "channels:space.mutedOn" : "channels:space.mutedOff"))} aria-label={t("channels:word.recordOnly")} data-space-on /></Row>
-            {me ? <Row icon={<PersonaAvatar bot={null} size={32} />} title={t("channels:word.you")} sub={t("channels:space.selfSub")} data-space-persona-row />
-              : <Row icon={<PersonaAvatar bot={persona?.bot_id} size={32} />} controls onClick={persona ? () => go("#/channels/personas/" + persona.id) : undefined} data-space-persona-row
+            {me ? <Row icon={<ActorAvatar actorId="me" size={32} />} title={t("channels:word.you")} sub={t("channels:space.selfSub")} data-space-persona-row />
+              : <Row icon={<ActorAvatar actorId={persona?.bot_id ?? "me"} size={32} />} controls onClick={persona ? () => go("#/channels/personas/" + persona.id) : undefined} data-space-persona-row
                 title={<span className="flex min-w-0 items-center gap-1"><span className="truncate">{s.persona?.name ?? "—"}</span>{persona && <ChevronRightIcon className="size-3.5 shrink-0 text-tertiary" aria-label={t("channels:word.editPersona")} />}</span>}
                 sub={t(personaOwn ? "channels:space.personaOwn" : "channels:space.personaFollow")}>
                 <Select align="end" testId="space-persona" value={personaOwn ? s.persona!.id : "__acc"} onChange={(v) => void save({ persona_id: v === "__acc" ? null : v }, t("channels:space.personaChanged"))}
@@ -143,7 +146,7 @@ function Msg({ m, bot, me }: { m: ChanMessage; bot?: string; me: boolean }) {
   const out = m.direction === "out"
   return (
     <div className={cn("-mx-3 flex gap-2.5 rounded-xl px-3 py-2.5", out && "bg-muted/60")} data-msg={m.id}>
-      {out ? <PersonaAvatar bot={me ? null : bot} size={24} /> : <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted type-label text-muted-foreground" aria-hidden>{(m.sender.name || "?")[0]}</span>}
+      {out ? <ActorAvatar actorId={me ? "me" : (bot ?? "me")} size={24} /> : <ActorAvatar actor={partyActor({ id: m.sender.party_id, name: m.sender.name || "?", avatar: m.sender.avatar })} size={24} />}
       <div className="min-w-0 flex-1">
         <div className="type-footnote text-muted-foreground"><span className="font-medium text-foreground/80">{m.sender.name || t("channels:space.unknownSender")}</span> · <span className="tabular-nums">{tm(m.created)}</span>{MSG_STATUS[m.status] && <span className={m.status === "failed" ? "text-destructive" : undefined}> · {MSG_STATUS[m.status]}</span>}{m.on_behalf === "proxy" && ` · ${t("channels:space.proxy")}`}{m.history && <span title={t(m.history === "late" ? "channels:space.historyLateHint" : m.history === "backfill" ? "channels:space.historyBackfillHint" : "channels:space.historyBeforeHint")}> · {t("channels:space.history")}</span>}</div>
         <ChannelMessageBody message={m} />

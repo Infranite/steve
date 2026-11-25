@@ -47,10 +47,14 @@ pub(crate) fn encode_event(event: &Envelope<BusEvent>) -> Bytes {
         BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event { .. }))
     ) {
         let mut slim = event.clone();
-        if let BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event { data, .. })) =
-            &mut slim.event
+        if let BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event {
+            kind,
+            data,
+            ..
+        })) = &mut slim.event
         {
-            let value = super::slim::ev_out(serde_json::to_value(&*data).expect("transcript JSON"));
+            let value =
+                super::slim::ev_out(kind, serde_json::to_value(&*data).expect("transcript JSON"));
             *data =
                 steve_types::RawJson::from_str(&serde_json::to_string(&value).expect("slim JSON"))
                     .expect("validated JSON");
@@ -498,7 +502,7 @@ mod tests {
                 seq: steve_types::Seq(1),
                 kind: "tool".into(),
                 data: steve_types::RawJson::from_str(
-                    &serde_json::json!({"rawOutput": "x".repeat(5000)}).to_string(),
+                    &serde_json::json!({"tool": {"id": "t1", "result": [{"type": "text", "text": "x".repeat(5000)}]}}).to_string(),
                 )
                 .unwrap(),
                 ws: "a".into(),

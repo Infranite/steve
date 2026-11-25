@@ -41,7 +41,7 @@ pub(crate) fn try_command(home: &Path, args: &[String]) -> Result<Option<CliOutp
                 "POST",
                 "/admin/v1/backup".into(),
                 serde_json::to_vec(&super::routes::BackupRequest {
-                    reason: Some(reason.kind().into()),
+                    reason: Some(reason),
                 })?,
             )
         }
@@ -96,7 +96,11 @@ pub(super) fn exchange(
 ) -> Result<(u16, Vec<u8>)> {
     stream.set_nonblocking(true)?;
     let started = Instant::now();
-    let budget = super::DEADLINE + Duration::from_secs(1);
+    let budget = if method == "POST" && route == "/admin/v1/backup" {
+        crate::backup::BACKUP_BUDGET
+    } else {
+        super::DEADLINE
+    } + Duration::from_secs(1);
     let remaining = || {
         budget.checked_sub(started.elapsed()).filter(|v| !v.is_zero())
         .context("management transport deadline exceeded; outcome may be unknown; no offline retry was attempted")

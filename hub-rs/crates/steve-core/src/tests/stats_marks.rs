@@ -88,8 +88,8 @@ fn every_status_change_leaves_one_mark() {
     // a dependency released: wait → run
     let a = k.item("run", "执行", None);
     let b = k.item("run", "执行", None);
-    k.core.add_dep(&b, &a).unwrap();
-    k.core.rm_dep(&b, &a).unwrap();
+    k.core.add_dep(&b, &a, "me").unwrap();
+    k.core.rm_dep(&b, &a, "me").unwrap();
     assert_chain(&k, &b);
 }
 

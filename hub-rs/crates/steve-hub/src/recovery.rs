@@ -13,7 +13,7 @@ fn set(v: Value) {
 }
 
 /// The outcome of `Domain::ready`'s main-conversation part.
-pub fn record(r: &crate::backend::BResult<steve_core::thread::ThreadReady>) {
+pub fn record(r: &crate::error::BResult<steve_core::thread::ThreadReady>) {
     match r {
         Ok(t) => set(json!({
             "state": if t.failed > 0 { "partial" } else { "ok" },

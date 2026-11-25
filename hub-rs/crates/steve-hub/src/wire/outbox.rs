@@ -58,13 +58,12 @@ async fn notice_dead(store: &Store, groups: &[outbox::DeadGroup]) {
     }
     let (store, groups) = (store.clone(), groups.to_vec());
     let r = tokio::task::spawn_blocking(move || {
-        let db = steve_core::repo::Db::new(store);
         for g in &groups {
             let Some(ws) = g.workspace_id.as_deref() else {
                 continue;
             };
             if let Err(e) =
-                steve_core::notify::notify(&db, ws, "system", "fail", &dead_notice(g), None)
+                steve_store::notify::notify(&store, ws, "system", "fail", &dead_notice(g), None)
             {
                 tracing::error!(consumer = %g.consumer, "outbox dead notice: {e}");
             }

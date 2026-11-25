@@ -21,8 +21,8 @@
 //! 2. on `/api`, after `require_user`: insert `Caller { ws, me }` into the request extensions and
 //!    `.merge(module_routes)`;
 //! 3. `POST /api/config/draft`: kinds in `registry.target_kinds()` go to [`changes::draft`];
-//!    `POST /api/config/:id/apply|undo` try [`changes::apply`] / [`changes::undo`] first and fall back to
-//!    the in-memory drafts on `None`; `pickTarget` appends [`changes::candidates`];
+//!    `POST /api/config/:id/apply|undo|drop` run through [`changes::apply`] / [`changes::undo`] /
+//!    [`changes::drop_draft`] over SQLite `changesets`; `pickTarget` appends [`changes::candidates`];
 //! 4. Decision commands select the registered subject handler through the settlement service;
 //! 5. `/api/stream`: filter typed envelopes using `Scoped::scope()`;
 //! 6. `undoDecision`: call [`Registry::before_undo`] in its transaction first;

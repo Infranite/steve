@@ -227,17 +227,8 @@ async fn preview_then_text_purge() {
         .await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["messages"], 3);
-    let backup = v["backup"].as_str().expect("backup").to_string();
-    assert!(backup.starts_with("pre-purge-"), "{backup}");
-    assert!(h.env.dir.path().join("backups").join(&backup).is_file());
-    {
-        // the copy is as private as the database: 0600 in a 0700 directory
-        use std::os::unix::fs::PermissionsExt;
-        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        let dir = h.env.dir.path().join("backups");
-        assert_eq!(mode(&dir.join(&backup)), 0o600);
-        assert_eq!(mode(&dir), 0o700);
-    }
+    let backup = v["backup"].as_str().expect("backup");
+    assert!(steve_types::backup::SnapshotId::try_from(backup.to_owned()).is_ok());
     assert_eq!(
         inspect::messages::count_chan_messages_by_text_null_count(h.env.store()).unwrap(),
         3
@@ -256,7 +247,7 @@ async fn preview_then_text_purge() {
         1
     );
     assert_eq!(
-        inspect::audit::count_audit_by_channel_cleanup(h.env.store()).unwrap(),
+        inspect::audit::count_audit_by_channel_cleanup(h.env.store(), backup).unwrap(),
         1
     );
     // nothing left to purge
@@ -386,12 +377,7 @@ async fn everything_but_what_is_referenced() {
         1
     );
     assert!(
-        h.env
-            .dir
-            .path()
-            .join("backups")
-            .join(v["backup"].as_str().expect("b"))
-            .is_file()
+        steve_types::backup::SnapshotId::try_from(v["backup"].as_str().unwrap().to_owned()).is_ok()
     );
 }
 

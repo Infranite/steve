@@ -31,23 +31,26 @@ test("installation actions follow component gaps and installer failures, not pro
 
 test("permission support is registry driven, with explicit empty modes and an absent offer kept distinct", () => {
   const limited = { id: "arbitrary-adapter", modes: ["full_access"] }
-  assert.equal(supportsPermission(limited, "default"), false)
+  assert.equal(supportsPermission(limited, "ask"), false)
   assert.equal(supportsPermission(limited, "plan"), false)
-  assert.equal(supportsPermission(limited, "bypassPermissions"), true)
-  assert.equal(supportsPermission({ modes: [] }, "default"), false)
-  assert.equal(supportsPermission({ modes: null }, "default"), true)
-  assert.equal(supportsPermission({}, "default"), true)
-  assert.equal(supportsPermission(undefined, "default"), false)
-  assert.equal(supportsPermission({ modes: ["accept_edits"] }, "acceptEdits"), true)
+  assert.equal(supportsPermission(limited, "full_access"), true)
+  assert.equal(supportsPermission({ modes: [] }, "ask"), false)
+  assert.equal(supportsPermission({ modes: null }, "ask"), true)
+  assert.equal(supportsPermission({}, "ask"), true)
+  assert.equal(supportsPermission(undefined, "ask"), false)
+  assert.equal(supportsPermission({ modes: ["plan", "ask"] }, "plan"), true)
+  assert.equal(supportsPermission({ modes: ["accept_edits"] }, "accept_edits"), true)
+  assert.equal(supportsPermission({ modes: ["accept_edits"] }, "acceptEdits"), false)
+  assert.equal(supportsPermission({ modes: ["full_access"] }, "bypassPermissions"), false)
 })
 
 
 test("global permission configuration keeps declared restrictions but unknown targets editable", () => {
   for (const ok of [false, true]) {
-    assert.equal(canConfigurePermission({ ok, modes: ["full_access"] }, "default"), false)
-    assert.equal(canConfigurePermission({ ok, modes: ["full_access"] }, "bypassPermissions"), true)
+    assert.equal(canConfigurePermission({ ok, modes: ["full_access"] }, "ask"), false)
+    assert.equal(canConfigurePermission({ ok, modes: ["full_access"] }, "full_access"), true)
   }
-  for (const mode of ["default", "plan", "bypassPermissions"]) {
+  for (const mode of ["ask", "plan", "full_access"]) {
     assert.equal(canConfigurePermission({ ok: false, modes: [] }, mode), true)
     assert.equal(canConfigurePermission(undefined, mode), true)
     assert.equal(canConfigurePermission({ ok: true, modes: [] }, mode), false, "verified empty contract remains distinct")

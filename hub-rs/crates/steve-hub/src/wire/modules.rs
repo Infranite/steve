@@ -12,7 +12,7 @@ use steve_core::{Core, ItemAction};
 use steve_modules::Modules;
 use steve_store::Store;
 
-use crate::backend::BackendError;
+use crate::error::BackendError;
 
 /// A named background task prepared during assembly, started after boot.
 pub struct Job {
@@ -193,7 +193,7 @@ impl steve_flow::Core for FlowCore {
                 Some(i) if i.workspace_id == ws => {}
                 _ => return Err(crate::api::Noun::Item.missing()),
             }
-            c.supplement(&id, &text, mode, &[])
+            c.supplement(&id, &text, mode, &[], "steve")
                 .map_err(|e| e.to_string())
         })
         .await
@@ -246,13 +246,13 @@ pub struct Tools {
     pub outbox: Arc<steve_channels::Outbox>,
 }
 
-/// The knowledge state: `{type:"kb"}` events on the bus, and loaders for uploads, item and chat documents (notes and folders are built in).
+/// The knowledge state: `{type:"kb"}` events on the bus, and loaders for uploads and mail threads
+/// (notes and folders are built in).
 pub(crate) fn knowledge(
     steve_home: &Path,
     data_dir: &Path,
     bus: &crate::bus::Bus,
 ) -> steve_knowledge::Knowledge {
-    use steve_knowledge::sources::{chat::ChatLoader, items::ItemsLoader};
     let kb_bus = bus.clone();
     let kb = steve_knowledge::Knowledge::with_loaders(
         move |e: steve_knowledge::KbEvent| {
@@ -268,8 +268,6 @@ pub(crate) fn knowledge(
             // loader is asked first (it accepts only thread documents)
             Arc::new(steve_mail::knowledge::ThreadLoader),
             Arc::new(steve_knowledge::FilesLoader::new(data_dir)),
-            Arc::new(ItemsLoader),
-            Arc::new(ChatLoader),
         ],
     );
     kb.set_folder_policy(steve_knowledge::FolderPolicy::new(
@@ -284,7 +282,7 @@ pub(crate) fn knowledge(
 pub struct Env<'a> {
     pub store: &'a Store,
     pub core: &'a Core,
-    pub backend: Arc<dyn crate::backend::Backend>,
+    pub backend: crate::wire::store::StoreBackend,
     pub steve_home: &'a Path,
     pub data_dir: &'a Path,
     pub public_urls: &'a [String],

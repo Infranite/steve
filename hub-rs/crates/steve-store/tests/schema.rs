@@ -248,7 +248,7 @@ fn row_types_follow_column_order() {
     assert_eq!(keys(&item), columns);
     assert_eq!(
         keys(&s.bots().get("steve").unwrap().unwrap()),
-        without("bots", &["project_dir", "worktree", "deleted"])
+        without("bots", &["deleted"])
     );
     let prj = s
         .projects()
@@ -293,10 +293,19 @@ fn row_types_follow_column_order() {
         })
         .unwrap()
         .unwrap();
-    assert_eq!(
-        keys(&dec),
-        without("decisions", &["source_revision", "question_template"])
+    let mut dec_columns = without(
+        "decisions",
+        &[
+            "source_revision",
+            "question_template",
+            "wait_owner",
+            "wait_started_at",
+            "wait_deadline",
+            "wait_on_timeout",
+        ],
     );
+    dec_columns.push("wait".into());
+    assert_eq!(keys(&dec), dec_columns);
     let mid = s
         .messages()
         .add(WS, "me", "hi", None, &serde_json::Value::Null, "steve")

@@ -119,14 +119,14 @@ public struct HubClientAPI: Sendable {
         _ = try? await session.data(for: req)
     }
 
-    /// Queries `/api/state` to populate menu bar & runtime summary metrics.
+    /// Queries `/api/summary` to populate menu bar & runtime summary metrics.
     public func fetchStateSummary(
         endpoint: URL,
         route: HubRouteKind,
         helloVersion: String,
         credential: String?
     ) async throws -> HubRuntimeSummary {
-        var req = URLRequest(url: endpoint.appendingPathComponent("api/state"))
+        var req = URLRequest(url: endpoint.appendingPathComponent("api/summary"))
         req.httpMethod = "GET"
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.setValue(L10n.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
@@ -153,47 +153,32 @@ public struct HubClientAPI: Sendable {
             throw HubClientAPIError.serverError(status: http.statusCode, message: msg)
         }
 
-        struct RawState: Decodable {
-            struct Workspace: Decodable { let name: String? }
-            struct Device: Decodable { let status: String? }
-            struct Session: Decodable { let status: String?; let busy: Bool? }
-            struct Decision: Decodable { let status: String? }
+        struct RawSummary: Decodable {
             struct UpdateInfo: Decodable { let version: String? }
 
             let version: String?
             let web_version: String?
             let update: UpdateInfo?
-            let workspace: Workspace?
-            let devices: [Device]?
-            let sessions: [Session]?
-            let decisions: [Decision]?
+            let workspace_name: String?
+            let devices_online: Int?
+            let devices_total: Int?
+            let sessions_running: Int?
+            let decisions_open: Int?
             let thinking: Bool?
         }
 
-        let decoded = try JSONDecoder().decode(RawState.self, from: data)
-        let devices = decoded.devices ?? []
-        let onlineDevices = devices.filter {
-            let s = ($0.status ?? "").lowercased()
-            return s != "离线" && s != "offline"
-        }.count
-        let runningSessions = (decoded.sessions ?? []).filter {
-            $0.busy == true || $0.status == "running" || $0.status == "starting"
-        }.count
-        let openDecisions = (decoded.decisions ?? []).filter {
-            ($0.status ?? "open") == "open"
-        }.count
-
+        let decoded = try JSONDecoder().decode(RawSummary.self, from: data)
         return HubRuntimeSummary(
             phase: .connected,
             activeEndpoint: endpoint,
             route: route,
             hubVersion: decoded.version ?? helloVersion,
             webVersion: decoded.web_version,
-            workspaceName: decoded.workspace?.name,
-            onlineDevices: onlineDevices,
-            totalDevices: devices.count,
-            runningSessions: runningSessions,
-            openDecisions: openDecisions,
+            workspaceName: decoded.workspace_name,
+            onlineDevices: decoded.devices_online ?? 0,
+            totalDevices: decoded.devices_total ?? 0,
+            runningSessions: decoded.sessions_running ?? 0,
+            openDecisions: decoded.decisions_open ?? 0,
             steveThinking: decoded.thinking ?? false,
             updateAvailable: decoded.update?.version,
             errorMessage: nil,

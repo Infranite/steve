@@ -19,9 +19,10 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { draftKey } from "@/composer-draft"
+import { WORKSPACE_SETTING_DEFAULTS } from "@/gen"
 import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
-import { Robot } from "@/robot"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { SteveModelControl } from "@/steve-model"
 import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, makeItem, decideCards, pendingCards, quoteMsg, reroute, st, stopReply, useShellSelector, tm, toast, type Item, type Msg } from "@/store"
 import { ChatQueue } from "@/queue"
@@ -71,7 +72,7 @@ function Hero() {
   const text = doing || label || t("pages:chat.idle")
   return (
     <div className="flex min-w-0 shrink items-center gap-2.5" data-hero="compact">
-      <div className="shrink-0" onDoubleClick={() => cue("love")}><Robot k="steve" size={28} live /></div>
+      <div className="shrink-0" onDoubleClick={() => cue("love")}><ActorAvatar actorId="steve" size={28} live tooltip={false} /></div>
       <span className="shrink-0 type-headline">{S?.n ?? "Steve"}</span>
       <span className={cn("flex min-w-0 items-center gap-1.5 truncate type-callout transition-colors duration-180", doing || label ? "text-foreground/80" : "text-tertiary")} data-hero-label>
         {doing && <span className="size-1.5 shrink-0 rounded-full bg-blue dot-running" aria-hidden />}<span key={text} className="truncate anim-in">{text}</span></span>
@@ -89,9 +90,13 @@ function SteveSays({ children, sub, still }: { children: ReactNode; sub?: string
   )
 }
 
-const Me = ({ t, files }: { t: string; files?: RFile[] }) => <div className="flex max-w-[80%] flex-col items-end gap-1.5 self-end anim-in" data-me-msg>
-  <Files files={files} align="end" />
-  {(t !== "（附件）" || !files?.length) && <div className="min-w-0 max-w-full rounded-2xl rounded-br-md bg-muted px-4 py-2.5 type-chat text-foreground"><Markdown text={t} /></div>}</div>
+const Me = ({ t, files }: { t: string; files?: RFile[] }) => <div className="flex max-w-[85%] items-start justify-end gap-2 self-end anim-in" data-me-msg>
+  <div className="flex min-w-0 flex-col items-end gap-1.5">
+    <Files files={files} align="end" />
+    {(t !== "（附件）" || !files?.length) && <div className="min-w-0 max-w-full rounded-2xl rounded-br-md bg-muted px-4 py-2.5 type-chat text-foreground"><Markdown text={t} /></div>}
+  </div>
+  <ActorAvatar actorId="me" size={24} className="mt-1" />
+</div>
 
 /* the actions under Steve's replies (affectUI Message Actions): copy, quote, and the corrections of thread routing (§3.5).
  * Regenerate, rating and read-aloud are left out: Steve has nothing behind them */
@@ -174,7 +179,7 @@ const SEEN = "steve-seen"
 function useAway() {
   const [from] = useState(() => Number(localStorage.getItem(SEEN) ?? 0))
   useEffect(() => { const mark = () => localStorage.setItem(SEEN, String(Date.now())); mark(); const t = setInterval(mark, 60_000); window.addEventListener("beforeunload", mark); return () => { clearInterval(t); window.removeEventListener("beforeunload", mark) } }, [])
-  const hours = Number(st.settings.awayH ?? 4)
+  const hours = Number(st.settings.awayH ?? WORKSPACE_SETTING_DEFAULTS.awayH)
   return hours > 0 && from > 0 && Date.now() - from > hours * 3600_000 ? from : 0
 }
 
@@ -488,7 +493,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
           }} /></ReadingPosition>}
           {conv && im ? <ConversationDraft conv={conv} decisionIds={imDecisions} /> : !conv && <LiveTail memory={processMemory} />}
           {!conv && !list.length && st.ready && st.onboard < 0 && <div className="flex flex-col items-center gap-3 px-6 pt-[18vh] text-center anim-in" data-chat-empty>
-            <Robot k="steve" size={48} />
+            <ActorAvatar actorId="steve" size={48} tooltip={false} />
             <div className="type-title">{t("pages:chat.emptyHead", { name: S?.n ?? "Steve" })}</div>
             <p className="max-w-[460px] text-balance type-callout text-muted-foreground">{t("pages:chat.emptyBody", { name: S?.n ?? "Steve" })}</p>
           </div>}
@@ -603,7 +608,8 @@ const MessageRow = memo(function MessageRow({ id, channel, previous, day, last, 
     <div tabIndex={-1}
       className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)}
       data-msg={id} data-attention-reply={!conv && m.k === "steve" && !drafted ? id : undefined} data-flash={lit ? "" : undefined}>
-      {head && <div className="flex min-w-0 items-baseline gap-2 px-1 type-footnote text-tertiary" data-chat-author>
+      {head && <div className="flex min-w-0 items-center gap-2 px-1 type-footnote text-tertiary" data-chat-author>
+        <ActorAvatar actorId="steve" size={18} />
         <span className="truncate type-callout font-semibold text-foreground">{name}</span>
         {m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}
       </div>}

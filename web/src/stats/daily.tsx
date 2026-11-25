@@ -8,7 +8,8 @@ import { Segmented } from "@/ui"
 import { stats, type Filter, type Series, type Summary } from "@/api/stats"
 import { Chart, ChartBody, ChartHead, ChartTable, STATE, type Overlay } from "@/stats/chart"
 import { DrillPanel, Loading, ModeSwitch, type Drill } from "@/stats/overview"
-import { fmtMs, fmtN, fmtRange, fmtUsd, oneDay, zoneName, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtMs, fmtN, fmtRange, fmtUsd, oneDay, zoneName } from "@/stats/format"
 import { durUnit } from "@/i18n/format"
 import { useT } from "@/i18n"
 
@@ -20,12 +21,12 @@ export function DailyChart({ s, f, fkey, live, drill, setDrill, rangeName }: { s
   const hourly = oneDay(f)
   const [line, setLine] = useState<LineKind>("cost")
   const [table, setTable] = useState(false)
-  const [dn] = useStats(() => stats.series(f, "done", "none", hourly), [fkey], live)
-  const [ln] = useStats(() => { const m = line; return stats.series(f, m, "none", hourly).then((v) => ({ ...v, m })) }, [fkey, line], live)
+  const dn = useHubQuery(["stats", "daily-done", fkey, hourly], () => stats.series(f, "done", "none", hourly), { events: ["stats"], debounceMs: 200, live })
+  const ln = useHubQuery(["stats", "daily-line", fkey, line, hourly], () => { const m = line; return stats.series(f, m, "none", hourly).then((v) => ({ ...v, m })) }, { events: ["stats"], debounceMs: 200, live })
   /* null stays null: an hour not yet come is empty, not 0 */
   const val = (v: number | null | undefined) => (v === null ? null : v ?? 0)
-  const data: Series | null = dn.s === "ok" ? { ...dn.v, series: [{ key: "done", label: t("stats:v2.daily.done"), values: dn.v.buckets.map((_, i) => val(dn.v.series[0]?.values[i])) }] } : null
-  const lv = ln.s === "ok" && ln.v.m === line && data ? data.buckets.map((b) => { const j = ln.v.buckets.indexOf(b); return j < 0 ? 0 : val(ln.v.series[0]?.values[j]) }) : null
+  const data: Series | null = dn.data ? { ...dn.data, series: [{ key: "done", label: t("stats:v2.daily.done"), values: dn.data.buckets.map((_, i) => val(dn.data!.series[0]?.values[i])) }] } : null
+  const lv = ln.data && ln.data.m === line && data ? data.buckets.map((b) => { const j = ln.data!.buckets.indexOf(b); return j < 0 ? 0 : val(ln.data!.series[0]?.values[j]) }) : null
   /* agent time is drawn in the one unit its largest day needs (hours, so the axis has round steps: "4 小时"); the
    * tooltip and the table say it exactly ("4 小时 15 分") */
   const [unit, div] = durUnit(Math.max(0, ...(lv ?? []).map((v) => v ?? 0)))
@@ -38,7 +39,7 @@ export function DailyChart({ s, f, fkey, live, drill, setDrill, rangeName }: { s
   const pick = (day: string | null) => setDrill(day ? `day:${day}` : null)
   const span = fmtRange(s.range.from, s.range.to)
   const meta = hourly ? t("stats:v2.daily.metaHourly", { range: span, zone: zoneName(s.range.tz) }) : t("stats:v2.daily.metaDaily", { range: span })
-  const err = dn.s === "error" ? dn.msg : null
+  const err = dn.error ? dn.error.message : null
   const empty = data && data.series[0].values.every((v) => !v) && (!lv || lv.every((v) => !v))
   const both: Series | null = data && lv ? { ...data, series: [...data.series, { key: line, label: overlay!.label, values: lv }] } : data
   return (

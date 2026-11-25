@@ -104,6 +104,9 @@ pub struct ItemView {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(test, ts(as = "Option<Vec<ItemWait>>", optional))]
     pub waits: Vec<ItemWait>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub prerequisite_wait: Option<WaitContract>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(test, ts(as = "Option<Vec<OperationBlocker>>", optional))]
     pub op_blockers: Vec<OperationBlocker>,
@@ -239,6 +242,9 @@ pub struct OperationBlocker {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub wait: Option<WaitContract>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -334,6 +340,10 @@ pub struct DecisionView {
     /// What it was settled with, as recorded.
     pub result: Option<RawJson>,
     pub requested_by: String,
+    /// Actor who settled the decision (a user id, `"yolo"`, or `None` when expired/system-settled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub resolved_by: Option<String>,
     pub created: Millis,
     pub resolved: Option<Millis>,
     /// Until when the answer can be taken back; `None` when it cannot.
@@ -346,6 +356,9 @@ pub struct DecisionView {
     pub folded: Option<FoldReason>,
     #[cfg_attr(test, ts(type = "number"))]
     pub revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub wait: Option<WaitContract>,
 }
 
 /// The text shown on a decision card.
@@ -368,6 +381,21 @@ pub enum DecisionPrompt {
         #[cfg_attr(test, ts(type = "number"))]
         number: i64,
         repo: String,
+    },
+    NoExecutor {
+        items: Vec<NoExecutorItem>,
+        rejected: Vec<PlacementBlocker>,
+        reason: PlacementRejection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        team: Option<ProposalTeam>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        proposal: Option<BotProposal>,
+    },
+    WaitTimeout {
+        wait_kind: WaitKind,
+        subject: String,
     },
 }
 

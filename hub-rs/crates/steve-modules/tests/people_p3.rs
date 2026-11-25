@@ -115,7 +115,7 @@ async fn mentions_link_related() {
     assert_eq!(s, 200);
     assert_eq!(
         people,
-        json!([{"party_id": lilei, "name": "李雷", "type": "contact", "role": "related", "source": "mention", "confidence": 1.0}])
+        json!([{"party_id": lilei, "name": "李雷", "type": "contact", "role": "related", "source": "mention", "confidence": 1.0, "avatar": {}}])
     );
 
     // validation
@@ -622,7 +622,7 @@ async fn item_people_routes() {
     assert_eq!(s, 200, "{list}");
     assert_eq!(
         list,
-        json!([{"party_id": sarah, "name": "Sarah", "type": "contact", "role": "waiting_on", "source": "manual", "confidence": 1.0}])
+        json!([{"party_id": sarah, "name": "Sarah", "type": "contact", "role": "waiting_on", "source": "manual", "confidence": 1.0, "avatar": {}}])
     );
     // again: unchanged, no second timeline line
     let (s, again) = req(

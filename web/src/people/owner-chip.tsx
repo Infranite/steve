@@ -3,7 +3,7 @@
  * record, so the toast offers 撤销. */
 import { useEffect, useState, type MouseEvent } from "react"
 import { cn } from "cn"
-import { CheckIcon, UserRoundIcon, UserRoundXIcon } from "lucide-react"
+import { CheckIcon, UserRoundXIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command"
@@ -12,7 +12,10 @@ import { toast, st } from "@/store"
 import { hubBase } from "@/hub"
 import { people, type ContactBrief } from "@/api/people"
 import { ownership, type Changed, type ObjectType, type Steward } from "@/api/ownership"
-import { act, joinList, useLoad } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { act, joinList, orgLine } from "@/people/common"
+import { disambiguateActors, formatActorName, partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { t as tr, useT } from "@/i18n"
 
 /** the toast after a change, with 撤销 when the Hub recorded one */
@@ -31,7 +34,7 @@ export function OwnerChip({ objectType, objectId, className, bare = false }: { o
 
 function Chip({ objectType, objectId, className, bare }: { objectType: ObjectType; objectId: string; className?: string; bare: boolean }) {
   const t = useT()
-  const L = useLoad(() => ownership.of(objectType, objectId), [objectType, objectId], ["party", "patch"])
+  const L = useHubQuery(["ownership", "of", objectType, objectId], () => ownership.of(objectType, objectId), { events: ["party", "patch"] })
   const [open, setOpen] = useState(false), [q, setQ] = useState(""), [busy, setBusy] = useState(false)
   const [found, setFound] = useState<ContactBrief[] | null>(null)
   useEffect(() => {
@@ -40,7 +43,7 @@ function Chip({ objectType, objectId, className, bare }: { objectType: ObjectTyp
     const h = setTimeout(() => { people.contacts({ q: q.trim() || undefined, limit: 30 }).then((xs) => { if (live) setFound(xs) }, () => { if (live) setFound([]) }) }, q ? 150 : 0)
     return () => { live = false; clearTimeout(h) }
   }, [open, q])
-  if (L.err) return <span className={cn("flex flex-wrap items-center justify-end gap-2 type-callout", className)} role="alert" data-owner-error><span className="text-destructive">{t("people:owner.loadFailed")}</span><Button size="xs" variant="outline" onClick={() => L.reload()}>{t("common:action.retry")}</Button></span>
+  if (L.error) return <span className={cn("flex flex-wrap items-center justify-end gap-2 type-callout", className)} role="alert" data-owner-error><span className="text-destructive">{t("people:owner.loadFailed")}</span><Button size="xs" variant="outline" onClick={() => void L.reload()}>{t("common:action.retry")}</Button></span>
   if (!L.data) return <Skeleton className={cn("inline-flex h-6 w-20 rounded-full", className)} aria-hidden />
   const { object, stewards } = L.data
   const owners = ownersOf(stewards), confirmed = owners.filter((s) => s.status === "confirmed"), proposed = owners.filter((s) => s.status !== "confirmed")
@@ -59,12 +62,14 @@ function Chip({ objectType, objectId, className, bare }: { objectType: ObjectTyp
   }
   const stop = (e: MouseEvent) => e.stopPropagation()
   const xs = (found ?? []).filter((c) => c.kind !== "bot" && !(objectType === "party" && c.id === objectId))
+  const optDisambig = disambiguateActors(xs.map((c) => ({ key: c.id, name: c.name, subtitle: orgLine(c), fallbackId: c.id })))
+  const leadOwner = confirmed[0]
   return (
     <span className={cn("inline-flex", className)} onClick={stop} onKeyDown={(e) => e.stopPropagation()} data-owner-chip={`${objectType}:${objectId}`}>
       <Popover open={open} onOpenChange={(o) => { setOpen(o); if (!o) setQ("") }}>
         <PopoverTrigger render={<Button variant="outline" size="xs" disabled={busy} aria-label={t("people:owner.aria", { name: object.name, owner: label })}
-          className={cn("h-6 max-w-[220px] gap-1 rounded-full px-2 font-normal", !confirmed.length && "border-dashed text-muted-foreground", proposed.length > 0 && !confirmed.length && "text-attention")} />}>
-          {confirmed.length ? <UserRoundIcon className="size-3.5 shrink-0 text-muted-foreground" /> : <UserRoundXIcon className="size-3.5 shrink-0" />}
+          className={cn("h-6 max-w-[220px] gap-1.5 rounded-full px-2 font-normal", !confirmed.length && "border-dashed text-muted-foreground", proposed.length > 0 && !confirmed.length && "text-attention")} />}>
+          {leadOwner ? <ActorAvatar actor={partyActor({ id: leadOwner.person_id, name: leadOwner.person_name, avatar: leadOwner.person_avatar, isMe: leadOwner.is_me })} size={16} tooltip={false} /> : <UserRoundXIcon className="size-3.5 shrink-0" />}
           {!bare && <span className="shrink-0 text-muted-foreground">{t("people:shared.owner")}</span>}
           <span className="truncate" data-owner-name>{label}</span>
         </PopoverTrigger>
@@ -75,9 +80,10 @@ function Chip({ objectType, objectId, className, bare }: { objectType: ObjectTyp
             <CommandInput placeholder={t("people:owner.search")} value={q} onValueChange={setQ} data-owner-search />
             <CommandList className="max-h-[min(320px,50vh)]">
               <CommandEmpty>{found ? t("people:shared.noMatch") : t("people:shared.loading")}</CommandEmpty>
-              {xs.length > 0 && <CommandGroup>{xs.map((c) => { const cur = confirmed.some((s) => s.person_id === c.id); return (
+              {xs.length > 0 && <CommandGroup>{xs.map((c) => { const cur = confirmed.some((s) => s.person_id === c.id); const extra = optDisambig.get(c.id); const shown = formatActorName(c.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex })); return (
                 <CommandItem key={c.id} value={c.id} onSelect={() => { if (!cur) void pick(c) }} data-owner-opt={c.name}>
-                  <span className="min-w-0 flex-1 truncate">{c.is_me ? t("people:shared.withMe", { name: c.name }) : c.name}</span>{cur && <CheckIcon className="size-4" />}</CommandItem>) })}</CommandGroup>}
+                  <ActorAvatar actor={partyActor({ id: c.id, name: c.name, contactKind: c.kind, avatar: c.avatar, subtitle: orgLine(c), isMe: c.is_me })} disambiguator={extra} size={18} tooltip={false} />
+                  <span className="min-w-0 flex-1 truncate">{c.is_me ? t("people:shared.withMe", { name: shown }) : shown}</span>{cur && <CheckIcon className="size-4" />}</CommandItem>) })}</CommandGroup>}
               {owners.length > 0 && <><CommandSeparator /><CommandGroup><CommandItem value="__clear" onSelect={() => void clear()} className="text-muted-foreground" data-owner-clear><UserRoundXIcon />{t("people:owner.clear")}</CommandItem></CommandGroup></>}
             </CommandList>
           </Command>

@@ -41,11 +41,6 @@ pub fn quote_untrusted(text: &str) -> String {
     format!("{UNTRUSTED_OPEN}\n{t}\n{UNTRUSTED_CLOSE}")
 }
 
-/// The historical decision's `result` identifies the retired auto-approval engine (`decided_by: "yolo"`).
-pub fn legacy_automatic_decision(result: &serde_json::Value) -> bool {
-    result.get("decided_by").and_then(serde_json::Value::as_str) == Some("yolo")
-}
-
 /// Who will read the text.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Audience {

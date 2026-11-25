@@ -13,12 +13,14 @@ export const canInstallRuntime = (r: RRuntime, requestError?: string): boolean =
     || s.components.some(c => c.status !== "installed")
 }
 
-/** Stored Bot modes and the registry's public permission modes are different vocabularies. */
-export const permissionModes = { plan: "plan", default: "ask", acceptEdits: "accept_edits", auto: "auto", bypassPermissions: "full_access" } as const
+/** Steve's canonical permission modes (matching steve_node_api::PermissionMode). */
+export const PERMISSION_MODES = ["plan", "ask", "accept_edits", "auto", "full_access"] as const
+export type PermissionMode = (typeof PERMISSION_MODES)[number]
+
 export const supportsPermission = (r: RRuntime | undefined, mode: string): boolean => {
   if (!r) return false
   // No session offer yet (`modes` null) declares no restriction; an explicit [] supports none.
-  return r.modes == null || r.modes.includes(permissionModes[mode as keyof typeof permissionModes] ?? mode)
+  return r.modes == null || r.modes.includes(mode)
 }
 
 /** Global configuration has no target probe yet. Keep known restrictions; absent modes are not an admission verdict. */

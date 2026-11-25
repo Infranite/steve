@@ -329,8 +329,8 @@ impl Tx<'_> {
     fn not_released(&mut self, item_id: &str, reason: &str, then: &str) -> Result<()> {
         self.release_outcome(item_id, "not_released", json!({"reason": reason}))?;
         let ws = self.item(item_id)?.workspace_id;
-        crate::notify::notify(
-            self.db(),
+        steve_store::notify::notify(
+            self.db().store(),
             &ws,
             "release",
             "fail",
@@ -478,8 +478,8 @@ impl Tx<'_> {
                 self.settle_item_operation(&operation.id, "failed", json!({"reason": reason}))?;
                 self.release_outcome(item_id, "not_released", json!({"reason": reason}))?;
                 let ws = item.workspace_id.clone();
-                crate::notify::notify(
-                    self.db(),
+                steve_store::notify::notify(
+                    self.db().store(),
                     &ws,
                     "release",
                     "fail",
@@ -652,8 +652,8 @@ impl Tx<'_> {
             .as_ref()
             .map(|i| i.workspace_id.clone())
             .unwrap_or_else(|| WS.into());
-        crate::notify::notify(
-            self.db(),
+        steve_store::notify::notify(
+            self.db().store(),
             &ws,
             "release",
             if ok { "success" } else { "fail" },
@@ -832,8 +832,8 @@ impl Tx<'_> {
                 .map(|i| i.workspace_id.clone())
                 .unwrap_or_else(|| WS.into());
             let level = if ok { "success" } else { "fail" };
-            crate::notify::notify(
-                self.db(),
+            steve_store::notify::notify(
+                self.db().store(),
                 &ws,
                 "release",
                 level,
@@ -907,8 +907,8 @@ impl Tx<'_> {
             if current {
                 self.fail(item, &why)?;
             }
-            crate::notify::notify(
-                self.db(),
+            steve_store::notify::notify_in(
+                w,
                 &i.workspace_id,
                 "release",
                 "fail",

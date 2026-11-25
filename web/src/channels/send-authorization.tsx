@@ -1,7 +1,7 @@
 /* A recovery proposal uses the standard changeset card. Its receipt is separate from both
  * the current connection capabilities and the message's send state. Applying never retries. */
 import { useCallback, useEffect, useRef, useState } from "react"
-import { HubError, modReq, type Proposal } from "@/api"
+import { api, HubError, type Proposal } from "@/api"
 import { accountsApi, type RConnection } from "@/api/accounts"
 import { sendAuthorization } from "@/api/channels"
 import { ProposalCard } from "@/config-ui"
@@ -53,7 +53,7 @@ export function SendAuthorization({ w, locked, revision }: { w: Wait; locked: bo
         const proposal = await sendAuthorization(w.subjectId!)
         remember({ proposal, phase: "draft" })
       } else if (receipt) {
-        const r = await modReq<{ ok: boolean; kept?: string[] }>("POST", `/config/${encodeURIComponent(receipt.proposal.id)}/${action}`, {})
+        const r = await (action === "apply" ? api.apply : action === "undo" ? api.undoConfig : api.dropConfig)(receipt.proposal.id)
         if (!r.ok) throw new Error(t("core:sendRecovery.authorizationUnconfirmed"))
         remember({ ...receipt, phase: action === "apply" ? "applied" : action === "undo" ? "undone" : "dropped", kept: r.kept })
       }

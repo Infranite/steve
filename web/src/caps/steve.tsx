@@ -14,7 +14,8 @@ import { Robot } from "@/robot"
 import { Section, Loading, Segmented, Notice, Pill, Panel, Disclosure, FieldRow } from "@/ui"
 import { st, toast, useStore } from "@/store"
 import { capsApi, type SteveServer, type SteveTool } from "@/api/caps"
-import { errText, useList } from "./common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { errText } from "./common"
 import { CLIENTS, FILE, LANGUAGE, mcpUrl, snippet, type ClientKind } from "./snippets"
 
 import { toolDescKey, toolCount } from "./tool-catalog"
@@ -43,14 +44,14 @@ function ToolList({ tools, counts }: { tools: SteveTool[]; counts?: Map<string, 
 /** "Steve · 内置": always on, its tools folded inside */
 export function SteveServerCard({ counts, open }: { counts?: Map<string, number>; open?: boolean }) {
   const t = useT()
-  const [d] = useList(() => capsApi.steve(), [])
-  const tools = d.s === "ok" ? d.v.tools : []
+  const d = useHubQuery(["caps", "steve"], () => capsApi.steve(), { events: ["bot"], debounceMs: 300 })
+  const tools = d.data?.tools ?? []
   return (
     <IntegrationSettings name={t("caps:steve.name")} logo={<Robot k="steve" size={28} />} data-steve-server
       badge={<Pill tone="success" data-steve-always>{t("caps:steve.always")}</Pill>}
-      meta={<span className="type-footnote">{d.s === "ok" ? t("caps:steve.meta", { count: tools.length }) : t("caps:steve.metaLoading")}</span>}>
+      meta={<span className="type-footnote">{d.data ? t("caps:steve.meta", { count: tools.length }) : t("caps:steve.metaLoading")}</span>}>
       <div className="px-4 pb-3">
-        {d.s === "loading" ? <Loading className="py-4" /> : d.s === "error" ? <Notice tone="destructive" role="alert">{d.e}</Notice>
+        {d.loading ? <Loading className="py-4" /> : d.error ? <Notice tone="destructive" role="alert">{d.error.message}</Notice>
           : <Disclosure defaultOpen={open} label={t("caps:steve.show", { count: tools.length })} data-steve-fold><div className="pt-1"><ToolList tools={tools} counts={counts} /></div></Disclosure>}
       </div>
     </IntegrationSettings>
@@ -77,7 +78,7 @@ export function CopyLine({ label, value, ...rest }: { label: string; value: stri
 export function OutsideConnect() {
   const t = useT()
   useStore()
-  const [d] = useList(() => capsApi.steve(), [])
+  const d = useHubQuery(["caps", "steve"], () => capsApi.steve(), { events: ["bot"], debounceMs: 300 })
   const [at, setAt] = useState(0)
   const [client, setClient] = useState<ClientKind>("generic")
   const [name, setName] = useState(() => t("caps:outside.tokenNameDefault"))
@@ -87,9 +88,9 @@ export function OutsideConnect() {
     setBusy(true)
     try { const r = await capsApi.token(name.trim() || t("caps:outside.tokenNameDefault")); setToken(r.token); toast(t("caps:outside.made", { name: r.item.name })) } catch (e) { toast(errText(e)) } finally { setBusy(false) }
   }
-  if (d.s === "loading") return <Section label={t("caps:outside.section")}><Loading className="py-8" /></Section>
-  if (d.s === "error") return <Section label={t("caps:outside.section")}><Notice tone="destructive" role="alert">{d.e}</Notice></Section>
-  const v: SteveServer = d.v
+  if (d.loading) return <Section label={t("caps:outside.section")}><Loading className="py-8" /></Section>
+  if (d.error || !d.data) return <Section label={t("caps:outside.section")}><Notice tone="destructive" role="alert">{d.error?.message ?? ""}</Notice></Section>
+  const v: SteveServer = d.data
   const ep = v.endpoints[Math.min(at, v.endpoints.length - 1)]
   const url = mcpUrl(ep.url, st.workspace?.id ?? null, st.workspaces.length > 1)
   const code = snippet(client, url, token, t("caps:outside.tokenPlaceholder"))

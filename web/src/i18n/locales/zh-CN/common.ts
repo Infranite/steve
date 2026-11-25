@@ -98,4 +98,9 @@ export default {
     copied: "已复制",
     optional: "可选",
   },
+  actor: {
+    kind: { person: "人", bot: "Bot", system: "系统", org: "组织", team: "团队" },
+    hover: "{{name}} · {{kind}}",
+    disambiguated: "{{name}}（{{extra}}）",
+  },
 }

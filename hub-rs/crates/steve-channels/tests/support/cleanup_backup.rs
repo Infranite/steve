@@ -1,33 +1,26 @@
-//! An injected fixture adapter with an explicit root, including a deterministic failure mode.
+//! A fixture receipt and a deterministic failure, at the cleanup port.
 use std::{path::PathBuf, sync::Arc};
+use steve_types::backup::SnapshotId;
 
 pub fn port(
-    database: PathBuf,
-    root: PathBuf,
+    _database: PathBuf,
+    _root: PathBuf,
     fail: bool,
 ) -> Arc<dyn steve_channels::PreDestructiveBackup> {
-    Arc::new(FixtureBackup {
-        database,
-        root,
-        fail,
-    })
+    Arc::new(FixtureBackup { fail })
 }
+
 struct FixtureBackup {
-    root: PathBuf,
-    database: PathBuf,
     fail: bool,
 }
+
 impl steve_channels::PreDestructiveBackup for FixtureBackup {
-    fn backup(&self, what: &str) -> steve_channels::ChannelResult<PathBuf> {
+    fn backup(&self) -> steve_channels::ChannelResult<SnapshotId> {
         if self.fail {
             return Err(steve_modules::ApiError::Internal(
                 "fixture backup failed".into(),
             ));
         }
-        Ok(steve_store::testkit::channels::destructive_backup(
-            &self.database,
-            &self.root,
-            what,
-        )?)
+        Ok("a".repeat(64).try_into().unwrap())
     }
 }

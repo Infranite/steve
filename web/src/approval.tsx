@@ -1,25 +1,22 @@
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { modReq } from "@/api"
+import { approvalApi } from "@/api/approval"
 import { Switch } from "@/components/affect/switch-clean"
 import { qc, scopeKey } from "@/data/sync"
 import type { ApprovalPolicy, ApprovalMode } from "@/gen"
 import { useT } from "@/i18n"
 import { toast, useHubEvents } from "@/store"
 
-type PolicyView = { policy: ApprovalPolicy; editable: boolean }
-type SessionMode = { status: "on" | "off" | "unsupported"; applied: string | null; desired: string | null; refused: string | null; target: string | null; native_id: string | null; unknown: boolean; released: boolean }
-
 export function ApprovalSwitch() {
   const t = useT()
   const key = ["detail", scopeKey(), "approval-policy"]
   const policy = useQuery({
     queryKey: key,
-    queryFn: ({ signal }) => modReq<PolicyView>("GET", "/approval-policy", undefined, signal),
+    queryFn: ({ signal }) => approvalApi.getPolicy(signal),
   }, qc)
   useHubEvents(["approval_policy"], () => void policy.refetch())
   const update = useMutation({
     mutationFn: ({ mode, revision }: Pick<ApprovalPolicy, "mode" | "revision">) =>
-      modReq<PolicyView>("PUT", "/approval-policy", { mode, revision }),
+      approvalApi.setPolicy(mode, revision),
     onSuccess: (value) => {
       qc.setQueryData(key, value)
       void qc.invalidateQueries({ queryKey: key })
@@ -41,7 +38,7 @@ export function SessionApproval({ id }: { id: string }) {
   const t = useT()
   const state = useQuery({
     queryKey: ["detail", scopeKey(), "approval-policy", id],
-    queryFn: ({ signal }) => modReq<SessionMode>("GET", `/approval-policy/sessions/${encodeURIComponent(id)}`, undefined, signal),
+    queryFn: ({ signal }) => approvalApi.sessionMode(id, signal),
   }, qc)
   useHubEvents(["approval_policy", "patch", "session"], () => void state.refetch(), 300, {
     filter: (e) => e.type !== "patch" || e.ops.some((op) => op.type === "session" && op.id === id),

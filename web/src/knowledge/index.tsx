@@ -1,8 +1,6 @@
-/* 知识 (knowledge.md §9): search, long-term memories, knowledge entries, notes and documents, sources, and
- * candidates waiting for you. The four kinds of record (ST-41): 事项记录 and 会话记录 are documents kept as
- * they are; 长期记忆 (preference, rule) and 知识条目 (fact, event) are what Steve distils from them, one tab each.
- * Every list is the Hub's; on a Hub without /api/kb the whole page is the "还没有接入" placeholder. The two memory
- * tabs are an affectUI Memory Panel (components/affect/memory-panel). */
+/* 知识: organized by the owner's world — 人 · 组织 · 项目 · 偏好与规则 · 资料, plus 待确认 (knowledge candidates
+ * only) and 整理 (deterministic knowledge steward). Search keeps knowledge hits and work-item/chat records strictly
+ * separated. Preferences & rules use affectUI's Memory Panel (components/affect/memory-panel). */
 import { useHubEvents } from "@/store"
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "cn"
@@ -20,22 +18,21 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Page, SectionLabel, Group, Panel, Row, Segmented, Chips, Empty, Blank, Meta, Tile, StatusDot, useScrollMore, go, DiscChevron, DISC_TRIGGER, SearchField } from "@/ui"
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
-import { kb, levelLabel, visLabel, memKind, LONG_TERM, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem, type MemProvider } from "@/api/knowledge"
+import { kb, levelLabel, visLabel, memKind, LONG_TERM, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem, type MemProvider, type RecordHit, type SearchScope } from "@/api/knowledge"
 import { LevelSel, META_SELECT, VisSel, errMsg } from "@/knowledge/fields"
 import { DocView, NoteView } from "@/knowledge/doc"
 import { SubjectsTab, SubjectView } from "@/knowledge/subjects"
 import { StewardTab } from "@/knowledge/steward"
-import { OriginLine, originText, parseSubject, savedLine } from "@/knowledge/origin"
+import { OriginLine, originText, parseSubject, savedLine, subjectHref } from "@/knowledge/origin"
 import { MemoryPanel, type Memory, type PanelText } from "@/components/affect/memory-panel"
 import { t as tt, useT } from "@/i18n"
 
-/* tab values are ids (also data-seg / data-kb-tab); the labels come from knowledge:tab.* */
-type Tab = "搜索" | "长期记忆" | "知识条目" | "subjects" | "笔记与文档" | "来源" | "待确认" | "steward"
-type RecordName = "长期记忆" | "知识条目"
-let tab: Tab = "长期记忆", query = "", tabHash = ""
+/* tab values are stable ASCII ids (data-seg / data-kb-tab); labels come from knowledge:tab.* */
+type Tab = "people" | "orgs" | "projects" | "rules" | "materials" | "pending" | "steward"
+let tab: Tab = "rules", query = "", tabHash = ""
 
-/** `#/knowledge`, `#/knowledge?mem=…`, `#/knowledge?tab=subjects|steward|pending`, `#/knowledge/doc/:id?seq=`,
- *  `#/knowledge/note/:id`, `#/knowledge/about/<type>:<id>` */
+/** `#/knowledge`, `#/knowledge?mem=…`, `#/knowledge?tab=people|orgs|projects|rules|materials|pending|steward`,
+ *  `#/knowledge/doc/:id?seq=`, `#/knowledge/note/:id`, `#/knowledge/about/<type>:<id>` */
 export function KnowledgeView({ sub, id }: { sub?: string; id?: string }) {
   const [docId] = (id ?? "").split("?")
   const subject = sub === "about" ? parseSubject(docId) : null
@@ -44,62 +41,82 @@ export function KnowledgeView({ sub, id }: { sub?: string; id?: string }) {
 
 const hashParam = (k: string) => new URLSearchParams(location.hash.split("?")[1] ?? "").get(k)
 
+const LINKED_TAB: Record<string, Tab> = {
+  people: "people",
+  orgs: "orgs",
+  projects: "projects",
+  rules: "rules",
+  materials: "materials",
+  pending: "pending",
+  steward: "steward",
+  subjects: "people",
+}
+
 const TAB_FADE: Record<string, string> = {
   end: "[mask-image:linear-gradient(to_right,#000_80%,transparent)]",
   start: "[mask-image:linear-gradient(to_left,#000_80%,transparent)]",
   "start end": "[mask-image:linear-gradient(to_right,transparent,#000_15%,#000_80%,transparent)]",
 }
+
 function KnowledgeHome() {
   const t = useT()
   const [, f] = useState(0), r = () => f((x) => x + 1)
   const focusMem = hashParam("mem")
-  if (focusMem && tab !== "长期记忆" && tab !== "知识条目") tab = "长期记忆"
-  /* 待处理's line “N 条记忆待确认” opens the batch page, a subject's back link the subjects (once per visit of that link) */
-  const linked = ({ pending: "待确认", subjects: "subjects", steward: "steward" } as const)[hashParam("tab") ?? ""] as Tab | undefined
-  if (linked && tabHash !== location.hash) { tab = linked; tabHash = location.hash }
+  if (focusMem && tab !== "rules") tab = "rules"
+  const linked = LINKED_TAB[hashParam("tab") ?? ""]
+  if (linked && tabHash !== location.hash) { tab = linked; query = ""; tabHash = location.hash }
   else if (!linked) tabHash = ""
+  const urlQ = hashParam("q")
+  if (urlQ && tabHash !== location.hash) { query = urlQ; tabHash = location.hash }
   const [pend, setPend] = useState(0)
   const loadPend = useCallback(() => { kb.candidates().then((xs) => setPend(xs.length), () => {}) }, [])
   useEffect(loadPend, [loadPend])
   useHubEvents(["mm", "kb"], loadPend)
-  const setTab = (x: Tab) => { tab = x; r() }
-  /* six tabs run past a phone's width: the cut edge fades, and the open tab scrolls into view */
+  const setTab = (x: Tab) => { tab = x; query = ""; r() }
   const [tabsRef, tabsMore] = useScrollMore<HTMLDivElement>("x")
   useEffect(() => { tabsRef.current?.querySelector<HTMLElement>(`[data-seg="${CSS.escape(tab)}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" }) }, [tab])
-  const opts = [["搜索", t("knowledge:tab.search")], ["长期记忆", t("knowledge:tab.mems")], ["知识条目", t("knowledge:tab.entries")], ["subjects", t("knowledge:tab.subjects")], ["笔记与文档", t("knowledge:tab.docs")], ["来源", t("knowledge:tab.sources")],
-    ["待确认", <span key="p" className="inline-flex items-center gap-1">{t("knowledge:tab.pending")}{pend > 0 && <span className="rounded-full bg-attention/14 px-1.5 type-label tabular-nums text-attention" data-pending-count>{pend}</span>}</span>, t("knowledge:tab.pending")],
-    ["steward", t("knowledge:tab.steward")]] as const
+  const opts = [
+    ["people", t("knowledge:tab.people")],
+    ["orgs", t("knowledge:tab.orgs")],
+    ["projects", t("knowledge:tab.projects")],
+    ["rules", t("knowledge:tab.rules")],
+    ["materials", t("knowledge:tab.materials")],
+    ["pending", <span key="p" className="inline-flex items-center gap-1">{t("knowledge:tab.pending")}{pend > 0 && <span className="rounded-full bg-attention/14 px-1.5 type-label tabular-nums text-attention" data-pending-count>{pend}</span>}</span>, t("knowledge:tab.pending")],
+    ["steward", t("knowledge:tab.steward")],
+  ] as const
+  const activeKey = query ? "search" : tab
   return (
     <Page title={t("knowledge:page.title")} sub={t("knowledge:page.sub")} max={760}>
       <div className="flex flex-col gap-5">
-        <SearchBox onQuery={(q) => { query = q; if (q && tab !== "搜索") tab = "搜索"; r() }} />
+        <SearchBox value={query} onQuery={(q) => { query = q; r() }} />
         <div ref={tabsRef} className={cn("-mx-1 overflow-x-auto px-1 pb-0.5 [scrollbar-width:none]", TAB_FADE[tabsMore ?? ""])} data-more={tabsMore}><Segmented value={tab} onChange={setTab} options={opts} /></div>
-        <div key={tab} className="anim-in" data-kb-tab={tab}>
-          {tab === "搜索" && <SearchTab q={query} />}
-          {(tab === "长期记忆" || tab === "知识条目") && <MemsTab key={tab} record={tab} focus={focusMem} onRecord={setTab} />}
-          {tab === "subjects" && <SubjectsTab />}
-          {tab === "笔记与文档" && <DocsTab />}
-          {tab === "来源" && <SourcesTab />}
-          {tab === "待确认" && <CandidatesTab onChange={setPend} />}
-          {tab === "steward" && <StewardTab />}
+        <div key={activeKey} className="anim-in" data-kb-tab={activeKey}>
+          {query ? <SearchTab q={query} />
+            : tab === "people" ? <SubjectsTab category="person" />
+            : tab === "orgs" ? <SubjectsTab category="org" />
+            : tab === "projects" ? <SubjectsTab category="project" />
+            : tab === "rules" ? <RulesTab focus={focusMem} />
+            : tab === "materials" ? <MaterialsTab />
+            : tab === "pending" ? <CandidatesTab onChange={setPend} />
+            : <StewardTab />}
         </div>
       </div>
     </Page>
   )
 }
 
-function SearchBox({ onQuery }: { onQuery: (q: string) => void }) {
+function SearchBox({ value, onQuery }: { value: string; onQuery: (q: string) => void }) {
   const t = useT()
-  const [v, setV] = useState(query), timer = useRef<number>(0)
+  const [v, setV] = useState(value), timer = useRef<number>(0)
+  useEffect(() => { setV(value) }, [value])
   const set = (x: string) => { setV(x); clearTimeout(timer.current); timer.current = window.setTimeout(() => onQuery(x.trim()), 250) }
   return (
     <SearchField size="lg" type="search" aria-label={t("knowledge:search.aria")} value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { clearTimeout(timer.current); onQuery(v.trim()) } }}
-      placeholder={t("knowledge:search.placeholder")} maxLength={200} clearable onClear={() => { clearTimeout(timer.current); onQuery("") }} data-kb-search />
+      placeholder={t("knowledge:search.placeholder")} maxLength={200} clearable onClear={() => { clearTimeout(timer.current); setV(""); onQuery("") }} data-kb-search />
   )
 }
 
-/* ───────── 搜索 ───────── */
-/** wraps each query term found in `text` in <mark>; done here, the Hub returns plain snippets */
+/* ───────── 搜索（知识与记录分离） ───────── */
 function Highlight({ text, q }: { text: string; q: string }) {
   const terms = q.split(/\s+/).filter(Boolean).map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
   if (!terms.length) return <>{text}</>
@@ -110,47 +127,65 @@ const LevelTag = ({ l }: { l: string }) => <span className="inline-flex shrink-0
 
 function SearchTab({ q }: { q: string }) {
   const t = useT()
-  const [res, setRes] = useState<{ q: string; hits: Hit[]; ms: number; down: boolean } | null>(null), [err, setErr] = useState("")
+  const [scope, setScope] = useState<SearchScope>("all")
+  const [res, setRes] = useState<{ q: string; scope: SearchScope; hits: Hit[]; records: RecordHit[]; ms: number; down: boolean } | null>(null)
+  const [err, setErr] = useState("")
   useEffect(() => {
     if (!q) { setRes(null); return }
     let on = true; setErr("")
-    kb.search(q).then((x) => on && setRes({ q, hits: x.hits, ms: x.took_ms, down: !!x.semantic_down }), (e) => on && setErr(errMsg(e)))
+    kb.search(q, 20, scope).then(
+      (x) => on && setRes({ q, scope, hits: x.hits ?? [], records: x.records ?? [], ms: x.took_ms, down: !!x.semantic_down }),
+      (e) => on && setErr(errMsg(e)),
+    )
     return () => { on = false }
-  }, [q])
+  }, [q, scope])
+  const scopeOpts: { k: SearchScope; l: string }[] = [
+    { k: "all", l: t("knowledge:search.scopeAll") },
+    { k: "knowledge", l: t("knowledge:search.scopeKnowledge") },
+    { k: "records", l: t("knowledge:search.scopeRecords") },
+  ]
+  const curLabel = scopeOpts.find((x) => x.k === scope)?.l ?? scopeOpts[0].l
   if (!q) return <Empty icon={<SearchIcon />} title={t("knowledge:search.idleTitle")} sub={t("knowledge:search.idleSub")} />
   if (err) return <Empty title={t("knowledge:search.failed")} sub={err} />
-  if (!res || res.q !== q) return <div className="flex justify-center py-12" role="status" aria-label={t("knowledge:search.searching")}><Spinner className="size-5 text-muted-foreground" /></div>
-  /* the meaning search was down: the hits are from keywords only, and the page says so */
-  const down = res.down && <p className="pb-2 type-footnote text-muted-foreground" role="note" data-kb-keywords-only>{t("knowledge:search.keywordsOnly")}</p>
-  if (!res.hits.length) return <>{down}<Empty title={t("knowledge:search.noneTitle")} sub={t("knowledge:search.noneSub", { q })} /></>
+  if (!res || res.q !== q || res.scope !== scope) return <div className="flex justify-center py-12" role="status" aria-label={t("knowledge:search.searching")}><Spinner className="size-5 text-muted-foreground" /></div>
+  const down = res.down && scope !== "records" && <p className="pb-2 type-footnote text-muted-foreground" role="note" data-kb-keywords-only>{t("knowledge:search.keywordsOnly")}</p>
+  const total = res.hits.length + res.records.length
   return (
-    <section aria-label={t("knowledge:search.results")}>{down}<SectionLabel>{t("knowledge:search.count", { count: res.hits.length, ms: res.ms })}</SectionLabel>
-      <Group>{res.hits.map((h) => (
-        <Row key={h.type + h.id + h.seq} onClick={() => go(h.href)} data-hit={h.id}
-          title={<span className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 truncate"><Highlight text={h.title} q={q} />{h.heading ? <span className="text-muted-foreground"> · <Highlight text={h.heading} q={q} /></span> : null}</span></span>}
-          sub={<span className="flex flex-col gap-1"><span className="line-clamp-3 type-callout text-foreground/80"><Highlight text={h.text} q={q} /></span><span className="truncate">{h.label}</span></span>}>
-          <LevelTag l={h.level} />
-        </Row>))}</Group>
-    </section>
+    <div className="flex flex-col gap-5" aria-label={t("knowledge:search.results")}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Chips value={curLabel} onChange={(label) => { const found = scopeOpts.find((x) => x.l === label); if (found) setScope(found.k) }} options={scopeOpts.map((x) => x.l)} />
+        {total > 0 && <span className="type-footnote text-muted-foreground">{t("knowledge:search.count", { count: total, ms: res.ms })}</span>}
+      </div>
+      {down}
+      {total === 0 ? <Empty title={t("knowledge:search.noneTitle")} sub={t("knowledge:search.noneSub", { q })} /> : <>
+        {res.hits.length > 0 && <section data-search-knowledge>
+          <SectionLabel>{t("knowledge:search.knowledgeSection", { count: res.hits.length })}</SectionLabel>
+          <Group>{res.hits.map((h) => (
+            <Row key={h.type + h.id + h.seq} onClick={() => go(h.href)} data-hit={h.id}
+              title={<span className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 truncate"><Highlight text={h.title} q={q} />{h.heading ? <span className="text-muted-foreground"> · <Highlight text={h.heading} q={q} /></span> : null}</span></span>}
+              sub={<span className="flex flex-col gap-1"><span className="line-clamp-3 type-callout text-foreground/80"><Highlight text={h.text} q={q} /></span><span className="truncate">{h.label}</span></span>}>
+              <LevelTag l={h.level} />
+            </Row>))}</Group>
+        </section>}
+        {res.records.length > 0 && <section data-search-records>
+          <SectionLabel>{t("knowledge:search.recordsSection", { count: res.records.length })}</SectionLabel>
+          <Group>{res.records.map((rec) => (
+            <Row key={rec.record_kind + rec.id} onClick={() => go(rec.href)} data-record={rec.id} data-record-kind={rec.record_kind}
+              icon={<Tile I={rec.record_kind === "item" ? FileTextIcon : MessagesSquareIcon} />}
+              title={<span className="truncate"><Highlight text={rec.title} q={q} /></span>}
+              sub={<span className="flex flex-col gap-1"><span className="line-clamp-3 type-callout text-foreground/80"><Highlight text={rec.text} q={q} /></span><Meta inline><span>{t(rec.record_kind === "item" ? "knowledge:search.recordItem" : "knowledge:search.recordChat")}</span><span>{tm(rec.updated)}</span></Meta></span>} />
+          ))}</Group>
+        </section>}
+      </>}
+    </div>
   )
 }
 
-/* ───────── 长期记忆 / 知识条目 ───────── */
-/* the kind a typed entry gets, and where its texts live: knowledge:record.<key>.* */
-const RECORD: Record<RecordName, { kind: string; key: "mem" | "entry" }> = {
-  长期记忆: { kind: "rule", key: "mem" },
-  知识条目: { kind: "fact", key: "entry" },
-}
-/** the tab a memory of `kind` lives on (an id) */
-const recordTab = (kind: string): RecordName => (LONG_TERM.includes(kind) ? "长期记忆" : "知识条目")
-/** the kinds each record keeps, in the order the panel groups them; the first is what a new one becomes */
-const KINDS: Record<RecordName, string[]> = { 长期记忆: ["rule", "preference"], 知识条目: ["fact", "event", "summary"] }
-/** how long a forgotten memory can still come back before the Hub deletes it */
+/* ───────── 偏好与规则 ───────── */
+const RULE_KINDS = ["rule", "preference"]
 const UNDO_MS = 6000
 
-/** every word the panel shows in Steve (no memory switch, no search of its own: the page has one) */
 type Unshown = "memoryOff" | "off" | "useMemory" | "offNote" | "search" | "closeSearch" | "noneFor"
-/** the rest are per record: none, newMemory, newPlaceholder */
 export const panelText = (): Omit<PanelText, Unshown | "none" | "newMemory" | "newPlaceholder"> => ({
   paused: tt("knowledge:mems.stale"), cancel: tt("common:action.cancel"), save: tt("common:action.save"), edit: tt("knowledge:panel.edit"),
   pause: tt("knowledge:panel.pause"), resume: tt("knowledge:panel.resume"), forget: tt("knowledge:panel.forget"), undo: tt("knowledge:panel.undo"),
@@ -163,16 +198,11 @@ export const panelText = (): Omit<PanelText, Unshown | "none" | "newMemory" | "n
   noneHere: tt("knowledge:panel.noneHere"), newCategory: tt("knowledge:panel.newCategory"), general: tt("knowledge:mems.general"),
 })
 
-/** 长期记忆 and 知识条目: an affectUI Memory Panel over the Hub's memories — grouped by kind, edited in place, marked
- *  stale (kept, no longer used) or forgotten with a few seconds to undo before the Hub deletes it; each keeps its
- *  disclosure level and visibility pickers, and candidates say they still wait for you in 待确认. */
-function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: string | null; onRecord: (r: RecordName) => void }) {
+/** 偏好与规则: affectUI Memory Panel over the owner's stable rules and preferences. */
+function RulesTab({ focus }: { focus: string | null }) {
   const t = useT()
-  const R = RECORD[record], k = R.key
   const [xs, setXs] = useState<Mem[] | null>(null), [err, setErr] = useState("")
-  /* forgotten ones: deleted on the Hub once Undo has passed (or when the page goes); until then a reload leaves them out */
   const gone = useRef(new Map<string, { m: Mem; at: number; timer: number }>())
-  /* deleted early because the app was hidden while Undo still showed: Undo writes them back */
   const left = useRef(new Map<string, Mem>())
   const load = useCallback(() => kb.mems().then((a) => setXs(a.filter((m) => !gone.current.has(m.id))), (e) => setErr(errMsg(e))), [])
   useEffect(() => { void load() }, [load])
@@ -183,18 +213,21 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
     kb.deleteMem(id).catch((e) => { toast(errMsg(e)); void load() })
   }, [load])
   useEffect(() => () => { for (const id of [...gone.current.keys()]) drop(id) }, [drop])
-  /* the page going away (reload, tab closed, app hidden) fires neither the timer nor unmount: send the deletes now */
   useEffect(() => {
     const flush = () => { for (const [id, g] of gone.current) { clearTimeout(g.timer); kb.deleteMemOnLeave(id); left.current.set(id, g.m) } gone.current.clear() }
     const hidden = () => { if (document.visibilityState === "hidden") flush() }
     addEventListener("pagehide", flush); document.addEventListener("visibilitychange", hidden)
     return () => { removeEventListener("pagehide", flush); document.removeEventListener("visibilitychange", hidden) }
   }, [])
-  /* a linked memory opens on the tab it belongs to */
+  /* If a linked `?mem=` is a subject-bound fact/event, jump to its subject page. */
   const focused = focus ? xs?.find((m) => m.id === focus) : undefined
-  useEffect(() => { if (focused && recordTab(focused.kind) !== record) onRecord(recordTab(focused.kind)) }, [focused, record, onRecord])
+  useEffect(() => {
+    if (focused && !LONG_TERM.includes(focused.kind) && focused.about.length > 0) {
+      go(subjectHref(focused.about[0]))
+    }
+  }, [focused])
   useEffect(() => { if (focus && xs) document.querySelector(`[data-mem="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "center" }) }, [focus, xs])
-  const kinds = KINDS[record], kindOf = (label: string) => kinds.find((c) => memKind(c) === label) ?? R.kind
+  const kindOf = (label: string) => RULE_KINDS.find((c) => memKind(c) === label) ?? "rule"
   const patch = async (id: string, p: Parameters<typeof kb.patchMem>[1]) => {
     setXs((a) => a?.map((x) => (x.id === id ? { ...x, ...p } : x)) ?? null)
     try { const n = await kb.patchMem(id, p); setXs((a) => a?.map((x) => (x.id === id ? { ...x, ...n } : x)) ?? null) } catch (e) { toast(errMsg(e)); void load() }
@@ -214,24 +247,22 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
     clearTimeout(g.timer); gone.current.delete(id)
     setXs((a) => (a ? [...a.slice(0, g.at), g.m, ...a.slice(g.at)] : a))
   }
-  const mine = (xs ?? []).filter((m) => recordTab(m.kind) === record)
+  const mine = (xs ?? []).filter((m) => LONG_TERM.includes(m.kind))
   const byId = new Map(mine.map((m) => [m.id, m]))
   const memories: Memory[] = mine.map((m) => ({
     id: m.id, text: m.text, category: memKind(m.kind), paused: m.status === "stale",
-    /* what it is about and where it came from, each a link (the subject's page, the conversation, item or session) */
     source: originText(m), sourceNode: <span data-mem-origin><OriginLine m={m} /></span>,
-    /* labelled: a source like "11-12 的对话" carries its own date; then how often it was used */
     date: savedLine(m) || undefined,
     tag: m.status === "candidate" ? t("knowledge:mems.pending") : undefined, canPause: m.status !== "candidate",
   }))
   return (
     <div className="flex flex-col gap-4">
-      {err ? <Empty title={t(`knowledge:record.${k}.failed`)} sub={err} /> : !xs ? <Loading /> : !mine.length && !gone.current.size ? <>
-        <Empty title={t(`knowledge:record.${k}.none`)} sub={t(`knowledge:record.${k}.empty`)} />
-        <AddFirst record={record} onAdd={(text) => add(text, memKind(R.kind))} />
+      {err ? <Empty title={t("knowledge:record.mem.failed")} sub={err} /> : !xs ? <Loading /> : !mine.length && !gone.current.size ? <>
+        <Empty title={t("knowledge:record.mem.none")} sub={t("knowledge:record.mem.empty")} />
+        <AddFirst onAdd={(text) => add(text, memKind("rule"))} />
       </> :
-        <MemoryPanel className="[--ui-mpc-width:100%]" title={t(`knowledge:tab.${k === "mem" ? "mems" : "entries"}`)} showTitle={false} searchable={false} memories={memories} categories={kinds.map(memKind)}
-          maxHeight={0} undoFor={UNDO_MS} showSwitch={false} focus={focus} text={{ ...panelText(), none: t(`knowledge:record.${k}.none`), newMemory: t(`knowledge:record.${k}.addAria`), newPlaceholder: t(`knowledge:record.${k}.hint`) } satisfies Omit<PanelText, Unshown>}
+        <MemoryPanel className="[--ui-mpc-width:100%]" title={t("knowledge:tab.rules")} showTitle={false} searchable={false} memories={memories} categories={RULE_KINDS.map(memKind)}
+          maxHeight={0} undoFor={UNDO_MS} showSwitch={false} focus={focus} text={{ ...panelText(), none: t("knowledge:record.mem.none"), newMemory: t("knowledge:record.mem.addAria"), newPlaceholder: t("knowledge:record.mem.hint") } satisfies Omit<PanelText, Unshown>}
           addedSource={t("knowledge:mems.youWrote")} onChange={() => {}}
           onAdd={(m) => void add(m.text, m.category)} onEdit={(id, text) => void patch(id, { text })}
           onPause={(id, paused) => void patch(id, { status: paused ? "stale" : "confirmed" })} onForget={forget} onRestore={(m) => restore(m.id)}
@@ -239,53 +270,106 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
             <LevelSel v={m.level} on={(l) => l && void patch(m.id, { level: l })} testId={"mem-level-" + m.id} className={META_SELECT} />
             <VisSel v={m.visibility} on={(v) => void patch(m.id, { visibility: v })} testId={"mem-vis-" + m.id} className={META_SELECT} />
           </> }} />}
-      <div className="type-footnote text-muted-foreground">{t("knowledge:mems.footer", { note: t(`knowledge:record.${k}.note`) })}</div>
+      <div className="type-footnote text-muted-foreground">{t("knowledge:mems.footer", { note: t("knowledge:record.mem.note") })}</div>
     </div>
   )
 }
-/** an empty record: the one line to write its first entry */
-function AddFirst({ record, onAdd }: { record: RecordName; onAdd: (text: string) => Promise<void> }) {
-  const t = useT(), k = RECORD[record].key
+
+function AddFirst({ onAdd }: { onAdd: (text: string) => Promise<void> }) {
+  const t = useT()
   const [v, setV] = useState(""), [busy, setBusy] = useState(false)
-  const go = async () => { const text = v.trim(); if (!text || busy) return; setBusy(true); try { await onAdd(text); setV("") } finally { setBusy(false) } }
+  const submit = async () => { const text = v.trim(); if (!text || busy) return; setBusy(true); try { await onAdd(text); setV("") } finally { setBusy(false) } }
   return (
     <div className="flex items-center gap-2 rounded-xl bg-card py-1.5 pl-3.5 pr-1.5 shadow-[var(--lift)] transition-[box-shadow] duration-180 focus-within:shadow-[var(--lift-hover)] focus-within:ring-[3px] focus-within:ring-ring/25">
-      <input aria-label={t(`knowledge:record.${k}.addAria`)} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void go() }} maxLength={2000}
-        placeholder={t(`knowledge:record.${k}.hint`)} className="h-8 min-w-0 flex-1 bg-transparent type-body outline-none placeholder:text-tertiary" data-mem-input />
-      <Button size="sm" disabled={!v.trim() || busy} onClick={() => void go()} data-mem-add>{busy ? <Spinner className="size-3.5" /> : <PlusIcon />}{t("knowledge:mems.add")}</Button>
+      <input aria-label={t("knowledge:record.mem.addAria")} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void submit() }} maxLength={2000}
+        placeholder={t("knowledge:record.mem.hint")} className="h-8 min-w-0 flex-1 bg-transparent type-body outline-none placeholder:text-tertiary" data-mem-input />
+      <Button size="sm" disabled={!v.trim() || busy} onClick={() => void submit()} data-mem-add>{busy ? <Spinner className="size-3.5" /> : <PlusIcon />}{t("knowledge:mems.add")}</Button>
     </div>
   )
 }
-/** on a phone the row's controls go on their own line under the text */
+
 const STACK = "max-sm:[&>[data-slot=item-actions]]:w-full max-sm:[&>[data-slot=item-actions]]:justify-start max-sm:[&>[data-slot=item-actions]]:-ml-2"
 const Loading = () => { const t = useT(); return <div className="flex justify-center py-12" role="status" aria-label={t("knowledge:page.loading")}><Spinner className="size-5 text-muted-foreground" /></div> }
 
-/* ───────── 笔记与文档 ───────── */
+/* ───────── 资料（笔记、文件、文件夹与来源） ───────── */
 export const docHref = (d: { id: string; source: { kind: string } }) => (d.source.kind === "notes" ? "#/knowledge/note/" : "#/knowledge/doc/") + d.id
-function DocsTab() {
+
+const statsLine = (s: KbSource) => {
+  const x = s.stats ?? {}, parts = [tt("knowledge:sources.docs", { count: x.docs ?? 0 }), tt("knowledge:sources.chunks", { count: x.chunks ?? 0 })]
+  if (x.skipped) parts.push(tt("knowledge:sources.skipped", { count: x.skipped }))
+  if (x.kept) parts.push(tt("knowledge:sources.kept", { count: x.kept })); else if (x.incomplete?.length) parts.push(tt("knowledge:sources.incomplete"))
+  if (s.status === "syncing") parts.push(tt("knowledge:sources.syncing")); else if (s.last_sync) parts.push(tt("knowledge:sources.lastSync", { time: tm(s.last_sync) })); else if (!s.builtin) parts.push(tt("knowledge:sources.neverSynced")); else parts.push(tt("knowledge:sources.live"))
+  return parts.join(" · ")
+}
+const sourceState = (s: KbSource): [string, string] => (s.paused ? ["idle", tt("knowledge:sources.state.paused")] : s.status === "error" ? ["fail", tt("knowledge:sources.state.error")] : s.status === "syncing" ? ["run", tt("knowledge:sources.state.syncing")] : ["done", tt("knowledge:sources.state.ok")])
+
+function MaterialsTab() {
   const t = useT()
-  /* src "" is every source; the chips show source names, with the "all" label first */
-  const [xs, setXs] = useState<DocBrief[] | null>(null), [err, setErr] = useState(""), [src, setSrc] = useState(""), [newNote, setNewNote] = useState(false)
-  const loadDocs = useCallback(() => kb.docs().then(setXs, (e) => setErr(errMsg(e))), [])
-  useEffect(() => { void loadDocs() }, [loadDocs])
-  useHubEvents(["kb"], () => void loadDocs())
+  const [docs, setDocs] = useState<DocBrief[] | null>(null), [docErr, setDocErr] = useState(""), [src, setSrc] = useState("")
+  const [sources, setSources] = useState<KbSource[] | null>(null), [srcErr, setSrcErr] = useState("")
+  const [prov, setProv] = useState<{ memory: MemProvider[]; store: string } | null>(null)
+  const [newNote, setNewNote] = useState(false), [folder, setFolder] = useState(false)
+  const loadDocs = useCallback(() => kb.docs().then(setDocs, (e) => setDocErr(errMsg(e))), [])
+  const loadSources = useCallback(() => kb.sources().then(setSources, (e) => setSrcErr(errMsg(e))), [])
+  const loadProv = useCallback(() => kb.providers().then(setProv, () => setProv(null)), [])
+  useEffect(() => { void loadDocs(); void loadSources(); void loadProv() }, [loadDocs, loadSources, loadProv])
+  useHubEvents(["kb"], () => { void loadDocs(); void loadSources() })
+  useHubEvents(["mm"], () => void loadProv())
+  const syncing = sources?.some((s) => s.status === "syncing")
+  useEffect(() => { if (!syncing) return; const iv = setInterval(() => { void loadSources(); void loadDocs() }, 2000); return () => clearInterval(iv) }, [syncing, loadSources, loadDocs])
+  const patch = async (s: KbSource, p: Parameters<typeof kb.patchSource>[1], msg?: string) => { try { const n = await kb.patchSource(s.id, p); setSources((a) => a?.map((x) => (x.id === s.id ? n : x)) ?? null); if (msg) toast(msg) } catch (e) { toast(errMsg(e)) } }
+  const sync = async (s: KbSource) => { try { await kb.sync(s.id); toast(t("knowledge:sources.syncStarted")); setTimeout(() => void loadSources(), 300) } catch (e) { toast(errMsg(e)) } }
+  const remove = async (s: KbSource) => { try { await kb.deleteSource(s.id); toast(t("knowledge:sources.removed")); void loadSources(); void loadDocs() } catch (e) { toast(errMsg(e)) } }
+
   const all = t("knowledge:all")
-  const names = [all, ...new Set((xs ?? []).map((d) => d.source.name))]
-  const shown = (xs ?? []).filter((d) => !src || d.source.name === src)
+  const names = [all, ...new Set((docs ?? []).map((d) => d.source.name))]
+  const shown = (docs ?? []).filter((d) => !src || d.source.name === src)
+
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        {names.length > 2 ? <Chips value={src && names.includes(src) ? src : all} onChange={(x) => setSrc(x === all ? "" : x)} options={names} /> : <span />}
-        <Button size="sm" onClick={() => setNewNote(true)} data-new-note><FilePlusIcon />{t("knowledge:docs.newNote")}</Button>
-      </div>
-      {err ? <Empty title={t("knowledge:docs.failed")} sub={err} /> : !xs ? <Loading /> : !shown.length ? <Empty title={t("knowledge:docs.noneTitle")} sub={t("knowledge:docs.noneSub")} /> :
-        <Group>{shown.map((d) => (
-          <Row key={d.id} onClick={() => go(docHref(d))} data-doc={d.id}
-            title={<span className="truncate">{d.title}</span>}
-            sub={<span className="flex flex-wrap gap-x-1.5"><span>{d.source.name}</span>{d.source.kind !== "notes" && d.ref && <span className="truncate">· {d.ref}</span>}<span>· {visLabel(d.visibility)}</span><span>· {tm(d.updated)}</span>{d.status !== "active" && <span className="text-attention">· {d.status === "error" ? t("knowledge:docs.error") : d.status}</span>}</span>}>
-            <LevelTag l={d.level} />
-          </Row>))}</Group>}
+    <div className="flex flex-col gap-6">
+      <section data-materials-docs>
+        <SectionLabel right={<span className="flex flex-wrap justify-end gap-2">
+          <AddFiles onDone={() => { void loadSources(); void loadDocs() }} />
+          <Button size="sm" variant="outline" onClick={() => setFolder(true)} data-add-folder><FolderPlusIcon />{t("knowledge:sources.addFolder")}</Button>
+          <Button size="sm" onClick={() => setNewNote(true)} data-new-note><FilePlusIcon />{t("knowledge:docs.newNote")}</Button>
+        </span>}>{t("knowledge:tab.docs")}</SectionLabel>
+        {names.length > 2 && <div className="mb-3"><Chips value={src && names.includes(src) ? src : all} onChange={(x) => setSrc(x === all ? "" : x)} options={names} /></div>}
+        {docErr ? <Empty title={t("knowledge:docs.failed")} sub={docErr} /> : !docs ? <Loading /> : !shown.length ? <Empty title={t("knowledge:docs.noneTitle")} sub={t("knowledge:docs.noneSub")} /> :
+          <Group>{shown.map((d) => (
+            <Row key={d.id} onClick={() => go(docHref(d))} data-doc={d.id}
+              title={<span className="truncate">{d.title}</span>}
+              sub={<span className="flex flex-wrap gap-x-1.5"><span>{d.source.name}</span>{d.source.kind !== "notes" && d.ref && <span className="truncate">· {d.ref}</span>}<span>· {visLabel(d.visibility)}</span><span>· {tm(d.updated)}</span>{d.status !== "active" && <span className="text-attention">· {d.status === "error" ? t("knowledge:docs.error") : d.status}</span>}</span>}>
+              <LevelTag l={d.level} />
+            </Row>))}</Group>}
+      </section>
+
+      <section data-materials-sources>
+        <SectionLabel>{t("knowledge:sources.docsTitle")}</SectionLabel>
+        {srcErr ? <Empty title={t("knowledge:sources.failed")} sub={srcErr} /> : !sources ? <Loading /> :
+          <Panel>{sources.map((s) => { const [dot, state] = sourceState(s); return (
+            <Row key={s.id} data-source={s.id} data-source-kind={s.kind} data-source-state={s.paused ? "paused" : s.status} className={cn(STACK, s.paused && "opacity-70")}
+              title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{s.name}<span className="type-footnote text-muted-foreground">{SOURCE_KIND[s.kind] ?? s.kind}</span></span>}
+              sub={<span className="flex flex-col gap-0.5"><span className="inline-flex flex-wrap items-center gap-x-1.5"><span className="inline-flex items-center gap-1" data-source-status><StatusDot s={dot} />{state}</span><span aria-hidden>·</span><span data-source-stats>{statsLine(s)}</span></span>{s.path && <span className="truncate font-mono">{s.path.replace(/^\/Users\/[^/]+/, "~")}</span>}{s.error && <span className="break-words text-destructive" data-source-error>{s.error}</span>}</span>}>
+              <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
+                <LevelSel v={s.level} on={(l) => l && void patch(s, { level: l }, t("knowledge:sources.levelChanged"))} testId={"src-level-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
+                <VisSel v={s.visibility} on={(x) => void patch(s, { visibility: x })} testId={"src-vis-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
+                <Switch checked={!s.paused} onCheckedChange={(on) => void patch(s, { paused: !on }, on ? t("knowledge:sources.resumed") : t("knowledge:sources.paused"))} aria-label={s.paused ? t("knowledge:sources.resumeAria", { name: s.name }) : t("knowledge:sources.pauseAria", { name: s.name })} className="ml-1" data-source-on />
+                {s.kind === "folder" && <DropdownMenu>
+                  <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("knowledge:sources.moreAria", { name: s.name })} className="text-muted-foreground" data-source-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="min-w-36">
+                    <DropdownMenuItem disabled={s.status === "syncing" || s.paused} onClick={() => void sync(s)} data-source-sync><RefreshCwIcon />{t("knowledge:sources.syncNow")}</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem variant="destructive" onClick={() => void remove(s)} data-source-del><TrashIcon />{t("knowledge:sources.remove")}</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>}
+              </span>
+            </Row>) })}</Panel>}
+        <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:sources.footer")}</div>
+      </section>
+
+      {prov && <MemProviders prov={prov} />}
       <NewNoteDialog open={newNote} onClose={() => setNewNote(false)} />
+      <FolderDialog open={folder} onClose={() => setFolder(false)} onDone={() => { void loadSources(); void loadDocs() }} />
     </div>
   )
 }
@@ -313,66 +397,6 @@ function NewNoteDialog({ open, onClose }: { open: boolean; onClose: () => void }
   )
 }
 
-/* ───────── 来源 ───────── */
-const statsLine = (s: KbSource) => {
-  const x = s.stats ?? {}, parts = [tt("knowledge:sources.docs", { count: x.docs ?? 0 }), tt("knowledge:sources.chunks", { count: x.chunks ?? 0 })]
-  if (x.skipped) parts.push(tt("knowledge:sources.skipped", { count: x.skipped }))
-  /* a scan that could not see everything deletes nothing */
-  if (x.kept) parts.push(tt("knowledge:sources.kept", { count: x.kept })); else if (x.incomplete?.length) parts.push(tt("knowledge:sources.incomplete"))
-  /* built-in sources follow their objects as they change; only folders are scanned */
-  if (s.status === "syncing") parts.push(tt("knowledge:sources.syncing")); else if (s.last_sync) parts.push(tt("knowledge:sources.lastSync", { time: tm(s.last_sync) })); else if (!s.builtin) parts.push(tt("knowledge:sources.neverSynced")); else parts.push(tt("knowledge:sources.live"))
-  return parts.join(" · ")
-}
-/** a source's state in words, with its dot: 正常, 同步中, 出错, 已暂停 */
-const sourceState = (s: KbSource): [string, string] => (s.paused ? ["idle", tt("knowledge:sources.state.paused")] : s.status === "error" ? ["fail", tt("knowledge:sources.state.error")] : s.status === "syncing" ? ["run", tt("knowledge:sources.state.syncing")] : ["done", tt("knowledge:sources.state.ok")])
-function SourcesTab() {
-  const t = useT()
-  const [xs, setXs] = useState<KbSource[] | null>(null), [err, setErr] = useState(""), [folder, setFolder] = useState(false)
-  const [prov, setProv] = useState<{ memory: MemProvider[]; store: string } | null>(null)
-  const load = useCallback(() => kb.sources().then(setXs, (e) => setErr(errMsg(e))), [])
-  const loadProv = useCallback(() => kb.providers().then(setProv, () => setProv(null)), [])
-  useEffect(() => { void load(); void loadProv() }, [load, loadProv])
-  useHubEvents(["kb"], () => void load())
-  useHubEvents(["mm"], () => void loadProv())
-  /* a scan runs in the background: poll while one is going */
-  const syncing = xs?.some((s) => s.status === "syncing")
-  useEffect(() => { if (!syncing) return; const iv = setInterval(() => void load(), 2000); return () => clearInterval(iv) }, [syncing, load])
-  const patch = async (s: KbSource, p: Parameters<typeof kb.patchSource>[1], msg?: string) => { try { const n = await kb.patchSource(s.id, p); setXs((a) => a?.map((x) => (x.id === s.id ? n : x)) ?? null); if (msg) toast(msg) } catch (e) { toast(errMsg(e)) } }
-  const sync = async (s: KbSource) => { try { await kb.sync(s.id); toast(t("knowledge:sources.syncStarted")); setTimeout(() => void load(), 300) } catch (e) { toast(errMsg(e)) } }
-  const remove = async (s: KbSource) => { try { await kb.deleteSource(s.id); toast(t("knowledge:sources.removed")); void load() } catch (e) { toast(errMsg(e)) } }
-  return (
-    <div className="flex flex-col gap-6">
-      <section>
-        <SectionLabel right={<span className="flex flex-wrap justify-end gap-2"><AddFiles onDone={() => void load()} /><Button size="sm" onClick={() => setFolder(true)} data-add-folder><FolderPlusIcon />{t("knowledge:sources.addFolder")}</Button></span>}>{t("knowledge:sources.docsTitle")}</SectionLabel>
-        {err ? <Empty title={t("knowledge:sources.failed")} sub={err} /> : !xs ? <Loading /> :
-          <Panel>{xs.map((s) => { const [dot, state] = sourceState(s); return (
-            <Row key={s.id} data-source={s.id} data-source-kind={s.kind} data-source-state={s.paused ? "paused" : s.status} className={cn(STACK, s.paused && "opacity-70")}
-              title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{s.name}<span className="type-footnote text-muted-foreground">{SOURCE_KIND[s.kind] ?? s.kind}</span></span>}
-              sub={<span className="flex flex-col gap-0.5"><span className="inline-flex flex-wrap items-center gap-x-1.5"><span className="inline-flex items-center gap-1" data-source-status><StatusDot s={dot} />{state}</span><span aria-hidden>·</span><span data-source-stats>{statsLine(s)}</span></span>{s.path && <span className="truncate font-mono">{s.path.replace(/^\/Users\/[^/]+/, "~")}</span>}{s.error && <span className="break-words text-destructive" data-source-error>{s.error}</span>}</span>}>
-              <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
-                <LevelSel v={s.level} on={(l) => l && void patch(s, { level: l }, t("knowledge:sources.levelChanged"))} testId={"src-level-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
-                <VisSel v={s.visibility} on={(x) => void patch(s, { visibility: x })} testId={"src-vis-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
-                <Switch checked={!s.paused} onCheckedChange={(on) => void patch(s, { paused: !on }, on ? t("knowledge:sources.resumed") : t("knowledge:sources.paused"))} aria-label={s.paused ? t("knowledge:sources.resumeAria", { name: s.name }) : t("knowledge:sources.pauseAria", { name: s.name })} className="ml-1" data-source-on />
-                {s.kind === "folder" && <DropdownMenu>
-                  <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("knowledge:sources.moreAria", { name: s.name })} className="text-muted-foreground" data-source-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="min-w-36">
-                    <DropdownMenuItem disabled={s.status === "syncing" || s.paused} onClick={() => void sync(s)} data-source-sync><RefreshCwIcon />{t("knowledge:sources.syncNow")}</DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive" onClick={() => void remove(s)} data-source-del><TrashIcon />{t("knowledge:sources.remove")}</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>}
-              </span>
-            </Row>) })}</Panel>}
-        <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:sources.footer")}</div>
-      </section>
-      {prov && <MemProviders prov={prov} />}
-      <FolderDialog open={folder} onClose={() => setFolder(false)} onDone={() => void load()} />
-    </div>
-  )
-}
-
-/** who writes the memories: you, the conversation, items, agents, Bots, plugins — with how many each wrote and how
- *  many still wait for you */
 const PROVIDER_ICON: Record<string, typeof UserIcon> = { you: UserIcon, conversation: MessagesSquareIcon, item: FileTextIcon, agent: BotIcon, mail: MailIcon, space: UsersIcon, event: ZapIcon, plugin: PuzzleIcon }
 const providerName = (p: MemProvider) => {
   const k = ["you", "conversation", "item", "agent", "mail", "space", "event", "plugin"].includes(p.kind) ? p.kind : "other"
@@ -395,7 +419,6 @@ function MemProviders({ prov }: { prov: { memory: MemProvider[]; store: string }
   )
 }
 
-/** "添加文件": the composer's upload path, then each uploaded file joins the knowledge base */
 function AddFiles({ onDone }: { onDone: () => void }) {
   const t = useT()
   const up = useUploads(), input = useRef<HTMLInputElement>(null), added = useRef(new Set<string>())
@@ -449,7 +472,7 @@ function FolderDialog({ open, onClose, onDone }: { open: boolean; onClose: () =>
   )
 }
 
-/* ───────── 待确认 ───────── */
+/* ───────── 待确认（仅知识候选） ───────── */
 function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
   const t = useT()
   const [xs, setXs] = useState<Candidate[] | null>(null), [err, setErr] = useState(""), [busy, setBusy] = useState(false)
@@ -464,7 +487,6 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
   if (err) return <Empty title={t("knowledge:cand.failed")} sub={err} />
   if (!xs) return <Loading />
   if (!xs.length) return <><Empty title={t("knowledge:cand.noneTitle")} sub={t("knowledge:cand.noneSub")} /><ExpiredCandidates onRestored={load} /></>
-  /* the batch call takes at most 50 ids */
   const ids = xs.slice(0, 50).map((c) => c.mem.id)
   return (
     <section>
@@ -485,7 +507,6 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
   )
 }
 
-/** candidates that expired unanswered, folded away; one click puts one back */
 function ExpiredCandidates({ onRestored }: { onRestored: () => void }) {
   const t = useT()
   const [xs, setXs] = useState<ExpiredCandidate[]>([]), [open, setOpen] = useState(false), [busy, setBusy] = useState(false)
@@ -509,4 +530,3 @@ function ExpiredCandidates({ onRestored }: { onRestored: () => void }) {
     </Collapsible>
   )
 }
-

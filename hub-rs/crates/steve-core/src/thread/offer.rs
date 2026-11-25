@@ -1,6 +1,5 @@
-//! Offers and the items the conversation makes: an answer may end with “要我改吗？
-//! → 做成事项：<标题>”; taking it (button, or “好，改吧”) makes the item with the conversation as context.
-//! Not a decision: YOLO never takes one.
+//! Offers and conversation-originated items backed by durable `thread_dispatch_refs`
+//! (at most one `create_item` dispatch per origin message across races, retries, and restarts).
 
 use super::{lock, meta_of};
 use crate::Core;
@@ -13,6 +12,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
+use steve_store::{DispatchClaim, ReceiptDispatch, thread};
 
 /// The result of a click on an offer, a suggestion card or a correction.
 #[derive(Debug, Clone, Serialize)]
@@ -24,6 +24,9 @@ pub struct Handled {
     /// it was handled before: nothing changed now (the API answers 409 with this result)
     #[serde(skip)]
     pub already: bool,
+    /// Durable `thread_dispatch_refs.id` when this action created or appended to an item.
+    #[serde(skip)]
+    pub dispatch_ref_id: Option<String>,
 }
 
 /// A short reply that confirms Steve's last proposal.
@@ -55,8 +58,7 @@ pub(crate) struct ThreadItem<'a> {
     pub from_question: bool,
     /// the answer it grows out of: the conversation up to it goes into the opening
     pub answer: Option<&'a Message>,
-    /// the owner asked for it: work starts. Anyone else: a proposal the owner says yes to first, from a
-    /// source of its own (`chat_proposal`) so that nothing (YOLO included) takes it for the owner's
+    /// the owner asked for it: work starts. Anyone else: a proposal the owner says yes to first.
     pub start: bool,
     /// The member who said it (`None`: not known), whose access the item's runs use.
     pub by: Option<String>,
@@ -88,7 +90,11 @@ impl Core {
 
     /// A new offer folds the older open ones (they stay clickable).
     pub(crate) fn fold_offers(&self, ws: &str, newest: &str) -> Result<()> {
-        for m in self.conv_messages(ws, &self.conv_of(newest))? {
+        let space = self.conv_of(newest);
+        if space.is_empty() {
+            return Ok(());
+        }
+        for m in self.conv_messages(ws, &space)? {
             if m.id != newest
                 && m.meta["offer"]["state"] == "open"
                 && m.meta["offer"].get("folded").is_none()
@@ -104,9 +110,7 @@ impl Core {
         Ok(())
     }
 
-    /// The opening of an item made from the conversation: the related part of the conversation,
-    /// oldest first — the run of messages before the origin (gaps ≤30 min, ≤8 messages, ≤6000 chars)
-    /// and everything up to the answer it grows out of, with the files that answer read.
+    /// The opening of an item made from the conversation.
     pub(crate) fn opening_for(
         &self,
         ws: &str,
@@ -114,7 +118,6 @@ impl Core {
         goal: &str,
         answer: Option<&Message>,
     ) -> Result<String> {
-        /* what was said up to the origin (or the answer), however much was said since */
         let all = match self.store().message(origin)? {
             Some(o) => {
                 let upto = answer.map_or(o.created, |a| a.created.max(o.created));
@@ -128,7 +131,6 @@ impl Core {
         let Some(at) = all.iter().position(|m| m.id == origin) else {
             return Ok(format!("这件事来自你和用户的主线对话。\n目标：{goal}"));
         };
-        /* a chat's conversation: say where it came from */
         let place = all[at]
             .meta
             .get("chan")
@@ -186,7 +188,6 @@ impl Core {
             })
             .map(line)
             .collect();
-        /* over budget: the oldest go first, the origin and the answer stay */
         while lines.len() > 2 && lines.iter().map(|l| js_len(l)).sum::<usize>() > 6000 {
             lines.remove(0);
         }
@@ -196,22 +197,27 @@ impl Core {
         ))
     }
 
-    /// What an item made from the conversation starts with, rebuilt from where it came from: the
-    /// conversation up to its origin message (and the answer it was taken from), and the origin's files. A proposal starts with it once
-    /// you said yes; `None` for an item that didn't come from a conversation.
+    /// Rebuilt opening and attachments for an item created from a conversation.
     pub(crate) fn thread_start(&self, item: &Item) -> Result<Option<(String, Vec<FileRef>)>> {
-        let Some(ti) = self.store().store().thread().item(&item.id)? else {
+        let Some(ti) = self
+            .store()
+            .store()
+            .read(|r| thread::dispatch_by_item(r, &item.id))?
+        else {
             return Ok(None);
         };
         let goal = self.store().goal(&item.id).unwrap_or_default();
-        // an offer taken from an answer grew out of that answer (marked `promoted` with the item)
         let answer = self
             .store()
             .store()
             .messages()
             .promoted_to(&item.workspace_id, &item.id)?;
-        let opening =
-            self.opening_for(&item.workspace_id, &ti.origin_msg, &goal, answer.as_ref())?;
+        let opening = self.opening_for(
+            &item.workspace_id,
+            &ti.origin_message_id,
+            &goal,
+            answer.as_ref(),
+        )?;
         let refs = |m: &Message, key: &str| -> Vec<FileRef> {
             m.meta
                 .get(key)
@@ -219,8 +225,7 @@ impl Core {
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default()
         };
-        // the origin's own files, or (an offer) the files the answer read
-        let mut files = match self.store().message(&ti.origin_msg)? {
+        let mut files = match self.store().message(&ti.origin_message_id)? {
             Some(m) => refs(&m, "files"),
             None => vec![],
         };
@@ -234,32 +239,84 @@ impl Core {
         Ok(Some((opening, files)))
     }
 
-    /// Make an item from the conversation and remember where it came from (`thread_items`).
-    pub(crate) fn thread_item(&self, n: ThreadItem<'_>) -> Result<Item> {
-        let opening = Some(self.opening_for(n.ws, n.origin, &n.goal, n.answer)?);
-        let item = self.tx().create_chat_item(CreateItem {
-            ws: n.ws.into(),
-            goal: n.goal,
-            title: n.title,
-            bot: n.bot,
-            project: Some(n.project),
-            source: Some(if n.start {
-                ("对话".into(), "chat".into())
-            } else {
-                ("对话里别人的提议".into(), "chat_proposal".into())
-            }),
-            tag_ids: n.tags,
-            opening,
-            files: n.files,
-            propose: !n.start,
-            requester: n.by,
-            ..Default::default()
+    /// Claim the single origin-level `create_item` dispatch slot and create (or return existing)
+    /// item. Returns `(item, already_existed)`.
+    pub(crate) fn thread_item_once(&self, n: ThreadItem<'_>) -> Result<(Item, bool, String)> {
+        let claim = self.store().store().write(|w| {
+            thread::claim_dispatch(w, n.ws, n.origin, "create_item", n.from_question, now())
         })?;
-        self.store()
-            .store()
-            .thread()
-            .item_add(&item.id, n.ws, n.origin, None, n.from_question)?;
-        Ok(item)
+        match claim {
+            DispatchClaim::Existing(mut existing) => {
+                // If another Core/worker just claimed the dispatch slot and is mid-commit,
+                // wait briefly for it to settle so concurrent callers observe idempotency.
+                for _ in 0..200 {
+                    if existing.state != "pending" {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    if let Some(next) = self
+                        .store()
+                        .store()
+                        .read(|r| thread::dispatch_by_origin(r, n.ws, n.origin, "create_item"))?
+                    {
+                        existing = next;
+                    } else {
+                        break;
+                    }
+                }
+                if existing.state == "applied"
+                    && let Some(ref item_id) = existing.target_item_id
+                    && let Some(item) = self.store().item(item_id)?
+                {
+                    return Ok((item, true, existing.id));
+                }
+                Err(CoreError::Status(
+                    409,
+                    steve_i18n::t!("core.thread.not_promotable"),
+                ))
+            }
+            DispatchClaim::Claimed(disp) => {
+                let opening = Some(self.opening_for(n.ws, n.origin, &n.goal, n.answer)?);
+                match self.tx().create_chat_item(CreateItem {
+                    ws: n.ws.into(),
+                    goal: n.goal,
+                    title: n.title,
+                    bot: n.bot,
+                    project: Some(n.project),
+                    source: Some(if n.start {
+                        ("对话".into(), "chat".into())
+                    } else {
+                        ("对话里别人的提议".into(), "chat_proposal".into())
+                    }),
+                    tag_ids: n.tags,
+                    opening,
+                    files: n.files,
+                    propose: !n.start,
+                    requester: n.by,
+                    ..Default::default()
+                }) {
+                    Ok(item) => {
+                        self.store().store().write(|w| {
+                            thread::settle_dispatch(
+                                w,
+                                &disp.id,
+                                "applied",
+                                Some(&item.id),
+                                None,
+                                now(),
+                            )
+                        })?;
+                        Ok((item, false, disp.id))
+                    }
+                    Err(e) => {
+                        let _ = self.store().store().write(|w| {
+                            thread::settle_dispatch(w, &disp.id, "rejected", None, None, now())
+                        });
+                        Err(e)
+                    }
+                }
+            }
+        }
     }
 
     /// Steve's message announcing an item made from the conversation; tied to the item's origin.
@@ -273,6 +330,11 @@ impl Core {
     ) -> Result<String> {
         meta.insert("origin".into(), json!(origin));
         let space = self.conv_of(origin);
+        let space = if space.is_empty() {
+            super::MAIN.to_string()
+        } else {
+            space
+        };
         let blocked = Self::unplaced_reply(item);
         let id = self.store().message_add_in(
             ws,
@@ -282,13 +344,11 @@ impl Core {
             Some(&item.id),
             &Value::Object(meta),
         )?;
-        let th = self.store().store().thread();
-        th.item_reply(&item.id, &id)?;
+        self.store()
+            .store()
+            .write(|w| thread::set_dispatch_reply(w, &item.id, &id))?;
         super::flowback::adopt_quiet(self.store(), &item.id, &id);
         self.said(ws, &space, &id);
-        if th.route_of(origin)?.is_some_and(|r| r.reply_id.is_none()) {
-            th.route_reply(origin, &id, Some(&item.id))?;
-        }
         Ok(id)
     }
 
@@ -325,13 +385,10 @@ impl Core {
     }
 
     /// Take (`take: true`) or dismiss an offer on Steve's answer `msg_id` (`POST /api/thread/:id/offer`).
-    /// Taken by you (the web's button): an item that starts.
-    /// `by`: the member who took it, whose access the item runs with.
     pub fn offer(&self, ws: &str, msg_id: &str, take: bool, by: Option<&str>) -> Result<Handled> {
         self.offer_as(ws, msg_id, take, true, by)
     }
 
-    /// `start`: the one taking the offer may start work (see [`ThreadItem::start`]).
     pub(crate) fn offer_as(
         &self,
         ws: &str,
@@ -353,32 +410,46 @@ impl Core {
             ));
         };
         if o["state"] != "open" {
+            let origin = self.origin_of(ws, &m)?;
             let item = o["item"]
                 .as_str()
                 .and_then(|i| self.store().item(i).ok().flatten());
+            let dispatch_ref_id =
+                self.existing_dispatch_id(ws, &origin, item.as_ref().map(|i| i.id.as_str()))?;
             return Ok(Handled {
                 message_id: msg_id.into(),
                 item,
                 already: true,
+                dispatch_ref_id,
             });
         }
         let origin = self.origin_of(ws, &m)?;
-        let th = self.store().store().thread();
         let mut meta = meta_of(&m);
         if !take {
             meta["offer"]["state"] = json!("dismissed");
             self.store()
                 .message_patch_meta(msg_id, &Value::Object(meta))?;
-            th.route_outcome(&origin, "offer_dismissed", None)?;
+            self.store().store().write(|w| {
+                thread::update_receipt_outcome(
+                    w,
+                    &origin,
+                    "offer_dismissed",
+                    None,
+                    ReceiptDispatch::NoDispatch,
+                )
+            })?;
             return Ok(Handled {
                 message_id: msg_id.into(),
                 item: None,
                 already: false,
+                dispatch_ref_id: None,
             });
         }
-        let from_question = th
-            .route_of(&origin)?
-            .is_some_and(|r| r.signals.iter().any(|s| s == "question"))
+        let from_question = self
+            .store()
+            .store()
+            .read(|r| thread::receipt_by_origin(r, &origin))?
+            .is_some_and(|r| r.route_signals.iter().any(|s| s == "question"))
             || super::decide::pure_question(
                 &self
                     .store()
@@ -386,7 +457,7 @@ impl Core {
                     .map(|x| x.text)
                     .unwrap_or_default(),
             );
-        let item = self.thread_item(ThreadItem {
+        let (item, already, disp_id) = self.thread_item_once(ThreadItem {
             ws,
             origin: &origin,
             title: crate::gateway::jstr(&o["title"]),
@@ -411,7 +482,23 @@ impl Core {
         meta.insert("promoted".into(), json!(item.id));
         self.store()
             .message_patch_meta(msg_id, &Value::Object(meta))?;
-        th.route_outcome(&origin, "offer_taken", Some(&item.id))?;
+        if already {
+            return Ok(Handled {
+                message_id: msg_id.into(),
+                item: Some(item),
+                already: true,
+                dispatch_ref_id: Some(disp_id),
+            });
+        }
+        self.store().store().write(|w| {
+            thread::update_receipt_outcome(
+                w,
+                &origin,
+                "offer_taken",
+                Some(&item.id),
+                ReceiptDispatch::Dispatched(&disp_id),
+            )
+        })?;
         let text = format!(
             "好，做成事项 {} 交给 {} 了，对话内容作为上下文带入。",
             item.id,
@@ -428,12 +515,17 @@ impl Core {
             message_id: id,
             item: Some(item),
             already: false,
+            dispatch_ref_id: Some(disp_id),
         })
     }
 
     /// The latest Steve message before `before` carrying an open offer, if it is the last Steve message.
     pub(crate) fn open_offer_before(&self, ws: &str, before: &str) -> Result<Option<Message>> {
-        let all = self.conv_messages(ws, &self.conv_of(before))?;
+        let space = self.conv_of(before);
+        if space.is_empty() {
+            return Ok(None);
+        }
+        let all = self.conv_messages(ws, &space)?;
         let at = all.iter().position(|m| m.id == before).unwrap_or(all.len());
         Ok(all[..at]
             .iter()

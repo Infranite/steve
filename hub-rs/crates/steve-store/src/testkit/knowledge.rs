@@ -115,7 +115,7 @@ pub fn seed_day_messages(s: &Store, start: i64) -> Result<()> {
 
 pub fn notice_text(s: &Store) -> Result<Vec<String>> {
     s.sqlite_read(|c| {
-        let mut q = c.prepare_cached("SELECT text FROM messages WHERE space='notify'")?;
+        let mut q = c.prepare_cached("SELECT text FROM thread_notices ORDER BY created ASC")?;
         Ok(q.query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     })
@@ -246,17 +246,6 @@ pub fn clear_bot_memories(s: &Store) -> Result<()> {
         c.execute("DELETE FROM bot_memories", [])?;
         Ok(())
     })
-}
-
-pub fn seed_item_doc(s: &Store, source: &str) -> Result<()> {
-    s
-        .write_locked(|c| {
-            c.execute(
-                "INSERT INTO kb_docs (id, workspace_id, source_id, ref, title, created_by, created, updated) VALUES ('kd_item', 'default', ?, 'ST-12', '交付：部署脚本', 'usr_dev', 1, 1)",
-                [source],
-            )?;
-            Ok(())
-        })
 }
 
 pub fn edit_doc_without_indexing(s: &Store, doc: &str) -> Result<()> {

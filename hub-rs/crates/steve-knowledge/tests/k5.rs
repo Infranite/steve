@@ -86,13 +86,10 @@ impl Env {
     }
     fn apply(&self, who: &str, id: &str) -> Result<Value, (u16, String)> {
         changes::apply(&self.env.modules, &caller(WS, who), id)
-            .expect("stored changeset")
             .map_err(|e| (e.status(), e.to_string()))
     }
     fn undo(&self, who: &str, id: &str) {
-        changes::undo(&self.env.modules, &caller(WS, who), id)
-            .expect("stored changeset")
-            .unwrap();
+        changes::undo(&self.env.modules, &caller(WS, who), id).unwrap();
     }
     async fn get(&self, who: &str, path: &str) -> Value {
         let (s, v) = call(&self.app, Some(&caller(WS, who)), "GET", path, None).await;

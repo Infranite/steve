@@ -11,7 +11,7 @@ const shots = process.env.STEVE_TEST_SHOTS; if (shots) mkdirSync(shots, { recurs
  * (description, this Bot's switch saving at once); the dialog edits a skill with a Markdown preview, a pasted SKILL.md
  * fills a new one that goes into the library and to this Bot, and taking one off the Bot leaves it in the library.
  * Steve · 内置's tools each say what they do, with this Bot's calls in 30 days. */
-const bot = (id, name, extra = {}) => ({ id, name, role: name + '的职责', main: id === 'steve', harness: 'claude-code', model: null, reasoning_effort: null, rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'default', avatar: { color: '#8b7cf6' }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['default'], memories: 0, ...extra })
+const bot = (id, name, extra = {}) => ({ id, name, role: name + '的职责', main: id === 'steve', harness: 'claude-code', model: null, reasoning_effort: null, rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'ask', avatar: { color: '#8b7cf6' }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['default'], memories: 0, ...extra })
 let bots, hub
 const reset = () => {
   bots = [bot('steve', 'Steve'), bot('dev', '开发'), bot('doc', '文档', { harness: 'my-agent' })]

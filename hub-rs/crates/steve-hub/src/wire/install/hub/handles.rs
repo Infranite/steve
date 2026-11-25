@@ -19,6 +19,7 @@ install! { install(reg, _cx) [auth, backend, built, core, harnesses, jobs, local
             node: local_node,
             nodes: nodes.clone(),
             lifecycle: built.lifecycle.clone(),
+            thread_recover_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }),
         auth: auth.router(),
         oidc: Some(Arc::new(auth.clone())),

@@ -266,6 +266,28 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/125.sql"),
     // 126: remove retired dynamic work-graph tables and steve_workflow tool pins.
     include_str!("../migrations/126.sql"),
+    // 127: unified WaitContract columns, bounds, and due indexes across durable wait tables.
+    include_str!("../migrations/127.sql"),
+    // 128: Steve as coordinator (strip main bot from Teams, migrate steve_fallback, wait queue).
+    include_str!("../migrations/128.sql"),
+    // 129: link workspace members to contact parties, add decisions.resolved_by, backfill legacy actors.
+    include_str!("../migrations/129.sql"),
+    // 130: durable thread submit keys, reply tasks/receipts, dispatch/delivery refs, and typed notices.
+    include_str!("../migrations/130.sql"),
+    // 131: redefine knowledge: project AGENTS.md proposals, reclassify facts, withdraw items/chat.
+    include_str!("../migrations/131.sql"),
+    // 132: per-Bot ordered fallback execution surfaces for automatic handoff.
+    include_str!("../migrations/132.sql"),
+    // 133: installation-wide daily backup policy.
+    include_str!("../migrations/133.sql"),
+    // 134: remove legacy raw ACP event rows and backfill sessions.first_tool_at from steve.v1 tool events.
+    include_str!("../migrations/134.sql"),
+    // 135: migrate retired YOLO rows to Steve settlement and backfill bot_node_bindings.
+    include_str!("../migrations/135.sql"),
+    // 136: migrate bots.perm_mode to Steve PermissionMode values and default to ask.
+    include_str!("../migrations/136.sql"),
+    // 137: drop retired bots.project_dir, bots.worktree, and items.project_dir columns.
+    include_str!("../migrations/137.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
@@ -696,6 +718,11 @@ fn run_pending(c: &Connection, cur: i64, progress: Option<&MigrationTracker<'_>>
         }
         if i == 121 {
             ensure_item_lifecycle(&tx)?;
+        }
+        if i == 135 {
+            // 136 rebuilds `bots` referencing `reasoning_effort`; ensure the column exists even if
+            // the database started at v120..v135 without having run the i == 119 hook.
+            add_reasoning_effort(&tx)?;
         }
         tx.execute_batch(m)?;
     }

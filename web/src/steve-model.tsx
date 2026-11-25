@@ -7,27 +7,13 @@ import { Input } from "@/components/ui/input"
 import { ModelPicker } from "@/components/affect/model-picker-clean"
 import { HarnessMark, ModelMark } from "@/components/harness-mark"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { modReq } from "@/api"
+import { modelSetupApi, type ModelSetupView as View } from "@/api/models"
 import { ModelPicker as CatalogPicker, useCatalog, harnessName } from "@/model-picker"
 import { chatBusy, refresh, st, useShellStore } from "@/store"
 import { Select } from "@/view-shared"
 import { useT } from "@/i18n"
 import { Loading, Reveal, Turn } from "@/ui"
 import { CpuIcon } from "lucide-react"
-
-type Choice = { harness: string; models: string[]; effort?: string | null }
-type View = {
-  steve: { harness: string; model: string | null; models: string[] }
-  lightweight?: Choice | null
-  lightweight_effective?: Choice
-  bot_revision: number
-  harnesses: { id: string; name: string; ready: boolean | null; judgments: boolean }[]
-  purposes: { key: string; label: string; role?: "primary" | "lightweight"; follows: boolean; effective: { harness: string; models: string[] } }[]
-}
-export const modelSetupApi = {
-  get: () => modReq<View>("GET", "/settings/models"),
-  select: (choice: { harness: string; model: string | null; expected_revision: number; follow_purposes: boolean; lightweight?: Choice | null }) => modReq<View>("POST", "/settings/models/select", choice),
-}
 
 export function SteveModelForm({ first = false, onSaved, onDirty, afterSave }: { first?: boolean; onSaved?: () => void; onDirty?: () => void; afterSave?: () => Promise<unknown> }) {
   useShellStore()

@@ -11,7 +11,7 @@ const shots = process.env.STEVE_TEST_SHOTS; if (shots) mkdirSync(shots, { recurs
  * configuration, the tools such a client gets) and the library with the Bots that use each server, chosen from the
  * card; 技能; A2A with a remote agent added by its card (read first, its skills shown, a key kept by name only) and
  * Steve's own Agent Card. */
-const bot = (id, name, extra = {}) => ({ id, name, role: name + '的职责', main: id === 'steve', harness: 'claude-code', model: null, reasoning_effort: null, rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'default', avatar: { color: '#8b7cf6' }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['default'], memories: 0, ...extra })
+const bot = (id, name, extra = {}) => ({ id, name, role: name + '的职责', main: id === 'steve', harness: 'claude-code', model: null, reasoning_effort: null, rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'ask', avatar: { color: '#8b7cf6' }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['default'], memories: 0, ...extra })
 let bots, hub
 const reset = () => {
   bots = [bot('steve', 'Steve'), bot('dev', '开发'), bot('doc', '文档', { harness: 'codex' })]

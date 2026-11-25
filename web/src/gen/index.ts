@@ -6,6 +6,9 @@ export type { ApprovalMode } from "./ApprovalMode";
 export type { ApprovalPolicy } from "./ApprovalPolicy";
 export type { AutomationEvent } from "./AutomationEvent";
 export type { AutonomyEvent } from "./AutonomyEvent";
+export type { AvatarRef } from "./AvatarRef";
+export type { BackupPurpose } from "./BackupPurpose";
+export type { BackupReceipt } from "./BackupReceipt";
 export type { BotId } from "./BotId";
 export type { BotProposal } from "./BotProposal";
 export type { BusEvent } from "./BusEvent";
@@ -23,6 +26,7 @@ export type { ComponentUpdateReason } from "./ComponentUpdateReason";
 export type { ComponentUpdateState } from "./ComponentUpdateState";
 export type { ConfigEvent } from "./ConfigEvent";
 export type { ConnectionId } from "./ConnectionId";
+export type { CoordinatorDeferSource } from "./CoordinatorDeferSource";
 export type { DecisionId } from "./DecisionId";
 export type { DecisionPrompt } from "./DecisionPrompt";
 export type { DecisionStatus } from "./DecisionStatus";
@@ -68,6 +72,7 @@ export type { KnowledgeEvent } from "./KnowledgeEvent";
 export type { LiveEvent } from "./LiveEvent";
 export type { MailDelivery } from "./MailDelivery";
 export type { MailThreadId } from "./MailThreadId";
+export type { MemberIdentity } from "./MemberIdentity";
 export type { MemoryId } from "./MemoryId";
 export type { MessageId } from "./MessageId";
 export type { MessageView } from "./MessageView";
@@ -76,6 +81,8 @@ export type { NavUsage } from "./NavUsage";
 export type { NavUsageItem } from "./NavUsageItem";
 export type { NavUsageRange } from "./NavUsageRange";
 export type { NetworkRate } from "./NetworkRate";
+export type { NoExecutorItem } from "./NoExecutorItem";
+export type { NoExecutorPolicy } from "./NoExecutorPolicy";
 export type { NodeId } from "./NodeId";
 export type { NodeOffline } from "./NodeOffline";
 export type { NodeOfflineReason } from "./NodeOfflineReason";
@@ -118,19 +125,20 @@ export type { SessionWaiting } from "./SessionWaiting";
 export type { SetHarnessAutoUpgrade } from "./SetHarnessAutoUpgrade";
 export type { SignalId } from "./SignalId";
 export type { Snapshot } from "./Snapshot";
+export type { SnapshotId } from "./SnapshotId";
 export type { SnapshotViews } from "./SnapshotViews";
 export type { SpaceId } from "./SpaceId";
 export type { StatsEvent } from "./StatsEvent";
 export type { SteveError } from "./SteveError";
 export type { StreamControl } from "./StreamControl";
 export type { TagId } from "./TagId";
-export type { ThreadRunId } from "./ThreadRunId";
 export type { TimeoutPhase } from "./TimeoutPhase";
 export type { UpgradeHarnessResponse } from "./UpgradeHarnessResponse";
 export type { UpgradeMethod } from "./UpgradeMethod";
 export type { UserId } from "./UserId";
 export type { VaultEvent } from "./VaultEvent";
 export type { VaultItemId } from "./VaultItemId";
+export type { VerifiedDatabase } from "./VerifiedDatabase";
 export type { View } from "./View";
 export type { ViewKind } from "./ViewKind";
 export type { VitalsGap } from "./VitalsGap";
@@ -138,8 +146,23 @@ export type { VitalsResponse } from "./VitalsResponse";
 export type { VitalsRoot } from "./VitalsRoot";
 export type { VitalsSampling } from "./VitalsSampling";
 export type { VitalsTokens } from "./VitalsTokens";
+export type { WaitContract } from "./WaitContract";
+export type { WaitKind } from "./WaitKind";
+export type { WaitLimits } from "./WaitLimits";
+export type { WaitOwner } from "./WaitOwner";
+export type { WaitTimeoutAction } from "./WaitTimeoutAction";
 export type { WorkEvent } from "./WorkEvent";
 export type { WorkLiveEvent } from "./WorkLiveEvent";
 export type { WorkspaceId } from "./WorkspaceId";
 export { REASONS } from "./reasons";
 export type { KnownReason } from "./reasons";
+export {
+  WORKSPACE_SETTINGS_SCHEMA,
+  WORKSPACE_SETTING_DEFAULTS,
+  WORKSPACE_SETTING_VALUES,
+} from "./settings-schema";
+export type {
+  WorkspaceSettingCategory,
+  WorkspaceSettingKey,
+  WorkspaceSettingValue,
+} from "./settings-schema";

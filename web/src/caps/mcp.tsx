@@ -17,14 +17,16 @@ import { IntegrationRow, IntegrationSection, IntegrationSettings } from "@/compo
 import { Section, Empty, Loading, Segmented, Notice } from "@/ui"
 import { toast } from "@/store"
 import { capsApi, type McpServer, type McpServerIn, type McpTransport, type McpVar } from "@/api/caps"
-import { AssignMenu, UsedBy, errText, useList } from "./common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { AssignMenu, UsedBy, errText } from "./common"
 
 const ICON = { stdio: TerminalIcon, http: GlobeIcon, sse: RadioTowerIcon } as const
 
 /** the library's servers */
 export function McpLibrary() {
   const t = useT()
-  const [d, load] = useList(() => capsApi.mcp.list(), [])
+  const d = useHubQuery(["caps", "mcp"], () => capsApi.mcp.list(), { events: ["bot"], debounceMs: 300 })
+  const load = d.reload
   const [editing, setEditing] = useState<McpServer | "new" | null>(null)
   const [removing, setRemoving] = useState<McpServer | null>(null)
   const remove = async (x: McpServer) => {
@@ -33,12 +35,12 @@ export function McpLibrary() {
   }
   const add = <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setEditing("new")} data-mcp-add><PlusIcon />{t("caps:mcp.add")}</Button>
   return (
-    <Section label={t("caps:mcp.section")} note={t("caps:mcp.note")} right={d.s === "ok" && d.v.length > 0 ? add : undefined} data-mcp>
-      {d.s === "loading" ? <Loading className="py-8" />
-        : d.s === "error" ? <Notice tone="destructive">{d.e}</Notice>
-        : d.v.length === 0 ? <Empty compact className="bg-muted/50" icon={<PlugIcon />} title={t("caps:mcp.emptyTitle")} sub={t("caps:mcp.emptySub")} data-mcp-empty
+    <Section label={t("caps:mcp.section")} note={t("caps:mcp.note")} right={d.data && d.data.length > 0 ? add : undefined} data-mcp>
+      {d.loading ? <Loading className="py-8" />
+        : d.error || !d.data ? <Notice tone="destructive">{d.error?.message ?? ""}</Notice>
+        : d.data.length === 0 ? <Empty compact className="bg-muted/50" icon={<PlugIcon />} title={t("caps:mcp.emptyTitle")} sub={t("caps:mcp.emptySub")} data-mcp-empty
             action={<Button size="sm" onClick={() => setEditing("new")} data-mcp-add><PlusIcon />{t("caps:mcp.add")}</Button>} />
-        : <div className="flex flex-col gap-3" data-mcp-list>{d.v.map((x) => (
+        : <div className="flex flex-col gap-3" data-mcp-list>{d.data.map((x) => (
             <McpServerCard key={x.id} x={x}
               aside={<>
                 <AssignMenu kind="mcp" id={x.id} name={x.name} users={x.bots ?? []} onChange={() => void load()} />

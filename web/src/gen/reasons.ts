@@ -7,6 +7,7 @@ export const REASONS = {
   "config.diagnostic_model_disabled": { code: "forbidden", params: [] },
   "config.harness_builtin_protected": { code: "forbidden", params: ["harness"] },
   "config.harness_env_not_allowed": { code: "invalid", params: [] },
+  "config.team_member_main_bot": { code: "invalid", params: [] },
   "node.downgrade": { code: "invalid", params: [] },
   "node.operation_not_found": { code: "invalid", params: [] },
   "node.session_not_open": { code: "invalid", params: [] },

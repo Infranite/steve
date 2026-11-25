@@ -399,7 +399,7 @@ fn commands_check_the_version_and_the_phase() {
     assert_eq!(
         conflict(
             k.core
-                .session_message(&s.id, "还有一件", false, &[])
+                .session_message(&s.id, "还有一件", false, &[], "me")
                 .unwrap_err()
         ),
         cycle::closed_msg()
@@ -436,7 +436,7 @@ fn a_busy_turn_holds_the_close_and_its_end_commits_it_once() {
     let x = k.delivered(false);
     // the agent is still at work (e.g. waiting for a permission) when you accept
     k.core
-        .session_message(&x.session, "顺便看看日志", false, &[])
+        .session_message(&x.session, "顺便看看日志", false, &[], "me")
         .unwrap();
     assert_eq!(
         k.phase(&x.id),

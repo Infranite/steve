@@ -58,7 +58,6 @@ use steve_store::{Decision, Item, NewDecision, W, uid};
 use crate::adapters::feishu::send::reply_in_thread;
 use crate::basis::{self, NewBasis, Rewrite};
 use crate::channel::{ActAsUser, ActTarget, MessageRef, OutContent, SendKey, Sent, SpaceKind};
-use crate::compose::PinnedModel;
 use crate::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Outbound, Purpose};
 use crate::disclosure::{self, MAX_REWRITES};
 use crate::flow_actions::{LateChannels, plan_in, plan_of};
@@ -620,6 +619,7 @@ fn open_approval(
                 text_hash(text)
             ),
         }),
+        wait: None,
     })?;
     message_repo::link_decision(w, id, &d.id)?;
     if review {
@@ -687,6 +687,7 @@ fn open_fail(
         requested_by: "steve".into(),
         question_template: None,
         source: Some(source),
+        wait: None,
     })?;
     channel_message_repo::outbound::link_decision(w, &row.id, &d.id)?;
     Ok(d.id)
@@ -768,32 +769,21 @@ fn send_delay_ms(r: &mut impl steve_store::Read, row: &OutRow) -> ChannelResult<
     Ok(set.map_or(default_send_delay_ms(mode), |s| s.clamp(0, 60) * 1000))
 }
 
-/// One rewrite of `text` by the model that wrote it (`model`; the gateway's smart tier when it was not
-/// a pinned one); `None` when it gave no text.
+/// One rewrite of `text` on the gateway's smart tier; `None` when it gave no text.
 async fn rewrite_text(
     ch: &Channels,
-    pinned: Option<&Arc<dyn PinnedModel>>,
     audience: &Audience,
     text: &str,
     r: &CheckResult,
-    model: &str,
 ) -> Option<String> {
     let prompt = disclosure::rewrite_prompt(audience, text, &r.spans);
-    let out = match pinned {
-        Some(p) if !model.is_empty() => p
-            .run(model, &prompt, compose::TIMEOUT)
-            .await
-            .map_err(steve_modules::gateway::GatewayError::from),
-        _ => {
-            steve_modules::gateway::purpose(
-                "compose",
-                ch.modules()
-                    .gateway
-                    .run(Tier::Smart, &prompt, compose::TIMEOUT),
-            )
-            .await
-        }
-    };
+    let out = steve_modules::gateway::purpose(
+        "compose",
+        ch.modules()
+            .gateway
+            .run(Tier::Smart, &prompt, compose::TIMEOUT),
+    )
+    .await;
     match out {
         Ok(o) => disclosure::parse_rewrite(&o.text),
         Err(e) => {
@@ -907,13 +897,11 @@ async fn check_again(ch: &Channels, l: &Later, text: &str) -> CheckResult {
 /// `None` when the model gave no answer.
 async fn rewrite_once(
     ch: &Channels,
-    pinned: Option<&Arc<dyn PinnedModel>>,
     audience: &Audience,
     text: &str,
     r: &CheckResult,
-    model: &str,
 ) -> Option<disclosure::Rewrite> {
-    let new = rewrite_text(ch, pinned, audience, text, r, model).await?;
+    let new = rewrite_text(ch, audience, text, r).await?;
     let judged = disclosure::judge_rewrite(text, &new);
     if judged == disclosure::Rewrite::Added {
         tracing::info!("a rewrite wrote what the reply did not say: discarded");
@@ -1062,7 +1050,6 @@ async fn check_later(ch: &Channels, message_id: &str) -> ChannelResult<()> {
 async fn rewrite_draft(
     ch: &Channels,
     link: &OutLink,
-    pinned: Option<&Arc<dyn PinnedModel>>,
     message_id: &str,
     decision_id: &str,
 ) -> ChannelResult<()> {
@@ -1113,11 +1100,10 @@ async fn rewrite_draft(
         spans,
         check_model: l.b.check_model.clone(),
     };
-    let model = l.b.answer_model.clone().unwrap_or_default();
     // A user's replacement is intentional new content; a model rewrite must only delete.
     let new = match edited {
         Some(t) => Some(disclosure::Rewrite::Kept(t)),
-        None => rewrite_once(ch, pinned, &l.audience, &row.text, &flagged, &model).await,
+        None => rewrite_once(ch, &l.audience, &row.text, &flagged).await,
     }
     .filter(|r| !matches!(r, disclosure::Rewrite::Kept(t) if t.chars().count() > TEXT_MAX));
     let checked = match &new {
@@ -1627,9 +1613,8 @@ pub fn verify(
                     && d.subject_id == row.id
                     && d.status == steve_types::DecisionStatus::Resolved
                     && row.decision_id.as_deref() == Some(d.id.as_str())
-                    && ((d.kind == "approve" && choice == "yes") || (d.kind == "fail" && choice == "retry"))
-                    // Also fence approvals scheduled by older YOLO engines before this fix.
-                    && !b1::legacy_automatic_decision(&d.result)
+                    && ((d.kind == "approve" && choice == "yes")
+                        || (d.kind == "fail" && choice == "retry"))
                     && d.result["hash"].as_str() == Some(text_hash(&row.text).as_str())
                     && d.result["send_at"].as_i64().is_some_and(|t| t <= now)
             })
@@ -1739,7 +1724,6 @@ pub struct Outbox {
     stopped: std::sync::atomic::AtomicBool,
     link: OutLink,
     as_user: BTreeMap<String, Arc<dyn ActAsUser>>,
-    pinned: Option<Arc<dyn PinnedModel>>,
     /// Drafts being rewritten now (“改写后再看”), each on a task of its own.
     rewriting: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Item conversions being resumed from their durable decision results.
@@ -2538,7 +2522,6 @@ impl Outbox {
         let cx = &prepared.cx;
         let audience = &prepared.audience;
         let knowledge = &prepared.knowledge;
-        let draft_model = &prepared.draft_model;
         // 1. disclosure (and the rewrites)
         let later = prepared.later;
         let now_cx = if later {
@@ -2562,16 +2545,7 @@ impl Outbox {
             && !prepared.will_draft
         {
             for _ in 0..MAX_REWRITES {
-                let Some(judged) = rewrite_once(
-                    ch,
-                    self.pinned.as_ref(),
-                    &audience,
-                    &text,
-                    &res,
-                    draft_model.as_deref().unwrap_or(""),
-                )
-                .await
-                else {
+                let Some(judged) = rewrite_once(ch, &audience, &text, &res).await else {
                     break;
                 };
                 let new = match judged {
@@ -2735,7 +2709,6 @@ impl Outbox {
             stopped: std::sync::atomic::AtomicBool::new(false),
             link,
             as_user: BTreeMap::new(),
-            pinned: None,
             rewriting: Arc::default(),
             converting: Arc::default(),
             expiry_cursor: Mutex::new(None),
@@ -2797,12 +2770,6 @@ impl Outbox {
     /// The adapters it sends as you on.
     pub fn as_user_ids(&self) -> Vec<String> {
         self.as_user.keys().cloned().collect()
-    }
-
-    /// Rewrites on the drafting model when it was a pinned one.
-    pub fn pinned(mut self, p: Arc<dyn PinnedModel>) -> Self {
-        self.pinned = Some(p);
-        self
     }
 
     pub fn link(&self) -> &OutLink {
@@ -3327,14 +3294,9 @@ impl Outbox {
                     if !lock(&self.rewriting).insert(m.clone()) {
                         continue;
                     }
-                    let (ch, link, pinned, busy) = (
-                        ch.clone(),
-                        self.link.clone(),
-                        self.pinned.clone(),
-                        self.rewriting.clone(),
-                    );
+                    let (ch, link, busy) = (ch.clone(), self.link.clone(), self.rewriting.clone());
                     self.spawn_background(async move {
-                        if let Err(e) = rewrite_draft(&ch, &link, pinned.as_ref(), &m, &d).await {
+                        if let Err(e) = rewrite_draft(&ch, &link, &m, &d).await {
                             tracing::warn!(message = m, "rewriting a draft failed: {e}");
                             if let Err(e) = rewrite_failed(&ch, &m, &d) {
                                 tracing::warn!(message = m, "putting the draft back: {e}");
@@ -4065,16 +4027,13 @@ fn approve_message_text(
     Ok(())
 }
 
-/// The authorization is your own approval (a decision a person answered, not a legacy auto-approval): what you
-/// approved goes out even after you spoke, it is yours.
+/// The authorization is your own approval: what you approved goes out even after you spoke.
 fn approved_by_you(r: &mut impl steve_store::Read, auth: &Auth) -> ChannelResult<bool> {
     let Auth::Decision { id } = auth else {
         return Ok(false);
     };
-    Ok(steve_store::decision_repo::get(r, id)?.is_some_and(|d| {
-        d.status == steve_types::DecisionStatus::Resolved
-            && !b1::legacy_automatic_decision(&d.result)
-    }))
+    Ok(steve_store::decision_repo::get(r, id)?
+        .is_some_and(|d| d.status == steve_types::DecisionStatus::Resolved))
 }
 
 // ---------------------------------------------------------------- decisions

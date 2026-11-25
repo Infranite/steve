@@ -166,7 +166,20 @@ async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
             Some(LiveEvent::Work(WorkLiveEvent::Event { .. }))
         )
     });
-    let data = json!({"rawOutput": "x".repeat(5000), "content": {"type":"image", "data":"base64"}, "_meta":{"claudeCode":{"toolName":"Read"}}});
+    let data = json!({
+        "tool": {
+            "id": "call_1",
+            "title": "Read",
+            "kind": "read",
+            "status": "completed",
+            "action": {
+                "kind": "tool",
+                "name": "Read",
+                "args": {"img": {"type": "image", "data": "base64"}}
+            },
+            "result": [{"type": "text", "text": "x".repeat(5000)}]
+        }
+    });
     bus.live(
         WorkLiveEvent::Event {
             session_id: "s".into(),
@@ -182,8 +195,19 @@ async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
         serde_json::to_value(&*tap.recv().await.unwrap()).unwrap()["data"],
         data
     );
-    assert_eq!(typed["data"]["tool"], "Read");
-    assert_eq!(typed["data"]["content"], json!({"type":"image"}));
+    assert_eq!(typed["data"]["tool"]["title"], "Read");
+    assert_eq!(
+        typed["data"]["tool"]["action"]["args"]["img"],
+        json!({"type": "image"})
+    );
+    assert_eq!(
+        typed["data"]["tool"]["result"][0]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        4001
+    );
 }
 
 /// Workspace events without a workspace reach nobody, including connections without a workspace.

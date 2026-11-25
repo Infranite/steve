@@ -878,7 +878,7 @@ impl Owner {
             error: None,
             previous: None,
             target: None,
-            backup: None,
+            backup_snapshot: None,
             progress: None,
             drain: None,
             runner: Some(runner::Spec {
@@ -1191,7 +1191,7 @@ mod tests {
             previous: None,
             target: None,
             runner: None,
-            backup: None,
+            backup_snapshot: None,
             progress: None,
             drain: None,
         };
@@ -1277,7 +1277,7 @@ mod tests {
             previous: None,
             target: None,
             runner: None,
-            backup: None,
+            backup_snapshot: None,
             progress: None,
             drain: None,
         };

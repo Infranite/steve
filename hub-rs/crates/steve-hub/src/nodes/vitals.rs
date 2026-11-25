@@ -114,7 +114,8 @@ pub async fn sample_once(local: Option<&Arc<dyn Node>>, svc: Option<&Arc<NodeSer
             .into_iter()
             .flatten()
             .collect(),
-    );
+    )
+    .await;
 }
 
 /// Warn once per low-disk episode on a remote Node. The Hub already watches its own disk.
@@ -124,7 +125,6 @@ async fn warn_low_disks(store: Store, mut warned: HashSet<String>, low: u64) -> 
             return warned;
         };
         let since = super::now() - 5 * 60 * 1000;
-        let db = steve_core::repo::Db::new(store);
         for node in nodes.into_iter().filter(|node| !node.local) {
             let Some(latest) = metrics::latest_node(&node.node_id, since) else {
                 continue;
@@ -145,9 +145,14 @@ async fn warn_low_disks(store: Store, mut warned: HashSet<String>, low: u64) -> 
                     name = node.name,
                     free = steve_core::workspace::human(free)
                 );
-                if let Err(e) =
-                    steve_core::notify::notify(&db, steve_store::WS, "disk", "info", &text, None)
-                {
+                if let Err(e) = steve_store::notify::notify(
+                    &store,
+                    steve_store::WS,
+                    "disk",
+                    "info",
+                    &text,
+                    None,
+                ) {
                     tracing::error!("node disk notice: {e}");
                 }
             }

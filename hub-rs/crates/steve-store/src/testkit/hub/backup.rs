@@ -158,3 +158,26 @@ pub fn checkpoint(store: &Store) -> Result<()> {
         Ok(())
     })
 }
+
+pub fn seed_retention_payload(store: &Store) -> Result<()> {
+    store.write(|w| {
+        w.db()
+            .batch("CREATE TABLE fixture(blob); INSERT INTO fixture VALUES(randomblob(1048576));")
+    })
+}
+
+pub fn clear_retention_payload(store: &Store) -> Result<()> {
+    store.write(|w| w.db().batch("DELETE FROM fixture;"))?;
+    store.write_locked(|c| {
+        c.execute_batch("VACUUM;")?;
+        Ok(())
+    })
+}
+
+/// Simulate a failed probe that wrote to the database before exiting.
+pub fn set_probe_evidence(path: &std::path::Path, value: &str) -> Result<()> {
+    let c = rusqlite::Connection::open(path)?;
+    c.execute_batch("PRAGMA journal_mode=WAL;")?;
+    c.execute("UPDATE upgrade_evidence SET value=?", [value])?;
+    Ok(())
+}

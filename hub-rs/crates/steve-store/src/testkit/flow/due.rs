@@ -39,7 +39,7 @@ pub fn seed_due_row(
                 DueKind::Wait | DueKind::Retry => {
                     tx.conn.execute("INSERT INTO flow_runs(id,workspace_id,flow_id,flow_version,trigger_kind,status,cursor,context,retry_at,attempts,started) VALUES(?1,?2,?1,1,'manual','waiting',?3,'{}',?4,?5,1)", params![id, ws, if poison { "wrong" } else { "w" }, if matches!(kind,DueKind::Retry) { Some(at) } else { None }, if poison { 2 } else { 1 }])?;
                     if matches!(kind,DueKind::Wait) {
-                        tx.conn.execute("INSERT INTO flow_waits(run_id,node_id,workspace_id,mode,until,created) VALUES(?1,'w',?2,'delay',?3,1)", params![id, ws, at])?;
+                        tx.conn.execute("INSERT INTO flow_waits(run_id,node_id,workspace_id,mode,until,created,wait_owner,wait_started_at,wait_deadline,wait_on_timeout) VALUES(?1,'w',?2,'delay',?3,1,'system:flow',1,?3,'close')", params![id, ws, at])?;
                     }
                 }
             }

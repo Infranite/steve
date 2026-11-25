@@ -7,7 +7,7 @@ import { formatBytes } from "./devices-install.ts"
 
 export const KEYS = [
   "http_p95", "write_lock_wait_p95", "sse_delivery_p95", "patch_delay_p95", "reconcile_diff", "ingest_p95", "ingest_rate", "cache_hit_ratio",
-  "hub_cpu", "hub_memory", "hub_disk_writes", "web_interaction_p75", "web_long_tasks",
+  "hub_cpu", "hub_memory", "hub_disk_writes", "backup_destination_space", "web_interaction_p75", "web_long_tasks",
   "job_panics", "jobs_down", "job_up",
   "node_link", "node_link_drops", "node_command_failures", "node_backlog", "node_disk_writes",
   "plugin_errors", "plugin_restarts", "plugin_backlog",

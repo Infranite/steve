@@ -346,6 +346,55 @@ impl<C: Read> Memories<'_, C> {
             |r| r.get(0),
         )
     }
+
+    /// Memories created after `since` that are active (`candidate` or `confirmed`) and do not
+    /// already supersede an existing memory (counted separately as conflicts).
+    pub fn new_since(&mut self, ws: &str, since: i64) -> Result<usize> {
+        let superseding = Query::select()
+            .column("mem_id")
+            .from("mem_candidates")
+            .and_where(Expr::col("mem_id").equals(("m", "id")))
+            .and_where(Expr::col("supersedes").is_not_null())
+            .take();
+        let n: i64 = self
+            .0
+            .one(
+                Query::select()
+                    .expr(Func::count(Expr::col(("m", "id"))))
+                    .from_as("mems", "m")
+                    .and_where(Expr::col(("m", "workspace_id")).eq(ws))
+                    .and_where(Expr::col(("m", "status")).is_in(["candidate", "confirmed"]))
+                    .and_where(Expr::col(("m", "created")).gt(since))
+                    .and_where(Expr::exists(superseding).not()),
+                |r| r.get(0),
+            )?
+            .unwrap_or(0);
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
+    /// Candidate memories created after `since` that conflict with (supersede) an existing memory.
+    pub fn conflicting_candidates_since(&mut self, ws: &str, since: i64) -> Result<usize> {
+        let n: i64 = self
+            .0
+            .one(
+                Query::select()
+                    .expr(Func::count(Expr::col(("m", "id"))))
+                    .from_as("mems", "m")
+                    .join_as(
+                        JoinType::InnerJoin,
+                        "mem_candidates",
+                        "c",
+                        Expr::col(("c", "mem_id")).equals(("m", "id")),
+                    )
+                    .and_where(Expr::col(("m", "workspace_id")).eq(ws))
+                    .and_where(Expr::col(("m", "status")).eq("candidate"))
+                    .and_where(Expr::col(("m", "created")).gt(since))
+                    .and_where(Expr::col(("c", "supersedes")).is_not_null()),
+                |r| r.get(0),
+            )?
+            .unwrap_or(0);
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
 }
 
 impl<C: Read> BotMemories<'_, C> {

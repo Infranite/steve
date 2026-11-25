@@ -30,8 +30,8 @@ use steve_store::Store;
 use super::host_node::{HostNode, ServiceNode};
 use super::node_runtime::NodeRuntime;
 use super::node_tools::NodeTools;
-use crate::backend::BackendError;
 use crate::config::Config;
+use crate::error::BackendError;
 
 pub const NODE_ID: &str = "local";
 const KEY: &str = "service-identity.key";

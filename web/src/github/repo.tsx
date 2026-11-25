@@ -1,6 +1,5 @@
 /* #/github/:repo —— 一个关联的仓库：设置（github.md §3.4）、PR、Issue、投递记录 */
-import { useHubEvents } from "@/store"
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useRef, useState, type ReactNode } from "react"
 import { ExternalLinkIcon, RefreshCwIcon, UnlinkIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/affect/badge-clean"
@@ -11,7 +10,8 @@ import { st, tm, toast } from "@/store"
 import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot, ItemNo, Segmented, Chips } from "@/ui"
 import { Select } from "@/view-shared"
 import { gh, type GhRepo, type GhPr, type GhIssue, type GhDelivery, type GhRun, type GhTrace, type GhSettings } from "@/api/github"
-import { useOverview, Health, Loading, Failed, errMsg, type Load } from "@/github/index"
+import { useHubQuery, type HubQuery } from "@/data/use-hub-query"
+import { useOverview, Health, Loading, Failed, errMsg } from "@/github/index"
 import { t, useT } from "@/i18n"
 import { Trans } from "react-i18next"
 
@@ -97,27 +97,10 @@ function Repo({ r: r0, reload }: { r: GhRepo; reload: () => void }) {
   )
 }
 
-/** a list tab: loads on mount and when `dep` changes */
-function useList<T>(f: () => Promise<T[]>, dep: string, events = ["gh"]) {
-  const [v, setV] = useState<Load<T[]>>({ s: "loading" })
-  const seq = useRef(0)
-  const fetch = (showLoading: boolean) => {
-    const n = ++seq.current
-    if (showLoading) setV({ s: "loading" })
-    void f().then(
-      (x) => { if (n === seq.current) setV({ s: "ok", v: x }) },
-      (e) => { if (n === seq.current) setV({ s: "error", msg: errMsg(e) }) },
-    )
-  }
-  const load = () => fetch(true)
-  useEffect(() => { load(); return () => { seq.current++ } }, [dep])
-  useHubEvents(events, () => fetch(false))
-  return [v, load] as const
-}
-function ListOf<T>({ v, retry, empty, row }: { v: Load<T[]>; retry: () => void; empty: [string, string]; row: (x: T) => ReactNode }) {
-  if (v.s === "loading") return <Loading />
-  if (v.s === "error") return <Failed msg={v.msg} retry={retry} />
-  return v.v.length ? <Group>{v.v.map(row)}</Group> : <Empty title={empty[0]} sub={empty[1]} />
+function ListOf<T>({ v, empty, row }: { v: HubQuery<T[]>; empty: [string, string]; row: (x: T) => ReactNode }) {
+  if (v.loading) return <Loading />
+  if (v.error || !v.data) return <Failed msg={v.error?.message ?? ""} retry={() => void v.reload()} />
+  return v.data.length ? <Group>{v.data.map(row)}</Group> : <Empty title={empty[0]} sub={empty[1]} />
 }
 const Ext = ({ href, label }: { href: string; label: string }) => (
   <Button size="icon-sm" variant="ghost" className="text-muted-foreground" nativeButton={false} render={<a href={href} target="_blank" rel="noreferrer" aria-label={label} />}><ExternalLinkIcon /></Button>
@@ -134,10 +117,10 @@ function StateChips({ value, onChange }: { value: "open" | "all"; onChange: (v: 
 function Prs({ repo }: { repo: string }) {
   const t = useT()
   const [state, setState] = useState<"open" | "all">("open")
-  const [v, retry] = useList(() => gh.prs(repo, state), repo + state)
+  const v = useHubQuery(["gh", "prs", repo, state], () => gh.prs(repo, state), { events: ["gh"], debounceMs: 300 })
   return (<>
     <StateChips value={state} onChange={setState} />
-    <ListOf v={v} retry={retry} empty={[t("github:pr.empty"), t("github:pr.emptySub")]} row={(p: GhPr) => {
+    <ListOf v={v} empty={[t("github:pr.empty"), t("github:pr.emptySub")]} row={(p: GhPr) => {
       const [dot, label] = checks(p.checks_state), rv = review(p.review_state), sep = t("github:shared.listSep")
       const failed = p.checks.filter((c) => c.state === "fail").map((c) => c.name)
       return (
@@ -166,10 +149,10 @@ function Prs({ repo }: { repo: string }) {
 function Issues({ repo }: { repo: string }) {
   const t = useT()
   const [state, setState] = useState<"open" | "all">("open")
-  const [v, retry] = useList(() => gh.issues(repo, state), repo + state)
+  const v = useHubQuery(["gh", "issues", repo, state], () => gh.issues(repo, state), { events: ["gh"], debounceMs: 300 })
   return (<>
     <StateChips value={state} onChange={setState} />
-    <ListOf v={v} retry={retry} empty={[t("github:issue.empty"), t("github:issue.emptySub")]} row={(i: GhIssue) => (
+    <ListOf v={v} empty={[t("github:issue.empty"), t("github:issue.emptySub")]} row={(i: GhIssue) => (
       <Row key={i.id} data-gh-issue={i.number}
         title={<span className="flex min-w-0 items-baseline gap-2"><span className="shrink-0 font-mono tabular-nums text-muted-foreground">#{i.number}</span><span className="truncate">{i.title}</span></span>}
         sub={<Meta>{i.state !== "open" && <span>{t("github:issue.closed")}</span>}{i.labels.length > 0 && <span>{i.labels.join(t("github:shared.listSep"))}</span>}<ItemLink item={i.item} /></Meta>}>
@@ -225,15 +208,15 @@ function AutomationTrace({ trace }: { trace: GhTrace }) {
 function Deliveries({ repo }: { repo: string }) {
   const t = useT()
   const [only, setOnly] = useState(false)
-  const [v, retry] = useList(() => gh.deliveries(repo, 50, only ? "only" : undefined), repo + only, ["gh", "run", "patch", "item"])
+  const v = useHubQuery(["gh", "deliveries", repo, only], () => gh.deliveries(repo, 50, only ? "only" : undefined), { events: ["gh", "run", "patch", "item"], debounceMs: 300 })
   const all = t("github:automation.all"), analysis = t("github:automation.filter")
   return (<>
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
       <Chips value={only ? analysis : all} onChange={(label) => setOnly(label === analysis)} options={[all, analysis]} />
-      <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={retry}><RefreshCwIcon />{t("common:action.refresh")}</Button>
+      <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void v.reload()}><RefreshCwIcon />{t("common:action.refresh")}</Button>
     </div>
     <p className="mb-2 type-footnote text-muted-foreground">{t("github:delivery.hint")}</p>
-    <ListOf v={v} retry={retry} empty={[t("github:delivery.empty"), t("github:delivery.emptySub")]} row={(d: GhDelivery) => {
+    <ListOf v={v} empty={[t("github:delivery.empty"), t("github:delivery.emptySub")]} row={(d: GhDelivery) => {
       const [dot, label] = delivery(d.status)
       return <Row key={d.id} data-gh-delivery={d.status} title={<span className="break-all font-mono" title={d.id}>{d.event}{d.action ? "." + d.action : ""}</span>}
         sub={<div className="flex min-w-0 flex-col gap-2">

@@ -104,10 +104,41 @@ impl MarkRow {
     }
 }
 
+/// Who settled a resolved decision (strongly-typed contract across store, stats and UI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionSettler {
+    /// Settled by a human user.
+    Me,
+    /// Settled automatically by Steve.
+    Steve,
+}
+
+impl DecisionSettler {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Me => "me",
+            Self::Steve => "steve",
+        }
+    }
+}
+
 impl DecisionRow {
-    /// Decided by YOLO on the user's behalf: not time the user spent.
-    pub fn by_yolo(&self) -> bool {
-        self.result.get("decided_by").and_then(Value::as_str) == Some("yolo")
+    /// Settled automatically by Steve (not time a person spent waiting).
+    pub fn by_steve(&self) -> bool {
+        self.result.get("decided_by").and_then(Value::as_str)
+            == Some(DecisionSettler::Steve.as_str())
+    }
+
+    /// Who settled a resolved decision (`None` while open or expired).
+    pub fn settled_by(&self) -> Option<DecisionSettler> {
+        (self.status == "resolved").then(|| {
+            if self.by_steve() {
+                DecisionSettler::Steve
+            } else {
+                DecisionSettler::Me
+            }
+        })
     }
 
     pub fn choice(&self) -> Option<&str> {
@@ -116,7 +147,7 @@ impl DecisionRow {
 
     /// A card that waited for a person.
     pub fn human(&self) -> bool {
-        HUMAN_KINDS.contains(&self.kind.as_str()) && !self.by_yolo()
+        HUMAN_KINDS.contains(&self.kind.as_str()) && !self.by_steve()
     }
 }
 

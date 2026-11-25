@@ -9,7 +9,7 @@
 use serde_json::{Value, json};
 use steve_core::Core;
 use steve_modules::contacts::{memory, service, stewards};
-use steve_store::{NewBot, ThreadRun};
+use steve_store::{NewBot, ThreadTask};
 
 use super::mcp_extra::Extra;
 
@@ -30,9 +30,13 @@ pub fn is(name: &str) -> bool {
 }
 
 /// The meeting is on for the run: the owner, in Steve's own conversation.
-pub fn open(core: &Core, run: &ThreadRun) -> bool {
-    core.onboard_allows(&run.workspace_id, &run.message_id, run.user_id.as_deref())
-        .unwrap_or(false)
+pub fn open(core: &Core, run: &ThreadTask) -> bool {
+    core.onboard_allows(
+        &run.workspace_id,
+        &run.origin_message_id,
+        run.user_id.as_deref(),
+    )
+    .unwrap_or(false)
 }
 
 fn schema(props: Value, required: &[&str]) -> Value {
@@ -112,7 +116,7 @@ pub fn descriptors() -> Vec<steve_node_api::ToolDescriptor> {
 /// user of its own stands for.
 pub async fn call(
     x: &Extra,
-    run: &ThreadRun,
+    run: &ThreadTask,
     name: &str,
     args: &Value,
     owner: &str,
@@ -432,20 +436,9 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
             skipped.push(b.name);
             continue;
         }
-        let bot = x
-            .store
-            .bots()
-            .create(ws, &b, user)
-            .map_err(|e| e.to_string())?
-            .ok_or("The Bot was not created.")?;
-        /* whoever creates a Bot is its 负责人, as on the Bots page (best effort: the Bot exists either way) */
-        if let Err(e) = x
-            .modules
-            .store
-            .write(|tx| stewards::adopt(tx, ws, "bot", &bot.id, Some(user), "seed"))
-        {
-            tracing::warn!("first meeting: steward of {}: {e}", bot.id);
-        }
+        x.store
+            .write(|tx| stewards::create_bot(tx, ws, &b, user))
+            .map_err(|e| e.to_string())?;
         created.push(b.name);
     }
     let mut out = vec![];

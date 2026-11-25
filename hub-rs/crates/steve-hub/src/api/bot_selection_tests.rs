@@ -10,28 +10,27 @@ use steve_core::harnesses::{Harness, HarnessModel};
 use tower::ServiceExt;
 
 use super::*;
-use crate::backend::{BResult, Domain};
 use crate::bus::Bus;
 use crate::config::Config;
-use crate::wire::store::StoreBackend;
+use crate::wire::{core::CoreDomain, store::StoreBackend};
 
 struct Catalogue(RwLock<Vec<Harness>>);
 
+struct DraftGateway;
+
 #[async_trait::async_trait]
-impl Domain for Catalogue {
-    async fn harnesses(&self, fresh: bool) -> BResult<Vec<Harness>> {
-        assert!(!fresh, "saving configuration must not start a probe");
-        Ok(self.0.read().unwrap().clone())
-    }
-    async fn claude_print(
+impl steve_core::ModelGateway for DraftGateway {
+    async fn call(
         &self,
-        _: &'static str,
         _: &str,
-        _: &str,
-        _: crate::backend::Tier,
-        _: u64,
-    ) -> Result<String, crate::error::ApiError> {
-        Ok(json!({"name":"Draft", "model":"claude-opus-5-5"}).to_string())
+        _: steve_core::Tier,
+        _: std::time::Duration,
+        _: &steve_core::gateway::ThinkTools,
+    ) -> steve_core::Result<steve_core::gateway::Printed> {
+        Ok(steve_core::gateway::Printed {
+            text: json!({"name":"Draft", "model":"claude-opus-5-5"}).to_string(),
+            ..Default::default()
+        })
     }
 }
 
@@ -40,6 +39,7 @@ struct Env {
     store: steve_store::Store,
     app: Router,
     catalogue: Arc<Catalogue>,
+    me: String,
 }
 
 fn reported(id: &str, models: &[&str], efforts: &[&str]) -> Harness {
@@ -75,6 +75,10 @@ impl Env {
         )
         .unwrap();
         store.ensure_workspace().unwrap();
+        let me = store
+            .users()
+            .create("test-owner", "Owner", None, "owner")
+            .unwrap();
         let catalogue = Arc::new(Catalogue(RwLock::new(vec![
             reported(
                 "claude-code",
@@ -87,18 +91,20 @@ impl Env {
                 &["low", "high", "ultra"],
             ),
         ])));
-        let st = AppState::new(
-            cfg,
-            Arc::new(StoreBackend(store.clone())),
-            catalogue.clone(),
-            Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-                Default::default(),
-            ))),
-        );
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
+        let domain = CoreDomain::for_test(&cfg, store.clone(), &bus, Some(Arc::new(DraftGateway)));
+        let cat = catalogue.clone();
+        domain
+            .core
+            .models()
+            .set_bot_harnesses(Arc::new(move |_| cat.0.read().unwrap().clone()));
+        let st = AppState::new(cfg, StoreBackend(store.clone()), domain, bus);
         let ctx = Ctx {
             user: Obj::new(),
             ws: "default".into(),
-            me: "me".into(),
+            me: me.clone(),
             client: None,
         };
         let app = Router::new()
@@ -113,6 +119,7 @@ impl Env {
             store,
             app,
             catalogue,
+            me,
         }
     }
 
@@ -399,4 +406,41 @@ async fn a_partially_unknown_target_set_does_not_certify_an_accepted_save() {
         status, 400,
         "unknown targets do not erase another target's known incompatibility"
     );
+}
+
+#[tokio::test]
+async fn create_draft_and_duplicate_all_adopt_creator_as_steward() {
+    let e = Env::new();
+    let me = e
+        .store
+        .read(|r| steve_modules::contacts::repo::me_of(r, "default", &e.me))
+        .unwrap()
+        .expect("creator party auto-created by user creation");
+    let created = e.create(json!({"name": "Created"})).await;
+    let (s, dup) = e
+        .call("POST", &format!("/bots/{created}/duplicate"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{dup}");
+    let duplicated = dup["id"].as_str().unwrap().to_string();
+    let (s, dr) = e
+        .call("POST", "/bots/draft", json!({"desc": "create a helper"}))
+        .await;
+    assert_eq!(s, 200, "{dr}");
+    let drafted = dr["id"].as_str().unwrap().to_string();
+
+    for (kind, id) in [
+        ("create", created),
+        ("duplicate", duplicated),
+        ("draft", drafted),
+    ] {
+        let stewards = e
+            .store
+            .read(|r| steve_store::Stewards(r).of_object("default", "bot", &id))
+            .unwrap();
+        assert_eq!(
+            stewards.first().map(|s| s.person_id.as_str()),
+            Some(me.id.as_str()),
+            "{kind} ({id}) did not adopt creator as steward: {stewards:?}"
+        );
+    }
 }

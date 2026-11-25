@@ -177,13 +177,6 @@ impl Db {
     pub fn bot_seed_fixups(&self, steve_project: Option<&str>) -> Result<()> {
         Ok(self.s.bots().seed_fixups(steve_project)?)
     }
-    /// A new bot in `ws`; `b` is a `NewBot` as JSON.
-    pub fn bot_create(&self, ws: &str, b: Value, author: &str) -> Result<Bot> {
-        self.s
-            .bots()
-            .create(ws, &serde_json::from_value(b)?, author)?
-            .ok_or_else(|| crate::error::msg(steve_i18n::t!("core.bot.not_found")))
-    }
     pub fn bot_patch(&self, id: &str, p: &Map<String, Value>, author: &str) -> Result<()> {
         self.s.bots().patch(id, &decode(p.clone())?, author)?;
         Ok(())
@@ -447,20 +440,15 @@ impl Db {
                     continue;
                 }
                 let user = e.kind == "user"
-                    || e.kind == "user_message_chunk"
                     || e.kind == steve_transcript::TEXT
                         && e.data.get("role").and_then(Value::as_str) == Some("user");
                 if user || read >= SCAN {
                     break 'back;
                 }
-                if matches!(
-                    e.kind.as_str(),
-                    steve_transcript::TOOL | "tool_call" | "tool_call_update"
-                ) {
+                if e.kind == steve_transcript::TOOL {
                     let call = e
                         .data
                         .pointer("/tool/id")
-                        .or_else(|| e.data.get("toolCallId"))
                         .and_then(Value::as_str)
                         .map(String::from);
                     turn.push(Seen::Tool(call));

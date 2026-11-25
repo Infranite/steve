@@ -606,12 +606,13 @@ impl<C: Read> Contacts<'_, C> {
         &mut self,
         viewer: &Viewer,
         org: &str,
-    ) -> Result<Vec<(String, String, Option<String>)>> {
+    ) -> Result<Vec<(String, String, Option<String>, Value)>> {
         let dialect = self.0.db().dialect();
         let mut q = active_parties(viewer, "contact");
         q.clear_selects()
             .columns([("p", "id"), ("p", "name")])
             .expr(dialect.json_field(Expr::col(("l", "props")), "title"))
+            .column(("p", "avatar"))
             .join_as(
                 JoinType::InnerJoin,
                 "links",
@@ -620,8 +621,14 @@ impl<C: Read> Contacts<'_, C> {
             )
             .order_by(("p", "name"), Order::Asc)
             .order_by(("p", "id"), Order::Asc);
-        self.0
-            .all(&q, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        self.0.all(&q, |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                json_or(row.get(3)?, Value::Object(Default::default())),
+            ))
+        })
     }
 
     pub fn contacts(&mut self, viewer: &Viewer, filters: &ContactQuery) -> Result<Vec<Party>> {

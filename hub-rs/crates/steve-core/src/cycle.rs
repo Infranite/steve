@@ -1174,6 +1174,13 @@ impl Tx<'_> {
         acceptance: &Option<String>,
         reason: &str,
     ) -> Result<()> {
+        if self
+            .db()
+            .store()
+            .write(|w| steve_store::bot_dispatch::clear_wait(w, &i.id))?
+        {
+            self.reconcile_no_executor_card(&i.workspace_id)?;
+        }
         self.retire_closed_cycle_children(&i.id)?;
         /* nothing of Steve's automation for the item is left to run */
         self.drop_steve_queued(&i.id)?;

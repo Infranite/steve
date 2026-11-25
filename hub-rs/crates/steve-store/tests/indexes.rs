@@ -330,9 +330,24 @@ const CASES: &[(&str, &str, &str)] = &[
         "SELECT * FROM sessions ORDER BY updated DESC LIMIT 1000",
     ),
     (
-        "thread_runs_token",
-        "steve-store repo/thread.rs run_by_token",
-        "SELECT * FROM thread_runs WHERE token_hash = ? AND status = 'running'",
+        "thread_reply_tasks_token",
+        "steve-store contract/thread.rs active_task_by_token",
+        "SELECT * FROM thread_reply_tasks WHERE token_hash = ? AND status = 'claimed' AND cancel_requested_at IS NULL",
+    ),
+    (
+        "thread_reply_tasks_head",
+        "steve-store contract/thread.rs claim_head",
+        "SELECT * FROM thread_reply_tasks WHERE workspace_id = ? AND space = ? AND status IN ('queued', 'claimed') ORDER BY input_seq ASC LIMIT 1",
+    ),
+    (
+        "thread_reply_receipts_resume",
+        "steve-store contract/thread.rs last_resumable_receipt",
+        "SELECT * FROM thread_reply_receipts WHERE workspace_id = ? AND space = ? AND outcome = 'answered' AND harness_session IS NOT NULL ORDER BY committed_at DESC LIMIT 1",
+    ),
+    (
+        "thread_notices_host",
+        "steve-store contract/thread.rs close_notice",
+        "SELECT id, host_message_id FROM thread_notices WHERE workspace_id = ? AND host_message_id = ? AND host_message_id IS NOT NULL",
     ),
     (
         "agent_turns_session",
@@ -478,6 +493,8 @@ const UNQUERIED: &[&str] = &[
     // these two indexes are removed with their table by the native approval migration
     "yolo_actions_window",
     "yolo_actions_decision",
+    // retired with thread_runs by migration 125
+    "thread_runs_token",
 ];
 
 #[test]

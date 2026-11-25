@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use steve_modules::Tier;
-use steve_modules::changes::first_json;
+use steve_runtime::json::first_json_opt as first_json;
 
 use super::{NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, req_str, str_list};
 use steve_store::{BotRows, FlowSources, Read};
@@ -60,16 +60,9 @@ pub fn pick_bot(
         Some(conn) => FlowSources(c).triage(ws, conn)?,
         None => None,
     };
-    let wanted = configured
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .or(triage.as_deref());
-    if let Some(name) = wanted
-        && let Some(bot) = BotRows(c).enabled_prompt(ws, name)?
-    {
-        return Ok(Some(bot));
-    }
-    BotRows(c).main_prompt(ws)
+    Ok(BotRows(c)
+        .pick_workspace_bot(ws, &[configured, triage.as_deref()])?
+        .map(steve_store::ReplyBot::into_prompt))
 }
 
 /// The branches: the configured ones, else the labels of the node's edges.

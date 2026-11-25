@@ -7,7 +7,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Row, Empty, go, Panel, Section, Loading, FieldRow, Notice } from "@/ui"
 import { tm } from "@/store"
 import { vaultApi, keyStoreState } from "@/api/vault"
-import { useLoad, useBusy } from "@/accounts/load"
+import { useBusy } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { RegisterPasskey } from "@/vault/reveal"
 import { RecoveryCode } from "@/vault/index"
 import { lazy } from "@/api/accounts"
@@ -18,17 +19,17 @@ export const VAULT_CAT: [string, string, any, string] = lazy<[string, string, an
 
 export function VaultSettingsPane() {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["vault", "settings"], async () => {
     const status = await vaultApi.status()
     const passkeys = status.initialized ? await vaultApi.passkeys().then(
       (keys) => ({ keys, error: null }),
       (e: Error) => ({ keys: [], error: e.message }),
     ) : null
     return { status, passkeys }
-  }, [], ["vault"])
+  }, { events: ["vault"] })
   const [busy, act] = useBusy(), [code, setCode] = useState(""), [rotated, setRotated] = useState<string | null>(null), [ask, setAsk] = useState(false), [rm, setRm] = useState<{ id: string; name: string } | null>(null)
-  if (L.s === "loading") return <Loading />
-  if (L.s === "error") return <Empty title={L.err} />
+  if (L.loading) return <Loading />
+  if (L.error || !L.data) return <Empty title={L.error?.message ?? ""} />
   const { status: s, passkeys } = L.data
   if (!s.initialized) return <Panel><Row title={t("vault:settings.notEnabled")} sub={t("vault:settings.notEnabledSub")} onClick={() => go("#/vault")} controls><Button size="sm" variant="outline" onClick={() => go("#/vault")}>{t("vault:settings.goEnable")}</Button></Row></Panel>
   if (rotated) return <RecoveryCode title={t("vault:recovery.newTitle")} code={rotated} onDone={() => { setRotated(null); void L.reload() }} />

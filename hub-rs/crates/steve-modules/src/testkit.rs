@@ -3,6 +3,7 @@
 //! Never touches `~/.steve`.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,6 +29,8 @@ pub const WS2: &str = "w2";
 /// A scripted model gateway. Answers, in this order: the first [`FakeGateway::script`] whose prefix the
 /// prompt starts with (reusable), else the next queued [`FakeGateway::reply`]/[`FakeGateway::fail`],
 /// else `{}`. Records every call so tests can assert on the prompts.
+type OnRun = Box<dyn Fn(Tier, &str) + Send + Sync>;
+
 #[derive(Default)]
 pub struct FakeGateway {
     scripts: Mutex<Vec<(String, Result<GatewayOut, crate::gateway::GatewayError>)>>,
@@ -36,6 +39,12 @@ pub struct FakeGateway {
     pub prompts: Mutex<Vec<String>>,
     /// Every call's tier and prompt, in order.
     pub calls: Mutex<Vec<(Tier, String)>>,
+    /// Every `(prompt, images)` passed to `run_with_images` when image acceptance is enabled.
+    pub image_calls: Mutex<Vec<(String, Vec<Value>)>>,
+    /// Every `exclude_model` passed to `run_excluding`, in order.
+    pub excluded_models: Mutex<Vec<Option<String>>>,
+    accept_images: AtomicBool,
+    on_run: Mutex<Option<OnRun>>,
 }
 
 fn out(text: impl Into<String>) -> GatewayOut {
@@ -84,6 +93,14 @@ impl FakeGateway {
     pub fn last_prompt(&self) -> Option<String> {
         lock(&self.prompts).last().cloned()
     }
+    /// Allows `run_with_images` calls and records them in [`Self::image_calls`].
+    pub fn accept_images(&self) {
+        self.accept_images.store(true, Ordering::SeqCst);
+    }
+    /// Runs `f` on every gateway invocation before answering.
+    pub fn on_run(&self, f: impl Fn(Tier, &str) + Send + Sync + 'static) {
+        *lock(&self.on_run) = Some(Box::new(f));
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -98,6 +115,9 @@ impl Gateway for FakeGateway {
         prompt: &str,
         _: Duration,
     ) -> Result<GatewayOut, crate::gateway::GatewayError> {
+        if let Some(f) = lock(&self.on_run).as_ref() {
+            f(tier, prompt);
+        }
         lock(&self.prompts).push(prompt.into());
         lock(&self.calls).push((tier, prompt.into()));
         if let Some((_, r)) = lock(&self.scripts)
@@ -109,6 +129,34 @@ impl Gateway for FakeGateway {
         lock(&self.replies)
             .pop_front()
             .unwrap_or_else(|| Ok(out("{}")))
+    }
+
+    async fn run_excluding(
+        &self,
+        tier: Tier,
+        prompt: &str,
+        exclude_model: Option<&str>,
+        timeout: Duration,
+    ) -> Result<GatewayOut, crate::gateway::GatewayError> {
+        lock(&self.excluded_models).push(exclude_model.map(str::to_string));
+        self.run(tier, prompt, timeout).await
+    }
+
+    async fn run_with_images(
+        &self,
+        tier: Tier,
+        prompt: &str,
+        images: &[Value],
+        timeout: Duration,
+    ) -> Result<GatewayOut, crate::gateway::GatewayError> {
+        if images.is_empty() {
+            return self.run(tier, prompt, timeout).await;
+        }
+        if !self.accept_images.load(Ordering::SeqCst) {
+            return Err("当前模型入口不支持读取图片".into());
+        }
+        lock(&self.image_calls).push((prompt.into(), images.to_vec()));
+        self.run(tier, prompt, timeout).await
     }
 }
 

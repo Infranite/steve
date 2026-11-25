@@ -173,6 +173,7 @@ pub struct OrgPerson {
     pub id: String,
     pub name: String,
     pub title: Option<String>,
+    pub avatar: Value,
 }
 
 /// An organization; `people` only on the detail.
@@ -242,10 +243,10 @@ pub fn ensure_base(w: &mut steve_store::W<'_>, who: &Caller) -> ApiResult<Party>
                 &json!({ "type": "contact", "me": true }),
             )?;
             w.emit(crate::accounts::service::party_changed(&who.ws, &me.id));
-            super::stewards::seed_defaults(w, &who.ws, &me)?;
             me
         }
     };
+    super::stewards::seed_defaults(w, &who.ws, &me)?;
     ensure_self_org(w, &who.ws, &who.me)?;
     Ok(me)
 }
@@ -414,7 +415,7 @@ fn head(
         org,
         tags: steve_store::TagRows(c).of(&viewer.ws, &pref(&p.id))?,
         visibility: p.visibility.clone(),
-        is_me: p.is_me(),
+        is_me: p.user_id.as_deref() == Some(viewer.user.as_str()),
         avatar: p.avatar.clone(),
         updated: p.updated,
     })
@@ -501,7 +502,12 @@ pub fn org(
             steve_store::Contacts::new(c)
                 .organization_people(viewer, &p.id)?
                 .into_iter()
-                .map(|(id, name, title)| OrgPerson { id, name, title })
+                .map(|(id, name, title, avatar)| OrgPerson {
+                    id,
+                    name,
+                    title,
+                    avatar,
+                })
                 .collect(),
         )
     } else {
