@@ -331,7 +331,7 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-core/src/orchestrator.rs", Hub, "the scratch dir of an item with no project and verification of a Hub-owned design report before approval"),
     e(Fs, "steve-hub/src/api/files.rs", Hub, "a blob download"),
     e(Fs, "steve-hub/src/app.rs", Hub, "the upgrade control token"),
-    e(Fs, "steve-hub/src/config.rs", Hub, "the Hub's dirs and harness manifest"),
+    e(Fs, "steve-hub/src/config.rs", Hub, "the Hub's dirs, steve.env, and harness manifest"),
     e(Fs, "steve-hub/src/files.rs", Hub, "the blob store (atomic temp file + rename and no-follow integrity read)"),
     e(Fs, "steve-hub/src/system.rs", Hub, "host facts (/proc/meminfo)"),
     e(Fs, "steve-hub/src/upgrades/client.rs", Hub, "the upgrader"),

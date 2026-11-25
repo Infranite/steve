@@ -1,7 +1,7 @@
 import type { SnapshotId } from "./gen"
 import { hubUrl } from "@/hub"
 import { modReq } from "@/api"
-import type { Health, Install } from "@/upgrade-guide"
+import type { CapabilityReasonCode, Health, Install } from "@/upgrade-guide"
 import { t } from "@/i18n"
 
 /** Release builds are named `YYYYMMDD-HHMMSS-<commit>`; anything else (dev, a hand-set STEVE_VERSION) is shown as is. */
@@ -16,13 +16,14 @@ export function shortVersion(v: string): string {
 }
 
 export type UpdatePhase = "awaiting_approval" | "staging" | "ready" | "draining" | "stopping" | "backing_up" | "restarting" | "verifying" | "committed" | "succeeded" | "rolling_back" | "rolled_back_pending_health" | "rolled_back" | "failed"
+export type UpdateErrorCode = "committed_startup_failed"
 export type UpdateCheck = { status: "available" | "up_to_date" | "ahead" | "unknown_current" | "no_release" | "error" | "unsupported_platform"; checked_at: number; version: string | null; release_url: string | null; notes: string | null; error: string | null }
 export type UpdateProgress = { step: string; started_at: number; updated_at: number; download?: { received_bytes: number; total_bytes: number }; detail?: string }
 export type UpdateDrain = { maintenance: boolean; ready: boolean; running: Record<string, number>; acp: number; node: number; adapters_stopped: boolean; unknown_mail: number; source_release_busy: boolean; blockers?: { kind: "node_turn" | "node_session" | "activity" | "source_release"; reason: string; node_id?: string; item_id?: string | null; session_id?: string; attempt_id?: string | null; state: string; count?: number }[] }
-export type UpdateOperation = { id: string; idempotency_key: string; version: string; phase: UpdatePhase; created_at: number; updated_at: number; requested_by: string; approved_by?: string | null; approved_at?: number | null; error: string | null; previous: string | null; target: string | null; runner?: { kind: string; log?: string | null } | null; backup_snapshot?: SnapshotId | null; progress?: UpdateProgress; drain?: UpdateDrain }
+export type UpdateOperation = { id: string; idempotency_key: string; version: string; phase: UpdatePhase; created_at: number; updated_at: number; requested_by: string; approved_by?: string | null; approved_at?: number | null; error: string | null; error_code?: UpdateErrorCode | null; previous: string | null; target: string | null; runner?: { kind: string; log?: string | null } | null; backup_snapshot?: SnapshotId | null; progress?: UpdateProgress; drain?: UpdateDrain }
 /** The verified pre-upgrade snapshot and its repository. */
 export type UpdateBackup = { snapshot_id: SnapshotId | null; dir: string }
-export type UpdateState = { repository: string; current: { hub: string; web: string }; capability: { managed: boolean; can_execute: boolean; reason: string; owner?: boolean }; check: UpdateCheck | null; operation: UpdateOperation | null; install?: Install; backup?: UpdateBackup | null }
+export type UpdateState = { repository: string; current: { hub: string; web: string }; capability: { managed: boolean; can_execute: boolean; reason: string; reason_code?: CapabilityReasonCode | null; owner?: boolean }; check: UpdateCheck | null; operation: UpdateOperation | null; install?: Install; backup?: UpdateBackup | null }
 export const updates = {
   status: () => modReq<UpdateState>("GET", "/updates", undefined, AbortSignal.timeout(8000)),
   check: () => modReq<UpdateCheck>("POST", "/updates/check", {}, AbortSignal.timeout(30_000)),

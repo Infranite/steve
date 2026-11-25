@@ -171,7 +171,7 @@ export const tm = (ts: number | null | undefined) => pastTime(ts)
 const since = (ts: number) => span(Date.now() - ts)
 const dur = (a: number, b: number) => elapsed(b - a)
 
-/** the web build this page was loaded from: ops/release-web.sh writes it into index.html; "dev" under vite */
+/** the web build this page was loaded from: the release packager writes it into index.html; "dev" under vite */
 export const LOADED_WEB_VERSION = document.querySelector('meta[name="steve-web-version"]')?.getAttribute("content") || "dev"
 
 /* ───────── the store ───────── */

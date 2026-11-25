@@ -33,7 +33,11 @@ pub async fn status(
     v["install"] = json!(u.install(&st.cfg.steve_repo));
     if owner(&cx).is_err() {
         // paths on this machine are the instance manager's
-        v["install"] = json!({"kind": v["install"]["kind"]});
+        let mut safe_install = json!({"kind": v["install"]["kind"]});
+        if !v["install"]["legacy_service"].is_null() {
+            safe_install["legacy_service"] = v["install"]["legacy_service"].clone();
+        }
+        v["install"] = safe_install;
         v["backup"] = Value::Null;
         v["capability"]["reason"] = json!(steve_i18n::t!("hub.upgrade.owner_only_reason"));
         if let Some(op) = v["operation"].as_object_mut() {

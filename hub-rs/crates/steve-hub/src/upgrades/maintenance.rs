@@ -19,7 +19,7 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
     if command == "--help" {
         return Ok((
             0,
-            json!({"usage":"--local-release setup-keychain|prepare-bundle|deploy <bundle> --home PATH; prune --home PATH [--keep PATH] [--dry-run]"}),
+            json!({"usage":"--local-release setup-keychain|prepare-bundle|deploy <bundle> --home PATH; upgrade-macos [<bundle>] [--home PATH] [--label LABEL] [--timeout SECS] [--keychain-pass-stdin]; rollback-macos [--home PATH] [--label LABEL] [--timeout SECS]; prune --home PATH [--keep PATH] [--dry-run]"}),
         ));
     }
     if command == "schema-state" && args.len() == 2 {
@@ -38,22 +38,38 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
         super::signing::provision(Path::new(&args[1]), password.trim())?;
         return Ok((0, json!({"stored":true})));
     }
-    if !["setup-keychain", "prepare-bundle", "deploy", "prune"].contains(&command) {
+    if ![
+        "setup-keychain",
+        "prepare-bundle",
+        "deploy",
+        "upgrade-macos",
+        "rollback-macos",
+        "prune",
+    ]
+    .contains(&command)
+    {
         bail!("unsupported native maintenance command")
     }
     let mut index = 1;
-    let candidate = if command != "prune" {
+    let candidate = if matches!(command, "setup-keychain" | "prepare-bundle" | "deploy") {
         let path = args
             .get(index)
             .filter(|s| !s.starts_with('-'))
             .context("bundle path required")?;
         index += 1;
         Some(PathBuf::from(path))
+    } else if command == "upgrade-macos" {
+        if let Some(path) = args.get(index).filter(|s| !s.starts_with('-')) {
+            index += 1;
+            Some(PathBuf::from(path))
+        } else {
+            None
+        }
     } else {
         None
     };
     let mut home = None;
-    let mut label = "io.github.infranite.steve.hub".to_owned();
+    let mut label: Option<String> = None;
     let (mut version, mut commit, mut operation) = (None, None, None);
     let mut timeout = 600_u64;
     let (mut password_stdin, mut dry) = (false, false);
@@ -61,7 +77,8 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
     while index < args.len() {
         let name = args[index].as_str();
         index += 1;
-        if name == "--keychain-pass-stdin" && command == "prepare-bundle" {
+        if name == "--keychain-pass-stdin" && matches!(command, "prepare-bundle" | "upgrade-macos")
+        {
             password_stdin = true;
             continue;
         }
@@ -73,11 +90,22 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
         index += 1;
         match name {
             "--home" => home = Some(PathBuf::from(value)),
-            "--label" if command == "setup-keychain" => label = value,
+            "--label"
+                if matches!(
+                    command,
+                    "setup-keychain" | "upgrade-macos" | "rollback-macos"
+                ) =>
+            {
+                label = Some(value)
+            }
             "--version" if command == "prepare-bundle" => version = Some(value),
             "--commit" if command == "prepare-bundle" => commit = Some(value),
             "--operation" if command == "deploy" => operation = Some(value),
-            "--timeout" | "--drain-s" if command == "deploy" => timeout = value.parse()?,
+            "--timeout" | "--drain-s"
+                if matches!(command, "deploy" | "upgrade-macos" | "rollback-macos") =>
+            {
+                timeout = value.parse()?
+            }
             "--keep" if command == "prune" => keep.push(PathBuf::from(value)),
             _ => bail!("unsupported option {name}"),
         }
@@ -89,7 +117,11 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
     match command {
         "setup-keychain" => Ok((
             0,
-            steve_install::signing::setup_keychain(&home, &candidate.unwrap(), &label)?,
+            steve_install::signing::setup_keychain(
+                &home,
+                &candidate.unwrap(),
+                label.as_deref().unwrap_or("io.github.infranite.steve.hub"),
+            )?,
         )),
         "prepare-bundle" => {
             if !password_stdin {
@@ -116,6 +148,50 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
                 &home,
                 &candidate.unwrap(),
                 operation.as_deref(),
+                Duration::from_secs(timeout),
+            )?;
+            Ok((result.exit_code, result.receipt))
+        }
+        "upgrade-macos" => {
+            if timeout == 0 || timeout > 86400 {
+                bail!("timeout must be within 1..86400 seconds")
+            }
+            let bundle = match candidate {
+                Some(path) => path,
+                None => {
+                    let exe = std::env::current_exe()?.canonicalize()?;
+                    exe.parent()
+                        .and_then(Path::parent)
+                        .context("steve-hub executable is not inside a release bundle")?
+                        .to_path_buf()
+                }
+            };
+            let password = if password_stdin {
+                let mut raw = zeroize::Zeroizing::new(String::new());
+                std::io::stdin().read_line(&mut raw)?;
+                Some(zeroize::Zeroizing::new(raw.trim().to_owned()))
+            } else if home.join("signing/identity.json").is_file() {
+                let store = super::signing::installed_helper(&home);
+                super::signing::password(store.as_deref()).ok().flatten()
+            } else {
+                None
+            };
+            let result = steve_install::release::upgrade_macos(
+                &home,
+                &bundle,
+                label.as_deref(),
+                Duration::from_secs(timeout),
+                password.as_deref().map(String::as_str),
+            )?;
+            Ok((result.exit_code, result.receipt))
+        }
+        "rollback-macos" => {
+            if timeout == 0 || timeout > 86400 {
+                bail!("timeout must be within 1..86400 seconds")
+            }
+            let result = steve_install::release::rollback_macos(
+                &home,
+                label.as_deref(),
                 Duration::from_secs(timeout),
             )?;
             Ok((result.exit_code, result.receipt))

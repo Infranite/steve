@@ -58,14 +58,12 @@ class BundleTests(unittest.TestCase):
         release.merge(SimpleNamespace(out=str(self.out / "steve-release.json"), manifests=[str(manifest)]))
         metadata = json.loads((self.out / "steve-release.json").read_text())
         with tarfile.open(self.out / metadata["assets"][0]["name"]) as bundle:
-            self.assertNotIn("private.env", bundle.getnames())
+            names = bundle.getnames()
+            self.assertNotIn("private.env", names)
             self.assertEqual(bundle.getmember("bin/steve-node").mode, 0o755)
             self.assertEqual(bundle.getmember("bin/steve-keyhelper").mode, 0o755)
-            self.assertEqual(set(n for n in bundle.getnames() if n.startswith("ops/")),
-                             {"ops/" + n for n in release.RUNTIME_OPS})
-            self.assertNotIn("ops/backup.sh", bundle.getnames())
-            self.assertIn("ops/upgrade.py", bundle.getnames())
-            self.assertEqual(bundle.getmember("ops/upgrade.py").mode, 0o755)
+            self.assertEqual([n for n in names if n == "ops" or n.startswith("ops/")], [])
+            self.assertEqual([n for n in names if n.endswith((".py", ".sh"))], [])
             self.assertEqual(bundle.getmember("bin/steve-hub").mode, 0o755)
             self.assertEqual(json.load(bundle.extractfile("release.json"))["version"], "0.2.0")
             self.assertIn(b'content="0.2.0"', bundle.extractfile("web/dist/index.html").read())
@@ -124,10 +122,9 @@ class BundleTests(unittest.TestCase):
                 self.assertEqual(bundle.extractfile("bin/restic").read(), b"backup engine")
                 self.assertEqual(bundle.extractfile("bin/restic.LICENSE").read(), b"license")
         with tarfile.open(self.out / installer["assets"][0]["name"]) as bundle:
-            self.assertNotIn("ops/steve.py", bundle.getnames())
-            self.assertFalse(any(name.endswith(".py") for name in bundle.getnames()))
-            self.assertEqual(set(name for name in bundle.getnames() if name.startswith("ops/")),
-                             {"ops/" + name for name in release.INSTALLER_OPS})
+            names = bundle.getnames()
+            self.assertEqual([name for name in names if name == "ops" or name.startswith("ops/")], [])
+            self.assertEqual([name for name in names if name.endswith((".py", ".sh"))], [])
             self.assertEqual(bundle.getmember("bin/steve").mode, 0o755)
             self.assertEqual(bundle.extractfile("bin/steve").read(), self.cli.read_bytes())
             self.assertEqual(bundle.getmember("LICENSE").mode, 0o644)
@@ -155,7 +152,7 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not executable"):
             release.package(self.args)
 
-    def test_packaged_installer_without_backup_script_passes_tap_verification(self):
+    def test_packaged_script_free_installer_passes_tap_verification_and_rejects_scripts(self):
         self.args.installer = True
         # Only build identity execution is stubbed. Real archives, manifests and the tap's
         # native-header, file inventory and identity checks run against the packaged output.
@@ -169,28 +166,24 @@ class BundleTests(unittest.TestCase):
         manifest = json.loads((self.out / "installer-manifest-aarch64-apple-darwin.json").read_text())
         archive = self.out / manifest["assets"][0]["name"]
         with tarfile.open(archive) as bundle:
-            self.assertNotIn("ops/backup.sh", bundle.getnames())
+            self.assertEqual([n for n in bundle.getnames() if n.endswith((".py", ".sh")) or n.startswith("ops/")], [])
         tap.verify_bundle(archive, manifest, self.args.target)
-        # Dropping the requirement must also preserve reading already-published installers
-        # that contain the optional retired script. Do not loosen the rest of the allowlist.
-        older = self.out / "legacy-installer.tar.gz"
-        with tarfile.open(archive) as source, tarfile.open(older, "w:gz") as destination:
+        # Tap verification rejects any legacy runtime script reintroduced into an installer archive.
+        with_script = self.out / "legacy-script-installer.tar.gz"
+        with tarfile.open(archive) as source, tarfile.open(with_script, "w:gz") as destination:
             for member in source:
                 destination.addfile(member, source.extractfile(member) if member.isfile() else None)
             script = b"#!/bin/sh\nexit 0\n"
-            member = tarfile.TarInfo("ops/backup.sh")
+            member = tarfile.TarInfo("ops/run.sh")
             member.mode, member.size = 0o755, len(script)
             destination.addfile(member, io.BytesIO(script))
-        tap.verify_bundle(older, manifest, self.args.target)
-        # Essential runtime scripts still have to be supplied; only backup.sh was retired.
-        ops = Path(self.tmp.name) / "ops"
-        ops.mkdir()
-        for name in release.RUNTIME_OPS:
-            if name != "run.sh":
-                shutil.copyfile(Path(__file__).parents[1] / "ops" / name, ops / name)
-        self.args.ops = str(ops)
-        with self.assertRaisesRegex(ValueError, "missing runtime ops scripts"):
-            release.package(self.args)
+        with self.assertRaisesRegex(tap.Refused, "unexpected installer member"):
+            tap.verify_bundle(with_script, manifest, self.args.target)
+        # Packager also refuses stray .sh/.py files placed under web/dist.
+        (self.web / "stray.sh").write_text("#!/bin/sh\n")
+        with self.assertRaisesRegex(ValueError, "runtime script forbidden"):
+            with patch.object(release.subprocess, "check_output", return_value=identity):
+                release.package(self.args)
 
     def test_installer_merge_requires_matching_protocol_and_both_platforms(self):
         self.args.installer = True

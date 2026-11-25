@@ -85,11 +85,36 @@ fn an_unmanaged_install_names_its_kind_and_why_it_is_not_upgraded_here() {
     let install = u.install(Path::new(""));
     let reason = install.reason().unwrap();
     let status = u.status().unwrap();
-    assert_eq!(status["install"]["kind"], install.kind);
+    assert_eq!(status["install"]["kind"], json!(install.kind));
     assert_eq!(status["capability"]["managed"], false);
     assert_eq!(status["capability"]["reason"], reason);
     let refused = u.request("0.2.0", "one", "agent:s", false).unwrap_err();
     assert_eq!(refused.to_string(), reason);
+}
+
+#[test]
+fn legacy_macos_service_disables_one_click_and_returns_typed_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let u = Updates {
+        home: dir.path().into(),
+        repository: "Infranite/steve".into(),
+        current_hub: "0.12.0".into(),
+        current_web: "0.12.0".into(),
+        managed: true,
+        blocked_reason: None,
+        client: reqwest::Client::new(),
+        api_base: String::new(),
+        web_base: String::new(),
+        repo: PathBuf::new(),
+        kind: Some(install::InstallKind::LegacyMacosService),
+        launch: crate::upgrades::runner::Launch::Launchd,
+    };
+    let reason = u.execution_reason().expect("one-click must be disabled");
+    let status = u.status().unwrap();
+    assert_eq!(status["install"]["kind"], "legacy_macos_service");
+    assert_eq!(status["capability"]["reason_code"], "legacy_macos_service");
+    assert_eq!(status["capability"]["reason"], reason);
+    assert!(u.request("0.13.0", "legacy-macos", "owner", true).is_err());
 }
 
 #[tokio::test]
@@ -523,7 +548,7 @@ fn local(home: &Path, repo: &Path, api_base: String) -> (Updates, Arc<Mutex<Vec<
         api_base: api_base.clone(),
         web_base: api_base,
         repo: repo.into(),
-        kind: Some("local_release"),
+        kind: Some(install::InstallKind::LocalRelease),
         launch: runner::Launch::Fake(started.clone()),
     };
     (u, started)

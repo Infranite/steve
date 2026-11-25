@@ -1273,6 +1273,15 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         });
     }
     crate::upgrades::startup_gate(&cfg, &listeners).await?;
+    // After commit (post-startup_gate), migrate any legacy Linux systemd unit that still points
+    // to ops/run-managed.sh to direct `steve-hub --supervise`.
+    #[cfg(target_os = "linux")]
+    if std::env::var("STEVE_MANAGED").as_deref() == Ok("1")
+        && let Ok(current) = std::fs::canonicalize(cfg.home.join("current"))
+        && let Err(e) = steve_install::service::sync_hub_systemd_unit(&cfg.home, &current)
+    {
+        tracing::warn!("sync systemd hub unit after upgrade: {e:#}");
+    }
     let caches = Arc::new(steve_runtime::cache::Caches::new(cfg.cache));
     let bus = Bus::new(caches);
     let w =

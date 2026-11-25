@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Package already-built Hub/Node/Web and explicitly selected runtime scripts; merge independently built platform manifests.
+"""Package already-built Rust binaries, static Web assets and verified restic; merge independently built platform manifests.
 
-Only explicit build outputs enter a release. Never archive the checkout or STEVE_HOME.
+Only explicit build outputs enter a release. Never archive runtime shell/Python scripts, the checkout, or STEVE_HOME.
 """
 import argparse
 import bz2
@@ -16,8 +16,6 @@ import urllib.request
 from pathlib import Path
 
 
-RUNTIME_OPS = ("run.sh", "run-managed.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh")
-INSTALLER_OPS = ("run.sh", "run-managed.sh", "sign-setup.sh", "release-lib.sh")
 RESTIC_VERSION = "0.19.1"
 # Published in restic's v0.19.1 SHA256SUMS. Pin the checksums independently of the downloads.
 RESTIC_ASSETS = {
@@ -72,6 +70,10 @@ def write(path, value):
 
 
 def archive_bundle(root, manifest, target, asset, platform_manifest):
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root)
+        if path.is_file() and (rel.parts[0] == "ops" or path.suffix in {".py", ".sh"}):
+            raise ValueError(f"runtime script forbidden in release archive: {rel}")
     write(root / "release.json", dict(manifest, assets=[]))
     with tarfile.open(asset, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
         for path in sorted(root.rglob("*")):
@@ -91,14 +93,10 @@ def package(a):
     binary, web, out = Path(a.binary), Path(a.web), Path(a.out)
     node = Path(a.node)
     helper = Path(a.keyhelper) if getattr(a, "keyhelper", None) else None
-    ops = Path(getattr(a, "ops", None) or Path(__file__).resolve().parent.parent / "ops")
     if not node.is_file():
         raise ValueError("build Node before packaging")
     if a.target == "aarch64-apple-darwin" and (not helper or not helper.is_file()):
         raise ValueError("build keyhelper before packaging for macOS")
-    runtime = [ops / name for name in RUNTIME_OPS]
-    if any(not p.is_file() for p in runtime):
-        raise ValueError("missing runtime ops scripts")
     if not binary.is_file() or not (web / "index.html").is_file():
         raise ValueError("build Hub and Web before packaging")
     installer = getattr(a, "installer", False)
@@ -109,7 +107,7 @@ def package(a):
     installer_files = [cli, license_file] if installer else []
     if any(not p.is_file() for p in installer_files):
         raise ValueError("installer requires a prebuilt --cli binary and LICENSE")
-    for path in [binary, node, *([helper] if helper else []), *runtime, *installer_files, web, *web.rglob("*")]:
+    for path in [binary, node, *([helper] if helper else []), *installer_files, web, *web.rglob("*")]:
         if path.is_symlink():
             raise ValueError(f"symlink in build output: {path}")
     identity = json.loads(subprocess.check_output([str(binary.resolve()), "--build-info"], timeout=15))
@@ -144,10 +142,6 @@ def package(a):
         if helper:
             shutil.copyfile(helper, root / "bin/steve-keyhelper")
             (root / "bin/steve-keyhelper").chmod(0o755)
-        (root / "ops").mkdir()
-        for path in runtime:
-            shutil.copyfile(path, root / "ops" / path.name)
-            (root / "ops" / path.name).chmod(0o755)
         shutil.copytree(web, root / "web/dist")
         index = root / "web/dist/index.html"
         html = index.read_text()
@@ -159,10 +153,6 @@ def package(a):
         asset = out / f"steve-{a.version}-{a.target}.tar.gz"
         archive_bundle(root, manifest, a.target, asset, out / f"manifest-{a.target}.json")
         if installer:
-            # The native installer omits the Python bridge after the runtime archive is complete.
-            for name in RUNTIME_OPS:
-                if name not in INSTALLER_OPS:
-                    (root / "ops" / name).unlink()
             shutil.copyfile(cli, root / "bin/steve")
             (root / "bin/steve").chmod(0o755)
             shutil.copyfile(license_file, root / "LICENSE")
@@ -199,7 +189,6 @@ if __name__ == "__main__":
     for name in ("version", "commit", "target", "binary", "node", "web", "out"):
         pack.add_argument("--" + name, required=True)
     pack.add_argument("--keyhelper")
-    pack.add_argument("--ops")
     pack.add_argument("--installer", action="store_true", help="also package the standalone CLI installer")
     pack.add_argument("--cli", help="prebuilt native steve binary (required with --installer)")
     pack.add_argument("--license")

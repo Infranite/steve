@@ -66,4 +66,5 @@ edge steve-store-sqlite steve-types	1
 edge steve-transcript steve-node-api	1
 edge steve-vault steve-confine	1
 edge steve-workflow-js steve-workflow-api	1
+rusqlite steve-node	1
 rusqlite steve-store-sqlite	1

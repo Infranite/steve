@@ -104,6 +104,18 @@ struct BackupStatus<'a> {
     dir: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationErrorCode {
+    CommittedStartupFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityReasonCode {
+    LegacyMacosService,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Operation {
     pub id: String,
@@ -118,6 +130,8 @@ pub struct Operation {
     #[serde(default)]
     pub approved_at: Option<u64>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<OperationErrorCode>,
     pub previous: Option<String>,
     pub target: Option<String>,
     /// A local_release upgrade: what the one-shot runner job downloads and deploys (`runner.rs`).
@@ -152,7 +166,7 @@ pub struct Updates {
     /// STEVE_REPO: the checkout release scripts run from.
     pub repo: PathBuf,
     /// The installation kind, when not detected from where this process runs (tests).
-    pub kind: Option<&'static str>,
+    pub kind: Option<install::InstallKind>,
     pub launch: runner::Launch,
 }
 pub fn now() -> u64 {
@@ -325,11 +339,14 @@ impl Updates {
     }
     /// Why this page can't upgrade this installation itself; `None` when it can.
     pub fn execution_reason(&self) -> Option<String> {
+        let install = self.install(&self.repo);
+        if install.kind == install::InstallKind::LegacyMacosService {
+            return install.reason();
+        }
         if self.managed {
             return self.blocked_reason.clone();
         }
-        let install = self.install(&self.repo);
-        if install.kind == "local_release" {
+        if install.kind == install::InstallKind::LocalRelease {
             let missing = runner::local_missing(self);
             return (!missing.is_empty()).then(|| {
                 steve_i18n::t!(
@@ -372,6 +389,9 @@ impl Updates {
         op.phase = phase.into();
         op.updated_at = now();
         op.error = error;
+        if phase != "failed" {
+            op.error_code = None;
+        }
         let step = match phase {
             "staging" => "resolving",
             "ready" => "preflight",
@@ -385,6 +405,11 @@ impl Updates {
             _ => return self.save(op),
         };
         self.progress(op, step, None)
+    }
+    /// Record a terminal failure after the irreversible commit boundary (new database retained).
+    pub fn fail_committed(&self, op: &mut Operation, error: String) -> Result<()> {
+        op.error_code = Some(OperationErrorCode::CommittedStartupFailed);
+        self.phase(op, "failed", Some(error))
     }
     pub(super) fn progress(
         &self,
@@ -416,18 +441,41 @@ impl Updates {
             snapshot_id: op.backup_snapshot.as_ref(),
             dir: crate::backup::root(&self.home),
         });
-        let kind = self.install(&self.repo).kind;
-        let ready = if kind == "local_release" {
+        let install = self.install(&self.repo);
+        let kind = install.kind;
+        let ready = if kind == install::InstallKind::LocalRelease {
             "local_release runner"
         } else {
             "managed supervisor"
         };
+        let reason_code = (kind == install::InstallKind::LegacyMacosService)
+            .then_some(CapabilityReasonCode::LegacyMacosService);
+        let mut capability = json!({
+            "managed": self.managed,
+            "reason": self.execution_reason().unwrap_or_else(|| ready.into()),
+        });
+        if let Some(code) = reason_code {
+            capability["reason_code"] = json!(code);
+        }
+        let mut install_summary = json!({"kind": kind});
+        if let Some(legacy) = install.legacy_service {
+            install_summary["legacy_service"] = json!(legacy);
+        }
         Ok(
-            json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":{"managed":self.managed,"reason":self.execution_reason().unwrap_or_else(||ready.into())},"install":{"kind":kind},"check":self.cached_check().map(|cached|cached.result),"operation":operation,"backup":backup}),
+            json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":capability,"install":install_summary,"check":self.cached_check().map(|cached|cached.result),"operation":operation,"backup":backup}),
         )
     }
     /// `repo`: STEVE_REPO, where release scripts run from.
     pub fn install(&self, repo: &Path) -> install::Install {
+        #[cfg(target_os = "macos")]
+        let legacy_macos_service = if self.kind.is_none() {
+            runner::account_home()
+                .and_then(|uh| steve_install::service::detect_legacy_hub_launchd(&uh, &self.home))
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let legacy_macos_service = None;
         let mut install = install::detect(&install::Probe {
             managed: self.managed,
             blocked: self.blocked_reason.is_some(),
@@ -435,6 +483,7 @@ impl Updates {
             exe: std::env::current_exe().ok(),
             repo,
             forced: std::env::var("STEVE_INSTALL_KIND").ok(),
+            legacy_macos_service,
         });
         if let Some(kind) = self.kind {
             install.kind = kind;
@@ -597,7 +646,8 @@ impl Updates {
         if self.active()?.is_some_and(|o| !o.terminal()) {
             bail!("{}", steve_i18n::t!("hub.upgrade.in_progress"))
         }
-        let local = !self.managed && self.install(&self.repo).kind == "local_release";
+        let local =
+            !self.managed && self.install(&self.repo).kind == install::InstallKind::LocalRelease;
         let runner = if local {
             Some(runner::prepare(self, &parsed)?)
         } else {
@@ -619,6 +669,7 @@ impl Updates {
             approved_by: approved.then(|| who.to_owned()),
             approved_at: approved.then(now),
             error: None,
+            error_code: None,
             previous: None,
             target: None,
             runner,

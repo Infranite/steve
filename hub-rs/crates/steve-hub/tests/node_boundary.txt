@@ -80,7 +80,7 @@ Fs	steve-install/src/service.rs	35
 Fs	steve-install/src/service/boot.rs	7
 Fs	steve-install/src/setup.rs	13
 Fs	steve-install/src/setup/reconfigure.rs	7
-Fs	steve-install/src/signing.rs	34
+Fs	steve-install/src/signing.rs	33
 Fs	steve-knowledge/src/eval.rs	3
 Fs	steve-knowledge/src/sources/files.rs	1
 Fs	steve-knowledge/src/sources/folder.rs	1
@@ -121,13 +121,13 @@ Spawn	steve-hub/src/upgrades/supervisor.rs	2
 Spawn	steve-hub/src/wire/local_service.rs	2
 Spawn	steve-i18n/src/lib.rs	1
 Spawn	steve-install/src/common.rs	1
-Spawn	steve-install/src/release.rs	3
+Spawn	steve-install/src/release.rs	2
 Spawn	steve-install/src/service.rs	1
 Spawn	steve-install/src/service/boot.rs	2
 Spawn	steve-install/src/service/file_access.rs	1
 Spawn	steve-install/src/setup.rs	1
 Spawn	steve-install/src/setup/reconfigure.rs	1
-Spawn	steve-install/src/signing.rs	19
+Spawn	steve-install/src/signing.rs	18
 Spawn	steve-keyhelper/src/mac.rs	2
 Spawn	steve-modules/src/net.rs	1
 Spawn	steve-modules/src/vault/keystore/helper.rs	1

@@ -610,3 +610,84 @@ fn a_late_release_result_is_recorded_on_its_original_approval() {
     assert_eq!(k.phase(&item), "ready");
     assert_eq!(k.db().store().items().cycles(&item).unwrap().len(), 1);
 }
+
+#[test]
+fn legacy_steve_release_script_requires_maintainer_workflow_and_uses_cut_release() {
+    // Ordinary deployment mode (maintainer_workflow = false) returns MaintainerWorkflowRequired.
+    let k = Kit::new();
+    let repo_dir = k.home().join("steve-repo");
+    std::fs::create_dir_all(repo_dir.join("ops")).unwrap();
+    let marker = k.home().join("cut-release-args.txt");
+    std::fs::write(
+        repo_dir.join("ops/cut-release.py"),
+        format!(
+            "import pathlib, sys\npathlib.Path({:?}).write_text(' '.join(sys.argv[1:]))\n",
+            marker.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let rel = Release {
+        kind: "script".into(),
+        cmd: repo_dir.join("ops/release.sh").to_string_lossy().into(),
+    };
+    let p = k
+        .db()
+        .project_create(
+            WS,
+            "Steve",
+            "",
+            &repo_dir.to_string_lossy(),
+            "dir",
+            false,
+            None,
+            Some(&rel),
+        )
+        .unwrap()
+        .id;
+    let (_, _, d) = asking(&k, &p, "main", None);
+    let err = k.core.resolve(&d, "yes", "", "me").unwrap_err();
+    assert!(
+        matches!(err, crate::CoreError::MaintainerWorkflowRequired),
+        "expected MaintainerWorkflowRequired, got {err:?}"
+    );
+    assert!(!marker.exists());
+
+    // Maintainer mode (maintainer_workflow = true) invokes `python3 <repo>/ops/cut-release.py cut`.
+    let k_maint = Kit::with(|cfg| {
+        cfg.maintainer_workflow = true;
+    });
+    let repo_m = k_maint.home().join("steve-repo");
+    std::fs::create_dir_all(repo_m.join("ops")).unwrap();
+    let marker_m = k_maint.home().join("cut-release-args.txt");
+    std::fs::write(
+        repo_m.join("ops/cut-release.py"),
+        format!(
+            "import pathlib, sys\npathlib.Path({:?}).write_text(' '.join(sys.argv[1:]))\n",
+            marker_m.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let rel_m = Release {
+        kind: "script".into(),
+        cmd: repo_m.join("ops/release.sh").to_string_lossy().into(),
+    };
+    let pm = k_maint
+        .db()
+        .project_create(
+            WS,
+            "Steve",
+            "",
+            &repo_m.to_string_lossy(),
+            "dir",
+            false,
+            None,
+            Some(&rel_m),
+        )
+        .unwrap()
+        .id;
+    let (_, _, dm) = asking(&k_maint, &pm, "main", None);
+    k_maint.core.resolve(&dm, "yes", "", "me").unwrap();
+    steve_runtime::testkit::eventually_blocking("cut-release.py ran with cut", || {
+        std::fs::read_to_string(&marker_m).is_ok_and(|s| s == "cut")
+    });
+}

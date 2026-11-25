@@ -355,14 +355,15 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
     match wait_health(cfg, u, child, &op.version, None).await {
         Ok(()) => {
             release_maintenance(cfg, u).await?;
+            #[cfg(target_os = "linux")]
+            if let Err(error) = steve_install::service::sync_hub_systemd_unit(&cfg.home, &target) {
+                tracing::warn!("sync systemd hub unit after managed upgrade: {error:#}");
+            }
             u.phase(op, "succeeded", None)?;
         }
-        Err(e) => u.phase(
+        Err(e) => u.fail_committed(
             op,
-            "failed",
-            Some(format!(
-                "升级已提交，业务启动失败；保留新数据库，禁止自动回滚：{e:#}"
-            )),
+            format!("升级已提交，业务启动失败；保留新数据库，禁止自动回滚：{e:#}"),
         )?,
     };
     Ok(())

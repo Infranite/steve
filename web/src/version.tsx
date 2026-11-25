@@ -186,7 +186,7 @@ export function UpgradeSettings() {
     </Panel>
     {connection && <p role="status" className="mt-2 px-1 type-footnote text-muted-foreground" data-upgrade-connection>{connection}</p>}
     {state && canExecute && <Note data-upgrade-capability data-install-kind={install?.kind}>{install?.kind === "local_release" ? t("pages:upgrade.local") : t("pages:upgrade.managed")}</Note>}
-    {state && !canExecute && manual && install && check?.status === "available" && check.version && <ManualGuide install={install} version={check.version} onVerify={() => setVerifying(check.version)} />}
+    {state && !canExecute && manual && install && ((check?.status === "available" && check.version) || install.kind === "legacy_macos_service") && <ManualGuide install={install} version={check?.version ?? ""} repository={state.repository} onVerify={check?.version ? () => setVerifying(check.version) : undefined} />}
     {verifying && <UpgradeVerify target={verifying} onClose={() => setVerifying(null)} />}
     {error && <p className="mt-2 px-1 type-footnote text-destructive" role="alert">{error}</p>}
   </Section>
@@ -208,6 +208,7 @@ function UpgradeUnavailable({ state, manual }: { state: UpdateState; manual: boo
   const install = state.install, check = state.check
   const kind = install?.kind ?? (state.capability.managed ? "managed" : undefined)
   const next = !manual ? null
+    : install?.kind === "legacy_macos_service" ? t("pages:upgrade.unavailable.nextLegacyMacos")
     : check?.status === "available" ? t("pages:upgrade.unavailable.nextAvailable")
     : check ? t("pages:upgrade.unavailable.nextLater") : t("pages:upgrade.unavailable.nextUnchecked")
   const enable = manual && install ? enableOneClick(install.kind) : undefined
@@ -225,12 +226,12 @@ function Command({ command }: { command: string }) {
 }
 
 /** Installations Steve does not switch itself: this machine's commands, what is backed up, how to recover. */
-function ManualGuide({ install, version, onVerify }: { install: Install; version: string; onVerify: () => void }) {
+function ManualGuide({ install, version, repository, onVerify }: { install: Install; version: string; repository?: string; onVerify?: () => void }) {
   const t = useT()
-  const g = upgradeGuide(install, version)
+  const g = upgradeGuide(install, version, repository)
   return <Card className="mt-3 space-y-4 type-callout" data-upgrade-guide={install.kind}>
     <div>
-      <p className="font-medium">{t("pages:upgrade.guideTitle", { version: version.replace(/^v/, ""), label: g.label })}</p>
+      <p className="font-medium">{version ? t("pages:upgrade.guideTitle", { version: version.replace(/^v/, ""), label: g.label }) : t("pages:upgrade.guideTitleLegacyMacos", { label: g.label })}</p>
       <p className="mt-1 text-muted-foreground">{g.summary}</p>
     </div>
     <ol className="space-y-3">
@@ -251,7 +252,7 @@ function ManualGuide({ install, version, onVerify }: { install: Install; version
       <p className="type-label text-tertiary">{t("pages:upgrade.recoveryTitle")}</p>
       <ul className="mt-1 list-disc space-y-1 ps-5 type-footnote text-muted-foreground break-words">{g.recovery.map((r, n) => <li key={n}>{r}</li>)}</ul>
     </div>
-    <Button size="sm" variant="outline" onClick={onVerify} data-upgrade-verify-start>{t("pages:upgrade.doneCheck")}</Button>
+    {onVerify && <Button size="sm" variant="outline" onClick={onVerify} data-upgrade-verify-start>{t("pages:upgrade.doneCheck")}</Button>}
   </Card>
 }
 

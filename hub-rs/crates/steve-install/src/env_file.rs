@@ -18,6 +18,267 @@ pub(crate) struct EnvDocument {
     line_ending: &'static [u8],
 }
 
+/// Parse a `steve.env` file for runtime startup without invoking a shell.
+///
+/// Supports comments, blank lines, optional `export`, single/double quotes, backslash escapes,
+/// leading `~/` expansion (from `HOME`), and simple `$VAR` / `${VAR}` references resolved against
+/// prior assignments in the file and `base`. Refuses command substitution, shell operators, globs,
+/// NUL/CR, and non-UTF-8 bytes without disclosing values in error messages.
+pub fn parse_runtime_env(
+    bytes: &[u8],
+    base: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let text = std::str::from_utf8(bytes).map_err(|error| {
+        let line = bytes[..error.valid_up_to()]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+            + 1;
+        problem(Some(line), None, &t!("install.env.not_utf8"))
+    })?;
+    let mut values = BTreeMap::new();
+    for (index, raw) in text.split_inclusive('\n').enumerate() {
+        let line = index + 1;
+        let body = match raw.strip_suffix('\n') {
+            Some(body) => body.strip_suffix('\r').unwrap_or(body),
+            None => raw,
+        };
+        if body.bytes().any(|b| matches!(b, 0 | b'\r')) {
+            return Err(problem(Some(line), None, &t!("install.env.no_nul_or_cr")));
+        }
+        let raw_bytes = body.as_bytes();
+        let mut at = skip_blanks(raw_bytes, 0);
+        if at == raw_bytes.len() || raw_bytes[at] == b'#' {
+            continue;
+        }
+        if raw_bytes[at..].starts_with(b"export")
+            && raw_bytes.get(at + 6).is_some_and(|b| blank(*b))
+        {
+            at = skip_blanks(raw_bytes, at + 6);
+        }
+        let name_start = at;
+        if !raw_bytes.get(at).is_some_and(|b| key_start(*b)) {
+            return Err(problem(
+                Some(line),
+                None,
+                &t!("install.env.assignment_only"),
+            ));
+        }
+        at += 1;
+        while raw_bytes.get(at).is_some_and(|b| key_byte(*b)) {
+            at += 1;
+        }
+        let key = &body[name_start..at];
+        if raw_bytes.get(at) != Some(&b'=') {
+            return Err(problem(
+                Some(line),
+                Some(key),
+                &t!("install.env.equals_after_name"),
+            ));
+        }
+        let (value, end) = parse_runtime_value(body, at + 1, line, key, &values, base)?;
+        let rest = skip_blanks(raw_bytes, end);
+        if rest != raw_bytes.len() && raw_bytes[rest] != b'#' {
+            return Err(problem(
+                Some(line),
+                Some(key),
+                &t!("install.env.one_per_line"),
+            ));
+        }
+        values.insert(key.to_owned(), value);
+    }
+    Ok(values)
+}
+
+fn expand_var(
+    body: &str,
+    dollar_at: usize,
+    line: usize,
+    key: &str,
+    parsed: &BTreeMap<String, String>,
+    base: &BTreeMap<String, String>,
+) -> Result<(String, usize)> {
+    let bytes = body.as_bytes();
+    let next = bytes
+        .get(dollar_at + 1)
+        .copied()
+        .ok_or_else(|| problem(Some(line), Some(key), &t!("install.env.no_expansion")))?;
+    let (var_name, end) = if next == b'{' {
+        let name_start = dollar_at + 2;
+        if !bytes.get(name_start).is_some_and(|b| key_start(*b)) {
+            return Err(problem(
+                Some(line),
+                Some(key),
+                &t!("install.env.no_expansion"),
+            ));
+        }
+        let mut cursor = name_start + 1;
+        while bytes.get(cursor).is_some_and(|b| key_byte(*b)) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'}') {
+            return Err(problem(
+                Some(line),
+                Some(key),
+                &t!("install.env.no_expansion"),
+            ));
+        }
+        (&body[name_start..cursor], cursor + 1)
+    } else if key_start(next) {
+        let name_start = dollar_at + 1;
+        let mut cursor = name_start + 1;
+        while bytes.get(cursor).is_some_and(|b| key_byte(*b)) {
+            cursor += 1;
+        }
+        (&body[name_start..cursor], cursor)
+    } else {
+        return Err(problem(
+            Some(line),
+            Some(key),
+            &t!("install.env.no_expansion"),
+        ));
+    };
+    let expanded = parsed
+        .get(var_name)
+        .or_else(|| base.get(var_name))
+        .cloned()
+        .unwrap_or_default();
+    Ok((expanded, end))
+}
+
+fn parse_runtime_value(
+    body: &str,
+    start: usize,
+    line: usize,
+    key: &str,
+    parsed: &BTreeMap<String, String>,
+    base: &BTreeMap<String, String>,
+) -> Result<(String, usize)> {
+    let bytes = body.as_bytes();
+    let mut at = start;
+    let mut quote: Option<u8> = None;
+    let mut out = String::new();
+    while at < bytes.len() {
+        let byte = bytes[at];
+        match quote {
+            Some(b'\'') => {
+                if byte == b'\'' {
+                    quote = None;
+                    at += 1;
+                } else {
+                    let ch = body[at..].chars().next().unwrap();
+                    out.push(ch);
+                    at += ch.len_utf8();
+                }
+            }
+            Some(b'"') => match byte {
+                b'"' => {
+                    quote = None;
+                    at += 1;
+                }
+                b'`' => {
+                    return Err(problem(
+                        Some(line),
+                        Some(key),
+                        &t!("install.env.no_expansion"),
+                    ));
+                }
+                b'$' => {
+                    let (expanded, next_at) = expand_var(body, at, line, key, parsed, base)?;
+                    out.push_str(&expanded);
+                    at = next_at;
+                }
+                b'\\' => {
+                    let next = bytes.get(at + 1).copied().ok_or_else(|| {
+                        problem(Some(line), Some(key), &t!("install.env.no_continuation"))
+                    })?;
+                    if matches!(next, b'$' | b'`' | b'"' | b'\\') {
+                        out.push(next as char);
+                        at += 2;
+                    } else {
+                        out.push('\\');
+                        at += 1;
+                    }
+                }
+                _ => {
+                    let ch = body[at..].chars().next().unwrap();
+                    out.push(ch);
+                    at += ch.len_utf8();
+                }
+            },
+            None => match byte {
+                b' ' | b'\t' => break,
+                b'\'' | b'"' => {
+                    quote = Some(byte);
+                    at += 1;
+                }
+                b'\\' => {
+                    let next_slice = &body[at + 1..];
+                    let Some(ch) = next_slice.chars().next() else {
+                        return Err(problem(
+                            Some(line),
+                            Some(key),
+                            &t!("install.env.no_continuation"),
+                        ));
+                    };
+                    out.push(ch);
+                    at += 1 + ch.len_utf8();
+                }
+                b'~' if at == start
+                    && matches!(
+                        bytes.get(at + 1),
+                        None | Some(b'/') | Some(b' ') | Some(b'\t')
+                    ) =>
+                {
+                    let home =
+                        parsed
+                            .get("HOME")
+                            .or_else(|| base.get("HOME"))
+                            .ok_or_else(|| {
+                                problem(Some(line), Some(key), &t!("install.env.unquoted_shell"))
+                            })?;
+                    out.push_str(home);
+                    at += 1;
+                }
+                b'$' => {
+                    let (expanded, next_at) = expand_var(body, at, line, key, parsed, base)?;
+                    out.push_str(&expanded);
+                    at = next_at;
+                }
+                b'=' if at == start || bytes[at - 1] == b':' => {
+                    return Err(problem(
+                        Some(line),
+                        Some(key),
+                        &t!("install.env.unquoted_shell"),
+                    ));
+                }
+                b'`' | b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')' | b'~' | b'*' | b'?'
+                | b'[' | b']' | b'{' | b'}' | b'!' => {
+                    return Err(problem(
+                        Some(line),
+                        Some(key),
+                        &t!("install.env.unquoted_shell"),
+                    ));
+                }
+                _ => {
+                    let ch = body[at..].chars().next().unwrap();
+                    out.push(ch);
+                    at += ch.len_utf8();
+                }
+            },
+            _ => unreachable!("only single and double quotes are tracked"),
+        }
+    }
+    if quote.is_some() {
+        return Err(problem(
+            Some(line),
+            Some(key),
+            &t!("install.env.quote_open"),
+        ));
+    }
+    Ok((out, at))
+}
+
 fn problem(line: Option<usize>, key: Option<&str>, reason: &str) -> anyhow::Error {
     let location = line.map_or_else(
         || t!("install.env.location_update"),
@@ -477,6 +738,54 @@ mod tests {
             let error = document.update(&changes(&[(key, value)])).unwrap_err();
             assert!(!error.to_string().contains("private_sentinel"));
             assert_eq!(document.update(&BTreeMap::new()).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn runtime_env_expands_safe_vars_and_tilde_while_refusing_shell_code() {
+        let base = changes(&[
+            ("HOME", "/srv/example"),
+            ("STEVE_HOME", "/srv/example/.steve"),
+        ]);
+        let src = concat!(
+            "# comment\n",
+            "STEVE_PORT=8440\n",
+            "export STEVE_OIDC_CLIENT_SECRET_FILE=$HOME/.steve/secrets/oidc\n",
+            "STEVE_WEB_DIR=\"${STEVE_HOME}/web/current\" # inline comment\n",
+            "TILDE_PATH=~/secrets/token\n",
+            "LITERAL='$HOME/${STEVE_HOME}'\n",
+            "ESCAPED=\"\\$HOME \\\"ok\\\"\"\n",
+            "STEVE_PORT=9001\n",
+        );
+        let parsed = parse_runtime_env(src.as_bytes(), &base).unwrap();
+        assert_eq!(parsed["STEVE_PORT"], "9001");
+        assert_eq!(
+            parsed["STEVE_OIDC_CLIENT_SECRET_FILE"],
+            "/srv/example/.steve/secrets/oidc"
+        );
+        assert_eq!(parsed["STEVE_WEB_DIR"], "/srv/example/.steve/web/current");
+        assert_eq!(parsed["TILDE_PATH"], "/srv/example/secrets/token");
+        assert_eq!(parsed["LITERAL"], "$HOME/${STEVE_HOME}");
+        assert_eq!(parsed["ESCAPED"], "$HOME \"ok\"");
+
+        for bad in [
+            "KEY=$(private_sentinel)",
+            "KEY=\"$(private_sentinel)\"",
+            "KEY=`private_sentinel`",
+            "KEY=\"`private_sentinel`\"",
+            "KEY=${HOME:-private_sentinel}",
+            "KEY=value;private_sentinel",
+            "KEY=value|private_sentinel",
+            "KEY=~other/private_sentinel",
+            "KEY=*private_sentinel",
+            "KEY='private_sentinel",
+            "KEY=\"private_sentinel",
+        ] {
+            let error = parse_runtime_env(bad.as_bytes(), &base).unwrap_err();
+            assert!(
+                !error.to_string().contains("private_sentinel"),
+                "error leaked value for {bad}: {error}"
+            );
         }
     }
 }

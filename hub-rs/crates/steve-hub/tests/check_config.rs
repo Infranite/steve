@@ -84,29 +84,51 @@ fn a_good_environment_passes_and_build_info_says_the_check_exists() {
 }
 
 #[test]
-fn local_cli_requests_use_the_hubs_operation_contract() {
-    let script =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../ops/test-upgrade.py");
-    let out = Command::new("python3")
-        .arg(script)
-        .arg("--contract")
+fn startup_loads_steve_env_without_overriding_explicit_env() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("steve.env"),
+        "STEVE_PORT=bad-from-file\nSTEVE_ITEM_PREFIX=ST\n",
+    )
+    .unwrap();
+    // Without STEVE_PORT in process env, steve.env's STEVE_ITEM_PREFIX (checked before port) stops startup.
+    let out = Command::new(env!("CARGO_BIN_EXE_steve-hub"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", tmp.path())
+        .env("STEVE_HOME", tmp.path())
+        .env("STEVE_NO_RESUME", "1")
+        .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
+        .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         .output()
-        .expect("isolated CLI fixture");
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+        stderr.contains("STEVE_ITEM_PREFIX") && stderr.contains("unknown variable"),
+        "{stderr}"
     );
-    let op: steve_hub::upgrades::Operation =
-        serde_json::from_slice(&out.stdout).expect("Hub Operation contract");
-    assert_eq!(op.phase, "staging");
-    assert_eq!(op.approved_by.as_deref(), Some(op.requested_by.as_str()));
-    assert!(op.requested_by.starts_with("local-os:"));
-    let runner = op.runner.unwrap();
-    assert_eq!(runner.kind, "release_bundle");
-    assert_eq!(
-        runner.commit.as_deref(),
-        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    assert!(!tmp.path().join("data").exists());
+
+    // Now write only an invalid STEVE_PORT in steve.env and verify an explicit process env var wins.
+    std::fs::write(tmp.path().join("steve.env"), "STEVE_PORT=not-a-port\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_steve-hub"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", tmp.path())
+        .env("STEVE_HOME", tmp.path())
+        .env("STEVE_PORT", "0")
+        .env("STEVE_HOST", "0.0.0.0")
+        .env("STEVE_NO_RESUME", "1")
+        .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
+        .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("STEVE_HOST") && !stderr.contains("STEVE_PORT"),
+        "explicit STEVE_PORT must override steve.env: {stderr}"
     );
 }
 

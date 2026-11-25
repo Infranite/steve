@@ -9,6 +9,7 @@ pub use boot::run_boot_node;
 pub mod file_access;
 
 use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -456,6 +457,494 @@ fn unit_quote(value: &str, command: bool) -> Result<String> {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Legacy macOS LaunchAgent shell-wrapper shape (from v0.12.0 and earlier).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyMacosServiceKind {
+    /// LaunchAgent invokes `/bin/zsh <home>/current/ops/run.sh`.
+    RunSh,
+    /// LaunchAgent invokes `/bin/sh <home>/current/ops/run-managed.sh`.
+    RunManagedSh,
+}
+
+/// Snapshot of a Hub service definition captured before rewriting its entrypoint
+/// (e.g. migrating a legacy `ops/run.sh` plist or `ops/run-managed.sh` systemd unit to direct
+/// `steve-hub` execution), so rollback restores the exact prior service file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceDefinitionBackup {
+    pub path: PathBuf,
+    pub original: Vec<u8>,
+    pub mode: u32,
+    pub reload_systemd: bool,
+}
+
+fn previous_service_path(path: &Path) -> PathBuf {
+    let ext = path
+        .extension()
+        .map(|e| format!("{}.previous", e.to_string_lossy()))
+        .unwrap_or_else(|| "previous".into());
+    path.with_extension(ext)
+}
+
+/// Path where [`sync_hub_launchd_plist`] / [`sync_hub_systemd_unit`] stores the prior definition.
+pub fn previous_service_definition_path(path: &Path) -> PathBuf {
+    previous_service_path(path)
+}
+
+fn home_variants(home: &Path) -> Result<Vec<String>> {
+    let mut out = vec![text(home)?];
+    if let Ok(resolved) = resolve(home)
+        && let Ok(resolved_text) = text(&resolved)
+        && !out.contains(&resolved_text)
+    {
+        out.push(resolved_text);
+    }
+    Ok(out)
+}
+
+/// Resolve the macOS LaunchAgent label and plist path for a Hub installation home.
+pub fn hub_launchd_plist_path(
+    service_home: &Path,
+    home: &Path,
+    label_override: Option<&str>,
+) -> Result<(String, PathBuf)> {
+    let valid_label = |s: &str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+    };
+    let record = read_json(&home.join("services/hub.json")).unwrap_or_else(|_| json!({}));
+    if let Some(label) = label_override {
+        ensure!(valid_label(label), "invalid launchd service label: {label}");
+        return Ok((
+            label.to_owned(),
+            service_home
+                .join("Library/LaunchAgents")
+                .join(format!("{label}.plist")),
+        ));
+    }
+    let signing_label = read_json(&home.join("signing/identity.json"))
+        .ok()
+        .and_then(|v| v["label"].as_str().map(str::to_owned))
+        .filter(|s| valid_label(s));
+    let record_label = record["label"]
+        .as_str()
+        .map(str::to_owned)
+        .filter(|s| valid_label(s));
+    let label = signing_label
+        .or(record_label)
+        .unwrap_or_else(|| "io.github.infranite.steve.hub".to_owned());
+    let plist = record["config"]
+        .as_str()
+        .filter(|p| p.ends_with(".plist"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            service_home
+                .join("Library/LaunchAgents")
+                .join(format!("{label}.plist"))
+        });
+    Ok((label, plist))
+}
+
+/// Inspect a LaunchAgent plist file for a legacy v0.12.0 wrapper script entrypoint.
+pub fn detect_legacy_hub_launchd_plist(
+    plist_path: &Path,
+    home: &Path,
+) -> Option<LegacyMacosServiceKind> {
+    let bytes = regular(plist_path).ok()?;
+    let def: Value = plist::from_bytes(&bytes).ok()?;
+    let args: Vec<String> = def
+        .get("ProgramArguments")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    if args.len() != 2 || !matches!(args[0].as_str(), "/bin/zsh" | "/bin/sh") {
+        return None;
+    }
+    let homes = home_variants(home).ok()?;
+    for h in &homes {
+        if args[1] == format!("{h}/current/ops/run.sh") {
+            return Some(LegacyMacosServiceKind::RunSh);
+        }
+        if args[1] == format!("{h}/current/ops/run-managed.sh") {
+            return Some(LegacyMacosServiceKind::RunManagedSh);
+        }
+    }
+    None
+}
+
+/// Locate the Hub's macOS LaunchAgent plist for `home` and detect whether it still uses a legacy
+/// shell wrapper script.
+pub fn detect_legacy_hub_launchd(
+    service_home: &Path,
+    home: &Path,
+) -> Option<LegacyMacosServiceKind> {
+    let (_, plist_path) = hub_launchd_plist_path(service_home, home, None).ok()?;
+    detect_legacy_hub_launchd_plist(&plist_path, home)
+}
+
+/// Rewrite a legacy macOS LaunchAgent plist (`/bin/zsh <home>/current/ops/run.sh` or
+/// `/bin/sh <home>/current/ops/run-managed.sh`) to invoke `<home>/current/bin/steve-hub` directly
+/// when switching to a script-free release, or restore the wrapper launcher when switching back to
+/// a legacy release that still ships `ops/run.sh` or `ops/run-managed.sh`.
+pub fn sync_hub_launchd_plist(
+    plist_path: &Path,
+    home: &Path,
+    target_release: &Path,
+) -> Result<Option<ServiceDefinitionBackup>> {
+    let Ok(meta) = fs::symlink_metadata(plist_path) else {
+        return Ok(None);
+    };
+    let original = regular(plist_path)?;
+    let mode = meta.permissions().mode() & 0o777;
+    let mut def: Value = plist::from_bytes(&original)
+        .with_context(|| format!("parse launchd plist {}", plist_path.display()))?;
+    let Some(args) = def
+        .get("ProgramArguments")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+    else {
+        return Ok(None);
+    };
+    let homes = home_variants(home)?;
+    let primary_home = homes[0].clone();
+    let target_has_run_sh = target_release.join("ops/run.sh").is_file();
+    let target_has_managed_sh = target_release.join("ops/run-managed.sh").is_file();
+    let matched_home = homes.iter().find(|h| {
+        args == [format!("{h}/current/bin/steve-hub")]
+            || args
+                == [
+                    format!("{h}/current/bin/steve-hub"),
+                    "--supervise".to_owned(),
+                ]
+            || args == ["/bin/zsh".to_owned(), format!("{h}/current/ops/run.sh")]
+            || args == ["/bin/sh".to_owned(), format!("{h}/current/ops/run.sh")]
+            || args
+                == [
+                    "/bin/sh".to_owned(),
+                    format!("{h}/current/ops/run-managed.sh"),
+                ]
+            || args
+                == [
+                    "/bin/zsh".to_owned(),
+                    format!("{h}/current/ops/run-managed.sh"),
+                ]
+    });
+    let h = matched_home.unwrap_or(&primary_home);
+    let direct_hub = format!("{h}/current/bin/steve-hub");
+    let legacy_signed = vec!["/bin/zsh".to_owned(), format!("{h}/current/ops/run.sh")];
+    let legacy_managed = vec![
+        "/bin/sh".to_owned(),
+        format!("{h}/current/ops/run-managed.sh"),
+    ];
+    let is_legacy_signed = args.len() == 2
+        && matches!(args[0].as_str(), "/bin/zsh" | "/bin/sh")
+        && args[1] == legacy_signed[1];
+    let is_legacy_managed = args.len() == 2
+        && matches!(args[0].as_str(), "/bin/sh" | "/bin/zsh")
+        && args[1] == legacy_managed[1];
+    let desired = if !target_has_run_sh && is_legacy_signed {
+        vec![direct_hub]
+    } else if !target_has_managed_sh && is_legacy_managed {
+        vec![direct_hub, "--supervise".to_owned()]
+    } else if target_has_run_sh && args == [direct_hub.clone()] {
+        legacy_signed
+    } else if target_has_managed_sh && args == [direct_hub, "--supervise".to_owned()] {
+        legacy_managed
+    } else {
+        return Ok(None);
+    };
+    if let Some(obj) = def.as_object_mut() {
+        obj.insert("ProgramArguments".into(), json!(desired));
+    }
+    let mut updated = Vec::new();
+    plist::to_writer_xml(&mut updated, &def)?;
+    atomic(&previous_service_path(plist_path), &original)?;
+    atomic_mode(plist_path, &updated, mode)?;
+    Ok(Some(ServiceDefinitionBackup {
+        path: plist_path.to_owned(),
+        original,
+        mode,
+        reload_systemd: false,
+    }))
+}
+
+/// Restore a LaunchAgent plist from its persisted `.plist.previous` snapshot, if present.
+pub fn restore_service_definition_from_backup(plist_path: &Path) -> Result<bool> {
+    let backup_path = previous_service_path(plist_path);
+    if !exists(&backup_path) {
+        return Ok(false);
+    }
+    let original = regular(&backup_path)?;
+    let mode = fs::symlink_metadata(plist_path)
+        .ok()
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0o644);
+    atomic_mode(plist_path, &original, mode)?;
+    Ok(true)
+}
+
+fn hub_systemd_unit_path(home: &Path) -> Option<PathBuf> {
+    let record = home.join("services/hub.json");
+    if let Ok(meta) = fs::symlink_metadata(&record)
+        && meta.is_file()
+        && let Ok(doc) = read_json(&record)
+        && let Some(path) = doc.get("config").and_then(Value::as_str)
+        && path.ends_with(".service")
+    {
+        return Some(PathBuf::from(path));
+    }
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })?;
+    Some(xdg.join("systemd/user/steve-hub.service"))
+}
+
+/// Rewrite a legacy Linux systemd user unit (`ExecStart=.../ops/run-managed.sh`) to invoke
+/// `<home>/current/bin/steve-hub --supervise` directly, or restore `ops/run-managed.sh` when
+/// switching back to a legacy release that still ships it.
+pub fn sync_hub_systemd_unit(
+    home: &Path,
+    target_release: &Path,
+) -> Result<Option<ServiceDefinitionBackup>> {
+    let Some(unit_path) = hub_systemd_unit_path(home) else {
+        return Ok(None);
+    };
+    sync_hub_systemd_unit_at(&unit_path, home, target_release, &execute)
+}
+
+fn sync_hub_systemd_unit_at(
+    unit_path: &Path,
+    home: &Path,
+    target_release: &Path,
+    run: &dyn Fn(&[String]) -> Result<Output>,
+) -> Result<Option<ServiceDefinitionBackup>> {
+    let Ok(meta) = fs::symlink_metadata(unit_path) else {
+        return Ok(None);
+    };
+    let original = regular(unit_path)?;
+    let mode = meta.permissions().mode() & 0o777;
+    let body = String::from_utf8(original.clone())
+        .with_context(|| format!("systemd unit is not UTF-8: {}", unit_path.display()))?;
+    let home_text = text(home)?;
+    let legacy_script = format!("{home_text}/current/ops/run-managed.sh");
+    let legacy_exec_quoted = format!(
+        "ExecStart={} {}",
+        unit_quote("/bin/sh", true)?,
+        unit_quote(&legacy_script, true)?
+    );
+    let legacy_exec_plain = format!("ExecStart=/bin/sh {legacy_script}");
+    let direct_exec = format!(
+        "ExecStart={} {}",
+        unit_quote(&format!("{home_text}/current/bin/steve-hub"), true)?,
+        unit_quote("--supervise", true)?
+    );
+    let target_has_managed_sh = target_release.join("ops/run-managed.sh").is_file();
+    let mut changed = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if !target_has_managed_sh && (trimmed == legacy_exec_quoted || trimmed == legacy_exec_plain)
+        {
+            lines.push(direct_exec.clone());
+            changed = true;
+        } else if target_has_managed_sh && trimmed == direct_exec {
+            lines.push(legacy_exec_quoted.clone());
+            changed = true;
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+    let mut updated = lines.join("\n");
+    if body.ends_with('\n') {
+        updated.push('\n');
+    }
+    atomic(&previous_service_path(unit_path), &original)?;
+    atomic_mode(unit_path, updated.as_bytes(), mode)?;
+    let _ = run(&["systemctl".into(), "--user".into(), "daemon-reload".into()]);
+    Ok(Some(ServiceDefinitionBackup {
+        path: unit_path.to_owned(),
+        original,
+        mode,
+        reload_systemd: true,
+    }))
+}
+
+/// Restore a Hub service definition previously backed up by [`sync_hub_launchd_plist`] or
+/// [`sync_hub_systemd_unit`].
+pub fn restore_service_definition(backup: &ServiceDefinitionBackup) -> Result<()> {
+    restore_service_definition_with(backup, &execute)
+}
+
+fn restore_service_definition_with(
+    backup: &ServiceDefinitionBackup,
+    run: &dyn Fn(&[String]) -> Result<Output>,
+) -> Result<()> {
+    atomic_mode(&backup.path, &backup.original, backup.mode)?;
+    if backup.reload_systemd {
+        let _ = run(&["systemctl".into(), "--user".into(), "daemon-reload".into()]);
+    }
+    Ok(())
+}
+
+/// Stage an external release directory into `<home>/releases/<dir_name>` with full SHA-256
+/// verification and atomic rename. Returns `source` unchanged if it already lives directly under
+/// `<home>/releases/`.
+fn stage_external_release(
+    home: &Path,
+    source: &Path,
+    dir_name: &str,
+    active_release: Option<&Path>,
+    previous_release: Option<&Path>,
+    matches_existing: impl FnOnce(&Path, &[(PathBuf, String)]) -> bool,
+    verify_staged: impl FnOnce(&Path) -> Result<()>,
+) -> Result<PathBuf> {
+    let releases = home.join("releases");
+    fs::create_dir_all(home)?;
+    directory(&releases)?;
+    let releases_canon = fs::canonicalize(&releases)?;
+    if source.parent() == Some(releases_canon.as_path()) {
+        return Ok(source.to_path_buf());
+    }
+    let source_files = crate::common::regular_tree(source)?
+        .into_iter()
+        .map(|path| -> Result<(PathBuf, String)> {
+            let rel = path.strip_prefix(source)?.to_path_buf();
+            let hash = crate::common::digest(&path)?;
+            Ok((rel, hash))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let dest = releases_canon.join(dir_name);
+    if exists(&dest) {
+        ensure!(
+            !fs::symlink_metadata(&dest)?.file_type().is_symlink(),
+            "managed release path cannot be a symlink: {}",
+            dest.display()
+        );
+        if matches_existing(&dest, &source_files) {
+            return Ok(dest);
+        }
+    }
+
+    let staging = releases_canon.join(format!(".update-{}", Uuid::new_v4().simple()));
+    directory(&staging)?;
+    let copy_result = (|| -> Result<PathBuf> {
+        for (rel, expected_hash) in &source_files {
+            let src_file = source.join(rel);
+            let dst_file = staging.join(rel);
+            if let Some(parent) = dst_file.parent() {
+                crate::common::private_dir(parent)?;
+            }
+            let mut input = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&src_file)?;
+            let meta = input.metadata()?;
+            ensure!(
+                meta.is_file(),
+                "release source changed during copy: {}",
+                src_file.display()
+            );
+            let mode = if meta.permissions().mode() & 0o111 != 0 {
+                0o755
+            } else {
+                0o644
+            };
+            let mut output = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(mode)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&dst_file)?;
+            std::io::copy(&mut input, &mut output)?;
+            output.set_permissions(fs::Permissions::from_mode(mode))?;
+            output.sync_all()?;
+            ensure!(
+                crate::common::digest(&dst_file)? == *expected_hash,
+                "copied release file digest mismatch: {}",
+                rel.display()
+            );
+        }
+        verify_staged(&staging)?;
+
+        let dest_in_use =
+            active_release == Some(dest.as_path()) || previous_release == Some(dest.as_path());
+        let final_dest = if !exists(&dest) {
+            fs::rename(&staging, &dest)?;
+            File::open(&releases_canon)?.sync_all()?;
+            dest
+        } else if dest_in_use {
+            let unique = releases_canon.join(format!(
+                "{dir_name}-{}",
+                &Uuid::new_v4().simple().to_string()[..MANAGED_RELEASE_COMMIT_PREFIX_LEN]
+            ));
+            fs::rename(&staging, &unique)?;
+            File::open(&releases_canon)?.sync_all()?;
+            unique
+        } else {
+            let retired = releases_canon.join(format!(".replace-{}", Uuid::new_v4().simple()));
+            fs::rename(&dest, &retired)?;
+            if let Err(err) = fs::rename(&staging, &dest) {
+                let _ = fs::rename(&retired, &dest);
+                return Err(err.into());
+            }
+            File::open(&releases_canon)?.sync_all()?;
+            let _ = fs::remove_dir_all(&retired);
+            dest
+        };
+        Ok(final_dest)
+    })();
+    if exists(&staging) {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    copy_result
+}
+
+/// Stage an external validated release bundle into `<home>/releases/<version>-<commit8>`.
+pub(crate) fn stage_release_bundle(
+    home: &Path,
+    source: &Path,
+    version: &str,
+    commit: &str,
+) -> Result<PathBuf> {
+    let source = resolve(source)?;
+    ensure!(
+        commit.len() >= MANAGED_RELEASE_COMMIT_PREFIX_LEN,
+        "release commit is too short"
+    );
+    let dir_name = format!("{version}-{}", &commit[..MANAGED_RELEASE_COMMIT_PREFIX_LEN]);
+    let current = resolve(&home.join("current")).ok();
+    stage_external_release(
+        home,
+        &source,
+        &dir_name,
+        current.as_deref(),
+        None,
+        |_, _| false,
+        |staging| {
+            crate::signing::validate_bundle(home, staging, version, commit)?;
+            Ok(())
+        },
+    )
 }
 
 impl Service {
@@ -1020,115 +1509,27 @@ impl Service {
         source: &Path,
         info: &Value,
     ) -> Result<(PathBuf, Value)> {
-        let releases = self.home.join("releases");
-        fs::create_dir_all(&self.home)?;
-        directory(&releases)?;
-        let releases_canon = fs::canonicalize(&releases)?;
-        if source.parent() == Some(releases_canon.as_path()) {
-            return Ok((source.to_path_buf(), info.clone()));
-        }
-        let source_files = crate::common::regular_tree(source)?
-            .into_iter()
-            .map(|path| -> Result<(PathBuf, String)> {
-                let rel = path.strip_prefix(source)?.to_path_buf();
-                let hash = crate::common::digest(&path)?;
-                Ok((rel, hash))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
         let dir_name = Self::managed_release_dir_name(info)?;
-        let dest = releases_canon.join(&dir_name);
-        if exists(&dest) {
-            ensure!(
-                !fs::symlink_metadata(&dest)?.file_type().is_symlink(),
-                "managed release path cannot be a symlink: {}",
-                dest.display()
-            );
-            if self.managed_release_matches_source(&dest, info, &source_files) {
-                return self.bundle(&dest);
-            }
-        }
-
-        let staging = releases_canon.join(format!(".update-{}", Uuid::new_v4().simple()));
-        directory(&staging)?;
-        let copy_result = (|| -> Result<PathBuf> {
-            for (rel, expected_hash) in &source_files {
-                let src_file = source.join(rel);
-                let dst_file = staging.join(rel);
-                if let Some(parent) = dst_file.parent() {
-                    crate::common::private_dir(parent)?;
-                }
-                let mut input = OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(&src_file)?;
-                let meta = input.metadata()?;
+        let active_release = configured_release(&self.record).map(PathBuf::from);
+        let previous_release = self.record["previous"].as_str().map(PathBuf::from);
+        let managed = stage_external_release(
+            &self.home,
+            source,
+            &dir_name,
+            active_release.as_deref(),
+            previous_release.as_deref(),
+            |dest, source_files| self.managed_release_matches_source(dest, info, source_files),
+            |staging| {
+                let (_, verified_info) = self
+                    .bundle(staging)
+                    .context("copied release failed verification before switch")?;
                 ensure!(
-                    meta.is_file(),
-                    "release source changed during copy: {}",
-                    src_file.display()
+                    verified_info == *info,
+                    "copied release build identity differs from source"
                 );
-                let mode = if meta.permissions().mode() & 0o111 != 0 {
-                    0o755
-                } else {
-                    0o644
-                };
-                let mut output = OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .mode(mode)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(&dst_file)?;
-                std::io::copy(&mut input, &mut output)?;
-                output.set_permissions(fs::Permissions::from_mode(mode))?;
-                output.sync_all()?;
-                ensure!(
-                    crate::common::digest(&dst_file)? == *expected_hash,
-                    "copied release file digest mismatch: {}",
-                    rel.display()
-                );
-            }
-            let (_, verified_info) = self
-                .bundle(&staging)
-                .context("copied release failed verification before switch")?;
-            ensure!(
-                verified_info == *info,
-                "copied release build identity differs from source"
-            );
-
-            let active_release = configured_release(&self.record).map(PathBuf::from);
-            let previous_release = self.record["previous"].as_str().map(PathBuf::from);
-            let dest_in_use = active_release.as_deref() == Some(dest.as_path())
-                || previous_release.as_deref() == Some(dest.as_path());
-            let final_dest = if !exists(&dest) {
-                fs::rename(&staging, &dest)?;
-                File::open(&releases_canon)?.sync_all()?;
-                dest
-            } else if dest_in_use {
-                let unique = releases_canon.join(format!(
-                    "{dir_name}-{}",
-                    &Uuid::new_v4().simple().to_string()[..MANAGED_RELEASE_COMMIT_PREFIX_LEN]
-                ));
-                fs::rename(&staging, &unique)?;
-                File::open(&releases_canon)?.sync_all()?;
-                unique
-            } else {
-                let retired = releases_canon.join(format!(".replace-{}", Uuid::new_v4().simple()));
-                fs::rename(&dest, &retired)?;
-                if let Err(err) = fs::rename(&staging, &dest) {
-                    let _ = fs::rename(&retired, &dest);
-                    return Err(err.into());
-                }
-                File::open(&releases_canon)?.sync_all()?;
-                let _ = fs::remove_dir_all(&retired);
-                dest
-            };
-            Ok(final_dest)
-        })();
-        if exists(&staging) {
-            let _ = fs::remove_dir_all(&staging);
-        }
-        let managed = copy_result?;
+                Ok(())
+            },
+        )?;
         self.bundle(&managed)
     }
 
@@ -1333,23 +1734,19 @@ impl Service {
             ("PATH", path_env.to_owned()),
         ]);
         let command = if self.component == "hub" {
-            let script = if self.signed {
-                "run.sh"
-            } else {
-                "run-managed.sh"
-            };
             ensure!(
-                release.join("ops").join(script).is_file(),
-                "release has no runtime ops/{script}"
+                release.join("bin/steve-hub").is_file(),
+                "release has no bin/steve-hub"
             );
-            vec![
-                if self.signed {
-                    "/bin/zsh".into()
-                } else {
-                    "/bin/sh".into()
-                },
-                text(&self.home.join("current/ops").join(script))?,
-            ]
+            env.insert("NO_COLOR", "1".into());
+            if self.signed {
+                vec![text(&self.home.join("current/bin/steve-hub"))?]
+            } else {
+                vec![
+                    text(&self.home.join("current/bin/steve-hub"))?,
+                    "--supervise".into(),
+                ]
+            }
         } else {
             if read_json(&self.home.join("node/node.json"))?["loopback"] == true {
                 env.insert("STEVE_NODE_LOOPBACK_PLAINTEXT", "1".into());
@@ -1672,15 +2069,16 @@ impl Service {
     /// or upgrade so its turns keep running; a stop stops it too. Only the process this home's
     /// `steve-hub --local-node` wrote into its pid file.
     fn stop_local_node(&self) -> Result<()> {
+        let base = BTreeMap::from([(
+            "STEVE_HOME".into(),
+            self.home.to_string_lossy().into_owned(),
+        )]);
         let data = fs::read_to_string(self.home.join("steve.env"))
             .ok()
-            .and_then(|env| {
-                env.lines().find_map(|l| {
-                    l.trim()
-                        .strip_prefix("STEVE_DATA_DIR=")
-                        .map(|v| PathBuf::from(v.trim().trim_matches(['\'', '"'])))
-                })
-            })
+            .and_then(|env| crate::env_file::parse_runtime_env(env.as_bytes(), &base).ok())
+            .and_then(|vars| vars.get("STEVE_DATA_DIR").cloned())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
             .unwrap_or_else(|| self.home.join("data"));
         let Some(pid) = fs::read_to_string(data.join("node/service.pid"))
             .ok()
@@ -2324,7 +2722,6 @@ mod tests {
             let path = root.join(version);
             fs::create_dir_all(path.join("bin")).unwrap();
             fs::create_dir_all(path.join("web/dist")).unwrap();
-            fs::create_dir(path.join("ops")).unwrap();
             let manifest = json!({"format_version":1,"version":version,"commit":commit.repeat(40)});
             fs::write(path.join("release.json"), json_bytes(&manifest).unwrap()).unwrap();
             fs::write(
@@ -2336,9 +2733,6 @@ mod tests {
                 let binary = path.join("bin").join(name);
                 fs::write(&binary, b"fake native binary").unwrap();
                 fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            for name in ["run.sh", "run-managed.sh"] {
-                fs::write(path.join("ops").join(name), "runtime").unwrap();
             }
             path
         }
@@ -3287,7 +3681,6 @@ esac
             codesign,
             security,
             openssl,
-            shell: "/bin/sh".into(),
         }));
         manager.lock().unwrap().config = s.config.clone();
 
@@ -3381,8 +3774,157 @@ esac
         );
         let (mut linux, _) = f.service(System::Linux, "hub");
         linux.dispatch("install", Some(&f.release), 0).unwrap();
+        let unit = fs::read_to_string(linux.config).unwrap();
         assert!(
-            fs::read_to_string(linux.config)
+            unit.contains("current/bin/steve-hub") && unit.contains("--supervise"),
+            "{unit}"
+        );
+        assert!(!unit.contains("run-managed.sh"), "{unit}");
+    }
+
+    #[test]
+    fn legacy_012_launchd_plist_rewrites_to_direct_hub_and_restores_on_rollback() {
+        let f = Fixture::new();
+        let legacy_release = f.root.join("releases/0.12.0");
+        fs::create_dir_all(legacy_release.join("ops")).unwrap();
+        fs::write(legacy_release.join("ops/run.sh"), "#!/bin/zsh\n").unwrap();
+        let new_release = f.release.clone();
+        assert!(!new_release.join("ops").exists());
+
+        let plist_path = f
+            .root
+            .join("Library/LaunchAgents/io.github.infranite.steve.hub.plist");
+        let legacy_plist = json!({
+            "Label": "io.github.infranite.steve.hub",
+            "ProgramArguments": ["/bin/zsh", format!("{}/current/ops/run.sh", f.home.display())],
+            "EnvironmentVariables": {"STEVE_HOME": f.home.display().to_string()},
+            "RunAtLoad": true,
+            "KeepAlive": true,
+        });
+        let mut original_bytes = Vec::new();
+        plist::to_writer_xml(&mut original_bytes, &legacy_plist).unwrap();
+        atomic(&plist_path, &original_bytes).unwrap();
+
+        let backup = sync_hub_launchd_plist(&plist_path, &f.home, &new_release)
+            .unwrap()
+            .expect("legacy plist must be rewritten");
+        let rewritten: Value = plist::from_bytes(&fs::read(&plist_path).unwrap()).unwrap();
+        assert_eq!(
+            rewritten["ProgramArguments"],
+            json!([format!("{}/current/bin/steve-hub", f.home.display())])
+        );
+        assert_eq!(
+            fs::read(previous_service_path(&plist_path)).unwrap(),
+            original_bytes
+        );
+        // Repeating on already-migrated plist is a no-op.
+        assert!(
+            sync_hub_launchd_plist(&plist_path, &f.home, &new_release)
+                .unwrap()
+                .is_none()
+        );
+
+        // Pre-commit rollback restores the exact original 0.12.0 plist.
+        restore_service_definition(&backup).unwrap();
+        assert_eq!(fs::read(&plist_path).unwrap(), original_bytes);
+
+        // Forward upgrade then explicit downgrade back to 0.12.0 restores ops/run.sh launcher.
+        sync_hub_launchd_plist(&plist_path, &f.home, &new_release)
+            .unwrap()
+            .unwrap();
+        sync_hub_launchd_plist(&plist_path, &f.home, &legacy_release)
+            .unwrap()
+            .expect("downgrade to 0.12.0 restores ops/run.sh");
+        let downgraded: Value = plist::from_bytes(&fs::read(&plist_path).unwrap()).unwrap();
+        assert_eq!(
+            downgraded["ProgramArguments"],
+            json!([
+                "/bin/zsh",
+                format!("{}/current/ops/run.sh", f.home.display())
+            ])
+        );
+    }
+
+    #[test]
+    fn legacy_012_systemd_unit_rewrites_to_direct_supervisor_and_restores_on_rollback() {
+        let f = Fixture::new();
+        let legacy_release = f.root.join("releases/0.12.0");
+        fs::create_dir_all(legacy_release.join("ops")).unwrap();
+        fs::write(legacy_release.join("ops/run-managed.sh"), "#!/bin/sh\n").unwrap();
+        let new_release = f.release.clone();
+
+        let unit_path = f.root.join(".config/systemd/user/steve-hub.service");
+        let legacy_exec = format!(
+            "ExecStart={} {}",
+            unit_quote("/bin/sh", true).unwrap(),
+            unit_quote(
+                &format!("{}/current/ops/run-managed.sh", f.home.display()),
+                true
+            )
+            .unwrap(),
+        );
+        let direct_exec = format!(
+            "ExecStart={} {}",
+            unit_quote(&format!("{}/current/bin/steve-hub", f.home.display()), true).unwrap(),
+            unit_quote("--supervise", true).unwrap(),
+        );
+        let legacy_unit = format!(
+            "[Unit]\nDescription=Steve hub\n[Service]\nType=simple\n{legacy_exec}\nEnvironment={}\nRestart=on-failure\n[Install]\nWantedBy=default.target\n",
+            unit_quote(&format!("STEVE_HOME={}", f.home.display()), false).unwrap(),
+        );
+        atomic(&unit_path, legacy_unit.as_bytes()).unwrap();
+
+        let calls = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let recorded = calls.clone();
+        let runner = move |args: &[String]| -> Result<Output> {
+            recorded.lock().unwrap().push(args.to_vec());
+            Ok(Output {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        };
+
+        let backup = sync_hub_systemd_unit_at(&unit_path, &f.home, &new_release, &runner)
+            .unwrap()
+            .expect("legacy systemd unit must be rewritten");
+        let rewritten = fs::read_to_string(&unit_path).unwrap();
+        assert!(rewritten.contains(&direct_exec), "{rewritten}");
+        assert!(!rewritten.contains("run-managed.sh"), "{rewritten}");
+        assert_eq!(
+            fs::read_to_string(previous_service_path(&unit_path)).unwrap(),
+            legacy_unit
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[vec![
+                "systemctl".to_owned(),
+                "--user".to_owned(),
+                "daemon-reload".to_owned()
+            ]]
+        );
+
+        // Idempotent when already rewritten.
+        assert!(
+            sync_hub_systemd_unit_at(&unit_path, &f.home, &new_release, &runner)
+                .unwrap()
+                .is_none()
+        );
+
+        // Rollback restores exact original 0.12.0 unit and reloads systemd.
+        restore_service_definition_with(&backup, &runner).unwrap();
+        assert_eq!(fs::read_to_string(&unit_path).unwrap(), legacy_unit);
+        assert_eq!(calls.lock().unwrap().len(), 2);
+
+        // Explicit downgrade to 0.12.0 restores run-managed.sh ExecStart as well.
+        sync_hub_systemd_unit_at(&unit_path, &f.home, &new_release, &runner)
+            .unwrap()
+            .unwrap();
+        sync_hub_systemd_unit_at(&unit_path, &f.home, &legacy_release, &runner)
+            .unwrap()
+            .expect("downgrade restores run-managed.sh");
+        assert!(
+            fs::read_to_string(&unit_path)
                 .unwrap()
                 .contains("run-managed.sh")
         );

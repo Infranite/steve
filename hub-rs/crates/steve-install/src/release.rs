@@ -167,32 +167,24 @@ pub fn check_schema(db: &Path, release: &Path) -> Result<()> {
     Ok(())
 }
 
-fn environment(home: &Path, tools: &Tools) -> Result<BTreeMap<String, String>> {
+fn read_text(path: &Path) -> std::io::Result<String> {
+    fs::read_to_string(path)
+}
+
+fn environment(home: &Path) -> Result<BTreeMap<String, String>> {
     let mut values = BTreeMap::new();
     for key in ["HOME", "PATH", "USER", "TMPDIR"] {
         if let Ok(value) = std::env::var(key) {
             values.insert(key.into(), value);
         }
     }
+    values.insert("STEVE_HOME".into(), home.to_string_lossy().into());
     let path = home.join("steve.env");
     if path.exists() {
         owned_file(&path)?;
-        let mut command = Command::new(&tools.shell);
-        command
-            .args(["-fc", "set -a; source \"$1\"; /usr/bin/env -0", "zsh"])
-            .arg(path)
-            .env_clear()
-            .envs(&values)
-            .stdin(Stdio::null());
-        let output = successful(&mut command, Duration::from_secs(30))?;
-        for entry in output.stdout.split(|b| *b == 0) {
-            if let Some(index) = entry.iter().position(|b| *b == b'=') {
-                let key = String::from_utf8(entry[..index].to_vec())?;
-                if !["PWD", "OLDPWD", "SHLVL", "_"].contains(&key.as_str()) {
-                    values.insert(key, String::from_utf8(entry[index + 1..].to_vec())?);
-                }
-            }
-        }
+        let raw = read_text(&path)?;
+        let parsed = crate::env_file::parse_runtime_env(raw.as_bytes(), &values)?;
+        values.extend(parsed);
     }
     values.insert("STEVE_HOME".into(), home.to_string_lossy().into());
     values
@@ -247,7 +239,7 @@ struct Runtime {
 impl Runtime {
     fn new(home: &Path) -> Result<Self> {
         let tools = Tools::default();
-        let env = environment(home, &tools)?;
+        let env = environment(home)?;
         let port: u16 = std::env::var("STEVE_PORT")
             .ok()
             .or_else(|| env.get("STEVE_PORT").cloned())
@@ -356,16 +348,19 @@ impl Runtime {
     }
     fn service(&self, action: &str, ident: &Value) -> Result<()> {
         let label = ident["label"].as_str().context("service label missing")?;
+        let plist = self
+            .service_home
+            .join("Library/LaunchAgents")
+            .join(format!("{label}.plist"));
+        self.service_at(action, label, &plist)
+    }
+    fn service_at(&self, action: &str, label: &str, plist: &Path) -> Result<()> {
         let domain = format!("gui/{}", unsafe { libc::getuid() });
         let mut command = Command::new(&self.launchctl);
         if action == "stop" {
             command.args(["bootout", &format!("{domain}/{label}")]);
         } else {
-            command.args(["bootstrap", &domain]).arg(
-                self.service_home
-                    .join("Library/LaunchAgents")
-                    .join(format!("{label}.plist")),
-            );
+            command.args(["bootstrap", &domain]).arg(plist);
         }
         successful(command.stdin(Stdio::null()), Duration::from_secs(30))?;
         if action == "stop" {
@@ -546,6 +541,7 @@ struct Changed {
     probed: bool,
     hub_link: bool,
     web_link: bool,
+    service_definition: Option<crate::service::ServiceDefinitionBackup>,
     started: bool,
 }
 fn restore(
@@ -567,6 +563,12 @@ fn restore(
             steps.push(format!("{name} failed: {error:#}"));
         }
     };
+    if let Some(backup) = &changed.service_definition {
+        step(
+            "service definition restored",
+            crate::service::restore_service_definition(backup),
+        );
+    }
     if changed.web_link {
         step(
             "web/current restored",
@@ -746,6 +748,13 @@ fn deploy_with(
         link(&home.join("current"), candidate)?;
         changed.web_link = true;
         link(&home.join("web/current"), &candidate.join("web/dist"))?;
+        let label = ident["label"].as_str().context("service label missing")?;
+        let plist = runtime
+            .service_home
+            .join("Library/LaunchAgents")
+            .join(format!("{label}.plist"));
+        changed.service_definition =
+            crate::service::sync_hub_launchd_plist(&plist, home, candidate)?;
         // From here the new process may run business, even if launchctl returns an error.
         changed.started = true;
         runtime.service("start", &ident)?;
@@ -787,7 +796,13 @@ fn deploy_with(
             receipt["phase"] = phase.into();
             receipt["error"] = message.clone().into();
             receipt["db_after"] = inspect_schema(&db).map_or(Value::Null, |state| json!(state));
-            journal.update("failed", Some(&message), None, json!({}))?;
+            receipt["error_code"] = "committed_startup_failed".into();
+            journal.update(
+                "failed",
+                Some(&message),
+                None,
+                json!({"error_code": "committed_startup_failed"}),
+            )?;
             3
         }
         Err(error) => {
@@ -832,7 +847,502 @@ pub fn prune(home: &Path, keep: &[PathBuf], dry_run: bool) -> Result<Vec<PathBuf
     if let Some(previous) = last_previous(home) {
         protected.push(previous);
     }
+    if let Some(previous) = last_macos_rollback_previous(home) {
+        protected.push(previous);
+    }
     prune_unlocked(home, &protected, dry_run)
+}
+
+fn last_macos_rollback_previous(home: &Path) -> Option<PathBuf> {
+    let path = home.join("releases/.macos-rollback.json");
+    let value = json_file(&path).ok()?;
+    value["previous_hub"].as_str().map(PathBuf::from)
+}
+
+fn validate_script_free_bundle(candidate: &Path) -> Result<()> {
+    for path in crate::common::regular_tree(candidate)? {
+        let rel = path.strip_prefix(candidate)?;
+        let in_ops = rel
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == "ops");
+        let is_script = rel
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| matches!(ext, "py" | "sh"));
+        ensure!(
+            !in_ops && !is_script,
+            "release bundle contains forbidden runtime script: {}",
+            rel.display()
+        );
+    }
+    Ok(())
+}
+
+fn restore_snapshot(runtime: &Runtime, helper_release: &Path, saved: &SnapshotId) -> Result<()> {
+    let mut command = runtime.hub_command(helper_release);
+    command
+        .args(["--admin", "restore", saved.as_str(), "--database-only"])
+        .stdin(Stdio::null());
+    let output = signing::output(&mut command, Duration::from_secs(3600))?;
+    ensure!(
+        output.status.success(),
+        "candidate restore failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ensure!(
+        String::from_utf8_lossy(&output.stdout).trim() == saved.as_str(),
+        "candidate returned the wrong restored snapshot"
+    );
+    Ok(())
+}
+
+/// One-shot macOS migration/upgrade driven purely by the Rust binary inside the new release
+/// package: validates the script-free bundle, stages it into `<home>/releases/`, drains/stops the
+/// prior Hub, backs up SQLite, switches `current` + `web/current`, rewrites the legacy LaunchAgent
+/// plist to invoke `steve-hub` directly, starts launchd, and probes `/healthz`. Any failure during
+/// switch, plist rewrite, service start, or health probe automatically rolls back to the prior
+/// (e.g. v0.12.0) release and plist.
+pub fn upgrade_macos(
+    home: &Path,
+    candidate: &Path,
+    label_override: Option<&str>,
+    drain_timeout: Duration,
+    signing_password: Option<&str>,
+) -> Result<DeployOutcome> {
+    ensure!(
+        cfg!(target_os = "macos"),
+        "macOS one-shot service upgrade requires macOS"
+    );
+    let (home, candidate, label_override, signing_password) = (
+        home.to_owned(),
+        candidate.to_owned(),
+        label_override.map(str::to_owned),
+        signing_password.map(str::to_owned),
+    );
+    std::thread::spawn(move || {
+        let _lock = lock_release(&home)?;
+        let runtime = Runtime::new(&home)?;
+        upgrade_macos_with(
+            &runtime,
+            &candidate,
+            label_override.as_deref(),
+            drain_timeout,
+            signing_password.as_deref(),
+        )
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("macOS upgrade worker stopped"))?
+}
+
+fn upgrade_macos_with(
+    runtime: &Runtime,
+    candidate: &Path,
+    label_override: Option<&str>,
+    drain_timeout: Duration,
+    signing_password: Option<&str>,
+) -> Result<DeployOutcome> {
+    let home = &runtime.home;
+    validate_script_free_bundle(candidate)?;
+    let manifest = json_file(&candidate.join("release.json"))?;
+    ensure!(
+        manifest["format_version"] == 1,
+        "unsupported release manifest format_version"
+    );
+    let version = manifest["version"]
+        .as_str()
+        .context("candidate version missing")?;
+    let commit = manifest["commit"]
+        .as_str()
+        .context("candidate commit missing")?;
+    let old_hub = fs::canonicalize(home.join("current"))
+        .context("current release symlink is missing; cannot establish rollback target")?;
+    let old_manifest = json_file(&old_hub.join("release.json"))?;
+    let old_web = fs::canonicalize(home.join("web/current"))
+        .or_else(|_| fs::canonicalize(old_hub.join("web/dist")))?;
+    let (label, plist_path) =
+        crate::service::hub_launchd_plist_path(&runtime.service_home, home, label_override)?;
+    ensure!(
+        crate::common::exists(&plist_path) && plist_path.is_file(),
+        "LaunchAgent plist not found at {}",
+        plist_path.display()
+    );
+    let db = home.join("data/steve.sqlite3");
+    check_schema(&db, candidate)?;
+
+    let staged = crate::service::stage_release_bundle(home, candidate, version, commit)?;
+    ensure!(old_hub != staged, "candidate is already current");
+    let info = signing::validate_bundle(home, &staged, version, commit)?;
+    runtime.check_config(&staged, &info)?;
+
+    if home.join("signing/identity.json").is_file() {
+        let ident = signing::identity(home, &runtime.tools)?;
+        let hub_id = ident["hub_identifier"]
+            .as_str()
+            .context("signing hub_identifier missing")?;
+        if signing::verify_signature(&staged.join("bin/steve-hub"), hub_id, &runtime.tools).is_err()
+        {
+            let password = signing_password.context(
+                "signed macOS installation requires the signing keychain password (pass --keychain-pass-stdin or unlock steve-keyhelper)",
+            )?;
+            signing::prepare_bundle(home, &staged, version, commit, password)?;
+            signing::verify_signature(&staged.join("bin/steve-hub"), hub_id, &runtime.tools)?;
+        }
+    }
+
+    let stamp = stamp();
+    let logs = home.join("logs/release");
+    private_dir(&logs)?;
+    let result_path = logs.join(format!("macos-upgrade-{version}-{stamp}.json"));
+    let mut receipt = json!({
+        "version": version,
+        "release": staged,
+        "previous": old_hub,
+        "previous_web": old_web,
+        "label": label,
+        "plist": plist_path,
+        "db_before": inspect_schema(&db)?,
+        "started": stamp,
+    });
+
+    let mut drained = false;
+    let mut stopped = false;
+    let mut hub_link = false;
+    let mut web_link = false;
+    let mut plist_backup: Option<crate::service::ServiceDefinitionBackup> = None;
+    let mut started_new = false;
+    let mut saved: Option<SnapshotId> = None;
+    let mut phase = "drain";
+
+    let transaction = (|| -> Result<Value> {
+        let was_running = runtime.health().is_some();
+        if was_running {
+            if home.join("updates/control-token.json").is_file()
+                && runtime.control(Method::POST).is_ok()
+            {
+                drained = true;
+                let until = Instant::now() + drain_timeout;
+                loop {
+                    let state = runtime.control(Method::GET)?;
+                    if state["ready"] == true {
+                        break;
+                    }
+                    ensure!(
+                        Instant::now() < until,
+                        "Hub did not drain before its deadline"
+                    );
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+            phase = "stop";
+            stopped = true;
+            runtime.service_at("stop", &label, &plist_path)?;
+        }
+        if db.is_file() {
+            phase = "backup";
+            let snapshot = backup(runtime, &staged)?;
+            receipt["backup_snapshot"] = json!(snapshot);
+            atomic_json(&result_path, &receipt)?;
+            saved = Some(snapshot);
+        }
+        phase = "switch";
+        hub_link = true;
+        link(&home.join("current"), &staged)?;
+        web_link = true;
+        link(&home.join("web/current"), &staged.join("web/dist"))?;
+        phase = "plist";
+        plist_backup = crate::service::sync_hub_launchd_plist(&plist_path, home, &staged)?;
+        let rollback_meta = json!({
+            "version": version,
+            "candidate": staged,
+            "previous_hub": old_hub,
+            "previous_web": old_web,
+            "previous_manifest": old_manifest,
+            "label": label,
+            "plist_path": plist_path,
+            "plist_backup_path": crate::service::previous_service_definition_path(&plist_path),
+            "backup_snapshot": saved,
+            "started": stamp,
+        });
+        atomic_json(&home.join("releases/.macos-rollback.json"), &rollback_meta)?;
+        phase = "start";
+        started_new = true;
+        runtime.service_at("start", &label, &plist_path)?;
+        phase = "health";
+        let health = runtime.wait_health(|h| {
+            h["version"] == version
+                && (h["build_commit"].is_null() || h["build_commit"] == commit)
+                && (h["web_version"].is_null() || h["web_version"] == version)
+                && h["recovery"]["state"] != "failed"
+        })?;
+        if health["drain"] == true {
+            runtime.lift()?;
+            runtime.wait_health(|h| {
+                h["version"] == version
+                    && (h["web_version"].is_null() || h["web_version"] == version)
+                    && h["drain"] != true
+                    && h["recovery"]["state"] != "failed"
+            })
+        } else {
+            Ok(health)
+        }
+    })();
+
+    let exit_code = match transaction {
+        Ok(health) => {
+            receipt["ok"] = true.into();
+            receipt["plist_rewritten"] = plist_backup.is_some().into();
+            receipt["health"] = health;
+            receipt["db_after"] = json!(inspect_schema(&db)?);
+            receipt["finished"] = self::stamp().into();
+            match prune_unlocked(home, std::slice::from_ref(&old_hub), false) {
+                Ok(paths) => receipt["pruned"] = json!(paths),
+                Err(error) => receipt["pruned_error"] = format!("{error:#}").into(),
+            }
+            0
+        }
+        Err(error) => {
+            let mut steps = Vec::new();
+            let mut ok = true;
+            fn record_step(ok: &mut bool, steps: &mut Vec<String>, name: &str, result: Result<()>) {
+                match result {
+                    Ok(()) => steps.push(name.to_owned()),
+                    Err(err) => {
+                        *ok = false;
+                        steps.push(format!("{name} failed: {err:#}"));
+                    }
+                }
+            }
+            if started_new {
+                let _ = runtime.service_at("stop", &label, &plist_path);
+                steps.push("failed candidate stopped".into());
+            }
+            if let Some(backup_def) = &plist_backup {
+                record_step(
+                    &mut ok,
+                    &mut steps,
+                    "LaunchAgent plist restored",
+                    crate::service::restore_service_definition(backup_def),
+                );
+            }
+            if web_link {
+                record_step(
+                    &mut ok,
+                    &mut steps,
+                    "web/current restored",
+                    link(&home.join("web/current"), &old_web),
+                );
+            }
+            if hub_link {
+                record_step(
+                    &mut ok,
+                    &mut steps,
+                    "current restored",
+                    link(&home.join("current"), &old_hub),
+                );
+            }
+            if let Some(snapshot) = saved.as_ref()
+                && started_new
+            {
+                record_step(
+                    &mut ok,
+                    &mut steps,
+                    "database backup restored",
+                    restore_snapshot(runtime, &staged, snapshot),
+                );
+            }
+            if stopped {
+                if ok {
+                    record_step(
+                        &mut ok,
+                        &mut steps,
+                        "previous service started",
+                        runtime.service_at("start", &label, &plist_path),
+                    );
+                    if ok {
+                        match runtime.wait_health(|h| {
+                            h["version"] == old_manifest["version"]
+                                && (h["build_commit"].is_null()
+                                    || h["build_commit"] == old_manifest["commit"])
+                        }) {
+                            Ok(old_health) => {
+                                steps.push("previous Hub healthy".into());
+                                if drained || old_health["drain"] == true {
+                                    record_step(
+                                        &mut ok,
+                                        &mut steps,
+                                        "drain lifted",
+                                        runtime.lift(),
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                ok = false;
+                                steps.push(format!("previous Hub health check failed: {err:#}"));
+                            }
+                        }
+                    }
+                } else {
+                    steps.push("previous service not started: recovery needs inspection".into());
+                }
+            }
+            let message = format!("{phase} failed: {error:#}; recovery: {}", steps.join("; "));
+            receipt["ok"] = false.into();
+            receipt["phase"] = phase.into();
+            receipt["error"] = message.into();
+            receipt["rolled_back"] = ok.into();
+            receipt["recovery"] = json!(steps);
+            receipt["finished"] = self::stamp().into();
+            if ok { 1 } else { 2 }
+        }
+    };
+    if let Err(error) = atomic_json(&result_path, &receipt) {
+        receipt["receipt_write_error"] = format!("{error:#}").into();
+    }
+    Ok(DeployOutcome { exit_code, receipt })
+}
+
+/// Manual rollback for a macOS one-shot upgrade: restores `current`, `web/current`, the original
+/// LaunchAgent plist (`.plist.previous`), and (when DB schema requires it) the pre-upgrade database
+/// backup, then restarts the previous (e.g. v0.12.0) Hub and verifies `/healthz`.
+pub fn rollback_macos(
+    home: &Path,
+    label_override: Option<&str>,
+    drain_timeout: Duration,
+) -> Result<DeployOutcome> {
+    ensure!(
+        cfg!(target_os = "macos"),
+        "macOS service rollback requires macOS"
+    );
+    let (home, label_override) = (home.to_owned(), label_override.map(str::to_owned));
+    std::thread::spawn(move || {
+        let _lock = lock_release(&home)?;
+        let runtime = Runtime::new(&home)?;
+        rollback_macos_with(&runtime, label_override.as_deref(), drain_timeout)
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("macOS rollback worker stopped"))?
+}
+
+fn rollback_macos_with(
+    runtime: &Runtime,
+    label_override: Option<&str>,
+    drain_timeout: Duration,
+) -> Result<DeployOutcome> {
+    let home = &runtime.home;
+    let meta = json_file(&home.join("releases/.macos-rollback.json"))
+        .context("no recorded macOS upgrade rollback metadata (releases/.macos-rollback.json)")?;
+    let previous_hub = PathBuf::from(
+        meta["previous_hub"]
+            .as_str()
+            .context("rollback metadata missing previous_hub")?,
+    );
+    let previous_web = meta["previous_web"]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| previous_hub.join("web/dist"));
+    let previous_manifest = json_file(&previous_hub.join("release.json"))
+        .context("previous release manifest missing; cannot roll back")?;
+    ensure!(
+        previous_hub.join("bin/steve-hub").is_file(),
+        "previous release has no bin/steve-hub"
+    );
+    let (resolved_label, resolved_plist) =
+        crate::service::hub_launchd_plist_path(&runtime.service_home, home, label_override)?;
+    let label = label_override
+        .map(str::to_owned)
+        .or_else(|| meta["label"].as_str().map(str::to_owned))
+        .unwrap_or(resolved_label);
+    let plist_path = if label_override.is_some() {
+        resolved_plist
+    } else {
+        meta["plist_path"]
+            .as_str()
+            .map(PathBuf::from)
+            .unwrap_or(resolved_plist)
+    };
+    let helper_release = meta["candidate"]
+        .as_str()
+        .map(PathBuf::from)
+        .filter(|p| p.join("bin/steve-hub").is_file())
+        .or_else(|| fs::canonicalize(home.join("current")).ok())
+        .unwrap_or_else(|| previous_hub.clone());
+    let saved_snapshot = meta["backup_snapshot"]
+        .as_str()
+        .and_then(|s| SnapshotId::try_from(s.to_owned()).ok());
+
+    let stamp = stamp();
+    let logs = home.join("logs/release");
+    private_dir(&logs)?;
+    let result_path = logs.join(format!("macos-rollback-{stamp}.json"));
+
+    let mut drained = false;
+    if runtime.health().is_some() {
+        if home.join("updates/control-token.json").is_file()
+            && runtime.control(Method::POST).is_ok()
+        {
+            drained = true;
+            let until = Instant::now() + drain_timeout;
+            loop {
+                let state = runtime.control(Method::GET)?;
+                if state["ready"] == true {
+                    break;
+                }
+                ensure!(
+                    Instant::now() < until,
+                    "Hub did not drain before rollback deadline"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        runtime.service_at("stop", &label, &plist_path)?;
+    }
+
+    let restored_from_backup = crate::service::restore_service_definition_from_backup(&plist_path)?;
+    if !restored_from_backup {
+        crate::service::sync_hub_launchd_plist(&plist_path, home, &previous_hub)?;
+    }
+    link(&home.join("web/current"), &previous_web)?;
+    link(&home.join("current"), &previous_hub)?;
+
+    let db = home.join("data/steve.sqlite3");
+    let mut restored_db = false;
+    if db.is_file() && check_schema(&db, &previous_hub).is_err() {
+        let snapshot = saved_snapshot.as_ref().context(
+            "database schema is newer than previous release and no backup snapshot is recorded",
+        )?;
+        restore_snapshot(runtime, &helper_release, snapshot)?;
+        restored_db = true;
+    }
+
+    runtime.service_at("start", &label, &plist_path)?;
+    let health = runtime.wait_health(|h| {
+        h["version"] == previous_manifest["version"]
+            && (h["build_commit"].is_null() || h["build_commit"] == previous_manifest["commit"])
+    })?;
+    let health = if drained || health["drain"] == true {
+        runtime.lift()?;
+        runtime
+            .wait_health(|h| h["version"] == previous_manifest["version"] && h["drain"] != true)?
+    } else {
+        health
+    };
+
+    let receipt = json!({
+        "ok": true,
+        "rolled_back_to": previous_hub,
+        "version": previous_manifest["version"],
+        "plist": plist_path,
+        "plist_restored_from_backup": restored_from_backup,
+        "database_restored": restored_db,
+        "health": health,
+        "finished": self::stamp(),
+    });
+    atomic_json(&result_path, &receipt)?;
+    Ok(DeployOutcome {
+        exit_code: 0,
+        receipt,
+    })
 }
 fn last_previous(home: &Path) -> Option<PathBuf> {
     let mut records = Vec::new();
@@ -862,7 +1372,7 @@ fn last_previous(home: &Path) -> Option<PathBuf> {
         return Some(path);
     }
     let mut previous = None;
-    if let Ok(history) = fs::read_to_string(home.join("releases/history.jsonl")) {
+    if let Ok(history) = read_text(&home.join("releases/history.jsonl")) {
         for line in history.lines() {
             if let Ok(value) = serde_json::from_str::<Value>(line) {
                 if value["kind"] == "hub" && value["ok"] == true {
@@ -1105,6 +1615,7 @@ mod tests {
     }
     fn service_fixture(home: &Path) -> (ServiceFixture, u16) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let port = address.port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -1113,7 +1624,17 @@ mod tests {
         let thread = std::thread::spawn(move || {
             let mut maintenance = false;
             loop {
-                let (mut stream, _) = listener.accept().unwrap();
+                if stopped.load(Ordering::Relaxed) {
+                    break;
+                }
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
                 if stopped.load(Ordering::Relaxed) {
                     break;
                 }
@@ -1131,11 +1652,21 @@ mod tests {
                     response(stream, 200, json!({"ready":true,"maintenance":maintenance}));
                 } else {
                     let manifest = json_file(&home.join("current/release.json")).unwrap();
-                    response(
-                        stream,
-                        200,
-                        json!({"version":manifest["version"],"web_version":manifest["version"],"build_commit":manifest["commit"],"drain":maintenance,"recovery":{"state":"ready"}}),
-                    );
+                    if fs::read_to_string(home.join("fail-health-version"))
+                        .is_ok_and(|v| v.trim() == manifest["version"].as_str().unwrap_or(""))
+                    {
+                        response(
+                            stream,
+                            503,
+                            json!({"ok":false,"error":"simulated health failure"}),
+                        );
+                    } else {
+                        response(
+                            stream,
+                            200,
+                            json!({"version":manifest["version"],"web_version":manifest["version"],"build_commit":manifest["commit"],"drain":maintenance,"recovery":{"state":"ready"}}),
+                        );
+                    }
                 }
             }
         });
@@ -1386,6 +1917,389 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
                 .as_str()
                 .unwrap()
                 .contains("automatic rollback refused")
+        );
+        assert_eq!(
+            json_file(journal.path.as_ref().unwrap()).unwrap()["error_code"],
+            "committed_startup_failed"
+        );
+    }
+    #[test]
+    fn upgrade_from_012_plist_rewrites_to_direct_hub_and_rollback_preserves_012_plist() {
+        let (dir, candidate, runtime, _service, journal) = runtime_fixture(false, false);
+        let home = dir.path();
+        // Shape the current installation like v0.12.0: ops/run.sh + LaunchAgent plist calling /bin/zsh .../ops/run.sh.
+        let old = fs::canonicalize(home.join("current")).unwrap();
+        fs::create_dir_all(old.join("ops")).unwrap();
+        executable(&old.join("ops/run.sh"), "#!/bin/zsh\nexit 0\n");
+        let agents = home.join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).unwrap();
+        let plist_path = agents.join("fixture.steve.plist");
+        let legacy_plist = json!({
+            "Label": "fixture.steve",
+            "ProgramArguments": ["/bin/zsh", format!("{}/current/ops/run.sh", home.display())],
+            "EnvironmentVariables": {"STEVE_HOME": home.display().to_string()},
+            "RunAtLoad": true,
+        });
+        let mut plist_bytes = Vec::new();
+        plist::to_writer_xml(&mut plist_bytes, &legacy_plist).unwrap();
+        fs::write(&plist_path, &plist_bytes).unwrap();
+        assert!(
+            !candidate.join("ops").exists(),
+            "candidate has 0 ops scripts"
+        );
+
+        let outcome = deploy_with(&runtime, &candidate, &journal, Duration::from_secs(2)).unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
+        let rewritten: Value = plist::from_bytes(&fs::read(&plist_path).unwrap()).unwrap();
+        assert_eq!(
+            rewritten["ProgramArguments"],
+            json!([format!("{}/current/bin/steve-hub", home.display())])
+        );
+
+        // Pre-commit rollback from a 0.12.0 fixture keeps 0.12.0 plist and restarts cleanly.
+        let (dir_rb, cand_rb, runtime_rb, _svc_rb, journal_rb) = runtime_fixture(true, false);
+        let home_rb = dir_rb.path();
+        let old_rb = fs::canonicalize(home_rb.join("current")).unwrap();
+        fs::create_dir_all(old_rb.join("ops")).unwrap();
+        executable(&old_rb.join("ops/run.sh"), "#!/bin/zsh\nexit 0\n");
+        let agents_rb = home_rb.join("Library/LaunchAgents");
+        fs::create_dir_all(&agents_rb).unwrap();
+        let plist_rb = agents_rb.join("fixture.steve.plist");
+        let legacy_rb = json!({
+            "Label": "fixture.steve",
+            "ProgramArguments": ["/bin/zsh", format!("{}/current/ops/run.sh", home_rb.display())],
+            "EnvironmentVariables": {"STEVE_HOME": home_rb.display().to_string()},
+            "RunAtLoad": true,
+        });
+        let mut rb_bytes = Vec::new();
+        plist::to_writer_xml(&mut rb_bytes, &legacy_rb).unwrap();
+        fs::write(&plist_rb, &rb_bytes).unwrap();
+
+        let rb_outcome =
+            deploy_with(&runtime_rb, &cand_rb, &journal_rb, Duration::from_secs(2)).unwrap();
+        assert_eq!(rb_outcome.exit_code, 1, "{}", rb_outcome.receipt);
+        assert_eq!(
+            json_file(journal_rb.path.as_ref().unwrap()).unwrap()["phase"],
+            "rolled_back"
+        );
+        let kept: Value = plist::from_bytes(&fs::read(&plist_rb).unwrap()).unwrap();
+        assert_eq!(
+            kept["ProgramArguments"],
+            json!([
+                "/bin/zsh",
+                format!("{}/current/ops/run.sh", home_rb.display())
+            ])
+        );
+        assert_eq!(
+            fs::read_to_string(home_rb.join("service-state")).unwrap(),
+            "start"
+        );
+    }
+    /// Build a realistic v0.12.0 macOS installation (release directory with `ops/run.sh`,
+    /// LaunchAgent plist invoking `/bin/zsh <home>/current/ops/run.sh`, and an external
+    /// script-free candidate directory outside `<home>/releases/`).
+    fn macos_012_fixture(
+        managed: bool,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        Vec<u8>,
+        Runtime,
+        ServiceFixture,
+    ) {
+        let (dir, staged_like_candidate, tools) = fixture();
+        let home = dir.path();
+        let old = home.join("releases/0.12.0");
+        fs::create_dir_all(old.join("bin")).unwrap();
+        fs::create_dir_all(old.join("web/dist")).unwrap();
+        fs::create_dir_all(old.join("ops")).unwrap();
+        let old_manifest = json!({
+            "format_version": 1,
+            "version": "0.12.0",
+            "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "hub_version": "0.12.0",
+            "web_version": "0.12.0",
+            "api_protocol": 1,
+            "schema": {"min_read": 53, "max_read": 53, "target": 53},
+            "assets": []
+        });
+        fs::write(old.join("release.json"), old_manifest.to_string()).unwrap();
+        executable(&old.join("bin/steve-hub"), "#!/bin/sh\nexit 0\n");
+        fs::write(old.join("web/dist/index.html"), "<html>0.12.0</html>").unwrap();
+        executable(&old.join("ops/run.sh"), "#!/bin/zsh\nexit 0\n");
+        executable(&old.join("ops/run-managed.sh"), "#!/bin/sh\nexit 0\n");
+        fs::create_dir_all(home.join("web")).unwrap();
+        std::os::unix::fs::symlink(&old, home.join("current")).unwrap();
+        std::os::unix::fs::symlink(old.join("web/dist"), home.join("web/current")).unwrap();
+        fs::create_dir_all(home.join("data")).unwrap();
+        set_schema(&home.join("data/steve.sqlite3"), 53, Some(53)).unwrap();
+
+        let label = "io.github.infranite.steve.hub";
+        if !managed {
+            private_dir(&home.join("signing")).unwrap();
+            signing::exclusive_json(
+                &home.join("signing/identity.json"),
+                &json!({
+                    "label": label,
+                    "hub_identifier": "io.github.infranite.steve.hub",
+                    "keyhelper_identifier": "io.github.infranite.steve.keyhelper",
+                    "vault_service": "fixture.vault"
+                }),
+            )
+            .unwrap();
+        }
+        let agents = home.join("Library/LaunchAgents");
+        fs::create_dir_all(&agents).unwrap();
+        let plist_path = agents.join(format!("{label}.plist"));
+        let legacy_args = if managed {
+            json!([
+                "/bin/sh",
+                format!("{}/current/ops/run-managed.sh", home.display())
+            ])
+        } else {
+            json!(["/bin/zsh", format!("{}/current/ops/run.sh", home.display())])
+        };
+        let legacy_plist = json!({
+            "Label": label,
+            "ProgramArguments": legacy_args,
+            "EnvironmentVariables": {"STEVE_HOME": home.display().to_string()},
+            "RunAtLoad": true,
+        });
+        let mut original_plist = Vec::new();
+        plist::to_writer_xml(&mut original_plist, &legacy_plist).unwrap();
+        fs::write(&plist_path, &original_plist).unwrap();
+
+        // External unpacked new release bundle (outside `<home>/releases/`, 0 scripts).
+        let ext_dir = tempfile::tempdir().unwrap();
+        let ext_candidate = ext_dir.path().join("steve-1.2.3-bundle");
+        fs::create_dir_all(ext_candidate.join("bin")).unwrap();
+        fs::create_dir_all(ext_candidate.join("web/dist")).unwrap();
+        fs::copy(
+            staged_like_candidate.join("release.json"),
+            ext_candidate.join("release.json"),
+        )
+        .unwrap();
+        fs::copy(
+            staged_like_candidate.join("web/dist/release.json"),
+            ext_candidate.join("web/dist/release.json"),
+        )
+        .unwrap();
+        fs::copy(
+            staged_like_candidate.join("web/dist/index.html"),
+            ext_candidate.join("web/dist/index.html"),
+        )
+        .unwrap();
+        let helper = std::env::current_exe().unwrap();
+        let quoted = shlex::try_quote(helper.to_str().unwrap()).unwrap();
+        executable(
+            &ext_candidate.join("bin/steve-hub"),
+            &format!(
+                r#"#!/bin/sh
+case "${{1:-}}" in
+    --build-info) printf '%s\n' '{{"version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target":"aarch64-apple-darwin","schema":54,"check_config":true}}'; exit 0;;
+    --check-config) printf '%s\n' '{{"ok":true}}'; exit 0;;
+    --admin)
+        case "$2" in
+            backup) [ "$3 $4 $5" = "--reason pre-upgrade --offline" ] || exit 9
+                STEVE_NATIVE_TEST_BACKUP=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
+                cat "$STEVE_HOME/fixture-manifest.json";;
+            restore) [ "$3 $4" = "{snapshot} --database-only" ] || exit 9
+                STEVE_NATIVE_TEST_RESTORE=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
+                printf '%s\n' "$3";;
+            *) exit 9;;
+        esac
+        exit 0;;
+esac
+exit 0
+"#,
+                snapshot = "a".repeat(64),
+            ),
+        );
+
+        let manager = home.join("launchctl");
+        let quoted_home = shlex::try_quote(home.to_str().unwrap()).unwrap();
+        executable(
+            &manager,
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in bootout) printf stop > {quoted_home}/service-state;; bootstrap) printf start > {quoted_home}/service-state;; *) exit 4;; esac\n"
+            ),
+        );
+        fs::write(home.join("service-state"), "start").unwrap();
+        let (service, port) = service_fixture(home);
+        let mut env = BTreeMap::new();
+        env.insert("STEVE_HOME".into(), home.to_string_lossy().into());
+        env.insert("PATH".into(), "/usr/bin:/bin".into());
+        let runtime = Runtime {
+            home: home.to_owned(),
+            env,
+            client: Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            address: format!("127.0.0.1:{port}"),
+            tools,
+            launchctl: manager,
+            service_home: home.to_owned(),
+            health_timeout: Duration::from_secs(2),
+            simulated_service: true,
+        };
+        (
+            dir,
+            ext_dir,
+            ext_candidate,
+            plist_path,
+            original_plist,
+            runtime,
+            service,
+        )
+    }
+
+    #[test]
+    fn macos_upgrade_from_012_succeeds_and_rewrites_plist() {
+        for managed in [false, true] {
+            let (dir, _ext_dir, ext_candidate, plist_path, original_plist, runtime, _service) =
+                macos_012_fixture(managed);
+            let home = dir.path();
+            assert_eq!(
+                crate::service::detect_legacy_hub_launchd_plist(&plist_path, home),
+                Some(if managed {
+                    crate::service::LegacyMacosServiceKind::RunManagedSh
+                } else {
+                    crate::service::LegacyMacosServiceKind::RunSh
+                })
+            );
+            // Reject a candidate that still ships a legacy runtime script before changing anything.
+            let bad_script = ext_candidate.join("ops/run.sh");
+            fs::create_dir_all(bad_script.parent().unwrap()).unwrap();
+            fs::write(&bad_script, "#!/bin/sh\n").unwrap();
+            assert!(
+                upgrade_macos_with(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                    .is_err()
+            );
+            fs::remove_dir_all(ext_candidate.join("ops")).unwrap();
+
+            let outcome =
+                upgrade_macos_with(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                    .unwrap();
+            assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
+            let current = fs::canonicalize(home.join("current")).unwrap();
+            assert!(
+                current.starts_with(fs::canonicalize(home.join("releases")).unwrap()),
+                "external bundle must be staged under <home>/releases/"
+            );
+            assert_eq!(
+                json_file(&current.join("release.json")).unwrap()["version"],
+                "1.2.3"
+            );
+            let rewritten: Value = plist::from_bytes(&fs::read(&plist_path).unwrap()).unwrap();
+            let expected_args = if managed {
+                json!([
+                    format!("{}/current/bin/steve-hub", home.display()),
+                    "--supervise"
+                ])
+            } else {
+                json!([format!("{}/current/bin/steve-hub", home.display())])
+            };
+            assert_eq!(rewritten["ProgramArguments"], expected_args);
+            assert_eq!(
+                crate::service::detect_legacy_hub_launchd_plist(&plist_path, home),
+                None
+            );
+            assert_eq!(
+                fs::read(crate::service::previous_service_definition_path(
+                    &plist_path
+                ))
+                .unwrap(),
+                original_plist
+            );
+            assert_eq!(outcome.receipt["health"]["version"], "1.2.3");
+            assert_eq!(
+                fs::read_to_string(home.join("service-state")).unwrap(),
+                "start"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_upgrade_from_012_auto_rolls_back_on_health_probe_failure() {
+        let (dir, _ext_dir, ext_candidate, plist_path, original_plist, runtime, _service) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Simulate new version 1.2.3 failing /healthz after launchd start.
+        fs::write(home.join("fail-health-version"), "1.2.3").unwrap();
+
+        let outcome =
+            upgrade_macos_with(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(outcome.exit_code, 1, "{}", outcome.receipt);
+        assert_eq!(outcome.receipt["rolled_back"], true);
+        assert_eq!(outcome.receipt["phase"], "health");
+        assert_eq!(
+            json_file(&home.join("current/release.json")).unwrap()["version"],
+            "0.12.0"
+        );
+        assert_eq!(
+            fs::canonicalize(home.join("web/current")).unwrap(),
+            fs::canonicalize(home.join("releases/0.12.0/web/dist")).unwrap()
+        );
+        assert_eq!(fs::read(&plist_path).unwrap(), original_plist);
+        assert!(home.join("data/failed-probe.sqlite3").is_file());
+        assert_eq!(
+            inspect_schema(&home.join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
+            53
+        );
+        assert_eq!(
+            fs::read_to_string(home.join("service-state")).unwrap(),
+            "start"
+        );
+    }
+
+    #[test]
+    fn macos_manual_rollback_restores_012_release_and_plist() {
+        let (dir, _ext_dir, ext_candidate, plist_path, original_plist, runtime, _service) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        let upgraded =
+            upgrade_macos_with(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(upgraded.exit_code, 0, "{}", upgraded.receipt);
+        assert_eq!(
+            json_file(&home.join("current/release.json")).unwrap()["version"],
+            "1.2.3"
+        );
+        assert_ne!(fs::read(&plist_path).unwrap(), original_plist);
+
+        // Simulate DB schema bumped after upgrade so manual rollback also proves DB restoration.
+        set_schema(&home.join("data/steve.sqlite3"), 54, Some(54)).unwrap();
+
+        let rolled_back = rollback_macos_with(&runtime, None, Duration::from_secs(2)).unwrap();
+        assert_eq!(rolled_back.exit_code, 0, "{}", rolled_back.receipt);
+        assert_eq!(rolled_back.receipt["ok"], true);
+        assert_eq!(rolled_back.receipt["version"], "0.12.0");
+        assert_eq!(rolled_back.receipt["database_restored"], true);
+        assert_eq!(
+            json_file(&home.join("current/release.json")).unwrap()["version"],
+            "0.12.0"
+        );
+        assert_eq!(
+            fs::canonicalize(home.join("web/current")).unwrap(),
+            fs::canonicalize(home.join("releases/0.12.0/web/dist")).unwrap()
+        );
+        assert_eq!(fs::read(&plist_path).unwrap(), original_plist);
+        assert_eq!(
+            inspect_schema(&home.join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
+            53
+        );
+        assert_eq!(
+            fs::read_to_string(home.join("service-state")).unwrap(),
+            "start"
         );
     }
     #[test]
