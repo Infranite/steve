@@ -122,6 +122,10 @@ pub fn shown(stored: &str) -> Option<String> {
     const HUB: &[&str] = &[
         "hub.node.disk_low",
         "hub.node.handed_over",
+        "hub.node.harness_auto_upgraded",
+        "hub.node.harness_auto_upgrade_failed",
+        "hub.node.harness_upgraded",
+        "hub.node.harness_upgrade_failed",
         "hub.notice.outbox_dead",
     ];
     steve_core::notice_line::shown(stored)

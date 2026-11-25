@@ -12,6 +12,9 @@ pub const TEXT: &str = "text";
 pub const MESSAGE: &str = "message";
 /// The whole current view of one tool invocation: `{tool: ToolView}`, replacing the previous one.
 pub const TOOL: &str = "tool";
+/// The whole current view of one subagent, background task, or native workflow run:
+/// `{subtask: SubtaskView}`, replacing the previous view for `subtask.id`.
+pub const SUBTASK: &str = "subtask";
 /// The agent's plan: `{entries: [{content, status}]}`.
 pub const PLAN: &str = "plan";
 
@@ -64,6 +67,10 @@ pub fn of_node(body: &EventBody, role: Option<Role>) -> Option<Entry> {
             }
             Some(Entry::new(TOOL, json!({ "tool": tool })))
         }
+        EventBody::SubtaskChanged { subtask } => Some(Entry::new(
+            SUBTASK,
+            json!({ "subtask": serde_json::to_value(subtask).unwrap_or(Value::Null) }),
+        )),
         EventBody::Plan { entries } => Some(Entry::new(PLAN, json!({ "entries": entries }))),
         _ => None,
     }
@@ -90,9 +97,9 @@ pub fn of_history(events: &[steve_node_api::NodeEvent]) -> Vec<Entry> {
                     Some(r.copied().unwrap_or(Role::Assistant)),
                 )),
             },
-            EventBody::ToolChanged { .. } | EventBody::Plan { .. } => {
-                out.extend(of_node(&e.body, None))
-            }
+            EventBody::ToolChanged { .. }
+            | EventBody::SubtaskChanged { .. }
+            | EventBody::Plan { .. } => out.extend(of_node(&e.body, None)),
             _ => {}
         }
     }

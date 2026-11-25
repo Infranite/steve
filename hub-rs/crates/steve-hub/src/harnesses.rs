@@ -579,9 +579,9 @@ pub(crate) async fn ready_locally(harnesses: &[&str], models: &[&str]) -> Arc<Hu
                 session_error: None,
                 session_auth_required: None,
                 execution_modes: Some(modes.clone()),
-                update: None,
                 resume_command: None,
                 fork_command: None,
+                capabilities: None,
             }),
         })
         .collect();
@@ -625,9 +625,9 @@ mod tests {
                 session_error: None,
                 session_auth_required: None,
                 execution_modes: None,
-                update: None,
                 resume_command: None,
                 fork_command: None,
+                capabilities: None,
             }),
         }
     }

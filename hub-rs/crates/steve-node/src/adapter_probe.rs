@@ -127,9 +127,9 @@ pub(crate) fn info(cfg: &AcpConfig, id: &str, p: &Probe) -> AdapterInfo {
         session_error: p.session_error.clone(),
         session_auth_required: p.session_auth_required.then_some(true),
         execution_modes: None,
-        update: None,
         resume_command: spec.properties.resume_cli,
         fork_command: spec.properties.fork_cli,
+        capabilities: Some(steve_acp::adapter::capabilities_for(id)),
     }
 }
 

@@ -102,6 +102,137 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("non-string panic payload")
 }
 
+/// Bounded reason why a periodic task skipped triggering a model call or session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// No new input (messages, items, notes, or packets) since the previous watermark.
+    NoChange,
+    /// Schedule is driven by a durable work queue rather than a blind wall-clock cron.
+    QueueDriven,
+    /// Task or workspace feature is disabled.
+    Disabled,
+    /// Wall-clock deadline was missed or not due.
+    NotDue,
+    /// Previous run or work item is still active.
+    Overlap,
+}
+
+impl SkipReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoChange => "no_change",
+            Self::QueueDriven => "queue_driven",
+            Self::Disabled => "disabled",
+            Self::NotDue => "not_due",
+            Self::Overlap => "overlap",
+        }
+    }
+}
+
+/// Bounded reason why a model call or session was avoided before dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvoidReason {
+    NoChange,
+    QueueDriven,
+    Batched,
+    Cached,
+    Deduplicated,
+    Deterministic,
+}
+
+impl AvoidReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoChange => "no_change",
+            Self::QueueDriven => "queue_driven",
+            Self::Batched => "batched",
+            Self::Cached => "cached",
+            Self::Deduplicated => "deduplicated",
+            Self::Deterministic => "deterministic",
+        }
+    }
+}
+
+/// Bounded token category for periodic-task usage metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenKind {
+    Input,
+    Output,
+    CacheRead,
+    CacheWrite,
+}
+
+impl TokenKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::CacheRead => "cache_read",
+            Self::CacheWrite => "cache_write",
+        }
+    }
+}
+
+/// Records that a periodic task's deterministic gate passed and triggered real work.
+pub fn record_periodic_triggered(task: &'static str) {
+    metrics::counter!(
+        "steve_periodic_task_evaluations_total",
+        "task" => task,
+        "outcome" => "triggered",
+        "reason" => "changed"
+    )
+    .increment(1);
+}
+
+/// Records that a periodic task's deterministic gate skipped work without invoking a model or session.
+pub fn record_periodic_skipped(task: &'static str, reason: SkipReason) {
+    metrics::counter!(
+        "steve_periodic_task_evaluations_total",
+        "task" => task,
+        "outcome" => "skipped",
+        "reason" => reason.as_str()
+    )
+    .increment(1);
+}
+
+/// Records tokens spent by a periodic task's model call.
+pub fn record_periodic_tokens(task: &'static str, kind: TokenKind, count: u64) {
+    if count > 0 {
+        metrics::counter!(
+            "steve_periodic_task_tokens_total",
+            "task" => task,
+            "kind" => kind.as_str()
+        )
+        .increment(count);
+    }
+}
+
+/// Records all four token buckets reported for a periodic task's model call.
+pub fn record_periodic_token_counts(
+    task: &'static str,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+) {
+    record_periodic_tokens(task, TokenKind::Input, input);
+    record_periodic_tokens(task, TokenKind::Output, output);
+    record_periodic_tokens(task, TokenKind::CacheRead, cache_read);
+    record_periodic_tokens(task, TokenKind::CacheWrite, cache_write);
+}
+
+/// Records `count` model calls avoided by gating, batching, caching, or deterministic matching.
+pub fn record_model_calls_avoided(purpose: &'static str, reason: AvoidReason, count: u64) {
+    if count > 0 {
+        metrics::counter!(
+            "steve_model_calls_avoided_total",
+            "purpose" => purpose,
+            "reason" => reason.as_str()
+        )
+        .increment(count);
+    }
+}
+
 /// Cached metric handles for one named background job; registered once when the job starts so
 /// per-round recording allocates nothing and performs no registry lookup.
 #[derive(Clone)]

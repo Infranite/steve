@@ -8,7 +8,7 @@ Read the "Development checks" and "Changes and releases" sections of `CONTRIBUTI
 - **Never choose a version:** do not write `docs/releases/X.Y.Z.md`, bump a version, or create a tag by hand. `ops/cut-release.py` computes `MAJOR.MINOR.PATCH` and generates release notes from commits since the last tag (MAJOR = public contract generation, `0` until `1.0.0`, bumped post-1.0 only on breaking changes; MINOR = `feat`, `Upgrade:`, or pre-1.0 breaking; PATCH = fixes/perf/docs/refactors only). See "Changes and releases" in `CONTRIBUTING.md`.
 - When changes on `main` should be released, run `python3 ops/cut-release.py cut` (use `next` or `cut --dry-run` to preview). If it refuses after retrying, report why instead of tagging yourself.
 - A new database migration takes the next free number when it is merged, with a line appended to `hub-rs/crates/steve-store/migrations/LOCK`.
-- Keep personal paths, hostnames, credentials, and process documents out of the public repository: `python3 scripts/check-public-boundary.py --strict`.
+- Keep personal paths, hostnames, credentials, and process documents out of the public repository: `python3 scripts/check-public-boundary.py`.
 
 ## Engineering standards
 

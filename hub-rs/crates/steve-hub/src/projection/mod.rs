@@ -812,7 +812,7 @@ mod tests {
         assert_eq!(f.p.reconcile().await, Some(0));
     }
 
-    /// W3.3 acceptance: >= 1,000 resolve / undo / expire / supersede / dismiss / CAS conflict
+    /// Decision lifecycle acceptance: >= 1,000 resolve / undo / expire / supersede / dismiss / CAS conflict
     /// sequences plus tier matrix (`Decide` vs `Draft` vs `Folded`) match hot reads & patches.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_thousand_decision_sequences_match_projection_and_tier_matrix() {

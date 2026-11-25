@@ -24,6 +24,10 @@ use steve_runtime::schedule::CronExpr;
 
 /// Due rows claimed per pass.
 pub const BATCH: usize = 200;
+/// Metric task label for ordinary cron schedule triggers.
+const PERIODIC_TASK_SCHEDULE: &str = "flow.schedule";
+/// Metric task label for wall-clock cron triggers suppressed on queue-driven digest schedules.
+const PERIODIC_TASK_DIGEST_CRON: &str = "digest.cron";
 /// Error of a run that was in the middle of its action when the Hub stopped.
 pub const INTERRUPTED: &str = "Hub 重启时这一步可能没有完成";
 /// Reader-localized rejection for projections only; persisted startup errors use the stable code.
@@ -192,6 +196,7 @@ fn start(w: &mut W<'_>, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(Strin
     if let (Some(ctx), Some(extra)) = (context.as_object_mut(), s.extra.as_object()) {
         ctx.extend(extra.clone());
     }
+    let is_periodic = matches!(s.kind, TriggerKind::Time | TriggerKind::CatchUp);
     // the item the last run made is still open (#223): this one is skipped, said on that item
     if f.overlap == OverlapPolicy::Skip
         && let Some(item) = open_item(w, &f.ws, &f.id)?
@@ -213,6 +218,12 @@ fn start(w: &mut W<'_>, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(Strin
             now,
         })?;
         TimelineRows(w).add(&f.ws, &item, "steve", "sys", &label)?;
+        if is_periodic {
+            steve_runtime::jobs::record_periodic_skipped(
+                PERIODIC_TASK_SCHEDULE,
+                steve_runtime::jobs::SkipReason::Overlap,
+            );
+        }
         return Ok((id, false));
     }
     let active = RunRows(w).active(&f.ws, &f.id)?;
@@ -229,6 +240,12 @@ fn start(w: &mut W<'_>, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(Strin
             context: &context,
             now,
         })?;
+        if is_periodic {
+            steve_runtime::jobs::record_periodic_skipped(
+                PERIODIC_TASK_SCHEDULE,
+                steve_runtime::jobs::SkipReason::Overlap,
+            );
+        }
         return Ok((id, false));
     }
     let cursor = after_trigger(&f.graph, s.trigger_node);
@@ -258,6 +275,9 @@ fn start(w: &mut W<'_>, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(Strin
             started: now,
         },
     )?;
+    if is_periodic {
+        steve_runtime::jobs::record_periodic_triggered(PERIODIC_TASK_SCHEDULE);
+    }
     Ok((id, true))
 }
 
@@ -291,6 +311,21 @@ fn claim(
         }
         Err(e) => return Err(e),
     };
+    // Digest Bot schedules are driven exclusively by the durable digest packet queue (`digest.bot`);
+    // suppress and disable any residual wall-clock cron trigger so idle workspaces never start sessions.
+    if w.digest_packets().schedule(&f.ws)?.as_deref() == Some(f.id.as_str()) {
+        FlowTriggers(w).disable(&d.id)?;
+        steve_runtime::jobs::record_periodic_skipped(
+            PERIODIC_TASK_DIGEST_CRON,
+            steve_runtime::jobs::SkipReason::QueueDriven,
+        );
+        steve_runtime::jobs::record_model_calls_avoided(
+            PERIODIC_TASK_DIGEST_CRON,
+            steve_runtime::jobs::AvoidReason::QueueDriven,
+            1,
+        );
+        return Ok(None);
+    }
     if !FlowTriggers(w).advance(&d.id, d.next_at, plan.next_at_ms)? {
         return Ok(None);
     }
@@ -310,6 +345,10 @@ fn claim(
                 context: &ctx,
                 now,
             })?;
+            steve_runtime::jobs::record_periodic_skipped(
+                PERIODIC_TASK_SCHEDULE,
+                steve_runtime::jobs::SkipReason::NotDue,
+            );
             (id, false)
         }
         ClaimAction::CatchUp { late_ms, missed } => start(

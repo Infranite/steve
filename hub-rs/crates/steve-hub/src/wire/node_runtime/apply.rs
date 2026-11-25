@@ -301,6 +301,27 @@ impl NodeRuntime {
                 }
                 w.attempts().keep_facts(a, &k)?;
             }
+            (EventBody::SubtaskChanged { subtask }, _) => {
+                let origin = match subtask.origin {
+                    SubtaskOrigin::Subagent => "subagent",
+                    SubtaskOrigin::BackgroundTask => "background_task",
+                    SubtaskOrigin::NativeWorkflow => "native_workflow",
+                };
+                let status = match subtask.status {
+                    SubtaskStatus::Queued => "queued",
+                    SubtaskStatus::Running => "running",
+                    SubtaskStatus::NeedsYou => "needs_you",
+                    SubtaskStatus::Done => "done",
+                    SubtaskStatus::Failed => "failed",
+                    SubtaskStatus::Cancelled => "cancelled",
+                };
+                metrics::counter!(
+                    "steve_subtask_updates_total",
+                    "origin" => origin,
+                    "status" => status,
+                )
+                .increment(1);
+            }
             (
                 EventBody::WorkspaceChanged {
                     workspace,
@@ -458,7 +479,7 @@ impl NodeRuntime {
                     .unwrap()
                     .push(Tell::StalledUsage(stall.reason, tokens));
             }
-            if report.model.is_some() {
+            if report.model.is_some() && report.scope != UsageScope::Subtask {
                 kept.model = report.model.clone();
             }
             if let Some(d) = delta {
@@ -466,14 +487,15 @@ impl NodeRuntime {
             }
             w.attempts().keep_facts(a, &kept)?;
         }
-        observations::context(
-            w,
-            session,
-            report.context_used.and_then(cost::context),
-            report.context_limit.and_then(cost::context),
-            delta,
-            self.clock.now(),
-        )?;
+        let (ctx_used, ctx_limit) = if report.scope == UsageScope::Subtask {
+            (None, None)
+        } else {
+            (
+                report.context_used.and_then(cost::context),
+                report.context_limit.and_then(cost::context),
+            )
+        };
+        observations::context(w, session, ctx_used, ctx_limit, delta, self.clock.now())?;
         Ok(if delta.is_some_and(|d| d > 0.0) {
             vec![After::Cost {
                 session: session.to_string(),
@@ -495,6 +517,7 @@ impl NodeRuntime {
         let agent = |role: Option<Role>| matches!(role, Some(Role::Assistant | Role::Thought));
         let active = match &ev.body {
             EventBody::ToolChanged { .. }
+            | EventBody::SubtaskChanged { .. }
             | EventBody::PermissionRequested { .. }
             | EventBody::PermissionResolved { .. }
             | EventBody::Plan { .. } => true,

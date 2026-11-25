@@ -1,4 +1,4 @@
-//! Running what is due (W2b §2, R0b). A domain keeps its due times in its own table and implements
+//! Running scheduled due work. A domain keeps its due times in its own table and implements
 //! [`DueSource`]; [`due_loop`] runs one source as one task. No scheduler object, central queue or
 //! registry: tokio already queues the timers, and write fairness belongs to the storage executor.
 //! Every source must pass [`contract::check`] (feature `due-contract`), which pins the B3 class of

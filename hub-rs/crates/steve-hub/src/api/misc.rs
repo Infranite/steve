@@ -1192,7 +1192,7 @@ pub async fn system_harness_remove(
     ok(json!({"removed": removed, "restart": true}))
 }
 
-// ── task workspaces (ST-45) ──
+// ── task workspaces ──
 
 /// Paths and sizes on this machine are the instance manager's.
 fn instance_owner(c: &Ctx) -> Result<(), ApiError> {

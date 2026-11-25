@@ -2017,4 +2017,45 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn periodic_task_gating_and_token_metrics_are_described_and_recorded() {
+        use steve_runtime::jobs::{
+            AvoidReason, SkipReason, record_model_calls_avoided, record_periodic_skipped,
+            record_periodic_token_counts, record_periodic_triggered,
+        };
+        let recorder = recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            catalog::describe();
+            record_periodic_triggered("flow.report");
+            record_periodic_skipped("flow.report", SkipReason::NoChange);
+            record_periodic_skipped("digest.cron", SkipReason::QueueDriven);
+            record_periodic_token_counts("flow.report", 1200, 300, 400, 0);
+            record_model_calls_avoided("channels.intent", AvoidReason::Batched, 2);
+            record_model_calls_avoided("channels.intent", AvoidReason::Cached, 1);
+            record_model_calls_avoided("channels.intent", AvoidReason::Deduplicated, 1);
+        });
+        let text = handle.render();
+        for line in [
+            "# HELP steve_periodic_task_evaluations_total ",
+            "# HELP steve_periodic_task_tokens_total ",
+            "# HELP steve_model_calls_avoided_total ",
+            "steve_periodic_task_evaluations_total{task=\"flow.report\",outcome=\"triggered\",reason=\"changed\"} 1",
+            "steve_periodic_task_evaluations_total{task=\"flow.report\",outcome=\"skipped\",reason=\"no_change\"} 1",
+            "steve_periodic_task_evaluations_total{task=\"digest.cron\",outcome=\"skipped\",reason=\"queue_driven\"} 1",
+            "steve_periodic_task_tokens_total{task=\"flow.report\",kind=\"input\"} 1200",
+            "steve_periodic_task_tokens_total{task=\"flow.report\",kind=\"output\"} 300",
+            "steve_periodic_task_tokens_total{task=\"flow.report\",kind=\"cache_read\"} 400",
+            "steve_model_calls_avoided_total{purpose=\"channels.intent\",reason=\"batched\"} 2",
+            "steve_model_calls_avoided_total{purpose=\"channels.intent\",reason=\"cached\"} 1",
+            "steve_model_calls_avoided_total{purpose=\"channels.intent\",reason=\"deduplicated\"} 1",
+        ] {
+            assert!(text.contains(line), "missing `{line}` in:\n{text}");
+        }
+        assert!(
+            !text.contains("kind=\"cache_write\""),
+            "zero token counts must not emit empty series:\n{text}"
+        );
+    }
 }

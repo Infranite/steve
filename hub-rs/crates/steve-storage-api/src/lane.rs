@@ -1,5 +1,5 @@
 //! Scheduling context without a runtime dependency.
-//! The default source is thread-local and defaults to Interactive. The Hub (W2a.6b) installs
+//! The default source is thread-local and defaults to Interactive. The Hub installs
 //! a plain function pointer that reads its Tokio task-local value, falling back to
 //! thread_lane(). Never hold the source lock while invoking it. When entering a blocking
 //! thread, capture current() and install it there with with_lane(); TLS is not task-local.

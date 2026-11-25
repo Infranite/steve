@@ -251,5 +251,6 @@
   "flow.startup.metadata_invalid": "启动失败记录已损坏。修改调度或 Bot 即可恢复，旧运行记录仍保留供诊断。",
   "flow.startup.metadata_recovered": "此历史启动记录已损坏。配置已变更，这条记录不再阻塞当前启动，仍保留供诊断。",
   "flow.startup.metadata_unattributed": "这条损坏的运行记录无法归属到启动来源或配置，已保留供诊断，不会替代已确认的来源预算。",
-  "flow.startup.metadata_damaged": "此运行的启动失败记录已损坏，仍保留供诊断。"
+  "flow.startup.metadata_damaged": "此运行的启动失败记录已损坏，仍保留供诊断。",
+  "flow.report.no_change": "自上次汇报以来无变化，已跳过"
 }

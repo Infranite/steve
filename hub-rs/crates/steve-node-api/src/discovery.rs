@@ -152,38 +152,107 @@ pub struct AdapterInfo {
     /// without a session offer. The adapter offer alone cannot prove Node policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_modes: Option<Vec<crate::PermissionMode>>,
-    /// An adapter Steve installed and keeps up to date (`<home>/adapters`): what its last check of
-    /// the npm registry found. `None` for one installed otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub update: Option<AdapterUpdate>,
     /// Shell template (`{id}` replaced with the session id) to resume a session in the CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_command: Option<String>,
     /// Shell template (`{id}` replaced with the session id) to fork a session in the CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_command: Option<String>,
+    /// Strongly-typed runtime adapter capabilities declared by the Node's `steve-acp` adapter layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<AdapterCapabilities>,
 }
 
-/// The update state of an adapter Steve keeps up to date ([`AdapterInfo::update`]).
+/// How a harness exposes subagents over ACP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentCapability {
+    /// No subagent delegation protocol or tool surface observed.
+    #[default]
+    None,
+    /// Subagents observed via harness-specific tool calls (e.g. `Agent`, `invoke_subagent`, `subagent`).
+    ToolFallback,
+    /// Standard ACP RFD #1992 subagent child sessions (`subagent_update` + routed child `sessionId`).
+    AcpRfd,
+}
+
+/// How a harness exposes background tasks over ACP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundTaskCapability {
+    /// No background task observation over ACP.
+    #[default]
+    None,
+    /// Background tasks observed via harness-specific tool calls (e.g. `Bash(run_in_background)`, `run_command`/`manage_task`).
+    ToolFallback,
+    /// Native ACP async task updates (`async_task_*`).
+    AcpAsyncTasks,
+}
+
+/// Token / usage attribution granularity reported by a harness.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageAttribution {
+    /// Only context window usage (`used`/`size`), no per-turn token accounting.
+    ContextOnly,
+    /// Turn-level `Main` usage without per-subtask attribution.
+    #[default]
+    TurnLevel,
+    /// Turn-level `Main` plus model-level `All` aggregate covering subagents.
+    TurnAndModelAll,
+    /// Separate per-subtask token attribution (`UsageScope::Subtask`) additive to `Main`.
+    SubtaskScoped,
+}
+
+/// How a harness resumes an existing session over ACP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeCapability {
+    #[default]
+    None,
+    SessionLoad,
+}
+
+/// Runtime capabilities of a harness adapter, owned by `steve-acp::adapter`.
+/// Hub business logic and Web inspect these capability flags rather than branching on harness names.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdapterUpdate {
-    /// `STEVE_ADAPTER_UPDATES` on the Node: `auto`, `check` or `off`.
-    pub policy: String,
-    /// The installed release.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installed: Option<String>,
-    /// The latest release on the registry, as of `checked`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest: Option<String>,
-    /// When the registry was asked last (Unix ms).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checked: Option<i64>,
-    /// Why the last check or upgrade failed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// A newer release waits for the Node to have no session running (`auto`).
+pub struct AdapterCapabilities {
+    pub subagents: SubagentCapability,
+    /// Individual subagent cancellation is supported natively over ACP (e.g. `session/cancel(childId)`).
     #[serde(default)]
-    pub pending: bool,
+    pub subagent_cancel: bool,
+    pub background_tasks: BackgroundTaskCapability,
+    /// Individual background task cancellation is supported natively over ACP.
+    #[serde(default)]
+    pub background_task_cancel: bool,
+    /// Child tool calls carry parent linkage (child `sessionId` or `parentToolUseId`) for nested UI rendering.
+    #[serde(default)]
+    pub child_tool_nesting: bool,
+    pub usage_attribution: UsageAttribution,
+    pub resume: ResumeCapability,
+    /// Reserved upgrade strategy capability for Node-side harness upgrades.
+    #[serde(default)]
+    pub upgrade: UpgradeCapability,
+    /// True only for harnesses verified empirically against real local runs.
+    #[serde(default)]
+    pub verified: bool,
+}
+
+/// How a harness's CLI and/or ACP adapter can be upgraded on a Node.
+///
+/// Reserved capability slot on [`AdapterCapabilities`]: concrete upgrade mechanics remain in
+/// `steve_acp::adapters::update_components` until the parallel Node harness-upgrade track merges
+/// into per-harness adapter implementations, keeping a single source of truth.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradeCapability {
+    /// Steve manages and upgrades npm-distributed CLI and/or ACP adapter packages.
+    ManagedNpm,
+    /// Installed/upgraded via an external package manager or vendor updater (e.g. `uv`, app bundle).
+    ExternalManaged,
+    /// No automated upgrade path is declared or verified.
+    #[default]
+    Manual,
 }
 
 /// The permission modes, models and efforts an adapter offers (harness parity S4, S8).

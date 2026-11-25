@@ -3,13 +3,16 @@ use std::time::Duration;
 
 use steve_modules::Modules;
 
+/// Deterministic window-cutting cadence over already-stored messages (no model or harness calls).
+pub const INTAKE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Cut windows from already stored messages once a minute. No history fetch, model or harness call.
 pub fn task(m: Modules) -> steve_runtime::Task {
     let clock = m.clock.clone();
     steve_runtime::every(
         "digest.intake",
         clock,
-        Duration::from_secs(60),
+        INTAKE_INTERVAL,
         steve_runtime::FirstRun::Immediate,
         move || {
             let m = m.clone();
