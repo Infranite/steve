@@ -170,6 +170,7 @@ export function SubtaskList({
         <Button
           size="xs"
           variant="outline"
+          className="shrink-0 whitespace-nowrap"
           disabled={!!cancelling[s.id]}
           data-subtask-cancel={s.id}
           onClick={(ev) => { ev.stopPropagation(); void handleCancel(s.id) }}
