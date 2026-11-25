@@ -127,6 +127,11 @@ pub trait Discovery: Send + Sync {
         Some(0)
     }
 
+    /// True when the Node is currently linked only on the frozen upgrade channel (protocol mismatch).
+    fn is_upgrade_only(&self) -> bool {
+        false
+    }
+
     /// The frozen upgrade channel's minimal discovery; no ordinary capability payload crosses it.
     /// This must not fall back to a harness probe on an incompatible link.
     async fn probe_build(&self) -> ApiResult<crate::upgrade_v1::ProbeBuildResponse> {

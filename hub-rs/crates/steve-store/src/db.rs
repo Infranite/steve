@@ -288,6 +288,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/136.sql"),
     // 137: drop retired bots.project_dir, bots.worktree, and items.project_dir columns.
     include_str!("../migrations/137.sql"),
+    // 138: clear cached harness update state persisted before typed update reasons.
+    include_str!("../migrations/138.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

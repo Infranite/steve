@@ -40,10 +40,7 @@ async fn row(h: &Hub, node: &str) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_incompatible_node_stays_linked_and_devices_explain_the_required_upgrade() {
     use steve_node_api::{Discovery, PROTOCOL};
-    for (protocol, older, status) in [
-        (PROTOCOL - 1, "node", "版本不一致，需要升级 Node"),
-        (PROTOCOL + 1, "hub", "版本不一致，需要升级 Hub"),
-    ] {
+    for (protocol, older) in [(PROTOCOL - 1, "node"), (PROTOCOL + 1, "hub")] {
         let h = Hub::start().await;
         let (id, node) = h.paired("u1").await;
         let linked = dial_url_as(
@@ -66,18 +63,29 @@ async fn an_incompatible_node_stays_linked_and_devices_explain_the_required_upgr
         let device = row(&h, node.as_str()).await;
         assert_eq!(device["linked"], true);
         assert_eq!(device["protocol"], protocol);
-        assert_eq!(device["protocol_mode"], "upgrade");
-        assert_eq!(device["protocol_status"], status);
+        assert_eq!(device["link_mode"], "upgrade_only");
         assert_eq!(device["protocol_older"], older);
+        assert!(
+            device["hub_version"]
+                .as_str()
+                .is_some_and(|v| !v.is_empty())
+        );
         assert!(device["link_error"].is_null());
         let again = row(&h, node.as_str()).await;
-        assert_eq!(again["protocol_status"], device["protocol_status"]);
+        assert_eq!(again["link_mode"], device["link_mode"]);
+        assert_eq!(again["protocol_older"], device["protocol_older"]);
         assert_eq!(again["link_error"], device["link_error"]);
         assert!(
             device["host"].is_null(),
             "ordinary host discovery is skipped"
         );
+        // Vitals must skip upgrade-only links cleanly without failing or recording RTT.
+        vitals::sample_once(None, Some(&h.svc)).await;
+        let after_vitals = row(&h, node.as_str()).await;
+        assert!(after_vitals["link"]["latency_ms"].is_null());
+
         let remote = h.svc.fleet.remote(&node);
+        assert!(remote.is_upgrade_only());
         assert!(remote.probe(false).await.is_err());
         remote.probe_build().await.unwrap();
         assert!(!linked.conn.is_closed());

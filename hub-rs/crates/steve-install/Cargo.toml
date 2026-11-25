@@ -10,6 +10,7 @@ name = "steve"
 path = "src/main.rs"
 
 [dependencies]
+steve-harness-spec = { path = "../steve-harness-spec" }
 steve-i18n = { path = "../steve-i18n" }
 steve-store = { path = "../steve-store" }
 steve-types = { path = "../steve-types" }

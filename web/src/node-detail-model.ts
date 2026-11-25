@@ -2,7 +2,8 @@
  * Keeps URL parsing, prioritized "needs your attention" items, per-tab badge counts,
  * and sanitized diagnostic snapshots in one testable module (node --test loads .ts directly). */
 import type { RNodeHarnessReport, RVitals } from "./api.ts"
-import { hostOf, linkRoute, nodeStatus, offlineReason, upgradeCard, type NodeView } from "./device-model.ts"
+import type { NodeProtocolOlder } from "./gen/NodeProtocolOlder.ts"
+import { hostOf, isUpgradeOnlyLink, linkRoute, nodeStatus, offlineReason, upgradeCard, type NodeView } from "./device-model.ts"
 import { availableUpgradableHarnesses, type HarnessUpdates } from "./harness-update-status.ts"
 import { harnessState } from "./node-harness-model.ts"
 
@@ -29,6 +30,7 @@ export type NodeActionKind =
   | "harnessUpdatesAvailable"
   | "upgradeFailed"
   | "upgradeRunning"
+  | "upgradeRequired"
   | "upgradeOutdated"
   | "upgradeManual"
   | "sessionsWaiting"
@@ -56,6 +58,7 @@ export type NodeActionItem = {
   names?: string[]
   locations?: string[]
   offlineReason?: string
+  protocolOlder?: NodeProtocolOlder | null
 }
 
 export type NodeActionContext = {
@@ -75,10 +78,11 @@ const TONE_ORDER = { bad: 0, warn: 1, info: 2 } as const
  * Shown at the top of Overview, while each item also maps to its owning tab and shared action. */
 export function nodeActionItems(v: NodeView, ctx: NodeActionContext = {}): NodeActionItem[] {
   if (v.state === "revoked") return []
-  const hubVersion = ctx.hubVersion ?? ""
+  const hubVersion = v.hubVersion || ctx.hubVersion || ""
   const out: NodeActionItem[] = []
   const status = nodeStatus(v, hubVersion)
   const up = upgradeCard(v, hubVersion)
+  const upgradeOnly = isUpgradeOnlyLink(v)
 
   if (status.kind === "pending") {
     out.push({
@@ -99,7 +103,7 @@ export function nodeActionItems(v: NodeView, ctx: NodeActionContext = {}): NodeA
     })
   }
 
-  // Upgrade states: failed rollback (bad) > upgrading (info) > outdated/manual behind (warn)
+  // Upgrade states: failed rollback (bad) > upgrading (info) > protocol upgrade-only (bad) > outdated/manual behind (warn)
   if (up.kind === "failed") {
     out.push({
       kind: "upgradeFailed",
@@ -121,6 +125,18 @@ export function nodeActionItems(v: NodeView, ctx: NodeActionContext = {}): NodeA
       from: up.run.from_version ?? null,
       phase: up.run.phase,
       running,
+    })
+  } else if (upgradeOnly) {
+    const protocolOlder = v.protocolOlder ?? v.node?.protocol_older ?? null
+    const canRemoteUpgrade = !v.local && protocolOlder !== "hub" && !!ctx.canUpgrade && !!v.node?.upgrade?.can
+    out.push({
+      kind: "upgradeRequired",
+      tone: "bad",
+      tab: "version",
+      command: canRemoteUpgrade ? "startUpgrade" : "openTab",
+      version: hubVersion || undefined,
+      from: v.version ?? null,
+      protocolOlder,
     })
   } else if (up.kind === "outdated") {
     out.push({
@@ -154,9 +170,9 @@ export function nodeActionItems(v: NodeView, ctx: NodeActionContext = {}): NodeA
     })
   }
 
-  // Harnesses needing login/authentication or failed probes (only while linked)
+  // Harnesses needing login/authentication or failed probes (only while linked normally)
   const report = ctx.harnessReport
-  if (v.linked && v.state !== "pending") {
+  if (v.linked && v.state !== "pending" && !upgradeOnly && report?.state !== "upgrade_required") {
     const authNames = (report?.harnesses ?? [])
       .filter((h) => harnessState(h) === "authentication_required")
       .map((h) => h.name)
@@ -274,10 +290,13 @@ export function nodeDiagnosticSnapshot(
       local: v.local,
       state: v.state,
       linked: v.linked,
+      link_mode: v.linkMode ?? v.node?.link_mode ?? "normal",
+      protocol: v.node?.protocol ?? null,
+      protocol_older: v.protocolOlder ?? v.node?.protocol_older ?? null,
       paused: v.paused,
       status: status.kind,
       version: v.version ?? null,
-      hub_version: hubVersion || null,
+      hub_version: v.hubVersion || hubVersion || null,
       fingerprint: v.fingerprint ?? null,
       last_seen: v.lastSeen ?? null,
       sessions: { running: v.running ?? null, waiting: v.waiting ?? null, max: v.max ?? null },

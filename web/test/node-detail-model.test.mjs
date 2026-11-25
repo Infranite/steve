@@ -218,3 +218,45 @@ test("nodeDiagnosticSnapshot produces sanitized read-only state matching vitals 
   assert.equal(snap.vitals?.gaps_count, 1)
   assert.equal(snap.vitals?.tokens.today, 12_000)
 })
+
+test("nodeActionItems surfaces single upgradeRequired item and suppresses harness errors on upgrade_only link", () => {
+  const stale = view({
+    version: "0.9.0",
+    hubVersion: "0.11.1",
+    linkMode: "upgrade_only",
+    protocolOlder: "node",
+    node: {
+      node_id: "n-stale",
+      name: "MacBook Pro",
+      fingerprint: "abcd",
+      state: "active",
+      linked: true,
+      local: false,
+      link_mode: "upgrade_only",
+      protocol: 12,
+      protocol_older: "node",
+      node_version: "0.9.0",
+      hub_version: "0.11.1",
+      upgrade: {
+        build: { version: "0.9.0", commit: "abc", target: "aarch64-apple-darwin" },
+        policy: "notify",
+        can: true,
+        reason: "outdated",
+      },
+    },
+  })
+  const items = nodeActionItems(stale, {
+    hubVersion: "0.11.1",
+    harnessReport: { state: "upgrade_required", checked_at: null, attempted_at: null, stale: false, refreshing: false, error: null, harnesses: [] },
+    harnessesError: "should be suppressed on upgrade_only",
+    canUpgrade: true,
+  })
+  assert.deepEqual(
+    items.map((i) => [i.kind, i.tone, i.tab, i.command, i.from, i.version]),
+    [["upgradeRequired", "bad", "version", "startUpgrade", "0.9.0", "0.11.1"]],
+  )
+  const snap = nodeDiagnosticSnapshot(stale, { hubVersion: "0.11.1", now: NOW })
+  assert.equal(snap.node.link_mode, "upgrade_only")
+  assert.equal(snap.node.protocol, 12)
+  assert.equal(snap.node.hub_version, "0.11.1")
+})

@@ -308,8 +308,9 @@ impl HomeLock {
     }
 
     fn take_retry(home: &Path, mut again: impl FnMut() -> bool) -> ApiResult<HomeLock> {
+        use std::io::{Seek, SeekFrom, Write};
         use std::os::fd::AsRawFd;
-        let f = std::fs::OpenOptions::new()
+        let mut f = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
@@ -326,6 +327,12 @@ impl HomeLock {
                 return Err(Error::new(Code::Conflict, "another node runs on this home"));
             }
         }
+        // Record the lock owner's PID while holding the exclusive lock so diagnostics
+        // (such as `steve node enable-boot`) can identify the holder even without `lsof`.
+        if f.set_len(0).is_ok() && f.seek(SeekFrom::Start(0)).is_ok() {
+            let _ = writeln!(f, "{}", std::process::id());
+            let _ = f.flush();
+        }
         Ok(HomeLock(f))
     }
 }
@@ -333,6 +340,8 @@ impl HomeLock {
 impl Drop for HomeLock {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;
+        // Clear the PID while still holding the exclusive lock so clean exits never leave a stale PID.
+        let _ = self.0.set_len(0);
         // CLOEXEC prevents inheritance after exec, but another thread may currently be
         // between fork and exec. Closing only our descriptor would leave that child holding
         // the same flock. The last Node owner has quiesced: release its lock explicitly,
@@ -349,6 +358,12 @@ mod home_lock_tests {
     fn a_live_holder_is_refused_and_a_short_inherited_descriptor_does_not_break_restart() {
         let dir = tempfile::tempdir().unwrap();
         let lease = HomeLock::take(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("node.lock"))
+                .unwrap()
+                .trim(),
+            std::process::id().to_string()
+        );
         assert!(matches!(
             HomeLock::take(dir.path()),
             Err(Error {
@@ -360,6 +375,11 @@ mod home_lock_tests {
         // boundary (exec's CLOEXEC), without relying on a child being scheduled within 200 ms.
         let mut inherited = Some(lease.0.try_clone().unwrap());
         drop(lease);
+        assert!(
+            std::fs::read_to_string(dir.path().join("node.lock"))
+                .unwrap()
+                .is_empty()
+        );
         let until = std::time::Instant::now() + Duration::from_secs(5);
         let next = HomeLock::take_retry(dir.path(), || {
             drop(inherited.take());
@@ -394,6 +414,9 @@ pub(crate) struct Inner {
     files: Mutex<Option<Arc<dyn HubFiles>>>,
     /// Where a command's secrets come from (the Hub).
     secrets: Mutex<Option<Arc<dyn HubSecrets>>>,
+    /// This process's own release identity ([`LocalNode::set_build`]), reported by `probe_build`
+    /// even when Hub-managed upgrades are unavailable.
+    build: std::sync::OnceLock<BuildIdentity>,
     /// Who stages and switches releases for the Hub ([`LocalNode::set_upgrader`]); none: this Node
     /// is upgraded by its operator.
     upgrader: std::sync::OnceLock<Arc<dyn Upgrader>>,
@@ -1510,6 +1533,7 @@ impl LocalNode {
             sink: Mutex::new(None),
             files: Mutex::new(None),
             secrets: Mutex::new(None),
+            build: std::sync::OnceLock::new(),
             upgrader: std::sync::OnceLock::new(),
             remover: std::sync::OnceLock::new(),
             retiring: AtomicBool::new(false),
@@ -1591,6 +1615,12 @@ impl LocalNode {
     /// that needs one fails without running.
     pub fn connect_secrets(&self, secrets: Arc<dyn HubSecrets>) {
         *self.0.secrets.lock().unwrap() = Some(secrets);
+    }
+
+    /// Records this process's own release build so `probe_build` always reports it, including when
+    /// Hub-managed upgrades are unavailable. Set once.
+    pub fn set_build(&self, build: BuildIdentity) {
+        let _ = self.0.build.set(build);
     }
 
     /// Lets the Hub upgrade this Node through `upgrader` (the host that installed it as a
@@ -4361,6 +4391,20 @@ impl Discovery for LocalNode {
             }
         };
         let (probed, adapters) = tokio::join!(binaries, adapters);
+        let any_adapter_missing = adapters
+            .values()
+            .any(|p| p.status == steve_acp::adapters::ProbeStatus::AdapterMissing);
+        let login_env = if any_adapter_missing {
+            adapter_probe::probe_login_shell_env().await
+        } else {
+            None
+        };
+        let service_path = std::env::var("PATH").unwrap_or_default();
+        let refresh_command = if self.0.cfg.node.as_str() == "local" {
+            "steve hub refresh-env"
+        } else {
+            "steve node refresh-env"
+        };
         let mut requirements = HashMap::new();
         for id in self.0.cfg.acp.adapters.keys() {
             if !steve_harness_spec::components(id).is_empty() {
@@ -4416,7 +4460,14 @@ impl Discovery for LocalNode {
                     adapter: None,
                     setup: None,
                 };
-                adapter_probe::apply(&self.0.cfg.acp, &mut c, adapters.get(h));
+                adapter_probe::apply(
+                    &self.0.cfg.acp,
+                    &mut c,
+                    adapters.get(h),
+                    &service_path,
+                    login_env.as_ref(),
+                    refresh_command,
+                );
                 if let Some(a) = c.adapter.as_mut() {
                     let ceiling = &self.0.cfg.ceiling;
                     a.execution_modes = a.session.as_ref().map(|o| {
@@ -4476,8 +4527,14 @@ impl Discovery for LocalNode {
         })
     }
     async fn probe_build(&self) -> ApiResult<upgrade_v1::ProbeBuildResponse> {
+        let build = self
+            .0
+            .build
+            .get()
+            .cloned()
+            .or_else(|| self.0.upgrader.get().map(|u| u.build()));
         Ok(upgrade_v1::ProbeBuildResponse {
-            build: self.0.upgrader.get().map(|u| u.build().into()),
+            build: build.map(Into::into),
             upgradable: self.0.upgrader.get().is_some(),
             running: self.running_work()? as u64,
         })
@@ -4829,5 +4886,43 @@ mod fit_tests {
             matches!(out.as_slice(), [EventBody::Diagnostic { code, .. }] if code == "event_too_large"),
             "{out:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn probe_build_reports_build_even_without_upgrader() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = LocalNode::open(NodeConfig {
+            node: NodeId::new("n_build").unwrap(),
+            home: dir.path().to_path_buf(),
+            acp: AcpConfig {
+                adapters: Default::default(),
+                declared: Default::default(),
+                node: PathBuf::from("/usr/bin/false"),
+                claude_executable: PathBuf::from("/usr/bin/false"),
+                claude_config_dir: None,
+                steve_home: dir.path().to_path_buf(),
+                codex_home: dir.path().to_path_buf(),
+                user_home: dir.path().to_path_buf(),
+                version: "0.11.1".into(),
+            },
+            roots: vec![],
+            capacity: Capacity {
+                sessions: 1,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Storage::default(),
+            ceiling: PolicyCeiling::default(),
+        })
+        .unwrap();
+        let build = BuildIdentity {
+            version: "0.11.1".into(),
+            commit: "a".repeat(40),
+            target: "aarch64-apple-darwin".into(),
+        };
+        node.set_build(build.clone());
+        let probed = node.probe_build().await.unwrap();
+        assert!(!probed.upgradable);
+        assert_eq!(probed.build, Some(build.into()));
     }
 }

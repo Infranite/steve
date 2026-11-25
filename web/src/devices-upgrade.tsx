@@ -11,7 +11,7 @@ import type { RNodeUpgradeRun } from "@/api"
 import { toast } from "@/store"
 import { useT } from "@/i18n"
 import { date, span } from "@/i18n/format"
-import { agoText, upgradeCard, UPGRADE_STEPS, type NodeView, type StepState } from "@/device-model"
+import { agoText, isUpgradeOnlyLink, manualUpdateCommand, manualUpdateTarget, upgradeCard, UPGRADE_STEPS, type NodeView, type StepState } from "@/device-model"
 import { useDevices } from "@/devices-data"
 import { DCard, DRow } from "@/devices-ui"
 import type { NodeActions } from "@/devices-node-actions"
@@ -51,12 +51,13 @@ type UpgradeActionSlice = Pick<NodeActions, "upgradeBusy" | "startUpgrade" | "sw
 
 export function NodeVersion({ v, editable, actions }: { v: NodeView; editable: boolean; actions: UpgradeActionSlice }) {
   const t = useT(), { hubVersion, upgradeDefault } = useDevices()
-  const c = upgradeCard(v, hubVersion), node = v.node, u = node?.upgrade
+  const effectiveHub = v.hubVersion || hubVersion
+  const c = upgradeCard(v, effectiveHub), node = v.node, u = node?.upgrade
   /* the Hub's own Node is the Hub's build: it is upgraded with the Hub */
   if (c.kind === "builtIn") {
     return (
       <DCard icon={<ArrowUpCircleIcon />} title={t("device:upgrade.title")}
-        sub={<span data-node-build>{t("devices:upgrade.builtIn", { version: hubVersion || "?" })}</span>}
+        sub={<span data-node-build>{t("devices:upgrade.builtIn", { version: effectiveHub || "?" })}</span>}
         action={<a className="type-footnote text-blue hover:underline" href="#/settings/about">{t("devices:upgrade.hubUpdates")}</a>}
         data-node-upgrade="builtIn" />
     )
@@ -69,7 +70,11 @@ export function NodeVersion({ v, editable, actions }: { v: NodeView; editable: b
     : c.kind === "current" ? (c.last ? t("devices:upgrade.currentLast", { version: v.version ?? "", ago: agoText(c.last.updated), from: c.last.from_version ?? "?", to: c.last.version }) : (v.version ?? ""))
     : c.kind === "devHub" ? t("device:upgrade.reason.hub_dev_build")
     : c.kind === "unknown" ? t("device:upgrade.reason.unknown")
-    : t("devices:upgrade.runs", { v: v.version ?? "?", hub: hubVersion || "?" })
+    : !v.version && isUpgradeOnlyLink(v)
+      ? (node.protocol != null
+        ? t("devices:upgrade.runsProto", { proto: node.protocol, hub: effectiveHub || "?" })
+        : t("devices:upgrade.runsUnknown", { hub: effectiveHub || "?" }))
+      : t("devices:upgrade.runs", { v: v.version ?? "?", hub: effectiveHub || "?" })
   const badge = c.kind === "current" ? <Badge tone="success" size="sm" dot>{t("devices:upgrade.same")}</Badge>
     : c.kind === "outdated" ? <Badge tone="warning" size="sm" icon={<ArrowUpCircleIcon />}>{t("devices:upgrade.can")}</Badge>
     : c.kind === "running" ? <Badge tone="info" size="sm" dot live>{t("devices:upgrade.upgrading")}</Badge>
@@ -114,9 +119,13 @@ export function NodeVersion({ v, editable, actions }: { v: NodeView; editable: b
           <div className="mx-5 flex flex-col gap-2.5 rounded-lg bg-muted/70 px-3.5 py-3 type-callout" data-upgrade-manual>
             <div className="flex gap-2.5">
               <InfoIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
-              <span>{t(c.behind ? "devices:upgrade.manualBehind" : "devices:upgrade.manual")}</span>
+              <span>
+                {t(c.behind ? "devices:upgrade.manualBehind" : "devices:upgrade.manual", {
+                  archive: `steve-${effectiveHub.trim() || "<version>"}-${manualUpdateTarget(v)}-installer.tar.gz`,
+                })}
+              </span>
             </div>
-            <CodeBlock code="steve node update" language="bash" />
+            <CodeBlock code={manualUpdateCommand(v, effectiveHub)} language="bash" />
           </div>
         )}
         <div className="border-t border-border/70">
@@ -145,7 +154,7 @@ export function NodeVersion({ v, editable, actions }: { v: NodeView; editable: b
             {u.can && c.kind !== "running" && (
               <Button size="sm" disabled={busy} onClick={() => void actions.startUpgrade(false)} data-node-upgrade-start>
                 {busy ? <Spinner className="size-3" /> : null}
-                {c.kind === "failed" ? t("devices:upgrade.retry") : t("devices:upgrade.to", { version: c.kind === "outdated" ? c.to : hubVersion })}
+                {c.kind === "failed" ? t("devices:upgrade.retry") : t("devices:upgrade.to", { version: c.kind === "outdated" ? c.to : effectiveHub })}
               </Button>
             )}
           </div>

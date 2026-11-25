@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { go, openSheet } from "@/ui"
 import { api } from "@/api"
 import { deviceWorkEvidence, st, toast, useStore } from "@/store"
-import { nodeStatus, offlineReason, statusText, upgradeCard, type NodeView } from "@/device-model"
+import { isUpgradeOnlyLink, nodeStatus, offlineReason, statusText, upgradeCard, type NodeView } from "@/device-model"
 import { mapClients } from "@/device-map-model"
 import { useDevices } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
@@ -43,6 +43,25 @@ export function OverviewTab() {
     else if (s.kind === "upgrading") rows.push({ key: v.id, tone: "info", icon: LoaderIcon, text: t("devices:attn.upgrading", { name, to: s.version ?? "" }), actions: open(v, t("devices:attn.open"), "version") })
     else if (s.kind === "offline") rows.push({ key: v.id, tone: "warn", icon: WifiOffIcon,
       text: <>{t("devices:attn.nodeStatus", { name, status: statusText(s, now) })}{offlineReason(v) && <span className="text-muted-foreground">{t("devices:attn.reason", { why: offlineReason(v) })}</span>}</>, actions: open(v) })
+    else if (isUpgradeOnlyLink(v)) {
+      const effectiveHub = v.hubVersion || hubVersion
+      const older = v.protocolOlder ?? v.node?.protocol_older ?? null
+      const canRemote = !v.local && older !== "hub" && st.owner && !!v.node?.upgrade?.can
+      rows.push({
+        key: v.id,
+        tone: "bad",
+        icon: ArrowUpCircleIcon,
+        text: older === "hub"
+          ? t("devices:attn.upgradeRequiredHub", { name, from: v.version ?? "?", to: effectiveHub || "?" })
+          : v.version && effectiveHub
+            ? t("devices:attn.upgradeRequired", { name, from: v.version, to: effectiveHub })
+            : t("devices:attn.upgradeRequiredUnknown", { name }),
+        actions: <>
+          {open(v, t("devices:card.details"), "version")}
+          {canRemote && <Button size="xs" disabled={busy === v.id} onClick={() => void upgrade(v)} data-attention-upgrade={v.id}>{t("devices:upgrade.nodeAction")}</Button>}
+        </>,
+      })
+    }
     else if (card.kind === "outdated" || card.kind === "manual" && card.behind) rows.push({ key: v.id, tone: "warn", icon: ArrowUpCircleIcon, text: t("devices:attn.outdated", { name, v: v.version ?? "?", hub: hubVersion }),
       actions: <>{open(v, t("devices:card.details"), "version")}{card.kind === "outdated" && st.owner && <Button size="xs" disabled={busy === v.id} onClick={() => void upgrade(v)} data-attention-upgrade={v.id}>{t("devices:attn.upgrade")}</Button>}</> })
     const asks = v.device && deviceWorkEvidence().loaded ? deviceGroups(v.device.id).attention.length : 0
