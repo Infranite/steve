@@ -814,7 +814,7 @@ impl Core {
             )
         });
         for ws in t.db().workspace_ids()? {
-            crate::notify::notify(t.db(), &ws, "disk", "info", &text, None)?;
+            steve_store::notify::notify(t.db().store(), &ws, "disk", "info", &text, None)?;
         }
         Ok(())
     }
@@ -829,7 +829,7 @@ impl Core {
             )
         });
         for ws in t.db().workspace_ids()? {
-            crate::notify::notify(t.db(), &ws, "disk", "warn", &text, None)?;
+            steve_store::notify::notify(t.db().store(), &ws, "disk", "warn", &text, None)?;
         }
         Ok(())
     }

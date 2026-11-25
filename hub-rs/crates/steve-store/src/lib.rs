@@ -35,6 +35,7 @@ pub use contract::channel_trigger_report;
 pub use contract::channel_write_policy;
 pub use contract::feishu_registration;
 pub use contract::notifications as notification_repo;
+pub use contract::notify;
 pub use contract::reply_basis;
 pub use contract::{
     Accounts, AuthSessions, ConnRow, ConnectionBrief, HealthState, MatchRule, MatchRules, NewParty,

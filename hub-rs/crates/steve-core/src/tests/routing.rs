@@ -1303,9 +1303,20 @@ async fn r4_an_item_from_the_conversation_reports_back() {
 
     /* a release failure is a notification, not a line in the conversation */
     let n0 = k.db().messages(WS).unwrap().len();
-    crate::notify::notify(k.db(), WS, "release", "fail", "发布失败了", Some(&id)).unwrap();
+    steve_store::notify::notify(
+        k.db().store(),
+        WS,
+        "release",
+        "fail",
+        "发布失败了",
+        Some(&id),
+    )
+    .unwrap();
     assert_eq!(k.db().messages(WS).unwrap().len(), n0);
-    assert_eq!(k.core.notifications(WS).unwrap()[0].text, "发布失败了");
+    assert_eq!(
+        steve_store::notify::list_recent(k.db().store(), WS, 100).unwrap()[0].text,
+        "发布失败了"
+    );
 
     /* lifecycle events never add messages: released and done land on the same card */
     crate::thread::flowback::flow(
@@ -1848,7 +1859,7 @@ fn a_notice_written_in_a_transaction_stays_or_goes_with_it() {
     let k = Kit::new();
     let told = |text: &str, keep: bool| {
         k.db().store().write(|w| {
-            crate::notify::notify_in(w, WS, "system", "fail", text, None)?;
+            steve_store::notify::notify_in(w, WS, "system", "fail", text, None)?;
             if keep {
                 Ok(())
             } else {
@@ -1859,10 +1870,14 @@ fn a_notice_written_in_a_transaction_stays_or_goes_with_it() {
         })
     };
     assert!(told("没写下来", false).is_err());
-    assert!(k.core.notifications(WS).unwrap().is_empty());
+    assert!(
+        steve_store::notify::list_recent(k.db().store(), WS, 100)
+            .unwrap()
+            .is_empty()
+    );
     assert!(k.db().messages(WS).unwrap().is_empty());
     told("写下来了", true).unwrap();
-    let n = k.core.notifications(WS).unwrap();
+    let n = steve_store::notify::list_recent(k.db().store(), WS, 100).unwrap();
     assert_eq!((n.len(), n[0].text.as_str()), (1, "写下来了"));
     // a failure without an item also leaves its line in the conversation, pointing at the notice
     let ms = k.db().messages(WS).unwrap();

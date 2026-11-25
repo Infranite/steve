@@ -32,7 +32,6 @@ pub mod models;
 mod modules;
 pub mod node_git;
 pub mod notice_line;
-pub mod notify;
 mod occupancy;
 mod orchestrator;
 pub mod outbox_work;

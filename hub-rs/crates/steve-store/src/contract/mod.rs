@@ -67,6 +67,7 @@ pub mod node_environment;
 pub mod node_sessions;
 pub mod node_turns;
 pub mod notifications;
+pub mod notify;
 pub mod operations;
 pub mod parties;
 mod party_rows;

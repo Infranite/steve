@@ -87,7 +87,7 @@ fn release_texts_follow_the_kind() {
         let k = Kit::new();
         last_json(&k, r.clone());
         k.core.report_release().unwrap();
-        let ns = k.core.notifications(WS).unwrap();
+        let ns = steve_store::notify::list_recent(k.db().store(), WS, 100).unwrap();
         assert_eq!(ns[0].text, want, "{r}");
     }
 }

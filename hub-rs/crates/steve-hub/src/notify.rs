@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use crate::backend::{BResult, Obj, Repo};
 use crate::bus::Bus;
 
-const SPACE: &str = "notify";
 use steve_store::NOTIFY_SEEN;
+use steve_store::notify::SPACE;
 const DISMISSED: &str = "noticeDismissed";
 /// notify rows looked at when deciding what is closed, and dismissed ids kept
 const WINDOW: i64 = 500;
@@ -83,36 +83,6 @@ pub fn dismiss(r: &dyn Repo, ws: &str, id: &str) -> BResult<()> {
         &serde_json::to_string(&ids[skip..]).unwrap_or_default(),
     )?;
     Ok(())
-}
-
-/// `notify(ws, kind, level, text, item)`; returns the notify row id.
-pub fn notify(
-    r: &dyn Repo,
-    ws: &str,
-    kind: &str,
-    level: &str,
-    text: &str,
-    item: Option<&str>,
-) -> BResult<String> {
-    let id = r.message_add(
-        ws,
-        "steve",
-        text,
-        item,
-        &json!({ "notice": { "kind": kind, "level": level } }),
-        SPACE,
-    )?;
-    if level == "fail" {
-        r.message_add(
-            ws,
-            "steve",
-            text,
-            item,
-            &json!({ "notice": { "kind": kind, "level": level, "ref": id } }),
-            "steve",
-        )?;
-    }
-    Ok(id)
 }
 
 /// A stored notice text the Hub wrote itself in the request's language (`steve_core::notice_line`, and
@@ -278,6 +248,32 @@ mod tests {
         }
     }
 
+    fn add_notice(
+        r: &Fake,
+        ws: &str,
+        kind: &str,
+        level: &str,
+        text: &str,
+        item: Option<&str>,
+    ) -> String {
+        let id = r.put(
+            SPACE,
+            text,
+            item,
+            json!({ "notice": { "kind": kind, "level": level } }),
+        );
+        if level == "fail" && item.is_none() {
+            r.put(
+                steve_store::notify::MAIN_SPACE,
+                text,
+                None,
+                json!({ "notice": { "kind": kind, "level": level, "ref": id } }),
+            );
+        }
+        let _ = ws;
+        id
+    }
+
     fn closed_of(r: &Fake) -> Vec<(String, bool)> {
         list(r, "w", 100)
             .expect("list")
@@ -294,9 +290,9 @@ mod tests {
     #[test]
     fn a_later_release_of_the_item_closes_the_failure() {
         let r = Fake::default();
-        notify(&r, "w", "release", "fail", "没有发布：冲突", Some("ST-16")).expect("notify");
-        notify(&r, "w", "release", "fail", "没有发布：别的", Some("ST-9")).expect("notify");
-        notify(&r, "w", "release", "success", "已发布", Some("ST-16")).expect("notify");
+        add_notice(&r, "w", "release", "fail", "没有发布：冲突", Some("ST-16"));
+        add_notice(&r, "w", "release", "fail", "没有发布：别的", Some("ST-9"));
+        add_notice(&r, "w", "release", "success", "已发布", Some("ST-16"));
         assert_eq!(
             closed_of(&r),
             [
@@ -312,10 +308,10 @@ mod tests {
     fn notices_by_language() {
         let r = Fake::default();
         let disk = steve_i18n::t!("hub.node.disk_low", name = "studio", free = "3 GB");
-        notify(&r, "w", "disk", "info", &disk, None).expect("notify");
+        add_notice(&r, "w", "disk", "info", &disk, None);
         // preserve the text of an existing historical notice
-        notify(&r, "w", "system", "fail", "YOLO 已暂停：连续出错", None).expect("notify");
-        notify(&r, "w", "release", "fail", "没有发布：冲突", Some("ST-1")).expect("notify");
+        add_notice(&r, "w", "system", "fail", "YOLO 已暂停：连续出错", None);
+        add_notice(&r, "w", "release", "fail", "没有发布：冲突", Some("ST-1"));
         let en = steve_i18n::with(steve_i18n::EN, || closed_of(&r));
         let texts: Vec<_> = en.iter().map(|x| x.0.as_str()).collect();
         assert_eq!(
@@ -333,8 +329,8 @@ mod tests {
     #[test]
     fn a_new_failure_replaces_the_older_one() {
         let r = Fake::default();
-        notify(&r, "w", "release", "fail", "第一次", Some("ST-1")).expect("notify");
-        notify(&r, "w", "release", "fail", "第二次", Some("ST-1")).expect("notify");
+        add_notice(&r, "w", "release", "fail", "第一次", Some("ST-1"));
+        add_notice(&r, "w", "release", "fail", "第二次", Some("ST-1"));
         assert_eq!(
             closed_of(&r),
             [("第二次".into(), false), ("第一次".into(), true)]
@@ -344,18 +340,24 @@ mod tests {
     #[test]
     fn a_dismissed_failure_stays_closed() {
         let r = Fake::default();
-        notify(&r, "w", "release", "fail", "没有发布", Some("ST-1")).expect("notify");
-        /* closed from its line in the conversation: the id is that of the line, the notice is what gets remembered */
+        add_notice(&r, "w", "system", "fail", "系统告警", None);
+        let release_id = add_notice(&r, "w", "release", "fail", "没有发布", Some("ST-1"));
+        /* itemless failure closed from its line in the conversation: the id is that of the line, the notice is what gets remembered */
         let line = r.messages_in("w", "steve", 10).expect("rows")[0]["id"]
             .as_str()
             .unwrap_or_default()
             .to_string();
         dismiss(&r, "w", &line).expect("dismiss");
         dismiss(&r, "w", &line).expect("dismiss twice");
-        assert_eq!(closed_of(&r), [("没有发布".into(), true)]);
+        /* item-scoped failure closed directly by its notice id */
+        dismiss(&r, "w", &release_id).expect("dismiss item failure");
+        assert_eq!(
+            closed_of(&r),
+            [("没有发布".into(), true), ("系统告警".into(), true)]
+        );
         assert_eq!(
             r.settings.borrow().get(DISMISSED).map(String::as_str),
-            Some(r#"["m1"]"#)
+            Some(r#"["m1","m3"]"#)
         );
     }
 }

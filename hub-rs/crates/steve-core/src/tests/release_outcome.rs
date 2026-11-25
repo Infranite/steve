@@ -76,8 +76,7 @@ fn result(k: &Kit, d: &str) -> Value {
 }
 
 fn fail_notices(k: &Kit) -> Vec<String> {
-    k.core
-        .notifications(WS)
+    steve_store::notify::list_recent(k.db().store(), WS, 100)
         .unwrap()
         .into_iter()
         .filter(|n| n.level == "fail")

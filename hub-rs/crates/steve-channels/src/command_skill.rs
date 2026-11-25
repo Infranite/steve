@@ -200,15 +200,8 @@ impl Channels {
     /// conversation). Best-effort.
     fn alert_owner(&self, ws: &str, text: &str, risk: bool) {
         let level = if risk { "fail" } else { "info" };
-        let r = self.store().messages().add(
-            ws,
-            "steve",
-            text,
-            None,
-            &serde_json::json!({"notice": {"kind": "security", "level": level}}),
-            "notify",
-        );
-        if let Err(e) = r {
+        if let Err(e) = steve_store::notify::notify(self.store(), ws, "security", level, text, None)
+        {
             tracing::warn!("trigger guard: owner not alerted: {e}");
         }
     }

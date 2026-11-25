@@ -66,12 +66,16 @@ pub async fn run(svc: Arc<NodeService>, core: steve_core::Core, minutes: i64) {
         }
         let store = svc.store.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            let db = steve_core::repo::Db::new(store);
             for (_, name, away) in moved {
                 let text = steve_i18n::t!("hub.node.handed_over", name = name, minutes = away);
-                if let Err(e) =
-                    steve_core::notify::notify(&db, steve_store::WS, "system", "info", &text, None)
-                {
+                if let Err(e) = steve_store::notify::notify(
+                    &store,
+                    steve_store::WS,
+                    "system",
+                    "info",
+                    &text,
+                    None,
+                ) {
                     tracing::error!("hand-over notice: {e}");
                 }
             }
