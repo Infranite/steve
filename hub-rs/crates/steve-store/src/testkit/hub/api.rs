@@ -10,14 +10,6 @@ pub(super) fn writable(path: &Path) -> Result<rusqlite::Connection> {
     Ok(c)
 }
 
-pub fn workflow_item_scopes(path: &Path) -> Result<()> {
-    writable(path)?.execute_batch(
-        "INSERT INTO workspaces(id,name,created) VALUES('other','Other',1);
-         INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('local-item','default',990,'Local','active',1,1),('other-item','other',991,'Other','active',1,1);",
-    )?;
-    Ok(())
-}
-
 pub fn fail_client_mint(path: &Path) -> Result<()> {
     writable(path)?.execute_batch(
         "CREATE TRIGGER test_fail_client_mint

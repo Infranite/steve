@@ -257,30 +257,6 @@ pub fn set_bots_enabled(store: &Store) -> Result<()> {
     })
 }
 
-pub fn set_items(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE items SET source='[\"work\",\"workflow\"]' WHERE id='i1'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
-pub fn set_items_and_clear_workflow_units(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE items SET source='[\"协作工作\",\"workflow\"]' WHERE id='child'",
-            rusqlite::params![],
-        )?;
-        tx.conn.execute(
-            "DELETE FROM workflow_units WHERE item_id='child'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
 pub fn assign_management_bot(store: &Store) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute(
@@ -312,16 +288,6 @@ pub fn assign_shared_bot(store: &Store) -> Result<()> {
         )?;
         tx.conn.execute(
             "UPDATE sessions SET bot_id='shared_bot' WHERE id='s1'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
-pub fn assign_foreign_session_scope(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE items SET source='[\"\",\"\"]' WHERE id='i1'",
             rusqlite::params![],
         )?;
         Ok(())
@@ -530,26 +496,6 @@ pub fn set_thread_runs_status_done(store: &Store) -> Result<()> {
     })
 }
 
-pub fn set_workflows_paused(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE workflows SET paused=1 WHERE item_id='parent'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
-pub fn resume_workflow(store: &Store) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE workflows SET paused=0 WHERE item_id='parent'",
-            rusqlite::params![],
-        )?;
-        Ok(())
-    })
-}
-
 pub fn stream_fault_record(store: &Store, stream: &str) -> Result<(String, String, String)> {
     store.sqlite_read(|db| Ok(db.query_row("SELECT fault, session_id, fault_reason FROM node_streams WHERE stream=? AND fault_event IS NOT NULL", rusqlite::params![stream], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?))
 }
@@ -660,36 +606,6 @@ pub fn seed_principal_session(store: &Store, node_owner: &str) -> Result<()> {
     })
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum WorkflowPermissionChange {
-    Pause,
-    Cancel,
-    NewGoal,
-    RemoveUnit,
-}
-
-pub const WORKFLOW_PERMISSION_CHANGES: [WorkflowPermissionChange; 4] = [
-    WorkflowPermissionChange::Pause,
-    WorkflowPermissionChange::Cancel,
-    WorkflowPermissionChange::NewGoal,
-    WorkflowPermissionChange::RemoveUnit,
-];
-
-pub fn change_workflow_permission(store: &Store, change: WorkflowPermissionChange) -> Result<()> {
-    let sql = match change {
-        WorkflowPermissionChange::Pause => "UPDATE workflows SET paused=1",
-        WorkflowPermissionChange::Cancel => "UPDATE workflow_units SET status='cancelled'",
-        WorkflowPermissionChange::NewGoal => {
-            "UPDATE item_goals SET version=2 WHERE item_id='parent'"
-        }
-        WorkflowPermissionChange::RemoveUnit => "DELETE FROM workflow_units",
-    };
-    store.write(|tx| {
-        tx.conn.execute_batch(sql)?;
-        Ok(())
-    })
-}
-
 pub fn ordered_attempt_states(store: &Store) -> Result<Vec<String>> {
     store.sqlite_read(|db| {
         let mut q = db.prepare("SELECT state FROM runtime_attempts ORDER BY created, rowid")?;
@@ -792,16 +708,17 @@ pub fn midturn_event_count(store: &Store, session: &str) -> Result<i64> {
     })
 }
 
-pub fn block_tools_for_prerequisite(store: &Store, blocked: bool) -> Result<()> {
+pub fn block_tools_for_prerequisite(store: &Store, paused: bool) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute(
-            if blocked {
-                "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated) VALUES('i1',1,NULL,'workspace','','waiting',1,1)"
-            } else {
-                "UPDATE items SET phase='active',source='[\"item\",\"workflow\"]' WHERE id='i1'"
-            },
-            [],
-        )?;
+        if paused {
+            tx.conn.execute("DELETE FROM item_dependency_waits WHERE item_id='i1'", [])?;
+            tx.conn.execute("UPDATE items SET phase='paused' WHERE id='i1'", [])?;
+        } else {
+            tx.conn.execute(
+                "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated) VALUES('i1',1,NULL,'workspace','','waiting',1,1)",
+                [],
+            )?;
+        }
         Ok(())
     })
 }
@@ -1022,5 +939,117 @@ pub fn seed_retry_blocker(store: &Store, state: &str) -> Result<()> {
             _ => {}
         }
         Ok(())
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRuntimeSnapshot {
+    pub session_status: String,
+    pub binding_phase: String,
+    pub active_attempt: Option<String>,
+    pub turns: Vec<String>,
+    pub attempts: Vec<String>,
+    pub start_commands: Vec<(String, i64, bool)>,
+    pub dispatches: Vec<(String, String)>,
+    pub queued: i64,
+    pub transcript: Vec<(String, i64)>,
+    pub folded_text: String,
+    pub duplicate_node_events: i64,
+    pub faulted_streams: i64,
+}
+
+pub fn session_runtime_snapshot(store: &Store, session: &str) -> Result<SessionRuntimeSnapshot> {
+    store.sqlite_read(|db| {
+        let session_status: String =
+            db.query_row("SELECT status FROM sessions WHERE id=?1", [session], |r| {
+                r.get(0)
+            })?;
+        let (binding_phase, active_attempt): (String, Option<String>) = db.query_row(
+            "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?1",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let turns = {
+            let mut st = db.prepare(
+                "SELECT state FROM runtime_turns WHERE session_id=?1 ORDER BY created, rowid",
+            )?;
+            st.query_map([session], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        let attempts = {
+            let mut st = db.prepare(
+                "SELECT a.state FROM runtime_attempts a
+                   JOIN runtime_turns t ON t.turn_id=a.turn_id
+                  WHERE t.session_id=?1 ORDER BY a.created, a.rowid",
+            )?;
+            st.query_map([session], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        let start_commands = {
+            let mut st = db.prepare(
+                "SELECT state, lease_generation, maybe_sent FROM node_commands
+                  WHERE method='start_turn' AND session_id=?1 ORDER BY created, rowid",
+            )?;
+            st.query_map([session], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let dispatches = {
+            let mut st = db.prepare(
+                "SELECT text, state FROM session_dispatch
+                  WHERE session_id=?1 AND backend='node' ORDER BY created, rowid",
+            )?;
+            st.query_map([session], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let queued: i64 = db.query_row(
+            "SELECT COUNT(*) FROM queued WHERE session_id=?1",
+            [session],
+            |r| r.get(0),
+        )?;
+        let transcript = {
+            let mut st = db.prepare(
+                "SELECT kind, COUNT(*) FROM events
+                  WHERE session_id=?1 AND kind IN ('user','text','turn_end')
+                  GROUP BY kind ORDER BY kind",
+            )?;
+            st.query_map([session], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let folded_text: String = db.query_row(
+            "SELECT COALESCE(group_concat(json_extract(data,'$.text'),''), '')
+               FROM (SELECT data FROM events WHERE session_id=?1 AND kind='text' ORDER BY seq)",
+            [session],
+            |r| r.get(0),
+        )?;
+        let duplicate_node_events: i64 = db.query_row(
+            "SELECT COUNT(*) FROM (
+               SELECT 1 FROM events WHERE source_node IS NOT NULL
+                GROUP BY source_node, source_stream, source_epoch, source_seq
+               HAVING COUNT(*)>1
+             )",
+            [],
+            |r| r.get(0),
+        )?;
+        let faulted_streams: i64 = db.query_row(
+            "SELECT COUNT(*) FROM node_streams WHERE fault IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(SessionRuntimeSnapshot {
+            session_status,
+            binding_phase,
+            active_attempt,
+            turns,
+            attempts,
+            start_commands,
+            dispatches,
+            queued,
+            transcript,
+            folded_text,
+            duplicate_node_events,
+            faulted_streams,
+        })
     })
 }

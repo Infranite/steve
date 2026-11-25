@@ -5,7 +5,7 @@ use sea_query::{Alias, Expr, ExprTrait, Query, SelectStatement};
 use serde::{Deserialize, Serialize};
 use steve_types::{
     BotPlacement, CloseKind, ClosedBy, ItemOutcome, ItemParent, ItemPhase, ItemSnooze, ItemState,
-    ItemView, ItemWait, ItemWorkflow, Millis, OperationBlocker,
+    ItemView, ItemWait, Millis, OperationBlocker,
 };
 
 use super::{Page, page, read_ids};
@@ -27,18 +27,12 @@ fn select() -> SelectStatement {
         .expr(Expr::cust("(SELECT count(*) FROM item_goals WHERE item_id=items.id)"))
         .expr(Expr::cust("(SELECT json_group_array(tag_id) FROM (SELECT tag_id FROM item_tags WHERE item_id=items.id ORDER BY rowid))"))
         .expr(Expr::cust("(SELECT json_group_array(dep_id) FROM (SELECT dep_id FROM item_deps WHERE item_id=items.id ORDER BY created,dep_id))"))
-        .expr(Expr::cust("(SELECT paused FROM workflows WHERE item_id=items.id)"))
-        .expr(Expr::cust("(SELECT cycle FROM workflows WHERE item_id=items.id)"))
-        .expr(Expr::cust("(SELECT json_group_array(item_id) FROM (SELECT u.item_id FROM workflow_units u JOIN workflows w ON w.item_id=u.workflow_id WHERE u.workflow_id=items.id AND w.cycle=items.cycle AND items.phase<>'closed' AND u.status='failed' AND u.item_id IS NOT NULL ORDER BY u.position))"))
-        .expr(Expr::cust("(SELECT attempt FROM workflow_units WHERE item_id=items.id LIMIT 1)"))
-        .expr(Expr::cust("(SELECT max(attempt) FROM workflow_attempts WHERE item_id=items.id)"))
         .expr(Expr::cust("(SELECT json_group_array(json_object('kind',kind,'status',status,'required',required,'revision',revision,'tag',json_extract(evidence,'$.tag'))) FROM (SELECT * FROM item_operations WHERE item_id=items.id AND cycle=items.cycle AND status NOT IN ('succeeded','waived') ORDER BY created,id))"))
         // The detail observer refetches when its own facts change, even if the list looks the same.
         .expr(Expr::cust("json_array(
             (SELECT max(id) FROM timeline WHERE item_id=items.id),
             (SELECT json_array(count(*), max(rowid)) FROM artifacts WHERE item_id=items.id),
             (SELECT json_array(count(*), max(updated)) FROM annotations WHERE item_id=items.id),
-            (SELECT json_array(revision, updated) FROM workflows WHERE item_id=items.id),
             (SELECT follow FROM thread_dispatch_refs WHERE target_item_id=items.id AND effect_kind='create_item' LIMIT 1)
         )"))
         .expr(Expr::cust("(SELECT fact FROM bot_placements WHERE item_id=items.id AND fact IS NOT NULL ORDER BY seq DESC LIMIT 1)"))
@@ -112,28 +106,14 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
             label: s.label,
             until: Millis(s.until),
         });
-    let paused: Option<bool> = r.get(29)?;
-    let unit: Option<i64> = r.get(32)?;
-    let attempt = unit.or(r.get(33)?);
-    let workflow = if paused.is_some() || attempt.is_some() {
-        Some(ItemWorkflow {
-            paused,
-            cycle: r.get(30)?,
-            failed: r.get::<Json<Vec<_>>>(31)?.0,
-            attempt,
-            superseded: unit.is_none() && attempt.is_some(),
-        })
-    } else {
-        None
-    };
     let revision: i64 = r.get(4)?;
     let delivery_revision: i64 = r.get(8)?;
     let mut stamp = DefaultHasher::new();
     revision.hash(&mut stamp);
-    r.get::<String>(35)?.hash(&mut stamp);
-    let delivery: Vec<steve_types::DeliveryRef> = r.get::<Json<Vec<_>>>(37)?.0;
+    r.get::<String>(30)?.hash(&mut stamp);
+    let delivery: Vec<steve_types::DeliveryRef> = r.get::<Json<Vec<_>>>(32)?.0;
     let outcome: Option<String> = r.get(5)?;
-    let acceptance: Option<String> = r.get(38)?;
+    let acceptance: Option<String> = r.get(33)?;
     let state = match phase {
         ItemPhase::Closed => ItemState::Closed {
             outcome: match outcome.as_deref() {
@@ -165,14 +145,14 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         ItemPhase::Ready => ItemState::Ready,
         ItemPhase::Active => ItemState::Active,
     };
-    let waits = if !matches!(state, ItemState::Closed { .. }) && r.get::<bool>(39)? {
+    let waits = if !matches!(state, ItemState::Closed { .. }) && r.get::<bool>(34)? {
         vec![ItemWait::Prerequisite]
     } else {
         Vec::new()
     };
     let mut v = ItemView {
         placement: r
-            .get::<Option<Json<BotPlacement>>>(36)?
+            .get::<Option<Json<BotPlacement>>>(31)?
             .map(|Json(f)| f.explanation),
         id: r.get::<String>(0)?.into(),
         ws: r.get::<String>(1)?.into(),
@@ -204,14 +184,13 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         goals: r.get::<i64>(26)? as u32,
         tags: r.get::<Json<Vec<_>>>(27)?.0,
         deps: r.get::<Json<Vec<_>>>(28)?.0,
-        workflow,
         waits,
         op_blockers: Vec::new(),
         active_operations: 0,
         detail_stamp: stamp.finish() & ((1 << 53) - 1),
         has_branch: r.get(22)?,
     };
-    apply_operations(&mut v, delivery_revision, r.get::<Json<Vec<_>>>(34)?.0);
+    apply_operations(&mut v, delivery_revision, r.get::<Json<Vec<_>>>(29)?.0);
     Ok(v)
 }
 

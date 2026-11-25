@@ -1,9 +1,18 @@
 /* A page starts at a user prompt. Each turn keeps its mapped rows, so earlier pages and
  * completed turns keep their identities as live events arrive. */
-import type { REvent } from "../api"
+import type { REvent, RSubtaskStatus, RSubtaskView } from "../api"
 import i18n, { t } from "../i18n"
 
 export type Ev = any[]
+export const toolId = (e: Ev): string => (e[0] === "tool" && typeof e[15] === "string" ? e[15] : "")
+export const toolParent = (e: Ev): string | undefined => (e[0] === "tool" && typeof e[16] === "string" && e[16] ? e[16] : undefined)
+export const toolDurationMs = (e: Ev): number | undefined => (e[0] === "tool" && typeof e[17] === "number" && Number.isFinite(e[17]) ? e[17] : undefined)
+export const isSubtaskEv = (e: Ev): boolean => e[0] === "sub" && !!e[1]
+export const subtaskOf = (e: Ev): RSubtaskView | undefined => (e[0] === "sub" ? (e[1] as RSubtaskView) : undefined)
+export const subtaskTimes = (e: Ev): { started?: number; ended?: number } => (e[0] === "sub"
+  ? { started: typeof e[2] === "number" ? e[2] : undefined, ended: typeof e[3] === "number" ? e[3] : undefined }
+  : {})
+export const isActiveSubtaskStatus = (s: RSubtaskStatus | string | undefined): boolean => s === "running" || s === "queued" || s === "needs_you"
 /** one line for a prompt Steve hands an agent (the task brief runs to pages: role, rules, retrieved knowledge) */
 export function briefHead(text: string): string {
   const title = /^You are working for Steve\b[^\n]*?“(.+?)”/.exec(text)?.[1]
@@ -45,10 +54,14 @@ function toolEv(t: Ev, v: any) {
     /* [14]: what went into one of Steve's own tools, as the Hub stored it, for the call's card and timeline */
     if (steve && Object.keys(args).length) t[14] = args
   }
+  /* [15]: call id, [16]: parent subtask id when nested, [17]: adapter-observed duration in ms */
+  t[15] = String(v.id ?? "")
+  if (typeof v.parent === "string" && v.parent) t[16] = v.parent
+  if (typeof v.duration_ms === "number" && Number.isFinite(v.duration_ms)) t[17] = v.duration_ms
   return t
 }
 function tuplesOf(evs: readonly REvent[]) {
-  const ev: Ev[] = [], seqs: number[] = [], ends: number[] = [], ts: number[] = [], tools = new Map<string, Ev>()
+  const ev: Ev[] = [], seqs: number[] = [], ends: number[] = [], ts: number[] = [], tools = new Map<string, Ev>(), subtasks = new Map<string, Ev>()
   let cur: REvent | undefined
   const push = (e: Ev, seq: number) => { ev.push(e); seqs.push(seq); ends.push(seq); ts.push(cur?.ts ?? 0) }
   for (const e of evs) {
@@ -65,6 +78,21 @@ function tuplesOf(evs: readonly REvent[]) {
       /* [13]: when the call ended (the update that settled it), so a turn's timeline can draw each call as long as it took */
       if (had) { const ended = had[13]; toolEv(had, v); if (ended != null || over) had[13] = ended ?? e.ts; continue }
       const t = toolEv([], v); if (over) t[13] = e.ts; tools.set(id, t); push(t, e.seq); continue
+    }
+    if (e.kind === "subtask") {
+      const v = d.subtask as RSubtaskView | undefined
+      if (!v || !v.id) continue
+      const id = String(v.id), over = v.status === "done" || v.status === "failed" || v.status === "cancelled"
+      const had = subtasks.get(id)
+      if (had) {
+        const started = had[2], ended = had[3]
+        had[1] = v
+        had[2] = started ?? e.ts
+        if (ended != null || over) had[3] = ended ?? e.ts
+        continue
+      }
+      const sub: Ev = ["sub", v, e.ts, over ? e.ts : undefined]
+      subtasks.set(id, sub); push(sub, e.seq); continue
     }
     if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
     if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
@@ -119,7 +147,7 @@ export function segmentsOf(tuple: ReturnType<typeof tuplesOf>, rangeStart = 0): 
       prompt = kind === "hi" ? briefHead(String(e[3] ?? e[1])) : String(e[1] ?? "")
       if (i >= rangeStart) row(i, kind, [e])
     } else if (i < rangeStart) continue
-    else if (kind === "th" || kind === "tool" || kind === "a") buf.push(i)
+    else if (kind === "th" || kind === "tool" || kind === "sub" || kind === "a") buf.push(i)
     else if (kind === "end") {
       if (!buf.length && work && !work.end) Object.assign(work, { end: e[1], t1: ts[i] })
       flush([e[1], ts[i]]); turnDone(i); t0 = 0; work = undefined
@@ -141,6 +169,63 @@ function mapTurn(events: REvent[]) {
 }
 
 export type Transcript = { turns: TranscriptTurn[]; oldest: number | null; newest: number }
+
+export type ActiveSubtask = { subtask: RSubtaskView; started?: number; childSteps: number }
+/** Active (running/queued/needs_you) subtasks in the latest turn, for the header's RunningNow capsule. */
+export function activeSubtasksOf(transcript: Transcript | undefined): ActiveSubtask[] {
+  if (!transcript?.turns.length) return []
+  const latest = transcript.turns.at(-1)!
+  const childCounts = new Map<string, number>()
+  for (const e of latest.ev) {
+    const p = toolParent(e)
+    if (p) childCounts.set(p, (childCounts.get(p) ?? 0) + 1)
+  }
+  const out: ActiveSubtask[] = []
+  for (const e of latest.ev) {
+    const s = subtaskOf(e)
+    if (s && isActiveSubtaskStatus(s.status)) {
+      const { started } = subtaskTimes(e)
+      out.push({ subtask: s, started, childSteps: childCounts.get(s.id) ?? 0 })
+    }
+  }
+  return out
+}
+
+export type WorkPartition = {
+  /** Top-level event indices (omitting child tools nested under a known subtask and raw launcher tools duplicated by a subtask with the same id). */
+  rootIndices: number[]
+  /** Subtask ids present in this work segment. */
+  subtaskIds: Set<string>
+  /** Child tool event indices grouped by their parent subtask id. */
+  childrenBySubtask: Map<string, number[]>
+}
+
+/** Separate top-level work steps from child tool calls nested under a subtask, without duplicating launcher tool rows. */
+export function partitionWork(evs: readonly Ev[]): WorkPartition {
+  const subtaskIds = new Set<string>()
+  for (const e of evs) {
+    const s = subtaskOf(e)
+    if (s) subtaskIds.add(s.id)
+  }
+  const rootIndices: number[] = []
+  const childrenBySubtask = new Map<string, number[]>()
+  for (let i = 0; i < evs.length; i++) {
+    const e = evs[i]
+    if (e[0] === "tool") {
+      const id = toolId(e)
+      if (id && subtaskIds.has(id)) continue
+      const parent = toolParent(e)
+      if (parent && subtaskIds.has(parent)) {
+        const list = childrenBySubtask.get(parent)
+        if (list) list.push(i)
+        else childrenBySubtask.set(parent, [i])
+        continue
+      }
+    }
+    rootIndices.push(i)
+  }
+  return { rootIndices, subtaskIds, childrenBySubtask }
+}
 
 export function splitTurns(events: readonly REvent[], lastKind?: string): REvent[][] {
   const turns: REvent[][] = [[]]

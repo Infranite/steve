@@ -77,7 +77,7 @@ fn table_counts(c: &rusqlite::Connection) -> BTreeMap<String, usize> {
         .collect()
 }
 
-/// Expected schema-table and row-count changes made on purpose by migrations 120–125.
+/// Expected schema-table and row-count changes made on purpose by migrations 120–127.
 /// Every other table present before migration must survive with its exact row count.
 #[derive(Default)]
 struct MigrationChanges {
@@ -89,6 +89,7 @@ struct MigrationChanges {
 
 impl MigrationChanges {
     fn drop_table(&mut self, table: &str) {
+        self.created_tables.remove(table);
         self.dropped_tables.insert(table.to_owned());
     }
 
@@ -109,9 +110,9 @@ impl MigrationChanges {
     }
 }
 
-/// Exact backfill counts expected from migration 125, evaluated on the pre-migration database so
+/// Exact backfill counts expected from migration 127, evaluated on the pre-migration database so
 /// post-migration checks prove neither `reply_message_id` nor `dispatch_ref_id` dropped links.
-struct Thread125Backfill {
+struct Thread127Backfill {
     total_receipts: usize,
     /// Distinct non-empty reply_ids available without the `route_log.reply_id` fallback on
     /// `thread_runs` (i.e., what only `thread_runs.reply_id` + non-run `route_log.reply_id` had).
@@ -132,7 +133,7 @@ struct Thread125Backfill {
     reply_commits_seq: i64,
 }
 
-fn expected_thread_125_backfill(path: &Path) -> Thread125Backfill {
+fn expected_thread_127_backfill(path: &Path) -> Thread127Backfill {
     let q = |sql: &str| cli_count(path, sql);
 
     let total_receipts = q(
@@ -205,7 +206,7 @@ fn expected_thread_125_backfill(path: &Path) -> Thread125Backfill {
             + unbackfillable_dispatch_no_item
             + unbackfillable_dispatch_other_origin_or_deleted,
         total_receipts,
-        "every pre-125 receipt must fall into exactly one dispatch backfill bucket"
+        "every pre-127 receipt must fall into exactly one dispatch backfill bucket"
     );
 
     let reply_commits_seq: i64 = cli(
@@ -219,7 +220,7 @@ fn expected_thread_125_backfill(path: &Path) -> Thread125Backfill {
     .parse()
     .unwrap();
 
-    Thread125Backfill {
+    Thread127Backfill {
         total_receipts,
         legacy_direct_reply_ids,
         backfillable_reply_ids,
@@ -229,7 +230,6 @@ fn expected_thread_125_backfill(path: &Path) -> Thread125Backfill {
         reply_commits_seq,
     }
 }
-
 /// Computes the exact tables dropped/created and rows added/removed on purpose by migrations
 /// newer than `v_before`, evaluated against the pre-migration database at `path`.
 fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
@@ -425,7 +425,32 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
         changes.create_table("decision_choice_receipts", 0);
     }
 
-    // 125: Durable thread submit idempotency, reply tasks, reply receipts, origin-scoped dispatch
+    // 125: Durable daily aggregates for low-cardinality telemetry counters.
+    if v_before < 125 {
+        changes.create_table("telemetry_daily", 0);
+    }
+
+    // 126: Remove retired dynamic work-graph tables, steve_workflow tool pins, and stale
+    // close-request workflow_revision keys.
+    if v_before < 126 {
+        for table in [
+            "workflow_review_findings",
+            "workflow_units",
+            "workflow_history",
+            "workflow_attempts",
+            "workflows",
+        ] {
+            changes.drop_table(table);
+        }
+        if v_before >= 69 {
+            changes.remove_rows(
+                "bot_tool_pins",
+                q("SELECT count(*) FROM bot_tool_pins WHERE kind = 'tool' AND target = 'steve_workflow'"),
+            );
+        }
+    }
+
+    // 127: Durable thread submit idempotency, reply tasks, reply receipts, origin-scoped dispatch
     // & delivery refs, and typed notices.
     // Drops legacy `thread_resume`, `thread_runs`, `route_log`, `thread_items`; migrates
     // `thread_runs` + non-run `route_log` into settled `thread_reply_tasks` & `thread_reply_receipts`,
@@ -433,7 +458,7 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
     // and `settings.noticeDismissed` into `thread_notices` (deleting the migrated `notify` messages
     // and legacy `thread.pending.*` / `noticeDismissed` / `thread.postback.*` settings), and rebuilds
     // `thread_reply_commits` against `thread_reply_receipts(id)` (pruning only orphaned rows).
-    if v_before < 125 {
+    if v_before < 127 {
         for table in ["thread_resume", "thread_runs", "route_log", "thread_items"] {
             changes.drop_table(table);
         }
@@ -502,7 +527,7 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         "prod copy at v{v_before}"
     );
     let expected = expected_migration_changes(&path, v_before);
-    let thread_125_backfill = (v_before < 125).then(|| expected_thread_125_backfill(&path));
+    let thread_127_backfill = (v_before < 127).then(|| expected_thread_127_backfill(&path));
 
     let s = Store::open(&path, NoPublisher).unwrap();
     if v_before == db::SCHEMA_VERSION {
@@ -581,14 +606,14 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
     // Every row decodes through the repositories and read views, and counts match the sqlite3 CLI.
     let n = |sql: &str| cli_count(&path, sql);
 
-    // Migration 125 backfill verification:
+    // Migration 127 backfill verification:
     // - `reply_message_id` must preserve every unique `COALESCE(thread_runs.reply_id, route_log.reply_id)`
     //   and non-run `route_log.reply_id` (recovering historical answer runs whose `thread_runs.reply_id`
     //   was NULL while `route_log.reply_id` was populated).
     // - `dispatch_ref_id` must link every receipt whose `(workspace_id, origin_message_id)` has a
     //   migrated `create_item` row in `thread_dispatch_refs`, leaving NULL only for non-item turns,
     //   supplements/appends to items created by earlier origins, or deleted items.
-    if let Some(ref bf) = thread_125_backfill {
+    if let Some(ref bf) = thread_127_backfill {
         let actual_reply_non_null =
             n("SELECT count(*) FROM thread_reply_receipts WHERE reply_message_id IS NOT NULL");
         let actual_reply_null =
@@ -599,26 +624,26 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
             n("SELECT count(*) FROM thread_reply_receipts WHERE dispatch_ref_id IS NULL");
         assert_eq!(
             actual_reply_non_null, bf.backfillable_reply_ids,
-            "migration 125 reply_message_id backfill count mismatch (legacy_direct={}, backfillable={}, actual={})",
+            "migration 127 reply_message_id backfill count mismatch (legacy_direct={}, backfillable={}, actual={})",
             bf.legacy_direct_reply_ids, bf.backfillable_reply_ids, actual_reply_non_null
         );
         assert!(
             actual_reply_non_null >= bf.legacy_direct_reply_ids,
-            "migration 125 must not lose direct reply_message_id links"
+            "migration 127 must not lose direct reply_message_id links"
         );
         assert_eq!(
             actual_reply_null,
             bf.total_receipts - bf.backfillable_reply_ids,
-            "migration 125 unbackfillable reply_message_id count mismatch"
+            "migration 127 unbackfillable reply_message_id count mismatch"
         );
         assert_eq!(
             actual_dispatch_non_null, bf.backfillable_dispatch_refs,
-            "migration 125 dispatch_ref_id backfill count mismatch"
+            "migration 127 dispatch_ref_id backfill count mismatch"
         );
         assert_eq!(
             actual_dispatch_null,
             bf.unbackfillable_dispatch_no_item + bf.unbackfillable_dispatch_other_origin_or_deleted,
-            "migration 125 unbackfillable dispatch_ref_id count mismatch"
+            "migration 127 unbackfillable dispatch_ref_id count mismatch"
         );
         // Every backfilled dispatch_ref_id resolves to a matching create_item dispatch ref.
         assert_eq!(
@@ -646,7 +671,7 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
             );
         }
         eprintln!(
-            "prod_copy m125 backfill: receipts={} reply_message_id={}/{} (legacy_direct={}, +{} recovered) dispatch_ref_id={}/{} (unbackfillable: no_item={}, other_origin_or_deleted={})",
+            "prod_copy m127 backfill: receipts={} reply_message_id={}/{} (legacy_direct={}, +{} recovered) dispatch_ref_id={}/{} (unbackfillable: no_item={}, other_origin_or_deleted={})",
             bf.total_receipts,
             actual_reply_non_null,
             bf.total_receipts,
@@ -851,7 +876,7 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
             }
         }
 
-        // Durable thread repository (W3.4 / migration 125) workspace-scoped readback.
+        // Durable thread repository (W3.4 / migration 127) workspace-scoped readback.
         active_thread_tasks += s
             .read(|r| thread::list_active_tasks(r, &w.id))
             .unwrap()
@@ -910,13 +935,14 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         ws_settings_count += s.settings().all(&w.id).unwrap().len();
     }
 
-    // Full per-row readback across all migration 125 thread repository tables.
+    // Full per-row readback across all migration 127 thread repository tables.
     assert_eq!(
         s.read(|r| thread::list_queued_spaces(r)).unwrap().len(),
         n(
             "SELECT count(*) FROM (SELECT DISTINCT workspace_id, space FROM thread_reply_tasks WHERE status = 'queued')"
         )
     );
+
     assert_eq!(
         active_thread_tasks,
         n("SELECT count(*) FROM thread_reply_tasks WHERE status IN ('queued', 'claimed')")

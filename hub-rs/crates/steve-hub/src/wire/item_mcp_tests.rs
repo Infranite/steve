@@ -320,27 +320,15 @@ fn changing_source_scope_revokes_cached_main_access_and_owner_marker_is_not_enou
 }
 
 #[test]
-fn workflow_child_does_not_inherit_a_main_origin() {
-    let f = Fixture::new();
-    let own = f.item("default", "P1 child");
-    let parent = f.item("default", "P1 parent");
-    f.origin(&own, steve_core::thread::MAIN);
-    fixtures::mark_workflow_item(&f.store, &own.id).unwrap();
-    let (_, view) = scope(&f.store, &f.session(&own)).unwrap();
-    assert!(view.sees(&own.id));
-    assert!(!view.sees(&parent.id));
-}
-
-#[test]
-fn a_session_limited_to_its_own_item_is_told_so_and_a_unit_where_its_upstream_is() {
+fn a_session_limited_to_its_own_item_is_told_so() {
     let f = Fixture::new();
     let own = f.item("default", "P1 own");
     let other = f.item("default", "P1 other");
     let s = f.session(&own);
     let (current, view) = scope(&f.store, &s).unwrap();
-    assert_eq!(only_own(&f.store, &current, &view, &own.id).unwrap(), None);
+    assert_eq!(only_own(&current, &view, &own.id), None);
     assert_eq!(
-        only_own(&f.store, &current, &view, &other.id).unwrap(),
+        only_own(&current, &view, &other.id),
         Some(format!("This session can only read item {}.", own.id))
     );
     // a conversation that sees several items keeps the ordinary answer
@@ -348,22 +336,7 @@ fn a_session_limited_to_its_own_item_is_told_so_and_a_unit_where_its_upstream_is
     f.origin(&own, "chan:group-a");
     f.origin(&sibling, "chan:group-a");
     let (current, view) = scope(&f.store, &s).unwrap();
-    assert_eq!(
-        only_own(&f.store, &current, &view, &other.id).unwrap(),
-        None
-    );
-
-    let unit = f.item("default", "P1 unit");
-    fixtures::mark_workflow_item(&f.store, &unit.id).unwrap();
-    let (current, view) = scope(&f.store, &f.session(&unit)).unwrap();
-    let said = only_own(&f.store, &current, &view, &other.id)
-        .unwrap()
-        .unwrap();
-    assert!(
-        said.starts_with(&format!("This session can only read item {}.", unit.id))
-            && said.contains("steve_workflow action=get"),
-        "{said}"
-    );
+    assert_eq!(only_own(&current, &view, &other.id), None);
 }
 
 #[test]

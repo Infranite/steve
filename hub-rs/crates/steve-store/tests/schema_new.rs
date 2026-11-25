@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use steve_store::{NoPublisher, Store, db};
 
 /// One table of each module migration, in migration order.
-const NEW_TABLES: [(&str, i64); 33] = [
+const NEW_TABLES: [(&str, i64); 34] = [
     ("connections", 5),
     ("ext_events", 6),
     ("spaces", 7),
@@ -36,13 +36,14 @@ const NEW_TABLES: [(&str, i64); 33] = [
     ("session_dispatch", 24),
     ("approval_policies", 121),
     ("approval_turns", 121),
-    ("thread_submit_keys", 125),
-    ("thread_reply_tasks", 125),
-    ("thread_reply_receipts", 125),
-    ("thread_dispatch_refs", 125),
-    ("thread_forwarded", 125),
-    ("thread_delivery_refs", 125),
-    ("thread_notices", 125),
+    ("telemetry_daily", 125),
+    ("thread_submit_keys", 127),
+    ("thread_reply_tasks", 127),
+    ("thread_reply_receipts", 127),
+    ("thread_dispatch_refs", 127),
+    ("thread_forwarded", 127),
+    ("thread_delivery_refs", 127),
+    ("thread_notices", 127),
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
@@ -278,7 +279,7 @@ fn rerunning_the_module_migrations_changes_nothing() {
         .find(|m| m.contains("DROP TABLE IF EXISTS lanes;"))
         .unwrap();
     c.execute_batch(dropped).unwrap();
-    // Replaying the early module SQL also recreates the tables retired by 121 and 125. Replay only
+    // Replaying the early module SQL also recreates the tables retired by 121 and 127. Replay only
     // their drops here; production never reapplies those migrations to an up-to-date store.
     c.execute_batch(
         "DROP TABLE IF EXISTS yolo_actions;
@@ -927,8 +928,8 @@ fn approval_policy_is_an_owner_cas_and_only_emits_changes() {
 }
 
 #[test]
-fn migration_125_preserves_history_commits_seq_and_notices() {
-    let (_dir, path) = at_version(124);
+fn migration_127_preserves_history_commits_seq_and_notices() {
+    let (_dir, path) = at_version(126);
     let c = Connection::open(&path).unwrap();
     c.execute_batch(
         "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('u1','default','u1','U1','owner',1);

@@ -466,3 +466,74 @@ fn marks_flag_the_item_and_unknown_items_are_ignored() {
     })
     .unwrap();
 }
+
+#[test]
+fn telemetry_daily_persists_across_reopen_and_aggregates_by_day_range() {
+    use steve_store::statistics::{TelemetryDaily, TelemetryMetric};
+
+    let t = with_steve();
+    let path = t.store.path().to_path_buf();
+    t.store
+        .write(|w| {
+            TelemetryDaily(w).record_counts(
+                WS,
+                "2026-10-01",
+                TelemetryMetric::WebNavOpen,
+                [("chat", 5), ("inbox", 2)],
+            )?;
+            TelemetryDaily(w).record_counts(
+                WS,
+                "2026-11-10",
+                TelemetryMetric::WebNavOpen,
+                [("chat", 3), ("items", 4)],
+            )?;
+            TelemetryDaily(w).record_counts(
+                WS,
+                "2026-11-18",
+                TelemetryMetric::WebNavOpen,
+                [("chat", 2), ("chat", 1), ("todos", 6), ("zero", 0)],
+            )?;
+            TelemetryDaily(w).record_counts(
+                "other_ws",
+                "2026-11-18",
+                TelemetryMetric::WebNavOpen,
+                [("chat", 99)],
+            )?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+    drop(t.store);
+
+    // Reopen the database to verify durable persistence across Hub restarts.
+    let reopened = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
+    let read = |range: Option<(&str, &str)>| {
+        let mut totals = reopened
+            .read(|r| TelemetryDaily(r).totals(WS, TelemetryMetric::WebNavOpen, range))
+            .unwrap();
+        totals.rows.sort();
+        totals
+    };
+
+    let d7 = read(Some(("2026-11-12", "2026-11-18")));
+    assert_eq!(d7.since_day.as_deref(), Some("2026-11-18"));
+    assert_eq!(d7.rows, vec![("chat".into(), 3), ("todos".into(), 6)]);
+
+    let d30 = read(Some(("2026-10-20", "2026-11-18")));
+    assert_eq!(d30.since_day.as_deref(), Some("2026-11-10"));
+    assert_eq!(
+        d30.rows,
+        vec![("chat".into(), 6), ("items".into(), 4), ("todos".into(), 6),]
+    );
+
+    let all = read(None);
+    assert_eq!(all.since_day.as_deref(), Some("2026-10-01"));
+    assert_eq!(
+        all.rows,
+        vec![
+            ("chat".into(), 11),
+            ("inbox".into(), 2),
+            ("items".into(), 4),
+            ("todos".into(), 6),
+        ]
+    );
+}

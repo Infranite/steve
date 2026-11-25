@@ -27,20 +27,8 @@ pub(crate) fn release_value(outcome: &str, result: &Map<String, Value>) -> Optio
 
 /// Why Steve refused a delivery: the reason code of its `reject` mark.
 pub mod reject {
-    /// A work unit still has open steps.
-    pub const UNIT_UNFINISHED: &str = "unit_unfinished";
-    /// A work unit's report did not meet the graph's evidence rules (summary, outputs, unit checks,
-    /// an operated check for an integration).
-    pub const UNIT_EVIDENCE: &str = "unit_evidence";
-    /// A work unit delivered while its work graph was paused.
-    pub const UNIT_PAUSED: &str = "unit_paused";
-    /// A work unit delivered with input still queued for its session.
-    pub const UNIT_QUEUED: &str = "unit_queued";
-    /// A work unit delivered on an attempt that no longer counts: it was replaced, or the item's goal
-    /// or cycle changed, or the item ended.
-    pub const UNIT_STALE: &str = "unit_stale";
-    /// The item's work graph has units that still block it.
-    pub const WORKFLOW_OPEN: &str = "workflow_open";
+    /// Prerequisite items are unfinished or waiting to resume.
+    pub const DEPENDENCY: &str = "dependency";
     /// The design confirmation needs a design file that opens and was received.
     pub const DESIGN_FILE: &str = "design_file";
     /// A check names a scope that does not exist.
@@ -122,31 +110,6 @@ impl Tx<'_> {
                 to_v: Some(code.into()),
                 actor: actor.into(),
                 detail: json!({ "why": why }),
-                ..Default::default()
-            },
-        );
-    }
-
-    /// `wake`: Steve woke a work graph's coordinator (`workflow.progress`) about `unit`, which ended
-    /// `status` on `attempt`; on the graph's item, the coordinator's session in `ref`.
-    pub(crate) fn mark_wake(
-        &self,
-        ws: &str,
-        parent: &str,
-        session: &str,
-        unit: &str,
-        status: &str,
-        attempt: i64,
-    ) {
-        self.stats_mark(
-            ws,
-            parent,
-            NewMark {
-                kind: "wake".into(),
-                to_v: Some(status.into()),
-                actor: "steve".into(),
-                r#ref: Some(session.into()),
-                detail: json!({ "unit_id": unit, "status": status, "attempt": attempt }),
                 ..Default::default()
             },
         );

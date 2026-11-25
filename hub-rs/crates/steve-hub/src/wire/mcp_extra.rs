@@ -34,7 +34,6 @@ pub(crate) enum Owner {
     Devices,
     Diagnostics,
     Items,
-    Workflow,
     Upgrade,
     Contacts,
     Knowledge,
@@ -143,8 +142,6 @@ pub(crate) fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::Diagnostics)
     } else if super::item_mcp::handles(name) {
         Some(Owner::Items)
-    } else if name == "steve_workflow" {
-        Some(Owner::Workflow)
     } else if name == "steve_upgrade" {
         Some(Owner::Upgrade)
     } else if mcp::handles(name) {
@@ -183,7 +180,6 @@ fn extra_tools() -> Vec<Value> {
     let mut v: Vec<Value> = mcp::tools().to_vec();
     v.push(super::diagnostics::tool());
     v.extend(super::item_mcp::tools());
-    v.push(workflow_tool());
     v.extend(steve_knowledge::tools::all_tools().iter().cloned());
     v.extend(steve_digest::tools::tools());
     v.extend(steve_digest::todo_tools::tools());
@@ -198,59 +194,6 @@ fn extra_tools() -> Vec<Value> {
     v.extend(steve_channels::im_mcp::tools());
     v.push(json!({"name":"steve_upgrade","description":"Check Steve GitHub releases, inspect an upgrade, or request an instance upgrade. A request requires instance owner approval in Settings / Versions before execution. Never grants approval through an agent token.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["check","status","request"]},"version":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["action"]}}));
     v
-}
-
-fn workflow_tool() -> Value {
-    json!({
-        "name": "steve_workflow",
-        "description": "Read or replan this item's shared work graph. Only the parent item's responsible Bot may change the graph; child Bots can read their own work and upstream deliveries, deliver success through steve_deliver, or report a failure / rejected review with action fail and reason, then end their turn. A work graph exists to finish sooner: plan units that can run at the same time (split by independent scope, not by phase), plus an independent review and an integration unit. Dependencies must pass before successors run, and units sharing a resource key never run together, so keep keys fine-grained. Ready units share the root item's collaboration budget with all descendant graphs and also obey Node capacity. Unrelated root items have independent collaboration budgets. Set max_parallel only for an additional real constraint on this graph. A plan reply may carry notes on what keeps its units from running at once, and a plan, retry or resume reply carries next: once the graph runs, end your turn; Steve wakes you with each unit's result. Pass known_revision to get to learn whether the graph changed since you read it; an unchanged graph answers only unchanged. Graph changes require the latest expected_revision and a reason. A new graph starts at revision 0. A plan replaces the active specification; preserve existing unit IDs for unchanged work. Cancelling units does not waive required acceptance. Only the user can explicitly switch to single-session acceptance on the item page after pausing; Bot tokens cannot approve it. Do not transfer credentials or permissions between Bots.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["get", "plan", "pause", "resume", "retry", "cancel", "fail", "apply_review_findings"]},
-                "expected_revision": {"type": "integer", "minimum": 0},
-                "known_revision": {"type": "integer", "minimum": 0, "description": "get only: the revision you last read. When the graph is still at it, the reply is only {unchanged: true, revision}."},
-                "reason": {"type": "string", "minLength": 1},
-                "unit_id": {"type": "string"},
-                "scope": {"type": "object", "description": "For apply_review_findings, copy the failed review's scope from get."},
-                "findings": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "affected_unit": {"type": "string"},
-                            "criterion": {"type": "string"},
-                            "evidence_ref": {"type": "string", "description": "Immutable Steve delivery URL created by the reviewer."}
-                        },
-                        "required": ["affected_unit", "criterion", "evidence_ref"],
-                        "additionalProperties": false
-                    }
-                },
-                "max_parallel": {"type": "integer", "minimum": 1, "description": "Leave out unless this graph needs an additional limit such as a shared device or rate limit. All descendant graphs still share their root item's collaboration budget, and Node capacity applies independently."},
-                "max_attempts": {"type": "integer", "minimum": 1},
-                "units": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string", "minLength": 1},
-                            "title": {"type": "string", "minLength": 1},
-                            "goal": {"type": "string", "minLength": 1, "description": "The unit's brief as short Markdown people read on the item page: one sentence on what this unit delivers, then bullet sections Scope and Acceptance, and only if needed Inputs (which upstream results to use) and Constraints. Write the brief and section labels in the user's language. Each bullet one line; no walls of text, logs or long file lists (put details in the conversation or upstream outputs)."},
-                            "bot_id": {"type": "string", "minLength": 1},
-                            "kind": {"type": "string", "enum": ["work", "review", "integrate"]},
-                            "depends_on": {"type": "array", "items": {"type": "string"}},
-                            "resources": {"type": "array", "items": {"type": "string"}},
-                            "required": {"type": "boolean"}
-                        },
-                        "required": ["id", "title", "goal", "bot_id", "kind", "depends_on", "resources", "required"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["action"],
-            "additionalProperties": false
-        }
-    })
 }
 
 /// A tool result that opened an approval: the session waits for the user.
@@ -535,25 +478,6 @@ async fn call_owned_inner(
         .await
         .map_err(|e| e.to_string())?;
     }
-    if matches!(tool_owner, Owner::Workflow) {
-        // Preserve the authenticated session itself. No caller-supplied item, workspace or
-        // principal can replace the scope established by its bearer token / Node run.
-        let core = x.tools.core.clone();
-        let ends_turn = args["action"] == "fail";
-        return tokio::task::spawn_blocking(steve_i18n::carry(move || {
-            core.tool_workflow(&s, args)
-                .map(|v| {
-                    if ends_turn {
-                        format!("{v}\n\n{}", steve_mcp::END)
-                    } else {
-                        v.to_string()
-                    }
-                })
-                .map_err(|e| e.to_string())
-        }))
-        .await
-        .map_err(|e| e.to_string())?;
-    }
     if matches!(tool_owner, Owner::A2a) {
         return x.caps.a2a_call(&s.id, name, &args).await;
     }
@@ -564,7 +488,6 @@ async fn call_owned_inner(
     let out: Result<String, String> = match tool_owner {
         Owner::Diagnostics => unreachable!("diagnostics preserve the session above"),
         Owner::Items => unreachable!("item management preserves the session above"),
-        Owner::Workflow => unreachable!("workflow preserves the session above"),
         Owner::A2a => unreachable!("remote agents are answered above"),
         Owner::Upgrade => call_upgrade(x, &cx, &args).await,
         Owner::Contacts => mcp::call(&x.modules, &x.ports, &cx, name, &args).await,

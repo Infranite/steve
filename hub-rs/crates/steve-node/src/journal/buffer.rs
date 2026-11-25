@@ -42,6 +42,10 @@ impl Prepared {
             EventBody::ToolChanged { tool } => {
                 matches!(tool.phase, ToolPhase::Succeeded | ToolPhase::Failed)
             }
+            EventBody::SubtaskChanged { subtask } => matches!(
+                subtask.status,
+                SubtaskStatus::Done | SubtaskStatus::Failed | SubtaskStatus::Cancelled
+            ),
             EventBody::Usage { report } => report.measurement == Measurement::Final,
             _ => true,
         }
@@ -55,6 +59,10 @@ impl Prepared {
             (EventBody::ToolChanged { tool: a }, EventBody::ToolChanged { tool: b }) => {
                 a.id == b.id
             }
+            (
+                EventBody::SubtaskChanged { subtask: a },
+                EventBody::SubtaskChanged { subtask: b },
+            ) => a.id == b.id,
             (EventBody::Plan { .. }, EventBody::Plan { .. }) => true,
             (EventBody::Usage { report: a }, EventBody::Usage { report: b }) => {
                 a.measurement != Measurement::Final && a.measurement == b.measurement

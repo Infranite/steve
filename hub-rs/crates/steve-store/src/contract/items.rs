@@ -141,29 +141,6 @@ pub fn item_workspace(c: &mut impl Read, id: &str) -> Result<Option<String>> {
     )
 }
 
-pub(crate) fn requested_by(r: &mut impl Read, item: &str) -> Result<Option<String>> {
-    Ok(r.one(
-        Query::select()
-            .column("requested_by")
-            .from("items")
-            .and_where(Expr::col("id").eq(item)),
-        |row| row.get::<Option<String>>(0),
-    )?
-    .flatten())
-}
-
-pub(crate) fn latest_goal(r: &mut impl Read, item: &str) -> Result<Option<(i64, String)>> {
-    r.one(
-        Query::select()
-            .columns(["version", "text"])
-            .from("item_goals")
-            .and_where(Expr::col("item_id").eq(item))
-            .order_by("version", Order::Desc)
-            .limit(1),
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-}
-
 pub fn running_tasks(c: &mut impl Read, ws: &str) -> Result<Vec<String>> {
     c.all(
         Query::select()
@@ -405,17 +382,13 @@ pub fn in_conversation(
     )
 }
 
-/// Admits dependency management for a current active parent with unresolved prerequisites.
+/// Admits dependency management for a current active item with unresolved prerequisites.
 pub fn dependency_management(r: &mut impl Read, item: Option<&str>) -> Result<bool> {
     let mut allowed = false;
     r.db().query(
         "SELECT EXISTS(
                     SELECT 1 FROM items i WHERE i.id=?1 AND i.phase='active'
                     AND i.archived=0
-                    AND COALESCE(json_extract(i.source,'$[1]'),'')<>'workflow'
-                    AND NOT EXISTS(SELECT 1 FROM workflow_units u WHERE u.item_id=i.id)
-                    AND NOT EXISTS(SELECT 1 FROM workflow_attempts a WHERE a.item_id=i.id)
-                    AND NOT EXISTS(SELECT 1 FROM workflows w WHERE w.item_id=i.id AND w.paused=1)
                     AND (
                         EXISTS(SELECT 1 FROM item_dependency_waits dw
                             WHERE dw.item_id=i.id AND dw.cycle=i.cycle AND dw.state='waiting')
@@ -430,4 +403,23 @@ pub fn dependency_management(r: &mut impl Read, item: Option<&str>) -> Result<bo
         },
     )?;
     Ok(allowed)
+}
+
+/// Non-terminal items created by the retired dynamic work-graph engine (`source[1] = "workflow"`).
+/// Used once during Hub startup before recovery to cancel leftover active child items cleanly.
+pub fn legacy_workflow_children_open(r: &mut impl Read) -> Result<Vec<String>> {
+    let dialect = r.db().dialect();
+    r.all(
+        Query::select()
+            .column("id")
+            .from("items")
+            .and_where(
+                dialect
+                    .json_path(Expr::col("source"), "$[1]")
+                    .eq("workflow"),
+            )
+            .and_where(Expr::col("phase").ne("closed"))
+            .order_by("id", Order::Asc),
+        |row| row.get(0),
+    )
 }
