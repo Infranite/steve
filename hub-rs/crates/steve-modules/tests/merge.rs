@@ -479,7 +479,7 @@ async fn merge_rejections() {
     assert_eq!((s, b), (404, err("没有这个合并记录")));
 }
 
-fn propose_silent(t: &TestEnv) -> (String, String) {
+fn propose(t: &TestEnv) -> (String, String, String) {
     let got = t
         .store()
         .write(|tx| {
@@ -498,39 +498,8 @@ fn propose_silent(t: &TestEnv) -> (String, String) {
         })
         .unwrap();
     let mp = got.proposal.expect("proposal");
-    assert!(
-        t.store()
-            .read(|r| steve_store::MergeProposals(r).get(&mp))
-            .unwrap()
-            .unwrap()
-            .decision
-            .is_none(),
-        "low-confidence identify proposal opens zero decisions"
-    );
-    (mp, got.party_id)
-}
-
-fn propose(t: &TestEnv) -> (String, String, String) {
-    let (mp, from) = propose_silent(t);
-    let d = t
-        .store()
-        .write(|tx| {
-            let d = steve_store::DecisionRows(tx).open(&NewDecision {
-                workspace_id: WS.into(),
-                kind: "propose".into(),
-                subject_type: "party_merge".into(),
-                subject_id: mp.clone(),
-                question: "sarah.c.design@gmail.com 可能是 Sarah Chen".into(),
-                options: Some(vec!["merge".into(), "not_same".into()]),
-                requested_by: "steve".into(),
-                source: Some(steve_store::DecisionSource::Record),
-                ..Default::default()
-            })?;
-            steve_store::MergeProposals(tx).set_decision(&mp, &d.id)?;
-            Ok::<_, steve_store::StoreError>(d.id)
-        })
-        .unwrap();
-    (mp, d, from)
+    let d: String = fixture::proposal_decision(t.store(), &mp).unwrap();
+    (mp, d, got.party_id)
 }
 
 fn resolve(t: &TestEnv, d: &str, choice: &str) -> Result<Decision, steve_modules::ApiError> {
@@ -656,7 +625,7 @@ async fn not_same_is_never_proposed_again() {
 }
 
 #[tokio::test]
-async fn high_confidence_me_match_auto_merges_with_24h_undo_and_zero_decisions() {
+async fn me_match_proposes_without_auto_merge_and_folds_out_of_decide_tier() {
     let t = env();
     let r = app(&t);
     let me_party = ok(&r, "GET", "/me/contact", Value::Null).await;
@@ -685,7 +654,7 @@ async fn high_confidence_me_match_auto_merges_with_24h_undo_and_zero_decisions()
         })
         .unwrap();
     assert_ne!(seen.party_id, me_id);
-    let undo_id = t
+    let mp = t
         .store()
         .write(|tx| {
             steve_modules::accounts::identify::propose_if_me(
@@ -699,22 +668,39 @@ async fn high_confidence_me_match_auto_merges_with_24h_undo_and_zero_decisions()
             )
         })
         .unwrap()
-        .expect("24h undo changeset id");
-    assert!(undo_id.starts_with("chs_"), "{undo_id}");
+        .expect("merge proposal id");
+    assert!(mp.starts_with("mp_"), "{mp}");
+    // Safety rule: an unconfirmed inbound contact is never silently merged into “我”.
+    assert_eq!(
+        fixture::party_status(t.store(), &seen.party_id).unwrap(),
+        "active"
+    );
+    let d = fixture::proposal_decision(t.store(), &mp).unwrap();
+    // Noise-reduction rule: the party_merge decision folds out of "待我决定" (zero Decide cards).
+    let open_views = t
+        .store()
+        .read(|r| steve_store::views::Views::decision_views(r).open())
+        .unwrap();
+    let view = open_views
+        .iter()
+        .find(|v| v.id.as_str() == d)
+        .expect("party_merge view");
+    assert_eq!(view.tier, steve_types::DecisionTier::Folded);
+    assert_eq!(view.folded, Some(steve_types::FoldReason::LowPriority));
+    assert_eq!(
+        open_views
+            .iter()
+            .filter(|v| v.tier == steve_types::DecisionTier::Decide)
+            .count(),
+        0
+    );
+
+    resolve(&t, &d, "merge").unwrap();
     assert_eq!(
         fixture::party_status(t.store(), &seen.party_id).unwrap(),
         "merged"
     );
-    let open_count = t.store().decisions().open(WS).unwrap().len();
-    assert_eq!(open_count, 0, "auto-merge opens zero decisions");
-    let notices = steve_store::notify::list_recent(t.store(), WS, 10).unwrap();
-    assert!(
-        notices
-            .iter()
-            .any(|n| n.kind == "contact_merge" && n.text.contains(&undo_id)),
-        "passive change-record notification includes undo token: {notices:?}"
-    );
-    steve_modules::changes::undo(&t.modules, &me(), &undo_id).unwrap();
+    undo(&t, &d).unwrap();
     assert_eq!(
         fixture::party_status(t.store(), &seen.party_id).unwrap(),
         "active"

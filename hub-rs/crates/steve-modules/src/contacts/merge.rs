@@ -777,52 +777,6 @@ async fn post_split(
     .await
 }
 
-/// `party.merge {from_id, into_id}`: merges `from_id` into `into_id`; 24h undo splits the recorded merge.
-pub struct PartyMergeOp {
-    ports: Ports,
-}
-
-impl PartyMergeOp {
-    pub fn new(ports: Ports) -> Self {
-        Self { ports }
-    }
-}
-
-impl crate::changes::ChangeOp for PartyMergeOp {
-    fn apply(&self, tx: &mut W<'_>, cx: &crate::changes::OpCx, op: &Value) -> ApiResult<Value> {
-        let from_id = op
-            .get("from_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ApiError::invalid("from_id"))?;
-        let into_id = op
-            .get("into_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ApiError::invalid("into_id"))?;
-        let viewer = Viewer::bare(cx.ws, cx.actor);
-        let merge_id = merge_tx(tx, &self.ports.hooks, &viewer, cx.actor, from_id, into_id)?;
-        Ok(json!({
-            "merge_id": merge_id,
-            "from_id": from_id,
-            "into_id": into_id,
-        }))
-    }
-
-    fn undo(
-        &self,
-        tx: &mut W<'_>,
-        cx: &crate::changes::OpCx,
-        _op: &Value,
-        before: &Value,
-    ) -> ApiResult<()> {
-        let merge_id = before
-            .get("merge_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ApiError::not_found("合并记录"))?;
-        let viewer = Viewer::bare(cx.ws, cx.actor);
-        split_tx(tx, &self.ports.hooks, &viewer, cx.actor, merge_id)
-    }
-}
-
 // ---------------------------------------------------------------- decision handlers
 
 /// Registers the `party_merge`, `attr_value` and `attr_def` decision handlers. `ports` = the ports the
@@ -834,7 +788,6 @@ pub fn register(reg: &mut Registry, ports: &Ports) {
             hooks: ports.hooks.clone(),
         }),
     )
-    .op("party.merge", Box::new(PartyMergeOp::new(ports.clone())))
     .decision("attr_value", Box::new(AttrValueConfirm))
     .decision("attr_def", Box::new(AttrDefConfirm))
     .decision(

@@ -8,15 +8,13 @@
 //!    by the mail signature) → a new unconfirmed contact plus a merge proposal, never a silent merge;
 //! 4. otherwise a new unconfirmed contact, working at the domain's organization when there is one.
 
-use std::sync::Arc;
-
 use serde::Serialize;
 use serde_json::json;
-use steve_store::base::changesets::{ChangeSets, NewChangeset};
 use steve_store::base::links::{self, NewLink};
-use steve_store::base::{Change, ObjRef, Viewer, Visibility};
+use steve_store::base::{DecisionKind, ObjRef, Viewer, Visibility};
 use steve_store::{
-    Accounts, Connections, MatchRules, MergeProposals, NewMergeProposal, Systems, W, uid,
+    Accounts, Connections, DecisionRows, MatchRules, MergeProposals, NewDecision, NewMergeProposal,
+    Systems, W, uid,
 };
 
 use super::repo::{Account, NewAccount, System};
@@ -25,12 +23,10 @@ use crate::contacts::repo::{self as people, NewParty, PARTY, Party};
 use crate::contacts::service as contacts;
 use crate::{ApiError, ApiResult};
 
-/// Merge proposals from low-confidence identification carry this confidence.
+/// Merge proposals from identification carry this confidence.
 pub const PROPOSAL_CONFIDENCE: f64 = 0.6;
 /// Accounts attached by the `email_prefix` rule.
 pub const PREFIX_CONFIDENCE: f64 = 0.9;
-/// Deterministic high-confidence identity match (e.g. exact email alias or owner email).
-pub const HIGH_CONFIDENCE: f64 = 0.95;
 
 /// What the caller saw besides the handle.
 #[derive(Debug, Clone, Default)]
@@ -652,13 +648,14 @@ fn new_contact(
     Ok(p)
 }
 
-/// A contact seen for the first time that looks like you, `me` (a user's “我”):
-/// - deterministic high-confidence match (exact email alias of `me` or the user's own email):
-///   merges directly with a 24h undoable changeset and passive change-record notification
-///   (never opens a blocking decision card);
-/// - low-confidence match (same name + same email domain): silently records a merge proposal
-///   on the contact detail page without entering the decision box.
-/// Only an unconfirmed, active contact is matched; a pair rejected before is never matched again.
+/// A contact seen for the first time that looks like you, `me` (a user's “我”): opens a merge
+/// proposal of `party` into `me` (the `party_merge` decision, which folds out of `DecisionTier::Decide`
+/// as low priority), never merges by itself. Merging an unconfirmed inbound contact into “我” without
+/// a proven OAuth self-claim (`claim_self`) would escalate an external handle into owner identity.
+/// It looks like you when one of `handles` is an email that is an alias of `me` or the user's own
+/// email, or when its `name` is your name or one of your aliases and one of its emails is in a
+/// domain one of your email accounts uses. Only an unconfirmed, active contact is proposed; a pair
+/// rejected before is not proposed again. Returns the proposal id.
 pub fn propose_if_me(
     w: &mut W<'_>,
     ws: &str,
@@ -679,9 +676,6 @@ pub fn propose_if_me(
     {
         return Ok(None);
     }
-    if MergeProposals(w).rejected(ws, &from.id, &me.id)? {
-        return Ok(None);
-    }
     let Some(a) = Accounts(w).get(account)? else {
         return Ok(None);
     };
@@ -700,105 +694,50 @@ pub fn propose_if_me(
         .email(me.user_id.as_deref().unwrap_or_default())?
         .map(|email| email.trim().to_lowercase());
     let aliases: Vec<String> = me.aliases.iter().map(|x| x.trim().to_lowercase()).collect();
-    if let Some(e) = emails
+    let reason = if let Some(e) = emails
         .iter()
         .find(|e| aliases.contains(e) || user_email.as_ref() == Some(*e))
     {
-        let reason = format!("邮箱 {e} 是「{}」用过的邮箱", me.name);
-        let undo_id = auto_merge_with_undo(w, ws, "steve", &from, &me, &a, &reason)?;
-        return Ok(Some(undo_id));
-    }
-    let key = name.map(|n| n.trim().to_lowercase()).unwrap_or_default();
-    let same_name = key.chars().count() >= 2
-        && (me.name.trim().to_lowercase() == key || aliases.contains(&key));
-    let mut domains: Vec<String> = Vec::new();
-    if same_name {
-        let owners = w.contacts().merged_party_ids(&me.id)?;
-        for handle in Accounts(w).primary_emails(ws, &owners)? {
-            if let Some((_, domain)) = handle.trim().to_lowercase().split_once('@') {
-                domains.push(domain.to_owned());
+        Some(format!("邮箱 {e} 是「{}」用过的邮箱", me.name))
+    } else {
+        let key = name.map(|n| n.trim().to_lowercase()).unwrap_or_default();
+        let same_name = key.chars().count() >= 2
+            && (me.name.trim().to_lowercase() == key || aliases.contains(&key));
+        let mut domains: Vec<String> = Vec::new();
+        if same_name {
+            let owners = w.contacts().merged_party_ids(&me.id)?;
+            for handle in Accounts(w).primary_emails(ws, &owners)? {
+                if let Some((_, domain)) = handle.trim().to_lowercase().split_once('@') {
+                    domains.push(domain.to_owned());
+                }
+            }
+            if let Some(d) = user_email.as_ref().and_then(|e| e.split_once('@')) {
+                domains.push(d.1.to_string());
             }
         }
-        if let Some(d) = user_email.as_ref().and_then(|e| e.split_once('@')) {
-            domains.push(d.1.to_string());
-        }
-    }
-    let reason = emails
-        .iter()
-        .filter_map(|e| e.split_once('@'))
-        .find(|(_, d)| domains.iter().any(|x| x == d))
-        .map(|(_, d)| {
-            format!(
-                "{} 和「{}」同名，邮箱域名 {d} 也是「{}」在用的",
-                name.unwrap_or("").trim(),
-                me.name,
-                me.name
-            )
-        });
+        emails
+            .iter()
+            .filter_map(|e| e.split_once('@'))
+            .find(|(_, d)| domains.iter().any(|x| x == d))
+            .map(|(_, d)| {
+                format!(
+                    "{} 和「{}」同名，邮箱域名 {d} 也是「{}」在用的",
+                    name.unwrap_or("").trim(),
+                    me.name,
+                    me.name
+                )
+            })
+    };
     match reason {
         Some(r) => propose(w, ws, &from, &me, &a, &r),
         None => Ok(None),
     }
 }
 
-/// Applies a deterministic high-confidence contact merge directly, records a 24h undoable
-/// `party.merge` changeset, and emits a passive change-record notification (zero decisions opened).
-fn auto_merge_with_undo(
-    w: &mut W<'_>,
-    ws: &str,
-    actor: &str,
-    from: &Party,
-    into: &Party,
-    a: &Account,
-    reason: &str,
-) -> ApiResult<String> {
-    let viewer = Viewer::bare(ws, actor);
-    let hooks: [Arc<dyn crate::contacts::PartyHooks>; 1] = [Arc::new(super::AccountHooks)];
-    let merge_id = crate::contacts::merge::merge_tx(w, &hooks, &viewer, actor, &from.id, &into.id)?;
-    let op = json!({
-        "op": "party.merge",
-        "from_id": from.id,
-        "into_id": into.id,
-    });
-    let before = vec![json!({
-        "op": op,
-        "before": {
-            "merge_id": merge_id,
-            "from_id": from.id,
-            "into_id": into.id,
-        },
-    })];
-    let cs = ChangeSets(w).create(
-        ws,
-        &NewChangeset {
-            target_type: "contact".into(),
-            target_id: Some(into.id.clone()),
-            target_revision: None,
-            title: format!("合并联系人「{}」到「{}」", from.name, into.name),
-            href: format!("#/contacts/{}", into.id),
-            changes: vec![Change::new(
-                a.handle_display.clone(),
-                from.name.clone(),
-                into.name.clone(),
-            )],
-            ops: vec![op],
-            origin: "steve".into(),
-            request: String::new(),
-            basis: reason.into(),
-            created_by: actor.into(),
-        },
-    )?;
-    ChangeSets(w).mark_applied(&cs, &before)?;
-    let notice = format!(
-        "已自动合并联系人「{}」到「{}」（{}）；24 小时内可在变更记录撤销（{}）",
-        from.name, into.name, reason, cs.id
-    );
-    steve_store::notify::notify_in(w, ws, "contact_merge", "info", &notice, None)?;
-    Ok(cs.id)
-}
-
-/// Silently records a low-confidence merge suggestion on the contact detail page (`decision_id = None`),
-/// never popping a confirmation decision card. A pair rejected before is not proposed again.
+/// Writes the merge proposal and opens its `party_merge` decision; the `party_merge` handler (P4)
+/// acts on `merge` / `not_same` (and undo). `party_merge` falls outside the `DecisionTier::Decide`
+/// whitelist, so it folds into passive review with zero blocking cards in "待我决定". A pair
+/// rejected before is not proposed again.
 fn propose(
     w: &mut W<'_>,
     ws: &str,
@@ -823,5 +762,21 @@ fn propose(
     })? {
         return Ok(None);
     }
+    let d = DecisionRows(w).open(&NewDecision {
+        workspace_id: ws.into(),
+        kind: DecisionKind::Propose.code().into(),
+        subject_type: "party_merge".into(),
+        subject_id: id.clone(),
+        item_id: None,
+        session_id: None,
+        question: format!("{} 可能是 {}", a.handle_display, into.name),
+        draft: Some(reason.into()),
+        options: Some(vec!["merge".into(), "not_same".into()]),
+        requested_by: "steve".into(),
+        question_template: None,
+        source: Some(steve_store::DecisionSource::Record),
+        wait: None,
+    })?;
+    MergeProposals(w).set_decision(&id, &d.id)?;
     Ok(Some(id))
 }

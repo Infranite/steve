@@ -78,28 +78,7 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
         .unwrap();
     let (mp, from) = (got.proposal.expect("proposal"), got.party_id);
     let store = k.db().store();
-    // Low-confidence identify records a silent merge proposal (decision_id = None);
-    // open a party_merge decision explicitly here to exercise module decision-undo dispatch.
-    let d = store
-        .write(|w| {
-            let dec = steve_store::DecisionRows(w).open(&steve_store::NewDecision {
-                workspace_id: WS.into(),
-                kind: "confirm".into(),
-                subject_type: "party_merge".into(),
-                subject_id: mp.clone(),
-                item_id: None,
-                session_id: None,
-                question: "是否合并这两个联系人？".into(),
-                question_template: None,
-                draft: None,
-                options: Some(vec!["merge".into(), "not_same".into()]),
-                requested_by: "steve".into(),
-                source: None,
-                wait: None,
-            })?;
-            Ok::<_, steve_store::StoreError>(dec.id)
-        })
-        .unwrap();
+    let (d, _) = steve_store::core_fixture::work::merge_proposal(store, &mp);
     let account = store
         .read(|r| steve_store::accounts::by_email(r, WS, "sarah.c.design@gmail.com"))
         .unwrap()
@@ -122,11 +101,7 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
     assert_eq!(back.undo, None);
     assert_eq!(decision(&k, &d).status, steve_types::DecisionStatus::Open);
     assert_eq!(
-        store
-            .read(|r| steve_store::MergeProposals(r).get(&mp))
-            .unwrap()
-            .unwrap()
-            .status,
+        steve_store::core_fixture::work::merge_proposal(store, &mp).1,
         "open"
     );
     assert_eq!(
