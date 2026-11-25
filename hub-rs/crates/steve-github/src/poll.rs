@@ -8,14 +8,21 @@
 //! synthetic delivery id `poll:<repo>:<kind>:<id>:<updated>`, recorded in `gh_deliveries`, so the
 //! same view is never applied twice and a change the webhook already applied produces no event.
 
-use std::sync::Weak;
-use std::sync::atomic::Ordering;
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicI64, Ordering},
+};
 use std::time::Duration;
 
 use futures::StreamExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_modules::ApiError;
+use steve_runtime::{
+    due::{DueError, DueSource, due_loop},
+    policy::{Backoff, Jitter},
+};
+use tokio::sync::Notify;
 
 use crate::sync::{Source, checks_state};
 use crate::{GitHub, Inner};
@@ -29,6 +36,9 @@ pub const STALE_MS: i64 = 6 * 3_600_000;
 /// Deliveries are kept (for dedupe and the debug list) this long.
 pub const DELIVERY_KEEP_MS: i64 = 7 * 24 * 3_600_000;
 const TICK: Duration = Duration::from_secs(30);
+const PRUNE_EVERY_MS: i64 = 3_600_000;
+const LOOP_RETRY_BASE: Duration = Duration::from_secs(5);
+const LOOP_RETRY_MAX: Duration = Duration::from_secs(60);
 /// Repos polled at the same time.
 const POLL_CONCURRENCY: usize = 4;
 /// Bound API work per repo; an unfinished scan continues on the next poll.
@@ -441,9 +451,9 @@ impl GitHub {
             .unwrap_or(0)
     }
 
-    /// The background job as a supervised periodic [`steve_runtime::Task`]: queues deliveries
-    /// left `received` (first tick immediate), polls what is due every 30 seconds, prunes
-    /// deliveries hourly. Holds a weak reference to `Inner` and closes the queue on drop.
+    /// The background job as a supervised [`steve_runtime::Task`] driven by [`due_loop`]: queues
+    /// deliveries left `received` (first pass immediate), polls what is due, and prunes deliveries
+    /// hourly. Closes the delivery queue on drop.
     pub fn jobs_task(self) -> steve_runtime::Task {
         struct Scope(GitHub);
         impl Drop for Scope {
@@ -451,41 +461,100 @@ impl GitHub {
                 self.0.0.queue.close();
             }
         }
-        let scope = std::sync::Arc::new(Scope(self.clone()));
-        let weak: Weak<Inner> = std::sync::Arc::downgrade(&self.0);
-        let n = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let task = steve_runtime::every(
-            "github.poll",
-            std::sync::Arc::new(steve_runtime::SystemClock),
-            TICK,
-            steve_runtime::FirstRun::Immediate,
-            move || {
-                let _scope = scope.clone();
-                let weak = weak.clone();
-                let n = n.clone();
-                async move {
-                    let Some(inner) = weak.upgrade() else {
-                        return;
-                    };
-                    let gh = GitHub(inner);
-                    // first what a restart left accepted but unprocessed, then the poll
-                    gh.recover_deliveries();
-                    gh.poll_due().await;
-                    gh.verify_deliveries().await;
-                    if n.fetch_add(1, Ordering::Relaxed).is_multiple_of(120) {
-                        gh.prune_deliveries();
-                    }
-                }
-            },
-        );
-        task
+        let clock = self.0.conns.modules().clock.clone();
+        let now = clock.now();
+        let source = Arc::new(GithubPollSource {
+            weak: Arc::downgrade(&self.0),
+            next_tick: AtomicI64::new(now),
+            next_prune: AtomicI64::new(now),
+        });
+        let scope = Scope(self);
+        let backoff = Backoff {
+            base: LOOP_RETRY_BASE,
+            max: LOOP_RETRY_MAX,
+            factor: 2,
+            jitter: Jitter::Equal,
+            attempts: None,
+            reset_after: None,
+        };
+        steve_runtime::spawn("github.poll", async move {
+            let _scope = scope;
+            due_loop(source, clock, Arc::new(Notify::new()), backoff).await;
+        })
     }
 
     /// The background job: queues deliveries left `received` (on start: the first tick is at once),
-    /// polls what is due every 30 seconds, prunes deliveries hourly. Holds
-    /// only a weak reference; stops when the service is dropped.
+    /// polls what is due, prunes deliveries hourly.
     pub async fn run_jobs(self) {
         self.jobs_task().await;
+    }
+}
+
+struct GithubPollSource {
+    weak: Weak<Inner>,
+    next_tick: AtomicI64,
+    next_prune: AtomicI64,
+}
+
+impl DueSource for GithubPollSource {
+    fn name(&self) -> &'static str {
+        "github.poll"
+    }
+
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        let Some(inner) = self.weak.upgrade() else {
+            return Ok(None);
+        };
+        let gh = GitHub(inner);
+        let tick = self.next_tick.load(Ordering::Relaxed);
+        let prune = self.next_prune.load(Ordering::Relaxed);
+        let earliest_repo = gh
+            .store()
+            .read(|r| {
+                let mut repositories = Repositories::new(r);
+                let mut earliest: Option<i64> = None;
+                for target in repositories.poll_targets()? {
+                    let last_poll = target.state["last_poll"].as_i64().unwrap_or(0);
+                    let due_at = if target.ingest == "poll" {
+                        Some(last_poll.saturating_add(POLL_EVERY_MS))
+                    } else if repositories.has_open_linked_pr(&target.id).unwrap_or(false) {
+                        let stale_at = target
+                            .last_delivery
+                            .map_or(0, |t| t.saturating_add(STALE_MS));
+                        Some(stale_at.max(last_poll.saturating_add(POLL_EVERY_MS)))
+                    } else {
+                        None
+                    };
+                    if let Some(at) = due_at {
+                        earliest = Some(earliest.map_or(at, |prev| prev.min(at)));
+                    }
+                }
+                Ok::<_, steve_store::StoreError>(earliest)
+            })
+            .map_err(|e| DueError(e.to_string()))?;
+        let base = tick.min(prune);
+        Ok(Some(earliest_repo.map_or(base, |at| at.min(base))))
+    }
+
+    async fn run_due(&self, now: i64) -> Result<(), DueError> {
+        let Some(inner) = self.weak.upgrade() else {
+            return Ok(());
+        };
+        let gh = GitHub(inner);
+        // first what a restart left accepted but unprocessed, then the poll
+        gh.recover_deliveries();
+        gh.poll_due().await;
+        gh.verify_deliveries().await;
+        if self.next_prune.load(Ordering::Relaxed) <= now {
+            gh.prune_deliveries();
+            self.next_prune
+                .store(now.saturating_add(PRUNE_EVERY_MS), Ordering::Relaxed);
+        }
+        self.next_tick.store(
+            now.saturating_add(TICK.as_millis() as i64),
+            Ordering::Relaxed,
+        );
+        Ok(())
     }
 }
 
