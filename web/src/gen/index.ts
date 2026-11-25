@@ -126,3 +126,13 @@ export type { WorkLiveEvent } from "./WorkLiveEvent";
 export type { WorkspaceId } from "./WorkspaceId";
 export { REASONS } from "./reasons";
 export type { KnownReason } from "./reasons";
+export {
+  WORKSPACE_SETTINGS_SCHEMA,
+  WORKSPACE_SETTING_DEFAULTS,
+  WORKSPACE_SETTING_VALUES,
+} from "./settings-schema";
+export type {
+  WorkspaceSettingCategory,
+  WorkspaceSettingKey,
+  WorkspaceSettingValue,
+} from "./settings-schema";

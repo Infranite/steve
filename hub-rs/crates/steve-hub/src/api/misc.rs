@@ -119,7 +119,9 @@ pub async fn shell(
         for p in &mut projects {
             steve_store::seeded::show(p, steve_store::seeded::PROJECT);
         }
-        let mut settings = crate::settings::defaults();
+        let mut settings: Obj = steve_types::settings::defaults()
+            .map(|(k, v)| (k.into(), json!(v)))
+            .collect();
         settings.extend(r.settings_all(ws)?);
         conditional_json(
             &headers,
@@ -827,7 +829,7 @@ pub async fn tag_merge(
 pub async fn settings_schema() -> ApiResult {
     Ok((
         [(header::CONTENT_TYPE, "application/json")],
-        crate::settings::SETTINGS_JSON,
+        steve_types::settings::schema_json(),
     )
         .into_response())
 }
@@ -842,20 +844,16 @@ pub async fn settings_patch(
     let p = k.map().cloned();
     k.finish()?;
     let p = p.unwrap_or_default();
-    let specs = crate::settings::specs();
     let mut values = Obj::new();
     for (key, val) in &p {
         let s = crate::js::string(val);
-        match specs.iter().find(|x| &x.key == key) {
-            Some(spec) if spec.values.contains(&s) => {
-                values.insert(key.clone(), json!(s));
-            }
-            _ => {
-                return Err(ApiError::bad_request(steve_i18n::t!(
-                    "hub.settings.bad_key",
-                    key = key
-                )));
-            }
+        if steve_types::settings::allowed(key, &s) {
+            values.insert(key.clone(), json!(s));
+        } else {
+            return Err(ApiError::bad_request(steve_i18n::t!(
+                "hub.settings.bad_key",
+                key = key
+            )));
         }
     }
     st.write(move |r| {

@@ -25,17 +25,11 @@ src/knowledge/index.tsx	"长期记忆"	2
 src/knowledge/steward.tsx	"每周日 03:00"	3
 src/knowledge/steward.tsx	"每天 03:00"	3
 src/knowledge/steward.tsx	"每月 1 日 03:00"	3
-src/lib/motion.ts	"大"	1
-src/lib/motion.ts	"开"	1
-src/manage.tsx	"1 年"	2
-src/manage.tsx	"90 天"	1
 src/manage.tsx	"全部"	4
 src/manage.tsx	"启用"	2
 src/manage.tsx	"定时与流程"	2
 src/manage.tsx	"对外身份"	2
-src/manage.tsx	"开"	1
 src/manage.tsx	"概览"	2
-src/manage.tsx	"永久"	1
 src/manage.tsx	"系统提示词"	2
 src/manage.tsx	"能力"	2
 src/manage.tsx	"记忆"	2

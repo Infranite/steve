@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils"
 import { st, tm, toast, botName } from "@/store"
 import { flowApi, useLoad, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
 import { HubError } from "@/api"
+import { WORKSPACE_SETTING_DEFAULTS } from "@/gen"
 import { srcIcon, Json, Failed, Clamp, ms, RUN_STATUS } from "@/auto/common"
 import { t, useT } from "@/i18n"
 
@@ -122,7 +123,7 @@ function SignalRow({ g, open, onOpen, reload }: { g: Signal[]; open: boolean; on
   )
 }
 
-const keepDays = () => st.settings.keepRaw || "7"
+const keepDays = () => st.settings.keepRaw || WORKSPACE_SETTING_DEFAULTS.keepRaw
 const rangeLabel = (r: Range) => (r === "today" ? t("misc:signals.today") : t("misc:signals.week"))
 function SignalDetailBox({ g, reload }: { g: Signal[]; reload: () => void }) {
   const t = useT(), s0 = g[0], many = g.length > 1

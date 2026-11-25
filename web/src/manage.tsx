@@ -53,6 +53,7 @@ import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
 import { when } from "@/auto/common"
 import { ExecutionNodes, TeamsSection, useBotTeams } from "@/bot-dispatch"
 import { BotOverview, BotPrompt, RunsOn } from "@/bot-page"
+import { WORKSPACE_SETTING_DEFAULTS, WORKSPACE_SETTING_VALUES } from "@/gen"
 import { HarnessMark } from "@/components/harness-mark"
 import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
 import { canConfigurePermission } from "@/runtime-status"
@@ -439,52 +440,82 @@ function Pane({ id }: { id: string }) {
   if (id === "audit") return <AuditSettingsPane />
   if (id === "models") return <ModelsSettingsPane />
   if (id === "plugins") return <PluginsSettingsPane />
-  if (id === "general") return <div className="flex flex-col gap-8">
-    <Section label={t("manage:general.assistant")}><Panel><Row icon={<BotAvatar k="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>
-    <Panel>
-      <Row title={t("manage:general.home")} sub={t("manage:general.homeSub")}><Sel label={t("manage:general.home")} testId="home" v={c.home} o={[["对话", t("manage:general.homeChat")], ["待处理", t("manage:general.homeInbox")], ["事项", t("manage:general.homeItems")]]} on={(v) => setSetting({ home: v })} /></Row>
-      <Row title={t("manage:general.away")} sub={t("manage:general.awaySub")}><Sel label={t("manage:general.away")} testId="away" v={c.awayH} o={[...[2, 4, 8].map((h): [string, string] => [String(h), t("common:dur.hours", { count: h })]), ["0", t("manage:general.awayNever")]]} on={(v) => setSetting({ awayH: v })} /></Row>
-    </Panel>
-    <Panel>
-      <Row title={t("manage:general.onboard")} sub={t("manage:general.onboardSub")}><Button size="sm" variant="outline" onClick={() => { localStorage.removeItem("steve-onboarded"); st.onboard = 0; emit(); go("#/") }} data-restart-onboard>{t("manage:general.restart")}</Button></Row>
-      <Row title={t("manage:general.shortcuts")} sub={t("manage:general.shortcutsSub")} />
-    </Panel>
-  </div>
-  if (id === "items") return <div className="flex flex-col gap-8">
-    {/* the pane's title already says 事项: the first group goes without a label; the number prefix lives in 工作空间 */}
-    <Panel>
-      <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : "auto"} onChange={(v) => setSetting({ accDefault: v })} options={[["manual", t("manage:acc.manual")], ["auto", t("manage:acc.auto")]] as const} /></Row>
-      <Row title={t("manage:items.depsAfter")} sub={t("manage:items.depsAfterSub")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row>
-      <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={[...[7, 30, 90].map((d): [string, string] => [String(d), t("common:dur.days", { count: d })]), ["0", t("manage:items.archNever")]]} on={(v) => setSetting({ archDays: v })} /></Row>
-      {/* the personal agent config default is the Hub's (a Node serves every workspace): set on Devices · Hub */}
-      <Row title={t("manage:items.ownerContext")} sub={t("manage:items.ownerContextSub")}><Button size="sm" variant="outline" onClick={() => go("#/devices/hub")} data-owner-context-link>{t("manage:items.ownerContextOpen")}</Button></Row></Panel>
-    <Section label={t("manage:items.sessions")}><Panel>
-      <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
-  </div>
+  if (id === "general") {
+    const homeLabels = [t("manage:general.homeChat"), t("manage:general.homeInbox"), t("manage:general.homeItems")]
+    const homeOpts: [string, string][] = WORKSPACE_SETTING_VALUES.home.map((v, i) => [v, homeLabels[i] ?? v])
+    const awayOpts: [string, string][] = WORKSPACE_SETTING_VALUES.awayH.map((v) => [
+      v,
+      v === "0" ? t("manage:general.awayNever") : t("common:dur.hours", { count: Number(v) }),
+    ])
+    return <div className="flex flex-col gap-8">
+      <Section label={t("manage:general.assistant")}><Panel><Row icon={<BotAvatar k="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>
+      <Panel>
+        <Row title={t("manage:general.home")} sub={t("manage:general.homeSub")}><Sel label={t("manage:general.home")} testId="home" v={c.home} o={homeOpts} on={(v) => setSetting({ home: v })} /></Row>
+        <Row title={t("manage:general.away")} sub={t("manage:general.awaySub")}><Sel label={t("manage:general.away")} testId="away" v={c.awayH} o={awayOpts} on={(v) => setSetting({ awayH: v })} /></Row>
+      </Panel>
+      <Panel>
+        <Row title={t("manage:general.onboard")} sub={t("manage:general.onboardSub")}><Button size="sm" variant="outline" onClick={() => { localStorage.removeItem("steve-onboarded"); st.onboard = 0; emit(); go("#/") }} data-restart-onboard>{t("manage:general.restart")}</Button></Row>
+        <Row title={t("manage:general.shortcuts")} sub={t("manage:general.shortcutsSub")} />
+      </Panel>
+    </div>
+  }
+  if (id === "items") {
+    const accOpts = WORKSPACE_SETTING_VALUES.accDefault.map((v): [string, string] => [v, v === "manual" ? t("manage:acc.manual") : t("manage:acc.auto")])
+    const depsLabels = [t("manage:items.depsAuto"), t("manage:items.depsRemind")]
+    const depsOpts: [string, string][] = WORKSPACE_SETTING_VALUES.depsAfter.map((v, i) => [v, depsLabels[i] ?? v])
+    const archOpts: [string, string][] = WORKSPACE_SETTING_VALUES.archDays.map((v) => [
+      v,
+      v === "0" ? t("manage:items.archNever") : t("common:dur.days", { count: Number(v) }),
+    ])
+    const handoffOpts: [string, string][] = WORKSPACE_SETTING_VALUES.handoff.map((v) => [
+      v,
+      v === "0" ? t("manage:items.handoffOff") : `${v}%`,
+    ])
+    return <div className="flex flex-col gap-8">
+      {/* the pane's title already says 事项: the first group goes without a label; the number prefix lives in 工作空间 */}
+      <Panel>
+        <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : WORKSPACE_SETTING_DEFAULTS.accDefault} onChange={(v) => setSetting({ accDefault: v })} options={accOpts} /></Row>
+        <Row title={t("manage:items.depsAfter")} sub={t("manage:items.depsAfterSub")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={depsOpts} on={(v) => setSetting({ depsAfter: v })} /></Row>
+        <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={archOpts} on={(v) => setSetting({ archDays: v })} /></Row>
+        {/* the personal agent config default is the Hub's (a Node serves every workspace): set on Devices · Hub */}
+        <Row title={t("manage:items.ownerContext")} sub={t("manage:items.ownerContextSub")}><Button size="sm" variant="outline" onClick={() => go("#/devices/hub")} data-owner-context-link>{t("manage:items.ownerContextOpen")}</Button></Row></Panel>
+      <Section label={t("manage:items.sessions")}><Panel>
+        <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? WORKSPACE_SETTING_DEFAULTS.handoff} o={handoffOpts} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
+    </div>
+  }
   if (id === "notify") return st.workspace ? <NotificationSettingsPane key={`${currentHub()}:${st.workspace.id}`} workspace={st.workspace.id} /> : null
-  if (id === "look") return <div className="flex flex-col gap-8">
-    <Section label={t("manage:look.ui")}><Panel>
-      <Row title={t("manage:look.theme")}><ThemeSwitch labels /></Row>
-      <LanguageRow />
-      <Row title={t("manage:look.fontSize")}><Segmented size="sm" value={c.fontSize} onChange={(v) => setSetting({ fontSize: v })} options={[["标准", t("manage:look.fontNormal")], ["大", t("manage:look.fontLarge")]]} /></Row>
-      <Row title={t("manage:look.reduceMotion")} sub={t("manage:look.reduceMotionSub")}><SetSwitch testId="reduce-motion" label={t("manage:look.reduceMotion")} checked={c.reduceMotion === "开"} onChange={(v) => setSetting({ reduceMotion: v ? "开" : "关" })} /></Row>
-    </Panel></Section>
-    <AppearanceSection />
-    {/* the Bots' avatars are set on each Bot: one row that shows them and leads there, not a gallery */}
-    <Panel><Row title={t("manage:look.avatars")} sub={t("manage:look.avatarsHint")} onClick={() => go("#/bots")} data-avatar-preview>
-      <span className="hidden items-center gap-1 sm:flex" aria-hidden>{Object.keys(st.bots).slice(0, 5).map((k) => <Robot key={k} k={k} size={22} />)}</span><Chevron /></Row></Panel>
-  </div>
-  if (id === "data") return <div className="flex flex-col gap-8">
-    <HubData />
-    <WorkspaceDisk />
-    <OutboxDead />
-    <Section label={t("manage:data.keep")}><Panel>
-      {/* read-only: whole logs are kept for good; a shorter keepSess (set by a confirmed config draft) compacts archived sessions */}
-      <Row title={t("manage:data.sessions")} sub={c.keepSess && c.keepSess !== "永久" ? t("manage:data.sessionsCompact", { period: c.keepSess === "1 年" ? t("manage:data.keepYear") : t("common:dur.days", { count: 90 }) }) : t("manage:data.sessionsForever")} data-keep-sess={c.keepSess || "永久"}>
-        <span className="type-callout text-muted-foreground">{c.keepSess === "1 年" ? t("manage:data.keepYear") : c.keepSess === "90 天" ? t("common:dur.days", { count: 90 }) : t("manage:data.keepForever")}</span></Row></Panel></Section>
-    <Section label={t("manage:data.danger")} data-danger-zone><Panel className="shadow-[var(--lift),0_0_0_1px_color-mix(in_srgb,var(--destructive)_18%,transparent)]">
-      <DangerRow testId="clear-mem" title={t("manage:data.clearMem")} sub={t("manage:data.clearMemSub")} label={t("manage:data.clear")} what={t("manage:data.clearWhat")} onOk={() => void api.clearMemories().then(() => toast(t("manage:data.cleared")))} /></Panel></Section>
-  </div>
+  if (id === "look") {
+    const fontLabels = [t("manage:look.fontNormal"), t("manage:look.fontLarge")]
+    const fontOpts: [string, string][] = WORKSPACE_SETTING_VALUES.fontSize.map((v, i) => [v, fontLabels[i] ?? v])
+    const [motionOn, motionOff] = WORKSPACE_SETTING_VALUES.reduceMotion
+    return <div className="flex flex-col gap-8">
+      <Section label={t("manage:look.ui")}><Panel>
+        <Row title={t("manage:look.theme")}><ThemeSwitch labels /></Row>
+        <LanguageRow />
+        <Row title={t("manage:look.fontSize")}><Segmented size="sm" value={c.fontSize} onChange={(v) => setSetting({ fontSize: v })} options={fontOpts} /></Row>
+        <Row title={t("manage:look.reduceMotion")} sub={t("manage:look.reduceMotionSub")}><SetSwitch testId="reduce-motion" label={t("manage:look.reduceMotion")} checked={c.reduceMotion === motionOn} onChange={(v) => setSetting({ reduceMotion: v ? motionOn : motionOff })} /></Row>
+      </Panel></Section>
+      <AppearanceSection />
+      {/* the Bots' avatars are set on each Bot: one row that shows them and leads there, not a gallery */}
+      <Panel><Row title={t("manage:look.avatars")} sub={t("manage:look.avatarsHint")} onClick={() => go("#/bots")} data-avatar-preview>
+        <span className="hidden items-center gap-1 sm:flex" aria-hidden>{Object.keys(st.bots).slice(0, 5).map((k) => <Robot key={k} k={k} size={22} />)}</span><Chevron /></Row></Panel>
+    </div>
+  }
+  if (id === "data") {
+    const [keep90d, keep1y, keepForever] = WORKSPACE_SETTING_VALUES.keepSess
+    const keepSess = c.keepSess || WORKSPACE_SETTING_DEFAULTS.keepSess
+    return <div className="flex flex-col gap-8">
+      <HubData />
+      <WorkspaceDisk />
+      <OutboxDead />
+      <Section label={t("manage:data.keep")}><Panel>
+        {/* read-only: whole logs are kept for good; a shorter keepSess (set by a confirmed config draft) compacts archived sessions */}
+        <Row title={t("manage:data.sessions")} sub={keepSess !== keepForever ? t("manage:data.sessionsCompact", { period: keepSess === keep1y ? t("manage:data.keepYear") : t("common:dur.days", { count: 90 }) }) : t("manage:data.sessionsForever")} data-keep-sess={keepSess}>
+          <span className="type-callout text-muted-foreground">{keepSess === keep1y ? t("manage:data.keepYear") : keepSess === keep90d ? t("common:dur.days", { count: 90 }) : t("manage:data.keepForever")}</span></Row></Panel></Section>
+      <Section label={t("manage:data.danger")} data-danger-zone><Panel className="shadow-[var(--lift),0_0_0_1px_color-mix(in_srgb,var(--destructive)_18%,transparent)]">
+        <DangerRow testId="clear-mem" title={t("manage:data.clearMem")} sub={t("manage:data.clearMemSub")} label={t("manage:data.clear")} what={t("manage:data.clearWhat")} onOk={() => void api.clearMemories().then(() => toast(t("manage:data.cleared")))} /></Panel></Section>
+    </div>
+  }
   if (id === "about") return <AboutVersions />
   return null
 }

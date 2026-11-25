@@ -41,7 +41,6 @@ pub mod price_sync;
 pub mod projection;
 pub mod recovery;
 pub mod resume;
-pub mod settings;
 pub mod stats_snapshot;
 pub mod system;
 pub mod validate;

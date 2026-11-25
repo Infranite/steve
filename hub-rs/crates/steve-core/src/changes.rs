@@ -8,70 +8,14 @@ use crate::util::{js_head, js_len, now, uid};
 use crate::{Core, patch};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use std::sync::LazyLock;
 use std::time::Duration;
+use steve_types::settings::{self as ws_settings, SettingSpec};
 
-/// `GET /api/settings/schema`, verbatim (key order preserved).
-pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
-    json!({
-      "general": [
-        { "key": "lang", "label": "语言", "values": ["简体中文", "English"], "def": "简体中文", "live": false },
-        { "key": "home", "label": "打开时进入", "values": ["对话", "待处理", "事项"], "def": "对话", "live": true },
-        { "key": "awayH", "label": "离开期间汇报", "values": ["2", "4", "8", "0"], "def": "4", "live": true, "labels": { "2": "2 小时", "4": "4 小时", "8": "8 小时", "0": "不汇报" } },
-        // the workspace time zone of schedules (steve-flow), as steve-hub's settings.rs serves it
-        { "key": "tz", "label": "时区", "values": ["system", "Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"], "def": "system", "live": true, "labels": {"system": "跟随系统"} },
-      ],
-      "items": [
-        { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "auto", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
-        { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
-        { "key": "handoff", "label": "交接阈值", "values": ["0", "70", "80", "90"], "def": "0", "live": true, "labels": { "0": "不换会话", "70": "70%", "80": "80%", "90": "90%" } },
-        { "key": "archDays", "label": "完成后自动归档", "values": ["7", "30", "90", "0"], "def": "30", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天", "0": "不自动归档" } },
-      ],
-      "notify": [
-        { "key": "quiet", "label": "免打扰", "values": ["23:00 – 08:00", "22:00 – 09:00", "关闭"], "def": "23:00 – 08:00", "live": false },
-      ],
-      "look": [
-        { "key": "fontSize", "label": "字号", "values": ["标准", "大"], "def": "标准", "live": true },
-        { "key": "reduceMotion", "label": "减弱动态效果", "values": ["开", "关"], "def": "关", "live": true },
-      ],
-      "data": [
-        { "key": "keepSess", "label": "会话记录保留", "values": ["90 天", "1 年", "永久"], "def": "永久", "live": true },
-        // signals (S1 `steve_flow::retention::keep_raw_setting`) and mail (E1 `keepMail`), as steve-hub's settings.rs serves them
-        { "key": "keepRaw", "label": "事件与消息原文保留", "values": ["7", "30", "90"], "def": "7", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天" } },
-        { "key": "keepMail", "label": "本地邮件正文保留", "values": ["30", "90", "365"], "def": "90", "live": true, "labels": { "30": "30 天", "90": "90 天", "365": "1 年" } },
-      ],
-    })
-});
-
-/// `settingDefaults()`: every key's `def`.
+/// Workspace setting defaults (`{key: def}`) from the shared schema in `steve-types`.
 pub fn setting_defaults() -> Map<String, Value> {
-    let mut m = Map::new();
-    for spec in all_specs() {
-        m.insert(
-            spec["key"].as_str().unwrap_or_default().into(),
-            spec["def"].clone(),
-        );
-    }
-    m
-}
-
-fn all_specs() -> Vec<&'static Value> {
-    SETTINGS
-        .as_object()
-        .into_iter()
-        .flat_map(|o| o.values())
-        .flat_map(|v| v.as_array().into_iter().flatten())
+    ws_settings::defaults()
+        .map(|(k, v)| (k.into(), json!(v)))
         .collect()
-}
-
-/// Is `v` an allowed value of setting `k`? (`PATCH /api/settings` validation)
-pub fn setting_allowed(k: &str, v: &str) -> bool {
-    all_specs().iter().any(|s| {
-        s["key"] == k
-            && s["values"]
-                .as_array()
-                .is_some_and(|vs| vs.iter().any(|x| x == v))
-    })
 }
 
 const ACC: [(&str, &str); 3] = [
@@ -1095,14 +1039,14 @@ fn project_fields(p: &crate::repo::Project, bs: &[Bot]) -> Vec<FieldSpec> {
 }
 
 /// A setting's value as the user sees it (`archDays` “30” → “30 天”).
-fn setting_shown(specs: &[Value], k: &str, v: &Value) -> Value {
-    specs
+fn setting_shown(specs: &[SettingSpec], k: &str, v: &Value) -> Value {
+    let s = jstr(v);
+    let shown = specs
         .iter()
-        .find(|s| s["key"] == k)
-        .and_then(|s| s.get("labels"))
-        .and_then(|l| l.get(jstr(v)))
-        .cloned()
-        .unwrap_or_else(|| json!(jstr(v)))
+        .find(|spec| spec.key == k)
+        .map(|spec| spec.label_of(&s))
+        .unwrap_or(s.as_str());
+    json!(shown)
 }
 
 /// What a configuration request in the conversation is about (see [`Core::pick_targets`]).
@@ -1187,12 +1131,13 @@ impl Core {
     }
 
     /// The settings of category `cat` as draft fields, and their schema entries (for value labels).
-    fn settings_fields(&self, ws: &str, cat: &str) -> Result<(Vec<Value>, Vec<FieldSpec>)> {
+    fn settings_fields(
+        &self,
+        ws: &str,
+        cat: &str,
+    ) -> Result<(&'static [SettingSpec], Vec<FieldSpec>)> {
         let db = self.store();
-        let specs: Vec<Value> = SETTINGS
-            .get(cat)
-            .and_then(Value::as_array)
-            .cloned()
+        let specs = ws_settings::category(cat)
             .ok_or_else(|| msg(steve_i18n::t!("core.settings.no_category")))?;
         let mut cur = setting_defaults();
         cur.extend(db.settings_all(ws)?);
@@ -1202,24 +1147,22 @@ impl Core {
         let mut fs: Vec<FieldSpec> = specs
             .iter()
             .map(|s| {
-                let labels = s.get("labels").and_then(Value::as_object).map(|l| {
+                let labels = s.labels.as_ref().map(|l| {
                     format!(
                         "（值：{}）",
-                        l.iter()
-                            .map(|(k, v)| format!("{k}={}", jstr(v)))
+                        l.entries()
+                            .iter()
+                            .map(|(k, v)| format!("{k}={v}"))
                             .collect::<Vec<_>>()
                             .join("，")
                     )
                 });
-                let key = s["key"].as_str().unwrap_or_default().to_string();
                 FieldSpec {
-                    label: format!("{}{}", jstr(&s["label"]), labels.unwrap_or_default()),
+                    label: format!("{}{}", s.label, labels.unwrap_or_default()),
                     ty: "enum",
-                    values: s["values"]
-                        .as_array()
-                        .map(|vs| vs.iter().map(jstr).collect()),
-                    current: cur.get(&key).cloned().unwrap_or(Value::Null),
-                    key,
+                    values: Some(s.values.clone()),
+                    current: cur.get(&s.key).cloned().unwrap_or(Value::Null),
+                    key: s.key.clone(),
                 }
             })
             .collect();
@@ -1300,7 +1243,7 @@ impl Core {
                             value_shown(
                                 "settings",
                                 &f.key,
-                                show(&setting_shown(&specs, &f.key, &f.current)),
+                                show(&setting_shown(specs, &f.key, &f.current)),
                             ),
                         )
                     })
@@ -1606,13 +1549,9 @@ impl Core {
                         from: value_shown(
                             "settings",
                             &k,
-                            show(&setting_shown(&specs, &k, &f.current)),
+                            show(&setting_shown(specs, &k, &f.current)),
                         ),
-                        to: value_shown(
-                            "settings",
-                            &k,
-                            show(&setting_shown(&specs, &k, &json!(v))),
-                        ),
+                        to: value_shown("settings", &k, show(&setting_shown(specs, &k, &json!(v)))),
                     });
                     patch.insert(k, json!(v));
                 }
@@ -2503,13 +2442,17 @@ mod tests {
         assert_eq!(d["archDays"], "30");
         assert_eq!(d.len(), 14);
         assert_eq!(d["tz"], "system");
-        assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
+        assert!(ws_settings::allowed("tz", "UTC") && !ws_settings::allowed("tz", "Mars/Base"));
         assert!(
-            setting_allowed("handoff", "70")
-                && !setting_allowed("handoff", "75")
-                && !setting_allowed("nope", "x")
+            ws_settings::allowed("handoff", "70")
+                && !ws_settings::allowed("handoff", "75")
+                && !ws_settings::allowed("nope", "x")
         );
-        let keys: Vec<&String> = SETTINGS.as_object().unwrap().keys().collect();
+        let keys: Vec<&str> = ws_settings::schema()
+            .categories()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         assert_eq!(keys, ["general", "items", "notify", "look", "data"]);
     }
 

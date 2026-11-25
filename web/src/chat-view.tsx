@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { draftKey } from "@/composer-draft"
+import { WORKSPACE_SETTING_DEFAULTS } from "@/gen"
 import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
 import { Robot } from "@/robot"
@@ -173,7 +174,7 @@ const SEEN = "steve-seen"
 function useAway() {
   const [from] = useState(() => Number(localStorage.getItem(SEEN) ?? 0))
   useEffect(() => { const mark = () => localStorage.setItem(SEEN, String(Date.now())); mark(); const t = setInterval(mark, 60_000); window.addEventListener("beforeunload", mark); return () => { clearInterval(t); window.removeEventListener("beforeunload", mark) } }, [])
-  const hours = Number(st.settings.awayH ?? 4)
+  const hours = Number(st.settings.awayH ?? WORKSPACE_SETTING_DEFAULTS.awayH)
   return hours > 0 && from > 0 && Date.now() - from > hours * 3600_000 ? from : 0
 }
 

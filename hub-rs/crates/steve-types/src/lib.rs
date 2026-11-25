@@ -43,6 +43,7 @@ pub mod orchestration;
 pub mod people;
 pub mod placement;
 pub mod raw;
+pub mod settings;
 pub mod stats;
 pub mod stream;
 pub mod vault;
