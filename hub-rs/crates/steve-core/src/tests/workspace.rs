@@ -1,4 +1,4 @@
-//! Task workspaces (ST-45): closed items give their caches and safe worktrees back, open and busy ones are
+//! Task workspaces: closed items give their caches and safe worktrees back, open and busy ones are
 //! left alone, a worktree with a process inside stays, an interrupted pass is finished by the next, and no
 //! new worktree is made below the disk floor.
 

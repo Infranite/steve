@@ -1,4 +1,4 @@
-/** Settings · 数据 · 工作区与磁盘 (ST-45): the Hub's `/api/system/workspaces` report and what the page says about it. */
+/** Settings · 数据 · 工作区与磁盘: the Hub's `/api/system/workspaces` report and what the page says about it. */
 /* a relative .ts import so node --test loads this file without a bundler */
 import { t } from "./i18n/index.ts"
 

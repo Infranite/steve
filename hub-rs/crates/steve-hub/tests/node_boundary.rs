@@ -316,7 +316,7 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-modules/src/vault/keystore/helper.rs", Hub, "the vault keystore helper"),
     e(Spawn, "steve-modules/src/net.rs", Hub, "test support: reruns one test in a child"),
     e(Dir, "steve-hub/src/upgrades/mod.rs", Hub, "upgrade operations in the Hub data dir"),
-    e(Fs, "steve-store-sqlite/src/backup/offline.rs", Hub, "the single backup implementation copies the Hub's own database file into its backups directory: a 0700 directory, a create_new 0600 partial, fsync, and a no-replace hard-link publish (replaces the daily copy's own file handling in W2a.9)"),
+    e(Fs, "steve-store-sqlite/src/backup/offline.rs", Hub, "the single backup implementation copies the Hub's own database file into its backups directory: a 0700 directory, a create_new 0600 partial, fsync, and a no-replace hard-link publish (replaces the daily copy's own file handling)"),
     e(Dir, "steve-store-sqlite/src/backup/plan.rs", Hub, "inventories installation-owned backup directories and their declared daily file trees for retention accounting"),
     e(Fs, "steve-store-sqlite/src/backup/plan.rs", Hub, "stages private backup directories, verifies and publishes manifests atomically under the backup-root lock, and retires declared artifacts and file trees with the manifest last"),
     e(Dir, "steve-hub/src/admin/backup.rs", Hub, "daily snapshots and tar archives walk only the installation parts of their backup scope, and measure skipped workspace caches for the log"),
