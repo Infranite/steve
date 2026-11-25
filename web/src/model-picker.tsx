@@ -8,14 +8,12 @@ import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { modReq } from "@/api"
+import { modelsApi, type Catalog, type CatalogModel, type Used } from "@/api/models"
 import { lang, t, useT } from "@/i18n"
 import { runtimeName, useRuntimes } from "@/store"
 import { HarnessMark, ModelMark, modelKind } from "@/components/harness-mark"
 
-export type Used = { calls: number; ok_at: number | null; failed_at: number | null }
-export type CatalogModel = { id: string; label: string; family: string; via: string | null; note: string | null; efforts: string[]; used?: Used }
-export type Catalog = { harness: string; name: string; source: string; default: string | null; families: string[]; models: CatalogModel[] }
+export type { Used, CatalogModel, Catalog }
 
 /** a harness adapter's name as the Hub reports it (its id when the Hub has not listed it) */
 export const harnessName = (h: string) => runtimeName(h) ?? h
@@ -25,7 +23,7 @@ const cache = new Map<string, Promise<Catalog>>()
 export function loadCatalog(harness: string, fresh = false): Promise<Catalog> {
   const key = `${lang()}:${harness}`
   if (fresh || !cache.has(key)) {
-    const p = modReq<Catalog>("GET", `/system/models?harness=${encodeURIComponent(harness)}${fresh ? "&fresh=1" : ""}`)
+    const p = modelsApi.catalog(harness, fresh)
     p.catch(() => cache.delete(key))
     cache.set(key, p)
   }

@@ -56,7 +56,7 @@ impl NodeRuntime {
                         row.revision,
                         "applied",
                         None,
-                        now(),
+                        self.clock.now(),
                     )?;
                 } else if row.state == "waiting" {
                     // The Node closed the request before the Hub recorded a choice.
@@ -66,7 +66,7 @@ impl NodeRuntime {
                         row.revision,
                         "expired",
                         None,
-                        now(),
+                        self.clock.now(),
                     )?;
                     steve_store::decision_repo::expire_unapplied(
                         tx,
@@ -129,6 +129,14 @@ impl NodeRuntime {
                 PermissionDecision::Reject => format!("{REJECT}|拒绝|reject_once"),
             })
             .collect();
+        let opened_at = now();
+        let wait = steve_types::WaitContract::new(
+            steve_types::WaitOwner::Owner,
+            steve_types::Millis(opened_at.min(request.expires_at.0)),
+            steve_types::Millis(request.expires_at.0),
+            steve_types::WaitTimeoutAction::Close,
+        )
+        .ok();
         let (d, opened) = steve_store::DecisionRows(tx).open_in(&steve_store::NewDecision {
             workspace_id: scope.workspace,
             kind: "approve".into(),
@@ -151,6 +159,7 @@ impl NodeRuntime {
                 node: self.node_id.to_string(),
                 attempt: attempt.into(),
             }),
+            wait,
         })?;
         if !opened {
             return Ok(None);
@@ -161,6 +170,7 @@ impl NodeRuntime {
             "permission",
             json!({ "decision": d.id, "title": request.title }),
         )?;
+        let at = self.clock.now();
         node_write::insert_permission_in(
             tx,
             &rt::NewPermission {
@@ -173,20 +183,20 @@ impl NodeRuntime {
                 expires_at: request.expires_at.0,
                 resolver: resolution.resolver,
             },
-            now(),
+            at,
         )?;
         if let Some(row) = node_write::permission_of_decision_in(tx, &d.id)? {
-            if request.expires_at.0 <= now() {
-                Self::expire_card_in(tx, &row, EXPIRED)?;
+            if request.expires_at.0 <= at {
+                Self::expire_card_in(tx, &row, EXPIRED, at)?;
             } else if let Outcome::Answer(choice) = resolution.outcome {
-                let op = Self::answer_command_in(tx, &row, choice)?;
+                let op = Self::answer_command_in(tx, &row, choice, at)?;
                 if !node_write::permission_cas_in(
                     tx,
                     &d.id,
                     row.revision,
                     "answering",
                     Some(&op),
-                    now(),
+                    at,
                 )? {
                     return Err(conflict("permission changed while recording the answer"));
                 }
@@ -204,7 +214,7 @@ impl NodeRuntime {
                 }
             }
         }
-        let outcome = if request.expires_at.0 <= now() {
+        let outcome = if request.expires_at.0 <= at {
             "expired"
         } else {
             match resolution.outcome {
@@ -225,6 +235,7 @@ impl NodeRuntime {
         tx: &mut W<'_>,
         row: &PermissionRow,
         choice: PermissionDecision,
+        at: i64,
     ) -> Result<String, StoreError> {
         let request: PermissionRequest = serde_json::from_value(row.request.clone())?;
         if let Some(op) = &row.answer_operation {
@@ -240,7 +251,7 @@ impl NodeRuntime {
             Advance::NewInput,
         )?;
         let op = key.op().to_string();
-        let (req, digest) = command(
+        let (req, digest) = command_at(
             &op,
             PermissionResolution {
                 id: request.id.clone(),
@@ -249,6 +260,7 @@ impl NodeRuntime {
                 decision_revision: idv(derived_id("d", &format!("{}:{revision}", row.decision)))?,
                 decision: choice,
             },
+            at,
         )?;
         rt::insert_intent_in(
             tx,
@@ -262,14 +274,19 @@ impl NodeRuntime {
                 target_attempt: Some(&row.attempt),
                 dependency: None,
             },
-            now(),
+            at,
         )?;
         Ok(op)
     }
 
     /// A waiting card whose time is up: expired, and the Node (if its attempt still runs) is told
     /// to reject the request. True: a command was queued.
-    fn expire_card_in(tx: &mut W<'_>, row: &PermissionRow, why: &str) -> Result<bool, StoreError> {
+    fn expire_card_in(
+        tx: &mut W<'_>,
+        row: &PermissionRow,
+        why: &str,
+        at: i64,
+    ) -> Result<bool, StoreError> {
         if row.state != "waiting" {
             return Ok(false);
         }
@@ -279,6 +296,7 @@ impl NodeRuntime {
                 tx,
                 row,
                 PermissionDecision::Reject,
+                at,
             )?)
         } else {
             None
@@ -289,7 +307,7 @@ impl NodeRuntime {
             row.revision,
             "expired",
             op.as_deref(),
-            now(),
+            at,
         )? {
             return Err(conflict("the permission changed while expiring it"));
         }
@@ -313,7 +331,14 @@ impl NodeRuntime {
         if !matches!(row.state.as_str(), "waiting" | "answering") {
             return Ok(());
         }
-        node_write::permission_cas_in(tx, &row.decision, row.revision, "expired", None, now())?;
+        node_write::permission_cas_in(
+            tx,
+            &row.decision,
+            row.revision,
+            "expired",
+            None,
+            self.clock.now(),
+        )?;
         if row.state == "answering" {
             steve_store::decision_repo::expire_unapplied(
                 tx,
@@ -359,11 +384,12 @@ impl NodeRuntime {
             // our own reject of an expired card, refused or not: the card is closed already
             return Ok(());
         }
+        let at = self.clock.now();
         if success {
-            node_write::permission_cas_in(tx, &row.decision, row.revision, "applied", None, now())?;
+            node_write::permission_cas_in(tx, &row.decision, row.revision, "applied", None, at)?;
             return Ok(());
         }
-        node_write::permission_cas_in(tx, &row.decision, row.revision, "refused", None, now())?;
+        node_write::permission_cas_in(tx, &row.decision, row.revision, "refused", None, at)?;
         let code = error
             .map(|e| serde_json::to_value(e.code).unwrap_or(Value::Null))
             .unwrap_or(Value::Null);
@@ -384,7 +410,7 @@ impl NodeRuntime {
                 if let Some(row) = node_write::permission_of_decision_in(w, &id)?
                     && row.expires_at <= at
                 {
-                    Self::expire_card_in(w, &row, EXPIRED)?;
+                    Self::expire_card_in(w, &row, EXPIRED, at)?;
                 }
                 Ok::<_, StoreError>(())
             });
@@ -414,14 +440,16 @@ impl NodeRuntime {
             if card.status != DecisionStatus::Open || row.state != "waiting" {
                 return Ok((false, false));
             }
-            if let Some(why) = steve_store::workflow_gate::session_blocker(tx, &row.session)? {
-                // A pause/cancel/replan can precede a late human answer. Commit the
+            let at = self.clock.now();
+            if let Some(blocker) = steve_store::item_gate::session_blocker(tx, &row.session)? {
+                let why = super::super::item_gate_reason(blocker);
+                // A pause or prerequisite wait can precede a late human answer. Commit the
                 // expired card and a rejection together; never grant the old attempt new access.
-                return Ok((false, Self::expire_card_in(tx, &row, &why)?));
+                return Ok((false, Self::expire_card_in(tx, &row, &why, at)?));
             }
-            if row.expires_at <= now() {
+            if row.expires_at <= at {
                 // too late: closed now (committed), not answered
-                return Ok((false, Self::expire_card_in(tx, &row, EXPIRED)?));
+                return Ok((false, Self::expire_card_in(tx, &row, EXPIRED, at)?));
             }
             let request: PermissionRequest = serde_json::from_value(row.request.clone())?;
             let choice = match answer.option() {
@@ -432,14 +460,14 @@ impl NodeRuntime {
             if !request.choices.contains(&choice) {
                 return Err(conflict("permission did not offer this option"));
             }
-            let op = Self::answer_command_in(tx, &row, choice)?;
+            let op = Self::answer_command_in(tx, &row, choice, at)?;
             if !node_write::permission_cas_in(
                 tx,
                 &row.decision,
                 row.revision,
                 "answering",
                 Some(&op),
-                now(),
+                at,
             )? {
                 return Err(conflict("the permission changed while answering it"));
             }
@@ -454,11 +482,12 @@ impl NodeRuntime {
                     None,
                 )?,
                 PermissionAction::Dismiss => {
-                    let changed = rows.apply(
+                    let changed = rows.apply_by(
                         &card,
                         DecisionChange::Dismiss,
                         &json!({"dismissed": true, "operation_id": op}),
                         None,
+                        Some(answer.actor),
                     )?;
                     if changed {
                         tx.audit(

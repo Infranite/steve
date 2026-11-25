@@ -445,6 +445,36 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Cac
         value
     }
 }
+
+/// Bounded process-local TTL cache backed by `moka`, for deduplicating pure/idempotent lookups
+/// (such as identical model classification inputs) by input hash without hand-rolled eviction.
+#[derive(Clone)]
+pub struct TtlCache<K, V> {
+    inner: Cache<K, V>,
+}
+
+impl<K, V> TtlCache<K, V>
+where
+    K: Hash + Eq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    pub fn new(max_capacity: u64, ttl: Duration) -> Self {
+        Self {
+            inner: Cache::builder()
+                .max_capacity(max_capacity)
+                .time_to_live(ttl)
+                .build(),
+        }
+    }
+
+    pub async fn get(&self, key: &K) -> Option<V> {
+        self.inner.get(key).await
+    }
+
+    pub async fn insert(&self, key: K, value: V) {
+        self.inner.insert(key, value).await;
+    }
+}
 #[cfg(test)]
 #[path = "cache/tests.rs"]
 mod tests;

@@ -181,16 +181,6 @@ pub fn move_to_unverified_channel(store: &Store, message: &str) -> Result<()> {
     })
 }
 
-pub fn mark_workflow_item(store: &Store, item: &str) -> Result<()> {
-    store.write(|tx| {
-        tx.conn.execute(
-            "UPDATE items SET source=? WHERE id=?",
-            [r#"["collaboration","workflow"]"#, item],
-        )?;
-        Ok(())
-    })
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum SessionViolation {
     ReadOnly,
@@ -247,14 +237,9 @@ pub fn seed_item_dependency(store: &Store, item: &str, upstream: &str) -> Result
 pub enum ItemCondition {
     Paused,
     Archived,
-    WorkflowUnit,
 }
 
-pub const ITEM_CONDITIONS: [ItemCondition; 3] = [
-    ItemCondition::Paused,
-    ItemCondition::Archived,
-    ItemCondition::WorkflowUnit,
-];
+pub const ITEM_CONDITIONS: [ItemCondition; 2] = [ItemCondition::Paused, ItemCondition::Archived];
 
 pub fn set_item_condition(
     store: &Store,
@@ -271,17 +256,6 @@ pub fn set_item_condition(
             ItemCondition::Archived => tx.conn.execute(
                 "UPDATE items SET archived=? WHERE id=?",
                 rusqlite::params![set, id],
-            )?,
-            ItemCondition::WorkflowUnit => tx.conn.execute(
-                "UPDATE items SET source=? WHERE id=?",
-                [
-                    if set {
-                        r#"["work","workflow"]"#
-                    } else {
-                        r#"["",""]"#
-                    },
-                    id,
-                ],
             )?,
         };
         Ok(())
@@ -340,7 +314,7 @@ pub fn seed_thread_group(store: &Store, item: &str) -> Result<()> {
                    ('msg_grp_2', 'default', 'chan:spc_t', 'u', '进展如何', 2)",
         )?;
         tx.conn.execute(
-            "                 UPDATE thread_items SET origin_msg = 'msg_grp_1' WHERE item_id = ?;",
+            "UPDATE thread_dispatch_refs SET origin_message_id = 'msg_grp_1' WHERE target_item_id = ? AND effect_kind = 'create_item';",
             [item],
         )?;
         Ok(())

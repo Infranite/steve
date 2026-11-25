@@ -1,11 +1,9 @@
-//! Answers and inline research on the workspace's inline queue, and the seam to the
-//! research executor (R2, `Researcher`): this module decides when a run starts, records it in
-//! `thread_runs`, streams it into the conversation and stores the answer; the executor only reads.
-//!
-//! One answer or research run at a time per workspace; while one runs, up to [`MAX_WAITING`] more wait
-//! (the user's message shows “排队中”), the next is refused with a sentence.
+//! Inline answers and read-only research executed under durable `thread_reply_tasks` leases,
+//! with per-space `--resume` isolation, prompt stop cancellation, explicit failure marking,
+//! and single-tx fenced receipt commits.
 
-use super::{DRAFT_EVERY, Steps, lane_key, lock, meta_of};
+use super::handle::RouteInfo;
+use super::{Conv, DRAFT_EVERY, Steps, Stop, decide, handoff, lock, meta_of};
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{self, Offer, Said};
@@ -15,70 +13,45 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use steve_store::{RunPatch, W, thread_runs};
-use tokio::sync::mpsc;
+use steve_store::{CommitOutcome, CommitReplyInput, ThreadTask, thread};
 
-fn run_changed(w: &mut W<'_>, ws: &str, run: &str) {
-    w.emit(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::ThreadRun {
-            id: run.to_owned().into(),
-            ws: ws.into(),
-        },
-    ));
-}
-
-/// How many answers or research runs may wait behind the running one.
-pub const MAX_WAITING: usize = 3;
-/// The reply when the queue is full.
-pub const QUEUE_FULL: &str = "前面还有 3 个问题在排队，先等等或停掉当前的";
 /// Where to look when a chat's answer could not be written.
 const FIX_MODEL: &str = "到「设置 · 模型」看看回复用的模型是否可用，或稍后再发一次";
-/// `meta` flag of a message Steve's thread writes about its own state rather than as an answer
-/// (the queue full, a stop, an error): a guest conversation's host never says it in the chat.
+/// `meta` flag of a message Steve's thread writes about its own state rather than as an answer.
 pub const SYSTEM: &str = "system";
 
 /// One tool call of a research run, as the executor saw it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSeen {
     pub call: Option<u32>,
-    /// the harness tool name (`Read`, `Grep`, `mcp__steve__steve_knowledge_search`, …)
     pub name: String,
-    /// its category (`read`, `search`, `exec`, …), or empty
     pub kind: String,
-    /// what it was about: a relative path with lines, a pattern, a command, a query, an item id
     pub brief: String,
     pub ok: bool,
-    /// Stable diagnostic code; never a raw tool error or result.
     pub error: Option<String>,
     pub ms: i64,
 }
 
-/// How a run ended.
+/// How a research run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunEnd {
     #[default]
     Done,
-    /// the user stopped it
     Stopped,
-    /// time, turns or tool calls ran out
     Budget,
-    /// a tool check stopped it; this does not prove that protected data was read
     Violated,
     Failed,
 }
 
 impl RunEnd {
-    /// The `thread_runs.status` and `meta.steps.research.stopped` value.
-    pub fn status(self) -> &'static str {
+    pub fn outcome(self) -> &'static str {
         match self {
-            RunEnd::Done => "done",
+            RunEnd::Done => "answered",
             RunEnd::Stopped => "stopped",
-            RunEnd::Budget => "budget",
-            RunEnd::Violated => "violated",
-            RunEnd::Failed => "failed",
+            RunEnd::Budget | RunEnd::Violated | RunEnd::Failed => "failed",
         }
     }
-    /// The note after a partial answer.
+
     fn note(self) -> Option<&'static str> {
         match self {
             RunEnd::Done | RunEnd::Failed => None,
@@ -89,90 +62,59 @@ impl RunEnd {
     }
 }
 
-/// Everything a research run needs; collected by the thread, so the executor touches no state.
+/// Everything a research run needs; collected by the thread so the executor touches no state.
 #[derive(Clone)]
 pub struct ResearchRequest {
-    /// the `thread_runs` row (status `running` when the executor is called)
     pub run: String,
     pub ws: String,
-    /// the user message being answered
     pub mid: String,
     pub user: Option<String>,
     pub question: String,
-    /// the conversation before the question, oldest first
     pub history: Vec<Said>,
-    /// the main bot: name, persona and rules of the voice that answers
     pub main: Bot,
-    /// module context for the question (knowledge snippets, B1 `PromptContext::chat`); may be empty
     pub context: String,
-    /// the project to work in (cwd), if the router named one or the question is about Steve
     pub project: Option<Project>,
-    /// every project directory of the workspace that may be read
     pub readable: Vec<Project>,
-    /// the question's attachments
     pub files: Vec<FileRef>,
-    /// attachments of the message the question follows up on (“这样你也看不出来吗？” after a screenshot)
     pub earlier_files: Vec<FileRef>,
-    /// the previous round on the same topic, to `--resume`
     pub resume: Option<ResumeFrom>,
-    /// set when the user stops the run; the executor ends the process and returns what it has
     pub stop: Arc<AtomicBool>,
-    /// Steve's `/mcp` with this run's own token: only the read-only research tools answer it
     pub mcp: Option<crate::McpEndpoint>,
-    /// 设置 · 模型 · 就地研究: the models to try in order and the effort (`models::for_purpose`)
     pub models: crate::models::Choice,
-    /// answered in the web's main conversation: the answer may draw an A2UI interface ([`crate::gateway::A2UI_HINT`])
     pub ui: bool,
-    /// the instance's owner asks where they alone read the answer: the run acts on the Hub's
-    /// machine with the owner's own access instead of only reading the project directories
     pub full: bool,
-    /// what this run is for besides the question, in the prompt's own words: the first meeting's
-    /// brief ([`super::onboard::BRIEF`]) while it is on, else empty
     pub brief: String,
 }
 
-/// A follow-up within [`RESUME_WINDOW`] of a research answer continues that run's harness session.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResumeFrom {
-    /// the earlier `thread_runs` row
     pub run: String,
-    /// the harness adapter's session, and the adapter (a session continues only on its own)
     pub session: String,
     pub harness: String,
-    /// continuing needs the same model
     pub model: String,
 }
 
-/// How long a research answer can be followed up in the same harness session.
+/// How long a research answer can be followed up in the same harness session (per space).
 pub const RESUME_WINDOW: i64 = 30 * 60 * 1000;
 
-/// Told about a run while it reads and writes.
 pub trait ResearchSink: Send + Sync {
-    /// The answer so far (whole, each time it grows).
     fn text(&self, text: &str);
-    /// A tool call finished.
     fn tool(&self, t: &ToolSeen);
-    /// A tool call began, or says more about itself, and has not finished: what the run is doing now.
     fn tool_running(&self, _call: Option<u32>, _name: &str, _kind: &str, _brief: &str) {}
 }
 
-/// What a run produced.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResearchOutcome {
-    /// the answer, without the `OFFER:` line (see [`gateway::split_offer`]); partial when stopped
     pub text: String,
     pub offer: Option<Offer>,
     pub end: RunEnd,
     pub model: Option<String>,
-    /// the harness adapter's session id, to continue the run with
     pub session: Option<String>,
     pub turns: i64,
     pub first_text_ms: Option<i64>,
     pub error: Option<String>,
 }
 
-/// The read-only research executor (thread-routing R2). Implemented with `claude -p` stream-json and a
-/// tool whitelist by the integrator; faked in tests.
 #[async_trait]
 pub trait Researcher: Send + Sync {
     async fn shutdown(&self, _grace: std::time::Duration) -> bool {
@@ -190,78 +132,13 @@ impl Core {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Inline {
-    Answer,
-    Research,
-}
-
-/// An answer or research run waiting on the inline queue.
-pub(crate) struct InlineJob {
-    pub kind: Inline,
-    /// the user message answered
-    pub origin: String,
-    pub question: String,
-    pub files: Vec<FileRef>,
-    /// the files of the message this one follows up on ([`Core::earlier_files`])
-    pub earlier: Vec<FileRef>,
-    pub user: Option<String>,
-    pub project: Option<String>,
-    /// `meta.steps.route` of the reply
-    pub route: Option<Value>,
-    /// offered with the answer unless the answer brings its own (guard rule 4)
-    pub offer: Option<Offer>,
-    /// the Steve message this answer continues (suggestion card “在这里出方案”, “改成在这里回答”)
-    pub reply_to: Option<String>,
-    pub run: Option<String>,
-    /// of a message just routed, the stop of that routing: stopped before it is queued, it is not queued
-    pub stop: super::Stop,
-    pub t0: i64,
-    /// a follow-up of a recent research answer
-    pub resume: Option<ResumeFrom>,
-    /// the conversation (`messages.space`) it is answered in
-    pub space: String,
-    /// An answer that needs tools becomes an item here ([`Core::hand_off`], [`Conv::hands_on`]):
-    /// `Some(start)`, the speaker may start work (else it is a proposal); `None`, it does not
-    /// become one on its own.
-    ///
-    /// [`Conv::hands_on`]: super::Conv::hands_on
-    pub to_item: Option<bool>,
-}
-
-/// The inline queue of a conversation: the web's is keyed by the workspace (as before), a guest
-/// conversation's has its own, so a chat's question never waits behind your research.
-struct Active {
-    origin: String,
-    run: Option<String>,
-    kind: Inline,
-    stop: super::Stop,
-    /// the user message it answers
-    question: String,
-}
-
-#[derive(Default)]
-struct LaneState {
-    waiting: Vec<Active>,
-    running: Option<Active>,
-}
-
-pub(crate) struct InlineLane {
-    tx: mpsc::UnboundedSender<InlineJob>,
-    st: Arc<Mutex<LaneState>>,
-    /// told whenever an answer or research ends or leaves the queue (`turn_done` waits on it)
-    idle: Arc<tokio::sync::Notify>,
-}
-
-/// `steve.draft` at most every [`DRAFT_EVERY`] ms, including the trailing update:
-/// a burst's last tokens must reach the page even while the model pauses to use a tool.
+/// `steve.draft` throttled to [`DRAFT_EVERY`] ms, closed immediately on stop or completion.
 struct Drafts<'a> {
     core: &'a Core,
     ws: &'a str,
     mid: &'a str,
-    stop: &'a super::Stop,
+    stop: &'a Stop,
     state: Arc<Mutex<DraftState>>,
-    /// an IM conversation's answer: nothing streams to the web's conversation
     quiet: bool,
 }
 
@@ -275,7 +152,7 @@ struct DraftState {
 }
 
 impl<'a> Drafts<'a> {
-    fn new(core: &'a Core, ws: &'a str, mid: &'a str, stop: &'a super::Stop, quiet: bool) -> Self {
+    fn new(core: &'a Core, ws: &'a str, mid: &'a str, stop: &'a Stop, quiet: bool) -> Self {
         Self {
             core,
             ws,
@@ -288,13 +165,16 @@ impl<'a> Drafts<'a> {
 
     fn send(&self, thought: &str, text: &str) {
         let mut l = lock(&self.state);
-        if self.quiet || self.stop.is_stopped() || (l.thought == thought && l.text == text) {
+        if self.quiet
+            || l.closed
+            || self.stop.is_stopped()
+            || (l.thought == thought && l.text == text)
+        {
             return;
         }
         l.thought = thought.into();
         l.text = text.into();
         let wait = DRAFT_EVERY - (now() - l.sent);
-        // Once scheduled, that task publishes the latest snapshot, not the one that scheduled it.
         if l.pending {
             return;
         }
@@ -305,14 +185,8 @@ impl<'a> Drafts<'a> {
                 .store()
                 .publish(steve_types::LiveEvent::from(
                     steve_types::WorkLiveEvent::SteveDraft {
-                        ws: {
-                            let value: String = self.ws.into();
-                            steve_types::WorkspaceId::from(value)
-                        },
-                        mid: {
-                            let value: String = self.mid.into();
-                            steve_types::MessageId::from(value)
-                        },
+                        ws: self.ws.to_owned().into(),
+                        mid: self.mid.to_owned().into(),
                         thought: l.thought.clone(),
                         text: l.text.clone(),
                     },
@@ -337,14 +211,8 @@ impl<'a> Drafts<'a> {
             l.sent = now();
             core.store().store().publish(steve_types::LiveEvent::from(
                 steve_types::WorkLiveEvent::SteveDraft {
-                    ws: {
-                        let value: String = ws;
-                        steve_types::WorkspaceId::from(value)
-                    },
-                    mid: {
-                        let value: String = mid;
-                        steve_types::MessageId::from(value)
-                    },
+                    ws: ws.into(),
+                    mid: mid.into(),
                     thought: l.thought.clone(),
                     text: l.text.clone(),
                 },
@@ -355,12 +223,10 @@ impl<'a> Drafts<'a> {
 
 impl Drop for Drafts<'_> {
     fn drop(&mut self) {
-        // A stored reply (or a stopped run) must never be followed by a late live draft.
         lock(&self.state).closed = true;
     }
 }
 
-/// The thread's side of a running research: drafts, tool rows, `steve.tool`.
 struct Sink<'a> {
     drafts: Drafts<'a>,
     run: &'a str,
@@ -374,6 +240,7 @@ impl ResearchSink for Sink<'_> {
         lock(&self.first_text).get_or_insert_with(|| now() - self.t0);
         self.drafts.send("", text);
     }
+
     fn tool(&self, t: &ToolSeen) {
         let mut step = json!({
             "name": t.name,
@@ -381,7 +248,6 @@ impl ResearchSink for Sink<'_> {
             "status": if t.ok { "ok" } else { "failed" },
             "ms": t.ms,
         });
-        // what the step did is told by this, not by the tool's name: every harness names its own
         if let Some(call) = t.call {
             step["call"] = json!(call);
         }
@@ -398,29 +264,21 @@ impl ResearchSink for Sink<'_> {
         }
         d.core.store().store().publish(steve_types::LiveEvent::from(
             steve_types::WorkLiveEvent::SteveTool {
-                ws: {
-                    let value: String = d.ws.into();
-                    steve_types::WorkspaceId::from(value)
-                },
-                mid: {
-                    let value: String = d.mid.into();
-                    steve_types::MessageId::from(value)
-                },
-                run: {
-                    let value: String = self.run.into();
-                    steve_types::ThreadRunId::from(value)
-                },
+                ws: d.ws.to_owned().into(),
+                mid: d.mid.to_owned().into(),
+                run: self.run.to_owned(),
                 name: t.name.clone(),
                 brief: t.brief.clone(),
                 ok: t.ok,
                 kind: t.kind.clone(),
                 running: false,
                 call: t.call,
-                started_at: (Some(self.t0)).map(steve_types::Millis),
-                at: (Some(now())).map(steve_types::Millis),
+                started_at: Some(steve_types::Millis(self.t0)),
+                at: Some(steve_types::Millis(now())),
             },
         ));
     }
+
     fn tool_running(&self, call: Option<u32>, name: &str, kind: &str, brief: &str) {
         let d = &self.drafts;
         if d.quiet {
@@ -428,53 +286,52 @@ impl ResearchSink for Sink<'_> {
         }
         d.core.store().store().publish(steve_types::LiveEvent::from(
             steve_types::WorkLiveEvent::SteveTool {
-                ws: {
-                    let value: String = d.ws.into();
-                    steve_types::WorkspaceId::from(value)
-                },
-                mid: {
-                    let value: String = d.mid.into();
-                    steve_types::MessageId::from(value)
-                },
-                run: {
-                    let value: String = self.run.into();
-                    steve_types::ThreadRunId::from(value)
-                },
+                ws: d.ws.to_owned().into(),
+                mid: d.mid.to_owned().into(),
+                run: self.run.to_owned(),
                 name: name.into(),
                 brief: brief.into(),
                 ok: true,
                 kind: kind.into(),
                 running: true,
-                call: call,
-                started_at: (Some(self.t0)).map(steve_types::Millis),
-                at: (Some(now())).map(steve_types::Millis),
+                call,
+                started_at: Some(steve_types::Millis(self.t0)),
+                at: Some(steve_types::Millis(now())),
             },
         ));
     }
 }
 
 impl Core {
-    /// The research run a follow-up `mid` continues: the latest finished run, at most
-    /// [`RESUME_WINDOW`] old, whose answer is the last Steve message before `mid`.
-    pub(crate) fn resume_for(&self, ws: &str, mid: &str) -> Result<Option<ResumeFrom>> {
-        let th = self.store().store().thread();
-        let Some(r) = th.run_last_done(ws)? else {
+    /// Per-space isolated `--resume` lookup: only resumes a recent `answered` receipt from the
+    /// exact same `(ws, space)` whose reply is the last visible Steve message before `mid`.
+    pub(crate) fn resume_for(
+        &self,
+        ws: &str,
+        space: &str,
+        mid: &str,
+    ) -> Result<Option<ResumeFrom>> {
+        let Some(r) = self
+            .store()
+            .store()
+            .read(|rd| thread::last_resumable_receipt(rd, ws, space))?
+        else {
             return Ok(None);
         };
-        let (Some(session), Some(model), Some(reply)) = (&r.session, &r.model, &r.reply_id) else {
+        let (Some(session), Some(model), Some(reply)) =
+            (&r.harness_session, &r.answer_model, &r.reply_message_id)
+        else {
             return Ok(None);
         };
-        if r.ended.is_none_or(|t| now() - t > RESUME_WINDOW) {
+        if now() - r.committed_at > RESUME_WINDOW {
             return Ok(None);
         }
-        let msgs = self.conv_messages(ws, &self.conv_of(mid))?;
+        let msgs = self.conv_messages(ws, space)?;
         let at = msgs.iter().position(|m| m.id == mid).unwrap_or(msgs.len());
         let last_steve = msgs[..at]
             .iter()
             .rev()
             .find(|m| m.author == "steve" && !super::hidden(m));
-        // when the session cannot be continued the run starts over, with this answer among its
-        // recent messages
         Ok(match last_steve {
             Some(m) if &m.id == reply => Some(ResumeFrom {
                 run: r.id.clone(),
@@ -486,488 +343,170 @@ impl Core {
         })
     }
 
-    /// Whether a research run is reading in this workspace right now.
-    pub(crate) fn researching(&self, ws: &str) -> bool {
-        lock(&self.0.thread.inline).get(ws).is_some_and(|l| {
-            lock(&l.st)
-                .running
-                .as_ref()
-                .is_some_and(|a| a.kind == Inline::Research)
-        })
-    }
-
-    /// The messages the main conversation's answers and research runs are for: the running one first,
-    /// then those waiting.
-    pub(crate) fn inline_questions(&self, ws: &str) -> Vec<String> {
-        lock(&self.0.thread.inline)
-            .get(ws)
-            .map(|l| {
-                let st = lock(&l.st);
-                st.running
-                    .iter()
-                    .chain(st.waiting.iter())
-                    .map(|a| a.question.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Whether the main conversation has an answer or research running or waiting.
-    pub(crate) fn inline_busy(&self, ws: &str) -> bool {
-        lock(&self.0.thread.inline).get(ws).is_some_and(|l| {
-            let st = lock(&l.st);
-            st.running.is_some() || !st.waiting.is_empty()
-        })
-    }
-
-    /// Stop the main conversation's turn: its answer or research, and `routing`, the message being
-    /// routed. False with nothing to stop. Queueing and the lane's worker wait while this decides, so
-    /// one stop note is written, and before anything that waited on the turn goes on:
-    /// - a running answer ends with its partial text and says so itself;
-    /// - one its lane has not started (queued a moment ago, or new work is held for maintenance) is
-    ///   taken off the queue here, and its run ends;
-    /// - a message still being routed is stopped once the note is written, and what it would queue
-    ///   from then on is not queued ([`Core::enqueue_inline`]).
-    pub(crate) fn stop_turn(&self, ws: &str, routing: Option<&super::Stop>) -> Result<bool> {
-        let lanes = lock(&self.0.thread.inline);
-        let lane = lanes.get(ws);
-        let mut st = lane.map(|l| lock(&l.st));
-        let (says_so, taken, origin) = match st.as_deref_mut() {
-            Some(LaneState {
-                running: Some(a), ..
-            }) => {
-                a.stop.stop();
-                (true, false, None)
-            }
-            Some(q) if !q.waiting.is_empty() => {
-                let a = q.waiting.remove(0);
-                a.stop.stop();
-                if let Some(run) = &a.run {
-                    self.end_unstarted(ws, run)?;
-                }
-                (false, true, Some(a.origin))
-            }
-            _ if routing.is_none() => return Ok(false),
-            _ => (false, false, routing.and_then(|f| f.origin.clone())),
-        };
-        if !says_so {
-            self.post(
-                ws,
-                super::MAIN,
-                "好，停下了。要我换个方式就直接说。",
-                None,
-                Some(&json!({"origin": origin, "stopped": true, SYSTEM: true})),
-            )?;
-        }
-        if let Some(f) = routing {
-            f.stop();
-        }
-        drop(st);
-        if let (true, Some(l)) = (taken, lane) {
-            l.idle.notify_waiters();
-        }
-        Ok(true)
-    }
-
-    /// A run stopped before its lane started it ends `stopped`, and its message no longer says
-    /// “排队中”. Nothing to do when it ended already.
-    pub(crate) fn end_unstarted(&self, ws: &str, run: &str) -> Result<()> {
-        self.store().store().write(|w| {
-            let Some(r) = thread_runs::get(w, run)?.filter(|r| r.status == "queued") else {
-                return Ok(());
-            };
-            thread_runs::patch(
-                w,
-                run,
-                &RunPatch {
-                    status: Some("stopped".into()),
-                    ended: Some(now()),
-                    ..Default::default()
-                },
-            )?;
-            self.unmark_queued(&r.message_id)?;
-            run_changed(w, ws, run);
-            Ok(())
-        })
-    }
-
-    /// Stop one research run: the running one ends with its partial answer, a queued one is taken off
-    /// the queue (`stopped`). False when it is not active.
-    pub fn stop_run(&self, ws: &str, run: &str) -> Result<bool> {
-        let found = {
-            let lanes = lock(&self.0.thread.inline);
-            let prefix = format!("{ws}\u{1f}");
-            lanes
-                .iter()
-                .filter(|(k, _)| k.as_str() == ws || k.starts_with(&prefix))
-                .find_map(|(_, l)| {
-                    let st = lock(&l.st);
-                    st.running
-                        .iter()
-                        .chain(st.waiting.iter())
-                        .find(|a| a.run.as_deref() == Some(run) && !a.stop.is_stopped())
-                        .map(|a| {
-                            // Claim the stop under the lanes lock; repeated stop requests must not
-                            // write another queued stop receipt.
-                            a.stop.stop();
-                            (
-                                a.origin.clone(),
-                                st.running
-                                    .as_ref()
-                                    .is_some_and(|r| r.run.as_deref() == Some(run)),
-                            )
-                        })
-                })
-        };
-        let Some((origin, running)) = found else {
-            return Ok(false);
-        };
-        if !running {
-            self.end_unstarted(ws, run)?;
-            self.post(
-                ws,
-                &self.conv_of(&origin),
-                "好，停下了。要我换个方式就直接说。",
-                None,
-                Some(&json!({"origin": origin, "run": run, "stopped": true, SYSTEM: true})),
-            )?;
-        }
-        Ok(true)
-    }
-
-    /// Queue an answer or research run; `false` when the queue is full (the caller says so).
-    pub(crate) fn enqueue_inline(&self, ws: &str, mut job: InlineJob) -> Result<bool> {
-        /* held to the end: the job is sent under the map's lock, and an idle lane only goes under it */
-        let mut lanes = lock(&self.0.thread.inline);
-        if job.stop.is_stopped() {
-            /* stopped while it was being routed, and told so already: there is nothing to answer */
-            return Ok(true);
-        }
-        let key = lane_key(ws, &job.space);
-        if lanes.get(&key).is_some_and(|l| l.tx.is_closed()) {
-            /* its worker is gone: a new lane takes over, so the conversation is not stuck */
-            tracing::error!("inline lane of {ws} was gone; starting it again");
-            lanes.remove(&key);
-        }
-        let lane = lanes
-            .entry(key.clone())
-            .or_insert_with(|| self.inline_lane(ws, &key));
-        let queued = {
-            let mut st = lock(&lane.st);
-            let busy = st.running.is_some() || !st.waiting.is_empty();
-            if busy && st.waiting.len() >= MAX_WAITING && job.run.is_none() {
-                return Ok(false);
-            }
-            st.waiting.push(Active {
-                origin: job.origin.clone(),
-                run: None,
-                kind: job.kind,
-                stop: job.stop.clone(),
-                question: job.question.clone(),
-            });
-            busy
-        };
-        {
-            // All inline work is durable, including a short direct answer.
-            let r = self.store().store().write(|w| -> Result<_> {
-                let r = if let Some(id) = &job.run {
-                    thread_runs::patch(
-                        w,
-                        id,
-                        &RunPatch {
-                            status: Some("queued".into()),
-                            ..Default::default()
-                        },
-                    )?
-                    .ok_or_else(|| {
-                        crate::error::msg(steve_i18n::t!("core.thread.resume_missing"))
-                    })?
-                } else {
-                    thread_runs::add(
-                        w,
-                        &steve_store::NewThreadRun {
-                            workspace_id: ws.into(),
-                            message_id: job.origin.clone(),
-                            user_id: job.user.clone(),
-                            project_id: job.project.clone(),
-                            prev_run: job.resume.as_ref().map(|r| r.run.clone()),
-                            ..Default::default()
-                        },
-                    )?
-                };
-                run_changed(w, ws, &r.id);
-                Ok(r)
-            })?;
-            if let Some(a) = lock(&lane.st)
-                .waiting
-                .iter_mut()
-                .find(|a| a.stop.same(&job.stop))
-            {
-                a.run = Some(r.id.clone());
-            }
-            job.run = Some(r.id);
-        }
-        if queued {
-            self.mark_queued(&job.origin, job.run.as_deref())?;
-        }
-        if lane.tx.send(job).is_err() {
-            tracing::error!("inline lane of {ws} is gone");
-        }
-        Ok(true)
-    }
-
-    /// The `turn_done` signal of the main conversation's inline lane, if it has one.
-    pub(crate) fn inline_idle(&self, ws: &str) -> Option<Arc<tokio::sync::Notify>> {
-        lock(&self.0.thread.inline).get(ws).map(|l| l.idle.clone())
-    }
-
-    /// An inline lane `key` of workspace `ws`: one answer or research at a time, each on a task of its
-    /// own so a panic loses that one only. It goes after [`super::LANE_IDLE`] with nothing to do.
-    fn inline_lane(&self, ws: &str, key: &str) -> InlineLane {
-        let (tx, mut rx) = mpsc::unbounded_channel::<InlineJob>();
-        let st = Arc::new(Mutex::new(LaneState::default()));
-        let idle = Arc::new(tokio::sync::Notify::new());
-        let me = tx.downgrade();
-        let core = self.clone();
-        let (w, key) = (ws.to_string(), key.to_string());
-        let (s, done) = (st.clone(), idle.clone());
-        tokio::spawn(async move {
-            loop {
-                let j = match tokio::time::timeout(super::LANE_IDLE, rx.recv()).await {
-                    Ok(Some(j)) => j,
-                    Ok(None) => return,
-                    Err(_) => {
-                        let mut lanes = lock(&core.0.thread.inline);
-                        let busy = {
-                            let g = lock(&s);
-                            g.running.is_some() || !g.waiting.is_empty()
-                        };
-                        if busy || !rx.is_empty() {
-                            continue;
-                        }
-                        if me.upgrade().is_some_and(|me| {
-                            lanes.get(&key).is_some_and(|l| l.tx.same_channel(&me))
-                        }) {
-                            lanes.remove(&key);
-                        }
-                        return;
-                    }
-                };
-                let _activity = core.store().store().activity("thread_answer").await;
-                {
-                    let mut g = lock(&s);
-                    g.waiting.retain(|a| !a.stop.same(&j.stop));
-                    if j.stop.is_stopped() {
-                        drop(g);
-                        if let Some(run) = &j.run
-                            && let Err(e) = core.end_unstarted(&w, run)
-                        {
-                            tracing::error!("ending a run stopped before it started: {e}");
-                        }
-                        done.notify_waiters();
-                        continue;
-                    }
-                    g.running = Some(Active {
-                        origin: j.origin.clone(),
-                        run: j.run.clone(),
-                        kind: j.kind,
-                        stop: j.stop.clone(),
-                        question: j.question.clone(),
-                    });
-                }
-                let (c, w2) = (core.clone(), w.clone());
-                let run = tokio::spawn(async move {
-                    if let Err(e) = c.store().store().admitted(c.run_inline(&w2, &j)).await {
-                        tracing::error!("inline answer in {w2}: {e}");
-                        let _ = c.post(
-                            &w2,
-                            &j.space,
-                            &format!("（出错了：{}）", js_head(&e.to_string(), 120)),
-                            None,
-                            Some(&json!({"origin": j.origin, "error": true, SYSTEM: true})),
-                        );
-                    }
-                });
-                if let Err(e) = run.await {
-                    tracing::error!("inline answer in {w} failed: {e}");
-                }
-                lock(&s).running = None;
-                done.notify_waiters();
-            }
-        });
-        InlineLane { tx, st, idle }
-    }
-
-    /// The user message shows “排队中” while its answer waits.
-    fn mark_queued(&self, mid: &str, run: Option<&str>) -> Result<()> {
-        if let Some(m) = self.store().message(mid)? {
-            let mut meta = meta_of(&m);
-            meta.insert("queued".into(), json!({"run": run}));
-            self.store().message_patch_meta(mid, &Value::Object(meta))?;
-        }
-        Ok(())
-    }
-
-    fn unmark_queued(&self, mid: &str) -> Result<()> {
-        if let Some(m) = self.store().message(mid)?
-            && m.meta.get("queued").is_some()
-        {
-            let mut meta = meta_of(&m);
-            meta.remove("queued");
-            self.store().message_patch_meta(mid, &Value::Object(meta))?;
-        }
-        Ok(())
-    }
-
-    /// Answer or research one queued question and store the reply.
-    async fn run_inline(&self, ws: &str, j: &InlineJob) -> Result<()> {
-        self.unmark_queued(&j.origin)?;
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn execute_inline(
+        &self,
+        task: &ThreadTask,
+        lease: &str,
+        stop: &Stop,
+        conv: &Conv,
+        text: &str,
+        files: &[FileRef],
+        info: RouteInfo,
+        t0: i64,
+    ) -> Result<()> {
         let researcher = self.0.thread.researcher.get().cloned();
-        let r = match (j.kind, researcher) {
-            (Inline::Research, Some(r)) => self.research_now(ws, j, r).await,
-            _ => {
-                if let Some(id) = &j.run {
-                    self.store().store().write(|w| {
-                        thread_runs::patch(
-                            w,
-                            id,
-                            &RunPatch {
-                                status: Some("running".into()),
-                                started: Some(now()),
-                                ..Default::default()
-                            },
-                        )
-                    })?;
-                }
-                let answer = self.answer_now(ws, j).await;
-                if let Some(id) = &j.run {
-                    self.store().store().write(|w| {
-                        thread_runs::patch(
-                            w,
-                            id,
-                            &RunPatch {
-                                status: Some(
-                                    if j.stop.is_stopped() {
-                                        "stopped"
-                                    } else if answer.is_ok() {
-                                        "done"
-                                    } else {
-                                        "failed"
-                                    }
-                                    .into(),
-                                ),
-                                ended: Some(now()),
-                                ..Default::default()
-                            },
-                        )
-                    })?;
-                }
-                answer
+        let want_research = info.kind == "research";
+        match (want_research, researcher) {
+            (true, Some(r)) => {
+                self.research_now(task, lease, stop, text, files, info, r, t0)
+                    .await
             }
-        };
-        if j.space == super::MAIN {
-            self.store().store().publish(steve_types::LiveEvent::from(
-                steve_types::WorkLiveEvent::SteveThinking {
-                    on: false,
-                    ws: {
-                        let value: String = ws.into();
-                        value.into()
-                    },
-                    phase: None,
-                },
-            ));
+            _ => {
+                self.answer_now(task, lease, stop, conv, text, files, info, t0)
+                    .await
+            }
         }
-        r
     }
 
-    /// The reply's `meta` common to answers and research.
     fn inline_meta(
         &self,
         ws: &str,
-        j: &InlineJob,
+        task: &ThreadTask,
+        question: &str,
+        files: &[FileRef],
+        project: Option<&str>,
         offer: Option<&Offer>,
         steps: Value,
     ) -> Result<Value> {
         let mut m = serde_json::Map::new();
-        m.insert("chat".into(), json!(j.question));
-        if !j.files.is_empty() {
-            m.insert("chatFiles".into(), json!(j.files));
+        m.insert("chat".into(), json!(question));
+        if !files.is_empty() {
+            m.insert("chatFiles".into(), json!(files));
         }
-        m.insert("origin".into(), json!(j.origin));
-        if let Some(run) = &j.run {
-            m.insert("run".into(), json!(run));
-            m.insert("run_receipt".into(), json!(true));
-        }
-        if let Some(r) = &j.reply_to {
+        m.insert("origin".into(), json!(task.origin_message_id));
+        m.insert("run".into(), json!(task.id));
+        m.insert("run_receipt".into(), json!(true));
+        if let Some(ref r) = task.reply_to_message_id {
             m.insert("reply_to".into(), json!(r));
         }
         if let Some(o) = offer {
-            m.insert(
-                "offer".into(),
-                self.offer_meta(ws, o, j.project.as_deref())?,
-            );
+            m.insert("offer".into(), self.offer_meta(ws, o, project)?);
         }
         m.insert("steps".into(), steps);
         Ok(Value::Object(m))
     }
 
-    /// Store an inline reply and tie it to its question, the routing and the message it continues.
-    fn inline_reply(&self, ws: &str, j: &InlineJob, text: &str, meta: &Value) -> Result<String> {
-        let id = self
-            .store()
-            .message_add_in(ws, &j.space, "steve", text, None, meta)?;
+    fn after_inline_commit(
+        &self,
+        ws: &str,
+        task: &ThreadTask,
+        reply_id: &str,
+        meta: &Value,
+    ) -> Result<()> {
         if meta.get("offer").is_some() {
-            self.fold_offers(ws, &id)?;
+            self.fold_offers(ws, reply_id)?;
         }
-        let th = self.store().store().thread();
-        // Both short answers and research name their persisted final receipt. Attention assigns
-        // commit order only when this run subsequently ends with a persisted final receipt, never to draft tokens.
-        if let Some(run) = &j.run {
-            self.store().store().write(|w| {
-                thread_runs::patch(
-                    w,
-                    run,
-                    &RunPatch {
-                        reply_id: Some(id.clone()),
-                        ..Default::default()
-                    },
-                )
-            })?;
-        }
-        if th
-            .route_of(&j.origin)?
-            .is_some_and(|r| r.reply_id.is_none())
-        {
-            th.route_reply(&j.origin, &id, None)?;
-        }
-        if let Some(to) = &j.reply_to
+        if let Some(ref to) = task.reply_to_message_id
             && let Some(m) = self.store().message(to)?
         {
-            let mut meta = meta_of(&m);
-            meta.insert("answer".into(), json!(id));
-            self.store().message_patch_meta(to, &Value::Object(meta))?;
+            let mut mmeta = meta_of(&m);
+            mmeta.insert("answer".into(), json!(reply_id));
+            self.store().message_patch_meta(to, &Value::Object(mmeta))?;
         }
-        self.said(ws, &j.space, &id);
-        Ok(id)
+        self.said(ws, &task.space, reply_id);
+        Ok(())
     }
 
-    async fn answer_now(&self, ws: &str, j: &InlineJob) -> Result<()> {
-        if j.space != super::MAIN
+    #[allow(clippy::too_many_arguments)]
+    async fn answer_now(
+        &self,
+        task: &ThreadTask,
+        lease: &str,
+        stop: &Stop,
+        conv: &Conv,
+        text: &str,
+        files: &[FileRef],
+        info: RouteInfo,
+        t0: i64,
+    ) -> Result<()> {
+        let ws = &task.workspace_id;
+        let space = &task.space;
+        let mid = &task.origin_message_id;
+
+        // Capability preflight for hands-on spaces before any tool-less answer call (0 wasted probes).
+        if conv.hands_on && decide::needs_machine_tools(text) {
+            let steps = Mutex::new(Steps {
+                route: info.step_json.clone(),
+                ..Default::default()
+            });
+            if conv.items {
+                return self
+                    .preflight_hands_on_item(task, lease, conv, text, files, &info, &steps, t0);
+            }
+            let reply_text = if space == super::MAIN {
+                handoff::NEEDS_TOOLS_ANSWER
+            } else {
+                handoff::NEEDS_TOOLS_HERE
+            };
+            let mut meta = self.inline_meta(
+                ws,
+                task,
+                text,
+                files,
+                info.project.as_deref(),
+                info.offer.as_ref(),
+                lock(&steps).json(now() - t0),
+            )?;
+            meta["error"] = json!(true);
+            meta[SYSTEM] = json!(true);
+            let committed = self.commit_inline_reply(
+                task,
+                lease,
+                false,
+                "failed",
+                reply_text,
+                meta.clone(),
+                &info,
+                None,
+                None,
+                None,
+                0,
+                0,
+                None,
+                Some("needs_tools"),
+            )?;
+            if let CommitOutcome::Committed {
+                reply_message_id: Some(ref id),
+                ..
+            } = committed
+            {
+                self.after_inline_commit(ws, task, id, &meta)?;
+            }
+            return Ok(());
+        }
+
+        lock(&self.0.thread.running_phase).insert((ws.clone(), space.clone()), "answer");
+
+        if space != super::MAIN
             && let Some(host) = self.conv_host()
         {
-            return self.guest_answer(ws, j, host).await;
+            return self
+                .guest_answer(task, lease, stop, text, files, info, host, t0)
+                .await;
         }
+
         let db = self.store();
         let main = db.main_bot()?;
-        let history = self.history_before(ws, &j.origin)?;
-        let cf = self.chat_files(&j.files, &j.earlier);
+        let history = self.history_before(ws, mid)?;
+        let earlier = self.earlier_files(ws, space, mid, files, None)?;
+        let cf = self.chat_files(files, &earlier);
         self.phase(ws, "answer");
         let a0 = now();
-        let cx = self.chat_context(ws, j.user.as_deref(), &j.question);
+        let cx = self.chat_context(ws, task.user_id.as_deref(), text);
         let extra = cx.as_ref().map(|(_, c)| c.text.as_str()).unwrap_or("");
-        let drafts = Drafts::new(self, ws, &j.origin, &j.stop, false);
+        let drafts = Drafts::new(self, ws, mid, stop, false);
         let on_draft = |thought: &str, t: &str| drafts.send(thought, t);
-        /* a stop ends the call right away (its harness is killed), not after the whole answer is written */
         let a = tokio::select! {
             a = crate::stats::tagged(
                 "chat",
@@ -975,91 +514,193 @@ impl Core {
                 gateway::answer(
                     self.gw(),
                     &main,
-                    &j.question,
+                    text,
                     &history,
                     &cf,
                     extra,
                     &on_draft,
                 ),
             ) => Some(a),
-            _ = j.stop.stopped() => None,
+            _ = stop.stopped() => None,
         };
         lock(&drafts.state).closed = true;
-        let Some(a) = a.filter(|_| !j.stop.is_stopped()) else {
-            /* what was written so far stays, marked as stopped */
+        let Some(a) = a.filter(|_| !stop.is_stopped()) else {
             let partial = lock(&drafts.state).text.trim().to_string();
-            let text = if partial.is_empty() {
+            let reply_text = if partial.is_empty() {
                 "好，停下了。要我换个方式就直接说。".to_string()
             } else {
                 format!("{partial}\n\n（已停下）")
             };
-            /* steps of their own shape (a tool list, the time taken): the web reads them on every reply */
-            let mut meta =
-                self.inline_meta(ws, j, None, json!({"tools": [], "ms": now() - j.t0}))?;
+            let mut meta = self.inline_meta(
+                ws,
+                task,
+                text,
+                files,
+                info.project.as_deref(),
+                None,
+                json!({"tools": [], "ms": now() - t0}),
+            )?;
             meta["stopped"] = json!(true);
             meta[SYSTEM] = json!(true);
-            self.inline_reply(ws, j, &text, &meta)?;
+            let committed = self.commit_inline_reply(
+                task,
+                lease,
+                true,
+                "stopped",
+                &reply_text,
+                meta.clone(),
+                &info,
+                None,
+                None,
+                None,
+                0,
+                0,
+                None,
+                None,
+            )?;
+            if let CommitOutcome::Committed {
+                reply_message_id: Some(ref id),
+                ..
+            } = committed
+            {
+                self.after_inline_commit(ws, task, id, &meta)?;
+            }
             return Ok(());
         };
-        /* the question needs tools the answer does not have: an item does it, or the reply says why not */
-        let text = if a.needs_tools {
-            match self.needs_tools(ws, j).await {
-                None => return Ok(()),
-                Some(why) => why,
+
+        let reply_text = if a.needs_tools {
+            if space == super::MAIN {
+                handoff::NEEDS_TOOLS_ANSWER.to_string()
+            } else {
+                handoff::NEEDS_TOOLS_HERE.to_string()
             }
         } else {
             a.text.clone()
         };
         let steps = Steps {
-            route: j.route.clone(),
+            route: info.step_json.clone(),
             answer: Some(
                 json!({"thought": a.thought, "model": a.model, "ms": now() - a0, "failed": a.failed}),
             ),
             ..Default::default()
         };
-        let offer = a.offer.clone().or_else(|| j.offer.clone());
-        let mut meta = self.inline_meta(ws, j, offer.as_ref(), steps.json(now() - j.t0))?;
-        if a.failed {
+        let offer = if a.failed {
+            None
+        } else {
+            a.offer.clone().or_else(|| info.offer.clone())
+        };
+        let mut meta = self.inline_meta(
+            ws,
+            task,
+            text,
+            files,
+            info.project.as_deref(),
+            offer.as_ref(),
+            steps.json(now() - t0),
+        )?;
+        let is_err = a.failed || a.needs_tools;
+        if is_err {
             meta["error"] = json!(true);
         }
-        let id = self.inline_reply(ws, j, &text, &meta)?;
-        if let Some((provider, c)) = &cx
-            && !a.failed
-            && let Err(e) = self.chat_done(ws, *provider, c, &id, &a.text)
+        let outcome = if is_err { "failed" } else { "answered" };
+        let committed = self.commit_inline_reply(
+            task,
+            lease,
+            false,
+            outcome,
+            &reply_text,
+            meta.clone(),
+            &info,
+            a.model.as_deref(),
+            None,
+            None,
+            0,
+            1,
+            None,
+            if a.needs_tools {
+                Some("needs_tools")
+            } else {
+                a.failed.then_some("answer_failed")
+            },
+        )?;
+        if let CommitOutcome::Committed {
+            reply_message_id: Some(ref id),
+            ..
+        } = committed
         {
-            tracing::error!("chat context of {id}: {e}");
+            self.after_inline_commit(ws, task, id, &meta)?;
+            if let Some((provider, c)) = &cx
+                && !a.failed
+                && let Err(e) = self.chat_done(ws, *provider, c, id, &a.text)
+            {
+                tracing::error!("chat context of {id}: {e}");
+            }
         }
         Ok(())
     }
 
-    /// A guest conversation's inline answer: the host composes it in the voice of the place it goes
-    /// to (an IM space: persona, safety rules, knowledge by disclosure level).
+    #[allow(clippy::too_many_arguments)]
     async fn guest_answer(
         &self,
-        ws: &str,
-        j: &InlineJob,
+        task: &ThreadTask,
+        lease: &str,
+        stop: &Stop,
+        text: &str,
+        files: &[FileRef],
+        info: RouteInfo,
         host: Arc<dyn super::ConvHost>,
+        t0: i64,
     ) -> Result<()> {
+        let ws = &task.workspace_id;
+        let space = &task.space;
+        let mid = &task.origin_message_id;
         let a0 = now();
-        let r = host.answer(ws, &j.space, &j.origin).await;
-        if j.stop.is_stopped() {
-            self.post(
+        // Race host.answer against stop so guest cancellation unblocks promptly.
+        let r = tokio::select! {
+            r = host.answer(ws, space, mid) => Some(r),
+            _ = stop.stopped() => None,
+        };
+        let Some(r) = r.filter(|_| !stop.is_stopped()) else {
+            let mut meta = self.inline_meta(
                 ws,
-                &j.space,
-                "好，停下了。要我换个方式就直接说。",
+                task,
+                text,
+                files,
+                info.project.as_deref(),
                 None,
-                Some(&json!({"origin": j.origin, "stopped": true, SYSTEM: true})),
+                json!({"tools": [], "ms": now() - t0}),
             )?;
+            meta["stopped"] = json!(true);
+            meta[SYSTEM] = json!(true);
+            let committed = self.commit_inline_reply(
+                task,
+                lease,
+                true,
+                "stopped",
+                "好，停下了。要我换个方式就直接说。",
+                meta.clone(),
+                &info,
+                Some("channel"),
+                None,
+                None,
+                0,
+                0,
+                None,
+                None,
+            )?;
+            if let CommitOutcome::Committed {
+                reply_message_id: Some(ref id),
+                ..
+            } = committed
+            {
+                self.after_inline_commit(ws, task, id, &meta)?;
+            }
             return Ok(());
-        }
-        let (text, failed) = match r {
+        };
+        let (reply_text, failed) = match r {
             Ok(t) if !t.trim().is_empty() => (t, false),
             Ok(_) => (format!("（没能生成回答。{FIX_MODEL}）"), true),
-            /* the question needs tools the answer does not have: an item does it, or the reply says why not */
-            Err(e) if e.can_handoff() => match self.needs_tools(ws, j).await {
-                None => return Ok(()),
-                Some(why) => (why, true),
-            },
+            Err(e) if e.can_handoff() => (handoff::NEEDS_TOOLS_HERE.to_string(), true),
             Err(e) => (
                 format!(
                     "（没能生成回答：{}。{FIX_MODEL}）",
@@ -1069,71 +710,87 @@ impl Core {
             ),
         };
         let steps = Steps {
-            route: j.route.clone(),
+            route: info.step_json.clone(),
             answer: Some(json!({"model": "channel", "ms": now() - a0, "failed": failed})),
             ..Default::default()
         };
-        let mut meta = self.inline_meta(ws, j, j.offer.as_ref(), steps.json(now() - j.t0))?;
+        let mut meta = self.inline_meta(
+            ws,
+            task,
+            text,
+            files,
+            info.project.as_deref(),
+            if failed { None } else { info.offer.as_ref() },
+            steps.json(now() - t0),
+        )?;
         if failed {
             meta["error"] = json!(true);
             meta[SYSTEM] = json!(true);
         }
-        self.inline_reply(ws, j, &text, &meta)?;
+        let outcome = if failed { "failed" } else { "answered" };
+        let committed = self.commit_inline_reply(
+            task,
+            lease,
+            false,
+            outcome,
+            &reply_text,
+            meta.clone(),
+            &info,
+            Some("channel"),
+            None,
+            None,
+            0,
+            1,
+            None,
+            failed.then_some("guest_answer_failed"),
+        )?;
+        if let CommitOutcome::Committed {
+            reply_message_id: Some(ref id),
+            ..
+        } = committed
+        {
+            self.after_inline_commit(ws, task, id, &meta)?;
+        }
         Ok(())
     }
 
-    /// The answer to `j` needed tools: handed to an item where `j` hands it on (`None`, its announcement is the reply), or
-    /// the words that say why not.
-    async fn needs_tools(&self, ws: &str, j: &InlineJob) -> Option<String> {
-        if j.to_item.is_none() {
-            return Some(
-                if j.space == super::MAIN {
-                    super::handoff::NEEDS_TOOLS_ANSWER
-                } else {
-                    super::handoff::NEEDS_TOOLS_HERE
-                }
-                .to_string(),
-            );
-        }
-        match self.hand_off(ws, j).await {
-            Ok(Some(_)) => None,
-            // already an item (made meanwhile): its announcement said so
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(
-                    origin = j.origin,
-                    "hand-off of a question that needs tools: {e}"
-                );
-                Some(super::handoff::not_handed_off(&e.to_string()))
-            }
-        }
-    }
-
-    async fn research_now(&self, ws: &str, j: &InlineJob, r: Arc<dyn Researcher>) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    async fn research_now(
+        &self,
+        task: &ThreadTask,
+        lease: &str,
+        stop: &Stop,
+        text: &str,
+        files: &[FileRef],
+        info: RouteInfo,
+        r: Arc<dyn Researcher>,
+        t0: i64,
+    ) -> Result<()> {
         let db = self.store();
-        let run = j.run.clone().unwrap_or_default();
+        let ws = &task.workspace_id;
+        let space = &task.space;
+        let mid = &task.origin_message_id;
+        let run = task.id.clone();
         let started = now();
         let token = crate::util::token();
-        db.store().write(|w| -> Result<()> {
-            thread_runs::patch(
+        let token_ok = db.store().write(|w| {
+            thread::set_task_token(
                 w,
                 &run,
-                &RunPatch {
-                    status: Some("running".into()),
-                    started: Some(started),
-                    token_hash: Some(Some(crate::util::sha(&token))),
-                    ..Default::default()
-                },
-            )?;
-            run_changed(w, ws, &run);
-            Ok(())
+                lease,
+                task.generation,
+                Some(&crate::util::sha(&token)),
+            )
         })?;
-        if j.space == super::MAIN {
+        if !token_ok {
+            return Ok(());
+        }
+        lock(&self.0.thread.running_phase).insert((ws.clone(), space.clone()), "research");
+        if space == super::MAIN {
             self.phase(ws, "research");
         }
-        /* where anyone besides the owner reads the answer, the run gets no project directory and no one's
-         * personal view: what it may say there it finds through its tools, which check every call */
-        let own = own_reader(db, &j.space, &j.origin)?;
+
+        let own = own_reader(db, space, mid)?;
         let projects: Vec<Project> = if own {
             db.projects(ws)?
                 .into_iter()
@@ -1143,9 +800,10 @@ impl Core {
             vec![]
         };
         let repo = self.config().steve_repo.clone();
-        let project = j
+        let project = info
             .project
             .as_deref()
+            .or(task.project_id.as_deref())
             .and_then(|id| projects.iter().find(|p| p.id == id))
             .or_else(|| {
                 projects.iter().find(|p| {
@@ -1153,10 +811,9 @@ impl Core {
                 })
             })
             .cloned();
-        let cx = self.chat_context(ws, j.user.as_deref().filter(|_| own), &j.question);
-        /* a chat's research knows who hears its answer */
-        let guest_frame = match (j.space != super::MAIN, self.conv_host()) {
-            (true, Some(h)) => h.research_context(ws, &j.space, &j.origin),
+        let cx = self.chat_context(ws, task.user_id.as_deref().filter(|_| own), text);
+        let guest_frame = match (space != super::MAIN, self.conv_host()) {
+            (true, Some(h)) => h.research_context(ws, space, mid),
             _ => String::new(),
         };
         let context = cx.as_ref().map(|(_, c)| c.text.clone()).unwrap_or_default();
@@ -1165,10 +822,9 @@ impl Core {
         } else {
             format!("{guest_frame}\n\n{context}")
         };
-        let history = self.history_before(ws, &j.origin)?;
-        /* items are read up front only where the owner alone reads the answer; a shared chat asks the tool */
+        let history = self.history_before(ws, mid)?;
         let named = if own {
-            mentioned_items(db, ws, &j.question, &history)?
+            mentioned_items(db, ws, text, &history)?
         } else {
             String::new()
         };
@@ -1178,31 +834,34 @@ impl Core {
             format!("{context}\n\n{named}")
         };
         let models = self.models().for_purpose(ws, "research");
-        let full = own && asked_by_owner(db, j.user.as_deref());
+        let resume = self
+            .resume_for(ws, space, mid)?
+            .filter(|res| res.harness.eq(&models.harness));
+        let earlier = self.earlier_files(ws, space, mid, files, resume.as_ref())?;
+        let full = own && asked_by_owner(db, task.user_id.as_deref());
         let req = ResearchRequest {
             run: run.clone(),
-            ws: ws.into(),
-            mid: j.origin.clone(),
-            user: j.user.clone(),
-            question: j.question.clone(),
+            ws: ws.clone(),
+            mid: mid.clone(),
+            user: task.user_id.clone(),
+            question: text.to_string(),
             history,
             main: db.main_bot()?,
             context,
             project,
             readable: projects,
-            files: j.files.clone(),
-            earlier_files: j.earlier.clone(),
-            // a session continues only on the adapter it belongs to
-            resume: j.resume.clone().filter(|r| r.harness.eq(&models.harness)),
-            stop: j.stop.flag(),
+            files: files.to_vec(),
+            earlier_files: earlier,
+            resume,
+            stop: stop.flag(),
             mcp: Some(crate::McpEndpoint {
                 url: format!("http://127.0.0.1:{}/mcp", self.config().port),
                 token,
             }),
             models: models.clone(),
-            ui: j.space == super::MAIN,
+            ui: space == super::MAIN,
             full,
-            brief: if full && j.space == super::MAIN && self.meeting(ws)? {
+            brief: if full && space == super::MAIN && self.meeting(ws)? {
                 super::onboard::BRIEF.trim().to_string()
             } else {
                 String::new()
@@ -1210,11 +869,11 @@ impl Core {
         };
         let harness = models.harness.clone();
         let steps = Mutex::new(Steps {
-            route: j.route.clone(),
+            route: info.step_json.clone(),
             ..Default::default()
         });
         let sink = Sink {
-            drafts: Drafts::new(self, ws, &j.origin, &j.stop, j.space != super::MAIN),
+            drafts: Drafts::new(self, ws, mid, stop, space != super::MAIN),
             run: &run,
             steps: &steps,
             t0: started,
@@ -1222,30 +881,43 @@ impl Core {
         };
         let mut out = r.research(req, &sink).await;
         lock(&sink.drafts.state).closed = true;
-        if j.stop.is_stopped() && out.end == RunEnd::Done {
+        // Clear MCP token immediately after research finishes.
+        let _ = db
+            .store()
+            .write(|w| thread::set_task_token(w, &run, lease, task.generation, None));
+
+        if stop.is_stopped() && out.end == RunEnd::Done {
             out.end = RunEnd::Stopped;
         }
         let tools = lock(&steps).tools.len() as i64;
-        let mut text = out.text.trim().to_string();
-        if out.end == RunEnd::Failed && text.is_empty() {
-            text = format!(
-                "（没查完：{}）",
-                js_head(out.error.as_deref().unwrap_or("研究失败"), 80)
-            );
+        let mut reply_text = out.text.trim().to_string();
+        if out.end == RunEnd::Failed {
+            if reply_text.is_empty() {
+                reply_text = format!(
+                    "（没查完：{}）",
+                    js_head(out.error.as_deref().unwrap_or("研究失败"), 80)
+                );
+            } else {
+                reply_text = format!("{reply_text}\n\n（研究中断，结果不完整）");
+            }
         }
-        /* the executor may have marked the end already */
-        if let Some(n) = out.end.note().filter(|n| !text.ends_with(n)) {
-            text = if text.is_empty() {
+        if let Some(n) = out.end.note().filter(|n| !reply_text.ends_with(n)) {
+            reply_text = if reply_text.is_empty() {
                 n.to_string()
             } else {
-                format!("{text}\n\n{n}")
+                format!("{reply_text}\n\n{n}")
             };
         }
-        let mut offer = out.offer.clone().or_else(|| j.offer.clone());
+        // Stopped runs NEVER attach a late offer.
+        let mut offer = if stop.is_stopped() || out.end == RunEnd::Stopped {
+            None
+        } else {
+            out.offer.clone().or_else(|| info.offer.clone())
+        };
         if out.end == RunEnd::Budget && offer.is_none() {
             offer = Some(Offer {
-                title: js_head(&format!("继续深入：{}", j.question), 24).to_string(),
-                goal: j.question.clone(),
+                title: js_head(&format!("继续深入：{text}"), 24).to_string(),
+                goal: text.to_string(),
             });
         }
         let first = (*lock(&sink.first_text)).or(out.first_text_ms);
@@ -1266,23 +938,21 @@ impl Core {
             }
             s.research = Some(research);
         }
-        // Research uses tools, not the host's inline answer. Hand a completed result back to the
-        // host explicitly; otherwise owner-voice channels have no classified reply to deliver.
-        // Incomplete results and preparation errors stay readable but may never be sent raw.
-        let raw = text.clone();
+
+        let raw = reply_text.clone();
         let mut host_reply = None;
-        if j.space != super::MAIN {
-            if out.end == RunEnd::Done && !text.is_empty() && !j.stop.is_stopped() {
+        if space != super::MAIN {
+            if out.end == RunEnd::Done && !reply_text.is_empty() && !stop.is_stopped() {
                 let prepared = match self.conv_host() {
                     Some(host) => tokio::select! {
-                        r = host.research_answer(ws, &j.space, &j.origin, &raw) => r,
-                        _ = j.stop.stopped() => Err("已停止，研究结果未进入发送流程".into()),
+                        res = host.research_answer(ws, space, mid, &raw) => res,
+                        _ = stop.stopped() => Err("已停止，研究结果未进入发送流程".into()),
                     },
                     None => Err("对话渠道不可用，未核验研究结果的发送资格".into()),
                 };
                 match prepared {
-                    Ok(t) if !t.trim().is_empty() && !j.stop.is_stopped() => {
-                        text = t;
+                    Ok(t) if !t.trim().is_empty() && !stop.is_stopped() => {
+                        reply_text = t;
                         host_reply = Some(json!({"status": "prepared"}));
                     }
                     other => {
@@ -1304,10 +974,11 @@ impl Core {
                 host_reply = Some(json!({"status": "ineligible", "reason": why}));
             }
         }
-        if j.stop.is_stopped() && out.end == RunEnd::Done {
+        if stop.is_stopped() && out.end == RunEnd::Done {
             out.end = RunEnd::Stopped;
-            text = format!("{raw}\n\n（已停下）");
-            if j.space != super::MAIN {
+            offer = None;
+            reply_text = format!("{raw}\n\n（已停下）");
+            if space != super::MAIN {
                 host_reply = Some(
                     json!({"status": "ineligible", "reason": "已停止，研究结果未进入发送流程"}),
                 );
@@ -1316,48 +987,120 @@ impl Core {
                 research["stopped"] = json!("user");
             }
         }
-        let mut meta = self.inline_meta(ws, j, offer.as_ref(), lock(&steps).json(now() - j.t0))?;
+
+        let mut meta = self.inline_meta(
+            ws,
+            task,
+            text,
+            files,
+            info.project.as_deref(),
+            offer.as_ref(),
+            lock(&steps).json(now() - t0),
+        )?;
+        if out.end == RunEnd::Stopped {
+            meta["stopped"] = json!(true);
+        }
+        if out.end == RunEnd::Failed {
+            meta["error"] = json!(true);
+        }
         if let Some(h) = host_reply {
             meta["host_reply"] = h;
-            // Keep the evidence even if composing changes the wording or asks the owner instead.
             meta["research_result"] = json!(raw);
         }
-        let id = self.inline_reply(ws, j, &text, &meta)?;
-        db.store().write(|w| -> Result<()> {
-            thread_runs::patch(
-                w,
-                &run,
-                &RunPatch {
-                    status: Some(out.end.status().into()),
-                    reply_id: Some(id.clone()),
-                    model: out.model.clone(),
-                    session: out.session.clone(),
-                    harness: out.session.as_ref().map(|_| harness.clone()),
-                    token_hash: Some(None),
-                    tools: Some(tools),
-                    turns: Some(out.turns),
-                    first_text_ms: first,
-                    error: out.error.clone(),
-                    ended: Some(now()),
-                    ..Default::default()
-                },
-            )?;
-            run_changed(w, ws, &run);
-            Ok(())
-        })?;
-        if let Some((provider, c)) = &cx
-            && out.end == RunEnd::Done
-            && let Err(e) = self.chat_done(ws, *provider, c, &id, &text)
+
+        let committed = self.commit_inline_reply(
+            task,
+            lease,
+            out.end == RunEnd::Stopped,
+            out.end.outcome(),
+            &reply_text,
+            meta.clone(),
+            &info,
+            out.model.as_deref(),
+            out.session.as_ref().map(|_| harness.as_str()),
+            out.session.as_deref(),
+            tools,
+            out.turns,
+            first,
+            out.error.as_deref(),
+        )?;
+        if let CommitOutcome::Committed {
+            reply_message_id: Some(ref id),
+            ..
+        } = committed
         {
-            tracing::error!("chat context of {id}: {e}");
+            self.after_inline_commit(ws, task, id, &meta)?;
+            if let Some((provider, c)) = &cx
+                && out.end == RunEnd::Done
+                && let Err(e) = self.chat_done(ws, *provider, c, id, &reply_text)
+            {
+                tracing::error!("chat context of {id}: {e}");
+            }
         }
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_inline_reply(
+        &self,
+        task: &ThreadTask,
+        lease: &str,
+        allow_cancelled_stop: bool,
+        outcome: &str,
+        reply_text: &str,
+        reply_meta: Value,
+        info: &RouteInfo,
+        answer_model: Option<&str>,
+        harness: Option<&str>,
+        harness_session: Option<&str>,
+        tools: i64,
+        turns: i64,
+        first_text_ms: Option<i64>,
+        error_detail: Option<&str>,
+    ) -> Result<CommitOutcome> {
+        Ok(self.store().store().write(|w| {
+            thread::commit_reply(
+                w,
+                &CommitReplyInput {
+                    task_id: &task.id,
+                    lease_token: lease,
+                    expected_generation: task.generation,
+                    allow_cancelled_stop,
+                    outcome,
+                    reply_text: Some(reply_text),
+                    existing_reply_id: None,
+                    reply_item_id: None,
+                    reply_meta: &reply_meta,
+                    error_code: (outcome == "failed").then_some("inline_failed"),
+                    route_kind: &info.kind,
+                    model_kind: &info.model_kind,
+                    route_guard: info.guard.as_deref(),
+                    route_model: info.model.as_deref(),
+                    route_confidence: info.confidence,
+                    route_signals: &info.signals,
+                    route_fallback: info.fallback,
+                    route_ms: info.ms,
+                    route_outcome: None,
+                    item_id: None,
+                    dispatch: steve_store::ReceiptDispatch::NoDispatch,
+                    delivery_ref_id: None,
+                    model_call_id: None,
+                    user_id: task.user_id.as_deref(),
+                    project_id: info.project.as_deref().or(task.project_id.as_deref()),
+                    answer_model,
+                    harness,
+                    harness_session,
+                    tools,
+                    turns,
+                    first_text_ms,
+                    error_detail,
+                    record_attention_commit: task.space == super::MAIN && task.user_id.is_some(),
+                },
+            )
+        })?)
+    }
 }
 
-/// The items the question or the last turns name (`ST-23`), at most 3, read up front for the research
-/// prompt: a follow-up like "是的" after "查一下 ST-23" names nothing itself, and the model skips the item
-/// tool often enough. The same reading `steve_item_read` gives, shorter.
 fn mentioned_items(
     db: &crate::repo::Db,
     ws: &str,
@@ -1407,8 +1150,6 @@ fn mentioned_items(
     })
 }
 
-/// The asker is the instance's owner (`users.role`); a message without a user counts where the
-/// instance has one user only.
 pub(crate) fn asked_by_owner(db: &crate::repo::Db, user: Option<&str>) -> bool {
     let users = db.store().users();
     match user {
@@ -1417,8 +1158,6 @@ pub(crate) fn asked_by_owner(db: &crate::repo::Db, user: Option<&str>) -> bool {
     }
 }
 
-/// Only the owner reads the answer to `origin`: Steve's own conversation, or a chat the channel marked
-/// `owner_only` (the owner's private chat with Steve).
 pub(crate) fn own_reader(db: &crate::repo::Db, space: &str, origin: &str) -> Result<bool> {
     if space == super::MAIN {
         return Ok(true);
@@ -1428,7 +1167,6 @@ pub(crate) fn own_reader(db: &crate::repo::Db, space: &str, origin: &str) -> Res
         .is_some_and(|m| m.meta["chan"]["owner_only"] == json!(true)))
 }
 
-/// `PREFIX-<digits>` references in `t` (any case), normalised to upper case.
 fn item_refs(t: &str, prefix: &str) -> Vec<String> {
     let up = t.to_uppercase();
     let pat = format!("{prefix}-");
@@ -1488,7 +1226,6 @@ mod draft_tests {
             ("```rs\nlet n = 1;", "\n```"),
         ] {
             drafts.send("", head);
-            // Hold the throttle window open so this test does not depend on scheduling speed.
             lock(&drafts.state).sent = now() + 100;
             drafts.send("", &format!("{head}{}", tail.chars().next().unwrap()));
             drafts.send("", &format!("{head}{tail}"));
@@ -1498,14 +1235,8 @@ mod draft_tests {
                 k.events.lock().unwrap().last(),
                 Some(&steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
                     steve_types::WorkLiveEvent::SteveDraft {
-                        ws: {
-                            let value: String = WS.into();
-                            steve_types::WorkspaceId::from(value)
-                        },
-                        mid: {
-                            let value: String = "question".into();
-                            steve_types::MessageId::from(value)
-                        },
+                        ws: WS.to_owned().into(),
+                        mid: "question".to_owned().into(),
                         thought: String::new(),
                         text: format!("{head}{tail}")
                     }
@@ -1542,11 +1273,7 @@ mod draft_tests {
                     steve_types::WorkLiveEvent::SteveDraft { .. }
                 ))
             )));
-            assert_eq!(
-                lock(&state).text,
-                "尾字。",
-                "stop keeps the latest buffered text"
-            );
+            assert_eq!(lock(&state).text, "尾字。");
         }
         let k = Kit::new();
         let stop = super::super::Stop::default();

@@ -147,7 +147,7 @@ pub fn listed() -> Vec<Value> {
         v.push(json!({
             "name": d.name,
             "description": d.description.replace(
-                "Steve's own (items, work graph, knowledge, memories, contacts, secrets, GitHub, mail, chats, devices, diagnostics), the MCP servers and remote agents your Bot uses",
+                "Steve's own (items, knowledge, memories, contacts, secrets, GitHub, mail, chats, devices, diagnostics), the MCP servers and remote agents your Bot uses",
                 "Steve's tools for a client outside Steve (items, sessions, knowledge, memories)",
             ),
             "inputSchema": d.input_schema,
@@ -265,8 +265,14 @@ pub async fn call(x: &Extra, o: &Outside, name: &str, args: &Value) -> Result<St
                     .map_err(|e| e.to_string())?
                     .filter(|i| i.workspace_id == ws)
                     .ok_or_else(|| format!("No item {id} in this workspace."))?;
-                core.supplement(&item.id, &text, steve_core::SupplementMode::Auto, &[])
-                    .map_err(|e| e.to_string())?;
+                core.supplement(
+                    &item.id,
+                    &text,
+                    steve_core::SupplementMode::Auto,
+                    &[],
+                    "steve",
+                )
+                .map_err(|e| e.to_string())?;
                 Ok(format!("Added to {} «{}».", item.id, item.title))
             })
             .await
@@ -508,7 +514,6 @@ mod tests {
             "steve_deliver",
             "steve_ask",
             "steve_secret_use",
-            "steve_workflow",
             "steve_memory_tidy",
         ] {
             assert!(!allows(n), "{n}");

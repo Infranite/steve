@@ -17,7 +17,8 @@ pub struct Usage {
 }
 
 impl Usage {
-    fn add(mut self, o: Usage) -> Usage {
+    /// Combines two process usage snapshots (for example, multiple instances of one plugin).
+    pub fn add(mut self, o: Usage) -> Usage {
         let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
@@ -36,6 +37,15 @@ impl Usage {
 /// This process.
 pub fn this() -> Option<Usage> {
     pid(std::process::id() as i32)
+}
+
+/// One process by PID (for example, a supervised plugin child process).
+pub fn of_pid(target: u32) -> Option<Usage> {
+    let target = i32::try_from(target).ok()?;
+    if target <= 1 {
+        return None;
+    }
+    pid(target)
 }
 
 /// Every live member of process group `pgid`, summed; `None` when it has none (or cannot be read).

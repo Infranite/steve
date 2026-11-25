@@ -103,12 +103,13 @@ fn upgrade_preserves_old_rows_and_requires_new_reader() {
         ),
         1
     );
+    // Migration 034 tags pre-v34 events as `legacy.acp`; migration 134 removes retired non-steve.v1 rows.
     assert_eq!(
         count(
             &c,
             "SELECT count(*) FROM events WHERE format='legacy.acp' AND source_node IS NULL AND data='{}'"
         ),
-        1
+        0
     );
     assert_eq!(
         count(

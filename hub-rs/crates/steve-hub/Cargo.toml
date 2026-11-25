@@ -20,7 +20,6 @@ steve-types = { path = "../steve-types" }
 markdown = "=1.0.0"
 steve-install = { path = "../steve-install" }
 steve-store = { path = "../steve-store" }
-steve-store-sqlite = { path = "../steve-store-sqlite" }
 steve-auth = { path = "../steve-auth" }
 steve-mcp = { path = "../steve-mcp" }
 steve-core = { path = "../steve-core" }
@@ -66,7 +65,7 @@ thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "process", "signal", "time", "fs", "sync", "io-util", "net"] }
 tokio-util = { version = "=0.7.20", features = ["io"] }
 tower = { version = "=0.5.3", features = ["util"] }
-# The CLI talks to a running Hub over its admin unix socket (W2a §4, HTTP/1.1 over UDS).
+# The CLI talks to a running Hub over its admin unix socket (HTTP/1.1 over UDS).
 hyper = { version = "=1.12.0", features = ["client", "http1"] }
 hyper-util = { version = "=0.1.21", features = ["tokio"] }
 # gzip for the web assets and JSON answers (SSE is never compressed: its default predicate excludes event streams)
@@ -81,6 +80,7 @@ flate2 = "=1.1.10"
 zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tar = "0.4"
 libc = "0.2"
+jiff = { version = "=0.2.38", features = ["serde"] }
 # Metrics facade and its in-memory Prometheus recorder; the Hub serves `/metrics` itself (no exporter listener).
 metrics = "=0.24.6"
 metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }

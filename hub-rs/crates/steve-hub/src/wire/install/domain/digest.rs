@@ -8,6 +8,6 @@ install! { start(reg, _cx) [mut jobs, modules] => [jobs, modules] {
     // Deterministic intake; the ordinary digest schedule consumes these packets through tools.
     {
         let modules = modules.clone();
-        jobs.push(Job::new("digest.intake", steve_digest::job::run(modules)));
+        jobs.push(Job::task("digest.intake", move || steve_digest::job::task(modules)));
     }
 }}

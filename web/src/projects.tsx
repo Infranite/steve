@@ -1,10 +1,13 @@
-import { getItems, useDeviceInventory } from "@/store"
+import { getItems, useDeviceInventory, useHubEvents, useShellStore } from "@/store"
+import { useViewKinds } from "@/data/sync"
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
 import { api, type CloneProgress, type RBrowse, type RNode, type RProject } from "@/api"
+import { kb, type ProjectProposal } from "@/api/knowledge"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { stats, statsSeed } from "@/api/stats"
 import type { GhOverview } from "@/api/github"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
@@ -14,17 +17,20 @@ import { Textarea } from "@/components/ui/textarea"
 import { AskSteve } from "@/config-ui"
 import { crumbs, emptyNote, lookUp, nameOf, narrowed, projectNodes } from "@/dir-browse"
 import { GitHubLine, Health, projectRepo, useProjectGitHub } from "@/github/index"
-import { itemDisplayStatus } from "@/item-workflow-relation"
-import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
-import { botName, closedSt, newProject, newWorkspace, patchProject, refresh, st, toast, type Item } from "@/store"
-import { Blank, BotName, Card, closeSheet, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Row, Section, Segmented } from "@/ui"
+import { itemDisplayStatus } from "@/store"
+import { useHubQuery } from "@/data/use-hub-query"
+import { errMsg } from "@/knowledge/fields"
+import { MetaLink } from "@/knowledge/origin"
+import { fmtMs, fmtN, fmtPct, fmtUsd } from "@/stats/format"
+import { botName, closedSt, newProject, newWorkspace, patchProject, refresh, st, tm, toast, type Item } from "@/store"
+import { Blank, BotName, Card, closeSheet, DiscChevron, DISC_TRIGGER, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Pill, Row, Section, Segmented } from "@/ui"
 import { ItemRowExport as ItemRow, Select } from "@/view-shared"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
-import { Fragment, useEffect, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useRef, useState } from "react"
+import { homeTilde } from "@/lib/path"
 import { useT } from "@/i18n"
 
-const home = (p: string) => p.replace(/^\/Users\/[^/]+/, "~")
 export const projectIcon = (kind: string) => (kind === "git" ? FolderGit2Icon : FolderIcon)
 export function NewWorkspaceDialog() {
   const t = useT()
@@ -48,6 +54,8 @@ export function NewWorkspaceDialog() {
 
 /* ── 项目 ── */
 export function ProjectsView() {
+  useShellStore()
+  useViewKinds(["item", "session", "decision"])
   const t = useT()
   const ps = st.projects, running = (id: string) => getItems().filter((i) => i.project === id && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
   return (
@@ -56,7 +64,7 @@ export function ProjectsView() {
       {ps.length ? <Group>{ps.map((p) => { const I = projectIcon(p.kind); return (
         <Row key={p.id} icon={<span className="flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground"><I className="size-4.5" strokeWidth={1.5} /></span>} onClick={() => go("#/projects/" + p.id)} data-project-row={p.name}
           title={<span className="type-body font-medium">{p.name}</span>}
-          sub={<Meta><span className="font-mono">{home(p.path)}</span><span>{p.kind === "git" ? (p.worktree ? t("pages:projects.gitWorktree") : "git") : t("pages:projects.plainDir")}</span>{p.default_bot && <span>{t("pages:projects.defaultBotIs", { bot: botName(p.default_bot) })}</span>}<span>{t("pages:projects.running", { count: running(p.id) })}</span>{p.release && <span>{t("pages:projects.releasable")}</span>}</Meta>}>
+          sub={<Meta><span className="font-mono">{homeTilde(p.path)}</span><span>{p.kind === "git" ? (p.worktree ? t("pages:projects.gitWorktree") : "git") : t("pages:projects.plainDir")}</span>{p.default_bot && <span>{t("pages:projects.defaultBotIs", { bot: botName(p.default_bot) })}</span>}<span>{t("pages:projects.running", { count: running(p.id) })}</span>{p.release && <span>{t("pages:projects.releasable")}</span>}</Meta>}>
           <ChevronRightIcon className="size-4 text-tertiary" /></Row>) })}</Group>
         : <Empty title={t("pages:projects.empty")} sub={t("pages:projects.emptySub")} />}
       <div className="mt-4 type-footnote text-tertiary">{t("pages:projects.hint")}</div>
@@ -86,6 +94,8 @@ export function projectItems(project: string, items: Item[]) {
 }
 
 export function ProjectView({ id }: { id: string }) {
+  useShellStore()
+  useViewKinds(["item", "session", "decision"])
   const t = useT()
   const p = st.projects.find((x) => x.id === id)
   const [tab, setTab0] = useState<Tab>(lastTab.id === id ? lastTab.tab : "overview")
@@ -114,17 +124,74 @@ function Overview({ p, gh, ghError, onSettings }: Parts & { onSettings: () => vo
         right={open > 0 ? <Meta inline className="font-normal">{yours > 0 && <span className="text-attention" data-proj-yours>{t("pages:projects.yours", { count: yours })}</span>}<span>{t("pages:projects.running", { count: open })}</span></Meta> : undefined}>
         {list.length ? <Panel>{list.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Panel> : <Blank data-proj-none>{t("pages:projects.noItems")}</Blank>}
       </Section>
+      <AgentsProposals projectId={p.id} />
       <Recent p={p} />
       <Where p={p} gh={gh} ghError={ghError} onSettings={onSettings} />
     </div>
   )
 }
 
+/** Project-level AGENTS.md proposals extracted from engineering work on this project. */
+function AgentsProposals({ projectId }: { projectId: string }) {
+  const t = useT()
+  const [xs, setXs] = useState<ProjectProposal[] | null>(null), [err, setErr] = useState(""), [busy, setBusy] = useState("")
+  const [showHandled, setShowHandled] = useState(false)
+  const load = useCallback(() => kb.proposals({ project_id: projectId }).then(setXs, (e) => setErr(errMsg(e))), [projectId])
+  useEffect(() => { void load() }, [load])
+  useHubEvents(["kb"], () => void load())
+  const resolve = async (id: string, choice: "yes" | "no") => {
+    if (busy) return
+    setBusy(id)
+    try {
+      await kb.resolveProposal(id, choice)
+      toast(t(choice === "yes" ? "pages:projects.proposals.acceptedToast" : "pages:projects.proposals.dismissedToast"))
+      await load()
+    } catch (e) { toast(errMsg(e)) } finally { setBusy("") }
+  }
+  const pending = (xs ?? []).filter((x) => x.status === "pending")
+  const handled = (xs ?? []).filter((x) => x.status !== "pending")
+  return (
+    <Section label={t("pages:projects.proposals.title")} note={t("pages:projects.proposals.note")} data-proj-proposals
+      right={pending.length > 0 ? <span className="type-footnote font-normal text-attention" data-proj-proposals-pending>{t("pages:projects.proposals.pending", { count: pending.length })}</span> : undefined}>
+      {err ? <Blank>{err}</Blank>
+        : !xs ? <Loading className="py-6" />
+        : !pending.length && !handled.length ? <Blank data-proj-proposals-empty>{t("pages:projects.proposals.empty")}</Blank>
+        : <div className="flex flex-col gap-3">
+          {pending.length > 0 && <Panel>{pending.map((p) => (
+            <Row key={p.id} data-proposal={p.id}
+              title={<span className="break-words">{p.text}</span>}
+              sub={<span className="flex flex-col gap-0.5">
+                {p.reason && <span className="break-words text-foreground/80" data-proposal-reason>{p.reason}</span>}
+                {p.evidence && <span className="break-words" data-proposal-evidence>{t("knowledge:cand.evidence", { evidence: p.evidence })}</span>}
+                <Meta inline>{p.origin_label && <MetaLink href={p.origin_href || undefined}>{p.origin_label}</MetaLink>}<span>{tm(p.updated)}</span></Meta>
+              </span>}>
+              <span className="flex items-center gap-1">
+                <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={!!busy} onClick={() => void resolve(p.id, "no")} data-proposal-no>{t("pages:projects.proposals.dismiss")}</Button>
+                <Button size="xs" variant="outline" disabled={!!busy} onClick={() => void resolve(p.id, "yes")} data-proposal-yes>{t("pages:projects.proposals.accept")}</Button>
+              </span>
+            </Row>))}</Panel>}
+          {handled.length > 0 && <Collapsible open={showHandled} onOpenChange={setShowHandled} data-proj-proposals-handled>
+            <CollapsibleTrigger className={DISC_TRIGGER + " type-footnote"} data-proj-proposals-handled-toggle>
+              <DiscChevron className="size-3" />{t("pages:projects.proposals.handled", { count: handled.length })}
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <Panel className="mt-2">{handled.map((p) => (
+                <Row key={p.id} data-proposal-handled={p.id}
+                  title={<span className="inline-flex flex-wrap items-center gap-2"><span className="break-words">{p.text}</span><Pill tone={p.status === "accepted" ? "success" : "neutral"}>{t(p.status === "accepted" ? "pages:projects.proposals.statusAccepted" : "pages:projects.proposals.statusDismissed")}</Pill></span>}
+                  sub={<Meta inline>{p.origin_label && <MetaLink href={p.origin_href || undefined}>{p.origin_label}</MetaLink>}<span>{tm(p.updated)}</span></Meta>} />
+              ))}</Panel>
+            </CollapsibleContent>
+          </Collapsible>}
+        </div>}
+    </Section>
+  )
+}
+
 /** the last 7 days in six figures: what got done, landed and released, what failed, and what it cost in money and time */
 function Recent({ p }: { p: RProject }) {
   const t = useT()
-  const [d] = useStats(() => stats.summary({ range: "7d", project: p.id }), [p.id])
-  const s = d.s === "ok" ? d.v : null
+  const d = useHubQuery(["stats", "summary", "7d", "project", p.id], () => stats.summary({ range: "7d", project: p.id }), { events: ["stats"], debounceMs: 200 })
+  const s = d.data ?? null
   const fails = s ? Object.entries(s.quality.fails).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]) : []
   const figs = [
     s && { k: "done", label: t("pages:projects.fig.done"), value: fmtN(s.throughput.done), sub: s.throughput.wip ? t("pages:projects.fig.wip", { count: s.throughput.wip }) : undefined },
@@ -139,8 +206,8 @@ function Recent({ p }: { p: RProject }) {
   return (
     <Section label={t("pages:projects.recent")} data-proj-recent
       right={s && !quiet ? <button type="button" onClick={openStats} className="type-footnote font-normal text-muted-foreground hover:text-foreground" data-proj-stats-open>{t("pages:projects.openStats")}</button> : undefined}>
-      {d.s === "loading" ? <Loading className="py-8" />
-        : quiet ? <Blank data-proj-quiet>{d.s === "error" ? d.msg : t("pages:projects.quiet")}</Blank>
+      {d.loading ? <Loading className="py-8" />
+        : quiet ? <Blank data-proj-quiet>{d.error ? d.error.message : t("pages:projects.quiet")}</Blank>
         : <Card className="grid grid-cols-2 gap-0 p-1 sm:grid-cols-3" data-proj-figures>{figs.map((f) => <Figure key={f.k} testId={f.k} label={f.label} value={f.value} sub={f.sub} />)}</Card>}
     </Section>
   )
@@ -153,10 +220,10 @@ function Where({ p, gh, ghError, onSettings }: Parts & { onSettings: () => void 
   const device = useDeviceInventory().find((x) => x.id === p.device_id)?.name ?? "Hub"
   const repo = gh ? projectRepo(gh, p.id) : undefined
   const code = "font-mono text-[13px] break-all"
-  const cmd = p.release?.cmd ? <span className={cn("mt-0.5 block text-muted-foreground", code)}>{home(p.release.cmd)}</span> : null
+  const cmd = p.release?.cmd ? <span className={cn("mt-0.5 block text-muted-foreground", code)}>{homeTilde(p.release.cmd)}</span> : null
   const facts = [
     <Fact key="dir" label={t("pages:projects.dir")} testId="dir">
-      <span className={cn("block", code)}>{home(p.path)}</span>
+      <span className={cn("block", code)}>{homeTilde(p.path)}</span>
       <Meta className="mt-0.5"><span>{git ? (p.worktree ? t("pages:projects.gitWorktree") : t("pages:projects.gitRepo")) : t("pages:projects.plainDir")}</span><span>{t("pages:projects.onDevice", { device })}</span></Meta>
     </Fact>,
     git && ghError && <Fact key="gh-error" label="GitHub" testId="github-error"><span role="alert" className="text-destructive">{ghError}</span></Fact>,

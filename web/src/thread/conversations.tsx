@@ -1,4 +1,4 @@
-import { decisionView, onViews, useOpenDecisions } from "@/data/sync"
+import { useDecisionView, useOpenDecisions } from "@/data/sync"
 import { Textarea } from "@/components/ui/textarea"
 import { Markdown } from "@/components/markdown"
 /* IM conversations in 对话 (channels-personas.md §2.12): every IM space where Steve answers is a conversation of its
@@ -8,12 +8,12 @@ import { Markdown } from "@/components/markdown"
  * Since #243 a conversation also shows the chat's whole record (every message you may see, with what Steve did with
  * it), a space Steve never answered in is listed too, and a channel switcher picks the account whose conversations
  * the list shows. */
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
 import { ArrowLeftIcon, BotIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon, MessagesSquareIcon } from "lucide-react"
 import { conversationsApi, type ChannelEntry, type ConvBadge, type ConvMessage, type ConvRecord, type ConvRow, type ConvState, type Handling, type Reaction, type RecordPage } from "@/api/conversations"
 import { HANDLING_TONE, handlingDetail, shownUpTo } from "@/thread/channel-record"
-import { st, msgOf, discardOut, decide, editReplyDraft, tm, useHubEvents, type Msg } from "@/store"
+import { st, msgOf, discardOut, decide, editReplyDraft, tm, useHubEvents, useShellSelector, type Msg } from "@/store"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { Badge } from "@/components/ui/badge"
 import { ChannelMessageBody } from "@/channels/message-body"
@@ -26,6 +26,8 @@ import { HubError } from "@/api"
 import { hubBase } from "@/hub"
 import { MessageActions } from "@/components/affect/message-actions"
 import { OpenInFeishu, openable, openInApp, openInFeishuLabel } from "@/channels/open-in-app"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 
 /** records asked for at a time, and the most kept in view when the conversation reloads on a live update */
 const RECORD_PAGE = 100, RECORD_KEEP = 500
@@ -308,7 +310,8 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const t = useT()
   const [closed, setClosed] = useState(false)
   const s = m?.meta?.chan_out?.status as string | undefined, decision = m?.meta?.chan_out?.decision as string | undefined
-  const tier = useSyncExternalStore(onViews, () => decision ? decisionView(decision)?.tier : undefined)
+  const tier = useDecisionView(decision)?.tier
+  const busy = useShellSelector(() => !!decision && st.pendingActions.has("decision:" + decision))
   const reason = m?.meta?.chan_out?.reason as string | undefined
   /* a new state from the Hub replaces what this click assumed */
   useEffect(() => setClosed(false), [s, decision])
@@ -319,7 +322,6 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const note = <div className={cn("type-callout", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{reason ? t("thread:chanOut.withReason", { label, reason }) : label}</div>
   if (shown !== "draft" || !decision) return note
   if (tier === "draft") return null
-  const busy = st.pendingActions.has("decision:" + decision)
   const discard = async () => { if (await discardOut(decision)) setClosed(true) }
   return (
     <div className="flex flex-wrap items-center gap-2" data-chan-out-decision={decision}>
@@ -367,7 +369,15 @@ export function SenderLine({ m }: { m?: ConvMessage }) {
   const t = useT()
   const c = m?.meta?.chan
   if (!c) return null
-  return <div className="flex items-center justify-end gap-2 self-end type-footnote text-tertiary"><span className="font-medium text-muted-foreground">{c.sender || t("thread:who.someone")}{c.command ? " · /bot" : ""}</span><ReactionChip r={m?.reaction} /></div>
+  const name = c.sender || t("thread:who.someone")
+  const sender = m?.channel_message?.sender
+  return (
+    <div className="flex items-center justify-end gap-1.5 self-end type-footnote text-tertiary">
+      <ActorAvatar actor={partyActor({ id: sender?.party_id, name, avatar: sender?.avatar })} size={18} />
+      <span className="font-medium text-muted-foreground">{name}{c.command ? " · /bot" : ""}</span>
+      <ReactionChip r={m?.reaction} />
+    </div>
+  )
 }
 
 /** in place of the composer: this conversation is read here, said there */
@@ -437,7 +447,10 @@ export function RecordRow({ r, last }: { r: ConvRecord; last?: boolean }) {
   const failed = out?.status === "failed" || out?.status === "disconnected"
   return (
     <div className={cn("relative flex min-w-0 flex-col gap-1.5", mine ? "group/sm items-start" : "group/me items-end")} data-msg={r.id} data-record={r.direction}>
-      <div className={cn("flex min-w-0 max-w-full items-baseline gap-2 px-1 type-footnote text-tertiary", mine ? "self-start" : "self-end")}>
+      <div className={cn("flex min-w-0 max-w-full items-center gap-1.5 px-1 type-footnote text-tertiary", mine ? "self-start" : "self-end")}>
+        {mine && !r.sender.party_id
+          ? <ActorAvatar actorId={r.on_behalf === "proxy" ? "me" : "steve"} name={r.sender.name || undefined} size={18} />
+          : <ActorAvatar actor={partyActor({ id: r.sender.party_id, name: r.sender.name || t("thread:who.someone"), avatar: r.sender.avatar })} size={18} />}
         <span className="truncate font-medium text-muted-foreground">{r.sender.name || t("thread:who.someone")}</span>
         <time className="shrink-0 tabular-nums" dateTime={new Date(r.created).toISOString()}>{tm(r.created)}</time>
         {r.history && <span className="shrink-0">{t("thread:record.history")}</span>}

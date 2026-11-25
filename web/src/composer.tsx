@@ -6,12 +6,12 @@ import { getItems } from "@/store"
  * the other side is idle; while it works Stop (or Esc), and once something is typed 排队 (and, where a running turn
  * takes a note, 插话: Enter steers, ⌥ Enter queues). What waits for the turn sits in the card above the field. */
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
-import { AtSignIcon, BotIcon, ClipboardListIcon, FileTextIcon, FolderPlusIcon, HashIcon, PaperclipIcon, SlashIcon, UsersRoundIcon } from "lucide-react"
+import { AtSignIcon, BotIcon, ClipboardListIcon, FileTextIcon, FolderPlusIcon, HashIcon, PaperclipIcon, SlashIcon } from "lucide-react"
 import { cn } from "cn"
 import { cue } from "@/bus"
 import { useT } from "@/i18n"
 import { st } from "@/store"
-import { itemDisplayStatus } from "@/item-workflow-relation"
+import { itemDisplayStatus } from "@/store"
 import { useMentions } from "@/people/mention"
 import { readDraft, saveDraft, draftToSend, clearSentDraft } from "@/composer-draft"
 import { useUploads, PendingList, ACCEPT } from "@/attach"
@@ -20,7 +20,8 @@ import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui
 import { Kbd } from "@/components/ui/kbd"
 import { ChatComposer, type ComposerAddRow } from "@/components/affect/chat-composer-clean"
 import { RunActions, RunContext, runKey, type RunActionsLabels } from "@/components/affect/run-controls-clean"
-import { BotAvatar, ItemNo, Status, useLinger } from "@/ui"
+import { ItemNo, Status, useLinger } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 
 /** the composer's slash commands: [the token the Hub reads after "/", the command id]; label and description by id */
 export const COMMANDS: [string, "newItem" | "newProject" | "digest" | "newBot"][] = [["新事项", "newItem"], ["新项目", "newProject"], ["汇报", "digest"], ["新 Bot", "newBot"]]
@@ -135,9 +136,7 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
     ? getItems().filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
     : menu.kind === "@" && men.opts ? men.opts
     : menu.kind === "@"
-    ? [...Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><BotAvatar k={k} size={18} /><span className="type-callout">{tr("core:composer.botName", { name: st.bots[k].n })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> })),
-      ...st.pp.contacts.filter((c) => !c.me && c.kind !== "未确认" && (!menu.q || [c.n, ...c.aliases].some((x) => x.toLowerCase().includes(menu.q.toLowerCase())))).slice(0, 5).map((c) => ({ id: c.id, ins: "@" + c.n.split(" ")[0], label: <><span className="flex size-4.5 items-center justify-center rounded-full bg-muted type-label leading-none text-muted-foreground">{c.n[0]}</span><span className="type-callout">{c.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.relate", { info: [st.pp.orgs.find((o) => o.id === c.org)?.n, c.title].filter(Boolean).join(" · ") })}</span></> })),
-      ...st.pp.teams.filter((g) => !menu.q || g.n.includes(menu.q)).slice(0, 3).map((g) => ({ id: g.id, ins: "@" + g.n.replace(/\s+/g, ""), label: <><UsersRoundIcon className="size-4.5 text-muted-foreground" /><span className="type-callout">{g.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.team", { count: g.members.length })}</span></> }))]
+    ? Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><ActorAvatar actorId={k} size={18} tooltip={false} /><span className="type-callout">{tr("core:composer.botName", { name: st.bots[k].n })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> }))
     : COMMANDS.filter(([n, c]) => !menu.q || n.includes(menu.q) || tr(`core:cmd.${c}`).toLowerCase().includes(menu.q.toLowerCase())).map(([, c]) => ({ id: c, ins: "", cmd: c, label: <><SlashIcon className="size-3.5 text-muted-foreground" /><span className="type-callout">{tr(`core:cmd.${c}`)}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr(`core:cmd.${c}Desc`)}</span></> }))
   const track = (val: string, caret: number) => {
     const before = val.slice(0, caret)
@@ -179,7 +178,6 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
     const m = men.known(ins); if (m) return m.kind
     const n = ins.slice(1)
     if (Object.values(st.bots).some((b) => b.on && [b.n, b.n + "Bot"].map((x) => x.replace(/\s+/g, "")).includes(n))) return "bot"
-    if (st.pp.contacts.some((c) => !c.me && c.n.split(" ")[0] === n) || st.pp.teams.some((g) => g.n.replace(/\s+/g, "") === n)) return "party"
   }
   const marked = markText(v, atKind, menu && [menu.start, menu.end])
   useLayoutEffect(() => { if (mirror.current && ta.current) mirror.current.scrollTop = ta.current.scrollTop })

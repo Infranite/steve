@@ -148,7 +148,7 @@ async fn mcp_draft(Extension(f): F, Json(b): Json<Value>) -> ApiResult<Json<Valu
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controls = Arc::new(Controls::default());
-    let disclosure = Disclosure::with_models(vec!["reviewer".into()]);
+    let disclosure = Disclosure::new();
     let h = setup_with(Opts {
         check: Some(Arc::new(Check {
             real: disclosure.clone(),

@@ -104,6 +104,11 @@ CREATE TABLE decisions (
     revision BIGINT NOT NULL DEFAULT 1,
     source_revision TEXT,
     question_template TEXT CHECK (question_template IS NULL OR question = ''),
+    wait_owner TEXT NOT NULL DEFAULT 'owner',
+    wait_started_at BIGINT NOT NULL DEFAULT 0,
+    wait_deadline BIGINT NOT NULL DEFAULT 0,
+    wait_on_timeout TEXT NOT NULL DEFAULT 'close',
+    resolved_by TEXT,
     UNIQUE (workspace_id, subject_type, subject_id, kind, source_revision)
 );
 CREATE TABLE decision_choice_receipts (
@@ -172,6 +177,25 @@ CREATE TABLE source_settings (
 CREATE TABLE kb_marks (
     workspace_id TEXT NOT NULL, name TEXT NOT NULL,
     value TEXT NOT NULL, updated BIGINT NOT NULL, PRIMARY KEY (workspace_id, name)
+);
+
+CREATE TABLE project_proposals (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    project_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'agents_md',
+    text TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    evidence TEXT NOT NULL DEFAULT '',
+    origin_kind TEXT NOT NULL DEFAULT '',
+    origin_id TEXT,
+    origin_label TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    decision_id TEXT,
+    writer TEXT NOT NULL DEFAULT 'steve',
+    created_by TEXT NOT NULL DEFAULT '',
+    created BIGINT NOT NULL,
+    updated BIGINT NOT NULL
 );
 
 CREATE TABLE mail_account_settings (

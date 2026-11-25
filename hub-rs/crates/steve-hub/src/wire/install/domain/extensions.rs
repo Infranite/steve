@@ -13,20 +13,14 @@ install! { prepare(reg, cx) [ports] => [declared, ports] {
         .map_err(|e| BackendError::msg(e.to_string()))?;
 }}
 
-// Capture the extension context before the plugin and route constructors, as at the old root.
-install! { context(reg, cx) [channels] => [channels, started] {
-    let Env { bus, vars, .. } = cx.clone();
-    let started = crate::extension::Started::new(&channels, bus, vars);
-}}
-
-install! { mount(reg, cx) [channels, declared, jobs, module_routes, started] => [channels, ext_jobs, jobs, module_routes, pending_lifecycle] {
-    let Env { bus, assembly, .. } = cx.clone();
+install! { mount(reg, cx) [channels, declared, jobs, routes] => [channels, ext_jobs, jobs, pending_lifecycle, routes] {
+    let Env { bus, vars, assembly, .. } = cx.clone();
     let crate::extension::StartedAll {
-        routes: module_routes,
+        routes,
         jobs: ext_jobs,
         hooks,
     } = assembly
-        .start(&started, &declared, module_routes)
+        .start(&channels, bus, vars, &declared, routes)
         .map_err(|e| BackendError::msg(e.to_string()))?;
     // what runs for each connection of an adapter with a hook: the events are tapped now, before
     // the runtime lists the connections
@@ -39,14 +33,34 @@ install! { mount(reg, cx) [channels, declared, jobs, module_routes, started] => 
     });
 }}
 
-install! { start(reg, _cx) [ext_jobs, mut jobs, pending_lifecycle] => [jobs, lifecycle] {
+install! { start(reg, cx) [ext_jobs, mut jobs, pending_lifecycle] => [jobs, lifecycle] {
+    let Env { bus, .. } = cx.clone();
     // the extensions' (built in: Feishu app registrations resumed) and the connection runtime
     // (built in: the Feishu long connections and self pollers)
     jobs.extend(ext_jobs);
     let lifecycle = pending_lifecycle.map(|(rt, events)| {
         let run = rt.clone();
-        jobs.push(Job::new("channels.lifecycle", async move {
-            let _ = run.start(events).await;
+        let bus = bus.clone();
+        let initial = std::sync::Arc::new(std::sync::Mutex::new(Some(events)));
+        jobs.push(Job::supervised("channels.lifecycle", move || {
+            let run = run.clone();
+            let events = initial
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .unwrap_or_else(|| {
+                    bus.tap(|event| {
+                        matches!(
+                            event.as_domain(),
+                            Some(steve_types::DomainEvent::Channels(
+                                steve_types::ChannelsEvent::Connection { .. }
+                            ))
+                        )
+                    })
+                });
+            async move {
+                run.run(events).await;
+            }
         }));
         rt
     });

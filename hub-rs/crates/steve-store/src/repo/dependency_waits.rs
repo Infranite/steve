@@ -17,6 +17,7 @@ pub struct DependencyWait {
     pub reason: String,
     pub state: String,
     pub updated: i64,
+    pub wait: steve_types::WaitContract,
 }
 
 pub struct DependencyWaits<'a>(&'a Store);
@@ -25,6 +26,14 @@ impl Store {
     pub fn dependency_waits(&self) -> DependencyWaits<'_> {
         DependencyWaits(self)
     }
+}
+
+fn dependency_owner(item: &Item) -> steve_types::WaitOwner {
+    item.bot_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .map(steve_types::WaitOwner::bot)
+        .unwrap_or_else(|| steve_types::WaitOwner::system("dependencies"))
 }
 
 fn get(c: &rusqlite::Connection, item: &str) -> Result<Option<DependencyWait>> {
@@ -41,6 +50,7 @@ fn get(c: &rusqlite::Connection, item: &str) -> Result<Option<DependencyWait>> {
                 reason: r.get("reason")?,
                 state: r.get("state")?,
                 updated: r.get("updated")?,
+                wait: crate::wait_repo::decode_contract_rusqlite(r)?,
             })
         },
     )
@@ -70,11 +80,31 @@ pub(super) fn rearm_in(tx: &mut crate::W<'_>, item: &str) -> Result<()> {
         return Ok(());
     }
     let at = now();
+    let wait = crate::wait_repo::contract_for(
+        tx,
+        &i.workspace_id,
+        steve_types::WaitKind::Dependency,
+        dependency_owner(&i),
+        at,
+        steve_types::WaitTimeoutAction::EscalateToOwner,
+    )?;
+    let wait_owner = wait.owner.to_code();
     tx.conn.execute(
-        "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated)
-         VALUES(?,?,NULL,'workspace','','waiting',?,?)
-         ON CONFLICT(item_id,cycle) DO UPDATE SET state='waiting',updated=excluded.updated",
-        params![item, i.cycle, at, at],
+        "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated,wait_owner,wait_started_at,wait_deadline,wait_on_timeout)
+         VALUES(?,?,NULL,'workspace','','waiting',?,?,?,?,?,?)
+         ON CONFLICT(item_id,cycle) DO UPDATE SET state='waiting',updated=excluded.updated,
+         wait_owner=excluded.wait_owner,wait_started_at=excluded.wait_started_at,
+         wait_deadline=excluded.wait_deadline,wait_on_timeout=excluded.wait_on_timeout",
+        params![
+            item,
+            i.cycle,
+            at,
+            at,
+            wait_owner,
+            wait.started_at.0,
+            wait.deadline.0,
+            wait.on_timeout.as_str()
+        ],
     )?;
     for id in all(
         tx.conn,
@@ -150,13 +180,6 @@ impl DependencyWaits<'_> {
             if i.phase != steve_types::ItemPhase::Active || i.archived {
                 return Err(refuse("事项正在结束或已结束，不能登记等待"));
             }
-            let child:bool=tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM workflow_units WHERE item_id=?
-                 UNION ALL SELECT 1 FROM workflow_attempts WHERE item_id=?)",
-                [item,item],|r|r.get(0))?;
-            if child || i.source.1=="workflow" {
-                return Err(refuse("工作单元不能登记事项依赖，请向主事项负责人报告阻塞"));
-            }
             let authorized: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sessions s WHERE s.id=? AND s.item_id=? AND
                  s.workspace_id=? AND s.bot_id IS ? AND s.readonly=0 AND s.status<>'ended'
@@ -183,10 +206,7 @@ impl DependencyWaits<'_> {
             let mut added = false;
             for dep in deps {
                 let valid: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM items p WHERE p.id=? AND p.workspace_id=? AND p.id<>? AND p.kind='task'
-                       AND COALESCE(json_extract(p.source,'$[1]'),'')<>'workflow'
-                       AND NOT EXISTS(SELECT 1 FROM workflow_units u WHERE u.item_id=p.id)
-                       AND NOT EXISTS(SELECT 1 FROM workflow_attempts a WHERE a.item_id=p.id))",
+                    "SELECT EXISTS(SELECT 1 FROM items p WHERE p.id=? AND p.workspace_id=? AND p.id<>? AND p.kind='task')",
                     params![dep,i.workspace_id,item], |r| r.get(0))?;
                 if !valid {
                     return Err(refuse("前置事项不存在、不可用或不属于当前工作空间"));
@@ -213,11 +233,23 @@ impl DependencyWaits<'_> {
                 return Ok(false);
             }
             let at = now();
-            tx.execute("INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated)
-                        VALUES(?,?,?,?,?,'waiting',?,?)
+            let wait = crate::wait_repo::contract_for(
+                w,
+                &i.workspace_id,
+                steve_types::WaitKind::Dependency,
+                dependency_owner(&i),
+                at,
+                steve_types::WaitTimeoutAction::EscalateToOwner,
+            )?;
+            let wait_owner = wait.owner.to_code();
+            let tx = w.conn;
+            tx.execute("INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated,wait_owner,wait_started_at,wait_deadline,wait_on_timeout)
+                        VALUES(?,?,?,?,?,'waiting',?,?,?,?,?,?)
                         ON CONFLICT(item_id,cycle) DO UPDATE SET session_id=excluded.session_id,
-                        resume=excluded.resume,reason=excluded.reason,state='waiting',updated=excluded.updated",
-                       params![item,i.cycle,session,resume,reason,at,at])?;
+                        resume=excluded.resume,reason=excluded.reason,state='waiting',updated=excluded.updated,
+                        wait_owner=excluded.wait_owner,wait_started_at=excluded.wait_started_at,
+                        wait_deadline=excluded.wait_deadline,wait_on_timeout=excluded.wait_on_timeout",
+                       params![item,i.cycle,session,resume,reason,at,at,wait_owner,wait.started_at.0,wait.deadline.0,wait.on_timeout.as_str()])?;
             for id in all(tx, "SELECT id FROM decisions WHERE item_id=? AND status='open' AND kind IN ('ask','fail')", [item], |r| r.get::<_,String>(0))? {
                 crate::DecisionRows(w).settle(&id, &json!({"superseded":"已登记前置等待"}), crate::decision_repo::DecisionChange::Expire, None)?;
             }

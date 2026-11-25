@@ -10,9 +10,18 @@ pub(super) const COUNTS: &[&str] = &[
     "steve_node_ingest_events",
     "steve_projection_snapshot_store_calls",
     "steve_projection_flush_entities",
+    "steve_transcript_page_events",
 ];
 /// Histograms of durations up to days.
-pub(super) const LONG: &[&str] = &["steve_node_link_uptime_seconds", "steve_model_call_seconds"];
+pub(super) const LONG: &[&str] = &[
+    "steve_node_link_uptime_seconds",
+    "steve_model_call_seconds",
+    "steve_backup_operation_seconds",
+    "steve_backup_phase_seconds",
+    "steve_backup_engine_command_seconds",
+];
+/// Histograms of token counts across a turn's context window.
+pub(super) const TOKENS: &[&str] = &["steve_turn_context_peak_tokens"];
 
 pub(super) fn describe() {
     // Session approval: applied-mode gauge and post-commit request/turn counts.
@@ -49,6 +58,26 @@ pub(super) fn describe() {
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
     );
     describe_counter!(
+        "steve_dispatch_no_executor_total",
+        Count,
+        "Automatic dispatch requests where no eligible non-main Bot could execute. Labels: policy (ask, steve), reason."
+    );
+    describe_counter!(
+        "steve_no_executor_decisions_opened_total",
+        Count,
+        "Workspace-scoped no-executor AskOwner decision cards opened."
+    );
+    describe_counter!(
+        "steve_no_executor_decisions_settled_total",
+        Count,
+        "Workspace-scoped no-executor decision cards settled. Label: choice (assign_bot, confirm_proposal, later, dismiss, supersede)."
+    );
+    describe_counter!(
+        "steve_coordinator_self_executions_total",
+        Count,
+        "Items taken over by the coordinator (Steve) when no executor Bot was eligible. Label: source (card, setting)."
+    );
+    describe_counter!(
         "steve_item_automatic_delivery_total",
         Count,
         "Automatic delivery checks. Label: result (verified or unverified)."
@@ -72,6 +101,16 @@ pub(super) fn describe() {
         "steve_decision_open",
         Count,
         "Open decisions in the Hub projection. Label: tier (decide, draft, or folded)."
+    );
+    describe_counter!(
+        "steve_wait_timeouts_total",
+        Count,
+        "Durable waits settled by the unified WaitContract due sweep. Labels: kind, action."
+    );
+    describe_histogram!(
+        "steve_wait_sweep_duration_seconds",
+        Seconds,
+        "Duration of one unified WaitContract due sweep."
     );
     // Dynamic script workflows (WF-3)
     describe_histogram!(
@@ -151,6 +190,11 @@ pub(super) fn describe() {
         Count,
         "Times a stream fell behind the bus and replayed or reset."
     );
+    describe_gauge!(
+        "steve_sse_active_connections",
+        Count,
+        "Currently open SSE event stream connections."
+    );
     // Bus (bus::dispatch, the one dispatcher thread)
     describe_counter!(
         "steve_bus_published_total",
@@ -166,6 +210,76 @@ pub(super) fn describe() {
         "steve_bus_subscriber_lag",
         Count,
         "Frames the slowest stream subscriber has not read yet."
+    );
+    describe_histogram!(
+        "steve_backup_operation_seconds",
+        Seconds,
+        "Backup operation time. Labels: operation, purpose."
+    );
+    describe_histogram!(
+        "steve_backup_phase_seconds",
+        Seconds,
+        "Backup phase duration across SQLite, staging and repository boundaries. Labels: phase, purpose."
+    );
+    describe_counter!(
+        "steve_backup_engine_commands_total",
+        Count,
+        "Backup engine subprocess invocations. Labels: command, result."
+    );
+    describe_histogram!(
+        "steve_backup_engine_command_seconds",
+        Seconds,
+        "Backup engine subprocess duration. Labels: command."
+    );
+    describe_counter!(
+        "steve_backup_written_bytes_total",
+        Bytes,
+        "Bytes written by repository initialization, completed backups or restores. Labels: operation, purpose."
+    );
+    describe_counter!(
+        "steve_backup_staged_files_total",
+        Count,
+        "Allowlisted installation files staged for backup. Labels: purpose."
+    );
+    describe_counter!(
+        "steve_backup_staged_bytes_total",
+        Bytes,
+        "Bytes copied while staging allowlisted installation files for backup. Labels: purpose."
+    );
+    describe_counter!(
+        "steve_backup_skipped_caches_total",
+        Count,
+        "Disposable workspace cache directories excluded during backup staging. Labels: purpose."
+    );
+    describe_counter!(
+        "steve_backup_snapshots_deleted_total",
+        Count,
+        "Expired or incomplete backup snapshots forgotten during retention. Labels: purpose."
+    );
+    describe_counter!(
+        "steve_backup_reclaimed_bytes_total",
+        Bytes,
+        "Repository bytes reclaimed by backup pruning."
+    );
+    describe_counter!(
+        "steve_backup_failures_total",
+        Count,
+        "Failed backup operations. Labels: operation, purpose, code."
+    );
+    describe_gauge!(
+        "steve_backup_repository_bytes",
+        Bytes,
+        "Total bytes in the backup repository."
+    );
+    describe_gauge!(
+        "steve_backup_destination_available_bytes",
+        Bytes,
+        "Available bytes at the backup destination."
+    );
+    describe_gauge!(
+        "steve_backup_destination_required_bytes",
+        Bytes,
+        "Estimated space for staging and writing a full database backup, based on the SQLite database and WAL sizes."
     );
     // Read projection (projection: its one task)
     describe_histogram!(
@@ -229,6 +343,41 @@ pub(super) fn describe() {
         Count,
         "Write transactions begun."
     );
+    describe_counter!(
+        "steve_store_transaction_outcomes_total",
+        Count,
+        "Write transactions finished. Labels: kind (root, savepoint), outcome (commit, rollback)."
+    );
+    describe_histogram!(
+        "steve_store_transaction_duration_seconds",
+        Seconds,
+        "Write transaction duration. Labels: kind (root, savepoint), outcome (commit, rollback)."
+    );
+    describe_counter!(
+        "steve_store_queries_total",
+        Count,
+        "Storage backend operations. Labels: op (query, exec, batch), family, result (ok, err)."
+    );
+    describe_histogram!(
+        "steve_store_query_duration_seconds",
+        Seconds,
+        "Storage backend operation duration. Labels: op (query, exec, batch), family."
+    );
+    describe_histogram!(
+        "steve_store_read_pool_wait_seconds",
+        Seconds,
+        "Time waiting to borrow a read connection from the pool."
+    );
+    describe_counter!(
+        "steve_store_read_pool_acquisitions_total",
+        Count,
+        "Read pool acquisitions. Labels: result (ok, err)."
+    );
+    describe_gauge!(
+        "steve_store_read_pool_active",
+        Count,
+        "Read connections currently checked out from the pool."
+    );
     describe_histogram!(
         "steve_lock_wait_seconds",
         Seconds,
@@ -285,7 +434,17 @@ pub(super) fn describe() {
     describe_counter!(
         "steve_job_panics_total",
         Count,
-        "Background job panics (restarted). Labels: job."
+        "Background job panics (restarted with bounded backoff). Labels: job."
+    );
+    describe_counter!(
+        "steve_job_restarts_total",
+        Count,
+        "Background job restarts after a panic. Labels: job."
+    );
+    describe_gauge!(
+        "steve_job_up",
+        Count,
+        "Whether a background job is running (1) or stopped after consecutive panics (0). Labels: job."
     );
     describe_histogram!(
         "steve_job_duration_seconds",
@@ -296,6 +455,36 @@ pub(super) fn describe() {
         "steve_due_lag_seconds",
         Seconds,
         "How late a due loop woke. Labels: loop."
+    );
+    describe_counter!(
+        "steve_due_runs_total",
+        Count,
+        "Due loop cycles completed. Labels: loop, result (ok, err)."
+    );
+    describe_histogram!(
+        "steve_due_run_duration_seconds",
+        Seconds,
+        "Duration of one due loop cycle. Labels: loop."
+    );
+    describe_counter!(
+        "steve_due_errors_total",
+        Count,
+        "Due loop failures. Labels: loop, stage (next_due, run_due)."
+    );
+    describe_counter!(
+        "steve_periodic_task_evaluations_total",
+        Count,
+        "Periodic task gate evaluations. Labels: task, outcome (triggered, skipped), reason (changed, no_change, queue_driven, disabled, not_due, overlap)."
+    );
+    describe_counter!(
+        "steve_periodic_task_tokens_total",
+        Count,
+        "Model tokens spent by periodic tasks. Labels: task, kind (input, output, cache_read, cache_write)."
+    );
+    describe_counter!(
+        "steve_model_calls_avoided_total",
+        Count,
+        "Model calls avoided by deterministic gating, batching, deduplication, or caching. Labels: purpose, reason (no_change, queue_driven, batched, cached, deduplicated, deterministic)."
     );
     // Node protocol, Hub side (node_runtime: receive, send_one; RemoteNode attach/detach)
     describe_counter!(
@@ -382,6 +571,26 @@ pub(super) fn describe() {
         "steve_node_link_uptime_seconds",
         Seconds,
         "How long a link lasted. Labels: node."
+    );
+    describe_counter!(
+        "steve_subtask_updates_total",
+        Count,
+        "Subtask state updates observed from Nodes. Labels: origin (subagent, background_task, native_workflow), status."
+    );
+    describe_counter!(
+        "steve_subtask_cancels_total",
+        Count,
+        "Subtask cancel requests sent to Nodes. Labels: node, outcome (cancelled, noop, error)."
+    );
+    describe_counter!(
+        "steve_hub_harness_upgrades_total",
+        Count,
+        "Harness upgrades finished on Nodes. Labels: trigger (manual, auto), outcome (succeeded, failed)."
+    );
+    describe_counter!(
+        "steve_hub_harness_auto_upgrade_policy_changes_total",
+        Count,
+        "Owner updates to per-Node or per-harness automatic upgrade policy."
     );
     // Node meters, from each Node's vitals (nodes::vitals); totals count from the Node's start
     describe_gauge!(
@@ -521,6 +730,157 @@ pub(super) fn describe() {
         Count,
         "Plugin processes that exited and are started again. Labels: plugin."
     );
+    describe_gauge!(
+        "steve_plugin_processes",
+        Count,
+        "Running child processes of a plugin. Labels: plugin."
+    );
+    describe_gauge!(
+        "steve_plugin_process_cpu_seconds",
+        Seconds,
+        "CPU time of running plugin child processes. Labels: plugin."
+    );
+    describe_gauge!(
+        "steve_plugin_process_resident_bytes",
+        Bytes,
+        "Resident memory of running plugin child processes. Labels: plugin."
+    );
+    describe_gauge!(
+        "steve_plugin_process_open_fds",
+        Count,
+        "Open file descriptors of running plugin child processes. Labels: plugin."
+    );
+    describe_gauge!(
+        "steve_plugin_process_threads",
+        Count,
+        "Threads of running plugin child processes. Labels: plugin."
+    );
+    describe_gauge!(
+        "steve_plugin_process_disk_read_bytes",
+        Bytes,
+        "Disk bytes read by running plugin child processes. Labels: plugin."
+    );
+    describe_gauge!(
+        "steve_plugin_process_disk_written_bytes",
+        Bytes,
+        "Disk bytes written by running plugin child processes. Labels: plugin."
+    );
+    describe_counter!(
+        "steve_plugin_upstream_requests_total",
+        Count,
+        "Upstream requests reported by a plugin via metrics.report. Labels: plugin."
+    );
+    describe_counter!(
+        "steve_plugin_upstream_errors_total",
+        Count,
+        "Upstream request errors reported by a plugin via metrics.report. Labels: plugin."
+    );
+    describe_histogram!(
+        "steve_plugin_upstream_latency_seconds",
+        Seconds,
+        "Upstream request latency reported by a plugin via metrics.report. Labels: plugin."
+    );
+    describe_counter!(
+        "steve_plugin_inbound_events_total",
+        Count,
+        "Inbound events reported by a plugin via metrics.report. Labels: plugin."
+    );
+    describe_counter!(
+        "steve_plugin_outbound_events_total",
+        Count,
+        "Outbound events reported by a plugin via metrics.report. Labels: plugin."
+    );
+    describe_gauge!(
+        "steve_plugin_queue_depth",
+        Count,
+        "Plugin internal queue depth reported via metrics.report. Labels: plugin."
+    );
+    describe_gauge!(
+        "steve_plugin_upstream_connected",
+        Count,
+        "Whether a plugin's upstream link is connected (1) or not (0). Labels: plugin."
+    );
+    describe_counter!(
+        "steve_plugin_upstream_reconnects_total",
+        Count,
+        "Plugin upstream reconnects reported via metrics.report. Labels: plugin."
+    );
+    // Built-in integrations (steve-mail, steve-calendar, Feishu)
+    describe_counter!(
+        "steve_mail_sync_total",
+        Count,
+        "Mailbox sync runs finished. Labels: adapter, result (ok, auth, transient, error)."
+    );
+    describe_histogram!(
+        "steve_mail_sync_duration_seconds",
+        Seconds,
+        "Duration of one mailbox sync. Labels: adapter."
+    );
+    describe_counter!(
+        "steve_mail_messages_synced_total",
+        Count,
+        "Messages fetched by mailbox syncs. Labels: adapter."
+    );
+    describe_counter!(
+        "steve_mail_sends_total",
+        Count,
+        "Approved mail sends attempted. Labels: adapter, result (sent, blocked, failed, unknown, error)."
+    );
+    describe_histogram!(
+        "steve_mail_send_duration_seconds",
+        Seconds,
+        "Duration of one mail send attempt. Labels: adapter."
+    );
+    describe_counter!(
+        "steve_calendar_sync_total",
+        Count,
+        "Calendar connection sync runs finished. Labels: source, result (ok, err)."
+    );
+    describe_histogram!(
+        "steve_calendar_sync_duration_seconds",
+        Seconds,
+        "Duration of one calendar connection sync. Labels: source."
+    );
+    describe_counter!(
+        "steve_calendar_events_synced_total",
+        Count,
+        "Calendar events written by syncs. Labels: source, op (changed, deleted)."
+    );
+    describe_counter!(
+        "steve_feishu_api_requests_total",
+        Count,
+        "Feishu open-platform API calls. Labels: endpoint, result."
+    );
+    describe_histogram!(
+        "steve_feishu_api_duration_seconds",
+        Seconds,
+        "Duration of one Feishu open-platform API call. Labels: endpoint."
+    );
+    describe_counter!(
+        "steve_feishu_sends_total",
+        Count,
+        "Feishu outbound message sends. Labels: result (ok, err)."
+    );
+    describe_histogram!(
+        "steve_feishu_send_duration_seconds",
+        Seconds,
+        "Duration of one Feishu outbound message send."
+    );
+    describe_counter!(
+        "steve_feishu_inbound_events_total",
+        Count,
+        "Feishu inbound events handled. Labels: kind."
+    );
+    describe_histogram!(
+        "steve_feishu_inbound_duration_seconds",
+        Seconds,
+        "Duration of handling one Feishu inbound event. Labels: kind."
+    );
+    describe_counter!(
+        "steve_feishu_ws_connections_total",
+        Count,
+        "Feishu long-connection lifecycle transitions. Labels: result (connected, reconnected, disconnected, failed)."
+    );
     // Models and agents (a finished agent turn; a finished gateway call)
     describe_counter!(
         "steve_model_calls_total",
@@ -562,6 +922,26 @@ pub(super) fn describe() {
         Count,
         "Reported cost in millionths of a dollar. Labels: source, harness, model."
     );
+    describe_histogram!(
+        "steve_turn_context_peak_tokens",
+        Count,
+        "Peak prompt context tokens observed during an agent turn. Labels: harness."
+    );
+    describe_counter!(
+        "steve_handoffs_total",
+        Count,
+        "Session handoffs executed. Labels: reason (quota_exhausted, provider_error, owner_request), from_harness, to_harness, switched_bot."
+    );
+    describe_counter!(
+        "steve_handoff_outcomes_total",
+        Count,
+        "First-turn outcomes of sessions created via handoff. Labels: reason, outcome."
+    );
+    describe_histogram!(
+        "steve_handoff_package_bytes",
+        Bytes,
+        "Serialized size of the working-memory opening prompt sent on session handoff. Labels: reason."
+    );
     // This process (sampled when read)
     describe_gauge!(
         "steve_process_cpu_seconds",
@@ -590,7 +970,7 @@ pub(super) fn describe() {
     describe_histogram!(
         "steve_web_long_task_seconds",
         Seconds,
-        "Main-thread tasks over 50 ms. Labels: page (chat, items, item, sessions, session, inbox, other)."
+        "Main-thread tasks over 50 ms. Labels: page (bounded nav destination or detail route)."
     );
     describe_histogram!(
         "steve_web_interaction_seconds",
@@ -603,6 +983,16 @@ pub(super) fn describe() {
         "Merging one patch frame into the web client's views. Labels: page."
     );
     describe_histogram!(
+        "steve_web_snapshot_seconds",
+        Seconds,
+        "Applying a full view snapshot in the web client. Labels: page."
+    );
+    describe_gauge!(
+        "steve_web_dom_nodes",
+        Count,
+        "DOM element count sampled by the web client. Labels: page."
+    );
+    describe_histogram!(
         "steve_transcript_page_events",
         Count,
         "Events delivered in a session transcript page."
@@ -613,8 +1003,49 @@ pub(super) fn describe() {
         "Time from mounting a session transcript to rendering its latest turns. Labels: page."
     );
     describe_counter!(
+        "steve_web_nav_opens_total",
+        Count,
+        "Menu item opens reported by the web client. Labels: item."
+    );
+    describe_counter!(
+        "steve_web_errors_total",
+        Count,
+        "Uncaught JS errors and unhandled promise rejections reported by the web client. Labels: page, kind."
+    );
+    describe_counter!(
+        "steve_web_sse_reconnects_total",
+        Count,
+        "SSE stream reconnect attempts reported by the web client. Labels: reason (error, stale, wake)."
+    );
+    describe_counter!(
         "steve_metrics_collection_errors_total",
         Count,
         "Figures that could not be collected. Labels: source."
+    );
+    // Knowledge extraction, project AGENTS.md proposals, and steward trigger gating
+    describe_counter!(
+        "steve_knowledge_extract_produced_total",
+        Count,
+        "Knowledge items produced by extraction. Labels: kind (fact, preference, rule, event, agents_proposal)."
+    );
+    describe_counter!(
+        "steve_knowledge_extract_dropped_total",
+        Count,
+        "Extraction outputs dropped by deterministic validation. Labels: reason (duplicate, shape, no_evidence, one_off, restates_goal, missing_about, unresolved_about, cap_reached)."
+    );
+    describe_counter!(
+        "steve_knowledge_proposals_total",
+        Count,
+        "Project AGENTS.md proposals lifecycle events. Labels: action (created, accepted, dismissed)."
+    );
+    describe_counter!(
+        "steve_knowledge_steward_runs_total",
+        Count,
+        "Knowledge steward schedule trigger evaluations. Labels: outcome (triggered, skipped), reason (threshold, manual, nothing_to_tidy, below_threshold)."
+    );
+    describe_counter!(
+        "steve_security_refusals_total",
+        Count,
+        "Actions refused at a security or tenant boundary. Labels: boundary, reason."
     );
 }

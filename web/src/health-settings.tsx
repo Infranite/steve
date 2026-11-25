@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
-import { HubError, modReq } from "@/api"
+import { HubError } from "@/api"
+import { systemApi } from "@/api/system"
 import { Row, Panel, Section, Notice } from "@/ui"
 import { useT } from "@/i18n"
 import { grouped, label, limitText, valueText, warnings, warningText, type HubHealth } from "@/health"
@@ -11,7 +12,7 @@ export function HubHealthSection() {
   const [h, setH] = useState<HubHealth | null>(null), [error, setError] = useState(""), t = useT()
   useEffect(() => {
     let live = true
-    const load = () => modReq<HubHealth>("GET", "/system/health").then((v) => { if (live) { setH(v); setError("") } })
+    const load = () => systemApi.health().then((v) => { if (live) { setH(v); setError("") } })
       .catch((e) => { if (!live) return; if (e instanceof HubError && e.status === 403) { setH(null); setError("") } else setError((e as Error).message) })
     void load()
     const timer = setInterval(load, 60_000)

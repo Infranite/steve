@@ -73,16 +73,15 @@
   "knowledge.source.syncing_now": "Already syncing",
   "knowledge.files.taken": "Someone else has already added this attachment to the knowledge base",
   "knowledge.doc.delete_folder": "This document comes from a folder: delete it there or exclude it in the source",
-  "knowledge.doc.delete_item": "This document follows its item and can't be deleted on its own; you can set its level to “Never use”",
-  "knowledge.doc.delete_chat": "This document follows its conversation and can't be deleted on its own; you can set its level to “Never use”",
   "knowledge.doc.delete_other": "This document can't be deleted on its own",
   "knowledge.uses.deleted": "Deleted",
   "knowledge.mem.already_handled": "This memory has already been handled",
   "knowledge.mem.deleted_no_undo": "This memory was deleted and can't be restored",
+  "knowledge.proposal.already_handled": "This proposal has already been handled",
+  "knowledge.steward.skip_nothing": "Nothing new to tidy; skipped",
+  "knowledge.steward.skip_below": "New candidates and conflicts (%{count}) below threshold (%{threshold}); skipped",
   "knowledge.builtin.notes": "My notes",
   "knowledge.builtin.files": "Uploaded files",
-  "knowledge.builtin.items": "Item deliveries",
-  "knowledge.builtin.chat": "Main conversation",
   "knowledge.builtin.mems": "Memories",
   "knowledge.builtin.bot_mems": "Bot memories",
   "knowledge.chat.day": "Conversation on %{day}",
@@ -97,7 +96,5 @@
   "knowledge.change.not_undoable": "This change was already undone, or has nothing to undo",
   "knowledge.change.answered": "This conflict was already answered",
   "knowledge.doc_prefix.notes": "Note",
-  "knowledge.doc_prefix.files": "File",
-  "knowledge.doc_prefix.items": "Item record",
-  "knowledge.doc_prefix.chat": "Conversation record"
+  "knowledge.doc_prefix.files": "File"
 }

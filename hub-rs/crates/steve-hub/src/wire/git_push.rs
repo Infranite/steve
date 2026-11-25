@@ -14,7 +14,7 @@
 //! Every answer is `None` with the local Node off: the Hub's own git runs as before.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -199,20 +199,19 @@ impl GitPush {
 
     /// Waits for `op` to settle.
     async fn settled(&self, runtime: &NodeRuntime, op: &str) -> Option<LedgerEntry> {
-        let until = Instant::now() + self.answer_wait;
-        loop {
-            match runtime.ledger(op) {
-                Ok(Some(l)) if l.is_settled() => return Some(l),
-                Ok(Some(_)) => {}
-                Ok(None) => return None,
+        runtime
+            .wait_ledger_until(op, self.answer_wait, |res| match res {
+                Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(Some(l)),
+                Ok(Some(_)) => std::ops::ControlFlow::Continue(()),
+                Ok(None) => std::ops::ControlFlow::Break(None),
                 // the store is there again later; the push is in the ledger either way
-                Err(e) => tracing::warn!("push {op}: {e}"),
-            }
-            if Instant::now() >= until {
-                return None;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+                Err(e) => {
+                    tracing::warn!("push {op}: {e}");
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .await
+            .flatten()
     }
 
     /// A push the ledger lost: stopped (asked once) and given a moment to be, never sent again.
@@ -225,14 +224,12 @@ impl GitPush {
                 return;
             }
         }
-        let until = Instant::now() + LOST_WAIT;
-        while Instant::now() < until {
-            match runtime.ledger(op) {
-                Ok(Some(l)) if l.state == "unknown" => {}
-                _ => return,
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        let _ = runtime
+            .wait_ledger_until(op, LOST_WAIT, |res| match res {
+                Ok(Some(l)) if l.state == "unknown" => std::ops::ControlFlow::Continue(()),
+                _ => std::ops::ControlFlow::Break(()),
+            })
+            .await;
     }
 
     async fn push_on(
@@ -541,6 +538,7 @@ mod tests {
     use std::io::Read as _;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+    use std::time::Instant;
 
     use steve_store::Store;
 
@@ -628,6 +626,7 @@ mod tests {
                     adapters: Default::default(),
                     node: "node".into(),
                     claude_executable: "/usr/bin/false".into(),
+                    claude_config_dir: None,
                     steve_home: root.join("steve"),
                     codex_home: root.join("codex"),
                     user_home: root.to_path_buf(),

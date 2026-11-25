@@ -29,14 +29,14 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
         let _ = s.secrets.set(secrets.clone());
     }
     if model_node.is_some() || nodes.is_some() {
-        node_jobs.push(Job::new("harnesses.follow",
-            harnesses.clone().follow_all(
-                model_node
-                    .as_ref()
-                    .map(|h| h.node.clone() as Arc<dyn steve_node_api::Node>),
-                nodes.clone(),
-            ),
-        ));
+        let harnesses_job = harnesses.clone();
+        let local_node_ref = model_node
+            .as_ref()
+            .map(|h| h.node.clone() as Arc<dyn steve_node_api::Node>);
+        let nodes_ref = nodes.clone();
+        node_jobs.push(Job::task("harnesses.follow", move || {
+            harnesses_job.follow_task(local_node_ref, nodes_ref)
+        }));
     }
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
     // where the Hub's own Node runs sessions: in this process, or in one of its own (B1)
@@ -75,9 +75,36 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
     );
     if node_host.is_some() {
         // the local roots follow projects and knowledge folders, with no restart
-        node_jobs.push(Job::new("workspaces.follow",
-            workspaces.clone().follow(bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project { .. }) | steve_types::DomainEvent::Knowledge(_))))),
-        ));
+        let initial = std::sync::Arc::new(std::sync::Mutex::new(Some(bus.tap(|event| {
+            matches!(
+                event.as_domain(),
+                Some(
+                    steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project { .. })
+                        | steve_types::DomainEvent::Knowledge(_)
+                )
+            )
+        }))));
+        let bus = bus.clone();
+        let ws_job = workspaces.clone();
+        node_jobs.push(Job::supervised("workspaces.follow", move || {
+            let events = initial
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .unwrap_or_else(|| {
+                    bus.tap(|event| {
+                        matches!(
+                            event.as_domain(),
+                            Some(
+                                steve_types::DomainEvent::Config(
+                                    steve_types::ConfigEvent::Project { .. }
+                                ) | steve_types::DomainEvent::Knowledge(_)
+                            )
+                        )
+                    })
+                });
+            ws_job.clone().follow("workspaces.follow", events)
+        }));
     }
     // whether a principal's Bot can run at all: what the Nodes said of its harness last (installed,
     // ready, signed in); a Node linked but not heard from yet leaves its harnesses unknown, never

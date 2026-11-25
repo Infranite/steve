@@ -88,27 +88,33 @@ impl FlowCmd {
         runtime: &super::node_runtime::NodeRuntime,
         op: &str,
     ) -> Result<(), String> {
-        let until = Instant::now() + LOST_WAIT;
         let mut asked = false;
-        loop {
-            match runtime.ledger(op) {
+        runtime
+            .wait_ledger_until(op, LOST_WAIT, |res| match res {
                 Ok(Some(l)) if l.state == "unknown" => {
                     // asked once: a recover the Node could not finish leaves it as it is
                     if !asked {
                         asked = true;
-                        if !runtime.stop_lost(op).map_err(|e| e.to_string())? {
-                            return Err(LOST_RUNS.into());
+                        match runtime.stop_lost(op) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return std::ops::ControlFlow::Break(Err(LOST_RUNS.into()));
+                            }
+                            Err(e) => {
+                                return std::ops::ControlFlow::Break(Err(e.to_string()));
+                            }
                         }
                     }
+                    std::ops::ControlFlow::Continue(())
                 }
-                Ok(_) => return Ok(()),
-                Err(e) => tracing::warn!("flow cmd {op}: {e}"),
-            }
-            if Instant::now() >= until {
-                return Err(LOST_RUNS.into());
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+                Ok(_) => std::ops::ControlFlow::Break(Ok(())),
+                Err(e) => {
+                    tracing::warn!("flow cmd {op}: {e}");
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .await
+            .unwrap_or_else(|| Err(LOST_RUNS.into()))
     }
 
     /// The project directory as a workspace on `node`.
@@ -243,20 +249,19 @@ impl CmdNode for FlowCmd {
                 _ => return CmdRan::NotRun(e.to_string()),
             }
         }
-        let until = Instant::now() + req.timeout + ANSWER_GRACE;
-        loop {
-            match runtime.ledger(&op) {
-                Ok(Some(l)) if l.is_settled() => return ran(&l),
-                Ok(Some(_)) => {}
-                Ok(None) => return CmdRan::Unknown,
+        runtime
+            .wait_ledger_until(&op, req.timeout + ANSWER_GRACE, |res| match res {
+                Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(ran(&l)),
+                Ok(Some(_)) => std::ops::ControlFlow::Continue(()),
+                Ok(None) => std::ops::ControlFlow::Break(CmdRan::Unknown),
                 // the store is there again later; the command is in the ledger either way
-                Err(e) => tracing::warn!("flow cmd {op}: {e}"),
-            }
-            if Instant::now() >= until {
-                return CmdRan::Unknown;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+                Err(e) => {
+                    tracing::warn!("flow cmd {op}: {e}");
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .await
+            .unwrap_or(CmdRan::Unknown)
     }
 }
 
@@ -333,6 +338,7 @@ mod tests {
                     adapters: Default::default(),
                     node: "node".into(),
                     claude_executable: "/usr/bin/false".into(),
+                    claude_config_dir: None,
                     steve_home: dir.join("steve"),
                     codex_home: dir.join("codex"),
                     user_home: dir.to_path_buf(),

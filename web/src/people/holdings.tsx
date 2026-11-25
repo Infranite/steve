@@ -11,7 +11,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { api } from "@/api"
 import { go, Group, Panel, Row, SectionLabel, Meta } from "@/ui"
 import { ownership, objectHref, type Holding, type ObjectInfo, type ObjectType } from "@/api/ownership"
-import { Loading, Section, act, joinList, label, useLoad } from "@/people/common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { Loading, Section, act, joinList, label } from "@/people/common"
 import { useT } from "@/i18n"
 import { OwnerChip, changedToast } from "@/people/owner-chip"
 
@@ -20,8 +21,8 @@ const clip = (s: string, n = 24) => (s.length > n ? s.slice(0, n) + "…" : s)
 export const ObjIcon = ({ t }: { t: ObjectType }) => { const I = ICON[t] ?? BotIcon; return <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><I className="size-4" strokeWidth={1.5} aria-hidden /></span> }
 
 export function HoldingsSection({ person, name, isMe, isBot }: { person: string; name: string; isMe: boolean; isBot: boolean }) {
-  const L = useLoad(() => ownership.holdings(person), [person], ["party", "patch"])
-  if (L.err) return null
+  const L = useHubQuery(["ownership", "holdings", person], () => ownership.holdings(person), { events: ["party", "patch"] })
+  if (L.error) return null
   const t = useT()
   const h = L.data
   const nAcc = h?.accounts.reduce((n, g) => n + g.accounts.length, 0) ?? 0
@@ -52,9 +53,9 @@ export function HoldingsSection({ person, name, isMe, isBot }: { person: string;
  *  nothing at all, and the section is not there (their accounts are the page's 关联账号) */
 export function ResponsibleSection({ person, name, isMe }: { person: string; name: string; isMe: boolean }) {
   const t = useT()
-  const L = useLoad(() => ownership.holdings(person), [person], ["party", "patch"])
+  const L = useHubQuery(["ownership", "holdings", person], () => ownership.holdings(person), { events: ["party", "patch"] })
   const xs = L.data?.responsible ?? []
-  if (L.err || !xs.length) return null
+  if (L.error || !xs.length) return null
   return (
     <Section label={t("people:holdings.responsible", { n: xs.length })} right={<AddHolding person={person} name={name} isMe={isMe} />} data-holdings>
       <Panel>{xs.map((x) => <HoldingRow key={x.object.object_type + x.object.object_id + x.role} x={x} person={person} plain />)}</Panel>
@@ -108,8 +109,8 @@ function AddHolding({ person, name, isMe }: { person: string; name: string; isMe
 /** 没有负责人 (the contacts overview): what nobody is responsible for yet, each with its chip */
 export function UnownedSection() {
   const t = useT()
-  const L = useLoad(() => ownership.unowned(), [], ["party", "patch", "bot", "persona", "connection"])
-  if (L.err || !L.data || !L.data.length) return null
+  const L = useHubQuery(["ownership", "unowned"], () => ownership.unowned(), { events: ["party", "patch", "bot", "persona", "connection"] })
+  if (L.error || !L.data || !L.data.length) return null
   return (
     <section className="mt-8" data-unowned><Section label={t("people:holdings.unowned", { n: L.data.length })}>
       <Group>{L.data.map((o) => { const href = objectHref(o); return (

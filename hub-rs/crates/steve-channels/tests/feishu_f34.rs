@@ -690,37 +690,6 @@ async fn media_proxy(
         .body(Body::from(bytes))
         .unwrap()
 }
-#[derive(Default)]
-struct ImageReplyCapture(std::sync::Mutex<Vec<(String, Vec<Value>)>>);
-#[async_trait::async_trait]
-impl steve_channels::compose::PinnedModel for ImageReplyCapture {
-    async fn run(
-        &self,
-        _: &str,
-        _: &str,
-        _: Duration,
-    ) -> Result<steve_modules::GatewayOut, String> {
-        panic!("image input must not be dropped")
-    }
-    async fn run_with_images(
-        &self,
-        _: &str,
-        prompt: &str,
-        images: &[Value],
-        _: Duration,
-    ) -> Result<steve_modules::GatewayOut, String> {
-        self.0
-            .lock()
-            .unwrap()
-            .push((prompt.into(), images.to_vec()));
-        Ok(steve_modules::GatewayOut {
-            text:
-                r#"{"outcome":"reply","text":"已读取附件","needs_approval":false,"why":"基于原件"}"#
-                    .into(),
-            ..Default::default()
-        })
-    }
-}
 #[tokio::test(flavor = "multi_thread")]
 async fn authenticated_provider_bytes_reach_the_channel_composer() {
     use base64::Engine;
@@ -759,10 +728,13 @@ async fn authenticated_provider_bytes_reach_the_channel_composer() {
     let written = h.ch.on_inbound(WS, &h.con, incoming).await.unwrap();
     let plan =
         steve_channels::flow_actions::plan_of(h.ch.store(), WS, &written.message_id).unwrap();
-    let capture = Arc::new(ImageReplyCapture::default());
+    h.env.gateway.accept_images();
+    h.env.gateway.script(
+        steve_channels::compose::H_SAFETY,
+        r#"{"outcome":"reply","text":"已读取附件","needs_approval":false,"why":"基于原件"}"#,
+    );
     let composer = steve_channels::compose::Composer::new()
-        .media(Arc::new(steve_channels::media_agent::FeishuMediaSource))
-        .pinned(capture.clone());
+        .media(Arc::new(steve_channels::media_agent::FeishuMediaSource));
     composer
         .generate(
             &h.ch,
@@ -772,7 +744,7 @@ async fn authenticated_provider_bytes_reach_the_channel_composer() {
         .await
         .unwrap();
     {
-        let seen = capture.0.lock().unwrap();
+        let seen = h.env.gateway.image_calls.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].1.len(), 1);
         assert!(seen[0].0.contains("real provider log: deploy succeeded"));

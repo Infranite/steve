@@ -133,20 +133,35 @@ impl Projection {
         })
     }
 
-    /// The projection's task (once).
+    /// The projection's task (once), supervised with bounded backoff on panic.
     pub fn start(&self) -> Option<steve_runtime::jobs::Task> {
         let (tap, asks) = self
             .parts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()?;
-        let run = flush::Run::new(
-            self.store.clone(),
-            self.bus.clone(),
-            tap,
-            self.routes.clone(),
-        );
-        Some(steve_runtime::spawn("hub.projection", run.run(asks)))
+        let initial_tap = std::sync::Arc::new(std::sync::Mutex::new(Some(tap)));
+        let asks = std::sync::Arc::new(tokio::sync::Mutex::new(asks));
+        let store = self.store.clone();
+        let bus = self.bus.clone();
+        let routes = self.routes.clone();
+        Some(steve_runtime::supervise(
+            "hub.projection",
+            Arc::new(steve_runtime::SystemClock),
+            move || {
+                let tap = initial_tap
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                    .unwrap_or_else(|| bus.commits());
+                let asks = asks.clone();
+                let run = flush::Run::new(store.clone(), bus.clone(), tap, routes.clone());
+                async move {
+                    let mut asks = asks.lock().await;
+                    run.run(&mut asks).await;
+                }
+            },
+        ))
     }
 
     /// The hot views of `ws`, including everything committed before this call; `None` when the
@@ -616,6 +631,7 @@ mod tests {
                 matched: vec!["code review".into()],
                 rejected: vec![],
                 fallback: None,
+                deferred_by: None,
             },
         };
         f.store
@@ -797,7 +813,7 @@ mod tests {
         assert_eq!(f.p.reconcile().await, Some(0));
     }
 
-    /// W3.3 acceptance: >= 1,000 resolve / undo / expire / supersede / dismiss / CAS conflict
+    /// Decision lifecycle acceptance: >= 1,000 resolve / undo / expire / supersede / dismiss / CAS conflict
     /// sequences plus tier matrix (`Decide` vs `Draft` vs `Folded`) match hot reads & patches.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_thousand_decision_sequences_match_projection_and_tier_matrix() {

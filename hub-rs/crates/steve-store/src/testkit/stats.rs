@@ -19,7 +19,7 @@ pub fn seed_events(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
          INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, model, turn_id, session_id, item_id, input, output, cache_read, cache_write) VALUES
            ('default', {t1e}, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 'tn_1', 's1', 'ST-1', 100, 20, 1000, 0);
          INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, result, requested_by, created, resolved) VALUES
-           ('d1', 'default', 'approve', 'item', 'ST-1', 'ST-1', 'q', 'resolved', '{{\"decided_by\":\"yolo\"}}', 'dev', {d1}, {d1r}),
+           ('d1', 'default', 'approve', 'item', 'ST-1', 'ST-1', 'q', 'resolved', '{{\"decided_by\":\"steve\"}}', 'dev', {d1}, {d1r}),
            ('d2', 'default', 'fail', 'item', 'ST-2', 'ST-2', 'q', 'open', NULL, 'dev', {d2}, NULL);
          INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor) VALUES
            ('default', 'ST-1', {k1}, 'status', 'active', 'completed', 'usr_1'),
@@ -39,7 +39,7 @@ pub fn seed_events(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     s.write_locked(|c| Ok(c.execute_batch(&sql)?))
 }
 
-/// (id, item, kind, created, resolved, decided by YOLO)
+/// (id, item, kind, created, resolved, by_steve)
 pub type Card<'a> = (&'a str, Option<&'a str>, &'a str, i64, Option<i64>, bool);
 
 pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
@@ -49,7 +49,7 @@ pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
          INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ST-1', 'default', 1, 't1', 'active', 0, 0);
          INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ST-2', 'default', 2, 't2', 'active', 0, 0);\n",
     );
-    for (id, item, kind, created, resolved, yolo) in cards {
+    for (id, item, kind, created, resolved, by_steve) in cards {
         let item = item.map_or("NULL".into(), |i| format!("'{i}'"));
         let resolved = resolved.map_or("NULL".into(), |r| r.to_string());
         let status = if resolved == "NULL" {
@@ -57,8 +57,8 @@ pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
         } else {
             "resolved"
         };
-        let result = if *yolo {
-            "'{\"decided_by\":\"yolo\"}'"
+        let result = if *by_steve {
+            r#"'{"decided_by":"steve"}'"#
         } else {
             "NULL"
         };
@@ -70,55 +70,22 @@ pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
     s.write_locked(|c| Ok(c.execute_batch(&sql)?))
 }
 
-pub fn seed_workflow(s: &Store, m: impl Fn(i64) -> i64, long_turn_ms: i64) -> Result<()> {
-    let units = r#"[{"id":"work","kind":"work"},{"id":"review","kind":"review"},{"id":"integrate","kind":"integrate"}]"#;
+pub fn seed_delivery(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     let mut sql = String::from(
         "PRAGMA foreign_keys = OFF;
          INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'stats.tz', '\"UTC\"', 0);\n",
     );
-    for (no, source) in [
-        (1, r#"["对话","chat"]"#),
-        (2, r#"["协作工作","workflow"]"#),
-        (3, r#"["协作工作","workflow"]"#),
-        (4, r#"["协作工作","workflow"]"#),
-        (5, r#"["对话","chat"]"#),
-    ] {
+    for no in [1, 5] {
         sql.push_str(&format!(
-            "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, source, created, updated, outcome) VALUES ('ST-{no}', 'default', {no}, 't', 'closed', 'dev', '{source}', {t}, {t}, 'completed');\n",
+            "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, source, created, updated, outcome) VALUES ('ST-{no}', 'default', {no}, 't', 'closed', 'dev', '[\"对话\",\"chat\"]', {t}, {t}, 'completed');\n",
             t = m(0)
         ));
     }
-    sql.push_str(&format!(
-        "INSERT INTO workflows (item_id, revision, max_parallel, max_attempts, created, updated) VALUES ('ST-1', 12, 2, 3, {t0}, {t0});
-         INSERT INTO workflow_units (workflow_id, id, position, spec, status, item_id, attempt) VALUES
-           ('ST-1', 'work', 0, '{{}}', 'succeeded', 'ST-2', 2),
-           ('ST-1', 'review', 1, '{{}}', 'succeeded', 'ST-3', 2),
-           ('ST-1', 'integrate', 2, '{{}}', 'succeeded', 'ST-4', 1);
-         INSERT INTO workflow_attempts (item_id, attempt, workflow_id, unit_id, snapshot, created) VALUES
-           ('ST-2', 1, 'ST-1', 'work', '{{}}', {r}), ('ST-3', 1, 'ST-1', 'review', '{{}}', {r});
-         INSERT INTO workflow_history (workflow_id, revision, action, reason, unit_id, detail, created) VALUES
-           ('ST-1', 1, 'plan', 'p', NULL, '{{\"units\":{units}}}', {t0}),
-           ('ST-1', 2, 'claim', 'c', 'work', '{{\"attempt\":1}}', {}),
-           ('ST-1', 3, 'deliver', 'd', 'work', '{{\"status\":\"succeeded\"}}', {}),
-           ('ST-1', 4, 'claim', 'c', 'review', '{{\"attempt\":1}}', {}),
-           ('ST-1', 5, 'deliver', 'd', 'review', '{{\"status\":\"failed\"}}', {}),
-           ('ST-1', 6, 'reset', 'r', 'work', '{{}}', {r}),
-           ('ST-1', 7, 'claim', 'c', 'work', '{{\"attempt\":2}}', {}),
-           ('ST-1', 8, 'deliver', 'd', 'work', '{{\"status\":\"succeeded\"}}', {}),
-           ('ST-1', 9, 'claim', 'c', 'review', '{{\"attempt\":2}}', {}),
-           ('ST-1', 10, 'deliver', 'd', 'review', '{{\"status\":\"succeeded\"}}', {}),
-           ('ST-1', 11, 'claim', 'c', 'integrate', '{{\"attempt\":1}}', {}),
-           ('ST-1', 12, 'deliver', 'd', 'integrate', '{{\"status\":\"succeeded\"}}', {});\n",
-        m(1), m(10), m(11), m(20), m(22), m(30), m(31), m(40), m(41), m(50),
-        t0 = m(0),
-        r = m(21),
-    ));
     // sessions: (id, item, created, first_tool_at); sw1's first tool call is only an event
     for (id, item, created, first) in [
         ("sc", "ST-1", m(0), Some(m(2))),
-        ("sw1", "ST-2", m(1), None),
-        ("sr1", "ST-3", m(11), None),
-        ("sw2", "ST-2", m(22), Some(m(23))),
+        ("sw1", "ST-1", m(1), None),
+        ("sr1", "ST-1", m(11), None),
         ("s5", "ST-5", m(60), Some(m(61))),
     ] {
         sql.push_str(&format!(
@@ -127,23 +94,17 @@ pub fn seed_workflow(s: &Store, m: impl Fn(i64) -> i64, long_turn_ms: i64) -> Re
             first.map_or("NULL".into(), |f| f.to_string())
         ));
     }
+    // Keep sr1 on a separate open item so ST-1 has 2 sessions and ST-5 has 1, while sr1 still tests no_tool.
     sql.push_str(&format!(
-        "INSERT INTO events (session_id, ts, kind, data) VALUES ('sw1', {}, 'tool_call', '{{}}'), ('sw1', {}, 'tool_call', '{{}}');
+        "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, source, created, updated, outcome) VALUES ('ST-2', 'default', 2, 't', 'active', 'dev', '[\"对话\",\"chat\"]', {t0}, {t0}, NULL);
+         UPDATE sessions SET item_id='ST-2' WHERE id='sr1';
+         INSERT INTO events (session_id, ts, kind, data) VALUES ('sw1', {}, 'tool', '{{}}'), ('sw1', {}, 'tool', '{{}}');
          INSERT INTO item_stats (item_id, workspace_id, created, accepted, done_at, updated) VALUES
            ('ST-1', 'default', {t0}, {}, {}, {t0}), ('ST-5', 'default', {t0}, NULL, {}, {t0});
-         INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, item_id, input) VALUES
-           ('default', {}, '2026-11-01', 'agent', 'turn', 'claude-code', 'ST-1', 400),
-           ('default', {}, '2026-11-01', 'agent', 'turn', 'claude-code', 'ST-2', 600);
-         INSERT INTO agent_turns (id, workspace_id, session_id, item_id, bot_id, harness, started, ended) VALUES
-           ('tn_1', 'default', 'sc', 'ST-1', 'dev', 'claude-code', {}, {}),
-           ('tn_2', 'default', 'sc', 'ST-1', 'dev', 'claude-code', {}, {});
          INSERT INTO item_marks (workspace_id, item_id, ts, kind, to_v, actor, detail) VALUES
-           ('default', 'ST-1', {}, 'wake', 'succeeded', 'steve', '{{}}'),
-           ('default', 'ST-1', {}, 'wake', 'failed', 'steve', '{{}}'),
-           ('default', 'ST-1', {}, 'wake', 'succeeded', 'steve', '{{}}'),
            ('default', 'ST-1', {}, 'invalidate', 'plan', 'steve', '{{}}'),
            ('default', 'ST-1', {}, 'merge', 'merged', 'steve', '{{}}'),
-           ('default', 'ST-2', {}, 'reject', 'unit_evidence', 'dev', '{{}}'),
+           ('default', 'ST-1', {}, 'reject', 'design_file', 'dev', '{{}}'),
            ('default', 'ST-5', {}, 'deliver', 'auto', 'dev', '{{}}');
          INSERT INTO chan_messages (id, workspace_id, space_id, external_id, reply_to, direction, status, created, sent) VALUES
            ('mi', 'default', 'sp', 'om_1', NULL, 'in', 'received', {}, NULL),
@@ -152,9 +113,7 @@ pub fn seed_workflow(s: &Store, m: impl Fn(i64) -> i64, long_turn_ms: i64) -> Re
          PRAGMA foreign_keys = ON;",
         m(3), m(4),
         m(60), m(70), m(65),
-        m(5), m(25),
-        m(0), m(0) + long_turn_ms + 600_000, m(55), m(60),
-        m(10), m(20), m(50), m(52), m(68), m(29), m(64),
+        m(52), m(68), m(29), m(64),
         m(100), m(101), m(102), m(104), m(105),
         t0 = m(0),
     ));
@@ -320,15 +279,15 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
         &mut sql,
         "s1",
         m(2),
-        "tool_call",
-        r#"{"toolCallId":"a","kind":"execute","_meta":{"claudeCode":{"toolName":"Bash"}}}"#,
+        "tool",
+        r#"{"tool":{"id":"a","origin":"harness","name":"Bash","category":"exec","title":"Bash","phase":"running"}}"#,
     );
     ev(
         &mut sql,
         "s1",
         m(3),
-        "tool_call_update",
-        r#"{"toolCallId":"a","status":"failed"}"#,
+        "tool",
+        r#"{"tool":{"id":"a","origin":"harness","name":"Bash","category":"exec","title":"Bash","phase":"failed"}}"#,
     );
     ev(
         &mut sql,
@@ -434,10 +393,10 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
         "approve",
         "tool_call",
         "rm",
-        "resolved",
-        r#"{"choice":"yes","decided_by":"yolo"}"#,
+        "expired",
+        r#"{"choice":"yes"}"#,
         m(55),
-        Some(m(56)),
+        Some(m(55)),
     );
     dec(
         &mut sql,

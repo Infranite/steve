@@ -17,6 +17,7 @@ pub mod approval;
 pub mod attachments;
 pub mod changes;
 pub mod config;
+mod context_handoff;
 pub mod cycle;
 mod dependencies;
 mod diagnostics;
@@ -32,7 +33,6 @@ pub mod models;
 mod modules;
 pub mod node_git;
 pub mod notice_line;
-pub mod notify;
 mod occupancy;
 mod orchestrator;
 pub mod outbox_work;
@@ -50,7 +50,6 @@ mod turn_receipts;
 mod turn_wait;
 pub mod upstream;
 pub mod util;
-pub mod workflow;
 pub mod workflow_run;
 pub mod workspace;
 mod worktrees;
@@ -61,18 +60,23 @@ mod testkit;
 mod tests;
 
 pub use config::CoreConfig;
-pub use error::{CoreError, Result};
+pub use context_handoff::{
+    BotDefaultSnapshot, BotDefaultUpdated, HANDOFF_UNAVAILABLE_SUBJECT, HandoffOutcome,
+    HandoffReason, HandoffTarget,
+};
+pub use error::{CoreError, HandoffError, Result};
 pub use gateway::{ModelGateway, OneModel, SharedGateway, SingleModelGateway, Tier};
 pub use orchestrator::{
     CreateItem, DecisionCommand, Forked, ItemAction, SendNow, SupplementMode, design_pending,
 };
+pub use quota::has_quota_reset;
 pub use runtime::{
     AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, PermissionAction,
     PermissionAnswer, Prompted, Released, Running, Stop, TurnEnd,
 };
 pub use workflow_run::{
-    ChildResultError, WF_CHILD_SOURCE_KIND, WF_RUN_SUBJECT, WfBudget, WfDeliveryBlocker,
-    WfRunAction, WfRunSnapshot, WorkflowStepExecutor, validate_child_result,
+    ChildResultError, WF_RUN_SUBJECT, WfBudget, WfDeliveryBlocker, WfRunAction, WfRunSnapshot,
+    WorkflowStepExecutor, validate_child_result,
 };
 
 use repo::Db;
@@ -91,7 +95,7 @@ pub(crate) struct Inner {
     /// 设置 · 模型 (the same resolver the gateway's [`SingleModelGateway`] uses).
     models: models::Models,
     state: Mutex<State>,
-    thread: thread::Lanes,
+    thread: thread::ThreadRuntime,
     /// The B1 registries (item hooks, prompt contexts, decision handlers); unset = no modules.
     modules: OnceLock<steve_modules::Modules>,
     hook_queue: modules::HookQueue,
@@ -136,8 +140,6 @@ pub(crate) struct State {
     quota_waits: HashMap<String, quota::QuotaWait>,
     releasing: Option<Releasing>,
     release_generation: u64,
-    drafts: HashMap<String, changes::Proposal>,
-    applied: HashMap<String, changes::Applied>,
     /// Item hook calls collected in this critical section, run once the lock is gone.
     hooks: Vec<modules::HookEvent>,
     /// Items the user marked done, with what to restore if they undo it from the toast.
@@ -150,6 +152,14 @@ pub(crate) struct State {
     /// Items handing over to a new session while the old one's release is on its way: the
     /// release (`Released::Pending`) the item's next session waits for, taken when it starts.
     handoffs: HashMap<String, String>,
+    /// Sessions created by handoff waiting to record their first-turn outcome metric.
+    handoff_outcomes: HashMap<String, &'static str>,
+    /// Execution surfaces currently known to be quota-exhausted or failing `(harness, model) -> until_ms`.
+    surface_cooldowns: HashMap<context_handoff::SurfaceKey, i64>,
+    /// Per-item consecutive surface error streaks and surfaces already failed during this outage.
+    surface_errors: HashMap<String, context_handoff::SurfaceFailureState>,
+    /// Metadata for open coordinator surface-unavailable cards (`decision_id -> meta`).
+    handoff_cards: HashMap<String, context_handoff::HandoffCardMeta>,
     /// Git facts of items on a Node, gathered off the lock (`node_git`).
     git: node_git::Slots,
     /// Critical sections entered so far (facts taken in one may be read again in the same one).
@@ -187,7 +197,7 @@ impl Core {
             models,
             config,
             state: Mutex::new(State::default()),
-            thread: thread::Lanes::default(),
+            thread: thread::ThreadRuntime::default(),
             modules: OnceLock::new(),
             hook_queue: OnceLock::new(),
             steve_notes: Default::default(),

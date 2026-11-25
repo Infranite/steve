@@ -25,7 +25,7 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use crate::api::AppState;
-use crate::backend::CreateItem;
+use crate::wire::core::CreateItem;
 
 pub const PATH: &str = "/a2a";
 pub const CARD_PATHS: &[&str] = &["/.well-known/agent-card.json", "/.well-known/agent.json"];
@@ -304,7 +304,11 @@ async fn send_message(
         if !known {
             return rpc_err(id, -32001, format!("Task not found: {task}"));
         }
-        if let Err(e) = st.domain.supplement(task, &text, "auto", vec![]).await {
+        if let Err(e) = st
+            .domain
+            .supplement(task, &text, "auto", vec![], "steve")
+            .await
+        {
             return rpc_err(id, -32603, e.message);
         }
         return match task_of(store, &who.ws, task) {

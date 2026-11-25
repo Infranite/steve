@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use serde_json::{Value, json};
 
 use crate::api::{self, AppState};
-use crate::backend::BackendError;
+use crate::error::BackendError;
 use crate::error::json_response;
 
 /// Whether the TCP peer is this machine: 127/8, `::1` or an IPv4-mapped 127/8 (main.ts and auth.ts match
@@ -77,10 +77,6 @@ async fn drain_call(st: AppState, start: bool, req: Request) -> Response {
     match st.domain.drain(&token, start).await {
         Ok(Some(r)) => json_response(200, &Value::Object(r)),
         Ok(None) => crate::error::text_response(404, "not found"),
-        // no domain wired means no release in progress
-        Err(e) if e.message.starts_with(crate::backend::UNIMPLEMENTED) => {
-            crate::error::text_response(404, "not found")
-        }
         Err(e) => crate::error::ApiError::from(e).into_response(),
     }
 }
@@ -143,11 +139,10 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
                                 })
                                 || modules
                                     .store
-                                    .thread()
-                                    .run_by_token(token)
+                                    .read(|r| steve_store::thread::active_task_by_token(r, token))
                                     .ok()
                                     .flatten()
-                                    .is_some_and(|r| r.status == "running")
+                                    .is_some()
                         })
                 })
             });
@@ -468,26 +463,25 @@ fn compression()
         .compress_when(SizeAbove::new(1024).and(text as fn(_, _, &_, &_) -> bool))
 }
 
-/// A boot step whose backend method the integrator hasn't wired yet is skipped with a warning; any other
-/// failure stops the Hub like a throw at import time in TS.
-fn boot_step(what: &str, r: Result<(), BackendError>) -> anyhow::Result<()> {
-    match r {
-        Ok(()) => Ok(()),
-        Err(e) if e.message.starts_with(crate::backend::UNIMPLEMENTED) => {
-            tracing::warn!("{what}: {e}");
-            Ok(())
-        }
-        Err(e) => Err(anyhow::anyhow!("{what}: {e}")),
-    }
+fn boot_err(what: &str, e: BackendError) -> anyhow::Error {
+    anyhow::anyhow!("{what}: {e}")
 }
 
 /// `ensureWorkspace(); seed(); registerHub(); recover(); watchReleases(); housekeeping()` + hourly.
 pub async fn boot(st: &AppState) -> anyhow::Result<()> {
     let b = st.backend.clone();
-    let r =
-        tokio::task::spawn_blocking(move || b.writer().and_then(|w| w.ensure_workspace())).await?;
-    boot_step("ensure workspace", r)?;
-    boot_step("seed", st.domain.seed().await)?;
+    tokio::task::spawn_blocking(move || b.ensure_workspace())
+        .await?
+        .map_err(|e| boot_err("ensure workspace", e))?;
+    st.domain.seed().await.map_err(|e| boot_err("seed", e))?;
+    match st.domain.retire_legacy_workflow_children().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            count = n,
+            "retired non-terminal legacy workflow child items"
+        ),
+        Err(e) => return Err(boot_err("retire legacy workflow children", e)),
+    }
     // registerHub runs scutil/sw_vers/sysctl: in the background, so the Hub listens at once
     let dev = st.clone();
     st.jobs.start("hub.device", || {
@@ -495,8 +489,7 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
             let (name, os, version) = crate::system::hub_device(&dev.cfg.version).await;
             let b = dev.backend.clone();
             let r = tokio::task::spawn_blocking(move || {
-                b.writer()
-                    .and_then(|w| crate::system::register_hub(w.as_ref(), &name, &os, &version))
+                crate::system::register_hub(&b, &name, &os, &version)
             })
             .await;
             match r {
@@ -528,8 +521,10 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
                 .unwrap_or_else(|| steve_runtime::spawn("hub.projection", async {}))
         });
     }
-    // recover() reports a finished release first, as in TS
-    boot_step("recover", st.domain.recover().await)?;
+    st.domain
+        .recover()
+        .await
+        .map_err(|e| anyhow::anyhow!("recover: {e}"))?;
     st.domain.spawn_background();
     // closings waiting for something the turn-end callback may never report (queued turns, the hold)
     st.jobs.start("hub.lifecycle", || {
@@ -538,7 +533,7 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
     // live streams of clients signed out by another process (`steve access revoke`) end too (G11)
     if let Some(m) = &st.modules {
         st.jobs.start("hub.presence", || {
-            steve_runtime::spawn("hub.presence", st.presence.clone().sweep(m.store.clone()))
+            st.presence.clone().sweep_task(m.store.clone())
         });
     }
     // warm the runtimes cache so the first /api/runtimes doesn't wait for `claude --version`

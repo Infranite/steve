@@ -82,13 +82,16 @@ fn published_v49_upgrades_and_reopens_with_existing_data_and_new_gates() {
                 )
                 .is_err()
             );
-            c.execute_batch(
-                "INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
-                   VALUES('parent',1,2,3,2,2);
-                 INSERT INTO workflow_units(workflow_id,id,position,spec,status)
-                   VALUES('parent','unit',0,'{}','pending');
-                 INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated)
-                   VALUES('parent',1,'session','automatic','Pending prerequisite','waiting',2,2);",
+            c.execute(
+                "INSERT INTO item_dependency_waits(
+                   item_id,cycle,session_id,resume,reason,state,created,updated,
+                   wait_owner,wait_started_at,wait_deadline,wait_on_timeout
+                 ) VALUES('parent',1,'session','automatic','Pending prerequisite','waiting',2,2,?1,2,?2,?3)",
+                rusqlite::params![
+                    steve_types::WaitOwner::system("dependencies").to_code(),
+                    2 + steve_types::wait::WAIT_LIMIT_DEPENDENCY_MS,
+                    steve_types::WaitTimeoutAction::EscalateToOwner.as_str(),
+                ],
             )?;
             Ok(())
         })
@@ -100,8 +103,13 @@ fn published_v49_upgrades_and_reopens_with_existing_data_and_new_gates() {
     let reopened = Store::open(&path, NoPublisher).unwrap();
     reopened
         .fixture_write(|c| {
-            assert_eq!(count(c, "SELECT count(*) FROM workflows"), 1);
-            assert_eq!(count(c, "SELECT count(*) FROM workflow_units"), 1);
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('workflows','workflow_units')"
+                ),
+                0
+            );
             assert_eq!(
                 count(
                     c,

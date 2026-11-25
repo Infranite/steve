@@ -144,10 +144,12 @@ async fn a_bot_draft_encodes_labels_and_undo_restores() {
     assert_eq!(p.href, "#/bots/dev");
     assert_eq!(
         p.patch,
-        json!({"accept_mode": "auto", "proactive": 2})
-            .as_object()
-            .unwrap()
-            .clone()
+        Some(
+            json!({"accept_mode": "auto", "proactive": 2})
+                .as_object()
+                .unwrap()
+                .clone()
+        )
     );
     assert_eq!(
         serde_json::to_value(&p.changes).unwrap(),
@@ -190,10 +192,12 @@ async fn a_bot_text_draft_starts_from_the_editor_and_carries_the_whole_text() {
     assert_eq!(p.href, "#/bots/dev");
     assert_eq!(
         p.patch,
-        json!({"prompt": "你是开发助手。\n回答先给结论。"})
-            .as_object()
-            .unwrap()
-            .clone()
+        Some(
+            json!({"prompt": "你是开发助手。\n回答先给结论。"})
+                .as_object()
+                .unwrap()
+                .clone()
+        )
     );
     assert_eq!(p.changes.len(), 1);
     k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"rules","value":"先跑测试"}]}"#.into()));
@@ -202,7 +206,7 @@ async fn a_bot_text_draft_starts_from_the_editor_and_carries_the_whole_text() {
         .draft_bot_text(WS, "dev", "rules", Some("先跑测试"), "测试先跑")
         .await
         .unwrap();
-    assert!(same.changes.is_empty() && same.patch.is_empty());
+    assert!(same.changes.is_empty() && same.patch.as_ref().is_none_or(serde_json::Map::is_empty));
     assert!(
         k.core
             .draft_bot_text(WS, "dev", "name", None, "x")
@@ -325,10 +329,12 @@ async fn a_project_draft() {
     assert_eq!(p.title, "项目 Web");
     assert_eq!(
         p.patch,
-        json!({"default_bot": "dev", "worktree": true})
-            .as_object()
-            .unwrap()
-            .clone()
+        Some(
+            json!({"default_bot": "dev", "worktree": true})
+                .as_object()
+                .unwrap()
+                .clone()
+        )
     );
     assert_eq!(
         serde_json::to_value(&p.changes).unwrap(),
@@ -357,10 +363,12 @@ async fn a_settings_draft_with_the_item_prefix() {
         .unwrap();
     assert_eq!(
         p.patch,
-        json!({"accDefault": "manual", "item_prefix": "ABCDEF"})
-            .as_object()
-            .unwrap()
-            .clone()
+        Some(
+            json!({"accDefault": "manual", "item_prefix": "ABCDEF"})
+                .as_object()
+                .unwrap()
+                .clone()
+        )
     );
     assert_eq!(
         serde_json::to_value(&p.changes).unwrap(),
@@ -418,6 +426,80 @@ async fn global_requests_pick_a_target_and_fall_back_to_general() {
         serde_json::to_value(&p).unwrap()["target"],
         json!({"kind": "settings", "id": "general"})
     );
+}
+
+#[tokio::test]
+async fn deterministic_single_setting_change_skips_target_picker_and_draft_model() {
+    let k = Kit::new();
+    k.gw.set(|p, _| panic!("deterministic setting change must not call gateway: {p}"));
+
+    let (ask, drafted) = k
+        .core
+        .config_request(WS, "免打扰：关闭", None)
+        .await
+        .unwrap();
+    assert!(!ask);
+    assert_eq!(drafted.len(), 1);
+    let proposal = drafted[0].proposal.as_ref().expect("proposal");
+    assert_eq!(
+        proposal["target"],
+        json!({"kind": "settings", "id": "notify"})
+    );
+    assert_eq!(
+        proposal["changes"],
+        json!([{"label": "免打扰", "from": "23:00 – 08:00", "to": "关闭"}])
+    );
+
+    let p = k
+        .core
+        .draft(WS, target("global", None), "tz=UTC")
+        .await
+        .unwrap();
+    assert_eq!(p.target, json!({"kind": "settings", "id": "general"}));
+    assert_eq!(
+        p.patch.as_ref().and_then(|m| m.get("tz")),
+        Some(&json!("UTC"))
+    );
+    k.core.apply(&p.id, "me", WS).unwrap();
+    assert_eq!(k.db().setting(WS, "tz", "system").unwrap(), "UTC");
+
+    let p2 = k
+        .core
+        .draft(WS, target("global", None), "时区 Asia/Tokyo")
+        .await
+        .unwrap();
+    assert_eq!(p2.target, json!({"kind": "settings", "id": "general"}));
+    assert_eq!(
+        p2.patch.as_ref().and_then(|m| m.get("tz")),
+        Some(&json!("Asia/Tokyo"))
+    );
+}
+
+#[tokio::test]
+async fn prose_question_negation_or_compound_setting_request_still_uses_model_picker() {
+    let k = Kit::new();
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen_cb = seen.clone();
+    k.gw.set(move |p, _| {
+        seen_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if p.starts_with("Which Steve configuration") {
+            Ok(r#"{"targets":["settings:notify"],"ask":true}"#.into())
+        } else {
+            Ok(r#"{"changes":[]}"#.into())
+        }
+    });
+    for req in [
+        "现在免打扰是几点",
+        "免打扰现在是关闭吗",
+        "不要把免打扰改成关闭",
+        "字号太大了",
+        "is tz UTC",
+        "免打扰=关闭，字号=大",
+    ] {
+        let picked = k.core.pick_targets(WS, req, None).await.unwrap();
+        assert!(picked.ask, "request must go through model picker: {req}");
+    }
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 6);
 }
 
 #[tokio::test]
@@ -590,8 +672,11 @@ async fn describe_shows_settings_as_the_user_sees_them() {
     assert_eq!(
         now,
         [
+            ("无人可接时", "问我"),
             ("默认验收方式", "自动验收"),
             ("前置完成后", "自动开始"),
+            ("额度不足自动交接", "开"),
+            ("额度恢复等待阈值", "10 分钟"),
             ("交接阈值", "不换会话"),
             ("完成后自动归档", "30 天"),
             ("事项编号前缀", "ST"),
@@ -684,4 +769,23 @@ async fn bot_card_apply_uses_the_target_node_instead_of_a_different_nodes_offer(
         k.db().bot("dev").unwrap().unwrap().model.as_deref(),
         Some("next-model")
     );
+}
+
+#[tokio::test]
+async fn core_drafts_and_undos_survive_hub_restart() {
+    let k = Kit::new();
+    k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"accept_mode","value":"自动验收"}]}"#.into()));
+    let p = k
+        .core
+        .draft(WS, target("bot", Some("dev")), "自动验收")
+        .await
+        .unwrap();
+    // Restart before apply: draft is persisted in SQLite `changesets`.
+    let after_restart = k.reopened();
+    after_restart.apply(&p.id, "me", WS).unwrap();
+    assert_eq!(k.db().bot("dev").unwrap().unwrap().accept_mode, "auto");
+    // Restart again before undo: undo still works across process restarts.
+    let after_second_restart = k.reopened();
+    after_second_restart.undo(&p.id, "me", WS).unwrap();
+    assert_eq!(k.db().bot("dev").unwrap().unwrap().accept_mode, "inherit");
 }

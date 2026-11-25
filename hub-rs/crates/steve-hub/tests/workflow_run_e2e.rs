@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use steve_core::{
     AgentRuntime, Answered, Core, CoreConfig, DecisionCommand, Flushed, ModelGateway,
     PermissionAnswer, Prompted, Released, Running, Stop, Tier, TurnEnd, WorkflowStepExecutor,
-    workflow_run::{SETTING_NO_EXECUTOR, WF_RUN_SUBJECT, budget_settings},
+    workflow_run::{WF_RUN_SUBJECT, budget_settings},
 };
 use steve_hub::wire::core::CoreMcp;
 use steve_hub::wire::workspaces::Workspaces;
@@ -26,9 +26,12 @@ use steve_store::workflow_runs::{
 };
 use steve_store::{
     NewBot, NewItem, NewProject, NewSession, NoPublisher, Session, Store, StoreError, UserRows, WS,
-    WorkspaceSettings,
+    WorkspaceSettings, bot_admin, bot_dispatch,
 };
-use steve_types::{DecisionPrompt, DecisionStatus, ItemPhase, PlacementRejection};
+use steve_types::{
+    CoordinatorDeferSource, DecisionPrompt, DecisionStatus, ItemPhase, NO_EXECUTOR,
+    NoExecutorPolicy, PlacementReason, PlacementRejection,
+};
 use steve_workflow_api::{StepFrame, StepInput};
 
 /// Fast in-process JS executor wrapping `steve_workflow_js::run_step` for deterministic tests.
@@ -420,6 +423,21 @@ impl Env {
             "timed out waiting for {expected_total_attempts} dispatched sessions on {run_id}, got {n}"
         );
     }
+
+    async fn wait_for_item_closed(&self, item_id: &str) -> steve_store::Item {
+        for _ in 0..100 {
+            let item = self.store.items().get(item_id).unwrap().unwrap();
+            if item.phase == ItemPhase::Closed {
+                return item;
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let item = self.store.items().get(item_id).unwrap().unwrap();
+        panic!(
+            "timed out waiting for item {item_id} to close, stuck in phase={:?}",
+            item.phase
+        );
+    }
 }
 
 fn real_step_runner() -> StepRunner {
@@ -693,7 +711,7 @@ async fn scenario_03_race_cancels_losing_branch() {
         .unwrap()
         .unwrap();
     assert_eq!(slow_call.status, WfCallStatus::Cancelled);
-    let slow_item = env.store.items().get(&slow_child).unwrap().unwrap();
+    let slow_item = env.wait_for_item_closed(&slow_child).await;
     assert_eq!(slow_item.phase, ItemPhase::Closed);
     assert_eq!(slow_item.outcome.as_deref(), Some("cancelled"));
 
@@ -909,16 +927,8 @@ async fn scenario_05_cross_version_lazy_hydration_and_git_fingerprint_verificati
             .status,
         WfCallStatus::Cancelled
     );
-    assert_eq!(
-        env.store
-            .items()
-            .get(&child_b)
-            .unwrap()
-            .unwrap()
-            .outcome
-            .as_deref(),
-        Some("cancelled")
-    );
+    let cancelled_b = env.wait_for_item_closed(&child_b).await;
+    assert_eq!(cancelled_b.outcome.as_deref(), Some("cancelled"));
 
     // (b) Now simulate worktree tampering (dirty edit changing git tree!) and revise to v3:
     // pre-hydration verification MUST reject A, invalidate it, and re-run A (attempt 2)!
@@ -1657,15 +1667,7 @@ async fn scenarios_11_and_12_bidirectional_owner_finish_contract() {
         .unwrap();
     assert_eq!(run.status, WfRunStatus::Cancelled);
 
-    // Give cancel task a brief moment to settle child2's running turn.
-    for _ in 0..50 {
-        let c2 = env.store.items().get(&child2_id).unwrap().unwrap();
-        if c2.phase == ItemPhase::Closed {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
-    let c2 = env.store.items().get(&child2_id).unwrap().unwrap();
+    let c2 = env.wait_for_item_closed(&child2_id).await;
     assert_eq!(c2.phase, ItemPhase::Closed);
     assert_eq!(c2.outcome.as_deref(), Some("cancelled"));
 }
@@ -1801,15 +1803,40 @@ async fn scenario_13_crash_restart_zero_duplicate_dispatch() {
     }
 }
 
-/// Scenario 15 & 16: PR #544 coordinator PlacementBlocked rules (`noExecutor = ask | steve`) and
-/// parent goal revision superseding active workflow runs.
+/// Scenario 15 & 16: PR #544 + workflow-script-v3 §6 #4 coordinator placement rules
+/// (Steve is coordinator, never a Team member; no eligible Bot opens the single workspace
+/// `NO_EXECUTOR` card; `assign_bot` dispatches to chosen Bot; `later` runs waiting step on Steve
+/// and flips `noExecutor` from `ask` to `steve`; qualified ordinary Bot still wins over Steve)
+/// and parent goal revision superseding active workflow runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn placement_blocked_coordinator_rules_and_goal_revision_superseding() {
     let env = Env::new(false);
     let (parent_id, coord) = env.create_parent(None);
 
+    // 0. Coordinator rule 1: Steve (main bot) cannot be saved as a Team member.
+    let team_err = env
+        .store
+        .write(|w| {
+            bot_admin::save(
+                w,
+                WS,
+                None,
+                "Invalid Team",
+                &[bot_dispatch::Member {
+                    bot: "steve".into(),
+                    nodes: None,
+                }],
+            )
+        })
+        .unwrap_err();
+    assert!(
+        matches!(team_err, StoreError::Rejected(_)),
+        "expected StoreError::Rejected when adding main bot to Team, got: {team_err:?}"
+    );
+
     // 1. Default `noExecutor = ask`: required specialty "quantum" has no worker -> MUST NOT
-    //    silently fall back to Steve; marks attempt `blocked` and opens WorkflowPlacementBlocked card.
+    //    silently fall back to Steve; creates unassigned child item, marks attempt `blocked`,
+    //    pauses run, and opens the single workspace `NO_EXECUTOR` AskOwner card.
     let script = r#"
         export default async function () {
             return await agent("quantum work", { specialties: ["quantum"], title: "Quantum Step" });
@@ -1828,12 +1855,33 @@ async fn placement_blocked_coordinator_rules_and_goal_revision_superseding() {
     );
     let dec_id = snap["decision_id"].as_str().unwrap().to_owned();
     let dec = env.store.decisions().get(&dec_id).unwrap().unwrap();
+    assert_eq!(dec.subject_type, NO_EXECUTOR);
     assert!(matches!(
         dec.question_template,
-        Some(DecisionPrompt::WorkflowPlacementBlocked { .. })
+        Some(DecisionPrompt::NoExecutor { .. })
     ));
+    assert!(dec.options.iter().any(|o| o == "assign_bot"));
+    assert!(dec.options.iter().any(|o| o == "later"));
+    let blocked_attempts = env
+        .store
+        .read(|r| WorkflowRuns(r).list_attempts_for_run(&run_id))
+        .unwrap();
+    assert_eq!(blocked_attempts.len(), 1);
+    assert_eq!(blocked_attempts[0].status, WfAttemptStatus::Blocked);
+    let waiting_child_id = blocked_attempts[0].child_item_id.clone().unwrap();
+    assert_eq!(
+        env.store
+            .items()
+            .get(&waiting_child_id)
+            .unwrap()
+            .unwrap()
+            .bot_id,
+        None,
+        "blocked workflow child must start unassigned"
+    );
 
-    // Owner chooses `assign_bot` with `coder` -> promotes blocked attempt & dispatches!
+    // Owner chooses `assign_bot` with `coder` on the NO_EXECUTOR card -> promotes blocked attempt,
+    // starts the waiting child on `coder`, and resumes the workflow run!
     env.core
         .decision_command(
             &env.owner(),
@@ -1853,10 +1901,16 @@ async fn placement_blocked_coordinator_rules_and_goal_revision_superseding() {
     assert_eq!(attempts[0].status, WfAttemptStatus::Dispatched);
     assert_eq!(attempts[0].bot_id.as_deref(), Some("coder"));
     let active_child = attempts[0].child_item_id.clone().unwrap();
+    assert_eq!(active_child, waiting_child_id);
+    assert_eq!(
+        env.store.sessions().of_item(&active_child).unwrap().len(),
+        1,
+        "assign_bot must start the waiting workflow child session"
+    );
 
     // 2. Goal revision supersedes active run (goal_version 1 -> 2) and cancels active child!
     env.core
-        .revise_goal(&parent_id, "Completely new v2 goal")
+        .revise_goal(&parent_id, "Completely new v2 goal", "owner")
         .unwrap();
     let old_run = env
         .store
@@ -1864,34 +1918,114 @@ async fn placement_blocked_coordinator_rules_and_goal_revision_superseding() {
         .unwrap()
         .unwrap();
     assert_eq!(old_run.status, WfRunStatus::Superseded);
-    for _ in 0..50 {
-        if env.store.items().get(&active_child).unwrap().unwrap().phase == ItemPhase::Closed {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
-    assert_eq!(
-        env.store
-            .items()
-            .get(&active_child)
-            .unwrap()
-            .unwrap()
-            .outcome
-            .as_deref(),
-        Some("cancelled")
-    );
+    let cancelled_child = env.wait_for_item_closed(&active_child).await;
+    assert_eq!(cancelled_child.outcome.as_deref(), Some("cancelled"));
 
-    // 3. Workspace setting `noExecutor = steve`: when no worker matches, Steve (main bot) executes directly!
-    env.store
-        .write(|w| WorkspaceSettings(w).set(WS, SETTING_NO_EXECUTOR, "steve", steve_store::now()))
-        .unwrap();
+    // 3. Coordinator rule 2: submit v2 while `noExecutor = ask` -> opens NO_EXECUTOR card;
+    //    owner chooses `later` -> Steve executes the waiting workflow step itself AND flips
+    //    workspace `noExecutor` policy from `ask` to `steve`!
     let snap_v2 = env
         .core
         .tool_workflow_run(&coord, json!({ "action": "submit", "script": script }))
         .await
         .unwrap();
+    let run_v2_id = snap_v2["run"]["id"].as_str().unwrap().to_owned();
     assert_eq!(snap_v2["run"]["goal_version"], 2);
-    assert_eq!(snap_v2["run"]["status"], "running");
-    assert_eq!(snap_v2["attempts"][0]["bot_id"], "steve");
-    assert_eq!(snap_v2["attempts"][0]["status"], "dispatched");
+    assert_eq!(snap_v2["run"]["status"], "paused");
+    let dec2_id = snap_v2["decision_id"].as_str().unwrap().to_owned();
+    let dec2 = env.store.decisions().get(&dec2_id).unwrap().unwrap();
+    assert_eq!(dec2.subject_type, NO_EXECUTOR);
+
+    env.core
+        .decision_command(
+            &env.owner(),
+            &dec2_id,
+            Some(dec2.revision),
+            DecisionCommand::Resolve {
+                choice: "later".into(),
+                text: String::new(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        env.store
+            .read(|r| bot_dispatch::no_executor_policy(r, WS))
+            .unwrap(),
+        NoExecutorPolicy::Steve,
+        "choosing `later` must flip workspace noExecutor policy to `steve`"
+    );
+    let v2_attempts = env
+        .store
+        .read(|r| WorkflowRuns(r).list_attempts_for_run(&run_v2_id))
+        .unwrap();
+    assert_eq!(v2_attempts.len(), 1);
+    assert_eq!(v2_attempts[0].status, WfAttemptStatus::Dispatched);
+    assert_eq!(v2_attempts[0].bot_id.as_deref(), Some("steve"));
+    let v2_child = v2_attempts[0].child_item_id.clone().unwrap();
+    let v2_fact = env
+        .store
+        .read(|r| bot_dispatch::initial(r, &v2_child))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        v2_fact.explanation.reason,
+        PlacementReason::CoordinatorDeferred
+    );
+    assert_eq!(
+        v2_fact.explanation.deferred_by,
+        Some(CoordinatorDeferSource::Card)
+    );
+    assert_eq!(env.store.sessions().of_item(&v2_child).unwrap().len(), 1);
+
+    // 4. Subsequent blocked step under `noExecutor = steve` executes directly on Steve
+    //    (`CoordinatorDeferSource::Setting`), while a qualified ordinary Bot still wins!
+    env.core
+        .revise_goal(&parent_id, "Completely new v3 goal", "owner")
+        .unwrap();
+    let script_v3 = r#"
+        export default async function () {
+            return await all([
+                () => agent("quantum work", { specialties: ["quantum"], title: "Quantum Direct" }),
+                () => agent("rust implementation", { specialties: ["rust"], title: "Rust Direct" }),
+            ]);
+        }
+    "#;
+    let snap_v3 = env
+        .core
+        .tool_workflow_run(&coord, json!({ "action": "submit", "script": script_v3 }))
+        .await
+        .unwrap();
+    assert_eq!(snap_v3["run"]["goal_version"], 3);
+    assert_eq!(snap_v3["run"]["status"], "running");
+    let v3_attempts = env
+        .store
+        .read(|r| WorkflowRuns(r).list_attempts_for_run(snap_v3["run"]["id"].as_str().unwrap()))
+        .unwrap();
+    assert_eq!(v3_attempts.len(), 2);
+    let bots_by_call: HashSet<&str> = v3_attempts
+        .iter()
+        .filter_map(|a| a.bot_id.as_deref())
+        .collect();
+    assert!(
+        bots_by_call.contains("steve") && bots_by_call.contains("coder"),
+        "expected Steve for unmatched step and qualified coder for rust step, got: {bots_by_call:?}"
+    );
+    let steve_child = v3_attempts
+        .iter()
+        .find(|a| a.bot_id.as_deref() == Some("steve"))
+        .and_then(|a| a.child_item_id.as_deref())
+        .unwrap();
+    let v3_fact = env
+        .store
+        .read(|r| bot_dispatch::initial(r, steve_child))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        v3_fact.explanation.reason,
+        PlacementReason::CoordinatorDeferred
+    );
+    assert_eq!(
+        v3_fact.explanation.deferred_by,
+        Some(CoordinatorDeferSource::Setting)
+    );
 }

@@ -21,6 +21,7 @@ type Log = Arc<Mutex<Vec<String>>>;
 
 fn attach(k: &Kit, f: impl FnOnce(&mut Registry)) {
     let mut r = Registry::new();
+    k.core.register_change_ops(&mut r);
     f(&mut r);
     let m = Modules::new(k.db().store().clone(), k.core.module_gateway(), r);
     k.core.attach_modules(m);

@@ -20,6 +20,7 @@ mod attribute_rows;
 pub mod audit;
 pub(crate) mod automation;
 mod backend;
+pub mod backup_policy;
 mod bot_rows;
 pub mod bots;
 mod catalog_rows;
@@ -38,7 +39,6 @@ pub mod connections;
 mod contacts;
 #[cfg(feature = "testkit")]
 pub mod core_fixture;
-pub mod core_queue;
 pub mod core_usage;
 pub mod decisions;
 mod digest_notes;
@@ -67,6 +67,7 @@ pub mod node_environment;
 pub mod node_sessions;
 pub mod node_turns;
 pub mod notifications;
+pub mod notify;
 pub mod operations;
 pub mod parties;
 mod party_rows;
@@ -91,12 +92,13 @@ mod steward_rows;
 mod systems;
 pub mod tags;
 mod team_rows;
-pub mod thread_runs;
+pub mod thread;
 mod thread_triggers;
 mod user_rows;
 pub mod vault_items;
 pub mod vault_keys;
 pub mod vault_uses;
+pub mod waits;
 pub mod workflow_runs;
 mod workspace_settings;
 mod workspaces;
@@ -125,7 +127,7 @@ pub use flow_triggers::{DueTrigger, FlowTriggers};
 pub use flow_waits::{FlowWaits, NewWait};
 pub use grant_rows::{FlowGrant, GrantRows, NewVaultGrant, VaultGrant, VaultGrantRecord};
 pub use knowledge_references::{
-    FileInfo, FileReads, ItemEvidence, MessageEvidence, References, SessionEvidence,
+    FileInfo, FileReads, ItemEvidence, MessageEvidence, ProjectRef, References, SessionEvidence,
 };
 pub use match_rules::{MatchRule, MatchRules, PrefixConfig};
 pub use memory_index::{
@@ -165,7 +167,16 @@ pub struct W<'a> {
     pub(super) conn: &'a Connection,
 }
 
-type ReadConnection = PooledConnection<SqliteConnectionManager>;
+pub(crate) struct ReadConnection {
+    conn: PooledConnection<SqliteConnectionManager>,
+    _active: Option<crate::instrumentation::ReadPoolActiveGuard>,
+}
+
+impl ReadConnection {
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+}
 
 thread_local! {
     static READ_SNAPSHOTS: RefCell<Vec<(usize, Rc<ReadConnection>)>> = const { RefCell::new(Vec::new()) };
@@ -182,6 +193,26 @@ impl Drop for ReadSnapshot {
 }
 
 impl Store {
+    pub(crate) fn acquire_reader(&self) -> Result<ReadConnection> {
+        let wait = crate::instrumentation::ReadPoolWait::start();
+        match self.inner.readers.get() {
+            Ok(conn) => {
+                let active = wait.map(crate::instrumentation::ReadPoolWait::acquired);
+                crate::instrumentation::store_acquired();
+                Ok(ReadConnection {
+                    conn,
+                    _active: active,
+                })
+            }
+            Err(e) => {
+                if let Some(w) = wait {
+                    w.failed();
+                }
+                Err(StoreError::from(e))
+            }
+        }
+    }
+
     pub(crate) fn active_snapshot(&self) -> Option<Rc<ReadConnection>> {
         let id = Arc::as_ptr(&self.inner) as usize;
         READ_SNAPSHOTS.with_borrow(|snapshots| {
@@ -232,13 +263,12 @@ impl Store {
         }
         if let Some(c) = self.active_snapshot() {
             return f(&mut R {
-                db: &mut Sqlite(&c),
-                conn: &c,
+                db: &mut Sqlite(c.conn()),
+                conn: c.conn(),
             });
         }
-        let c = Rc::new(self.inner.readers.get().map_err(StoreError::from)?);
-        crate::instrumentation::store_acquired();
-        read_snapshot(&c, |r| {
+        let c = Rc::new(self.acquire_reader()?);
+        read_snapshot(c.conn(), |r| {
             let id = Arc::as_ptr(&self.inner) as usize;
             READ_SNAPSHOTS.with_borrow_mut(|snapshots| snapshots.push((id, Rc::clone(&c))));
             let _snapshot = ReadSnapshot(id);
@@ -293,12 +323,6 @@ impl<'a> W<'a> {
     /// Published after the commit; dropped if this write, or the scope it is in, rolls back.
     pub fn emit(&mut self, e: impl Into<BusEvent>) {
         self.store.emit_event(e.into());
-    }
-
-    pub(crate) fn capture_created(&self, ws: &str, item: &str, created: i64) {
-        if let Some(until) = crate::diagnostics::capture_created(self.conn, ws, item, created) {
-            self.store.stage_diagnostic_until(until);
-        }
     }
 
     pub(crate) fn diagnostic(&self, event: crate::diagnostics::Record) {

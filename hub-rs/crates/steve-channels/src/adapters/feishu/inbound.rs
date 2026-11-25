@@ -543,36 +543,89 @@ impl FeishuInbound {
 
     /// Validates, de-dups and queues one payload; never waits on the pipeline.
     pub fn accept(&self, payload: &[u8]) -> Result<(), String> {
-        let env: Value = serde_json::from_slice(payload).map_err(|e| format!("not JSON: {e}"))?;
+        let started = std::time::Instant::now();
+        let env: Value = match serde_json::from_slice(payload) {
+            Ok(v) => v,
+            Err(e) => {
+                record_feishu_inbound("invalid", "error", started.elapsed().as_secs_f64());
+                return Err(format!("not JSON: {e}"));
+            }
+        };
         let header = &env["header"];
         let app = s(header, "app_id");
         if !app.is_empty() && app != self.app_id {
             // another app's event on our connection: acknowledged, not processed
             tracing::warn!(app, "feishu ws: event of another app ignored");
+            record_feishu_inbound("ignored", "ok", started.elapsed().as_secs_f64());
             return Ok(());
         }
         if let Some(id) = opt(header, "event_id")
             && !lock(&self.seen).insert(&id, steve_store::now())
         {
             tracing::debug!(event_id = id, "feishu ws: repeated event ignored");
+            record_feishu_inbound("duplicate", "ok", started.elapsed().as_secs_f64());
             return Ok(());
         }
-        let item = match parse_receive(&env, &self.bot_open_id)? {
-            Some(m) => Queued::Message(Box::new(m)),
+        let parsed = match parse_receive(&env, &self.bot_open_id) {
+            Ok(v) => v,
+            Err(e) => {
+                record_feishu_inbound("message", "error", started.elapsed().as_secs_f64());
+                return Err(e);
+            }
+        };
+        let (kind, item) = match parsed {
+            Some(m) => ("message", Queued::Message(Box::new(m))),
             None => match chats::parse_chat_event(&env) {
-                Some(e) => Queued::Space(e),
+                Some(e) => ("space", Queued::Space(e)),
                 None => {
                     if let Some((ch, ws, conn)) = &self.others {
                         ch.other_event(ws, conn, &env);
                     }
+                    record_feishu_inbound("other", "ok", started.elapsed().as_secs_f64());
                     return Ok(());
                 }
             },
         };
-        self.queue
-            .send(item)
-            .map_err(|_| "feishu ws: inbound worker stopped".to_string())
+        match self.queue.send(item) {
+            Ok(()) => {
+                record_feishu_inbound(kind, "ok", started.elapsed().as_secs_f64());
+                Ok(())
+            }
+            Err(_) => {
+                record_feishu_inbound(kind, "error", started.elapsed().as_secs_f64());
+                Err("feishu ws: inbound worker stopped".to_string())
+            }
+        }
     }
+}
+
+fn record_feishu_inbound(kind: &'static str, result: &'static str, elapsed_secs: f64) {
+    thread_local! {
+        static EVENTS: std::cell::RefCell<HashMap<(&'static str, &'static str), metrics::Counter>> =
+            std::cell::RefCell::new(HashMap::new());
+        static DURS: std::cell::RefCell<HashMap<&'static str, metrics::Histogram>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    EVENTS.with(|c| {
+        c.borrow_mut()
+            .entry((kind, result))
+            .or_insert_with(|| {
+                metrics::counter!(
+                    "steve_feishu_inbound_events_total",
+                    "kind" => kind,
+                    "result" => result
+                )
+            })
+            .increment(1);
+    });
+    DURS.with(|c| {
+        c.borrow_mut()
+            .entry(kind)
+            .or_insert_with(
+                || metrics::histogram!("steve_feishu_inbound_duration_seconds", "kind" => kind),
+            )
+            .record(elapsed_secs);
+    });
 }
 
 impl WsHandler for FeishuInbound {

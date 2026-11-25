@@ -35,7 +35,7 @@ pub fn tools() -> Vec<Value> {
     }
     tools.push(json!({
         "name": DEPENDENCIES,
-        "description": "Read this item's persisted prerequisites, waiting status and effective resume policy. Use action wait to add verified prerequisite item IDs, preserve existing dependencies, and wait without delivering or closing this item. A reason is required. resume automatic or notify applies only to this item and cycle; workspace follows the workspace preference. Only this item's current responsible session may write; child work units must report blockers to their parent. Inspect the returned persisted snapshot and end your turn when end_turn is true. Use get to inspect the saved state later; never claim a dependency is registered from a plan update alone.",
+        "description": "Read this item's persisted prerequisites, waiting status and effective resume policy. Use action wait to add verified prerequisite item IDs, preserve existing dependencies, and wait without delivering or closing this item. A reason is required. resume automatic or notify applies only to this item and cycle; workspace follows the workspace preference. Only this item's current responsible session may write. Inspect the returned persisted snapshot and end your turn when end_turn is true. Use get to inspect the saved state later; never claim a dependency is registered from a plan update alone.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -119,7 +119,7 @@ pub(super) fn scope(store: &Store, session: &Session) -> Result<(Session, ItemSc
         })
         .ok_or_else(denied)?;
     let id = s.item_id.as_deref().ok_or_else(denied)?;
-    let item = store
+    let _item = store
         .items()
         .get(id)
         .map_err(|e| e.to_string())?
@@ -151,25 +151,17 @@ pub(super) fn scope(store: &Store, session: &Session) -> Result<(Session, ItemSc
         return Err(denied());
     }
     let own = ItemScope::Conversation([id.to_string()].into_iter().collect());
-    let work_unit = item.source.1 == "workflow"
-        || item.source.1 == steve_core::WF_CHILD_SOURCE_KIND
-        || store
-            .workflows()
-            .by_child(id)
-            .map_err(|e| e.to_string())?
-            .is_some()
-        || store
-            .read(|r| steve_store::WorkflowRuns(r).attempt_by_child_item(id))
-            .map_err(|e| e.to_string())?
-            .is_some();
-    // Work units have a separate upstream projection in steve_workflow. Do not inherit the
-    // parent's main-conversation privileges, including when an old attempt was retired.
+    // Script-workflow child items are scoped to their own item and never inherit
+    // the parent's main-conversation privileges.
+    let work_unit = store
+        .read(|r| steve_store::WorkflowRuns(r).attempt_by_child_item(id))
+        .map_err(|e| e.to_string())?
+        .is_some();
     if work_unit {
         return Ok((s, own));
     }
     let origin = store
-        .thread()
-        .item(id)
+        .read(|r| steve_store::thread::dispatch_by_item(r, id))
         .map_err(|e| e.to_string())?
         .filter(|t| t.workspace_id == s.workspace_id);
     let Some(origin) = origin else {
@@ -177,13 +169,13 @@ pub(super) fn scope(store: &Store, session: &Session) -> Result<(Session, ItemSc
     };
     let message = store
         .messages()
-        .get(&origin.origin_msg)
+        .get(&origin.origin_message_id)
         .map_err(|e| e.to_string())?
         .filter(|m| m.workspace_id == s.workspace_id);
     if message.is_none() {
         return Ok((s, own));
     }
-    let scope = ItemScope::of(store, &origin.origin_msg)?;
+    let scope = ItemScope::of(store, &origin.origin_message_id)?;
     Ok((s, scope))
 }
 
@@ -202,45 +194,16 @@ pub(super) fn dependency_management_allowed(
 }
 
 /// A session that sees only its own item and asked for another: said as it is, instead of "no
-/// such item", so the agent stops looking. A work unit is told where its upstream results are.
-fn only_own(
-    store: &Store,
-    current: &Session,
-    scope: &ItemScope,
-    id: &str,
-) -> Result<Option<String>, String> {
-    let Some(own) = current.item_id.as_deref() else {
-        return Ok(None);
-    };
+/// such item", so the agent stops looking.
+fn only_own(current: &Session, scope: &ItemScope, id: &str) -> Option<String> {
+    let own = current.item_id.as_deref()?;
     let ItemScope::Conversation(ids) = scope else {
-        return Ok(None);
+        return None;
     };
     if id.trim() == own || ids.len() != 1 || !ids.contains(own) {
-        return Ok(None);
+        return None;
     }
-    let unit = store
-        .items()
-        .get(own)
-        .map_err(|e| e.to_string())?
-        .is_some_and(|i| {
-            i.source.1 == "workflow" || i.source.1 == steve_core::WF_CHILD_SOURCE_KIND
-        })
-        || store
-            .workflows()
-            .by_child(own)
-            .map_err(|e| e.to_string())?
-            .is_some()
-        || store
-            .read(|r| steve_store::WorkflowRuns(r).attempt_by_child_item(own))
-            .map_err(|e| e.to_string())?
-            .is_some();
-    Ok(Some(if unit {
-        format!(
-            "This session can only read item {own}. Your upstream results are in your opening message and in steve_workflow action=get; open the files their outputs list."
-        )
-    } else {
-        format!("This session can only read item {own}.")
-    }))
+    Some(format!("This session can only read item {own}."))
 }
 
 #[cfg(test)]
@@ -285,7 +248,7 @@ pub fn call(
         ),
         research_mcp::ITEM_READ => {
             let id = string(&args, "id")?;
-            if let Some(refused) = only_own(store, &current, &scope, id)? {
+            if let Some(refused) = only_own(&current, &scope, id) {
                 return Err(refused);
             }
             research_mcp::item_read(store, &current.workspace_id, &scope, id)

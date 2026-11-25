@@ -158,6 +158,115 @@ pub struct Note {
 
 type Pending = Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>;
 
+/// Cached per-session handles bound to a Hub-trusted plugin label (never remote `hello` values).
+struct SessionMeters {
+    plugin: metrics::SharedString,
+    calls: Mutex<HashMap<(&'static str, &'static str), metrics::Counter>>,
+    durations: Mutex<HashMap<&'static str, metrics::Histogram>>,
+    upstream_requests: metrics::Counter,
+    upstream_errors: metrics::Counter,
+    upstream_latency: metrics::Histogram,
+    inbound_events: metrics::Counter,
+    outbound_events: metrics::Counter,
+    queue_depth: metrics::Gauge,
+    upstream_connected: metrics::Gauge,
+    upstream_reconnects: metrics::Counter,
+}
+
+impl SessionMeters {
+    fn new(plugin: metrics::SharedString) -> Self {
+        Self {
+            upstream_requests: metrics::counter!(
+                "steve_plugin_upstream_requests_total",
+                "plugin" => plugin.clone()
+            ),
+            upstream_errors: metrics::counter!(
+                "steve_plugin_upstream_errors_total",
+                "plugin" => plugin.clone()
+            ),
+            upstream_latency: metrics::histogram!(
+                "steve_plugin_upstream_latency_seconds",
+                "plugin" => plugin.clone()
+            ),
+            inbound_events: metrics::counter!(
+                "steve_plugin_inbound_events_total",
+                "plugin" => plugin.clone()
+            ),
+            outbound_events: metrics::counter!(
+                "steve_plugin_outbound_events_total",
+                "plugin" => plugin.clone()
+            ),
+            queue_depth: metrics::gauge!(
+                "steve_plugin_queue_depth",
+                "plugin" => plugin.clone()
+            ),
+            upstream_connected: metrics::gauge!(
+                "steve_plugin_upstream_connected",
+                "plugin" => plugin.clone()
+            ),
+            upstream_reconnects: metrics::counter!(
+                "steve_plugin_upstream_reconnects_total",
+                "plugin" => plugin.clone()
+            ),
+            plugin,
+            calls: Mutex::new(HashMap::new()),
+            durations: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn record_call(&self, method: &'static str, result: &'static str, elapsed_secs: f64) {
+        lock(&self.calls)
+            .entry((method, result))
+            .or_insert_with(|| {
+                metrics::counter!(
+                    "steve_plugin_calls_total",
+                    "plugin" => self.plugin.clone(),
+                    "method" => method,
+                    "result" => result
+                )
+            })
+            .increment(1);
+        lock(&self.durations)
+            .entry(method)
+            .or_insert_with(|| {
+                metrics::histogram!(
+                    "steve_plugin_call_seconds",
+                    "plugin" => self.plugin.clone(),
+                    "method" => method
+                )
+            })
+            .record(elapsed_secs);
+    }
+
+    fn record_forwarded(&self, m: &wire::PluginMeters) {
+        if m.upstream_requests > 0 {
+            self.upstream_requests.increment(m.upstream_requests);
+        }
+        if m.upstream_errors > 0 {
+            self.upstream_errors.increment(m.upstream_errors);
+        }
+        for &ms in &m.upstream_latency_ms {
+            self.upstream_latency.record(ms / 1000.0);
+        }
+        if m.inbound_events > 0 {
+            self.inbound_events.increment(m.inbound_events);
+        }
+        if m.outbound_events > 0 {
+            self.outbound_events.increment(m.outbound_events);
+        }
+        if let Some(depth) = m.queue_depth {
+            self.queue_depth.set(depth as f64);
+        }
+        if let Some(connected) = m.upstream_connected {
+            self.upstream_connected
+                .set(if connected { 1.0 } else { 0.0 });
+        }
+        if m.upstream_reconnects > 0 {
+            self.upstream_reconnects.increment(m.upstream_reconnects);
+        }
+    }
+}
+
 /// One open session. Cheap to share; dropping the last handle does not close it, [`Self::close`]
 /// does (and so does the server, or silence).
 pub struct Session {
@@ -172,9 +281,7 @@ pub struct Session {
     /// Features the server answered `unsupported` for: absent for the session (§7).
     absent: Mutex<HashSet<String>>,
     timing: Timing,
-    /// Who the service is, as a bounded metric label: its connector id, else the platform it
-    /// reaches, else `ext_ws`.
-    plugin: metrics::SharedString,
+    meters: SessionMeters,
 }
 
 impl std::fmt::Debug for Session {
@@ -257,11 +364,14 @@ async fn dial(ep: &Endpoint, token: &str, t: &Timing) -> Result<Ws, OpenError> {
 impl Session {
     /// Dials, says hello and checks the answer (§3). Returns the session and its notifications.
     /// `now_ms`: the Hub's clock, sent in hello.
+    /// `plugin`: Hub-trusted bounded metric label (local manifest id or adapter name), never a
+    /// remote-reported string from `hello`.
     pub async fn open(
         ep: &Endpoint,
         token: &str,
         timing: Timing,
         now_ms: i64,
+        plugin: &str,
     ) -> Result<(Arc<Session>, mpsc::Receiver<Note>), OpenError> {
         let ws = dial(ep, token, &timing).await?;
         let (sink, stream) = ws.split();
@@ -342,15 +452,21 @@ impl Session {
             );
         }
         let plugin = metrics::SharedString::from(
-            hello
-                .connector
-                .as_ref()
-                .map(|c| c.id.clone())
-                .or_else(|| hello.platform.clone())
-                .unwrap_or_else(|| super::ADAPTER.to_string()),
+            if wire::valid_plugin_id(plugin)
+                || plugin == super::ADAPTER
+                || plugin == super::BOT_ADAPTER
+            {
+                plugin.to_string()
+            } else {
+                super::ADAPTER.to_string()
+            },
         );
         let _ = backlog
             .set(metrics::gauge!("steve_plugin_inbound_backlog", "plugin" => plugin.clone()));
+        let meters = SessionMeters::new(plugin);
+        meters
+            .upstream_connected
+            .set(if hello.upstream == "ok" { 1.0 } else { 0.0 });
         let session = Arc::new(Session {
             out: out_tx,
             pending,
@@ -362,7 +478,7 @@ impl Session {
             hello,
             absent: Mutex::default(),
             timing,
-            plugin,
+            meters,
         });
         tokio::spawn(ping_loop(Arc::downgrade(&session), timing.ping, closed));
         Ok((session, note_rx))
@@ -422,6 +538,18 @@ impl Session {
         close_with(&self.out, &self.closed, &self.why, code, reason);
     }
 
+    /// Records plugin-reported structured metrics under this session's Hub-trusted `plugin` label.
+    pub fn record_plugin_meters(&self, meters: &wire::PluginMeters) {
+        self.meters.record_forwarded(meters);
+    }
+
+    /// Updates upstream connectivity gauge from a `push.status` notification.
+    pub fn set_upstream_connected(&self, connected: bool) {
+        self.meters
+            .upstream_connected
+            .set(if connected { 1.0 } else { 0.0 });
+    }
+
     /// One request, answered within `timeout` (bounded by `max_inflight_requests`). The one entry
     /// of every request to the service, so where the Hub measures it from outside.
     pub async fn call(
@@ -433,10 +561,8 @@ impl Session {
         let started = Instant::now();
         let r = self.request(method, params, timeout).await;
         let result = r.as_ref().map_or_else(CallError::code, |_| "ok");
-        metrics::counter!("steve_plugin_calls_total", "plugin" => self.plugin.clone(), "method" => method, "result" => result)
-            .increment(1);
-        metrics::histogram!("steve_plugin_call_seconds", "plugin" => self.plugin.clone(), "method" => method)
-            .record(started.elapsed().as_secs_f64());
+        self.meters
+            .record_call(method, result, started.elapsed().as_secs_f64());
         r
     }
 

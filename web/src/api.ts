@@ -1,13 +1,13 @@
 import type { MessageView } from "@/gen"
 import type { Code, Reason, Params, NodeOffline, HarnessDegradedReason, FileAccessReport } from "./gen"
-import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked } from "./gen"
+import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked, MemberIdentity } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
+import { recordSseReconnect } from "./perf"
 import { resumableStream } from "./stream-cursor"
 import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { ItemDispatch } from "./bot-dispatch"
-import type { Workflow } from "./workflow"
 import type { Delivery, DeliveryShare } from "./delivery"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type DependencyWait = {
@@ -20,7 +20,6 @@ export type DependencyWait = {
   can_register: boolean; register_blocker: string | null
 }
 export type RItemDetail = { id: string; source?: [string, string]; cwd?: string | null; branch?: string | null; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id: string | null }[]; decisions: DecisionView[]; dependents: string[]
-  workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   dispatch?: ItemDispatch
   /** outputs delivered as records of the work (self-check screenshots, logs): `{artifact id: "record"}` */
@@ -34,7 +33,8 @@ export type RQueued = { id: string; session_id?: string; text: string; via: stri
 /** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
 export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
-export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
+export type RExecutionSurface = { harness: string; model?: string | null; reasoning_effort?: string | null }
+export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; owner?: string | null; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; fallback_surfaces?: RExecutionSurface[]; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string } | null; archived: boolean; created: number; updated: number }
@@ -76,8 +76,8 @@ export type RNode = { node_id: string; name: string; fingerprint: string; state:
 /** A Node's latest sample and day of vitals. Network rates are bytes per second. */
 export type RVitals = import("./gen/NodeVitalsDay").NodeVitalsDay
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
-/** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
-/** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */
+/** remote Nodes over tailcat: `hub_url` is `tailcat:<address>:<port>` once it runs */
+/** a remote install over tailcat's SSH: the command for the target, then its steps */
 export type RInstall = { id: string; state: "waiting" | "running" | "done" | "failed"; command: string; steps: RInstallStep[]; node_id: string | null; error: string | null; failed_step?: RInstallKind | null; address?: string | null; created?: number; transfer_route?: "direct_observed" | "derp_observed" | null }
 export type RInstallKind = "probe" | "fetch" | "send" | "setup" | "done"
 /** fetch: download, cached (a copy fetched before, checked again) or verify; send: send; setup: install, pair, adapters, start */
@@ -85,7 +85,7 @@ export type RInstallProgress = { phase: string; done: number; total: number | nu
 /** a step of a remote install: `elapsed_ms` is up to now while it runs */
 export type RInstallStep = { kind: RInstallKind; at: number; text: string; ended?: number | null; elapsed_ms?: number; progress?: RInstallProgress | null; transfer_ms?: number; unpack_ms?: number }
 export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
-/* `custom`: an adapter the Hub's harness manifest adds (harness parity S1), with `error` and `install_hint` when it has them */
+/* `custom`: an adapter declared by the Hub's harness manifest, with `error` and `install_hint` when it has them */
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
@@ -107,14 +107,58 @@ export type RRuntime = {
     }[]
     can_install: boolean; reason?: string | null; help?: string | null; error?: string | null
   }
-  /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
-  update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
+}
+export type RSubagentCapability = "acp_rfd" | "tool_fallback" | "none"
+export type RBackgroundTaskCapability = "acp_rfd" | "tool_fallback" | "none"
+export type RUsageAttribution = "subtask_scoped" | "turn_and_model_all" | "turn_level" | "context_only" | "none"
+export type RResumeCapability = "session_load" | "cli_only" | "none"
+export type RAdapterUpgradeCapability = "managed_npm" | "external_managed" | "manual"
+export type RAdapterCapabilities = {
+  subagents: RSubagentCapability
+  subagent_cancel: boolean
+  background_tasks: RBackgroundTaskCapability
+  background_task_cancel?: boolean
+  child_tool_nesting: boolean
+  usage_attribution: RUsageAttribution
+  resume: RResumeCapability
+  upgrade?: RAdapterUpgradeCapability
+  verified: boolean
+}
+export type RSubtaskOrigin = "subagent" | "background_task" | "native_workflow"
+export type RSubtaskStatus = "queued" | "running" | "needs_you" | "done" | "failed" | "cancelled"
+export type RSubtaskUsage = {
+  input?: number | null
+  output?: number | null
+  cache_read?: number | null
+  cache_write?: number | null
+  reasoning?: number | null
+  total_tokens?: number | null
+  context_used?: number | null
+  context_limit?: number | null
+  cost?: { decimal: string; currency: string } | null
+}
+export type RSubtaskView = {
+  id: string
+  parent?: string | null
+  external_id?: string | null
+  origin: RSubtaskOrigin
+  status: RSubtaskStatus
+  title: string
+  actor?: string | null
+  model?: string | null
+  progress?: string | null
+  summary?: string | null
+  error?: string | null
+  can_cancel?: boolean
+  duration_ms?: number | null
+  usage?: RSubtaskUsage | null
 }
 /** Read-only report from one particular Node, never the Hub's merged model catalogue. */
 export type RNodeHarness = {
   id: string; name: string; available: boolean | null; version: string; adapter_version: string | null
   degraded_reason: HarnessDegradedReason | null
   models: string[]; error: string | null; setup: RRuntime["setup"] | null
+  capabilities?: RAdapterCapabilities | null
 }
 export type RNodeHarnessReport = {
   state: "reported" | "unreported" | "offline" | "unsupported" | "failed"
@@ -129,10 +173,13 @@ export type LocalSession = { key: string; harness: string; title: string; cwd: s
 export type StateUpdate = { version: string; owner: boolean }
 export type Shell = {
   modules: OptionalModules
-  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
+  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null
+  me?: MemberIdentity | null; members?: MemberIdentity[]
+  workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; owner?: string | null; workspaces: string[] }[]
   projects: RProject[]; tags: RTag[]; settings: Record<string, string>
   harnessNames?: Record<string, string>
   notifySeen?: number
+  dismissedAlerts?: string[]
 }
 export type Summary = { ws: string; workspace_name: string; thinking: boolean; hold: RHold | null }
 export type RHold = { item: string; running: number; since: number }
@@ -185,32 +232,26 @@ export class Unauthenticated extends Error { login: string | null; constructor(l
  * and the page sees only a failed fetch, never the 401. When the Hub still answers `hello` (open to any origin), the
  * page is not signed in there rather than cut off: it is shown how to sign in, by token, which lets its origin in. */
 async function refused(e: unknown): Promise<never> {
-  if (hubBase() && e instanceof TypeError) {
+  if (typeof hubBase === "function" && hubBase() && e instanceof TypeError) {
     const h = await hello(hubBase(), 4000).catch(() => null)
     if (h) { signIn.refused = true; throw new Unauthenticated(null, h.login.token) }
   }
   throw e
 }
-const CUT = {}
-async function apiResponse(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
+async function apiFetch(method: string, path: string, body?: unknown, signal?: AbortSignal, scope?: ModuleScope): Promise<Response> {
   /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever; a delete (no body) is
    * keepalive so one sent as the page goes away, like a forget whose Undo ran out, still reaches the Hub */
-  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined), keepalive: method === "DELETE" }).catch(refused)
-  if (r.status === 401) { const j = await r.json().catch(() => ({})); if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j.login ?? null, j.token === true) }
-  return r
-}
-async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void, signal?: AbortSignal): Promise<T> {
-  const r = await apiResponse(method, path, body, signal)
-  const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
-  if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
-  if (!r.ok) {
-    if (j.placement) throw new BotPlacementError(j.error, j.placement, j.proposal)
-    throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
-  }
-  seen?.(r)
-  const rev = Number(r.headers.get("x-steve-rev"))
-  if (rev > 0 && j && typeof j === "object") writeRevs.set(j, rev)
-  return j as T
+  const headers = { ...wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), ...(scope ? { "x-steve-ws": scope.workspace } : {}) }
+  const p = fetch(scope ? scope.hub + "/api" + path : hubUrl("/api" + path), {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    credentials: "include",
+    cache: "no-store",
+    signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined),
+    keepalive: method === "DELETE" && body === undefined,
+  })
+  return scope ? p : p.catch(refused)
 }
 /** what a command on a decision answers: the decision as it now stands */
 export type DecisionAnswer = { id: string; revision: number; status: string; kind: string; subject_type: string; result?: any }
@@ -227,8 +268,13 @@ async function snapshot(kinds: string, etag?: string): Promise<{ snapshot: Snaps
 }
 async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => void): Promise<RProject> {
   const interrupted = () => new Error(t("pages:projects.setupInterrupted"))
-  const r = await apiResponse("POST", "/projects/setup", p, AbortSignal.timeout(660_000))
+  const r = await apiFetch("POST", "/projects/setup", p, AbortSignal.timeout(660_000))
     .catch((e) => { throw e instanceof Unauthenticated ? e : interrupted() })
+  if (r.status === 401) {
+    const j = await r.json().catch(() => ({}))
+    if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true
+    throw new Unauthenticated(j.login ?? null, j.token === true)
+  }
   if (!r.ok) {
     const answer = await r.json().catch(() => ({}))
     throw new Error(answer.error ?? t("shell:http.failed", { status: r.status }))
@@ -283,24 +329,36 @@ export class HubError extends Error {
 
 /** A resource that outlives a workspace/Hub switch can bind requests to the scope it was loaded in. */
 export type ModuleScope = { workspace: string; hub: string }
+/** Single JSON HTTP transport for both core and module Hub API endpoints. */
 export async function modReq<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, scope?: ModuleScope): Promise<T> {
-  const headers = { ...wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), ...(scope ? { "x-steve-ws": scope.workspace } : {}) }
-  const r = await fetch(scope ? scope.hub + "/api" + path : hubUrl("/api" + path), { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
+  const r = await apiFetch(method, path, body, signal, scope)
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
   /* the session's own 401 carries `login`; a 401 from a module (e.g. 请重新登录后再登记) is an ordinary error */
-  if (r.status === 401 && j?.error === "unauthenticated" && "login" in j) { if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j?.login ?? null, j?.token === true) }
-  if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code, j?.reason, j?.params)
+  if (r.status === 401 && (r.headers.get("x-steve-origin") === "refused" || (j?.error === "unauthenticated" && "login" in j))) {
+    if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true
+    throw new Unauthenticated(j?.login ?? null, j?.token === true)
+  }
+  if (!r.ok) {
+    if (j?.placement) throw new BotPlacementError(j.error, j.placement, j.proposal)
+    throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code, j?.reason, j?.params)
+  }
   if (!json && method !== "GET" && (await r.text()) === "") return {} as T
   if (j === undefined) throw new Error(t("shell:http.incomplete"))
+  const rev = Number(r.headers.get("x-steve-rev"))
+  if (rev > 0 && j && typeof j === "object") writeRevs.set(j, rev)
   return j as T
 }
 /** `?a=1&b=2` from the defined, non-empty values */
 export const qs = (o: Record<string, string | number | boolean | undefined | null>) => { const s = new URLSearchParams(); for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== "") s.set(k, String(v)); const x = s.toString(); return x ? "?" + x : "" }
-const get = <T>(p: string) => req<T>("GET", p), post = <T = any>(p: string, b: unknown = {}) => req<T>("POST", p, b), patch = <T = any>(p: string, b: unknown) => req<T>("PATCH", p, b), del = <T = any>(p: string, b?: unknown) => req<T>("DELETE", p, b)
+const get = <T>(p: string, signal?: AbortSignal) => modReq<T>("GET", p, undefined, signal)
+const post = <T = any>(p: string, b: unknown = {}, signal?: AbortSignal) => modReq<T>("POST", p, b, signal)
+const put = <T = any>(p: string, b: unknown) => modReq<T>("PUT", p, b)
+const patch = <T = any>(p: string, b: unknown) => modReq<T>("PATCH", p, b)
+const del = <T = any>(p: string, b?: unknown) => modReq<T>("DELETE", p, b)
 export const api = {
   snapshot,
-  messagePage: (before: string, signal?: AbortSignal) => req<PageOf<MessageView>>("GET", `/views/page${qs({ kind: "message", before })}`, undefined, undefined, signal),
+  messagePage: (before: string, signal?: AbortSignal) => get<PageOf<MessageView>>(`/views/page${qs({ kind: "message", before })}`, signal),
   archivedItems: (before?: string) => get<PageOf<ItemView>>(`/views/page${qs({ kind: "item", status: "archived", before })}`),
   endedSessions: (before?: string) => get<PageOf<SessionView>>(`/views/page${qs({ kind: "session", status: "ended", before })}`),
   itemSessions: (items: string[]) => get<ById>(`/views${qs({ kind: "session", items: items.join(",") })}`),
@@ -310,7 +368,7 @@ export const api = {
   editReplyDraft: (id: string, previous: string, text: string) => patch(`/decisions/${encodeURIComponent(id)}/draft`, { previous, text }),
   /** the link that opens a chat message in its platform's own client, asked when its card shows */
   messageOpenUrl: (id: string) => get<{ url: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
-  shell: (signal?: AbortSignal) => req<Shell>("GET", "/shell", undefined, undefined, signal),
+  shell: (signal?: AbortSignal) => get<Shell>("/shell", signal),
   summary: () => get<Summary>("/summary"),
   notifications: () => get<RNotice[]>("/notifications"),
   runtimes: (fresh = false) => get<RRuntime[]>(`/runtimes${qs({ fresh: fresh ? 1 : undefined })}`),
@@ -335,9 +393,7 @@ export const api = {
   threadFollow: (item: string, follow: boolean) => patch(`/items/${item}/thread`, { follow }),
   readNotifications: (at?: number) => post<{ seen: number }>("/notifications/read", { at }),
   dismissNotice: (id: string) => post<{ ok: true }>(`/notifications/${encodeURIComponent(id)}/dismiss`, {}),
-  item: (id: string, signal?: AbortSignal) => req<RItemDetail>("GET", "/items/" + id, undefined, undefined, signal),
-  workflow: (id: string) => get<Workflow | null>(`/items/${encodeURIComponent(id)}/workflow`),
-  workflowChange: (id: string, p: { action: "pause" | "resume" | "retry" | "cancel" | "single_session"; expected_revision: number; reason: string; unit_id?: string }) => post<Workflow>(`/items/${encodeURIComponent(id)}/workflow`, p),
+  item: (id: string, signal?: AbortSignal) => get<RItemDetail>("/items/" + id, signal),
   outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
   delivery: (id: string) => get<Delivery>(`/file-deliveries/${encodeURIComponent(id)}`),
   /** "我的发布": the deliveries this user manages in the current workspace, newest first */
@@ -358,21 +414,23 @@ export const api = {
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),
   /* only the instance's owner switches it; nothing else writes it */
-  designGate: (id: string, on: boolean) => req<{ id: string }>("PUT", `/items/${encodeURIComponent(id)}/design-gate`, { on }),
+  designGate: (id: string, on: boolean) => put<{ id: string }>(`/items/${encodeURIComponent(id)}/design-gate`, { on }),
   deleteItem: (id: string) => del(`/items/${id}`),
   supplement: (id: string, text: string, mode: "auto" | "steer" | "new", files: string[] = []) => post(`/items/${id}/supplement`, { text, mode, files }), deliver: (id: string) => post(`/items/${id}/deliver`),
   reassign: (id: string, bot: string) => post(`/items/${id}/reassign`, { bot }),
+  handoffItem: (id: string, p: { bot?: string; harness?: string; model?: string; effort?: string; make_bot_default?: boolean }) =>
+    post<{ session: string; bot_default_updated?: { bot: string; previous: { harness: string; model: string | null; reasoning_effort: string | null } } }>(`/items/${id}/handoff`, p),
   dependencyWait: (id: string) => get<DependencyWait>(`/items/${id}/dependency-wait`),
   saveDependencyWait: (id: string, body: { expected_cycle: number; resume: DependencyWait["resume_override"]; reason: string }) => post<DependencyWait>(`/items/${id}/dependency-wait`, body),
   addDep: (id: string, dep: string) => post(`/items/${id}/deps`, { dep }), rmDep: (id: string, dep: string) => del(`/items/${id}/deps/${dep}`),
   snooze: (id: string, label: string | null, until: number | null) => post(`/items/${id}/snooze`, { label, until }),
   transcript: (id: string, before?: number, signal?: AbortSignal) =>
-    req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?align=turn${before == null ? "" : "&before=" + before}`, undefined, undefined, signal),
+    get<RTranscriptPage>(`/sessions/${encodeURIComponent(id)}/events?align=turn${before == null ? "" : "&before=" + before}`, signal),
   transcriptAfter: (id: string, after: number, through?: number, signal?: AbortSignal) =>
-    req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, undefined, undefined, signal),
+    get<RTranscriptPage>(`/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, signal),
   transcriptMarks: (id: string) => get<{ marks: number[] }>(`/sessions/${encodeURIComponent(id)}/events/marks`),
   searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
-  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
+  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), cancelSubtask: (id: string, subtaskId: string) => post<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}/subtasks/${encodeURIComponent(subtaskId)}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`), handoffSession: (id: string, p: { bot?: string; harness?: string; model?: string; effort?: string; make_bot_default?: boolean }) => post<{ session: string; bot_default_updated?: { bot: string; previous: { harness: string; model: string | null; reasoning_effort: string | null } } }>(`/sessions/${id}/handoff`, p),
   renameSession: (id: string, title: string) => patch(`/sessions/${id}`, { title }), removeSession: (id: string) => del(`/sessions/${id}`), dropQueued: (id: string) => del("/queued/" + id),
   queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`), resumeInfo: (sid: string) => get<RResume>(`/sessions/${sid}/resume`),
   queuedEdit: (sid: string, qid: string, text: string) => patch<RQueued>(`/sessions/${sid}/queued/${qid}`, { text }),
@@ -385,11 +443,11 @@ export const api = {
   undo: (id: string, revision: number) => post<DecisionAnswer>(`/decisions/${id}/undo`, { revision }),
   dismiss: (id: string, revision: number) => post<DecisionAnswer>(`/decisions/${id}/dismiss`, { revision }),
   newBot: (p: Partial<RBot> & { name: string }) => post<RBot>("/bots", p), draftBot: (desc: string) => post<RBot>("/bots/draft", { desc }), patchBot: (id: string, p: Partial<RBot>) => patch<RBot>("/bots/" + id, p),
-  botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
+  botWorkspaces: (id: string, ids: string[]) => put(`/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), removeBotFromWorkspace: (id: string, to: string, memory: "delete" | "export" | "keep") => del<{ moved: string[]; memories: any[]; removed_workspace: string }>(`/bots/${id}/workspace`, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
   botPrompt: (id: string) => get<{ generated: string; custom: string | null }>(`/bots/${id}/prompt`), memories: (id: string) => get<{ id: string; text: string; source: string; created: number }[]>(`/bots/${id}/memories`),
   addMemory: (id: string, text: string) => post(`/bots/${id}/memories`, { text }), editMemory: (id: string, text: string) => patch(`/memories/${id}`, { text }), deleteMemory: (id: string) => del(`/memories/${id}`), clearMemories: () => del("/memories"),
   newProject: (p: NewProjectInput) => post<RProject>("/projects", p),
-  projectDestination: (p: ProjectDestination, signal: AbortSignal) => req<{ path: string }>("POST", "/projects/setup/preview", p, undefined, signal),
+  projectDestination: (p: ProjectDestination, signal: AbortSignal) => post<{ path: string }>("/projects/setup/preview", p, signal),
   setupProject,
    patchProject: (id: string, p: Partial<RProject>) => patch<RProject>("/projects/" + id, p),
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }),
@@ -397,14 +455,17 @@ export const api = {
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
   settings: (p: Record<string, string>) => patch("/settings", p),
   /** `field` + `base` (bot targets): draft only the bot's working rules or own system prompt, from the text the editor shows */
-  draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
+  draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post<{ ok: boolean; kept?: string[] }>(`/config/${encodeURIComponent(id)}/apply`), undoConfig: (id: string) => post<{ ok: boolean; kept?: string[] }>(`/config/${encodeURIComponent(id)}/undo`), dropConfig: (id: string) => post<{ ok: boolean; kept?: string[] }>(`/config/${encodeURIComponent(id)}/drop`),
   devices: () => get<{ devices: RDevice[] }>("/devices"),
   /** Installs only this registry entry's declared components, on its Node. */
   installHarness: (id: string) => post<{ accepted: boolean; restart?: boolean }>("/system/harnesses/" + encodeURIComponent(id) + "/install"),
   harnessUpdates: (node: string, fresh = false) => get<import("./harness-update-status").HarnessUpdates>("/node-harness-updates/" + encodeURIComponent(node) + (fresh ? "?fresh=1" : "")),
-  upgradeHarness: (node: string, harness: string, operation: string, versions: Record<string, string>, retry_unknown = false) => post<{ receipt: import("./harness-update-status").HarnessReceipt }>("/node-harness-updates/" + encodeURIComponent(node) + "/" + encodeURIComponent(harness), { operation, versions, retry_unknown }),
+  upgradeHarness: (node: string, harness: string, operation: string, versions: Record<string, string>, retry_unknown = false, self_update: string[] = []) =>
+    post<import("./harness-update-status").UpgradeHarnessResponse>("/node-harness-updates/" + encodeURIComponent(node) + "/" + encodeURIComponent(harness), { operation, versions, self_update, retry_unknown }),
+  setHarnessAutoUpgrade: (node: string, body: import("./harness-update-status").SetHarnessAutoUpgrade) =>
+    put<import("./harness-update-status").HarnessAutoUpgradePolicy>("/node-harness-updates/" + encodeURIComponent(node) + "/auto-upgrade", body),
   /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
-  addHarness: (p: { id: string; name?: string; command: string; args?: string[]; env?: Record<string, string>; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
+  addHarness: (p: { id: string; name?: string; command: string; args?: string[]; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),
   /** `off`: this Hub does not listen for remote Nodes (STEVE_NODE_LISTEN=0, or a read-only copy) */
   nodes: () => get<{ nodes: RNode[]; off?: boolean }>("/nodes"),
@@ -413,10 +474,10 @@ export const api = {
   createPairing: () => post<RPairing>("/nodes/pairings"),
   vitals: () => get<import("./gen/VitalsResponse").VitalsResponse>("/vitals"),
   nodeTags: () => get<{ tags: Record<string, string[]> }>("/node-tags"),
-  setNodeTags: (node: string, tags: string[]) => req<{ tags: string[] }>("PUT", `/node-tags/${encodeURIComponent(node)}`, { tags }),
-  setItemNodeTag: (item: string, tag: string | null) => req<{ ok: boolean }>("PUT", `/items/${encodeURIComponent(item)}/node-tag`, { tag }),
+  setNodeTags: (node: string, tags: string[]) => put<{ tags: string[] }>(`/node-tags/${encodeURIComponent(node)}`, { tags }),
+  setItemNodeTag: (item: string, tag: string | null) => put<{ ok: boolean }>(`/items/${encodeURIComponent(item)}/node-tag`, { tag }),
   nodesTailcat: () => get<RTailcat>("/nodes/tailcat"),
-  setNodesTailcat: (enabled: boolean) => req<RTailcat>("PUT", "/nodes/tailcat", { enabled }),
+  setNodesTailcat: (enabled: boolean) => put<RTailcat>("/nodes/tailcat", { enabled }),
   createInstall: () => post<RInstall>("/nodes/installs"),
   /** the caller's installs, newest first */
   installs: () => get<{ installs: RInstall[] }>("/nodes/installs"),
@@ -441,10 +502,10 @@ export const api = {
   switchNodeUpgrade: (id: string) => post<{ operation: string }>(`/nodes/${encodeURIComponent(id)}/upgrade/switch`, {}),
   /** `drain_secs`: how long an upgrade waits for running turns; `health_secs`: how long the new release has to link before the Node goes back */
   nodeUpgradeDefault: () => get<RUpgradeDefault>("/nodes/upgrade-default"),
-  setNodeUpgradeDefault: (policy: RUpgradePolicy) => req<{ policy: RUpgradePolicy }>("PUT", "/nodes/upgrade-default", { policy }),
+  setNodeUpgradeDefault: (policy: RUpgradePolicy) => put<{ policy: RUpgradePolicy }>("/nodes/upgrade-default", { policy }),
   /** the Hub's default for whether a Node owner's sessions load the owner's personal agent config there (a Node may choose for itself) */
   nodeContextDefault: () => get<{ owner_context: "on" | "off" }>("/node-context"),
-  setNodeContextDefault: (owner_context: "on" | "off") => req<{ owner_context: "on" | "off" }>("PUT", "/node-context", { owner_context }),
+  setNodeContextDefault: (owner_context: "on" | "off") => put<{ owner_context: "on" | "off" }>("/node-context", { owner_context }),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
     const r = await fetch(hubUrl("/api/files?name=" + encodeURIComponent(name)), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "include" })
@@ -468,7 +529,7 @@ export function stream(on: (e: HubEvent) => void, onOpen: (resumed: boolean) => 
     url: (after) => withWs(`/api/stream?lang=${encodeURIComponent(lang())}${after ? "&after=" + encodeURIComponent(after) : ""}`), // the workspace and language at each (re)connect
     source: (url) => new EventSource(url, { withCredentials: true }),
     on: (data) => { try { on(JSON.parse(data)) } catch {} },
-    onOpen, cursor, onDown,
+    onOpen, cursor, onDown, onReconnect: recordSseReconnect,
     setTimeout: (f, ms) => setTimeout(f, ms), clearTimeout: (x) => clearTimeout(x as ReturnType<typeof setTimeout>), now: Date.now,
     win: window, doc: document,
   })

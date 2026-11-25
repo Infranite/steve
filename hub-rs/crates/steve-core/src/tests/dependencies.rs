@@ -126,7 +126,7 @@ fn adding_a_prerequisite_to_a_running_item_blocks_questions_and_followups() {
                 .unwrap();
         }
         let gate = k.rt.stop_gate.write().unwrap();
-        k.core.add_dep(&item, &dep).unwrap();
+        k.core.add_dep(&item, &dep, "me").unwrap();
         assert_eq!(k.item_label(&item), "block");
         assert!(k.open_kinds(&item).is_empty());
         assert!(
@@ -291,7 +291,7 @@ fn item_page_registers_the_existing_dependency_without_running_a_turn() {
     let k = Kit::new();
     let (item, dep, s) = setup(&k);
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
-    k.core.add_dep(&item, &dep).unwrap();
+    k.core.add_dep(&item, &dep, "me").unwrap();
     let initial = k.core.dependency_get(&item).unwrap();
     assert_eq!(initial["waiting"], true);
     assert_eq!(initial["resume_source"], "workspace");
@@ -337,8 +337,6 @@ fn item_page_registers_the_existing_dependency_without_running_a_turn() {
         "waiting"
     );
     assert!(k.db().queued(&s.id).unwrap().is_empty());
-    // A saved policy does not bypass missing collaboration isolation.
-    assert!(k.rt.check_workflow_execution(&item).is_err());
     complete(&k, &dep);
     k.core.lifecycle_tick().unwrap();
     k.core.lifecycle_tick().unwrap();
@@ -594,7 +592,7 @@ fn notify_and_workspace_modes_prompt_once_and_user_can_start() {
 
 #[test]
 fn invalid_batch_missing_self_cross_workspace_and_cycle_leave_no_partial_changes() {
-    for invalid in ["missing", "self", "workspace", "cycle", "workflow"] {
+    for invalid in ["missing", "self", "workspace", "cycle"] {
         let k = Kit::new();
         let (item, dep, s) = setup(&k);
         let other = k.item("run", "执行", None);
@@ -611,14 +609,6 @@ fn invalid_batch_missing_self_cross_workspace_and_cycle_leave_no_partial_changes
             }
             "cycle" => {
                 k.db().dep_add(&other, &item).unwrap();
-                other.clone()
-            }
-            "workflow" => {
-                steve_store::core_fixture::item(
-                    k.db().store(),
-                    &other,
-                    steve_store::core_fixture::ItemState::Source("[\"协作\",\"workflow\"]"),
-                );
                 other.clone()
             }
             _ => unreachable!(),
@@ -672,7 +662,7 @@ fn retained_dependencies_and_old_sessions_cannot_be_rewritten_by_stale_tokens() 
 }
 
 #[test]
-fn owner_bot_and_workflow_attempt_authority_are_rechecked_in_database() {
+fn owner_bot_and_session_authority_are_rechecked_in_database() {
     for mutate in [
         "bot",
         "workspace",
@@ -681,7 +671,6 @@ fn owner_bot_and_workflow_attempt_authority_are_rechecked_in_database() {
         "deleted",
         "source",
         "device",
-        "child",
         "ended",
     ] {
         let k = Kit::new();
@@ -718,13 +707,6 @@ fn owner_bot_and_workflow_attempt_authority_are_rechecked_in_database() {
                     k.db().store(),
                     &s.id,
                     steve_store::core_fixture::SessionState::Device("other"),
-                );
-            }
-            "child" => {
-                steve_store::core_fixture::item(
-                    k.db().store(),
-                    &item,
-                    steve_store::core_fixture::ItemState::Source("[\"协作\",\"workflow\"]"),
                 );
             }
             "ended" => {
@@ -900,56 +882,6 @@ fn pause_then_resume_consumes_wait_only_when_prerequisites_are_complete() {
 }
 
 #[test]
-fn live_collaboration_must_stop_before_registering_a_wait() {
-    let k = Kit::new();
-    let (item, dep, s) = setup(&k);
-    k.rt.st().workflow_execution_ready = true;
-    let spec = |id: &str, bot: &str, kind: &str, deps: Vec<&str>| {
-        json!({
-            "id":id,"title":id,"goal":id,"bot_id":bot,"kind":kind,
-            "depends_on":deps,"resources":[],"required":true
-        })
-    };
-    k.core.workflow_change(&item,json!({
-        "action":"plan","reason":"协作","expected_revision":0,"max_parallel":1,"max_attempts":2,
-        "units":[spec("work","dev","work",vec![]),spec("review","steve","review",vec!["work"]),
-            spec("integration","dev","integrate",vec!["review"])]
-    }),"me").unwrap();
-    assert!(
-        k.core
-            .tool_item_dependencies(&s, json!({"action":"wait","deps":[dep],"reason":"先停止"}))
-            .is_err()
-    );
-    assert!(k.db().deps_of(&item).unwrap().is_empty());
-    let graph = k.db().store().workflows().get(&item).unwrap().unwrap();
-    let child = graph.units.iter().find_map(|u| u.item_id.clone()).unwrap();
-    // Even after stop is confirmed, the child cannot become its parent's prerequisite.
-    k.core
-        .workflow_change(
-            &item,
-            json!({"action":"pause","reason":"停止","expected_revision":graph.revision}),
-            "me",
-        )
-        .unwrap();
-    for u in graph.units {
-        if let Some(sid) = u.session_id {
-            k.rt.end_turn(&k.core, &sid, "cancelled", None);
-        }
-    }
-    assert!(
-        k.core
-            .tool_item_dependencies(
-                &s,
-                json!({"action":"wait","deps":[dep,child],"reason":"隐式环"})
-            )
-            .is_err()
-    );
-    assert!(k.db().deps_of(&item).unwrap().is_empty());
-    wait(&k, &s, &[&dep], "automatic");
-    assert_eq!(k.item_label(&item), "block");
-}
-
-#[test]
 fn ordinary_dependency_added_after_wakeup_rearms_the_saved_policy() {
     for mode in ["automatic", "notify"] {
         let k = Kit::new();
@@ -958,7 +890,7 @@ fn ordinary_dependency_added_after_wakeup_rearms_the_saved_policy() {
         wait(&k, &s, &[&dep], mode);
         k.rt.end_turn(&k.core, &s.id, "end_turn", None);
         let next = k.item("run", "执行", None);
-        k.core.add_dep(&item, &next).unwrap();
+        k.core.add_dep(&item, &next, "me").unwrap();
         assert_eq!(k.item_label(&item), "block");
         assert!(k.open_kinds(&item).is_empty());
         assert!(k.core.tx().dependency_waiting(&item).unwrap());

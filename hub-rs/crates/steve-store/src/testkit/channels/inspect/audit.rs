@@ -73,11 +73,11 @@ pub fn audit_action_by_target_and_channel_dead_letter(
     )
 }
 
-pub fn count_audit_by_channel_cleanup(store: &Store) -> Result<i64> {
+pub fn count_audit_by_channel_cleanup(store: &Store, snapshot: &str) -> Result<i64> {
     cell(
         store,
-        r#"SELECT count(*) FROM audit WHERE action = 'channel.cleanup' AND detail LIKE '%pre-purge-%'"#,
-        [],
+        r#"SELECT count(*) FROM audit WHERE action = 'channel.cleanup' AND json_extract(detail, '$.backup') = ?"#,
+        [snapshot],
     )
 }
 

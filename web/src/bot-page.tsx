@@ -1,4 +1,5 @@
-import { getItems, useBotMemories } from "@/store"
+import { getItems, useBotMemories, useShellStore } from "@/store"
+import { useViewKinds } from "@/data/sync"
 /* A Bot's page, the parts beyond its settings form (manage.tsx holds the page and the other tabs):
  *  - 概览: who it is, what it did in the last 30 days (GET /stats/summary?bot=), its items (running first, then the
  *    latest closed), and its capabilities and key settings, each leading to the tab where it is changed; a Bot with no
@@ -16,7 +17,8 @@ import { HarnessMark, ModelMark } from "@/components/harness-mark"
 import { useT } from "@/i18n"
 import { api } from "@/api"
 import { stats } from "@/api/stats"
-import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtMs, fmtN, fmtPct, fmtUsd } from "@/stats/format"
 import { st, closedSt, saveBot, toast, type Item } from "@/store"
 import { Section, Panel, Card, Note, Segmented, Loading, Fact, Figure } from "@/ui"
 import { ItemRowExport as ItemRow } from "@/view-shared"
@@ -49,12 +51,14 @@ export function recentItems(k: string, items: Item[]) {
 }
 
 export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) => void; labels: BotLabels }) {
+  useShellStore()
+  useViewKinds(["item", "session", "decision"])
   const memories = useBotMemories(k)
   const t = useT()
   const b = st.bots[k]
-  const [d] = useStats(() => stats.summary({ range: "30d", bot: k }), [k])
+  const d = useHubQuery(["stats", "summary", "30d", "bot", k], () => stats.summary({ range: "30d", bot: k }), { events: ["stats"], debounceMs: 200 })
   if (!b) return null
-  const s = d.s === "ok" ? d.v : null
+  const s = d.data ?? null
   const { open, list, any } = recentItems(k, getItems())
   /* a Bot with no history: nothing it was given, no turn in the statistics */
   const fresh = !any && !!s && s.agents.turns === 0 && s.throughput.done === 0
@@ -75,8 +79,8 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
 
       {!fresh && (
         <Section label={t("manage:ov.recent")} right={<a href="#/stats" className="type-footnote font-normal text-muted-foreground hover:text-foreground" data-bot-stats-open>{t("manage:ov.openStats")}</a>}
-          note={d.s === "error" ? d.msg : undefined}>
-          {d.s === "loading" ? <Loading className="py-8" /> : s && (
+          note={d.error ? d.error.message : undefined}>
+          {d.loading ? <Loading className="py-8" /> : s && (
             <Card className="grid grid-cols-2 gap-0 p-1 sm:grid-cols-3" data-bot-figures>
               <Figure testId="turns" label={t("manage:ov.turns")} value={fmtN(s.agents.turns)} sub={s.agents.tools ? t("manage:ov.toolCalls", { n: fmtN(s.agents.tools) }) : undefined} />
               <Figure testId="done" label={t("manage:ov.done")} value={fmtN(s.throughput.done)} sub={s.throughput.wip ? t("manage:ov.wip", { n: s.throughput.wip }) : undefined} />
@@ -86,7 +90,7 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
               <Figure testId="cache" label={t("manage:ov.cacheHit")} value={fmtPct(s.usage.hit_rate)} sub={s.usage.total ? t("manage:ov.tokens", { n: fmtN(s.usage.total) }) : undefined} />
             </Card>
           )}
-          {d.s === "error" && <Note className="mt-0">{d.msg}</Note>}
+          {d.error && <Note className="mt-0">{d.error.message}</Note>}
         </Section>
       )}
 

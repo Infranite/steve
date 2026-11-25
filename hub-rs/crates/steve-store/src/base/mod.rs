@@ -162,28 +162,19 @@ pub const CONFIRM_OPTIONS: [&str; 2] = ["yes", "no"];
 
 /// The caller's workspace and identity. Personal read visibility is unconditional in single-user mode;
 /// service callers may read only workspace-level objects.
-/// Legacy scope parameters remain until their query call sites are removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Viewer {
     pub ws: String,
     pub user: String,
-    /// Legacy scope codes kept only for existing SQL bindings; no membership scopes are loaded.
-    pub scopes: Vec<String>,
 }
 
 impl Viewer {
-    /// A viewer without legacy team or space scopes.
+    /// Creates a viewer for `user` in workspace `ws`.
     pub fn bare(ws: &str, user: &str) -> Self {
         Self {
             ws: ws.into(),
             user: user.into(),
-            scopes: Vec::new(),
         }
-    }
-
-    /// Keep the existing API without querying team membership in single-user mode.
-    pub fn load(_c: &Connection, ws: &str, user: &str) -> Result<Self> {
-        Ok(Self::bare(ws, user))
     }
 
     /// An absent identity (empty user) is treated as a service, as is a `svc:*` principal.
@@ -197,42 +188,6 @@ impl Viewer {
     pub fn sees(&self, visibility: &Visibility, _created_by: &str) -> bool {
         !self.is_service() || *visibility == Visibility::Workspace
     }
-
-    /// The visibility condition for rows of table alias `alias` (columns `visibility`, `created_by`).
-    /// Workspace scoping is separate: the caller still filters `workspace_id`.
-    /// G2-T7: retain the original predicate and bindings under a true OR branch,
-    /// including for NULL columns for personal viewers. Service audience policy is independent
-    /// of member visibility and still requires workspace-level content.
-    /// Remove the legacy predicate and bindings with their call sites in wave 4.
-    pub fn sql(&self, alias: &str) -> Scope {
-        let mut sql = format!("(1 OR ({alias}.visibility = 'workspace' OR {alias}.created_by = ?");
-        let mut params = vec![Sql::Text(self.user.clone())];
-        if !self.scopes.is_empty() {
-            sql.push_str(&format!(
-                " OR {alias}.visibility IN ({})",
-                vec!["?"; self.scopes.len()].join(", ")
-            ));
-            params.extend(self.scopes.iter().cloned().map(Sql::Text));
-        }
-        sql.push_str("))");
-        if self.is_service() {
-            sql = format!("({sql} AND {alias}.visibility = 'workspace')");
-        }
-        Scope { sql, params }
-    }
-}
-
-/// `visible_sql(alias, me)`: an SQL condition and its positional parameters, to splice into a
-/// query at the place where `sql` appears.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Scope {
-    pub sql: String,
-    pub params: Vec<Sql>,
-}
-
-/// Shorthand for [`Viewer::sql`].
-pub fn visible_sql(alias: &str, viewer: &Viewer) -> Scope {
-    viewer.sql(alias)
 }
 
 /// A typed object reference (`{type, id}` in the API).
@@ -378,7 +333,7 @@ pub fn revisions(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// `rusqlite` parameters from a list of SQL values (for queries built around a [`Scope`]).
+/// `rusqlite` parameters from a dynamic list of SQL values.
 pub fn bind(vals: Vec<Sql>) -> rusqlite::ParamsFromIter<Vec<Sql>> {
     rusqlite::params_from_iter(vals)
 }

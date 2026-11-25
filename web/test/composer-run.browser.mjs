@@ -87,14 +87,39 @@ try {
     assert.deepEqual(await log(page), ["cmd:newItem"])
     await chatField.fill("看看")
     await chat.locator("[data-composer-add]").click()
+    await menu.waitFor()
     await menu.getByText("引用事项", { exact: true }).click()
     assert.equal(await chatField.inputValue(), "看看 #")
     await page.waitForFunction(() => document.activeElement?.closest('[data-composer="chat"]'))
 
-    /* an item's composer: its own toggle after the plus, laid out as a toggle */
+    /* an item's composer: its own toggle after the plus, laid out as a toggle (check height, padding, row layout and
+     * active pill rather than a fixed CJK pixel width, which shrinks on Linux runners without CJK fonts) */
     const item = page.locator('[data-fixture="item"]')
-    const seg = await item.locator('[data-composer="item"] [data-slot="tabs-list"], [data-composer="item"] [role="tablist"]').first().boundingBox()
-    assert.ok(seg && seg.height >= 24 && seg.width > 80, `the toggle keeps its own look: ${JSON.stringify(seg)}`)
+    const segEl = item.locator('[data-composer="item"] [data-slot="tabs-list"], [data-composer="item"] [role="tablist"]').first()
+    await segEl.locator('.ui-segc__pill[data-ready="1"]').waitFor()
+    const seg = await segEl.evaluate((el) => {
+      const box = el.getBoundingClientRect()
+      const tabs = [...el.querySelectorAll('[role="tab"]')].map((b) => {
+        const r = b.getBoundingClientRect(), cs = getComputedStyle(b)
+        return { x: r.x, y: r.y, width: r.width, height: r.height, padX: parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) }
+      })
+      const pill = el.querySelector(".ui-segc__pill")
+      const pillBox = pill?.getBoundingClientRect()
+      return {
+        width: box.width, height: box.height, tabs,
+        pill: pill && pillBox ? { opacity: getComputedStyle(pill).opacity, width: pillBox.width, height: pillBox.height } : null,
+      }
+    })
+    assert.ok(
+      seg.height >= 24
+        && seg.tabs.length === 2
+        && seg.tabs.every((t) => t.height >= 24 && t.padX >= 16 && t.width > t.padX)
+        && Math.abs(seg.tabs[0].y - seg.tabs[1].y) <= 1
+        && seg.tabs[1].x >= seg.tabs[0].x + seg.tabs[0].width - 1
+        && seg.width >= seg.tabs[0].width + seg.tabs[1].width - 1
+        && seg.pill?.opacity === "1" && seg.pill.width >= seg.tabs[0].width - 1,
+      `the toggle keeps its own look: ${JSON.stringify(seg)}`,
+    )
     await item.locator('[data-composer="item"] textarea').fill("补一句")
     await item.locator("[data-send]").click()
     assert.deepEqual(await log(page), ["item:补一句"])

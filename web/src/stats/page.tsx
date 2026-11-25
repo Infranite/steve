@@ -20,12 +20,13 @@ import { DrillPanel, NowLine, type Drill } from "@/stats/overview"
 import { DailyChart } from "@/stats/daily"
 import { WhereSection } from "@/stats/where"
 import { BotCompare, ModelCompare } from "@/stats/compare"
-import { WorkflowSection } from "@/stats/workflow"
 import { StatsItemView } from "@/stats/drill"
+import { NavUsageSection } from "@/stats/nav-usage"
 import { EventsSection } from "@/stats/events"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
-import { fmtN, fmtUsage, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtN, fmtUsage, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName } from "@/stats/format"
 
 export function StatsRoute({ b, c }: { b?: string; c?: string }) {
   if (b === "items" && c) return <StatsItemView key={c} id={c} />
@@ -81,7 +82,7 @@ export function StatsView() {
     return () => clearTimeout(timer)
   }, [ticking, tick])
   const fkey = JSON.stringify(f) + (ticking ? "#" + tick : "")
-  const [s] = useStats(() => stats.summary(f), [fkey], live)
+  const s = useHubQuery(["stats", "summary", fkey], () => stats.summary(f), { events: ["stats"], debounceMs: 200, live })
   const nowDrill = drill && !drill.startsWith("day:") ? drill : null
   const bots = Object.keys(st.bots)
   const toolbar = (
@@ -90,11 +91,11 @@ export function StatsView() {
       {f.range === "custom" && <CustomRange f={f} set={(x) => { setDrill(null); setF(x) }} />}
       <Select value={f.project ?? ""} onChange={(v) => { setDrill(null); setF({ ...f, project: v || undefined }) }} options={[{ v: "", l: t("stats:page.allProjects") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} testId="stats-project" />
       <Select value={f.bot ?? ""} onChange={(v) => { setDrill(null); setF({ ...f, bot: v || undefined }) }} options={[{ v: "", l: t("stats:page.allBots") }, ...bots.map((k) => ({ v: k, l: st.bots[k].n }))]} testId="stats-bot" />
-      {s.s === "ok" && <span className="type-footnote tabular-nums text-tertiary" data-updated>{t("stats:page.updatedAt", { time: hhmm(s.at) })}</span>}
+      {s.data && <span className="type-footnote tabular-nums text-tertiary" data-updated>{t("stats:page.updatedAt", { time: hhmm(s.updatedAt) })}</span>}
     </div>
   )
   return (
-    <Page title={t("stats:page.title")} sub={s.s === "ok" ? (oneDay(f) ? t("stats:page.subHourly", { name: NAME(f.range), range: fmtRange(s.v.range.from, s.v.range.to), zone: zoneName(s.v.range.tz) }) : t("stats:page.sub", { name: NAME(f.range), range: fmtRange(s.v.range.from, s.v.range.to) })) : t("stats:page.estNote")} max={1280} toolbar={toolbar}>
+    <Page title={t("stats:page.title")} sub={s.data ? (oneDay(f) ? t("stats:page.subHourly", { name: NAME(f.range), range: fmtRange(s.data.range.from, s.data.range.to), zone: zoneName(s.data.range.tz) }) : t("stats:page.sub", { name: NAME(f.range), range: fmtRange(s.data.range.from, s.data.range.to) })) : t("stats:page.estNote")} max={1280} toolbar={toolbar}>
       <div className="@container/stats flex flex-col gap-8" data-stats>
         <div className="flex flex-col gap-3" data-overview>
           <div className="flex flex-col gap-1">
@@ -104,9 +105,9 @@ export function StatsView() {
           </div>
           {nowDrill && <DrillPanel key={nowDrill} d={nowDrill} f={f} fkey={fkey} live={live} rangeName={NAME(f.range)} close={() => setDrill(null)} />}
         </div>
-        {s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
-          : s.s === "error" ? <Empty title={t("stats:page.loadFailed")} sub={s.msg} />
-          : <StatsBody s={s.v} f={f} setF={setF} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />}
+        {s.loading ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
+          : s.error || !s.data ? <Empty title={t("stats:page.loadFailed")} sub={s.error?.message} />
+          : <StatsBody s={s.data} f={f} setF={setF} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />}
       </div>
     </Page>
   )
@@ -147,9 +148,6 @@ function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f:
           <WhereSection s={s} f={f} fkey={fkey} live={live} />
           <PriceNote spend={s.spend} />
         </Section>
-        {s.workflow && <Section k="workflow" title={t("stats:v2.workflow.section")} sub={t("stats:v2.workflow.sectionSub")}>
-          <WorkflowSection s={s} />
-        </Section>}
         <Section k="bots" title={t("stats:v2.bots.title")} sub={f.bot ? t("stats:v2.bots.subOne") : t("stats:v2.bots.sub")}
           right={f.bot ? <Button size="xs" variant="ghost" className="text-blue" onClick={() => setF({ ...f, bot: undefined })} data-bots-all>{t("stats:v2.bots.showAll")}</Button> : undefined}>
           <BotCompare f={f} fkey={fkey} live={live} onBot={(bot) => { setDrill(null); setF({ ...f, bot }) }} />
@@ -158,6 +156,7 @@ function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f:
           <ModelCompare f={f} fkey={fkey} live={live} />
         </Section>
       </>}
+      <NavUsageSection />
       <EventsSection f={f} fkey={fkey} live={live} />
       <footer className="max-w-[72ch] type-footnote text-tertiary" data-stats-foot>
         {t("stats:page.foot.all", {

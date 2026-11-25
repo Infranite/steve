@@ -1,6 +1,6 @@
 //! The time series of the daily chart: `turn_ms` (agent working time, each turn whole in the bucket it ended in,
 //! adding up to the summary's `usage.turn_ms`) and `wait_ms` (time a person was waited on: per item, the time any
-//! of its cards for a person was open, cut at local midnight; a card YOLO answered is not a person's time).
+//! of its cards for a person was open, cut at local midnight; a card Steve auto-settled is not a person's time).
 //! Asia/Shanghai, UTC+8.
 
 use steve_stats::metrics::{Query, bounds, summary};
@@ -140,7 +140,7 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
             Some(d1 + 24 * HOUR),
             false,
         ),
-        // answered by YOLO: no one was waited on
+        // settled automatically by Steve: no person was waited on
         (
             "d",
             Some("ST-1"),
@@ -189,11 +189,7 @@ fn waiting_on_you_is_cut_at_midnight_and_counted_once_per_item() {
     );
     assert_eq!(h.series[0].values[23], Some((2 * HOUR) as f64));
     assert_eq!(h.series[0].values[8], Some((HOUR + 30 * MIN) as f64));
-    assert_eq!(
-        h.series[0].values[11],
-        Some(HOUR as f64),
-        "YOLO's card adds nothing"
-    );
+    assert_eq!(h.series[0].values[11], Some(HOUR as f64));
 
     let m = Metric::parse("wait_ms").expect("wait_ms");
     assert!(m.allows("none") && m.allows("bot") && m.allows("project") && !m.allows("model"));

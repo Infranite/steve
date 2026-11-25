@@ -113,6 +113,41 @@ pub enum PermissionMode {
     FullAccess,
 }
 
+impl PermissionMode {
+    /// Every Steve permission mode, in ascending autonomy order.
+    pub const ALL: [Self; 5] = [
+        Self::Plan,
+        Self::Ask,
+        Self::AcceptEdits,
+        Self::Auto,
+        Self::FullAccess,
+    ];
+
+    /// Canonical snake_case wire/storage name (matches `#[serde(rename_all = "snake_case")]`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Ask => "ask",
+            Self::AcceptEdits => "accept_edits",
+            Self::Auto => "auto",
+            Self::FullAccess => "full_access",
+        }
+    }
+
+    /// Parses Steve's canonical snake_case permission mode name. Harness-specific wire names belong
+    /// in `steve-harness-spec`, never in Steve's Bot or Node policy vocabulary.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "plan" => Self::Plan,
+            "ask" => Self::Ask,
+            "accept_edits" => Self::AcceptEdits,
+            "auto" => Self::Auto,
+            "full_access" => Self::FullAccess,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NetworkScope {
@@ -617,4 +652,21 @@ pub struct SessionView {
     pub guarantees: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumeHandle>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PermissionMode;
+
+    #[test]
+    fn permission_mode_keys_round_trip_and_fail_closed() {
+        for mode in PermissionMode::ALL {
+            assert_eq!(PermissionMode::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(PermissionMode::parse(""), None);
+        assert_eq!(PermissionMode::parse("default"), None);
+        assert_eq!(PermissionMode::parse("acceptEdits"), None);
+        assert_eq!(PermissionMode::parse("bypassPermissions"), None);
+        assert_eq!(PermissionMode::parse("dontAsk"), None);
+    }
 }

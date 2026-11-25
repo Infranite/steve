@@ -184,7 +184,7 @@ try {
       /* a phone: the agenda first, under a week strip; an event is its own page; 3 日 for conflicts */
       const { page } = await open({ theme, width: 390 })
       await page.locator('[data-cal-view="agenda"] [data-cal-strip]').waitFor()
-      assert.deepEqual(await ids(page, "[data-mobile-tabs] a", "data-tab"), ["chat", "inbox", "calendar", "todos", "items"])
+      assert.deepEqual(await ids(page, "[data-mobile-tabs] a", "data-tab"), ["chat", "inbox", "items", "calendar", "todos"])
       assert.equal(await page.locator('[data-tab="calendar"]').getAttribute("aria-current"), "page")
       assert.deepEqual(await ids(page, "[data-cal-toolbar] [data-seg]", "data-seg"), ["agenda", "day", "three"])
       await page.locator('[data-cal-next="ev_yf"]').waitFor()

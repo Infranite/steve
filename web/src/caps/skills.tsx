@@ -18,7 +18,8 @@ import { Section, Empty, Loading, Segmented, Notice } from "@/ui"
 import { toast } from "@/store"
 import { capsApi, type Skill } from "@/api/caps"
 import { parseSkillMd, skillName, skillNameOk, type SkillMd } from "@/skill-md"
-import { AssignMenu, UsedBy, errText, useList } from "./common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { AssignMenu, UsedBy, errText } from "./common"
 
 /** what the dialog edits: a stored skill, or a new one (blank or from a pasted SKILL.md) */
 export type Editing = { x: Skill } | { draft: SkillMd }
@@ -36,7 +37,8 @@ export function SkillAddActions({ size, onBlank, onImport }: { size: "xs" | "sm"
 
 export function SkillsLibrary() {
   const t = useT()
-  const [d, load] = useList(() => capsApi.skills.list(), [])
+  const d = useHubQuery(["caps", "skills"], () => capsApi.skills.list(), { events: ["bot"], debounceMs: 300 })
+  const load = d.reload
   const [editing, setEditing] = useState<Editing | null>(null)
   const [importing, setImporting] = useState(false)
   const [removing, setRemoving] = useState<Skill | null>(null)
@@ -47,11 +49,11 @@ export function SkillsLibrary() {
   const blank = () => setEditing({ draft: { name: "", description: "", content: "" } })
   const actions = (size: "xs" | "sm") => <SkillAddActions size={size} onBlank={blank} onImport={() => setImporting(true)} />
   return (
-    <Section label={t("caps:skills.section")} note={t("caps:skills.note")} right={d.s === "ok" && d.v.length > 0 ? actions("xs") : undefined} data-skills>
-      {d.s === "loading" ? <Loading className="py-8" />
-        : d.s === "error" ? <Notice tone="destructive">{d.e}</Notice>
-        : d.v.length === 0 ? <Empty compact className="bg-muted/50" icon={<SparklesIcon />} title={t("caps:skills.emptyTitle")} sub={t("caps:skills.emptySub")} data-skills-empty action={actions("sm")} />
-        : <div className="flex flex-col gap-3" data-skills-list>{d.v.map((x) => (
+    <Section label={t("caps:skills.section")} note={t("caps:skills.note")} right={d.data && d.data.length > 0 ? actions("xs") : undefined} data-skills>
+      {d.loading ? <Loading className="py-8" />
+        : d.error || !d.data ? <Notice tone="destructive">{d.error?.message ?? ""}</Notice>
+        : d.data.length === 0 ? <Empty compact className="bg-muted/50" icon={<SparklesIcon />} title={t("caps:skills.emptyTitle")} sub={t("caps:skills.emptySub")} data-skills-empty action={actions("sm")} />
+        : <div className="flex flex-col gap-3" data-skills-list>{d.data.map((x) => (
             <SkillCard key={x.id} x={x}
               aside={<>
                 <AssignMenu kind="skill" id={x.id} name={x.name} users={x.bots ?? []} onChange={() => void load()} />

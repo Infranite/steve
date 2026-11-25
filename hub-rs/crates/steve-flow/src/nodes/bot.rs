@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use steve_modules::Tier;
-use steve_modules::changes::first_json;
+use steve_runtime::json::first_json_opt as first_json;
 
 use super::{NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, req_str, str_list};
 use steve_store::{BotRows, FlowSources, Read};
@@ -40,6 +40,8 @@ pub const NAME_MAX: usize = 40;
 pub const RESERVED_FIELDS: [&str; 2] = ["branch", "reason"];
 const INSTRUCTION_MAX: usize = 2000;
 const REASON_MAX: usize = 200;
+/// Metric task label for `bot` nodes invoked inside periodic (`time` / `catch_up`) flow runs.
+const PERIODIC_TASK_BOT: &str = "flow.bot";
 
 /// The `bot` node kind.
 #[derive(Debug, Default, Clone, Copy)]
@@ -58,16 +60,9 @@ pub fn pick_bot(
         Some(conn) => FlowSources(c).triage(ws, conn)?,
         None => None,
     };
-    let wanted = configured
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .or(triage.as_deref());
-    if let Some(name) = wanted
-        && let Some(bot) = BotRows(c).enabled_prompt(ws, name)?
-    {
-        return Ok(Some(bot));
-    }
-    BotRows(c).main_prompt(ws)
+    Ok(BotRows(c)
+        .pick_workspace_bot(ws, &[configured, triage.as_deref()])?
+        .map(steve_store::ReplyBot::into_prompt))
 }
 
 /// The branches: the configured ones, else the labels of the node's edges.
@@ -304,7 +299,12 @@ impl NodeKind for BotNode {
         )
         .await
         {
-            Ok(Ok(o)) => o,
+            Ok(Ok(o)) => {
+                if matches!(cx.run.trigger_kind.as_str(), "time" | "catch_up") {
+                    steve_modules::gateway::record_periodic_usage(PERIODIC_TASK_BOT, &o.usage);
+                }
+                o
+            }
             Ok(Err(e)) => {
                 tracing::warn!(run = %cx.run.id, node = %cx.node.id, "bot node: gateway failed: {e}");
                 return NodeOutcome::Fail(format!("{} 没有给出判断：{e}", bot.name));

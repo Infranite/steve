@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react"
 import { useChatLive } from "@/data/live"
-import { onViews } from "@/data/sync"
+import { onViewKind } from "@/data/sync"
 import { getItems } from "@/store"
 /* The queue in a composer's card (affectUI Run Controls' queue): every message waiting for the session's next turn is its own row,
  * with 编辑 (inline), 撤回 (back into the composer when it is empty, else an undo toast) and 立即发送 (interrupts the
@@ -57,9 +57,11 @@ export function QueueStrip({ sid, rows, note, composer, prefix = "", starting, n
   )
 }
 
+const onMessageViews = (cb: () => void) => onViewKind("message", cb)
+
 /** the main conversation's queue: messages said while Steve was on a turn, sent one by one once it ends */
 export function ChatQueue({ composer }: { composer?: { current: ComposerHandle | null } }) {
-  const held = useSyncExternalStore(onViews, chatQueue)
+  const held = useSyncExternalStore(onMessageViews, chatQueue)
   const sending = useChatLive((s) => s.sending), working = useChatLive((s) => s.thinking || !!s.live)
   const rows = [...held, ...sending.filter((m) => m.held)], t = useT()
   if (!rows.length) return null

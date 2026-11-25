@@ -202,6 +202,7 @@ async fn a_node_without_harness_updates_refuses_a_remote_upgrade() {
         body: UpgradeHarness {
             harness: "fixture".into(),
             versions: std::collections::BTreeMap::from([("adapter".into(), "2.0.0".into())]),
+            self_update: Vec::new(),
         },
     };
     let error = w.remote.upgrade_harness(c).await.unwrap_err();

@@ -3,7 +3,7 @@
 use sea_query::{Expr, ExprTrait, OnConflict, Query};
 
 use crate::contract::Q;
-use crate::{Store, StoreError, core_queue};
+use crate::{Store, StoreError};
 
 pub fn owner(store: &Store, ws: &str, id: &str, subject: &str, name: &str) {
     store
@@ -53,41 +53,14 @@ pub fn requested_by(store: &Store, item: &str) -> Option<String> {
         .flatten()
 }
 
-pub fn resume_attempts(store: &Store, run: &str, attempts: i64) {
-    store
-        .write(|w| {
-            w.exec(
-                Query::update()
-                    .table("thread_resume")
-                    .value("attempts", attempts)
-                    .and_where(Expr::col("run_id").eq(run)),
-            )
-        })
-        .unwrap();
-}
-
-pub fn pending_payload(store: &Store, ws: &str, message: &str) -> Option<String> {
-    store.read(|r| core_queue::pending(r, ws, message)).unwrap()
-}
-
-pub fn replace_pending(store: &Store, ws: &str, message: &str, payload: &str) {
-    store
-        .write(|w| core_queue::replace_pending(w, ws, message, payload))
-        .unwrap();
-}
-
-pub fn set_pending(store: &Store, ws: &str, message: &str, payload: &str) {
-    store
-        .write(|w| core_queue::enqueue(w, ws, message, payload, 1))
-        .unwrap();
-}
-
-pub fn thread_run_count(store: &Store, stored: Option<(&str, &str)>) -> i64 {
+pub fn thread_task_count(store: &Store, stored: Option<(&str, &str)>) -> i64 {
     let mut query = Query::select();
-    query.expr(Expr::cust("count(*)")).from("thread_runs");
+    query
+        .expr(Expr::cust("count(*)"))
+        .from("thread_reply_tasks");
     if let Some((message, status)) = stored {
         query
-            .and_where(Expr::col("message_id").eq(message))
+            .and_where(Expr::col("origin_message_id").eq(message))
             .and_where(Expr::col("status").eq(status));
     }
     store
@@ -101,27 +74,14 @@ pub fn conversation_item(store: &Store, origin: &str) -> Option<String> {
         .read(|r| {
             r.one(
                 Query::select()
-                    .column("item_id")
-                    .from("thread_items")
-                    .and_where(Expr::col("origin_msg").eq(origin)),
+                    .column("target_item_id")
+                    .from("thread_dispatch_refs")
+                    .and_where(Expr::col("origin_message_id").eq(origin))
+                    .and_where(Expr::col("effect_kind").eq("create_item"))
+                    .and_where(Expr::col("target_item_id").is_not_null()),
                 |row| row.get(0),
             )
         })
-        .unwrap()
-}
-
-pub fn pending_count(store: &Store, message: &str) -> i64 {
-    store
-        .read(|r| {
-            r.one(
-                Query::select()
-                    .expr(Expr::cust("count(*)"))
-                    .from("settings")
-                    .and_where(Expr::col("key").eq(core_queue::pending_key(message))),
-                |row| row.get(0),
-            )
-        })
-        .unwrap()
         .unwrap()
 }
 
@@ -226,8 +186,11 @@ pub fn important_contact(store: &Store, id: &str) -> bool {
         .unwrap()
 }
 
-pub fn workflow_blocker(store: &crate::Store, session: &str) -> crate::Result<Option<String>> {
-    store.read_conn(|c| crate::workflow_gate::session_blocker_on(c, session))
+pub fn session_blocker(
+    store: &crate::Store,
+    session: &str,
+) -> crate::Result<Option<crate::item_gate::GateBlocker>> {
+    store.read_conn(|c| crate::item_gate::session_blocker_on(c, session))
 }
 
 pub fn attention(

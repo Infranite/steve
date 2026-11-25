@@ -4,7 +4,14 @@
 use crate::*;
 use serde::Serialize;
 
-pub const REASONS: &[ReasonSet] = &[];
+reasons! {
+    pub enum VaultReason = "vault" {
+        ExecutionNodeUnavailable = execution_node_unavailable [Unavailable] (),
+    }
+    retired {}
+}
+
+pub const REASONS: &[ReasonSet] = &[VaultReason::SET];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]

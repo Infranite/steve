@@ -102,6 +102,10 @@ impl History {
         }
     }
 
+    pub(super) fn remove(&mut self, id: &str) {
+        self.0.remove(id);
+    }
+
     pub(super) fn latest(&self, id: &str, since: i64) -> Option<&NodeVitalsLatest> {
         self.0.get(id).map(|n| &n.latest).filter(|n| n.at >= since)
     }

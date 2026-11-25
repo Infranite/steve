@@ -526,12 +526,6 @@ impl Tx<'_> {
                 at: crate::util::now(),
                 frozen_revision: rev,
                 scope_revision: self.scope_revision(item_id)?,
-                workflow_revision: self
-                    .db()
-                    .store()
-                    .workflows()
-                    .get(item_id)?
-                    .map(|g| g.revision),
                 wf_run_revision: self
                     .db()
                     .store()
@@ -751,7 +745,6 @@ impl Tx<'_> {
             at: crate::util::now(),
             frozen_revision: i.delivery_revision,
             scope_revision: self.scope_revision(item_id)?,
-            workflow_revision: None,
             wf_run_revision: None,
             fingerprint: None,
             print_pending: false,
@@ -840,39 +833,39 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// A work unit's retry on its own closed child (#182): a new cycle as [`Self::start_new_cycle`] makes
-    /// one (`cycle + 1`, revision 0, `ready`, the plan kept as an earlier round; the cycle before stays
-    /// as it closed), with the unit's claim of it in the same transaction (`claim`): the cycle never
-    /// opens without its attempt, nor the attempt without its cycle. It runs at once (`run`).
-    pub(crate) fn retry_unit_cycle(
-        &mut self,
-        item_id: &str,
-        attempt: i64,
-        claim: impl FnOnce(&mut steve_store::W<'_>) -> Result<()>,
-    ) -> Result<Item> {
-        let i = self.item(item_id)?;
-        if i.phase != CLOSED {
-            return Err(conflict(steve_i18n::t!("core.item.new_cycle_needs_closed")));
+    /// One-time startup retirement for non-terminal child items created by the retired dynamic
+    /// work-graph engine (`source[1] = "workflow"`). Already-closed history and artifacts stay intact.
+    pub(crate) fn retire_legacy_workflow_children(&mut self) -> Result<usize> {
+        let ids = self
+            .db()
+            .store()
+            .read(|r| steve_store::item_repo::legacy_workflow_children_open(r))?;
+        let mut retired = 0;
+        for id in ids {
+            let Some(i) = self.db().item(&id)? else {
+                continue;
+            };
+            if i.phase == CLOSED {
+                continue;
+            }
+            if i.phase == CLOSING
+                && i.closing
+                    .as_ref()
+                    .is_some_and(|c| c.kind != CloseKind::Complete)
+            {
+                self.evaluate_cycle_close(&id)?;
+                continue;
+            }
+            self.request_cycle_stop(
+                &id,
+                CloseKind::Cancel,
+                "steve",
+                "legacy_workflow_retired",
+                None,
+            )?;
+            retired += 1;
         }
-        let w = LifecycleWrite {
-            cycle: i.cycle + 1,
-            delivery_revision: 0,
-            ..Default::default()
-        };
-        let reason = format!("协作工作第 {attempt} 次尝试");
-        self.change_cycle(&i, w, CycleChange::StartNewCycle, &reason, |tx, _| {
-            steve_store::item_repo::unarchive(tx, item_id)?;
-            claim(tx)
-        })?;
-        self.archive_cycle_plan(&i, "steve")?;
-        self.db().timeline_add(
-            item_id,
-            "steve",
-            "sys",
-            &format!("开始第 {} 个周期：协作工作第 {attempt} 次尝试", i.cycle + 1),
-            None,
-        )?;
-        self.item(item_id)
+        Ok(retired)
     }
 
     /* ── the gate ── */
@@ -903,10 +896,9 @@ impl Tx<'_> {
             delivery: c.kind == CloseKind::Complete && self.delivery_required(i)?,
             ..Gate::default()
         };
-        if !self
-            .workflow_blockers(&i.id, c.kind == CloseKind::Complete)?
-            .is_empty()
-            || (c.kind == CloseKind::Complete && !self.wf_run_delivery_blockers(i)?.is_empty())
+        if c.kind == CloseKind::Complete
+            && (!self.dependency_blockers(&i.id)?.is_empty()
+                || !self.wf_run_delivery_blockers(i)?.is_empty())
         {
             g.operation = true;
         }
@@ -959,13 +951,6 @@ impl Tx<'_> {
                 .map(|r| r.run_revision);
             if c.frozen_revision != i.delivery_revision
                 || c.scope_revision != self.scope_revision(&i.id)?
-                || c.workflow_revision
-                    != self
-                        .db()
-                        .store()
-                        .workflows()
-                        .get(&i.id)?
-                        .map(|g| g.revision)
                 || c.wf_run_revision != current_wf_rev
                 || now.is_some_and(|n| result_moved(n, c.fingerprint.as_deref()))
             {
@@ -1204,6 +1189,13 @@ impl Tx<'_> {
         acceptance: &Option<String>,
         reason: &str,
     ) -> Result<()> {
+        if self
+            .db()
+            .store()
+            .write(|w| steve_store::bot_dispatch::clear_wait(w, &i.id))?
+        {
+            self.reconcile_no_executor_card(&i.workspace_id)?;
+        }
         self.retire_closed_cycle_children(&i.id)?;
         /* nothing of Steve's automation for the item is left to run */
         self.drop_steve_queued(&i.id)?;

@@ -1,5 +1,5 @@
 //! Ordered domain installation. Slots are concrete startup dependencies, not runtime services.
-use crate::backend::BackendError;
+use crate::error::BackendError;
 use crate::wire::modules::*;
 use crate::wire::modules::{Env, knowledge};
 use crate::wire::ports as hp;
@@ -25,7 +25,6 @@ ordered_installers! { MODULES: Install;
     mod contacts; prepare,
     mod flow; prepare,
     mod connections; prepare,
-    mod channels; scopes,
     flow::hooks,
     mod knowledge; prepare,
     mod vault; prepare,
@@ -34,7 +33,7 @@ ordered_installers! { MODULES: Install;
     mod mail; prepare,
     mod github; prepare,
     mail::targets,
-    channels::prepare,
+    mod channels; prepare,
     mod extensions; prepare,
     channels::outbound,
     mod gateway; install,
@@ -49,7 +48,6 @@ ordered_installers! { MODULES: Install;
     contacts::install,
     channels::install,
     contacts::finish,
-    extensions::context,
     mod plugins; install,
     plugins::routes,
     knowledge::routes,
@@ -65,8 +63,8 @@ ordered_installers! { MODULES: Install;
     mail::routes,
     calendar::routes,
     channels::routes,
-    extensions::mount,
     gateway::routes,
+    extensions::mount,
     caps::routes,
     vault::routes,
     connections::root,
@@ -112,7 +110,6 @@ pub(crate) struct ModuleRegistry<'a> {
     mail_hooks: Option<steve_mail::nodes::MailHooks>,
     gh_slot: Option<steve_github::accept::Slot>,
     declared: Option<crate::extension::Declare<'a>>,
-    started: Option<crate::extension::Started>,
     disclosure: Option<steve_channels::Disclosure>,
     out_link: Option<steve_channels::OutLink>,
     late: Option<Arc<steve_channels::flow_actions::LateChannels>>,

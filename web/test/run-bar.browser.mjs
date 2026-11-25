@@ -6,7 +6,7 @@ const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
 const errors = []
-const W = { "zh-CN": { stopped: "已中断", think: "思考", run: /^运行 cargo test/, read: /读取 workflows\.rs/ }, en: { stopped: "Interrupted", think: "Thinking", run: /^Run cargo test/i, read: /Read workflows\.rs/ } }
+const W = { "zh-CN": { stopped: "已中断", think: "思考", run: /^运行 cargo test/, read: /读取 cycle\.rs/ }, en: { stopped: "Interrupted", think: "Thinking", run: /^Run cargo test/i, read: /Read cycle\.rs/ } }
 try {
   for (const [width, dark, lang] of [[1440, false, "zh-CN"], [1440, true, "en"], [390, false, "en"], [390, true, "zh-CN"]]) {
     const w = W[lang]
@@ -19,7 +19,9 @@ try {
     /* running: the step under way is the label, cut off with an ellipsis; one live region, not two */
     const bar = page.locator('[data-runbar="run"]')
     await bar.waitFor()
+    await page.waitForFunction((l) => document.documentElement.lang === l, lang)
     const label = bar.locator(".ui-tlc__label:not(.ui-tlc__label--out)")
+    await page.waitForFunction((re) => new RegExp(re, "i").test(document.querySelector('[data-runbar="run"] .ui-tlc__label:not(.ui-tlc__label--out)')?.textContent ?? ""), w.run.source)
     assert.match(await label.textContent(), w.run)
     const cut = await label.evaluate((x) => ({ over: x.scrollWidth > x.clientWidth, ellipsis: getComputedStyle(x).textOverflow, right: x.getBoundingClientRect().right }))
     assert.equal(cut.over, true, "a long command overflows its label")
@@ -52,7 +54,7 @@ try {
     const read = trace.locator('[role="treeitem"]', { hasText: "Read" }).first()
     assert.match(await read.locator(".ui-trwc__detail").textContent(), w.read)
     /* Steve's own tool: what went in, as the Hub stored it */
-    await trace.locator('[role="treeitem"]', { hasText: "steve_workflow" }).first().click()
+    await trace.locator('[role="treeitem"]', { hasText: "steve_update" }).first().click()
     assert.match(await trace.locator(".ui-trwc__pop").innerText(), /expected_revision[\s\S]*37/)
 
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)

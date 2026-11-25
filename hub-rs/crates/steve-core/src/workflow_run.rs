@@ -2,9 +2,10 @@
 //!
 //! Coordinates sandboxed single-step JS replay (`WorkflowStepExecutor`) against the normalized
 //! `wf_runs` / `wf_script_versions` / `wf_calls` / `wf_call_attempts` / `wf_version_calls` ledger,
-//! W3.1 deterministic placement (`placement::select_worker` + PR #544 coordinator policy),
-//! W3.2 two-phase cycle settlement (`cycle.rs`), W3.3 owner decisions (`subject_type = "wf_run"`),
-//! live SQL `COUNT(*)` cycle budgets, and Hub-authoritative 4-rule independent final review.
+//! W3.1 deterministic placement (`placement::select` / `placement::select_coordinator` + unified
+//! `NO_EXECUTOR` coordinator waits), W3.2 two-phase cycle settlement (`cycle.rs`), W3.3 owner
+//! decisions (`subject_type = "wf_run"`), live SQL `COUNT(*)` cycle budgets, and Hub-authoritative
+//! 4-rule independent final review.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use steve_store::workflow_runs::{
     WfCallAttempt, WfCallStatus, WfGitFingerprint, WfRun, WfRunStatus, WorkflowRuns, pause_reason,
 };
 use steve_store::{Decision, DecisionRows, DecisionSource, NewDecision, NewItem, Store};
-use steve_types::{DecisionPrompt, PlacementBlocked};
+use steve_types::DecisionPrompt;
 use steve_workflow_api::{
     CallOptions, CallSpec, JsonSchemaSubset, MAX_RESULT_BYTES, MAX_SCRIPT_SOURCE_BYTES,
     RecordedCall, ResultValidationError, StepFrame, StepInput, ValidationViolationCode,
@@ -33,13 +34,6 @@ use crate::{Core, Output, Tx};
 
 /// Decision `subject_type` for all script-workflow owner decision cards.
 pub const WF_RUN_SUBJECT: &str = "wf_run";
-
-/// Structured `item.source.1` tag identifying a script-workflow child item (distinct from legacy
-/// DAG `"workflow"` items until WF-0 removes the legacy graph).
-pub const WF_CHILD_SOURCE_KIND: &str = "wf_run";
-
-/// Workspace setting key aligned with PR #544 (`reform/steve-coordinator`): `"ask"` | `"steve"`.
-pub const SETTING_NO_EXECUTOR: &str = "noExecutor";
 
 /// Workspace settings keys for per-workspace workflow budget caps.
 pub mod budget_settings {
@@ -196,18 +190,6 @@ fn validate_child_result_inner(
         .read(|r| WorkflowRuns(r).child_attempt_and_call(item_id))
         .map_err(|e| record("storage_error", e.to_string()))?;
     let Some((attempt, call)) = pair else {
-        // Also check whether the item was tagged as a workflow child without an attempt row.
-        let tagged = store
-            .items()
-            .get(item_id)
-            .map_err(|e| record("storage_error", e.to_string()))?
-            .is_some_and(|i| i.source.1 == WF_CHILD_SOURCE_KIND);
-        if tagged {
-            return Err(record(
-                "attempt_not_active",
-                format!("workflow child {item_id} has no active attempt"),
-            ));
-        }
         return Ok(None);
     };
 
@@ -318,7 +300,7 @@ enum StepApplyOutcome {
     PausedWithDecision,
 }
 
-fn update_active_runs_gauge(store: &Store) {
+pub(crate) fn update_active_runs_gauge(store: &Store) {
     if let Ok(count) = store.read(|r| WorkflowRuns(r).count_active_runs()) {
         metrics::gauge!("steve_wf_active_runs").set(count as f64);
     }
@@ -342,12 +324,6 @@ fn build_child_opening_prompt(call: &WfCall) -> String {
         ));
     }
     parts.join("\n\n")
-}
-
-fn no_executor_allows_steve(store: &Store, ws: &str) -> Result<bool> {
-    Ok(store
-        .read(|r| steve_store::WorkspaceSettings(r).get(ws, SETTING_NO_EXECUTOR))?
-        .is_some_and(|v| v.trim() == "steve"))
 }
 
 fn parent_ref(parent_item_id: &str) -> steve_store::Parent {
@@ -735,13 +711,8 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Returns true if `item_id` is a script-workflow child item.
+    /// Returns true if `item_id` is a script-workflow child item (authoritative ledger check).
     pub(crate) fn is_wf_run_child(&self, item_id: &str) -> Result<bool> {
-        if let Some(item) = self.db().item(item_id)?
-            && item.source.1 == WF_CHILD_SOURCE_KIND
-        {
-            return Ok(true);
-        }
         Ok(self
             .db()
             .store()
@@ -870,7 +841,25 @@ impl Tx<'_> {
                     && d.subject_id == run.id
                     && d.status == steve_types::DecisionStatus::Open
             })
-            .map(|d| d.id);
+            .map(|d| d.id)
+            .or_else(|| {
+                (run.status == WfRunStatus::Paused
+                    && run.pause_reason_code.as_deref() == Some(pause_reason::PLACEMENT_BLOCKED))
+                .then(|| {
+                    store
+                        .read(|r| {
+                            DecisionRows(r).open_for(
+                                &run.workspace_id,
+                                steve_types::NO_EXECUTOR,
+                                &run.workspace_id,
+                            )
+                        })
+                        .ok()
+                        .flatten()
+                        .map(|d| d.id)
+                })
+                .flatten()
+            });
         Ok(WfRunSnapshot {
             cycle_attempts_limit: budget.max_total_attempts + run.extra_attempts_budget,
             script_versions_limit: budget.max_script_versions,
@@ -1843,6 +1832,9 @@ impl Tx<'_> {
         let per_call_limit = budget.max_attempts_per_call + run.extra_attempts_budget;
         let total_limit = budget.max_total_attempts + run.extra_attempts_budget;
 
+        let mut any_blocked = false;
+        let mut blocked_in_batch = 0_i64;
+
         for hash in pending_identities {
             let Some(call) = store.read(|r| WorkflowRuns(r).get_call_by_hash(&run.id, hash))?
             else {
@@ -1852,17 +1844,20 @@ impl Tx<'_> {
             if call.status != WfCallStatus::Queued {
                 continue;
             }
-            if store
-                .read(|r| WorkflowRuns(r).active_attempt_for_call(&call.id))?
-                .is_some()
+            if let Some(active) =
+                store.read(|r| WorkflowRuns(r).active_attempt_for_call(&call.id))?
             {
+                if active.status == WfAttemptStatus::Blocked {
+                    any_blocked = true;
+                    blocked_in_batch += 1;
+                }
                 continue;
             }
 
             // Enforce per-run parallel session limit (queue excess calls instead of rejecting).
             let active_dispatched =
                 store.read(|r| WorkflowRuns(r).count_active_dispatched(&run.id))?;
-            if active_dispatched >= budget.max_parallel_sessions {
+            if active_dispatched + blocked_in_batch >= budget.max_parallel_sessions {
                 break;
             }
 
@@ -1930,38 +1925,17 @@ impl Tx<'_> {
 
             match self.select_and_dispatch_call(run, &parent, &call, &options, attempt_no)? {
                 DispatchCallResult::Dispatched => {}
-                DispatchCallResult::Blocked(blocked) => {
-                    let call_title = call
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| call.phase.clone().unwrap_or_else(|| call.id.clone()));
-                    let reason_code = blocked.reason.as_str().to_owned();
-                    metrics::counter!(
-                        "steve_wf_calls_total",
-                        "outcome" => "blocked",
-                        "review" => if call.is_review { "true" } else { "false" },
-                        "hydrated" => "false"
-                    )
-                    .increment(1);
-                    let _dec_id = self.pause_and_open_decision(
-                        &run.id,
-                        pause_reason::PLACEMENT_BLOCKED,
-                        "ask",
-                        DecisionPrompt::WorkflowPlacementBlocked {
-                            call_title,
-                            reason: reason_code.clone(),
-                        },
-                        serde_json::to_string(&json!({
-                            "call_id": call.id,
-                            "reason": reason_code,
-                            "rejected": blocked.rejected,
-                        }))
-                        .unwrap_or_default(),
-                        vec!["assign_bot".into(), "steve".into(), "later".into()],
-                    )?;
-                    return Ok(StepApplyOutcome::PausedWithDecision);
+                DispatchCallResult::Blocked => {
+                    any_blocked = true;
+                    blocked_in_batch += 1;
                 }
             }
+        }
+        if any_blocked {
+            store.write(|w| WorkflowRuns(w).pause_run(&run.id, pause_reason::PLACEMENT_BLOCKED))?;
+            self.open_or_update_no_executor_card(&run.workspace_id)?;
+            update_active_runs_gauge(&store);
+            return Ok(StepApplyOutcome::PausedWithDecision);
         }
         Ok(StepApplyOutcome::Done)
     }
@@ -1989,6 +1963,9 @@ impl Tx<'_> {
         let req = crate::placement::DispatchRequest {
             workspace: ws,
             bot: explicit_bot,
+            harness: None,
+            model: None,
+            effort: None,
             team: team.as_ref(),
             project: &project_opt,
             goal: &call.prompt,
@@ -1997,44 +1974,103 @@ impl Tx<'_> {
             node: options.node.as_deref(),
             required_nodes: None,
         };
-        let model_fn = |bot: &steve_store::Bot| {
-            bot.model
-                .clone()
-                .or_else(|| self.c.models().agent_model(ws, &bot.harness))
-        };
+        let default_model = |rt_id: &str| self.c.models().agent_model(ws, rt_id);
 
-        let selected = match crate::placement::select_worker(self.db(), self.rt(), req, model_fn) {
-            Ok(pair) => Ok(pair),
-            Err(CoreError::Placement(blocked))
-                if explicit_bot.is_none() && no_executor_allows_steve(&store, ws)? =>
-            {
-                let fallback_req = crate::placement::DispatchRequest {
-                    workspace: ws,
-                    bot: None,
-                    team: team.as_ref(),
-                    project: &project_opt,
-                    goal: &call.prompt,
-                    tags: &tags,
-                    required_specialties: &specialties,
-                    node: options.node.as_deref(),
-                    required_nodes: None,
-                };
-                crate::placement::select_coordinator_fallback(
-                    self.db(),
-                    self.rt(),
-                    fallback_req,
-                    model_fn,
-                    blocked,
-                )
-            }
-            Err(e) => Err(e),
-        };
+        let (selected, deferred_by_setting) =
+            match crate::placement::select(self.db(), self.rt(), req, default_model) {
+                Ok(pair) => (Ok(pair), false),
+                Err(CoreError::Placement(blocked)) if explicit_bot.is_none() => {
+                    let policy =
+                        store.read(|r| steve_store::bot_dispatch::no_executor_policy(r, ws))?;
+                    metrics::counter!(
+                        "steve_dispatch_no_executor_total",
+                        "policy" => policy.as_str(),
+                        "reason" => blocked.reason.as_str()
+                    )
+                    .increment(1);
+                    if policy == steve_types::NoExecutorPolicy::Steve {
+                        let coord_req = crate::placement::DispatchRequest {
+                            workspace: ws,
+                            bot: None,
+                            harness: None,
+                            model: None,
+                            effort: None,
+                            team: team.as_ref(),
+                            project: &project_opt,
+                            goal: &call.prompt,
+                            tags: &tags,
+                            required_specialties: &specialties,
+                            node: options.node.as_deref(),
+                            required_nodes: None,
+                        };
+                        match crate::placement::select_coordinator(
+                            self.db(),
+                            self.rt(),
+                            coord_req,
+                            default_model,
+                            blocked.clone(),
+                            steve_types::CoordinatorDeferSource::Setting,
+                        ) {
+                            Ok(pair) => (Ok(pair), true),
+                            Err(CoreError::Placement(coord_blocked)) => (Err(coord_blocked), false),
+                            Err(e) => return Err(e),
+                        }
+                    } else {
+                        (Err(blocked), false)
+                    }
+                }
+                Err(CoreError::Placement(blocked)) => (Err(blocked), false),
+                Err(e) => return Err(e),
+            };
 
         let (placement, project) = match selected {
             Ok(pair) => pair,
-            Err(CoreError::Placement(blocked)) => {
-                // Record a blocked attempt row so owner settlement can promote it directly.
-                store.write(|w| {
+            Err(blocked) => {
+                // Unassigned workflow child follows the exact same NO_EXECUTOR coordinator flow as
+                // ordinary items (§6 #4): create unassigned child item, record item_placement_waits
+                // + deferred opening prompt + blocked wf_call_attempts row, propose a Bot if possible,
+                // and let dispatch_pending_calls open/update the single workspace NO_EXECUTOR card.
+                let title = call
+                    .title
+                    .clone()
+                    .or_else(|| call.phase.clone())
+                    .unwrap_or_else(|| format!("Workflow step {}", call.occurrence + 1));
+                let opening = build_child_opening_prompt(call);
+                let db = self.db().clone();
+                let project = db
+                    .project(project_opt.as_ref().and_then(|p| p.as_deref()))?
+                    .filter(|p| p.workspace_id == ws && !p.archived);
+                let child = store.write::<_, CoreError>(|w| {
+                    let (settled_tags, _) =
+                        crate::kinds::settle(&db, ws, &[], &title, &call.prompt)?;
+                    let parent_requester = steve_store::item_repo::requested_by(w, &parent.id)?;
+                    let child = db.item_create(
+                        ws,
+                        &NewItem {
+                            title: title.clone(),
+                            goal: call.prompt.clone(),
+                            bot_id: String::new(),
+                            project_id: project.as_ref().map(|p| p.id.clone()),
+                            kind: None,
+                            phase: None,
+                            source: Some(("workflow".into(), "script".into())),
+                            parent: Some(parent_ref(&parent.id)),
+                            tags: settled_tags,
+                            requested_by: parent_requester,
+                        },
+                    )?;
+                    db.timeline_add_files(
+                        &child.id,
+                        "steve",
+                        &format!("deferred_start:{}", child.cycle),
+                        &opening,
+                        None,
+                        &[],
+                    )?;
+                    if let Some(team) = team.as_ref() {
+                        steve_store::bot_dispatch::snapshot(w, &child.id, team, "inherited")?;
+                    }
+                    steve_store::bot_dispatch::record_wait(w, ws, &child.id, &blocked, None)?;
                     let current_rev = WorkflowRuns(w)
                         .get_run(&run.id)?
                         .map(|r| r.run_revision)
@@ -2045,7 +2081,7 @@ impl Tx<'_> {
                         parent_item_id: &run.parent_item_id,
                         parent_cycle: run.parent_cycle,
                         attempt_no,
-                        child_item_id: None,
+                        child_item_id: Some(&child.id),
                         bot_id: None,
                         placement_id: None,
                         harness: None,
@@ -2055,12 +2091,47 @@ impl Tx<'_> {
                         error_code: Some(blocked.reason.as_str()),
                         error_message: None,
                     })?;
-                    Ok::<_, steve_store::StoreError>(())
+                    Ok(child)
                 })?;
-                return Ok(DispatchCallResult::Blocked(blocked));
+                let proposal_req = crate::CreateItem {
+                    ws: ws.to_owned(),
+                    title,
+                    goal: call.prompt.clone(),
+                    project: project_opt,
+                    team: options.team.clone(),
+                    required_specialties: specialties,
+                    node: options.node.clone(),
+                    ..Default::default()
+                };
+                match self.rt().propose_bot(&proposal_req, &blocked) {
+                    Ok(Some(proposal)) => {
+                        store.write(|w| {
+                            steve_store::bot_dispatch::set_wait_proposal(w, &child.id, &proposal.id)
+                        })?;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(item = %child.id, "workflow bot proposal skipped: {error}");
+                    }
+                }
+                metrics::counter!(
+                    "steve_wf_calls_total",
+                    "outcome" => "blocked",
+                    "review" => if call.is_review { "true" } else { "false" },
+                    "hydrated" => "false"
+                )
+                .increment(1);
+                return Ok(DispatchCallResult::Blocked);
             }
-            Err(e) => return Err(e),
         };
+
+        if deferred_by_setting {
+            metrics::counter!(
+                "steve_coordinator_self_executions_total",
+                "source" => steve_types::CoordinatorDeferSource::Setting.as_str()
+            )
+            .increment(1);
+        }
 
         let (child_item, dispatch_rev) = self.create_child_and_attempt(
             run,
@@ -2070,7 +2141,6 @@ impl Tx<'_> {
             team.as_ref(),
             &placement,
             project.as_ref(),
-            None,
         )?;
         let opening = build_child_opening_prompt(call);
         let bot_id = placement.explanation.bot.as_str();
@@ -2096,6 +2166,43 @@ impl Tx<'_> {
         Ok(DispatchCallResult::Dispatched)
     }
 
+    /// Promotes a `Blocked` workflow child attempt to `Dispatched` inside the same transaction
+    /// that settles `NO_EXECUTOR` or reassigns an unassigned item. Resumes the parent `wf_run`
+    /// once no other blocked attempts remain and returns `Some(run_id)` to wake the workflow.
+    pub(crate) fn promote_wf_blocked_child_in(
+        w: &mut steve_store::W<'_>,
+        item_id: &str,
+        placement: &steve_types::BotPlacement,
+    ) -> Result<Option<String>> {
+        let Some(attempt) = WorkflowRuns(w).attempt_by_child_item(item_id)? else {
+            return Ok(None);
+        };
+        if attempt.status != WfAttemptStatus::Blocked {
+            return Ok(None);
+        }
+        let dispatch_rev = WorkflowRuns(w).bump_run_revision(&attempt.run_id)?;
+        WorkflowRuns(w).dispatch_blocked_attempt(
+            &attempt.id,
+            item_id,
+            placement.explanation.bot.as_str(),
+            None,
+            Some(&placement.harness),
+            placement.model.as_deref(),
+            dispatch_rev,
+        )?;
+        if let Some(run) = WorkflowRuns(w).get_run(&attempt.run_id)?
+            && run.status == WfRunStatus::Paused
+            && run.pause_reason_code.as_deref() == Some(pause_reason::PLACEMENT_BLOCKED)
+            && WorkflowRuns(w)
+                .blocked_attempt_for_run(&attempt.run_id)?
+                .is_none()
+        {
+            WorkflowRuns(w).resume_run(&attempt.run_id)?;
+            return Ok(Some(attempt.run_id));
+        }
+        Ok(None)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create_child_and_attempt(
         &mut self,
@@ -2106,7 +2213,6 @@ impl Tx<'_> {
         team: Option<&steve_store::bot_dispatch::Team>,
         placement: &steve_types::BotPlacement,
         project: Option<&steve_store::Project>,
-        promote_blocked_attempt_id: Option<&str>,
     ) -> Result<(Item, i64)> {
         let ws = run.workspace_id.as_str();
         let title = call
@@ -2128,7 +2234,7 @@ impl Tx<'_> {
                     project_id: project.map(|p| p.id.clone()),
                     kind: None,
                     phase: None,
-                    source: Some(("workflow".into(), WF_CHILD_SOURCE_KIND.into())),
+                    source: Some(("workflow".into(), "script".into())),
                     parent: Some(parent_ref(&parent.id)),
                     tags,
                     requested_by: parent_requester,
@@ -2139,34 +2245,22 @@ impl Tx<'_> {
             }
             steve_store::bot_dispatch::record(w, ws, &child.id, None, Ok(placement))?;
             let dispatch_rev = WorkflowRuns(w).bump_run_revision(&run.id)?;
-            if let Some(blocked_id) = promote_blocked_attempt_id {
-                WorkflowRuns(w).dispatch_blocked_attempt(
-                    blocked_id,
-                    &child.id,
-                    &bot_id,
-                    None,
-                    Some(&placement.harness),
-                    placement.model.as_deref(),
-                    dispatch_rev,
-                )?;
-            } else {
-                WorkflowRuns(w).create_attempt(&NewWfAttempt {
-                    call_id: &call.id,
-                    run_id: &run.id,
-                    parent_item_id: &run.parent_item_id,
-                    parent_cycle: run.parent_cycle,
-                    attempt_no,
-                    child_item_id: Some(&child.id),
-                    bot_id: Some(&bot_id),
-                    placement_id: None,
-                    harness: Some(&placement.harness),
-                    model: placement.model.as_deref(),
-                    status: WfAttemptStatus::Dispatched,
-                    dispatched_at_revision: dispatch_rev,
-                    error_code: None,
-                    error_message: None,
-                })?;
-            }
+            WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                call_id: &call.id,
+                run_id: &run.id,
+                parent_item_id: &run.parent_item_id,
+                parent_cycle: run.parent_cycle,
+                attempt_no,
+                child_item_id: Some(&child.id),
+                bot_id: Some(&bot_id),
+                placement_id: None,
+                harness: Some(&placement.harness),
+                model: placement.model.as_deref(),
+                status: WfAttemptStatus::Dispatched,
+                dispatched_at_revision: dispatch_rev,
+                error_code: None,
+                error_message: None,
+            })?;
             Ok((child, dispatch_rev))
         })?;
         Ok((child, dispatch_rev))
@@ -2201,6 +2295,7 @@ impl Tx<'_> {
                 requested_by: "steve".into(),
                 question_template: Some(template),
                 source: Some(source),
+                wait: None,
             })?;
             Ok((dec.id, run))
         })?;
@@ -2217,7 +2312,7 @@ impl Tx<'_> {
     ) -> Result<Decision> {
         let run_id = d.subject_id.clone();
         let store = self.db().store().clone();
-        let run = store
+        let _run = store
             .read(|r| WorkflowRuns(r).get_run(&run_id))?
             .ok_or_else(|| CoreError::Status(404, "wf_run_not_found".into()))?;
         let choice = cx.choice;
@@ -2282,7 +2377,7 @@ impl Tx<'_> {
                     self.stop_wf_child_best_effort(&cid, cx.actor, "wf_owner_cancelled");
                 }
             }
-            "revise" | "later" | "no" => {
+            "revise" | "no" => {
                 store.write::<_, CoreError>(|w| {
                     settle_fn(
                         w,
@@ -2290,130 +2385,6 @@ impl Tx<'_> {
                         DecisionChange::Resolve,
                     )
                 })?;
-            }
-            "assign_bot" | "steve" => {
-                let blocked_attempt = store
-                    .read(|r| WorkflowRuns(r).blocked_attempt_for_run(&run_id))?
-                    .ok_or_else(|| crate::cycle::conflict("wf_no_blocked_attempt"))?;
-                let call = store
-                    .read(|r| WorkflowRuns(r).get_call(&blocked_attempt.call_id))?
-                    .ok_or_else(|| CoreError::Status(404, "wf_call_not_found".into()))?;
-                let parent = self.item(&run.parent_item_id)?;
-                let options: CallOptions =
-                    serde_json::from_str(&call.options_canonical_json).unwrap_or_default();
-                let ws = run.workspace_id.as_str();
-                let team = store.read(|r| {
-                    steve_store::bot_dispatch::selected(r, ws, options.team.as_deref())
-                })?;
-                let project_opt = match options.project.as_deref() {
-                    Some(p) if !p.is_empty() => Some(Some(p.to_owned())),
-                    _ => Some(parent.project_id.clone()),
-                };
-                let tags = options.tags.clone().unwrap_or_default();
-                let model_fn = |bot: &steve_store::Bot| {
-                    bot.model
-                        .clone()
-                        .or_else(|| self.c.models().agent_model(ws, &bot.harness))
-                };
-
-                let (placement, project) = if choice == "steve" {
-                    let req = crate::placement::DispatchRequest {
-                        workspace: ws,
-                        bot: None,
-                        team: team.as_ref(),
-                        project: &project_opt,
-                        goal: &call.prompt,
-                        tags: &tags,
-                        required_specialties: &[],
-                        node: options.node.as_deref(),
-                        required_nodes: None,
-                    };
-                    crate::placement::select_coordinator_fallback(
-                        self.db(),
-                        self.rt(),
-                        req,
-                        model_fn,
-                        PlacementBlocked {
-                            reason: steve_types::PlacementRejection::NoCandidates,
-                            rejected: vec![],
-                        },
-                    )?
-                } else {
-                    if text.is_empty() {
-                        return Err(CoreError::Status(
-                            400,
-                            "wf_assign_bot_id_required: provide target bot_id in text".into(),
-                        ));
-                    }
-                    let req = crate::placement::DispatchRequest {
-                        workspace: ws,
-                        bot: Some(text),
-                        team: None,
-                        project: &project_opt,
-                        goal: &call.prompt,
-                        tags: &tags,
-                        required_specialties: &[],
-                        node: options.node.as_deref(),
-                        required_nodes: None,
-                    };
-                    crate::placement::select(self.db(), self.rt(), req, model_fn)?
-                };
-
-                // Atomically create child item, promote blocked attempt, settle decision, and resume run.
-                let title = call
-                    .title
-                    .clone()
-                    .or_else(|| call.phase.clone())
-                    .unwrap_or_else(|| format!("Workflow step {}", call.occurrence + 1));
-                let bot_id = placement.explanation.bot.as_str().to_owned();
-                let db = self.db().clone();
-                let child = store.write::<_, CoreError>(|w| {
-                    let (tags, _) = crate::kinds::settle(&db, ws, &[], &title, &call.prompt)?;
-                    let parent_requester = steve_store::item_repo::requested_by(w, &parent.id)?;
-                    let child = db.item_create(
-                        ws,
-                        &NewItem {
-                            title: title.clone(),
-                            goal: call.prompt.clone(),
-                            bot_id: bot_id.clone(),
-                            project_id: project.as_ref().map(|p| p.id.clone()),
-                            kind: None,
-                            phase: None,
-                            source: Some(("workflow".into(), WF_CHILD_SOURCE_KIND.into())),
-                            parent: Some(parent_ref(&parent.id)),
-                            tags,
-                            requested_by: parent_requester,
-                        },
-                    )?;
-                    if let Some(team) = team.as_ref() {
-                        steve_store::bot_dispatch::snapshot(w, &child.id, team, "inherited")?;
-                    }
-                    steve_store::bot_dispatch::record(w, ws, &child.id, None, Ok(&placement))?;
-                    let dispatch_rev = WorkflowRuns(w).bump_run_revision(&run.id)?;
-                    WorkflowRuns(w).dispatch_blocked_attempt(
-                        &blocked_attempt.id,
-                        &child.id,
-                        &bot_id,
-                        None,
-                        Some(&placement.harness),
-                        placement.model.as_deref(),
-                        dispatch_rev,
-                    )?;
-                    settle_fn(
-                        w,
-                        json!({"choice": choice, "bot_id": bot_id, "child_item_id": child.id}),
-                        DecisionChange::Resolve,
-                    )?;
-                    WorkflowRuns(w).resume_run(&run_id)?;
-                    Ok(child)
-                })?;
-                let opening = build_child_opening_prompt(&call);
-                self.start_or_fail(
-                    &child.id,
-                    Some(&opening),
-                    Some(placement.explanation.bot.as_str()),
-                )?;
-                self.schedule_wf_step(&run_id);
             }
             _ => {
                 return Err(CoreError::Status(
@@ -2440,5 +2411,5 @@ impl Tx<'_> {
 
 enum DispatchCallResult {
     Dispatched,
-    Blocked(PlacementBlocked),
+    Blocked,
 }

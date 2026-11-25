@@ -103,6 +103,7 @@ fn account(cx: &FlowCx, session_id: &str) -> FlowResult<Option<(String, String, 
                     source: Some(steve_store::DecisionSource::Revision {
                         revision: limit.to_string(),
                     }),
+                    wait: None,
                 })?;
                 run.context[ASKED] = json!(limit);
                 opened = Some((ws.clone(), item.clone(), d.id));

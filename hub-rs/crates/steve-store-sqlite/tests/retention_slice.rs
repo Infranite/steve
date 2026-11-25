@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
-use steve_storage_api::retention::OpName;
 use steve_store_sqlite::retention::{
-    self as r, Action, Budget, Cell, KeepFrom, Policy, RetentionPolicy, Row, Select, Window,
+    self as r, Action, Budget, Cell, KeepFrom, OpName, Policy, RetentionPolicy, Row, Select,
+    SettingScope, Window,
 };
 
 struct FixturePolicy {
@@ -335,7 +335,7 @@ fn a_setting_without_a_scoped_resolver_uses_the_contract_default() {
     let mut p = FixturePolicy::age();
     p.definition.keep_from = KeepFrom::Setting {
         key: "keep".into(),
-        per: steve_storage_api::retention::SettingScope::Workspace,
+        per: SettingScope::Workspace,
         default_ms: 10,
     };
     insert(&c, 1, 0, "done", Some("x"));

@@ -11,9 +11,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem,
 import { Section, Empty, Loading, Notice, Panel, Row } from "@/ui"
 import { harnessSkills, runtimeName, st, toast } from "@/store"
 import { stats } from "@/api/stats"
-import { useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
 import { capsApi, type A2aAgent, type BotCaps as Caps, type CapKind, type McpServer, type Skill } from "@/api/caps"
-import { errText, useList } from "./common"
+import { errText } from "./common"
 import { McpServerCard, McpServerDialog } from "./mcp"
 import { ImportDialog, SkillCard, SkillDialog, type Editing } from "./skills"
 import { AgentCardView, AgentDialog } from "./a2a"
@@ -25,18 +25,19 @@ type Entry = { id: string; name: string; enabled?: boolean }
 export function BotCaps({ k, permName, permSub, onPerm }: { k: string; permName: string; permSub: string; onPerm: () => void }) {
   const t = useT()
   const b = st.bots[k]
-  const [mine, load, setMine] = useList(() => capsApi.bot(k), [k])
-  const [use] = useStats(() => stats.counts({ range: "30d", bot: k }, "tool"), [k])
-  const counts = use.s === "ok" ? new Map(use.v.rows.filter((x) => x.dim === "mcp").map((x) => [x.label, x.count])) : undefined
+  const mine = useHubQuery(["caps", "bot", k], () => capsApi.bot(k), { events: ["bot"], debounceMs: 300 })
+  const load = mine.reload, setMine = mine.set
+  const use = useHubQuery(["stats", "counts", "30d", k, "tool"], () => stats.counts({ range: "30d", bot: k }, "tool"), { events: ["stats"], debounceMs: 200 })
+  const counts = use.data ? new Map(use.data.rows.filter((x) => x.dim === "mcp").map((x) => [x.label, x.count])) : undefined
   const [mcpEdit, setMcpEdit] = useState<McpServer | "new" | null>(null)
   const [skillEdit, setSkillEdit] = useState<Editing | null>(null)
   const [skillImport, setSkillImport] = useState(false)
   const [a2aEdit, setA2aEdit] = useState<A2aAgent | "new" | null>(null)
   if (!b) return null
   const toggle = async (kind: CapKind, x: Entry, on: boolean) => {
-    if (mine.s === "ok") {
+    if (mine.data) {
       const flip = <T extends Entry>(xs: T[]) => xs.map((y) => (y.id === x.id ? { ...y, enabled: on } : y))
-      setMine({ mcp: flip(mine.v.mcp), skills: flip(mine.v.skills), a2a: flip(mine.v.a2a) })
+      setMine({ mcp: flip(mine.data.mcp), skills: flip(mine.data.skills), a2a: flip(mine.data.a2a) })
     }
     try { await capsApi.assign(k, kind, x.id, on); toast(t(on ? "caps:bot.on" : "caps:bot.off", { name: x.name })) } catch (e) { toast(errText(e)) }
     void load()
@@ -53,10 +54,10 @@ export function BotCaps({ k, permName, permSub, onPerm }: { k: string; permName:
     <Button variant="ghost" size="icon-sm" className="text-muted-foreground" aria-label={t("caps:bot.edit", { name: x.name })} onClick={onEdit} data-cap-edit={x.name}><PencilIcon /></Button>
     <Button variant="ghost" size="icon-sm" className="text-muted-foreground" aria-label={t("caps:bot.drop", { name: x.name })} title={t("caps:bot.drop", { name: x.name })} onClick={() => void drop(kind, x)} data-cap-drop={x.name}><MinusCircleIcon /></Button>
   </>
-  const v: Caps | null = mine.s === "ok" ? mine.v : null
+  const v: Caps | null = mine.data ?? null
   const reads = harnessSkills(b.harness)
-  const body = (kind: CapKind, xs: Entry[] | undefined, empty: ReactNode, list: ReactNode) => mine.s === "loading" ? <Loading className="py-8" />
-    : mine.s === "error" ? <Notice tone="destructive">{mine.e}</Notice>
+  const body = (kind: CapKind, xs: Entry[] | undefined, empty: ReactNode, list: ReactNode) => mine.loading ? <Loading className="py-8" />
+    : mine.error ? <Notice tone="destructive">{mine.error.message}</Notice>
     : !xs?.length ? empty : <div className="flex flex-col gap-3" data-cap-list={kind}>{list}</div>
   return (
     <div className="flex flex-col gap-8 anim-in" data-caps>

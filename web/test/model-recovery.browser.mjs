@@ -29,6 +29,9 @@ try {
         return r.fulfill(fail?{status:409,json:{error:"Changed elsewhere"}}:{json:{...view(),bot_revision:++revision,steve:{harness:"codex",model:"new-model",models:["new-model"]}}})
       }
       if(u.pathname==="/api/shell") return r.fulfill({status:503,json:{error:"fixture state refresh disabled"}})
+      if(u.pathname==="/api/notifications") return r.fulfill({json:[]})
+      if(u.pathname==="/api/runtimes") return r.fulfill({json:[{id:"claude-code",name:"Claude Code",ok:true},{id:"codex",name:"Codex",ok:true}]})
+      if(u.pathname==="/api/conversations/channels") return r.fulfill({json:{channels:[]}})
       // Refresh and history are read-only fixture background traffic, isolated from a real Hub.
       if(r.request().method()==="GET") return r.fulfill({json:{messages:[],more:false}})
       unexpected.push(u.pathname);return r.abort()
@@ -52,7 +55,7 @@ try {
     await sheet.locator('[data-model-picker="lightweight-model"]').click()
     await page.locator('[data-model-opt="small-model"]').click()
     await sheet.locator('[data-role-preview-toggle]').click()
-    assert.equal(await sheet.locator('[data-role-preview-purpose]').count(),11)
+    assert.equal(await sheet.locator('[data-role-preview-purpose]').count(),10)
     for(const key of purposes) assert.match(await sheet.locator(`[data-role-preview-purpose="${key}"]`).innerText(),lightKeys.includes(key)?/small-model/:/new-model/)
     await sheet.locator('[data-role-preview-toggle]').click()
     assert.equal(saves.length,0,"browsing models does not save or run inference")

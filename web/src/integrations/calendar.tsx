@@ -15,7 +15,8 @@ import { Select } from "@/view-shared"
 import { useT } from "@/i18n"
 import { ago } from "@/i18n/format"
 import { toast } from "@/store"
-import { useBusy, useLoad } from "@/accounts/load"
+import { useBusy } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { people, type ContactBrief } from "@/api/people"
 import { calendarApi, type CalCalendar, type CalSource } from "@/api/calendar"
 
@@ -92,12 +93,12 @@ function CalendarRow({ c, onChange }: { c: CalCalendar; onChange: (x: CalCalenda
 /** a connection's calendars; nothing when it is no calendar source */
 export function CalendarSection({ conn }: { conn: string }) {
   const t = useT()
-  const L = useLoad(() => calendarApi.source(conn), [conn], ["calendar"])
+  const L = useHubQuery(["calendar", "source", conn], () => calendarApi.source(conn), { events: ["calendar"] })
   const [x, setX] = useState<CalSource | null>(null)
   const [busy, act] = useBusy()
   const file = useRef<HTMLInputElement>(null)
-  useEffect(() => { if (L.s === "ok") setX(L.data) }, [L])
-  if (L.s === "error") return <p role="alert" className="type-callout text-destructive">{L.err}</p>
+  useEffect(() => { if (L.data !== undefined) setX(L.data) }, [L.data])
+  if (L.error) return <p role="alert" className="type-callout text-destructive">{L.error.message}</p>
   if (!x) return null
   const cals = x.calendars.filter((c) => !c.gone)
   const needsFile = !!x.ics && !x.ics.subscribed

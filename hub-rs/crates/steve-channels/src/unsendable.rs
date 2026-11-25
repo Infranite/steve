@@ -9,11 +9,8 @@
 //! A write the channel refused for good ([`crate::write_blocks`]) has its own one notice already
 //! (the card of the first refused message): no second one is given here for it.
 
-use serde_json::json;
 use steve_store::connections::Connections;
-use steve_store::{
-    Accounts, Read, Systems, append_message, audit_repo, channel_message_repo, settings,
-};
+use steve_store::{Accounts, Read, Systems, audit_repo, channel_message_repo, settings};
 
 use crate::deliver::Delivered;
 use crate::{ChannelResult, Channels};
@@ -100,24 +97,7 @@ impl Channels {
                         if why.is_empty() { NO_REASON } else { why },
                     );
                     settings::report_unsendable(w, ws, conn, &error, now)?;
-                    let id = append_message(
-                        w,
-                        ws,
-                        "steve",
-                        &text,
-                        None,
-                        &json!({"notice": {"kind": NOTICE_KIND, "level": "fail"}}),
-                        "notify",
-                    )?;
-                    append_message(
-                        w,
-                        ws,
-                        "steve",
-                        &text,
-                        None,
-                        &json!({"notice": {"kind": NOTICE_KIND, "level": "fail", "ref": id}}),
-                        "steve",
-                    )?;
+                    steve_store::notify::notify_in(w, ws, NOTICE_KIND, "fail", &text, None)?;
                     Ok(())
                 })?;
             }

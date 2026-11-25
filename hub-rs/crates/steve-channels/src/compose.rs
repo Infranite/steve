@@ -2,9 +2,8 @@
 //! fixed seven layers — the more specific further down, the safety rules on top and never
 //! overridden — then the conversation ([`crate::context`]: where and why, who “我” is, the talk
 //! around the message in stretches of time, what came after it, drafts still waiting) and the
-//! message itself. One call on the
-//! model gateway's smart tier (the Bot's own `model` when it has one and a [`PinnedModel`] is
-//! wired), no ACP session. The answer is `{"text","needs_approval","why"}`.
+//! message itself. One call on the model gateway's smart tier, no ACP session. The answer is
+//! `{"text","needs_approval","why"}`.
 //!
 //! 1. safety rules ([`SAFETY_RULES`], a constant); for a trigger word, right after them, the
 //!    identity block ([`crate::im_context`]: account, as whom, chat, thread, sender, audience,
@@ -30,11 +29,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use serde_json::Value;
 use steve_knowledge::Hit;
 use steve_knowledge::context::{level_label, render_snippets, reply_hits};
-use steve_modules::{ApiError, GatewayOut, Tier};
+use steve_modules::{ApiError, Tier};
 use steve_store::base::mems::MemFilter;
 use steve_store::base::{ObjRef, Viewer};
 
@@ -153,29 +151,6 @@ pub const DECIDE_RULES: &str = "- ask_owner 只用在三种情况，reason 必�
 
 /// Written when a layer has nothing.
 const NONE: &str = "（无）";
-
-/// Runs the prompt on a specific model (the Bot's `model`). B1's gateway only knows tiers; the
-/// integrator wires this when the gateway can pin a model.
-#[async_trait]
-pub trait PinnedModel: Send + Sync {
-    async fn run(&self, model: &str, prompt: &str, timeout: Duration)
-    -> Result<GatewayOut, String>;
-
-    /// Custom pinned providers must explicitly implement image support.
-    async fn run_with_images(
-        &self,
-        model: &str,
-        prompt: &str,
-        images: &[Value],
-        timeout: Duration,
-    ) -> Result<GatewayOut, String> {
-        if images.is_empty() {
-            self.run(model, prompt, timeout).await
-        } else {
-            Err("当前固定模型入口不支持读取图片".into())
-        }
-    }
-}
 
 pub use steve_store::ReplyBot as BotInfo;
 
@@ -515,20 +490,6 @@ pub fn self_layer(owner: &str) -> String {
     )
 }
 
-fn pick_bot_info(
-    r: &mut impl steve_store::Read,
-    ws: &str,
-    ids: &[Option<&str>],
-) -> ChannelResult<Option<BotInfo>> {
-    let mut bots = steve_store::BotRows(r);
-    for id in ids.iter().flatten() {
-        if let Some(bot) = bots.reply_profile(ws, Some(id))? {
-            return Ok(Some(bot));
-        }
-    }
-    Ok(bots.reply_profile(ws, None)?)
-}
-
 /// The personal account's user, or the person who connected the bot.
 pub fn owner_user(r: &mut impl steve_store::Read, ws: &str, conn: &str) -> ChannelResult<String> {
     let conn =
@@ -746,7 +707,8 @@ fn gather_identity(
             }
         }
     };
-    let bot = pick_bot_info(r, ws, &[persona_bot.as_deref(), defaults_bot.as_deref()])?;
+    let bot = steve_store::BotRows(r)
+        .pick_workspace_bot(ws, &[persona_bot.as_deref(), defaults_bot.as_deref()])?;
     // on your own account the Bot only picks the model: the draft is you talking
     let model = bot.as_ref().and_then(|b| b.model.clone());
     let bot = bot.filter(|_| plan.mode == Mode::Bot);
@@ -957,7 +919,7 @@ fn conversation(
 /// Reads the composer's answer ([`OUTPUT`]; anywhere in the text; no `outcome` = a reply). A plain
 /// non-empty answer is taken as the text, with approval required. `None`: nothing to say.
 pub fn parse_answer(answer: &str) -> Option<Answer> {
-    if let Some(v) = steve_modules::changes::first_json(answer)
+    if let Some(v) = steve_runtime::json::first_json_opt(answer)
         && v.is_object()
     {
         let s = |k: &str| v[k].as_str().unwrap_or("").trim().to_string();
@@ -1040,7 +1002,7 @@ pub const DESCRIBE: &str = "如果你实际读到了图片，在 JSON 里再加�
 
 /// The answer's `described` ([`DESCRIBE`]), when it has one.
 pub fn described(answer: &str) -> Option<String> {
-    let v = steve_modules::changes::first_json(answer)?;
+    let v = steve_runtime::json::first_json_opt(answer)?;
     v["described"]
         .as_str()
         .map(str::trim)
@@ -1115,7 +1077,6 @@ pub fn settle_wide(r: &mut Reply, l: &Layers, unreadable: bool) {
 #[derive(Clone, Default)]
 pub struct Composer {
     media: Option<Arc<dyn crate::media_agent::MediaSource>>,
-    pinned: Option<Arc<dyn PinnedModel>>,
 }
 
 impl Composer {
@@ -1126,12 +1087,6 @@ impl Composer {
     /// Fetches only the current message's authorized resources, without creating shared files.
     pub fn media(mut self, source: Arc<dyn crate::media_agent::MediaSource>) -> Self {
         self.media = Some(source);
-        self
-    }
-
-    /// Runs prompts of Bots with their own `model` on it.
-    pub fn pinned(mut self, m: Arc<dyn PinnedModel>) -> Self {
-        self.pinned = Some(m);
         self
     }
 
@@ -1211,21 +1166,13 @@ impl Composer {
             }
         }
 
-        let out = match (&self.pinned, &layers.model) {
-            (Some(pm), Some(m)) => pm
-                .run_with_images(m, &p, &media.images, TIMEOUT)
-                .await
-                .map_err(steve_modules::gateway::GatewayError::from),
-            _ => {
-                steve_modules::gateway::purpose(
-                    "compose",
-                    ch.modules()
-                        .gateway
-                        .run_with_images(Tier::Smart, &p, &media.images, TIMEOUT),
-                )
-                .await
-            }
-        }
+        let out = steve_modules::gateway::purpose(
+            "compose",
+            ch.modules()
+                .gateway
+                .run_with_images(Tier::Smart, &p, &media.images, TIMEOUT),
+        )
+        .await
         .map_err(ApiError::Gateway)?;
         let mut reply = answer_of(&out.text, &out.model, &layers)
             .ok_or_else(|| ApiError::Internal("回复没有生成：模型没有给出正文".into()))?;

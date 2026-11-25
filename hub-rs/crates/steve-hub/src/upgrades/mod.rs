@@ -98,6 +98,12 @@ pub struct Progress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<DownloadProgress>,
 }
+#[derive(Serialize)]
+struct BackupStatus<'a> {
+    snapshot_id: Option<&'a crate::backup::SnapshotId>,
+    dir: PathBuf,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Operation {
     pub id: String,
@@ -117,9 +123,9 @@ pub struct Operation {
     /// A local_release upgrade: what the one-shot runner job downloads and deploys (`runner.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<runner::Spec>,
-    /// The verified database copy taken before switching.
+    /// The verified repository snapshot taken before switching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup: Option<String>,
+    pub backup_snapshot: Option<crate::backup::SnapshotId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
     /// The last actual drain observation. Kept across reconnects, never guessed from item status.
@@ -234,20 +240,31 @@ pub fn available(cfg: &Config) -> Option<String> {
 /// Checks for a newer release shortly after start and then every six hours, so the page can say so
 /// without anyone opening Settings. Off in debug builds unless STEVE_UPDATE_CHECK=1; STEVE_UPDATE_CHECK=0
 /// turns it off. Uses the same cache and lock as a check from the page.
-pub async fn run_auto_check(cfg: Config) {
+pub fn auto_check_task(cfg: Config) -> steve_runtime::Task {
     let on = match std::env::var("STEVE_UPDATE_CHECK").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
         _ => !cfg!(debug_assertions),
     };
     if !on {
-        return;
+        return steve_runtime::spawn("upgrades.check", async {});
     }
-    tokio::time::sleep(Duration::from_secs(30)).await;
-    loop {
-        check_release(&cfg).await;
-        tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
-    }
+    steve_runtime::every_after(
+        "upgrades.check",
+        std::sync::Arc::new(steve_runtime::SystemClock),
+        Duration::from_secs(6 * 3600),
+        steve_runtime::FirstRun::After(Duration::from_secs(30)),
+        move || {
+            let cfg = cfg.clone();
+            async move {
+                check_release(&cfg).await;
+            }
+        },
+    )
+}
+
+pub async fn run_auto_check(cfg: Config) {
+    auto_check_task(cfg).await;
 }
 
 async fn check_release(cfg: &Config) {
@@ -395,7 +412,10 @@ impl Updates {
         if let Some(op) = operation.as_mut() {
             runner::reap(self, op)?;
         }
-        let backup = operation.as_ref().map(|op| self.backup(op));
+        let backup = operation.as_ref().map(|op| BackupStatus {
+            snapshot_id: op.backup_snapshot.as_ref(),
+            dir: crate::backup::root(&self.home),
+        });
         let kind = self.install(&self.repo).kind;
         let ready = if kind == "local_release" {
             "local_release runner"
@@ -405,11 +425,6 @@ impl Updates {
         Ok(
             json!({"repository":self.repository,"current":{"hub":self.current_hub,"web":self.current_web},"capability":{"managed":self.managed,"reason":self.execution_reason().unwrap_or_else(||ready.into())},"install":{"kind":kind},"check":self.cached_check().map(|cached|cached.result),"operation":operation,"backup":backup}),
         )
-    }
-    /// Where what a failed upgrade is recovered from is kept: the verified database copy taken before
-    /// the switch (`null` until it exists) and the directory beside it.
-    fn backup(&self, op: &Operation) -> Value {
-        json!({"database": op.backup, "dir": crate::backup::root(&self.home).to_string_lossy()})
     }
     /// `repo`: STEVE_REPO, where release scripts run from.
     pub fn install(&self, repo: &Path) -> install::Install {
@@ -607,7 +622,7 @@ impl Updates {
             previous: None,
             target: None,
             runner,
-            backup: None,
+            backup_snapshot: None,
             progress: None,
             drain: None,
         };

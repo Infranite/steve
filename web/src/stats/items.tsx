@@ -11,7 +11,8 @@ import { Select } from "@/view-shared"
 import { Est } from "@/stats/kpi"
 import { Table, num, th } from "@/stats/tables"
 import { t, useT } from "@/i18n"
-import { fmtEst, fmtMs, fmtN, fmtUsage, fmtUsd, useStats } from "@/stats/format"
+import { useHubQuery } from "@/data/use-hub-query"
+import { fmtEst, fmtMs, fmtN, fmtUsage, fmtUsd } from "@/stats/format"
 
 const SORTS = (): [ItemSort, string][] => [["est", t("stats:items.sort.est")], ["tokens", t("stats:items.sort.tokens")], ["lead", t("stats:items.sort.lead")], ["wait", t("stats:items.sort.wait")], ["reworks", t("stats:items.sort.reworks")], ["done_at", t("stats:items.sort.doneAt")]]
 
@@ -22,18 +23,18 @@ export function ItemsTable({ f, fkey, live, only, sort0 = "est", panel }: { f: F
   const [sort, setSort] = useState<ItemSort>(sort0)
   const [cursor, setCursor] = useState<string[]>([])
   const at = cursor[cursor.length - 1]
-  const [d] = useStats(() => stats.items(f, sort, at, 50, only), [fkey, sort, at, only], live)
+  const d = useHubQuery(["stats", "items", fkey, sort, at ?? "", only ?? ""], () => stats.items(f, sort, at, 50, only), { events: ["stats"], debounceMs: 200, live })
   const sorter = <Select value={sort} onChange={(v) => { setSort(v as ItemSort); setCursor([]) }} options={SORTS().map(([v, l]) => ({ v, l }))} testId="items-sort" />
-  const count = d.s === "ok" ? <span data-items-total={d.v.total}>{only === "done" ? t("stats:items.totalDone", { count: d.v.total }) : only === "created" ? t("stats:items.totalCreated", { count: d.v.total }) : t("stats:items.totalActive", { count: d.v.total })}</span> : null
+  const count = d.data ? <span data-items-total={d.data.total}>{only === "done" ? t("stats:items.totalDone", { count: d.data.total }) : only === "created" ? t("stats:items.totalCreated", { count: d.data.total }) : t("stats:items.totalActive", { count: d.data.total })}</span> : null
   const body = (
     <div data-items-table className={panel ? "pb-3" : undefined}>
       {!panel && <div className="mb-2 flex items-center gap-2 px-5">{sorter}{count && <span className="type-footnote text-muted-foreground">{count}</span>}</div>}
-      {d.s === "loading" ? <div className="flex h-24 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
-        : d.s !== "ok" ? <div className="px-5 py-6 type-callout text-muted-foreground" role="alert">{d.s === "error" ? d.msg : t("stats:items.loadFailed")}</div>
-        : !d.v.rows.length ? <div className="px-5 py-6 type-callout text-muted-foreground">{only === "done" ? t("stats:items.emptyDone") : only === "created" ? t("stats:items.emptyCreated") : t("stats:items.emptyActive")}</div>
+      {d.loading ? <div className="flex h-24 items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>
+        : d.error || !d.data ? <div className="px-5 py-6 type-callout text-muted-foreground" role="alert">{d.error ? d.error.message : t("stats:items.loadFailed")}</div>
+        : !d.data.rows.length ? <div className="px-5 py-6 type-callout text-muted-foreground">{only === "done" ? t("stats:items.emptyDone") : only === "created" ? t("stats:items.emptyCreated") : t("stats:items.emptyActive")}</div>
         : <>
           <Table label={t("stats:col.item")} min={760} head={<tr><th className={cn(th, "w-20 whitespace-nowrap pr-3")}>{t("stats:col.item")}</th><th className={th}>{t("stats:col.title")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.lead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.agent")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.wait")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.reworks")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.tokens")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:col.cost")}<Est /></span></th></tr>}>
-            {d.v.rows.map((r) => (
+            {d.data.rows.map((r) => (
               <tr key={r.item_id} tabIndex={0} className="cursor-pointer hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none" onClick={() => go("#/stats/items/" + r.item_id)} onKeyDown={(e) => e.key === "Enter" && go("#/stats/items/" + r.item_id)} data-stats-item={r.item_id}>
                 <td className="whitespace-nowrap py-2.5 pr-3"><ItemNo id={r.item_id} /></td>
                 <td className="max-w-72 py-2.5"><span className="flex min-w-0 items-center gap-2"><StatusDot s={r.status} /><span className="truncate text-foreground">{r.title}</span></span></td>
@@ -42,10 +43,10 @@ export function ItemsTable({ f, fkey, live, only, sort0 = "est", panel }: { f: F
               </tr>
             ))}
           </Table>
-          {(cursor.length > 0 || d.v.next) && (
+          {(cursor.length > 0 || d.data.next) && (
             <div className="mt-2 flex items-center justify-end gap-2 px-5">
               <Button size="xs" variant="ghost" disabled={!cursor.length} onClick={() => setCursor(cursor.slice(0, -1))}>{t("stats:items.prevPage")}</Button>
-              <Button size="xs" variant="ghost" disabled={!d.v.next} onClick={() => d.v.next && setCursor([...cursor, d.v.next])} data-items-next>{t("stats:items.nextPage")}</Button>
+              <Button size="xs" variant="ghost" disabled={!d.data.next} onClick={() => d.data?.next && setCursor([...cursor, d.data.next])} data-items-next>{t("stats:items.nextPage")}</Button>
             </div>
           )}
         </>}

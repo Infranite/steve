@@ -27,6 +27,7 @@ import { closeSheet, go } from "@/ui"
 import { st, toast } from "@/store"
 import { useT } from "@/i18n"
 import { fpCheck, fpGroups, fpSpread, FP_GROUP, hostLine, hostOf, linkRoute, nodeViews } from "@/device-model"
+import { nodeHref } from "@/node-detail-model"
 import { useHubAddress, useHubs } from "@/hub-ui"
 import { AgentTrail } from "@/components/affect/agent-trail-clean"
 import { Progress } from "@/components/ui/progress"
@@ -39,7 +40,6 @@ type V = { kind: Kind; via: Via }
 type StepId = "kind" | "via" | "run" | "confirm" | "install" | "scan"
 /** how often the dialog looks for the Node that claimed the code */
 const POLL = 2000
-const nodeHref = (id: string) => "#/devices/nodes/" + encodeURIComponent(id)
 
 /** the steps of a flow, by what it adds and how; only the instance owner confirms a Node (anyone signed in may pair one) */
 export function stepsOf(kind: Kind, via: Via, owner = true): StepId[] {
@@ -285,7 +285,7 @@ function TailcatSwitch({ s, onChange }: { s: RTailcat | null; onChange: (s: RTai
   </div>
 }
 
-/* A remote install over tailcat (A6b): a line to run on the target machine, its address pasted back, the rest done by
+/* A remote install over tailcat: a line to run on the target machine, its address pasted back, the rest done by
  * the Hub (download and verify, install, pair, start). A Node installed so needs no fingerprint compared by hand.
  * Each step shows how far it is (bytes and speed while fetching and sending, the setup's phase on the target) and how
  * long it took, all kept by the Hub: the dialog opened again picks up the install that runs (or the last one that

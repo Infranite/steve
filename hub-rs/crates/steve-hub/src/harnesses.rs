@@ -214,16 +214,15 @@ impl HubHarnesses {
     ) -> steve_core::models::BotHarnessSource {
         let me = self.clone();
         Arc::new(move |bot| {
-            let (mut nodes, unconfigured) = store
-                .read(|r| steve_store::bot_admin::harness_nodes(r, bot))
-                .unwrap_or_default();
-            if unconfigured {
-                nodes.extend(
-                    steve_store::bot_dispatch::DEFAULT_NODES
-                        .iter()
-                        .map(ToString::to_string),
-                );
-            }
+            let nodes: std::collections::BTreeSet<String> = match bot {
+                Some(id) => store
+                    .read(|r| steve_store::bot_admin::harness_nodes(r, id))
+                    .unwrap_or_default(),
+                None => steve_store::bot_dispatch::DEFAULT_NODES
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            };
             if nodes.is_empty() {
                 // Placement is not fixed yet; another Node's offer must not certify this one.
                 return me.for_node("");
@@ -314,21 +313,41 @@ impl HubHarnesses {
     pub async fn follow(self: Arc<Self>, node: Arc<dyn steve_node_api::Node>) {
         self.follow_all(Some(node), None).await;
     }
+    pub fn follow_task(
+        self: Arc<Self>,
+        local: Option<Arc<dyn steve_node_api::Node>>,
+        svc: Option<Arc<crate::nodes::NodeService>>,
+    ) -> steve_runtime::Task {
+        steve_runtime::every_after(
+            "harnesses.follow",
+            Arc::new(steve_runtime::SystemClock),
+            REFRESH,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let me = self.clone();
+                let local = local.clone();
+                let svc = svc.clone();
+                async move {
+                    me.refresh_all(local.as_deref(), svc.as_deref(), false)
+                        .await;
+                }
+            },
+        )
+    }
     pub async fn follow_all(
         self: Arc<Self>,
         local: Option<Arc<dyn steve_node_api::Node>>,
         svc: Option<Arc<crate::nodes::NodeService>>,
     ) {
-        loop {
-            self.refresh_all(local.as_deref(), svc.as_deref(), false)
-                .await;
-            tokio::time::sleep(REFRESH).await;
-        }
+        self.follow_task(local, svc).await;
     }
 }
 
 /// An adapter of one's own as the runtimes page declares it.
+/// Custom declarations never inject environment variables; provider sign-in belongs to the harness
+/// on its Node and user variables belong to `node_env`.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NewHarness {
     pub id: String,
     #[serde(default)]
@@ -336,17 +355,121 @@ pub struct NewHarness {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
     /// Declared properties ([`steve_harness_spec::PropertiesPatch`]), checked key by key.
     #[serde(default)]
     pub properties: Option<serde_json::Value>,
 }
 
-/// Adds (or replaces) `h` in the Hub's harness manifest at `path`, keeping every other entry; in
-/// force once the Hub restarts. The file may hold variables an adapter needs: it is the owner's
-/// only.
-pub fn declare(path: &std::path::Path, h: NewHarness) -> Result<(), String> {
+/// Strongly typed failure for custom harness manifest mutations (`POST/DELETE /api/system/harnesses`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HarnessError {
+    #[error("custom harness manifest does not accept environment variables")]
+    EnvNotAllowed,
+    #[error(
+        "built-in harness `{0}` cannot be overridden or removed through the custom harness API"
+    )]
+    BuiltinProtected(String),
+    #[error("invalid harness id: {0}")]
+    InvalidId(String),
+    #[error("invalid harness command")]
+    InvalidCommand,
+    #[error("invalid harness properties: {0}")]
+    InvalidProperties(String),
+    #[error("unknown harness property: {0}")]
+    UnknownProperty(String),
+    #[error("invalid harness declaration payload: {0}")]
+    InvalidPayload(String),
+    #[error("could not read harness manifest: {0}")]
+    ManifestRead(String),
+    #[error("could not write harness manifest: {0}")]
+    ManifestWrite(String),
+}
+
+impl HarnessError {
+    /// Bounded reason label for `steve_security_refusals_total`.
+    pub fn refusal_reason(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::EnvNotAllowed => "env_not_allowed",
+            Self::BuiltinProtected(_) => "builtin_override",
+            Self::InvalidId(_) => "invalid_id",
+            Self::InvalidCommand => "invalid_command",
+            Self::InvalidProperties(_) => "invalid_properties",
+            Self::UnknownProperty(_) => "unknown_property",
+            Self::InvalidPayload(_) => "invalid_payload",
+            Self::ManifestRead(_) | Self::ManifestWrite(_) => return None,
+        })
+    }
+
+    pub fn into_api_error(self) -> crate::error::ApiError {
+        use steve_types::ConfigReason;
+        match self {
+            Self::EnvNotAllowed => {
+                crate::error::ApiError::Contract(ConfigReason::harness_env_not_allowed(
+                    "custom harness declarations do not accept environment variables",
+                ))
+            }
+            Self::BuiltinProtected(id) => {
+                crate::error::ApiError::Contract(ConfigReason::harness_builtin_protected(
+                    id.clone(),
+                    format!("built-in harness \"{id}\" cannot be overridden or removed"),
+                ))
+            }
+            Self::InvalidId(id) => {
+                crate::error::ApiError::bad_request(steve_i18n::t!("hub.harness.bad_id", id = id))
+            }
+            Self::InvalidCommand => {
+                crate::error::ApiError::bad_request(steve_i18n::t!("hub.harness.bad_command"))
+            }
+            Self::InvalidProperties(error) => crate::error::ApiError::bad_request(steve_i18n::t!(
+                "hub.harness.bad_properties",
+                error = error
+            )),
+            Self::UnknownProperty(key) => crate::error::ApiError::bad_request(steve_i18n::t!(
+                "hub.harness.unknown_property",
+                key = key
+            )),
+            Self::InvalidPayload(msg) => crate::error::ApiError::bad_request(msg),
+            Self::ManifestRead(error) => crate::error::ApiError::bad_request(steve_i18n::t!(
+                "hub.harness.manifest_unreadable",
+                error = error
+            )),
+            Self::ManifestWrite(error) => crate::error::ApiError::bad_request(steve_i18n::t!(
+                "hub.harness.manifest_unwritable",
+                error = error
+            )),
+        }
+    }
+}
+
+fn record_refusal(err: &HarnessError) {
+    if let Some(reason) = err.refusal_reason() {
+        metrics::counter!(
+            "steve_security_refusals_total",
+            "boundary" => "harness_manifest",
+            "reason" => reason
+        )
+        .increment(1);
+    }
+}
+
+/// Parses a `POST /api/system/harnesses` payload, explicitly refusing any `env` injection attempt
+/// with a typed error and metric before deserializing [`NewHarness`].
+pub fn parse_new_harness(raw: serde_json::Value) -> Result<NewHarness, HarnessError> {
+    if raw.as_object().is_some_and(|obj| obj.contains_key("env")) {
+        let err = HarnessError::EnvNotAllowed;
+        record_refusal(&err);
+        return Err(err);
+    }
+    serde_json::from_value(raw).map_err(|e| {
+        let err = HarnessError::InvalidPayload(e.to_string());
+        record_refusal(&err);
+        err
+    })
+}
+
+/// Adds (or replaces) a custom adapter `h` in the Hub's harness manifest at `path`, keeping every
+/// other entry; in force once the Hub restarts. Built-in harness ids cannot be overridden here.
+pub fn declare(path: &std::path::Path, h: NewHarness) -> Result<(), HarnessError> {
     let id_ok = !h.id.is_empty()
         && h.id.len() <= 64
         && h.id
@@ -354,25 +477,42 @@ pub fn declare(path: &std::path::Path, h: NewHarness) -> Result<(), String> {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
         && h.id.starts_with(|c: char| c.is_ascii_alphanumeric());
     if !id_ok {
-        return Err(steve_i18n::t!("hub.harness.bad_id", id = h.id));
+        let err = HarnessError::InvalidId(h.id);
+        record_refusal(&err);
+        return Err(err);
+    }
+    if steve_harness_spec::builtin(&h.id).is_some() {
+        let err = HarnessError::BuiltinProtected(h.id);
+        record_refusal(&err);
+        return Err(err);
     }
     let command = h.command.trim();
     if command.is_empty() || command.contains('\n') {
-        return Err(steve_i18n::t!("hub.harness.bad_command"));
+        let err = HarnessError::InvalidCommand;
+        record_refusal(&err);
+        return Err(err);
     }
     if let Some(p) = &h.properties {
         let patch: steve_harness_spec::PropertiesPatch = serde_json::from_value(p.clone())
-            .map_err(|e| steve_i18n::t!("hub.harness.bad_properties", error = e.to_string()))?;
+            .map_err(|e| {
+                let err = HarnessError::InvalidProperties(e.to_string());
+                record_refusal(&err);
+                err
+            })?;
         let _ = patch;
         // a key the adapter layer does not know is a mistake, not something to drop silently
-        let given = p
-            .as_object()
-            .ok_or_else(|| steve_i18n::t!("hub.harness.bad_properties", error = "not an object"))?;
+        let given = p.as_object().ok_or_else(|| {
+            let err = HarnessError::InvalidProperties("not an object".into());
+            record_refusal(&err);
+            err
+        })?;
         if let Some(k) = given
             .keys()
             .find(|k| !steve_harness_spec::PROPERTY_KEYS.contains(&k.as_str()))
         {
-            return Err(steve_i18n::t!("hub.harness.unknown_property", key = k));
+            let err = HarnessError::UnknownProperty(k.clone());
+            record_refusal(&err);
+            return Err(err);
         }
     }
     let mut entry = serde_json::json!({ "command": command });
@@ -382,9 +522,6 @@ pub fn declare(path: &std::path::Path, h: NewHarness) -> Result<(), String> {
     if !h.args.is_empty() {
         entry["args"] = serde_json::json!(h.args);
     }
-    if !h.env.is_empty() {
-        entry["env"] = serde_json::json!(h.env);
-    }
     if let Some(p) = h.properties {
         entry["properties"] = p;
     }
@@ -393,8 +530,13 @@ pub fn declare(path: &std::path::Path, h: NewHarness) -> Result<(), String> {
     })
 }
 
-/// Removes adapter `id` from the Hub's harness manifest; whether it was there.
-pub fn undeclare(path: &std::path::Path, id: &str) -> Result<bool, String> {
+/// Removes custom adapter `id` from the Hub's harness manifest; refuses built-in ids.
+pub fn undeclare(path: &std::path::Path, id: &str) -> Result<bool, HarnessError> {
+    if steve_harness_spec::builtin(id).is_some() {
+        let err = HarnessError::BuiltinProtected(id.to_owned());
+        record_refusal(&err);
+        return Err(err);
+    }
     let mut removed = false;
     edit_manifest(path, |adapters| removed = adapters.remove(id).is_some())?;
     Ok(removed)
@@ -403,18 +545,13 @@ pub fn undeclare(path: &std::path::Path, id: &str) -> Result<bool, String> {
 fn edit_manifest(
     path: &std::path::Path,
     f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
-) -> Result<(), String> {
+) -> Result<(), HarnessError> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut doc: serde_json::Value = match std::fs::read_to_string(path) {
-        Ok(t) => serde_json::from_str(&t).map_err(|e| {
-            steve_i18n::t!("hub.harness.manifest_unreadable", error = e.to_string())
-        })?,
+        Ok(t) => serde_json::from_str(&t).map_err(|e| HarnessError::ManifestRead(e.to_string()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(e) => {
-            return Err(steve_i18n::t!(
-                "hub.harness.manifest_unreadable",
-                error = e.to_string()
-            ));
+            return Err(HarnessError::ManifestRead(e.to_string()));
         }
     };
     if !doc.is_object() {
@@ -424,7 +561,8 @@ fn edit_manifest(
         doc["adapters"] = serde_json::json!({});
     }
     f(doc["adapters"].as_object_mut().expect("an object"));
-    let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(&doc)
+        .map_err(|e| HarnessError::ManifestWrite(e.to_string()))?;
     let tmp = path.with_extension("json.tmp");
     let write = || -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
@@ -440,7 +578,7 @@ fn edit_manifest(
         f.sync_all()?;
         std::fs::rename(&tmp, path)
     };
-    write().map_err(|e| steve_i18n::t!("hub.harness.manifest_unwritable", error = e.to_string()))
+    write().map_err(|e| HarnessError::ManifestWrite(e.to_string()))
 }
 
 /// Adapter `id` as declared, with what its probe reported where it did.
@@ -562,9 +700,9 @@ pub(crate) async fn ready_locally(harnesses: &[&str], models: &[&str]) -> Arc<Hu
                 session_error: None,
                 session_auth_required: None,
                 execution_modes: Some(modes.clone()),
-                update: None,
                 resume_command: None,
                 fork_command: None,
+                capabilities: None,
             }),
         })
         .collect();
@@ -608,9 +746,9 @@ mod tests {
                 session_error: None,
                 session_auth_required: None,
                 execution_modes: None,
-                update: None,
                 resume_command: None,
                 fork_command: None,
+                capabilities: None,
             }),
         }
     }
@@ -629,7 +767,6 @@ mod tests {
             name: Some("My Agent".into()),
             command: "/opt/my-agent".into(),
             args: vec!["--acp".into()],
-            env: BTreeMap::from([("K".into(), "v".into())]),
             properties: Some(props),
         };
         declare(&path, new(serde_json::json!({"modes": {"ask": "default"}}))).unwrap();
@@ -638,6 +775,7 @@ mod tests {
         // the other entries and keys stay
         assert_eq!(doc["adapters"]["codex"], "/opt/codex-acp");
         assert_eq!(doc["node"], "/opt/node");
+        assert!(doc["adapters"]["my-agent"].get("env").is_none());
         let entry: steve_harness_spec::AdapterEntry =
             serde_json::from_value(doc["adapters"]["my-agent"].clone()).unwrap();
         let (commands, declared) = steve_harness_spec::split_entries([("my-agent".into(), entry)]);
@@ -658,13 +796,81 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        // a property the adapter layer does not know, a bad id: refused, nothing written
-        assert!(declare(&path, new(serde_json::json!({"nope": 1}))).is_err());
+        // a property the adapter layer does not know, a bad id, env injection, or built-in override: refused
+        assert!(matches!(
+            declare(&path, new(serde_json::json!({"nope": 1}))),
+            Err(HarnessError::UnknownProperty(_))
+        ));
         let mut bad = new(serde_json::json!({}));
         bad.id = "Bad Id".into();
-        assert!(declare(&path, bad).is_err());
+        assert!(matches!(
+            declare(&path, bad),
+            Err(HarnessError::InvalidId(_))
+        ));
+        let mut builtin = new(serde_json::json!({}));
+        builtin.id = "claude-code".into();
+        assert_eq!(
+            declare(&path, builtin),
+            Err(HarnessError::BuiltinProtected("claude-code".into()))
+        );
+        assert_eq!(
+            undeclare(&path, "codex"),
+            Err(HarnessError::BuiltinProtected("codex".into()))
+        );
+        assert_eq!(
+            parse_new_harness(serde_json::json!({
+                "id": "my-agent",
+                "command": "/opt/my-agent",
+                "env": {"ANTHROPIC_API_KEY": "sk-test"}
+            }))
+            .unwrap_err(),
+            HarnessError::EnvNotAllowed
+        );
         assert!(undeclare(&path, "my-agent").unwrap());
         assert!(!undeclare(&path, "my-agent").unwrap());
+    }
+
+    #[test]
+    fn harness_manifest_refusals_increment_metrics_by_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("harness.json");
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let _ = parse_new_harness(serde_json::json!({
+                "id": "my-agent",
+                "command": "/opt/my-agent",
+                "env": {"ANTHROPIC_API_KEY": "sk-test"}
+            }));
+            let _ = declare(
+                &path,
+                NewHarness {
+                    id: "claude-code".into(),
+                    name: None,
+                    command: "/opt/hijack".into(),
+                    args: vec![],
+                    properties: None,
+                },
+            );
+            let _ = undeclare(&path, "codex");
+        });
+        let text = handle.render();
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("steve_security_refusals_total{")
+                    && line.contains("boundary=\"harness_manifest\"")
+                    && line.contains("reason=\"env_not_allowed\"")
+                    && line.ends_with(" 1")),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("steve_security_refusals_total{")
+                    && line.contains("boundary=\"harness_manifest\"")
+                    && line.contains("reason=\"builtin_override\"")
+                    && line.ends_with(" 2")),
+            "{text}"
+        );
     }
 
     #[test]

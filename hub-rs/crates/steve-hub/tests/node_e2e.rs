@@ -483,7 +483,7 @@ impl Client {
                 "POST",
                 "/api/bots",
                 Some(json!({
-                    "name": "Retry fixture", "harness": "pi", "perm_mode": "bypassPermissions"
+                    "name": "Retry fixture", "harness": "pi", "perm_mode": "full_access"
                 })),
             )
             .await;

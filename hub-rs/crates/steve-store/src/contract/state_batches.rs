@@ -18,12 +18,6 @@ pub struct ItemExtras {
     pub open: Vec<String>,
     /// Queued rows of the last non-ended session.
     pub queued: usize,
-    /// Graph identity and pause flag, plus failed children only when the graph matches the item cycle.
-    pub workflow_paused: Option<bool>,
-    pub workflow_cycle: Option<i64>,
-    pub workflow_failed: Vec<String>,
-    pub workflow_attempt: Option<i64>,
-    pub workflow_superseded: bool,
 }
 
 #[derive(Serialize)]
@@ -38,6 +32,7 @@ pub struct McpSummary {
 pub struct BotExtras {
     pub workspaces: HashMap<String, Vec<String>>,
     pub mcp: HashMap<String, Vec<McpSummary>>,
+    pub fallback_surfaces: HashMap<String, Vec<crate::ExecutionSurface>>,
 }
 
 fn scan_mcp(
@@ -109,6 +104,25 @@ pub fn bot_extras(r: &mut impl Read) -> Result<BotExtras> {
     scan_mcp(r, None, |bot, server| {
         extras.mcp.entry(bot).or_default().push(server)
     })?;
+    r.scan(
+        Query::select()
+            .columns(["bot_id", "harness", "model", "reasoning_effort"])
+            .from("bot_fallback_surfaces")
+            .order_by("bot_id", Order::Asc)
+            .order_by("ordinal", Order::Asc),
+        |row| {
+            extras
+                .fallback_surfaces
+                .entry(row.get(0)?)
+                .or_default()
+                .push(crate::ExecutionSurface {
+                    harness: row.get(1)?,
+                    model: row.get(2)?,
+                    reasoning_effort: row.get(3)?,
+                });
+            Ok(())
+        },
+    )?;
     Ok(extras)
 }
 

@@ -12,7 +12,8 @@ import { go, Page, Row, Meta, Empty, StatusDot, Panel, Section, Note, Blank, Not
 import { Select } from "@/view-shared"
 import { tm, toast } from "@/store"
 import { accountsApi, capLabel, kindLabel, KIND_LABEL, CONN_STATUS, connStatusOf, type RAccount, type RAdapter, type RConnection, type RMatchRule, type RUsage } from "@/api/accounts"
-import { useLoad, useBusy, report } from "@/accounts/load"
+import { useBusy, report } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { NewAccountDialog, ConnectDialog, CredentialDialog } from "@/accounts/dialogs"
 import { NewVaultDialog } from "@/vault/new-item"
 import { MailSettingsSections, useMailSettings } from "@/mail/settings"; import { MAIL_ADAPTERS } from "@/api/mail"
@@ -64,14 +65,14 @@ let reauthFor: string | null = null
 
 function AccountsView() {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["accounts", "list"], async () => {
     const [mine, company, rules, systems] = await Promise.all([accountsApi.accounts({ scope: "mine" }), accountsApi.accounts({ scope: "company" }), accountsApi.rules(), accountsApi.systems()])
     const adapters = await accountsApi.adapters().catch(() => [] as RAdapter[]) // no adapters: only "record an account"
     return { mine, company, rules, systems, adapters }
-  }, [], ["account", "connection"])
+  }, { events: ["account", "connection"] })
   const [dlg, setDlg] = useState<{ k: "new" } | { k: "connect"; a: RAdapter } | null>(null)
-  if (L.s === "loading") return <Loading title={t("accounts:page.title")} />
-  if (L.s === "error") return <Failed title={t("accounts:page.title")} err={L.err} />
+  if (L.loading) return <Loading title={t("accounts:page.title")} />
+  if (L.error || !L.data) return <Failed title={t("accounts:page.title")} err={L.error?.message ?? ""} />
   const { mine, company, rules, systems, adapters } = L.data
   const conn = mine.filter((a) => a.connection), rest = mine.filter((a) => !a.connection)
   const offer = adapters.filter((a) => a.auth === "oauth" || a.auth === "credential")
@@ -131,14 +132,14 @@ function MatchRules({ rules, onChange }: { rules: RMatchRule[]; onChange: () => 
 /* ═════════ 账号详情 ═════════ */
 function AccountDetail({ id }: { id: string }) {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["accounts", "detail", id], async () => {
     const a = await accountsApi.account(id)
     const [c, adapters] = await Promise.all([a.connection ? accountsApi.connection(a.connection.id) : Promise.resolve(null), a.connection ? accountsApi.adapters().catch(() => [] as RAdapter[]) : Promise.resolve([] as RAdapter[])])
     return { a, c, adapter: c ? adapters.find((x) => x.id === c.adapter) ?? null : null }
-  }, [id], ["account", "connection", "vault"])
+  }, { events: ["account", "connection", "vault"] })
   const [rm, setRm] = useState(false), [edit, setEdit] = useState(false), [newItem, setNewItem] = useState(false), [busy, act] = useBusy()
-  if (L.s === "loading") return <Loading title={t("accounts:page.title")} back={["#/accounts", t("accounts:page.title")]} />
-  if (L.s === "error") return <Failed title={t("accounts:page.title")} err={L.status === 404 ? t("accounts:detail.notFound") : L.err} back={["#/accounts", t("accounts:page.title")]} />
+  if (L.loading) return <Loading title={t("accounts:page.title")} back={["#/accounts", t("accounts:page.title")]} />
+  if (L.error || !L.data) return <Failed title={t("accounts:page.title")} err={L.status === 404 ? t("accounts:detail.notFound") : (L.error?.message ?? "")} back={["#/accounts", t("accounts:page.title")]} />
   const { a, c, adapter } = L.data
   const mine = a.party.is_me || a.party.type === "org" || a.party.type === "team"
   const back: [string, string] = mine ? ["#/accounts", t("accounts:page.title")] : ["#/contacts/" + a.party.id, a.party.name]

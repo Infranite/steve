@@ -5,8 +5,10 @@ import { getItems, getItem } from "@/store"
  * for YOLO, why it could) opens under it. The filters (by who) and the search work on the pages read so far. An action this page has
  * no words for goes by its code. */
 import { useEffect, useMemo, useState } from "react"
-import { BotIcon, BrainIcon, CircleCheckIcon, ContactRoundIcon, FolderIcon, HistoryIcon, KeyRoundIcon, ListTodoIcon, LockIcon, SettingsIcon, SparklesIcon, WorkflowIcon, ZapIcon } from "lucide-react"
-import { api, HubError, modReq } from "@/api"
+import { BotIcon, BrainIcon, CircleCheckIcon, ContactRoundIcon, FolderIcon, HistoryIcon, KeyRoundIcon, ListTodoIcon, LockIcon, SettingsIcon, SparklesIcon, WorkflowIcon } from "lucide-react"
+import { api, HubError } from "@/api"
+import { modelsApi } from "@/api/models"
+import { systemApi } from "@/api/system"
 import { Button } from "@/components/ui/button"
 import { ActivityList, type ActivityItem, type ActivityWho } from "@/components/affect/agent-activity"
 import { st, useStore } from "@/store"
@@ -14,6 +16,8 @@ import { Blank, Notice, Loading, go } from "@/ui"
 import { t as tr, useT } from "@/i18n"
 import { date, monthDayTime } from "@/i18n/format"
 import { actionKeys, changed, detailLines, purposeOf, type AuditEntry, type AuditPage } from "@/audit"
+import { disambiguateActors, formatActorName, resolveActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 
 export const AUDIT_CAT = Object.defineProperties(["audit", "", HistoryIcon, ""] as [string, string, any, string], {
   1: { get: () => tr("manage:audit.title"), enumerable: true },
@@ -58,17 +62,16 @@ function dayOf(ts: number) {
 }
 
 /** what kind of thing an action is about, as the row's glyph */
-const MARKS: [RegExp, typeof HistoryIcon][] = [[/^decision\./, CircleCheckIcon], [/^workflow\.|^flow\.|^run\./, WorkflowIcon], [/^item\./, ListTodoIcon], [/^project\./, FolderIcon], [/^bot\./, BotIcon], [/^mm\./, BrainIcon], [/^(pair|client|token|passkey|oidc|user)\./, KeyRoundIcon], [/^(party|team|steward)\./, ContactRoundIcon], [/^vault\./, LockIcon], [/^yolo\./, ZapIcon], [/^onboard\./, SparklesIcon], [/^(settings|config|workspace)\./, SettingsIcon]]
+const MARKS: [RegExp, typeof HistoryIcon][] = [[/^decision\./, CircleCheckIcon], [/^workflow\.|^flow\.|^run\./, WorkflowIcon], [/^item\./, ListTodoIcon], [/^project\./, FolderIcon], [/^bot\./, BotIcon], [/^mm\./, BrainIcon], [/^(pair|client|token|passkey|oidc|user)\./, KeyRoundIcon], [/^(party|team|steward)\./, ContactRoundIcon], [/^vault\./, LockIcon], [/^onboard\./, SparklesIcon], [/^(settings|config|workspace)\./, SettingsIcon]]
 const markOf = (action: string) => { const I = MARKS.find(([r]) => r.test(action))?.[1] ?? HistoryIcon; return <I /> }
 
-/** who did it: you, another member, a Bot on its own, YOLO answering for you, or the Hub itself. The Hub writes its
+/** who did it: you, another member, a Bot on its own, or the Hub itself. The Hub writes its
  *  own upkeep (a migration, an expiry, a restart's cleanup, a send attempt, what it seeds) under the main Bot's id,
  *  so that goes by the action, not the actor */
-type Who = "me" | "bot" | "yolo" | "member" | "hub"
+type Who = "me" | "bot" | "member" | "hub"
 const UPKEEP = /\.(migrate|expire)$|^vault\.use_(failed|expired)$|^mail\.send\.attempt$/
 function whoOf(e: AuditEntry, me: string | null): Who {
   const actor = e.actor
-  if (actor === "yolo") return "yolo"
   if (me && actor === me) return "me"
   if (actor.startsWith("usr_")) return "member"
   if (UPKEEP.test(e.action) || e.detail?.source === "seed") return "hub"
@@ -78,7 +81,6 @@ function whoOf(e: AuditEntry, me: string | null): Who {
 const WHOS = (): ActivityWho[] => [
   { id: "me", label: tr("manage:audit.by.me"), tone: "self" },
   { id: "bot", label: tr("manage:audit.by.bot"), tone: "auto" },
-  { id: "yolo", label: tr("manage:audit.by.yolo"), tone: "approved" },
   { id: "member", label: tr("manage:audit.by.member"), tone: "other" },
   { id: "hub", label: tr("manage:audit.by.hub"), tone: "other" },
 ]
@@ -89,10 +91,10 @@ export function AuditSettingsPane() {
   const [page, setPage] = useState<AuditPage | null>(null)
   const [err, setErr] = useState<string | null>(null), [denied, setDenied] = useState(false), [busy, setBusy] = useState(false)
   const [purposes, setPurposes] = useState<Record<string, string>>({})
-  const [me, setMe] = useState<string | null>(null)
+  const [me, setMe] = useState<string | null>(() => st.me?.user_id ?? null)
   const load = (before?: number) => {
     setBusy(true); setErr(null)
-    return modReq<AuditPage>("GET", `/audit?limit=${PAGE}${before ? `&before=${before}` : ""}`)
+    return systemApi.audit(PAGE, before)
       .then((p) => setPage((old) => (before && old ? { entries: [...old.entries, ...p.entries], names: { ...old.names, ...p.names }, more: p.more } : p)))
       .catch((e) => { if (e instanceof HubError && e.status === 403) setDenied(true); else setErr(e instanceof Error ? e.message : String(e)) })
       .finally(() => setBusy(false))
@@ -100,22 +102,34 @@ export function AuditSettingsPane() {
   useEffect(() => {
     void load()
     /* the purposes by the names the models page gives them; without them an entry says the purpose's key */
-    modReq<{ purposes: { key: string; label: string }[] }>("GET", "/settings/models").then((v) => setPurposes(Object.fromEntries(v.purposes.map((p) => [p.key, p.label])))).catch(() => {})
+    modelsApi.get().then((v) => setPurposes(Object.fromEntries(v.purposes.map((p) => [p.key, p.label])))).catch(() => {})
     /* who "you" are, so your own steps say 你 */
-    api.me().then((r) => setMe(r.user.id), () => {})
+    if (!st.me?.user_id) api.me().then((r) => setMe(r.user.id), () => {})
   }, [])
   const w: Words = { names: page?.names ?? {}, purposes }
   const items = useMemo(() => {
     if (!page) return []
+    const meId = st.me?.user_id ?? me
+    const ctx = { me: st.me, members: st.members, bots: st.bots, names: w.names, systemName: tr("manage:audit.by.hub") }
+    const disambig = disambiguateActors([
+      ...st.members.map((m) => { const a = resolveActor(m.user_id, ctx); return { key: a.id ?? m.user_id, name: a.name, subtitle: a.subtitle, fallbackId: m.user_id } }),
+      ...page.entries.map((e) => {
+        const by = whoOf(e, meId)
+        const a = resolveActor(by === "hub" ? "system" : e.actor, ctx)
+        return { key: a.id ?? e.actor, name: a.name, subtitle: a.subtitle, fallbackId: a.id }
+      }),
+    ])
     const one = (e: AuditEntry): ActivityItem => {
-      const by = whoOf(e, me), name = by === "hub" ? tr("manage:audit.by.hub") : w.names[e.actor] ?? st.bots[e.actor]?.n ?? e.actor
+      const by = whoOf(e, meId)
+      const actor = resolveActor(by === "hub" ? "system" : e.actor, ctx)
+      const extra = disambig.get(actor.id ?? e.actor)
+      const name = by === "hub" ? tr("manage:audit.by.hub") : formatActorName(actor.name, extra, (n, ex) => tr("common:actor.disambiguated", { name: n, extra: ex }))
       const item = getItem(e.target)
       return {
         id: String(e.id), at: e.ts, mark: markOf(e.action), text: title(e, w), task: summary(e, w) || undefined, by,
-        /* you and YOLO go by the filter's words; a Bot, a member or the Hub by its name when it has one */
-        byName: by === "me" || by === "yolo" || by === "hub" ? undefined : name,
-        /* why it could, only where the trail says so: YOLO answered for you. Who did it is in the details */
-        why: by === "yolo" ? tr("manage:audit.why.yolo") : undefined,
+        /* you and the Hub go by the filter's words; a Bot or another member by its name when it has one */
+        byName: by === "me" || by === "hub" ? undefined : name,
+        byAvatar: <ActorAvatar actor={actor} disambiguator={extra} size={16} tooltip={false} />,
         open: item ? { label: tr("manage:audit.openItem", { id: item.id }), run: () => go("#/items/" + item.id) } : undefined,
         details: [
           { label: tr("manage:audit.when"), value: monthDayTime(e.ts) },

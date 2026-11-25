@@ -2,9 +2,11 @@
 //! ordered execution Nodes, narrowed by the item's Team. Candidate evidence never writes an
 //! authorization.
 use rusqlite::{Connection, OptionalExtension, params};
-use sea_query::{Expr, ExprTrait, Query};
+use sea_query::{Expr, ExprTrait, JoinType, OnConflict, Order, Query};
 use serde::{Deserialize, Serialize};
-use steve_types::{BotPlacement, BotProposal, PlacementBlocked, WorkEvent};
+use steve_types::{
+    BotPlacement, BotProposal, ConfigEvent, NoExecutorPolicy, PlacementBlocked, WorkEvent,
+};
 
 use crate::{Read, W, contract::Json};
 
@@ -26,6 +28,63 @@ pub const NO_TEAM: &str = "none";
 
 /// The execution Nodes of a Bot nobody configured: the Hub's own Node.
 pub const DEFAULT_NODES: &[&str] = &["local"];
+
+/// Workspace setting key controlling what happens when no eligible executor Bot exists.
+pub const NO_EXECUTOR_SETTING: &str = "noExecutor";
+
+pub fn no_executor_policy(r: &mut impl Read, ws: &str) -> Result<NoExecutorPolicy> {
+    let raw: Option<String> = r.one(
+        Query::select()
+            .column("value")
+            .from("settings")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("key").eq(NO_EXECUTOR_SETTING)),
+        |row| row.get(0),
+    )?;
+    let parsed = raw.and_then(|v| {
+        serde_json::from_str::<NoExecutorPolicy>(&v)
+            .ok()
+            .or_else(|| NoExecutorPolicy::parse(v.trim_matches('"')))
+    });
+    Ok(parsed.unwrap_or_default())
+}
+
+pub fn set_no_executor_policy(
+    w: &mut W<'_>,
+    ws: &str,
+    policy: NoExecutorPolicy,
+    actor: &str,
+) -> Result<()> {
+    let value = serde_json::to_string(&policy)?;
+    w.exec(
+        Query::insert()
+            .into_table("settings")
+            .columns(["workspace_id", "key", "value", "updated"])
+            .values_panic([
+                ws.into(),
+                NO_EXECUTOR_SETTING.into(),
+                value.into(),
+                crate::now().into(),
+            ])
+            .on_conflict(
+                OnConflict::columns(["workspace_id", "key"])
+                    .update_columns(["value", "updated"])
+                    .to_owned(),
+            ),
+    )?;
+    w.audit(
+        ws,
+        actor,
+        "settings.update",
+        ws,
+        &serde_json::json!({ NO_EXECUTOR_SETTING: policy.as_str() }),
+    )?;
+    w.emit(ConfigEvent::Settings {
+        ws: ws.into(),
+        id: ws.into(),
+    });
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,7 +178,6 @@ pub(crate) fn bindings_on(c: &Connection, ws: &str, bot: &str) -> Result<Vec<Str
 }
 
 pub(crate) fn item_team_on(c: &Connection, item: &str) -> Result<Option<(Team, String)>> {
-    // Workflow children are created by their own repository. The parent's snapshot is their ceiling.
     let row: Option<(String, String)> = c
         .query_row(
             "SELECT d.team,d.source FROM item_team_snapshots d WHERE d.item_id=?1",
@@ -127,16 +185,6 @@ pub(crate) fn item_team_on(c: &Connection, item: &str) -> Result<Option<(Team, S
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let row = match row {
-        Some(row) => Some(row),
-        None => c.query_row(
-            "SELECT d.team,'inherited' FROM workflow_units u JOIN workflows w ON w.item_id=u.workflow_id
-             JOIN item_team_snapshots d ON d.item_id=w.item_id JOIN items p ON p.id=w.item_id
-             JOIN items i ON i.workspace_id=p.workspace_id AND i.id=u.item_id
-             WHERE u.item_id=?1",
-            [item], |r| Ok((r.get(0)?, r.get(1)?)),
-        ).optional()?,
-    };
     row.map(|(s, source)| Ok((serde_json::from_str(&s)?, source)))
         .transpose()
 }
@@ -155,6 +203,32 @@ pub fn snapshot(w: &mut crate::W<'_>, item: &str, team: &Team, source: &str) -> 
     Ok(())
 }
 
+/// Include a newly confirmed Team member in a waiting item's snapshot for that same Team.
+pub fn add_member_to_snapshot(
+    w: &mut crate::W<'_>,
+    item: &str,
+    team_id: &str,
+    bot_id: &str,
+) -> Result<bool> {
+    let Some((mut team, _)) = item_team_on(w.conn, item)? else {
+        return Ok(false);
+    };
+    if team.id != team_id || team.member(bot_id).is_some() {
+        return Ok(false);
+    }
+    team.members.push(Member {
+        bot: bot_id.to_owned(),
+        nodes: None,
+    });
+    w.exec(
+        Query::update()
+            .table("item_team_snapshots")
+            .value("team", serde_json::to_string(&team)?)
+            .and_where(Expr::col("item_id").eq(item)),
+    )?;
+    Ok(true)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Scope {
     /// The Nodes the session may run on, in priority order.
@@ -169,12 +243,30 @@ pub(crate) fn scope_on(c: &Connection, ws: &str, item: &str, bot: &str) -> Resul
     scope_for_on(c, ws, team.as_ref(), bot)
 }
 
+fn is_main_bot_on(c: &Connection, ws: &str, bot: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM bots b
+             WHERE b.id = ?1 AND b.main = 1 AND b.deleted = 0
+               AND (b.workspace_id = ?2
+                    OR EXISTS(SELECT 1 FROM bot_workspaces w WHERE w.bot_id = b.id AND w.workspace_id = ?2))
+        )",
+        params![bot, ws],
+        |r| r.get(0),
+    )?)
+}
+
 fn scope_for_on(c: &Connection, ws: &str, team: Option<&Team>, bot: &str) -> Result<Scope> {
     let bound = bindings_on(c, ws, bot)?;
     let Some(team) = team else {
         return Ok(Scope::Nodes(bound));
     };
     let Some(member) = team.member(bot) else {
+        // Steve (main bot) is the workspace coordinator, never a Team member, yet may still
+        // execute when explicitly picked or when taking over via CoordinatorDeferred.
+        if is_main_bot_on(c, ws, bot)? {
+            return Ok(Scope::Nodes(bound));
+        }
         return Ok(Scope::OutsideTeam);
     };
     Ok(Scope::Nodes(
@@ -225,12 +317,121 @@ pub fn record(
     Ok(())
 }
 
-/// A chat item whose placement failed before there was any execution session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementWait {
+    pub item_id: String,
+    pub title: String,
+    pub blocked: PlacementBlocked,
+    pub proposal_id: Option<String>,
+    pub created: i64,
+}
+
+pub fn record_wait(
+    w: &mut W<'_>,
+    ws: &str,
+    item: &str,
+    blocked: &PlacementBlocked,
+    proposal_id: Option<&str>,
+) -> Result<()> {
+    w.exec(
+        Query::insert()
+            .into_table("item_placement_waits")
+            .columns([
+                "item_id",
+                "workspace_id",
+                "blocked",
+                "proposal_id",
+                "created",
+            ])
+            .values_panic([
+                item.into(),
+                ws.into(),
+                serde_json::to_string(blocked)?.into(),
+                proposal_id.into(),
+                crate::now().into(),
+            ])
+            .on_conflict(
+                OnConflict::column("item_id")
+                    .update_columns(["blocked", "proposal_id"])
+                    .to_owned(),
+            ),
+    )?;
+    Ok(())
+}
+
+pub fn set_wait_proposal(w: &mut W<'_>, item: &str, proposal_id: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("item_placement_waits")
+            .value("proposal_id", proposal_id)
+            .and_where(Expr::col("item_id").eq(item)),
+    )?;
+    Ok(())
+}
+
+pub fn clear_wait(w: &mut W<'_>, item: &str) -> Result<bool> {
+    Ok(w.exec(
+        Query::delete()
+            .from_table("item_placement_waits")
+            .and_where(Expr::col("item_id").eq(item)),
+    )? > 0)
+}
+
+pub fn waiting_items(r: &mut impl Read, ws: &str) -> Result<Vec<PlacementWait>> {
+    r.all(
+        Query::select()
+            .columns([
+                ("w", "item_id"),
+                ("i", "title"),
+                ("w", "blocked"),
+                ("w", "proposal_id"),
+                ("w", "created"),
+            ])
+            .from_as("item_placement_waits", "w")
+            .join_as(
+                JoinType::InnerJoin,
+                "items",
+                "i",
+                Expr::col(("i", "id")).eq(Expr::col(("w", "item_id"))),
+            )
+            .and_where(Expr::col(("w", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("i", "archived")).eq(false))
+            .and_where(
+                Expr::col(("i", "bot_id"))
+                    .is_null()
+                    .or(Expr::col(("i", "bot_id")).eq("")),
+            )
+            .and_where(Expr::col(("i", "phase")).is_in(["ready", "active", "paused"]))
+            .order_by(("w", "created"), Order::Asc)
+            .order_by(("i", "no"), Order::Asc),
+        |row| {
+            Ok(PlacementWait {
+                item_id: row.get(0)?,
+                title: row.get(1)?,
+                blocked: row.get::<Json<PlacementBlocked>>(2)?.0,
+                proposal_id: row.get(3)?,
+                created: row.get(4)?,
+            })
+        },
+    )
+}
+
+/// An item whose placement failed before there was any execution session.
 pub fn creation_blocked(
     r: &mut impl Read,
     ws: &str,
     item: &str,
 ) -> Result<Option<PlacementBlocked>> {
+    if let Some(wait) = r.one(
+        Query::select()
+            .column("blocked")
+            .from("item_placement_waits")
+            .and_where(Expr::col("item_id").eq(item))
+            .and_where(Expr::col("workspace_id").eq(ws)),
+        |row| Ok(row.get::<Json<PlacementBlocked>>(0)?.0),
+    )? {
+        return Ok(Some(wait));
+    }
     let blocked = Expr::cust("json_extract(detail, '$.placement_blocked')");
     r.one(
         Query::select()
@@ -252,6 +453,17 @@ pub fn initial(r: &mut impl Read, item: &str) -> Result<Option<BotPlacement>> {
             .from("bot_placements")
             .and_where(Expr::col("item_id").eq(item))
             .and_where(Expr::col("session_id").is_null()),
+        |row| Ok(row.get::<Json<BotPlacement>>(0)?.0),
+    )
+}
+
+pub fn for_session(r: &mut impl Read, session: &str) -> Result<Option<BotPlacement>> {
+    r.one(
+        Query::select()
+            .column("fact")
+            .from("bot_placements")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("fact").is_not_null()),
         |row| Ok(row.get::<Json<BotPlacement>>(0)?.0),
     )
 }
@@ -311,6 +523,23 @@ pub fn proposal(r: &mut impl Read, ws: &str, actor: &str, id: &str) -> Result<Op
             .and_where(Expr::col("id").eq(id))
             .and_where(Expr::col("workspace_id").eq(ws))
             .and_where(Expr::col("actor").eq(actor)),
+        |row| {
+            Ok(Proposal {
+                draft: row.get::<Json<BotProposal>>(0)?.0,
+                project: row.get(1)?,
+                confirmed_bot: row.get(2)?,
+            })
+        },
+    )
+}
+
+pub fn proposal_by_id(r: &mut impl Read, ws: &str, id: &str) -> Result<Option<Proposal>> {
+    r.one(
+        Query::select()
+            .columns(["draft", "project_id", "confirmed_bot"])
+            .from("bot_proposals")
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("workspace_id").eq(ws)),
         |row| {
             Ok(Proposal {
                 draft: row.get::<Json<BotProposal>>(0)?.0,

@@ -56,10 +56,6 @@ pub struct CloseRequest {
     pub at: i64,
     pub frozen_revision: i64,
     pub scope_revision: i64,
-    /// A parent acceptance is for exactly this graph. A committed replan followed by a crash
-    /// cannot resurrect the previous acceptance after the new work finishes.
-    #[serde(default)]
-    pub workflow_revision: Option<i64>,
     /// Monotonic `wf_runs.run_revision` of the active script workflow run when delivery froze.
     #[serde(default)]
     pub wf_run_revision: Option<i64>,

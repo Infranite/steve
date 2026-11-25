@@ -36,7 +36,6 @@ pub(super) struct Ws {
     /// conversations (spaces) whose decisions are dirty, and whether all of them are
     chats: BTreeSet<String>,
     all_chats: bool,
-    notices: bool,
     /// when the oldest change not flushed yet came in
     first_dirty: Option<Instant>,
     /// when it flushes next
@@ -92,8 +91,8 @@ impl Run {
         self.seen = self.seen.max(rev);
     }
 
-    pub(super) async fn run(mut self, mut asks: mpsc::Receiver<Ask>) {
-        self.load().await;
+    pub(super) async fn run(mut self, asks: &mut mpsc::Receiver<Ask>) {
+        steve_runtime::round("hub.projection", self.load()).await;
         let mut reconcile = tokio::time::interval_at(
             tokio::time::Instant::now() + RECONCILE_EVERY,
             RECONCILE_EVERY,
@@ -107,21 +106,27 @@ impl Run {
                 .chain(self.waiting.iter().map(|w| w.until))
                 .min()
                 .unwrap_or_else(|| Instant::now() + RECONCILE_EVERY);
+            let mut worked = false;
             tokio::select! {
                 e = self.tap.recv() => match e {
                     Ok(batch) => self.take(&batch),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        self.rebuild().await;
+                        steve_runtime::round("hub.projection", self.rebuild()).await;
+                        worked = true;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
                 a = asks.recv() => match a {
-                    Some(a) => self.ask(a).await,
+                    Some(a) => {
+                        self.ask(a).await;
+                        worked = true;
+                    }
                     None => return,
                 },
                 _ = tokio::time::sleep_until(next.into()) => {}
                 _ = reconcile.tick() => {
-                    self.reconcile().await;
+                    steve_runtime::round("hub.projection", self.reconcile()).await;
+                    worked = true;
                 }
             }
             // A snapshot may bring forward a scheduled flush. Reading the snapshot itself
@@ -142,9 +147,16 @@ impl Run {
                 .filter(|(_, w)| w.due.is_some_and(|d| d <= now))
                 .map(|(k, _)| k.clone())
                 .collect();
-            for ws in due {
-                self.flush(&ws).await;
+            if !due.is_empty() {
+                steve_runtime::round("hub.projection", async {
+                    for ws in due {
+                        self.flush(&ws).await;
+                    }
+                })
+                .await;
+                worked = true;
             }
+            let _ = worked;
             self.answer_waiting().await;
         }
     }
@@ -166,10 +178,6 @@ impl Run {
                 }),
                 Dirty::Chats(ws) => self.touch(ws).map(|w| {
                     w.all_chats = true;
-                    w
-                }),
-                Dirty::Notices(ws) => self.touch(ws).map(|w| {
-                    w.notices = true;
                     w
                 }),
                 Dirty::SessionsOfNode(node) => {
@@ -310,7 +318,6 @@ impl Run {
             std::mem::take(&mut w.chats),
             std::mem::take(&mut w.all_chats),
         );
-        let notices = std::mem::take(&mut w.notices);
         let held_messages: BTreeSet<_> = w
             .hot
             .keys()
@@ -341,14 +348,6 @@ impl Run {
                                 .map(decision_key),
                         );
                     }
-                }
-                if notices {
-                    dirty.extend(
-                        r.message_views()
-                            .notices(&name)?
-                            .into_iter()
-                            .map(|id| (ViewKind::Message, id)),
-                    );
                 }
                 let mut batches = BTreeMap::<ViewKind, Vec<String>>::new();
                 for (kind, id) in dirty {
@@ -386,7 +385,6 @@ impl Run {
                 w.dirty.extend(taken.0);
                 w.chats.extend(taken.1);
                 w.all_chats |= taken.2;
-                w.notices |= notices;
                 w.retrying = true;
                 w.due = Some(Instant::now() + std::time::Duration::from_secs(1));
                 return;
@@ -517,12 +515,11 @@ pub(super) fn apply(
 
 impl Ws {
     pub(super) fn has_dirty(&self) -> bool {
-        !self.dirty.is_empty() || self.all_chats || !self.chats.is_empty() || self.notices
+        !self.dirty.is_empty() || self.all_chats || !self.chats.is_empty()
     }
 
     pub(super) fn may_change(&self, key: &Key) -> bool {
         self.dirty.contains(key)
-            || (key.0 == ViewKind::Message && self.notices)
             || (key.0 == ViewKind::Decision && (self.all_chats || !self.chats.is_empty()))
     }
 

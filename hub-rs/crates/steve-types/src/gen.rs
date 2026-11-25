@@ -22,6 +22,10 @@ fn bindings_match() {
         )+ };
     }
     export!(
+        backup::BackupPurpose,
+        backup::BackupReceipt,
+        backup::SnapshotId,
+        backup::VerifiedDatabase,
         integrations::OptionalModules,
         WorkspaceId,
         UserId,
@@ -30,7 +34,6 @@ fn bindings_match() {
         SessionId,
         DecisionId,
         MessageId,
-        ThreadRunId,
         BotId,
         ProjectId,
         TagId,
@@ -65,6 +68,9 @@ fn bindings_match() {
         Retry,
         PlacementRejection,
         PlacementReason,
+        CoordinatorDeferSource,
+        NoExecutorPolicy,
+        NoExecutorItem,
         PlacementBlocker,
         PlacementBlocked,
         PlacementExplanation,
@@ -107,12 +113,34 @@ fn bindings_match() {
         devices::VitalsGap,
         devices::VitalsSampling,
         devices::VitalsTokens,
+        devices::ComponentInstallSource,
+        devices::UpgradeMethod,
+        devices::ComponentUpdateState,
+        devices::ComponentUpdateReason,
+        devices::HarnessUpgradeBlockReason,
+        devices::HarnessAutoUpgradeMode,
+        devices::HarnessAutoUpgradePolicy,
+        devices::SetHarnessAutoUpgrade,
+        devices::HarnessUpgradeTrigger,
+        devices::HarnessUpgradeError,
+        devices::HarnessUpgradeReceiptState,
+        devices::HarnessUpgradeReceipt,
+        devices::HarnessComponentUpdateView,
+        devices::HarnessUpdateView,
+        devices::HarnessUpdateReportView,
+        devices::HarnessUpdatesResponse,
+        devices::UpgradeHarnessResponse,
         ChannelsEvent,
         PeopleEvent,
+        AvatarRef,
+        MemberIdentity,
         VaultEvent,
         AutomationEvent,
         AutonomyEvent,
         StatsEvent,
+        stats::NavUsageRange,
+        stats::NavUsage,
+        stats::NavUsageItem,
         KnowledgeEvent,
         IntegrationsEvent,
         WorkLiveEvent,
@@ -125,12 +153,16 @@ fn bindings_match() {
         MessageView,
         ItemParent,
         ItemSnooze,
-        ItemWorkflow,
         ItemState,
         CloseKind,
         ItemOutcome,
         ClosedBy,
         ItemWait,
+        WaitOwner,
+        WaitTimeoutAction,
+        WaitKind,
+        WaitLimits,
+        WaitContract,
         OperationBlocker,
         SessionView,
         SessionWaiting,
@@ -154,8 +186,9 @@ fn bindings_match() {
         })
         .collect::<String>();
     files.insert("reasons.ts".into(), reasons_binding(ALL_REASONS));
+    files.insert("settings-schema.ts".into(), settings_schema_binding());
     let index = format!(
-        "{HEADER}{index}export {{ REASONS }} from \"./reasons\";\nexport type {{ KnownReason }} from \"./reasons\";\n"
+        "{HEADER}{index}export {{ REASONS }} from \"./reasons\";\nexport type {{ KnownReason }} from \"./reasons\";\nexport {{\n  WORKSPACE_SETTINGS_SCHEMA,\n  WORKSPACE_SETTING_DEFAULTS,\n  WORKSPACE_SETTING_VALUES,\n}} from \"./settings-schema\";\nexport type {{\n  WorkspaceSettingCategory,\n  WorkspaceSettingKey,\n  WorkspaceSettingValue,\n}} from \"./settings-schema\";\n"
     );
     files.insert("index.ts".into(), index);
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../web/src/gen");
@@ -215,6 +248,52 @@ fn reasons_binding(all: &[&[ReasonSet]]) -> String {
     }
     text.push_str("} as const\nexport type KnownReason = keyof typeof REASONS\n");
     text
+}
+
+fn settings_schema_binding() -> String {
+    let schema = crate::settings::schema();
+    // Web renders all labels via i18n (`t()`), so the generated TS binding carries only
+    // categories, keys, allowed stored values, defaults, and `live` flags.
+    let mut categories = String::from("{\n");
+    for (cat, specs) in [
+        ("general", &schema.general),
+        ("items", &schema.items),
+        ("notify", &schema.notify),
+        ("look", &schema.look),
+        ("data", &schema.data),
+    ] {
+        categories.push_str(&format!("  \"{cat}\": [\n"));
+        for spec in specs {
+            let key = serde_json::to_string(&spec.key).unwrap();
+            let vals = serde_json::to_string(&spec.values).unwrap();
+            let def = serde_json::to_string(&spec.def).unwrap();
+            let live = spec.live;
+            categories.push_str(&format!(
+                "    {{ key: {key}, values: {vals}, def: {def}, live: {live} }},\n"
+            ));
+        }
+        categories.push_str("  ],\n");
+    }
+    categories.push_str("} as const");
+    let mut defaults = String::from("{\n");
+    let mut values = String::from("{\n");
+    for spec in crate::settings::specs() {
+        let key = serde_json::to_string(&spec.key).unwrap();
+        let def = serde_json::to_string(&spec.def).unwrap();
+        let vals = serde_json::to_string(&spec.values).unwrap();
+        defaults.push_str(&format!("  {key}: {def},\n"));
+        values.push_str(&format!("  {key}: {vals},\n"));
+    }
+    defaults.push_str("} as const");
+    values.push_str("} as const");
+    format!(
+        "{HEADER}export const WORKSPACE_SETTINGS_SCHEMA = {categories}\n\n\
+export const WORKSPACE_SETTING_DEFAULTS = {defaults}\n\n\
+export const WORKSPACE_SETTING_VALUES = {values}\n\n\
+export type WorkspaceSettingCategory = keyof typeof WORKSPACE_SETTINGS_SCHEMA\n\
+export type WorkspaceSettingKey = keyof typeof WORKSPACE_SETTING_DEFAULTS\n\
+export type WorkspaceSettingValue<K extends WorkspaceSettingKey> = (typeof WORKSPACE_SETTING_VALUES)[K][number]\n"
+    )
 }
 
 #[test]

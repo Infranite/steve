@@ -1,5 +1,7 @@
 //! Owner-only component maintenance, routed to the named Node. Persist intent before sending;
 //! receipt polling never resubmits work, including after a link or Hub restart.
+//! Automatic upgrades follow Hub-owned, owner-only per-Node / per-harness settings (default off)
+//! and write finished outcomes into workspace notifications/timeline.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,18 +12,46 @@ use axum::{
     extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use steve_node_api as na;
 use steve_store::{Read, Store, StoreError, UserRows, W, WS, WorkspaceSettings, node_directory};
+use steve_types::devices::{
+    ComponentUpdateState, DevicesEvent, HarnessAutoUpgradePolicy, HarnessComponentUpdateView,
+    HarnessUpdateReportView, HarnessUpdateView, HarnessUpdatesResponse, HarnessUpgradeError,
+    HarnessUpgradeReceipt, HarnessUpgradeReceiptState, HarnessUpgradeTrigger,
+    SetHarnessAutoUpgrade, UpgradeHarnessResponse,
+};
 
 use super::{AppState, Ctx};
+use crate::bus::Bus;
 use crate::error::ApiError;
+use crate::nodes::NodeService;
+
+/// Timeout for single Node RPC calls (`harness_updates`, `upgrade_harness`, `operation`).
+const NODE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+/// Acceptance window for a newly submitted upgrade command.
+const ACCEPT_WINDOW_MS: i64 = 30_000;
+/// Maximum time the Hub polls an in-flight harness upgrade receipt before yielding to normal polling.
+const WATCH_MAX_SECONDS: usize = 16 * 60;
+/// Delay after Hub boot before the background auto-upgrade loop runs its first check.
+const AUTO_UPGRADE_INITIAL_DELAY: Duration = Duration::from_secs(60);
+/// Cadence between Hub background auto-upgrade evaluation passes.
+const AUTO_UPGRADE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Validation bounds on harness / component identifiers and version maps.
+const MAX_ID_LEN: usize = 120;
+const MAX_VERSION_LEN: usize = 128;
+const MAX_COMPONENTS_PER_REQUEST: usize = 16;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Saved {
     report: Option<na::HarnessUpdateReport>,
     at: i64,
     runs: BTreeMap<String, Run>,
+    #[serde(default)]
+    auto_upgrade: HarnessAutoUpgradePolicy,
+    /// Per-harness version set that failed an automatic upgrade attempt, preventing silent retry
+    /// loops until a newer version arrives or the owner explicitly retries.
+    #[serde(default)]
+    auto_failed: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -30,13 +60,96 @@ struct Run {
     receipt: na::Receipt,
     #[serde(default)]
     reconciled: bool,
+    #[serde(default)]
+    trigger: HarnessUpgradeTrigger,
+    #[serde(default)]
+    notified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoUpgradeCandidate {
+    pub harness: String,
+    pub versions: BTreeMap<String, String>,
 }
 
 fn internal(e: impl std::fmt::Display) -> ApiError {
     ApiError::internal(e.to_string())
 }
+
 fn key(node: &str) -> String {
     format!("harness.updates.{node}")
+}
+
+fn code_string(c: na::Code) -> String {
+    serde_json::to_string(&c)
+        .map(|s| s.trim_matches('"').to_string())
+        .unwrap_or_else(|_| "internal".into())
+}
+
+fn outcome_string(o: na::Outcome) -> String {
+    serde_json::to_string(&o)
+        .map(|s| s.trim_matches('"').to_string())
+        .unwrap_or_else(|_| "failed".into())
+}
+
+fn receipt_view(r: &na::Receipt) -> HarnessUpgradeReceipt {
+    let state = match &r.state {
+        na::Observed::Accepted => HarnessUpgradeReceiptState::Accepted,
+        na::Observed::Running => HarnessUpgradeReceiptState::Running,
+        na::Observed::Waiting { .. } => HarnessUpgradeReceiptState::Waiting,
+        na::Observed::Unknown { reason } => HarnessUpgradeReceiptState::Unknown {
+            reason: reason.clone(),
+        },
+        na::Observed::Finished { outcome, error, .. } => HarnessUpgradeReceiptState::Finished {
+            outcome: outcome_string(*outcome),
+            error: error.as_ref().map(|e| HarnessUpgradeError {
+                code: code_string(e.code),
+                safe_detail: e.safe_detail.clone(),
+            }),
+        },
+    };
+    HarnessUpgradeReceipt {
+        operation: r.operation.as_str().to_string(),
+        state,
+    }
+}
+
+fn report_view(report: &na::HarnessUpdateReport) -> HarnessUpdateReportView {
+    HarnessUpdateReportView {
+        node: report.node.as_str().to_string(),
+        checking: report.checking,
+        harnesses: report
+            .harnesses
+            .iter()
+            .map(|h| HarnessUpdateView {
+                harness: h.harness.clone(),
+                name: h.name.clone(),
+                components: h
+                    .components
+                    .iter()
+                    .map(|c| HarnessComponentUpdateView {
+                        id: c.id.clone(),
+                        name: c.name.clone(),
+                        package: c.package.clone(),
+                        managed: c.managed,
+                        source: c.source,
+                        upgrade_method: c.upgrade_method,
+                        upgrade_command: c.upgrade_command.clone(),
+                        can_upgrade: c.can_upgrade,
+                        state: c.state,
+                        installed: c.installed.clone(),
+                        latest: c.latest.clone(),
+                        checked: c.checked.map(|t| t.0),
+                        reason: c.reason.clone(),
+                    })
+                    .collect(),
+                can_upgrade: h.can_upgrade,
+                active_sessions: h.active_sessions,
+                blocked_reason: h.blocked_reason,
+                operation: h.operation.as_ref().map(receipt_view),
+            })
+            .collect(),
+    }
 }
 
 fn authorized(db: &mut impl Read, me: &str, node: &str, write: bool) -> Result<bool, StoreError> {
@@ -120,47 +233,229 @@ fn node_error(e: na::Error) -> ApiError {
     ApiError::Json(status, e.safe_detail)
 }
 
+struct FinishedNotice {
+    trigger: HarnessUpgradeTrigger,
+    outcome: na::Outcome,
+    harness_name: String,
+    versions: String,
+    error: String,
+}
+
 async fn persist_receipt(
     store: &Store,
     node: &str,
     harness: &str,
     receipt: na::Receipt,
     reconciled: bool,
-) -> Result<(), ApiError> {
-    let (store, node, harness) = (store.clone(), node.to_string(), harness.to_string());
-    tokio::task::spawn_blocking(move || {
-        store.write(|tx| {
-            let mut s = load(tx, &node)?;
-            if let Some(run) = s.runs.get_mut(&harness) {
+) -> Result<Option<FinishedNotice>, ApiError> {
+    let (store_c, node_s, harness_s) = (store.clone(), node.to_string(), harness.to_string());
+    let notice = tokio::task::spawn_blocking(move || {
+        store_c.write(|tx| -> Result<Option<FinishedNotice>, StoreError> {
+            let mut s = load(tx, &node_s)?;
+            let mut finished_notice = None;
+            let harness_name = s
+                .report
+                .as_ref()
+                .and_then(|rep| rep.harnesses.iter().find(|h| harness_s == h.harness))
+                .map(|h| h.name.clone())
+                .unwrap_or_else(|| harness_s.clone());
+            let mut failed_auto_versions: Option<BTreeMap<String, String>> = None;
+            let mut clear_auto_failed = false;
+
+            if let Some(run) = s.runs.get_mut(&harness_s) {
                 // A late poll of an earlier retry must not replace the newer command.
                 if run.command.id == receipt.operation {
                     if run.receipt.state.is_finished() {
-                        return Ok(());
+                        return Ok(None);
                     }
-                    run.receipt = receipt;
+                    let just_finished = receipt.state.is_finished();
+                    run.receipt = receipt.clone();
                     run.reconciled = reconciled;
+                    if just_finished && !run.notified {
+                        run.notified = true;
+                        if let na::Observed::Finished { outcome, error, .. } = &receipt.state {
+                            let versions = if run.command.body.versions.is_empty() {
+                                "latest".to_string()
+                            } else {
+                                run.command
+                                    .body
+                                    .versions
+                                    .values()
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(" / ")
+                            };
+                            if *outcome == na::Outcome::Succeeded {
+                                clear_auto_failed = true;
+                            } else if run.trigger == HarnessUpgradeTrigger::Auto
+                                && !run.command.body.versions.is_empty()
+                            {
+                                failed_auto_versions = Some(run.command.body.versions.clone());
+                            }
+                            finished_notice = Some(FinishedNotice {
+                                trigger: run.trigger,
+                                outcome: *outcome,
+                                harness_name,
+                                versions,
+                                error: error
+                                    .as_ref()
+                                    .map(|e| e.safe_detail.clone())
+                                    .unwrap_or_else(|| outcome_string(*outcome)),
+                            });
+                        }
+                    }
                 }
             }
-            save(tx, &node, &s)
+            if clear_auto_failed {
+                s.auto_failed.remove(&harness_s);
+            } else if let Some(vers) = failed_auto_versions {
+                s.auto_failed.insert(harness_s.clone(), vers);
+            }
+            save(tx, &node_s, &s)?;
+            Ok(finished_notice)
         })
     })
     .await
     .map_err(internal)?
-    .map_err(internal)
+    .map_err(internal)?;
+
+    if let Some(ref info) = notice {
+        record_finished_outcome(store, node, info).await;
+    }
+    Ok(notice)
+}
+
+async fn record_finished_outcome(store: &Store, node_id: &str, info: &FinishedNotice) {
+    let trigger_label = match info.trigger {
+        HarnessUpgradeTrigger::Manual => "manual",
+        HarnessUpgradeTrigger::Auto => "auto",
+    };
+    let outcome_label = match info.outcome {
+        na::Outcome::Succeeded => "succeeded",
+        _ => "failed",
+    };
+    ::metrics::counter!(
+        "steve_hub_harness_upgrades_total",
+        "trigger" => trigger_label,
+        "outcome" => outcome_label
+    )
+    .increment(1);
+
+    let (store, node_id) = (store.clone(), node_id.to_string());
+    let (trigger, outcome, harness_name, versions, err_detail) = (
+        info.trigger,
+        info.outcome,
+        info.harness_name.clone(),
+        info.versions.clone(),
+        info.error.clone(),
+    );
+    let _ = tokio::task::spawn_blocking(move || {
+        let node_name = if node_id == "local" {
+            "local".to_string()
+        } else {
+            store
+                .read(|r| steve_store::nodes::get(r, &node_id))
+                .ok()
+                .flatten()
+                .map(|n| n.name)
+                .unwrap_or_else(|| node_id.clone())
+        };
+        let (level, text) = match (trigger, outcome) {
+            (HarnessUpgradeTrigger::Auto, na::Outcome::Succeeded) => (
+                "success",
+                steve_i18n::t!(
+                    "hub.node.harness_auto_upgraded",
+                    node = node_name,
+                    harness = harness_name,
+                    versions = versions
+                ),
+            ),
+            (HarnessUpgradeTrigger::Auto, _) => (
+                "fail",
+                steve_i18n::t!(
+                    "hub.node.harness_auto_upgrade_failed",
+                    node = node_name,
+                    harness = harness_name,
+                    error = err_detail
+                ),
+            ),
+            (HarnessUpgradeTrigger::Manual, na::Outcome::Succeeded) => (
+                "success",
+                steve_i18n::t!(
+                    "hub.node.harness_upgraded",
+                    node = node_name,
+                    harness = harness_name,
+                    versions = versions
+                ),
+            ),
+            (HarnessUpgradeTrigger::Manual, _) => (
+                "fail",
+                steve_i18n::t!(
+                    "hub.node.harness_upgrade_failed",
+                    node = node_name,
+                    harness = harness_name,
+                    error = err_detail
+                ),
+            ),
+        };
+        if let Err(e) = steve_store::notify::notify(&store, WS, "system", level, &text, None) {
+            tracing::warn!("harness upgrade notice failed: {e}");
+        }
+    })
+    .await;
+}
+
+/// Automatically re-probe the Node's harness version & availability after a successful upgrade.
+async fn reprobe_after_upgrade(
+    st: Option<&AppState>,
+    store: &Store,
+    node_id: &str,
+    node: &Arc<dyn na::Node>,
+) {
+    if let Some(st) = st {
+        st.node_harnesses.invalidate(node_id);
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(30), node.probe(true)).await;
+    if let Ok(Ok(report)) = tokio::time::timeout(NODE_RPC_TIMEOUT, node.harness_updates(true)).await
+        && report.node.as_str() == node_id
+    {
+        let (s, n, at) = (store.clone(), node_id.to_string(), crate::nodes::now());
+        let _ = tokio::task::spawn_blocking(move || {
+            s.write(|tx| {
+                let mut current = load(tx, &n)?;
+                current.report = Some(report);
+                current.at = at;
+                save(tx, &n, &current)
+            })
+        })
+        .await;
+    }
+    if let Some(st) = st {
+        publish_node_changed(&st.bus, store, node_id).await;
+    }
+}
+
+async fn publish_node_changed(bus: &Bus, store: &Store, node_id: &str) {
+    let store = store.clone();
+    if let Ok(Ok(Some(owner))) =
+        tokio::task::spawn_blocking(move || store.read(|db| UserRows(db).first_owner())).await
+    {
+        bus.publish(steve_types::DomainEvent::from(DevicesEvent::Node {
+            id: steve_types::NodeId::from(node_id.to_string()),
+            user: steve_types::UserId::from(owner),
+        }));
+    }
 }
 
 async fn inspect(node: &dyn na::Node, run: &Run) -> na::ApiResult<na::Receipt> {
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        node.operation(run.command.id.clone()),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        Err(na::Error::new(
-            na::Code::OutcomeUnknown,
-            "Receipt read timed out; reconnect and inspect the same operation",
-        ))
-    })
+    tokio::time::timeout(NODE_RPC_TIMEOUT, node.operation(run.command.id.clone()))
+        .await
+        .unwrap_or_else(|_| {
+            Err(na::Error::new(
+                na::Code::OutcomeUnknown,
+                "Receipt read timed out; reconnect and inspect the same operation",
+            ))
+        })
 }
 
 #[derive(Deserialize, Default)]
@@ -175,7 +470,7 @@ pub async fn get(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
     Query(q): Query<Fresh>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<HarnessUpdatesResponse>, ApiError> {
     let (store, node) = target(&st, &c, &id, false).await?;
     let (s, n) = (store.clone(), id.clone());
     let mut saved = tokio::task::spawn_blocking(move || s.read(|db| load(db, &n)))
@@ -183,7 +478,7 @@ pub async fn get(
         .map_err(internal)?
         .map_err(internal)?;
     let result = tokio::time::timeout(
-        Duration::from_secs(10),
+        NODE_RPC_TIMEOUT,
         node.harness_updates(q.fresh.as_deref() == Some("1")),
     )
     .await
@@ -211,15 +506,22 @@ pub async fn get(
             .await
             .map_err(internal)?
             .map_err(internal)?;
-            reconcile_runs(&store, &id, node.as_ref(), &mut saved).await?;
+            let succeeded = reconcile_runs(&store, &id, node.as_ref(), &mut saved).await?;
+            if succeeded {
+                let (st_c, store_c, id_c, node_c) =
+                    (st.clone(), store.clone(), id.clone(), node.clone());
+                tokio::spawn(async move {
+                    reprobe_after_upgrade(Some(&st_c), &store_c, &id_c, &node_c).await;
+                });
+            }
         }
         Ok(_) => {
             error = Some("Node returned another Node's update inventory".into());
-            code = Some(na::Code::Invalid);
+            code = Some(code_string(na::Code::Invalid));
         }
         Err(e) => {
             error = Some(e.safe_detail);
-            code = Some(e.code);
+            code = Some(code_string(e.code));
         }
     }
     if let Some(why) = &error {
@@ -243,20 +545,28 @@ pub async fn get(
     let runs: BTreeMap<_, _> = saved
         .runs
         .into_iter()
-        .map(|(h, r)| (h, r.receipt))
+        .map(|(h, r)| (h, receipt_view(&r.receipt)))
         .collect();
-    Ok(Json(
-        json!({"report":saved.report,"at":saved.at,"runs":runs,"retryable_unknown":retryable_unknown,"error":error,"code":code}),
-    ))
+    Ok(Json(HarnessUpdatesResponse {
+        report: saved.report.as_ref().map(report_view),
+        at: saved.at,
+        runs,
+        retryable_unknown,
+        auto_upgrade: saved.auto_upgrade,
+        error,
+        code,
+    }))
 }
 
 /// Refresh unfinished saved operations without ever resubmitting an upgrade.
+/// Returns true if any operation newly finished with `Outcome::Succeeded`.
 async fn reconcile_runs(
     store: &Store,
     id: &str,
     node: &dyn na::Node,
     saved: &mut Saved,
-) -> Result<(), ApiError> {
+) -> Result<bool, ApiError> {
+    let mut any_succeeded = false;
     for (h, run) in &mut saved.runs {
         if run.receipt.state.is_finished() {
             continue;
@@ -284,17 +594,24 @@ async fn reconcile_runs(
         if let Some(receipt) = receipt {
             run.receipt = receipt.clone();
             run.reconciled = true;
-            persist_receipt(&store, &id, h, receipt, true).await?;
+            if let Some(notice) = persist_receipt(store, id, h, receipt, true).await?
+                && notice.outcome == na::Outcome::Succeeded
+            {
+                any_succeeded = true;
+            }
         }
     }
-    Ok(())
+    Ok(any_succeeded)
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Start {
     operation: na::OperationId,
+    #[serde(default)]
     versions: BTreeMap<String, String>,
+    #[serde(default)]
+    self_update: Vec<String>,
     #[serde(default)]
     retry_unknown: bool,
 }
@@ -307,6 +624,7 @@ fn admit_upgrade(
     h: String,
     cmd: na::Command<na::UpgradeHarness>,
     retry_unknown: bool,
+    trigger: HarnessUpgradeTrigger,
 ) -> Result<Run, StoreError> {
     // Re-read authority under the writer lock: a stale Ctx or a concurrent pause,
     // revocation or role change cannot admit a new intent.
@@ -336,6 +654,9 @@ fn admit_upgrade(
             ));
         }
     }
+    if trigger == HarnessUpgradeTrigger::Manual {
+        saved.auto_failed.remove(&h);
+    }
     let run = Run {
         receipt: na::Receipt {
             operation: cmd.id.clone(),
@@ -345,6 +666,8 @@ fn admit_upgrade(
         },
         command: cmd,
         reconciled: false,
+        trigger,
+        notified: false,
     };
     saved.runs.insert(h, run.clone());
     save(tx, node, &saved)?;
@@ -357,71 +680,30 @@ async fn observe_or_submit(node: &dyn na::Node, run: &Run) -> na::ApiResult<na::
     // such operation; resending this exact saved command then cannot repeat an accepted effect.
     match inspect(node, run).await {
         Ok(r) => Ok(r),
-        Err(e) if e.code == na::Code::Invalid => tokio::time::timeout(
-            Duration::from_secs(10),
-            node.upgrade_harness(run.command.clone()),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(na::Error::new(
-                na::Code::OutcomeUnknown,
-                "Acceptance timed out; inspect this operation after reconnecting",
-            ))
-        }),
+        Err(e) if e.code == na::Code::Invalid => {
+            tokio::time::timeout(NODE_RPC_TIMEOUT, node.upgrade_harness(run.command.clone()))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(na::Error::new(
+                        na::Code::OutcomeUnknown,
+                        "Acceptance timed out; inspect this operation after reconnecting",
+                    ))
+                })
+        }
         Err(e) => Err(e),
     }
 }
 
-pub async fn start(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path((id, harness)): Path<(String, String)>,
-    Json(body): Json<Start>,
-) -> Result<Json<Value>, ApiError> {
-    let (store, node) = target(&st, &c, &id, true).await?;
-    if harness.len() > 120
-        || body.versions.is_empty()
-        || body.versions.len() > 16
-        || body
-            .versions
-            .iter()
-            .any(|(k, v)| k.len() > 120 || v.len() > 128)
-    {
-        return Err(ApiError::bad_request("Invalid component versions"));
-    }
-    let now = crate::nodes::now();
-    let retry_unknown = body.retry_unknown;
-    let command = na::Command {
-        id: body.operation,
-        issued_at: na::Timestamp(now),
-        accept_before: na::Timestamp(now + 30_000),
-        grant: na::GrantId::new("instance_owner").expect("static grant"),
-        body: na::UpgradeHarness {
-            harness: harness.clone(),
-            versions: body.versions,
-        },
-    };
-    let (s, n, h, cmd) = (store.clone(), id.clone(), harness.clone(), command.clone());
-    let me = c.me.clone();
-    // Durable single intent per harness. Different clicks while unfinished return the same
-    // operation; same-id/different-content requests are conflicts before anything is sent.
-    let run = tokio::task::spawn_blocking(move || {
-        s.write(|tx| admit_upgrade(tx, &me, &n, h, cmd, retry_unknown))
-    })
-    .await
-    .map_err(internal)?
-    .map_err(|e| {
-        ApiError::Json(
-            if matches!(&e,StoreError::Conflict(s) if s=="harness_owner_required") {
-                403
-            } else {
-                409
-            },
-            e.to_string(),
-        )
-    })?;
+async fn submit_and_watch(
+    st: Option<AppState>,
+    store: Store,
+    node: Arc<dyn na::Node>,
+    id: String,
+    harness: String,
+    run: Run,
+) -> Result<na::Receipt, ApiError> {
     if run.receipt.state.is_finished() {
-        return Ok(Json(json!({"receipt":run.receipt})));
+        return Ok(run.receipt);
     }
     let result = observe_or_submit(node.as_ref(), &run).await;
     let reconciled = result.is_ok();
@@ -436,7 +718,7 @@ pub async fn start(
                     error: Some(e.clone()),
                 },
             };
-            persist_receipt(&store, &id, &harness, receipt, true).await?;
+            let _ = persist_receipt(&store, &id, &harness, receipt, true).await?;
             return Err(node_error(e));
         }
         Err(e) => na::Receipt {
@@ -446,22 +728,36 @@ pub async fn start(
             },
         },
     };
-    persist_receipt(&store, &id, &harness, receipt.clone(), reconciled).await?;
-    if !receipt.state.is_finished() {
-        let (store, id, harness, run) = (store.clone(), id.clone(), harness.clone(), run.clone());
+    let finished_now = persist_receipt(&store, &id, &harness, receipt.clone(), reconciled).await?;
+    if finished_now
+        .as_ref()
+        .is_some_and(|n| n.outcome == na::Outcome::Succeeded)
+    {
+        let (st_c, store_c, id_c, node_c) = (st.clone(), store.clone(), id.clone(), node.clone());
         tokio::spawn(async move {
-            for _ in 0..(16 * 60) {
+            reprobe_after_upgrade(st_c.as_ref(), &store_c, &id_c, &node_c).await;
+        });
+    } else if !receipt.state.is_finished() {
+        tokio::spawn(async move {
+            for _ in 0..WATCH_MAX_SECONDS {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 match inspect(node.as_ref(), &run).await {
                     Ok(r) => {
                         let done = r.state.is_finished()
                             || matches!(r.state, na::Observed::Unknown { .. });
-                        if persist_receipt(&store, &id, &harness, r, true)
-                            .await
-                            .is_err()
-                            || done
-                        {
-                            break;
+                        match persist_receipt(&store, &id, &harness, r, true).await {
+                            Ok(notice) => {
+                                if notice
+                                    .as_ref()
+                                    .is_some_and(|n| n.outcome == na::Outcome::Succeeded)
+                                {
+                                    reprobe_after_upgrade(st.as_ref(), &store, &id, &node).await;
+                                }
+                                if done {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
                         }
                     }
                     Err(_) => break,
@@ -469,7 +765,339 @@ pub async fn start(
             }
         });
     }
-    Ok(Json(json!({"receipt":receipt})))
+    Ok(receipt)
+}
+
+pub async fn start(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path((id, harness)): Path<(String, String)>,
+    Json(body): Json<Start>,
+) -> Result<Json<UpgradeHarnessResponse>, ApiError> {
+    let (store, node) = target(&st, &c, &id, true).await?;
+    let total = body.versions.len().saturating_add(body.self_update.len());
+    if harness.len() > MAX_ID_LEN
+        || total == 0
+        || total > MAX_COMPONENTS_PER_REQUEST
+        || body
+            .versions
+            .iter()
+            .any(|(k, v)| k.len() > MAX_ID_LEN || v.len() > MAX_VERSION_LEN)
+        || body.self_update.iter().any(|k| k.len() > MAX_ID_LEN)
+    {
+        return Err(ApiError::bad_request("Invalid component versions"));
+    }
+    let now = crate::nodes::now();
+    let retry_unknown = body.retry_unknown;
+    let command = na::Command {
+        id: body.operation,
+        issued_at: na::Timestamp(now),
+        accept_before: na::Timestamp(now + ACCEPT_WINDOW_MS),
+        grant: na::GrantId::new("instance_owner").expect("static grant"),
+        body: na::UpgradeHarness {
+            harness: harness.clone(),
+            versions: body.versions,
+            self_update: body.self_update,
+        },
+    };
+    let (s, n, h, cmd) = (store.clone(), id.clone(), harness.clone(), command.clone());
+    let me = c.me.clone();
+    // Durable single intent per harness. Different clicks while unfinished return the same
+    // operation; same-id/different-content requests are conflicts before anything is sent.
+    let run = tokio::task::spawn_blocking(move || {
+        s.write(|tx| {
+            admit_upgrade(
+                tx,
+                &me,
+                &n,
+                h,
+                cmd,
+                retry_unknown,
+                HarnessUpgradeTrigger::Manual,
+            )
+        })
+    })
+    .await
+    .map_err(internal)?
+    .map_err(|e| {
+        ApiError::Json(
+            if matches!(&e, StoreError::Conflict(s) if s == "harness_owner_required") {
+                403
+            } else {
+                409
+            },
+            e.to_string(),
+        )
+    })?;
+    let receipt = submit_and_watch(Some(st), store, node, id, harness, run).await?;
+    Ok(Json(UpgradeHarnessResponse {
+        receipt: receipt_view(&receipt),
+    }))
+}
+
+/// `PUT /api/node-harness-updates/{node}/auto-upgrade`: update Node-level and/or per-harness
+/// automatic upgrade settings (instance owner only).
+pub async fn set_auto_upgrade(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    Json(body): Json<SetHarnessAutoUpgrade>,
+) -> Result<Json<HarnessAutoUpgradePolicy>, ApiError> {
+    if body.enabled.is_none() && body.harness.is_none() {
+        return Err(ApiError::bad_request(
+            "Provide enabled and/or harness + mode",
+        ));
+    }
+    if let Some(ref h) = body.harness {
+        if h.is_empty() || h.len() > MAX_ID_LEN || body.mode.is_none() {
+            return Err(ApiError::bad_request("Invalid harness auto-upgrade mode"));
+        }
+    } else if body.mode.is_some() {
+        return Err(ApiError::bad_request("mode requires a target harness id"));
+    }
+    let (store, _node) = target(&st, &c, &id, true).await?;
+    let (s, me, node_id) = (store.clone(), c.me.clone(), id.clone());
+    let policy = tokio::task::spawn_blocking(move || {
+        s.write(|tx| {
+            if !authorized(tx, &me, &node_id, true)? {
+                return Err(StoreError::Conflict("harness_owner_required".into()));
+            }
+            let mut saved = load(tx, &node_id)?;
+            if let Some(enabled) = body.enabled {
+                saved.auto_upgrade.enabled = enabled;
+            }
+            if let (Some(harness), Some(mode)) = (body.harness, body.mode) {
+                saved.auto_upgrade.set_harness_mode(harness, mode);
+            }
+            save(tx, &node_id, &saved)?;
+            Ok(saved.auto_upgrade)
+        })
+    })
+    .await
+    .map_err(internal)?
+    .map_err(|e| {
+        ApiError::Json(
+            if matches!(&e, StoreError::Conflict(s) if s == "harness_owner_required") {
+                403
+            } else {
+                409
+            },
+            e.to_string(),
+        )
+    })?;
+    ::metrics::counter!("steve_hub_harness_auto_upgrade_policy_changes_total").increment(1);
+    publish_node_changed(&st.bus, &store, &id).await;
+    Ok(Json(policy))
+}
+
+/// Pure, deterministic auto-upgrade decision over one Node's report, policy, and run history.
+pub fn select_auto_upgrades(
+    report: &na::HarnessUpdateReport,
+    policy: &HarnessAutoUpgradePolicy,
+    runs: &BTreeMap<String, na::Receipt>,
+    auto_failed: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Vec<AutoUpgradeCandidate> {
+    if report.checking {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for h in &report.harnesses {
+        if !policy.effective(&h.harness) {
+            continue;
+        }
+        // Auto-upgrades only run when idle (never interrupt or queue behind active sessions).
+        if !h.can_upgrade || h.active_sessions > 0 {
+            continue;
+        }
+        let in_flight_or_unknown = runs.get(&h.harness).is_some_and(|r| !r.state.is_finished())
+            || h.operation.as_ref().is_some_and(|r| !r.state.is_finished());
+        if in_flight_or_unknown {
+            continue;
+        }
+        let versions: BTreeMap<String, String> = h
+            .components
+            .iter()
+            .filter(|c| c.can_upgrade && c.state == ComponentUpdateState::Available)
+            .filter_map(|c| Some((c.id.clone(), c.latest.clone()?)))
+            .collect();
+        if versions.is_empty() {
+            continue;
+        }
+        if auto_failed.get(&h.harness) == Some(&versions) {
+            continue;
+        }
+        out.push(AutoUpgradeCandidate {
+            harness: h.harness.clone(),
+            versions,
+        });
+    }
+    out
+}
+
+/// Periodic Hub background task: evaluates Nodes that have auto-upgrade enabled (Node-level or
+/// per-harness) and triggers idle upgrades through the exact same durable operation path.
+pub fn auto_upgrade_task(
+    store: Store,
+    local: Option<Arc<dyn na::Node>>,
+    svc: Option<Arc<NodeService>>,
+    bus: Bus,
+) -> steve_runtime::Task {
+    steve_runtime::every(
+        "nodes.harness_auto_upgrade",
+        Arc::new(steve_runtime::SystemClock),
+        AUTO_UPGRADE_POLL_INTERVAL,
+        steve_runtime::FirstRun::After(AUTO_UPGRADE_INITIAL_DELAY),
+        move || {
+            let store = store.clone();
+            let local = local.clone();
+            let svc = svc.clone();
+            let bus = bus.clone();
+            async move {
+                run_auto_upgrade_pass(&store, local.as_ref(), svc.as_ref(), Some(&bus)).await;
+            }
+        },
+    )
+}
+
+/// Execute one auto-upgrade evaluation pass across all reachable owner Nodes.
+pub async fn run_auto_upgrade_pass(
+    store: &Store,
+    local: Option<&Arc<dyn na::Node>>,
+    svc: Option<&Arc<NodeService>>,
+    bus: Option<&Bus>,
+) {
+    let store_c = store.clone();
+    let owner_and_nodes = tokio::task::spawn_blocking(move || {
+        store_c.read(|db| {
+            let Some(owner) = UserRows(db).first_owner()? else {
+                return Ok::<_, StoreError>(None);
+            };
+            let rows = steve_store::nodes::list_for_owner(db, &owner)?;
+            Ok(Some((owner, rows)))
+        })
+    })
+    .await;
+    let Ok(Ok(Some((owner, rows)))) = owner_and_nodes else {
+        return;
+    };
+
+    let mut targets: Vec<(String, Arc<dyn na::Node>)> = Vec::new();
+    if let Some(local) = local {
+        targets.push(("local".into(), local.clone()));
+    }
+    if let Some(svc) = svc {
+        for row in rows.into_iter().filter(|n| !n.local && n.state == "active") {
+            if svc.registry.current(&row.node_id).is_some()
+                && let Ok(nid) = na::NodeId::new(row.node_id.clone())
+            {
+                targets.push((row.node_id, svc.fleet.remote(&nid)));
+            }
+        }
+    }
+
+    for (node_id, node) in targets {
+        auto_upgrade_one_node(store, &owner, &node_id, &node, bus).await;
+    }
+}
+
+async fn auto_upgrade_one_node(
+    store: &Store,
+    owner: &str,
+    node_id: &str,
+    node: &Arc<dyn na::Node>,
+    bus: Option<&Bus>,
+) {
+    let (s, n) = (store.clone(), node_id.to_string());
+    let Ok(Ok(mut saved)) = tokio::task::spawn_blocking(move || s.read(|db| load(db, &n))).await
+    else {
+        return;
+    };
+    let any_auto_enabled =
+        saved.auto_upgrade.enabled || saved.auto_upgrade.harnesses.values().any(|&v| v);
+    if !any_auto_enabled {
+        return;
+    }
+    let Ok(Ok(report)) = tokio::time::timeout(NODE_RPC_TIMEOUT, node.harness_updates(false)).await
+    else {
+        return;
+    };
+    if report.node.as_str() != node_id {
+        return;
+    }
+    saved.report = Some(report.clone());
+    saved.at = crate::nodes::now();
+    {
+        let (s, n, rep, at) = (store.clone(), node_id.to_string(), report.clone(), saved.at);
+        let _ = tokio::task::spawn_blocking(move || {
+            s.write(|tx| {
+                let mut current = load(tx, &n)?;
+                current.report = Some(rep);
+                current.at = at;
+                save(tx, &n, &current)
+            })
+        })
+        .await;
+    }
+    if let Ok(succeeded) = reconcile_runs(store, node_id, node.as_ref(), &mut saved).await
+        && succeeded
+    {
+        reprobe_after_upgrade(None, store, node_id, node).await;
+        if let Some(bus) = bus {
+            publish_node_changed(bus, store, node_id).await;
+        }
+    }
+    let receipts: BTreeMap<String, na::Receipt> = saved
+        .runs
+        .iter()
+        .map(|(h, r)| (h.clone(), r.receipt.clone()))
+        .collect();
+    let candidates =
+        select_auto_upgrades(&report, &saved.auto_upgrade, &receipts, &saved.auto_failed);
+    for cand in candidates {
+        let now = crate::nodes::now();
+        let Ok(op_id) = na::OperationId::new(format!("hup_auto_{}", uuid::Uuid::new_v4().simple()))
+        else {
+            continue;
+        };
+        let cmd = na::Command {
+            id: op_id,
+            issued_at: na::Timestamp(now),
+            accept_before: na::Timestamp(now + ACCEPT_WINDOW_MS),
+            grant: na::GrantId::new("instance_owner").expect("static grant"),
+            body: na::UpgradeHarness {
+                harness: cand.harness.clone(),
+                versions: cand.versions,
+                self_update: vec![],
+            },
+        };
+        let (s, me, nid, h) = (
+            store.clone(),
+            owner.to_string(),
+            node_id.to_string(),
+            cand.harness.clone(),
+        );
+        let Ok(Ok(run)) = tokio::task::spawn_blocking(move || {
+            s.write(|tx| admit_upgrade(tx, &me, &nid, h, cmd, false, HarnessUpgradeTrigger::Auto))
+        })
+        .await
+        else {
+            continue;
+        };
+        if let Err(e) = submit_and_watch(
+            None,
+            store.clone(),
+            node.clone(),
+            node_id.to_string(),
+            cand.harness,
+            run,
+        )
+        .await
+        {
+            tracing::warn!(node = %node_id, "auto-upgrade submission rejected: {e:?}");
+        }
+        // Submit at most one auto-upgrade per Node per pass so maintenance leases never collide.
+        break;
+    }
 }
 
 /// Routes mounted behind the shared API login and body-limit layers.
@@ -478,7 +1106,187 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
     Router::new()
         .route("/node-harness-updates/{node}", get(harness_updates::get))
         .route(
+            "/node-harness-updates/{node}/auto-upgrade",
+            put(harness_updates::set_auto_upgrade),
+        )
+        .route(
             "/node-harness-updates/{node}/{harness}",
             post(harness_updates::start),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use steve_types::devices::HarnessAutoUpgradeMode;
+
+    fn comp(
+        id: &str,
+        state: ComponentUpdateState,
+        latest: Option<&str>,
+        can_upgrade: bool,
+    ) -> na::HarnessComponentUpdate {
+        na::HarnessComponentUpdate {
+            id: id.into(),
+            name: id.into(),
+            package: None,
+            managed: false,
+            source: na::ComponentInstallSource::HomebrewCask,
+            upgrade_method: if can_upgrade {
+                na::UpgradeMethod::HomebrewCask
+            } else {
+                na::UpgradeMethod::Unsupported
+            },
+            upgrade_command: None,
+            can_upgrade,
+            state,
+            installed: Some("1.0.0".into()),
+            latest: latest.map(String::from),
+            checked: Some(na::Timestamp(1)),
+            reason: None,
+        }
+    }
+
+    fn report(harnesses: Vec<na::HarnessUpdateInfo>, checking: bool) -> na::HarnessUpdateReport {
+        na::HarnessUpdateReport {
+            node: na::NodeId::new("local").unwrap(),
+            checking,
+            harnesses,
+        }
+    }
+
+    #[test]
+    fn auto_upgrade_policy_defaults_off_and_per_harness_overrides_node_level() {
+        let mut p = HarnessAutoUpgradePolicy::default();
+        assert!(!p.enabled);
+        assert!(!p.effective("alpha"));
+
+        // Per-harness ON overrides Node OFF.
+        p.set_harness_mode("alpha".into(), HarnessAutoUpgradeMode::On);
+        assert!(p.effective("alpha"));
+        assert!(!p.effective("beta"));
+
+        // Node ON applies to beta; explicit OFF on alpha overrides Node ON.
+        p.enabled = true;
+        p.set_harness_mode("alpha".into(), HarnessAutoUpgradeMode::Off);
+        assert!(!p.effective("alpha"));
+        assert!(p.effective("beta"));
+
+        // Inherit clears the per-harness override.
+        p.set_harness_mode("alpha".into(), HarnessAutoUpgradeMode::Inherit);
+        assert!(p.effective("alpha"));
+        assert!(p.harnesses.is_empty());
+    }
+
+    #[test]
+    fn select_auto_upgrades_respects_policy_idle_sessions_check_on_upgrade_and_failed_versions() {
+        let rep = report(
+            vec![
+                na::HarnessUpdateInfo {
+                    harness: "idle_ready".into(),
+                    name: "Idle Ready".into(),
+                    components: vec![
+                        comp("cli", ComponentUpdateState::Available, Some("2.0.0"), true),
+                        comp(
+                            "adapter",
+                            ComponentUpdateState::Current,
+                            Some("1.0.0"),
+                            true,
+                        ),
+                    ],
+                    can_upgrade: true,
+                    active_sessions: 0,
+                    blocked_reason: None,
+                    operation: None,
+                },
+                na::HarnessUpdateInfo {
+                    harness: "busy_sessions".into(),
+                    name: "Busy".into(),
+                    components: vec![comp(
+                        "cli",
+                        ComponentUpdateState::Available,
+                        Some("2.0.0"),
+                        true,
+                    )],
+                    can_upgrade: true,
+                    active_sessions: 2,
+                    blocked_reason: None,
+                    operation: None,
+                },
+                na::HarnessUpdateInfo {
+                    harness: "self_check_only".into(),
+                    name: "Self Check".into(),
+                    components: vec![comp(
+                        "cli",
+                        ComponentUpdateState::CheckOnUpgrade,
+                        None,
+                        true,
+                    )],
+                    can_upgrade: true,
+                    active_sessions: 0,
+                    blocked_reason: None,
+                    operation: None,
+                },
+                na::HarnessUpdateInfo {
+                    harness: "explicit_off".into(),
+                    name: "Explicit Off".into(),
+                    components: vec![comp(
+                        "cli",
+                        ComponentUpdateState::Available,
+                        Some("2.0.0"),
+                        true,
+                    )],
+                    can_upgrade: true,
+                    active_sessions: 0,
+                    blocked_reason: None,
+                    operation: None,
+                },
+            ],
+            false,
+        );
+
+        // Default policy OFF selects nothing.
+        let off = HarnessAutoUpgradePolicy::default();
+        assert!(select_auto_upgrades(&rep, &off, &BTreeMap::new(), &BTreeMap::new()).is_empty());
+
+        // Node ON, explicit_off overridden OFF -> only idle_ready qualifies.
+        let mut on = HarnessAutoUpgradePolicy {
+            enabled: true,
+            harnesses: BTreeMap::new(),
+        };
+        on.set_harness_mode("explicit_off".into(), HarnessAutoUpgradeMode::Off);
+        let picked = select_auto_upgrades(&rep, &on, &BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(
+            picked,
+            vec![AutoUpgradeCandidate {
+                harness: "idle_ready".into(),
+                versions: BTreeMap::from([("cli".into(), "2.0.0".into())]),
+            }]
+        );
+
+        // Failed auto-upgrade for exact same version set does not retry in a loop.
+        let failed = BTreeMap::from([(
+            "idle_ready".into(),
+            BTreeMap::from([("cli".into(), "2.0.0".into())]),
+        )]);
+        assert!(select_auto_upgrades(&rep, &on, &BTreeMap::new(), &failed).is_empty());
+
+        // Checking in progress suppresses auto-upgrades.
+        let checking = report(rep.harnesses.clone(), true);
+        assert!(
+            select_auto_upgrades(&checking, &on, &BTreeMap::new(), &BTreeMap::new()).is_empty()
+        );
+
+        // In-flight or unknown receipt suppresses auto-upgrades.
+        let runs = BTreeMap::from([(
+            "idle_ready".into(),
+            na::Receipt {
+                operation: na::OperationId::new("op1").unwrap(),
+                state: na::Observed::Unknown {
+                    reason: "link lost".into(),
+                },
+            },
+        )]);
+        assert!(select_auto_upgrades(&rep, &on, &runs, &BTreeMap::new()).is_empty());
+    }
 }

@@ -6,10 +6,14 @@ import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Page, Group, Segmented, Chips, StatusDot, Empty, go, SearchField, ConnectPrompt } from "@/ui"
 import { cn } from "@/lib/utils"
-import { st, tm, toast, botName } from "@/store"
-import { flowApi, useLoad, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
+import { st, tm, toast, botName, useShellStore } from "@/store"
+import { flowApi, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
+import { useHubQuery } from "@/data/use-hub-query"
 import { HubError } from "@/api"
+import { WORKSPACE_SETTING_DEFAULTS } from "@/gen"
 import { srcIcon, Json, Failed, Clamp, ms, RUN_STATUS } from "@/auto/common"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { t, useT } from "@/i18n"
 
 type Mode = "outcome" | "source"
@@ -30,14 +34,15 @@ const openGroups = new Set<string>(["need", "failed"])
 const focusOf = () => new URLSearchParams(location.hash.split("?")[1] ?? "").get("e")
 
 export function SignalsView() {
+  useShellStore()
   const t = useT(), [, force] = useState(0), r = () => force((x) => x + 1)
   const focus = focusOf()
   if (focus && range === "today") range = "7d"
   const [q, setQ] = useState(query)
   useEffect(() => { const h = setTimeout(() => { query = q; r() }, 300); return () => clearTimeout(h) }, [q])
-  const L = useLoad(() => flowApi.signals({ range, q: query }), [range, query], ["signal", "run"])
+  const L = useHubQuery(["flow", "signals", range, query], () => flowApi.signals({ range, q: query }), { events: ["signal", "run"], debounceMs: 300 })
   /* whether anything can send signals yet: an empty page says what to do about it */
-  const src = useLoad(() => flowApi.sources().catch(() => null), [], ["signal"])
+  const src = useHubQuery(["flow", "sources-safe"], () => flowApi.sources().catch(() => null), { events: ["signal"], debounceMs: 300 })
   const connected = src.data ? src.data.some((s) => s.source !== "im" && s.connections.length > 0) : true
   const [row, setRow] = useState<string | null>(null)
   const groups = useMemo(() => {
@@ -112,7 +117,7 @@ function SignalRow({ g, open, onOpen, reload }: { g: Signal[]; open: boolean; on
         <Ic className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} aria-label={sourceLabel(s0.source)} />
         <span className="min-w-0 flex-1 truncate type-body">{many ? s0.group_label || s0.group_key : s0.summary}{many && <span className="ml-1.5 type-footnote tabular-nums text-muted-foreground">{t("misc:signals.count", { count: g.length })}</span>}</span>
         {mode === "source" ? <span className="hidden items-center gap-1.5 type-footnote text-muted-foreground sm:inline-flex"><StatusDot s={dotOf(s0.outcome)} />{s0.outcome_label}</span>
-          : !many && s0.actor && <span className="hidden max-w-40 truncate type-footnote text-muted-foreground sm:inline">{s0.actor.name}</span>}
+          : !many && s0.actor && <span className="hidden max-w-44 items-center gap-1.5 type-footnote text-muted-foreground sm:inline-flex"><ActorAvatar actor={partyActor({ id: s0.actor.party_id, name: s0.actor.name })} size={16} tooltip={false} /><span className="truncate">{s0.actor.name}</span></span>}
         <span className="w-16 shrink-0 text-right type-footnote tabular-nums text-muted-foreground">{tm(s0.received)}</span>
       </CollapsibleTrigger>
       <CollapsibleContent data-sig-detail={s0.id}>
@@ -122,7 +127,7 @@ function SignalRow({ g, open, onOpen, reload }: { g: Signal[]; open: boolean; on
   )
 }
 
-const keepDays = () => st.settings.keepRaw || "7"
+const keepDays = () => st.settings.keepRaw || WORKSPACE_SETTING_DEFAULTS.keepRaw
 const rangeLabel = (r: Range) => (r === "today" ? t("misc:signals.today") : t("misc:signals.week"))
 function SignalDetailBox({ g, reload }: { g: Signal[]; reload: () => void }) {
   const t = useT(), s0 = g[0], many = g.length > 1

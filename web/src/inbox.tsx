@@ -1,17 +1,14 @@
-import { useSettledDecisions } from "@/data/sync"
-import { getItems } from "@/store"
-import { Fragment, memo, useRef, useState, type ReactNode, type RefObject } from "react"
+import { itemView, itemViews, onViewKind, table, useOpenDecisions, useSettledDecisions } from "@/data/sync"
+import { Fragment, memo, useCallback, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react"
 import { BookOpenIcon, ChevronRightIcon } from "lucide-react"
 import { VirtualList } from "@/components/virtual-list"
 import { ItemSeparator } from "@/components/ui/item"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
-import { useOpenDecisions } from "@/data/sync"
 import { lang, useT } from "@/i18n"
 import { nearTime } from "@/i18n/format"
 import { InboxDone } from "@/inbox-done"
-import { itemDisplayState } from "@/item-workflow-relation"
-import { dismissDrafts, memCards, pendingCards, snoozed, unsnooze, WT, type Orphan } from "@/store"
+import { dismissDrafts, memCards, pendingCards, snoozed, unsnooze, useShellStore, WT, type Orphan } from "@/store"
 import { busyOf } from "@/thread/decide"
 import { Chips, Empty, go, Group, ItemNo, Page, Row, SectionLabel, Segmented } from "@/ui"
 import { DecisionCard } from "@/thread/decision-card"
@@ -19,10 +16,31 @@ import { Count } from "@/view-shared"
 
 /* ibType is a decision type key ("all" or one of `types`); the chips show labels, mapped back on change */
 let ibTab: "pending" | "done" = "pending"; let ibType = "all"
+const onItemViews = (cb: () => void) => onViewKind("item", cb)
+/** Track only items linked to open decisions or snoozed, so patches on unrelated items never re-render the inbox. */
+function useInboxItemsVersion(decisions: ReturnType<typeof useOpenDecisions>) {
+  const ids = decisions.map((d) => d.item_id).filter((id): id is string => !!id)
+  const key = ids.join(",")
+  const read = useCallback(() => {
+    const t = table(), now = Date.now()
+    let sig = ""
+    for (const id of ids) {
+      const v = itemView(id)
+      sig += `${id}:${v ? t.entityVersion("item", id) : 0}|`
+    }
+    for (const v of itemViews()) {
+      if (v.snooze && v.snooze.until > now) sig += `s:${v.id}:${v.snooze.until}|`
+    }
+    return sig
+  }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  useSyncExternalStore(onItemViews, read)
+}
 export function InboxView() {
   useSettledDecisions(ibTab === "done")
+  useShellStore()
   const t = useT()
   const decisions = useOpenDecisions()
+  useInboxItemsVersion(decisions)
   const scroll = useRef<HTMLDivElement>(null)
   const [ignoring, setIgnoring] = useState(false)
   const [, f] = useState(0); const r = () => f((x) => x + 1)
@@ -42,11 +60,7 @@ export function InboxView() {
     try { await dismissDrafts([...drafts.values()].flatMap((group) => group.map(({ w }) => w.decision))) }
     finally { setIgnoring(false) }
   }
-  /* an item whose graph cannot run (its Node is gone, a Bot is off…) counts as waiting on you everywhere else, but asks
-   * nothing: it is listed here too, with why, so 等你 always has something to open */
-  const waiting = new Set(p.map(({ i }) => i.id))
-  const stuck = getItems().filter((i) => !i.arch && !waiting.has(i.id) && itemDisplayState(i).kind === "unavailable")
-  const virtualize = all.length + stuck.length + sz.length > 24
+  const virtualize = all.length + sz.length > 24
   const types = ["accept", "approve", "ask", "propose", "fail", "confirm"] as const
   const typeKeys = ["all", ...types.filter((ty) => p.some((c) => c.w.type === ty))]
   const typeLabel = (k: string) => (k === "all" ? t("views:inbox.all") : WT[k])
@@ -57,7 +71,7 @@ export function InboxView() {
       toolbar={<><Segmented value={ibTab} onChange={(v) => { ibTab = v; r() }} options={[["pending", t("views:inbox.tabPending")], ["done", t("views:inbox.tabDone")]] as const} /></>}>
       {ibTab === "pending" && <>
         {p.length > 0 && <Chips className="mb-6" value={typeLabel(currentType)} onChange={(v) => { ibType = typeKeys.find((k) => typeLabel(k) === v) ?? "all"; r() }} options={typeKeys.map(typeLabel)} />}
-        {!all.length && !stuck.length && !mems && !sz.length && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
+        {!all.length && !mems && !sz.length && <Empty title={t("views:inbox.emptyTitle")} sub={t("views:inbox.emptySub")} />}
         {mems > 0 && <button type="button" onClick={() => go("#/knowledge?tab=pending")} className="mb-8 flex w-full items-center gap-3 rounded-xl bg-card px-4 py-3 text-left type-body shadow-[var(--lift)] hover:shadow-[var(--lift-hover)]" data-inbox-mems>
           <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue/10 text-blue"><BookOpenIcon className="size-4" strokeWidth={1.75} /></span><span className="min-w-0 flex-1">{t("views:inbox.mems", { count: mems })}</span><ChevronRightIcon className="size-4 shrink-0 text-tertiary" /></button>}
         <div className="flex flex-col gap-8">
@@ -87,9 +101,6 @@ export function InboxView() {
             <Group><InboxRows scroll={scroll} virtualize={virtualize} gap={0} estimate={64} rows={folded.map((card) => ({ id: card.w.decision, card }))}
               render={({ card }) => <FoldedRow c={card} />} /></Group>
           </section>}
-          {stuck.length > 0 && <section className="anim-in" data-inbox-stuck><SectionLabel>{t("views:inbox.stuck")}<Count n={stuck.length} /></SectionLabel>
-            <InboxItemRows scroll={scroll} virtualize={virtualize} rows={stuck} render={(i) => <Row onClick={() => go("#/items/" + i.id)} title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0 truncate">{i.t}</span></span>}
-              sub={<span className="line-clamp-2 text-destructive/90">{itemDisplayState(i).detail ?? t("views:inbox.stuckWhy")}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>} /></section>}
           {sz.length > 0 && <section data-snoozed><SectionLabel>{t("views:inbox.snoozed")}<Count n={sz.length} /></SectionLabel>
             <InboxItemRows scroll={scroll} virtualize={virtualize} rows={sz} render={(i) => <Row title={<span className="flex min-w-0 items-baseline gap-2"><ItemNo id={i.id} /><span className="min-w-0">{i.t}</span></span>} sub={t("views:inbox.snoozedAt", { type: WT[i.wait!.type], when: lang() === "zh-CN" ? i.snooze : nearTime(i.snoozeUntil) })}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => unsnooze(i.id)} data-unsnooze>{t("views:inbox.handleNow")}</Button></Row>} /></section>}
         </div>

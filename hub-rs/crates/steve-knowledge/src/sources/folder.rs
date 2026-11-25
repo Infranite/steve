@@ -779,11 +779,14 @@ pub async fn scan_job(m: Modules, kb: Knowledge) {
     let requested = async {
         loop {
             kb.scan_wake.notified().await;
-            for id in kb.take_scan_requests() {
-                if let Err(e) = sync_now(&m, &kb, &id).await {
-                    tracing::debug!(source = %id, "kb.folder_scan: {e}");
+            steve_runtime::round("kb.scans", async {
+                for id in kb.take_scan_requests() {
+                    if let Err(e) = sync_now(&m, &kb, &id).await {
+                        tracing::debug!(source = %id, "kb.folder_scan: {e}");
+                    }
                 }
-            }
+            })
+            .await;
         }
     };
     tokio::join!(all, requested);

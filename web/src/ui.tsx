@@ -3,13 +3,13 @@ import { getItem } from "@/store"
  * Quiet chrome: grey scale everywhere, blue = selected/running, orange = needs you. */
 import { Children, Fragment, useEffect, useLayoutEffect, useId, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
 import { flushSync } from "react-dom"
-import { Robot } from "@/robot"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { MineButton } from "@/mine"
 import { LANGS, lang, setLang, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
-import { itemDisplayStatus } from "@/item-workflow-relation"
+import { itemDisplayStatus } from "@/store"
 import { ScrollArea } from "@/components/affect/scroll-area-clean"
-import { ChevronLeftIcon, ListTodoIcon, MoonIcon, SearchIcon, SunIcon, TerminalIcon, MonitorIcon, XIcon, CircleCheckIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon } from "lucide-react"
+import { ChevronLeftIcon, ListTodoIcon, MoonIcon, SearchIcon, SunIcon, MonitorIcon, XIcon, CircleCheckIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useFieldLabels } from "@/components/ui/input"
 import { TextField as AffectTextField } from "@/components/affect/text-field-clean"
@@ -22,7 +22,7 @@ import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Spinner } from "@/components/ui/spinner"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { st, emit, ST, SS, tagCatLabel, tagLabel, tagDesc, botName, tag, isKind, sortTags, type Rel } from "@/store"
+import { emit, ST, SS, tagCatLabel, tagLabel, tagDesc, botName, tag, isKind, sortTags, type Rel } from "@/store"
 import "@/themes" /* the appearance chosen on this device, on <html> before the first paint */
 import { RunningNowPill } from "@/running-pill"
 import { reducedMotion } from "@/lib/motion"
@@ -98,17 +98,9 @@ export function Status({ s, sess = false, pill = false, className }: { s: string
   const label = (sess ? SS : ST)[s]?.[0] ?? ""
   return <span className={cn("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap type-footnote text-muted-foreground", pill && cn("h-6 rounded-full px-2.5 font-medium", s === "run" || s === "wait" || s === "fail" || s === "done" ? TONE[toneOf(s)].slice(0, 2) : "bg-muted"), className)} data-status={s}><StatusDot s={s} />{label}</span>
 }
-export function BotAvatar({ k, size = 24, className }: { k: string | null; size?: number; className?: string; style?: string; seed?: string }) {
-  if (k && st.bots[k]) return <Robot k={k} size={size} className={className} />
-  return (
-    <span className={cn("inline-flex shrink-0 select-none items-center justify-center rounded-full bg-muted text-muted-foreground", className)} style={{ width: size, height: size }} aria-hidden>
-      <TerminalIcon style={{ width: size * 0.5, height: size * 0.5 }} strokeWidth={1.75} />
-    </span>
-  )
-}
 export function BotName({ k, className }: { k: string | null; className?: string }) {
   if (!k) return null
-  return <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap", className)}><BotAvatar k={k} size={16} />{botName(k)}</span>
+  return <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap", className)}><ActorAvatar actorId={k} size={16} tooltip={false} />{botName(k)}</span>
 }
 /** an item's category: a quiet muted pill (no hue: colour on a row means status), always first and never removable on its own */
 export function KindTag({ id, className }: { id: string; className?: string }) {

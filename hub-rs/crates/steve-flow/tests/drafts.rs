@@ -64,7 +64,7 @@ async fn create_from_a_sentence() {
     );
     let prompt = e.env.gateway.last_prompt().unwrap();
     assert!(prompt.contains("schedule.create"), "{prompt}");
-    changes::apply(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::apply(&e.env.modules, &me, &p.id).unwrap();
     let (_, list) = call(&e.router(), Some(&me), "GET", "/schedules", None).await;
     let s = &list[0];
     assert_eq!(
@@ -87,7 +87,7 @@ async fn create_from_a_sentence() {
     let origin = (row.origin, row.origin_label);
     assert_eq!(origin, ("steve".into(), "Steve 起草，你确认".into()));
     // undo removes it again
-    changes::undo(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::undo(&e.env.modules, &me, &p.id).unwrap();
     let (_, list) = call(&e.router(), Some(&me), "GET", "/schedules", None).await;
     assert_eq!(list, json!([]));
 }
@@ -130,7 +130,7 @@ async fn create_from_a_sentence_in_english() {
     );
     let prompt = e.env.gateway.last_prompt().unwrap();
     assert!(prompt.contains("建事项，自动验收"), "{prompt}");
-    changes::apply(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::apply(&e.env.modules, &me, &p.id).unwrap();
     let (_, list) = steve_i18n::scope(
         steve_i18n::EN,
         call(&e.router(), Some(&me), "GET", "/schedules", None),
@@ -173,7 +173,7 @@ async fn patch_time_and_missed() {
         prompt.contains("when · 时间（中文说法，例如 每天 09:00） · text · \"每天 08:30\""),
         "{prompt}"
     );
-    changes::apply(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::apply(&e.env.modules, &me, &p.id).unwrap();
     let (_, v) = schedule(&e, &id).await;
     assert_eq!(
         (
@@ -190,7 +190,7 @@ async fn patch_time_and_missed() {
         )
     );
     assert_eq!(v["next_at"], next_before + 30 * 60_000);
-    changes::undo(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::undo(&e.env.modules, &me, &p.id).unwrap();
     let (_, v) = schedule(&e, &id).await;
     assert_eq!(
         (v["cron"].as_str(), v["missed"].as_str(), v["when"].as_str()),
@@ -226,7 +226,7 @@ async fn unknown_time_stays_out_of_the_draft() {
         p.changes,
         vec![Change::new("时间", "—", "（没看懂时间：看心情）")]
     );
-    changes::apply(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::apply(&e.env.modules, &me, &p.id).unwrap();
     let (_, v) = schedule(&e, &id).await;
     assert_eq!(v["cron"], "30 8 * * *");
 }
@@ -260,9 +260,7 @@ async fn stale_draft_and_candidates() {
         Some(&json!({"what": "汇报一下"})),
     )
     .await;
-    let err = changes::apply(&e.env.modules, &me, &p.id)
-        .unwrap()
-        .unwrap_err();
+    let err = changes::apply(&e.env.modules, &me, &p.id).unwrap_err();
     assert_eq!(err.status(), 409);
     let c = changes::candidates(&e.env.modules, &me).unwrap();
     let lines: Vec<String> = c.iter().map(|c| c.line()).collect();
@@ -353,7 +351,7 @@ async fn source_pause_triage_types_and_scopes() {
         prompt.contains(&format!("scope:{con}:INBOX · 范围「收件箱」 · enum")),
         "{prompt}"
     );
-    changes::apply(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::apply(&e.env.modules, &me, &p.id).unwrap();
     let after = source(&e).await;
     assert_eq!(after["paused"], true);
     assert_eq!(after["triage_bot"], "ops");
@@ -382,7 +380,7 @@ async fn source_pause_triage_types_and_scopes() {
     assert_eq!(mode(&after, "IMPORTANT"), "record");
     assert_eq!(mode(&after, "INBOX"), "receive");
     // undo puts every setting back
-    changes::undo(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::undo(&e.env.modules, &me, &p.id).unwrap();
     let undone = source(&e).await;
     for k in ["paused", "triage_bot", "scopes"] {
         assert_eq!(undone[k], before[k], "{k}");
@@ -420,9 +418,7 @@ async fn source_stale_unknown_and_candidates() {
     )
     .await;
     assert_eq!(st, 200);
-    let err = changes::apply(&e.env.modules, &me, &p.id)
-        .unwrap()
-        .unwrap_err();
+    let err = changes::apply(&e.env.modules, &me, &p.id).unwrap_err();
     assert_eq!(err.status(), 409);
     // an adapter that is not registered is not a target
     let err = changes::draft(
@@ -522,7 +518,7 @@ async fn flow_github_notifications_ignored_from_now_on() {
         "the graph is in the prompt: {prompt}"
     );
     assert!(prompt.contains("node.add · "), "{prompt}");
-    changes::apply(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::apply(&e.env.modules, &me, &p.id).unwrap();
     let f = flow(&e, &id).await;
     assert_eq!(f["version"], 2);
     assert_eq!(f["versions"][0]["author"], "steve");
@@ -553,7 +549,7 @@ async fn flow_github_notifications_ignored_from_now_on() {
         .collect();
     assert_eq!(path, ["t", "action"]);
     // undo: one more version with the old graph
-    changes::undo(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::undo(&e.env.modules, &me, &p.id).unwrap();
     let f = flow(&e, &id).await;
     assert_eq!(f["version"], 3);
     assert_eq!(f["graph"], github_flow_saved());
@@ -618,7 +614,7 @@ async fn flow_insert_update_and_patch_fields() {
             Change::new("名字", "GitHub 通知", "GitHub 检查失败"),
         ]
     );
-    changes::apply(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::apply(&e.env.modules, &me, &p.id).unwrap();
     let f = flow(&e, &id).await;
     assert_eq!(
         (
@@ -635,7 +631,7 @@ async fn flow_insert_update_and_patch_fields() {
     );
     let triggers = steve_store::testkit::flow::enabled_trigger_count(e.env.store(), &id).unwrap();
     assert_eq!(triggers, 1);
-    changes::undo(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::undo(&e.env.modules, &me, &p.id).unwrap();
     let f = flow(&e, &id).await;
     assert_eq!(
         (
@@ -703,7 +699,7 @@ async fn flow_edits_that_do_not_validate_stay_out() {
             Change::new("删除连线", "—", "（没认出：t → zz）"),
         ]
     );
-    changes::apply(&e.env.modules, &me, &p.id).unwrap().unwrap();
+    changes::apply(&e.env.modules, &me, &p.id).unwrap();
     assert_eq!(flow(&e, &id).await["version"], 1);
 }
 
@@ -735,9 +731,7 @@ async fn flow_stale_schedules_and_candidates() {
     )
     .await;
     assert_eq!(st, 200);
-    let err = changes::apply(&e.env.modules, &me, &p.id)
-        .unwrap()
-        .unwrap_err();
+    let err = changes::apply(&e.env.modules, &me, &p.id).unwrap_err();
     assert_eq!(err.status(), 409);
     // a schedule is edited through `schedule`, another workspace's flow is not there
     let (_, s) = call(&e.router(), Some(&me), "POST", "/schedules", Some(&json!({"name": "汇报", "when": "每天 08:30", "what": "汇报", "bot": "steve", "mode": "report"}))).await;

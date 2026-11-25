@@ -107,7 +107,7 @@ impl Core {
                 object.extend(extra);
             }
             let metadata = serde_json::to_string(&stored)?;
-            steve_store::core_queue::edit_message(w, ws, message_id, &text, Some(&metadata))?;
+            steve_store::thread::edit_message(w, ws, message_id, &text, Some(&metadata))?;
             w.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Message {
                     space: message.space.into(),

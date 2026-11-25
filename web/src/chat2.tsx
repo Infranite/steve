@@ -1,12 +1,13 @@
-import { notices, useShellStore, useStoreSelector, useNotices } from "@/store"
+import { notices, useShellSelector, useShellStore, useNotices } from "@/store"
+import { onViewKind, table } from "@/data/sync"
 import { useChatLive } from "@/data/live"
-import { getItems, getItem } from "@/store"
+import { getItems, getItem, type Item } from "@/store"
 import { useWorkSummary } from "@/running-pill"
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
-import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react"
-import { itemDisplayStatus } from "@/item-workflow-relation"
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
+import { itemDisplayStatus } from "@/store"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible"
@@ -143,8 +144,8 @@ export function LiveSteps({ memory }: { memory: ProcessMemory }) {
   const thought = useChatLive((s) => s.live ? "" : s.draft?.thought)
   const reply = useChatLive((s) => !!s.draft?.text)
   const phase = useChatLive((s) => s.draft?.text ? "reply" : s.live ? "research" : s.phase || "start")
-  const down = useStoreSelector(() => st.down)
-  useStoreSelector(() => st.bots.steve)
+  const down = useShellSelector(() => st.down)
+  useShellSelector(() => st.bots.steve)
   const items = useMemo<TrailItem[]>(() => l ? researchLiveItems(l) : thought ? [{ t: "think", key: "thought", text: thought, live: !reply, t0 }] : [], [l, thought, reply, t0, t])
   const kind = down ? undefined : l?.now?.kind
   const action = kind && Object.hasOwn(ACTIVE_KIND, kind) ? ACTIVE_KIND[kind as keyof typeof ACTIVE_KIND] : undefined
@@ -214,7 +215,8 @@ function Similar({ n, more, notice }: { n: RNotice; more: RNotice[]; notice: (n:
 export function RailToggle({ className }: { className?: string }) {
   const { railOpen: open, sheetOpen } = useRail(), t = useT()
   useNotices(open || sheetOpen)
-  useStoreSelector(() => st.noticeSeen)
+  useShellSelector(() => st.noticeSeen)
+  useWorkSummary()
   const n = unreadNotices().length, waiting = decideCards().length, run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
   const label = [t("shell:chat.railLabel.running", { count: run }), waiting && t("shell:chat.railLabel.waiting", { count: waiting }), n && t("shell:chat.railLabel.unread", { count: n })].filter(Boolean).join(t("shell:chat.railLabel.sep"))
   return (
@@ -253,13 +255,27 @@ function deliveredItems() {
   return getItems().filter((i) => i.st === "done" && !i.arch && i.updated > cutoff).sort((a, b) => b.updated - a.updated).slice(0, 5)
 }
 
+let deliveredCache: { ver: number; seq: number; items: Item[] } | undefined
+function deliveredVersion(): number {
+  const ver = table().kindVersion("item")
+  if (deliveredCache?.ver === ver) return deliveredCache.seq
+  const items = deliveredItems()
+  const same = !!deliveredCache
+    && items.length === deliveredCache.items.length
+    && items.every((x, i) => {
+      const p = deliveredCache!.items[i]
+      return x.id === p.id && x.t === p.t && x.up === p.up
+    })
+  const seq = same ? deliveredCache!.seq : (deliveredCache?.seq ?? 0) + 1
+  deliveredCache = { ver, seq, items }
+  return seq
+}
+const onDeliveredItems = (cb: () => void) => onViewKind("item", cb)
+
 function RecentDeliveries() {
   const t = useT()
-  const items = deliveredItems()
-  useStoreSelector(() => {
-    const now = Date.now()
-    return JSON.stringify(deliveredItems().map((i) => [i.id, i.t, now - i.updated < 60_000 ? 0 : Math.floor(i.updated / 60_000)]))
-  })
+  useSyncExternalStore(onDeliveredItems, deliveredVersion)
+  const items = deliveredCache?.items ?? deliveredItems()
   if (!items.length) return null
   return <section data-rail-done><SectionLabel>{t("shell:chat.recentDone")}</SectionLabel>
     {items.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{i.up}</span></Line>)}

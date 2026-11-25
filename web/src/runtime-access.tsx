@@ -7,7 +7,7 @@ import { closeSheet } from "@/ui"
 import { useT } from "@/i18n"
 import { runtimeSetupHrefFor } from "@/hub-management-model"
 import type { RRuntime } from "@/api"
-import { permissionModes, runtimeReason, runtimeState, supportsPermission } from "@/runtime-status"
+import { runtimeReason, runtimeState, supportsPermission } from "@/runtime-status"
 
 export const useRuntimeSetupHref = (enabled = true) => runtimeSetupHrefFor(useDeviceInventory(enabled))
 
@@ -52,6 +52,6 @@ export function RuntimePermissionNotice({ harness, mode }: { harness: string; mo
   if (supportsPermission(r, mode)) return null
   const modes = (r.modes ?? []).map(m => t(`shell:devices.harness.mode.${m}`, { defaultValue: m })).join(t("shell:list.sep"))
   return <p role="alert" className="break-words rounded-lg bg-attention/10 px-3 py-2 type-callout text-attention" data-runtime-permission>
-    {t("shell:runtimeSetup.localSample")} · {t("shell:runtimeSetup.unsupportedMode", { name: r.name, mode: t(`shell:devices.harness.mode.${permissionModes[mode as keyof typeof permissionModes] ?? mode}`, { defaultValue: mode }), modes: modes || t("shell:runtimeSetup.noModes") })}
+    {t("shell:runtimeSetup.localSample")} · {t("shell:runtimeSetup.unsupportedMode", { name: r.name, mode: t(`shell:devices.harness.mode.${mode}`, { defaultValue: mode }), modes: modes || t("shell:runtimeSetup.noModes") })}
   </p>
 }

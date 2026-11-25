@@ -1,4 +1,4 @@
-//! Task workspaces (ST-45): how much disk the items' worktrees take, giving space back, and the floor below
+//! Task workspaces: how much disk the items' worktrees take, giving space back, and the floor below
 //! which no new worktree is made.
 //!
 //! A worktree is the item's sources (small; the git objects are shared with the project) plus rebuildable
@@ -743,8 +743,8 @@ impl Core {
     }
 
     /// At boot, then every ten minutes: a reclaim pass; when it leaves the disk below the floor, the
-    /// workspaces hear of it once (again only after it was above `low` in between). Runs forever.
-    pub async fn run_workspace_watch(self) {
+    /// workspaces hear of it once (again only after it was above `low` in between).
+    pub fn watch_workspaces(self) -> steve_runtime::Task {
         let clock = self
             .modules()
             .map(|m| m.clock.clone())
@@ -753,7 +753,7 @@ impl Core {
         // before anything is refused)
         let warned = std::sync::Arc::new(std::sync::Mutex::new(Pressure::Ok));
         steve_runtime::every(
-            "core.workspace",
+            "core.workspaces",
             clock,
             CHECK_EVERY,
             steve_runtime::FirstRun::Immediate,
@@ -799,7 +799,11 @@ impl Core {
                 }
             },
         )
-        .await;
+    }
+
+    /// At boot, then every ten minutes: a reclaim pass; runs forever.
+    pub async fn run_workspace_watch(self) {
+        self.watch_workspaces().await;
     }
 
     /// Below `low` but above the floor: nothing is refused yet; what Steve could give back it did.
@@ -814,7 +818,7 @@ impl Core {
             )
         });
         for ws in t.db().workspace_ids()? {
-            crate::notify::notify(t.db(), &ws, "disk", "info", &text, None)?;
+            steve_store::notify::notify(t.db().store(), &ws, "disk", "info", &text, None)?;
         }
         Ok(())
     }
@@ -829,7 +833,7 @@ impl Core {
             )
         });
         for ws in t.db().workspace_ids()? {
-            crate::notify::notify(t.db(), &ws, "disk", "warn", &text, None)?;
+            steve_store::notify::notify(t.db().store(), &ws, "disk", "warn", &text, None)?;
         }
         Ok(())
     }
@@ -1046,11 +1050,6 @@ impl Tx<'_> {
 
     /// Why a closed item's worktree stays.
     fn why_kept(&self, item: &str, wt: &Path) -> String {
-        if let Ok(Some(i)) = self.db().item(item)
-            && self.workflow_retry_keeps(&i).unwrap_or(false)
-        {
-            return "工作单元还会重试，保留工作区和构建缓存给下一次尝试".into();
-        }
         let dirty = git::git_read(wt, &["status", "--porcelain"]).map(|s| !s.is_empty());
         let archived = self
             .db()

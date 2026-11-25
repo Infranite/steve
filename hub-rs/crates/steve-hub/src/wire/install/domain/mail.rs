@@ -39,11 +39,11 @@ install! { install(reg, cx) [conns, declared, draft_link, kb, mail_cfg, mail_hoo
 install! { start(reg, _cx) [mut jobs, mail] => [jobs, mail] {
     {
         let mail = mail.clone();
-        jobs.push(Job::new("mail.sync", mail.run_jobs()));
+        jobs.push(Job::task("mail.sync", move || mail.jobs_task()));
     }
     {
         let mail = mail.clone();
-        jobs.push(Job::new("mail.send", mail.run_send_queue()));
+        jobs.push(Job::task("mail.send", move || mail.send_queue_task()));
     }
 }}
 
@@ -54,9 +54,32 @@ install! { routes(reg, _cx) [mail, mut module_routes] => [mail, module_routes] {
 install! { watch(reg, cx) [flow, mut jobs, tools] => [flow, jobs, tools] {
     let Env { bus, .. } = cx.clone();
     // new mailboxes get the triage template
-    jobs.push(Job::new("mail.mailboxes", crate::wire::signals::watch_mailboxes(
-        bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. })))),
-        flow.clone(),
-        tools.mail.clone(),
-    )));
+    let initial = std::sync::Arc::new(std::sync::Mutex::new(Some(bus.tap(|event| {
+        matches!(
+            event.as_domain(),
+            Some(steve_types::DomainEvent::Channels(
+                steve_types::ChannelsEvent::Connection { .. }
+            ))
+        )
+    }))));
+    let bus = bus.clone();
+    let flow_job = flow.clone();
+    let mail = tools.mail.clone();
+    jobs.push(Job::supervised("mail.mailboxes", move || {
+        let changes = initial
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .unwrap_or_else(|| {
+                bus.tap(|event| {
+                    matches!(
+                        event.as_domain(),
+                        Some(steve_types::DomainEvent::Channels(
+                            steve_types::ChannelsEvent::Connection { .. }
+                        ))
+                    )
+                })
+            });
+        crate::wire::signals::watch_mailboxes(changes, flow_job.clone(), mail.clone())
+    }));
 }}

@@ -2,19 +2,14 @@
  * PLAYWRIGHT_MODULE / PLAYWRIGHT_EXECUTABLE / PLAYWRIGHT_CHANNEL choose an installed browser; STEVE_TEST_SHOTS saves evidence. */
 import assert from "node:assert/strict"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
-import { fileURLToPath } from "node:url"
-import { createServer } from "vite"
-import { deliveryFixture, longName, staticHtmlCsp } from "./fixtures/delivery-api.mjs"
+import { deliveryFixture, longName, staticHtmlCsp } from "./fixtures/delivery-api.ts"
+import { createWebProxy } from "./fixtures/hub-proxy.mjs"
 import { settle } from "./settle.mjs"
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const fixture = await deliveryFixture()
-const previousHub = process.env.STEVE_HUB
-process.env.STEVE_HUB = fixture.url
-const root = fileURLToPath(new URL("..", import.meta.url))
-const web = await createServer({ root, configFile: root + "/vite.config.ts", server: { host: "127.0.0.1", port: 0, strictPort: true }, logLevel: "error" })
-await web.listen()
-const base = `http://127.0.0.1:${web.httpServer.address().port}`
+const web = await createWebProxy({ hubUrl: fixture.url })
+const base = web.url
 const browser = await chromium.launch({ headless: true,
   ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}),
   ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}),
@@ -102,7 +97,12 @@ try {
   await publicPage.locator("[data-delivery-error]").waitFor({ timeout: 10_000 })
   assert.equal((await anonymous.request.get(base + `/api/delivery-shares/${expiringToken}/content/file`)).status(), 410)
 
+  // A standalone delivery link without its owning ?ws= selector is refused before loading App state.
   await page.goto(base + "/deliveries/html")
+  await page.locator("[data-delivery-error]").waitFor()
+  assert.equal(await page.locator("[data-delivery-html]").count(), 0)
+
+  await page.goto(base + "/deliveries/html?ws=fixture")
   const frame = page.frameLocator("[data-delivery-html]")
   await frame.getByRole("heading", { name: "Design entry" }).waitFor()
   assert.equal(await frame.locator("h1").evaluate((el) => getComputedStyle(el).color), "rgb(20, 100, 180)")
@@ -142,11 +142,11 @@ try {
   assert.equal((await owner.request.post(base + "/api/workspaces/other/switch", { headers: { "x-steve-ws": "fixture" }, data: {} })).status(), 200)
   assert.equal((await (await owner.request.get(base + "/api/shell")).json()).workspace.id, "other")
   const switchedAt = fixture.requests.length
-  await page.goto(base + "/deliveries/html")
+  await page.goto(base + "/deliveries/html?ws=fixture")
   await frame.getByRole("heading", { name: "Design entry" }).waitFor()
   const afterSwitch = fixture.requests.slice(switchedAt)
   const firstMeta = afterSwitch.find((r) => r.path === "/api/file-deliveries/html")
-  assert.equal(firstMeta.ws, undefined, "ownership discovery must precede state binding")
+  assert.equal(firstMeta.ws, "fixture", "explicit ?ws= selector binds metadata lookup instead of the switched workspace cookie")
   assert.equal(firstMeta.query, "")
   assert.ok(afterSwitch.some((r) => r.path === "/api/shell" && r.ws === "fixture"))
   await frame.getByRole("link", { name: "Open details" }).click()
@@ -163,29 +163,29 @@ try {
   await page.locator("[data-delivery-error]").waitFor()
   assert.equal(await page.locator("[data-delivery-html]").count(), 0)
   fixture.memberships.delete("fixture")
-  await page.goto(base + "/deliveries/html")
+  await page.goto(base + "/deliveries/html?ws=fixture")
   await page.locator("[data-delivery-error]").waitFor()
   assert.equal(await page.locator("[data-delivery-html]").count(), 0)
   fixture.memberships.add("fixture")
   await owner.request.post(base + "/api/workspaces/fixture/switch", { headers: { "x-steve-ws": "other" }, data: {} })
 
-  await page.goto(base + "/deliveries/image")
+  await page.goto(base + "/deliveries/image?ws=fixture")
   await page.locator("[data-delivery-image]").waitFor()
   assert.equal(await page.locator("[data-delivery-image]").evaluate((el) => el.complete && el.naturalWidth), 1)
   await screenshot(page, "delivery-image")
-  await page.goto(base + "/deliveries/office")
+  await page.goto(base + "/deliveries/office?ws=fixture")
   await page.locator('[data-office="docx"]').waitFor()
   assert.match(await page.locator('[data-office="docx"]').innerText(), /Delivered Office document/)
   await screenshot(page, "delivery-office")
   const pdfResponse = page.waitForResponse((r) => r.url().includes("/api/file-deliveries/pdf/content/file") && r.status() === 200)
-  await page.goto(base + "/deliveries/pdf")
+  await page.goto(base + "/deliveries/pdf?ws=fixture")
   await page.locator("[data-delivery-pdf]").waitFor()
   assert.equal((await pdfResponse).headers()["content-type"], "application/pdf")
   await screenshot(page, "delivery-pdf")
-  await page.goto(base + "/deliveries/binary")
+  await page.goto(base + "/deliveries/binary?ws=fixture")
   await page.locator("[data-delivery-no-preview]").waitFor()
   assert.ok(await page.locator("[data-delivery-download]").isVisible())
-  await page.goto(base + "/deliveries/missing")
+  await page.goto(base + "/deliveries/missing?ws=fixture")
   await page.locator("[data-delivery-error]").waitFor()
   await page.locator("[data-delivery-retry]").click()
   await page.locator("[data-delivery-error]").waitFor()
@@ -223,7 +223,7 @@ try {
     const c = await context(locale, width)
     await c.addCookies(await owner.cookies())
     const p = await c.newPage()
-    await p.goto(base + "/deliveries/md")
+    await p.goto(base + "/deliveries/md?ws=fixture")
     await p.locator("[data-out-md]").waitFor()
     await noOverflow(p)
     await screenshot(p, `delivery-layout-${width}`)
@@ -241,5 +241,4 @@ try {
   throw e
 } finally {
   await browser.close(); await web.close(); await fixture.close()
-  if (previousHub === undefined) delete process.env.STEVE_HUB; else process.env.STEVE_HUB = previousHub
 }

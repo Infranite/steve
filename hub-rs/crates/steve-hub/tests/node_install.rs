@@ -1,4 +1,4 @@
-//! Installing a Node on another machine over tailcat's SSH (A6b), with stand-ins: `ssh` runs the
+//! Installing a Node on another machine over tailcat's SSH, with stand-ins: `ssh` runs the
 //! command locally with a temporary home as the target's, and the installer comes from a local
 //! release directory (`STEVE_NODE_INSTALLERS`) whose `steve` records what it was asked.
 

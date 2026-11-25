@@ -16,30 +16,50 @@ use crate::metrics::{
     nodes::{ASK, EVERY, Observation},
 };
 
+pub fn task(
+    store: Store,
+    local: Option<Arc<dyn Node>>,
+    svc: Option<Arc<NodeService>>,
+    low: u64,
+) -> steve_runtime::Task {
+    let warned = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+    steve_runtime::every(
+        "nodes.vitals",
+        Arc::new(steve_runtime::SystemClock),
+        EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let store = store.clone();
+            let local = local.clone();
+            let svc = svc.clone();
+            let warned = warned.clone();
+            async move {
+                let sample_store = store.clone();
+                let approval = tokio::task::spawn_blocking(move || {
+                    sample_store.read(|r| steve_store::statistics::approval::applied_sessions(r))
+                })
+                .await;
+                if let Ok(Ok(n)) = approval {
+                    ::metrics::gauge!("steve_approval_auto_sessions").set(n as f64);
+                }
+                sample_once(local.as_ref(), svc.as_ref()).await;
+                if svc.is_some() {
+                    let mut guard = warned.lock().await;
+                    let prev = std::mem::take(&mut *guard);
+                    *guard = warn_low_disks(store, prev, low).await;
+                }
+            }
+        },
+    )
+}
+
 pub async fn sample(
     store: Store,
     local: Option<Arc<dyn Node>>,
     svc: Option<Arc<NodeService>>,
     low: u64,
 ) {
-    let mut warned = HashSet::new();
-    let mut tick = tokio::time::interval(EVERY);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tick.tick().await;
-        let sample_store = store.clone();
-        let approval = tokio::task::spawn_blocking(move || {
-            sample_store.read(|r| steve_store::statistics::approval::applied_sessions(r))
-        })
-        .await;
-        if let Ok(Ok(n)) = approval {
-            ::metrics::gauge!("steve_approval_auto_sessions").set(n as f64);
-        }
-        sample_once(local.as_ref(), svc.as_ref()).await;
-        if svc.is_some() {
-            warned = warn_low_disks(store.clone(), warned, low).await;
-        }
-    }
+    task(store, local, svc, low).await;
 }
 
 /// Ask in parallel, then capture the recorder's minute snapshot.
@@ -94,7 +114,8 @@ pub async fn sample_once(local: Option<&Arc<dyn Node>>, svc: Option<&Arc<NodeSer
             .into_iter()
             .flatten()
             .collect(),
-    );
+    )
+    .await;
 }
 
 /// Warn once per low-disk episode on a remote Node. The Hub already watches its own disk.
@@ -104,7 +125,6 @@ async fn warn_low_disks(store: Store, mut warned: HashSet<String>, low: u64) -> 
             return warned;
         };
         let since = super::now() - 5 * 60 * 1000;
-        let db = steve_core::repo::Db::new(store);
         for node in nodes.into_iter().filter(|node| !node.local) {
             let Some(latest) = metrics::latest_node(&node.node_id, since) else {
                 continue;
@@ -125,9 +145,14 @@ async fn warn_low_disks(store: Store, mut warned: HashSet<String>, low: u64) -> 
                     name = node.name,
                     free = steve_core::workspace::human(free)
                 );
-                if let Err(e) =
-                    steve_core::notify::notify(&db, steve_store::WS, "disk", "info", &text, None)
-                {
+                if let Err(e) = steve_store::notify::notify(
+                    &store,
+                    steve_store::WS,
+                    "disk",
+                    "info",
+                    &text,
+                    None,
+                ) {
                     tracing::error!("node disk notice: {e}");
                 }
             }

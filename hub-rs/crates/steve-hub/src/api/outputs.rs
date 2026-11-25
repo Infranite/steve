@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use steve_core::git::{git, is_git};
 
 use super::{ApiResult, AppState, Ctx, Noun, blocking, ok, own, str_of};
-use crate::backend::BackendError;
 use crate::config::home_dir;
+use crate::error::BackendError;
 use crate::error::{ApiError, json_response};
 use crate::files::disposition;
 
@@ -75,7 +75,7 @@ async fn load(
                 .into_iter()
                 .find(|a| str_of(a, "id") == art)
                 .ok_or_else(|| BackendError::not_found(steve_i18n::t!("hub.not_found.output")))?;
-            let opt = |o: &crate::backend::Obj, k: &str| {
+            let opt = |o: &crate::wire::store::Obj, k: &str| {
                 o.get(k)
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())

@@ -11,11 +11,64 @@ use serde_json::{Value, json};
 use steve_store::{StoreError, Views};
 
 use super::{
-    ApiResult, AppState, Ctx, Noun, blocking, body, objs, ok, ok_true, own, sess_out, str_of,
+    ApiResult, AppState, Ctx, Noun, blocking, check_file_ids, check_len, json_body, objs, ok,
+    ok_true, own, sess_out, str_of,
 };
-use crate::backend::Obj;
 use crate::error::ApiError;
-use crate::validate::{Check, Num, Str};
+use crate::wire::store::Obj;
+
+#[derive(Clone, Copy, Deserialize, serde::Serialize)]
+enum MessageMode {
+    #[serde(rename = "插话")]
+    Steer,
+    #[serde(rename = "排队")]
+    Queue,
+}
+
+impl MessageMode {
+    fn wire(self) -> &'static str {
+        match self {
+            MessageMode::Steer => "插话",
+            MessageMode::Queue => "排队",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MessageBody {
+    text: String,
+    mode: Option<MessageMode>,
+    files: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct PatchBody {
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct ForkBody {
+    seq: f64,
+    #[serde(default)]
+    goal: String,
+    #[serde(default, rename = "asSession")]
+    as_session: bool,
+}
+
+#[derive(Deserialize)]
+struct LinkBody {
+    item: String,
+}
+
+#[derive(Deserialize)]
+struct TextBody {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct ImportBody {
+    keys: Vec<String>,
+}
 
 async fn own_session(st: &AppState, ws: &str, id: &str) -> Result<Obj, ApiError> {
     let (id, ws) = (id.to_string(), ws.to_string());
@@ -108,7 +161,7 @@ pub async fn events(
         };
         for event in &mut page.events {
             system_shown(&event.kind, &mut event.data);
-            event.data = super::slim::ev_out(std::mem::take(&mut event.data));
+            event.data = super::slim::ev_out(&event.kind, std::mem::take(&mut event.data));
         }
         Ok(page)
     })
@@ -166,16 +219,14 @@ pub async fn message(
             "hub.session.imported_readonly"
         )));
     }
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let text = k.str("text", Str::min(1));
-    let mode = k
-        .opt_enum("mode", &["插话", "排队"])
-        .unwrap_or_else(|| "排队".into());
-    let files = super::files::file_ids(&mut k);
-    k.finish()?;
-    let refs = super::files::refs(&st, &c.ws, files).await?;
-    ok(json!({ "result": st.domain.session_message(&id, &text, &mode, refs).await? }))
+    let req: MessageBody = json_body(&b)?;
+    if req.text.is_empty() {
+        return Err(ApiError::Invalid(vec!["text".into()]));
+    }
+    check_file_ids(&req.files)?;
+    let mode = req.mode.unwrap_or(MessageMode::Queue).wire();
+    let refs = super::files::refs(&st, &c.ws, req.files).await?;
+    ok(json!({ "result": st.domain.session_message(&id, &req.text, mode, refs, &c.me).await? }))
 }
 
 pub async fn cancel(
@@ -185,6 +236,62 @@ pub async fn cancel(
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
     ok(json!({ "ok": st.domain.cancel(&id).await? }))
+}
+
+/// `POST /api/sessions/{id}/subtasks/{subtask_id}/cancel`: cancel one active subtask (e.g. an
+/// ACP RFD child subagent) without cancelling the parent turn.
+pub async fn cancel_subtask(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path((id, subtask_id)): Path<(String, String)>,
+) -> ApiResult {
+    own_session(&st, &c.ws, &id).await?;
+    let runtime = session_node_runtime(&st, &id).await?;
+    let Some(runtime) = runtime else {
+        return ok(json!({ "ok": false }));
+    };
+    let cancelled = runtime
+        .cancel_subtask(&id, &subtask_id)
+        .await
+        .map_err(|e| match e.code {
+            steve_node_api::Code::Invalid => ApiError::bad_request(e.safe_detail),
+            steve_node_api::Code::Unsupported => ApiError::Json(400, e.safe_detail),
+            steve_node_api::Code::Unavailable => ApiError::Json(503, e.safe_detail),
+            _ => ApiError::internal(e.safe_detail),
+        })?;
+    ok(json!({ "ok": cancelled }))
+}
+
+async fn session_node_runtime(
+    st: &AppState,
+    session_id: &str,
+) -> Result<Option<std::sync::Arc<crate::wire::node_runtime::NodeRuntime>>, ApiError> {
+    let node_id = if let Some(store) = st.modules.as_ref().map(|m| m.store.clone()) {
+        let sid = session_id.to_string();
+        blocking(move || {
+            store
+                .read(|r| steve_store::node_sessions::principal_state(r, &sid))
+                .map(|row| row.map(|r| r.node))
+                .map_err(|e| ApiError::internal(e.to_string()))
+        })
+        .await?
+    } else {
+        None
+    };
+    if let Some(nid) = node_id {
+        if let Some(svc) = &st.nodes
+            && let Some(rt) = svc.fleet.runtime_for(&nid)
+        {
+            return Ok(Some(rt));
+        }
+        if let Some(rt) = &st.node
+            && rt.node_id().as_str() == nid
+        {
+            return Ok(Some(rt.clone()));
+        }
+        return Ok(None);
+    }
+    Ok(st.node.clone())
 }
 
 pub async fn end(
@@ -208,6 +315,19 @@ pub async fn continue_new(
     ok(json!({ "session": ns }))
 }
 
+/// `POST /sessions/{id}/handoff`: hand off an item session to a fresh session (same or different
+/// Bot, harness, and/or model) carrying deterministic working memory through W3.1 placement.
+pub async fn handoff(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    own_session(&st, &c.ws, &id).await?;
+    let target = super::items::parse_handoff_body(&b)?;
+    ok(st.domain.handoff_session(&id, target, &c.me).await?)
+}
+
 pub async fn patch_one(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -215,13 +335,13 @@ pub async fn patch_one(
     b: Bytes,
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let title = k.str("title", Str::len(1, 80));
-    k.finish()?;
+    let req: PatchBody = json_body(&b)?;
+    if !check_len(&req.title, 1, 80) {
+        return Err(ApiError::Invalid(vec!["title".into()]));
+    }
     st.write(move |r| {
         let mut p = Obj::new();
-        p.insert("title".into(), json!(title));
+        p.insert("title".into(), json!(req.title));
         r.session_patch(&id, &p)?;
         ok_true()
     })
@@ -248,15 +368,10 @@ pub async fn fork(
     b: Bytes,
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let seq = k.num("seq", Num::ANY);
-    let goal = k.opt_str("goal", Str::ANY).unwrap_or_default();
-    let as_session = k.opt_bool("asSession").unwrap_or(false);
-    k.finish()?;
+    let req: ForkBody = json_body(&b)?;
     ok(Value::Object(
         st.domain
-            .fork(&c.ws, &id, seq, &goal, as_session, &c.me)
+            .fork(&c.ws, &id, req.seq, &req.goal, req.as_session, &c.me)
             .await?,
     ))
 }
@@ -268,12 +383,9 @@ pub async fn link(
     b: Bytes,
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let item = k.str("item", Str::ANY);
-    k.finish()?;
+    let req: LinkBody = json_body(&b)?;
     st.write(move |r| {
-        let i = own(r.item_get(&item)?, &c.ws, Noun::Item)?;
+        let i = own(r.item_get(&req.item)?, &c.ws, Noun::Item)?;
         let iid = str_of(&i, "id");
         let mut p = Obj::new();
         p.insert("item_id".into(), json!(iid));
@@ -303,15 +415,12 @@ pub async fn queued_edit(
     b: Bytes,
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let text = k.str("text", Str::min(1));
-    k.finish()?;
-    let text = text.trim().to_string();
+    let req: TextBody = json_body(&b)?;
+    let text = req.text.trim().to_string();
     if text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
-    ok(json!(st.domain.queued_edit(&id, &qid, &text).await?))
+    ok(json!(st.domain.queued_edit(&id, &qid, &text, &c.me).await?))
 }
 
 /// `DELETE /api/sessions/:id/queued/:qid` → the row as it was (the composer takes it back).
@@ -321,7 +430,7 @@ pub async fn queued_remove(
     Path((id, qid)): Path<(String, String)>,
 ) -> ApiResult {
     own_session(&st, &c.ws, &id).await?;
-    ok(json!(st.domain.queued_remove(&id, &qid).await?))
+    ok(json!(st.domain.queued_remove(&id, &qid, &c.me).await?))
 }
 
 /// `POST /api/sessions/:id/queued/:qid/send-now` → `{result: interrupted | sent | waiting, reason?}`.
@@ -493,10 +602,11 @@ pub async fn import(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let keys = k.str_array("keys", Some(1), Some(50));
-    k.finish()?;
+    let req: ImportBody = json_body(&b)?;
+    if !(1..=50).contains(&req.keys.len()) {
+        return Err(ApiError::Invalid(vec!["keys".into()]));
+    }
+    let keys = req.keys;
     let bus = st.bus.clone();
     // Node file reads happen outside the core lock, and only for its discovery keys.
     let prepared = crate::system::node_prepare(history_node(&st)?, &keys).await;
@@ -560,8 +670,13 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         .route("/sessions/{id}/events/marks", get(sessions::marks))
         .route("/sessions/{id}/messages", post(sessions::message))
         .route("/sessions/{id}/cancel", post(sessions::cancel))
+        .route(
+            "/sessions/{id}/subtasks/{subtask_id}/cancel",
+            post(sessions::cancel_subtask),
+        )
         .route("/sessions/{id}/end", post(sessions::end))
         .route("/sessions/{id}/continue", post(sessions::continue_new))
+        .route("/sessions/{id}/handoff", post(sessions::handoff))
         .route("/sessions/{id}/fork", post(sessions::fork))
         .route("/sessions/{id}/link", post(sessions::link))
         .route("/sessions/{id}/queued", get(sessions::queued_list))

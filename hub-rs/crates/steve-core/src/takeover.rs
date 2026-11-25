@@ -30,14 +30,12 @@ pub(crate) enum Stop {
     },
     /// The session sat idle with nothing going on (`crate::stall`).
     Idle { why: String },
-    /// The coordinator stopped while its work graph needs it ([`crate::turn_wait::CoordinatorAttention::Failed`]).
-    Workflow { why: String },
 }
 
 impl Stop {
     fn why(&self) -> &str {
         match self {
-            Stop::Stopped { why, .. } | Stop::Idle { why } | Stop::Workflow { why } => why,
+            Stop::Stopped { why, .. } | Stop::Idle { why } => why,
         }
     }
 }
@@ -68,14 +66,6 @@ impl Tx<'_> {
          * step as done. Whatever way it stopped. */
         if crate::agent_questions::own_action(&self.db().final_reply(sid)?).is_some() {
             return Ok(Some(stop.why().into()));
-        }
-        /* the graph is not done: no completion rule can hold, the coordinator has to act */
-        if let Stop::Workflow { why } = &stop {
-            let text = format!(
-                "（Steve）协作工作图需要你处理：{}。用 steve_workflow action=get 读取当前图和各单元的结果，再重试、重规划或取消；只有用户能决定的事用 steve_ask 提问。不要重做已经通过的单元，已经完成的推送、合并、打 tag、发布不要重做。",
-                why.strip_prefix("它停下了：").unwrap_or(why)
-            );
-            return self.takeover_continue(&i, sid, why, &text);
         }
         let why = stop.why().to_string();
         self.takeover_continue(&i, sid, &why, &continue_text(&stop, &i))
@@ -140,7 +130,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// When you last answered a card of the item (not YOLO for you); 0 when never.
+    /// When you last answered a card of the item; 0 when never.
     fn last_answered(&self, item_id: &str) -> Result<i64> {
         Ok(self
             .db()
@@ -148,7 +138,7 @@ impl Tx<'_> {
             .iter()
             .filter(|d| {
                 d.status == steve_types::DecisionStatus::Resolved
-                    && d.result["decided_by"] != "yolo"
+                    && d.result.get("decided_by").and_then(|v| v.as_str()) != Some("steve")
             })
             .filter_map(|d| d.resolved)
             .max()
@@ -180,7 +170,7 @@ impl Tx<'_> {
 
     /// The reasons `steve_deliver` was refused since the last delivery taken in or the last thing you
     /// did on the item, newest first.
-    fn refusals(&self, item_id: &str) -> Result<Vec<String>> {
+    pub(crate) fn refusals(&self, item_id: &str) -> Result<Vec<String>> {
         let answered = self.last_answered(item_id)?;
         let t = self.db().timeline(item_id)?;
         Ok(t.iter()
@@ -390,7 +380,6 @@ fn continue_text(stop: &Stop, i: &Item) -> String {
                 .to_string()
         }
         Stop::Idle { .. } => "（Steve）会话停了一会儿，没有在运行，也没有交付或提问。".to_string(),
-        Stop::Workflow { why } => format!("（Steve）{why}。"),
     };
     s.push_str(
         "如果上下文压缩过，提醒你：Steve 的工具 steve_update、steve_ask、steve_deliver 仍然可用。",

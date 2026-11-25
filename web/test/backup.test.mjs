@@ -2,8 +2,8 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 
 const m = await import("../src/backup.ts")
-const status = (daily, last) => ({ database: "/h/data/steve.sqlite3", dir: "/h/backups", daily, keep_days: 7, settings: { enabled: daily, keep_days: 7 }, available: true, last })
-const copy = { name: "daily-20260102.sqlite3", at: 1, bytes: 2 }
+const status = (daily, last) => ({ database: "/h/data/steve.sqlite3", dir: "/h/backups/restic", settings: { enabled: daily, keep_days: 7 }, available: true, last })
+const copy = { snapshot_id: "a".repeat(64), at: 1 }
 
 test("the backup row says the plan, and the newest daily copy or that none was made yet", () => {
   assert.deepEqual([m.planKey(status(true, copy)), m.lastKey(status(true, copy))], ["backupDaily", "backupLast"])

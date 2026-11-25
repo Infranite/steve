@@ -19,7 +19,7 @@ pub const REQUIRED_FEATURES: [&str; 6] = [
     "media.download",
 ];
 /// What the Hub can use, sent in hello (§3.2).
-pub const CAPABILITIES: [&str; 8] = [
+pub const CAPABILITIES: [&str; 9] = [
     "changes",
     "history",
     "media",
@@ -28,6 +28,7 @@ pub const CAPABILITIES: [&str; 8] = [
     "recall",
     "reactions",
     "people",
+    "metrics",
 ];
 /// The earliest time a receiver accepts (2000-01-01, §6).
 pub const MIN_TIME_MS: i64 = 946_684_800_000;
@@ -677,6 +678,65 @@ impl Hello {
     }
 }
 
+/// `connections.config` plugin id validation: lowercase slug `[a-z0-9][a-z0-9_-]{0,39}`.
+pub fn valid_plugin_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    (1..=40).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
+}
+
+/// Maximum latency samples accepted in one `metrics.report` notification.
+pub const MAX_METRIC_SAMPLES: usize = 256;
+/// Maximum latency value accepted from a plugin report (10 minutes in ms).
+pub const MAX_METRIC_LATENCY_MS: f64 = 600_000.0;
+
+/// Optional structured telemetry pushed by a plugin via the `metrics.report` notification.
+/// All labels are supplied by the Hub from its local manifest, never from this frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginMeters {
+    pub upstream_requests: u64,
+    pub upstream_errors: u64,
+    pub upstream_latency_ms: Vec<f64>,
+    pub inbound_events: u64,
+    pub outbound_events: u64,
+    pub queue_depth: Option<u64>,
+    pub upstream_connected: Option<bool>,
+    pub upstream_reconnects: u64,
+}
+
+impl PluginMeters {
+    pub fn parse(v: &Value) -> Result<Self, String> {
+        let Some(o) = v.as_object() else {
+            return Err("metrics.report params must be an object".into());
+        };
+        let u64_field = |k: &str| o.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let upstream_latency_ms = o
+            .get("upstream_latency_ms")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .take(MAX_METRIC_SAMPLES)
+                    .filter_map(Value::as_f64)
+                    .filter(|ms| ms.is_finite() && *ms >= 0.0 && *ms <= MAX_METRIC_LATENCY_MS)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Self {
+            upstream_requests: u64_field("upstream_requests"),
+            upstream_errors: u64_field("upstream_errors"),
+            upstream_latency_ms,
+            inbound_events: u64_field("inbound_events"),
+            outbound_events: u64_field("outbound_events"),
+            queue_depth: o.get("queue_depth").and_then(Value::as_u64),
+            upstream_connected: o.get("upstream_connected").and_then(Value::as_bool),
+            upstream_reconnects: u64_field("upstream_reconnects"),
+        })
+    }
+}
+
 /// `[a-z0-9._-]`, 1–64 bytes (§3.3).
 pub fn realm_ok(r: &str) -> bool {
     (1..=64).contains(&r.len())
@@ -1263,5 +1323,44 @@ mod tests {
         let h = idempotency_key("a key with spaces");
         assert!(h.starts_with("h:") && h.len() == 66);
         assert_eq!(h, idempotency_key("a key with spaces"));
+    }
+
+    #[test]
+    fn valid_plugin_ids_and_plugin_meters_are_bounded() {
+        assert!(valid_plugin_id("lark"));
+        assert!(valid_plugin_id("my_plugin-2"));
+        assert!(!valid_plugin_id(""));
+        assert!(!valid_plugin_id("-bad"));
+        assert!(!valid_plugin_id("Upper"));
+        assert!(!valid_plugin_id(&"a".repeat(41)));
+
+        let mut samples = vec![json!(12.5), json!(-1.0), json!(MAX_METRIC_LATENCY_MS + 1.0)];
+        samples.extend((0..300).map(|_| json!(5.0)));
+        let parsed = PluginMeters::parse(&json!({
+            "upstream_requests": 10,
+            "upstream_errors": 2,
+            "upstream_latency_ms": samples,
+            "inbound_events": 4,
+            "outbound_events": 3,
+            "queue_depth": 7,
+            "upstream_connected": true,
+            "upstream_reconnects": 1,
+        }))
+        .expect("valid metrics.report");
+        assert_eq!(parsed.upstream_requests, 10);
+        assert_eq!(parsed.upstream_errors, 2);
+        assert_eq!(parsed.inbound_events, 4);
+        assert_eq!(parsed.outbound_events, 3);
+        assert_eq!(parsed.queue_depth, Some(7));
+        assert_eq!(parsed.upstream_connected, Some(true));
+        assert_eq!(parsed.upstream_reconnects, 1);
+        assert!(parsed.upstream_latency_ms.len() <= MAX_METRIC_SAMPLES);
+        assert!(
+            parsed
+                .upstream_latency_ms
+                .iter()
+                .all(|&v| (0.0..=MAX_METRIC_LATENCY_MS).contains(&v))
+        );
+        assert!(PluginMeters::parse(&json!("not-an-object")).is_err());
     }
 }

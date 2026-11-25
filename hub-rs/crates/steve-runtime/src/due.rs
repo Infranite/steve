@@ -1,4 +1,4 @@
-//! Running what is due (W2b §2, R0b). A domain keeps its due times in its own table and implements
+//! Running scheduled due work. A domain keeps its due times in its own table and implements
 //! [`DueSource`]; [`due_loop`] runs one source as one task. No scheduler object, central queue or
 //! registry: tokio already queues the timers, and write fairness belongs to the storage executor.
 //! Every source must pass [`contract::check`] (feature `due-contract`), which pins the B3 class of
@@ -56,6 +56,14 @@ pub async fn due_loop<S: DueSource>(
 ) {
     let name = source.name();
     let lag = metrics::histogram!("steve_due_lag_seconds", "loop" => name);
+    let runs_ok = metrics::counter!("steve_due_runs_total", "loop" => name, "result" => "ok");
+    let runs_err = metrics::counter!("steve_due_runs_total", "loop" => name, "result" => "err");
+    let run_duration = metrics::histogram!("steve_due_run_duration_seconds", "loop" => name);
+    let err_next =
+        metrics::counter!("steve_due_errors_total", "loop" => name, "stage" => "next_due");
+    let err_run = metrics::counter!("steve_due_errors_total", "loop" => name, "stage" => "run_due");
+    let job_runs = metrics::counter!("steve_job_runs_total", "job" => name);
+    let job_duration = metrics::histogram!("steve_job_duration_seconds", "job" => name);
     let fallback = FALLBACK.as_millis() as i64;
     let mut failures = 0u32;
     loop {
@@ -66,10 +74,29 @@ pub async fn due_loop<S: DueSource>(
         let step = match next {
             Ok(Some(at)) if at <= now => {
                 lag.record((now - at) as f64 / 1000.0);
-                source.run_due(now).await.map(|()| None)
+                job_runs.increment(1);
+                let started = std::time::Instant::now();
+                let res = source.run_due(now).await;
+                let elapsed = started.elapsed().as_secs_f64();
+                run_duration.record(elapsed);
+                job_duration.record(elapsed);
+                match res {
+                    Ok(()) => {
+                        runs_ok.increment(1);
+                        Ok(None)
+                    }
+                    Err(e) => {
+                        runs_err.increment(1);
+                        err_run.increment(1);
+                        Err(e)
+                    }
+                }
             }
             Ok(next) => Ok(Some(next.map_or(fallback, |at| (at - now).min(fallback)))),
-            Err(e) => Err(e),
+            Err(e) => {
+                err_next.increment(1);
+                Err(e)
+            }
         };
         match step {
             Ok(None) => failures = 0,

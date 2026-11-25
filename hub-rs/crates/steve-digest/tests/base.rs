@@ -22,7 +22,6 @@ fn owner_viewer_resolves_the_workspace_owner() {
         .read::<_, steve_store::StoreError>(|r| {
             let viewer = conv::owner_viewer(r, WS)?.unwrap();
             assert_eq!(viewer.user, ME);
-            assert!(viewer.scopes.is_empty());
             assert!(conv::owner_viewer(r, "missing").unwrap().is_none());
             Ok(())
         })

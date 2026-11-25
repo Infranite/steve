@@ -1,19 +1,18 @@
 import { qc, scopeKey } from "../../src/data/sync"
-import { updateChat } from "../../src/data/live"
-import { seedMessages } from "./view-data"
+import { fixtureWorkspace, seedMessages } from "./view-data"
 /* ST-50: a long main conversation. The page has the latest messages; the test serves the 300 before them from
  * /api/views/page and /api/thread/search (see chat-history.browser.mjs). */
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
-import { st, emit, useStore, type Msg, type Bot } from "../../src/store"
+import { st, useStore, type Msg, type Bot } from "../../src/store"
 import { created, older, text } from "./chat-history-data"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const steve: Bot = { id: "steve", main: true, n: "Steve", a: "", role: "你的助手", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
 st.bots = { steve }
-st.workspace = { id: "ws-history", name: "测试", item_prefix: "ST" } as typeof st.workspace
+st.workspace = fixtureWorkspace({ id: "ws-history", name: "测试", item_prefix: "ST" })
 seedMessages(Array.from({ length: 200 }, (_, n): Msg => { const i = older + n; return { id: "w" + i, k: i % 2 ? "steve" : "me", t: text(i), created: created(i) } }))
 qc.setQueryData(["page", scopeKey(), "message"], { next: `${created(older)}:w${older}`, pending: false })
 st.ready = true

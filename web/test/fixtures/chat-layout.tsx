@@ -1,7 +1,6 @@
 import { updateChat } from "../../src/data/live"
-import { seedMessages } from "./view-data"
-import { seedItems } from "./view-data"
-import { useEffect, useState } from "react"
+import { fixtureItem, fixtureWorkspace, seedItems, seedMessages } from "./view-data"
+import { useEffect, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ChatView } from "../../src/chat-view"
@@ -21,15 +20,15 @@ const long: Msg = { id: "long", k: "steve", created: now, replyTo: "request", t:
 const steve: Bot = { id: "steve", main: true, n: "Steve", a: "", role: "你的助手", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
 const dev: Bot = { ...steve, id: "dev", main: false, n: "Steve 开发 Bot" }
 st.bots = { steve, dev }
-const item = (id: string, t: string, s: Item["st"]): Item => ({ id, t, b: "dev", st: s, src: ["", ""], ws: "", project: null, up: "", acc: "", goals: [], now: "定位外层进度条与 Bot 执行过程两处状态摘要的渲染代码", plan: [["定位渲染代码", 1], ["统一计时来源", 0]], rounds: [], waits: [], ss: [], tl: [], outs: [], q: [], qs: null, branch: null, cwd: null, detail: false, dependents: [], created: now, updated: now })
+const item = (id: string, t: string, s: Item["st"]): Item => fixtureItem({ id, t, b: "dev", st: s, ws: "", acc: "", progress: "定位外层进度条与 Bot 执行过程两处状态摘要的渲染代码", plan: [["定位渲染代码", 1], ["统一计时来源", 0]], created: now, updated: now })
 seedItems([item("ST-47", "思考摘要不再堆叠“没有读文件”", "done"), item("ST-48", "执行进度只显示一处，计时统一", "run")])
 const url = "https://github.com/Infranite/steve/actions/runs/41851954210/job/118000000000?pr=48&check_suite_focus=true"
 /* what a busy conversation carries: item cards, flow-back updates, a notice, an offer and a long unbroken link */
 const rich: Msg[] = [...short,
   { id: "card", k: "steve", t: "交给开发 Bot 处理。", item: "ST-47", created: now - 90000, card: { item: "ST-47", state: "done", delivery: { text: "构建记录：" + url, at: now - 60000 }, released: { version: "v0.2.29", at: now - 50000 } } },
-  { id: "upd", k: "steve", t: "ST-48 有进展。", item: "ST-48", created: now - 40000, updates: [{ kind: "reply", text: "ST-48 · Steve 开发 Bot · 定位外层进度条与 Bot 执行过程两处状态摘要的渲染代码 " + url } as any] },
+  { id: "upd", k: "steve", t: "ST-48 有进展。", item: "ST-48", created: now - 40000, updates: [{ kind: "reply", item: "ST-48", text: "ST-48 · Steve 开发 Bot · 定位外层进度条与 Bot 执行过程两处状态摘要的渲染代码 " + url }] },
   { id: "note", k: "steve", t: "ST-48 的 Release 构建失败：" + url, item: "ST-48", created: now - 30000, notice: { kind: "build", level: "error", ref: "n1" } },
-  { id: "offer", k: "steve", t: "路径 `hub-rs/crates/steve-store/migrations/../../../web/src/components/ui/message-scroller.tsx` 里没有用到。", created: now - 20000, offer: { title: "把对话页里没用到的消息滚动组件和它的样式一起删掉，顺便整理滚动条", state: "open" } as any },
+  { id: "offer", k: "steve", t: "路径 `hub-rs/crates/steve-store/migrations/../../../web/src/components/ui/message-scroller.tsx` 里没有用到。", created: now - 20000, offer: { title: "把对话页里没用到的消息滚动组件和它的样式一起删掉，顺便整理滚动条", goal: "", state: "open" } },
 ]
 /* quoting the long reply: the quote line shows its words, not its Markdown */
 /* (a quote of the message right above is not shown: one message sits between them) */
@@ -42,10 +41,16 @@ window.addEventListener("fixture-thinking", () => { seedMessages(short); updateC
 function Fixture() {
   useStore()
   const [conv, setConv] = useState(new URLSearchParams(location.search).get("conv") ?? undefined)
+  const convRef = useRef(conv)
+  convRef.current = conv
   useEffect(() => {
-    const refresh = () => hubSubs.forEach(f => f({ type: "chan_message", id: "fixture" }))
+    const refresh = () => hubSubs.forEach(f => f({
+      rev: 1, type: "chan_message", id: "fixture",
+      space_id: convRef.current?.replace(/^chan:/, "") || "sp1",
+      ws: st.workspace?.id ?? "default",
+    }))
     const switchScope = (e: Event) => {
-      st.workspace = { ...st.workspace, id: (e as CustomEvent<string>).detail } as typeof st.workspace
+      st.workspace = fixtureWorkspace({ ...st.workspace, id: (e as CustomEvent<string>).detail })
       emit()
     }
     const switchConv = (e: Event) => setConv((e as CustomEvent<string>).detail)

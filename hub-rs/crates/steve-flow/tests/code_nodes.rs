@@ -830,6 +830,7 @@ mod on_node {
                     adapters: HashMap::new(),
                     node: "node".into(),
                     claude_executable: "/usr/bin/false".into(),
+                    claude_config_dir: None,
                     steve_home: home.path().join("steve"),
                     codex_home: home.path().join("codex"),
                     user_home: home.path().to_path_buf(),

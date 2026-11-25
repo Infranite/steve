@@ -8,6 +8,8 @@ use std::time::Duration;
 /// The default of [`CoreConfig::takeover_same_refusals`]: the second refusal for the same reason is
 /// the user's (decided by the user on 2026-11-17).
 pub const TAKEOVER_SAME_REFUSALS: u32 = 2;
+/// Default consecutive provider/execution failures on the same surface before switching fallback.
+pub const PROVIDER_ERROR_HANDOFF_THRESHOLD: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
@@ -40,14 +42,14 @@ pub struct CoreConfig {
     /// `STEVE_NO_RESUME=1`: never run agents at boot (no automatic resume, no flushing of held prompts).
     /// Always set when a Hub opens a copy of the production database.
     pub no_resume: bool,
-    /// `STEVE_DYNAMIC_WORKFLOWS=1`: opt in to collaboration planning and execution (default off).
-    pub dynamic_workflows: bool,
     /// How many times in a row Steve continues an agent that stopped without delivering or asking
     /// before the user hears of it (`takeover`); anything the user does on the item starts over.
     pub takeover_continues: u32,
     /// How many refusals of `steve_deliver` in a row for the same reason hand the item to the user
     /// instead of another continue (`takeover`); 0: never.
     pub takeover_same_refusals: u32,
+    /// Consecutive execution errors on one surface before auto-handoff to a Bot fallback (`0`: disabled).
+    pub provider_error_handoff_threshold: u32,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds.
     pub gh: PathBuf,
     /// The version this Hub runs (`dev` when unknown): what an item whose goal asks for its result to
@@ -57,8 +59,6 @@ pub struct CoreConfig {
     pub commit: Option<String>,
     /// Disk thresholds for the worktrees' volume (`workspace`).
     pub disk: crate::workspace::DiskPolicy,
-    /// `STEVE_WORKFLOW_MAX_PARALLEL`: active workflow unit cap per root item and its descendants.
-    pub max_workflow_parallel: usize,
 }
 
 /// The GitHub CLI: `STEVE_GH`, else the first of the usual places that exists, else `gh` on `PATH`.
@@ -73,15 +73,6 @@ pub fn gh_cli() -> PathBuf {
         .map(PathBuf::from)
         .find(|p| p.exists())
         .unwrap_or_else(|| "gh".into())
-}
-
-/// Active workflow units allowed per item tree (`STEVE_WORKFLOW_MAX_PARALLEL`, default 4).
-pub fn workflow_max_parallel_from_env() -> usize {
-    std::env::var("STEVE_WORKFLOW_MAX_PARALLEL")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(4)
 }
 
 fn list(s: &str) -> Vec<String> {
@@ -113,14 +104,13 @@ impl CoreConfig {
             debug_route: false,
             resume_delay: Duration::from_secs(3),
             no_resume: false,
-            dynamic_workflows: false,
             takeover_continues: 2,
             takeover_same_refusals: TAKEOVER_SAME_REFUSALS,
+            provider_error_handoff_threshold: PROVIDER_ERROR_HANDOFF_THRESHOLD,
             gh: gh_cli(),
             version: "dev".into(),
             commit: None,
             disk: Default::default(),
-            max_workflow_parallel: 4,
         }
     }
 

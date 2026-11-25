@@ -11,12 +11,12 @@ import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Section, Empty, StatusDot, ConnectPrompt, Notice, Pill, Blank } from "@/ui"
 import { Select } from "@/view-shared"
 import { tm } from "@/store"
-import { useLoad } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { CONN_STATUS } from "@/api/accounts"
 import { channelsApi, attentionOf, spaceTitle, type Attention, type ChannelAccount, type Space } from "@/api/channels"
 import { useBusy } from "@/accounts/load"
 import { AttentionMenu, Name, SpaceAvatar, doingLine } from "@/channels/space-bits"
-import { PersonaAvatar } from "@/channels/basis"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { SpaceView } from "@/channels/space"
 import { AccountView } from "@/channels/account"
 import { PersonasRoute, PersonasSection } from "@/channels/persona"
@@ -36,13 +36,13 @@ const ALL = "__all"
 
 function ChannelsView() {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["channels", "list"], async () => {
     const [accounts, personas] = await Promise.all([channelsApi.accounts(), channelsApi.personas()])
     return { accounts, personas }
-  }, [], ["connection", "account", "space", "persona", "channel"])
+  }, { events: ["connection", "account", "space", "persona", "channel"] })
   const [acc, setAcc] = useState(ALL), [showBlocked, setShowBlocked] = useState(false)
   const [busy, act] = useBusy()
-  const data = L.s === "ok" ? L.data : null
+  const data = L.data ?? null
   const accounts = data?.accounts ?? []
   const shown = accounts.filter((a) => acc === ALL || a.connection.id === acc)
   const every = useMemo(() => shown.flatMap((a) => a.spaces.map((s) => ({ s, a }))).sort((x, y) => (y.s.last_message ?? 0) - (x.s.last_message ?? 0)), [data, acc])
@@ -50,8 +50,8 @@ function ChannelsView() {
   const blocked = every.filter(({ s }) => attentionOf(s) === "blocked")
   const spaces = showBlocked ? blocked : every.filter(({ s }) => attentionOf(s) !== "blocked")
   const pick = (s: Space, a: Attention) => void act(() => channelsApi.patchSpace(s.id, { attention: a }), t(a === "blocked" ? "channels:list.blockedToast" : a === "quiet" ? "channels:list.quietToast" : "channels:list.realtimeToast", { name: spaceTitle(s) })).then((r) => r && L.reload())
-  if (L.s === "loading") return <Page title={t("channels:list.title")}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
-  if (L.s === "error") return <Page title={t("channels:list.title")}><Empty title={L.err} /></Page>
+  if (L.loading) return <Page title={t("channels:list.title")}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
+  if (L.error || !L.data) return <Page title={t("channels:list.title")}><Empty title={L.error?.message ?? ""} /></Page>
   const all = L.data.accounts
   const many = all.length > 1
   const total = all.reduce((n, a) => n + a.spaces.length, 0)
@@ -101,7 +101,7 @@ function AccountRow({ a }: { a: ChannelAccount }) {
   const [s, dot] = CONN_STATUS[a.connection.status] ?? [a.connection.status, "idle"]
   const as = a.mode === "self" ? t("channels:list.rowAsYou") : t("channels:list.rowAsPersona", { persona: a.persona?.name ?? t("channels:word.defaultPersona") })
   return (
-    <Row icon={<PersonaAvatar bot={a.mode === "self" ? null : a.personaBot} size={32} />} onClick={() => go("#/channels/acc/" + a.connection.id)} data-channel-row={a.connection.id}
+    <Row icon={<ActorAvatar actorId={a.mode === "self" ? "me" : (a.personaBot ?? "me")} size={32} />} onClick={() => go("#/channels/acc/" + a.connection.id)} data-channel-row={a.connection.id}
       title={<span className="flex min-w-0 items-center gap-1.5"><Name>{a.name}</Name><Pill className="font-normal">{t(a.mode === "self" ? "channels:word.you" : "channels:word.bot")}</Pill></span>}
       sub={<span className="block truncate">{[a.provider.name, as, t("channels:list.rowCount", { count: a.spaces.length })].join(" · ")}</span>}>
       {a.connection.status !== "ok" && <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span>}

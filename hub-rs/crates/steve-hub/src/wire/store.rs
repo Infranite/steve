@@ -1,5 +1,4 @@
-//! [`Repo`] on steve-store: every method is one store call; rows go out through serde, which keeps the
-//! repo.ts shapes (steve-store's types are tested against them).
+//! Hub storage operations on [`steve_store::Store`].
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -8,11 +7,52 @@ use steve_store as s;
 
 use std::collections::HashMap;
 
-use crate::backend::{
-    BResult, Backend, BackendError, BotExtras, ImportedSession, NewProject, Obj, Repo,
-};
 use crate::bus::Bus;
+use crate::error::{BResult, BackendError};
 use crate::files::NewFile;
+
+/// A JSON object produced by store serializers.
+pub type Obj = Map<String, Value>;
+pub type ItemExtras = steve_store::state_batches::ItemExtras;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewProject {
+    pub name: String,
+    pub description: String,
+    pub device_id: String,
+    pub path: String,
+    /// `git` or `dir`.
+    pub kind: String,
+    pub worktree: bool,
+    pub default_bot: Option<String>,
+    pub release: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedSession {
+    pub workspace_id: String,
+    pub harness: String,
+    pub cwd: String,
+    pub title: String,
+    pub source: String,
+    pub import_key: String,
+    pub created: f64,
+}
+
+#[derive(Default)]
+pub struct SummaryFacts {
+    pub workspace_name: String,
+    pub pending: bool,
+    pub devices_online: usize,
+    pub devices_total: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BotExtras {
+    pub workspaces: HashMap<String, Vec<String>>,
+    pub mcp: HashMap<String, Vec<Value>>,
+    pub fallback_surfaces: HashMap<String, Vec<Value>>,
+}
 
 /// Store errors keep their user-facing text (`没有这个 Bot`, SQLite's `UNIQUE constraint failed: …`) as a 500.
 fn err(e: s::StoreError) -> BackendError {
@@ -65,18 +105,9 @@ impl s::Publisher for BusPublisher {
     }
 }
 
-/// The Hub adapter for storage reads and writes.
+/// The Hub handle for storage reads and writes.
 #[derive(Clone)]
 pub struct StoreBackend(pub s::Store);
-
-impl Backend for StoreBackend {
-    fn reader(&self) -> BResult<Box<dyn Repo + '_>> {
-        Ok(Box::new(self.clone()))
-    }
-    fn writer(&self) -> BResult<Box<dyn Repo + '_>> {
-        Ok(Box::new(self.clone()))
-    }
-}
 
 fn mcp_value(server: s::state_batches::McpSummary) -> BResult<Value> {
     serde_json::to_value(server).map_err(|e| BackendError::msg(e.to_string()))
@@ -86,8 +117,8 @@ fn str_field(o: &Obj, k: &str) -> Option<String> {
     o.get(k).and_then(Value::as_str).map(str::to_string)
 }
 
-impl Repo for StoreBackend {
-    fn bot_extras(&self) -> BResult<Option<BotExtras>> {
+impl StoreBackend {
+    pub fn bot_extras(&self) -> BResult<BotExtras> {
         let extras = self
             .0
             .read(|r| s::state_batches::bot_extras(r))
@@ -100,25 +131,34 @@ impl Repo for StoreBackend {
                 Ok((bot, values))
             })
             .collect::<BResult<_>>()?;
-        Ok(Some(BotExtras {
+        let fallback_surfaces = extras
+            .fallback_surfaces
+            .into_iter()
+            .map(|(bot, surfaces)| {
+                let values = surfaces
+                    .into_iter()
+                    .map(|s| serde_json::to_value(s).map_err(|e| BackendError::msg(e.to_string())))
+                    .collect::<BResult<_>>()?;
+                Ok((bot, values))
+            })
+            .collect::<BResult<_>>()?;
+        Ok(BotExtras {
             workspaces: extras.workspaces,
             mcp,
-        }))
+            fallback_surfaces,
+        })
     }
 
-    fn ensure_workspace(&self) -> BResult<()> {
+    pub fn ensure_workspace(&self) -> BResult<()> {
         self.0.ensure_workspace().map_err(err)
     }
-    fn workspace_get(&self, id: &str) -> BResult<Option<Obj>> {
+    pub fn workspace_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.workspaces().get(id).map_err(err)?)
     }
-    fn workspaces_of_user(&self, user: &str) -> BResult<Vec<Obj>> {
+    pub fn workspaces_of_user(&self, user: &str) -> BResult<Vec<Obj>> {
         objs(self.0.workspaces().of_user(user).map_err(err)?)
     }
-    fn workspaces_all(&self) -> BResult<Vec<Obj>> {
-        objs(self.0.workspaces().all().map_err(err)?)
-    }
-    fn workspace_create(
+    pub fn workspace_create(
         &self,
         name: &str,
         description: Option<&str>,
@@ -132,7 +172,7 @@ impl Repo for StoreBackend {
         };
         obj(self.0.workspaces().create(&p, owner).map_err(err)?)
     }
-    fn workspace_patch(&self, id: &str, p: &Obj) -> BResult<Obj> {
+    pub fn workspace_patch(&self, id: &str, p: &Obj) -> BResult<Obj> {
         self.0
             .workspaces()
             .patch(id, &patch(p)?)
@@ -140,13 +180,23 @@ impl Repo for StoreBackend {
             .map(obj)
             .unwrap_or_else(|| Err(gone("workspace")))
     }
-    fn workspace_is_member(&self, id: &str, user: &str) -> BResult<bool> {
+    pub fn workspace_is_member(&self, id: &str, user: &str) -> BResult<bool> {
         self.0.workspaces().is_member(id, user).map_err(err)
     }
-    fn user_by_session(&self, token: &str) -> BResult<Option<Obj>> {
+    pub fn user_by_session(&self, token: &str) -> BResult<Option<Obj>> {
         opt(self.0.auth_sessions().user(token).map_err(err)?)
     }
-    fn audit(
+    pub fn member_identities(&self, ws: &str) -> BResult<Vec<steve_types::MemberIdentity>> {
+        self.0.users().member_identities(ws).map_err(err)
+    }
+    pub fn member_identity(
+        &self,
+        ws: &str,
+        user: &str,
+    ) -> BResult<Option<steve_types::MemberIdentity>> {
+        self.0.users().member_identity(ws, user).map_err(err)
+    }
+    pub fn audit(
         &self,
         actor: &str,
         action: &str,
@@ -156,7 +206,7 @@ impl Repo for StoreBackend {
     ) -> BResult<()> {
         self.0.audit(actor, action, target, detail, ws).map_err(err)
     }
-    fn audit_page(
+    pub fn audit_page(
         &self,
         ws: &str,
         reader: &str,
@@ -167,29 +217,23 @@ impl Repo for StoreBackend {
         serde_json::to_value(page).map_err(|e| BackendError::msg(e.to_string()))
     }
 
-    fn settings_all(&self, ws: &str) -> BResult<Obj> {
+    pub fn settings_all(&self, ws: &str) -> BResult<Obj> {
         self.0.settings().all(ws).map_err(err)
     }
-    fn settings_get(&self, ws: &str, key: &str) -> BResult<Option<Value>> {
-        self.0
-            .settings()
-            .get::<Option<Value>>(ws, key, None)
-            .map_err(err)
-    }
-    fn settings_set(&self, ws: &str, values: &Obj, author: &str) -> BResult<()> {
+    pub fn settings_set(&self, ws: &str, values: &Obj, author: &str) -> BResult<()> {
         self.0.settings().set(ws, values, author).map_err(err)
     }
 
-    fn projects_list(&self, ws: &str) -> BResult<Vec<Obj>> {
+    pub fn projects_list(&self, ws: &str) -> BResult<Vec<Obj>> {
         objs(self.0.projects().list(ws, false).map_err(err)?)
     }
-    fn project_get(&self, id: &str) -> BResult<Option<Obj>> {
+    pub fn project_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.projects().get(id).map_err(err)?)
     }
-    fn project_by_path(&self, ws: &str, path: &str) -> BResult<Option<Obj>> {
+    pub fn project_by_path(&self, ws: &str, path: &str) -> BResult<Option<Obj>> {
         opt(self.0.projects().by_path(ws, path).map_err(err)?)
     }
-    fn project_create(&self, ws: &str, p: &NewProject) -> BResult<Obj> {
+    pub fn project_create(&self, ws: &str, p: &NewProject) -> BResult<Obj> {
         let release = p
             .release
             .clone()
@@ -208,7 +252,7 @@ impl Repo for StoreBackend {
         };
         obj(self.0.projects().create(ws, &np).map_err(err)?)
     }
-    fn project_patch(&self, id: &str, p: &Obj, author: &str) -> BResult<Obj> {
+    pub fn project_patch(&self, id: &str, p: &Obj, author: &str) -> BResult<Obj> {
         obj(self
             .0
             .projects()
@@ -216,13 +260,16 @@ impl Repo for StoreBackend {
             .map_err(err)?)
     }
 
-    fn bots_list(&self, ws: Option<&str>) -> BResult<Vec<Obj>> {
+    pub fn bots_list(&self, ws: Option<&str>) -> BResult<Vec<Obj>> {
         objs(self.0.bots().list(ws).map_err(err)?)
     }
-    fn bot_get(&self, id: &str) -> BResult<Option<Obj>> {
+    pub fn bot_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.bots().get(id).map_err(err)?)
     }
-    fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
+    pub fn bot_owner(&self, id: &str) -> BResult<Option<Option<String>>> {
+        self.0.bots().owner(id).map_err(err)
+    }
+    pub fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
         Ok(self
             .0
             .bots()
@@ -232,7 +279,7 @@ impl Repo for StoreBackend {
             .map(|w| w.workspace_id)
             .collect())
     }
-    fn bot_mcp_servers(&self, id: &str) -> BResult<Vec<Value>> {
+    pub fn bot_mcp_servers(&self, id: &str) -> BResult<Vec<Value>> {
         self.0
             .read(|r| s::state_batches::bot_mcp(r, id))
             .map_err(err)?
@@ -240,13 +287,24 @@ impl Repo for StoreBackend {
             .map(mcp_value)
             .collect()
     }
-    fn bot_in_workspace(&self, id: &str, ws: &str) -> BResult<bool> {
+    pub fn bot_fallback_surfaces(&self, id: &str) -> BResult<Vec<Value>> {
+        self.0
+            .bots()
+            .fallback_surfaces(id)
+            .map_err(err)?
+            .into_iter()
+            .map(|surface| {
+                serde_json::to_value(surface).map_err(|e| BackendError::msg(e.to_string()))
+            })
+            .collect()
+    }
+    pub fn bot_in_workspace(&self, id: &str, ws: &str) -> BResult<bool> {
         self.0.bots().in_workspace(id, ws).map_err(err)
     }
-    fn bot_set_workspaces(&self, id: &str, ws: &[String]) -> BResult<()> {
+    pub fn bot_set_workspaces(&self, id: &str, ws: &[String]) -> BResult<()> {
         self.0.bots().set_workspaces(id, ws).map_err(err)
     }
-    fn bot_create(&self, ws: &str, f: &Obj, author: &str) -> BResult<Obj> {
+    pub fn bot_create(&self, ws: &str, f: &Obj, author: &str) -> BResult<Obj> {
         let get = |k: &str| f.get(k).filter(|v| !v.is_null()).cloned();
         let nb = s::NewBot {
             name: str_field(f, "name").unwrap_or_default(),
@@ -269,15 +327,19 @@ impl Repo for StoreBackend {
                 .transpose()
                 .map_err(|e| BackendError::msg(e.to_string()))?,
             default_project: str_field(f, "default_project"),
+            enabled: f.get("enabled").and_then(Value::as_bool),
+            fallback_surfaces: get("fallback_surfaces")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| BackendError::msg(e.to_string()))?,
         };
-        self.0
-            .bots()
-            .create(ws, &nb, author)
-            .map_err(err)?
-            .map(obj)
-            .unwrap_or_else(|| Err(gone("bot")))
+        let bot = self
+            .0
+            .write(|tx| steve_modules::contacts::stewards::create_bot(tx, ws, &nb, author))
+            .map_err(|e| BackendError::msg(e.to_string()))?;
+        obj(bot)
     }
-    fn bot_patch(&self, id: &str, p: &Obj, author: &str) -> BResult<Obj> {
+    pub fn bot_patch(&self, id: &str, p: &Obj, author: &str) -> BResult<Obj> {
         self.0
             .bots()
             .patch(id, &patch(p)?, author)
@@ -285,7 +347,7 @@ impl Repo for StoreBackend {
             .map(obj)
             .unwrap_or_else(|| Err(gone("bot")))
     }
-    fn bot_patch_checked(
+    pub fn bot_patch_checked(
         &self,
         id: &str,
         p: &Obj,
@@ -308,45 +370,51 @@ impl Repo for StoreBackend {
                 Err(e) => BackendError::msg(e.to_string()),
             })
     }
-    fn bot_restore(&self, id: &str) -> BResult<()> {
+    pub fn bot_restore(&self, id: &str) -> BResult<()> {
         self.0.bots().restore(id).map_err(err)
     }
 
-    fn memory_get(&self, id: &str) -> BResult<Option<Obj>> {
+    pub fn memory_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.memories().get(id).map_err(err)?)
     }
-    fn memories_list(&self, bot: &str, ws: &str) -> BResult<Vec<Obj>> {
+    pub fn memories_list(&self, bot: &str, ws: &str) -> BResult<Vec<Obj>> {
         objs(self.0.memories().list(bot, ws).map_err(err)?)
     }
-    fn memories_count(&self, bot: &str, ws: &str) -> BResult<i64> {
+    pub fn memories_count(&self, bot: &str, ws: &str) -> BResult<i64> {
         self.0.memories().count(bot, ws).map_err(err)
     }
-    fn memory_add(&self, bot: &str, ws: &str, text: &str, source: &str) -> BResult<String> {
+    pub fn memory_add(&self, bot: &str, ws: &str, text: &str, source: &str) -> BResult<String> {
         self.0.memories().add(bot, ws, text, source).map_err(err)
     }
-    fn memory_edit(&self, id: &str, text: &str) -> BResult<()> {
+    pub fn memory_edit(&self, id: &str, text: &str) -> BResult<()> {
         self.0.memories().edit(id, text).map_err(err)
     }
-    fn memory_remove(&self, id: &str) -> BResult<()> {
+    pub fn memory_remove(&self, id: &str) -> BResult<()> {
         self.0.memories().remove(id).map_err(err)
     }
-    fn memories_clear(&self, ws: &str) -> BResult<()> {
+    pub fn memories_clear(&self, ws: &str) -> BResult<()> {
         self.0.memories().clear(ws).map_err(err)
     }
-    fn memories_delete_of_bot(&self, bot: &str) -> BResult<()> {
+    pub fn memories_delete_of_bot(&self, bot: &str) -> BResult<()> {
         self.0.memories().remove_of_bot(bot).map_err(err)
     }
+    pub fn memories_delete_of_bot_in_workspace(&self, bot: &str, ws: &str) -> BResult<()> {
+        self.0
+            .memories()
+            .remove_of_bot_in_workspace(bot, ws)
+            .map_err(err)
+    }
 
-    fn tags_list(&self, ws: &str) -> BResult<Vec<Obj>> {
+    pub fn tags_list(&self, ws: &str) -> BResult<Vec<Obj>> {
         objs(self.0.tags().list(ws).map_err(err)?)
     }
-    fn tag_get(&self, id: &str) -> BResult<Option<Obj>> {
+    pub fn tag_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.tags().get(id).map_err(err)?)
     }
-    fn tag_by_name(&self, ws: &str, name: &str) -> BResult<Option<Obj>> {
+    pub fn tag_by_name(&self, ws: &str, name: &str) -> BResult<Option<Obj>> {
         opt(self.0.tags().by_name(ws, name).map_err(err)?)
     }
-    fn tag_create(
+    pub fn tag_create(
         &self,
         ws: &str,
         name: &str,
@@ -361,16 +429,16 @@ impl Repo for StoreBackend {
         };
         obj(self.0.tags().create(ws, &t, by).map_err(err)?)
     }
-    fn tag_patch(&self, id: &str, p: &Obj) -> BResult<Option<Obj>> {
+    pub fn tag_patch(&self, id: &str, p: &Obj) -> BResult<Option<Obj>> {
         opt(self.0.tags().patch(id, &patch(p)?).map_err(err)?)
     }
-    fn tag_remove(&self, id: &str) -> BResult<()> {
+    pub fn tag_remove(&self, id: &str) -> BResult<()> {
         self.0.tags().remove(id).map_err(err)
     }
-    fn tag_merge(&self, from: &str, into: &str) -> BResult<()> {
+    pub fn tag_merge(&self, from: &str, into: &str) -> BResult<()> {
         self.0.tags().merge(from, into).map_err(err)
     }
-    fn tag_uses(&self, ws: &str) -> BResult<Obj> {
+    pub fn tag_uses(&self, ws: &str) -> BResult<Obj> {
         Ok(self
             .0
             .tags()
@@ -380,56 +448,65 @@ impl Repo for StoreBackend {
             .map(|(k, n)| (k, Value::from(n)))
             .collect::<Map<_, _>>())
     }
-    fn tags_of_item(&self, item: &str) -> BResult<Vec<String>> {
+    pub fn tags_of_item(&self, item: &str) -> BResult<Vec<String>> {
         self.0.tags().of_item(item).map_err(err)
     }
-    fn tags_set_item(&self, item: &str, tags: &[String]) -> BResult<Vec<String>> {
+    pub fn tags_set_item(&self, item: &str, tags: &[String]) -> BResult<Vec<String>> {
         self.0.tags().set_item(item, tags).map_err(err)
     }
 
-    fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
+    pub fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.items().get(id).map_err(err)?)
     }
-    fn item_patch(&self, id: &str, p: &Obj) -> BResult<Option<Obj>> {
+    pub fn item_view(&self, ws: &str, id: &str) -> BResult<Option<steve_types::ItemView>> {
+        use s::Views;
+        let id = id.to_string();
+        Ok(self
+            .0
+            .read(|r| r.item_views().of(ws, std::slice::from_ref(&id)))
+            .map_err(err)?
+            .into_iter()
+            .next())
+    }
+    pub fn item_patch(&self, id: &str, p: &Obj) -> BResult<Option<Obj>> {
         opt(self.0.items().patch(id, &patch(p)?).map_err(err)?)
     }
-    fn item_set_design_gate(&self, id: &str, on: bool) -> BResult<Option<Obj>> {
+    pub fn item_set_design_gate(&self, id: &str, on: bool) -> BResult<Option<Obj>> {
         opt(self.0.items().set_design_gate(id, on).map_err(err)?)
     }
-    fn item_remove(&self, id: &str) -> BResult<()> {
+    pub fn item_remove(&self, id: &str) -> BResult<()> {
         self.0.items().remove(id).map_err(err)
     }
-    fn item_text(&self, ws: &str, id: &str) -> BResult<Option<Obj>> {
+    pub fn item_text(&self, ws: &str, id: &str) -> BResult<Option<Obj>> {
         use steve_store::Views;
         opt(self.0.read(|r| r.item_views().text(ws, id)).map_err(err)?)
     }
-    fn item_goals(&self, id: &str) -> BResult<Vec<Obj>> {
+    pub fn item_goals(&self, id: &str) -> BResult<Vec<Obj>> {
         objs(self.0.items().goals(id).map_err(err)?)
     }
-    fn item_plan_rounds(&self, id: &str) -> BResult<Vec<Obj>> {
+    pub fn item_plan_rounds(&self, id: &str) -> BResult<Vec<Obj>> {
         objs(self.0.items().plan_rounds(id).map_err(err)?)
     }
-    fn item_cycles(&self, id: &str) -> BResult<Vec<Obj>> {
+    pub fn item_cycles(&self, id: &str) -> BResult<Vec<Obj>> {
         objs(self.0.items().cycles(id).map_err(err)?)
     }
-    fn item_goal(&self, id: &str) -> BResult<String> {
+    pub fn item_goal(&self, id: &str) -> BResult<String> {
         self.0.items().goal(id).map_err(err)
     }
-    fn deps_of(&self, item: &str) -> BResult<Vec<String>> {
+    pub fn deps_of(&self, item: &str) -> BResult<Vec<String>> {
         self.0.deps().of(item).map_err(err)
     }
-    fn deps_dependents(&self, item: &str) -> BResult<Vec<String>> {
+    pub fn deps_dependents(&self, item: &str) -> BResult<Vec<String>> {
         self.0.deps().dependents(item).map_err(err)
     }
-    fn thread_item(&self, item: &str) -> BResult<Option<Value>> {
+    pub fn thread_item(&self, item: &str) -> BResult<Option<Value>> {
         Ok(self
             .0
-            .thread()
-            .item(item)
+            .read(|r| s::thread::dispatch_by_item(r, item))
             .map_err(err)?
-            .map(|t| serde_json::json!({"follow": t.follow, "origin_msg": t.origin_msg})))
+            .map(|t| serde_json::json!({"follow": t.follow, "origin_msg": t.origin_message_id})))
     }
-    fn timeline_add(
+    pub fn timeline_add(
         &self,
         item: &str,
         actor: &str,
@@ -442,13 +519,13 @@ impl Repo for StoreBackend {
             .add(item, actor, kind, text, session, &[])
             .map_err(err)
     }
-    fn timeline_list(&self, item: &str) -> BResult<Vec<Obj>> {
+    pub fn timeline_list(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.timeline().list(item).map_err(err)?)
     }
-    fn artifacts_list(&self, item: &str) -> BResult<Vec<Obj>> {
+    pub fn artifacts_list(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.artifacts().list(item).map_err(err)?)
     }
-    fn artifact_roles(&self, item: &str) -> BResult<Obj> {
+    pub fn artifact_roles(&self, item: &str) -> BResult<Obj> {
         Ok(self
             .0
             .artifacts()
@@ -458,10 +535,10 @@ impl Repo for StoreBackend {
             .map(|(id, role)| (id, Value::String(role)))
             .collect())
     }
-    fn annotations_list(&self, item: &str) -> BResult<Vec<Obj>> {
+    pub fn annotations_list(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.annotations().list(item).map_err(err)?)
     }
-    fn annotation_add(
+    pub fn annotation_add(
         &self,
         item: &str,
         art: &str,
@@ -475,13 +552,13 @@ impl Repo for StoreBackend {
             .add(item, art, path, anchor, note)
             .map_err(err)?)
     }
-    fn annotation_edit(&self, item: &str, id: &str, note: &str) -> BResult<Option<Obj>> {
+    pub fn annotation_edit(&self, item: &str, id: &str, note: &str) -> BResult<Option<Obj>> {
         opt(self.0.annotations().edit(item, id, note).map_err(err)?)
     }
-    fn annotation_remove(&self, item: &str, id: &str) -> BResult<bool> {
+    pub fn annotation_remove(&self, item: &str, id: &str) -> BResult<bool> {
         self.0.annotations().remove(item, id).map_err(err)
     }
-    fn annotations_claim(
+    pub fn annotations_claim(
         &self,
         item: &str,
         ids: &[String],
@@ -490,7 +567,7 @@ impl Repo for StoreBackend {
         let c = self.0.annotations().claim(item, ids, key).map_err(err)?;
         Ok((c.again, objs(c.taken)?))
     }
-    fn annotations_settle(
+    pub fn annotations_settle(
         &self,
         item: &str,
         key: &str,
@@ -503,28 +580,28 @@ impl Repo for StoreBackend {
             .map_err(err)
     }
 
-    fn session_get(&self, id: &str) -> BResult<Option<Obj>> {
+    pub fn session_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.sessions().get(id).map_err(err)?)
     }
-    fn sessions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
+    pub fn sessions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.sessions().of_item(item).map_err(err)?)
     }
-    fn session_patch(&self, id: &str, p: &Obj) -> BResult<()> {
+    pub fn session_patch(&self, id: &str, p: &Obj) -> BResult<()> {
         self.0.sessions().patch(id, &patch(p)?).map_err(err)
     }
-    fn sessions_search(&self, ws: &str, q: &str) -> BResult<Vec<String>> {
+    pub fn sessions_search(&self, ws: &str, q: &str) -> BResult<Vec<String>> {
         self.0.sessions().search(ws, q).map_err(err)
     }
-    fn events_add(&self, session: &str, kind: &str, data: &Value) -> BResult<i64> {
+    pub fn events_add(&self, session: &str, kind: &str, data: &Value) -> BResult<i64> {
         self.0
             .events()
             .add(session, kind, data.clone())
             .map_err(err)
     }
-    fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
+    pub fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
         objs(self.0.queued().list(session).map_err(err)?)
     }
-    fn import_keys(&self) -> BResult<Vec<String>> {
+    pub fn import_keys(&self) -> BResult<Vec<String>> {
         Ok(self
             .0
             .sessions()
@@ -533,7 +610,7 @@ impl Repo for StoreBackend {
             .into_iter()
             .collect())
     }
-    fn session_insert_imported(&self, p: &ImportedSession) -> BResult<String> {
+    pub fn session_insert_imported(&self, p: &ImportedSession) -> BResult<String> {
         let x = s::ImportedSession {
             workspace_id: p.workspace_id.clone(),
             harness: p.harness.clone(),
@@ -546,17 +623,17 @@ impl Repo for StoreBackend {
         };
         self.0.sessions().insert_imported(&x).map_err(err)
     }
-    fn session_delete(&self, id: &str) -> BResult<()> {
+    pub fn session_delete(&self, id: &str) -> BResult<()> {
         self.0.sessions().remove(id).map_err(err)
     }
 
-    fn file_get(&self, id: &str) -> BResult<Option<Obj>> {
+    pub fn file_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.files().get(id).map_err(err)?)
     }
-    fn file_same(&self, ws: &str, sha256: &str, name: &str) -> BResult<Option<Obj>> {
+    pub fn file_same(&self, ws: &str, sha256: &str, name: &str) -> BResult<Option<Obj>> {
         opt(self.0.files().same(ws, sha256, name).map_err(err)?)
     }
-    fn file_create(&self, f: &NewFile) -> BResult<Obj> {
+    pub fn file_create(&self, f: &NewFile) -> BResult<Obj> {
         let n = s::NewFile {
             id: f.id.clone(),
             workspace_id: f.workspace_id.clone(),
@@ -569,10 +646,10 @@ impl Repo for StoreBackend {
         obj(self.0.files().create(&n).map_err(err)?)
     }
 
-    fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
+    pub fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.decisions().of_item(item).map_err(err)?)
     }
-    fn decision_views_of_item(
+    pub fn decision_views_of_item(
         &self,
         ws: &str,
         item: &str,
@@ -584,13 +661,13 @@ impl Repo for StoreBackend {
             .map_err(err)?;
         Ok(ds)
     }
-    fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {
+    pub fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {
         objs(self.0.messages().list(ws, space, limit).map_err(err)?)
     }
-    fn messages_search(&self, ws: &str, space: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
+    pub fn messages_search(&self, ws: &str, space: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
         objs(self.0.messages().search(ws, space, q, limit).map_err(err)?)
     }
-    fn message_add(
+    pub fn message_add(
         &self,
         ws: &str,
         author: &str,
@@ -604,12 +681,12 @@ impl Repo for StoreBackend {
             .add(ws, author, text, item, meta, space)
             .map_err(err)
     }
-    fn setting_raw(&self, ws: &str, key: &str) -> BResult<Option<String>> {
+    pub fn setting_raw(&self, ws: &str, key: &str) -> BResult<Option<String>> {
         self.0
             .read(|r| steve_store::WorkspaceSettings(r).get(ws, key))
             .map_err(err)
     }
-    fn node_env_list(&self, me: &str, ws: &str, node: &str, principal: &str) -> BResult<Value> {
+    pub fn node_env_list(&self, me: &str, ws: &str, node: &str, principal: &str) -> BResult<Value> {
         use super::node_env as ne;
         use steve_store::node_environment as env;
         self.0
@@ -626,7 +703,7 @@ impl Repo for StoreBackend {
                 message: why,
             })
     }
-    fn node_env_put(
+    pub fn node_env_put(
         &self,
         me: &str,
         ws: &str,
@@ -676,26 +753,71 @@ impl Repo for StoreBackend {
                 message: why,
             })
     }
-    fn setting_put_raw(&self, ws: &str, key: &str, value: &str) -> BResult<()> {
+    pub fn setting_put_raw(&self, ws: &str, key: &str, value: &str) -> BResult<()> {
         self.0
             .write(|w| steve_store::WorkspaceSettings(w).set(ws, key, value, steve_store::now()))
             .map_err(err)
     }
-    fn summary_facts(&self, ws: &str) -> BResult<crate::backend::SummaryFacts> {
+    pub fn notices_post(
+        &self,
+        ws: &str,
+        kind: &str,
+        level: &str,
+        text: &str,
+        item: Option<&str>,
+        post_host_line: bool,
+    ) -> BResult<String> {
+        self.0
+            .write(|w| {
+                s::thread::post_notice(
+                    w,
+                    ws,
+                    kind,
+                    level,
+                    text,
+                    item,
+                    post_host_line,
+                    steve_store::now(),
+                )
+            })
+            .map(|n| n.id)
+            .map_err(err)
+    }
+    pub fn notices_dismiss(
+        &self,
+        ws: &str,
+        id_or_host_msg: &str,
+        by: Option<&str>,
+    ) -> BResult<bool> {
+        self.0
+            .write(|w| s::thread::close_notice(w, ws, id_or_host_msg, by, steve_store::now()))
+            .map_err(err)
+    }
+    pub fn notices_list(&self, ws: &str, limit: i64) -> BResult<Vec<s::ThreadNotice>> {
+        self.0
+            .read(|r| s::thread::list_notices(r, ws, limit))
+            .map_err(err)
+    }
+    pub fn notices_dismissed(&self, ws: &str) -> BResult<Vec<String>> {
+        self.0
+            .read(|r| s::thread::dismissed_alert_ids(r, ws))
+            .map_err(err)
+    }
+    pub fn summary_facts(&self, ws: &str) -> BResult<SummaryFacts> {
         self.0
             .read(|r| -> steve_store::Result<_> {
                 let workspace_name = s::Workspaces(r).name(ws)?.unwrap_or_default();
                 let (devices_online, devices_total) = s::state_batches::device_counts(r)?;
-                Ok(crate::backend::SummaryFacts {
+                Ok(SummaryFacts {
                     workspace_name,
-                    pending: s::core_queue::has_pending_in_space(r, ws, steve_core::thread::MAIN)?,
+                    pending: s::thread::has_active_or_queued(r, ws, steve_core::thread::MAIN)?,
                     devices_online: devices_online as usize,
                     devices_total: devices_total as usize,
                 })
             })
             .map_err(err)
     }
-    fn devices_list(&self) -> BResult<Vec<Obj>> {
+    pub fn devices_list(&self) -> BResult<Vec<Obj>> {
         use steve_store::runtime::{HUB_DEVICE, HUB_NODE, session_room};
         let mut out = objs(self.0.devices().list().map_err(err)?)?;
         // the Hub's machine runs the Hub's own Node: how many of its turns run and wait, against
@@ -710,7 +832,7 @@ impl Repo for StoreBackend {
         }
         Ok(out)
     }
-    fn waiting_for_room(&self) -> BResult<HashMap<String, Value>> {
+    pub fn waiting_for_room(&self) -> BResult<HashMap<String, Value>> {
         let rows = self
             .0
             .read(|r| steve_store::runtime::sessions_waiting_for_room(r))
@@ -723,7 +845,7 @@ impl Repo for StoreBackend {
             })
             .collect()
     }
-    fn device_upsert(
+    pub fn device_upsert(
         &self,
         id: &str,
         name: &str,
@@ -739,8 +861,5 @@ impl Repo for StoreBackend {
             version: version.into(),
         };
         self.0.devices().upsert(&d).map_err(err)
-    }
-    fn device_patch(&self, id: &str, p: &Obj) -> BResult<()> {
-        self.0.devices().patch(id, &patch(p)?).map_err(err)
     }
 }

@@ -47,10 +47,14 @@ pub(crate) fn encode_event(event: &Envelope<BusEvent>) -> Bytes {
         BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event { .. }))
     ) {
         let mut slim = event.clone();
-        if let BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event { data, .. })) =
-            &mut slim.event
+        if let BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event {
+            kind,
+            data,
+            ..
+        })) = &mut slim.event
         {
-            let value = super::slim::ev_out(serde_json::to_value(&*data).expect("transcript JSON"));
+            let value =
+                super::slim::ev_out(kind, serde_json::to_value(&*data).expect("transcript JSON"));
             *data =
                 steve_types::RawJson::from_str(&serde_json::to_string(&value).expect("slim JSON"))
                     .expect("validated JSON");
@@ -104,6 +108,25 @@ struct Resume {
     last: u64,
 }
 
+/// Tracks currently open SSE connections (`steve_sse_active_connections`), decrementing on drop.
+struct ActiveSseGuard {
+    gauge: metrics::Gauge,
+}
+
+impl ActiveSseGuard {
+    fn open() -> Self {
+        let gauge = metrics::gauge!("steve_sse_active_connections");
+        gauge.increment(1.0);
+        Self { gauge }
+    }
+}
+
+impl Drop for ActiveSseGuard {
+    fn drop(&mut self) {
+        self.gauge.decrement(1.0);
+    }
+}
+
 struct Sub {
     /// The workspace the stream shows; Hub events reach every connection.
     ws: String,
@@ -115,6 +138,7 @@ struct Sub {
     pending: Pending,
     /// the signed-in client this stream keeps online; the stream ends when it is signed out
     here: Option<Here>,
+    _active: ActiveSseGuard,
 }
 
 /// Resolves once the stream's client was signed out; never for a stream without one.
@@ -221,6 +245,7 @@ impl Sub {
                 last: 0,
             }),
             pending: Pending::default(),
+            _active: ActiveSseGuard::open(),
         };
         sub.write_replay(replay);
         sub
@@ -385,6 +410,7 @@ pub fn events(
             resume: None,
             pending: Pending::default(),
             here: None,
+            _active: ActiveSseGuard::open(),
         },
     };
     sub.here = here;
@@ -476,7 +502,7 @@ mod tests {
                 seq: steve_types::Seq(1),
                 kind: "tool".into(),
                 data: steve_types::RawJson::from_str(
-                    &serde_json::json!({"rawOutput": "x".repeat(5000)}).to_string(),
+                    &serde_json::json!({"tool": {"id": "t1", "result": [{"type": "text", "text": "x".repeat(5000)}]}}).to_string(),
                 )
                 .unwrap(),
                 ws: "a".into(),
@@ -505,6 +531,7 @@ mod tests {
                 ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
                 resume: None,
                 pending: Pending::default(),
+                _active: ActiveSseGuard::open(),
             };
             let second_ws = if event.scope() == Scope::Hub {
                 "b"
@@ -559,6 +586,7 @@ mod tests {
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: None,
             pending: Pending::default(),
+            _active: ActiveSseGuard::open(),
         };
         let (first, second, other) = (
             subscriber("client-a", "a"),
@@ -602,6 +630,7 @@ mod tests {
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: None,
             pending: Pending::default(),
+            _active: ActiveSseGuard::open(),
         };
         tx.send(delivery(Scope::Hub)).unwrap();
         let first = Frame::from(sub.rx.recv().await.unwrap().as_ref()).bytes;
@@ -625,6 +654,7 @@ mod tests {
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: None,
             pending: Pending::default(),
+            _active: ActiveSseGuard::open(),
         };
         tx.send(delivery(Scope::Ws("b".into()))).unwrap();
         assert_eq!(sub.coalesce(first.bytes.clone()), first.bytes);
@@ -696,6 +726,7 @@ mod tests {
                 ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
                 resume: None,
                 pending: Pending::default(),
+                _active: ActiveSseGuard::open(),
             };
             let mut watch = bus.subscribe();
             project(&bus, "ST-1");
@@ -836,6 +867,7 @@ mod tests {
                     last: c.n,
                 }),
                 pending: Pending::default(),
+                _active: ActiveSseGuard::open(),
             };
             let out = drain(&mut sub);
             assert!(!out.contains("\"type\":\"workspace\""), "{out}");
@@ -951,6 +983,42 @@ mod tests {
             assert_eq!(cursor_of(&q(None), &h).as_deref(), Some("ep_x:3"));
             assert_eq!(cursor_of(&q(Some("")), &h).as_deref(), Some("ep_x:3"));
             assert_eq!(cursor_of(&q(None), &HeaderMap::new()), None);
+        }
+
+        #[test]
+        fn active_sse_guard_tracks_open_and_closed_streams() {
+            let recorder = crate::metrics::test_recorder();
+            let handle = recorder.handle();
+            metrics::with_local_recorder(&recorder, || {
+                let first = ActiveSseGuard::open();
+                let second = ActiveSseGuard::open();
+                assert!(
+                    handle
+                        .render()
+                        .lines()
+                        .any(|l| l == "steve_sse_active_connections 2"),
+                    "{}",
+                    handle.render()
+                );
+                drop(first);
+                assert!(
+                    handle
+                        .render()
+                        .lines()
+                        .any(|l| l == "steve_sse_active_connections 1"),
+                    "{}",
+                    handle.render()
+                );
+                drop(second);
+                assert!(
+                    handle
+                        .render()
+                        .lines()
+                        .any(|l| l == "steve_sse_active_connections 0"),
+                    "{}",
+                    handle.render()
+                );
+            });
         }
     }
 }

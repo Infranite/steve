@@ -1,6 +1,13 @@
 // Real Web components against an isolated, simulated API. This does not exercise Pi or an actual Node.
 import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
+import {
+  runtimeSetupItemDetail,
+  runtimeSetupItemView,
+  runtimeSetupSessionView,
+  runtimeSnapshot,
+  runtimeViews,
+} from "./fixtures/runtime-views.ts"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:19565"
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
@@ -11,7 +18,7 @@ const runtime = (id, state, installed = [false, false], extra = {}) => ({
   setup: { state, components: installed.map((on, i) => ({ id: i ? "adapter" : "agent", name: i ? "ACP adapter" : "Agent", package: i ? "@example/acp" : "@example/agent", status: on ? "installed" : "missing", version: on ? "1.0.0" : null, path: on ? "/fixture/managed/" + "component/".repeat(10) + i : null })), can_install: state === "not_installed", reason: "Registry reason: " + state, help: "Registry help: review Node and provider configuration" }, ...extra,
 })
 const legacy = { id: "legacy", name: "Legacy ACP", ok: true, version: "", path: "", models: [], note: "No setup field", modes: ["ask", "full_access"] }
-const bot = (id, harness, perm_mode = "default") => ({ id, name: id, role: "Fixture Bot", main: false, harness, model: null, rules: "", persona: "", proactive: 1, accept_mode: "inherit", perm_mode, avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["fixture"], memories: 0 })
+const bot = (id, harness, perm_mode = "ask") => ({ id, name: id, role: "Fixture Bot", main: false, harness, model: null, rules: "", persona: "", proactive: 1, accept_mode: "inherit", perm_mode, avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["fixture"], memories: 0 })
 const device = { id: "hub", name: "Fixture Hub", roles: ["Hub"], node_id: "local", connected: true, can_configure: true, revision: 0, os: "fixture", version: "fixture", status: "正常", max_sessions: 4, seen: 0, created: 0 }
 const workspace = { id: "fixture", name: "Fixture", description: "", item_prefix: "ST", sort: 0, created: 0 }
 const fits = async page => assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no horizontal overflow")
@@ -48,8 +55,8 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
     let data
     if (p === "/api/shell") data = shell()
     else if (p === "/api/summary") data = { ws: workspace.id, thinking: false, hold: null }
-    else if (p === "/api/snapshot") data = { epoch: "e", rev: 1, cursor: "e:1", views: { item: f.items, session: f.sessions, decision: [] } }
-    else if (p === "/api/views") data = { rev: 2, views: u.searchParams.get("kind") === "session" ? f.sessions : f.items, missing: [] }
+    else if (p === "/api/snapshot") data = runtimeSnapshot(f.items, f.sessions, "e")
+    else if (p === "/api/views") data = runtimeViews(u.searchParams.get("kind") === "session" ? f.sessions : f.items, 2)
     else if (p.endsWith("/queued")) data = []
     else if (p === "/api/devices") data = { devices: f.devices }
     else if (p === "/api/runtimes") {
@@ -86,16 +93,16 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
     else if (p === "/api/bots" && method === "POST") { const b = { ...bot("created-bot", "legacy"), ...req.postDataJSON() }; f.bots.push(b); data = b }
     else if (p === "/api/items" && method === "POST") {
       const body = req.postDataJSON(), b = f.bots.find(b => b.id === body.bot)
-      const item = { id: "ST-900", ws: "fixture", phase: "active", cycle: 1, revision: 0, op_blockers: [], active_operations: 0, detail_stamp: "fixture", plan_done: 0, plan_total: 0, no: 900, title: body.goal, status: "run", stage: "执行", bot_id: b.id, project_id: null, cwd: "/fixture", branch: null, plan: [], now: "Fixture: session dispatched", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null, source: ["web", ""], parent: null, created: 0, updated: 0, goal: body.goal, goals: 1, tags: [], deps: [], sessionIds: ["fixture-session"], open: [], queued: 0, live: false }
+      const item = runtimeSetupItemView(body.goal, b.id)
       f.items = [item]
-      f.sessions = [{ id: "fixture-session", ws: "fixture", item_id: item.id, no: 1, bot_id: b.id, harness: b.harness, model: b.model, cwd: "/fixture", status: "starting", used: null, size: null, cost: null, title: body.goal, device_id: "hub", source: "Steve", readonly: false, busy: false, queued: 0, created: 0, updated: 0 }]
+      f.sessions = [runtimeSetupSessionView(item.id, b, body.goal)]
       data = item
-    } else if (p === "/api/items/ST-900") data = { ...f.items[0], goalsList: [{ version: 1, text: f.items[0].goal, created: 0 }], timeline: [], artifacts: [], decisions: [], dependents: [] }
+    } else if (p === "/api/items/ST-900") data = runtimeSetupItemDetail(f.items[0].title)
     else if (p.endsWith("/events")) data = { events: [], next: null }
     else return route.fulfill({ status: 404, json: {} })
     return route.fulfill({ json: data })
   })
-  f.open = async (hash = "#/devices/nodes/local") => { await page.goto(base + "/" + hash); await page.locator(hash.startsWith("#/devices") ? "[data-panel=runtimes]" : "[data-slot=sidebar]").first().waitFor() }
+  f.open = async (hash = "#/devices/nodes/local/harness") => { await page.goto(base + "/" + hash); await page.locator(hash.startsWith("#/devices") ? "[data-panel=runtimes]" : "[data-slot=sidebar]").first().waitFor() }
   return f
 }
 
@@ -256,13 +263,13 @@ try {
     assert.equal(await page.locator("[data-save-bot]").isDisabled(), false, "existing permission remains editable with its warning")
     await page.locator('[data-model-picker="bot-model"]').click()
     await page.locator('[data-model-opt="fixture-model"]').click()
-    await page.locator('[data-choices="bot-perm"] [data-choice=bypassPermissions]').click()
+    await page.locator('[data-choices="bot-perm"] [data-choice=full_access]').click()
     await page.locator("[data-save-bot]").click()
     await page.waitForFunction(() => !document.querySelector("[data-save-bot]"))
-    assert.equal(f.bots.find(b => b.id === "pi-bot").perm_mode, "bypassPermissions")
+    assert.equal(f.bots.find(b => b.id === "pi-bot").perm_mode, "full_access")
     assert.equal(f.bots.find(b => b.id === "pi-bot").model, "fixture-model")
 
-    await page.goto(base + "/#/devices/nodes/local")
+    await page.goto(base + "/#/devices/nodes/local/harness")
     await card(page).locator("[data-runtime-use]").click()
     await page.locator("#new-goal").fill("Fixture conversation after runtime installation")
     assert.match(await page.locator('[data-select="new-bot"]').innerText(), /pi-bot/)
@@ -292,7 +299,7 @@ try {
     assert.notEqual(await option.getAttribute("aria-disabled"), "true")
     await p.keyboard.press("Escape")
     await p.locator('[data-runtime-availability="fixture-runtime"] [data-runtime-setup-link]').click()
-    await p.waitForFunction(() => location.hash === "#/devices/nodes/local")
+    await p.waitForFunction(() => location.hash === "#/devices/nodes/local/harness")
     await p.goto(base + "/#/settings/models")
     await p.locator("[data-models-advanced-toggle]").click()
     await p.locator('[data-purpose="chat"]').click()
@@ -320,7 +327,7 @@ try {
     await np.locator("[data-save-bot]").waitFor()
     const created = n.mutations.find(m => m.path === "/api/bots")
     assert.equal(created.body.harness, "fixture-runtime")
-    assert.equal(created.body.perm_mode, "bypassPermissions")
+    assert.equal(created.body.perm_mode, "full_access")
     assert.deepEqual(n.errors, [])
   } finally { await np.close() }
   console.log("PASS: first usable runtime has limited modes; new Bot requires explicit permission and sends it, 320px")

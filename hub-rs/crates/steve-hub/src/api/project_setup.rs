@@ -14,9 +14,28 @@ use steve_node::project_setup::{self, Branch, Remote, SetupError, Staging};
 use tokio::sync::{Semaphore, mpsc};
 
 use super::projects::{Registration, already_project, expand, on_builtin_node, require_fs_owner};
-use super::{ApiResult, AppState, Ctx, blocking, body, ok};
+use super::{ApiResult, AppState, Ctx, blocking, check_len, json_body, ok};
 use crate::error::ApiError;
-use crate::validate::{Check, Str};
+
+#[derive(serde::Deserialize)]
+struct PreviewBody {
+    parent: String,
+    directory: String,
+    node: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SetupBody {
+    #[serde(flatten)]
+    registration: Registration,
+    node: Option<String>,
+    parent: String,
+    directory: String,
+    preview: String,
+    mode: String,
+    remote: Option<String>,
+    branch: Option<String>,
+}
 
 fn setup_error(e: SetupError) -> ApiError {
     use SetupError::*;
@@ -65,14 +84,19 @@ pub async fn setup_preview(
     b: Bytes,
 ) -> ApiResult {
     require_fs_owner(&c)?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let parent = k.str("parent", Str::len(1, 4096));
-    let directory = k.str("directory", Str::len(1, 255));
-    let node = k.opt_str("node", Str::ANY);
-    k.finish()?;
-    on_builtin_node(node.as_deref())?;
-    ok(json!({ "path": setup_target(&st, &c, parent, directory).await? }))
+    let req: PreviewBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    if !check_len(&req.parent, 1, 4096) {
+        bad.push("parent".into());
+    }
+    if !check_len(&req.directory, 1, 255) {
+        bad.push("directory".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    on_builtin_node(req.node.as_deref())?;
+    ok(json!({ "path": setup_target(&st, &c, req.parent, req.directory).await? }))
 }
 
 // The filesystem is shared by all workspaces of this installation, so bound Git jobs globally.
@@ -84,17 +108,46 @@ pub async fn setup(
     b: Bytes,
 ) -> ApiResult {
     require_fs_owner(&c)?;
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let registration = Registration::parse(&mut k);
-    let node = k.opt_str("node", Str::ANY);
-    let parent = k.str("parent", Str::len(1, 4096));
-    let directory = k.str("directory", Str::len(1, 255));
-    let preview = k.str("preview", Str::len(1, 8192));
-    let mode = k.str("mode", Str::ANY);
-    let remote = k.opt_str("remote", Str::len(1, 4096));
-    let branch = k.opt_str("branch", Str::max(255)).filter(|b| !b.is_empty());
-    k.finish()?;
+    let req: SetupBody = json_body(&b)?;
+    let mut bad = Vec::new();
+    req.registration.check(&mut bad);
+    if !check_len(&req.parent, 1, 4096) {
+        bad.push("parent".into());
+    }
+    if !check_len(&req.directory, 1, 255) {
+        bad.push("directory".into());
+    }
+    if !check_len(&req.preview, 1, 8192) {
+        bad.push("preview".into());
+    }
+    if req
+        .remote
+        .as_deref()
+        .is_some_and(|r| !check_len(r, 1, 4096))
+    {
+        bad.push("remote".into());
+    }
+    if req
+        .branch
+        .as_deref()
+        .is_some_and(|br| !check_len(br, 0, 255))
+    {
+        bad.push("branch".into());
+    }
+    if !bad.is_empty() {
+        return Err(ApiError::Invalid(bad));
+    }
+    let SetupBody {
+        registration,
+        node,
+        parent,
+        directory,
+        preview,
+        mode,
+        remote,
+        branch,
+    } = req;
+    let branch = branch.filter(|b| !b.is_empty());
     on_builtin_node(node.as_deref())?;
     let clone = match (mode.as_str(), remote, branch) {
         ("empty", None, None) => None,

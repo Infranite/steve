@@ -230,6 +230,9 @@ impl SessionExecutor for RemoteNode {
     async fn release_session(&self, c: Command<SessionId>) -> ApiResult<Receipt> {
         self.cmd(SESSION_RELEASE, &c, false).await
     }
+    async fn cancel_subtask(&self, c: CancelSubtask) -> ApiResult<bool> {
+        self.go(SESSION_CANCEL_SUBTASK, &c, None, false).await
+    }
 }
 
 #[async_trait]

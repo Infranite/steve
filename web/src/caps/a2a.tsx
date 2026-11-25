@@ -16,12 +16,14 @@ import { IntegrationRow, IntegrationSection, IntegrationSettings } from "@/compo
 import { Section, Empty, Loading, Segmented, Notice, Panel, Row } from "@/ui"
 import { toast } from "@/store"
 import { capsApi, type A2aAgent, type A2aAgentIn, type A2aAuth, type AgentCard } from "@/api/caps"
-import { AssignMenu, UsedBy, errText, useList } from "./common"
+import { useHubQuery } from "@/data/use-hub-query"
+import { AssignMenu, UsedBy, errText } from "./common"
 import { CopyLine } from "./steve"
 
 export function A2aLibrary() {
   const t = useT()
-  const [d, load] = useList(() => capsApi.a2a.list(), [])
+  const d = useHubQuery(["caps", "a2a"], () => capsApi.a2a.list(), { events: ["bot"], debounceMs: 300 })
+  const load = d.reload
   const [editing, setEditing] = useState<A2aAgent | "new" | null>(null)
   const [removing, setRemoving] = useState<A2aAgent | null>(null)
   const remove = async (x: A2aAgent) => {
@@ -34,12 +36,12 @@ export function A2aLibrary() {
   }
   const add = <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setEditing("new")} data-a2a-add><PlusIcon />{t("caps:a2a.add")}</Button>
   return (
-    <Section label={t("caps:a2a.section")} note={t("caps:a2a.note")} right={d.s === "ok" && d.v.length > 0 ? add : undefined} data-a2a>
-      {d.s === "loading" ? <Loading className="py-8" />
-        : d.s === "error" ? <Notice tone="destructive">{d.e}</Notice>
-        : d.v.length === 0 ? <Empty compact className="bg-muted/50" icon={<NetworkIcon />} title={t("caps:a2a.emptyTitle")} sub={t("caps:a2a.emptySub")} data-a2a-empty
+    <Section label={t("caps:a2a.section")} note={t("caps:a2a.note")} right={d.data && d.data.length > 0 ? add : undefined} data-a2a>
+      {d.loading ? <Loading className="py-8" />
+        : d.error || !d.data ? <Notice tone="destructive">{d.error?.message ?? ""}</Notice>
+        : d.data.length === 0 ? <Empty compact className="bg-muted/50" icon={<NetworkIcon />} title={t("caps:a2a.emptyTitle")} sub={t("caps:a2a.emptySub")} data-a2a-empty
             action={<Button size="sm" onClick={() => setEditing("new")} data-a2a-add><PlusIcon />{t("caps:a2a.add")}</Button>} />
-        : <div className="flex flex-col gap-3" data-a2a-list>{d.v.map((x) => (
+        : <div className="flex flex-col gap-3" data-a2a-list>{d.data.map((x) => (
             <AgentCardView key={x.id} x={x}
               aside={<>
                 <AssignMenu kind="a2a" id={x.id} name={x.title} users={x.bots ?? []} onChange={() => void load()} />
@@ -149,13 +151,13 @@ export function AgentDialog({ x, bot, onClose, onSaved }: { x: A2aAgent | null; 
 /** Steve's own card: where another agent finds it, and where it sends tasks */
 export function SteveAgent() {
   const t = useT()
-  const [d] = useList(() => capsApi.steve(), [])
+  const d = useHubQuery(["caps", "steve"], () => capsApi.steve(), { events: ["bot"], debounceMs: 300 })
   return (
     <Section label={t("caps:a2a.own")} note={t("caps:a2a.ownNote")} data-a2a-own>
-      {d.s === "loading" ? <Loading className="py-8" /> : d.s === "error" ? <Notice tone="destructive" role="alert">{d.e}</Notice> : (
+      {d.loading ? <Loading className="py-8" /> : d.error || !d.data ? <Notice tone="destructive" role="alert">{d.error?.message ?? ""}</Notice> : (
         <Panel><div className="flex flex-col gap-4 p-3 sm:p-4">
-          <CopyLine label={t("caps:a2a.ownCard")} value={d.v.agent_card} data-a2a-own-card />
-          <CopyLine label={t("caps:a2a.ownEndpoint")} value={d.v.a2a} data-a2a-own-endpoint />
+          <CopyLine label={t("caps:a2a.ownCard")} value={d.data.agent_card} data-a2a-own-card />
+          <CopyLine label={t("caps:a2a.ownEndpoint")} value={d.data.a2a} data-a2a-own-endpoint />
         </div></Panel>)}
     </Section>
   )

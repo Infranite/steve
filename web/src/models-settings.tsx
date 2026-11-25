@@ -11,7 +11,13 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { modReq } from "@/api"
+import {
+  modelsApi as api,
+  type ModelChoice as Choice,
+  type ModelPurpose as Purpose,
+  type ModelsSettingsView as View,
+  type ModelUsedRow as UsedRow,
+} from "@/api/models"
 import { st, toast, useStore, useRuntimes } from "@/store"
 import { Row, Segmented, Panel, Section, Card, Blank, Notice, Pill, Chevron, Loading, Reveal, Turn } from "@/ui"
 import { Select } from "@/view-shared"
@@ -28,19 +34,6 @@ export const MODELS_CAT = Object.defineProperties(["models", "", CpuIcon, ""], {
   3: { get: () => tr("pages:models.cat.desc"), enumerable: true },
 }) as [string, string, any, string]
 
-type Choice = { harness: string; models: string[]; effort?: string | null }
-type UsedRow = { harness: string; model: string; calls: number; failed: number; at: number }
-type Recent = { last: { harness: string; model: string; at: number } | null; used: UsedRow[] }
-type Purpose = { role?: "primary" | "lightweight"; source?: "primary" | "lightweight" | "override"; key: string; label: string; desc: string; value: Choice | null; follows: boolean; effective: Choice; recommended: Choice | null; recent: Recent | null }
-type Steve = { bot_id: string | null; name: string; harness: string; model: string | null; bot_effort: string | null; runs_on: string; models: string[]; effort: string | null; note: string | null; model_note: string | null }
-type Harness = { id: string; name: string; efforts: { key: string; label: string }[]; default_models: string[] }
-type Agent = { harness: string; name: string; models: string[]; default: string | null; value: string | null }
-type View = { lightweight?: Choice | null; lightweight_effective?: Choice; steve: Steve; purposes: Purpose[]; agents: Agent[]; harnesses: Harness[]; max: number }
-
-const api = {
-  get: () => modReq<View>("GET", "/settings/models"),
-  patch: (b: { purposes?: Record<string, Choice | null>; agents?: Record<string, string | null> }) => modReq<View>("PATCH", "/settings/models", b),
-}
 /** the name of a model without its provider path or family prefix: `claude/claude-haiku-5-5` → `haiku-5-5` */
 const short = (m: string) => m.replace(/^.*\//, "").replace(/^claude-/, "")
 const EFFORTS = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const

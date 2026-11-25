@@ -96,33 +96,6 @@ mutation!(seed_items_for_observation_preserves_results_partial_effects_and_cance
 mutation!(seed_items_for_retry_fixture, "INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('i1','default',1,'retry','active',1,1);
             INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','.','active',1,1);");
 
-mutation!(seed_items_for_workflow_pause_holds_node_fact_followups_until_explicit_resume, "INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('parent','default',2,'主事项','active',1,1);
-             INSERT INTO item_goals(item_id,version,text,created)
-             VALUES ('parent',1,'验证暂停和恢复',1);
-             INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
-             VALUES ('parent',1,2,3,1,1);
-             INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
-             VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作\",\"goal\":\"测试\",\"bot_id\":\"dev\"}','running','i1','s1');");
-
-mutation!(seed_items_for_workflow_sessions_without_a_node_never_fall_back, "INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('parent','default',1,'主事项','active',1,1),('child','default',2,'工作单元','active',1,1);
-                 INSERT INTO item_goals(item_id,version,text,created)
-                 VALUES ('parent',1,'验证运行隔离',1);
-                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated)
-                 VALUES ('work','default','child','unused-acp','','active',1,1);
-                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
-                 VALUES ('parent',1,2,3,1,1);
-                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
-                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作单元\",\"goal\":\"验证隔离\",\"bot_id\":\"test\"}','running','child','work');");
-
-mutation!(seed_items_item_id_child_id_s1, "INSERT INTO items(id, workspace_id, no, title, phase, source, created, updated) VALUES ('parent','default',1,'主事项','active','[\"测试\",\"test\"]',1,1),('child','default',2,'工作','active','[\"协作工作\",\"workflow\"]',1,1);
-                 INSERT INTO item_goals(item_id,version,text,created)
-                 VALUES ('parent',1,'验证旧授权失效',1);
-                 UPDATE sessions SET item_id='child' WHERE id='s1';
-                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
-                 VALUES ('parent',1,2,3,1,1);
-                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
-                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作\",\"goal\":\"测试\",\"bot_id\":\"dev\"}','running','child','s1');");
-
 mutation!(seed_users, "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1);
              INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
              INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_far','u','far',zeroblob(32),'ff','active',1);");
@@ -164,11 +137,6 @@ mutation!(
 );
 
 mutation!(
-    update_items_bot_id_test_id_child,
-    "UPDATE items SET bot_id='test' WHERE id='child'; UPDATE sessions SET bot_id='test' WHERE id='work'"
-);
-
-mutation!(
     update_items_requested_by_requester,
     "UPDATE items SET requested_by='requester'"
 );
@@ -186,7 +154,7 @@ mutation!(
 mutation!(
     update_messages_id_reply_unbound_status_failed,
     "UPDATE messages SET meta='{}' WHERE id='reply_unbound';
-              UPDATE thread_runs SET status='failed' WHERE id='run_unbound';"
+              UPDATE thread_reply_tasks SET status='settled' WHERE id='run_unbound';"
 );
 
 mutation!(

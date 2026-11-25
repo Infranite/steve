@@ -11,6 +11,7 @@ function client(status, body, contentType = "application/json", failure) {
     if (id === "@/i18n") return { lang: () => "en", t: (key) => key }
     if (id === "./i18n/reason.ts") return { reasonText: body => body.error }
     if (id === "./stream-cursor") return {}
+    if (id === "./perf") return { recordSseReconnect: () => {} }
     if (id === "./hub") return { hubUrl: (path) => path }
     throw new Error(id)
   }, fetch: async () => {
@@ -55,4 +56,28 @@ test("HTML and network failures cannot masquerade as module data", async () => {
   await assert.rejects(client(0, null, null, failed).modReq("GET", "/channels"), e => e === failed)
   const empty = client(204, undefined, null)
   await empty.modReq("DELETE", "/channels/id")
+})
+
+test("unified transport records x-steve-rev and preserves BotPlacementError", async () => {
+  const exports = {}
+  let response = { ok: true, status: 200, headers: { get: (k) => k === "content-type" ? "application/json" : k === "x-steve-rev" ? "42" : null }, json: async () => ({ id: "ST-1" }), text: async () => "" }
+  runInNewContext(code, { exports, AbortSignal, URLSearchParams, require: (id) => {
+    if (id === "@/i18n") return { lang: () => "en", t: (key) => key }
+    if (id === "./i18n/reason.ts") return { reasonText: body => body.error }
+    if (id === "./stream-cursor") return {}
+    if (id === "./perf") return { recordSseReconnect: () => {} }
+    if (id === "./hub") return { hubUrl: (path) => path }
+    throw new Error(id)
+  }, fetch: async () => response })
+  const created = await exports.api.newItem({ goal: "hi" })
+  assert.equal(exports.revOf(created), 42)
+  response = { ok: false, status: 409, headers: { get: (k) => k === "content-type" ? "application/json" : null }, json: async () => ({ error: "No matching node", placement: { reason: "offline", rejected: [] } }), text: async () => "" }
+  await assert.rejects(exports.api.newItem({ goal: "hi" }), e => e instanceof exports.BotPlacementError && e.blocked.reason === "offline")
+})
+
+test("homeTilde collapses both macOS and Linux home directories", async () => {
+  const { homeTilde } = await import("../src/lib/path.ts")
+  assert.equal(homeTilde("/Users/example/work/repo"), "~/work/repo")
+  assert.equal(homeTilde("/home/example/work/repo"), "~/work/repo")
+  assert.equal(homeTilde("/opt/steve/repo"), "/opt/steve/repo")
 })

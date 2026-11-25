@@ -126,6 +126,7 @@ impl StatsApi {
 pub fn routes(api: StatsApi) -> Router {
     Router::new()
         .route("/stats/realtime", get(realtime))
+        .route("/stats/nav", get(nav_usage))
         .route("/stats/summary", get(summary))
         .route("/stats/series", get(series))
         .route("/stats/breakdown", get(breakdown))
@@ -165,6 +166,81 @@ fn check_scope(c: &mut R<'_>, ws: &str, p: &Params) -> Result<(), ApiError> {
         return Err(ApiError::not_found(Noun::Bot.missing()));
     }
     Ok(())
+}
+
+/// GET /stats/nav?range=7d|30d|all: durable menu open counts aggregated by workspace local day
+/// from the unified telemetry daily series (`telemetry_daily`, metric `web.nav.open`).
+async fn nav_usage(
+    State(api): State<StatsApi>,
+    Extension(c): Extension<Ctx>,
+    Query(p): Query<Params>,
+) -> ApiResult {
+    use steve_store::statistics::{TelemetryDaily, TelemetryMetric};
+    use steve_types::stats::{NavUsage, NavUsageItem, NavUsageRange};
+
+    let range = match p.get("range").map(String::as_str) {
+        None | Some("" | "7d") => NavUsageRange::Days7,
+        Some("30d") => NavUsageRange::Days30,
+        Some("all") => NavUsageRange::All,
+        Some(_) => return Err(invalid("range")),
+    };
+    let ws = c.ws;
+    let usage = api
+        .read(move |db| {
+            let today = views::today(db, &ws, now()).map_err(serr)?;
+            let bounds = match range {
+                NavUsageRange::Days7 => {
+                    Some(views::range("7d", None, None, &today).map_err(invalid)?)
+                }
+                NavUsageRange::Days30 => {
+                    Some(views::range("30d", None, None, &today).map_err(invalid)?)
+                }
+                NavUsageRange::All => None,
+            };
+            let totals = TelemetryDaily(db)
+                .totals(
+                    &ws,
+                    TelemetryMetric::WebNavOpen,
+                    bounds.as_ref().map(|(f, t)| (f.as_str(), t.as_str())),
+                )
+                .map_err(serr)?;
+            let mut items: Vec<NavUsageItem> = totals
+                .rows
+                .into_iter()
+                .filter_map(|(item, opens)| {
+                    let opens = u64::try_from(opens).ok().filter(|&n| n > 0)?;
+                    crate::metrics::WEB_NAV_ITEMS
+                        .contains(&item.as_str())
+                        .then_some(NavUsageItem { item, opens })
+                })
+                .collect();
+            items.sort_by(|a, b| {
+                b.opens.cmp(&a.opens).then_with(|| {
+                    let pos = |k: &str| {
+                        crate::metrics::WEB_NAV_ITEMS
+                            .iter()
+                            .position(|x| *x == k)
+                            .unwrap_or(usize::MAX)
+                    };
+                    pos(&a.item).cmp(&pos(&b.item))
+                })
+            });
+            let total = items.iter().map(|x| x.opens).sum();
+            Ok(NavUsage {
+                range,
+                from: bounds.map(|(f, _)| f).or(totals.since_day),
+                to: today,
+                total,
+                items,
+            })
+        })
+        .await?;
+    let mut response = axum::response::IntoResponse::into_response(axum::Json(usage));
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
 }
 
 /// GET /stats/realtime: poll once per second; no historical cache or date range is consulted.

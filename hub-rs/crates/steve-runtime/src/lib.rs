@@ -6,6 +6,7 @@ pub use clock::{Clock, FakeClock, SystemClock};
 pub mod due;
 #[cfg(feature = "policy")]
 mod jitter;
+pub mod json;
 #[cfg(feature = "machine")]
 pub mod machine;
 #[cfg(feature = "policy")]
@@ -20,7 +21,7 @@ pub mod tz;
 #[cfg(feature = "jobs")]
 pub mod jobs;
 #[cfg(feature = "jobs")]
-pub use jobs::{FirstRun, Task, every, every_after, spawn};
+pub use jobs::{FirstRun, Task, every, every_after, round, spawn, supervise};
 #[cfg(feature = "cache")]
 pub mod cache;
 #[cfg(feature = "testkit")]

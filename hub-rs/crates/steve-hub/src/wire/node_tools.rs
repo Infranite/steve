@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use steve_node_api::*;
 use steve_store::{
-    Session, Store, ThreadRun, tool_admission,
+    Session, Store, ThreadTask, tool_admission,
     tool_journal::{Intent, Journal},
 };
 
@@ -84,7 +84,7 @@ fn authorize_session(
 
 /// The session side of every Steve tool authorization, for an attempt's calls and a session's
 /// list alike: a live Steve session of this Hub, its item and Bot still in its workspace. `gate`:
-/// fresh work, which the workflow gate stops; a gated session then gets dependency management
+/// fresh work, which the item gate stops; a gated session then gets dependency management
 /// only, if `allow_dependency_management` and that is allowed. Returns whether it is gated.
 fn authorize_steve_session(
     store: &Store,
@@ -103,10 +103,10 @@ fn authorize_steve_session(
     }
     // Steve tools enter through the Node without a harness permission card. Recheck the same
     // persisted gate used for turns before every fresh call, including the check after its fence.
-    // A known ToolKey must still be readable when a wait/replan stops further work.
+    // A known ToolKey must still be readable when a wait or pause stops further work.
     let gated = gate
         && store
-            .read(|c| steve_store::workflow_gate::session_blocker(c, &s.id))
+            .read(|c| steve_store::item_gate::session_blocker(c, &s.id))
             .map_err(internal)?
             .is_some();
     if gated
@@ -170,7 +170,7 @@ pub(crate) fn authorize_research(
     node: &NodeId,
     exec: &ExecutionRef,
     active: bool,
-) -> ApiResult<ThreadRun> {
+) -> ApiResult<ThreadTask> {
     let ExecutionRef::Job { job, attempt } = exec else {
         return Err(denied());
     };
@@ -196,12 +196,14 @@ pub(crate) fn authorize_research(
     {
         return Err(denied());
     }
+    let task_id = row.run.as_deref().ok_or_else(denied)?;
     let run = store
-        .thread()
-        .run(row.run.as_deref().ok_or_else(denied)?)
+        .read(|r| steve_store::thread::task_by_id(r, task_id))
         .map_err(internal)?
         .ok_or_else(denied)?;
-    if run.workspace_id != row.workspace || (active && run.status != "running") {
+    if run.workspace_id != row.workspace
+        || (active && (run.status != "claimed" || run.cancel_requested_at.is_some()))
+    {
         return Err(denied());
     }
     Ok(run)
@@ -212,7 +214,7 @@ pub(crate) fn authorize_research(
 pub enum Caller {
     Session(Session),
     DependencyManagement(Session),
-    Research(ThreadRun),
+    Research(ThreadTask),
 }
 
 impl Caller {
@@ -254,14 +256,14 @@ pub trait Service: Send + Sync {
     ) -> Result<String, String>;
     /// The tools the research job of `run` sees: the read-only ones, and the first meeting's
     /// while that is on for it.
-    async fn research_catalog(&self, run: &ThreadRun) -> Vec<ToolDescriptor> {
+    async fn research_catalog(&self, run: &ThreadTask) -> Vec<ToolDescriptor> {
         let _ = run;
         vec![]
     }
     /// Runs research tool `name` for thread run `run`; anything else is refused.
     async fn research_call(
         &self,
-        run: ThreadRun,
+        run: ThreadTask,
         name: &str,
         args: serde_json::Value,
     ) -> Result<String, String> {
@@ -288,12 +290,12 @@ impl Service for ToolService {
     ) -> Result<String, String> {
         self.call(session, name, args).await
     }
-    async fn research_catalog(&self, run: &ThreadRun) -> Vec<ToolDescriptor> {
+    async fn research_catalog(&self, run: &ThreadTask) -> Vec<ToolDescriptor> {
         super::research_mcp::catalog(&self.extra, run).await
     }
     async fn research_call(
         &self,
-        run: ThreadRun,
+        run: ThreadTask,
         name: &str,
         args: serde_json::Value,
     ) -> Result<String, String> {
@@ -394,7 +396,7 @@ fn caller(store: &Store, node: &NodeId, exec: &ExecutionRef, active: bool) -> Ap
         }
     }
 }
-/// A session's caller: only dependency management while the workflow gate holds it.
+/// A session's caller: only dependency management while the item gate holds it.
 fn session_caller((s, gated): (Session, bool)) -> Caller {
     if gated {
         Caller::DependencyManagement(s)
@@ -646,9 +648,6 @@ pub(crate) mod tests {
     use steve_node_api::testkit::{FakeNode, build};
     pub(crate) struct Ends;
     impl NodeDomain for Ends {
-        fn dynamic_workflows(&self) -> bool {
-            true
-        }
         fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
     }
     pub(crate) struct Host {
@@ -965,7 +964,7 @@ pub(crate) mod tests {
         assert_eq!(parts, vec![Part::Text { text: "ok".into() }]);
     }
     #[tokio::test]
-    async fn workflow_gate_stops_new_tools_but_keeps_known_results_readable() {
+    async fn item_gate_stops_new_tools_but_keeps_known_results_readable() {
         let h = fixture(vec![]).await;
         let tools =
             NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
@@ -979,11 +978,11 @@ pub(crate) mod tests {
             tools.call(q.clone()).await.unwrap(),
             ToolResult::Completed { .. }
         ));
-        // The running attempt has not ended or received cancellation yet. Both an ordinary
-        // prerequisite wait and a detached old work unit must nevertheless revoke fresh calls.
-        for (index, blocked) in [true, false].into_iter().enumerate() {
+        // The running attempt has not ended or received cancellation yet. Both a prerequisite wait
+        // and a paused item must nevertheless revoke fresh calls.
+        for (index, paused) in [false, true].into_iter().enumerate() {
             steve_store::testkit::hub::node_fixtures::block_tools_for_prerequisite(
-                &h.store, blocked,
+                &h.store, paused,
             )
             .unwrap();
             assert_eq!(
@@ -1489,7 +1488,6 @@ pub(crate) mod tests {
             ("steve_items_search", json!({"query": "test"})),
             ("steve_item_read", json!({"id": "i1"})),
             ("steve_item_dependencies", json!({"action": "get"})),
-            ("steve_workflow", json!({"action": "get"})),
             ("steve_debug", json!({"action":"explain","item_id":"i1"})),
         ] {
             // Non-core built-ins named in the brief remain callable through the registry.
@@ -1541,7 +1539,7 @@ pub(crate) mod tests {
         let calls = observed["events"].as_array().unwrap();
         assert_eq!(
             calls.len(),
-            6,
+            5,
             "one observation per actual non-debug invocation: {observed}"
         );
         assert!(
@@ -1582,8 +1580,19 @@ pub(crate) mod tests {
             )
             .unwrap();
         store
-            .thread()
-            .item_add("i1", "default", &origin, None, false)
+            .write(|w| {
+                steve_store::thread::record_dispatch(
+                    w,
+                    "default",
+                    steve_core::thread::MAIN,
+                    &origin,
+                    "i1",
+                    None,
+                    false,
+                    true,
+                    steve_store::now(),
+                )
+            })
             .unwrap();
         steve_store::testkit::hub::node_fixtures::seed_items_and_item_deps(&store).unwrap();
         let restricted = tools.catalog(host.exec.clone()).await.unwrap();
@@ -1698,13 +1707,6 @@ pub(crate) mod tests {
             tools.call(forbidden).await.unwrap(),
             ToolResult::Failed { .. }
         ));
-        // A detached old work unit cannot use the management exception even with the same deps.
-        steve_store::testkit::hub::node_fixtures::set_items(&store).unwrap();
-        assert_eq!(
-            tools.catalog(host.exec.clone()).await.unwrap_err().code,
-            Code::Forbidden
-        );
-        steve_store::testkit::hub::node_fixtures::assign_foreign_session_scope(&store).unwrap();
 
         let before_end = steve_store::testkit::hub::node_fixtures::item_progress(&store).unwrap();
         steve_store::testkit::hub::node_fixtures::end_tool_session(&store).unwrap();

@@ -7,13 +7,15 @@ import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Spinner } from "@/components/ui/spinner"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { go, Page, Row, Segmented, Meta, Empty, Chips, BotAvatar, Panel, Section, Note, Blank, Notice, Pill, Tile, Chevron, Loading, LIFT } from "@/ui"
+import { go, Page, Row, Segmented, Meta, Empty, Chips, Panel, Section, Note, Blank, Notice, Pill, Tile, Chevron, Loading, LIFT } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { cn } from "cn"
 import { Select } from "@/view-shared"
 import { st, tm, botName, toast } from "@/store"
 import { accountsApi, type RAccount } from "@/api/accounts"
 import { vaultApi, keyStoreState, SENS_LABEL, MODE_LABEL, USE_STATUS, type RItem, type RField, type RUse, type RVaultStatus, type Sensitivity } from "@/api/vault"
-import { useLoad, useBusy, report } from "@/accounts/load"
+import { useBusy, report } from "@/accounts/load"
+import { useHubQuery } from "@/data/use-hub-query"
 import { NewVaultDialog } from "@/vault/new-item"
 import { useReveal, Countdown } from "@/vault/reveal"
 import { t as tr, useT } from "@/i18n"
@@ -38,8 +40,8 @@ function VaultRow({ v }: { v: RItem }) {
 }
 function UseRow({ u, showItem }: { u: RUse; showItem?: boolean }) {
   const t = useT()
-  const bot = u.actor.type === "bot" ? u.actor.id : u.actor.type === "steve" ? "steve" : null
-  return <Row icon={bot ? <BotAvatar k={bot} size={24} /> : <Tile I={u.mode === "copy" ? CopyIcon : EyeIcon} className="size-6! rounded-full!" />} onClick={showItem ? () => go("#/vault/" + u.item_id) : undefined} data-use-row={u.id}
+  const actorId = u.actor.type === "bot" ? u.actor.id : u.actor.type === "steve" ? "steve" : (u.actor.id || "me")
+  return <Row icon={<ActorAvatar actorId={actorId} name={u.actor.name || undefined} size={24} />} onClick={showItem ? () => go("#/vault/" + u.item_id) : undefined} data-use-row={u.id}
     title={u.actor.type === "me" ? (u.mode === "copy" ? t("vault:use.meCopied") : t("vault:use.meViewed")) : `${u.actor.name} · ${u.purpose}`}
     sub={<Meta inline>{showItem && <span>{u.item_title}</span>}<span>{MODE_LABEL[u.mode] ?? u.mode}</span>{u.status !== "ok" && <span>{USE_STATUS[u.status] ?? u.status}</span>}{u.work_item_id && <span className="font-mono">{u.work_item_id}</span>}</Meta>}>
     <span className="type-footnote text-muted-foreground">{tm(u.created)}</span></Row>
@@ -89,14 +91,14 @@ function VaultView() {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const [newItem, setNewItem] = useState(false)
-  const L = useLoad(async () => {
+  const L = useHubQuery(["vault", "home"], async () => {
     const status = await vaultApi.status()
     if (!status.initialized) return { status, items: [] as RItem[], uses: null as RUse[] | null }
     const [items, uses] = await Promise.all([vaultApi.items(), vaultApi.uses({ limit: 6 })])
     return { status, items, uses }
-  }, [], ["vault"])
-  if (L.s === "loading") return <Page title={t("vault:title")} back={back()}><Loading /></Page>
-  if (L.s === "error") return <Page title={t("vault:title")} back={back()}><Empty title={L.err} /></Page>
+  }, { events: ["vault"] })
+  if (L.loading) return <Page title={t("vault:title")} back={back()}><Loading /></Page>
+  if (L.error || !L.data) return <Page title={t("vault:title")} back={back()}><Empty title={L.error?.message ?? ""} /></Page>
   const { status, items, uses } = L.data
   const sub = t("vault:home.sub")
   if (!status.initialized) return <Page title={t("vault:title")} back={back()} sub={sub} max={640}><EnableVault onDone={() => void L.reload()} /></Page>
@@ -129,16 +131,16 @@ function VaultView() {
 /* ═════════ 条目 ═════════ */
 function VaultItemView({ id }: { id: string }) {
   const t = useT()
-  const L = useLoad(async () => {
+  const L = useHubQuery(["vault", "item", id], async () => {
     const [item, uses] = await Promise.all([vaultApi.item(id), vaultApi.uses({ item: id, limit: 50 })])
     return { item, uses }
-  }, [id], ["vault"])
+  }, { events: ["vault"] })
   const [del, setDel] = useState(false), [edit, setEdit] = useState<RField | null>(null), [, act] = useBusy()
   const reload = L.reload
   const used = useCallback(() => void reload(), [reload])
   const R = useReveal(id, used)
-  if (L.s === "loading") return <Page title={t("vault:title")} back={backVault()}><Loading /></Page>
-  if (L.s === "error") return <Page title={t("vault:title")} back={backVault()}><Empty title={L.status === 404 ? t("vault:item.notFound") : L.err} /></Page>
+  if (L.loading) return <Page title={t("vault:title")} back={backVault()}><Loading /></Page>
+  if (L.error || !L.data) return <Page title={t("vault:title")} back={backVault()}><Empty title={L.status === 404 ? t("vault:item.notFound") : (L.error?.message ?? "")} /></Page>
   const { item: v, uses } = L.data
   const fields = v.fields ?? []
   const setSens = async (x: Sensitivity) => {
@@ -227,7 +229,7 @@ function Grants({ v, onChange }: { v: RItem; onChange: () => void }) {
   const live = v.grants.filter((g) => g.until > Date.now())
   return (
     <Section label={t("vault:grants.section")}>
-      {live.length ? <Panel>{live.map((g) => <Row key={g.id} icon={<BotAvatar k={g.bot_id} size={24} />} title={botName(g.bot_id)} sub={t("vault:grants.rowSub", { scope: g.scope_label, time: tm(g.until) })} data-grant={g.bot_id}>
+      {live.length ? <Panel>{live.map((g) => <Row key={g.id} icon={<ActorAvatar actorId={g.bot_id} size={24} />} title={botName(g.bot_id)} sub={t("vault:grants.rowSub", { scope: g.scope_label, time: tm(g.until) })} data-grant={g.bot_id}>
         <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(() => vaultApi.revokeGrant(g.id), t("vault:grants.revoked")).then((r) => r && onChange())} data-revoke-grant>{t("vault:grants.revoke")}</Button></Row>)}</Panel>
         : v.sensitivity === "high" || v.template === "bank_card" ? null : <Quiet>{t("vault:grants.none")}</Quiet>}
       {v.sensitivity === "high" || v.template === "bank_card" ? <Note>{t("vault:grants.highNote")}</Note> :

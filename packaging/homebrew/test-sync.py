@@ -21,7 +21,7 @@ API = "https://api.github.com/repos/Infranite/steve/"
 
 
 def bundle(manifest, change=None, target="aarch64-apple-darwin"):
-    files = {name: (b"#!/bin/sh\nexit 0\n" if name.startswith(("bin/", "ops/")) else b"fixture\n")
+    files = {name: (b"#!/bin/sh\nexit 0\n" if name.startswith(("bin/", "ops/")) and name != "bin/restic.LICENSE" else b"fixture\n")
              for name in sync.REQUIRED}
     files["release.json"] = sync.json_bytes(dict(manifest, assets=[]))
     files["bin/steve"] = (b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" + b"\0" * 24
@@ -33,7 +33,7 @@ def bundle(manifest, change=None, target="aarch64-apple-darwin"):
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
         for name, data in sorted(files.items()):
             item = tarfile.TarInfo(name)
-            item.mode = 0o755 if name.startswith(("bin/", "ops/")) else 0o644
+            item.mode = 0o755 if name.startswith(("bin/", "ops/")) and name != "bin/restic.LICENSE" else 0o644
             if isinstance(data, tarfile.TarInfo):
                 archive.addfile(data)
             else:
@@ -47,6 +47,7 @@ class FakeGitHub:
         self.downloads, self.calls = {}, []
         self.manifest = dict(format_version=1, cli_protocol=2, version=version, commit=commit,
                              hub_version=version, web_version=version, api_protocol=1,
+                             restic_version="0.19.1",
                              schema=dict(min_read=24, max_read=24, target=24), assets=[])
         self.release = dict(draft=False, prerelease=False, published_at="2026-11-08T00:00:00Z",
                             tag_name="v" + version, assets=[])
@@ -143,6 +144,7 @@ class SyncTests(unittest.TestCase):
     def test_protocol_and_complete_platform_contract_are_required(self):
         cases = [lambda m: m.pop("cli_protocol"), lambda m: m.update(cli_protocol=1),
                  lambda m: m.update(cli_protocol=True), lambda m: m.update(version="01.2.3"),
+                 lambda m: m.pop("restic_version"), lambda m: m.update(restic_version=""),
                  lambda m: m["assets"].pop(), lambda m: m["assets"].append(m["assets"][0]),
                  lambda m: m["assets"][1].update(target=m["assets"][0]["target"])]
         for change in cases:
@@ -199,7 +201,8 @@ class SyncTests(unittest.TestCase):
             item = tarfile.TarInfo("bin/steve")
             item.type, item.linkname = tarfile.SYMTYPE, "../../outside"
             files["bin/steve"] = item
-        cases = [lambda files: files.pop("bin/steve"), wrong_identity, symlink,
+        cases = [lambda files: files.pop("bin/steve"), lambda files: files.pop("bin/restic"),
+                 lambda files: files.pop("bin/restic.LICENSE"), wrong_identity, symlink,
                  lambda files: files.update({"bin/steve": b"#!/usr/bin/env python3\n"}),
                  lambda files: files.update({"bin/steve": b"\x7fELF\x02\x01" + b"\0" * 12 + b"\xb7\x00"}),
                  lambda files: files.update({"ops/upgrade.py": b"legacy bridge must stay in runtime\n"}),

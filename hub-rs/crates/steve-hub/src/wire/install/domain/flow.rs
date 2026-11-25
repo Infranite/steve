@@ -1,5 +1,29 @@
 use super::*;
 
+struct KnowledgeStewardGuard;
+
+impl steve_flow::ScheduleGuard for KnowledgeStewardGuard {
+    fn check(
+        &self,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        flow_id: &str,
+        trigger: steve_flow::policy::TriggerKind,
+        now: i64,
+    ) -> steve_flow::FlowResult<steve_flow::ScheduleGate> {
+        let manual = trigger == steve_flow::policy::TriggerKind::Manual;
+        match steve_knowledge::steward::check_schedule_trigger(w, ws, flow_id, manual, now)? {
+            steve_knowledge::steward::StewardGate::NotSteward
+            | steve_knowledge::steward::StewardGate::Run { .. } => {
+                Ok(steve_flow::ScheduleGate::Run)
+            }
+            steve_knowledge::steward::StewardGate::Skip { label, reason, .. } => {
+                Ok(steve_flow::ScheduleGate::Skip { label, reason })
+            }
+        }
+    }
+}
+
 install! { prepare(reg, cx) [mut registry] => [registry, setup] {
     let Env { core, preflight, .. } = cx.clone();
     let setup = steve_flow::FlowSetup::new(Arc::new(FlowCore {
@@ -64,7 +88,8 @@ install! { install(reg, cx) [conns, declared, digest, gh, item_events, late, mai
         .item_finder("gh_pr", Arc::new(steve_github::flow::GhPrFinder))
         // a todo's reminder and snooze wake-up, a member's morning brief (`time_alarms`)
         .alarm_source(Arc::new(steve_digest::todo_alarms::TodoAlarms))
-        .alarm_source(Arc::new(steve_digest::brief::BriefAlarms));
+        .alarm_source(Arc::new(steve_digest::brief::BriefAlarms))
+        .schedule_guard(Arc::new(KnowledgeStewardGuard));
     let flow = setup.build(modules.clone(), Arc::new(steve_flow::GraphEngine));
     mail_events.bind(&flow);
     item_events.bind(flow.clone());
@@ -77,15 +102,43 @@ install! { routes(reg, _cx) [flow, mut module_routes] => [flow, module_routes] {
 }}
 
 install! { clocks(reg, _cx) [flow, mut jobs] => [flow, jobs] {
-    jobs.push(Job::new("flow.followups", flow.clone().followups_task()));
-    jobs.push(Job::new("flow.triggers", steve_flow::scheduler::Triggers::new(flow.clone()).run()));
-    jobs.push(Job::new("flow.waits", steve_flow::scheduler::Waits::new(flow.clone()).run()));
-    jobs.push(Job::new("flow.retries", steve_flow::scheduler::Retries::new(flow.clone()).run()));
-    jobs.push(Job::new("flow.alarms", steve_flow::AlarmClock::new(flow.clone()).run()));
+    {
+        let f = flow.clone();
+        jobs.push(Job::supervised("flow.followups", move || f.clone().followups_task()));
+    }
+    {
+        let f = flow.clone();
+        jobs.push(Job::supervised("flow.triggers", move || {
+            steve_flow::scheduler::Triggers::new(f.clone()).run()
+        }));
+    }
+    {
+        let f = flow.clone();
+        jobs.push(Job::supervised("flow.waits", move || {
+            steve_flow::scheduler::Waits::new(f.clone()).run()
+        }));
+    }
+    {
+        let f = flow.clone();
+        jobs.push(Job::supervised("flow.retries", move || {
+            steve_flow::scheduler::Retries::new(f.clone()).run()
+        }));
+    }
+    {
+        let f = flow.clone();
+        jobs.push(Job::supervised("flow.alarms", move || {
+            steve_flow::AlarmClock::new(f.clone()).run()
+        }));
+    }
 }}
 
 install! { pollers(reg, _cx) [flow, mut jobs] => [flow, jobs] {
-    jobs.push(Job::new("flow.ingest", steve_flow::Poller::new(flow.clone()).run()));
+    {
+        let f = flow.clone();
+        jobs.push(Job::supervised("flow.ingest", move || {
+            steve_flow::Poller::new(f.clone()).run()
+        }));
+    }
     let retention = flow.clone();
     jobs.push(Job::task("flow.retention", move || steve_flow::retention::run(retention)));
 }}

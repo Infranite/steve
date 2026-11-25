@@ -7,7 +7,7 @@ use crate::base::{Level, ObjRef, Viewer, Visibility};
 use crate::contract::Row;
 use crate::{Read, Result, W};
 
-const BUILTIN_KINDS: [&str; 6] = ["notes", "files", "items", "chat", "mems", "bot_mems"];
+const BUILTIN_KINDS: [&str; 4] = ["notes", "files", "mems", "bot_mems"];
 
 pub struct Documents<'a, C>(pub &'a mut C);
 

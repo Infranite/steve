@@ -1,7 +1,5 @@
 /* Signals, flows, schedules and event sources (steve-flow, signals-automation.md §4 and schedules.md §8). */
-import { useCallback, useEffect, useRef, useState } from "react"
-import { modReq as req, Unauthenticated, qs } from "@/api"
-import { refresh, useHubEvents } from "@/store"
+import { modReq as req, qs } from "@/api"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"
 
@@ -101,22 +99,6 @@ export const flowApi = {
   refreshScopes: (adapter: string) => post<Source>(`/sources/${enc(adapter)}/refresh-scopes`),
   /** connected accounts, for the automation chain; the shape belongs to the accounts module */
   connections: () => get<any>("/connections").then((x) => (Array.isArray(x) ? x : x?.connections ?? x?.items ?? []) as unknown[]),
-}
-
-export type Load<T> = { data: T | undefined; error: Error | null; loading: boolean; reload: () => Promise<void>; set: (v: T) => void }
-/** load once on mount (and when `deps` change) */
-export function useLoad<T>(f: () => Promise<T>, deps: unknown[], live: string[] = []): Load<T> {
-  const [data, setData] = useState<T>(), [error, setError] = useState<Error | null>(null), [loading, setLoading] = useState(true)
-  const seq = useRef(0)
-  const reload = useCallback(async () => {
-    const n = ++seq.current
-    try { const v = await f(); if (n === seq.current) { setData(v); setError(null) } }
-    catch (e) { if (n !== seq.current) return; if (e instanceof Unauthenticated) { void refresh(); return } setError(e as Error) }
-    finally { if (n === seq.current) setLoading(false) }
-  }, deps)
-  useEffect(() => { setLoading(true); void reload() }, [reload])
-  useHubEvents(live, () => void reload())
-  return { data, error, loading, reload, set: setData }
 }
 
 /* labels shared by the pages */

@@ -1,77 +1,35 @@
-//! Conversational configuration (changes.ts, 变更集): the user says what they want, Steve drafts a field-level
-//! change, the user applies it, and every applied change can be undone. Drafts and undo records live in memory.
+//! Conversational configuration (变更集): the user says what they want, Steve drafts a field-level
+//! change, stores it in SQLite `changesets` via `steve-modules::changes`, applies it in one
+//! transaction, and supports 24-hour undo across restarts.
 
 use crate::error::{Result, msg};
 use crate::gateway::{FieldSpec, TAG_CATS, Tier, draft_fields, first_json, jstr, truthy};
 use crate::repo::{Bot, BotExt};
-use crate::util::{js_head, js_len, now, uid};
+use crate::util::{js_head, js_len};
 use crate::{Core, patch};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use std::sync::LazyLock;
 use std::time::Duration;
+use steve_modules::changes::{ChangeOp, OpCx, Origin, Plan, Prepared};
+use steve_modules::{ApiError, ApiResult};
+use steve_types::settings::{self as ws_settings, SettingSpec};
 
-/// `GET /api/settings/schema`, verbatim (key order preserved).
-pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
-    json!({
-      "general": [
-        { "key": "lang", "label": "语言", "values": ["简体中文", "English"], "def": "简体中文", "live": false },
-        { "key": "home", "label": "打开时进入", "values": ["对话", "待处理", "事项"], "def": "对话", "live": true },
-        { "key": "awayH", "label": "离开期间汇报", "values": ["2", "4", "8", "0"], "def": "4", "live": true, "labels": { "2": "2 小时", "4": "4 小时", "8": "8 小时", "0": "不汇报" } },
-        // the workspace time zone of schedules (steve-flow), as steve-hub's settings.rs serves it
-        { "key": "tz", "label": "时区", "values": ["system", "Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"], "def": "system", "live": true, "labels": {"system": "跟随系统"} },
-      ],
-      "items": [
-        { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "auto", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
-        { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
-        { "key": "handoff", "label": "交接阈值", "values": ["0", "70", "80", "90"], "def": "0", "live": true, "labels": { "0": "不换会话", "70": "70%", "80": "80%", "90": "90%" } },
-        { "key": "archDays", "label": "完成后自动归档", "values": ["7", "30", "90", "0"], "def": "30", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天", "0": "不自动归档" } },
-      ],
-      "notify": [
-        { "key": "quiet", "label": "免打扰", "values": ["23:00 – 08:00", "22:00 – 09:00", "关闭"], "def": "23:00 – 08:00", "live": false },
-      ],
-      "look": [
-        { "key": "fontSize", "label": "字号", "values": ["标准", "大"], "def": "标准", "live": true },
-        { "key": "reduceMotion", "label": "减弱动态效果", "values": ["开", "关"], "def": "关", "live": true },
-      ],
-      "data": [
-        { "key": "keepSess", "label": "会话记录保留", "values": ["90 天", "1 年", "永久"], "def": "永久", "live": true },
-        // signals (S1 `steve_flow::retention::keep_raw_setting`) and mail (E1 `keepMail`), as steve-hub's settings.rs serves them
-        { "key": "keepRaw", "label": "事件与消息原文保留", "values": ["7", "30", "90"], "def": "7", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天" } },
-        { "key": "keepMail", "label": "本地邮件正文保留", "values": ["30", "90", "365"], "def": "90", "live": true, "labels": { "30": "30 天", "90": "90 天", "365": "1 年" } },
-      ],
-    })
-});
+pub use steve_modules::changes::Proposal;
+pub use steve_store::base::Change;
 
-/// `settingDefaults()`: every key's `def`.
+/// Core operation names registered on [`steve_modules::Registry`].
+const OP_BOT_CREATE: &str = "core.bot.create";
+const OP_BOT_PATCH: &str = "core.bot.patch";
+const OP_PROJECT_PATCH: &str = "core.project.patch";
+const OP_SETTINGS_PATCH: &str = "core.settings.patch";
+const OP_TAGS_APPLY: &str = "core.tags.apply";
+const OP_MODELS_PATCH: &str = "core.models.patch";
+
+/// Workspace setting defaults (`{key: def}`) from the shared schema in `steve-types`.
 pub fn setting_defaults() -> Map<String, Value> {
-    let mut m = Map::new();
-    for spec in all_specs() {
-        m.insert(
-            spec["key"].as_str().unwrap_or_default().into(),
-            spec["def"].clone(),
-        );
-    }
-    m
-}
-
-fn all_specs() -> Vec<&'static Value> {
-    SETTINGS
-        .as_object()
-        .into_iter()
-        .flat_map(|o| o.values())
-        .flat_map(|v| v.as_array().into_iter().flatten())
+    ws_settings::defaults()
+        .map(|(k, v)| (k.into(), json!(v)))
         .collect()
-}
-
-/// Is `v` an allowed value of setting `k`? (`PATCH /api/settings` validation)
-pub fn setting_allowed(k: &str, v: &str) -> bool {
-    all_specs().iter().any(|s| {
-        s["key"] == k
-            && s["values"]
-                .as_array()
-                .is_some_and(|vs| vs.iter().any(|x| x == v))
-    })
 }
 
 const ACC: [(&str, &str); 3] = [
@@ -79,15 +37,23 @@ const ACC: [(&str, &str); 3] = [
     ("manual", "需要你验收"),
     ("auto", "自动验收"),
 ];
-/// Permission modes and their labels.
-pub const PERM: [(&str, &str); 3] = [
-    ("plan", "只读：只出方案，不改文件"),
-    ("default", "每次改文件或运行命令都问你"),
-    (
-        "bypassPermissions",
-        "不再询问：工具直接运行，由系统沙箱兜底",
-    ),
-];
+/// Prompt label for a Steve [`steve_node_api::PermissionMode`].
+fn perm_label(mode: steve_node_api::PermissionMode) -> &'static str {
+    use steve_node_api::PermissionMode as P;
+    match mode {
+        P::Plan => "只读：只出方案，不改文件",
+        P::Ask => "每次改文件或运行命令都问你",
+        P::AcceptEdits => "可以改项目目录里的文件，运行命令要问你",
+        P::Auto => "可以改文件、运行命令；对外操作仍需你批准",
+        P::FullAccess => "不再询问：工具直接运行，由系统沙箱兜底",
+    }
+}
+
+fn perm_label_value(k: &str) -> Value {
+    steve_node_api::PermissionMode::parse(k)
+        .map(|m| json!(perm_label(m)))
+        .unwrap_or(Value::Null)
+}
 const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 
 fn label_of(table: &[(&str, &str)], k: &str) -> Value {
@@ -110,58 +76,6 @@ pub struct Target {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Change {
-    pub label: String,
-    pub from: String,
-    pub to: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Proposal {
-    pub id: String,
-    pub ws: String,
-    pub title: String,
-    pub target: Target,
-    pub href: String,
-    pub changes: Vec<Change>,
-    pub patch: Map<String, Value>,
-    pub created: i64,
-    /// How the target was set when drafted (for the conversation when nothing changes); not sent.
-    #[serde(skip)]
-    pub current: Vec<Current>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Applied {
-    target: Target,
-    before: Map<String, Value>,
-    /// What the apply wrote, field by field (bots, projects, settings, models): an undo puts back
-    /// only the fields that still hold it, a field changed since is kept and named.
-    after: Map<String, Value>,
-    ws: String,
-}
-
-/// The fields of `before` an undo may put back: those whose value `now` is still what the apply
-/// wrote (`after`). Returns them and the keys changed since (kept as they are).
-fn still_ours(
-    before: &Map<String, Value>,
-    after: &Map<String, Value>,
-    now: impl Fn(&str) -> Value,
-) -> (Map<String, Value>, Vec<String>) {
-    let mut back = Map::new();
-    let mut kept = vec![];
-    for (k, v) in before {
-        match after.get(k) {
-            Some(a) if now(k) != *a => kept.push(k.clone()),
-            _ => {
-                back.insert(k.clone(), v.clone());
-            }
-        }
-    }
-    (back, kept)
 }
 
 /// `show()`: empty → （空）; long values cut at 40 with an ellipsis.
@@ -189,28 +103,10 @@ struct BotField {
 
 fn text_field(key: &str, label: &str, current: &str) -> BotField {
     BotField {
-        spec: FieldSpec {
-            key: key.into(),
-            label: label.into(),
-            ty: "text",
-            values: None,
-            current: json!(current),
-        },
+        spec: FieldSpec::new(key, label, "text", json!(current)),
         enc: None,
         dec: None,
     }
-}
-
-fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
-    use steve_node_api::PermissionMode as P;
-    Some(match k {
-        "plan" => P::Plan,
-        "default" => P::Ask,
-        "acceptEdits" => P::AcceptEdits,
-        "auto" => P::Auto,
-        "bypassPermissions" => P::FullAccess,
-        _ => return None,
-    })
 }
 
 const STANDARD_EFFORTS: &[&str] = &[
@@ -257,7 +153,7 @@ fn sanitize_bot_for_harness(
         .is_some_and(|next_id| cur.is_none_or(|b| b.harness.as_str() != next_id));
 
     if let Some(pm) = patch.get("perm_mode").and_then(Value::as_str) {
-        if perm_mode_of_key(pm).is_some_and(|m| !target.offers_bot_mode(m)) {
+        if steve_node_api::PermissionMode::parse(pm).is_some_and(|m| !target.offers_bot_mode(m)) {
             if switched {
                 patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
             } else {
@@ -267,7 +163,8 @@ fn sanitize_bot_for_harness(
         }
     } else if switched
         && let Some(b) = cur
-        && perm_mode_of_key(&b.perm_mode).is_some_and(|m| !target.offers_bot_mode(m))
+        && steve_node_api::PermissionMode::parse(&b.perm_mode)
+            .is_some_and(|m| !target.offers_bot_mode(m))
     {
         patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
     }
@@ -341,16 +238,15 @@ fn bot_fields(
                 .unwrap_or_else(|| e.to_string())
         },
     );
-    let perms: Vec<(&'static str, &'static str)> = PERM
+    let perms: Vec<(&'static str, &'static str)> = steve_node_api::PermissionMode::ALL
         .iter()
         .copied()
-        .filter(|(k, _)| {
-            *k == b.perm_mode
+        .filter(|m| {
+            m.as_str() == b.perm_mode
                 || harnesses.is_empty()
-                || harnesses
-                    .iter()
-                    .any(|h| perm_mode_of_key(k).is_none_or(|m| h.offers_bot_mode(m)))
+                || harnesses.iter().any(|h| h.offers_bot_mode(*m))
         })
+        .map(|m| (m.as_str(), perm_label(m)))
         .collect();
     let perms_enc = perms.clone();
     let perm_keep = b.perm_mode.clone();
@@ -368,7 +264,7 @@ fn bot_fields(
             spec: FieldSpec {
                 key: "harness".into(),
                 label: "Harness".into(),
-                ty: "enum",
+                ty: "enum".into(),
                 values: Some(
                     hs.iter()
                         .map(|(_, n)| n.clone())
@@ -404,7 +300,7 @@ fn bot_fields(
             spec: FieldSpec {
                 key: "proactive".into(),
                 label: "主动程度".into(),
-                ty: "enum",
+                ty: "enum".into(),
                 values: Some(PRO.iter().map(|s| s.to_string()).collect()),
                 current: pro_at(&json!(b.proactive)),
             },
@@ -418,7 +314,7 @@ fn bot_fields(
             spec: FieldSpec {
                 key: "reasoning_effort".into(),
                 label: "思考强度".into(),
-                ty: "enum",
+                ty: "enum".into(),
                 values: Some(
                     std::iter::once("默认".to_string())
                         .chain(efforts.iter().map(|(_, l)| l.clone()))
@@ -451,7 +347,7 @@ fn bot_fields(
             spec: FieldSpec {
                 key: "accept_mode".into(),
                 label: "交付验收".into(),
-                ty: "enum",
+                ty: "enum".into(),
                 values: Some(ACC.iter().map(|(_, l)| l.to_string()).collect()),
                 current: label_of(&ACC, &b.accept_mode),
             },
@@ -461,13 +357,12 @@ fn bot_fields(
             dec: Some(Box::new(|v| label_of(&ACC, v.as_str().unwrap_or("")))),
         },
         BotField {
-            spec: FieldSpec {
-                key: "model".into(),
-                label: "模型（留空为默认）".into(),
-                ty: "text",
-                values: None,
-                current: json!(b.model.clone().unwrap_or_default()),
-            },
+            spec: FieldSpec::new(
+                "model",
+                "模型（留空为默认）",
+                "text",
+                json!(b.model.clone().unwrap_or_default()),
+            ),
             enc: Some(Box::new(|v| {
                 if truthy(v) {
                     json!(jstr(v))
@@ -481,20 +376,20 @@ fn bot_fields(
             spec: FieldSpec {
                 key: "perm_mode".into(),
                 label: "权限".into(),
-                ty: "enum",
+                ty: "enum".into(),
                 values: Some(perms.iter().map(|(_, l)| l.to_string()).collect()),
-                current: label_of(&PERM, &b.perm_mode),
+                current: perm_label_value(&b.perm_mode),
             },
             enc: Some(Box::new(move |v| {
                 json!(key_of(&perms_enc, v).unwrap_or_else(|| perm_keep.clone()))
             })),
-            dec: Some(Box::new(|v| label_of(&PERM, v.as_str().unwrap_or("")))),
+            dec: Some(Box::new(|v| perm_label_value(v.as_str().unwrap_or("")))),
         },
         BotField {
             spec: FieldSpec {
                 key: "default_project".into(),
                 label: "默认项目".into(),
-                ty: "enum",
+                ty: "enum".into(),
                 values: Some(
                     std::iter::once("无".to_string())
                         .chain(ps.iter().map(|(_, n)| n.clone()))
@@ -529,7 +424,7 @@ fn bot_fields(
             spec: FieldSpec {
                 key: "enabled".into(),
                 label: "启用状态".into(),
-                ty: "enum",
+                ty: "enum".into(),
                 values: Some(vec!["启用".into(), "停用".into()]),
                 current: json!(if b.enabled { "启用" } else { "停用" }),
             },
@@ -563,6 +458,7 @@ fn blank_bot(ws: &str, name: &str, m: &crate::models::Models) -> Bot {
     Bot {
         id: String::new(),
         workspace_id: ws.into(),
+        owner: None,
         name: name.into(),
         role: String::new(),
         specialties: vec![],
@@ -647,8 +543,11 @@ fn setting_label_shown(key: &str) -> Option<String> {
         "home" => steve_i18n::t!("core.draft.setting.home"),
         "awayH" => steve_i18n::t!("core.draft.setting.awayH"),
         "tz" => steve_i18n::t!("core.draft.setting.tz"),
+        "noExecutor" => steve_i18n::t!("core.draft.setting.noExecutor"),
         "accDefault" => steve_i18n::t!("core.draft.setting.accDefault"),
         "depsAfter" => steve_i18n::t!("core.draft.setting.depsAfter"),
+        "quotaAutoHandoff" => steve_i18n::t!("core.draft.setting.quotaAutoHandoff"),
+        "quotaWaitMinutes" => steve_i18n::t!("core.draft.setting.quotaWaitMinutes"),
         "handoff" => steve_i18n::t!("core.draft.setting.handoff"),
         "archDays" => steve_i18n::t!("core.draft.setting.archDays"),
         "quiet" => steve_i18n::t!("core.draft.setting.quiet"),
@@ -826,7 +725,7 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
                 }
                 .describe_with(&harnesses)
             ),
-            ty: "enum",
+            ty: "enum".into(),
             values: Some(
                 std::iter::once(FOLLOW.to_string())
                     .chain(harnesses.iter().map(|h| h.name.clone()))
@@ -844,14 +743,14 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
                 "{} · 模型，按顺序逗号分隔，留空为该 harness 的默认",
                 p.label
             ),
-            ty: "text",
+            ty: "text".into(),
             values: None,
             current: json!(c.models.join(",")),
         });
         fs.push(FieldSpec {
             key: format!("{}.effort", p.key),
             label: format!("{} · 推理强度", p.label),
-            ty: "enum",
+            ty: "enum".into(),
             values: Some(effort_labels.clone()),
             current: json!(c.effort.as_ref().map_or_else(|| "默认".to_string(), label)),
         });
@@ -864,7 +763,7 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
                 h.name,
                 h.model_ids().join("、")
             ),
-            ty: "text",
+            ty: "text".into(),
             values: None,
             current: json!(m.agent_model(ws, &h.id).unwrap_or_default()),
         });
@@ -1047,24 +946,12 @@ fn plain_label(l: &str) -> String {
 /// The project fields a draft may change.
 fn project_fields(p: &crate::repo::Project, bs: &[Bot]) -> Vec<FieldSpec> {
     vec![
-        FieldSpec {
-            key: "name".into(),
-            label: "名称".into(),
-            ty: "text",
-            values: None,
-            current: json!(p.name),
-        },
-        FieldSpec {
-            key: "description".into(),
-            label: "说明".into(),
-            ty: "text",
-            values: None,
-            current: json!(p.description),
-        },
+        FieldSpec::new("name", "名称", "text", json!(p.name)),
+        FieldSpec::new("description", "说明", "text", json!(p.description)),
         FieldSpec {
             key: "default_bot".into(),
             label: "默认 Bot".into(),
-            ty: "enum",
+            ty: "enum".into(),
             values: Some(
                 std::iter::once("无".to_string())
                     .chain(bs.iter().map(|b| b.name.clone()))
@@ -1080,29 +967,60 @@ fn project_fields(p: &crate::repo::Project, bs: &[Bot]) -> Vec<FieldSpec> {
         FieldSpec {
             key: "worktree".into(),
             label: "每个事项单独开 worktree 分支".into(),
-            ty: "enum",
+            ty: "enum".into(),
             values: Some(vec!["开".into(), "关".into()]),
             current: json!(if p.worktree { "开" } else { "关" }),
         },
         FieldSpec {
             key: "archived".into(),
             label: "状态（归档后不再出现在项目列表和分派选项里）".into(),
-            ty: "enum",
+            ty: "enum".into(),
             values: Some(vec!["使用中".into(), "已归档".into()]),
             current: json!(if p.archived { "已归档" } else { "使用中" }),
         },
     ]
 }
 
+/// Translate settings whose stored values are ASCII codes directly via `steve-i18n`, without
+/// routing through Chinese schema labels.
+fn setting_code_value_shown(key: &str, v: &Value) -> Option<String> {
+    let s = v.as_str()?;
+    match (key, s) {
+        ("quotaAutoHandoff", "on") => Some(steve_i18n::t!("core.draft.value.on")),
+        ("quotaAutoHandoff", "off") => Some(steve_i18n::t!("core.draft.value.off")),
+        ("quotaWaitMinutes", "0") => Some(steve_i18n::t!("core.draft.value.no_wait")),
+        ("quotaWaitMinutes", n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(steve_i18n::t!("core.draft.value.minutes", n = n))
+        }
+        _ => None,
+    }
+}
+
+/// A setting's value as a card shows it, in the request's language. New settings match their code
+/// value directly instead of round-tripping through a Chinese label.
+fn setting_value_shown(specs: &[SettingSpec], key: &str, v: &Value) -> String {
+    if key == "noExecutor" {
+        return match jstr(v).as_str() {
+            "ask" => steve_i18n::t!("core.draft.value.no_executor_ask"),
+            "steve" => steve_i18n::t!("core.draft.value.no_executor_steve"),
+            _ => value_shown("settings", key, show(v)),
+        };
+    }
+    if let Some(shown) = setting_code_value_shown(key, v) {
+        return shown;
+    }
+    value_shown("settings", key, show(&setting_shown(specs, key, v)))
+}
+
 /// A setting's value as the user sees it (`archDays` “30” → “30 天”).
-fn setting_shown(specs: &[Value], k: &str, v: &Value) -> Value {
-    specs
+fn setting_shown(specs: &[SettingSpec], k: &str, v: &Value) -> Value {
+    let s = jstr(v);
+    let shown = specs
         .iter()
-        .find(|s| s["key"] == k)
-        .and_then(|s| s.get("labels"))
-        .and_then(|l| l.get(jstr(v)))
-        .cloned()
-        .unwrap_or_else(|| json!(jstr(v)))
+        .find(|spec| spec.key == k)
+        .map(|spec| spec.label_of(&s))
+        .unwrap_or(s.as_str());
+    json!(shown)
 }
 
 /// What a configuration request in the conversation is about (see [`Core::pick_targets`]).
@@ -1162,6 +1080,165 @@ fn clear_lines(p: &Value) -> bool {
 
 /// How many configurations one request drafts at most (“按这个方案补齐 Bot” can touch every bot).
 const MAX_TARGETS: usize = 6;
+/// Maximum characters for a direct single-setting command eligible for deterministic matching.
+const MAX_DETERMINISTIC_CONFIG_CHARS: usize = 64;
+/// Timeout for fast-tier configuration target selection (`pick_targets`).
+const PICK_TARGETS_TIMEOUT: Duration = Duration::from_secs(60);
+/// Timeout for smart-tier tag configuration drafting (`draft_tags`).
+const DRAFT_TAGS_TIMEOUT: Duration = Duration::from_secs(90);
+/// Maximum module configuration candidates passed to `pick_targets`.
+const MAX_MODULE_CANDIDATES: usize = 80;
+/// Metric task label for configuration target selection.
+const CONFIG_PICK_METRIC_TASK: &str = "core.config_pick";
+/// Metric task label for configuration field drafting.
+const CONFIG_DRAFT_METRIC_TASK: &str = "core.config_draft";
+
+/// Single-clause, non-question, short configuration command without multi-line proposal context.
+fn is_single_statement(request: &str) -> bool {
+    let r = request.trim();
+    !r.is_empty()
+        && r.chars().count() <= MAX_DETERMINISTIC_CONFIG_CHARS
+        && !r.chars().any(|c| {
+            matches!(
+                c,
+                ',' | '\u{ff0c}' | ';' | '\u{ff1b}' | '\u{3001}' | '?' | '\u{ff1f}' | '\n' | '\r'
+            )
+        })
+}
+
+/// Case-insensitive ASCII token search requiring non-alphanumeric boundaries around `needle`.
+fn contains_ascii_token(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || !needle.is_ascii() {
+        return false;
+    }
+    let h = haystack.to_ascii_lowercase();
+    let n = needle.to_ascii_lowercase();
+    let bytes = h.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = h[start..].find(&n) {
+        let abs = start + pos;
+        let end = abs + n.len();
+        let left_ok = abs == 0 || !bytes[abs - 1].is_ascii_alphanumeric();
+        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+/// Matches one `SETTINGS` entry against an anchored `<key|label> <sep> <value|value_label>`
+/// command using only schema keys, labels, and allowed values.
+///
+/// Requiring the full trimmed request to be `<field><sep><value>` (no surrounding prose) prevents
+/// false positives on natural-language questions, negations, or complaints such as "字号太大了" or
+/// "免打扰现在是关闭吗", which fall through to the model.
+fn match_setting_spec(spec: &SettingSpec, request: &str) -> Option<(String, String)> {
+    let key = spec.key.as_str();
+    let label = spec.label.as_str();
+    let r = request.trim();
+    let rest = if !label.is_empty()
+        && let Some(s) = r.strip_prefix(label)
+    {
+        s
+    } else if r.len() >= key.len()
+        && r.is_char_boundary(key.len())
+        && r[..key.len()].eq_ignore_ascii_case(key)
+    {
+        &r[key.len()..]
+    } else {
+        return None;
+    };
+    let rest_trimmed = rest.trim_start();
+    let val_str = if let Some(s) = rest_trimmed.strip_prefix("->") {
+        s.trim()
+    } else if let Some(s) = rest_trimmed.strip_prefix(['=', ':', '\u{ff1a}', '\u{2192}']) {
+        s.trim()
+    } else if rest.len() > rest_trimmed.len() {
+        rest_trimmed
+    } else {
+        return None;
+    };
+    if val_str.is_empty() {
+        return None;
+    }
+    for raw in &spec.values {
+        let raw_hit = if raw.is_ascii() {
+            val_str.eq_ignore_ascii_case(raw)
+        } else {
+            val_str == raw
+        };
+        let label_hit = spec
+            .labels
+            .as_ref()
+            .and_then(|m| m.get(raw))
+            .is_some_and(|l| !l.is_empty() && val_str == l);
+        if raw_hit || label_hit {
+            return Some((key.to_string(), raw.to_string()));
+        }
+    }
+    None
+}
+
+/// Resolves an unambiguous single setting change inside one category without a model call.
+fn try_draft_setting_deterministic(
+    specs: &[SettingSpec],
+    request: &str,
+) -> Option<Vec<(String, Value)>> {
+    if !is_single_statement(request) {
+        return None;
+    }
+    let mut hits: Vec<(String, String)> = specs
+        .iter()
+        .filter_map(|s| match_setting_spec(s, request))
+        .collect();
+    if hits.len() != 1 {
+        return None;
+    }
+    let (k, v) = hits.remove(0);
+    Some(vec![(k, json!(v))])
+}
+
+/// Resolves an unambiguous single settings target without calling the fast-tier target picker
+/// when `request` names exactly one workspace setting field + allowed value and no bot or project.
+fn try_pick_deterministic(
+    bots: &[Bot],
+    projects: &[crate::repo::Project],
+    request: &str,
+) -> Option<Picked> {
+    if !is_single_statement(request) {
+        return None;
+    }
+    let mentions_bot = bots.iter().any(|b| {
+        contains_ascii_token(request, &b.id) || (!b.name.is_empty() && request.contains(&b.name))
+    });
+    let mentions_project = projects.iter().any(|p| {
+        contains_ascii_token(request, &p.id) || (!p.name.is_empty() && request.contains(&p.name))
+    });
+    if mentions_bot || mentions_project {
+        return None;
+    }
+    let mut matched_cat: Option<&str> = None;
+    for (cat, specs) in ws_settings::schema().categories() {
+        for spec in specs {
+            if match_setting_spec(spec, request).is_some() {
+                if matched_cat.is_some() {
+                    return None;
+                }
+                matched_cat = Some(cat);
+            }
+        }
+    }
+    let cat = matched_cat?;
+    Some(Picked {
+        targets: vec![Target {
+            kind: "settings".into(),
+            id: Some(cat.into()),
+        }],
+        ask: false,
+    })
+}
 
 /// The option line of a bot to make; `bot:new:<名字>` once per new bot.
 const NEW_BOT_OPTION: &str = "bot:new:<名字> — 新建一个 Bot，名字写在冒号后，每个新 Bot 一项；已有职责相近的 Bot 就改它，不新建";
@@ -1187,12 +1264,13 @@ impl Core {
     }
 
     /// The settings of category `cat` as draft fields, and their schema entries (for value labels).
-    fn settings_fields(&self, ws: &str, cat: &str) -> Result<(Vec<Value>, Vec<FieldSpec>)> {
+    fn settings_fields(
+        &self,
+        ws: &str,
+        cat: &str,
+    ) -> Result<(&'static [SettingSpec], Vec<FieldSpec>)> {
         let db = self.store();
-        let specs: Vec<Value> = SETTINGS
-            .get(cat)
-            .and_then(Value::as_array)
-            .cloned()
+        let specs = ws_settings::category(cat)
             .ok_or_else(|| msg(steve_i18n::t!("core.settings.no_category")))?;
         let mut cur = setting_defaults();
         cur.extend(db.settings_all(ws)?);
@@ -1202,35 +1280,32 @@ impl Core {
         let mut fs: Vec<FieldSpec> = specs
             .iter()
             .map(|s| {
-                let labels = s.get("labels").and_then(Value::as_object).map(|l| {
+                let labels = s.labels.as_ref().map(|l| {
                     format!(
                         "（值：{}）",
-                        l.iter()
-                            .map(|(k, v)| format!("{k}={}", jstr(v)))
+                        l.entries()
+                            .iter()
+                            .map(|(k, v)| format!("{k}={v}"))
                             .collect::<Vec<_>>()
                             .join("，")
                     )
                 });
-                let key = s["key"].as_str().unwrap_or_default().to_string();
                 FieldSpec {
-                    label: format!("{}{}", jstr(&s["label"]), labels.unwrap_or_default()),
-                    ty: "enum",
-                    values: s["values"]
-                        .as_array()
-                        .map(|vs| vs.iter().map(jstr).collect()),
-                    current: cur.get(&key).cloned().unwrap_or(Value::Null),
-                    key,
+                    label: format!("{}{}", s.label, labels.unwrap_or_default()),
+                    ty: "enum".into(),
+                    values: Some(s.values.clone()),
+                    current: cur.get(&s.key).cloned().unwrap_or(Value::Null),
+                    key: s.key.clone(),
                 }
             })
             .collect();
         if cat == "items" {
-            fs.push(FieldSpec {
-                key: "item_prefix".into(),
-                label: "事项编号前缀（大写字母）".into(),
-                ty: "text",
-                values: None,
-                current: json!(w.item_prefix),
-            });
+            fs.push(FieldSpec::new(
+                "item_prefix",
+                "事项编号前缀（大写字母）",
+                "text",
+                json!(w.item_prefix),
+            ));
         }
         Ok((specs, fs))
     }
@@ -1297,11 +1372,7 @@ impl Core {
                                 &short_label(&f.label),
                                 &harnesses,
                             ),
-                            value_shown(
-                                "settings",
-                                &f.key,
-                                show(&setting_shown(&specs, &f.key, &f.current)),
-                            ),
+                            setting_value_shown(specs, &f.key, &f.current),
                         )
                     })
                     .collect();
@@ -1368,13 +1439,7 @@ impl Core {
                 _ => return Err(msg(steve_i18n::t!("core.settings.not_found"))),
             };
             let cur = base.map(str::to_string).unwrap_or(saved);
-            let spec = FieldSpec {
-                key: field.into(),
-                label: label.into(),
-                ty: "text",
-                values: None,
-                current: json!(cur),
-            };
+            let spec = FieldSpec::new(field, label, "text", json!(cur));
             let what = format!(
                 "the bot \"{}\" (role: {}; way of speaking: {})",
                 b.name,
@@ -1408,19 +1473,15 @@ impl Core {
                 kind: "bot".into(),
                 id: Some(b.id.clone()),
             };
-            let p = Proposal {
-                id: uid("chg"),
-                ws: ws.into(),
-                title: steve_i18n::t!("core.draft.title.bot", bot = b.display()),
-                href: format!("#/bots/{}", b.id),
-                target,
+            self.store_core_draft(
+                ws,
+                &target,
+                steve_i18n::t!("core.draft.title.bot", bot = b.display()),
+                format!("#/bots/{}", b.id),
                 changes,
                 patch,
-                created: now(),
-                current: vec![],
-            };
-            self.tx().st.drafts.insert(p.id.clone(), p.clone());
-            Ok(p)
+                request,
+            )
         })
         .await
     }
@@ -1439,7 +1500,7 @@ impl Core {
         } else {
             target
         };
-        let (title, href, current) = self.describe(ws, &target)?;
+        let (title, href, _) = self.describe(ws, &target)?;
         let db = self.store();
         let gw = self.gw();
         let harnesses = self.models().harnesses();
@@ -1573,9 +1634,20 @@ impl Core {
             "settings" => {
                 let cat = target.id.clone().unwrap_or_else(|| "general".into());
                 let (specs, fs) = self.settings_fields(ws, &cat)?;
-                for (k, value) in
-                    draft_fields(gw, &format!("Steve settings · {cat}"), &fs, request).await?
-                {
+                let said = match try_draft_setting_deterministic(&specs, request) {
+                    Some(deterministic) => {
+                        steve_runtime::jobs::record_model_calls_avoided(
+                            CONFIG_DRAFT_METRIC_TASK,
+                            steve_runtime::jobs::AvoidReason::Deterministic,
+                            1,
+                        );
+                        deterministic
+                    }
+                    None => {
+                        draft_fields(gw, &format!("Steve settings · {cat}"), &fs, request).await?
+                    }
+                };
+                for (k, value) in said {
                     let Some(f) = fs.iter().find(|f| f.key == k) else {
                         continue;
                     };
@@ -1603,16 +1675,8 @@ impl Core {
                             &plain_label(&f.label),
                             &harnesses,
                         ),
-                        from: value_shown(
-                            "settings",
-                            &k,
-                            show(&setting_shown(&specs, &k, &f.current)),
-                        ),
-                        to: value_shown(
-                            "settings",
-                            &k,
-                            show(&setting_shown(&specs, &k, &json!(v))),
-                        ),
+                        from: setting_value_shown(specs, &k, &f.current),
+                        to: setting_value_shown(specs, &k, &json!(v)),
                     });
                     patch.insert(k, json!(v));
                 }
@@ -1625,19 +1689,7 @@ impl Core {
             }
             _ => {}
         }
-        let p = Proposal {
-            id: uid("chg"),
-            ws: ws.into(),
-            title,
-            target,
-            href,
-            changes,
-            patch,
-            created: now(),
-            current,
-        };
-        self.tx().st.drafts.insert(p.id.clone(), p.clone());
-        Ok(p)
+        self.store_core_draft(ws, &target, title, href, changes, patch, request)
     }
 
     /// The tags draft: new tags, and existing ones renamed, moved to another category, described anew or
@@ -1667,7 +1719,7 @@ impl Core {
         let r = first_json(
             &self
                 .gw()
-                .print(&prompt, Tier::Smart, Duration::from_secs(90))
+                .print(&prompt, Tier::Smart, DRAFT_TAGS_TIMEOUT)
                 .await?,
         )?
         .unwrap_or(json!({}));
@@ -1792,8 +1844,17 @@ impl Core {
     /// sources, mailboxes, repositories, channels… — to the options.
     pub async fn pick_targets(&self, ws: &str, request: &str, who: Option<&str>) -> Result<Picked> {
         let db = self.store();
-        let mut opts: Vec<String> = db
-            .bots(ws)?
+        let bots = db.bots(ws)?;
+        let projects = db.store().projects().list(ws, true)?;
+        if let Some(picked) = try_pick_deterministic(&bots, &projects, request) {
+            steve_runtime::jobs::record_model_calls_avoided(
+                CONFIG_PICK_METRIC_TASK,
+                steve_runtime::jobs::AvoidReason::Deterministic,
+                1,
+            );
+            return Ok(picked);
+        }
+        let mut opts: Vec<String> = bots
             .iter()
             .map(|b| {
                 format!(
@@ -1806,7 +1867,7 @@ impl Core {
             })
             .collect();
         opts.push(NEW_BOT_OPTION.into());
-        opts.extend(db.store().projects().list(ws, true)?.iter().map(|p| {
+        opts.extend(projects.iter().map(|p| {
             format!(
                 "project:{} — 项目 {}{}",
                 p.id,
@@ -1836,7 +1897,7 @@ impl Core {
                             !c.code.starts_with("contact:")
                                 || request.contains(c.label.split('（').next().unwrap_or(&c.label))
                         })
-                        .take(80)
+                        .take(MAX_MODULE_CANDIDATES)
                         .map(|c| c.line()),
                 ),
                 Err(e) => tracing::warn!("config candidates of {ws}: {e:?}"),
@@ -1851,7 +1912,7 @@ impl Core {
         );
         let raw = self
             .gw()
-            .print(&prompt, Tier::Fast, Duration::from_secs(60))
+            .print(&prompt, Tier::Fast, PICK_TARGETS_TIMEOUT)
             .await
             .unwrap_or_else(|_| "{}".into());
         let r = first_json(&raw)?.unwrap_or(json!({}));
@@ -1944,17 +2005,21 @@ impl Core {
             });
         }
         let p = self.draft(ws, t.clone(), request).await?;
-        let proposal = if p.changes.is_empty() {
-            self.tx().st.drafts.remove(&p.id);
-            None
-        } else {
-            Some(serde_json::to_value(&p)?)
-        };
+        if p.changes.is_empty() {
+            let _ = self.drop_draft(&p.id, ws);
+            let (title, href, current) = self.describe(ws, t)?;
+            return Ok(Drafted {
+                title,
+                href,
+                proposal: None,
+                current,
+            });
+        }
         Ok(Drafted {
-            title: p.title,
-            href: p.href,
-            proposal,
-            current: p.current,
+            title: p.title.clone(),
+            href: p.href.clone(),
+            proposal: Some(serde_json::to_value(&p)?),
+            current: vec![],
         })
     }
 
@@ -2012,6 +2077,7 @@ impl Core {
             proposal: None,
         })
     }
+
     /// Drafts of a request said in the conversation that touch only L0 configuration — the settings
     /// in [`AUTO_SETTINGS`], field edits of contacts, organizations and teams — apply at once; their
     /// card says so and offers the undo. Returns the ids applied; the rest stay cards to apply.
@@ -2021,6 +2087,7 @@ impl Core {
         who: Option<&str>,
         ds: &[Drafted],
     ) -> Vec<String> {
+        let m = self.changes_modules();
         let mut done = vec![];
         for p in ds.iter().filter_map(|d| d.proposal.as_ref()) {
             let (Some(id), Some(kind)) = (p["id"].as_str(), p["target"]["kind"].as_str()) else {
@@ -2029,46 +2096,47 @@ impl Core {
             if !clear_lines(p) {
                 continue;
             }
-            let ok = if CORE_KINDS.contains(&kind) {
-                let keys = p["patch"]
-                    .as_object()
-                    .map(|o| o.keys().cloned().collect::<Vec<_>>());
-                kind == "settings"
-                    && keys.is_some_and(|k| {
-                        !k.is_empty() && k.iter().all(|k| AUTO_SETTINGS.contains(&k.as_str()))
-                    })
-                    && self.apply(id, who.unwrap_or("me"), ws).is_ok()
-            } else {
-                let (Some(m), Some(me)) = (self.modules(), who) else {
-                    continue;
-                };
-                let caller = steve_modules::Caller {
-                    ws: ws.into(),
-                    me: me.into(),
-                };
-                let cid = id.to_string();
-                m.blocking(move |m| {
-                    let operations = m
+            if !CORE_KINDS.contains(&kind) && who.is_none() {
+                continue;
+            }
+            let caller = steve_modules::Caller {
+                ws: ws.into(),
+                me: who.unwrap_or("me").into(),
+            };
+            let cid = id.to_string();
+            let ok = m
+                .blocking(move |m| {
+                    let Some(cs) = m
                         .store
-                        .read(|r| steve_store::changeset_repo::operation_names(r, &cid))?;
-                    let fields_only = operations.is_some_and(|ops| {
-                        !ops.is_empty()
-                            && ops.iter().all(|op| AUTO_MODULE_OPS.contains(&op.as_str()))
-                    });
-                    if !fields_only {
+                        .read(|r| steve_store::base::changesets::ChangeSets(r).get(&cid))?
+                    else {
+                        return Ok(false);
+                    };
+                    if cs.ops.is_empty() {
                         return Ok(false);
                     }
-                    match steve_modules::changes::apply(m, &caller, &cid) {
-                        Some(r) => r.map(|_| true),
-                        None => Ok(false),
+                    let auto_settings = cs.ops.iter().all(|op| {
+                        op.get("op").and_then(Value::as_str) == Some(OP_SETTINGS_PATCH)
+                            && op.get("patch").and_then(Value::as_object).is_some_and(|m| {
+                                !m.is_empty()
+                                    && m.keys().all(|k| AUTO_SETTINGS.contains(&k.as_str()))
+                            })
+                    });
+                    let auto_module = cs.ops.iter().all(|op| {
+                        op.get("op")
+                            .and_then(Value::as_str)
+                            .is_some_and(|n| AUTO_MODULE_OPS.contains(&n))
+                    });
+                    if !auto_settings && !auto_module {
+                        return Ok(false);
                     }
+                    steve_modules::changes::apply(m, &caller, &cid).map(|_| true)
                 })
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!("config auto-apply {kind}: {e}");
                     false
-                })
-            };
+                });
             if ok {
                 done.push(id.to_string());
             }
@@ -2076,29 +2144,120 @@ impl Core {
         done
     }
 
-    /// Apply a draft of this workspace; returns the id to undo it with.
+    /// Registers core's conversational configuration operations (`core.*`) into `steve-modules`'s
+    /// single changeset registry so every target (core and modules alike) shares one persisted
+    /// SQLite `changesets` engine.
+    pub fn register_change_ops(&self, reg: &mut steve_modules::Registry) {
+        reg.op(OP_BOT_CREATE, Box::new(CoreBotCreate(self.clone())))
+            .op(OP_BOT_PATCH, Box::new(CoreBotPatch(self.clone())))
+            .op(OP_PROJECT_PATCH, Box::new(CoreProjectPatch(self.clone())))
+            .op(OP_SETTINGS_PATCH, Box::new(CoreSettingsPatch(self.clone())))
+            .op(OP_TAGS_APPLY, Box::new(CoreTagsApply(self.clone())))
+            .op(OP_MODELS_PATCH, Box::new(CoreModelsPatch(self.clone())));
+    }
+
+    fn changes_modules(&self) -> &steve_modules::Modules {
+        self.0.modules.get_or_init(|| {
+            let mut reg = steve_modules::Registry::default();
+            self.register_change_ops(&mut reg);
+            steve_modules::Modules::new(self.store().store().clone(), self.module_gateway(), reg)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn store_core_draft(
+        &self,
+        ws: &str,
+        target: &Target,
+        title: String,
+        href: String,
+        changes: Vec<Change>,
+        patch: Map<String, Value>,
+        request: &str,
+    ) -> Result<Proposal> {
+        let m = self.changes_modules();
+        let caller = steve_modules::Caller {
+            ws: ws.into(),
+            me: "me".into(),
+        };
+        let tid = target.id.clone().unwrap_or_default();
+        let ops = if changes.is_empty() {
+            vec![]
+        } else {
+            match target.kind.as_str() {
+                "bot" if new_bot_name(&tid).is_some() => {
+                    vec![json!({ "op": OP_BOT_CREATE, "patch": Value::Object(patch.clone()) })]
+                }
+                "bot" => vec![
+                    json!({ "op": OP_BOT_PATCH, "id": tid, "patch": Value::Object(patch.clone()) }),
+                ],
+                "project" => vec![
+                    json!({ "op": OP_PROJECT_PATCH, "id": tid, "patch": Value::Object(patch.clone()) }),
+                ],
+                "settings" => {
+                    vec![json!({ "op": OP_SETTINGS_PATCH, "patch": Value::Object(patch.clone()) })]
+                }
+                "tags" => {
+                    vec![json!({ "op": OP_TAGS_APPLY, "patch": Value::Object(patch.clone()) })]
+                }
+                "models" => {
+                    vec![json!({ "op": OP_MODELS_PATCH, "patch": Value::Object(patch.clone()) })]
+                }
+                _ => vec![],
+            }
+        };
+        let prepared = Prepared {
+            target_id: target.id.clone(),
+            revision: None,
+            title,
+            href,
+            subject: String::new(),
+            fields: vec![],
+            ops: vec![],
+            free_text: None,
+            context: Value::Null,
+        };
+        let p = steve_modules::changes::store_plan_with_request(
+            m,
+            &caller,
+            &target.kind,
+            &prepared,
+            Plan { ops, changes },
+            Origin::default(),
+            request,
+        )
+        .map_err(|e| msg(e.to_string()))?;
+        Ok(p.with_patch(patch))
+    }
+
+    /// Apply a stored draft of this workspace; returns `{ok: true, undo: id, ...}`.
     pub fn apply(&self, id: &str, actor: &str, ws: &str) -> Result<Value> {
-        let r = self.apply_draft(id, actor, ws)?;
+        let m = self.changes_modules();
+        let caller = steve_modules::Caller {
+            ws: ws.into(),
+            me: actor.into(),
+        };
+        let r = steve_modules::changes::apply(m, &caller, id).map_err(|e| msg(e.to_string()))?;
         self.mark_proposal(ws, id, Some("applied"));
         Ok(r)
     }
 
-    /// Throws a draft of this workspace away; its conversation card says so. A draft already gone (the
-    /// Hub restarted) is dropped all the same.
+    /// Throws a stored draft of this workspace away; its conversation card says so.
     pub fn drop_draft(&self, id: &str, ws: &str) -> Result<Value> {
-        {
-            let mut t = self.tx();
-            if t.st.drafts.get(id).is_some_and(|p| p.ws == ws) {
-                t.st.drafts.remove(id);
-            }
-        }
+        let m = self.changes_modules();
+        let caller = steve_modules::Caller {
+            ws: ws.into(),
+            me: "me".into(),
+        };
+        let r =
+            steve_modules::changes::drop_draft(m, &caller, id).map_err(|e| msg(e.to_string()))?;
         self.mark_proposal(ws, id, Some("dropped"));
-        Ok(json!({"ok": true}))
+        Ok(r)
     }
 
     /// The conversation card of draft `id` is now `state` (`applied`, `dropped`; `None`: a draft again
     /// after an undo), kept in its message's `meta.cfg_state` so it shows so after a reload. Draft ids
-    /// are the core's (`chg_…`) or a module changeset's; a draft made outside the conversation has no card.
+    /// are persisted changeset ids (`chs_…`); a draft made outside the conversation has no card.
     pub fn mark_proposal(&self, ws: &str, id: &str, state: Option<&str>) {
         let db = self.store();
         let holds = |meta: &Value| {
@@ -2136,354 +2295,432 @@ impl Core {
         }
     }
 
-    fn apply_draft(&self, id: &str, actor: &str, ws: &str) -> Result<Value> {
-        let mut t = self.tx();
-        let p = match t.st.drafts.get(id) {
-            Some(p) if p.ws == ws => p.clone(),
-            _ => return Err(msg(steve_i18n::t!("core.draft.stale"))),
-        };
-        let db = t.db().clone();
-        let (before, after) =
-            db.store()
-                .write(|_w| -> Result<(Map<String, Value>, Map<String, Value>)> {
-                    let db = &db;
-                    let mut before = Map::new();
-                    let mut after = Map::new();
-                    let tid = p.target.id.clone().unwrap_or_default();
-                    match p.target.kind.as_str() {
-                        "bot" if new_bot_name(&tid).is_some() => {
-                            let mut nb = p.patch.clone();
-                            let (def_harness, def_perm) = self.models().default_bot();
-                            let h = nb
-                                .get("harness")
-                                .and_then(Value::as_str)
-                                .filter(|s| !s.is_empty())
-                                .map(str::to_string)
-                                .unwrap_or(def_harness);
-                            nb.insert("harness".into(), json!(h));
-                            if !nb.contains_key("perm_mode") {
-                                let pm = if h == self.models().default_bot().0 {
-                                    def_perm
-                                } else {
-                                    self.models().default_perm_mode_for(&h)
-                                };
-                                nb.insert("perm_mode".into(), json!(pm));
-                            }
-                            self.models().validate_bot_patch(None, &nb).map_err(msg)?;
-                            let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
-                            before.insert("created".into(), json!(b.id));
-                        }
-                        "bot" => {
-                            let cur_bot = db
-                                .bot(&tid)?
-                                .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?;
-                            let b = serde_json::to_value(&cur_bot)?;
-                            let hs = self.models().harnesses();
-                            self.models()
-                                .validate_bot_patch(b.as_object(), &p.patch)
-                                .map_err(msg)?;
-                            let mut bp = p.patch.clone();
-                            if let Some(next_id) = bp.get("harness").and_then(Value::as_str)
-                                && next_id != cur_bot.harness.as_str()
-                                && !bp.contains_key("perm_mode")
-                                && let Some(target) = hs.iter().find(|h| h.id == next_id)
-                                && perm_mode_of_key(&cur_bot.perm_mode)
-                                    .is_some_and(|m| !target.offers_bot_mode(m))
-                            {
-                                bp.insert("perm_mode".into(), json!(target.default_perm_mode()));
-                            }
-                            for k in bp.keys() {
-                                before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
-                            }
-                            db.bot_patch(&tid, &bp, actor)?;
-                            if let Some(b) = db.bot(&tid)? {
-                                let b = serde_json::to_value(b)?;
-                                for k in bp.keys() {
-                                    after.insert(
-                                        k.clone(),
-                                        b.get(k).cloned().unwrap_or(Value::Null),
-                                    );
-                                }
-                            }
-                        }
-                        "project" => {
-                            let x = serde_json::to_value(
-                                db.project(Some(&tid))?
-                                    .ok_or_else(|| msg(steve_i18n::t!("core.project.not_found")))?,
-                            )?;
-                            for k in p.patch.keys() {
-                                before.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
-                            }
-                            db.project_patch(&tid, &p.patch, actor)?;
-                            if let Some(x) = db.project(Some(&tid))? {
-                                let x = serde_json::to_value(x)?;
-                                for k in p.patch.keys() {
-                                    after.insert(
-                                        k.clone(),
-                                        x.get(k).cloned().unwrap_or(Value::Null),
-                                    );
-                                }
-                            }
-                        }
-                        "settings" => {
-                            let mut cur = setting_defaults();
-                            cur.extend(db.settings_all(&p.ws)?);
-                            let mut rest = p.patch.clone();
-                            let prefix = rest.remove("item_prefix");
-                            for k in rest.keys() {
-                                before
-                                    .insert(k.clone(), cur.get(k).cloned().unwrap_or(Value::Null));
-                            }
-                            if !rest.is_empty() {
-                                db.settings_set(&p.ws, &rest, actor)?;
-                                let mut now = setting_defaults();
-                                now.extend(db.settings_all(&p.ws)?);
-                                for k in rest.keys() {
-                                    after.insert(
-                                        k.clone(),
-                                        now.get(k).cloned().unwrap_or(Value::Null),
-                                    );
-                                }
-                            }
-                            if let Some(pre) = prefix.filter(truthy) {
-                                let w = db
-                                    .workspace(&p.ws)?
-                                    .ok_or_else(|| msg(steve_i18n::t!("core.space.not_found")))?;
-                                before.insert("item_prefix".into(), json!(w.item_prefix));
-                                db.workspace_patch(&p.ws, patch![item_prefix: jstr(&pre)])?;
-                                if let Some(w) = db.workspace(&p.ws)? {
-                                    after.insert("item_prefix".into(), json!(w.item_prefix));
-                                }
-                            }
-                        }
-                        "tags" => {
-                            let mut made = vec![];
-                            for x in p
-                                .patch
-                                .get("create")
-                                .and_then(Value::as_array)
-                                .into_iter()
-                                .flatten()
-                            {
-                                made.push(
-                                    db.tag_create(
-                                        &p.ws,
-                                        &jstr(&x["name"]),
-                                        &jstr(&x["cat"]),
-                                        &x.get("description").map(jstr).unwrap_or_default(),
-                                        "Steve",
-                                    )?
-                                    .id,
-                                );
-                            }
-                            let mut edits = Map::new();
-                            for e in p
-                                .patch
-                                .get("edit")
-                                .and_then(Value::as_array)
-                                .into_iter()
-                                .flatten()
-                            {
-                                let Some(tag) = db.tag_by_name(&p.ws, &jstr(&e["name"]))? else {
-                                    continue;
-                                };
-                                let s = |k: &str| e.get(k).filter(|v| truthy(v)).map(jstr);
-                                let to = steve_store::TagPatch {
-                                    name: s("newName"),
-                                    cat: s("cat"),
-                                    description: s("description"),
-                                };
-                                edits.insert(
-                        tag.id.clone(),
-                        json!({"name": tag.name, "cat": tag.cat, "description": tag.description}),
-                    );
-                                db.tag_patch(&tag.id, &to)?;
-                            }
-                            let mut removed = vec![];
-                            for n in p
-                                .patch
-                                .get("remove")
-                                .and_then(Value::as_array)
-                                .into_iter()
-                                .flatten()
-                            {
-                                /* used since the draft: kept */
-                                let Some(tag) = db.tag_by_name(&p.ws, &jstr(n))? else {
-                                    continue;
-                                };
-                                if db.tag_used(&tag.id)? > 0 {
-                                    continue;
-                                }
-                                removed.push(
-                        json!({"name": tag.name, "cat": tag.cat, "description": tag.description}),
-                    );
-                                db.tag_remove(&tag.id)?;
-                            }
-                            before.insert("made".into(), json!(made));
-                            before.insert("edits".into(), Value::Object(edits));
-                            before.insert("removed".into(), json!(removed));
-                        }
-                        "models" => {
-                            before = self.models().stored(&p.ws, &p.patch);
-                            self.models()
-                                .write(&p.ws, &p.patch, actor, "settings.models")?;
-                            after = self.models().stored(&p.ws, &p.patch);
-                        }
-                        _ => {}
-                    }
-                    db.audit(
-                        actor,
-                        "config.apply",
-                        id,
-                        &json!({"target": p.target, "patch": p.patch}),
-                        &p.ws,
-                    )?;
-                    Ok((before, after))
-                })?;
-        t.st.drafts.remove(id);
-        let mut r = json!({"ok": true, "undo": id});
-        if let Some(b) = before.get("created") {
-            r["bot"] = b.clone();
-        }
-        t.st.applied.insert(
-            id.into(),
-            Applied {
-                target: p.target.clone(),
-                before,
-                after,
-                ws: p.ws.clone(),
-            },
-        );
-        Ok(r)
-    }
-
     /// Undo an applied draft of this workspace.
     pub fn undo(&self, id: &str, actor: &str, ws: &str) -> Result<Value> {
-        let r = self.undo_applied(id, actor, ws)?;
+        let m = self.changes_modules();
+        let caller = steve_modules::Caller {
+            ws: ws.into(),
+            me: actor.into(),
+        };
+        let r = steve_modules::changes::undo(m, &caller, id).map_err(|e| msg(e.to_string()))?;
         self.mark_proposal(ws, id, None);
         Ok(r)
     }
+}
 
-    fn undo_applied(&self, id: &str, actor: &str, ws: &str) -> Result<Value> {
-        let mut t = self.tx();
-        let a = match t.st.applied.get(id) {
-            Some(a) if a.ws == ws => a.clone(),
-            _ => return Err(msg(steve_i18n::t!("core.draft.not_undoable"))),
-        };
-        let tid = a.target.id.clone().unwrap_or_default();
-        /* a bot made by the draft goes again; work it took meanwhile goes to the main bot */
-        if a.target.kind == "bot" && new_bot_name(&tid).is_some() {
-            let made = a.before.get("created").map(jstr).unwrap_or_default();
-            let main = t.db().main_bot()?.id;
-            t.delete_bot(&made, &main, actor)?;
+fn core_err(e: impl std::fmt::Display) -> ApiError {
+    ApiError::rule(e.to_string())
+}
+
+fn patch_map(op: &Value) -> ApiResult<&Map<String, Value>> {
+    op.get("patch")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ApiError::invalid("patch"))
+}
+
+fn op_id(op: &Value) -> ApiResult<&str> {
+    op.get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::invalid("id"))
+}
+
+fn before_after(before: &Value) -> (&Map<String, Value>, &Map<String, Value>) {
+    static EMPTY: std::sync::LazyLock<Map<String, Value>> = std::sync::LazyLock::new(Map::new);
+    (
+        before
+            .get("before")
+            .and_then(Value::as_object)
+            .unwrap_or(&EMPTY),
+        before
+            .get("after")
+            .and_then(Value::as_object)
+            .unwrap_or(&EMPTY),
+    )
+}
+
+struct CoreBotCreate(Core);
+impl ChangeOp for CoreBotCreate {
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let mut nb = patch_map(op)?.clone();
+        let (def_harness, def_perm) = self.0.models().default_bot();
+        let h = nb
+            .get("harness")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| def_harness.clone());
+        nb.insert("harness".into(), json!(h));
+        if !nb.contains_key("perm_mode") {
+            let pm = if h == def_harness {
+                def_perm
+            } else {
+                self.0.models().default_perm_mode_for(&h)
+            };
+            nb.insert("perm_mode".into(), json!(pm));
         }
-        let db = t.db().clone();
-        let r = db.store().write(|_w| -> Result<Value> {
-        let db = &db;
-        /* only what still holds the value this change wrote goes back: an edit made since is kept */
-        let now: Map<String, Value> = match a.target.kind.as_str() {
-            "bot" if new_bot_name(&tid).is_some() => Map::new(),
-            "bot" => db
-                .bot(&tid)?
-                .map(serde_json::to_value)
-                .transpose()?
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default(),
-            "project" => db
-                .project(Some(&tid))?
-                .map(serde_json::to_value)
-                .transpose()?
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default(),
-            "settings" => {
-                let mut now = setting_defaults();
-                now.extend(db.settings_all(&a.ws)?);
-                if let Some(w) = db.workspace(&a.ws)? {
-                    now.insert("item_prefix".into(), json!(w.item_prefix));
-                }
-                now
+        self.0
+            .models()
+            .validate_bot_patch(None, &nb)
+            .map_err(ApiError::rule)?;
+        let new_bot: steve_store::NewBot =
+            serde_json::from_value(Value::Object(nb)).map_err(core_err)?;
+        let b = steve_modules::contacts::stewards::create_bot(tx, cx.ws, &new_bot, cx.actor)?;
+        cx.set_result("bot", json!(b.id));
+        Ok(json!({ "created": b.id }))
+    }
+
+    fn undo(
+        &self,
+        _tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let made = before.get("created").map(jstr).unwrap_or_default();
+        if made.is_empty() {
+            return Ok(());
+        }
+        let main = self.0.store().main_bot().map_err(core_err)?.id;
+        self.0
+            .delete_bot(&made, &main, cx.actor, &[cx.ws.to_string()])
+            .map_err(core_err)?;
+        Ok(())
+    }
+}
+
+struct CoreBotPatch(Core);
+impl ChangeOp for CoreBotPatch {
+    fn apply(&self, _tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tid = op_id(op)?;
+        let patch = patch_map(op)?;
+        let db = self.0.store();
+        let cur_bot = db
+            .bot(tid)
+            .map_err(core_err)?
+            .ok_or_else(|| ApiError::rule(steve_i18n::t!("core.bot.not_found")))?;
+        let b = serde_json::to_value(&cur_bot).map_err(core_err)?;
+        let hs = self.0.models().harnesses();
+        self.0
+            .models()
+            .validate_bot_patch(b.as_object(), patch)
+            .map_err(ApiError::rule)?;
+        let mut bp = patch.clone();
+        crate::models::reconcile_bot_perm_mode(b.as_object(), &mut bp, &hs)
+            .map_err(ApiError::invalid)?;
+        let mut before = Map::new();
+        for k in bp.keys() {
+            before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
+        }
+        db.bot_patch(tid, &bp, cx.actor).map_err(core_err)?;
+        let mut after = Map::new();
+        if let Some(b) = db.bot(tid).map_err(core_err)? {
+            let b = serde_json::to_value(b).map_err(core_err)?;
+            for k in bp.keys() {
+                after.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
             }
-            "models" => self.models().stored(&a.ws, &a.after),
-            _ => Map::new(),
-        };
-        let (back, kept) = still_ours(&a.before, &a.after, |k| {
-            now.get(k).cloned().unwrap_or(Value::Null)
+        }
+        Ok(json!({ "before": before, "after": after }))
+    }
+
+    fn undo(
+        &self,
+        _tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tid = op_id(op)?;
+        let (before_map, after_map) = before_after(before);
+        let db = self.0.store();
+        let now = db
+            .bot(tid)
+            .map_err(core_err)?
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(core_err)?
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        let harnesses = self.0.models().harnesses();
+        let back = steve_modules::changes::still_ours(cx, before_map, after_map, &now, |k| {
+            field_shown("bot", k, false, k, &harnesses)
         });
-        match a.target.kind.as_str() {
-            "bot" if new_bot_name(&tid).is_some() => {}
-            "bot" if !back.is_empty() => db.bot_patch(&tid, &back, actor)?,
-            "project" if !back.is_empty() => db.project_patch(&tid, &back, actor)?,
-            "settings" => {
-                let mut rest = back.clone();
-                let prefix = rest.remove("item_prefix");
-                if !rest.is_empty() {
-                    db.settings_set(&a.ws, &rest, actor)?;
-                }
-                if let Some(pre) = prefix.filter(truthy) {
-                    db.workspace_patch(&a.ws, patch![item_prefix: jstr(&pre)])?;
-                }
-            }
-            "tags" => {
-                for m in a
-                    .before
-                    .get("made")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    db.tag_remove(&jstr(m))?;
-                }
-                for (tag, was) in a
-                    .before
-                    .get("edits")
-                    .and_then(Value::as_object)
-                    .into_iter()
-                    .flatten()
-                {
-                    let back = steve_store::TagPatch {
-                        name: was.get("name").map(jstr),
-                        cat: was.get("cat").map(jstr),
-                        description: was.get("description").map(jstr),
-                    };
-                    db.tag_patch(tag, &back)?;
-                }
-                for t in a
-                    .before
-                    .get("removed")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    db.tag_create(
-                        &a.ws,
-                        &jstr(&t["name"]),
-                        &jstr(&t["cat"]),
-                        &jstr(&t["description"]),
-                        actor,
-                    )?;
-                }
-            }
-            "models" if !back.is_empty() => {
-                self.models()
-                    .write(&a.ws, &back, actor, "settings.models")?
-            }
-            _ => {}
+        if !back.is_empty() {
+            db.bot_patch(tid, &back, cx.actor).map_err(core_err)?;
         }
-        db.audit(actor, "config.undo", id, &json!({"kept": kept}), &a.ws)?;
-        let mut r = json!({"ok": true});
-        if !kept.is_empty() {
-            /* named as the user sees them, in their language: these were changed again since */
-            let harnesses = self.models().harnesses();
-            r["kept"] = json!(
-                kept.iter()
-                    .map(|k| field_shown(&a.target.kind, k, false, k, &harnesses))
-                    .collect::<Vec<_>>()
+        Ok(())
+    }
+}
+
+struct CoreProjectPatch(Core);
+impl ChangeOp for CoreProjectPatch {
+    fn apply(&self, _tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tid = op_id(op)?;
+        let patch = patch_map(op)?;
+        let db = self.0.store();
+        let x = serde_json::to_value(
+            db.project(Some(tid))
+                .map_err(core_err)?
+                .ok_or_else(|| ApiError::rule(steve_i18n::t!("core.project.not_found")))?,
+        )
+        .map_err(core_err)?;
+        let mut before = Map::new();
+        for k in patch.keys() {
+            before.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
+        }
+        db.project_patch(tid, patch, cx.actor).map_err(core_err)?;
+        let mut after = Map::new();
+        if let Some(x) = db.project(Some(tid)).map_err(core_err)? {
+            let x = serde_json::to_value(x).map_err(core_err)?;
+            for k in patch.keys() {
+                after.insert(k.clone(), x.get(k).cloned().unwrap_or(Value::Null));
+            }
+        }
+        Ok(json!({ "before": before, "after": after }))
+    }
+
+    fn undo(
+        &self,
+        _tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tid = op_id(op)?;
+        let (before_map, after_map) = before_after(before);
+        let db = self.0.store();
+        let now = db
+            .project(Some(tid))
+            .map_err(core_err)?
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(core_err)?
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        let harnesses = self.0.models().harnesses();
+        let back = steve_modules::changes::still_ours(cx, before_map, after_map, &now, |k| {
+            field_shown("project", k, false, k, &harnesses)
+        });
+        if !back.is_empty() {
+            db.project_patch(tid, &back, cx.actor).map_err(core_err)?;
+        }
+        Ok(())
+    }
+}
+
+struct CoreSettingsPatch(Core);
+impl ChangeOp for CoreSettingsPatch {
+    fn apply(&self, _tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let patch = patch_map(op)?;
+        let db = self.0.store();
+        let mut cur = setting_defaults();
+        cur.extend(db.settings_all(cx.ws).map_err(core_err)?);
+        let mut rest = patch.clone();
+        let prefix = rest.remove("item_prefix");
+        let mut before = Map::new();
+        let mut after = Map::new();
+        for k in rest.keys() {
+            before.insert(k.clone(), cur.get(k).cloned().unwrap_or(Value::Null));
+        }
+        if !rest.is_empty() {
+            db.settings_set(cx.ws, &rest, cx.actor).map_err(core_err)?;
+            let mut now = setting_defaults();
+            now.extend(db.settings_all(cx.ws).map_err(core_err)?);
+            for k in rest.keys() {
+                after.insert(k.clone(), now.get(k).cloned().unwrap_or(Value::Null));
+            }
+        }
+        if let Some(pre) = prefix.filter(truthy) {
+            let w = db
+                .workspace(cx.ws)
+                .map_err(core_err)?
+                .ok_or_else(|| ApiError::rule(steve_i18n::t!("core.space.not_found")))?;
+            before.insert("item_prefix".into(), json!(w.item_prefix));
+            db.workspace_patch(cx.ws, patch![item_prefix: jstr(&pre)])
+                .map_err(core_err)?;
+            if let Some(w) = db.workspace(cx.ws).map_err(core_err)? {
+                after.insert("item_prefix".into(), json!(w.item_prefix));
+            }
+        }
+        Ok(json!({ "before": before, "after": after }))
+    }
+
+    fn undo(
+        &self,
+        _tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let (before_map, after_map) = before_after(before);
+        let db = self.0.store();
+        let mut now = setting_defaults();
+        now.extend(db.settings_all(cx.ws).map_err(core_err)?);
+        if let Some(w) = db.workspace(cx.ws).map_err(core_err)? {
+            now.insert("item_prefix".into(), json!(w.item_prefix));
+        }
+        let harnesses = self.0.models().harnesses();
+        let mut back = steve_modules::changes::still_ours(cx, before_map, after_map, &now, |k| {
+            field_shown("settings", k, false, k, &harnesses)
+        });
+        let prefix = back.remove("item_prefix");
+        if !back.is_empty() {
+            db.settings_set(cx.ws, &back, cx.actor).map_err(core_err)?;
+        }
+        if let Some(pre) = prefix.filter(truthy) {
+            db.workspace_patch(cx.ws, patch![item_prefix: jstr(&pre)])
+                .map_err(core_err)?;
+        }
+        Ok(())
+    }
+}
+
+struct CoreTagsApply(Core);
+impl ChangeOp for CoreTagsApply {
+    fn apply(&self, _tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let patch = patch_map(op)?;
+        let db = self.0.store();
+        let mut made = vec![];
+        for x in patch
+            .get("create")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            made.push(
+                db.tag_create(
+                    cx.ws,
+                    &jstr(&x["name"]),
+                    &jstr(&x["cat"]),
+                    &x.get("description").map(jstr).unwrap_or_default(),
+                    "Steve",
+                )
+                .map_err(core_err)?
+                .id,
             );
         }
-        Ok(r)
-        })?;
-        t.st.applied.remove(id);
-        Ok(r)
+        let mut edits = Map::new();
+        for e in patch
+            .get("edit")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(tag) = db.tag_by_name(cx.ws, &jstr(&e["name"])).map_err(core_err)? else {
+                continue;
+            };
+            let s = |k: &str| e.get(k).filter(|v| truthy(v)).map(jstr);
+            let to = steve_store::TagPatch {
+                name: s("newName"),
+                cat: s("cat"),
+                description: s("description"),
+            };
+            edits.insert(
+                tag.id.clone(),
+                json!({"name": tag.name, "cat": tag.cat, "description": tag.description}),
+            );
+            db.tag_patch(&tag.id, &to).map_err(core_err)?;
+        }
+        let mut removed = vec![];
+        for n in patch
+            .get("remove")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            /* used since the draft: kept */
+            let Some(tag) = db.tag_by_name(cx.ws, &jstr(n)).map_err(core_err)? else {
+                continue;
+            };
+            if db.tag_used(&tag.id).map_err(core_err)? > 0 {
+                continue;
+            }
+            removed.push(json!({"name": tag.name, "cat": tag.cat, "description": tag.description}));
+            db.tag_remove(&tag.id).map_err(core_err)?;
+        }
+        Ok(json!({ "made": made, "edits": edits, "removed": removed }))
+    }
+
+    fn undo(
+        &self,
+        _tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let db = self.0.store();
+        for m in before
+            .get("made")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            db.tag_remove(&jstr(m)).map_err(core_err)?;
+        }
+        for (tag, was) in before
+            .get("edits")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            let back = steve_store::TagPatch {
+                name: was.get("name").map(jstr),
+                cat: was.get("cat").map(jstr),
+                description: was.get("description").map(jstr),
+            };
+            db.tag_patch(tag, &back).map_err(core_err)?;
+        }
+        for t in before
+            .get("removed")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            db.tag_create(
+                cx.ws,
+                &jstr(&t["name"]),
+                &jstr(&t["cat"]),
+                &jstr(&t["description"]),
+                cx.actor,
+            )
+            .map_err(core_err)?;
+        }
+        Ok(())
+    }
+}
+
+struct CoreModelsPatch(Core);
+impl ChangeOp for CoreModelsPatch {
+    fn apply(&self, _tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let patch = patch_map(op)?;
+        let before = self.0.models().stored(cx.ws, patch);
+        self.0
+            .models()
+            .write(cx.ws, patch, cx.actor, "settings.models")
+            .map_err(core_err)?;
+        let after = self.0.models().stored(cx.ws, patch);
+        Ok(json!({ "before": before, "after": after }))
+    }
+
+    fn undo(
+        &self,
+        _tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let (before_map, after_map) = before_after(before);
+        let now = self.0.models().stored(cx.ws, after_map);
+        let harnesses = self.0.models().harnesses();
+        let back = steve_modules::changes::still_ours(cx, before_map, after_map, &now, |k| {
+            field_shown("models", k, false, k, &harnesses)
+        });
+        if !back.is_empty() {
+            self.0
+                .models()
+                .write(cx.ws, &back, cx.actor, "settings.models")
+                .map_err(core_err)?;
+        }
+        Ok(())
     }
 }
 
@@ -2494,17 +2731,34 @@ mod tests {
     #[test]
     fn schema_and_defaults() {
         let d = setting_defaults();
+        assert_eq!(d["noExecutor"], "ask");
         assert_eq!(d["accDefault"], "auto");
         assert_eq!(d["archDays"], "30");
-        assert_eq!(d.len(), 14);
+        assert_eq!(d["quotaAutoHandoff"], "on");
+        assert_eq!(d["quotaWaitMinutes"], "10");
+        assert_eq!(d.len(), 17);
         assert_eq!(d["tz"], "system");
-        assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
+        assert!(ws_settings::allowed("tz", "UTC") && !ws_settings::allowed("tz", "Mars/Base"));
         assert!(
-            setting_allowed("handoff", "70")
-                && !setting_allowed("handoff", "75")
-                && !setting_allowed("nope", "x")
+            ws_settings::allowed("quotaAutoHandoff", "on")
+                && ws_settings::allowed("quotaAutoHandoff", "off")
+                && !ws_settings::allowed("quotaAutoHandoff", "maybe")
         );
-        let keys: Vec<&String> = SETTINGS.as_object().unwrap().keys().collect();
+        assert!(
+            ws_settings::allowed("quotaWaitMinutes", "0")
+                && ws_settings::allowed("quotaWaitMinutes", "15")
+                && !ws_settings::allowed("quotaWaitMinutes", "7")
+        );
+        assert!(
+            ws_settings::allowed("handoff", "70")
+                && !ws_settings::allowed("handoff", "75")
+                && !ws_settings::allowed("nope", "x")
+        );
+        let keys: Vec<&str> = ws_settings::schema()
+            .categories()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         assert_eq!(keys, ["general", "items", "notify", "look", "data"]);
     }
 

@@ -304,9 +304,10 @@ pub struct DraftRow {
     pub updated: i64,
     pub sent: Option<i64>,
     pub delivery_version: Option<steve_types::DeliveryVersion>,
+    pub wait: Option<steve_types::WaitContract>,
 }
 
-const DRAFT_COLS: [&str; 27] = [
+const DRAFT_COLS: [&str; 31] = [
     "id",
     "workspace_id",
     "connection_id",
@@ -334,6 +335,10 @@ const DRAFT_COLS: [&str; 27] = [
     "updated",
     "sent",
     "delivery_version",
+    "wait_owner",
+    "wait_started_at",
+    "wait_deadline",
+    "wait_on_timeout",
 ];
 
 fn rcpts(s: Option<String>) -> Vec<Rcpt> {
@@ -342,6 +347,7 @@ fn rcpts(s: Option<String>) -> Vec<Rcpt> {
 }
 
 fn draft_row(r: &Row<'_>) -> Result<DraftRow> {
+    let wait = crate::wait_repo::decode_contract(r.get(27)?, r.get(28)?, r.get(29)?, r.get(30)?)?;
     Ok(DraftRow {
         id: r.get(0)?,
         workspace_id: r.get(1)?,
@@ -378,6 +384,7 @@ fn draft_row(r: &Row<'_>) -> Result<DraftRow> {
             .get::<Option<String>>(26)?
             .map(|v| serde_json::from_str(&v))
             .transpose()?,
+        wait: Some(wait),
     })
 }
 
@@ -967,6 +974,19 @@ pub fn thread_drafts(c: &mut impl Read, thread: &str) -> Result<Vec<DraftRow>> {
 }
 
 pub fn insert_draft(tx: &mut W<'_>, d: &DraftRow) -> Result<()> {
+    let wait = match &d.wait {
+        Some(w) => {
+            crate::wait_repo::validate_contract(w)?;
+            w.clone()
+        }
+        None => crate::wait_repo::default_mail_draft_contract(
+            tx,
+            &d.workspace_id,
+            &d.status,
+            d.created,
+        )?,
+    };
+    let wait_owner = wait.owner.to_code();
     tx.exec(
         Query::insert()
             .into_table("mail_drafts")
@@ -1003,6 +1023,10 @@ pub fn insert_draft(tx: &mut W<'_>, d: &DraftRow) -> Result<()> {
                         .map(|v| serde_json::to_string(&v))
                         .transpose()?,
                 ),
+                Expr::val(wait_owner),
+                Expr::val(wait.started_at.0),
+                Expr::val(wait.deadline.0),
+                Expr::val(wait.on_timeout.as_str()),
             ]),
     )?;
     Ok(())
@@ -1261,14 +1285,31 @@ pub fn draft_transition(
     to: &str,
     now: i64,
 ) -> Result<bool> {
-    Ok(w.exec(
-        Query::update()
-            .table("mail_drafts")
-            .value("status", to)
-            .value("updated", now)
-            .and_where(Expr::col("id").eq(id))
-            .and_where(Expr::col("status").is_in(from.iter().copied())),
-    )? > 0)
+    let mut update = Query::update();
+    update
+        .table("mail_drafts")
+        .value("status", to)
+        .value("updated", now)
+        .and_where(Expr::col("id").eq(id))
+        .and_where(Expr::col("status").is_in(from.iter().copied()));
+    if matches!(to, "draft" | "pending" | "unknown")
+        && let Some(ws) = w.one(
+            Query::select()
+                .column("workspace_id")
+                .from("mail_drafts")
+                .and_where(Expr::col("id").eq(id)),
+            |r| r.get::<String>(0),
+        )?
+    {
+        let wait = crate::wait_repo::default_mail_draft_contract(w, &ws, to, now)?;
+        update
+            .value("wait_owner", wait.owner.to_code())
+            .value("wait_started_at", wait.started_at.0)
+            .value("wait_deadline", wait.deadline.0)
+            .value("wait_on_timeout", wait.on_timeout.as_str())
+            .value("wait_escalated_at", Option::<i64>::None);
+    }
+    Ok(w.exec(&update)? > 0)
 }
 
 pub fn unread_of(c: &mut impl Read, conn: &str) -> Result<i64> {

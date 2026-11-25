@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
-"""cut-release.py on throwaway repositories: no network, no real remote, a fake `gh` for CI."""
+"""cut-release.py unit and end-to-end checks on throwaway repositories: no network, fake `gh`."""
 import importlib.util
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 CUT = Path(__file__).resolve().parent / "cut-release.py"
-ENV = dict({k: v for k, v in os.environ.items() if k != "STEVE_GH"}, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
-           GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+ENV = dict(
+    {k: v for k, v in os.environ.items() if k not in ("STEVE_GH", "GH_REPO")},
+    GIT_AUTHOR_NAME="t",
+    GIT_AUTHOR_EMAIL="t@example.com",
+    GIT_COMMITTER_NAME="t",
+    GIT_COMMITTER_EMAIL="t@example.com",
+)
 
-# GitHub's answer for the CI workflow's runs on a commit, from $FAKE_GH_CI: {"conclusion": ..., "status": ...}
-# for the push run of every commit, or {"none": true} (only a pull request's run). `commits` overrides
-# these answers per SHA (including `older_conclusion` for a superseded run); each call is logged to
-# $FAKE_GH_LOG. With {"pull": {"number": N, "head": sha, ...}} every commit asked about is that pull request
-# as merged ("merged_as": another commit instead; "base": its target), and its head has one pull-request run
-# ("conclusion", "status").
-# `gh pr create|merge|view|close` act on $FAKE_GH_ORIGIN (a bare repository) and keep the pull requests in
-# $FAKE_GH_PRS. A merge is a merge commit: the base's head and the pull request's head as its two parents, or
-# "not mergeable" when they conflict. A release pull request's head has one pull-request run:
-# {"release_pr": {"conclusion": ..., "status": ...}} (default success); {"move_main": true} pushes a commit onto
-# main the first time that run is asked about ({"move_main": {path: text}}: one that writes those files);
-# {"merge_refused": "..."} makes the merge fail with that message; {"base_modified": true} makes the first
-# merge fail the way GitHub does when the base moved at that very moment.
 FAKE_GH = r"""#!/usr/bin/env python3
 import json, os, re, subprocess, sys
 args = " ".join(sys.argv[1:])
@@ -63,7 +55,7 @@ if sys.argv[1:2] == ["pr"]:
         if trial.returncode != 0:
             sys.exit("X Pull request #" + rest[0] + " is not mergeable: the merge commit cannot be cleanly created.")
         tree = trial.stdout.splitlines()[0]
-        msg = "Merge pull request #" + rest[0] + " from acme/" + pr["head"]
+        msg = "Merge pull request #" + rest[0] + " from acme/" + pr["head"] + "\n\n" + pr["title"]
         new = og("commit-tree", tree, "-p", base, "-p", pr["sha"], "-m", msg, env={"GIT_COMMITTER_NAME": "merger"})
         og("update-ref", "refs/heads/" + pr["base"], new, base)
         pr.update(state="MERGED", merged=new)
@@ -80,10 +72,18 @@ if sys.argv[1:2] == ["pr"]:
 m = re.search(r"workflows/ci\.yml/runs\?head_sha=([0-9a-f]{40})&event=push&branch=main&", args)
 merged = re.search(r"/commits/([0-9a-f]{40})/pulls\?", args)
 tested = re.search(r"workflows/ci\.yml/runs\?head_sha=([0-9a-f]{40})&event=pull_request&", args)
-if sys.argv[1:2] != ["api"] or not (m or merged or tested):
+pr_api = re.search(r"/pulls/(\d+)$", args)
+if sys.argv[1:2] != ["api"] or not (m or merged or tested or pr_api):
     sys.exit("fake gh: unexpected " + args)
 if ci.get("down"):
     sys.exit("HTTP 502")
+if pr_api:
+    num = pr_api.group(1)
+    pr_meta = (ci.get("pr_meta") or {}).get(num)
+    if pr_meta is None:
+        sys.exit("HTTP 404: Not Found")
+    print(json.dumps({"number": int(num), "title": pr_meta["title"], "body": pr_meta.get("body", "")}))
+    sys.exit(0)
 if merged:
     print(json.dumps([{"number": pull["number"], "merged_at": "2026-01-01T00:00:00Z",
                        "merge_commit_sha": pull.get("merged_as", merged.group(1)),
@@ -95,12 +95,15 @@ if tested and any(p["sha"] == tested.group(1) for p in prs.values()):
         main = og("rev-parse", "refs/heads/main")
         index = prs_file + ".index"
         og("read-tree", main, env={"GIT_INDEX_FILE": index})
-        for path, text in (ci["move_main"] if isinstance(ci["move_main"], dict) else {}).items():
+        mv = ci["move_main"]
+        files = mv.get("files", mv) if isinstance(mv, dict) else {}
+        mv_msg = mv.get("msg", "fix(core): handle meanwhile update") if isinstance(mv, dict) and "msg" in mv else "fix(core): handle meanwhile update"
+        for path, text in files.items():
             blob = subprocess.run(["git", "-C", origin, "hash-object", "-w", "--stdin"], input=text, check=True,
                                   capture_output=True, text=True).stdout.strip()
             og("update-index", "--add", "--cacheinfo", "100644," + blob + "," + path, env={"GIT_INDEX_FILE": index})
         tree = og("write-tree", env={"GIT_INDEX_FILE": index})
-        og("update-ref", "refs/heads/main", og("commit-tree", tree, "-p", main, "-m", "meanwhile"), main)
+        og("update-ref", "refs/heads/main", og("commit-tree", tree, "-p", main, "-m", mv_msg), main)
     rel = ci.get("release_pr", {})
     runs = [{"id": 88, "run_number": 9, "head_sha": tested.group(1), "event": "pull_request",
              "head_branch": "release", "status": rel.get("status", "completed"),
@@ -113,7 +116,6 @@ if tested:
              "html_url": "https://github.example/runs/77"}] if pull and pull["head"] == tested.group(1) else []
     print(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
     sys.exit(0)
-# a green pull-request run of the same commit (Linux only) is always there, and newer: by itself it never counts
 state = ci.get("commits", {}).get(m.group(1), ci)
 pr = {"id": 99, "run_number": 3, "head_sha": m.group(1), "event": "pull_request", "head_branch": "feature",
       "status": "completed", "conclusion": "success", "html_url": "https://github.example/runs/99"}
@@ -127,21 +129,33 @@ print(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
 """
 
 
+def load_module(name="cut_release"):
+    spec = importlib.util.spec_from_file_location(name, CUT)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def fake_gh(tmp):
     bin_ = Path(tmp, "bin")
     bin_.mkdir()
     gh = bin_ / "gh"
     gh.write_text(FAKE_GH.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1))
     gh.chmod(0o755)
-    ENV.update(PATH=f"{bin_}{os.pathsep}{ENV['PATH']}", FAKE_GH_CI=str(Path(tmp, "ci.json")),
-               FAKE_GH_LOG=str(Path(tmp, "gh.log")), FAKE_GH_ORIGIN=str(Path(tmp, "origin.git")),
-               FAKE_GH_PRS=str(Path(tmp, "prs.json")))
+    ENV.update(
+        PATH=f"{bin_}{os.pathsep}{ENV['PATH']}",
+        FAKE_GH_CI=str(Path(tmp, "ci.json")),
+        FAKE_GH_LOG=str(Path(tmp, "gh.log")),
+        FAKE_GH_ORIGIN=str(Path(tmp, "origin.git")),
+        FAKE_GH_PRS=str(Path(tmp, "prs.json")),
+    )
     set_ci(conclusion="success")
 
 
 def set_ci(**state):
     Path(ENV["FAKE_GH_CI"]).write_text(json.dumps(state))
-    for once in (".moved", ".modified"):  # move_main and base_modified happen once after each set_ci
+    for once in (".moved", ".modified"):
         Path(ENV["FAKE_GH_PRS"] + once).unlink(missing_ok=True)
 
 
@@ -156,13 +170,12 @@ def gh_calls():
 
 
 def git(cwd, *args):
-    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True,
-                          env=ENV).stdout.strip()
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True, env=ENV).stdout.strip()
 
 
-def cut(cwd, *args):
-    return subprocess.run([sys.executable, str(CUT), "--repo", str(cwd), *args], capture_output=True,
-                          text=True, env=ENV)
+def cut(cwd, *args, extra_env=None):
+    env = dict(ENV, **(extra_env or {}))
+    return subprocess.run([sys.executable, str(CUT), "--repo", str(cwd), *args], capture_output=True, text=True, env=env)
 
 
 def commit(repo, files, msg):
@@ -177,12 +190,32 @@ def commit(repo, files, msg):
     git(repo, "commit", "-q", "-m", msg)
 
 
+def merge_pr(repo, number, branch_name, pr_title, files, commit_msg=None):
+    """Create a feature branch commit and merge it with GitHub's merge-commit shape."""
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "-b", branch_name)
+    commit(repo, files, commit_msg or pr_title)
+    git(repo, "checkout", "-q", "main")
+    git(
+        repo,
+        "merge",
+        "-q",
+        "--no-ff",
+        branch_name,
+        "-m",
+        f"Merge pull request #{number} from acme/{branch_name}\n\n{pr_title}",
+    )
+    git(repo, "branch", "-q", "-D", branch_name)
+    assert git(repo, "rev-parse", "HEAD^1") == base
+    return git(repo, "rev-parse", "HEAD")
+
+
 def setup(tmp):
     origin = Path(tmp, "origin.git")
     seed = Path(tmp, "seed")
     seed.mkdir()
     git(seed, "init", "-q", "-b", "main")
-    commit(seed, {"README.md": "x\n", "docs/releases/0.2.24.md": "# Steve v0.2.24\n\nold\n"}, "base")
+    commit(seed, {"README.md": "x\n", "docs/releases/0.2.24.md": "# Steve v0.2.24\n\nold\n"}, "chore: initial release")
     git(seed, "tag", "-a", "v0.2.24", "-m", "Steve v0.2.24")
     git(tmp, "clone", "-q", "--bare", str(seed), str(origin))
     a = Path(tmp, "a")
@@ -194,450 +227,544 @@ def ok(name):
     print(f"✓ {name}")
 
 
-def main():
+def unit_checks():
+    m = load_module("cut_release_unit")
+
+    # Header parsing: valid and invalid forms.
+    for t in m.ALLOWED_TYPES:
+        p = m.parse_header(f"{t}(hub/api-v2): do the thing")
+        assert p and p.commit_type == t and p.scope == "hub/api-v2" and not p.breaking and p.description == "do the thing"
+    p = m.parse_header("feat(api)!: replace item payload")
+    assert p and p.breaking and p.scope == "api"
+    p = m.parse_header("fix: trim whitespace")
+    assert p and p.scope is None and not p.breaking
+    for bad in (
+        "Add feature",
+        "feature(hub): wrong type",
+        "Feat: capitalized",
+        "feat(): empty scope",
+        "feat(bad scope): spaces",
+        "feat:no space",
+        "feat:   ",
+        "Release notes 0.10.1",
+        "feat: first\nsecond",
+    ):
+        assert m.parse_header(bad) is None, bad
+    ok("Conventional Commits header parser enforces exact allowed types, scope, and breaking marker")
+
+    # Trailers: multi-line, bullets, multiple trailers, code fences, empty validation.
+    body = """Summary paragraph.
+
+```
+Upgrade: ignored inside code block
+BREAKING CHANGE: also ignored inside code block
+```
+
+Upgrade: upgrade Hub and Node together.
+  Reinstalling the old release cannot undo migration 124.
+Upgrade:
+- Back up SQLite before upgrading.
+- Re-grant macOS Full Disk Access once.
+Closes #443
+BREAKING CHANGE: drop `/api/v1/legacy` endpoint.
+Co-Authored-By: Gemini <noreply@google.com>
+"""
+    ups, brs = m.parse_trailers(body, validate=True)
+    assert ups == [
+        "upgrade Hub and Node together.\nReinstalling the old release cannot undo migration 124.",
+        "- Back up SQLite before upgrading.\n- Re-grant macOS Full Disk Access once.",
+    ], ups
+    assert brs == ["drop `/api/v1/legacy` endpoint."], brs
+    try:
+        m.parse_trailers("Upgrade:\n\nCo-Authored-By: x", validate=True)
+        raise AssertionError("empty Upgrade: was accepted")
+    except m.Refused as e:
+        assert "empty Upgrade:" in str(e), e
+    ok("trailer parser handles multi-line Upgrade:, BREAKING CHANGE:, code fences, and empty-trailer rejection")
+
+    # ## Release note extraction.
+    pr_body = """## Summary
+Internal context.
+
+## Release note
+<!-- keep concise -->
+Marking an item finished closes its cycle immediately.
+
+- Handles paused and running items.
+
+Upgrade: upgrade the web client alongside the Hub.
+
+## Testing
+Ran cargo nextest.
+"""
+    rn = m.extract_release_note(pr_body)
+    assert rn == "Marking an item finished closes its cycle immediately.\n\n- Handles paused and running items.", rn
+    assert m.extract_release_note("## Summary\nNothing else.") is None
+    assert m.extract_release_note("## Release note\n<!-- only comment -->\n") is None
+    ok("## Release note extraction strips comments and trailing Upgrade: lines cleanly")
+
+    # Version computation: pre-1.0 vs post-1.0, PATCH/MINOR/MAJOR, triggers.
+    def mk(ct, *, breaking=False, upgrades=(), pr=None, title=None):
+        return m.ReleaseEntry(
+            sha="a" * 40,
+            pr_number=pr,
+            raw_title=title or f"{ct or 'misc'}: item",
+            commit_type=ct,
+            scope="hub",
+            breaking=breaking,
+            description="item",
+            release_note=None,
+            upgrades=tuple(upgrades),
+            breaking_notes=(),
+        )
+
+    assert m.compute_version(None, [mk("fix")]).version == "0.1.0"
+    p_patch = m.compute_version((0, 10, 1), [mk("fix"), mk("perf"), mk("refactor"), mk("docs"), mk("chore"), mk("revert")])
+    assert (p_patch.version, p_patch.bump, p_patch.triggers) == ("0.10.2", "patch", ())
+    p_feat = m.compute_version((0, 10, 1), [mk("fix", pr=1), mk("feat", pr=2)])
+    assert (p_feat.version, p_feat.bump) == ("0.11.0", "minor") and len(p_feat.triggers) == 1 and p_feat.triggers[0][0].pr_number == 2
+    p_up = m.compute_version((0, 10, 1), [mk("fix", upgrades=("restart node",), pr=3)])
+    assert (p_up.version, p_up.bump) == ("0.11.0", "minor") and p_up.triggers[0][1] == ("Upgrade:",)
+    p_pre1_br = m.compute_version((0, 10, 1), [mk("refactor", breaking=True, pr=4)])
+    assert (p_pre1_br.version, p_pre1_br.bump) == ("0.11.0", "minor")
+    p_post1_br = m.compute_version((1, 2, 3), [mk("feat", pr=5), mk("fix", breaking=True, pr=6)])
+    assert (p_post1_br.version, p_post1_br.bump) == ("2.0.0", "major") and len(p_post1_br.triggers) == 1 and p_post1_br.triggers[0][0].pr_number == 6
+    p_post1_feat = m.compute_version((1, 2, 3), [mk("feat", pr=7)])
+    assert (p_post1_feat.version, p_post1_feat.bump) == ("1.3.0", "minor")
+    ok("version calculation follows pre-1.0 / post-1.0 MAJOR, MINOR, and PATCH rules")
+
+    # Rendering: section order, manual override note, links, and complete coverage.
+    entries = [
+        m.ReleaseEntry("1" * 40, 50, "feat(items): add lifecycle", "feat", "items", False, "add lifecycle",
+                       "Details line.", ("upgrade web client with Hub",), ()),
+        m.ReleaseEntry("2" * 40, 51, "fix(web): anchor scroll", "fix", "web", False, "anchor scroll", None, (), ()),
+        m.ReleaseEntry("3" * 40, None, "perf(chat): batch frames", "perf", "chat", False, "batch frames", None, (), ()),
+        m.ReleaseEntry("4" * 40, 52, "refactor(store): unify snapshots", "refactor", "store", False, "unify snapshots", None, (), ()),
+        m.ReleaseEntry("5" * 40, 53, "docs: clarify versioning", "docs", None, False, "clarify versioning", None, (), ()),
+    ]
+    rendered = m.render_notes("1.0.0", entries, "https://github.com/acme/app", manual_reason="Freeze public contracts")
+    order = [rendered.index(h) for h in ("# Steve v1.0.0", "> Version set manually", "## Before upgrading", "## Features", "## Fixes", "## Performance", "## Other changes")]
+    assert order == sorted(order), rendered
+    assert "upgrade web client with Hub ([#50](https://github.com/acme/app/pull/50))" in rendered
+    assert "  Details line." in rendered
+    assert "[`3333333`](https://github.com/acme/app/commit/" + "3" * 40 + ")" in rendered
+    assert "**refactor(store):** unify snapshots ([#52](https://github.com/acme/app/pull/52))" in rendered
+    assert "**docs:** clarify versioning ([#53](https://github.com/acme/app/pull/53))" in rendered
+    ok("release notes render in fixed order with upgrade notices, PR/commit links, and full coverage")
+
+    # lint --github-event with live refresh, invalid title rejection, and docs/releases/ file guard.
+    with tempfile.TemporaryDirectory(prefix="steve-lint-event-") as tmp:
+        ev = Path(tmp, "event.json")
+        ev.write_text(json.dumps({"pull_request": {"number": 9, "title": "Bad title", "body": ""}}))
+        try:
+            m.lint_github_event(str(ev), env={})
+            raise AssertionError("bad PR title passed")
+        except m.Refused as e:
+            assert "Bad title" in str(e), e
+        # Live refresh sees an edited valid PR title even if the event snapshot still has the old one.
+        m.lint_github_event(
+            str(ev),
+            env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+            refresh=lambda repo, num, tok, base: ("fix(ci): edited title", "Upgrade: restart Hub"),
+            fetch_files=lambda repo, num, tok, base: [{"filename": "ops/cut-release.py", "status": "modified"}],
+        )
+        # Ordinary PR adding or modifying any file under docs/releases/ is refused.
+        for bad_files in (
+            [{"filename": "docs/releases/0.11.0.md", "status": "added"}],
+            [{"filename": "docs/releases/draft.md", "status": "added"}],
+            [{"filename": "docs/releases/0.10.1.md", "status": "modified"}],
+        ):
+            try:
+                m.lint_github_event(
+                    str(ev),
+                    env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+                    refresh=lambda repo, num, tok, base: ("docs: edit release notes", ""),
+                    fetch_files=lambda repo, num, tok, base, bf=bad_files: bf,
+                )
+                raise AssertionError(f"docs/releases change passed: {bad_files}")
+            except m.Refused as e:
+                assert "docs/releases/" in str(e), e
+        # chore(release) PR adding extra files or modifying existing notes is refused.
+        for bad_rel in (
+            [{"filename": "docs/releases/0.11.0.md", "status": "added"}, {"filename": "README.md", "status": "modified"}],
+            [{"filename": "docs/releases/0.11.0.md", "status": "modified"}],
+            [{"filename": "docs/releases/0.12.0.md", "status": "added"}],
+        ):
+            try:
+                m.lint_github_event(
+                    str(ev),
+                    env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+                    refresh=lambda repo, num, tok, base: ("chore(release): v0.11.0", ""),
+                    fetch_files=lambda repo, num, tok, base, br=bad_rel: br,
+                )
+                raise AssertionError(f"bad release PR passed: {bad_rel}")
+            except m.Refused as e:
+                assert "docs/releases/" in str(e), e
+        # Genuine chore(release): v0.11.0 PR adding only docs/releases/0.11.0.md passes.
+        m.lint_github_event(
+            str(ev),
+            env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+            refresh=lambda repo, num, tok, base: ("chore(release): v0.11.0", ""),
+            fetch_files=lambda repo, num, tok, base: [{"filename": "docs/releases/0.11.0.md", "status": "added"}],
+        )
+        # Deleting files under docs/releases/ (cleanup PR) passes.
+        m.lint_github_event(
+            str(ev),
+            env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+            refresh=lambda repo, num, tok, base: ("chore(release): remove old notes", ""),
+            fetch_files=lambda repo, num, tok, base: [
+                {"filename": "docs/releases/old/note.md", "status": "removed"},
+                {"filename": "ops/cut-release.py", "status": "modified"},
+            ],
+        )
+        ev_non_pr = Path(tmp, "push.json")
+        ev_non_pr.write_text(json.dumps({"before": "a" * 40}))
+        m.lint_github_event(str(ev_non_pr), env={})
+    ok("lint --github-event validates PR titles/trailers, refreshes edited titles, and guards docs/releases/")
+
+
+def integration_checks():
     with tempfile.TemporaryDirectory(prefix="steve-cut-test-") as tmp:
         fake_gh(tmp)
         origin, a = setup(tmp)
 
         r = cut(a, "next")
-        assert r.returncode == 0 and r.stdout.strip() == "0.2.25", r
-        assert cut(a, "next", "--minor").stdout.strip() == "0.3.0"
-        ok("the next version is one more than the highest tag on origin")
-
+        assert r.returncode == 0 and r.stdout.startswith("0.2.25 (patch, from v0.2.24)\n") and "No new commits" in r.stdout, r
         r = cut(a, "cut")
-        assert r.returncode == 1 and "no release notes" in r.stderr, r
-        ok("no fragments, no release")
+        assert r.returncode == 1 and "nothing to release" in r.stderr, r
+        ok("no new commits since last tag: next reports patch and cut refuses")
 
-        # two changes arrive with their fragments, the second one with a title it shouldn't have
-        commit(a, {"src/x.txt": "x\n", "docs/releases/unreleased/ST-1.md": "- First change. (ST-1)\n"}, "one")
-        commit(a, {"src/y.txt": "y\n", "docs/releases/unreleased/ST-2.md": "# Steve v9.9.9\n\n- Second change. (ST-2)\n"}, "two")
+        # Merge a PR whose git merge commit has an old non-conventional title, to prove:
+        # (1) non-conventional titles are refused (never silently bucketed into Other changes as PATCH);
+        # (2) live GitHub PR title + description edited after merge override the merge commit message!
+        merge_pr(
+            a,
+            50,
+            "feat/items",
+            "Items and delivery: legacy title before convention (#443)",
+            {"src/items.txt": "1\n"},
+            "feat(items): close finished cycles immediately",
+        )
+        commit(a, {"src/web.txt": "2\n"}, "fix(web): keep scroll anchored")
+        commit(a, {"src/chat.txt": "3\n"}, "perf(chat): batch streaming frames")
+        commit(a, {"src/doc.txt": "4\n"}, "docs: document version policy")
         git(a, "push", "-q", "origin", "main")
 
-        r = cut(a, "cut", "--dry-run")
-        assert r.returncode == 0 and r.stdout == "# Steve v0.2.25\n\n- First change. (ST-1)\n\n- Second change. (ST-2)\n", r
-        assert git(origin, "tag", "-l", "v0.2.25") == ""
-        assert gh_calls() == [], gh_calls()
-        ok("--dry-run shows the notes and changes nothing, without asking CI")
+        # Without updating PR #50 on GitHub (or in --offline reading merge commit title), next and cut --dry-run MUST refuse!
+        set_ci(conclusion="success", pr_meta={"50": {"title": "Items and delivery: legacy title before convention (#443)", "body": ""}})
+        for cmd in (("next",), ("cut", "--dry-run"), ("next", "--range", "v0.2.24..origin/main", "--offline"), ("cut", "--dry-run", "--range", "v0.2.24..origin/main", "--offline")):
+            r = cut(a, *cmd)
+            assert r.returncode == 1 and "PR #50" in r.stderr and "legacy title before convention" in r.stderr and "Update the PR title on GitHub" in r.stderr, (cmd, r)
+        # Online next/cut fails closed if GitHub PR API is unreachable (never silently falls back to commit messages).
+        set_ci(conclusion="success", down=True)
+        r = cut(a, "next")
+        assert r.returncode == 1 and "can't read PR #50 from GitHub" in r.stderr, r
+        ok("next and cut refuse non-Conventional PR titles with actionable hints and fail closed if GitHub is down")
 
+        # Now maintainer edits PR #50 on GitHub (after merge!) to Conventional Commits + ## Release note + Upgrade:.
+        pr50 = {
+            "50": {
+                "title": "feat(items): close finished cycles immediately",
+                "body": "Summary.\n\n## Release note\n\nFinishing an item closes its active cycle immediately.\n\nUpgrade: upgrade web client alongside the Hub.\n",
+            }
+        }
+        set_ci(conclusion="success", pr_meta=pr50)
+
+        r = cut(a, "next")
+        assert r.returncode == 0 and r.stdout.startswith("0.3.0 (minor, from v0.2.24)\n"), r
+        assert "#50 [feat, Upgrade:]" in r.stdout, r
+        ok("next reads live PR title/body edited after merge, computes MINOR, and names triggering PR")
+
+        calls_before = len(gh_calls())
+        r = cut(a, "cut", "--dry-run", extra_env={"GH_REPO": "acme/app"})
+        assert r.returncode == 0, r
+        assert "# Steve v0.3.0" in r.stdout
+        assert "## Before upgrading\n\n- upgrade web client alongside the Hub. ([#50](https://github.com/acme/app/pull/50))" in r.stdout, r.stdout
+        assert "Finishing an item closes its active cycle immediately." in r.stdout, r.stdout
+        assert "## Features" in r.stdout and "## Fixes" in r.stdout and "## Performance" in r.stdout and "## Other changes" in r.stdout, r.stdout
+        assert "**docs:** document version policy" in r.stdout, r.stdout
+        assert git(origin, "tag", "-l", "v0.3.0") == ""
+        assert not [c for c in gh_calls()[calls_before:] if "workflows" in c], gh_calls()[calls_before:]
+        ok("--dry-run renders complete notes from live PR title/body with links, without asking CI or mutating origin")
+
+        # Offline --range preview with valid commits makes zero gh calls.
+        calls_before = len(gh_calls())
+        r = cut(a, "cut", "--dry-run", "--range", "HEAD~3..HEAD", "--offline")
+        assert r.returncode == 0 and "keep scroll anchored" in r.stdout, r
+        assert gh_calls()[calls_before:] == [], gh_calls()[calls_before:]
+        ok("--range with --offline previews valid local commits without calling origin or gh")
+
+        # Manual --version requires --reason and writes it into the notes.
+        assert cut(a, "cut", "--dry-run", "--version", "1.0.0").returncode == 1
+        assert cut(a, "cut", "--dry-run", "--reason", "why").returncode == 1
+        r = cut(a, "cut", "--dry-run", "--version", "1.0.0", "--reason", "Freeze public contracts")
+        assert r.returncode == 0 and "> Version set manually (`--version 1.0.0`): Freeze public contracts" in r.stdout, r
+        ok("--version requires --reason and embeds the override rationale in release notes")
+
+        # CI failure modes on head.
         head = git(origin, "rev-parse", "main")
-        set_ci(conclusion="failure")
+        set_ci(conclusion="failure", pr_meta=pr50)
         r = cut(a, "cut", "--ci-wait", "0")
-        assert r.returncode == 1 and f"failure on {head[:7]}" in r.stderr, r
-        assert "gh run rerun 42 --failed" in r.stderr and "runs/42" in r.stderr, r.stderr
-        assert git(origin, "tag", "-l", "v0.2.25") == "" and git(origin, "rev-parse", "main") == head
-        assert any(f"head_sha={head}" in c for c in gh_calls()), gh_calls()
-        ok("a red CI run on the head refuses the release and says how to rerun its failed jobs")
-
-        # Even a success value cannot release while other parallel jobs are still running.
-        set_ci(conclusion="success", status="in_progress")
-        r = cut(a, "cut", "--ci-wait", "0")
-        assert r.returncode == 1 and "still in_progress" in r.stderr and "runs/42" in r.stderr, r
+        assert r.returncode == 1 and f"failure on {head[:7]}" in r.stderr and "gh run rerun 42 --failed" in r.stderr, r
+        assert git(origin, "tag", "-l", "v0.3.0") == ""
+        set_ci(conclusion="success", status="in_progress", pr_meta=pr50)
+        assert "still in_progress" in cut(a, "cut", "--ci-wait", "0").stderr
         for conclusion in ("cancelled", "skipped", "neutral"):
-            set_ci(conclusion=conclusion)
+            set_ci(conclusion=conclusion, pr_meta=pr50)
             r = cut(a, "cut", "--ci-wait", "0")
             assert r.returncode == 1 and f"{conclusion} on" in r.stderr, r
-            assert git(origin, "tag", "-l", "v0.2.25") == ""
-        set_ci(none=True)
-        r = cut(a, "cut", "--ci-wait", "0")
-        assert r.returncode == 1 and "has no push run on" in r.stderr, r
-        assert git(origin, "tag", "-l", "v0.2.25") == ""
-        set_ci(down=True)
-        r = cut(a, "cut", "--ci-wait", "0")
-        assert r.returncode == 1 and "can't read CI" in r.stderr, r
-        assert git(origin, "tag", "-l", "v0.2.25") == ""
-        ok("CI still running, no push run (a green pull-request run does not count), or GitHub unreadable: no release")
+        set_ci(none=True, pr_meta=pr50)
+        assert "has no push run on" in cut(a, "cut", "--ci-wait", "0").stderr
+        set_ci(down=True, pr_meta=pr50)
+        assert "can't read" in cut(a, "cut", "--ci-wait", "0").stderr
+        ok("red, in-progress, cancelled, PR-only, or unreachable CI refuses the release")
 
+        # $STEVE_GH fallback when PATH has no gh.
         only_git = Path(tmp, "only-git")
         only_git.mkdir()
         (only_git / "git").symlink_to(shutil.which("git"))
         no_gh = dict(ENV, PATH=f"{only_git}{os.pathsep}/usr/bin{os.pathsep}/bin")
         fake = str(Path(tmp, "bin", "gh"))
-        # launchd's PATH has no gh: $STEVE_GH (what the Hub uses) still finds it
-        set_ci(conclusion="failure")
-        r = subprocess.run([sys.executable, str(CUT), "--repo", str(a), "cut", "--ci-wait", "0"], capture_output=True,
-                           text=True, env=dict(no_gh, STEVE_GH=fake))
+        set_ci(conclusion="failure", pr_meta=pr50)
+        r = subprocess.run([sys.executable, str(CUT), "--repo", str(a), "cut", "--ci-wait", "0"], capture_output=True, text=True, env=dict(no_gh, STEVE_GH=fake))
         assert r.returncode == 1 and f"failure on {head[:7]}" in r.stderr, r
         ok("no gh on PATH: $STEVE_GH is used")
-        places = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh")
-        if not any(Path(p).exists() for p in places):
-            r = subprocess.run([sys.executable, str(CUT), "--repo", str(a), "cut"], capture_output=True, text=True,
-                               env=no_gh)
-            assert r.returncode == 1 and "no `gh` on PATH" in r.stderr and "--skip-ci" in r.stderr, r
-            ok("no gh: refused, naming the override")
-        set_ci(conclusion="success")
 
-        # the caller's own checkout is left alone: an unrelated dirty file and another branch
+        # Full release cut leaves caller checkout untouched.
+        set_ci(conclusion="success", pr_meta=pr50)
         git(a, "checkout", "-q", "-b", "elsewhere")
         Path(a, "scratch.txt").write_text("mine\n")
         r = cut(a, "cut")
-        assert r.returncode == 0 and "released v0.2.25" in r.stdout, r
+        assert r.returncode == 0 and "released v0.3.0" in r.stdout, r
         assert git(a, "rev-parse", "--abbrev-ref", "HEAD") == "elsewhere" and Path(a, "scratch.txt").exists()
         pr = prs()["100"]
-        assert git(origin, "rev-parse", "v0.2.25^{commit}") == pr["sha"] == git(origin, "rev-parse", "main^2")
-        assert git(origin, "rev-parse", "main^1") == head
-        assert git(origin, "cat-file", "-t", "v0.2.25") == "tag"
-        notes = git(origin, "show", "main:docs/releases/0.2.25.md")
-        assert notes == "# Steve v0.2.25\n\n- First change. (ST-1)\n\n- Second change. (ST-2)", notes
-        assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/") == ""
-        assert git(origin, "rev-parse", "v0.2.25^{commit}^") == head
-        assert "CI passed on" in r.stderr and "gh run rerun <run id> --failed" in r.stderr, r.stderr
-        assert pr["title"] == "Release notes 0.2.25" and pr["head"] == "release/v0.2.25" and pr["base"] == "main", pr
-        assert pr["state"] == "MERGED" and pr["merged"] == git(origin, "rev-parse", "main"), pr
-        assert "- First change. (ST-1)" in pr["body"] and "release pull request #100" in r.stderr, (pr, r.stderr)
-        assert git(origin, "branch", "--list", "release/*") == "", "the release branch is deleted"
-        assert any("pull_request" in c and pr["sha"] in c for c in gh_calls()), "it waited for the release PR's CI"
-        ok("cut releases the branch as it is on origin once its CI passed: the notes through a pull request "
-           "merged with a merge commit, the tag on the notes commit its run tested")
+        assert pr["title"] == "chore(release): v0.3.0" and pr["head"] == "release/v0.3.0" and pr["state"] == "MERGED", pr
+        assert git(origin, "rev-parse", "v0.3.0^{commit}") == pr["sha"] == git(origin, "rev-parse", "main^2")
+        assert git(origin, "rev-parse", "v0.3.0^{commit}^") == head
+        assert git(origin, "diff", "--name-status", head, "v0.3.0^{commit}") == "A\tdocs/releases/0.3.0.md"
+        assert git(origin, "branch", "--list", "release/*") == ""
+        notes = git(origin, "show", "main:docs/releases/0.3.0.md")
+        assert "# Steve v0.3.0" in notes and "Finishing an item closes its active cycle immediately." in notes
+        ok("cut opens chore(release): vX.Y.Z PR, waits for CI, merges, deletes branch, and tags notes commit")
 
-        # a second clone that hasn't seen the release yet still gets the next free number
+        # Immediately cutting again refuses (the release PR merge commit is skipped).
+        r = cut(a, "cut")
+        assert r.returncode == 1 and "nothing to release" in r.stderr, r
+        ok("the release PR merge commit is not counted as a new change")
+
+        # Stale checkout gets PATCH 0.3.1 for a fix commit; taken version is refused.
         b = Path(tmp, "b")
         git(tmp, "clone", "-q", str(origin), str(b))
-        commit(b, {"docs/releases/unreleased/ST-3.md": "- Third. (ST-3)\n"}, "three")
+        commit(b, {"src/f.txt": "f\n"}, "fix(core): avoid nil deref")
         git(b, "push", "-q", "origin", "main")
         git(a, "checkout", "-q", "main")
         r = cut(a, "cut")
-        assert r.returncode == 0 and "released v0.2.26" in r.stdout, r
-        ok("a stale checkout releases from origin's state, not its own")
-
-        r = cut(a, "cut", "--version", "0.2.26")
+        assert r.returncode == 0 and "released v0.3.1" in r.stdout, r
+        r = cut(a, "cut", "--version", "0.3.1", "--reason", "duplicate")
         assert r.returncode == 1 and "already on origin" in r.stderr, r
-        ok("a version that is taken is refused")
+        ok("stale checkout computes PATCH 0.3.1 from origin and refuses already-taken versions")
 
-        commit(b, {"docs/releases/unreleased/ST-3b.md": "- Untested. (ST-3b)\n"}, "untested")
+        # --skip-ci releases without asking CI.
+        commit(b, {"src/s.txt": "s\n"}, "refactor(hub): simplify router")
         subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
         git(b, "push", "-q", "origin", "main")
         set_ci(conclusion="failure")
         calls = len(gh_calls())
         r = cut(a, "cut", "--skip-ci")
-        assert r.returncode == 0 and "released v0.2.27" in r.stdout and "--skip-ci" in r.stderr, r
-        assert not [c for c in gh_calls()[calls:] if "actions/workflows" in c], "--skip-ci asks no CI"
+        assert r.returncode == 0 and "released v0.3.2" in r.stdout and "--skip-ci" in r.stderr, r
+        assert not [c for c in gh_calls()[calls:] if "actions/workflows" in c]
         set_ci(conclusion="success")
-        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
-        ok("--skip-ci releases without the CI check, and says so")
+        ok("--skip-ci releases without CI checks")
 
-        # someone else pushes between our fetch and our push: the hook rejects once, then lets it in
+        # Rejected push retries cleanly.
         hook = Path(origin, "hooks", "pre-receive")
         marker = Path(tmp, "rejected-once")
         hook.write_text(f"#!/bin/sh\nif [ ! -f '{marker}' ]; then touch '{marker}'; echo busy >&2; exit 1; fi\nexit 0\n")
         hook.chmod(0o755)
-        commit(b, {"docs/releases/unreleased/ST-4.md": "- Fourth. (ST-4)\n"}, "four")
         subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
+        commit(b, {"src/r.txt": "r\n"}, "fix(node): flush stderr")
         marker.touch()
         git(b, "push", "-q", "origin", "main")
         marker.unlink()
         r = cut(a, "cut")
-        assert r.returncode == 0 and "released v0.2.28" in r.stdout and "again from the new state" in r.stderr, r
-        assert git(origin, "show", "main:docs/releases/0.2.28.md") == "# Steve v0.2.28\n\n- Fourth. (ST-4)"
-        assert git(a, "tag", "-l", "v0.2.28") == "v0.2.28"
-        ok("a rejected push starts again and lands once")
+        assert r.returncode == 0 and "released v0.3.3" in r.stdout and "again from the new state" in r.stderr, r
         hook.unlink()
+        ok("a rejected push starts again and lands once")
 
-        # notes written ahead the old way are the first fragment of their version
-        commit(b, {"docs/releases/0.2.29.md": "# Steve v0.2.29\n\nAhead.\n"}, "ahead")
-        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
-        commit(b, {"docs/releases/unreleased/ST-5.md": "- Fifth. (ST-5)\n"}, "five")
-        git(b, "push", "-q", "origin", "main")
-        r = cut(a, "cut")
-        assert r.returncode == 0 and "released v0.2.29" in r.stdout, r
-        assert git(origin, "show", "main:docs/releases/0.2.29.md") == "# Steve v0.2.29\n\nAhead.\n\n- Fifth. (ST-5)"
-        ok("notes for a version not yet tagged are taken in, not overwritten")
-
-        # lint: a branch may carry fragments, not versioned notes
+        # lint on branch: valid commits, docs/releases/ guard (general rule), chore(release) exception, invalid subject.
         git(a, "fetch", "-q", "origin")
-        git(a, "checkout", "-q", "-b", "feat", "origin/main")
-        commit(a, {"docs/releases/unreleased/ST-6.md": "- Six.\n"}, "fragment")
+        git(a, "checkout", "-q", "-b", "feat/lint-test", "origin/main")
+        commit(a, {"src/l1.txt": "1\n"}, "feat(web): add filter\n\nUpgrade: reload open tabs.")
         assert cut(a, "lint").returncode == 0
-        commit(a, {"docs/releases/0.2.30.md": "# Steve v0.2.30\n"}, "versioned")
+        # Adding any file under docs/releases/ on a regular branch -> refused.
+        commit(a, {"docs/releases/draft.md": "- Draft.\n"}, "docs: add draft note")
         r = cut(a, "lint")
-        assert r.returncode == 1 and "docs/releases/0.2.30.md" in r.stderr, r
-        ok("lint refuses a branch that picks its own version")
+        assert r.returncode == 1 and "files under docs/releases/ may only be generated by" in r.stderr, r
+        git(a, "reset", "-q", "--hard", "HEAD~1")
+        # Adding a hand-written versioned release note -> refused.
+        commit(a, {"docs/releases/0.4.0.md": "# Steve v0.4.0\n"}, "docs: write version ahead")
+        r = cut(a, "lint")
+        assert r.returncode == 1 and "docs/releases/0.4.0.md" in r.stderr, r
+        git(a, "reset", "-q", "--hard", "HEAD~1")
+        # Non-conventional commit subject -> refused.
+        commit(a, {"src/l2.txt": "2\n"}, "wip quick fix")
+        r = cut(a, "lint")
+        assert r.returncode == 1 and "wip quick fix" in r.stderr, r
+        # A genuine chore(release): v0.4.0 branch adding only docs/releases/0.4.0.md passes lint.
+        git(a, "checkout", "-q", "-b", "release/v0.4.0", "origin/main")
+        commit(a, {"docs/releases/0.4.0.md": "# Steve v0.4.0\n"}, "chore(release): v0.4.0")
+        assert cut(a, "lint").returncode == 0
+        # --pr-title check.
+        assert cut(a, "lint", "--pr-title", "fix(hub): handle EOF").returncode == 0
+        assert cut(a, "lint", "--pr-title", "Handle EOF").returncode == 1
+        # --range check on main skips release PR merges and validates commits.
+        assert cut(a, "lint", "--range", "v0.3.0..origin/main").returncode == 0
+        ok("lint validates branch commits, PR titles, ranges, and enforces docs/releases/ cut-only rule")
 
-        # in process: the version is taken between choosing it and checking it, and a push that fails
-        spec = importlib.util.spec_from_file_location("cut_release", CUT)
-        m = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(m)
-        commit(b, {"docs/releases/unreleased/ST-7.md": "- Seventh.\n"}, "seven")
-        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
-        git(b, "push", "-q", "origin", "main")
-        real, calls = m.remote_versions, []
-
-        def taken_once(repo):
-            have = real(repo)
-            calls.append(1)
-            if len(calls) == 2:  # the check right after choosing: someone else took it
-                have = have | {(0, 2, 30)}
-            return have
-        m.remote_versions = taken_once
+        # In-process checks: interrupted tag push recovery even when a higher-bump commit lands later.
+        m = load_module("cut_release_proc")
+        saved_env = dict(os.environ)
         os.environ.update({k: v for k, v in ENV.items() if k.startswith(("GIT_", "FAKE_GH_")) or k == "PATH"})
-        assert m.cut(b, "main", None, False, False) == "0.2.30"
-        assert git(origin, "tag", "-l", "v0.2.30") == "v0.2.30" and len(calls) >= 3
-        m.remote_versions = real
-        ok("a version taken meanwhile means the next one, not a refusal")
-
-        # CI still runs on the head: cut waits for it, then releases
-        commit(b, {"docs/releases/unreleased/ST-7b.md": "- Waited for.\n"}, "waited")
-        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
-        git(b, "push", "-q", "origin", "main")
-        real_run, seen = m.ci_run, []
-        waited = git(origin, "rev-parse", "main")
-
-        def finishes(repo, sha, branch):
-            # only the head has a push run; the older commits since the last release have none
-            if sha != waited:
-                return None
-            seen.append(sha)
-            states = [None, {"id": 9, "status": "queued"}, {"id": 9, "status": "in_progress"},
-                      {"id": 9, "status": "completed", "conclusion": "success"}]
-            return states[min(len(seen) - 1, 3)]
-        m.ci_run, m.CI_POLL = finishes, 0
-        assert m.cut(b, "main", None, False, False) == "0.2.31"
-        assert len(seen) == 4 and set(seen) == {git(origin, "rev-parse", "v0.2.31^{commit}^")}, seen
-        seen.clear()
-
-        def never(repo, sha, branch):
-            seen.append(sha)
-            return {"id": 9, "status": "in_progress", "html_url": "https://github.example/runs/9"}
-        m.ci_run = never
-        commit(b, {"docs/releases/unreleased/ST-7c.md": "- Never.\n"}, "never")
-        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
-        git(b, "push", "-q", "origin", "main")
         try:
-            m.cut(b, "main", None, False, False, ci_wait=0)
-            raise AssertionError("released while CI runs")
-        except m.Refused as e:
-            assert "still in_progress" in str(e) and "runs/9" in str(e), e
-        assert git(origin, "tag", "-l", "v0.2.32") == ""
-        m.ci_run, m.CI_POLL = real_run, 30
-        ok("CI queued or running on the head: cut waits for it, and gives up after --ci-wait")
+            # GH_PLACES discovery when PATH has no gh.
+            saved_path, saved_places = os.environ.get("PATH"), m.GH_PLACES
+            os.environ["PATH"] = str(only_git)
+            m.GH_PLACES = (str(Path(tmp, "nowhere", "gh")), str(Path(tmp, "bin", "gh")))
+            try:
+                assert m.gh_path() == str(Path(tmp, "bin", "gh"))
+                m.GH_PLACES = (str(Path(tmp, "nowhere", "gh")),)
+                assert m.gh_path() is None
+            finally:
+                os.environ["PATH"], m.GH_PLACES = saved_path, saved_places
+            ok("no gh on PATH nor $STEVE_GH: usual install places are checked")
 
-        # launchd's PATH and no $STEVE_GH: gh in its usual install place (Homebrew's) is found
-        saved = os.environ.get("PATH"), m.GH_PLACES
-        os.environ["PATH"] = str(only_git)
-        m.GH_PLACES = (str(Path(tmp, "nowhere", "gh")), str(Path(tmp, "bin", "gh")))
-        try:
-            assert m.gh_path() == str(Path(tmp, "bin", "gh")), m.gh_path()
-            m.GH_PLACES = (str(Path(tmp, "nowhere", "gh")),)
-            assert m.gh_path() is None
-        finally:
-            os.environ["PATH"], m.GH_PLACES = saved
-        ok("no gh on PATH nor $STEVE_GH: the usual install places are looked in")
-
-        commit(b, {"docs/releases/unreleased/ST-8.md": "- Eighth.\n"}, "eight")
-        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
-        git(b, "push", "-q", "origin", "main")
-
-        real_push = m.push
-
-        def lost(wt, *refspecs):
-            if refspecs[-1].startswith("refs/tags/"):
-                raise m.Refused("pushing timed out")
-            return real_push(wt, *refspecs)
-        m.push = lost
-        try:
-            m.cut(b, "main", None, False, False)
-            raise AssertionError("released without a push")
-        except m.Refused:
-            pass
-        m.push = real_push
-        assert git(b, "tag", "-l", "v0.2.32") == "" and git(origin, "tag", "-l", "v0.2.32") == ""
-        assert len(git(b, "worktree", "list").splitlines()) == 1, git(b, "worktree", "list")
-        assert "- Eighth." in git(origin, "show", "main:docs/releases/0.2.32.md")
-        ok("a tag push that did not land leaves no tag and no worktree behind")
-        notes_commit = git(origin, "rev-parse", "main^2")
-        assert git(origin, "log", "-1", "--format=%s", notes_commit) == "Release notes 0.2.32"
-        # main moves on before the next cut, with a fragment of its own
-        git(b, "checkout", "-q", "-B", "main", "origin/main")
-        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
-        commit(b, {"src/later.txt": "l\n", "docs/releases/unreleased/ST-8b.md": "- Later.\n"}, "later")
-        git(b, "push", "-q", "origin", "main")
-        r = cut(a, "cut", "--dry-run")
-        assert r.returncode == 0 and "- Eighth." in r.stdout and "Later" not in r.stdout, r
-        assert "without its tag" in r.stderr, r.stderr
-        opened = len(prs())
-        assert m.cut(b, "main", None, False, False) == "0.2.32"
-        assert len(prs()) == opened, "no second pull request"
-        assert git(origin, "rev-parse", "v0.2.32^{commit}") == notes_commit
-        assert git(origin, "show", "main:docs/releases/unreleased/ST-8b.md") == "- Later."
-        ok("the next cut tags notes that merged without their tag, as they are, even with main moved on; "
-           "what arrived since waits for the next release")
-
-        # a pull request, rebase-merged: GitHub replays its commits onto the branch, under new ids
-        def pull_request(number, files):
+            # Push tag fails -> left_behind recovers 0.3.4 even after a later `feat:` lands on main!
             git(b, "fetch", "-q", "origin")
-            git(b, "checkout", "-q", "-B", "pr", "origin/main")
-            for n, (f, text) in enumerate(files.items()):
-                commit(b, {f: text}, f"pr {number}.{n}")
-            git(b, "push", "-q", "origin", f"HEAD:refs/pull/{number}/head")
-            return git(b, "rev-parse", "HEAD")
-
-        def rebase_merge(count):
             git(b, "checkout", "-q", "-B", "main", "origin/main")
-            subprocess.run(["git", "-C", str(b), "cherry-pick", f"pr~{count}..pr"], check=True, capture_output=True,
-                           env=dict(ENV, GIT_COMMITTER_NAME="merger"))
+            commit(b, {"src/p.txt": "p\n"}, "fix(store): close cursor")
             git(b, "push", "-q", "origin", "main")
-            return git(b, "rev-parse", "HEAD")
+            real_push = m.push
 
-        def refused(why, **state):
-            set_ci(**state)
+            def drop_tag_push(wt, *refspecs):
+                if refspecs[-1].startswith("refs/tags/"):
+                    raise m.Refused("pushing timed out")
+                return real_push(wt, *refspecs)
+
+            m.push = drop_tag_push
+            try:
+                m.cut(b, "main", None, None, False)
+                raise AssertionError("released without tag push")
+            except m.Refused:
+                pass
+            m.push = real_push
+            assert git(origin, "tag", "-l", "v0.3.4") == ""
+            notes_commit = git(origin, "rev-parse", "main^2")
+            assert git(origin, "log", "-1", "--format=%s", notes_commit) == "chore(release): v0.3.4"
+
+            # Now a `feat:` commit lands on main before the next cut!
+            git(b, "fetch", "-q", "origin")
+            git(b, "checkout", "-q", "-B", "main", "origin/main")
+            commit(b, {"src/feat_later.txt": "fl\n"}, "feat(ui): add timeline view")
+            git(b, "push", "-q", "origin", "main")
+
+            r = cut(a, "cut", "--dry-run")
+            assert r.returncode == 0 and "without its tag" in r.stderr and "close cursor" in r.stdout and "timeline" not in r.stdout, r
+            opened = len(prs())
+            assert m.cut(b, "main", None, None, False) == "0.3.4"
+            assert len(prs()) == opened
+            assert git(origin, "rev-parse", "v0.3.4^{commit}") == notes_commit
+            # Next cut now picks up `feat(ui): add timeline view` as 0.4.0!
+            assert m.cut(b, "main", None, None, False) == "0.4.0"
+            assert "add timeline view" in git(origin, "show", "v0.4.0:docs/releases/0.4.0.md")
+            ok("interrupted tagging recovers untagged v0.3.4 even after a later feat lands, then releases 0.4.0")
+
+            # main moves between CI check and merge: tested commit is tagged, meanwhile commit goes into next release.
+            git(b, "fetch", "-q", "origin")
+            git(b, "checkout", "-q", "-B", "main", "origin/main")
+            commit(b, {"src/t1.txt": "1\n"}, "fix(api): return 404 on missing id")
+            git(b, "push", "-q", "origin", "main")
+            tested_head = git(origin, "rev-parse", "main")
+            before_prs = len(prs())
+            set_ci(conclusion="success", move_main={"files": {"src/meanwhile.txt": "m\n"}, "msg": "feat(hub): stream metrics"})
+            r = cut(a, "cut")
+            assert r.returncode == 0 and "released v0.4.1" in r.stdout and "again from the new state" not in r.stderr, r
+            tagged = git(origin, "rev-parse", "v0.4.1^{commit}")
+            assert git(origin, "rev-parse", "v0.4.1^{commit}^") == tested_head
+            assert "stream metrics" not in git(origin, "show", "v0.4.1:docs/releases/0.4.1.md")
+            set_ci(conclusion="success")
+            # Next release automatically picks up the meanwhile `feat` commit and bumps MINOR to 0.5.0!
+            r = cut(a, "cut")
+            assert r.returncode == 0 and "released v0.5.0" in r.stdout, r
+            assert "stream metrics" in git(origin, "show", "v0.5.0:docs/releases/0.5.0.md")
+            ok("commits landing while a release PR runs stay out of that tag and enter the next release automatically")
+
+            # Release PR failure closes PR and deletes release branch; existing release branch refuses; base_modified retries.
+            git(b, "fetch", "-q", "origin")
+            git(b, "checkout", "-q", "-B", "main", "origin/main")
+            commit(b, {"src/t2.txt": "2\n"}, "fix(mail): decode utf-8 header")
+            git(b, "push", "-q", "origin", "main")
+            before_prs = len(prs())
+            set_ci(conclusion="success", release_pr={"conclusion": "failure"})
             r = cut(a, "cut", "--ci-wait", "0")
-            assert r.returncode == 1 and why in r.stderr, r
-            assert git(origin, "tag", "-l", "v0.2.33") == ""
-
-        # the branch moved on before the merge: the pull request's run tested less than what is released
-        behind = pull_request(7, {"src/p7.txt": "7\n", "docs/releases/unreleased/ST-9.md": "- Ninth.\n"})
-        git(b, "checkout", "-q", "-B", "main", "origin/main")
-        commit(b, {"src/meanwhile.txt": "m\n"}, "meanwhile")
-        git(b, "push", "-q", "origin", "main")
-        assert rebase_merge(2) != behind
-        refused("has no push run on", none=True, pull={"number": 7, "head": behind})
-        ok("a pull request merged onto a branch that had moved: its run does not count")
-
-        head = pull_request(8, {"src/p8.txt": "8\n", "src/p8b.txt": "8b\n"})
-        merged = rebase_merge(2)
-        assert merged != head and git(b, "rev-parse", f"{merged}^{{tree}}") == git(b, "rev-parse", f"{head}^{{tree}}")
-        pull = {"number": 8, "head": head}
-        refused("has no push run on", none=True, pull=dict(pull, conclusion="failure"))
-        refused("has no push run on", none=True, pull=dict(pull, status="in_progress", conclusion=None))
-        refused("has no push run on", none=True, pull=dict(pull, merged_as=head))
-        refused("has no push run on", none=True, pull=dict(pull, base="other"))
-        refused(f"failure on {merged[:7]}", conclusion="failure", pull=pull)
-        ok("a pull request's run that did not pass, another merge or target, or a red run on the head: no release")
-        refused("still in_progress", status="in_progress", conclusion=None, pull=pull)
-        ok("an up-to-date pull request's green run does not stand for the head's own push run")
-        set_ci(conclusion="success", pull=pull)
-        r = cut(a, "cut", "--ci-wait", "0")
-        assert r.returncode == 0 and "released v0.2.33" in r.stdout, r
-        assert f"CI passed on {merged[:7]}" in r.stderr, r.stderr
-        assert git(origin, "rev-parse", "v0.2.33^{commit}^") == merged
-        ok("once the head's own push run passed, it releases")
-
-        def fragment(name):
-            subprocess.run(["git", "-C", str(b), "checkout", "-q", "-B", "main", "origin/main"], check=True, env=ENV)
-            subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
-            commit(b, {f"docs/releases/unreleased/{name}.md": f"- {name}.\n"}, name)
-            git(b, "push", "-q", "origin", "main")
-            return git(origin, "rev-parse", "main")
-
-        def closed_clean(before, head, version):
-            new = list(prs().values())[before:]
-            assert new and all(p["state"] == "CLOSED" for p in new), new
+            assert r.returncode == 1 and "failure on release pull request #" in r.stderr
+            assert all(p["state"] == "CLOSED" for p in list(prs().values())[before_prs:])
             assert git(origin, "branch", "--list", "release/*") == ""
-            assert git(origin, "rev-parse", "main") == head and git(origin, "tag", "-l", f"v{version}") == ""
 
-        head, before = fragment("ST-10"), len(prs())
-        set_ci(conclusion="success", release_pr={"conclusion": "failure"})
-        r = cut(a, "cut", "--ci-wait", "0")
-        assert r.returncode == 1 and "failure on release pull request #" in r.stderr and "runs/88" in r.stderr, r
-        closed_clean(before, head, "0.2.34")
-        ok("a red run on the release pull request: closed, its branch deleted, nothing released")
+            git(b, "push", "-q", "origin", "HEAD:refs/heads/release/v0.5.1")
+            set_ci(conclusion="success")
+            assert "release/v0.5.1 is already on origin" in cut(a, "cut").stderr
+            git(b, "push", "-q", "origin", "--delete", "release/v0.5.1")
 
-        before = len(prs())
-        set_ci(conclusion="success", merge_refused='Required status check "CI gate" is expected')
-        r = cut(a, "cut", "--skip-ci")
-        assert r.returncode == 1 and "merging release pull request #" in r.stderr and "CI gate" in r.stderr, r
-        closed_clean(before, head, "0.2.34")
-        ok("a merge the branch rules refuse: closed, its branch deleted, nothing released")
+            set_ci(conclusion="success", base_modified=True)
+            r = cut(a, "cut")
+            assert r.returncode == 0 and "released v0.5.1" in r.stdout and "merging again" in r.stderr, r
+            set_ci(conclusion="success")
+            ok("failed release PR cleans up; existing release branch refuses; base_modified retries merge")
 
-        git(b, "push", "-q", "origin", "HEAD:refs/heads/release/v0.2.34")
-        set_ci(conclusion="success")
-        r = cut(a, "cut")
-        assert r.returncode == 1 and "release/v0.2.34 is already on origin" in r.stderr, r
-        assert git(origin, "tag", "-l", "v0.2.34") == ""
-        git(b, "push", "-q", "origin", "--delete", "release/v0.2.34")
-        ok("a release branch already on origin: refused, naming it")
+            # Release PR that never merges cleanly closes every attempt and tags nothing.
+            git(b, "fetch", "-q", "origin")
+            git(b, "checkout", "-q", "-B", "main", "origin/main")
+            commit(b, {"src/t3.txt": "3\n"}, "fix(sync): retry cleanly")
+            git(b, "push", "-q", "origin", "main")
+            real_gh = m.gh
 
-        before = len(prs())
-        # main moves between the CI check on its head and the merge, with a change and a fragment of its own
-        late = "docs/releases/unreleased/ST-late.md"
-        set_ci(conclusion="success", move_main={"src/meanwhile.txt": "moved\n", late: "- Late.\n"})
-        r = cut(a, "cut")
-        assert r.returncode == 0 and "released v0.2.34" in r.stdout and "again from the new state" not in r.stderr, r
-        new = list(prs().values())[before:]
-        assert [p["state"] for p in new] == ["MERGED"], new
-        tagged = git(origin, "rev-parse", "v0.2.34^{commit}")
-        # the tag is the very notes commit whose run passed, on the head whose push run passed
-        assert tagged == new[0]["sha"] and git(origin, "rev-parse", "v0.2.34^{commit}^") == head
-        assert any("pull_request" in c and tagged in c for c in gh_calls())
-        assert git(origin, "log", "--format=%s", "-1", "main^1") == "meanwhile"
-        assert git(origin, "rev-parse", "main") == new[0]["merged"] and git(origin, "rev-parse", "main^2") == tagged
-        assert subprocess.run(["git", "-C", str(origin), "merge-base", "--is-ancestor", tagged, "main"]).returncode == 0
-        changed = git(origin, "diff", "--name-status", head, tagged)
-        assert changed == "A\tdocs/releases/0.2.34.md\nD\tdocs/releases/unreleased/ST-10.md", changed
-        assert "Late" not in git(origin, "show", "v0.2.34:docs/releases/0.2.34.md")
-        assert git(origin, "show", "v0.2.34:src/meanwhile.txt") == "m", "the tag has the tested tree, not main's"
-        # the merge keeps main's own changes: its fragment for the next release, and its code
-        assert git(origin, "show", f"main:{late}") == "- Late."
-        assert git(origin, "show", "main:src/meanwhile.txt") == "moved"
-        assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/") == late
-        notes = "docs/releases/0.2.34.md"
-        assert git(origin, "show", f"main:{notes}") == git(origin, "show", f"v0.2.34:{notes}")
-        set_ci(conclusion="success")
-        ok("main moved between the CI check and the merge: released anyway, without starting again; the tag is the "
-           "tested notes commit, an ancestor of main")
-        ok("a fragment that landed on main meanwhile survives the merge for the next release")
+            def conflicting(*args, cwd):
+                if args[:2] == ("pr", "merge"):
+                    raise m.Refused("can't ask GitHub: gh pr merge: X Pull request #1 is not mergeable: the merge commit cannot be cleanly created.")
+                return real_gh(*args, cwd=cwd)
 
-        # another pull request merges at the very moment of the release's merge: the merge is tried again
-        head, before = fragment("ST-11"), len(prs())
-        set_ci(conclusion="success", base_modified=True)
-        r = cut(a, "cut")
-        assert r.returncode == 0 and "released v0.2.35" in r.stdout and "again from the new state" not in r.stderr, r
-        assert "merging again" in r.stderr and [p["state"] for p in list(prs().values())[before:]] == ["MERGED"]
-        notes = git(origin, "show", "v0.2.35:docs/releases/0.2.35.md")
-        assert "- Late." in notes and "- ST-11." in notes, notes
-        assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/") == ""
-        ok("GitHub's \"base branch was modified\" retries the merge, not the release")
+            m.gh = conflicting
+            before_prs = len(prs())
+            try:
+                try:
+                    m.cut(b, "main", None, None, False)
+                    raise AssertionError("released conflicting PR")
+                except m.Refused as e:
+                    assert "origin moved while releasing" in str(e) and "does not merge cleanly" in str(e), e
+            finally:
+                m.gh = real_gh
+            assert [p["state"] for p in list(prs().values())[before_prs:]] == ["CLOSED"] * m.ATTEMPTS
+            assert git(origin, "tag", "-l", "v0.5.2") == "" and git(origin, "branch", "--list", "release/*") == ""
+            ok("a release pull request that never merges cleanly closes each attempt and tags nothing")
 
-        # main changes a fragment the release removes: the merge conflicts, so the release starts again
-        head, before = fragment("ST-12"), len(prs())
-        set_ci(conclusion="success", move_main={"docs/releases/unreleased/ST-12.md": "- ST-12, reworded.\n"})
-        r = cut(a, "cut")
-        assert r.returncode == 0 and "released v0.2.36" in r.stdout, r
-        assert "again from the new state" in r.stderr and "does not merge cleanly" in r.stderr, r.stderr
-        assert [p["state"] for p in list(prs().values())[before:]] == ["CLOSED", "MERGED"]
-        assert git(origin, "show", "v0.2.36:docs/releases/0.2.36.md") == "# Steve v0.2.36\n\n- ST-12, reworded."
-        assert git(origin, "log", "-1", "--format=%s", "v0.2.36^{commit}^") == "meanwhile"
-        assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/") == ""
-        assert git(origin, "branch", "--list", "release/*") == ""
-        set_ci(conclusion="success")
-        ok("a release pull request that conflicts with main: closed, and released from the new state")
-
-        # a conflict every time: it gives up after a few attempts and tags nothing
-        fragment("ST-13")
-        spec2 = importlib.util.spec_from_file_location("cut_release2", CUT)
-        m2 = importlib.util.module_from_spec(spec2)
-        spec2.loader.exec_module(m2)
-        real_gh = m2.gh
-
-        def conflicting(*args, cwd):
-            if args[:2] == ("pr", "merge"):
-                raise m2.Refused("can't ask GitHub: gh pr merge: X Pull request #1 is not mergeable: the merge "
-                                 "commit cannot be cleanly created.")
-            return real_gh(*args, cwd=cwd)
-        m2.gh = conflicting
-        before = len(prs())
-        try:
-            m2.cut(b, "main", None, False, False)
-            raise AssertionError("released a conflicting pull request")
-        except m2.Refused as e:
-            assert "origin moved while releasing" in str(e) and "does not merge cleanly" in str(e), e
-        assert [p["state"] for p in list(prs().values())[before:]] == ["CLOSED"] * m2.ATTEMPTS
-        assert git(origin, "tag", "-l", "v0.2.37") == "" and git(origin, "branch", "--list", "release/*") == ""
-        ok("a release pull request that never merges cleanly: closed each time, nothing tagged")
-
-        commit(b, {"src/unmerged.txt": "u\n"}, "unmerged")
-        git(b, "push", "-q", "origin", "HEAD:refs/heads/elsewhere")
-        sleep, m2.time.sleep = m2.time.sleep, lambda s: None
-        try:
-            m2.tag(b, b, git(b, "rev-parse", "HEAD"), "0.2.37", "main")
-            raise AssertionError("tagged a commit main does not contain")
-        except m2.Refused as e:
-            assert "is not on origin's main" in str(e), e
+            # Unmerged commit is never tagged.
+            commit(b, {"src/u.txt": "u\n"}, "chore: unmerged")
+            git(b, "push", "-q", "origin", "HEAD:refs/heads/elsewhere")
+            sleep, m.time.sleep = m.time.sleep, lambda s: None
+            try:
+                try:
+                    m.tag(b, b, git(b, "rev-parse", "HEAD"), "0.5.2", "main")
+                    raise AssertionError("tagged unmerged commit")
+                except m.Refused as e:
+                    assert "is not on origin's main" in str(e), e
+            finally:
+                m.time.sleep = sleep
+            ok("a commit main does not contain is never tagged")
         finally:
-            m2.time.sleep = sleep
-        assert git(origin, "tag", "-l", "v0.2.37") == "" and git(b, "tag", "-l", "v0.2.37") == ""
-        ok("a commit main does not contain is never tagged")
+            os.environ.clear()
+            os.environ.update(saved_env)
 
-        # origin unreachable: an error, not "no tags"
+        # Unreachable origin is an error, never 0.1.0.
         git(a, "remote", "set-url", "origin", str(Path(tmp, "gone.git")))
         r = cut(a, "next")
         assert r.returncode == 1 and "can't read the tags" in r.stderr, r
@@ -648,21 +775,21 @@ def latest_tested_checks():
     with tempfile.TemporaryDirectory(prefix="steve-cut-tested-") as tmp:
         fake_gh(tmp)
         origin, a = setup(tmp)
-        commit(a, {"src/tested.txt": "tested\n",
-                   "docs/releases/unreleased/.gitkeep": "",
-                   "docs/releases/unreleased/tested.md": "- Tested change.\n"}, "tested")
+        commit(a, {"src/tested.txt": "tested\n"}, "fix(core): tested patch fix")
         tested = git(a, "rev-parse", "HEAD")
-        commit(a, {"src/pending.txt": "pending\n", "docs/releases/unreleased/pending.md": "- Later.\n"}, "pending")
+        commit(a, {"src/pending.txt": "pending\n"}, "feat(ui): untested feature")
         pending = git(a, "rev-parse", "HEAD")
-        commit(a, {"src/head.txt": "head\n"}, "head")
+        commit(a, {"src/head.txt": "head\n"}, "chore: untested chore")
         head = git(a, "rev-parse", "HEAD")
         git(a, "push", "-q", "origin", "main")
-        states = {tested: {"conclusion": "success"}, pending: {"conclusion": "cancelled", "older_conclusion": "success"},
-                  head: {"status": "queued"}}
+
+        states = {
+            tested: {"conclusion": "success"},
+            pending: {"conclusion": "cancelled", "older_conclusion": "success"},
+            head: {"status": "queued"},
+        }
         set_ci(commits=states)
-        spec = importlib.util.spec_from_file_location("cut_tested", CUT)
-        m = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(m)
+        m = load_module("cut_tested")
         saved_env = dict(os.environ)
         os.environ.update(ENV)
         try:
@@ -671,68 +798,51 @@ def latest_tested_checks():
             set_ci(commits=states)
             assert m.release_base(a, head, "main", 0) == head
             states[head] = {"status": "queued"}
-            # Commit order wins even if an older run completed later or has a higher run number.
             states[pending] = {"conclusion": "success"}
             set_ci(commits=states)
             assert m.release_base(a, head, "main", 0) == pending
-            # A real failed run is not success either; a newer PR-only green never stands for a push.
-            for state in ({"conclusion": "failure"}, {"none": True}, {"conclusion": "neutral"},
-                          {"status": "in_progress", "conclusion": "success"}):
-                states[pending] = state
+
+            for bad_state in (
+                {"conclusion": "failure"},
+                {"none": True},
+                {"conclusion": "neutral"},
+                {"status": "in_progress", "conclusion": "success"},
+            ):
+                states[pending] = bad_state
                 set_ci(commits=states)
                 assert m.release_base(a, head, "main", 0) == tested
-            # A tested feature SHA on a second parent is not a tested main push commit.
-            git(a, "checkout", "-q", "-b", "feature", tested)
-            commit(a, {"src/feature.txt": "feature\n"}, "feature")
-            feature = git(a, "rev-parse", "HEAD")
-            git(a, "checkout", "-q", "main")
-            git(a, "merge", "-q", "--no-ff", "feature", "-m", "merge feature")
-            merged = git(a, "rev-parse", "HEAD")
-            states[feature] = {"conclusion": "success"}
-            states[merged] = {"conclusion": "cancelled"}
-            states[pending] = {"conclusion": "cancelled", "older_conclusion": "success"}
-            set_ci(commits=states)
-            assert m.release_base(a, merged, "main", 0) == tested
-            git(a, "push", "-q", "origin", "main")
-            # Nothing eligible passed: the bounded head gate refuses, without suggesting a cancelled
-            # workflow passed. The already released tag's code is not a candidate for a new release.
-            states[tested] = {"conclusion": "cancelled"}
-            set_ci(commits=states)
-            try:
-                m.release_base(a, merged, "main", 0)
-                raise AssertionError("released without a successful push")
-            except m.Refused as e:
-                assert "cancelled on" in str(e), e
-            set_ci(down=True)
-            try:
-                m.release_base(a, merged, "main", 0)
-                raise AssertionError("released with GitHub unavailable")
-            except m.Refused as e:
-                assert "can't read CI" in str(e), e
-            states[tested] = {"conclusion": "success"}
-            set_ci(commits=states)
+
+            # Cutting now releases `tested` (fix only -> PATCH 0.2.25!), NOT `pending` (untested feat!).
             r = cut(a, "cut", "--ci-wait", "0")
             assert r.returncode == 0 and "released v0.2.25" in r.stdout, r
             assert git(origin, "rev-parse", "v0.2.25^{commit}^") == tested
-            assert git(origin, "show", "v0.2.25:docs/releases/0.2.25.md") == "# Steve v0.2.25\n\n- Tested change."
-            assert git(origin, "ls-tree", "--name-only", "v0.2.25", "src/pending.txt") == ""
-            assert git(origin, "show", "main:docs/releases/unreleased/pending.md") == "- Later."
-            assert git(origin, "show", "main:src/pending.txt") == "pending"
-            assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/tested.md") == ""
-            # Recovery finds the notes on current main before selecting another tested base.
-            git(origin, "tag", "-d", "v0.2.25")
-            git(a, "tag", "-d", "v0.2.25")
+            notes = git(origin, "show", "v0.2.25:docs/releases/0.2.25.md")
+            assert "tested patch fix" in notes and "untested feature" not in notes, notes
+
+            # Now `main` has the release merge commit (green), `pending` (cancelled), `head` (queued):
+            # release_base must NOT pick the release merge commit (no new changes at it) and must gate on head.
+            new_main = git(origin, "rev-parse", "main")
+            states[new_main] = {"status": "queued"}
+            states[tested] = {"conclusion": "success"}
+            set_ci(commits=states)
             r = cut(a, "cut", "--ci-wait", "0")
-            assert r.returncode == 0 and "notes commit" in r.stderr, r
-            assert git(origin, "rev-parse", "v0.2.25^{commit}^") == tested
+            assert r.returncode == 1 and "still queued" in r.stderr, r
+
+            # Once `new_main` passes, the next release cuts 0.3.0 (MINOR) containing `pending` + `head`.
+            states[new_main] = {"conclusion": "success"}
+            set_ci(commits=states)
+            r = cut(a, "cut", "--ci-wait", "0")
+            assert r.returncode == 0 and "released v0.3.0" in r.stdout, r
+            notes2 = git(origin, "show", "v0.3.0:docs/releases/0.3.0.md")
+            assert "untested feature" in notes2 and "untested chore" in notes2 and "tested patch fix" not in notes2, notes2
         finally:
             os.environ.clear()
             os.environ.update(saved_env)
-        ok("latest tested main push is released; cancelled/running/PR-only runs and feature SHAs are excluded; "
-           "newer code and fragments stay on main, and interrupted tagging still recovers")
+        ok("latest tested commit determines both tree and version bump; untested feat waits for next release")
 
 
 if __name__ == "__main__":
-    main()
+    unit_checks()
+    integration_checks()
     latest_tested_checks()
     print("All cut-release checks passed")

@@ -15,12 +15,6 @@ import { DateField, TimeField, NumberField } from "@/components/ui/pickers"
 import { Field, FieldError, FieldLabel } from "@/components/ui/field"
 import { Select } from "@/view-shared"
 import { fmtN, fmtUsd } from "@/stats/format"
-import { ParallelAttempts, type Attempt } from "@/components/affect/parallel-attempts-clean"
-import { stepLabels } from "@/agent-tree-view"
-import { StepGraph, type StepCard } from "@/collab-graph"
-import { fleetLabels } from "@/items-collab"
-import { longDur } from "@/i18n/format"
-import { AgentFleet, type FleetAgent } from "@/components/affect/agent-fleet-clean"
 import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
 import { RunningNow, type RunningTask } from "@/components/affect/running-now"
 import { TraceWaterfall, type TraceSpan } from "@/components/affect/trace-waterfall"
@@ -46,7 +40,8 @@ import { Spinner } from "@/components/ui/spinner"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Separator } from "@/components/ui/separator"
 import { CodeBlock } from "@/components/ui/code-block"
-import { ContactAvatar } from "@/people/avatar"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { AvatarGroup, Avatar } from "@/components/ui/avatar"
 import { NumberTicker } from "@/components/affect/number-ticker"
 
@@ -58,48 +53,6 @@ const S = (t: T, k: keyof Copy["s"]) => t(`views:showroom.s.${k}`)
 /* ───────── sample data (a fixed afternoon: 14:00 to 15:00, "now" at 14:42) ───────── */
 const T0 = new Date(2026, 10, 13, 14, 0).getTime(), MIN = 60_000, NOW = T0 + 42 * MIN
 const hhmm = (ms: number) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
-
-/* the collaboration: the item page's steps (Parallel Attempts without its picking), the full view's call tree and
- * handoffs, and the items page's 协作 view */
-const stepRows = (t: T): Attempt[] => {
-  const row = (id: string, name: string, bot: string, model: string, status: Attempt["status"], line: string, progress: number, time: string, cost: string, act?: "open" | "decide" | "retry"): Attempt => ({
-    id, name, approach: `${bot} · ${model}`, status, progress, step: line, note: line, figures: [time, cost],
-    icon: <span className="type-label">{bot.slice(0, 1)}</span>,
-    action: act ? <Button size="xs" variant={act === "open" ? "ghost" : "outline"} className={act === "open" ? "text-muted-foreground" : undefined} onClick={noop}>{t(`views:agentTree.act.${act}`)}</Button> : undefined,
-  })
-  return [
-    row("s1", S(t, "stepSpec"), S(t, "botDocs"), "gpt-6.1-mini", "done", `${t("views:agentTree.passedOn", { n: 2 })} · ${S(t, "stepPassed")}`, 1, longDur(12 * MIN), "$0.41", "open"),
-    row("s2", S(t, "stepBuild"), S(t, "botDev"), "gpt-6.1-sol", "running", S(t, "stepDoing"), 0.6, longDur(27 * MIN), "$1.12", "open"),
-    row("s3", S(t, "stepColors"), S(t, "botReview"), "claude-opus-5", "waiting", t("views:agentTree.row.needsYou", { q: S(t, "stepAsk") }), 0.45, longDur(6 * MIN), "$0.22", "decide"),
-    row("s4", S(t, "stepShots"), S(t, "botDocs"), "gpt-6.1-mini", "failed", t("views:agentTree.row.failed", { reason: S(t, "stepFail") }), 0.3, longDur(4 * MIN), "$0.05", "retry"),
-    row("s5", S(t, "stepDocs"), S(t, "botDocs"), "gpt-6.1-mini", "queued", t("views:workflow.waitingFor", { names: S(t, "stepBuild") }), 0, "", ""),
-  ]
-}
-/* the full view's graph: seven steps, two of them at the same time, one passed on its second try, one failed, one
- * waits for you, two not started; the dependencies already without the ones implied through another step */
-const graphSample = (t: T): StepCard[] => {
-  const card = (id: string, title: string, bot: string, state: StepCard["state"], depends: string[], figures: string, tries = 0, passedOn?: number): StepCard =>
-    ({ id, bot: null, botLabel: bot, mark: bot.slice(0, 1), title, state, depends, figures, tries, passedOn })
-  return [
-    card("spec", S(t, "stepSpec"), S(t, "botDocs"), "done", [], `${longDur(12 * MIN)} · $0.41`, 1, 2),
-    card("build", S(t, "stepBuild"), S(t, "botDev"), "running", ["spec"], `${longDur(27 * MIN)} · $1.12`),
-    card("colors", S(t, "stepColors"), S(t, "botReview"), "needsYou", ["spec"], `${longDur(6 * MIN)} · $0.22`),
-    card("shots", S(t, "stepShots"), S(t, "botDocs"), "failed", ["build"], `${longDur(4 * MIN)} · $0.05`, 1),
-    card("review", S(t, "stepReview"), S(t, "botReview"), "notStarted", ["build", "colors"], ""),
-    card("docs", S(t, "stepDocs"), S(t, "botDocs"), "notStarted", ["review", "shots"], ""),
-  ]
-}
-const fleetSample = (t: T): FleetAgent[] => [
-  { id: "ST-27", name: S(t, "st27"), model: `ST-27 · Steve`, task: S(t, "st27Desc"), status: "running", cost: 0.42, time: longDur(6 * MIN), children: [
-    { id: "f1", name: S(t, "botDocs"), model: "gpt-6.1-mini", task: S(t, "stepSpec"), status: "done", cost: 0.41, time: longDur(12 * MIN) },
-    { id: "f2", name: S(t, "botDev"), model: "gpt-6.1-sol", task: S(t, "stepBuild"), status: "running", cost: 1.12, time: longDur(27 * MIN) },
-    { id: "f3", name: S(t, "botReview"), model: "claude-opus-5", task: S(t, "stepColors"), status: "waiting", ask: S(t, "stepAsk"), cost: 0.22, time: longDur(6 * MIN) },
-    { id: "f4", name: S(t, "botDocs"), model: "gpt-6.1-mini", task: S(t, "stepShots"), status: "failed", error: S(t, "stepFail"), cost: 0.05, time: longDur(4 * MIN) },
-  ] },
-  { id: "ST-29", name: S(t, "st29"), model: `ST-29 · Steve`, task: S(t, "st29Desc"), status: "done", cost: 0.3, time: longDur(3 * MIN), children: [
-    { id: "g1", name: S(t, "botDev"), model: "gpt-6.1-sol", task: S(t, "step2"), status: "done", cost: 0.8, time: longDur(15 * MIN) },
-  ] },
-]
 
 const inboxTasks = (t: T): AgentTask[] => [
   { id: "ST-27", code: "ST-27", title: S(t, "st27"), agent: S(t, "botDev"), lane: "needs", status: "waiting", tone: "wait", stateText: S(t, "stAccept"), time: "14:38", description: S(t, "st27Desc"), progress: { done: 5, total: 6 } },
@@ -209,7 +162,7 @@ function SampleComposer({ running, text: first = "", queue = [], ctx }: { runnin
   )
 }
 
-const IDS: Id[] = ["parallel-attempts", "collab-graph", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "memory-panel", "chat-composer", "display", "form-controls"]
+const IDS: Id[] = ["agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "memory-panel", "chat-composer", "display", "form-controls"]
 
 export function DesignShowroom() {
   const t = useT()
@@ -260,27 +213,6 @@ export function DesignShowroom() {
           {IDS.map((id) => <a key={id} href={"#showroom-" + id} onClick={(e) => { e.preventDefault(); document.getElementById("showroom-" + id)?.scrollIntoView({ behavior: "smooth", block: "start" }) }}
             className="rounded-full bg-muted/70 px-2.5 py-1 type-footnote text-muted-foreground hover:bg-accent hover:text-foreground">{t(`views:showroom.c.${id}.name`)}</a>)}
         </nav>
-
-        <Exhibit id="parallel-attempts" wide>
-          <State label={L(t, "stepsLive")}>
-            <div data-showroom-steps>
-              <div className="mb-3 flex flex-wrap items-center gap-x-1.5 type-footnote tabular-nums text-muted-foreground">
-                <span className="text-attention">● {t("views:agentTree.dots.needs", { count: 1 })}</span>·<span className="text-destructive">● {t("views:agentTree.dots.failed", { count: 1 })}</span>·<span className="text-blue">● {t("views:agentTree.dots.running", { count: 1 })}</span>·<span>● {t("views:agentTree.dots.done", { count: 1 })}</span>
-              </div>
-              <ParallelAttempts pickable={false} header={null} attempts={stepRows(t)} selected="s2" onSelect={noop}
-                labels={stepLabels(t)} />
-            </div>
-          </State>
-        </Exhibit>
-
-        <Exhibit id="collab-graph" wide>
-          <State label={L(t, "graph")}><StepGraph cards={graphSample(t)} picked={null} onPick={noop} down={false} className="h-[420px]" /></State>
-          <State label={L(t, "graphPicked")}><StepGraph cards={graphSample(t)} picked="build" onPick={noop} down={false} className="h-[420px]" /></State>
-        </Exhibit>
-
-        <Exhibit id="agent-fleet" wide>
-          <State label={L(t, "fleet")}><Card><AgentFleet agents={fleetSample(t)} defaultOpen="ST-27" now={NOW} formatCost={fmtUsd} title={t("views:items.fleet.title")} onSelect={noop} labels={fleetLabels(t)} /></Card></State>
-        </Exhibit>
 
         <Exhibit id="agent-inbox" wide>
           <State label={L(t, "board")}>
@@ -402,7 +334,7 @@ export function DesignShowroom() {
             <Skeleton className="h-5 w-40" /><Skeleton className="h-3 w-full" /><Skeleton className="h-3 w-3/4" /><Separator label={S(t, "yesterday")} /><Skeleton className="h-16 w-full rounded-lg" />
           </Card></State>
           <State label={L(t, "dpAvatars")}><Card className="flex flex-wrap items-center gap-3">
-            <ContactAvatar name="Mara Lindqvist" size={40} /><ContactAvatar name={S(t, "dpName1")} size={32} /><ContactAvatar name={S(t, "dpName2")} size={28} unconfirmed /><ContactAvatar name="Globex" type="org" size={32} /><ContactAvatar name="Infra" type="team" size={32} />
+            <ActorAvatar actor={partyActor({ id: "ct_demo_1", name: "Mara Lindqvist" })} size={40} /><ActorAvatar actor={partyActor({ id: "ct_demo_2", name: S(t, "dpName1") })} size={32} /><ActorAvatar actor={partyActor({ id: "ct_demo_3", name: S(t, "dpName2"), unconfirmed: true })} size={28} /><ActorAvatar actor={partyActor({ id: "org_demo", name: "Globex", type: "org" })} size={32} /><ActorAvatar actor={partyActor({ id: "tm_demo", name: "Infra", type: "team" })} size={32} /><ActorAvatar actorId="steve" size={32} /><ActorAvatar actorId="system" size={32} />
             <AvatarGroup size={24} max={3} total={6}><Avatar name="Mara Lindqvist" /><Avatar name={S(t, "dpName1")} /><Avatar name="Tom Okafor" /></AvatarGroup>
           </Card></State>
           <State label={L(t, "dpCode")}><div className="flex flex-col gap-3">

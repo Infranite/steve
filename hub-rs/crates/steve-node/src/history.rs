@@ -800,6 +800,10 @@ pub struct Probed {
 pub(crate) struct Probes(tokio::sync::Mutex<Option<(Instant, HashMap<String, Probed>)>>);
 
 impl Probes {
+    pub(crate) async fn forget(&self) {
+        *self.0.lock().await = None;
+    }
+
     pub(crate) async fn get(&self, d: &DiscoveryConfig, fresh: bool) -> HashMap<String, Probed> {
         let mut last = self.0.lock().await;
         if !fresh
@@ -968,12 +972,4 @@ fn js_string(v: &Value) -> String {
     }
 }
 
-fn truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(_) => true,
-    }
-}
+use steve_runtime::json::truthy_opt as truthy;

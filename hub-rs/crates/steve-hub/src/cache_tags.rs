@@ -42,7 +42,6 @@ pub fn tags(event: &BusEvent) -> Tags {
                 | WorkEvent::Decision { .. }
                 | WorkEvent::Session { .. }
                 | WorkEvent::Message { .. }
-                | WorkEvent::ThreadRun { .. }
                 | WorkEvent::WorkflowRun { .. } => {}
             },
             DomainEvent::People(event) => match event {

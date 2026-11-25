@@ -4,12 +4,20 @@ Read the "Development checks" and "Changes and releases" sections of `CONTRIBUTI
 
 - Start every piece of work with a GitHub issue, including bug fixes, features, documentation, refactoring and maintenance. Reuse an existing issue only when it already covers the same work. Handle the issue in a dedicated pull request that links to it (`Closes #N`), and keep unrelated work in separate issues and pull requests.
 - Work on a branch made from the latest `main` (`git fetch origin && git switch -c <branch> origin/main`), push it, and open a pull request into `main`. Never push to `main`: it accepts changes only through pull requests whose `CI gate` check passed. CI runs in the pull request; locally, run only the checks of what you changed. When `main` moved and your pull request conflicts, rebase it on the new `main` and push again.
-- Never choose a version. Do not write `docs/releases/X.Y.Z.md`, bump a version, or create a tag by hand.
-- When your change makes operators act before or after upgrading (a Hub/Node or client protocol change, something removed or changed in meaning, manual configuration, an upgrade that cannot be undone by reinstalling the previous release), start its release fragment with `Needs a minor release: <why>`. See "Changes and releases" in `CONTRIBUTING.md`.
-- Describe your change for the user in `docs/releases/unreleased/<item>.md` (for example `ST-38.md`), with no version and no title. Run `python3 ops/cut-release.py lint` before delivering.
-- When the change should be released and is on `main`, run `python3 ops/cut-release.py cut`. It picks the version, brings the release notes in through a release pull request, merges it once its CI passed and pushes the tag. If it says origin moved, it has already tried again; if it still refuses, report why instead of tagging yourself.
+- **Commits and PR titles:** use Conventional Commits (`type(scope): imperative summary`, `type` in `feat|fix|perf|refactor|docs|test|build|ci|chore|revert`). Mark breaking public-contract changes with `!` or a `BREAKING CHANGE:` trailer. When operators must act before or after upgrading, add a trailer `Upgrade: <what to do>` (may span multiple lines). Add an optional `## Release note` section in the PR description for user-facing detail; otherwise the PR title is used. Run `python3 ops/cut-release.py lint` before delivering.
+- **Never choose a version:** do not write `docs/releases/X.Y.Z.md`, bump a version, or create a tag by hand. `ops/cut-release.py` computes `MAJOR.MINOR.PATCH` and generates release notes from commits since the last tag (MAJOR = public contract generation, `0` until `1.0.0`, bumped post-1.0 only on breaking changes; MINOR = `feat`, `Upgrade:`, or pre-1.0 breaking; PATCH = fixes/perf/docs/refactors only). See "Changes and releases" in `CONTRIBUTING.md`.
+- When changes on `main` should be released, run `python3 ops/cut-release.py cut` (use `next` or `cut --dry-run` to preview). If it refuses after retrying, report why instead of tagging yourself.
 - A new database migration takes the next free number when it is merged, with a line appended to `hub-rs/crates/steve-store/migrations/LOCK`.
-- Keep personal paths, hostnames and credentials out of the repository: `python3 scripts/check-public-boundary.py --strict`.
+- Keep personal paths, hostnames, credentials, and process documents out of the public repository: `python3 scripts/check-public-boundary.py`.
+
+## Engineering standards
+
+- **No legacy or transition bridges:** go straight to the target design. Do not retain compatibility shims, dual paths, or transitional fallbacks; land large refactors as one coherent cutover rather than half-migrated states.
+- **Metrics at every layer boundary:** leave structured metric and telemetry hooks at each boundary (HTTP/RPC, queue, storage, protocol, adapter) so latency, failures, and throughput can be observed without retrofitting.
+- **Deterministic first, models as glue, no magic numbers:** handle everything deterministic in code and typed rules; use models only as glue for judgment or synthesis. Name thresholds, timeouts, and limits as explicit constants or configuration with rationale—never bare magic numbers.
+- **Strongly typed errors and contracts:** carry typed error enums and explicit data contracts across crates and APIs; do not smuggle untyped strings or ad-hoc JSON maps through business logic.
+- **Type-checked tests and fixtures:** every test, mock, and fixture (Rust and TypeScript/browser) must pass the same strict type checks as production code. Keep tests focused on contracts and delete tests that existed only for removed code.
+- **Human-first UI:** before designing or modifying a screen, decide in what situation the user opens it and what the first screen must answer; organize around that task rather than mirroring backend tables.
 
 ## Open-source portability
 

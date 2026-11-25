@@ -4,7 +4,7 @@ import {
   FileCheckIcon, GitBranchIcon, GitForkIcon, GitPullRequestIcon, HistoryIcon, KeyRoundIcon, LibraryIcon,
   LightbulbIcon, ListChecksIcon, ListPlusIcon, ListTodoIcon, MailIcon, MessageCircleQuestionIcon,
   MessagesSquareIcon, MonitorIcon, NotebookPenIcon, PackageCheckIcon, PenLineIcon,
-  RocketIcon, SearchIcon, SendIcon, ShieldCheckIcon, UserRoundIcon, WorkflowIcon, WrenchIcon,
+  RocketIcon, SearchIcon, SendIcon, ShieldCheckIcon, UserRoundIcon, WrenchIcon,
   type LucideIcon,
 } from "lucide-react"
 
@@ -19,7 +19,6 @@ const ICONS: Record<string, LucideIcon> = {
   steve_deliver_file: FileCheckIcon,
   steve_publish: RocketIcon,
   steve_lane_status: ActivityIcon,
-  steve_workflow: WorkflowIcon,
   steve_items_search: ListTodoIcon,
   steve_item_read: ClipboardListIcon,
   steve_item_create: ListPlusIcon,

@@ -1,4 +1,4 @@
-//! Replaces retry, window/bucket and trailing-throttle shapes in W2b §1.2–1.3.
+//! Retry backoff, keyed rate-limit buckets and trailing-throttle policies.
 //! GCRA buckets are governor's keyed limiter; recovered keys are dropped every few admissions.
 //! Default durations use monotonic Tokio time; with_clock injects the domain millisecond clock.
 //! Backward wall-clock jumps do not replenish quotas or move limiter time backwards.

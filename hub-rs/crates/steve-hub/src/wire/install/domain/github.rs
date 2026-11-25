@@ -25,12 +25,14 @@ install! { start(reg, _cx) [flow, gh, mut jobs, sink] => [flow, gh, gh_sink, job
     gh.set_flow(flow.clone());
     {
         let gh = gh.clone();
-        jobs.push(Job::new("github.poll", gh.run_jobs()));
+        jobs.push(Job::task("github.poll", move || gh.jobs_task()));
     }
     // approved GitHub writes: running ones a restart cut off become unknown first
     {
         let gh = gh.clone();
-        jobs.push(Job::new("github.effects", gh.run_effects_job()));
+        jobs.push(Job::supervised("github.effects", move || {
+            gh.clone().run_effects_job()
+        }));
     }
 }}
 

@@ -97,7 +97,7 @@ pub(super) async fn list(State(st): State<AppState>, Extension(c): Extension<Ctx
     Ok(no_store(ok(json!(v))?))
 }
 
-fn truthy(v: Option<&String>) -> bool {
+fn query_flag(v: Option<&String>) -> bool {
     v.is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
 }
 
@@ -121,7 +121,7 @@ pub(super) async fn upload(
         .ok_or_else(|| ApiError::Json(400, "a file name (?name=) is required".into()))?;
     let title = q.get("title").cloned().unwrap_or_default();
     let entrypoint = q.get("entrypoint").filter(|e| !e.is_empty()).cloned();
-    let interactive = truthy(q.get("interactive"));
+    let interactive = query_flag(q.get("interactive"));
     let v = blocking(move || {
         let d = svc
             .publish(

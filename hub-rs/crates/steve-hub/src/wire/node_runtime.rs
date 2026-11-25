@@ -166,10 +166,6 @@ pub trait NodeDomain: Send + Sync + 'static {
         Ok(None)
     }
 
-    /// New collaboration turns are opt-in; reading this must not acquire the core transaction lock.
-    fn dynamic_workflows(&self) -> bool {
-        false
-    }
     /// The session's logical turn is over and nothing follows it: the turn end of the item's
     /// lifecycle. Called once per turn, after its end is committed. `attempt`: the turn's last
     /// attempt (after gateway retries, the retry that ended it); `None` when an open failed with
@@ -242,6 +238,8 @@ pub struct NodeRuntime {
     /// Shared with the workers, which wait on them without keeping the runtime alive.
     wake_send: Arc<tokio::sync::Notify>,
     wake_upkeep: Arc<tokio::sync::Notify>,
+    /// Bumped after every committed runtime write so ledger waiters wake immediately instead of polling SQLite.
+    ledger_rev: tokio::sync::watch::Sender<u64>,
     holding: AtomicBool,
     /// The owner paused the Node ([`Self::set_paused`]).
     paused: AtomicBool,
@@ -255,6 +253,8 @@ pub struct NodeRuntime {
     replay_check: OnceLock<ReplayCheck>,
     /// What the Node's usage reports may add to a session's cost ([`Self::set_cost_caps`]).
     cost_caps: Mutex<CostCaps>,
+    /// Peak prompt context tokens observed per in-flight attempt (read-only metric observation).
+    context_peaks: Mutex<HashMap<String, u64>>,
     /// The largest replay page the Node's transport carries (unbounded in process).
     largest_replay: AtomicU32,
     /// What the business side is told of committed transactions, in commit order, by the upkeep
@@ -309,11 +309,15 @@ const IDLE_EVERY: Duration = Duration::from_secs(1);
 /// The most pending gateway accounting rows the upkeep worker applies at once.
 const LOCAL_RUN: usize = 128;
 
-fn command<T: serde::Serialize>(op: &str, body: T) -> Result<(Value, String), StoreError> {
+fn command_at<T: serde::Serialize>(
+    op: &str,
+    body: T,
+    at: i64,
+) -> Result<(Value, String), StoreError> {
     let c = Command {
         id: idv::<OperationId>(op)?,
-        issued_at: Timestamp(now()),
-        accept_before: Timestamp(now() + ACCEPT_WINDOW_MS),
+        issued_at: Timestamp(at),
+        accept_before: Timestamp(at + ACCEPT_WINDOW_MS),
         grant: idv::<GrantId>("hub")?,
         body,
     };
@@ -347,6 +351,7 @@ impl NodeRuntime {
             owner: uid("hub"),
             wake_send: Arc::new(tokio::sync::Notify::new()),
             wake_upkeep: Arc::new(tokio::sync::Notify::new()),
+            ledger_rev: tokio::sync::watch::channel(0).0,
             holding: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             reconciled: AtomicBool::new(false),
@@ -354,6 +359,7 @@ impl NodeRuntime {
             held: Mutex::new(HashSet::new()),
             replay_check: OnceLock::new(),
             cost_caps: Mutex::new(CostCaps::default()),
+            context_peaks: Mutex::new(HashMap::new()),
             largest_replay: AtomicU32::new(u32::MAX),
             later: Mutex::new(vec![]),
             staged: Mutex::new(vec![]),
@@ -411,31 +417,16 @@ impl NodeRuntime {
         }
     }
 
-    /// Include startup policy at durable admission too: reconciliation bypasses RoutedRuntime.
-    fn workflow_blocker_in(&self, session: &str) -> Result<Option<String>, StoreError> {
-        if let Some(why) = self.disabled_workflow_in(session)? {
-            return Ok(Some(why));
-        }
-        self.store
-            .read(|c| steve_store::workflow_gate::session_blocker(c, session))
-    }
-
-    fn disabled_workflow_in(&self, session: &str) -> Result<Option<String>, StoreError> {
-        let disabled = !self.domain.dynamic_workflows()
-            && self
-                .store
-                .read(|r| node_sessions::authority::is_workflow_child(r, session))?;
-        Ok(disabled.then(|| steve_i18n::t!("hub.workflow.disabled")))
-    }
-
-    /// Check the workflow authority and the workspace's Node admission together.
-    fn session_owners_work_in(&self, w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
-        if let Some(why) = self
+    /// Recheck persisted item gates (paused item or open prerequisite wait) at durable admission.
+    fn item_blocker_in(&self, session: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
             .store
-            .read(|c| steve_store::workflow_gate::session_authority_blocker(c, session))?
-        {
-            return Err(conflict(why));
-        }
+            .read(|c| steve_store::item_gate::session_blocker(c, session))?
+            .map(super::item_gate_reason))
+    }
+
+    /// Check the workspace's Node admission for this session.
+    fn session_owners_work_in(&self, w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
         if !self.is_remote() {
             return Ok(());
         }
@@ -573,12 +564,13 @@ impl NodeRuntime {
         let (weak, wake) = (Arc::downgrade(self), self.wake_upkeep.clone());
         let clock = self.clock.clone();
         tokio::spawn(async move {
-            let mut idled = std::time::Instant::now();
+            let mut idled = clock.now();
             loop {
                 let Some(me) = weak.upgrade() else { return };
-                let idle = idled.elapsed() >= IDLE_EVERY;
+                let at = clock.now();
+                let idle = at.saturating_sub(idled) >= IDLE_EVERY.as_millis() as i64;
                 if idle {
-                    idled = std::time::Instant::now();
+                    idled = at;
                 }
                 let tick = clock.sleep(stall::POLL_INTERVAL);
                 let more = tokio::task::spawn_blocking(move || me.upkeep(idle))
@@ -648,6 +640,8 @@ impl NodeRuntime {
             self.notify_job(&attempt, &body);
         }
         drop(commit);
+        self.ledger_rev
+            .send_modify(|rev| *rev = rev.wrapping_add(1));
         for f in facts {
             self.domain.workspace_changed(f);
         }
@@ -740,6 +734,29 @@ impl NodeRuntime {
     /// Its faces, for what needs no ledger (discovery: probing, listing and reading history).
     pub fn node(&self) -> Arc<dyn Node> {
         self.node.clone()
+    }
+
+    /// Cancel a single active subtask on this Node without cancelling the parent turn.
+    pub async fn cancel_subtask(&self, session: &str, subtask: &str) -> ApiResult<bool> {
+        let session =
+            SessionId::new(session).map_err(|e| Error::new(Code::Invalid, e.to_string()))?;
+        let subtask = CallId::new(subtask).map_err(|e| Error::new(Code::Invalid, e.to_string()))?;
+        let res = self
+            .node
+            .cancel_subtask(CancelSubtask { session, subtask })
+            .await;
+        let outcome = match &res {
+            Ok(true) => "cancelled",
+            Ok(false) => "noop",
+            Err(_) => "error",
+        };
+        metrics::counter!(
+            "steve_subtask_cancels_total",
+            "node" => self.node_id.to_string(),
+            "outcome" => outcome,
+        )
+        .increment(1);
+        res
     }
 }
 
@@ -854,9 +871,17 @@ impl NodeRuntime {
         })
     }
 
+    fn command<T: serde::Serialize>(
+        &self,
+        op: &str,
+        body: T,
+    ) -> Result<(Value, String), StoreError> {
+        command_at(op, body, self.clock.now())
+    }
+
     fn status_in(&self, session: &str, status: &str) -> Result<(), StoreError> {
         self.store
-            .write(|w| node_sessions::set_status(w, session, status, now()))
+            .write(|w| node_sessions::set_status(w, session, status, self.clock.now()))
     }
 
     fn attempt_row(&self, attempt: &str) -> Result<Option<node_turns::Attempt>, StoreError> {

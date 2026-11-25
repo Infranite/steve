@@ -2,6 +2,8 @@ use super::*;
 
 install! { install(reg, cx) [declared, disclosure, kb_hooks, out_link, registry, uses] => [declared, modules, uses] {
     let Env { store, core, .. } = cx.clone();
+    let mut registry = registry;
+    core.register_change_ops(&mut registry);
     let modules = Modules::new(store.clone(), core.module_gateway(), registry);
     // the handle systems the extensions declared, there before anything names a sender in one
     if !declared.systems.is_empty() {
@@ -15,12 +17,6 @@ install! { install(reg, cx) [declared, disclosure, kb_hooks, out_link, registry,
             .map_err(|e| BackendError::msg(format!("declared handle systems: {e}")))?;
     }
     kb_hooks.bind(modules.clone());
-    // an item's knowledge document goes in the transaction that deletes the item
-    store.on_item_deleted(|tx, ws, id| {
-        steve_knowledge::sources::items::item_deleted(tx, ws, id)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    });
     // B1: the core calls the modules' hooks, prompt contexts and decision handlers from here on
     core.attach_modules(modules.clone());
     uses.start();

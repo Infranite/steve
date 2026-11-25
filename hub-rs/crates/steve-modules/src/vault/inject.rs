@@ -1,27 +1,13 @@
-//! Injection: Steve runs the command itself, so the agent never holds a
-//! value or the path of a file with one.
+//! Secret injection contract types and decryption for Node-isolated execution.
 //!
-//! - `cwd` must canonicalize to a directory inside the session's working directory;
-//! - environment = the Hub's (which the session's agent process inherits too) plus the injected
-//!   variables; `file` values go to `STEVE_HOME/scratch/secrets/<su id>/<VAR>` (directory 0700, file
-//!   0600) and the variable holds the path; `stdin` is written and closed;
-//! - `/bin/sh -c <command>` in its own process group; on timeout (default 120 s, at most 600 s) the
-//!   whole group is killed; when the command ends, whatever it left in its group is killed too and
-//!   the temp directory is deleted right away; leftovers are removed at startup ([`cleanup`]);
-//! - stdout and stderr keep their first 64 KiB each, as the command wrote them.
-//!
-//! [`Vault::injection_values`] is one of the three decryption sites.
+//! Secret-injected commands execute exclusively on an isolated Node (`UseNodes`), never inside the
+//! Hub process. [`Vault::injection_values`] is one of the three decryption sites.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::path::PathBuf;
 use std::sync::LazyLock;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use regex::Regex;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::crypto::open_field;
 use super::secret::SecretBytes;
@@ -35,13 +21,9 @@ pub const DEFAULT_TIMEOUT_S: u64 = 120;
 pub const MAX_TIMEOUT_S: u64 = 600;
 /// Bytes kept per stream.
 pub const OUTPUT_CAP: usize = 64 * 1024;
-/// How long to keep reading pipes after the command ended (a straggler may still hold them).
-const DRAIN: Duration = Duration::from_secs(2);
 
 static VAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$").expect("var pattern"));
-static USE_ID: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^su_[A-Za-z0-9]{1,64}$").expect("use id pattern"));
 
 /// A valid variable name (also a safe file name).
 pub fn valid_var(v: &str) -> bool {
@@ -52,7 +34,7 @@ pub fn valid_var(v: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum How {
     Env,
-    /// The variable holds the path of a 0600 file with the value.
+    /// The variable holds the path of a 0600 file with the value (created on the Node).
     File,
     Stdin,
 }
@@ -76,19 +58,19 @@ pub struct Injection {
     pub how: How,
 }
 
-/// What to run. Holds no value.
+/// What to run on the session's Node. Holds no secret value.
 #[derive(Debug, Clone)]
 pub struct RunSpec {
-    /// The `secret_uses` id; names the temp directory.
+    /// The `secret_uses` id.
     pub use_id: String,
-    /// Already checked by [`resolve_cwd`].
+    /// Display path shown in approval drafts (resolved relative to the Node workspace).
     pub cwd: PathBuf,
     pub command: String,
     pub injections: Vec<Injection>,
     pub timeout: Duration,
 }
 
-/// What came back.
+/// What came back from the Node execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutput {
     /// `None` when killed by a signal (timeout) or never started.
@@ -96,7 +78,7 @@ pub struct RunOutput {
     pub timed_out: bool,
     pub stdout: String,
     pub stderr: String,
-    /// The command could not be started (or a temp file not written): the reason.
+    /// The command could not be started or was refused: the reason.
     pub error: Option<String>,
 }
 
@@ -108,7 +90,7 @@ impl RunOutput {
     pub fn ok(&self) -> bool {
         self.exit_code == Some(0)
     }
-    /// stdout, then stderr under a marker, then the timeout note.
+    /// stdout, then stderr under a marker, then any error/timeout note.
     pub fn combined(&self) -> String {
         let mut s = self.stdout.clone();
         if !self.stderr.is_empty() {
@@ -125,251 +107,6 @@ impl RunOutput {
             s.push_str(&format!("[steve] {e}"));
         }
         s
-    }
-}
-
-/// `cwd` (relative to `workdir`, or absolute) canonicalized; it must be `workdir` or below it.
-pub fn resolve_cwd(workdir: &Path, cwd: Option<&str>) -> VaultResult<PathBuf> {
-    let root = workdir
-        .canonicalize()
-        .map_err(|_| ApiError::rule(steve_i18n::t!("modules.vault.cwd_outside")))?;
-    let want = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
-        Some(c) => root.join(c),
-        None => root.clone(),
-    };
-    let real = want
-        .canonicalize()
-        .map_err(|_| ApiError::rule(steve_i18n::t!("modules.vault.cwd_outside")))?;
-    if !real.starts_with(&root) || !real.is_dir() {
-        return Err(ApiError::rule(steve_i18n::t!("modules.vault.cwd_outside")).into());
-    }
-    Ok(real)
-}
-
-/// `STEVE_HOME/scratch/secrets`.
-pub fn secrets_root(home: &Path) -> PathBuf {
-    home.join("scratch").join("secrets")
-}
-
-/// Removes temp directories under [`secrets_root`] older than `older_than` (`None` = all, at startup).
-/// Returns how many were removed.
-pub fn cleanup(home: &Path, older_than: Option<Duration>) -> usize {
-    let Ok(rd) = std::fs::read_dir(secrets_root(home)) else {
-        return 0;
-    };
-    let now = SystemTime::now();
-    let mut n = 0;
-    for e in rd.flatten() {
-        let old = match older_than {
-            None => true,
-            Some(age) => e
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| now.duration_since(t).ok())
-                .is_none_or(|d| d >= age),
-        };
-        if old && std::fs::remove_dir_all(e.path()).is_ok() {
-            n += 1;
-        }
-    }
-    if n > 0 {
-        tracing::info!(removed = n, "vault: removed leftover secret temp dirs");
-    }
-    n
-}
-
-/// The temp directory of one run; deleted on drop, whatever happens.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn create(home: &Path, use_id: &str) -> std::io::Result<Self> {
-        if !USE_ID.is_match(use_id) {
-            return Err(std::io::Error::other("bad use id"));
-        }
-        let root = secrets_root(home);
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&root)?;
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
-        let dir = root.join(use_id);
-        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
-        Ok(Self(dir))
-    }
-
-    fn write(&self, var: &str, value: &[u8]) -> std::io::Result<PathBuf> {
-        use std::io::Write;
-        let p = self.0.join(var);
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&p)?;
-        f.write_all(value)?;
-        f.sync_all()?;
-        Ok(p)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_dir_all(&self.0)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(error = %e, "vault: could not remove a secret temp dir");
-        }
-    }
-}
-
-fn value_of<'a>(values: &'a [(String, SecretBytes)], label: &str) -> Option<&'a SecretBytes> {
-    values.iter().find(|(l, _)| l == label).map(|(_, v)| v)
-}
-
-/// Reads a pipe to the end, keeping the first `cap` bytes.
-async fn read_capped(mut r: impl AsyncRead + Unpin, cap: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        match r.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let room = cap.saturating_sub(out.len());
-                out.extend_from_slice(&buf[..n.min(room)]);
-            }
-        }
-    }
-    out
-}
-
-fn kill_group(pid: Option<u32>) {
-    if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 1) {
-        // SAFETY: plain syscall; a negative pid addresses the process group the child leads
-        // (`process_group(0)`). ESRCH (nothing left) is fine.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-}
-
-/// Cuts to [`OUTPUT_CAP`] on a char boundary.
-fn finish(raw: &[u8]) -> String {
-    let s = String::from_utf8_lossy(raw);
-    if s.len() <= OUTPUT_CAP {
-        return s.into_owned();
-    }
-    let mut end = OUTPUT_CAP;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
-}
-
-/// Runs `spec` with `values` (label → value) injected.
-pub async fn run(home: &Path, spec: &RunSpec, values: &[(String, SecretBytes)]) -> RunOutput {
-    let fail = |msg: String| RunOutput {
-        exit_code: None,
-        timed_out: false,
-        stdout: String::new(),
-        stderr: String::new(),
-        error: Some(msg),
-    };
-
-    let files: Vec<&Injection> = spec
-        .injections
-        .iter()
-        .filter(|i| i.how == How::File)
-        .collect();
-    let temp = if files.is_empty() {
-        None
-    } else {
-        match TempDir::create(home, &spec.use_id) {
-            Ok(t) => Some(t),
-            Err(e) => return fail(format!("could not create the temp directory: {e}")),
-        }
-    };
-
-    let mut cmd = tokio::process::Command::new("/bin/sh");
-    for key in [
-        "STEVE_UPGRADE_CONTROL_TOKEN",
-        "STEVE_SUPERVISOR_PID",
-        "STEVE_UPGRADE_ID",
-    ] {
-        cmd.env_remove(key);
-    }
-    cmd.arg("-c")
-        .arg(&spec.command)
-        .current_dir(&spec.cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true);
-    let stdin_value = match apply_injections(&mut cmd, temp.as_ref(), &spec.injections, values) {
-        Ok(v) => v,
-        Err(msg) => return fail(msg),
-    };
-    cmd.stdin(if stdin_value.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    });
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return fail(format!("could not start the command: {e}")),
-    };
-    // the command builder holds copies of env values: drop it as soon as the child runs
-    drop(cmd);
-    let pid = child.id();
-    let feeder = start_stdin_feeder(&mut child, stdin_value);
-    let out = child
-        .stdout
-        .take()
-        .map(|r| tokio::spawn(read_capped(r, OUTPUT_CAP)));
-    let err = child
-        .stderr
-        .take()
-        .map(|r| tokio::spawn(read_capped(r, OUTPUT_CAP)));
-
-    let (status, timed_out) = match tokio::time::timeout(spec.timeout, child.wait()).await {
-        Ok(s) => (s.ok(), false),
-        Err(_) => {
-            kill_group(pid);
-            (child.wait().await.ok(), true)
-        }
-    };
-    // stragglers in the group would keep the pipes (and maybe a temp file) open
-    kill_group(pid);
-    drop(temp);
-    if let Some(f) = feeder {
-        f.abort();
-    }
-    let collect = |h: Option<tokio::task::JoinHandle<Vec<u8>>>| async move {
-        match h {
-            Some(h) => tokio::time::timeout(DRAIN, h)
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
-    };
-    let (o, e) = (collect(out).await, collect(err).await);
-    RunOutput {
-        exit_code: if timed_out {
-            None
-        } else {
-            status.and_then(|s| s.code())
-        },
-        timed_out,
-        stdout: finish(&o),
-        stderr: finish(&e),
-        error: timed_out.then(|| {
-            format!(
-                "timed out after {} s; the command was stopped",
-                spec.timeout.as_secs()
-            )
-        }),
     }
 }
 
@@ -421,247 +158,5 @@ impl Vault {
             out.push((label.clone(), v));
         }
         Ok(out)
-    }
-}
-
-fn apply_injections<'a>(
-    cmd: &mut tokio::process::Command,
-    temp: Option<&TempDir>,
-    injections: &[Injection],
-    values: &'a [(String, SecretBytes)],
-) -> Result<Option<&'a SecretBytes>, String> {
-    let mut stdin_value: Option<&SecretBytes> = None;
-    for inj in injections {
-        let Some(v) = value_of(values, &inj.label) else {
-            return Err(format!("field {} has no value", inj.label));
-        };
-        match inj.how {
-            How::Env => {
-                cmd.env(&inj.var, OsStr::from_bytes(v.expose()));
-            }
-            How::File => {
-                let Some(t) = temp else { continue };
-                match t.write(&inj.var, v.expose()) {
-                    Ok(p) => {
-                        cmd.env(&inj.var, p);
-                    }
-                    Err(e) => return Err(format!("could not write the temp file: {e}")),
-                }
-            }
-            How::Stdin => stdin_value = Some(v),
-        }
-    }
-    Ok(stdin_value)
-}
-
-fn start_stdin_feeder(
-    child: &mut tokio::process::Child,
-    stdin_value: Option<&SecretBytes>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    match (child.stdin.take(), stdin_value) {
-        (Some(mut w), Some(v)) => {
-            let bytes = zeroize::Zeroizing::new(v.expose().to_vec());
-            Some(tokio::spawn(async move {
-                let _ = w.write_all(&bytes).await;
-                let _ = w.shutdown().await;
-            }))
-        }
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn spec(dir: &Path, cmd: &str, inj: Vec<Injection>) -> RunSpec {
-        RunSpec {
-            use_id: steve_store::uid("su"),
-            cwd: dir.to_path_buf(),
-            command: cmd.into(),
-            injections: inj,
-            timeout: Duration::from_secs(20),
-        }
-    }
-
-    fn env(var: &str, label: &str) -> Injection {
-        Injection {
-            var: var.into(),
-            label: label.into(),
-            how: How::Env,
-        }
-    }
-
-    fn vals(xs: &[(&str, &str)]) -> Vec<(String, SecretBytes)> {
-        xs.iter()
-            .map(|(l, v)| (l.to_string(), SecretBytes::new(v.as_bytes().to_vec())))
-            .collect()
-    }
-
-    const TOKEN: &str = "inj-T0ken-value-5521";
-
-    #[test]
-    fn cwd_must_stay_inside_the_workdir() {
-        let t = tempfile::tempdir().unwrap();
-        let w = t.path().join("work");
-        std::fs::create_dir_all(w.join("sub")).unwrap();
-        std::fs::create_dir_all(t.path().join("outside")).unwrap();
-        std::os::unix::fs::symlink(t.path().join("outside"), w.join("link")).unwrap();
-        let root = w.canonicalize().unwrap();
-        assert_eq!(resolve_cwd(&w, None).unwrap(), root);
-        assert_eq!(resolve_cwd(&w, Some("sub")).unwrap(), root.join("sub"));
-        assert_eq!(resolve_cwd(&w, Some("./sub/..")).unwrap(), root);
-        for bad in [
-            "..",
-            "../outside",
-            "link",
-            "/",
-            "/tmp",
-            "missing",
-            "sub/../../outside",
-        ] {
-            let e = resolve_cwd(&w, Some(bad)).unwrap_err();
-            assert_eq!(e.to_string(), CWD_OUTSIDE, "{bad}");
-            assert_eq!(e.status(), 400);
-        }
-        let abs = root.join("sub");
-        assert!(resolve_cwd(&w, abs.to_str()).is_ok());
-    }
-
-    #[tokio::test]
-    async fn env_injection_and_output_as_written() {
-        let home = tempfile::tempdir().unwrap();
-        let w = tempfile::tempdir().unwrap();
-        let s = spec(
-            w.path(),
-            "echo \"t=$TOK\"; echo err \"$TOK\" >&2; pwd",
-            vec![env("TOK", "令牌")],
-        );
-        let out = run(home.path(), &s, &vals(&[("令牌", TOKEN)])).await;
-        assert_eq!(out.exit_code, Some(0), "{out:?}");
-        assert!(out.stdout.starts_with(&format!("t={TOKEN}\n")), "{out:?}");
-        assert_eq!(out.stderr, format!("err {TOKEN}\n"));
-        assert!(
-            out.stdout
-                .contains(&*w.path().canonicalize().unwrap().to_string_lossy())
-        );
-    }
-
-    #[tokio::test]
-    async fn file_injection_is_private_and_deleted() {
-        let home = tempfile::tempdir().unwrap();
-        let w = tempfile::tempdir().unwrap();
-        let stat_mode = if cfg!(target_os = "macos") {
-            "stat -f '%Lp'"
-        } else {
-            "stat -c '%a'"
-        };
-        let s = spec(
-            w.path(),
-            &format!(
-                "echo \"path=$KEYF\"; {stat_mode} \"$KEYF\"; {stat_mode} \"$(dirname \"$KEYF\")\"; cat \"$KEYF\"; cp \"$KEYF\" copied"
-            ),
-            vec![Injection {
-                var: "KEYF".into(),
-                label: "私钥".into(),
-                how: How::File,
-            }],
-        );
-        let out = run(home.path(), &s, &vals(&[("私钥", TOKEN)])).await;
-        assert_eq!(out.exit_code, Some(0), "{out:?}");
-        let lines: Vec<&str> = out.stdout.lines().collect();
-        let dir = secrets_root(home.path()).join(&s.use_id);
-        assert_eq!(lines[0], format!("path={}/KEYF", dir.display()));
-        assert_eq!(lines[1], "600");
-        assert_eq!(lines[2], "700");
-        assert_eq!(lines[3], TOKEN);
-        assert!(!dir.exists());
-        assert_eq!(
-            std::fs::metadata(secrets_root(home.path()))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-    }
-
-    #[tokio::test]
-    async fn stdin_injection() {
-        let home = tempfile::tempdir().unwrap();
-        let w = tempfile::tempdir().unwrap();
-        let s = spec(
-            w.path(),
-            "read -r x; [ \"$x\" = \"$EXPECT\" ] && echo same; echo \"$x\"",
-            vec![
-                Injection {
-                    var: String::new(),
-                    label: "密码".into(),
-                    how: How::Stdin,
-                },
-                env("EXPECT", "密码"),
-            ],
-        );
-        let out = run(home.path(), &s, &vals(&[("密码", TOKEN)])).await;
-        assert_eq!(out.stdout, format!("same\n{TOKEN}\n"), "{out:?}");
-    }
-
-    #[tokio::test]
-    async fn timeout_kills_the_group_and_cleans_up() {
-        let home = tempfile::tempdir().unwrap();
-        let w = tempfile::tempdir().unwrap();
-        let mut s = spec(
-            w.path(),
-            "/bin/sleep 30 & echo start; wait",
-            vec![Injection {
-                var: "F".into(),
-                label: "k".into(),
-                how: How::File,
-            }],
-        );
-        s.timeout = Duration::from_millis(500);
-        let t0 = std::time::Instant::now();
-        let out = run(home.path(), &s, &vals(&[("k", TOKEN)])).await;
-        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
-        assert!(out.timed_out && out.exit_code.is_none() && out.code() == -1);
-        // The background child inherits stdout. Nonempty collected output proves EOF was
-        // observed before the drain deadline rather than the child surviving and holding it open.
-        assert_eq!(out.stdout, "start\n");
-        assert!(out.combined().contains("timed out after 0 s"));
-        assert!(!secrets_root(home.path()).join(&s.use_id).exists());
-    }
-
-    #[tokio::test]
-    async fn exit_codes_and_output_cap() {
-        let home = tempfile::tempdir().unwrap();
-        let w = tempfile::tempdir().unwrap();
-        let s = spec(w.path(), "exit 3", vec![]);
-        let out = run(home.path(), &s, &[]).await;
-        assert_eq!(out.exit_code, Some(3));
-        assert!(!out.ok());
-        let s = spec(
-            w.path(),
-            "head -c 200000 /dev/zero | tr '\\0' a; printf %s \"$T\"",
-            vec![env("T", "t")],
-        );
-        let out = run(home.path(), &s, &vals(&[("t", TOKEN)])).await;
-        assert_eq!(out.stdout.len(), OUTPUT_CAP);
-        assert!(out.stdout.bytes().all(|b| b == b'a'));
-    }
-
-    #[test]
-    fn startup_cleanup_removes_leftovers() {
-        let home = tempfile::tempdir().unwrap();
-        let d = TempDir::create(home.path(), "su_leftover1").unwrap();
-        d.write("X", b"v").unwrap();
-        std::mem::forget(d);
-        let d2 = secrets_root(home.path()).join("su_leftover1");
-        assert!(d2.exists());
-        assert_eq!(cleanup(home.path(), Some(Duration::from_secs(900))), 0);
-        assert!(d2.exists());
-        assert_eq!(cleanup(home.path(), None), 1);
-        assert!(!d2.exists());
-        assert!(TempDir::create(home.path(), "../evil").is_err());
-        assert!(TempDir::create(home.path(), "su_a/../../b").is_err());
     }
 }

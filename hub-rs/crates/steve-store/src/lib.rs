@@ -15,6 +15,14 @@
 
 steve_i18n::init!();
 
+/// Physical backup and restore of an offline or WAL-mode SQLite installation. These storage
+/// maintenance operations do not open a Store or run migrations, and never take its writer lock.
+pub mod backup {
+    pub use steve_store_sqlite::backup::offline::{
+        BackupError, CancelFlag, CopiedFile, CopyOptions, Progress, backup_file, close_wal,
+        verify_file,
+    };
+}
 pub mod base;
 pub mod bot_dispatch;
 mod bus;
@@ -24,6 +32,7 @@ pub mod compact;
 mod contract;
 pub use contract::approval;
 pub use contract::audit as audit_repo;
+pub use contract::backup_policy;
 pub use contract::channel_feed;
 pub use contract::channel_messages as channel_message_repo;
 pub use contract::channel_names;
@@ -35,6 +44,7 @@ pub use contract::channel_trigger_report;
 pub use contract::channel_write_policy;
 pub use contract::feishu_registration;
 pub use contract::notifications as notification_repo;
+pub use contract::notify;
 pub use contract::reply_basis;
 pub use contract::{
     Accounts, AuthSessions, ConnRow, ConnectionBrief, HealthState, MatchRule, MatchRules, NewParty,
@@ -47,6 +57,7 @@ pub mod diagnostics;
 pub mod digest;
 mod event_payload;
 mod ingest;
+pub mod item_gate;
 pub mod knowledge;
 pub mod maintenance;
 pub mod outbox;
@@ -56,7 +67,6 @@ pub mod statistics;
 mod tx;
 mod types;
 pub mod views;
-pub mod workflow_gate;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -72,7 +82,6 @@ pub use contract::automation::{ScheduleRow, Schedules};
 pub use contract::changesets as changeset_repo;
 #[cfg(feature = "testkit")]
 pub use contract::core_fixture;
-pub use contract::core_queue;
 pub use contract::core_usage;
 pub use contract::item_delivery;
 pub use contract::message_sources::{
@@ -91,8 +100,14 @@ pub use contract::read_models::{
 };
 pub use contract::realtime_output;
 pub use contract::tags as tag_repo;
-pub use contract::thread_runs;
+pub use contract::thread;
+pub use contract::thread::{
+    CommitOutcome, CommitReplyInput, DeliveryRefClaim, DeliveryRefRow, DispatchClaim, DispatchRef,
+    EditQueuedOutcome, NewRevisionTask, ReceiptDispatch, RecoveredTask, ReplyReceipt,
+    StopTaskOutcome, SubmitInput, SubmitOutcome, ThreadNotice, ThreadTask, WithdrawOutcome,
+};
 pub use contract::vault_uses as vault_use_repo;
+pub use contract::waits as wait_repo;
 pub use contract::workflow_runs::{
     self, FinalizedAttempt, NewWfAttempt, NewWfCall, ReviewGateFailure, ReviewGateVerdict,
     WfAttemptStatus, WfCall, WfCallAttempt, WfCallStatus, WfRun, WfRunStatus, WfScriptVersion,
@@ -103,8 +118,8 @@ pub use contract::{
     DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,
     FlowSources, FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange,
     ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence,
-    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R,
-    Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
+    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRef,
+    ProjectRows, R, Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
     SessionEvidence, SignalFilter, SignalRow, SignalRows, SignalTriage, SourceConfig,
     StartupRecord, TagRows, W, WorkspaceSettings, Workspaces,
 };
@@ -308,7 +323,7 @@ impl Store {
     /// Opens an existing database at exactly this build's schema head for offline administration.
     /// The caller must hold the Hub instance lock. Repository writes remain available, but opening
     /// never migrates, optimizes, initializes workspaces or starts diagnostic recording. One lazy
-    /// read connection is enough for a CLI. Transitional adapter, replaced by the storage engine.
+    /// read connection is enough for a CLI.
     pub fn open_admin(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_observed(path.as_ref(), NoPublisher, None, true)
     }
@@ -684,6 +699,639 @@ pub mod instrumentation {
         });
     }
 
+    /// Low-cardinality SQL operation category for storage backend metrics.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(usize)]
+    pub(crate) enum SqlOp {
+        Query = 0,
+        Exec = 1,
+        Batch = 2,
+    }
+
+    impl SqlOp {
+        const COUNT: usize = 3;
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::Query => "query",
+                Self::Exec => "exec",
+                Self::Batch => "batch",
+            }
+        }
+    }
+
+    /// Bounded table family derived deterministically from SQL without allocating or exposing SQL text.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(usize)]
+    pub(crate) enum TableFamily {
+        Items = 0,
+        Sessions = 1,
+        Decisions = 2,
+        Messages = 3,
+        Mail = 4,
+        Calendar = 5,
+        Flows = 6,
+        Knowledge = 7,
+        People = 8,
+        Config = 9,
+        Nodes = 10,
+        Vault = 11,
+        Github = 12,
+        Stats = 13,
+        Tx = 14,
+        Other = 15,
+    }
+
+    impl TableFamily {
+        const COUNT: usize = 16;
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::Items => "items",
+                Self::Sessions => "sessions",
+                Self::Decisions => "decisions",
+                Self::Messages => "messages",
+                Self::Mail => "mail",
+                Self::Calendar => "calendar",
+                Self::Flows => "flows",
+                Self::Knowledge => "knowledge",
+                Self::People => "people",
+                Self::Config => "config",
+                Self::Nodes => "nodes",
+                Self::Vault => "vault",
+                Self::Github => "github",
+                Self::Stats => "stats",
+                Self::Tx => "tx",
+                Self::Other => "other",
+            }
+        }
+    }
+
+    fn next_sql_token(bytes: &[u8], mut pos: usize) -> Option<(&[u8], usize)> {
+        loop {
+            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            if pos + 1 < bytes.len() && bytes[pos] == b'-' && bytes[pos + 1] == b'-' {
+                pos += 2;
+                while pos < bytes.len() && bytes[pos] != b'\n' {
+                    pos += 1;
+                }
+                continue;
+            }
+            if pos + 1 < bytes.len() && bytes[pos] == b'/' && bytes[pos + 1] == b'*' {
+                pos += 2;
+                while pos + 1 < bytes.len() && !(bytes[pos] == b'*' && bytes[pos + 1] == b'/') {
+                    pos += 1;
+                }
+                pos = (pos + 2).min(bytes.len());
+                continue;
+            }
+            break;
+        }
+        if pos >= bytes.len() {
+            return None;
+        }
+        let b = bytes[pos];
+        if matches!(b, b'"' | b'`' | b'\'') {
+            let quote = b;
+            let start = pos + 1;
+            pos = start;
+            while pos < bytes.len() && bytes[pos] != quote {
+                pos += 1;
+            }
+            let end = pos;
+            if pos < bytes.len() {
+                pos += 1;
+            }
+            return Some((&bytes[start..end], pos));
+        }
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            let start = pos;
+            while pos < bytes.len()
+                && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_' || bytes[pos] == b'.')
+            {
+                pos += 1;
+            }
+            return Some((&bytes[start..pos], pos));
+        }
+        Some((&bytes[pos..pos + 1], pos + 1))
+    }
+
+    fn classify_table_ident(raw: &[u8]) -> TableFamily {
+        // Strip optional schema prefix (e.g. `main.items`).
+        let ident = match raw.iter().rposition(|&b| b == b'.') {
+            Some(i) => &raw[i + 1..],
+            None => raw,
+        };
+        let mut buf = [0u8; 40];
+        let n = ident.len().min(buf.len());
+        for (dst, &src) in buf[..n].iter_mut().zip(&ident[..n]) {
+            *dst = src.to_ascii_lowercase();
+        }
+        let s = std::str::from_utf8(&buf[..n]).unwrap_or("");
+        if s == "items"
+            || s.starts_with("item_")
+            || s.starts_with("work_")
+            || s.starts_with("deliver")
+            || s == "operations"
+        {
+            TableFamily::Items
+        } else if s == "sessions"
+            || s.starts_with("session_")
+            || s == "events"
+            || s.starts_with("event_")
+            || s == "queued"
+            || s.starts_with("runtime_")
+            || s.starts_with("node_turn")
+            || s.starts_with("node_session")
+            || s == "turns"
+            || s == "attempts"
+        {
+            TableFamily::Sessions
+        } else if s == "decisions" || s.starts_with("decision_") || s.starts_with("approval") {
+            TableFamily::Decisions
+        } else if s == "messages"
+            || s.starts_with("message_")
+            || s.starts_with("thread_")
+            || s.starts_with("chan_")
+            || s.starts_with("channel_")
+        {
+            TableFamily::Messages
+        } else if s.starts_with("mail_") || s == "mail" {
+            TableFamily::Mail
+        } else if s.starts_with("calendar") || s.starts_with("cal_") {
+            TableFamily::Calendar
+        } else if s == "flows"
+            || s.starts_with("flow_")
+            || s == "schedules"
+            || s == "alarms"
+            || s == "time_alarms"
+            || s == "triggers"
+            || s == "runs"
+            || s.starts_with("run_")
+        {
+            TableFamily::Flows
+        } else if s.starts_with("kb_")
+            || s == "mems"
+            || s.starts_with("mem_")
+            || s == "bot_memories"
+            || s.starts_with("memory_")
+            || s == "files"
+        {
+            TableFamily::Knowledge
+        } else if s == "users"
+            || s.starts_with("auth_")
+            || s == "passkeys"
+            || s == "parties"
+            || s.starts_with("party_")
+            || s.starts_with("contact")
+            || s == "accounts"
+            || s.starts_with("account_")
+            || s == "teams"
+            || s.starts_with("team_")
+            || s == "stewards"
+            || s.starts_with("merge_")
+            || s.starts_with("attr")
+            || s == "personas"
+        {
+            TableFamily::People
+        } else if s == "workspaces"
+            || s.starts_with("workspace_")
+            || s == "settings"
+            || s == "bots"
+            || s.starts_with("bot_")
+            || s == "projects"
+            || s.starts_with("project_")
+            || s == "tags"
+            || s.starts_with("tag_")
+            || s == "changesets"
+            || s == "connections"
+            || s.starts_with("connection_")
+            || s == "sources"
+            || s == "match_rules"
+            || s == "revisions"
+            || s == "systems"
+            || s == "links"
+        {
+            TableFamily::Config
+        } else if s == "nodes"
+            || s.starts_with("node_")
+            || s == "devices"
+            || s.starts_with("device_")
+            || s == "capabilities"
+            || s.starts_with("caps_")
+        {
+            TableFamily::Nodes
+        } else if s.starts_with("vault_")
+            || s == "secrets"
+            || s.starts_with("secret_")
+            || s == "grants"
+            || s.starts_with("grant_")
+        {
+            TableFamily::Vault
+        } else if s.starts_with("github_") || s.starts_with("gh_") {
+            TableFamily::Github
+        } else if s.starts_with("stats_")
+            || s.starts_with("telemetry_")
+            || s.starts_with("usage_")
+            || s.starts_with("price_")
+            || s.starts_with("digest_")
+            || s == "signals"
+            || s.starts_with("signal_")
+            || s == "notifications"
+            || s.starts_with("audit")
+            || s.starts_with("outbox")
+            || s.starts_with("diagnostic")
+        {
+            TableFamily::Stats
+        } else {
+            TableFamily::Other
+        }
+    }
+
+    pub(crate) fn table_family(sql: &str) -> TableFamily {
+        let bytes = sql.as_bytes();
+        let Some((first, mut pos)) = next_sql_token(bytes, 0) else {
+            return TableFamily::Other;
+        };
+        if first.eq_ignore_ascii_case(b"BEGIN")
+            || first.eq_ignore_ascii_case(b"COMMIT")
+            || first.eq_ignore_ascii_case(b"END")
+            || first.eq_ignore_ascii_case(b"ROLLBACK")
+            || first.eq_ignore_ascii_case(b"SAVEPOINT")
+            || first.eq_ignore_ascii_case(b"RELEASE")
+        {
+            return TableFamily::Tx;
+        }
+        if first.eq_ignore_ascii_case(b"INSERT") || first.eq_ignore_ascii_case(b"REPLACE") {
+            while let Some((tok, next)) = next_sql_token(bytes, pos) {
+                pos = next;
+                if tok.eq_ignore_ascii_case(b"INTO") {
+                    return next_sql_token(bytes, pos)
+                        .map_or(TableFamily::Other, |(t, _)| classify_table_ident(t));
+                }
+            }
+            return TableFamily::Other;
+        }
+        if first.eq_ignore_ascii_case(b"UPDATE") {
+            if let Some((tok, next)) = next_sql_token(bytes, pos) {
+                if tok.eq_ignore_ascii_case(b"OR") {
+                    // UPDATE OR IGNORE/REPLACE/ABORT/FAIL/ROLLBACK <table>
+                    if let Some((_, after_action)) = next_sql_token(bytes, next) {
+                        return next_sql_token(bytes, after_action)
+                            .map_or(TableFamily::Other, |(t, _)| classify_table_ident(t));
+                    }
+                    return TableFamily::Other;
+                }
+                return classify_table_ident(tok);
+            }
+            return TableFamily::Other;
+        }
+        if first.eq_ignore_ascii_case(b"DELETE")
+            || first.eq_ignore_ascii_case(b"SELECT")
+            || first.eq_ignore_ascii_case(b"WITH")
+        {
+            // Scan a bounded number of tokens to avoid O(N) scanning huge SQL payloads.
+            for _ in 0..64 {
+                let Some((tok, next)) = next_sql_token(bytes, pos) else {
+                    break;
+                };
+                pos = next;
+                if tok.eq_ignore_ascii_case(b"FROM") {
+                    if let Some((table, _)) = next_sql_token(bytes, pos)
+                        && table != b"("
+                    {
+                        return classify_table_ident(table);
+                    }
+                }
+            }
+        }
+        TableFamily::Other
+    }
+
+    struct QueryHandles {
+        ok: metrics::Counter,
+        err: metrics::Counter,
+        duration: metrics::Histogram,
+    }
+
+    /// Zero-allocation boundary meter for `Backend::{query, exec, batch}`.
+    pub(crate) struct QueryMeter {
+        op: SqlOp,
+        family: TableFamily,
+        started: std::time::Instant,
+    }
+
+    impl QueryMeter {
+        #[inline]
+        pub(crate) fn start(op: SqlOp, sql: &str) -> Option<Self> {
+            if !LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
+                return None;
+            }
+            Some(Self {
+                op,
+                family: table_family(sql),
+                started: std::time::Instant::now(),
+            })
+        }
+
+        #[inline]
+        pub(crate) fn finish(self, ok: bool) {
+            let elapsed = self.started.elapsed().as_secs_f64();
+            let op = self.op;
+            let family = self.family;
+            let idx = (op as usize) * TableFamily::COUNT + (family as usize);
+            thread_local! {
+                static SLOTS: [std::cell::OnceCell<QueryHandles>; SqlOp::COUNT * TableFamily::COUNT] =
+                    [const { std::cell::OnceCell::new() }; SqlOp::COUNT * TableFamily::COUNT];
+            }
+            SLOTS.with(|slots| {
+                let handles = slots[idx].get_or_init(|| {
+                    let op_s = op.as_str();
+                    let fam_s = family.as_str();
+                    QueryHandles {
+                        ok: metrics::counter!("steve_store_queries_total", "op" => op_s, "family" => fam_s, "result" => "ok"),
+                        err: metrics::counter!("steve_store_queries_total", "op" => op_s, "family" => fam_s, "result" => "err"),
+                        duration: metrics::histogram!("steve_store_query_duration_seconds", "op" => op_s, "family" => fam_s),
+                    }
+                });
+                if ok {
+                    handles.ok.increment(1);
+                } else {
+                    handles.err.increment(1);
+                }
+                handles.duration.record(elapsed);
+            });
+        }
+    }
+
+    struct ReadPoolHandles {
+        wait: metrics::Histogram,
+        ok: metrics::Counter,
+        err: metrics::Counter,
+        active: metrics::Gauge,
+    }
+
+    fn with_read_pool_handles<R>(f: impl FnOnce(&ReadPoolHandles) -> R) -> R {
+        thread_local! {
+            static HANDLES: std::cell::OnceCell<ReadPoolHandles> = const { std::cell::OnceCell::new() };
+        }
+        HANDLES.with(|cell| {
+            let handles = cell.get_or_init(|| ReadPoolHandles {
+                wait: metrics::histogram!("steve_store_read_pool_wait_seconds"),
+                ok: metrics::counter!("steve_store_read_pool_acquisitions_total", "result" => "ok"),
+                err: metrics::counter!("steve_store_read_pool_acquisitions_total", "result" => "err"),
+                active: metrics::gauge!("steve_store_read_pool_active"),
+            });
+            f(handles)
+        })
+    }
+
+    /// Keeps `steve_store_read_pool_active` accurate across the pooled connection's lifetime.
+    pub(crate) struct ReadPoolActiveGuard {
+        active: metrics::Gauge,
+    }
+
+    impl Drop for ReadPoolActiveGuard {
+        fn drop(&mut self) {
+            self.active.decrement(1.0);
+        }
+    }
+
+    pub(crate) struct ReadPoolWait {
+        started: std::time::Instant,
+    }
+
+    impl ReadPoolWait {
+        #[inline]
+        pub(crate) fn start() -> Option<Self> {
+            if !LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
+                return None;
+            }
+            Some(Self {
+                started: std::time::Instant::now(),
+            })
+        }
+
+        #[inline]
+        pub(crate) fn acquired(self) -> ReadPoolActiveGuard {
+            let elapsed = self.started.elapsed().as_secs_f64();
+            with_read_pool_handles(|h| {
+                h.wait.record(elapsed);
+                h.ok.increment(1);
+                h.active.increment(1.0);
+                ReadPoolActiveGuard {
+                    active: h.active.clone(),
+                }
+            })
+        }
+
+        #[inline]
+        pub(crate) fn failed(self) {
+            let elapsed = self.started.elapsed().as_secs_f64();
+            with_read_pool_handles(|h| {
+                h.wait.record(elapsed);
+                h.err.increment(1);
+            });
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(usize)]
+    pub(crate) enum TxKind {
+        Root = 0,
+        Savepoint = 1,
+    }
+
+    impl TxKind {
+        const COUNT: usize = 2;
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::Root => "root",
+                Self::Savepoint => "savepoint",
+            }
+        }
+    }
+
+    struct TxHandles {
+        commit_count: metrics::Counter,
+        rollback_count: metrics::Counter,
+        commit_duration: metrics::Histogram,
+        rollback_duration: metrics::Histogram,
+    }
+
+    /// Tracks transaction duration and commit/rollback outcome for root transactions and savepoints.
+    pub(crate) struct TxMeter {
+        kind: TxKind,
+        started: std::time::Instant,
+        committed: bool,
+    }
+
+    impl TxMeter {
+        #[inline]
+        pub(crate) fn start(kind: TxKind) -> Option<Self> {
+            transaction_started();
+            if !LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
+                return None;
+            }
+            Some(Self {
+                kind,
+                started: std::time::Instant::now(),
+                committed: false,
+            })
+        }
+
+        #[inline]
+        pub(crate) fn commit(mut self) {
+            self.committed = true;
+            // Drop records commit outcome and duration.
+        }
+    }
+
+    impl Drop for TxMeter {
+        fn drop(&mut self) {
+            let elapsed = self.started.elapsed().as_secs_f64();
+            let kind = self.kind;
+            let committed = self.committed;
+            thread_local! {
+                static SLOTS: [std::cell::OnceCell<TxHandles>; TxKind::COUNT] =
+                    [const { std::cell::OnceCell::new() }; TxKind::COUNT];
+            }
+            SLOTS.with(|slots| {
+                let h = slots[kind as usize].get_or_init(|| {
+                    let k = kind.as_str();
+                    TxHandles {
+                        commit_count: metrics::counter!("steve_store_transaction_outcomes_total", "kind" => k, "outcome" => "commit"),
+                        rollback_count: metrics::counter!("steve_store_transaction_outcomes_total", "kind" => k, "outcome" => "rollback"),
+                        commit_duration: metrics::histogram!("steve_store_transaction_duration_seconds", "kind" => k, "outcome" => "commit"),
+                        rollback_duration: metrics::histogram!("steve_store_transaction_duration_seconds", "kind" => k, "outcome" => "rollback"),
+                    }
+                });
+                if committed {
+                    h.commit_count.increment(1);
+                    h.commit_duration.record(elapsed);
+                } else {
+                    h.rollback_count.increment(1);
+                    h.rollback_duration.record(elapsed);
+                }
+            });
+        }
+    }
+
+    /// Bounded set of built-in harness IDs registered at Hub startup from the single adapter catalog
+    /// (`steve-harness-spec`); unknown or custom harnesses fold to `custom`.
+    static KNOWN_HARNESSES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+
+    /// Registers the bounded set of known harness identifiers so `steve_model_*` labels stay bounded
+    /// without duplicating adapter names outside the adapter layer.
+    pub fn register_known_harnesses(ids: impl IntoIterator<Item = &'static str>) {
+        let _ = KNOWN_HARNESSES.set(ids.into_iter().collect());
+    }
+
+    /// Bounded built-in model catalog for metric labels; arbitrary user strings fold to `custom`.
+    const BUILTIN_MODELS: &[&str] = &[
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-4-5",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+        "claude-opus-4-1",
+        "claude-sonnet-4",
+        "claude-3-7-sonnet",
+        "claude-3-5-sonnet",
+        "claude-3-5-haiku",
+        "gpt-6.1-sol",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-luna",
+        "gpt-5.4",
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "o1",
+        "o3",
+        "o3-mini",
+        "o4-mini",
+        "gemini-3-pro",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
+        "mistral-medium-3.5",
+        "codestral",
+        "devstral",
+        "deepseek-r1",
+        "deepseek-v3",
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "qwen3-coder",
+        "qwen-2.5-coder",
+        "kimi-k2",
+        "glm-4.5",
+        "grok-4",
+        "grok-3",
+        "minimax-m1",
+    ];
+
+    /// Normalizes a harness identifier to a bounded static label without allocating.
+    pub fn normalize_harness(raw: &str) -> &'static str {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return "unknown";
+        }
+        KNOWN_HARNESSES
+            .get()
+            .and_then(|ids| {
+                ids.iter()
+                    .copied()
+                    .find(|&h| h.eq_ignore_ascii_case(trimmed))
+            })
+            .unwrap_or("custom")
+    }
+
+    /// Normalizes a model identifier against the built-in catalog without allocating.
+    /// Strips optional `<provider>/` route prefixes, `[…]` context suffixes, and trailing
+    /// `-YYYYMMDD` date stamps; unrecognized values fold to `custom`.
+    pub fn normalize_model(raw: &str) -> &'static str {
+        let mut s = raw.trim();
+        if s.is_empty() {
+            return "unknown";
+        }
+        if let Some((_, rest)) = s.split_once('/') {
+            s = rest.trim();
+        }
+        if let Some(i) = s.find('[')
+            && s.ends_with(']')
+        {
+            s = s[..i].trim_end();
+        }
+        if s.is_empty() {
+            return "unknown";
+        }
+        if let Some(&known) = BUILTIN_MODELS.iter().find(|&&m| m.eq_ignore_ascii_case(s)) {
+            return known;
+        }
+        // Strip trailing `-YYYYMMDD` date stamp (9 ASCII bytes) if present.
+        if s.len() > 9 {
+            let (head, tail) = s.split_at(s.len() - 9);
+            if tail.as_bytes()[0] == b'-' && tail.as_bytes()[1..].iter().all(u8::is_ascii_digit) {
+                if let Some(&known) = BUILTIN_MODELS
+                    .iter()
+                    .find(|&&m| m.eq_ignore_ascii_case(head))
+                {
+                    return known;
+                }
+            }
+        }
+        "custom"
+    }
+
     /// One finished agent turn or gateway call (`steve_model_*`), recorded once it committed: by
     /// the coordinator after an attempt's end, by the gateway after its call's finish.
     #[derive(Debug, Clone, Default)]
@@ -697,38 +1345,121 @@ pub mod instrumentation {
         pub result: &'static str,
         pub seconds: f64,
         pub usage: Vec<crate::ModelUsage>,
+        /// Peak prompt context tokens observed during an agent turn, when reported.
+        pub context_peak: Option<u64>,
     }
 
     impl ModelCall {
         pub fn record(&self) {
-            let (source, harness) = (self.source, self.harness.clone());
-            metrics::counter!("steve_model_calls_total", "source" => source, "harness" => harness.clone(), "model" => self.model.clone(), "result" => self.result)
-                .increment(1);
-            metrics::histogram!("steve_model_call_seconds", "source" => source, "harness" => harness.clone())
-                .record(self.seconds);
-            for u in &self.usage {
-                let model = if u.model.is_empty() {
-                    &self.model
-                } else {
-                    &u.model
-                };
-                let t = &u.tokens;
-                for (kind, n) in [
-                    ("input", t.input),
-                    ("output", t.output),
-                    ("cache_read", t.cache_read),
-                    ("cache_write", t.cache_write),
-                ] {
-                    if let Some(n) = n.and_then(|n| u64::try_from(n).ok()).filter(|n| *n > 0) {
-                        metrics::counter!("steve_model_tokens_total", "source" => source, "harness" => harness.clone(), "model" => model.clone(), "kind" => kind)
-                            .increment(n);
+            let source = self.source;
+            let harness = normalize_harness(&self.harness);
+            let call_model = normalize_model(&self.model);
+            let result = self.result;
+
+            type CallKey = (&'static str, &'static str, &'static str, &'static str);
+            type DurKey = (&'static str, &'static str);
+            type TokKey = (&'static str, &'static str, &'static str, &'static str);
+            type CostKey = (&'static str, &'static str, &'static str);
+
+            #[derive(Default)]
+            struct ModelCache {
+                calls: std::collections::HashMap<CallKey, metrics::Counter>,
+                durations: std::collections::HashMap<DurKey, metrics::Histogram>,
+                context_peaks: std::collections::HashMap<&'static str, metrics::Histogram>,
+                tokens: std::collections::HashMap<TokKey, metrics::Counter>,
+                costs: std::collections::HashMap<CostKey, metrics::Counter>,
+            }
+
+            thread_local! {
+                static CACHE: std::cell::RefCell<ModelCache> =
+                    std::cell::RefCell::new(ModelCache::default());
+            }
+
+            CACHE.with(|cell| {
+                let mut cache = cell.borrow_mut();
+                cache
+                    .calls
+                    .entry((source, harness, call_model, result))
+                    .or_insert_with(|| {
+                        metrics::counter!(
+                            "steve_model_calls_total",
+                            "source" => source,
+                            "harness" => harness,
+                            "model" => call_model,
+                            "result" => result,
+                        )
+                    })
+                    .increment(1);
+                cache
+                    .durations
+                    .entry((source, harness))
+                    .or_insert_with(|| {
+                        metrics::histogram!(
+                            "steve_model_call_seconds",
+                            "source" => source,
+                            "harness" => harness,
+                        )
+                    })
+                    .record(self.seconds);
+                if source == "agent"
+                    && let Some(peak) = self.context_peak.filter(|&n| n > 0)
+                {
+                    cache
+                        .context_peaks
+                        .entry(harness)
+                        .or_insert_with(|| {
+                            metrics::histogram!(
+                                "steve_turn_context_peak_tokens",
+                                "harness" => harness,
+                            )
+                        })
+                        .record(peak as f64);
+                }
+                for u in &self.usage {
+                    let model = if u.model.is_empty() {
+                        call_model
+                    } else {
+                        normalize_model(&u.model)
+                    };
+                    let t = &u.tokens;
+                    for (kind, n) in [
+                        ("input", t.input),
+                        ("output", t.output),
+                        ("cache_read", t.cache_read),
+                        ("cache_write", t.cache_write),
+                    ] {
+                        if let Some(n) = n.and_then(|n| u64::try_from(n).ok()).filter(|n| *n > 0) {
+                            cache
+                                .tokens
+                                .entry((source, harness, model, kind))
+                                .or_insert_with(|| {
+                                    metrics::counter!(
+                                        "steve_model_tokens_total",
+                                        "source" => source,
+                                        "harness" => harness,
+                                        "model" => model,
+                                        "kind" => kind,
+                                    )
+                                })
+                                .increment(n);
+                        }
+                    }
+                    if let Some(usd) = u.cost_reported.filter(|c| c.is_finite() && *c > 0.0) {
+                        cache
+                            .costs
+                            .entry((source, harness, model))
+                            .or_insert_with(|| {
+                                metrics::counter!(
+                                    "steve_model_cost_micro_usd_total",
+                                    "source" => source,
+                                    "harness" => harness,
+                                    "model" => model,
+                                )
+                            })
+                            .increment((usd * 1e6).round() as u64);
                     }
                 }
-                if let Some(usd) = u.cost_reported.filter(|c| c.is_finite() && *c > 0.0) {
-                    metrics::counter!("steve_model_cost_micro_usd_total", "source" => source, "harness" => harness.clone(), "model" => model.clone())
-                        .increment((usd * 1e6).round() as u64);
-                }
-            }
+            });
         }
     }
 
@@ -880,6 +1611,47 @@ pub mod instrumentation {
             .join()
             .unwrap();
         }
+
+        #[test]
+        fn sql_table_family_and_model_labels_are_bounded_without_sql_or_raw_strings() {
+            assert_eq!(
+                table_family("SELECT id FROM items WHERE workspace_id = ?"),
+                TableFamily::Items
+            );
+            assert_eq!(
+                table_family("/* comment */ INSERT OR IGNORE INTO \"events\" (id) VALUES (?)"),
+                TableFamily::Sessions
+            );
+            assert_eq!(
+                table_family("UPDATE mail_drafts SET status = ? WHERE id = ?"),
+                TableFamily::Mail
+            );
+            assert_eq!(
+                table_family("DELETE FROM flow_waits WHERE id = ?"),
+                TableFamily::Flows
+            );
+            assert_eq!(table_family("BEGIN IMMEDIATE"), TableFamily::Tx);
+            assert_eq!(table_family("SAVEPOINT steve_sp_42"), TableFamily::Tx);
+            assert_eq!(table_family("PRAGMA optimize"), TableFamily::Other);
+
+            register_known_harnesses(["alpha-harness", "beta-harness"]);
+            assert_eq!(normalize_harness("alpha-harness"), "alpha-harness");
+            assert_eq!(normalize_harness("BETA-HARNESS"), "beta-harness");
+            assert_eq!(normalize_harness("my-private-harness"), "custom");
+            assert_eq!(normalize_harness("  "), "unknown");
+
+            assert_eq!(normalize_model("claude-opus-5-5"), "claude-opus-5-5");
+            assert_eq!(
+                normalize_model("kiro/claude-sonnet-4-5-20250929[1m]"),
+                "claude-sonnet-4-5"
+            );
+            assert_eq!(normalize_model("passthrough/gpt-6.1-sol"), "gpt-6.1-sol");
+            assert_eq!(
+                normalize_model(&"user-typed-unbounded-model-".repeat(7)),
+                "custom"
+            );
+            assert_eq!(normalize_model(""), "unknown");
+        }
     }
 }
 
@@ -902,7 +1674,7 @@ impl Drop for WriteGuard<'_> {
     }
 }
 
-/// Legacy storage grants; scheduling belongs to the Hub assembly root.
+/// Bounded retention slices on the store's writer connection; scheduling belongs to the Hub.
 pub mod retention {
     use super::{Result, Store};
     pub use steve_store_sqlite::retention::{
