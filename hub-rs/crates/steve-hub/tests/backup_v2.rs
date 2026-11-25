@@ -3,8 +3,9 @@ use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
 };
+use steve_runtime::testkit::process::Command;
 use steve_store::testkit::hub::backup as fixture;
 use steve_types::backup::{BackupPurpose, BackupReceipt};
 
@@ -230,32 +231,22 @@ fn backup_uses_live_management_socket_and_offline_respects_instance_lock() {
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
-        process::{Child, Stdio},
+        process::Stdio,
         thread,
         time::{Duration, Instant},
     };
 
-    struct Stop(Child);
-    impl Drop for Stop {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
     let home = tempfile::tempdir_in("/tmp").unwrap();
     let h = home.path();
-    let mut hub = Stop(
-        hub_command(h)
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
-    );
+    let mut hub = hub_command(h)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
     let socket = h.join("run/hub.sock");
     let deadline = Instant::now() + Duration::from_secs(20);
     while UnixStream::connect(&socket).is_err() {
-        assert!(hub.0.try_wait().unwrap().is_none(), "temporary Hub exited");
+        assert!(hub.try_wait().unwrap().is_none(), "temporary Hub exited");
         assert!(Instant::now() < deadline, "temporary Hub did not start");
         thread::sleep(Duration::from_millis(20));
     }

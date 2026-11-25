@@ -38,6 +38,8 @@ scalar!(notification_policies_count() -> i64, "SELECT COUNT(*) FROM notification
 
 scalar!(outbox_consumers_count_work_item_done_with_since_seq() -> i64, "SELECT COUNT(*) FROM outbox_consumers WHERE topic='work.item.done' AND since_seq=0");
 
+scalar!(outbox_consumers_count_work_item_lifecycle_with_since_seq() -> i64, "SELECT COUNT(*) FROM outbox_consumers WHERE topic='work.item.lifecycle' AND since_seq=0");
+
 scalar!(
     outbox_events_count_by_topic(topic: &str) -> i64,
     "SELECT COUNT(*) FROM outbox_events WHERE topic=?1"

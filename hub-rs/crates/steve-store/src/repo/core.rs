@@ -523,4 +523,26 @@ impl Settings<'_> {
             Ok(())
         })
     }
+
+    /// Whether a one-time installation maintenance task (`workspace_id = '*'`) has already finished.
+    pub fn maintenance_done(&self, key: &str) -> Result<bool> {
+        self.0.read_conn(|c| {
+            exists(
+                c,
+                "SELECT 1 FROM settings WHERE workspace_id = '*' AND key = ?",
+                [key],
+            )
+        })
+    }
+
+    /// Record completion of a one-time installation maintenance task (`workspace_id = '*'`).
+    pub fn mark_maintenance_done(&self, key: &str, detail: &Value) -> Result<()> {
+        self.0.write_conn(|w| {
+            w.c.run(
+                "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('*', ?, ?, ?) ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
+                params![key, to_json(detail)?, now()],
+            )?;
+            Ok(())
+        })
+    }
 }

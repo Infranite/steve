@@ -1513,7 +1513,7 @@ async fn child_research_node() {
 async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
     let t = T::new();
     t.write_adapter();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_research_node", "--nocapture"])
         .env("STEVE_RESEARCH_CHILD_ROOT", &t.root)
         .stdout(std::process::Stdio::null())
@@ -1524,19 +1524,10 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
         t.root.join("ready").exists()
     })
     .await;
-    child.kill().unwrap();
-    child.wait().unwrap();
-    // the adapter's group outlived the Node that ran it
+    child.simulate_crash().unwrap();
+    // the adapter's group outlived the Node that ran it; guard the entire group (research-script.mjs + sleep)
     let harness_child = pid_of(&t.log("pid"));
-    struct Cleanup(i32);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            unsafe {
-                libc::kill(self.0, libc::SIGKILL);
-            }
-        }
-    }
-    let _cleanup = Cleanup(harness_child);
+    let _cleanup = steve_runtime::testkit::GroupGuard::for_pid(harness_child);
     assert!(alive(harness_child));
     std::fs::remove_file(t.log("hold")).unwrap();
     let n = t.scripted_node(1, Arc::new(Files::default()));

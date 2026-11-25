@@ -51,7 +51,7 @@ impl Drop for Control {
     }
 }
 
-fn fake(h: &Home, role: &str, gate: &std::path::Path, log: &std::path::Path) -> Child {
+fn fake(h: &Home, role: &str, gate: &std::path::Path, log: &std::path::Path) -> ProcessGuard {
     Command::new("node")
         .args([
             concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/late-spawn.mjs"),
@@ -67,6 +67,32 @@ fn fake(h: &Home, role: &str, gate: &std::path::Path, log: &std::path::Path) -> 
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap()
+}
+
+/// Exercise the real scan-to-kill race window on an intentionally escaping child process,
+/// killing only the parent's group and pre-scan children so the post-scan child stays alive
+/// under an explicit `GroupGuard`.
+fn kill_child_after_scan(mut child: ProcessGuard, after_scan: impl FnOnce(&[i32])) {
+    if !matches!(child.try_wait(), Ok(None)) {
+        return;
+    }
+    let pid = child.id() as i32;
+    let children: Vec<i32> = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    after_scan(&children);
+    let _ = child.simulate_crash();
+    for c in &children {
+        GroupGuard::kill_pgid(*c);
+        unsafe { libc::kill(*c, libc::SIGKILL) };
+    }
 }
 
 #[test]
@@ -85,12 +111,14 @@ fn late_old_adapter_does_not_count_as_new_hub_spawn() {
     let mut parent = Control::accept(&listener);
     assert!(parent.read().starts_with("parent "));
     let mut adapter = None;
+    let mut late_guard = None;
     // Make the real discovery-to-signal window deterministic, rather than hoping load hits it.
-    Hub::kill_child_after_scan(old.child.take().unwrap(), |children| {
+    kill_child_after_scan(old.child.take().unwrap(), |children| {
         parent.send("spawn");
         let mut late = Control::accept(&listener);
         let ready = late.read();
         let pid: i32 = ready.strip_prefix("adapter ").unwrap().parse().unwrap();
+        late_guard = Some(GroupGuard::for_pid(pid));
         assert!(
             !children.contains(&pid),
             "the adapter starts after enumeration"

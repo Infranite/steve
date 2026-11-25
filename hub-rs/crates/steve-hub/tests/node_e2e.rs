@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
-use steve_runtime::testkit::process::{Child, Command};
+use steve_runtime::testkit::process::{Command, GroupGuard, ProcessGuard};
 use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
@@ -155,7 +155,7 @@ impl Home {
 
 /// A running Hub process and the adapter log owned by this launch.
 struct Hub {
-    child: Option<Child>,
+    child: Option<ProcessGuard>,
     adapter_log: PathBuf,
     service: bool,
 }
@@ -167,50 +167,21 @@ impl Hub {
             .filter(|m| m.get("spawn").is_some())
             .count()
     }
-    /// SIGKILL the Hub and observed direct agents, then reap the Hub. Agents in independent
-    /// groups created after enumeration can outlive it; log attribution must not depend on teardown.
+    /// SIGKILL the Hub and observed direct agents, then reap the Hub. For detached service-mode
+    /// Hubs, kill only the Hub's group so `ServiceNodeGuard` retires the detached Node cleanly.
     fn kill(&mut self) {
         if self.service {
             self.kill_hub_group();
-        } else if let Some(child) = self.child.take() {
-            Self::kill_child_after_scan(child, |_| {});
+        } else if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
     /// Simulate a service manager restart, leaving the independent Node running.
     fn kill_hub_group(&mut self) {
-        if let Some(mut child) = self.child.take()
-            && matches!(child.try_wait(), Ok(None))
-        {
-            // SAFETY: the unreaped child pins the group created by this fixture.
-            unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
-            let _ = child.wait();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.simulate_crash();
         }
-    }
-    fn kill_child_after_scan(mut child: Child, after_scan: impl FnOnce(&[i32])) {
-        // A completed child no longer pins its cached PID/group number.
-        if !matches!(child.try_wait(), Ok(None)) {
-            return;
-        }
-        let pid = child.id() as i32;
-        let children: Vec<i32> = Command::new("pgrep")
-            .args(["-P", &pid.to_string()])
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|l| l.trim().parse().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        after_scan(&children);
-        unsafe {
-            libc::killpg(pid, libc::SIGKILL);
-            for c in &children {
-                libc::killpg(*c, libc::SIGKILL);
-                libc::kill(*c, libc::SIGKILL);
-            }
-        }
-        let _ = child.wait();
     }
 }
 
@@ -1876,10 +1847,13 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-/// The fixture retires its own executable, so it never signals an unowned or reused PID.
+/// The fixture retires its own executable, so it never signals an unowned or reused PID; if the
+/// detached local Node fails to retire within its deadline while still holding `node.lock`, its
+/// lock-proven session group (`setsid`) is force-killed so no `steve-hub --local-node` leaks.
 struct ServiceNodeGuard {
     executable: PathBuf,
     node_lock: PathBuf,
+    service_pid: PathBuf,
 }
 
 impl ServiceNodeGuard {
@@ -1896,7 +1870,15 @@ impl ServiceNodeGuard {
         Ok(Self {
             executable,
             node_lock: home.join("data/node/node.lock"),
+            service_pid: home.join("data/node/service.pid"),
         })
+    }
+
+    fn lock_holder_pid(&self) -> Option<i32> {
+        std::fs::read_to_string(&self.node_lock)
+            .ok()
+            .and_then(|s| s.lines().next()?.trim().parse::<i32>().ok())
+            .filter(|pid| *pid > 1)
     }
 
     fn stop(&self) -> std::io::Result<()> {
@@ -1907,7 +1889,24 @@ impl ServiceNodeGuard {
         }
         let lock = match File::open(&self.node_lock) {
             Ok(lock) => lock,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // If the Hub started `--local-node` right before panic, wait briefly in case it
+                // opens `node.lock` before noticing the removed executable.
+                if self.service_pid.exists() {
+                    let wait = std::time::Instant::now() + Duration::from_secs(2);
+                    loop {
+                        if let Ok(lock) = File::open(&self.node_lock) {
+                            break lock;
+                        }
+                        if std::time::Instant::now() >= wait {
+                            return Ok(());
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                } else {
+                    return Ok(());
+                }
+            }
             Err(e) => return Err(e),
         };
         // The Node holds its home lock until it shuts down. The executable is gone even if
@@ -1920,6 +1919,18 @@ impl ServiceNodeGuard {
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 Err(TryLockError::WouldBlock) => {
+                    // Graceful retirement timed out while `node.lock` is still exclusively held:
+                    // reading the PID written by the lock holder proves ownership (zero reuse risk).
+                    if let Some(pid) = self.lock_holder_pid() {
+                        GroupGuard::kill_pgid(pid);
+                        let force_deadline = std::time::Instant::now() + Duration::from_secs(5);
+                        while std::time::Instant::now() < force_deadline {
+                            if lock.try_lock().is_ok() {
+                                return Ok(());
+                            }
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                    }
                     return Err(std::io::Error::other("local Node did not shut down"));
                 }
                 Err(TryLockError::Error(e)) => return Err(e),

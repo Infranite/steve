@@ -170,7 +170,7 @@ struct Owned(Arc<Conn>, bool);
 impl Drop for Owned {
     fn drop(&mut self) {
         if !self.1 {
-            self.0.kill();
+            self.0.signal(libc::SIGKILL);
         }
     }
 }
