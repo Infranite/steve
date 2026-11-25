@@ -829,3 +829,28 @@ async fn chat_failed_extraction_retries_and_catches_up_only_seven_days() {
         .unwrap();
     assert_eq!(e.env.gateway.prompts.lock().unwrap().len(), calls);
 }
+
+#[tokio::test]
+async fn empty_chat_day_is_marked_and_skips_model_call() {
+    let e = setup();
+    let m = &e.env.modules;
+    e.env.gateway.fail("empty day must not invoke model");
+    let got = chat::extract_day(m, &e.kb, WS, "2026-10-30").await.unwrap();
+    assert!(got.is_empty());
+    assert!(e.env.gateway.prompts.lock().unwrap().is_empty());
+    let marked = e
+        .env
+        .store()
+        .read(|c| steve_store::knowledge::Documents(c).mark(WS, "extract:chat:2026-10-30"))
+        .unwrap()
+        .is_some();
+    assert!(marked, "empty day is marked done so future ticks skip it");
+    // Running again also makes zero model calls.
+    assert!(
+        chat::extract_day(m, &e.kb, WS, "2026-10-30")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(e.env.gateway.prompts.lock().unwrap().is_empty());
+}

@@ -395,6 +395,7 @@ pub fn owner_me(c: &mut impl Read, ws: &str) -> ApiResult<Option<Party>> {
 pub struct StewardOut {
     pub person_id: String,
     pub person_name: String,
+    pub person_avatar: Value,
     pub is_me: bool,
     pub role: String,
     pub role_label: String,
@@ -410,6 +411,10 @@ fn steward_out(c: &mut impl Read, s: &Steward) -> ApiResult<StewardOut> {
     Ok(StewardOut {
         person_id: s.person_id.clone(),
         person_name: p.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
+        person_avatar: p
+            .as_ref()
+            .map(|p| p.avatar.clone())
+            .unwrap_or_else(|| Value::Object(Default::default())),
         is_me: p.as_ref().is_some_and(Party::is_me),
         role: s.role.clone(),
         role_label: role_shown(&s.role),

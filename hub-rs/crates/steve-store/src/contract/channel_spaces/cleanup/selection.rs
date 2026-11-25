@@ -177,11 +177,11 @@ pub fn messages(
         ),
         (
             observed(
-                "thread_items",
+                "thread_dispatch_refs",
                 "t",
-                Expr::col(("t", "origin_msg"))
+                Expr::col(("t", "origin_message_id"))
                     .eq(msg())
-                    .or(Expr::col(("t", "reply_msg")).eq(msg())),
+                    .or(Expr::col(("t", "reply_message_id")).eq(msg())),
             ),
             Keep::Item,
         ),

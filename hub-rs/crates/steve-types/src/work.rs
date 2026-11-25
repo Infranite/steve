@@ -1,5 +1,5 @@
 //! Group 6 owns events and reasons for items, sessions, decisions, main conversation, transcript and threads.
-//! Associated ID labels (ItemId, SessionId, DecisionId, MessageId, ThreadRunId) are all defined centrally in `id.rs`.
+//! Associated ID labels (ItemId, SessionId, DecisionId, MessageId) are all defined centrally in `id.rs`.
 
 use crate::*;
 use serde::Serialize;
@@ -34,8 +34,6 @@ pub enum WorkEvent {
         ws: WorkspaceId,
         space: String,
     },
-    #[serde(rename = "thread.run")]
-    ThreadRun { id: ThreadRunId, ws: WorkspaceId },
 }
 
 impl Scoped for WorkEvent {
@@ -45,7 +43,6 @@ impl Scoped for WorkEvent {
             Self::Decision { ws, .. } => Scope::Ws(ws.clone()),
             Self::Session { ws, .. } => Scope::Ws(ws.clone()),
             Self::Message { ws, .. } => Scope::Ws(ws.clone()),
-            Self::ThreadRun { ws, .. } => Scope::Ws(ws.clone()),
         }
     }
 }
@@ -81,7 +78,7 @@ pub enum WorkLiveEvent {
     SteveTool {
         ws: WorkspaceId,
         mid: MessageId,
-        run: ThreadRunId,
+        run: String,
         name: String,
         brief: String,
         ok: bool,
@@ -120,7 +117,6 @@ impl WorkEvent {
             Self::Decision { .. } => "decision",
             Self::Session { .. } => "session",
             Self::Message { .. } => "message",
-            Self::ThreadRun { .. } => "thread.run",
         }
     }
 }
@@ -144,7 +140,6 @@ impl WorkEvent {
             Self::Decision { id, .. } => Some(id.as_str()),
             Self::Session { id, .. } => Some(id.as_str()),
             Self::Message { id, .. } => Some(id.as_str()),
-            Self::ThreadRun { id, .. } => Some(id.as_str()),
         }
     }
 }

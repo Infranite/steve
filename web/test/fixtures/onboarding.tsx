@@ -25,7 +25,7 @@ let view = {
 modelSetupApi.get = async () => structuredClone(view)
 modelSetupApi.select = async (c) => { calls.push("model:" + c.harness); view = { ...view, bot_revision: view.bot_revision + 1, steve: { harness: c.harness, model: c.model, models: c.model ? [c.model] : [] } }; return structuredClone(view) }
 const proj = (id: string, name: string, path: string, archived = false) => ({ id, workspace_id: "w1", name, description: "", device_id: "hub", path, kind: "git" as const, worktree: true, default_bot: null, release: null, archived, created: now, updated: now })
-st.projects = q.includes("bare") ? [] : [proj("p1", "Steve", "/home/example/Agents/clients/a-rather-long-client-folder/steve-dev-loop"), proj("p2", "website", "~/Sites/website"), proj("p3", "notes", "~/notes"), proj("p4", "infra", "~/infra"), proj("p5", "scratch", "~/scratch"), proj("p6", "old", "~/old", true)]
+st.projects = q.includes("bare") ? [] : [proj("p1", "Steve", "/home/example/projects/clients/a-rather-long-client-folder/demo-app"), proj("p2", "website", "~/Sites/website"), proj("p3", "notes", "~/notes"), proj("p4", "infra", "~/infra"), proj("p5", "scratch", "~/scratch"), proj("p6", "old", "~/old", true)]
 st.onboard = 0
 function Fixture() {
   useStore()

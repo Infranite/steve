@@ -159,7 +159,14 @@ pub fn seed_route_log_fixture_route(
     reply: &str,
 ) -> Result<()> {
     project_write(store, |c| {
-        c.execute(r#"INSERT INTO route_log (id,workspace_id,message_id,reply_id,model_kind,kind,ms,created) VALUES ('fixture-route',?1,?2,?3,'fixture','ask',0,1)"#, params![ws, turn, reply])?;
+        c.execute(
+            r#"INSERT INTO thread_reply_tasks (id,workspace_id,space,origin_message_id,reply_revision,origin_version,input_seq,status,generation,receipt_id,created,updated) VALUES ('fixture-task',?1,'steve',?2,0,1,0,'settled',1,'fixture-route',1,1)"#,
+            params![ws, turn],
+        )?;
+        c.execute(
+            r#"INSERT INTO thread_reply_receipts (id,task_id,workspace_id,space,origin_message_id,reply_revision,outcome,reply_message_id,route_kind,model_kind,route_ms,committed_at) VALUES ('fixture-route','fixture-task',?1,'steve',?2,0,'answered',?3,'ask','fixture',0,1)"#,
+            params![ws, turn, reply],
+        )?;
         Ok(())
     })
 }

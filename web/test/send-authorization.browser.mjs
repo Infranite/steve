@@ -39,8 +39,9 @@ try {
     const calls = () => page.evaluate(() => JSON.parse(JSON.stringify(window.__calls)))
     const open = async () => {
       enabled = false; available = true; readFailed = false; conflict = false; lost = false; kept = false; hold = null; decision = "dec_f"; count = 0; mutations.length = 0
+      if (page.url().startsWith(base)) await page.evaluate(() => sessionStorage.clear())
       await page.goto(base + "/test/fixtures/handoff-card.html?managed")
-      await page.evaluate(async () => { sessionStorage.clear(); await window.__refresh() })
+      await page.evaluate(async () => { await window.__refresh() })
       // The fixture starts without Wait.recovery; only a state refresh can pass it through waitOf.
       await page.locator('[data-authorization-current="disabled"]').waitFor()
     }

@@ -618,6 +618,7 @@ pub(crate) async fn request_merge(
             source: Some(steve_store::DecisionSource::Revision {
                 revision: body.head,
             }),
+            wait: None,
         })?;
         Ok(axum::Json(decision.id))
     })
@@ -694,6 +695,14 @@ mod tests {
             created: 0,
             resolved: None,
             undo: None,
+            resolved_by: None,
+            wait: steve_types::WaitContract::bounded(
+                steve_types::WaitOwner::Owner,
+                0,
+                steve_types::wait::WAIT_LIMIT_DECISION_MS,
+                steve_types::WaitTimeoutAction::Close,
+            )
+            .unwrap(),
         }
     }
 

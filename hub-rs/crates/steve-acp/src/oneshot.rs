@@ -828,6 +828,7 @@ for line in sys.stdin:
             adapters: HashMap::from([("neutral-test".into(), path)]),
             node: "node".into(),
             claude_executable: "unused".into(),
+            claude_config_dir: None,
             steve_home: root.into(),
             codex_home: root.into(),
             user_home: root.into(),

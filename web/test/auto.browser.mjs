@@ -223,8 +223,9 @@ const startupHistory = async ({ width, height, scheme, locale }) => {
     await page.locator('[data-schedule-row="digest_schedule"]').click()
     await page.locator('[data-schedule-run="restarted"]').waitFor()
     assert.equal(await page.locator("[data-schedule-run]").count(), startupRuns.length)
-    assert.match(await row("repeated").locator("[data-run-failures]").innerText(), zh ? /相同错误 2 次/ : /Same error 2 times/)
-    assert.match(await row("new_error").locator("[data-run-failures]").innerText(), zh ? /相同错误 1 次/ : /Same error 1 time(?!s)/)
+    // the English catalog loads after the first paint: wait for the localized text instead of reading it once
+    await row("repeated").locator("[data-run-failures]").filter({ hasText: zh ? /相同错误 2 次/ : /Same error 2 times/ }).waitFor()
+    await row("new_error").locator("[data-run-failures]").filter({ hasText: zh ? /相同错误 1 次/ : /Same error 1 time(?!s)/ }).waitFor()
     for (const r of startupRuns.filter((r) => r.start_failures)) {
       const li = row(r.id)
       assert.equal(await li.locator("[data-run-first] time").getAttribute("datetime"), new Date(r.first_at).toISOString())

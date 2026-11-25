@@ -403,6 +403,9 @@ steve-core/src/takeover.rs	"待确认"	1
 steve-core/src/takeover.rs	"方案"	1
 steve-core/src/takeover.rs	"需要你决定"	1
 steve-core/src/takeover.rs	"需要你确认"	1
+steve-core/src/thread/decide.rs	"(?i)^(谢谢|谢谢你|多谢|感谢|好的|好呀|好滴|你好|您好|嗨|哈喽|收到|明白|明白了|了解了|知道了|辛苦了|早安|早上好|晚安|拜拜|再见|不客气|太好了|赞|棒|hi|hello|hey|thanks|thank you|thx|ok|okay|got it|bye)[。！!，,～~\\.\\s]*$"	1
+steve-core/src/thread/decide.rs	"(?i)看下|看一下|看看|查下|查一下|查看|检查|跑下|跑一下|运行|执行|读一下|读下|列一下|列出|统计一下"	1
+steve-core/src/thread/decide.rs	"(?i)磁盘|硬盘|剩余空间|磁盘空间|内存|CPU|进程|端口|日志|目录|本地文件|文件|代码库|仓库|系统状态|终端|命令行|shell|stdout|stderr|\\b(ls|df|ps|grep|git\\s+(status|log|diff))\\b"	1
 steve-core/src/thread/decide.rs	"(?i)设置|配置|开关|免打扰|提醒|通知|汇报|yolo|模型|权限|规则|默认|偏好|定时|Bot|机器人"	1
 steve-core/src/thread/decide.rs	"(建|开|做|记|整理)(个|一个|成|为)(新)?事项|交给.{0,16}(做|处理|去办|来做)|跟进一下|记下来跟进|放(到)?后台(做|跑)|后台去做"	1
 steve-core/src/thread/decide.rs	"帮我|给我|替我|你看看|你看下|你来|需要|优化|设计|整理|方案|做个|弄个|搞个|写个|出个|安排"	1
@@ -411,8 +414,6 @@ steve-core/src/thread/decide.rs	"改|修|加|删|实现|重构|换成|发布|上
 steve-core/src/thread/handle.rs	"/汇报"	1
 steve-core/src/thread/handle.rs	"别建|不用建|不要建|不建事项|别做成|不用做成|直接(在这里?|在对话里)?(告诉|说|讲|回答)|在这里?(告诉|说|讲|回答)"	1
 steve-core/src/thread/handle.rs	"进展|进度|做完没|做完了吗|完成了吗|怎么样了|到哪了|到哪一步"	1
-steve-core/src/thread/mod.rs	"/汇报"	1
-steve-core/src/thread/mod.rs	"对话"	1
 steve-core/src/thread/offer.rs	"^(好|好的|好啊|行|可以|嗯|对|改吧|做吧|就这么办|按建议|按你说的|那就改|那就做|做成事项|改一下吧|好，?(改|做)吧)[。！!，,～~ ]*$"	1
 steve-core/src/turn_receipts.rs	"Agent 停下来了，没有交付也没有提问"	1
 steve-core/src/turn_receipts.rs	"它停下了：上一回合结束后没有交付、提问"	1

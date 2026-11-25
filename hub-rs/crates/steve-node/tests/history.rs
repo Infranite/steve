@@ -56,6 +56,7 @@ fn setup(codex: &str) -> T {
             ]),
             node: "node".into(),
             claude_executable: "claude".into(),
+            claude_config_dir: None,
             steve_home: root.join("steve"),
             codex_home: root.join(".codex"),
             user_home: root.clone(),

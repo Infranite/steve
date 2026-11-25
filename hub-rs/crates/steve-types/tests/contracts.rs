@@ -20,7 +20,6 @@ fn ids_are_transparent_labels() {
         SessionId,
         DecisionId,
         MessageId,
-        ThreadRunId,
         BotId,
         ProjectId,
         TagId,

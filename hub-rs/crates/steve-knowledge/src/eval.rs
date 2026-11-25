@@ -1,7 +1,7 @@
 //! Retrieval evaluation: a fixed corpus, queries with expected sources,
 //! and recall@k / MRR. The corpus lives in `tests/eval/`; this module loads it with the same
 //! extraction and chunking the index uses, and scores any search function, so the FTS baseline
-//! here (K0) and the full `retrieve` (K1) and vector variants (K6) are measured the same way.
+//! here and the full `retrieve` and vector variants are measured the same way.
 
 use std::collections::BTreeMap;
 use std::path::Path;

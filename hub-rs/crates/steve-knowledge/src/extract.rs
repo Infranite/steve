@@ -26,7 +26,7 @@ use steve_modules::{ApiError, ApiResult, Modules, Tier};
 use steve_store::base::mems::Mem;
 use steve_store::base::{Level, ObjRef, Viewer};
 use steve_store::knowledge::{CandidateRows, Memories, ProjectProposals};
-use steve_store::{Contacts, ItemEvidence, Members, MessageEvidence, Read, References, W};
+use steve_store::{Contacts, ItemEvidence, Members, Read, References, W};
 use tokio::sync::Semaphore;
 
 use crate::candidates::{self, MAX_PER_ORIGIN, NewCandidate, Origin, OriginKind};
@@ -875,6 +875,12 @@ pub(crate) async fn prepare(
         tracing::warn!(origin = %origin.id, "kb.extract: gateway failed: {e}");
         ApiError::Internal(format!("gateway: {e}"))
     })?;
+    if origin.kind == OriginKind::Chat {
+        steve_modules::gateway::record_periodic_usage(
+            crate::sources::chat::PERIODIC_TASK_EXTRACT,
+            &answer.usage,
+        );
+    }
     let raw = parse(&answer.text);
     let offered = raw.len();
     let ws = origin.ws.clone();
@@ -956,8 +962,16 @@ fn kept_notice(tx: &mut W<'_>, ws: &str, made: &[Mem]) -> ApiResult<()> {
         kept.len(),
         kept.join("；")
     );
-    let meta = serde_json::json!({"notice": {"kind": "memory", "level": "info"}});
-    MessageEvidence(tx).add(ws, "steve", &text, None, &meta, "notify")?;
+    steve_store::thread::post_notice(
+        tx,
+        ws,
+        "memory",
+        "info",
+        &text,
+        None,
+        false,
+        steve_store::now(),
+    )?;
     Ok(())
 }
 

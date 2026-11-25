@@ -4,7 +4,7 @@ import { modReq as req, qs } from "@/api"
 export type ObjectType = "account" | "connection" | "device" | "bot" | "persona" | "party" | "space"
 export type StewardRole = "owner" | "maintainer" | "user"
 export type ObjectInfo = { object_type: ObjectType; object_id: string; type_label: string; name: string; kind: string | null; detail: string; party_id: string | null }
-export type Steward = { person_id: string; person_name: string; is_me: boolean; role: StewardRole; role_label: string; source: string; status: "confirmed" | "proposed"; confidence: number; decision_id: string | null; updated: number }
+export type Steward = { person_id: string; person_name: string; person_avatar?: unknown; is_me: boolean; role: StewardRole; role_label: string; source: string; status: "confirmed" | "proposed"; confidence: number; decision_id: string | null; updated: number }
 export type ObjectStewards = { object: ObjectInfo; stewards: Steward[] }
 /** a write's answer: `undo` is a changeset for `POST /api/config/:id/undo` (null when nothing changed) */
 export type Changed = ObjectStewards & { ok: true; undo: string | null }

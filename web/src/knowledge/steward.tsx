@@ -5,7 +5,8 @@ import { ArchiveIcon, CheckIcon, GitMergeIcon, LinkIcon, PlayIcon, ScaleIcon, Sp
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
-import { Card, Panel, Section, Empty, Meta, Pill, Tile, Notice, Loading, BotAvatar } from "@/ui"
+import { Card, Panel, Section, Empty, Meta, Pill, Tile, Notice, Loading } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { Select } from "@/view-shared"
 import { when } from "@/auto/common"
 import { useHubEvents, toast, tm, st, botName, makeBot, saveBot } from "@/store"
@@ -81,7 +82,7 @@ export function StewardTab() {
                 onChange={(v) => { const n = Number(v); if (n >= 1 && n <= 100) void act("threshold", () => kb.setSteward({ threshold: n }), t("knowledge:steward.thresholdChanged")) }} />
               <Meta className="min-w-0 flex-1 max-sm:order-last max-sm:basis-full">
                 <span>{s.enabled ? (s.next_at ? t("knowledge:steward.next", { time: when(s.next_at) }) : t("knowledge:steward.onPlan")) : t("knowledge:steward.paused")}</span>
-                <MetaLink href={"#/bots/" + s.bot} data-steward-bot><span className="inline-flex items-center gap-1"><BotAvatar k={s.bot} size={14} />{t("knowledge:steward.by", { name: botName(s.bot) })}</span></MetaLink>
+                <MetaLink href={"#/bots/" + s.bot} data-steward-bot><span className="inline-flex items-center gap-1"><ActorAvatar actorId={s.bot} size={14} tooltip={false} />{t("knowledge:steward.by", { name: botName(s.bot) })}</span></MetaLink>
                 {s.last && <MetaLink href={s.last.item_id ? "#/items/" + s.last.item_id : undefined} data-steward-last>{s.last.status === "failed" ? t("knowledge:steward.lastFailed", { time: tm(s.last.at) }) : t("knowledge:steward.last", { time: tm(s.last.at) })}</MetaLink>}
               </Meta>
               <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void act("run", () => flowApi.runSchedule(s.id), t("knowledge:steward.started"))} data-steward-run>{busy === "run" ? <Spinner className="size-3.5" /> : <PlayIcon />}{t("knowledge:steward.runNow")}</Button>

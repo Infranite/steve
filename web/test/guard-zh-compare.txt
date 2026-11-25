@@ -44,9 +44,7 @@ src/store.ts	"不"	1
 src/store.ts	"主题"	1
 src/store.ts	"交付"	3
 src/store.ts	"你"	1
-src/store.ts	"删除"	1
 src/store.ts	"客户"	1
-src/store.ts	"导出"	2
 src/store.ts	"开始会话"	1
 src/store.ts	"类型"	1
 src/store.ts	"项目"	1

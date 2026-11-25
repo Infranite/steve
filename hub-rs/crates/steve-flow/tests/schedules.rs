@@ -354,6 +354,11 @@ async fn boot_applies_missed_policy() {
     let e = env();
     let s = create(&e, daily("report")).await;
     let id = s["id"].as_str().unwrap().to_string();
+    let now = e.now();
+    e.env
+        .store()
+        .write(|tx| steve_store::DigestNotes(tx).add(WS, "补跑汇总素材", None, None, now))
+        .unwrap();
     e.env.gateway.script("你是 Steve", "汇报正文");
     e.env.clock.set(monday_8am() + DAY + HOUR);
     let handles = scheduler::Scheduler::new(e.flow.clone())
@@ -692,6 +697,11 @@ async fn run_now_keeps_next_at() {
     e.env.gateway.script("你是 Steve", "汇报正文");
     let s = create(&e, daily("report")).await;
     let id = s["id"].as_str().unwrap().to_string();
+    let now = e.now();
+    e.env
+        .store()
+        .write(|tx| steve_store::DigestNotes(tx).add(WS, "手动触发素材", None, None, now))
+        .unwrap();
     let before = next_at(&e, &id);
     let (st, v) = call(
         &e.router(),
@@ -1341,6 +1351,11 @@ async fn report_retry_recovers_canonical_result_before_model_or_digest_and_nodes
     let e = env();
     e.env.gateway.script("你是 Steve", "persistent report");
     let s = create(&e, daily("report")).await;
+    let now = e.now();
+    e.env
+        .store()
+        .write(|tx| steve_store::DigestNotes(tx).add(WS, "initial material", None, None, now))
+        .unwrap();
     e.env.clock.set(monday_8am() + 30 * MIN);
     let ids = claim_due(&e.flow).unwrap();
     // Drive the actual legacy executor; it must use the same node key as GraphEngine.
@@ -1747,4 +1762,76 @@ async fn schedule_guard_skips_scheduled_runs_and_allows_manual_runs() {
     assert!(go);
     let _ = drive(&e.flow, &manual_run).await;
     assert!(!e.core.calls().is_empty());
+}
+
+#[tokio::test]
+async fn report_skips_model_when_nothing_changed_and_runs_only_on_changes() {
+    let e = env();
+    e.env.gateway.script("你是 Steve", "变化汇报正文");
+    let s = create(&e, daily("report")).await;
+    let id = s["id"].as_str().unwrap().to_string();
+
+    // Day 1: no digest notes and no changed items -> skipped with zero gateway calls.
+    e.env.clock.set(monday_8am() + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(drive(&e.flow, &ids[0]).await.unwrap(), RunStatus::Skipped);
+    assert!(e.env.gateway.calls.lock().unwrap().is_empty());
+    let first = &runs_of(&e, &id)[0];
+    assert_eq!(first.status, "skipped");
+    assert_eq!(first.outcome.as_deref(), Some("skipped"));
+    assert!(
+        e.env
+            .store()
+            .read(|c| steve_store::FeedReads(c).report_result(WS, &first.id, "a"))
+            .unwrap()
+            .is_none()
+    );
+
+    // Day 2: new digest note arrives -> Smart model is invoked once and report publishes.
+    let day2 = monday_8am() + DAY + 30 * MIN;
+    e.env
+        .store()
+        .write(|tx| {
+            steve_store::DigestNotes(tx).add(WS, "新进展：完成部署", None, None, day2 - MIN)
+        })
+        .unwrap();
+    e.env.clock.set(day2);
+    let ids = claim_due(&e.flow).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(drive(&e.flow, &ids[0]).await.unwrap(), RunStatus::Done);
+    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        e.env.gateway.calls.lock().unwrap()[0].0,
+        steve_modules::Tier::Smart
+    );
+
+    // Day 3: nothing changed since Day 2 -> skipped again with zero additional model calls.
+    e.env.clock.set(monday_8am() + 2 * DAY + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(drive(&e.flow, &ids[0]).await.unwrap(), RunStatus::Skipped);
+    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), 1);
+
+    // Day 4: a workspace item changes (without any digest notes) -> model runs and publishes.
+    fixtures::create_item(
+        e.env.store(),
+        fixtures::FixtureItem {
+            ws: WS,
+            title: "修复告警",
+            bot: "steve",
+            project: None,
+            source: &json!({"kind": "chat"}),
+            requester: Some(ME),
+            tag_ids: &[],
+            propose: false,
+            accept_auto: true,
+        },
+    )
+    .unwrap();
+    e.env.clock.set(monday_8am() + 3 * DAY + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(drive(&e.flow, &ids[0]).await.unwrap(), RunStatus::Done);
+    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), 2);
 }

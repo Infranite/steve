@@ -12,6 +12,8 @@ import { Spinner } from "@/components/ui/spinner"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { api } from "@/api"
+import { ActorAvatar } from "@/components/actor-avatar"
+import { useMe } from "@/mine"
 import { access, type AccessClient, type AccessToken, type AccessView } from "@/access-api"
 import { toast } from "@/store"
 import { Loading, Notice, openSheet } from "@/ui"
@@ -39,7 +41,7 @@ function groups(v: AccessView, live: boolean): Group[] {
 
 /** `focus`: a client to bring into view (from the map), its row lit for a moment */
 export function ClientsTab({ focus }: { focus?: string }) {
-  const t = useT(), { access: v, accessError, reloadAccess } = useDevices()
+  const t = useT(), { access: v, accessError, reloadAccess } = useDevices(), currentUser = useMe()
   const [confirm, setConfirm] = useState<Group | null>(null)
   const ready = !!v
   useEffect(() => {
@@ -73,7 +75,7 @@ export function ClientsTab({ focus }: { focus?: string }) {
       title={<><span className="truncate">{c.name}</span>
         {on && onBadge}
         {g.clients.length > 1 && <span className="type-footnote tabular-nums text-muted-foreground" data-client-count={g.clients.length}>{t("devices:clients.sameN", { count: g.clients.length })}</span>}
-        {!mine(c) && c.user_id && <Chip>{t("devices:clients.of", { name: v.users?.[c.user_id] ?? c.user_id })}</Chip>}
+        {!mine(c) && c.user_id && <Chip><span className="inline-flex items-center gap-1"><ActorAvatar actorId={c.user_id} name={v.users?.[c.user_id]} size={16} />{t("devices:clients.of", { name: v.users?.[c.user_id] ?? c.user_id })}</span></Chip>}
         {age === "unused" && <Badge tone="warning" size="sm" data-client-unused>{t("devices:clients.unused30")}</Badge>}</>}
       sub={facts(c, when(c, on))}>
       <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setConfirm(g)} data-revoke-client={c.id}>{t("devices:clients.revoke")}</Button>
@@ -86,7 +88,7 @@ export function ClientsTab({ focus }: { focus?: string }) {
           <div className="border-t border-border/70">
             <DRow icon={me ? (() => { const I = ICON[clientKind(me.kind, me.platform)]; return <I /> })() : <GlobeIcon />} data-client-current={me?.id ?? ""}
               title={<><span className="truncate">{me?.name ?? t("devices:clients.browserSession")}</span><Chip tone="info">{t("devices:clients.you")}</Chip></>}
-              sub={me ? facts(me, me.version ? <span>{me.version}</span> : null) : v.route ? <span>{t("devices:clients.via", { route: routeLabel(v.route) })}</span> : undefined}>
+              sub={<>{currentUser?.login && <span className="font-mono" data-login-handle>{t("devices:clients.loginAs", { login: currentUser.login })}</span>}{me ? facts(me, me.version ? <span>{me.version}</span> : null) : v.route ? <span>{t("devices:clients.via", { route: routeLabel(v.route) })}</span> : undefined}</>}>
               <Button size="sm" variant="outline" onClick={async () => { await api.logout().catch(() => {}); location.reload() }} data-sign-out><LogOutIcon />{t("devices:clients.signOut")}</Button>
             </DRow>
           </div>

@@ -91,8 +91,10 @@ impl Fixture {
                 declared:HashMap::from([("meter".into(),serde_json::from_value(json!({"properties":{
                     "nested_sandbox":false,"self_read_only":true,"usage_fallback":if transcript { "claude_transcript" } else { "codex_rollout" },
                     "state":{"env":if transcript { "CLAUDE_CONFIG_DIR" } else { "CODEX_HOME" },"default":"unused"}
-                },"env":if transcript { json!({"CLAUDE_CONFIG_DIR":root.join("configured-home")}) } else { json!({}) }})).unwrap())]),
-                node:"node".into(),claude_executable:"unused".into(),steve_home:root.join("unused"),
+                }})).unwrap())]),
+                node:"node".into(),claude_executable:"unused".into(),
+                claude_config_dir:transcript.then(|| root.join("configured-home")),
+                steve_home:root.join("unused"),
                 codex_home:root.join("configured-home"),user_home:root.into(),version:"test".into(),
             },
             roots:vec![Root { id:RootId::new("work").unwrap(),path:root.join("work"),display:"work".into(),access:RootAccess::ReadWrite }],

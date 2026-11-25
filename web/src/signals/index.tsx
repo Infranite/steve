@@ -10,6 +10,8 @@ import { st, tm, toast, botName } from "@/store"
 import { flowApi, useLoad, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
 import { HubError } from "@/api"
 import { srcIcon, Json, Failed, Clamp, ms, RUN_STATUS } from "@/auto/common"
+import { partyActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { t, useT } from "@/i18n"
 
 type Mode = "outcome" | "source"
@@ -112,7 +114,7 @@ function SignalRow({ g, open, onOpen, reload }: { g: Signal[]; open: boolean; on
         <Ic className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} aria-label={sourceLabel(s0.source)} />
         <span className="min-w-0 flex-1 truncate type-body">{many ? s0.group_label || s0.group_key : s0.summary}{many && <span className="ml-1.5 type-footnote tabular-nums text-muted-foreground">{t("misc:signals.count", { count: g.length })}</span>}</span>
         {mode === "source" ? <span className="hidden items-center gap-1.5 type-footnote text-muted-foreground sm:inline-flex"><StatusDot s={dotOf(s0.outcome)} />{s0.outcome_label}</span>
-          : !many && s0.actor && <span className="hidden max-w-40 truncate type-footnote text-muted-foreground sm:inline">{s0.actor.name}</span>}
+          : !many && s0.actor && <span className="hidden max-w-44 items-center gap-1.5 type-footnote text-muted-foreground sm:inline-flex"><ActorAvatar actor={partyActor({ id: s0.actor.party_id, name: s0.actor.name })} size={16} tooltip={false} /><span className="truncate">{s0.actor.name}</span></span>}
         <span className="w-16 shrink-0 text-right type-footnote tabular-nums text-muted-foreground">{tm(s0.received)}</span>
       </CollapsibleTrigger>
       <CollapsibleContent data-sig-detail={s0.id}>

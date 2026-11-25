@@ -1,4 +1,4 @@
-import { getItem } from "@/store"
+import { getItem, st } from "@/store"
 import { useState } from "react"
 import { hasMoreSettled, loadMoreSettled } from "@/data/sync"
 import { ChevronRightIcon, RotateCcwIcon } from "lucide-react"
@@ -9,25 +9,39 @@ import { cn } from "@/lib/utils"
 import { done, toast, undoDecision, WT, type Done } from "@/store"
 import { clip } from "@/thread/topics"
 import { Chips, Empty, go, Group, ItemNo, permissionQuestion, RelNote, SectionLabel } from "@/ui"
+import { disambiguateActors, formatActorName, resolveActor, type Actor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 
 /* 已处理: the decisions of the last 7 days, read back to check what was decided and by whom. A day holds one row per
  * item, the latest outcome first, so an item that stalled ten times is one line, not ten; the row opens to every
  * decision with its question and, while it can still be taken back, an undo. Decisions that lapsed on their own
  * (the item started again, was dropped) are their own filter: they needed nothing from you. */
 
-type Who = "you" | "steve" | "lapsed"
-const whoOf = (d: Done): Who => (d.how === "expired" ? "lapsed" : d.yolo !== undefined ? "steve" : "you")
-type Entry = { d: Done; who: Who }
+type Who = "you" | "others" | "steve" | "lapsed"
+const whoOf = (d: Done): Who => {
+  if (d.how === "expired") return "lapsed"
+  if (d.yolo !== undefined || d.resolvedBy === "yolo") return "steve"
+  if (d.resolvedBy && d.resolvedBy !== "me" && st.me?.user_id && d.resolvedBy !== st.me.user_id) return "others"
+  return "you"
+}
+type Entry = { d: Done; who: Who; actor: Actor; extra?: string }
 
 let filter: "all" | Who = "all"
 
-function Outcome({ d, who, line }: { d: Done; who: Who; line?: boolean }) {
+function Outcome({ d, who, actor, extra, line }: { d: Done; who: Who; actor: Actor; extra?: string; line?: boolean }) {
   const t = useT()
-  if (d.rel) return <RelNote rel={d.rel} className="inline-flex" />
+  const shown = formatActorName(actor.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex }))
+  if (d.rel) return <span className="inline-flex min-w-0 items-center gap-1.5"><ActorAvatar actor={actor} disambiguator={extra} size={16} /><RelNote rel={d.rel} className="inline-flex" /></span>
   const text = who === "lapsed" ? t("views:inbox.expired", { choice: d.choice })
     : who === "steve" ? t("views:inbox.steveChose", { choice: d.choice })
+    : who === "others" ? (d.how === "dismissed" ? t("views:inbox.dismissedBy", { who: shown }) : t("views:inbox.choseBy", { who: shown, choice: d.choice }))
     : d.how === "dismissed" ? t("views:inbox.dismissed") : t("views:inbox.chose", { choice: d.choice })
-  return <span className={cn("inline-flex min-w-0 items-center gap-1", who === "lapsed" && "text-tertiary")}><span className={line ? "min-w-0 truncate" : "min-w-0 [overflow-wrap:anywhere] line-clamp-3"}>{text}{d.undone ? ` · ${t("views:inbox.undone")}` : ""}</span></span>
+  return (
+    <span className={cn("inline-flex min-w-0 items-center gap-1.5", who === "lapsed" && "text-tertiary")}>
+      <ActorAvatar actor={actor} disambiguator={extra} size={16} />
+      <span className={line ? "min-w-0 truncate" : "min-w-0 [overflow-wrap:anywhere] line-clamp-3"}>{text}{d.undone ? ` · ${t("views:inbox.undone")}` : ""}</span>
+    </span>
+  )
 }
 
 function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
@@ -43,20 +57,20 @@ function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
         <ChevronRightIcon className={cn("mt-1 size-3.5 shrink-0 text-tertiary transition-transform duration-150", open && "rotate-90")} />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex min-w-0 items-baseline gap-2 type-body">{id && <ItemNo id={id} />}<span className="min-w-0 truncate">{title}</span></span>
-          <span className="flex min-w-0 items-center gap-x-1 whitespace-nowrap type-footnote text-muted-foreground">
-            <span className="shrink-0 text-tertiary">{WT[last.d.type]} ·</span><Outcome d={last.d} who={last.who} line />
+          <span className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap type-footnote text-muted-foreground">
+            <span className="shrink-0 text-tertiary">{WT[last.d.type]} ·</span><Outcome d={last.d} who={last.who} actor={last.actor} extra={last.extra} line />
             {more > 0 && <span className="shrink-0 text-tertiary">· {t("views:inbox.moreTimes", { count: more })}</span>}
           </span>
         </span>
         <span className="mt-0.5 shrink-0 type-footnote tabular-nums text-tertiary">{last.d.at ? hm(last.d.at) : last.d.tm}</span>
       </button>
       {open && <div className="anim-in mb-2 ml-[1.625rem] flex flex-col gap-3 border-l border-border pl-4 pt-1">
-        {xs.map(({ d, who }) => (
+        {xs.map(({ d, who, actor, extra }) => (
           <div key={d.decision} className="flex min-w-0 items-start gap-3">
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <div className="type-callout text-foreground/85 [overflow-wrap:anywhere] line-clamp-3">{permissionQuestion(d.q)}</div>
-              <div className="flex min-w-0 flex-wrap items-center gap-x-1 type-footnote text-muted-foreground">
-                <Outcome d={d} who={who} />
+              <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground">
+                <Outcome d={d} who={who} actor={actor} extra={extra} />
                 {who === "steve" && d.yolo && <span className="min-w-0 text-tertiary">· {d.yolo}</span>}
                 {d.via && <span className="text-tertiary">· {t("views:inbox.via", { client: d.via })}</span>}
                 <span className="tabular-nums text-tertiary">· {d.at ? hm(d.at) : d.tm}</span>
@@ -74,7 +88,20 @@ export function InboxDone() {
   const t = useT()
   const [, f] = useState(0)
   const [loading, setLoading] = useState(false)
-  const all: Entry[] = done().map((d) => ({ d, who: whoOf(d) })).sort((a, b) => b.d.at - a.d.at)
+  const raw = done().sort((a, b) => b.at - a.at)
+  const sysName = t("common:actor.kind.system")
+  const ctx = { me: st.me, members: st.members, bots: st.bots, systemName: sysName }
+  const resolved = raw.map((d) => {
+    const who = whoOf(d)
+    const rawId = who === "lapsed" ? "system" : who === "steve" ? "yolo" : (d.resolvedBy ?? "me")
+    const actor = resolveActor(rawId, ctx)
+    return { d, who, actor }
+  })
+  const disambig = disambiguateActors([
+    ...st.members.map((m) => { const a = resolveActor(m.user_id, ctx); return { key: a.id ?? m.user_id, name: a.name, subtitle: a.subtitle, fallbackId: m.user_id } }),
+    ...resolved.map(({ actor }) => ({ key: actor.id ?? actor.name, name: actor.name, subtitle: actor.subtitle, fallbackId: actor.id })),
+  ])
+  const all: Entry[] = resolved.map((x) => ({ ...x, extra: disambig.get(x.actor.id ?? x.actor.name) }))
   if (!all.length) return <Empty title={t("views:inbox.doneEmpty")} />
   async function more() {
     setLoading(true)
@@ -82,7 +109,7 @@ export function InboxDone() {
     finally { setLoading(false) }
   }
   const count = (w: Who) => all.filter((x) => x.who === w).length
-  const keys = (["all", "you", "steve", "lapsed"] as const).filter((k) => k === "all" || count(k) > 0)
+  const keys = (["all", "you", "others", "steve", "lapsed"] as const).filter((k) => k === "all" || count(k) > 0)
   const label = (k: (typeof keys)[number]) => (k === "all" ? t("views:inbox.all") : t(`views:inbox.who.${k}`, { count: count(k) }))
   const cur = keys.includes(filter) ? filter : "all"
   const xs = all.filter((x) => cur === "all" || x.who === cur)

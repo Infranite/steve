@@ -268,6 +268,13 @@ fn open_candidate_confirmation(
     nd.draft = Some(draft);
     nd.session_id = o.session_id.clone();
     nd.source = Some(steve_store::DecisionSource::Record);
+    nd.wait = steve_types::WaitContract::bounded(
+        steve_types::WaitOwner::Owner,
+        mem.created,
+        EXPIRE_AFTER_MS,
+        steve_types::WaitTimeoutAction::Close,
+    )
+    .ok();
     let d = DecisionRows(tx).open(&nd)?;
     Memories(tx)
         .patch(
@@ -662,16 +669,23 @@ pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
                     && d.subject_id == mem.id
                     && d.status == steve_types::DecisionStatus::Expired
             });
+        let now = steve_store::now();
         let decision_id = if let Some(d) = previous {
             let mut spec = decisions::confirm(&who.ws, SUBJECT, id, &d.question, &d.requested_by);
             spec.draft = Some(d.draft);
             spec.session_id = d.session_id;
             spec.source = Some(steve_store::DecisionSource::Revision { revision: d.id });
+            spec.wait = steve_types::WaitContract::bounded(
+                steve_types::WaitOwner::Owner,
+                now,
+                EXPIRE_AFTER_MS,
+                steve_types::WaitTimeoutAction::Close,
+            )
+            .ok();
             Some(DecisionRows(tx).open(&spec)?.id)
         } else {
             None
         };
-        let now = steve_store::now();
         Memories(tx).patch(
             id,
             &MemPatch {

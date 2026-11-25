@@ -22,6 +22,8 @@ pub const SPACE: &str = "steve";
 pub const TICK: Duration = Duration::from_secs(600);
 /// Local time after which yesterday's conversation is extracted.
 pub const EXTRACT_AT: (u32, u32) = (3, 40);
+/// Metric task label for daily main-thread memory extraction.
+pub const PERIODIC_TASK_EXTRACT: &str = "kb.chat_extract";
 
 /// The local day (`YYYY-MM-DD`) of a Unix-ms time.
 pub fn day_of(ms: i64, zone: Zone) -> String {
@@ -82,14 +84,28 @@ pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> Ap
                 if Documents(tx).mark(&w, &mark)?.is_some() {
                     return Ok::<_, ApiError>(None);
                 }
+                let Some(text) = day_text(tx, &w, &d)?.filter(|t| !t.trim().is_empty()) else {
+                    Documents(tx).set_mark(&w, &mark, "done", now)?;
+                    steve_runtime::jobs::record_periodic_skipped(
+                        PERIODIC_TASK_EXTRACT,
+                        steve_runtime::jobs::SkipReason::NoChange,
+                    );
+                    steve_runtime::jobs::record_model_calls_avoided(
+                        PERIODIC_TASK_EXTRACT,
+                        steve_runtime::jobs::AvoidReason::NoChange,
+                        1,
+                    );
+                    return Ok(None);
+                };
                 let user = extract::owner(tx, &w)?;
-                Ok(Some((user, day_text(tx, &w, &d)?.unwrap_or_default())))
+                Ok(Some((user, text)))
             })
         })
         .await?;
     let Some((user, text)) = todo else {
         return Ok(Vec::new());
     };
+    steve_runtime::jobs::record_periodic_triggered(PERIODIC_TASK_EXTRACT);
     let origin = Origin {
         ws: ws.into(),
         kind: OriginKind::Chat,

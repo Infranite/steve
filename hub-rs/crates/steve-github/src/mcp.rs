@@ -597,6 +597,7 @@ fn open_pr(
         },
         question_template: None,
         source: None,
+        wait: None,
     };
     let opened = gh
         .store()

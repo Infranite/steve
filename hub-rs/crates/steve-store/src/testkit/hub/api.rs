@@ -187,13 +187,55 @@ pub fn seed_attention_reply(
     let msg = format!("question_{suffix}");
     let reply = format!("reply_{suffix}");
     let run = format!("run_{suffix}");
+    let terminal_outcome = match status {
+        "done" | "answered" => Some("answered"),
+        "handed_off" => Some("handed_off"),
+        "stopped" => Some("stopped"),
+        "budget" | "violated" | "failed" => Some("failed"),
+        "unknown" => Some("unknown"),
+        _ => None,
+    };
+    let task_status = if terminal_outcome.is_some() {
+        "settled"
+    } else {
+        "queued"
+    };
     store.write(|tx| -> Result<()> {
-            tx.conn.execute("INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES(?,?,?,'me','question',10)",rusqlite::params![msg,ws,space])?;
-            tx.conn.execute("INSERT INTO thread_runs(id,workspace_id,message_id,user_id,status,created) VALUES(?,?,?,?,'running',10)",rusqlite::params![run,ws,msg,user])?;
-            tx.conn.execute("INSERT INTO messages(id,workspace_id,space,author,text,meta,created) VALUES(?,?,?,'steve','final',?,20)",rusqlite::params![reply,ws,space,serde_json::json!({"run":run,"origin":msg,"run_receipt":true}).to_string()])?;
-            tx.conn.execute("UPDATE thread_runs SET status=?,reply_id=?,ended=20 WHERE id=?",rusqlite::params![status,reply,run])?;
-            Ok(())
-        })?;
+        tx.conn.execute(
+            "INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES(?,?,?,'me','question',10)",
+            rusqlite::params![msg, ws, space],
+        )?;
+        tx.conn.execute(
+            "INSERT INTO thread_reply_tasks(id,workspace_id,space,origin_message_id,reply_revision,origin_version,input_seq,status,generation,user_id,created,updated) VALUES(?,?,?,?,0,1,0,?,1,?,10,20)",
+            rusqlite::params![run, ws, space, msg, task_status, user],
+        )?;
+        tx.conn.execute(
+            "INSERT INTO messages(id,workspace_id,space,author,text,meta,created) VALUES(?,?,?,'steve','final',?,20)",
+            rusqlite::params![
+                reply,
+                ws,
+                space,
+                serde_json::json!({"run": run, "origin": msg, "run_receipt": true}).to_string()
+            ],
+        )?;
+        if let Some(outcome) = terminal_outcome {
+            tx.conn.execute(
+                "INSERT INTO thread_reply_receipts(id,task_id,workspace_id,space,origin_message_id,reply_revision,outcome,reply_message_id,route_kind,model_kind,route_ms,user_id,committed_at) VALUES(?,?,?,?,?,0,?,?,'research','research',0,?,20)",
+                rusqlite::params![run, run, ws, space, msg, outcome, reply, user],
+            )?;
+            tx.conn.execute(
+                "UPDATE thread_reply_tasks SET receipt_id=? WHERE id=?",
+                rusqlite::params![run, run],
+            )?;
+            if space == "steve" {
+                tx.conn.execute(
+                    "INSERT OR IGNORE INTO thread_reply_commits(message_id,receipt_id,workspace_id,user_id) VALUES(?,?,?,?)",
+                    rusqlite::params![reply, run, ws, user],
+                )?;
+            }
+        }
+        Ok(())
+    })?;
     Ok(reply)
 }
 
@@ -212,4 +254,41 @@ pub fn seed_channel_record(path: &Path, at: i64) -> Result<()> {
         [at],
     )?;
     Ok(())
+}
+
+/// Seeds a non-owner member user belonging to exactly `workspaces` with an active browser session.
+pub fn seed_member_session(
+    store: &crate::Store,
+    sub: &str,
+    name: &str,
+    workspaces: &[&str],
+    token: &str,
+) -> Result<String> {
+    let user_id = store.users().create(sub, name, None, "member")?;
+    store.auth_sessions().create(&user_id, token, 3_600_000)?;
+    store.write(|tx| -> Result<()> {
+        tx.conn.execute(
+            "DELETE FROM workspace_members WHERE user_id = ?1",
+            [&user_id],
+        )?;
+        for ws in workspaces {
+            tx.conn.execute(
+                "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?1, ?2, 'member', 1)",
+                rusqlite::params![ws, &user_id],
+            )?;
+        }
+        Ok(())
+    })?;
+    Ok(user_id)
+}
+
+/// Seeds a paused (non-closed) item assigned to `bot_id` in `ws` for bot-deletion boundary tests.
+pub fn seed_bot_item(store: &crate::Store, ws: &str, id: &str, bot_id: &str) -> Result<()> {
+    store.write(|tx| -> Result<()> {
+        tx.conn.execute(
+            "INSERT INTO items (id, workspace_id, no, title, phase, bot_id, created, updated) VALUES (?1, ?2, 99, 'secret work', 'paused', ?3, 1, 1)",
+            rusqlite::params![id, ws, bot_id],
+        )?;
+        Ok(())
+    })
 }

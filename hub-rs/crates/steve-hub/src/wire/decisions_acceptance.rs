@@ -1,4 +1,4 @@
-//! W3.3 acceptance suite: verifies every registered module subject and every core subject through
+//! Decision lifecycle acceptance suite: verifies every registered module subject and every core subject through
 //! the single `Core::decision_command` settlement entry (one success + one refusal each, replay
 //! idempotence, conflicting-choice rejection, cross-workspace isolation, natural-key deduplication)
 //! and proves staged decision replies wake idle Node sessions after commit.
@@ -54,8 +54,8 @@ fn wire_hub() -> Harness {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NO_RESUME", "1".into()),
-        ("STEVE_NODE_MODE", "".into()),
+        ("STEVE_NODE_MODE", "local".into()),
+        ("STEVE_NODE_LISTEN", "0".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
@@ -1021,6 +1021,7 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                         updated: now,
                         sent: None,
                         delivery_version: None,
+                        wait: None,
                     },
                 )
             })

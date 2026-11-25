@@ -455,6 +455,7 @@ fn secret_gate(
             requested_by: "steve".into(),
             question_template: None,
             source: None,
+            wait: None,
         }),
         output: json!({ "waiting": "approval" }),
     }

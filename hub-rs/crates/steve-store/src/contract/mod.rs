@@ -38,7 +38,6 @@ pub mod connections;
 mod contacts;
 #[cfg(feature = "testkit")]
 pub mod core_fixture;
-pub mod core_queue;
 pub mod core_usage;
 pub mod decisions;
 mod digest_notes;
@@ -91,12 +90,13 @@ mod steward_rows;
 mod systems;
 pub mod tags;
 mod team_rows;
-pub mod thread_runs;
+pub mod thread;
 mod thread_triggers;
 mod user_rows;
 pub mod vault_items;
 pub mod vault_keys;
 pub mod vault_uses;
+pub mod waits;
 mod workspace_settings;
 mod workspaces;
 

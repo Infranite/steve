@@ -22,6 +22,7 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
         { "key": "tz", "label": "时区", "values": ["system", "Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"], "def": "system", "live": true, "labels": {"system": "跟随系统"} },
       ],
       "items": [
+        { "key": "noExecutor", "label": "无人可接时", "values": ["ask", "steve"], "def": "ask", "live": true, "labels": { "ask": "问我", "steve": "Steve 自己做" } },
         { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "auto", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
         { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
         { "key": "handoff", "label": "交接阈值", "values": ["0", "70", "80", "90"], "def": "0", "live": true, "labels": { "0": "不换会话", "70": "70%", "80": "80%", "90": "90%" } },
@@ -563,6 +564,7 @@ fn blank_bot(ws: &str, name: &str, m: &crate::models::Models) -> Bot {
     Bot {
         id: String::new(),
         workspace_id: ws.into(),
+        owner: None,
         name: name.into(),
         role: String::new(),
         specialties: vec![],
@@ -647,6 +649,7 @@ fn setting_label_shown(key: &str) -> Option<String> {
         "home" => steve_i18n::t!("core.draft.setting.home"),
         "awayH" => steve_i18n::t!("core.draft.setting.awayH"),
         "tz" => steve_i18n::t!("core.draft.setting.tz"),
+        "noExecutor" => steve_i18n::t!("core.draft.setting.noExecutor"),
         "accDefault" => steve_i18n::t!("core.draft.setting.accDefault"),
         "depsAfter" => steve_i18n::t!("core.draft.setting.depsAfter"),
         "handoff" => steve_i18n::t!("core.draft.setting.handoff"),
@@ -1105,6 +1108,19 @@ fn setting_shown(specs: &[Value], k: &str, v: &Value) -> Value {
         .unwrap_or_else(|| json!(jstr(v)))
 }
 
+/// A setting's value as the UI shows it, in the request's language. New settings match their code
+/// value directly instead of round-tripping through a Chinese label.
+fn setting_value_shown(specs: &[Value], key: &str, v: &Value) -> String {
+    if key == "noExecutor" {
+        return match jstr(v).as_str() {
+            "ask" => steve_i18n::t!("core.draft.value.no_executor_ask"),
+            "steve" => steve_i18n::t!("core.draft.value.no_executor_steve"),
+            _ => value_shown("settings", key, show(v)),
+        };
+    }
+    value_shown("settings", key, show(&setting_shown(specs, key, v)))
+}
+
 /// What a configuration request in the conversation is about (see [`Core::pick_targets`]).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Picked {
@@ -1162,6 +1178,167 @@ fn clear_lines(p: &Value) -> bool {
 
 /// How many configurations one request drafts at most (“按这个方案补齐 Bot” can touch every bot).
 const MAX_TARGETS: usize = 6;
+/// Maximum characters for a direct single-setting command eligible for deterministic matching.
+const MAX_DETERMINISTIC_CONFIG_CHARS: usize = 64;
+/// Timeout for fast-tier configuration target selection (`pick_targets`).
+const PICK_TARGETS_TIMEOUT: Duration = Duration::from_secs(60);
+/// Timeout for smart-tier tag configuration drafting (`draft_tags`).
+const DRAFT_TAGS_TIMEOUT: Duration = Duration::from_secs(90);
+/// Maximum module configuration candidates passed to `pick_targets`.
+const MAX_MODULE_CANDIDATES: usize = 80;
+/// Metric task label for configuration target selection.
+const CONFIG_PICK_METRIC_TASK: &str = "core.config_pick";
+/// Metric task label for configuration field drafting.
+const CONFIG_DRAFT_METRIC_TASK: &str = "core.config_draft";
+
+/// Single-clause, non-question, short configuration command without multi-line proposal context.
+fn is_single_statement(request: &str) -> bool {
+    let r = request.trim();
+    !r.is_empty()
+        && r.chars().count() <= MAX_DETERMINISTIC_CONFIG_CHARS
+        && !r.chars().any(|c| {
+            matches!(
+                c,
+                ',' | '\u{ff0c}' | ';' | '\u{ff1b}' | '\u{3001}' | '?' | '\u{ff1f}' | '\n' | '\r'
+            )
+        })
+}
+
+/// Case-insensitive ASCII token search requiring non-alphanumeric boundaries around `needle`.
+fn contains_ascii_token(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || !needle.is_ascii() {
+        return false;
+    }
+    let h = haystack.to_ascii_lowercase();
+    let n = needle.to_ascii_lowercase();
+    let bytes = h.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = h[start..].find(&n) {
+        let abs = start + pos;
+        let end = abs + n.len();
+        let left_ok = abs == 0 || !bytes[abs - 1].is_ascii_alphanumeric();
+        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+/// Matches one `SETTINGS` entry against an anchored `<key|label> <sep> <value|value_label>`
+/// command using only schema keys, labels, and allowed values.
+///
+/// Requiring the full trimmed request to be `<field><sep><value>` (no surrounding prose) prevents
+/// false positives on natural-language questions, negations, or complaints such as "字号太大了" or
+/// "免打扰现在是关闭吗", which fall through to the model.
+fn match_setting_spec(spec: &Value, request: &str) -> Option<(String, String)> {
+    let key = spec["key"].as_str()?;
+    let label = spec["label"].as_str().unwrap_or("");
+    let r = request.trim();
+    let rest = if !label.is_empty()
+        && let Some(s) = r.strip_prefix(label)
+    {
+        s
+    } else if r.len() >= key.len()
+        && r.is_char_boundary(key.len())
+        && r[..key.len()].eq_ignore_ascii_case(key)
+    {
+        &r[key.len()..]
+    } else {
+        return None;
+    };
+    let rest_trimmed = rest.trim_start();
+    let val_str = if let Some(s) = rest_trimmed.strip_prefix("->") {
+        s.trim()
+    } else if let Some(s) = rest_trimmed.strip_prefix(['=', ':', '\u{ff1a}', '\u{2192}']) {
+        s.trim()
+    } else if rest.len() > rest_trimmed.len() {
+        rest_trimmed
+    } else {
+        return None;
+    };
+    if val_str.is_empty() {
+        return None;
+    }
+    let values = spec["values"].as_array()?;
+    let labels = spec.get("labels").and_then(Value::as_object);
+    for v in values {
+        let Some(raw) = v.as_str() else { continue };
+        let raw_hit = if raw.is_ascii() {
+            val_str.eq_ignore_ascii_case(raw)
+        } else {
+            val_str == raw
+        };
+        let label_hit = labels
+            .and_then(|m| m.get(raw))
+            .and_then(Value::as_str)
+            .is_some_and(|l| !l.is_empty() && val_str == l);
+        if raw_hit || label_hit {
+            return Some((key.to_string(), raw.to_string()));
+        }
+    }
+    None
+}
+
+/// Resolves an unambiguous single setting change inside one category without a model call.
+fn try_draft_setting_deterministic(specs: &[Value], request: &str) -> Option<Vec<(String, Value)>> {
+    if !is_single_statement(request) {
+        return None;
+    }
+    let mut hits: Vec<(String, String)> = specs
+        .iter()
+        .filter_map(|s| match_setting_spec(s, request))
+        .collect();
+    if hits.len() != 1 {
+        return None;
+    }
+    let (k, v) = hits.remove(0);
+    Some(vec![(k, json!(v))])
+}
+
+/// Resolves an unambiguous single settings target without calling the fast-tier target picker
+/// when `request` names exactly one `SETTINGS` field + allowed value and no bot or project.
+fn try_pick_deterministic(
+    bots: &[Bot],
+    projects: &[crate::repo::Project],
+    request: &str,
+) -> Option<Picked> {
+    if !is_single_statement(request) {
+        return None;
+    }
+    let mentions_bot = bots.iter().any(|b| {
+        contains_ascii_token(request, &b.id) || (!b.name.is_empty() && request.contains(&b.name))
+    });
+    let mentions_project = projects.iter().any(|p| {
+        contains_ascii_token(request, &p.id) || (!p.name.is_empty() && request.contains(&p.name))
+    });
+    if mentions_bot || mentions_project {
+        return None;
+    }
+    let mut matched_cat: Option<&str> = None;
+    for (cat, entries) in SETTINGS.as_object()? {
+        let Some(specs) = entries.as_array() else {
+            continue;
+        };
+        for spec in specs {
+            if match_setting_spec(spec, request).is_some() {
+                if matched_cat.is_some() {
+                    return None;
+                }
+                matched_cat = Some(cat.as_str());
+            }
+        }
+    }
+    let cat = matched_cat?;
+    Some(Picked {
+        targets: vec![Target {
+            kind: "settings".into(),
+            id: Some(cat.into()),
+        }],
+        ask: false,
+    })
+}
 
 /// The option line of a bot to make; `bot:new:<名字>` once per new bot.
 const NEW_BOT_OPTION: &str = "bot:new:<名字> — 新建一个 Bot，名字写在冒号后，每个新 Bot 一项；已有职责相近的 Bot 就改它，不新建";
@@ -1297,11 +1474,7 @@ impl Core {
                                 &short_label(&f.label),
                                 &harnesses,
                             ),
-                            value_shown(
-                                "settings",
-                                &f.key,
-                                show(&setting_shown(&specs, &f.key, &f.current)),
-                            ),
+                            setting_value_shown(&specs, &f.key, &f.current),
                         )
                     })
                     .collect();
@@ -1573,9 +1746,20 @@ impl Core {
             "settings" => {
                 let cat = target.id.clone().unwrap_or_else(|| "general".into());
                 let (specs, fs) = self.settings_fields(ws, &cat)?;
-                for (k, value) in
-                    draft_fields(gw, &format!("Steve settings · {cat}"), &fs, request).await?
-                {
+                let said = match try_draft_setting_deterministic(&specs, request) {
+                    Some(deterministic) => {
+                        steve_runtime::jobs::record_model_calls_avoided(
+                            CONFIG_DRAFT_METRIC_TASK,
+                            steve_runtime::jobs::AvoidReason::Deterministic,
+                            1,
+                        );
+                        deterministic
+                    }
+                    None => {
+                        draft_fields(gw, &format!("Steve settings · {cat}"), &fs, request).await?
+                    }
+                };
+                for (k, value) in said {
                     let Some(f) = fs.iter().find(|f| f.key == k) else {
                         continue;
                     };
@@ -1603,16 +1787,8 @@ impl Core {
                             &plain_label(&f.label),
                             &harnesses,
                         ),
-                        from: value_shown(
-                            "settings",
-                            &k,
-                            show(&setting_shown(&specs, &k, &f.current)),
-                        ),
-                        to: value_shown(
-                            "settings",
-                            &k,
-                            show(&setting_shown(&specs, &k, &json!(v))),
-                        ),
+                        from: setting_value_shown(&specs, &k, &f.current),
+                        to: setting_value_shown(&specs, &k, &json!(v)),
                     });
                     patch.insert(k, json!(v));
                 }
@@ -1667,7 +1843,7 @@ impl Core {
         let r = first_json(
             &self
                 .gw()
-                .print(&prompt, Tier::Smart, Duration::from_secs(90))
+                .print(&prompt, Tier::Smart, DRAFT_TAGS_TIMEOUT)
                 .await?,
         )?
         .unwrap_or(json!({}));
@@ -1792,8 +1968,17 @@ impl Core {
     /// sources, mailboxes, repositories, channels… — to the options.
     pub async fn pick_targets(&self, ws: &str, request: &str, who: Option<&str>) -> Result<Picked> {
         let db = self.store();
-        let mut opts: Vec<String> = db
-            .bots(ws)?
+        let bots = db.bots(ws)?;
+        let projects = db.store().projects().list(ws, true)?;
+        if let Some(picked) = try_pick_deterministic(&bots, &projects, request) {
+            steve_runtime::jobs::record_model_calls_avoided(
+                CONFIG_PICK_METRIC_TASK,
+                steve_runtime::jobs::AvoidReason::Deterministic,
+                1,
+            );
+            return Ok(picked);
+        }
+        let mut opts: Vec<String> = bots
             .iter()
             .map(|b| {
                 format!(
@@ -1806,7 +1991,7 @@ impl Core {
             })
             .collect();
         opts.push(NEW_BOT_OPTION.into());
-        opts.extend(db.store().projects().list(ws, true)?.iter().map(|p| {
+        opts.extend(projects.iter().map(|p| {
             format!(
                 "project:{} — 项目 {}{}",
                 p.id,
@@ -1836,7 +2021,7 @@ impl Core {
                             !c.code.starts_with("contact:")
                                 || request.contains(c.label.split('（').next().unwrap_or(&c.label))
                         })
-                        .take(80)
+                        .take(MAX_MODULE_CANDIDATES)
                         .map(|c| c.line()),
                 ),
                 Err(e) => tracing::warn!("config candidates of {ws}: {e:?}"),
@@ -1851,7 +2036,7 @@ impl Core {
         );
         let raw = self
             .gw()
-            .print(&prompt, Tier::Fast, Duration::from_secs(60))
+            .print(&prompt, Tier::Fast, PICK_TARGETS_TIMEOUT)
             .await
             .unwrap_or_else(|_| "{}".into());
         let r = first_json(&raw)?.unwrap_or(json!({}));
@@ -2375,7 +2560,7 @@ impl Core {
         if a.target.kind == "bot" && new_bot_name(&tid).is_some() {
             let made = a.before.get("created").map(jstr).unwrap_or_default();
             let main = t.db().main_bot()?.id;
-            t.delete_bot(&made, &main, actor)?;
+            t.delete_bot(&made, &main, actor, &[ws.to_string()])?;
         }
         let db = t.db().clone();
         let r = db.store().write(|_w| -> Result<Value> {
@@ -2494,9 +2679,10 @@ mod tests {
     #[test]
     fn schema_and_defaults() {
         let d = setting_defaults();
+        assert_eq!(d["noExecutor"], "ask");
         assert_eq!(d["accDefault"], "auto");
         assert_eq!(d["archDays"], "30");
-        assert_eq!(d.len(), 14);
+        assert_eq!(d.len(), 15);
         assert_eq!(d["tz"], "system");
         assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
         assert!(

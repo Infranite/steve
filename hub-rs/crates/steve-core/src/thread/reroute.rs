@@ -1,10 +1,9 @@
-//! Corrections: the user moves a message to the other side — an item back into the
-//! conversation (“改成在这里回答”), an answer into an item (“做成事项”, the old `promote`), or a message to
-//! an existing item. The count of corrections is the router's error rate (`route_log.override`).
+//! Corrections: move a message between inline research, item creation, and supplement.
+//! Backed by durable `thread_dispatch_refs` (no in-memory `OnceCell`) and task generation fencing
+//! so an in-flight worker can never commit a stale reply after an explicit reroute.
 
 use super::offer::{Handled, ThreadItem, not_found};
-use super::research::{Inline, InlineJob, QUEUE_FULL, SYSTEM};
-use super::{Promotion, lock, meta_of, route_step};
+use super::{Conv, lock, meta_of, route_step};
 use crate::Core;
 use crate::error::{CoreError, Result};
 use crate::gateway::{self, Said};
@@ -12,8 +11,7 @@ use crate::orchestrator::ItemAction;
 use crate::repo::{FileRef, Item, Message};
 use crate::util::now;
 use serde_json::{Value, json};
-use std::sync::Arc;
-use tokio::sync::OnceCell;
+use steve_store::{NewRevisionTask, ReceiptDispatch, thread};
 
 /// Where a correction sends a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +47,7 @@ fn files_of(m: &Message, key: &str) -> Vec<FileRef> {
 }
 
 impl Core {
-    /// `POST /api/thread/:id/reroute`. `msg_id` is Steve's reply or the user's own message; `by`:
-    /// the member who asked, whose access an item made here runs with.
+    /// `POST /api/thread/:id/reroute`. Preserves caller `by` and fences any in-flight task for `origin`.
     pub async fn reroute(
         &self,
         ws: &str,
@@ -63,77 +60,103 @@ impl Core {
             .message(msg_id)?
             .filter(|m| m.workspace_id == ws)
             .ok_or_else(not_found)?;
-        /* the user's own message: act on Steve's reply to it */
         let (origin, reply) = if m.author == "me" {
             let reply = self
                 .store()
                 .store()
-                .thread()
-                .route_of(&m.id)?
-                .and_then(|r| r.reply_id)
+                .read(|r| thread::latest_receipt_by_origin(r, &m.id))?
+                .and_then(|r| r.reply_message_id)
                 .and_then(|r| self.store().message(&r).ok().flatten());
             (m.id.clone(), reply)
         } else {
             (self.origin_of(ws, &m)?, Some(m.clone()))
         };
         match to {
-            RerouteTo::Inline => self.to_inline(ws, &origin, reply.as_ref()),
+            RerouteTo::Inline => self.to_inline(ws, &origin, reply.as_ref(), by),
             RerouteTo::Supplement(item) => self.to_supplement(ws, &origin, &item),
-            RerouteTo::Item => match reply {
-                Some(r) if r.meta["offer"]["state"] == "open" => self.offer(ws, &r.id, true, by),
-                Some(r) if r.meta.get("suggest").is_some_and(Value::is_object) => {
-                    let choice = if r.meta["suggest"]["choices"]
-                        .as_array()
-                        .is_some_and(|cs| cs.iter().any(|c| c["id"] == "item"))
+            RerouteTo::Item => {
+                self.fence_origin(ws, &origin, "reroute")?;
+                match reply {
+                    Some(r) if r.meta["offer"]["state"] == "open" => {
+                        self.offer(ws, &r.id, true, by)
+                    }
+                    Some(r) if r.meta.get("suggest").is_some_and(Value::is_object) => {
+                        let choice = if r.meta["suggest"]["choices"]
+                            .as_array()
+                            .is_some_and(|cs| cs.iter().any(|c| c["id"] == "item"))
+                        {
+                            "item"
+                        } else {
+                            "new"
+                        };
+                        self.suggest(ws, &r.id, choice, by)
+                    }
+                    Some(r) if r.item_id.is_some() => {
+                        let item = self
+                            .store()
+                            .item(r.item_id.as_deref().unwrap_or_default())?;
+                        let dispatch_ref_id = self.existing_dispatch_id(
+                            ws,
+                            &origin,
+                            item.as_ref().map(|i| i.id.as_str()),
+                        )?;
+                        Ok(Handled {
+                            message_id: r.id.clone(),
+                            item,
+                            already: true,
+                            dispatch_ref_id,
+                        })
+                    }
+                    Some(r)
+                        if r.meta.get("chat").is_some_and(gateway::truthy)
+                            || r.meta.get("promoted").is_some() =>
                     {
-                        "item"
-                    } else {
-                        "new"
-                    };
-                    self.suggest(ws, &r.id, choice, by)
+                        let existing_before = r.meta.get("promoted").is_some()
+                            || self
+                                .store()
+                                .store()
+                                .read(|rd| {
+                                    thread::dispatch_by_origin(rd, ws, &origin, "create_item")
+                                })?
+                                .is_some_and(|d| d.state == "applied");
+                        let item = self.promote(ws, &r.id, by).await?;
+                        let dispatch_ref_id =
+                            self.existing_dispatch_id(ws, &origin, Some(&item.id))?;
+                        let id = self
+                            .conv_messages(ws, &r.space)?
+                            .into_iter()
+                            .rfind(|x| x.item_id.as_deref() == Some(item.id.as_str()))
+                            .map(|x| x.id)
+                            .unwrap_or_else(|| r.id.clone());
+                        Ok(Handled {
+                            message_id: id,
+                            item: Some(item),
+                            already: existing_before,
+                            dispatch_ref_id,
+                        })
+                    }
+                    _ => self.user_message_to_item(ws, &origin, by).await,
                 }
-                Some(r) if r.item_id.is_some() => Ok(Handled {
-                    message_id: r.id.clone(),
-                    item: self
-                        .store()
-                        .item(r.item_id.as_deref().unwrap_or_default())?,
-                    already: true,
-                }),
-                Some(r)
-                    if r.meta.get("chat").is_some_and(gateway::truthy)
-                        || r.meta.get("promoted").is_some() =>
-                {
-                    let before = r.meta.get("promoted").is_some();
-                    let item = self.promote(ws, &r.id, by).await?;
-                    let id = self
-                        .conv_messages(ws, &r.space)?
-                        .into_iter()
-                        .rfind(|x| x.item_id.as_deref() == Some(item.id.as_str()))
-                        .map(|x| x.id)
-                        .unwrap_or_else(|| r.id.clone());
-                    Ok(Handled {
-                        message_id: id,
-                        item: Some(item),
-                        already: before,
-                    })
-                }
-                _ => self.user_message_to_item(ws, &origin, by).await,
-            },
+            }
         }
     }
 
-    /// “改成在这里回答”: an item made from this message is dropped (if not delivered yet) and the
-    /// message is researched here, the answer continuing Steve's reply.
-    fn to_inline(&self, ws: &str, origin: &str, reply: Option<&Message>) -> Result<Handled> {
+    /// “改成在这里回答”: drop an undelivered item and enqueue a durable inline research revision.
+    fn to_inline(
+        &self,
+        ws: &str,
+        origin: &str,
+        reply: Option<&Message>,
+        by: Option<&str>,
+    ) -> Result<Handled> {
         let _one = lock(&self.0.thread.acting);
         let om = self.store().message(origin)?.ok_or_else(not_found)?;
-        let th = self.store().store().thread();
         let item = match reply.and_then(|r| r.item_id.clone()) {
             Some(i) => self.store().item(&i)?,
             None => None,
         };
         let Some(reply) = reply else {
-            return self.research_again(ws, &om, None, None);
+            return self.research_again(ws, &om, None, None, by);
         };
         let Some(item) = item else {
             if reply.meta.get("chat").is_some() || reply.meta.get("answer").is_some() {
@@ -141,9 +164,10 @@ impl Core {
                     message_id: reply.id.clone(),
                     item: None,
                     already: true,
+                    dispatch_ref_id: None,
                 });
             }
-            return self.research_again(ws, &om, Some(&reply.id), None);
+            return self.research_again(ws, &om, Some(&reply.id), None, by);
         };
         if item.is_completed() {
             return Err(CoreError::Status(
@@ -156,10 +180,19 @@ impl Core {
                 message_id: reply.id.clone(),
                 item: Some(item),
                 already: true,
+                dispatch_ref_id: None,
             });
         }
-        th.route_override(origin, "to_inline", Some(&item.id))?;
-        /* delivered: keep the item, put its delivery summary into the conversation */
+        self.store().store().write(|w| {
+            thread::update_receipt_override(
+                w,
+                origin,
+                "to_inline",
+                Some(&item.id),
+                ReceiptDispatch::NoDispatch,
+                now(),
+            )
+        })?;
         let delivered = self
             .store()
             .decisions_of_item(&item.id)?
@@ -182,70 +215,94 @@ impl Core {
                 message_id: id,
                 item: Some(item),
                 already: false,
+                dispatch_ref_id: None,
             });
         }
         let dropped = self.item_action(&item.id, ItemAction::Drop, "me")?;
         self.store()
             .timeline_add(&item.id, "me", "me", "改在对话里回答", None)?;
-        self.research_again(ws, &om, Some(&reply.id), item.project_id.clone())
+        self.research_again(ws, &om, Some(&reply.id), item.project_id.clone(), by)
             .map(|h| Handled {
                 item: Some(dropped),
                 ..h
             })
     }
 
-    /// Research the user message `om` here; the answer continues `reply_to` when given.
+    /// Fence any active task for `om` and enqueue a durable inline research revision preserving `by`.
     fn research_again(
         &self,
         ws: &str,
         om: &Message,
         reply_to: Option<&str>,
         project: Option<String>,
+        by: Option<&str>,
     ) -> Result<Handled> {
-        let th = self.store().store().thread();
-        if reply_to.is_none() {
-            th.route_override(&om.id, "to_inline", None)?;
-        }
-        let route = th.route_of(&om.id)?.map(
-            |r| json!({"kind": "research", "modelKind": r.model_kind, "override": "to_inline"}),
-        );
-        let job = InlineJob {
-            kind: Inline::Research,
-            origin: om.id.clone(),
-            question: om.text.clone(),
-            files: files_of(om, "files"),
-            earlier: vec![],
-            user: None,
-            project,
-            route,
-            offer: None,
-            reply_to: reply_to.map(String::from),
-            run: None,
-            stop: super::Stop::default(),
-            t0: now(),
-            resume: None,
-            space: om.space.clone(),
-            to_item: None,
-        };
-        if !self.enqueue_inline(ws, job)? {
-            /* the item is already back in the conversation; the answer waits for the user to ask again */
-            let id = self.post(
-                ws,
-                &om.space,
-                QUEUE_FULL,
-                None,
-                Some(&json!({"origin": om.id, "reply_to": reply_to, SYSTEM: true})),
-            )?;
-            return Ok(Handled {
-                message_id: id,
-                item: None,
-                already: false,
+        self.fence_origin(ws, &om.id, "reroute")?;
+        let route_json = self
+            .store()
+            .store()
+            .read(|r| thread::receipt_by_origin(r, &om.id))?
+            .map(|r| {
+                json!({"kind": "research", "modelKind": r.model_kind, "override": "to_inline"})
+                    .to_string()
             });
-        }
+        let files = files_of(om, "files");
+        let files_json = (!files.is_empty())
+            .then(|| serde_json::to_string(&files).ok())
+            .flatten();
+        let conv = if om.space == super::MAIN {
+            Conv::main()
+        } else {
+            Conv {
+                space: om.space.clone(),
+                research: true,
+                items: false,
+                owner_only: false,
+                start: false,
+                hands_on: false,
+            }
+        };
+        let conv_json = serde_json::to_string(&conv)?;
+        self.store().store().write(|w| {
+            if reply_to.is_none() {
+                thread::update_receipt_override(
+                    w,
+                    &om.id,
+                    "to_inline",
+                    None,
+                    ReceiptDispatch::NoDispatch,
+                    now(),
+                )?;
+            }
+            thread::enqueue_revision(
+                w,
+                &NewRevisionTask {
+                    ws,
+                    space: &om.space,
+                    origin_message_id: &om.id,
+                    user_id: by,
+                    project_id: project.as_deref(),
+                    conv_json: Some(&conv_json),
+                    to_item: None,
+                    to_reply_to: None,
+                    files_json: files_json.as_deref(),
+                    mentions_json: None,
+                    reply_to_message_id: reply_to,
+                    forced_kind: Some("research"),
+                    route_json: route_json.as_deref(),
+                    offer_json: None,
+                    prev_receipt_id: None,
+                    read_task_intent_key: None,
+                },
+            )?;
+            Ok::<_, steve_store::StoreError>(())
+        })?;
+        self.wake_space(ws, &om.space);
         Ok(Handled {
             message_id: reply_to.unwrap_or(&om.id).into(),
             item: None,
             already: false,
+            dispatch_ref_id: None,
         })
     }
 
@@ -256,11 +313,18 @@ impl Core {
             .filter(|i| i.workspace_id == ws)
             .ok_or_else(|| CoreError::Status(404, steve_i18n::t!("core.item.not_found")))?;
         let om = self.store().message(origin)?.ok_or_else(not_found)?;
-        self.forward(&it.id, &om.text, &files_of(&om, "files"), origin)?;
-        self.store()
-            .store()
-            .thread()
-            .route_override(origin, "to_supplement", Some(&it.id))?;
+        self.fence_origin(ws, origin, "reroute")?;
+        let disp_id = self.forward(&it.id, &om.text, &files_of(&om, "files"), origin)?;
+        self.store().store().write(|w| {
+            thread::update_receipt_override(
+                w,
+                origin,
+                "to_supplement",
+                Some(&it.id),
+                ReceiptDispatch::Dispatched(&disp_id),
+                now(),
+            )
+        })?;
         let id = self.store().message_add_in(
             ws,
             &om.space,
@@ -269,15 +333,18 @@ impl Core {
             Some(&it.id),
             &json!({"origin": origin}),
         )?;
+        self.store()
+            .store()
+            .write(|w| thread::set_dispatch_reply_by_id(w, &disp_id, &id))?;
         super::flowback::adopt_quiet(self.store(), &it.id, &id);
         Ok(Handled {
             message_id: id,
             item: Some(it),
             already: false,
+            dispatch_ref_id: Some(disp_id),
         })
     }
 
-    /// A user message nothing became an item: route it as “做成事项” and make the item.
     async fn user_message_to_item(
         &self,
         ws: &str,
@@ -285,20 +352,25 @@ impl Core {
         by: Option<&str>,
     ) -> Result<Handled> {
         let om = self.store().message(origin)?.ok_or_else(not_found)?;
+        if let Some(existing) = self
+            .store()
+            .store()
+            .read(|r| thread::dispatch_by_origin(r, ws, origin, "create_item"))?
+            .filter(|d| d.state == "applied")
+            && let Some(ref item_id) = existing.target_item_id
+            && let Some(item) = self.store().item(item_id)?
+        {
+            return Ok(Handled {
+                message_id: existing.reply_message_id.unwrap_or_else(|| origin.into()),
+                item: Some(item),
+                already: true,
+                dispatch_ref_id: Some(existing.id),
+            });
+        }
         let history = self.history_before(ws, origin)?;
         let r = self.route(ws, &om.text, &history, true).await?;
         let _one = lock(&self.0.thread.acting);
-        let th = self.store().store().thread();
-        if let Some(i) = th.route_of(origin)?.and_then(|r| r.item_id)
-            && let Some(item) = self.store().item(&i)?
-        {
-            return Ok(Handled {
-                message_id: origin.into(),
-                item: Some(item),
-                already: true,
-            });
-        }
-        let item = self.thread_item(ThreadItem {
+        let (item, already, disp_id) = self.thread_item_once(ThreadItem {
             ws,
             origin,
             title: r.title.clone(),
@@ -309,10 +381,27 @@ impl Core {
             files: files_of(&om, "files"),
             from_question: super::decide::pure_question(&om.text),
             answer: None,
-            start: true, // your action in the web
+            start: true,
             by: by.map(String::from),
         })?;
-        th.route_override(origin, "to_item", Some(&item.id))?;
+        if already {
+            return Ok(Handled {
+                message_id: origin.into(),
+                item: Some(item),
+                already: true,
+                dispatch_ref_id: Some(disp_id),
+            });
+        }
+        self.store().store().write(|w| {
+            thread::update_receipt_override(
+                w,
+                origin,
+                "to_item",
+                Some(&item.id),
+                ReceiptDispatch::Dispatched(&disp_id),
+                now(),
+            )
+        })?;
         let text = format!(
             "好，做成事项 {} 交给 {} 了。",
             item.id,
@@ -323,12 +412,12 @@ impl Core {
             message_id: id,
             item: Some(item),
             already: false,
+            dispatch_ref_id: Some(disp_id),
         })
     }
 
-    /// Turn a chat answer into an item, with the conversation as context. A message becomes at most one item:
-    /// clicking again (or from another tab, or while routing) returns the same one. Counts as a correction
-    /// (`to_item`) unless the answer offered that work.
+    /// Turn a chat answer into an item. Durable `thread_dispatch_refs` guarantees at most one
+    /// item per origin across concurrent calls, tabs, offer races, and restarts (no `OnceCell`).
     pub async fn promote(&self, ws: &str, msg_id: &str, by: Option<&str>) -> Result<Item> {
         let refuse = || crate::error::msg(steve_i18n::t!("core.thread.not_promotable"));
         let m = self
@@ -341,89 +430,167 @@ impl Core {
         {
             return Ok(i);
         }
+        let origin = self.origin_of(ws, &m)?;
+        if let Some(existing) = self
+            .store()
+            .store()
+            .read(|r| thread::dispatch_by_origin(r, ws, &origin, "create_item"))?
+            .filter(|d| d.state == "applied")
+            && let Some(ref item_id) = existing.target_item_id
+            && let Some(item) = self.store().item(item_id)?
+        {
+            return Ok(item);
+        }
         if m.meta["offer"]["state"] == "open" {
             return self.offer(ws, msg_id, true, by)?.item.ok_or_else(refuse);
         }
-        let cell = {
-            let mut p = lock(&self.0.thread.promoting);
-            match p.get(msg_id) {
-                Some(c) => c.clone(),
-                None => {
-                    if m.meta.get("chat").is_none_or(|q| !gateway::truthy(q)) {
-                        return Err(refuse());
+        if m.meta.get("chat").is_none_or(|q| !gateway::truthy(q)) {
+            return Err(refuse());
+        }
+        let q = gateway::jstr(&m.meta["chat"]);
+        let from_question = super::decide::pure_question(&q);
+        // Claim the durable origin-level dispatch slot BEFORE invoking the router so concurrent
+        // promotions wait for the single in-flight promotion without duplicating model calls.
+        let claim = self.store().store().write(|w| {
+            thread::claim_dispatch(w, ws, &origin, "create_item", from_question, now())
+        })?;
+        let disp = match claim {
+            steve_store::DispatchClaim::Claimed(d) => d,
+            steve_store::DispatchClaim::Existing(mut existing) => {
+                for _ in 0..1200 {
+                    if existing.state != "pending" {
+                        break;
                     }
-                    let c: Promotion = Arc::new(OnceCell::new());
-                    p.insert(msg_id.into(), c.clone());
-                    c
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    if let Some(next) = self
+                        .store()
+                        .store()
+                        .read(|r| thread::dispatch_by_origin(r, ws, &origin, "create_item"))?
+                    {
+                        existing = next;
+                    } else {
+                        break;
+                    }
                 }
+                if existing.state == "applied"
+                    && let Some(ref item_id) = existing.target_item_id
+                    && let Some(item) = self.store().item(item_id)?
+                {
+                    return Ok(item);
+                }
+                return Err(refuse());
             }
         };
-        let r = cell
-            .get_or_init(|| async {
-                self.promote_now(ws, &m, by)
-                    .await
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .clone();
-        lock(&self.0.thread.promoting).remove(msg_id);
-        r.map_err(crate::CoreError::Msg)
-    }
 
-    async fn promote_now(&self, ws: &str, m: &Message, by: Option<&str>) -> Result<Item> {
-        let meta = if m.meta.is_object() {
-            m.meta.clone()
-        } else {
-            json!({})
+        let all: Vec<Said> = match self.conv_messages(ws, &m.space) {
+            Ok(msgs) => msgs
+                .into_iter()
+                .filter(|x| x.created <= m.created && x.id != m.id)
+                .map(|x| Said {
+                    author: x.author,
+                    text: x.text,
+                })
+                .collect(),
+            Err(e) => {
+                let _ = self
+                    .store()
+                    .store()
+                    .write(|w| thread::settle_dispatch(w, &disp.id, "rejected", None, None, now()));
+                return Err(e);
+            }
         };
-        let q = gateway::jstr(&meta["chat"]);
-        /* the conversation up to Steve's answer decides goal and title, not the bare question */
-        let all: Vec<Said> = self
-            .conv_messages(ws, &m.space)?
-            .into_iter()
-            .filter(|x| x.created <= m.created && x.id != m.id)
-            .map(|x| Said {
-                author: x.author,
-                text: x.text,
-            })
-            .collect();
         let mut history: Vec<Said> = all[all.len().saturating_sub(4)..].to_vec();
         history.push(Said {
             author: "steve".into(),
             text: m.text.clone(),
         });
         let t0 = now();
-        let r = self.route(ws, &q, &history, true).await?;
+        let r = match self.route(ws, &q, &history, true).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = self
+                    .store()
+                    .store()
+                    .write(|w| thread::settle_dispatch(w, &disp.id, "rejected", None, None, now()));
+                return Err(e);
+            }
+        };
         let t1 = now();
         let goal = if r.goal.trim().is_empty() {
             q.clone()
         } else {
             r.goal.trim().to_string()
         };
-        let origin = self.origin_of(ws, m)?;
-        let item = self.thread_item(ThreadItem {
-            ws,
-            origin: &origin,
-            title: r.title.clone(),
+        let _one = lock(&self.0.thread.acting);
+        let opening = match self.opening_for(ws, &origin, &goal, Some(&m)) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                let _ = self
+                    .store()
+                    .store()
+                    .write(|w| thread::settle_dispatch(w, &disp.id, "rejected", None, None, now()));
+                return Err(e);
+            }
+        };
+        let bot = match self.named_bot(ws, &q) {
+            Ok(b) => b.map(|b| b.id),
+            Err(e) => {
+                let _ = self
+                    .store()
+                    .store()
+                    .write(|w| thread::settle_dispatch(w, &disp.id, "rejected", None, None, now()));
+                return Err(e);
+            }
+        };
+        let item = match self.tx().create_chat_item(crate::CreateItem {
+            ws: ws.into(),
             goal,
-            bot: self.named_bot(ws, &q)?.map(|b| b.id),
-            project: r.project.clone(),
-            tags: r.tag_ids.clone(),
-            files: files_of(m, "chatFiles"),
-            from_question: super::decide::pure_question(&q),
-            answer: Some(m),
-            start: true, // your action in the web
-            by: by.map(String::from),
-        })?;
-        let mut meta = meta_of(m);
+            title: r.title.clone(),
+            bot,
+            project: Some(r.project.clone()),
+            source: Some(("对话".into(), "chat".into())),
+            tag_ids: r.tag_ids.clone(),
+            opening,
+            files: files_of(&m, "chatFiles"),
+            propose: false,
+            requester: by.map(String::from),
+            ..Default::default()
+        }) {
+            Ok(item) => {
+                self.store().store().write(|w| {
+                    thread::settle_dispatch(w, &disp.id, "applied", Some(&item.id), None, now())
+                })?;
+                item
+            }
+            Err(e) => {
+                let _ = self
+                    .store()
+                    .store()
+                    .write(|w| thread::settle_dispatch(w, &disp.id, "rejected", None, None, now()));
+                return Err(e);
+            }
+        };
+        let mut meta = meta_of(&m);
         meta.remove("chat");
         meta.insert("promoted".into(), json!(item.id));
+        if let Some(offer) = meta.get_mut("offer").and_then(|v| v.as_object_mut())
+            && offer.get("state").and_then(Value::as_str) == Some("open")
+        {
+            offer.insert("state".into(), json!("taken"));
+            offer.insert("item".into(), json!(item.id));
+        }
         self.store()
             .message_patch_meta(&m.id, &Value::Object(meta))?;
-        self.store()
-            .store()
-            .thread()
-            .route_override(&origin, "to_item", Some(&item.id))?;
+        self.store().store().write(|w| {
+            thread::update_receipt_override(
+                w,
+                &origin,
+                "to_item",
+                Some(&item.id),
+                ReceiptDispatch::Dispatched(&disp.id),
+                now(),
+            )
+        })?;
         let mut route = route_step(&r, None, t1 - t0);
         route["kind"] = json!("item");
         route["newTags"] = json!([]);
