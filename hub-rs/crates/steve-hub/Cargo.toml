@@ -40,6 +40,8 @@ steve-node = { path = "../steve-node" }
 steve-node-wire = { path = "../steve-node-wire" }
 steve-node-cli = { path = "../steve-node-cli" }
 steve-transcript = { path = "../steve-transcript" }
+steve-workflow-api = { path = "../steve-workflow-api" }
+steve-workflow-js = { path = "../steve-workflow-js" }
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"
 anyhow = "=1.0.104"

@@ -141,6 +141,17 @@ pub fn item_workspace(c: &mut impl Read, id: &str) -> Result<Option<String>> {
     )
 }
 
+pub fn requested_by(r: &mut impl Read, item: &str) -> Result<Option<String>> {
+    Ok(r.one(
+        Query::select()
+            .column("requested_by")
+            .from("items")
+            .and_where(Expr::col("id").eq(item)),
+        |row| row.get::<Option<String>>(0),
+    )?
+    .flatten())
+}
+
 pub fn running_tasks(c: &mut impl Read, ws: &str) -> Result<Vec<String>> {
     c.all(
         Query::select()
@@ -403,23 +414,4 @@ pub fn dependency_management(r: &mut impl Read, item: Option<&str>) -> Result<bo
         },
     )?;
     Ok(allowed)
-}
-
-/// Non-terminal items created by the retired dynamic work-graph engine (`source[1] = "workflow"`).
-/// Used once during Hub startup before recovery to cancel leftover active child items cleanly.
-pub fn legacy_workflow_children_open(r: &mut impl Read) -> Result<Vec<String>> {
-    let dialect = r.db().dialect();
-    r.all(
-        Query::select()
-            .column("id")
-            .from("items")
-            .and_where(
-                dialect
-                    .json_path(Expr::col("source"), "$[1]")
-                    .eq("workflow"),
-            )
-            .and_where(Expr::col("phase").ne("closed"))
-            .order_by("id", Order::Asc),
-        |row| row.get(0),
-    )
 }

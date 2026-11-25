@@ -15,6 +15,11 @@ export default {
       mail_draft: "邮件草稿",
       flow_wait: "自动化等待",
     },
+    workflowScriptFault: "工作流脚本运行异常（{{faultCode}}），已暂停等待处理。",
+    workflowNonDeterministicReplay: "工作流重放检测到非确定性漂移，已暂停并停止派发。",
+    workflowBudgetExhausted: "工作流周期预算已耗尽（{{scope}}：{{used}}/{{limit}}），请选择增额、中止或单会话接管。",
+    workflowReviewBlocked: "工作流未通过独立终审校验（{{reason}}），请安排独立复核或由你决定是否接管。",
+    workflowSingleSessionOverride: "确认跳过工作流并切换为单会话直接交付？",
   },
   feed: {
     viewItem: "查看事项",

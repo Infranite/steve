@@ -23,6 +23,8 @@ steve-store = { path = "../steve-store" }
 steve-modules = { path = "../steve-modules" }
 # Work's published facts (`work.item.done`), emitted in the transaction that finishes an item.
 steve-work-api = { path = "../steve-work-api" }
+# Pure sandboxed JS workflow contract (schema validation, CallIdentity, StepInput/StepFrame).
+steve-workflow-api = { path = "../steve-workflow-api" }
 steve-stats = { path = "../steve-stats" }
 # One-shot ACP calls of the gateway in process; the gateway keeps model choice and fallback.
 steve-acp = { path = "../steve-acp" }

@@ -279,6 +279,105 @@ pub(super) fn bwrap_readonly(
 pub(super) fn minimal_bwrap_probe() -> Vec<OsString> {
     render_bwrap(BwrapPolicy::default(), "/usr/bin/true".into(), vec![])
 }
+
+/// Sensitive home-relative directories hidden from pure-compute subprocesses (including Steve's
+/// default home variants alongside `SENSITIVE_HOME_DIRS`).
+const PURE_COMPUTE_EXTRA_HOME_DIRS: [&str; 2] = [".steve-dev", ".steve-node"];
+
+fn pure_compute_hidden_home_paths(user_home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(home) = user_home else {
+        return Vec::new();
+    };
+    super::SENSITIVE_HOME_DIRS
+        .iter()
+        .chain(PURE_COMPUTE_EXTRA_HOME_DIRS.iter())
+        .map(|rel| home.join(rel))
+        .collect()
+}
+
+/// macOS Seatbelt profile for pure-compute subprocesses (`--workflow-step`):
+/// denies all network access, denies all filesystem writes (except `/dev/null`), denies
+/// `process-fork`, hides Steve's control plane (when provided), and hides sensitive home dirs.
+pub fn pure_compute_seatbelt_profile(
+    homes: Option<(&Path, &Path)>,
+    user_home: Option<&Path>,
+) -> Option<String> {
+    let control = match homes {
+        Some((steve, node)) => Some(super::control::control_rules(steve, node)?),
+        None => None,
+    };
+    Some(pure_compute_seatbelt_with_rules(
+        control.as_deref(),
+        user_home,
+    ))
+}
+
+pub(super) fn pure_compute_seatbelt_with_rules(
+    control_rules: Option<&str>,
+    user_home: Option<&Path>,
+) -> String {
+    let mut s = String::from(
+        "(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n(allow file-write* (literal \"/dev/null\"))\n(deny process-fork)\n",
+    );
+    let hidden = pure_compute_hidden_home_paths(user_home);
+    s.push_str(&seatbelt_hide_cli(&hidden));
+    if let Some(rules) = control_rules {
+        s.push_str(rules);
+    }
+    s
+}
+
+/// Linux Bubblewrap arguments for pure-compute subprocesses (`--workflow-step`):
+/// unshares network/IPC/PID/UTS namespaces, mounts `/` strictly read-only, masks Steve's control
+/// plane and sensitive user home directories with empty `tmpfs`, and chdirs into an empty read-only
+/// temporary directory.
+pub fn pure_compute_bwrap_args(
+    plan: Option<&BwrapPlan>,
+    user_home: Option<&Path>,
+    cwd: &Path,
+    program: PathBuf,
+    args: Vec<OsString>,
+) -> Vec<OsString> {
+    let mut a: Vec<OsString> = vec![
+        "--unshare-net".into(),
+        "--unshare-ipc".into(),
+        "--unshare-pid".into(),
+        "--unshare-uts".into(),
+        "--die-with-parent".into(),
+        "--ro-bind".into(),
+        "/".into(),
+        "/".into(),
+        "--dev".into(),
+        "/dev".into(),
+        "--proc".into(),
+        "/proc".into(),
+    ];
+    if let Some(p) = plan {
+        for path in &p.masked {
+            a.extend(["--tmpfs".into(), path.into()]);
+        }
+        for path in p.hidden_dirs.iter().filter(|d| d.is_dir()) {
+            a.extend(["--tmpfs".into(), path.into()]);
+        }
+        for path in &p.hidden_files {
+            a.extend(["--ro-bind".into(), "/dev/null".into(), path.into()]);
+        }
+    }
+    let hidden = pure_compute_hidden_home_paths(user_home);
+    bwrap_hide_cli(&mut a, &hidden);
+    let cwd_real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    a.extend([
+        "--ro-bind".into(),
+        cwd_real.clone().into(),
+        cwd_real.clone().into(),
+        "--chdir".into(),
+        cwd_real.into(),
+        "--".into(),
+        program.into(),
+    ]);
+    a.extend(args);
+    a
+}
 /// Seatbelt: those names in the store, and whatever is under them (a lock directory), readable
 /// and writable after everything that hides the directory; the way to it may be looked at.
 pub(super) fn seatbelt_login(l: &LoginStore) -> String {
