@@ -632,7 +632,12 @@ impl PureComputeLimits {
     }
 }
 
-fn apply_rlimit_capped(resource: libc::c_int, limit: u64) {
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+type RlimitResource = libc::c_int;
+
+fn apply_rlimit_capped(resource: RlimitResource, limit: u64) {
     // SAFETY: `getrlimit`/`setrlimit` operate solely on a stack-allocated POD `rlimit` struct
     // with no heap allocations or locks (async-signal-safe for `pre_exec`).
     unsafe {
@@ -669,10 +674,9 @@ fn standalone_pure_compute_backend() -> &'static Option<StandalonePureBackend> {
         }
         #[cfg(target_os = "linux")]
         {
+            // `bwrap_path()` already runs the shared `probe::detect(None)` availability check.
             if let Some(bwrap) = bwrap_path() {
-                if probe::bwrap_works(&bwrap) {
-                    return Some(StandalonePureBackend::Bwrap(bwrap));
-                }
+                return Some(StandalonePureBackend::Bwrap(bwrap));
             }
         }
         None
