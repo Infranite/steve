@@ -1,6 +1,12 @@
 // Domain-owned reason texts, grouped by the stable reason prefix.
 export default {
+  "config.bot_foreign_workspaces": "该 Bot 仍属于你未加入的工作区，不能执行全局删除。",
+  "config.bot_heir_outside_workspace": "接手事项的 Bot 必须属于所有受影响的工作区。",
+  "config.bot_owner_required": "只有该 Bot 的拥有者才能执行此操作。",
+  "config.bot_project_outside_workspace": "默认项目不属于当前工作区。",
   "config.diagnostic_model_disabled": "此诊断副本已禁用模型执行。",
+  "config.harness_builtin_protected": "内置 harness「{{harness}}」不能通过自定义接口覆盖或移除。",
+  "config.harness_env_not_allowed": "自定义 harness 声明不允许注入环境变量。",
   "node.downgrade": "Node 拒绝安装较旧的版本。",
   "node.operation_not_found": "Node 没有这项操作的回执。",
   "node.session_not_open": "会话在 Node 上已关闭。",
@@ -20,4 +26,5 @@ export default {
   "node_stop.output_limit": "输出已达到上限，Node 已停止运行。",
   "node_stop.research_budget": "研究已达到回合数或工具调用次数上限。",
   "node_stop.stopped_by_node": "Node 已停止运行。",
+  "vault.execution_node_unavailable": "当前会话没有可用的执行 Node，机密注入命令不能在 Hub 进程内运行。",
 } as const

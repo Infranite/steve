@@ -7,6 +7,12 @@ use serde::Serialize;
 reasons! {
     pub enum ConfigReason = "config" {
         DiagnosticModelDisabled = diagnostic_model_disabled [Forbidden] (),
+        HarnessEnvNotAllowed = harness_env_not_allowed [Invalid] (),
+        HarnessBuiltinProtected = harness_builtin_protected [Forbidden] (harness),
+        BotProjectOutsideWorkspace = bot_project_outside_workspace [NotFound] (),
+        BotOwnerRequired = bot_owner_required [Forbidden] (),
+        BotForeignWorkspaces = bot_foreign_workspaces [Forbidden] (),
+        BotHeirOutsideWorkspace = bot_heir_outside_workspace [Invalid] (),
     }
     retired {}
 }

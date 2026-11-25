@@ -166,6 +166,7 @@ fn acp_config(cfg: &Config) -> steve_acp::AcpConfig {
             .collect(),
         node: cfg.node.clone().into(),
         claude_executable: cfg.claude_executable.clone().into(),
+        claude_config_dir: cfg.claude_config_dir.clone(),
         steve_home: cfg.home.clone(),
         codex_home: cfg.codex_home.clone(),
         user_home: crate::config::home_dir(),

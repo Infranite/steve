@@ -62,6 +62,7 @@ fn route_ctx(c: &Ctx) -> RouteCtx {
                 specialties: vec![],
                 id: s(b, "id"),
                 workspace_id: "default".into(),
+                owner: None,
                 name: s(b, "id"),
                 role: s(b, "role"),
                 main: s(b, "id") == "steve",
