@@ -39,13 +39,13 @@ export function useLoad<T>(f: () => Promise<T>, deps: unknown[], events: string[
   const n = useRef(0)
   const load = () => {
     const k = ++n.current
-    return fn.current().then((d) => { if (k === n.current) { setData(d); setErr(null) } }, (e) => {
+    fn.current().then((d) => { if (k === n.current) { setData(d); setErr(null) } }, (e) => {
       if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit(); return }
       if (k === n.current) setErr(e)
     })
   }
-  useEffect(() => { setData(null); setErr(null); void load() }, deps) // eslint-disable-line react-hooks/exhaustive-deps
-  useHubEvents(events, () => { void load() }, 150)
+  useEffect(() => { setData(null); setErr(null); load() }, deps) // eslint-disable-line react-hooks/exhaustive-deps
+  useHubEvents(events, load, 150)
   return { data, err, reload: load, set: setData }
 }
 
