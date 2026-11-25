@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChevronDownIcon, ChevronUpIcon, ExternalLinkIcon, RefreshCwIcon } from "lucide-react"
 import { feedApi, appendFeed, feedHref, type FeedClient, type FeedEntry, type FeedFilter, type FeedKind, type FeedPage, type FeedRead, type FeedSource } from "@/api/feed"
 import { errText } from "@/api/flow"
@@ -111,13 +111,26 @@ function FeedReader({ client, filters, controls, target }: { client: FeedClient;
     return () => { alive.current = false; operation.current++; pending.current = false; clearInterval(timer); window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onFocus); controllers.current.forEach((controller) => controller.abort()); controllers.current.clear() }
   }, [])
   const entries = data?.entries ?? [], selectable = entries.filter((entry) => entry.read_at === null)
-  const toggle = (id: string, checked: boolean) => setSelected((old) => { const next = new Set(old); if (checked && next.size < 100) next.add(id); else if (!checked) next.delete(id); return next })
+  const toggle = useCallback((id: string, checked: boolean) => setSelected((old) => { const next = new Set(old); if (checked && next.size < 100) next.add(id); else if (!checked) next.delete(id); return next }), [])
+  const markRef = useRef(mark); markRef.current = mark
+  const markOne = useCallback((id: string) => { void markRef.current({ ids: [id] }) }, [])
+  const locale = lang()
+  const entryDays = useMemo(() => {
+    const out: (string | null)[] = new Array(entries.length)
+    let previous: string | null = null
+    for (let i = 0; i < entries.length; i++) {
+      const day = new Date(entries[i].published_at).toLocaleDateString(locale, { year: "numeric", month: "long", day: "numeric" })
+      out[i] = day !== previous ? day : null
+      previous = day
+    }
+    return out
+  }, [entries, locale])
   const count = data?.unread_count
   return <Page title={t("core:nav.feed")} sub={t("views:feed.sub")} max={920} scrollRef={scroll} actions={<Button size="sm" variant={newContent ? "outline" : "ghost"} aria-label={t("common:action.refresh")} disabled={busy !== null} onClick={() => void load()} data-feed-refresh data-feed-new={newContent ? "" : undefined}><RefreshCwIcon className="size-4" />{newContent && <span role="status">{t("views:feed.newContent")}</span>}</Button>}>
     <div data-feed className="min-w-0">
       {controls}
       {targetError != null && <FeedError error={targetError} retry={() => void loadTarget()} />}
-      {targetEntry && <div data-feed-target={targetEntry.id}><FeedRow key={targetEntry.id} client={client} entry={targetEntry} checked={false} disabled={busy !== null} selectionDisabled initialOpen onSelect={() => {}} onRead={() => void mark({ ids: [targetEntry.id] })} /></div>}
+      {targetEntry && <div data-feed-target={targetEntry.id}><FeedRow key={targetEntry.id} client={client} entry={targetEntry} checked={false} disabled={busy !== null} selectionDisabled initialOpen onSelect={toggle} onRead={markOne} /></div>}
       <div className="mt-4 flex min-h-10 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border pb-3 text-sm">
         <Checkbox aria-label={t("views:feed.selectLoaded")} checked={selectable.length > 0 && selected.size === Math.min(100, selectable.length)} indeterminate={selected.size > 0 && selected.size < Math.min(100, selectable.length)} disabled={!selectable.length || busy !== null} onChange={(e) => setSelected(e.currentTarget.checked ? new Set(selectable.slice(0, 100).map((entry) => entry.id)) : new Set())} data-feed-select-all />
         <span className="mr-auto text-muted-foreground" data-feed-count>{count === undefined ? t("common:state.loading") : t("views:feed.count", { count })}</span>
@@ -132,11 +145,12 @@ function FeedReader({ client, filters, controls, target }: { client: FeedClient;
       {error && <FeedError error={error.error} retry={error.retry} disabled={busy !== null} />}
       <span role="status" className="sr-only" data-feed-status>{status}</span>
       {busy === "refresh" && !data ? <Loading /> : data && !entries.length ? <EmptyState bare title={t(filters.unread ? "views:feed.emptyUnread" : "views:feed.empty")} text={t("views:feed.emptySub")} /> : null}
-      <div data-feed-list>{entries.map((entry, index) => {
-        const day = new Date(entry.published_at).toLocaleDateString(lang(), { year: "numeric", month: "long", day: "numeric" })
-        const previous = index ? new Date(entries[index - 1].published_at).toLocaleDateString(lang(), { year: "numeric", month: "long", day: "numeric" }) : null
-        return <div key={entry.id}>{day !== previous && <h2 className="pb-1 pt-6 text-xs font-medium text-muted-foreground" data-feed-day>{day}</h2>}<FeedRow client={client} entry={entry} checked={selected.has(entry.id)} disabled={busy !== null} selectionDisabled={selected.size >= 100 && !selected.has(entry.id)} onSelect={(value) => toggle(entry.id, value)} onRead={() => void mark({ ids: [entry.id] })} /></div>
-      })}</div>
+      <div data-feed-list>{entries.map((entry, index) => (
+        <div key={entry.id}>
+          {entryDays[index] && <h2 className="pb-1 pt-6 text-xs font-medium text-muted-foreground" data-feed-day>{entryDays[index]}</h2>}
+          <FeedRow client={client} entry={entry} checked={selected.has(entry.id)} disabled={busy !== null} selectionDisabled={selected.size >= 100 && !selected.has(entry.id)} onSelect={toggle} onRead={markOne} />
+        </div>
+      ))}</div>
       {data?.next_cursor && <div className="flex justify-center py-6"><Button variant="outline" disabled={busy !== null} onClick={() => void load(true)} data-feed-more>{t(busy === "more" ? "common:state.loading" : "views:feed.more")}</Button></div>}
     </div>
   </Page>
@@ -148,7 +162,7 @@ function FeedError({ error, retry, disabled }: { error: unknown; retry: () => vo
   return <div role="alert" className="my-3 flex flex-wrap items-center gap-3 rounded-lg border border-destructive/25 p-3 text-sm"><p className="min-w-0 flex-1 [overflow-wrap:anywhere]">{reset ? t("views:feed.expired") : t("views:feed.failed", { error: errText(error) })}</p><Button size="sm" variant="outline" onClick={retry} disabled={disabled}>{t(reset ? "views:feed.reset" : "common:action.retry")}</Button></div>
 }
 
-function FeedRow({ client, entry, checked, disabled, selectionDisabled, onSelect, onRead, initialOpen = false }: { client: FeedClient; entry: FeedEntry; checked: boolean; disabled: boolean; selectionDisabled: boolean; onSelect: (value: boolean) => void; onRead: () => void; initialOpen?: boolean }) {
+const FeedRow = memo(function FeedRow({ client, entry, checked, disabled, selectionDisabled, onSelect, onRead, initialOpen = false }: { client: FeedClient; entry: FeedEntry; checked: boolean; disabled: boolean; selectionDisabled: boolean; onSelect: (id: string, value: boolean) => void; onRead: (id: string) => void; initialOpen?: boolean }) {
   const t = useT()
   const [open, setOpen] = useState(initialOpen), [detail, setDetail] = useState<FeedEntry | undefined>(initialOpen ? entry : undefined), [loading, setLoading] = useState(false), [error, setError] = useState<unknown>()
   const seq = useRef(0), ctl = useRef<AbortController | null>(null)
@@ -172,9 +186,9 @@ function FeedRow({ client, entry, checked, disabled, selectionDisabled, onSelect
   }).filter((link) => link.href)
   // The verified rule route redirects schedule sources to their schedules page; it also accepts ?run=.
   const flowHref = entry.source.type === "flow" ? `#/auto/rule/${encodeURIComponent(entry.source.id)}${entry.source.run_id ? `?run=${encodeURIComponent(entry.source.run_id)}` : ""}` : null
-  return <article className="min-w-0 border-b border-border/70 py-3" data-feed-entry={entry.id} data-feed-read={entry.read_at !== null}>
+  return <article className="min-w-0 border-b border-border/70 py-3 [content-visibility:auto] [contain-intrinsic-size:auto_96px]" data-feed-entry={entry.id} data-feed-read={entry.read_at !== null}>
     <div className="flex items-start gap-3">
-      <div className="shrink-0 pt-1"><Checkbox aria-label={t("views:feed.select", { title })} checked={checked} disabled={disabled || selectionDisabled || entry.read_at !== null} onChange={(e) => onSelect(e.currentTarget.checked)} /></div>
+      <div className="shrink-0 pt-1"><Checkbox aria-label={t("views:feed.select", { title })} checked={checked} disabled={disabled || selectionDisabled || entry.read_at !== null} onChange={(e) => onSelect(entry.id, e.currentTarget.checked)} /></div>
       <div className="min-w-0 flex-1">
         <button className="group w-full min-w-0 text-left focus-visible:outline-primary" aria-expanded={open} aria-controls={contentId} onClick={() => { setOpen(!open); if (!open && !detail && !loading) void load() }} data-feed-expand>
           <span className="flex items-start gap-2"><span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${entry.read_at === null ? "bg-primary" : "bg-transparent"}`} aria-label={entry.read_at === null ? t("views:feed.unread") : undefined} /><span className="min-w-0 flex-1 break-words text-sm leading-6 font-medium [overflow-wrap:anywhere]">{title}</span>{open ? <ChevronUpIcon className="mt-1 size-4 shrink-0 text-muted-foreground" /> : <ChevronDownIcon className="mt-1 size-4 shrink-0 text-muted-foreground" />}</span>
@@ -192,10 +206,10 @@ function FeedRow({ client, entry, checked, disabled, selectionDisabled, onSelect
             {flowHref && <a href={flowHref} className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline" data-feed-source>{t("views:feed.viewSource")}<ExternalLinkIcon className="size-3" /></a>}
             {links.map((link, index) => <a key={index} href={link.href!} {...(link.href!.startsWith("http") ? { target: "_blank", rel: "noopener noreferrer" } : {})} className="max-w-full text-primary underline-offset-4 [overflow-wrap:anywhere] hover:underline">{link.label || t("views:feed.viewSource")}</a>)}
             {!flowHref && !links.length && <span className="text-muted-foreground">{t("views:feed.noSource")}</span>}
-            {entry.read_at === null && <Button size="sm" variant="outline" disabled={disabled} onClick={onRead} data-feed-read-one>{t("views:feed.markRead")}</Button>}
+            {entry.read_at === null && <Button size="sm" variant="outline" disabled={disabled} onClick={() => onRead(entry.id)} data-feed-read-one>{t("views:feed.markRead")}</Button>}
           </div>
         </div>}
       </div>
     </div>
   </article>
-}
+})

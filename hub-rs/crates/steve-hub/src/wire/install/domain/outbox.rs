@@ -40,6 +40,9 @@ install! { install(reg, cx) [flow, gh, mail, outbox, ov] => [dispatcher, flow, g
 }}
 
 install! { jobs(reg, cx) [dispatcher, flow, mut jobs] => [flow, jobs] {
-    let Env { store, .. } = cx.clone();
-    jobs.push(Job::new("outbox.dispatch", crate::wire::outbox::run(dispatcher, store.clone(), flow.clone())));
+    let store = cx.store.clone();
+    let flow_job = flow.clone();
+    jobs.push(Job::supervised("outbox.dispatch", move || {
+        crate::wire::outbox::run(dispatcher.clone(), store.clone(), flow_job.clone())
+    }));
 }}

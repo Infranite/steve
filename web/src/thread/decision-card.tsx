@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react"
 import { useT } from "@/i18n"
 import { Card as UICard, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { st, WT, decide, getItem, getSession, sessionCards, closeRel, useNotices, type Item } from "@/store"
+import { st, WT, decide, getSession, sessionCards, closeRel, useItem, useNotices, useShellSelector, type Item } from "@/store"
+import { useSettledVersion, useViewGroup } from "@/data/sync"
 import { RelNote, StatusDot } from "@/ui"
 import { FLOW_SUBJECTS, isModuleCard, isPeopleDecision } from "@/decision-options"
 import { MemConfirm, memAsk } from "@/knowledge/parts"
@@ -14,7 +15,8 @@ import { PeopleDecisionBody } from "@/people/pending"
 export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?: Item["wait"] & {}; showItem?: boolean }) {
   const t = useT()
   const [localBusy, setBusy] = useState(false)
-  const busy = localBusy || st.pendingActions.has("decision:" + w.decision)
+  const pending = useShellSelector(() => st.pendingActions.has("decision:" + w.decision))
+  const busy = localBusy || pending
   const act = async (c: string, t?: string) => { if (busy) return; setBusy(true); try { await decide(i.id, c, t, w.decision) } finally { setBusy(false) } }
   const head = (title: ReactNode) => (
     <CardHeader className="flex min-w-0 flex-col gap-2 pt-4 pb-3">
@@ -46,9 +48,11 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
 
 /** decisions the session waits on, answerable here like in 待处理 (also for sessions without an item) */
 export function SessionCards({ k }: { k: string }) {
+  useViewGroup(`decision:session:${k}`)
+  useSettledVersion()
   const cards = sessionCards(k)
   /* after the release card is answered, what became of it stays under the conversation */
-  const item = getSession(k)?.item, it = item ? getItem(item) : undefined, rel = it?.rel
+  const item = getSession(k)?.item, it = useItem(item), rel = it?.rel
   useNotices(rel?.tone === "fail")
   if (!cards.length && !rel) return null
   return <div className="mt-6 flex flex-col gap-3" data-session-cards={k}>{rel && <RelNote rel={rel} box={rel.tone !== "ok"} onClose={rel.tone === "fail" && it ? () => closeRel(it) : undefined} />}{cards.map(({ i, w }) => <DecisionCard key={w.decision} i={i} w={w} showItem={!!i.id} />)}</div>

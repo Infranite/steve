@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { BugIcon, CheckIcon, CopyIcon, RefreshCwIcon } from "lucide-react"
-import { debugApi, type DebugEvent, type DebugFilter, type DebugPage, type DebugSnapshot } from "@/api/debug"
+import { debugApi, type DebugCapture, type DebugEvent, type DebugFilter, type DebugPage, type DebugSnapshot } from "@/api/debug"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
+import { VirtualList } from "@/components/virtual-list"
 import { useT } from "@/i18n"
 import { clockDur, date, num } from "@/i18n/format"
 import { cn } from "cn"
@@ -13,7 +14,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 const time = (at: number) => date(at, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error)
 const json = (value: unknown) => JSON.stringify(value, null, 2)
-
+/** Estimated collapsed height (px) of one diagnostic EventRow inside VirtualList. */
+const DEBUG_EVENT_ROW_ESTIMATE_PX = 148
+const DEBUG_EVENT_ROW_GAP_PX = 8
+const CAPTURE_TICK_MS = 1000
 
 export function ItemDebugDialog({ item, session, onClose }: { item: string; session?: string; onClose: () => void }) {
   const t = useT()
@@ -30,6 +34,28 @@ export function ItemDebugDialog({ item, session, onClose }: { item: string; sess
   </Dialog>
 }
 
+/** Isolated 1Hz capture countdown: runs no timer when capture is inactive and never re-renders the event list. */
+function CaptureStatus({ capture, onExpired }: { capture?: DebugCapture; onExpired: (expiresAt: number) => void }) {
+  const t = useT()
+  const active = !!capture?.active
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    if (!active) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), CAPTURE_TICK_MS)
+    return () => clearInterval(timer)
+  }, [active])
+  const elapsed = active && capture?.expires_at != null && now >= capture.expires_at
+  useEffect(() => {
+    if (elapsed && capture?.expires_at != null) onExpired(capture.expires_at)
+  }, [elapsed, capture?.expires_at, onExpired])
+  return <p className="type-callout" data-debug-capture-state>
+    {active ? elapsed ? t("views:debug.expiryChecking") : t("views:debug.recording", { duration: clockDur(Math.max(0, (capture?.expires_at ?? now) - now)) }) : t("views:debug.notRecording")}
+  </p>
+}
+
+type DebugEventRow = { id: string; event: DebugEvent }
+
 /** Reads are scoped to this mounted item and filter. Late answers cannot replace a new query. */
 export function ItemDebugPanel({ item, session }: { item: string; session?: string }) {
   const t = useT()
@@ -38,7 +64,6 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
   const [snapshotLoading, setSnapshotLoading] = useState(true)
   const [changing, setChanging] = useState(false)
   const [refresh, setRefresh] = useState(0)
-  const [now, setNow] = useState(Date.now())
   const [minutes, setMinutes] = useState(30)
   const [sessionId, setSessionId] = useState(session ?? "")
   const [kind, setKind] = useState("")
@@ -49,6 +74,7 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
   const [eventsError, setEventsError] = useState("")
   const [eventsLoading, setEventsLoading] = useState(true)
   const [moreLoading, setMoreLoading] = useState(false)
+  const scroll = useRef<HTMLDivElement>(null)
   const generation = useRef(0)
   const mounted = useRef(true)
   const expired = useRef<number | null>(null)
@@ -57,8 +83,7 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
 
   useEffect(() => {
     mounted.current = true
-    const timer = setInterval(() => setNow(Date.now()), 1000)
-    return () => { mounted.current = false; clearInterval(timer); generation.current++ }
+    return () => { mounted.current = false; generation.current++ }
   }, [])
 
   useEffect(() => {
@@ -80,13 +105,12 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
   }, [item, filterKey, refresh])
 
   const capture = snapshot?.capture
-  const elapsed = capture?.active && capture.expires_at != null && now >= capture.expires_at
-  useEffect(() => {
-    if (elapsed && capture?.expires_at != null && expired.current !== capture.expires_at) {
-      expired.current = capture.expires_at
+  const handleExpired = useCallback((expiresAt: number) => {
+    if (expired.current !== expiresAt) {
+      expired.current = expiresAt
       setRefresh((n) => n + 1)
     }
-  }, [elapsed, capture?.expires_at])
+  }, [])
 
   const changeCapture = async () => {
     if (changing || !snapshot?.can_capture) return
@@ -115,10 +139,12 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
     finally { if (generation.current === request) setMoreLoading(false) }
   }
   const sessions = snapshot?.sessions ?? []
-  const kinds = [...new Set(events.map((event) => event.kind))]
+  const kinds = useMemo(() => [...new Set(events.map((event) => event.kind))], [events])
+  const eventRows = useMemo<DebugEventRow[]>(() => events.map((event) => ({ id: event.event_id, event })), [events])
+  const renderEventRow = useCallback((row: DebugEventRow) => <EventRow item={item} event={row.event} />, [item])
   const coverage = page?.coverage ?? snapshot?.coverage
 
-  return <div className="min-h-0 space-y-5 overflow-y-auto pr-1" data-debug-panel>
+  return <div ref={scroll} className="min-h-0 space-y-5 overflow-y-auto pr-1" data-debug-panel>
     <section className="space-y-3 rounded-xl bg-muted/60 p-4" data-debug-state>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="type-headline">{t("views:debug.current")}</h3>
@@ -136,7 +162,7 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
         <CurrentBlockers snapshot={snapshot} />
         <div className="flex flex-col items-start gap-3 border-t border-foreground/6 pt-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 flex-1">
-            <p className="type-callout" data-debug-capture-state>{capture?.active ? elapsed ? t("views:debug.expiryChecking") : t("views:debug.recording", { duration: clockDur(Math.max(0, (capture.expires_at ?? now) - now)) }) : t("views:debug.notRecording")}</p>
+            <CaptureStatus capture={capture} onExpired={handleExpired} />
             <p className="mt-1 type-footnote text-muted-foreground">{t("views:debug.captureScope")}</p>
             {capture?.stop_reason && <p className="mt-1 break-words type-footnote font-mono text-muted-foreground">{t("views:debug.stopReason", { reason: capture.stop_reason })}</p>}
           </div>
@@ -180,7 +206,7 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
       {eventsLoading && <p className="flex items-center gap-2 py-3 type-footnote text-muted-foreground"><Spinner className="size-3" />{t("views:debug.loading")}</p>}
       {eventsError && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-destructive/10 px-3.5 py-2.5 type-callout text-destructive" data-debug-events-error><span className="min-w-0 flex-1 break-words">{eventsError}</span><Button size="xs" variant="outline" onClick={() => events.length && page?.next_cursor ? void more() : setRefresh((n) => n + 1)} disabled={moreLoading}>{t("views:debug.retry")}</Button></div>}
       {!eventsLoading && !eventsError && events.length === 0 && <p className="rounded-lg bg-muted/60 px-4 py-6 text-center type-callout text-muted-foreground" data-debug-empty>{t("views:debug.empty")}</p>}
-      <ol className="space-y-2">{events.map((event) => <EventRow key={event.event_id} item={item} event={event} />)}</ol>
+      {eventRows.length > 0 && <div role="list" className="min-w-0"><VirtualList rows={eventRows} scroll={scroll} render={renderEventRow} estimate={DEBUG_EVENT_ROW_ESTIMATE_PX} gap={DEBUG_EVENT_ROW_GAP_PX} /></div>}
       {page?.has_more && page.next_cursor && <Button className="w-full" size="sm" variant="outline" disabled={moreLoading} onClick={more} data-debug-more>{moreLoading && <Spinner className="size-3" />}{t("views:debug.more")}</Button>}
       {page?.coverage.retention_days != null && <p className="pb-1 type-footnote text-muted-foreground">{t("views:debug.retention", { days: num(page.coverage.retention_days) })}</p>}
     </section>
@@ -189,6 +215,7 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
 
 function CurrentBlockers({ snapshot }: { snapshot: DebugSnapshot }) {
   const t = useT()
+  const [open, setOpen] = useState(false)
   const state = snapshot.state, blockers = state?.lifecycle?.blockers, deps = state?.dependencies
   // The domain view is an evidence projection; missing data must never become "healthy".
   return <div className="space-y-2 border-t border-foreground/6 pt-3" data-debug-blockers>
@@ -198,14 +225,15 @@ function CurrentBlockers({ snapshot }: { snapshot: DebugSnapshot }) {
     {deps?.resume_mode && <p className="type-footnote text-muted-foreground">{t("views:debug.resumeMode", { mode: deps.resume_mode === "automatic" ? t("views:debug.resumeAutomatic") : deps.resume_mode === "notify" ? t("views:debug.resumeNotify") : deps.resume_mode, source: deps.resume_source ?? t("views:debug.unknown") })}</p>}
     {deps?.resume_blocker && <p className="break-words type-footnote text-attention">{deps.resume_blocker}</p>}
     {state?.changed_during_read && <p role="status" className="type-footnote text-attention">{t("views:debug.stateChanged")}</p>}
-    {state && <details><summary className="cursor-pointer type-footnote text-muted-foreground">{t("views:debug.snapshotDetails")}</summary><pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all type-footnote font-mono text-muted-foreground">{json(state)}</pre></details>}
+    {state && <details onToggle={(e) => setOpen(e.currentTarget.open)}><summary className="cursor-pointer type-footnote text-muted-foreground">{t("views:debug.snapshotDetails")}</summary>{open && <pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all type-footnote font-mono text-muted-foreground">{json(state)}</pre>}</details>}
   </div>
 }
 
-function EventRow({ item, event }: { item: string; event: DebugEvent }) {
+const EventRow = memo(function EventRow({ item, event }: { item: string; event: DebugEvent }) {
   const t = useT()
   const [copied, setCopied] = useState(false)
   const [copyError, setCopyError] = useState(false)
+  const [detailOpen, setDetailOpen] = useState(false)
   const copy = async () => {
     setCopyError(false)
     try {
@@ -214,7 +242,7 @@ function EventRow({ item, event }: { item: string; event: DebugEvent }) {
       setCopied(true)
     } catch { setCopyError(true) }
   }
-  return <li className="rounded-xl bg-muted/50 px-3.5 py-3 anim-in" data-debug-event={event.event_id}>
+  return <div role="listitem" className="rounded-xl bg-muted/50 px-3.5 py-3 anim-in" data-debug-event={event.event_id}>
     <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
       <span className={cn("break-all type-footnote font-mono", event.severity === "error" ? "text-destructive" : event.severity === "warning" ? "text-attention" : "text-foreground")}>{event.kind}</span>
       <time className="type-footnote tabular-nums text-muted-foreground" dateTime={new Date(event.at).toISOString()}>{time(event.at)}</time>
@@ -222,10 +250,10 @@ function EventRow({ item, event }: { item: string; event: DebugEvent }) {
     </div>
     <p className="mt-1 break-all type-footnote font-mono text-muted-foreground">{event.reason_code || t("views:debug.noReason")}</p>
     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 type-footnote font-mono text-muted-foreground">{event.session_id && <span className="break-all">{event.session_id}</span>}{event.attempt_id && <span className="break-all">{event.attempt_id}</span>}</div>
-    <details className="mt-2" data-debug-detail>
+    <details className="mt-2" data-debug-detail onToggle={(e) => setDetailOpen(e.currentTarget.open)}>
       <summary className="cursor-pointer type-footnote text-muted-foreground hover:text-foreground">{t("views:debug.evidence")}</summary>
-      <pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all rounded-lg bg-background/70 px-3 py-2 type-footnote font-mono">{json(event)}</pre>
+      {detailOpen && <pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all rounded-lg bg-background/70 px-3 py-2 type-footnote font-mono">{json(event)}</pre>}
     </details>
     {copyError && <p role="alert" className="mt-1 type-footnote text-destructive">{t("views:debug.copyFailed")}</p>}
-  </li>
-}
+  </div>
+})

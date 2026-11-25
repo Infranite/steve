@@ -1,7 +1,6 @@
 //! Metrics, collected in memory from the Hub's start (S1). Exporting is optional: with
 //! `STEVE_METRICS=prometheus` the Hub serves `/metrics` on `STEVE_METRICS_LISTEN`, the management
-//! socket always serves the same text, an export plugin may take a snapshot a minute ([`Export`]),
-//! and `/api/system/health` reads the same recorder. Every
+//! socket always serves the same text, and `/api/system/health` reads the same recorder. Every
 //! metric is described in [`catalog`]; labels take bounded values only (route templates, methods,
 //! results, reason codes, harnesses, plugin and Node ids), never a session, item or message id.
 //! Hot paths use static keys or handles registered once; nothing here writes to the database.
@@ -16,6 +15,9 @@ macro_rules! once {
     (counter $name:literal) => {
         $crate::metrics::once!(@ metrics::Counter, metrics::counter!($name))
     };
+    (gauge $name:literal) => {
+        $crate::metrics::once!(@ metrics::Gauge, metrics::gauge!($name))
+    };
     (histogram $name:literal) => {
         $crate::metrics::once!(@ metrics::Histogram, metrics::histogram!($name))
     };
@@ -26,19 +28,23 @@ macro_rules! once {
 }
 pub(crate) use once;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
-use futures::TryStreamExt;
+use hyper::body::{Body as _, Frame, SizeHint};
 use metrics_exporter_prometheus::{
     Matcher, PrometheusBuilder, PrometheusHandle, PrometheusRecorder,
 };
@@ -51,6 +57,18 @@ use crate::config::ConfigError;
 const WINDOW_SNAPSHOTS: usize = 15;
 const UPKEEP_EVERY: Duration = Duration::from_secs(5);
 pub(crate) const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+const DEFAULT_BUCKETS: &[f64] = &[
+    0.00001, 0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05,
+    0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 100.0,
+];
+const COUNT_BUCKETS: &[f64] = &[
+    0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
+];
+const LONG_BUCKETS: &[f64] = &[
+    0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0, 21600.0,
+    86400.0, 604800.0,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Listen {
@@ -83,36 +101,474 @@ impl Listen {
     }
 }
 
-fn recorder() -> PrometheusRecorder {
+fn atomic_f64_add(bits: &AtomicU64, delta: f64) {
+    let mut cur = bits.load(Ordering::Relaxed);
+    loop {
+        let next = (f64::from_bits(cur) + delta).to_bits();
+        match bits.compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+struct DynCounter(AtomicU64);
+
+impl metrics::CounterFn for DynCounter {
+    fn increment(&self, value: u64) {
+        self.0.fetch_add(value, Ordering::Relaxed);
+    }
+    fn absolute(&self, value: u64) {
+        self.0.fetch_max(value, Ordering::Relaxed);
+    }
+}
+
+struct DynGauge(AtomicU64);
+
+impl DynGauge {
+    fn new() -> Self {
+        Self(AtomicU64::new(0.0_f64.to_bits()))
+    }
+    fn get(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Relaxed))
+    }
+}
+
+impl metrics::GaugeFn for DynGauge {
+    fn increment(&self, value: f64) {
+        atomic_f64_add(&self.0, value);
+    }
+    fn decrement(&self, value: f64) {
+        atomic_f64_add(&self.0, -value);
+    }
+    fn set(&self, value: f64) {
+        self.0.store(value.to_bits(), Ordering::Relaxed);
+    }
+}
+
+struct BucketHistogram {
+    bounds: &'static [f64],
+    buckets: Box<[AtomicU64]>,
+    sum_bits: AtomicU64,
+    count: AtomicU64,
+}
+
+impl BucketHistogram {
+    fn new(bounds: &'static [f64]) -> Self {
+        let mut buckets = Vec::with_capacity(bounds.len() + 1);
+        buckets.resize_with(bounds.len() + 1, || AtomicU64::new(0));
+        Self {
+            bounds,
+            buckets: buckets.into_boxed_slice(),
+            sum_bits: AtomicU64::new(0.0_f64.to_bits()),
+            count: AtomicU64::new(0),
+        }
+    }
+}
+
+impl metrics::HistogramFn for BucketHistogram {
+    fn record(&self, value: f64) {
+        if value.is_nan() {
+            return;
+        }
+        let idx = self.bounds.partition_point(|&b| b < value);
+        self.buckets[idx].fetch_add(1, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        atomic_f64_add(&self.sum_bits, value);
+    }
+}
+
+/// Dynamic series owned by entities that can be revoked or uninstalled (`node`, `plugin`).
+/// Storing them separately from `PrometheusRecorder` allows immediate removal on revocation so
+/// deleted Nodes or uninstalled plugins never leak unbounded series in memory.
+#[derive(Default)]
+struct DynSeries {
+    counters: RwLock<HashMap<metrics::Key, Arc<DynCounter>>>,
+    gauges: RwLock<HashMap<metrics::Key, Arc<DynGauge>>>,
+    histograms: RwLock<HashMap<metrics::Key, Arc<BucketHistogram>>>,
+    descriptions: RwLock<HashMap<String, String>>,
+}
+
+fn is_removable(key: &metrics::Key) -> bool {
+    key.labels().any(|l| matches!(l.key(), "node" | "plugin"))
+}
+
+fn buckets_for(name: &str) -> &'static [f64] {
+    if catalog::COUNTS.contains(&name) {
+        COUNT_BUCKETS
+    } else if catalog::LONG.contains(&name) {
+        LONG_BUCKETS
+    } else {
+        DEFAULT_BUCKETS
+    }
+}
+
+fn escape_label_value(out: &mut String, val: &str) {
+    for ch in val.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+}
+
+fn format_labels(key: &metrics::Key, extra: Option<(&str, &str)>) -> String {
+    let mut out = String::new();
+    let mut first = true;
+    for l in key.labels() {
+        if first {
+            out.push('{');
+            first = false;
+        } else {
+            out.push(',');
+        }
+        out.push_str(l.key());
+        out.push_str("=\"");
+        escape_label_value(&mut out, l.value());
+        out.push('"');
+    }
+    if let Some((ek, ev)) = extra {
+        if first {
+            out.push('{');
+            first = false;
+        } else {
+            out.push(',');
+        }
+        out.push_str(ek);
+        out.push_str("=\"");
+        escape_label_value(&mut out, ev);
+        out.push('"');
+    }
+    if !first {
+        out.push('}');
+    }
+    out
+}
+
+fn write_f64(out: &mut String, v: f64) {
+    if v.is_nan() {
+        out.push_str("NaN");
+    } else if v == f64::INFINITY {
+        out.push_str("+Inf");
+    } else if v == f64::NEG_INFINITY {
+        out.push_str("-Inf");
+    } else {
+        let _ = write!(out, "{v}");
+    }
+}
+
+impl DynSeries {
+    fn remove_label(&self, label_key: &str, label_val: &str) {
+        let keep = |k: &metrics::Key| {
+            !k.labels()
+                .any(|l| l.key() == label_key && l.value() == label_val)
+        };
+        self.counters
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| keep(k));
+        self.gauges
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| keep(k));
+        self.histograms
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| keep(k));
+    }
+
+    fn render(&self, out: &mut String) {
+        let descs = self.descriptions.read().unwrap_or_else(|e| e.into_inner());
+        // Counters
+        {
+            let map = self.counters.read().unwrap_or_else(|e| e.into_inner());
+            let mut by_name: BTreeMap<&str, Vec<(String, u64)>> = BTreeMap::new();
+            for (k, v) in map.iter() {
+                by_name
+                    .entry(k.name())
+                    .or_default()
+                    .push((format_labels(k, None), v.0.load(Ordering::Relaxed)));
+            }
+            for (name, mut rows) in by_name {
+                rows.sort_by(|a, b| a.0.cmp(&b.0));
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                if let Some(help) = descs.get(name) {
+                    let _ = writeln!(out, "# HELP {name} {help}");
+                }
+                let _ = writeln!(out, "# TYPE {name} counter");
+                for (labels, val) in rows {
+                    let _ = writeln!(out, "{name}{labels} {val}");
+                }
+            }
+        }
+        // Gauges
+        {
+            let map = self.gauges.read().unwrap_or_else(|e| e.into_inner());
+            let mut by_name: BTreeMap<&str, Vec<(String, f64)>> = BTreeMap::new();
+            for (k, v) in map.iter() {
+                by_name
+                    .entry(k.name())
+                    .or_default()
+                    .push((format_labels(k, None), v.get()));
+            }
+            for (name, mut rows) in by_name {
+                rows.sort_by(|a, b| a.0.cmp(&b.0));
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                if let Some(help) = descs.get(name) {
+                    let _ = writeln!(out, "# HELP {name} {help}");
+                }
+                let _ = writeln!(out, "# TYPE {name} gauge");
+                for (labels, val) in rows {
+                    let _ = write!(out, "{name}{labels} ");
+                    write_f64(out, val);
+                    out.push('\n');
+                }
+            }
+        }
+        // Histograms
+        {
+            let map = self.histograms.read().unwrap_or_else(|e| e.into_inner());
+            let mut by_name: BTreeMap<&str, Vec<(&metrics::Key, String, &BucketHistogram)>> =
+                BTreeMap::new();
+            for (k, v) in map.iter() {
+                by_name
+                    .entry(k.name())
+                    .or_default()
+                    .push((k, format_labels(k, None), v.as_ref()));
+            }
+            for (name, mut rows) in by_name {
+                rows.sort_by(|a, b| a.1.cmp(&b.1));
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                if let Some(help) = descs.get(name) {
+                    let _ = writeln!(out, "# HELP {name} {help}");
+                }
+                let _ = writeln!(out, "# TYPE {name} histogram");
+                for (key, base_labels, h) in rows {
+                    let mut cumulative = 0u64;
+                    for (idx, &bound) in h.bounds.iter().enumerate() {
+                        cumulative += h.buckets[idx].load(Ordering::Relaxed);
+                        let le = bound.to_string();
+                        let labels = format_labels(key, Some(("le", &le)));
+                        let _ = writeln!(out, "{name}_bucket{labels} {cumulative}");
+                    }
+                    cumulative += h.buckets[h.bounds.len()].load(Ordering::Relaxed);
+                    let inf_labels = format_labels(key, Some(("le", "+Inf")));
+                    let _ = writeln!(out, "{name}_bucket{inf_labels} {cumulative}");
+                    let _ = write!(out, "{name}_sum{base_labels} ");
+                    write_f64(out, f64::from_bits(h.sum_bits.load(Ordering::Relaxed)));
+                    out.push('\n');
+                    let _ = writeln!(
+                        out,
+                        "{name}_count{base_labels} {}",
+                        h.count.load(Ordering::Relaxed)
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct HubRecorder {
+    inner: PrometheusRecorder,
+    dyn_series: Arc<DynSeries>,
+}
+
+#[derive(Clone)]
+pub(crate) struct HubHandle {
+    inner: PrometheusHandle,
+    dyn_series: Arc<DynSeries>,
+}
+
+impl HubHandle {
+    pub(crate) fn render(&self) -> String {
+        let mut out = self.inner.render();
+        self.dyn_series.render(&mut out);
+        out
+    }
+
+    fn run_upkeep(&self) {
+        self.inner.run_upkeep();
+    }
+
+    fn remove_label(&self, key: &str, value: &str) {
+        self.dyn_series.remove_label(key, value);
+    }
+}
+
+impl HubRecorder {
+    pub(crate) fn handle(&self) -> HubHandle {
+        HubHandle {
+            inner: self.inner.handle(),
+            dyn_series: self.dyn_series.clone(),
+        }
+    }
+}
+
+impl metrics::Recorder for HubRecorder {
+    fn describe_counter(
+        &self,
+        key: metrics::KeyName,
+        unit: Option<metrics::Unit>,
+        description: metrics::SharedString,
+    ) {
+        self.dyn_series
+            .descriptions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.as_str().to_owned(), description.as_ref().to_owned());
+        self.inner.describe_counter(key, unit, description);
+    }
+
+    fn describe_gauge(
+        &self,
+        key: metrics::KeyName,
+        unit: Option<metrics::Unit>,
+        description: metrics::SharedString,
+    ) {
+        self.dyn_series
+            .descriptions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.as_str().to_owned(), description.as_ref().to_owned());
+        self.inner.describe_gauge(key, unit, description);
+    }
+
+    fn describe_histogram(
+        &self,
+        key: metrics::KeyName,
+        unit: Option<metrics::Unit>,
+        description: metrics::SharedString,
+    ) {
+        self.dyn_series
+            .descriptions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.as_str().to_owned(), description.as_ref().to_owned());
+        self.inner.describe_histogram(key, unit, description);
+    }
+
+    fn register_counter(
+        &self,
+        key: &metrics::Key,
+        metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Counter {
+        if !is_removable(key) {
+            return self.inner.register_counter(key, metadata);
+        }
+        if let Some(c) = self
+            .dyn_series
+            .counters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+        {
+            return metrics::Counter::from_arc(c.clone());
+        }
+        let c = self
+            .dyn_series
+            .counters
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(DynCounter(AtomicU64::new(0))))
+            .clone();
+        metrics::Counter::from_arc(c)
+    }
+
+    fn register_gauge(
+        &self,
+        key: &metrics::Key,
+        metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Gauge {
+        if !is_removable(key) {
+            return self.inner.register_gauge(key, metadata);
+        }
+        if let Some(g) = self
+            .dyn_series
+            .gauges
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+        {
+            return metrics::Gauge::from_arc(g.clone());
+        }
+        let g = self
+            .dyn_series
+            .gauges
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(DynGauge::new()))
+            .clone();
+        metrics::Gauge::from_arc(g)
+    }
+
+    fn register_histogram(
+        &self,
+        key: &metrics::Key,
+        metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        if !is_removable(key) {
+            return self.inner.register_histogram(key, metadata);
+        }
+        if let Some(h) = self
+            .dyn_series
+            .histograms
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+        {
+            return metrics::Histogram::from_arc(h.clone());
+        }
+        let bounds = buckets_for(key.name());
+        let h = self
+            .dyn_series
+            .histograms
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(BucketHistogram::new(bounds)))
+            .clone();
+        metrics::Histogram::from_arc(h)
+    }
+}
+
+fn recorder() -> HubRecorder {
     // Explicit buckets give distributions without the exporter's time-window maintenance task.
-    let counts = [
-        0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
-    ];
-    let long = [
-        0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0, 21600.0,
-        86400.0, 604800.0,
-    ];
     let mut b = PrometheusBuilder::new()
-        .set_buckets(&[
-            0.00001, 0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025,
-            0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 100.0,
-        ])
+        .set_buckets(DEFAULT_BUCKETS)
         .expect("static nonempty buckets");
     for name in catalog::COUNTS {
         b = b
-            .set_buckets_for_metric(Matcher::Full((*name).into()), &counts)
+            .set_buckets_for_metric(Matcher::Full((*name).into()), COUNT_BUCKETS)
             .expect("static count buckets");
     }
     for name in catalog::LONG {
         b = b
-            .set_buckets_for_metric(Matcher::Full((*name).into()), &long)
+            .set_buckets_for_metric(Matcher::Full((*name).into()), LONG_BUCKETS)
             .expect("static long buckets");
     }
-    b.build_recorder()
+    HubRecorder {
+        inner: b.build_recorder(),
+        dyn_series: Arc::new(DynSeries::default()),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_recorder() -> HubRecorder {
+    recorder()
 }
 
 struct Installed {
-    handle: PrometheusHandle,
+    handle: HubHandle,
     started: Instant,
     history: Mutex<History>,
 }
@@ -126,18 +582,38 @@ struct History {
 
 static INSTALLED: OnceLock<Installed> = OnceLock::new();
 
-/// An export beyond the built-in pull listener (OTLP and others come as plugins from a plugin
-/// store): the Hub keeps the one recorder and hands the exporter a snapshot, the exposition text,
-/// once a minute. `push` runs on the sampling task and must hand off without blocking.
-pub trait Export: Send + Sync {
-    fn push(&self, exposition: &str);
+type PluginPidSource = Arc<dyn Fn() -> Vec<(String, u32)> + Send + Sync>;
+static PLUGIN_PIDS: Mutex<Option<PluginPidSource>> = Mutex::new(None);
+static SEEN_PLUGINS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Registers the running plugin PID provider so `sample_process` collects per-plugin CPU/RSS/IO.
+pub(crate) fn set_plugin_pids(source: impl Fn() -> Vec<(String, u32)> + Send + Sync + 'static) {
+    *PLUGIN_PIDS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(source));
 }
 
-static EXPORT: OnceLock<Box<dyn Export>> = OnceLock::new();
+/// Drops all in-memory Prometheus series and vitals history for a revoked Node.
+pub(crate) fn remove_node(id: &str) {
+    let Some(i) = INSTALLED.get() else { return };
+    i.handle.remove_label("node", id);
+    i.history
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .nodes
+        .remove(id);
+}
 
-/// Connects the one external exporter; `false` when one is connected already.
-pub fn connect_export(export: Box<dyn Export>) -> bool {
-    EXPORT.set(export).is_ok()
+/// Drops all in-memory Prometheus series for an uninstalled/removed plugin.
+pub(crate) fn remove_plugin(id: &str) {
+    if let Some(seen) = SEEN_PLUGINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        seen.remove(id);
+    }
+    if let Some(i) = INSTALLED.get() {
+        i.handle.remove_label("plugin", id);
+    }
 }
 
 /// Installs the in-memory recorder, before anything that records starts. Collection is always on;
@@ -151,6 +627,7 @@ pub fn install() {
     }
     catalog::describe();
     steve_store::instrumentation::enable_lock_metrics();
+    steve_store::instrumentation::register_known_harnesses(steve_harness_spec::builtin_ids());
     let installed = INSTALLED.get_or_init(|| Installed {
         handle,
         started: Instant::now(),
@@ -171,21 +648,15 @@ pub fn install() {
 /// typed history and exported gauges are updated from the same observations in this pass.
 pub(crate) fn record_minute(observations: Vec<nodes::Observation>) {
     let Some(i) = INSTALLED.get() else { return };
-    let text = {
-        let mut history = i.history.lock().unwrap_or_else(|e| e.into_inner());
-        history.nodes.record(observations, crate::nodes::now());
-        let text = i.render();
-        let point = health::Snapshot::parse(&text, i.started.elapsed().as_secs_f64());
-        if history.health.len() == WINDOW_SNAPSHOTS {
-            history.health.pop_front();
-        }
-        history.summary = Some(health::assess(&point, history.health.front()));
-        history.health.push_back(point);
-        text
-    };
-    if let Some(export) = EXPORT.get() {
-        export.push(&text);
+    let mut history = i.history.lock().unwrap_or_else(|e| e.into_inner());
+    history.nodes.record(observations, crate::nodes::now());
+    let text = i.render();
+    let point = health::Snapshot::parse(&text, i.started.elapsed().as_secs_f64());
+    if history.health.len() == WINDOW_SNAPSHOTS {
+        history.health.pop_front();
     }
+    history.summary = Some(health::assess(&point, history.health.front()));
+    history.health.push_back(point);
 }
 
 pub(crate) fn latest_node(id: &str, since: i64) -> Option<NodeVitalsLatest> {
@@ -243,10 +714,43 @@ pub(crate) fn health() -> Option<health::Health> {
         .or_else(|| Some(health::assess(&i.snapshot(), None)))
 }
 
-/// The pages a web report may name (a bounded label); anything else is `other`.
-pub(crate) const WEB_PAGES: [&str; 7] = [
-    "chat", "items", "item", "sessions", "session", "inbox", "other",
+/// The pages a web report may name (a bounded label covering every nav destination plus detail
+/// views); anything else is `other`.
+pub(crate) const WEB_PAGES: [&str; 28] = [
+    "chat",
+    "inbox",
+    "items",
+    "item",
+    "projects",
+    "calendar",
+    "todos",
+    "feed",
+    "channels",
+    "mail",
+    "contacts",
+    "knowledge",
+    "integrations",
+    "bots",
+    "sessions",
+    "session",
+    "auto",
+    "capabilities",
+    "signals",
+    "stats",
+    "me",
+    "devices",
+    "accounts",
+    "vault",
+    "settings",
+    "publications",
+    "github",
+    "other",
 ];
+
+/// Bounded JS error kinds accepted for `steve_web_errors_total`.
+pub(crate) const WEB_ERROR_KINDS: [&str; 2] = ["error", "unhandledrejection"];
+/// Bounded SSE reconnect reasons accepted for `steve_web_sse_reconnects_total`.
+pub(crate) const WEB_SSE_RECONNECT_REASONS: [&str; 3] = ["error", "stale", "wake"];
 
 /// Bounded menu item keys accepted for `steve_web_nav_opens_total` (`POST /api/system/web-perf`).
 pub(crate) const WEB_NAV_ITEMS: &[&str] = &[
@@ -279,8 +783,9 @@ pub(crate) const WEB_NAV_ITEMS: &[&str] = &[
 
 /// What a web client measured on `page` since its last report (`POST /api/system/web-perf`): its
 /// long tasks, the latency of each interaction and of merging each patch frame, in seconds, plus
-/// menu item open counts (`steve_web_nav_opens_total`). Returns the bounded nav opens recorded so
-/// the caller can also aggregate them by workspace local day in `telemetry_daily`.
+/// menu item open counts (`steve_web_nav_opens_total`), JS error counts, and SSE reconnect counts.
+/// Returns the bounded nav opens recorded so the caller can also aggregate them by workspace local
+/// day in `telemetry_daily`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn web_report(
     page: &str,
@@ -291,6 +796,8 @@ pub(crate) fn web_report(
     transcripts: &[f64],
     dom_nodes: Option<u64>,
     nav_opens: &BTreeMap<String, u32>,
+    errors: &BTreeMap<String, u32>,
+    sse_reconnects: &BTreeMap<String, u32>,
 ) -> Vec<(&'static str, u32)> {
     let page = WEB_PAGES
         .into_iter()
@@ -324,11 +831,34 @@ pub(crate) fn web_report(
             accepted.push((known, count));
         }
     }
+    for (kind, &count) in errors {
+        if count == 0 {
+            continue;
+        }
+        if let Some(&known) = WEB_ERROR_KINDS.iter().find(|k| **k == kind.as_str()) {
+            metrics::counter!("steve_web_errors_total", "page" => page, "kind" => known)
+                .increment(u64::from(count));
+        }
+    }
+    for (reason, &count) in sse_reconnects {
+        if count == 0 {
+            continue;
+        }
+        if let Some(&known) = WEB_SSE_RECONNECT_REASONS
+            .iter()
+            .find(|r| **r == reason.as_str())
+        {
+            metrics::counter!("steve_web_sse_reconnects_total", "reason" => known)
+                .increment(u64::from(count));
+        }
+    }
     accepted
 }
 
-/// This process's use of the machine, sampled when somebody reads the metrics.
+/// This process's and running plugin child processes' resource usage, sampled when somebody reads
+/// the metrics.
 fn sample_process() {
+    sample_plugins();
     let Some(u) = steve_runtime::process::this() else {
         metrics::counter!("steve_metrics_collection_errors_total", "source" => "process")
             .increment(1);
@@ -350,6 +880,72 @@ fn sample_process() {
     ] {
         if let Some(v) = v {
             gauge.set(v as f64);
+        }
+    }
+}
+
+fn sample_plugins() {
+    let source = PLUGIN_PIDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(source) = source else { return };
+    let pids = source();
+    let mut active: BTreeMap<String, (usize, Option<steve_runtime::process::Usage>)> =
+        BTreeMap::new();
+    for (plugin, pid) in pids {
+        let entry = active.entry(plugin).or_insert((0, None));
+        entry.0 += 1;
+        if let Some(usage) = steve_runtime::process::of_pid(pid) {
+            entry.1 = Some(match entry.1.take() {
+                Some(sum) => sum.add(usage),
+                None => usage,
+            });
+        }
+    }
+    let mut seen_guard = SEEN_PLUGINS.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = seen_guard.get_or_insert_with(HashSet::new);
+    for (plugin, (count, usage)) in &active {
+        seen.insert(plugin.clone());
+        let p = plugin.clone();
+        metrics::gauge!("steve_plugin_processes", "plugin" => p.clone()).set(*count as f64);
+        if let Some(u) = usage {
+            metrics::gauge!("steve_plugin_process_cpu_seconds", "plugin" => p.clone())
+                .set(u.cpu_seconds);
+            metrics::gauge!("steve_plugin_process_resident_bytes", "plugin" => p.clone())
+                .set(u.resident_bytes as f64);
+            for (name, v) in [
+                ("steve_plugin_process_open_fds", u.open_fds),
+                ("steve_plugin_process_threads", u.threads),
+                ("steve_plugin_process_disk_read_bytes", u.disk_read_bytes),
+                (
+                    "steve_plugin_process_disk_written_bytes",
+                    u.disk_written_bytes,
+                ),
+            ] {
+                if let Some(v) = v {
+                    metrics::gauge!(name, "plugin" => p.clone()).set(v as f64);
+                }
+            }
+        }
+    }
+    let gone: Vec<String> = seen
+        .iter()
+        .filter(|plugin| !active.contains_key(*plugin))
+        .cloned()
+        .collect();
+    for plugin in gone {
+        seen.remove(&plugin);
+        metrics::gauge!("steve_plugin_processes", "plugin" => plugin.clone()).set(0.0);
+        for name in [
+            "steve_plugin_process_cpu_seconds",
+            "steve_plugin_process_resident_bytes",
+            "steve_plugin_process_open_fds",
+            "steve_plugin_process_threads",
+            "steve_plugin_process_disk_read_bytes",
+            "steve_plugin_process_disk_written_bytes",
+        ] {
+            metrics::gauge!(name, "plugin" => plugin.clone()).set(0.0);
         }
     }
 }
@@ -495,10 +1091,10 @@ fn unix_listener(path: &std::path::Path) -> std::io::Result<tokio::net::UnixList
 #[derive(Clone)]
 struct Endpoint {
     store: Store,
-    handle: PrometheusHandle,
+    handle: HubHandle,
 }
 
-fn router(store: Store, handle: PrometheusHandle) -> Router {
+fn router(store: Store, handle: HubHandle) -> Router {
     Router::new()
         .route("/metrics", get(scrape))
         .with_state(Endpoint { store, handle })
@@ -527,14 +1123,21 @@ async fn scrape(State(st): State<Endpoint>, headers: HeaderMap) -> Response {
     ([(header::CONTENT_TYPE, CONTENT_TYPE)], st.handle.render()).into_response()
 }
 
-#[derive(Clone)]
 struct HttpMetrics {
     requests: metrics::Counter,
     duration: metrics::Histogram,
     bytes: metrics::Counter,
 }
 
-fn http_metrics(route: &str, method: &'static str, status: &'static str) -> HttpMetrics {
+/// Records HTTP request metrics without cloning `Arc` handles on the hot exact-size path.
+/// Returns `Some(bytes_counter)` only for streaming bodies whose byte length is not known upfront.
+fn record_http(
+    route: &str,
+    method: &'static str,
+    status: &'static str,
+    elapsed_secs: f64,
+    exact_bytes: Option<u64>,
+) -> Option<metrics::Counter> {
     // Only cold route registration allocates labels. MatchedPath never contains an entity ID.
     thread_local! {
         static HANDLES: std::cell::RefCell<HashMap<String, HashMap<(&'static str, &'static str), HttpMetrics>>> =
@@ -542,23 +1145,69 @@ fn http_metrics(route: &str, method: &'static str, status: &'static str) -> Http
     }
     HANDLES.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if !cache.contains_key(route) { cache.insert(route.to_owned(), HashMap::new()); }
-        cache.get_mut(route).expect("inserted").entry((method, status)).or_insert_with(|| HttpMetrics {
+        let by_route = match cache.get_mut(route) {
+            Some(m) => m,
+            None => cache.entry(route.to_owned()).or_default(),
+        };
+        let handles = by_route.entry((method, status)).or_insert_with(|| HttpMetrics {
             requests: metrics::counter!("steve_http_requests_total", "route" => route.to_owned(), "method" => method, "status" => status),
             duration: metrics::histogram!("steve_http_request_duration_seconds", "route" => route.to_owned(), "method" => method, "status" => status),
             bytes: metrics::counter!("steve_http_response_bytes_total", "route" => route.to_owned(), "method" => method, "status" => status),
-        }).clone()
+        });
+        handles.requests.increment(1);
+        handles.duration.record(elapsed_secs);
+        match exact_bytes {
+            Some(n) => {
+                handles.bytes.increment(n);
+                None
+            }
+            None => Some(handles.bytes.clone()),
+        }
     })
+}
+
+/// Zero-copy streaming body wrapper that counts data frame bytes while preserving trailers and errors.
+struct CountedBody {
+    inner: Body,
+    bytes: metrics::Counter,
+}
+
+impl hyper::body::Body for CountedBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let poll = Pin::new(&mut self.inner).poll_frame(cx);
+        if let Poll::Ready(Some(Ok(ref frame))) = poll
+            && let Some(data) = frame.data_ref()
+        {
+            self.bytes.increment(data.len() as u64);
+        }
+        poll
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 /// The header with the newest bus revision a request committed that can change a view.
 pub const REV_HEADER: &str = "x-steve-rev";
 
 /// Outermost request observation, including CORS/maintenance/auth short responses. Latency
-/// ends at response headers; body bytes reflect the inner compression layer's actual chunks.
-/// Hub responses carry data frames; the data-stream adapter forwards errors without buffering.
+/// ends at response headers; body bytes count exact sizes without wrapping and stream chunks
+/// without losing trailers or errors.
 pub async fn http(request: Request, next: Next) -> Response {
     let route = request.extensions().get::<MatchedPath>().cloned();
+    // `mcp_gate` intercepts `/mcp*` ahead of axum's Router, so `MatchedPath` is absent there.
+    let is_mcp = route.is_none() && request.uri().path().starts_with("/mcp");
     let method = match request.method().as_str() {
         "GET" => "GET",
         "POST" => "POST",
@@ -579,7 +1228,10 @@ pub async fn http(request: Request, next: Next) -> Response {
             .headers_mut()
             .insert(REV_HEADER, axum::http::HeaderValue::from(calls.rev()));
     }
-    let route = route.as_ref().map_or("unmatched", MatchedPath::as_str);
+    let route = route
+        .as_ref()
+        .map(MatchedPath::as_str)
+        .unwrap_or(if is_mcp { "/mcp" } else { "unmatched" });
     if response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -590,7 +1242,7 @@ pub async fn http(request: Request, next: Next) -> Response {
                 .is_some_and(|v| v.trim() == "text/event-stream")
         })
     {
-        sse_counter(route).increment(1);
+        inc_sse_connections(route);
         return response;
     }
     let status = match response.status().as_u16() / 100 {
@@ -600,22 +1252,19 @@ pub async fn http(request: Request, next: Next) -> Response {
         4 => "4xx",
         _ => "5xx",
     };
-    store_calls_histogram(route).record(calls.count() as f64);
-    let handles = http_metrics(route, method, status);
-    handles.requests.increment(1);
-    handles.duration.record(start.elapsed().as_secs_f64());
-    // BodyDataStream discards trailers. No current Hub route emits them; preserve any future
-    // declared trailer response unchanged rather than changing its wire semantics.
-    if response.headers().contains_key(header::TRAILER) {
-        metrics::counter!("steve_metrics_collection_errors_total", "source" => "response_trailers")
-            .increment(1);
+    record_store_calls(route, calls.count() as f64);
+    let exact_bytes = response.body().size_hint().exact();
+    let Some(bytes) = record_http(
+        route,
+        method,
+        status,
+        start.elapsed().as_secs_f64(),
+        exact_bytes,
+    ) else {
         return response;
-    }
+    };
     let (parts, body) = response.into_parts();
-    let stream = body
-        .into_data_stream()
-        .inspect_ok(move |chunk| handles.bytes.increment(chunk.len() as u64));
-    Response::from_parts(parts, Body::from_stream(stream))
+    Response::from_parts(parts, Body::new(CountedBody { inner: body, bytes }))
 }
 
 /// Blocking API work keeps the request's storage counter alongside its existing language context.
@@ -623,7 +1272,7 @@ pub(crate) fn carry<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
     steve_store::instrumentation::carry(f)
 }
 
-fn store_calls_histogram(route: &str) -> metrics::Histogram {
+fn record_store_calls(route: &str, count: f64) {
     thread_local! {
         static HANDLES: std::cell::RefCell<HashMap<String, metrics::Histogram>> =
             std::cell::RefCell::new(HashMap::new());
@@ -631,16 +1280,17 @@ fn store_calls_histogram(route: &str) -> metrics::Histogram {
     HANDLES.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(handle) = cache.get(route) {
-            return handle.clone();
+            handle.record(count);
+            return;
         }
         let handle =
             metrics::histogram!("steve_http_store_calls_per_request", "route" => route.to_owned());
-        cache.insert(route.to_owned(), handle.clone());
-        handle
-    })
+        handle.record(count);
+        cache.insert(route.to_owned(), handle);
+    });
 }
 
-fn sse_counter(route: &str) -> metrics::Counter {
+fn inc_sse_connections(route: &str) {
     thread_local! {
         static HANDLES: std::cell::RefCell<HashMap<String, metrics::Counter>> =
             std::cell::RefCell::new(HashMap::new());
@@ -648,13 +1298,14 @@ fn sse_counter(route: &str) -> metrics::Counter {
     HANDLES.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(handle) = cache.get(route) {
-            return handle.clone();
+            handle.increment(1);
+            return;
         }
         let handle =
             metrics::counter!("steve_http_sse_connections_total", "route" => route.to_owned());
-        cache.insert(route.to_owned(), handle.clone());
-        handle
-    })
+        handle.increment(1);
+        cache.insert(route.to_owned(), handle);
+    });
 }
 
 #[cfg(test)]
@@ -966,11 +1617,70 @@ mod tests {
                 assert!(response.into_body().collect().await.is_err());
             })
         });
+        let text = recorder.handle().render();
         assert!(
-            recorder
-                .handle()
-                .render()
-                .contains("source=\"response_trailers\"")
+            text.lines()
+                .any(|line| line.starts_with("steve_http_response_bytes_total{")
+                    && line.contains("route=\"/metrics-trailers\"")
+                    && line.ends_with(" 4")),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("steve_http_response_bytes_total{")
+                    && line.contains("route=\"/metrics-body-error\"")
+                    && line.ends_with(" 4")),
+            "{text}"
+        );
+        assert!(!text.contains("source=\"response_trailers\""), "{text}");
+    }
+
+    #[test]
+    fn mcp_routes_without_matched_path_use_bounded_mcp_label_and_revoked_node_series_are_removed() {
+        let recorder = recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            runtime().block_on(async {
+                let app = Router::new()
+                    .fallback(|| async { (StatusCode::OK, "ok") })
+                    .layer(axum::middleware::from_fn(http));
+                let res = app
+                    .oneshot(
+                        HttpRequest::builder()
+                            .uri("/mcp/tools/secret-id")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                res.into_body().collect().await.unwrap();
+            });
+            metrics::gauge!("steve_node_link_up", "node" => "n-revoked").set(1.0);
+            metrics::counter!("steve_node_commands_total", "node" => "n-revoked", "method" => "ping", "result" => "ok").increment(3);
+            metrics::histogram!("steve_node_command_seconds", "node" => "n-revoked", "method" => "ping").record(0.05);
+            metrics::gauge!("steve_node_link_up", "node" => "n-keep").set(1.0);
+        });
+        let before = handle.render();
+        assert!(before.contains("route=\"/mcp\""), "{before}");
+        assert!(!before.contains("secret-id"), "{before}");
+        assert!(before.contains("node=\"n-revoked\""), "{before}");
+        assert!(
+            before
+                .contains("steve_node_command_seconds_count{method=\"ping\",node=\"n-revoked\"} 1")
+                || before.contains(
+                    "steve_node_command_seconds_count{node=\"n-revoked\",method=\"ping\"} 1"
+                ),
+            "{before}"
+        );
+        handle.remove_label("node", "n-revoked");
+        let after = handle.render();
+        assert!(
+            !after.contains("n-revoked"),
+            "revoked node series must be removed: {after}"
+        );
+        assert!(
+            after.contains("steve_node_link_up{node=\"n-keep\"} 1"),
+            "{after}"
         );
     }
 
@@ -1256,7 +1966,7 @@ mod tests {
             |b: &str| crate::api::misc::record_web_perf(&axum::body::Bytes::from(b.to_string()));
         metrics::with_local_recorder(&recorder, || {
             let first = post(
-                r#"{"page":"inbox","long_tasks":[120,60000],"interactions":[250],"patch_apply":[3],"transcript_open":[50],"nav_opens":{"inbox":2,"chat":5,"unknown_page":9}}"#,
+                r#"{"page":"calendar","long_tasks":[120,60000],"interactions":[250],"patch_apply":[3],"transcript_open":[50],"nav_opens":{"inbox":2,"chat":5,"unknown_page":9},"errors":{"error":2,"unhandledrejection":1,"custom":4},"sse_reconnects":{"stale":3,"wake":1,"bogus":9}}"#,
             )
             .expect("first report");
             assert_eq!(first, vec![("chat", 5), ("inbox", 2)]);
@@ -1275,6 +1985,8 @@ mod tests {
                 r#"{"interactions":[60001]}"#,
                 r#"{"long_tasks":"x"}"#,
                 r#"{"nav_opens":{"chat":10001}}"#,
+                r#"{"errors":{"error":10001}}"#,
+                r#"{"sse_reconnects":{"error":10001}}"#,
                 &many,
                 &many_nav,
             ] {
@@ -1284,20 +1996,26 @@ mod tests {
         let text = handle.render();
         for line in [
             "steve_web_reports_total 2",
-            "steve_web_long_task_seconds_count{page=\"inbox\"} 2",
-            "steve_web_interaction_seconds_sum{page=\"inbox\"} 0.25",
-            "steve_web_patch_apply_seconds_count{page=\"inbox\"} 1",
-            "steve_web_transcript_open_seconds_count{page=\"inbox\"} 1",
+            "steve_web_long_task_seconds_count{page=\"calendar\"} 2",
+            "steve_web_interaction_seconds_sum{page=\"calendar\"} 0.25",
+            "steve_web_patch_apply_seconds_count{page=\"calendar\"} 1",
+            "steve_web_transcript_open_seconds_count{page=\"calendar\"} 1",
             "steve_web_nav_opens_total{item=\"chat\"} 5",
             "steve_web_nav_opens_total{item=\"inbox\"} 3",
             "steve_web_nav_opens_total{item=\"todos\"} 3",
+            "steve_web_errors_total{page=\"calendar\",kind=\"error\"} 2",
+            "steve_web_errors_total{page=\"calendar\",kind=\"unhandledrejection\"} 1",
+            "steve_web_sse_reconnects_total{reason=\"stale\"} 3",
+            "steve_web_sse_reconnects_total{reason=\"wake\"} 1",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} in {text}");
         }
-        assert!(
-            !text.contains("unknown_page"),
-            "unknown nav keys are never exported as labels: {text}"
-        );
+        for unknown in ["unknown_page", "custom", "bogus"] {
+            assert!(
+                !text.contains(unknown),
+                "unknown keys are never exported as labels ({unknown}): {text}"
+            );
+        }
     }
 
     #[test]

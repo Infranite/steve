@@ -164,7 +164,16 @@ pub struct W<'a> {
     pub(super) conn: &'a Connection,
 }
 
-type ReadConnection = PooledConnection<SqliteConnectionManager>;
+pub(crate) struct ReadConnection {
+    conn: PooledConnection<SqliteConnectionManager>,
+    _active: Option<crate::instrumentation::ReadPoolActiveGuard>,
+}
+
+impl ReadConnection {
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+}
 
 thread_local! {
     static READ_SNAPSHOTS: RefCell<Vec<(usize, Rc<ReadConnection>)>> = const { RefCell::new(Vec::new()) };
@@ -181,6 +190,26 @@ impl Drop for ReadSnapshot {
 }
 
 impl Store {
+    pub(crate) fn acquire_reader(&self) -> Result<ReadConnection> {
+        let wait = crate::instrumentation::ReadPoolWait::start();
+        match self.inner.readers.get() {
+            Ok(conn) => {
+                let active = wait.map(crate::instrumentation::ReadPoolWait::acquired);
+                crate::instrumentation::store_acquired();
+                Ok(ReadConnection {
+                    conn,
+                    _active: active,
+                })
+            }
+            Err(e) => {
+                if let Some(w) = wait {
+                    w.failed();
+                }
+                Err(StoreError::from(e))
+            }
+        }
+    }
+
     pub(crate) fn active_snapshot(&self) -> Option<Rc<ReadConnection>> {
         let id = Arc::as_ptr(&self.inner) as usize;
         READ_SNAPSHOTS.with_borrow(|snapshots| {
@@ -231,13 +260,12 @@ impl Store {
         }
         if let Some(c) = self.active_snapshot() {
             return f(&mut R {
-                db: &mut Sqlite(&c),
-                conn: &c,
+                db: &mut Sqlite(c.conn()),
+                conn: c.conn(),
             });
         }
-        let c = Rc::new(self.inner.readers.get().map_err(StoreError::from)?);
-        crate::instrumentation::store_acquired();
-        read_snapshot(&c, |r| {
+        let c = Rc::new(self.acquire_reader()?);
+        read_snapshot(c.conn(), |r| {
             let id = Arc::as_ptr(&self.inner) as usize;
             READ_SNAPSHOTS.with_borrow_mut(|snapshots| snapshots.push((id, Rc::clone(&c))));
             let _snapshot = ReadSnapshot(id);

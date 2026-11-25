@@ -1,6 +1,7 @@
-import { itemViews, openDecisions, sessionViews, table } from "@/data/sync"
-import type { ItemView } from "@/gen"
-import { actOnItem, getItems, itemDisplayState, st, useStoreSelector, type Item } from "@/store"
+import { itemViews, onViewKinds, openDecisions, sessionViews, table } from "@/data/sync"
+import { deepEqual } from "@/data/table"
+import type { DecisionView, ItemView, SessionView } from "@/gen"
+import { actOnItem, getItems, itemDisplayState, st, useShellSelector, type Item } from "@/store"
 /* The running-status pill, on affectUI's Running Now, with Steve's own data: every open item's one state (item-state.ts
  * via itemDisplayState) sorted as the items page sorts it (item-lanes.ts), so the pill's "N 进行中 · M 等你" is the
  * page's. ui.tsx shows it in the sidebar and a phone's page header, so this imports nothing from ui.tsx. */
@@ -8,7 +9,7 @@ import { RunningNow, type RunningTask } from "@/components/affect/running-now"
 import { resumable, RUN_ORDER, runStateOf, type RunState } from "@/item-lanes"
 import { permissionQuestion } from "@/permission-question"
 import { useT } from "@/i18n"
-import { useMemo, useState } from "react"
+import { useMemo, useState, useSyncExternalStore } from "react"
 
 /** what the item is on now: its open card's question or its own "now" line */
 export function stepOf(i: Item, said: string): string {
@@ -30,38 +31,54 @@ export function runningTasks(t: ReturnType<typeof useT>): RunningTask[] {
   return rows.sort((a, b) => a.order - b.order)
 }
 
-let inputs: { table: ReturnType<typeof table>; key: string } | undefined
-const itemStatusKeys = new WeakMap<ItemView, string>()
-function itemStatusKey(item: ItemView) {
-  let key = itemStatusKeys.get(item)
-  if (key === undefined) {
-    const { star, updated, detail_stamp, ...status } = item
-    key = JSON.stringify(status)
-    itemStatusKeys.set(item, key)
-  }
-  return key
+function itemSummaryEqual(a: ItemView, b: ItemView): boolean {
+  if (a === b) return true
+  return a.id === b.id && a.title === b.title && a.archived === b.archived
+    && a.plan_done === b.plan_done && a.plan_total === b.plan_total
+    && deepEqual(a.state, b.state) && deepEqual(a.waits, b.waits) && deepEqual(a.op_blockers, b.op_blockers)
+    && deepEqual(a.snooze, b.snooze)
 }
 
-function workSummary() {
-  const current = table()
-  if (inputs?.table === current) return inputs.key
-  const key = JSON.stringify([
-    itemViews().map(itemStatusKey),
-    sessionViews().map(({ id, item_id, status, busy, waiting, queued }) => [id, item_id, status, busy, waiting, queued]),
-    openDecisions(),
-  ])
-  inputs = { table: current, key }
-  return key
+function sessionSummaryEqual(a: SessionView, b: SessionView): boolean {
+  if (a === b) return true
+  return a.id === b.id && a.item_id === b.item_id && a.status === b.status
+    && a.busy === b.busy && a.queued === b.queued && deepEqual(a.waiting, b.waiting)
 }
 
-export const useWorkSummary = () => useStoreSelector(workSummary)
+let summaryState: {
+  sourceVer: number
+  summaryVer: number
+  items: ItemView[]
+  sessions: SessionView[]
+  decisions: DecisionView[]
+} | undefined
+
+function workSummaryVersion(): number {
+  const t = table()
+  const sourceVer = Math.max(t.kindVersion("item"), t.kindVersion("session"), t.kindVersion("decision"))
+  if (summaryState?.sourceVer === sourceVer) return summaryState.summaryVer
+  const items = itemViews(), sessions = sessionViews(), decisions = openDecisions()
+  const same = !!summaryState
+    && items.length === summaryState.items.length
+    && sessions.length === summaryState.sessions.length
+    && decisions.length === summaryState.decisions.length
+    && items.every((x, i) => itemSummaryEqual(x, summaryState!.items[i]))
+    && sessions.every((x, i) => sessionSummaryEqual(x, summaryState!.sessions[i]))
+    && decisions.every((x, i) => x === summaryState!.decisions[i])
+  const summaryVer = same ? summaryState!.summaryVer : (summaryState?.summaryVer ?? 0) + 1
+  summaryState = { sourceVer, summaryVer, items, sessions, decisions }
+  return summaryVer
+}
+
+const onWorkViews = (cb: () => void) => onViewKinds(["item", "session", "decision"], cb)
+export const useWorkSummary = () => useSyncExternalStore(onWorkViews, workSummaryVersion)
 
 /** `quiet`: nothing at all when no item is open (a phone's page header has no room to say so) */
 export function RunningNowPill({ className, align = "start", quiet = false }: { className?: string; align?: "start" | "end"; quiet?: boolean }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const work = useWorkSummary()
-  const bots = useStoreSelector(() => st.bots)
+  const bots = useShellSelector(() => st.bots)
   const tasks = useMemo(() => runningTasks(t), [work, bots, t])
   const leave = (h: string) => { setOpen(false); location.hash = h }
   if (quiet && !tasks.length) return null

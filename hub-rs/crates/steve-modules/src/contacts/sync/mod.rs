@@ -235,7 +235,7 @@ pub struct DirectorySync {
     state: Mutex<State>,
     wake: Arc<tokio::sync::Notify>,
     tx: mpsc::UnboundedSender<String>,
-    rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
+    rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>,
 }
 
 /// The first `hour:00` on the system clock strictly after `now_ms`.
@@ -279,18 +279,16 @@ impl DirectorySync {
             }),
             wake: Arc::new(tokio::sync::Notify::new()),
             tx,
-            rx: Mutex::new(Some(rx)),
+            rx: tokio::sync::Mutex::new(rx),
         })
     }
 
-    /// Runs the worker and timer once. Dropping this future drops both loops.
+    /// Runs the worker and timer. Safe to restart after a panic; dropping this future drops both loops.
     pub async fn run(self: Arc<Self>) {
-        let Some(mut rx) = lock(&self.rx).take() else {
-            return;
-        };
+        let mut rx = self.rx.lock().await;
         let worker = async {
             while let Some(id) = rx.recv().await {
-                self.run_job(&id).await;
+                steve_runtime::round("contacts.sync", self.run_job(&id)).await;
             }
         };
         let timer = steve_runtime::due::due_loop(

@@ -14,7 +14,7 @@ import { HubSwitcher } from "@/hub-ui"
 import { useT } from "@/i18n"
 import { MOBILE_TAB_KEYS, SIDEBAR_NAV, SIDEBAR_SCROLL_GROUPS, type SidebarNavKey } from "@/nav"
 import { RunningNowPill } from "@/running-pill"
-import { LOADED_WEB_VERSION, decisionBadgeCount, st, useStoreSelector } from "@/store"
+import { LOADED_WEB_VERSION, st, useDecisionBadgeCount, useShellSelector } from "@/store"
 import { Initials, useMe } from "@/mine"
 import { useMinute, useTodos } from "@/todos/data"
 import { dueCount } from "@/todos/model"
@@ -118,11 +118,11 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
 export function Sidebar({ route: full }: { route: string }) {
   const t = useT()
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
-  useStoreSelector(() => st.workspace)
-  useStoreSelector(() => st.workspaces)
-  useStoreSelector(() => st.version)
-  useStoreSelector(() => st.webVersion)
-  const n = useStoreSelector(decisionBadgeCount), now = useMinute(), todos = useTodos().todos, next = useNextMeetingAt(now)
+  useShellSelector(() => st.workspace)
+  useShellSelector(() => st.workspaces)
+  useShellSelector(() => st.version)
+  useShellSelector(() => st.webVersion)
+  const n = useDecisionBadgeCount(), now = useMinute(), todos = useTodos().todos, next = useNextMeetingAt(now)
   const meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
   /* what is in progress is the running-status pill's, under the header; the inbox keeps its count of open cards, in
    * the reminder color; 待办 a gray count of what is due today or overdue, which is never pushed */
@@ -197,7 +197,7 @@ export function Sidebar({ route: full }: { route: string }) {
 /** A newer Steve release the Hub found on its own: leads to Settings · 关于, where it is installed. */
 export function HubUpdateNotice() {
   const t = useT()
-  const update = useStoreSelector(() => st.update)
+  const update = useShellSelector(() => st.update)
   if (!update) return null
   return <a href="#/settings/about" className="flex items-center gap-2 rounded-lg px-1.5 py-1 type-footnote text-primary hover:bg-sidebar-accent group-data-[collapsible=icon]:hidden" data-sidebar-hub-update={update.version}>
     <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden />{t("core:sidebar.hubUpdate", { version: update.version })}
@@ -208,7 +208,7 @@ export function HubUpdateNotice() {
 export function MobileTabs({ route: full }: { route: string }) {
   const tr = useT()
   const route = full.split("?")[0]
-  const n = useStoreSelector(decisionBadgeCount)
+  const n = useDecisionBadgeCount()
   const tabs = MOBILE_TAB_KEYS.map((k) => {
     const entry = SIDEBAR_NAV.find((x) => x.l === k)!
     return { h: entry.h, l: tr(`core:nav.${k}`), I: NAV_ICON[k], b: k === "inbox" ? n : 0 }

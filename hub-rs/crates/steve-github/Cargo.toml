@@ -18,7 +18,7 @@ fake = [
 ]
 
 [dependencies]
-steve-runtime = { path = "../steve-runtime", default-features = false, features = ["policy", "cache"] }
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["policy", "cache", "jobs"] }
 steve-types = { path = "../steve-types" }
 steve-flow = { path = "../steve-flow" }
 steve-modules = { path = "../steve-modules" }

@@ -1,5 +1,5 @@
 import { useQueries } from "@tanstack/react-query"
-import { useEffect } from "react"
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react"
 import { api, Unauthenticated, type REvent } from "../api"
 import i18n, { t } from "../i18n"
 import { toast } from "../components/ui/toaster"
@@ -25,11 +25,25 @@ type Active = {
 }
 const active = new Map<string, Active>()
 const idle = new Set<string>()
+const transcriptListeners = new Map<string, Set<() => void>>()
 let frame = 0
+
+export function onTranscript(sid: string, fn: () => void): () => void {
+  let set = transcriptListeners.get(sid)
+  if (!set) transcriptListeners.set(sid, (set = new Set()))
+  set.add(fn)
+  return () => {
+    set!.delete(fn)
+    if (!set!.size) transcriptListeners.delete(sid)
+  }
+}
 
 function update(sid: string, f: (data: Transcript | undefined) => Transcript | undefined) {
   const old = getTranscript(sid), data = f(old)
-  if (data && data !== old) qc.setQueryData(keyOf(sid), data)
+  if (data && data !== old) {
+    qc.setQueryData(keyOf(sid), data)
+    transcriptListeners.get(sid)?.forEach((fn) => fn())
+  }
 }
 
 function flush(sid: string, slot: Active) {
@@ -124,6 +138,38 @@ export function useTranscripts(ids: readonly string[], load: readonly string[] =
 
 export const useTranscript = (sid?: string | null) => useTranscripts(sid ? [sid] : [])[0]
 
+const noop = () => {}
+/** Subscribe to a derived slice of one session's transcript, re-rendering only when `equal(prev, next)` is false. */
+export function useTranscriptSelector<T>(
+  sid: string | null | undefined,
+  select: (data: Transcript | undefined) => T,
+  equal: (a: T, b: T) => boolean = Object.is,
+  key?: unknown,
+): T {
+  useTranscriptDemand(sid ? [sid] : [])
+  const selectRef = useRef(select); selectRef.current = select
+  const equalRef = useRef(equal); equalRef.current = equal
+  const keyRef = useRef(key); keyRef.current = key
+  const cache = useRef<{ sid: string | null | undefined; data: Transcript | undefined; key: unknown; value: T; has: boolean }>({
+    sid: undefined, data: undefined, key: undefined, value: undefined as T, has: false,
+  })
+  const subscribe = useCallback((cb: () => void) => (sid ? onTranscript(sid, cb) : noop), [sid])
+  const getSnapshot = useCallback(() => {
+    const data = sid ? getTranscript(sid) : undefined
+    const k = keyRef.current
+    const cur = cache.current
+    if (cur.has && cur.sid === sid && cur.data === data && Object.is(cur.key, k)) return cur.value
+    const next = selectRef.current(data)
+    if (cur.has && cur.sid === sid && equalRef.current(cur.value, next)) {
+      cur.data = data; cur.key = k
+      return cur.value
+    }
+    cur.sid = sid; cur.data = data; cur.key = k; cur.value = next; cur.has = true
+    return next
+  }, [sid])
+  return useSyncExternalStore(subscribe, getSnapshot)
+}
+
 const older = new Map<string, Promise<void>>()
 export function loadOlderTranscript(sid: string) {
   const pending = older.get(sid)
@@ -171,12 +217,14 @@ export function resetTranscripts() {
   idle.clear()
   older.clear()
   qc.removeQueries({ queryKey: prefix })
+  for (const set of transcriptListeners.values()) set.forEach((fn) => fn())
 }
 
 function reloadTranscripts() {
   idle.clear()
   older.clear()
   qc.removeQueries({ queryKey: prefix })
+  for (const set of transcriptListeners.values()) set.forEach((fn) => fn())
   for (const [sid, slot] of active) {
     slot.controller.abort()
     clearTimeout(slot.retry)

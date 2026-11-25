@@ -441,35 +441,51 @@ impl GitHub {
             .unwrap_or(0)
     }
 
-    /// The background job: queues deliveries left `received` (on start: the first tick is at once),
-    /// polls what is due every 30 seconds, prunes deliveries hourly. Holds
-    /// only a weak reference; stops when the service is dropped.
-    pub async fn run_jobs(self) {
+    /// The background job as a supervised periodic [`steve_runtime::Task`]: queues deliveries
+    /// left `received` (first tick immediate), polls what is due every 30 seconds, prunes
+    /// deliveries hourly. Holds a weak reference to `Inner` and closes the queue on drop.
+    pub fn jobs_task(self) -> steve_runtime::Task {
         struct Scope(GitHub);
         impl Drop for Scope {
             fn drop(&mut self) {
                 self.0.0.queue.close();
             }
         }
-        let _scope = Scope(self.clone());
+        let scope = std::sync::Arc::new(Scope(self.clone()));
         let weak: Weak<Inner> = std::sync::Arc::downgrade(&self.0);
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let task = steve_runtime::every(
+            "github.poll",
+            std::sync::Arc::new(steve_runtime::SystemClock),
+            TICK,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let _scope = scope.clone();
+                let weak = weak.clone();
+                let n = n.clone();
+                async move {
+                    let Some(inner) = weak.upgrade() else {
+                        return;
+                    };
+                    let gh = GitHub(inner);
+                    // first what a restart left accepted but unprocessed, then the poll
+                    gh.recover_deliveries();
+                    gh.poll_due().await;
+                    gh.verify_deliveries().await;
+                    if n.fetch_add(1, Ordering::Relaxed).is_multiple_of(120) {
+                        gh.prune_deliveries();
+                    }
+                }
+            },
+        );
+        task
+    }
 
-        let mut tick = tokio::time::interval(TICK);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut n: u64 = 0;
-        loop {
-            tick.tick().await;
-            let Some(inner) = weak.upgrade() else { break };
-            let gh = GitHub(inner);
-            // first what a restart left accepted but unprocessed, then the poll
-            gh.recover_deliveries();
-            gh.poll_due().await;
-            gh.verify_deliveries().await;
-            if n.is_multiple_of(120) {
-                gh.prune_deliveries();
-            }
-            n += 1;
-        }
+    /// The background job: queues deliveries left `received` (on start: the first tick is at once),
+    /// polls what is due every 30 seconds, prunes deliveries hourly. Holds
+    /// only a weak reference; stops when the service is dropped.
+    pub async fn run_jobs(self) {
+        self.jobs_task().await;
     }
 }
 

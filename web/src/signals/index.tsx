@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Page, Group, Segmented, Chips, StatusDot, Empty, go, SearchField, ConnectPrompt } from "@/ui"
 import { cn } from "@/lib/utils"
-import { st, tm, toast, botName } from "@/store"
+import { st, tm, toast, botName, useShellStore } from "@/store"
 import { flowApi, useLoad, errText, sourceLabel, SOURCE_LABEL, type Signal, type SignalDetail } from "@/api/flow"
 import { HubError } from "@/api"
 import { srcIcon, Json, Failed, Clamp, ms, RUN_STATUS } from "@/auto/common"
@@ -30,6 +30,7 @@ const openGroups = new Set<string>(["need", "failed"])
 const focusOf = () => new URLSearchParams(location.hash.split("?")[1] ?? "").get("e")
 
 export function SignalsView() {
+  useShellStore()
   const t = useT(), [, force] = useState(0), r = () => force((x) => x + 1)
   const focus = focusOf()
   if (focus && range === "today") range = "7d"

@@ -153,12 +153,27 @@ impl Presence {
         true
     }
 
+    /// Ends the streams of clients signed out where this Hub did not see it, as a supervised
+    /// periodic [`steve_runtime::Task`].
+    pub fn sweep_task(self: Arc<Self>, store: Store) -> steve_runtime::Task {
+        steve_runtime::every_after(
+            "hub.presence",
+            Arc::new(steve_runtime::SystemClock),
+            SWEEP_EVERY,
+            steve_runtime::FirstRun::AfterPeriod,
+            move || {
+                let me = self.clone();
+                let store = store.clone();
+                async move {
+                    me.sweep_once(&store).await;
+                }
+            },
+        )
+    }
+
     /// Ends the streams of clients signed out where this Hub did not see it, until the Hub stops.
     pub async fn sweep(self: Arc<Self>, store: Store) {
-        loop {
-            tokio::time::sleep(SWEEP_EVERY).await;
-            self.sweep_once(&store).await;
-        }
+        self.sweep_task(store).await;
     }
 
     /// One look: every client with a stream open that is signed out (or gone) now is kicked.

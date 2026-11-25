@@ -11,6 +11,7 @@ function client(status, body, contentType = "application/json", failure) {
     if (id === "@/i18n") return { lang: () => "en", t: (key) => key }
     if (id === "./i18n/reason.ts") return { reasonText: body => body.error }
     if (id === "./stream-cursor") return {}
+    if (id === "./perf") return { recordSseReconnect: () => {} }
     if (id === "./hub") return { hubUrl: (path) => path }
     throw new Error(id)
   }, fetch: async () => {

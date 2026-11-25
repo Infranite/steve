@@ -12,7 +12,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { go, SectionLabel, DiscChevron, Disclosure, DISC_TRIGGER, SUMMARY } from "@/ui"
 import { Select, ChoiceCards } from "@/view-shared"
-import { st, toast, useStoreSelector } from "@/store"
+import { st, toast, useShellSelector } from "@/store"
 import { HubError } from "@/api"
 import { t, useT } from "@/i18n"
 import { useBusy, report } from "@/accounts/load"
@@ -260,7 +260,7 @@ type GuideAdapter = IAdapter
 
 export function FeishuGuide({ adapters, bots, selfDone, callbackUrls, bare }: { adapters: GuideAdapter[]; bots: { id: string; name: string; domain?: "feishu" | "lark" }[]; selfDone: boolean; callbackUrls: string[]; bare?: boolean }) {
   const t = useT()
-  const registration = useStoreSelector(() => st.modules?.feishuRegistration)
+  const registration = useShellSelector(() => st.modules?.feishuRegistration)
   const botAdapter = adapters.some((a) => a.id === FEISHU_APP)
   /* “授权你本人” only with a side acting as you that pairs with the bot; its buttons are the ways it declares */
   const side = selfSideOf(adapters) as IAdapter | null

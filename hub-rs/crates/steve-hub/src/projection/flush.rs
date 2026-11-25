@@ -92,8 +92,8 @@ impl Run {
         self.seen = self.seen.max(rev);
     }
 
-    pub(super) async fn run(mut self, mut asks: mpsc::Receiver<Ask>) {
-        self.load().await;
+    pub(super) async fn run(mut self, asks: &mut mpsc::Receiver<Ask>) {
+        steve_runtime::round("hub.projection", self.load()).await;
         let mut reconcile = tokio::time::interval_at(
             tokio::time::Instant::now() + RECONCILE_EVERY,
             RECONCILE_EVERY,
@@ -107,21 +107,27 @@ impl Run {
                 .chain(self.waiting.iter().map(|w| w.until))
                 .min()
                 .unwrap_or_else(|| Instant::now() + RECONCILE_EVERY);
+            let mut worked = false;
             tokio::select! {
                 e = self.tap.recv() => match e {
                     Ok(batch) => self.take(&batch),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        self.rebuild().await;
+                        steve_runtime::round("hub.projection", self.rebuild()).await;
+                        worked = true;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
                 a = asks.recv() => match a {
-                    Some(a) => self.ask(a).await,
+                    Some(a) => {
+                        self.ask(a).await;
+                        worked = true;
+                    }
                     None => return,
                 },
                 _ = tokio::time::sleep_until(next.into()) => {}
                 _ = reconcile.tick() => {
-                    self.reconcile().await;
+                    steve_runtime::round("hub.projection", self.reconcile()).await;
+                    worked = true;
                 }
             }
             // A snapshot may bring forward a scheduled flush. Reading the snapshot itself
@@ -142,9 +148,16 @@ impl Run {
                 .filter(|(_, w)| w.due.is_some_and(|d| d <= now))
                 .map(|(k, _)| k.clone())
                 .collect();
-            for ws in due {
-                self.flush(&ws).await;
+            if !due.is_empty() {
+                steve_runtime::round("hub.projection", async {
+                    for ws in due {
+                        self.flush(&ws).await;
+                    }
+                })
+                .await;
+                worked = true;
             }
+            let _ = worked;
             self.answer_waiting().await;
         }
     }

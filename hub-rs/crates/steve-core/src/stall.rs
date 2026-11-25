@@ -35,18 +35,27 @@ impl Core {
     }
 
     /// Checks for stalled sessions every 30 seconds.
+    pub fn watch_stalls(self) -> steve_runtime::Task {
+        self.stall_task(CHECK_EVERY)
+    }
+
+    /// Checks for stalled sessions every 30 seconds.
     pub async fn run_stall_watch(self) {
         self.stall_watch(CHECK_EVERY).await;
     }
 
     /// The stall watch every `every` (tests run it faster).
     pub(crate) async fn stall_watch(self, every: Duration) {
+        self.stall_task(every).await;
+    }
+
+    fn stall_task(self, every: Duration) -> steve_runtime::Task {
         let clock = self
             .modules()
             .map(|m| m.clock.clone())
             .unwrap_or_else(|| std::sync::Arc::new(steve_runtime::SystemClock));
         steve_runtime::every(
-            "core.stall",
+            "core.stalls",
             clock,
             every,
             steve_runtime::FirstRun::Immediate,
@@ -62,7 +71,6 @@ impl Core {
                 }
             },
         )
-        .await;
     }
 }
 

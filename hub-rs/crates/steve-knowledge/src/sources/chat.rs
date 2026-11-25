@@ -263,11 +263,12 @@ pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResu
 }
 
 /// Starts the `kb.chat` job (today hourly; yesterday at 03:30 and its extraction at 03:40).
-pub async fn run(m: Modules, kb: Knowledge) {
+pub fn task(m: Modules, kb: Knowledge) -> steve_runtime::Task {
+    let clock = m.clock.clone();
     let mut last_today = i64::MIN;
     steve_runtime::every(
         "kb.chat",
-        m.clock.clone(),
+        clock,
         TICK,
         steve_runtime::FirstRun::Immediate,
         move || {
@@ -284,7 +285,10 @@ pub async fn run(m: Modules, kb: Knowledge) {
             }
         },
     )
-    .await;
+}
+
+pub async fn run(m: Modules, kb: Knowledge) {
+    task(m, kb).await;
 }
 
 /// Re-reads a day document for the index queue.

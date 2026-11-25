@@ -8,13 +8,13 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
 import { api, setPageWorkspace, signIn, Unauthenticated } from "@/api"
-import { table } from "@/data/sync"
+import { table, useItemView } from "@/data/sync"
 import { useTranscriptDemand } from "@/data/transcript"
 import { deliveryWorkspace } from "@/delivery"
 import { hubNavigationAllowed, API, currentHub, hello, hubBase, HubError, hubUrl, nativeBridge, openUrl, rememberHub, setHub } from "@/hub"
 import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
 import { readHubInfo } from "@/hub-management-api"
-import { getItem, st, useSession, useStoreSelector, start, type Sess } from "@/store"
+import { st, useSession, useShellSelector, start, type Sess } from "@/store"
 import { lang, useT } from "@/i18n"
 import { useCommandShortcut, useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
@@ -118,12 +118,12 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     else if (a === "items" && !b) void loadItems().catch(() => {})
     else if (a === "sessions" && b) void loadSessionView().catch(() => {})
   }, [a, b, inChat, deliveryId])
-  const workspace = useStoreSelector(() => st.workspace)
-  const ready = useStoreSelector(() => st.ready)
-  const error = useStoreSelector(() => st.error)
-  const signInPath = useStoreSelector(() => st.login)
-  const itemTitle = useStoreSelector(() => a === "items" && b ? getItem(b)?.t : undefined)
-  const projectTitle = useStoreSelector(() => a === "projects" && b ? st.projects.find((p) => p.id === b)?.name : undefined)
+  const workspace = useShellSelector(() => st.workspace)
+  const ready = useShellSelector(() => st.ready)
+  const error = useShellSelector(() => st.error)
+  const signInPath = useShellSelector(() => st.login)
+  const itemTitle = useItemView(a === "items" ? b : undefined)?.title
+  const projectTitle = useShellSelector(() => a === "projects" && b ? st.projects.find((p) => p.id === b)?.name : undefined)
   const t = useT()
   /* whether this page has a Hub to talk to: the one that served it, or the one it was pointed at */
   const [hub, setHubState] = useState<"checking" | "ok" | "missing">("checking")
@@ -266,8 +266,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
 }
 
 function WorkspacePage({ a, b, c, d, workspace, session }: { a: string; b?: string; c?: string; d?: string; workspace: string; session?: Sess }) {
-  const sh = useStoreSelector(getSheet)
-  useStoreSelector(() => a === "" || a === "c" ? (sh ? st.ver : 0) : st.ver)
+  const sh = useShellSelector(getSheet)
   const navPath = a === "contacts" && b === "me" ? "#/contacts/me" : "#/" + a
   const navKey = navItemOf(navPath)
   useEffect(() => { if (navKey) recordNavOpen(navPath) }, [navKey]) // eslint-disable-line react-hooks/exhaustive-deps
