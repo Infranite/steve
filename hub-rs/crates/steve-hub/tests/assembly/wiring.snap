@@ -155,6 +155,7 @@ api GET /stats/breakdown
 api GET /stats/events
 api GET /stats/items
 api GET /stats/items/x
+api GET /stats/nav
 api GET /stats/prices
 api GET /stats/realtime
 api GET /stats/series

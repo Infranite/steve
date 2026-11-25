@@ -92,8 +92,6 @@ export function BotCompare({ f, fkey, live, onBot }: { f: Filter; fkey: string; 
       cell: (r) => { const n = failsOf(r.s), p = per(n, r.s.throughput.done); return <span title={failTitle(r.s)}><Two a={<span className={n ? "text-destructive" : undefined}>{n}</span>} b={p != null ? t("stats:v2.bots.perDone", { n: fmtRate(p) }) : undefined} /></span> } },
     { k: "reworks", label: t("stats:v2.bots.reworks"), def: t("stats:v2.bots.reworksDef"), v: (r) => r.s.quality.reworks,
       cell: (r) => <Two a={<span className={r.s.quality.reworks ? "text-attention" : undefined}>{r.s.quality.reworks}</span>} b={r.s.quality.reworks_per_done != null ? t("stats:v2.bots.perDone", { n: fmtRate(r.s.quality.reworks_per_done) }) : undefined} /> },
-    { k: "unit_retries", label: t("stats:v2.bots.unitRetries"), def: t("stats:v2.bots.unitRetriesDef"), v: (r) => r.s.quality.unit_retries ?? null,
-      cell: (r) => (r.s.quality.unit_retries == null ? dash : <span className={r.s.quality.unit_retries ? "text-attention" : undefined}>{r.s.quality.unit_retries}</span>) },
     { k: "turn_err", label: t("stats:v2.bots.turnErr"), def: t("stats:v2.bots.turnErrDef"), v: (r) => r.s.quality.turn_error_rate,
       cell: (r) => (r.s.quality.turn_error_rate == null ? dash : <Two a={fmtPct(r.s.quality.turn_error_rate, 1)} b={t("stats:v2.bots.ofTurns", { count: r.s.usage.turns, n: fmtN(r.s.usage.turns) })} />) },
     { k: "agent_per_item", label: t("stats:v2.bots.agentPerItem"), def: t("stats:v2.bots.agentPerItemDef"), v: (r) => r.s.time.agent.avg, fmt: fmtMs },

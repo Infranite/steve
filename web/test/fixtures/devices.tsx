@@ -15,8 +15,8 @@ st.version = "0.2.112"
 if (!location.hash) location.hash = "#/devices/nodes"
 /* the devices pages under their routes, as the app mounts them (a route change remounts the page) */
 function Routed() {
-  const [, b, c] = useRoute()
-  return <DevicesRoute key={`${b}/${c}`} b={b} c={c} />
+  const [, b, c, d] = useRoute()
+  return <DevicesRoute key={`${b}/${c}`} b={b} c={c} d={d} />
 }
 /* the Add device dialog, as the app opens it from a sheet */
 function Sheet() {

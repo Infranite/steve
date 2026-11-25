@@ -287,6 +287,13 @@ pub struct Cancel {
     pub reason: String,
 }
 
+/// Cancel a single active subtask (e.g. an ACP RFD child subagent) without cancelling the parent turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelSubtask {
+    pub session: SessionId,
+    pub subtask: CallId,
+}
+
 /// The Hub gives up on an execution whose outcome is unknown (after a Node restart): the Node makes
 /// sure its processes are gone (stopping them if they still run), then ends it as interrupted and
 /// frees what it held. Only for `unknown` targets; a live one is cancelled instead.

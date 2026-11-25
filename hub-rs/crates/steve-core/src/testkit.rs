@@ -72,8 +72,6 @@ pub struct FakeState {
     pub follow_up_before_stop: bool,
     /// The backend makes items' worktrees ([`AgentRuntime::makes_worktrees`]).
     pub makes_worktrees: bool,
-    /// Explicit opt-in only for collaboration state-machine tests; no real process is started.
-    pub workflow_execution_ready: bool,
     /// `created` binds the session where its worktree is made (else it stays with the core).
     pub binds_worktrees: bool,
     /// `created` binds the session to a directory it only opens (its item was first prepared
@@ -101,8 +99,8 @@ pub struct FakeRuntime {
 }
 
 impl FakeRuntime {
-    fn workflow_blocker(&self, sid: &str) -> Result<Option<String>> {
-        Ok(steve_store::core_fixture::thread::workflow_blocker(
+    fn session_blocker(&self, sid: &str) -> Result<Option<steve_store::item_gate::GateBlocker>> {
+        Ok(steve_store::core_fixture::thread::session_blocker(
             self.store.store(),
             sid,
         )?)
@@ -158,7 +156,7 @@ impl FakeRuntime {
             let _ = self
                 .store
                 .event_add(sid, "turn_end", json!({"stopReason": stop}));
-            let q = if st.holding || self.workflow_blocker(sid).unwrap().is_some() {
+            let q = if st.holding || self.session_blocker(sid).unwrap().is_some() {
                 vec![]
             } else {
                 self.store.queue_take(sid).unwrap()
@@ -214,13 +212,6 @@ impl AgentRuntime for FakeRuntime {
             None => Ok(()),
         }
     }
-    fn check_workflow_execution(&self, _item: &str) -> Result<()> {
-        if self.st().workflow_execution_ready {
-            Ok(())
-        } else {
-            Err(msg("测试运行器未启用隔离协作执行"))
-        }
-    }
     fn prompt(
         &self,
         sid: &str,
@@ -228,8 +219,8 @@ impl AgentRuntime for FakeRuntime {
         via: &str,
         files: &[crate::repo::FileRef],
     ) -> Result<Prompted> {
-        if let Some(why) = self.workflow_blocker(sid)? {
-            return Err(msg(why));
+        if let Some(why) = self.session_blocker(sid)? {
+            return Err(msg(why.code()));
         }
         let s = self.store.session(sid)?.ok_or_else(|| msg("no session"))?;
         let mut st = self.st();
@@ -257,8 +248,8 @@ impl AgentRuntime for FakeRuntime {
         sid: &str,
         text: &str,
     ) -> Result<()> {
-        if let Some(why) = steve_store::workflow_gate::session_blocker(w, sid)? {
-            return Err(msg(why));
+        if let Some(why) = steve_store::item_gate::session_blocker(w, sid)? {
+            return Err(msg(why.code()));
         }
         if steve_store::node_sessions::ended(w, sid)? {
             return Err(msg("已结束的会话不能接收新消息，请使用当前会话。"));
@@ -432,7 +423,7 @@ impl AgentRuntime for FakeRuntime {
 
 impl FakeRuntime {
     fn flush_now(&self, sid: &str, lead: Option<(&str, &str)>) -> Flushed {
-        if self.workflow_blocker(sid).unwrap().is_some() {
+        if self.session_blocker(sid).unwrap().is_some() {
             return Flushed::Held;
         }
         let mut st = self.st();
@@ -533,8 +524,6 @@ impl Kit {
     pub fn with(f: impl FnOnce(&mut CoreConfig)) -> Kit {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = CoreConfig::for_home(dir.path());
-        /* Existing collaboration fixtures opt in; production defaults stay off. */
-        cfg.dynamic_workflows = true;
         /* the boot resume runs when a test says so (`core.fire_resume()`), not on a clock */
         cfg.resume_delay = Duration::from_secs(3600);
         /* a stopped agent reaches the card at once unless a test lets Steve continue it (`takeover`) */

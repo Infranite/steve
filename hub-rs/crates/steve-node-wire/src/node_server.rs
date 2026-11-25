@@ -37,6 +37,7 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
             TURN_START => en(&n.start_turn(de(p)?).await?),
             SESSION_INSPECT => en(&n.session(de(p)?).await?),
             SESSION_RELEASE => en(&n.release_session(de(p)?).await?),
+            SESSION_CANCEL_SUBTASK => en(&n.cancel_subtask(de(p)?).await?),
             JOB_START => en(&n.start_job(de(p)?).await?),
             OP_INSPECT => en(&n.operation(de(p)?).await?),
             EXEC_CANCEL => en(&n.cancel(de(p)?).await?),

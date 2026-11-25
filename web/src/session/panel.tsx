@@ -24,7 +24,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useT } from "@/i18n"
 import { clockDur, longDur, nearTime, pastTime } from "@/i18n/format"
 import { OutDialog, type OutOpen } from "@/item-outputs"
-import { itemDisplayStatus } from "@/item-workflow-relation"
+import { itemDisplayStatus } from "@/store"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { ResumeCard } from "@/resume"
 import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, useStats } from "@/stats/format"
@@ -199,7 +199,7 @@ function Outputs({ s, det, data }: { s: Sess; det: RItemDetail | null; data?: Tr
 }
 
 /* ───────── where it sits ───────── */
-type Why = "flowParent" | "forkedFrom" | "itemFromSession" | "sessionFork" | "dep" | "flowChild" | "forked" | "fromHere" | "dependent" | "sessionForked"
+type Why = "forkedFrom" | "itemFromSession" | "sessionFork" | "dep" | "forked" | "fromHere" | "dependent" | "sessionForked"
 type Rel = { id: string; kind: "item" | "sess"; why: Why }
 /** one related item or session on one line: its state, its number, its name; why it is related when the row's label
  *  does not already say it */
@@ -226,19 +226,19 @@ function Relations({ s }: { s: Sess }) {
   const [openDown, setOpenDown] = useState(false), [allSame, setAllSame] = useState(false)
   const i = find(s.item)
   const up: Rel[] = [], down: Rel[] = [], same: Rel[] = []
-  if (i?.parent?.item && find(i.parent.item)) up.push({ id: i.parent.item, kind: "item", why: i.src[1] === "workflow" ? "flowParent" : "forkedFrom" })
+  if (i?.parent?.item && find(i.parent.item)) up.push({ id: i.parent.item, kind: "item", why: "forkedFrom" })
   if (i?.parent?.s && getSession(i.parent.s)) up.push({ id: i.parent.s, kind: "sess", why: "itemFromSession" })
   if (s.fork?.s && getSession(s.fork.s)) up.push({ id: s.fork.s, kind: "sess", why: "sessionFork" })
   for (const d of i?.deps ?? []) if (find(d)) up.push({ id: d, kind: "item", why: "dep" })
   for (const x of getItems()) {
-    if (i && x.parent?.item === i.id) down.push({ id: x.id, kind: "item", why: x.src[1] === "workflow" ? "flowChild" : "forked" })
+    if (i && x.parent?.item === i.id) down.push({ id: x.id, kind: "item", why: "forked" })
     else if (x.parent?.s === s.id) down.push({ id: x.id, kind: "item", why: "fromHere" })
   }
   /* what waits on the item: the items that list it among their prerequisites */
   for (const x of getItems()) if (i && x.deps?.includes(i.id) && !down.some((r) => r.id === x.id)) down.push({ id: x.id, kind: "item", why: "dependent" })
   for (const other of getSessions()) if (other.id !== s.id && other.fork?.s === s.id) down.push({ id: other.id, kind: "sess", why: "sessionForked" })
   for (const k of i?.ss ?? []) if (k !== s.id && getSession(k)) same.push({ id: k, kind: "sess", why: "itemFromSession" })
-  /* one reason for all of them (an item's collaboration units): said once, in the count */
+  /* one reason for all of them: said once, in the count */
   const one = down.length && down.every((r) => r.why === down[0].why) ? down[0].why : null
   const sameShown = allSame ? same : same.slice(0, 3)
   return (
@@ -255,7 +255,7 @@ function Relations({ s }: { s: Sess }) {
         {down.length > 0 && <Row k={t("views:sessionPanel.row.down")} data-rel-group="down">
           <Collapsible open={openDown} onOpenChange={setOpenDown}>
             <CollapsibleTrigger className={cn(ROW, "group/disc items-center py-0.5 text-foreground")} data-rel-down-toggle>
-              <span className="min-w-0 flex-1 truncate">{t("views:sessionPanel.downN", { count: down.length, what: t(`views:sessionPanel.downWhat.${(one as "flowChild" | "forked" | "fromHere" | "dependent" | "sessionForked" | null) ?? "mixed"}`) })}</span>
+              <span className="min-w-0 flex-1 truncate">{t("views:sessionPanel.downN", { count: down.length, what: t(`views:sessionPanel.downWhat.${(one as "forked" | "fromHere" | "dependent" | "sessionForked" | null) ?? "mixed"}`) })}</span>
               <DiscChevron className="text-tertiary" />
             </CollapsibleTrigger>
             <CollapsibleContent><div className="pt-0.5">{down.map((r) => <RelLine key={r.kind + r.id} r={r} why={!one} />)}</div></CollapsibleContent>

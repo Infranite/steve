@@ -2,6 +2,14 @@
  * No Hub or external messaging service receives a request. Set STEVE_TEST_SHOTS to save screenshots and receipts. */
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
+import {
+  channelReplyContext,
+  channelReplyDecisionAnswer,
+  channelReplyOpenDecision,
+  decisionSnapshot,
+  decisionViews,
+  emptyMessagePage,
+} from "./fixtures/channel-reply-data.ts"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5193"
@@ -11,8 +19,6 @@ const receipts = []
 let assertions = 0
 const eq = (actual, expected, message) => { assert.deepEqual(actual, expected, message); assertions++ }
 const ok = (value, message) => { assert.ok(value, message); assertions++ }
-const context = (id) => ({ space: { id: id === "cm_next" ? "sp_next" : "sp_product", name: id === "cm_next" ? "另一个聊天" : "产品讨论群", kind: "group", external: true }, as_you: id === "cm_next", persona: id === "cm_next" ? null : "值班助手", text: "正式草稿", reply_to: { id: "cm_in", sender: "陈同学", text: "你是谁啊？\n我想了解你的职责。", at: 1 }, before: [{ sender: "林同学", text: "欢迎新同学。", at: 0 }] })
-const openDecision = { id: "dc_reply", ws: "ws_fixture", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: { kind: "raw", text: "以值班助手回复「产品讨论群」的消息" }, draft: "我是值班助手。", options: ["yes", "no"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null, revision: 1 }
 
 async function open(kind, { width = 1280, lang = "zh-CN", dark = true, fail = false, refreshFails = true, missingContext = false, delayedContext = false, staleRead = false } = {}) {
   const page = await browser.newPage({ locale: lang, viewport: { width, height: 1000 } })
@@ -32,19 +38,19 @@ async function open(kind, { width = 1280, lang = "zh-CN", dark = true, fail = fa
       await new Promise((resolve) => { release = resolve })
       const failed = failNext; failNext = false
       receipts.push({ scenario: kind, width, lang, request: calls.at(-1), response: failed ? { status: 503, error: "fixture: channel unavailable" } : { status: 200, result: { revision: 1, choice: body.choice, send_at: body.choice === "yes" ? 2000 : undefined } } })
-      return failed ? route.fulfill({ status: 503, json: { error: "fixture: channel unavailable" } }) : route.fulfill({ headers: { "x-steve-rev": String(++rev) }, json: { id: "dc_reply", status: "resolved", result: { revision: 1, choice: body.choice, ...(body.choice === "yes" ? { send_at: 2000 } : {}) } } })
+      return failed ? route.fulfill({ status: 503, json: { error: "fixture: channel unavailable" } }) : route.fulfill({ headers: { "x-steve-rev": String(++rev) }, json: channelReplyDecisionAnswer(body.choice) })
     }
     if (u.pathname.endsWith("/context")) {
       const id = u.pathname.split("/")[3]
       if (delayedContext && id === "cm_next") await new Promise((resolve) => { contextRelease = resolve })
-      return missingContext ? route.fulfill({ status: 404, json: { error: "fixture: context unavailable" } }) : route.fulfill({ json: context(id) })
+      return missingContext ? route.fulfill({ status: 404, json: { error: "fixture: context unavailable" } }) : route.fulfill({ json: channelReplyContext(id) })
     }
-    if (u.pathname === "/api/views" && !refreshFails) return route.fulfill({ json: { rev, views: [], missing: ["dc_reply"] } })
-    if (u.pathname === "/api/views/page") return route.fulfill({ json: { rev, views: [], next: null } })
+    if (u.pathname === "/api/views" && !refreshFails) return route.fulfill({ json: decisionViews([], rev, ["dc_reply"]) })
+    if (u.pathname === "/api/views/page") return route.fulfill({ json: emptyMessagePage(rev) })
     if (u.pathname === "/api/snapshot") {
       stateReads++
-      const snapshot = (rows, at = ++rev) => route.fulfill({ json: { rev: at, cursor: String(at), views: { decision: rows } } })
-      if (staleRead && stateReads === 1) { await new Promise((resolve) => { stateRelease = resolve }); return snapshot([openDecision], 1) }
+      const snapshot = (rows, at = ++rev) => route.fulfill({ json: decisionSnapshot(rows, at) })
+      if (staleRead && stateReads === 1) { await new Promise((resolve) => { stateRelease = resolve }); return snapshot([channelReplyOpenDecision], 1) }
       return decisions ? snapshot(decisions) : route.fulfill({ status: 503, json: { error: "fixture: snapshot unavailable" } })
     }
     return route.fulfill({ status: 404, json: { error: "fixture: unavailable" } })
@@ -55,7 +61,7 @@ async function open(kind, { width = 1280, lang = "zh-CN", dark = true, fail = fa
     page, calls,
     async started(n = 1) { await page.waitForFunction(() => document.querySelector('[aria-busy="true"]')); eq(calls.length, n, "exactly one decision request per click") },
     release() { assert.ok(release, "a request is waiting"); release() },
-    authoritativeOpen() { decisions = [openDecision] },
+    authoritativeOpen() { decisions = [channelReplyOpenDecision] },
     authoritativeClosed() { decisions = [] },
     async stateStarted() { for (let n = 0; n < 100 && !stateRelease; n++) await page.waitForTimeout(10); assert.ok(stateRelease) },
     releaseState() { assert.ok(stateRelease); stateRelease() },

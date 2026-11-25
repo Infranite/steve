@@ -37,7 +37,7 @@ impl NodeRuntime {
         self.running()?;
         let planned = self.write(|tx| {
             self.store
-                .write(|w| queue_in(w, session, text, via, files, now()))?;
+                .write(|w| queue_in(w, session, text, via, files, self.clock.now()))?;
             self.plan_in(tx, session)
         })?;
         if planned == Planned::Created {
@@ -75,9 +75,9 @@ impl NodeRuntime {
                     .store
                     .read(|r| planning::queue_head(r, session, text))?;
                 if !waiting {
-                    self.store.write(|w| {
-                        queue_in(w, session, text, via, &[], first.map_or(now(), |t| t - 1))
-                    })?;
+                    let at = first.map_or_else(|| self.clock.now(), |t| t - 1);
+                    self.store
+                        .write(|w| queue_in(w, session, text, via, &[], at))?;
                 }
             }
             let p = self.plan_in(tx, session)?;
@@ -129,8 +129,8 @@ impl NodeRuntime {
             return Ok(Planned::Held);
         }
         // Node facts and reconciliation can schedule the next queued turn without going through
-        // RoutedRuntime::flush. Recheck the durable graph in the same transaction as the claim.
-        if self.workflow_blocker_in(session)?.is_some() {
+        // RoutedRuntime::flush. Recheck the durable item gate in the same transaction as the claim.
+        if self.item_blocker_in(session)?.is_some() {
             return Ok(Planned::Held);
         }
         // the persisted upgrade maintenance holds too: after a restart mid-drain nobody calls hold
@@ -174,7 +174,7 @@ impl NodeRuntime {
         // a member joined the workspace since the session was bound, say: no new turn there
         self.session_owners_work_in(tx, session)?;
         let turn = uid("t");
-        let msgs = node_write::claim_in(tx, session, &turn, now())?;
+        let msgs = node_write::claim_in(tx, session, &turn, self.clock.now())?;
         if msgs.is_empty() {
             return Ok(Planned::Empty);
         }
@@ -245,6 +245,7 @@ impl NodeRuntime {
         let key = next_revision(tx, Intent::StartTurn(idv(turn.to_string())?), advance)?;
         let op = key.op().to_string();
         let limit = self.turn_limit.load(std::sync::atomic::Ordering::Relaxed);
+        let at = self.clock.now();
         let spec = TurnSpec {
             session: open.session.clone(),
             turn: idv(turn.to_string())?,
@@ -257,8 +258,8 @@ impl NodeRuntime {
                 prompt,
                 policy: open.policy.clone(),
                 limits: Limits {
-                    deadline: Timestamp(now() + limit),
-                    offline_until: Timestamp(now() + limit),
+                    deadline: Timestamp(at + limit),
+                    offline_until: Timestamp(at + limit),
                     /* no total cap on a turn's output: a long turn is not cut for talking much; the
                      * Node's journal budget still keeps its disk (2026-11-09) */
                     max_output_bytes: u64::MAX,
@@ -273,7 +274,7 @@ impl NodeRuntime {
             turn: spec.turn.clone(),
             attempt: spec.run.attempt.clone(),
         };
-        let (req, digest) = command(&op, spec.clone())?;
+        let (req, digest) = command_at(&op, spec.clone(), at)?;
         node_write::insert_attempt_in(
             tx,
             &rt::NewAttempt {
@@ -286,7 +287,7 @@ impl NodeRuntime {
                 spec: &serde_json::to_value(&spec).map_err(conflict)?,
                 digest: &digest,
             },
-            now(),
+            at,
         )?;
         rt::insert_intent_in(
             tx,
@@ -300,7 +301,7 @@ impl NodeRuntime {
                 target_attempt: Some(&attempt),
                 dependency: None,
             },
-            self.clock.now(),
+            at,
         )?;
         let trev = self.turn_revision(turn)?;
         node_write::turn_cas_in(
@@ -313,7 +314,7 @@ impl NodeRuntime {
                 retry_ordinal: ordinal,
                 applied: false,
             },
-            now(),
+            at,
         )?;
         let srev = self.session_revision(session)?;
         if !node_write::session_cas_in(
@@ -325,7 +326,7 @@ impl NodeRuntime {
                 active_attempt: Some(&attempt),
                 release_pending: false,
             },
-            now(),
+            at,
         )? {
             return Err(conflict("the session changed while planning"));
         }
@@ -403,7 +404,7 @@ impl NodeRuntime {
                 }
                 return Ok(self.recover_in(tx, session, None)?.unwrap_or(false));
             };
-            node_write::cancel_attempt_in(tx, &attempt, rev, now())?;
+            node_write::cancel_attempt_in(tx, &attempt, rev, self.clock.now())?;
             let start = self.store.read(|r| dispatch::start_state(r, &target))?;
             match start {
                 // every send of it so far was refused before acceptance (or none was made): it
@@ -491,7 +492,7 @@ impl NodeRuntime {
         let op = key.op().to_string();
         let target = idv(target.to_string())?;
         let (req, digest) = if method == "abandon" {
-            command(
+            self.command(
                 &op,
                 Abandon {
                     target,
@@ -499,7 +500,7 @@ impl NodeRuntime {
                 },
             )?
         } else {
-            command(
+            self.command(
                 &op,
                 Cancel {
                     target,
@@ -540,7 +541,7 @@ impl NodeRuntime {
             ReceiptState::Rejected,
             false,
             &json!({ "reason": "cancelled before it was sent" }),
-            now(),
+            self.clock.now(),
         )?;
         let completion = Completion {
             outcome: Outcome::Cancelled,
@@ -571,6 +572,7 @@ impl NodeRuntime {
             let (turn, _) = node_turns::for_attempt(r, attempt)?;
             Ok::<_, StoreError>((row.revision, turn))
         })?;
+        let at = self.clock.now();
         node_write::attempt_cas_in(
             tx,
             attempt,
@@ -578,14 +580,13 @@ impl NodeRuntime {
             "finished",
             None,
             Some(&serde_json::to_value(completion).map_err(conflict)?),
-            now(),
+            at,
         )?;
         self.close_cards_of_attempt_in(tx, attempt)?;
         self.turn_over_in(tx, session, &turn, completion)?;
         // the attempt's statistics row, if it had started, ends with this outcome (with the
         // runtime state); the business side hears it once this transaction committed (staged
         // until then, see `Self::write`)
-        let at = now();
         let facts = super::apply::take_facts(tx, attempt)?;
         let measure = super::super::acp_stats::try_node_attempt_finished(
             &self.store,

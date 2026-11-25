@@ -38,7 +38,6 @@ pub fn summary_reference(location: Option<&str>) -> bool {
         || location.starts_with("交付摘要")
         || location.starts_with("本次交付正文")
         || location.contains("steve_deliver summary")
-        || (location.contains("steve_workflow") && location.contains("summary"))
         || (location.starts_with("ST-") && location.contains("交付摘要"))
 }
 

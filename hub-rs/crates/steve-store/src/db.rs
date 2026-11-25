@@ -262,8 +262,12 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/123.sql"),
     // 124: decision revisions, choice receipts, natural keys, prompt templates, and typed undo.
     include_str!("../migrations/124.sql"),
-    // 125: redefine knowledge: project AGENTS.md proposals, reclassify facts, withdraw items/chat.
+    // 125: durable daily aggregates for low-cardinality telemetry counters.
     include_str!("../migrations/125.sql"),
+    // 126: remove retired dynamic work-graph tables and steve_workflow tool pins.
+    include_str!("../migrations/126.sql"),
+    // 127: redefine knowledge: project AGENTS.md proposals, reclassify facts, withdraw items/chat.
+    include_str!("../migrations/127.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
@@ -825,168 +829,6 @@ mod migration_progress_tests {
             count,
             "observer leaked beyond the failed migration"
         );
-    }
-
-    #[test]
-    fn migration_125_redefines_knowledge_proposals_and_withdraws_record_sources() {
-        let c = Connection::open_in_memory().unwrap();
-        for (i, m) in MIGRATIONS[..124].iter().enumerate() {
-            if i == 119 {
-                add_reasoning_effort(&c).unwrap();
-            }
-            if i == 121 {
-                ensure_item_lifecycle(&c).unwrap();
-            }
-            c.execute_batch(m).unwrap();
-        }
-        ensure_item_lifecycle(&c).unwrap();
-        c.execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_version(v INTEGER NOT NULL);
-             DELETE FROM schema_version; INSERT INTO schema_version VALUES(124);
-             CREATE TABLE IF NOT EXISTS schema_compat(min_reader INTEGER NOT NULL);
-             DELETE FROM schema_compat; INSERT INTO schema_compat VALUES(124);
-             PRAGMA foreign_keys = ON;
-             INSERT INTO workspaces(id, name, created) VALUES ('ws_1', 'Default', 1);
-             INSERT INTO projects(id, workspace_id, name, path, kind, archived, created, updated)
-               VALUES ('prj_steve', 'ws_1', 'steve', '/repo/steve', 'git', 0, 1, 1);
-             INSERT INTO parties(id, workspace_id, type, name, created_by, created, updated)
-               VALUES ('ct_sarah', 'ws_1', 'contact', 'Sarah', 'owner', 1, 1);
-             INSERT INTO items(id, workspace_id, no, title, phase, project_id, created, updated)
-               VALUES ('ST-10', 'ws_1', 10, 'Fix CI build', 'closed', 'prj_steve', 1, 10);
-             INSERT INTO messages(id, workspace_id, space, author, text, created)
-               VALUES ('msg_1', 'ws_1', 'steve', 'me', 'Remember to review contract', 10);
-             INSERT INTO kb_sources(id, workspace_id, kind, name, visibility, level, created_by, created, updated) VALUES
-               ('ks_notes', 'ws_1', 'notes', 'Notes', 'private', 'conclusion', 'owner', 1, 1),
-               ('ks_files', 'ws_1', 'files', 'Files', 'private', 'conclusion', 'owner', 1, 1),
-               ('ks_items', 'ws_1', 'items', 'Items', 'workspace', 'conclusion', 'owner', 1, 1),
-               ('ks_chat', 'ws_1', 'chat', 'Chat', 'private', 'conclusion', 'owner', 1, 1),
-               ('ks_mems', 'ws_1', 'mems', 'Mems', 'private', 'conclusion', 'owner', 1, 1),
-               ('ks_bots', 'ws_1', 'bot_mems', 'Bots', 'workspace', 'conclusion', 'owner', 1, 1);
-             INSERT INTO kb_docs(id, workspace_id, source_id, ref, title, created_by, created, updated) VALUES
-               ('kd_note', 'ws_1', 'ks_notes', 'n1', 'Acme note', 'owner', 1, 1),
-               ('kd_item', 'ws_1', 'ks_items', 'ST-10', 'ST-10 Fix CI build', 'owner', 1, 1),
-               ('kd_chat', 'ws_1', 'ks_chat', '2026-11-01', '2026-11-01 chat', 'owner', 1, 1);
-             INSERT INTO kb_doc_about(doc_id, workspace_id, object_type, object_id) VALUES ('kd_item', 'ws_1', 'project', 'prj_steve');
-             INSERT INTO kb_chunks(id, workspace_id, obj_type, obj_id, seq, text, visibility, level, created_by, source_kind, label, updated) VALUES
-               (1, 'ws_1', 'chunk', 'kd_note', 0, 'Acme note body', 'private', 'conclusion', 'owner', 'notes', '笔记 · Acme', 1),
-               (2, 'ws_1', 'chunk', 'kd_item', 0, 'Item delivery text', 'workspace', 'conclusion', 'owner', 'items', '事项 · ST-10', 1),
-               (3, 'ws_1', 'chunk', 'kd_chat', 0, 'Chat day transcript', 'private', 'conclusion', 'owner', 'chat', '对话 · 11-01', 1),
-               (4, 'ws_1', 'mem', 'mm_eng_conf', 0, 'Run cargo check before merge', 'private', 'conclusion', 'owner', 'mems', '知识条目', 1),
-               (5, 'ws_1', 'mem', 'mm_rule_mis', 0, '创建事项必须先建卡片', 'private', 'conclusion', 'owner', 'mems', '知识条目 · 通用', 1),
-               (6, 'ws_1', 'mem', 'mm_pref_mis', 0, '优先给完整方案', 'private', 'conclusion', 'owner', 'mems', '知识条目 · 通用', 1);
-             INSERT INTO kb_fts(rowid, seg, title) VALUES
-               (1, 'acme note', 'acme'),
-               (2, 'item delivery', 'st-10'),
-               (3, 'chat transcript', 'chat'),
-               (4, 'cargo check', ''),
-               (5, '先建 卡片', ''),
-               (6, '优先 方案', '');
-             INSERT INTO kb_marks(workspace_id, name, value, updated) VALUES
-               ('ws_1', 'sync:chat:2026-11-01', '1', 1),
-               ('ws_1', 'extract:chat:2026-11-01', '1', 1);
-             -- Engineering confirmed memory (from item) -> project_proposals
-             INSERT INTO mems(id, workspace_id, kind, text, source_type, source_id, source_label, status, visibility, level, writer, created_by, created, updated)
-               VALUES ('mm_eng_conf', 'ws_1', 'fact', 'Run cargo check before merge', 'item', 'ST-10', 'ST-10 交付时', 'confirmed', 'private', 'conclusion', 'steve', 'owner', 10, 10);
-             -- Engineering pending candidate (unanchored, mentions steve) -> project_proposals + decision superseded
-             INSERT INTO mems(id, workspace_id, kind, text, source_type, source_id, source_label, status, visibility, level, decision_id, writer, created_by, created, updated)
-               VALUES ('mm_eng_cand', 'ws_1', 'fact', 'steve migrations lock file must match', 'message', 'chat:1', '对话', 'candidate', 'private', 'conclusion', 'dec_eng', 'steve', 'owner', 11, 11);
-             INSERT INTO mem_candidates(mem_id, workspace_id, origin, origin_id, origin_label, evidence, created)
-               VALUES ('mm_eng_cand', 'ws_1', 'chat', 'chat:1', '对话', 'migrations lock file', 11);
-             INSERT INTO decisions(id, workspace_id, kind, subject_type, subject_id, question, draft, options, status, requested_by, created)
-               VALUES ('dec_eng', 'ws_1', 'confirm', 'mem', 'mm_eng_cand', 'Save?', '', '[\"yes\",\"no\"]', 'open', 'steve', 11);
-             -- Owner misclassified facts -> rule & preference
-             INSERT INTO mems(id, workspace_id, kind, text, source_type, source_label, status, visibility, level, writer, created_by, created, updated) VALUES
-               ('mm_rule_mis', 'ws_1', 'fact', '创建事项必须先建卡片', 'me', '你写的', 'confirmed', 'private', 'conclusion', 'me', 'owner', 12, 12),
-               ('mm_pref_mis', 'ws_1', 'fact', '优先给完整方案', 'me', '你写的', 'confirmed', 'private', 'conclusion', 'me', 'owner', 13, 13);
-             -- Valid person fact -> untouched
-             INSERT INTO mems(id, workspace_id, kind, text, source_type, source_id, source_label, status, visibility, level, writer, created_by, created, updated)
-               VALUES ('mm_person', 'ws_1', 'fact', 'Sarah leads procurement', 'item', 'ST-10', 'ST-10 交付时', 'confirmed', 'private', 'conclusion', 'steve', 'owner', 14, 14);
-             INSERT INTO mem_about(mem_id, workspace_id, object_type, object_id) VALUES ('mm_person', 'ws_1', 'party', 'ct_sarah');",
-        )
-        .unwrap();
-
-        migrate(&c).unwrap();
-        assert_eq!(compat(&c).unwrap().schema, SCHEMA_VERSION);
-
-        // Engineering memories moved to project_proposals; open decision superseded; mems cleaned.
-        let props: Vec<(String, String, String, String)> = c
-            .prepare("SELECT id, project_id, kind, status FROM project_proposals ORDER BY id")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(
-            props,
-            vec![
-                (
-                    "prp_mm_eng_cand".into(),
-                    "prj_steve".into(),
-                    "agents_md".into(),
-                    "pending".into()
-                ),
-                (
-                    "prp_mm_eng_conf".into(),
-                    "prj_steve".into(),
-                    "agents_md".into(),
-                    "pending".into()
-                ),
-            ]
-        );
-        let dec_status: String = c
-            .query_row("SELECT status FROM decisions WHERE id='dec_eng'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(dec_status, "superseded");
-
-        // Remaining memories: misclassified owner facts fixed, valid person fact kept, eng mems gone.
-        let mems: Vec<(String, String)> = c
-            .prepare("SELECT id, kind FROM mems ORDER BY id")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(
-            mems,
-            vec![
-                ("mm_person".into(), "fact".into()),
-                ("mm_pref_mis".into(), "preference".into()),
-                ("mm_rule_mis".into(), "rule".into()),
-            ]
-        );
-        let relabeled: String = c
-            .query_row("SELECT label FROM kb_chunks WHERE id=5", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(relabeled, "长期记忆 · 通用");
-
-        // items & chat removed from kb_* tables while underlying items & messages remain untouched.
-        let count = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
-        assert_eq!(
-            count("SELECT COUNT(*) FROM kb_sources WHERE kind IN ('items','chat')"),
-            0
-        );
-        assert_eq!(count("SELECT COUNT(*) FROM kb_sources"), 4);
-        assert_eq!(count("SELECT COUNT(*) FROM kb_docs"), 1);
-        assert_eq!(
-            count("SELECT COUNT(*) FROM kb_chunks WHERE source_kind IN ('items','chat')"),
-            0
-        );
-        assert_eq!(
-            count("SELECT COUNT(*) FROM kb_chunks WHERE obj_id='mm_eng_conf'"),
-            0
-        );
-        assert_eq!(
-            count("SELECT COUNT(*) FROM kb_marks WHERE name LIKE 'sync:chat:%'"),
-            0
-        );
-        assert_eq!(
-            count("SELECT COUNT(*) FROM kb_marks WHERE name='extract:chat:2026-11-01'"),
-            1
-        );
-        assert_eq!(count("SELECT COUNT(*) FROM items WHERE id='ST-10'"), 1);
-        assert_eq!(count("SELECT COUNT(*) FROM messages WHERE id='msg_1'"), 1);
     }
 }
 

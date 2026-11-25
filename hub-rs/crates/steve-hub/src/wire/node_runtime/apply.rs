@@ -284,6 +284,27 @@ impl NodeRuntime {
                 }
                 w.attempts().keep_facts(a, &k)?;
             }
+            (EventBody::SubtaskChanged { subtask }, _) => {
+                let origin = match subtask.origin {
+                    SubtaskOrigin::Subagent => "subagent",
+                    SubtaskOrigin::BackgroundTask => "background_task",
+                    SubtaskOrigin::NativeWorkflow => "native_workflow",
+                };
+                let status = match subtask.status {
+                    SubtaskStatus::Queued => "queued",
+                    SubtaskStatus::Running => "running",
+                    SubtaskStatus::NeedsYou => "needs_you",
+                    SubtaskStatus::Done => "done",
+                    SubtaskStatus::Failed => "failed",
+                    SubtaskStatus::Cancelled => "cancelled",
+                };
+                metrics::counter!(
+                    "steve_subtask_updates_total",
+                    "origin" => origin,
+                    "status" => status,
+                )
+                .increment(1);
+            }
             (
                 EventBody::WorkspaceChanged {
                     workspace,
@@ -330,13 +351,13 @@ impl NodeRuntime {
                                 active_attempt: None,
                                 release_pending: false,
                             },
-                            now(),
+                            self.clock.now(),
                         )?;
                     }
                 }
                 // the resume handle is the harness's own session id (ACP `sessionId`), what ST-28
                 // shows and the legacy runner keeps too
-                observations::effective(w, &session, view, now())?;
+                observations::effective(w, &session, view, self.clock.now())?;
             }
             (EventBody::AttemptStarted, Some(a)) => {
                 if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
@@ -354,7 +375,7 @@ impl NodeRuntime {
                         out.push(After::AutoTurn);
                     }
                     let ordinal = node_turns::ordinal(w, a)?;
-                    node_sessions::set_status(w, &session, "running", now())?;
+                    node_sessions::set_status(w, &session, "running", self.clock.now())?;
                     // The turn's first message follows the last completed turn.
                     let user_seq = observations::first_user_since_turn(w, &session)?;
                     super::super::acp_stats::try_node_attempt_started(
@@ -441,7 +462,7 @@ impl NodeRuntime {
                     .unwrap()
                     .push(Tell::StalledUsage(stall.reason, tokens));
             }
-            if report.model.is_some() {
+            if report.model.is_some() && report.scope != UsageScope::Subtask {
                 kept.model = report.model.clone();
             }
             if let Some(d) = delta {
@@ -449,14 +470,15 @@ impl NodeRuntime {
             }
             w.attempts().keep_facts(a, &kept)?;
         }
-        observations::context(
-            w,
-            session,
-            report.context_used.and_then(cost::context),
-            report.context_limit.and_then(cost::context),
-            delta,
-            now(),
-        )?;
+        let (ctx_used, ctx_limit) = if report.scope == UsageScope::Subtask {
+            (None, None)
+        } else {
+            (
+                report.context_used.and_then(cost::context),
+                report.context_limit.and_then(cost::context),
+            )
+        };
+        observations::context(w, session, ctx_used, ctx_limit, delta, self.clock.now())?;
         Ok(if delta.is_some_and(|d| d > 0.0) {
             vec![After::Cost {
                 session: session.to_string(),
@@ -478,6 +500,7 @@ impl NodeRuntime {
         let agent = |role: Option<Role>| matches!(role, Some(Role::Assistant | Role::Thought));
         let active = match &ev.body {
             EventBody::ToolChanged { .. }
+            | EventBody::SubtaskChanged { .. }
             | EventBody::PermissionRequested { .. }
             | EventBody::PermissionResolved { .. }
             | EventBody::Plan { .. } => true,
@@ -521,7 +544,7 @@ impl NodeRuntime {
                         "running",
                         None,
                         None,
-                        now(),
+                        self.clock.now(),
                     )? {
                         self.observe_attempt_start(w, x.attempt().as_str())?;
                     }
@@ -685,7 +708,7 @@ impl NodeRuntime {
             }) = &c.error
             && let Some(delay) = RETRY_DELAYS_MS.get(ordinal as usize)
             && config::desired_in(&self.store, session)?.is_none()
-            && self.workflow_blocker_in(session)?.is_none()
+            && self.item_blocker_in(session)?.is_none()
             && self
                 .store
                 .read(|r| node_turns::retry::allowed(r, session))?
@@ -748,6 +771,7 @@ impl NodeRuntime {
     ) -> Result<(), StoreError> {
         let rev = self.turn_revision(turn)?;
         let ordinal = self.store.read(|r| node_turns::retry_ordinal(r, turn))?;
+        let at = self.clock.now();
         node_write::turn_cas_in(
             tx,
             turn,
@@ -758,7 +782,7 @@ impl NodeRuntime {
                 retry_ordinal: ordinal,
                 applied: true,
             },
-            now(),
+            at,
         )?;
         node_write::dispatch_receipt_in(
             tx,
@@ -769,7 +793,7 @@ impl NodeRuntime {
                 Outcome::Interrupted | Outcome::TimedOut => "interrupted",
                 Outcome::Failed => "error",
             },
-            now(),
+            at,
         )?;
         event_in(
             tx,
@@ -790,7 +814,7 @@ impl NodeRuntime {
                 active_attempt: None,
                 release_pending: false,
             },
-            now(),
+            at,
         )?;
         Ok(())
     }

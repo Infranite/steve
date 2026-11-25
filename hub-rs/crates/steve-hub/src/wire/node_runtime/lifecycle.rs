@@ -84,7 +84,7 @@ impl NodeRuntime {
                     node_session: &b.session,
                     config_revision: open.policy.revision.as_str(),
                 },
-                now(),
+                self.clock.now(),
             )?;
             if !fresh {
                 return Ok(false);
@@ -114,7 +114,7 @@ impl NodeRuntime {
             let prep_key =
                 next_revision(tx, Intent::Prepare(open.session.clone()), Advance::NewInput)?;
             let prep_op = prep_key.op().to_string();
-            let (prep, prep_d) = command(
+            let (prep, prep_d) = self.command(
                 &prep_op,
                 Prepare {
                     resource: b.resource.clone(),
@@ -159,7 +159,7 @@ impl NodeRuntime {
                     &open.choice.harness,
                 )?;
             }
-            let (open_v, open_d) = command(&open_op, open.clone())?;
+            let (open_v, open_d) = self.command(&open_op, open.clone())?;
             rt::insert_intent_in(
                 tx,
                 &open_key,
@@ -185,7 +185,7 @@ impl NodeRuntime {
                     active_attempt: None,
                     release_pending: false,
                 },
-                now(),
+                self.clock.now(),
             )?;
             Ok(true)
         })?;
@@ -257,7 +257,7 @@ impl NodeRuntime {
             super::super::node_env::for_session(&self.store, self.node_id.as_str(), session)?;
         open.skills = super::super::bot_skills::for_session(tx, session)?;
         let op = key.op().to_string();
-        let (req, digest) = command(&op, open)?;
+        let (req, digest) = self.command(&op, open)?;
         rt::insert_intent_in(
             tx,
             &key,
@@ -283,7 +283,7 @@ impl NodeRuntime {
                 active_attempt: None,
                 release_pending: false,
             },
-            now(),
+            self.clock.now(),
         )?;
         Ok(())
     }
@@ -343,7 +343,7 @@ impl NodeRuntime {
         if !self.may_plan() || self.running().is_err() || self.store.maintenance() {
             return 0;
         }
-        let before = now() - self.idle_release.load(Ordering::Relaxed);
+        let before = self.clock.now() - self.idle_release.load(Ordering::Relaxed);
         let node = self.node_id.as_str();
         let idle = self.store.read(|r| sessions::idle(r, node, before, None));
         let idle = match idle {
@@ -403,7 +403,7 @@ impl NodeRuntime {
                         ReceiptState::Finished,
                         true,
                         &json!({ "reason": "the session was let go already" }),
-                        now(),
+                        self.clock.now(),
                     )?;
                 }
                 Ok(Release::Gone)
@@ -433,7 +433,7 @@ impl NodeRuntime {
                         active_attempt: None,
                         release_pending: false,
                     },
-                    now(),
+                    self.clock.now(),
                 )?;
                 Ok(Release::Pending(op))
             }
@@ -462,7 +462,7 @@ impl NodeRuntime {
         let sid: SessionId = idv(session.to_string())?;
         let key = next_revision(tx, Intent::Release(sid.clone()), Advance::NewInput)?;
         let op = key.op().to_string();
-        let (req, digest) = command(&op, sid)?;
+        let (req, digest) = self.command(&op, sid)?;
         rt::insert_intent_in(
             tx,
             &key,

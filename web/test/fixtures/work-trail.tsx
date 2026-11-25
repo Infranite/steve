@@ -1,5 +1,5 @@
 import { updateChat } from "../../src/data/live"
-import { seedMessages, seedSessions } from "./view-data"
+import { fixtureRawBot, fixtureShell, seedMessages, seedSessions } from "./view-data"
 import { useEffect } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
@@ -7,7 +7,7 @@ import { api, type REvent, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { Trail } from "../../src/components/work-trail"
-import { refresh, st, useStore, type Msg } from "../../src/store"
+import { refresh, useStore, type Msg } from "../../src/store"
 import { Transcript } from "../../src/thread/transcript"
 import { LiveSteps, StepsBlock, openSteps } from "../../src/chat2"
 
@@ -19,10 +19,9 @@ const T = Date.now(), s = (n: number) => T - (120 - n) * 1000
 seedSessions({ s1: { b: "dev", harness: "claude-code", m: "claude-opus-5-5", cwd: "/tmp/st-7", st: done ? "ended" : "run",
   title: "瑞典上线调研", device: "hub", src: "item", busy: !done, since: s(0), at: s(60) } })
 let seq = 0
-const ev = (n: number, kind: string, data: any): REvent => ({ seq: ++seq, ts: s(n), kind, data })
-const tool = (n: number, v: any, open = false): REvent => ev(n, "tool", { tool: { id: "t" + seq, origin: "harness", phase: open ? "running" : "succeeded", ...v } })
+const ev = (n: number, kind: string, data: Record<string, unknown>): REvent => ({ seq: ++seq, ts: s(n), kind, data })
+const tool = (n: number, v: Record<string, unknown>, open = false): REvent => ev(n, "tool", { tool: { id: "t" + seq, origin: "harness", phase: open ? "running" : "succeeded", ...v } })
 const read = (n: number, f: string) => tool(n, { name: "Read", category: "read", title: "Read " + f, target: f })
-const grep = (n: number, p: string, open = false) => tool(n, { name: "Grep", category: "search", title: "Grep " + p, target: p, action: { type: "search", query: p } }, open)
 const web = (n: number, p: string) => tool(n, { name: "WebSearch", category: "fetch", title: p, action: { type: "search", query: p } })
 const run = (n: number, cmd: string, desc: string, open = false) => tool(n, { name: "Bash", category: "exec", title: cmd, target: cmd, description: desc, action: { type: "exec", command: cmd }, result: [{ type: "text", text: "ok\n3 files" }] }, open)
 const edit = (n: number, f: string) => tool(n, { name: "Edit", category: "edit", title: "Edit " + f, target: f, result: [{ type: "diff", path: f, old: "a\nb", new: "a\nc\nd", added: 2, removed: 1 }] })
@@ -32,16 +31,30 @@ const events: REvent[] = [
   ev(2, "text", { role: "thought", text: thought }),
   read(8, "/repo/data/orders/sweden-2026.csv"), read(9, "/repo/data/orders/returns.csv"), read(9, "/repo/docs/shipping.md"), read(10, "/repo/data/customers.json"), read(10, "/repo/data/orders/norway-2026.csv"),
   web(12, "Swedish e-commerce delivery expectations 2026"), web(13, "acedesign.io sweden pricing"), web(14, "Klarna share Sweden checkout"),
-  tool(16, { name: "Task", category: "think", title: "Brand Researcher", description: "品牌研究员：扫描瑞典竞品品牌" }),
+  tool(15, { name: "Skill", category: "other", title: "sweden-brief", target: "sweden-brief", description: "加载瑞典上线调研模板" }),
+  ev(16, "subtask", { subtask: {
+    id: "sub-brand", origin: "subagent", status: done ? "done" : "running",
+    title: "品牌研究员：扫描瑞典竞品品牌", actor: "Brand Researcher", model: "claude-sonnet-4-6",
+    progress: "检索本地竞品定价", can_cancel: !done, duration_ms: done ? 4200 : undefined,
+    summary: done ? "梳理了 6 家瑞典本土品牌的价格带与退货政策。" : undefined,
+    usage: done ? { input: 1800, output: 420, cost: { decimal: "0.012", currency: "USD" } } : undefined,
+  } }),
+  tool(17, { name: "Read", category: "read", parent: "sub-brand", title: "Read competitors.md", target: "/repo/data/competitors.md", duration_ms: 420 }),
+  tool(17, { name: "WebSearch", category: "fetch", parent: "sub-brand", title: "sweden brand benchmarks", action: { type: "search", query: "sweden brand benchmarks" }, duration_ms: 910 }),
+  ev(17, "subtask", { subtask: {
+    id: "bg-report-check", origin: "background_task", status: done ? "done" : "running",
+    title: "后台校验报告模板", actor: "Bash", progress: "npm run lint:report",
+    can_cancel: false, duration_ms: done ? 1950 : undefined,
+  } }),
   tool(18, { name: "mcp__steve__steve_update", origin: "steve", category: "steve", title: "update", action: { type: "tool", args: { now: "写上线报告", plan: [{ step: "读瑞典订单历史", done: true }, { step: "搜本地市场资料", done: true }, { step: "对比瑞典与挪威", done: true }, { step: "写上线报告", done: false }] } } }),
   ev(19, "text", { role: "assistant", text: "订单和市场都看完了，开始写报告。" }),
   edit(20, "/repo/reports/sweden-insight.md"), edit(22, "/repo/reports/summary.md"),
   run(24, "npm run build:report", "生成 PDF 报告"), run(26, "ls reports", "检查产物", !done),
   ...(done ? [ev(28, "text", { role: "assistant", text: "报告已就绪：`reports/sweden-insight.pdf`。" }), ev(29, "turn_end", { stopReason: "end_turn" })] : []),
 ]
-const state = { version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [], decisions: [], recent: [], allBots: [],
-  bots: [{ id: "dev", name: "Steve 开发 Bot", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
-  projects: [], tags: [], tagUses: {}, thread: [], settings: {}, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
+const state: Shell = fixtureShell({
+  bots: [fixtureRawBot({ id: "dev", name: "Steve 开发 Bot" })],
+})
 api.shell = async () => structuredClone(state)
 api.transcript = async () => ({ events, next: null })
 const research: Msg = { id: "r1", k: "steve", t: "", created: T, steps: { ms: 41000, research: { run: "x", model: null, ms: 41000, turns: 3, tools: 7 },

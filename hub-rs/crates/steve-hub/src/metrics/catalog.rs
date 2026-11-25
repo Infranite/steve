@@ -587,6 +587,11 @@ pub(super) fn describe() {
         "Time from mounting a session transcript to rendering its latest turns. Labels: page."
     );
     describe_counter!(
+        "steve_web_nav_opens_total",
+        Count,
+        "Menu item opens reported by the web client. Labels: item."
+    );
+    describe_counter!(
         "steve_metrics_collection_errors_total",
         Count,
         "Figures that could not be collected. Labels: source."
