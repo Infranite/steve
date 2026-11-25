@@ -18,6 +18,7 @@ export default {
     remove: "移除",
     search: "搜索",
     refresh: "刷新",
+    choose: "请选择…",
   },
   a11y: {
     code: "{{name}} 代码",

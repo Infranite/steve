@@ -329,6 +329,7 @@ export default {
     propDeps: "前置",
     propDependents: "后续",
     propSessions: "会话",
+    sessionTechDetails: "运行与审批详情",
     propUsage: "用量",
     propTime: "用时",
     propProject: "项目",
@@ -754,7 +755,7 @@ export default {
     tagWait: "等你",
     tagDone: "已完成",
     tagProp: "提议",
-    doAvatar: "头像固定用 Agent Robot Avatar，每个 Bot 自己定颜色和头型，静止不动",
+    doAvatar: "头像固定用机器人头像，每个 Bot 自己定颜色和头型，静止不动",
     dontAvatar: "每个 Bot 一种颜色：和状态色混在一起",
     /* one initial per sample bot: 前端、邮件、日程、运维、评审 */
     botInitials: "前邮日运评",

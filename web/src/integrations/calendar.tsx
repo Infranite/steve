@@ -8,7 +8,7 @@ import { CalendarIcon, CheckIcon, RefreshCwIcon, UploadIcon, UserRoundIcon } fro
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
+import { CommandMenu } from "@/components/affect/command-menu-clean"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Group, Row, SectionLabel } from "@/ui"
 import { Select } from "@/view-shared"
@@ -48,20 +48,33 @@ function PersonPick({ c, onPick, disabled }: { c: CalCalendar; onPick: (party: s
       </PopoverTrigger>
       <PopoverContent align="start" className="w-[min(300px,calc(100vw-24px))] gap-0 rounded-2xl p-0">
         <div className="border-b px-3 py-2 type-footnote text-muted-foreground">{t("integrations:calendar.whoseOf", { name: c.name })}</div>
-        <Command className="rounded-b-2xl" shouldFilter={false}>
-          <CommandInput placeholder={t("integrations:calendar.search")} value={q} onValueChange={setQ} />
-          <CommandList className="max-h-[min(320px,50vh)]">
-            <CommandEmpty>{found ? t("integrations:calendar.noMatch") : t("integrations:calendar.loading")}</CommandEmpty>
-            <CommandGroup>
-              <CommandItem value="__me" onSelect={() => { setOpen(false); if (!c.mine) onPick(null) }} data-calendar-person-opt="me">
-                <span className="min-w-0 flex-1 truncate">{t("integrations:calendar.mine")}</span>{c.mine && <CheckIcon className="size-4" />}</CommandItem>
-              {xs.map((p) => (
-                <CommandItem key={p.id} value={p.id} onSelect={() => { setOpen(false); if (c.party_id !== p.id) onPick(p.id) }} data-calendar-person-opt={p.name}>
-                  <span className="min-w-0 flex-1 truncate">{p.name}</span>{!c.mine && c.party_id === p.id && <CheckIcon className="size-4" />}</CommandItem>
-              ))}
-            </CommandGroup>
-          </CommandList>
-        </Command>
+        <CommandMenu
+          bare
+          autoFocus
+          showFooter={false}
+          shouldFilter={false}
+          onQueryChange={setQ}
+          onClose={() => setOpen(false)}
+          labels={{ placeholder: t("integrations:calendar.search"), empty: found ? t("integrations:calendar.noMatch") : t("integrations:calendar.loading") }}
+          groups={[{
+            id: "people",
+            label: "",
+            commands: [
+              { id: "__me", label: t("integrations:calendar.mine"), trailing: c.mine ? <CheckIcon className="size-4" /> : undefined, data: { "data-calendar-person-opt": "me" } },
+              ...xs.map((p) => ({
+                id: p.id,
+                label: p.name,
+                trailing: !c.mine && c.party_id === p.id ? <CheckIcon className="size-4" /> : undefined,
+                data: { "data-calendar-person-opt": p.name },
+              })),
+            ],
+          }]}
+          onRun={(id) => {
+            setOpen(false)
+            if (id === "__me") { if (!c.mine) onPick(null) }
+            else if (c.party_id !== id) onPick(id)
+          }}
+        />
       </PopoverContent>
     </Popover>
   )

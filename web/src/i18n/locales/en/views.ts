@@ -336,6 +336,7 @@ export default {
     propDeps: "Depends on",
     propDependents: "Next",
     propSessions: "Conversations",
+    sessionTechDetails: "Runtime & approval details",
     propUsage: "Usage",
     propTime: "Time",
     propProject: "Project",

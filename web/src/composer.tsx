@@ -10,13 +10,13 @@ import { AtSignIcon, BotIcon, ClipboardListIcon, FileTextIcon, FolderPlusIcon, H
 import { cn } from "cn"
 import { cue } from "@/bus"
 import { useT } from "@/i18n"
-import { st } from "@/store"
+import { formatBotName, st } from "@/store"
 import { itemDisplayStatus } from "@/store"
 import { useMentions } from "@/people/mention"
 import { readDraft, saveDraft, draftToSend, clearSentDraft } from "@/composer-draft"
 import { useUploads, PendingList, ACCEPT } from "@/attach"
 import type { RFile } from "@/api"
-import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
+import { CommandMenu } from "@/components/affect/command-menu-clean"
 import { Kbd } from "@/components/ui/kbd"
 import { ChatComposer, type ComposerAddRow } from "@/components/affect/chat-composer-clean"
 import { RunActions, RunContext, runKey, type RunActionsLabels } from "@/components/affect/run-controls-clean"
@@ -136,7 +136,7 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
     ? getItems().filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
     : menu.kind === "@" && men.opts ? men.opts
     : menu.kind === "@"
-    ? Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><ActorAvatar actorId={k} size={18} tooltip={false} /><span className="type-callout">{tr("core:composer.botName", { name: st.bots[k].n })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> }))
+    ? Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><ActorAvatar actorId={k} size={18} tooltip={false} /><span className="type-callout">{formatBotName(st.bots[k].n, st.bots[k].main)}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> }))
     : COMMANDS.filter(([n, c]) => !menu.q || n.includes(menu.q) || tr(`core:cmd.${c}`).toLowerCase().includes(menu.q.toLowerCase())).map(([, c]) => ({ id: c, ins: "", cmd: c, label: <><SlashIcon className="size-3.5 text-muted-foreground" /><span className="type-callout">{tr(`core:cmd.${c}`)}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr(`core:cmd.${c}Desc`)}</span></> }))
   const track = (val: string, caret: number) => {
     const before = val.slice(0, caret)
@@ -197,17 +197,32 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
       onDrop={(e) => { if (isFileDrag(e)) { e.preventDefault(); setDrag(0); takeFiles(e.dataTransfer.files) } }}
       onKeyDown={(e) => { if (e.key === "Escape" && queues && !menu && !e.nativeEvent.isComposing && !e.defaultPrevented && (e.target as HTMLElement).closest("[data-composer]")) { e.preventDefault(); stop() } }}>
       {floating && (
-        <Command shouldFilter={false} value={floating.opts[sel]?.id} className="absolute inset-x-2 bottom-full z-30 mb-2 h-auto max-w-md origin-bottom-left rounded-2xl bg-popover shadow-[var(--lift-hover)] anim-float" data-ref-menu={leaving ? undefined : floating.kind} data-leaving={leaving || undefined} aria-hidden={leaving || undefined}>
-          <CommandList>
-            {mentionError && <p role="alert" className="px-3 py-2 type-footnote text-destructive">{mentionError}</p>}
-            {floating.groups.filter((g) => g.xs.length).map((g, k) => (
-            <CommandGroup key={k} heading={<span className="inline-flex items-center gap-1.5">{g.head}</span>}>
-              {g.xs.map((o) => { const n = floating.opts.indexOf(o); return (
-                <CommandItem key={o.id} value={o.id} onMouseDown={(e) => { e.preventDefault(); insert(o) }} onSelect={() => insert(o)} onMouseEnter={() => setSel(n)} data-ref-opt={o.id} className="gap-2.5 rounded-lg">{o.label}</CommandItem>
-              ) })}
-            </CommandGroup>))}
-          </CommandList>
-        </Command>
+        <div className="absolute inset-x-2 bottom-full z-30 mb-2 max-w-md origin-bottom-left overflow-hidden rounded-2xl bg-popover shadow-[var(--lift-hover)] anim-float" data-ref-menu={leaving ? undefined : floating.kind} data-leaving={leaving || undefined} aria-hidden={leaving || undefined}>
+          {mentionError && <p role="alert" className="px-3 py-2 type-footnote text-destructive">{mentionError}</p>}
+          {floating.opts.length > 0 && (
+            <CommandMenu
+              bare
+              showSearch={false}
+              showFooter={false}
+              shouldFilter={false}
+              preventFocus
+              activeId={floating.opts[sel]?.id}
+              onActiveIdChange={(id) => { const idx = floating.opts.findIndex((o) => o.id === id); if (idx >= 0) setSel(idx) }}
+              groups={floating.groups.filter((g) => g.xs.length).map((g, k) => ({
+                id: `g${k}`,
+                label: "",
+                header: <span className="inline-flex items-center gap-1.5">{g.head}</span>,
+                commands: g.xs.map((o) => ({
+                  id: o.id,
+                  label: o.id,
+                  content: <span className="flex min-w-0 flex-1 items-center gap-2.5">{o.label}</span>,
+                  data: { "data-ref-opt": o.id },
+                })),
+              }))}
+              onRun={(id) => { const o = floating.opts.find((x) => x.id === id); if (o) insert(o) }}
+            />
+          )}
+        </div>
       )}
       <input ref={fileInput} type="file" multiple accept={ACCEPT} className="hidden" data-file-input onChange={(e) => { if (e.target.files?.length) takeFiles(e.target.files); e.target.value = "" }} />
       <ChatComposer className={className} testId={testId} drop={drag > 0} disabled={disabled} onFocusField={() => ta.current?.focus()}

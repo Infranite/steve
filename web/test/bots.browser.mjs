@@ -150,6 +150,7 @@ const run = async ({ width, height, scheme }) => {
 
   /* 设置: the permission mode and acceptance as one choice each, saved with the form */
   await page.locator('[data-slot=tabs-trigger]:has-text("设置")').click()
+  await page.locator('[data-bot-settings-tabs] [data-seg="permissions"]').click()
   const perm = page.locator('[data-choices="bot-perm"]')
   await perm.waitFor()
   assert.deepEqual(await perm.locator('[role=radio]').evaluateAll((choices) => choices.map((choice) => choice.getAttribute('data-choice')).sort()), ['ask', 'plan'])
@@ -159,7 +160,8 @@ const run = async ({ width, height, scheme }) => {
   assert.equal(await perm.locator('[aria-checked=true]').getAttribute('data-choice'), 'plan')
   await fits(); await shot('settings')
   await page.locator('[data-save-bot]').click()
-  for (let i = 0; i < 50 && patches.length < 2; i++) await page.waitForTimeout(100)
+  await page.locator('[data-save-bot]').waitFor({ state: 'detached' })
+  assert.equal(patches.length, 2)
   assert.equal(patches[1].perm_mode, 'plan')
   assert.equal(patches[1].accept_mode, 'auto')
 

@@ -17,6 +17,7 @@ export default {
     remove: "Remove",
     search: "Search",
     refresh: "Refresh",
+    choose: "Choose…",
   },
   a11y: {
     code: "{{name}}, code",

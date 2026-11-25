@@ -1,7 +1,7 @@
 /* Branches of flow nodes and their edges (pure, no React: web/test/flow-branches.test.mjs runs them):
  * the labels a node's edges are expected to carry, renaming them with the node's branches, and the
  * same branch/edge checks as the hub (graph.rs `branch_warnings`). */
-import type { GNode, Graph } from "@/api/flow"
+import type { FlowSummary, GNode, Graph } from "@/api/flow"
 
 const unq = (s: string) => s.trim().replace(/^"(.*)"$/, "$1")
 /** labels a node's outgoing edges are expected to carry */
@@ -57,4 +57,85 @@ export function unreachableNodes(g: Graph): string[] {
   const seen = new Set<string>(start ? [start] : []), stack = start ? [start] : []
   while (stack.length) { const c = stack.pop()!; for (const e of g.edges) if (e.from === c && !seen.has(e.to)) { seen.add(e.to); stack.push(e.to) } }
   return g.nodes.filter((n) => !seen.has(n.id)).map((n) => n.id)
+}
+
+export type RuleConflict =
+  | { kind: "duplicate_branch"; node: string; label: string }
+  | { kind: "shadowed_rule"; node: string; earlier: string; shadowed: string }
+  | { kind: "duplicate_edge"; node: string; label: string }
+  | { kind: "trigger_overlap"; flowId: string; flowName: string; source: string }
+
+const normExpr = (s: unknown) => String(s ?? "").trim().replace(/\s+/g, " ")
+const isAlwaysTrueExpr = (expr: string) => expr === "" || expr.toLowerCase() === "true"
+
+/** Detect deterministic rule conflicts inside a flow graph and overlapping triggers across enabled flows. */
+export function ruleConflicts(
+  g: Graph,
+  current?: { id: string; enabled: boolean },
+  otherFlows: FlowSummary[] = [],
+): RuleConflict[] {
+  const out: RuleConflict[] = []
+  for (const n of g.nodes) {
+    const c = n.config ?? {}
+    if (["filter", "bot", "approve"].includes(n.kind)) {
+      const seenLabels = new Set<string>()
+      const reportedDup = new Set<string>()
+      for (const raw of branchLabels(n)) {
+        const label = String(raw ?? "").trim()
+        if (!label) continue
+        if (seenLabels.has(label) && !reportedDup.has(label)) {
+          reportedDup.add(label)
+          out.push({ kind: "duplicate_branch", node: n.id, label })
+        }
+        seenLabels.add(label)
+      }
+    }
+    if (n.kind === "filter" && Array.isArray(c.rules) && c.rules.length > 1) {
+      const rules = c.rules as { label?: string; when?: string }[]
+      let catchAll: string | null = null
+      const seenConds = new Map<string, string>()
+      for (let idx = 0; idx < rules.length; idx++) {
+        const label = String(rules[idx]?.label ?? "").trim() || `#${idx + 1}`
+        const cond = normExpr(rules[idx]?.when)
+        if (catchAll !== null) {
+          out.push({ kind: "shadowed_rule", node: n.id, earlier: catchAll, shadowed: label })
+          continue
+        }
+        if (isAlwaysTrueExpr(cond)) {
+          catchAll = label
+          continue
+        }
+        const prev = seenConds.get(cond)
+        if (prev !== undefined) {
+          out.push({ kind: "shadowed_rule", node: n.id, earlier: prev, shadowed: label })
+        } else {
+          seenConds.set(cond, label)
+        }
+      }
+    }
+    const edgeSeen = new Set<string>()
+    const edgeReported = new Set<string>()
+    for (const e of g.edges) {
+      if (e.from !== n.id) continue
+      const label = String(e.label ?? "").trim()
+      if (edgeSeen.has(label) && !edgeReported.has(label)) {
+        edgeReported.add(label)
+        out.push({ kind: "duplicate_edge", node: n.id, label })
+      }
+      edgeSeen.add(label)
+    }
+  }
+  const trig = g.nodes.find((n) => n.kind === "trigger")
+  const source = typeof trig?.config?.source === "string" ? trig.config.source.trim() : ""
+  if (current?.enabled && source && source !== "manual" && source !== "time") {
+    const curTypes = new Set<string>(Array.isArray(trig?.config?.types) ? trig!.config.types.map((x: unknown) => String(x).trim()).filter(Boolean) : [])
+    for (const other of otherFlows) {
+      if (other.id === current.id || !other.enabled || other.kind !== "flow") continue
+      if (other.trigger?.source !== source) continue
+      const otherTypes = (other.trigger?.types ?? []).map((x) => x.trim()).filter(Boolean)
+      const overlaps = curTypes.size === 0 || otherTypes.length === 0 || otherTypes.some((x) => curTypes.has(x))
+      if (overlaps) out.push({ kind: "trigger_overlap", flowId: other.id, flowName: other.name, source })
+    }
+  }
+  return out
 }

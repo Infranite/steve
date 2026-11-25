@@ -117,7 +117,7 @@ try {
   await page.locator("[data-session-menu]").click()
   await page.locator("[data-session-debug]").click()
   await page.locator('[data-debug-event="event-3"]').waitFor()
-  assert.equal((await page.locator("[data-debug-session]").innerText()).trim(), "session-two")
+  assert.equal((await page.locator("[data-debug-session]").innerText()).trim(), "#2 等待前置")
   assert.equal(data.requests.at(-1).session_id, "session-two")
   await page.close()
 

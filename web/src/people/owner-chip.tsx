@@ -6,7 +6,7 @@ import { cn } from "cn"
 import { CheckIcon, UserRoundXIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command"
+import { CommandMenu, type CommandGroup } from "@/components/affect/command-menu-clean"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { toast, st } from "@/store"
 import { hubBase } from "@/hub"
@@ -76,17 +76,44 @@ function Chip({ objectType, objectId, className, bare }: { objectType: ObjectTyp
         <PopoverContent align="start" className="w-[min(300px,calc(100vw-24px))] gap-0 rounded-2xl p-0" data-owner-menu>
           <div className="border-b px-3 py-2"><div className="type-footnote text-muted-foreground">{t("people:owner.of", { type: object.type_label, name: object.name })}</div>
             {proposed.length > 0 && <div className="mt-0.5 type-footnote text-attention">{t("people:owner.proposedNote", { names: joinList(proposed.map((s) => s.person_name)) })}</div>}</div>
-          <Command className="rounded-b-2xl" shouldFilter={false}>
-            <CommandInput placeholder={t("people:owner.search")} value={q} onValueChange={setQ} data-owner-search />
-            <CommandList className="max-h-[min(320px,50vh)]">
-              <CommandEmpty>{found ? t("people:shared.noMatch") : t("people:shared.loading")}</CommandEmpty>
-              {xs.length > 0 && <CommandGroup>{xs.map((c) => { const cur = confirmed.some((s) => s.person_id === c.id); const extra = optDisambig.get(c.id); const shown = formatActorName(c.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex })); return (
-                <CommandItem key={c.id} value={c.id} onSelect={() => { if (!cur) void pick(c) }} data-owner-opt={c.name}>
-                  <ActorAvatar actor={partyActor({ id: c.id, name: c.name, contactKind: c.kind, avatar: c.avatar, subtitle: orgLine(c), isMe: c.is_me })} disambiguator={extra} size={18} tooltip={false} />
-                  <span className="min-w-0 flex-1 truncate">{c.is_me ? t("people:shared.withMe", { name: shown }) : shown}</span>{cur && <CheckIcon className="size-4" />}</CommandItem>) })}</CommandGroup>}
-              {owners.length > 0 && <><CommandSeparator /><CommandGroup><CommandItem value="__clear" onSelect={() => void clear()} className="text-muted-foreground" data-owner-clear><UserRoundXIcon />{t("people:owner.clear")}</CommandItem></CommandGroup></>}
-            </CommandList>
-          </Command>
+          <CommandMenu
+            bare
+            autoFocus
+            showFooter={false}
+            shouldFilter={false}
+            onQueryChange={setQ}
+            onClose={() => setOpen(false)}
+            inputData={{ "data-owner-search": "" }}
+            labels={{ placeholder: t("people:owner.search"), empty: found ? t("people:shared.noMatch") : t("people:shared.loading") }}
+            groups={[
+              ...(xs.length > 0 ? [{
+                id: "people",
+                label: "",
+                commands: xs.map((c) => {
+                  const cur = confirmed.some((s) => s.person_id === c.id)
+                  const extra = optDisambig.get(c.id)
+                  const shown = formatActorName(c.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex }))
+                  return {
+                    id: c.id,
+                    label: c.is_me ? t("people:shared.withMe", { name: shown }) : shown,
+                    icon: <ActorAvatar actor={partyActor({ id: c.id, name: c.name, contactKind: c.kind, avatar: c.avatar, subtitle: orgLine(c), isMe: c.is_me })} disambiguator={extra} size={18} tooltip={false} />,
+                    trailing: cur ? <CheckIcon className="size-4" /> : undefined,
+                    data: { "data-owner-opt": c.name },
+                  }
+                }),
+              }] : []),
+              ...(owners.length > 0 ? [{
+                id: "clear",
+                label: "",
+                commands: [{ id: "__clear", label: t("people:owner.clear"), icon: <UserRoundXIcon className="size-4" />, data: { "data-owner-clear": "" } }],
+              }] : []),
+            ] satisfies CommandGroup[]}
+            onRun={(id) => {
+              if (id === "__clear") { void clear(); return }
+              const c = xs.find((x) => x.id === id)
+              if (c && !confirmed.some((s) => s.person_id === c.id)) void pick(c)
+            }}
+          />
         </PopoverContent>
       </Popover>
     </span>
