@@ -24,7 +24,7 @@ const item = (no: number, status: Item["st"], title: string, x: Partial<Item> = 
 const fail = wait("fail", "会话出错：构建脚本退出 1", "d_fail"), accept = wait("accept", "验收：统计页重整", "d_accept")
 seedItems([
   item(1, "run", "重整统计页图表"), item(2, "run", "整理发布脚本"), item(3, "run", "修复构建失败", { waits: [fail], wait: fail }),
-  item(4, "wait", "统计页验收", { waits: [accept], wait: accept }), item(5, "prop", "提议：清理旧日志"),
+  item(4, "wait", "统计页验收", { waits: [accept], wait: accept }),
   item(6, "block", "等 ST-2 发布后再迁移", { deps: ["ST-2"] }), item(7, "pause", "暂停的调研"),
   item(8, "done", "已完成的事项"), item(9, "drop", "放弃的事项"), item(10, "run", "归档的事项", { arch: true }),
 ])

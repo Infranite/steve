@@ -34,6 +34,10 @@ fn cerr(e: CoreError) -> BackendError {
             },
         },
         CoreError::Status(status, message) => BackendError { status, message },
+        CoreError::Contract(e) => BackendError {
+            status: e.code.http_status(),
+            message: e.to_string(),
+        },
         CoreError::Placement(blocked) => BackendError {
             status: 409,
             message: super::bot_dispatch::text(blocked.reason),
@@ -1261,14 +1265,37 @@ impl Domain for CoreDomain {
             .map(str::to_string);
         self.core.bot_prompt(&b, ws).map_err(cerr)
     }
-    async fn delete_bot(&self, id: &str, to: &str, actor: &str) -> BResult<Obj> {
+    async fn delete_bot(
+        &self,
+        id: &str,
+        to: &str,
+        actor: &str,
+        allowed_workspaces: Vec<String>,
+    ) -> BResult<Obj> {
         let (c, id, to, actor) = (
             self.core.clone(),
             id.to_string(),
             to.to_string(),
             actor.to_string(),
         );
-        let moved = blocking(move || c.delete_bot(&id, &to, &actor)).await?;
+        let moved = blocking(move || c.delete_bot(&id, &to, &actor, &allowed_workspaces)).await?;
+        to_obj(json!({ "moved": moved }))
+    }
+    async fn remove_bot_from_workspace(
+        &self,
+        ws: &str,
+        id: &str,
+        to: &str,
+        actor: &str,
+    ) -> BResult<Obj> {
+        let (c, ws, id, to, actor) = (
+            self.core.clone(),
+            ws.to_string(),
+            id.to_string(),
+            to.to_string(),
+            actor.to_string(),
+        );
+        let moved = blocking(move || c.remove_bot_from_workspace(&ws, &id, &to, &actor)).await?;
         to_obj(json!({ "moved": moved }))
     }
 

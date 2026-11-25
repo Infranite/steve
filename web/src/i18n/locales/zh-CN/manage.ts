@@ -126,6 +126,12 @@ export default {
   del: {
     title: "删除 {{name}} Bot？",
     desc_other: "它手上有 {{count}} 件进行中的事项，删除后交给下面选的 Bot，正在跑的会话会停下，由新 Bot 带交接重新开始；已完成的事项和会话记录保留。它会从所有工作空间里移除。",
+    removeTitle: "将 {{name}} Bot 移出当前工作空间？",
+    removeDesc_other: "它在当前工作空间有 {{count}} 件进行中的事项，移出后交给下面选的 Bot；该 Bot 在其他工作空间中的成员身份、事项和记忆不受影响。",
+    scope: "范围",
+    scopeWorkspace: "移出当前空间",
+    scopeGlobal: "全局删除",
+    removeAction: "移出",
     handTo: "交给",
     itsMemories_other: "它的 {{count}} 条记忆",
     export: "导出",

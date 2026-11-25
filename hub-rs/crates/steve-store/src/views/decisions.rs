@@ -32,6 +32,10 @@ mod schema {
         Undo,
         Revision,
         QuestionTemplate,
+        WaitOwner,
+        WaitStartedAt,
+        WaitDeadline,
+        WaitOnTimeout,
     }
 
     #[derive(Iden, Clone, Copy)]
@@ -152,6 +156,10 @@ fn select() -> SelectStatement {
     ))
     .column((D::Table, D::Revision))
     .column((D::Table, D::QuestionTemplate))
+    .column((D::Table, D::WaitOwner))
+    .column((D::Table, D::WaitStartedAt))
+    .column((D::Table, D::WaitDeadline))
+    .column((D::Table, D::WaitOnTimeout))
     .from(D::Table)
     .join_as(
         JoinType::LeftJoin,
@@ -205,6 +213,8 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
                     .and_then(serde_json::Value::as_bool)
             })
             == Some(true);
+    let wait =
+        crate::wait_repo::decode_contract(r.get(21)?, r.get(22)?, r.get(23)?, r.get(24)?).ok();
     let view = DecisionView {
         id: r.get::<String>(0)?.into(),
         revision: r.get(19)?,
@@ -229,6 +239,7 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
         space_id: r.get::<Option<String>>(16)?.map(Into::into),
         tier: DecisionTier::Decide,
         folded: None,
+        wait,
     };
     Ok(Candidate {
         view,

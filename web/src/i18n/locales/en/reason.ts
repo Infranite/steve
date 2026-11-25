@@ -1,6 +1,12 @@
 // Domain-owned reason texts, grouped by the stable reason prefix.
 export default {
+  "config.bot_foreign_workspaces": "This bot still belongs to workspaces you are not a member of and cannot be deleted globally.",
+  "config.bot_heir_outside_workspace": "The handover bot must be a member of every affected workspace.",
+  "config.bot_owner_required": "Only the bot's owner can perform this action.",
+  "config.bot_project_outside_workspace": "The default project does not belong to the current workspace.",
   "config.diagnostic_model_disabled": "Model execution is disabled on this diagnostic Hub.",
+  "config.harness_builtin_protected": "Built-in harness \"{{harness}}\" cannot be overridden or removed.",
+  "config.harness_env_not_allowed": "Custom harness declarations do not accept environment variables.",
   "config.team_member_main_bot": "Steve is the workspace coordinator and cannot be added to a Team’s member list.",
   "node.downgrade": "The Node refused to install an older version.",
   "node.operation_not_found": "The Node has no receipt for this operation.",
@@ -21,4 +27,5 @@ export default {
   "node_stop.output_limit": "The Node stopped the run when it reached its output limit.",
   "node_stop.research_budget": "The research run reached its turn or tool call limit.",
   "node_stop.stopped_by_node": "The Node stopped the run.",
+  "vault.execution_node_unavailable": "No execution Node is available for this session; secret-injected commands cannot run on the Hub.",
 } as const

@@ -5,7 +5,7 @@
 //! - `roots.json`: the directories this Node lets the Hub work in (`[{id, path, display}]`)
 //! - `harness.json`: optional, the ACP adapters (`{"adapters": {"claude-code": "/path"}, "node": "node"}`);
 //!   an adapter of one's own is declared as `{"adapters": {"my-agent": {"command": "/path",
-//!   "name": "My Agent", "args": [], "env": {}, "properties": {}}}}` ([`steve_acp::adapters`])
+//!   "name": "My Agent", "args": [], "properties": {}}}}` ([`steve_acp::adapters`])
 //! - `policy.json`: optional, the most any Hub may ask of this Node
 //!   (`{"max_permissions": "auto", "full_network": true, "exec": false, "jobs": false}`, the
 //!   defaults). Sessions here run with this machine's own home and logins until runs are
@@ -197,12 +197,14 @@ impl Home {
             .or(h.claude_executable)
             .or_else(|| steve_acp::default_claude_executable(path_env))
             .unwrap_or_default();
+        let claude_config_dir = var("CLAUDE_CONFIG_DIR");
         let codex_home = var("CODEX_HOME").unwrap_or_else(|| user_home.join(".codex"));
         Ok(steve_acp::AcpConfig {
             declared,
             adapters,
             node,
             claude_executable,
+            claude_config_dir,
             steve_home,
             codex_home,
             user_home,
@@ -349,9 +351,7 @@ mod tests {
         assert_eq!(acp.adapter_mode("mine", PermissionMode::Ask), "ask");
         let (_, args) = acp.adapter_command("mine").unwrap();
         assert_eq!(args, vec![std::ffi::OsString::from("acp")]);
-        assert_eq!(
-            acp.adapter_env("mine"),
-            vec![("MINE_MODE".into(), "acp".into())]
-        );
+        // Custom manifest declarations cannot inject environment variables into adapters.
+        assert!(acp.adapter_env("mine").is_empty());
     }
 }

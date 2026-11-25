@@ -20,18 +20,31 @@ fn process_key() -> SessionId {
 
 pub(crate) struct Lease {
     inner: Arc<Inner>,
-    prefix: Arc<managed::PrefixLock>,
+    prefix: Option<Arc<managed::PrefixLock>>,
 }
 impl Lease {
     pub(crate) fn held(inner: Arc<Inner>, prefix: managed::PrefixLock) -> Self {
         Self {
             inner,
-            prefix: Arc::new(prefix),
+            prefix: Some(Arc::new(prefix)),
+        }
+    }
+    pub(crate) fn held_optional(inner: Arc<Inner>, prefix: Option<managed::PrefixLock>) -> Self {
+        Self {
+            inner,
+            prefix: prefix.map(Arc::new),
         }
     }
     pub(crate) fn prefix(&self) -> Arc<managed::PrefixLock> {
+        self.prefix
+            .as_ref()
+            .expect("managed prefix lock held")
+            .clone()
+    }
+    pub(crate) fn optional_prefix(&self) -> Option<Arc<managed::PrefixLock>> {
         self.prefix.clone()
     }
+    #[cfg(test)]
     pub(crate) fn reserve(inner: &Arc<Inner>, id: &str) -> Option<Self> {
         let mut busy = inner.adapter_maintenance.lock().unwrap();
         if busy.is_some()

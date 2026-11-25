@@ -9,5 +9,9 @@ export function decisionText(said: Said): string {
     case "turn_no_progress": return t("views:decision.turnNoProgress")
     case "merge_pull_request": return t("views:decision.mergePullRequest", { number: prompt.number, repo: prompt.repo })
     case "no_executor": return t("views:decision.noExecutor", { count: prompt.items.length })
+    case "wait_timeout": return t("views:decision.waitTimeout", {
+      kind: t(`views:decision.waitKind.${prompt.wait_kind}`),
+      subject: prompt.subject,
+    })
   }
 }

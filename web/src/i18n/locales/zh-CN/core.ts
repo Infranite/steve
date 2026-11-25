@@ -196,6 +196,8 @@ export default {
     botDrafted: "Steve 起草好了，看看要不要改",
     botDeleted_other: "已删除 {{name}} Bot，{{count}} 件事项交给 {{to}}",
     botDeletedExported_other: "已删除 {{name}} Bot，{{count}} 件事项交给 {{to}}，记忆已导出",
+    botRemovedFromWorkspace_other: "已将 {{name}} Bot 移出当前工作空间，{{count}} 件事项交给 {{to}}",
+    botRemovedFromWorkspaceExported_other: "已将 {{name}} Bot 移出当前工作空间，{{count}} 件事项交给 {{to}}，记忆已导出",
     botRestored: "已恢复 {{name}} Bot；已交出去的事项不会自动收回",
     memoryFile: "{{name}}-记忆.json",
     botCopied: "已复制，默认停用，改好后再启用",

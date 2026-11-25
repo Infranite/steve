@@ -93,6 +93,16 @@ pub(super) fn describe() {
         Count,
         "Open decisions in the Hub projection. Label: tier (decide, draft, or folded)."
     );
+    describe_counter!(
+        "steve_wait_timeouts_total",
+        Count,
+        "Durable waits settled by the unified WaitContract due sweep. Labels: kind, action."
+    );
+    describe_histogram!(
+        "steve_wait_sweep_duration_seconds",
+        Seconds,
+        "Duration of one unified WaitContract due sweep."
+    );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(
         "steve_http_requests_total",
@@ -290,6 +300,21 @@ pub(super) fn describe() {
         "steve_due_lag_seconds",
         Seconds,
         "How late a due loop woke. Labels: loop."
+    );
+    describe_counter!(
+        "steve_periodic_task_evaluations_total",
+        Count,
+        "Periodic task gate evaluations. Labels: task, outcome (triggered, skipped), reason (changed, no_change, queue_driven, disabled, not_due, overlap)."
+    );
+    describe_counter!(
+        "steve_periodic_task_tokens_total",
+        Count,
+        "Model tokens spent by periodic tasks. Labels: task, kind (input, output, cache_read, cache_write)."
+    );
+    describe_counter!(
+        "steve_model_calls_avoided_total",
+        Count,
+        "Model calls avoided by deterministic gating, batching, deduplication, or caching. Labels: purpose, reason (no_change, queue_driven, batched, cached, deduplicated, deterministic)."
     );
     // Node protocol, Hub side (node_runtime: receive, send_one; RemoteNode attach/detach)
     describe_counter!(
@@ -615,5 +640,10 @@ pub(super) fn describe() {
         "steve_metrics_collection_errors_total",
         Count,
         "Figures that could not be collected. Labels: source."
+    );
+    describe_counter!(
+        "steve_security_refusals_total",
+        Count,
+        "Actions refused at a security or tenant boundary. Labels: boundary, reason."
     );
 }

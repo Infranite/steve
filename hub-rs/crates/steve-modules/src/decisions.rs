@@ -96,7 +96,13 @@ pub fn confirm(
         requested_by: requested_by.into(),
         question_template: None,
         source: None,
+        wait: None,
     }
+}
+
+/// Whether a module registered a [`DecisionHandler`] for `subject_type`.
+pub fn has_handler(m: &Modules, subject_type: &str) -> bool {
+    m.registry.handlers.contains_key(subject_type)
 }
 
 /// Resolve a fixture's card using the current revision. Production callers carry

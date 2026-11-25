@@ -143,6 +143,7 @@ impl Local {
             adapters: HashMap::from([(id, root.join("adapter.py"))]),
             node: "node".into(),
             claude_executable: "claude".into(),
+                claude_config_dir: None,
             steve_home: root.join("steve"),
             codex_home: root.join("codex-home"),
             user_home: root.to_path_buf(),

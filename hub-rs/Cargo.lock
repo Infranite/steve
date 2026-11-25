@@ -6096,6 +6096,7 @@ dependencies = [
  "getrandom 0.4.3",
  "jsonwebtoken",
  "libc",
+ "metrics",
  "rand 0.10.3",
  "regex",
  "reqwest",

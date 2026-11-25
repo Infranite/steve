@@ -5,8 +5,9 @@ import type { NoExecutorItem } from "./NoExecutorItem";
 import type { PlacementBlocker } from "./PlacementBlocker";
 import type { PlacementRejection } from "./PlacementRejection";
 import type { ProposalTeam } from "./ProposalTeam";
+import type { WaitKind } from "./WaitKind";
 
 /**
  * Machine-authored prompts carry their arguments separately from the UI text.
  */
-export type DecisionPrompt = { "code": "turn_repeated_failure" } | { "code": "turn_no_progress" } | { "code": "merge_pull_request", number: number, repo: string, } | { "code": "no_executor", items: Array<NoExecutorItem>, rejected: Array<PlacementBlocker>, reason: PlacementRejection, team?: ProposalTeam, proposal?: BotProposal, };
+export type DecisionPrompt = { "code": "turn_repeated_failure" } | { "code": "turn_no_progress" } | { "code": "merge_pull_request", number: number, repo: string, } | { "code": "no_executor", items: Array<NoExecutorItem>, rejected: Array<PlacementBlocker>, reason: PlacementRejection, team?: ProposalTeam, proposal?: BotProposal, } | { "code": "wait_timeout", wait_kind: WaitKind, subject: string, };

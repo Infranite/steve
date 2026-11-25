@@ -42,6 +42,7 @@ import { cn } from "cn"
 import { ArrowDownIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
 import { Component, lazy, memo, startTransition, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { lang, t as tr, useT } from "@/i18n"
+import { hubBase } from "@/hub"
 
 
 /* ═════════ 对话 ═════════ */
@@ -217,7 +218,7 @@ const Onboarding = lazy(() => import("@/onboarding").then((m) => ({ default: m.O
 export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
   const { channels, error: channelsError, retry: retryChannels } = useChannels()
   useStoreSelector(() => st.bots.steve)
-  useStoreSelector(() => `${st.ready}|${st.onboard}|${st.quote ?? ""}|${focusItem() ?? ""}|${st.hold?.item ?? ""}|${st.workspace?.id ?? ""}`)
+  useStoreSelector(() => `${st.ready}|${st.onboard}|${st.quote ?? ""}|${focusItem() ?? ""}|${st.hold?.item ?? ""}|${hubBase()}|${st.workspace?.id ?? ""}`)
   const S = st.bots.steve, away = useAway()
   const t = useT()
   const { more, ended, loading } = useHistory()

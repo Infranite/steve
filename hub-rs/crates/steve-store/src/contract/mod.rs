@@ -97,6 +97,7 @@ mod user_rows;
 pub mod vault_items;
 pub mod vault_keys;
 pub mod vault_uses;
+pub mod waits;
 mod workspace_settings;
 mod workspaces;
 

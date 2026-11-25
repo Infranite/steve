@@ -6,6 +6,16 @@ export default {
     mergePullRequest: "Merge PR #{{number}} ({{repo}})?",
     noExecutor_one: "{{count}} item has no eligible executor Bot. How should Steve proceed?",
     noExecutor_other: "{{count}} items have no eligible executor Bot. How should Steve proceed?",
+    waitTimeout: "{{kind}} timed out ({{subject}}). Choose how to proceed.",
+    waitKind: {
+      dependency: "Prerequisite wait",
+      decision: "Decision wait",
+      channel_draft: "Channel draft",
+      item_operation: "Item operation",
+      external_effect: "External action",
+      mail_draft: "Mail draft",
+      flow_wait: "Automation wait",
+    },
   },
   feed: {
     viewItem: "View item",

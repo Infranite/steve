@@ -100,11 +100,26 @@ mod tests {
                 w.conn
                     .execute("UPDATE items SET phase='active' WHERE id='ST-1'", [])?;
                 w.conn.execute(
-                    "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated)
-                     VALUES ('ST-1',1,'s1','automatic','wait','waiting',0,0)",
-                    [],
+                    "INSERT INTO item_dependency_waits(
+                       item_id,cycle,session_id,resume,reason,state,created,updated,
+                       wait_owner,wait_started_at,wait_deadline,wait_on_timeout
+                     )
+                     VALUES ('ST-1',1,'s1','automatic','wait','waiting',0,0,?1,0,?2,?3)",
+                    rusqlite::params![
+                        steve_types::WaitOwner::system("dependencies").to_code(),
+                        steve_types::wait::WAIT_LIMIT_DEPENDENCY_MS,
+                        steve_types::WaitTimeoutAction::EscalateToOwner.as_str(),
+                    ],
                 )?;
                 assert_eq!(session_blocker(w, "s1")?, Some(GateBlocker::DependencyWait));
+
+                // Once a wait times out (escalated to owner), it no longer holds DependencyWait;
+                // open prerequisites still block through OpenPrerequisite below.
+                w.conn.execute(
+                    "UPDATE item_dependency_waits SET state='timed_out' WHERE item_id='ST-1'",
+                    [],
+                )?;
+                assert_eq!(session_blocker(w, "s1")?, None);
 
                 w.conn.execute(
                     "UPDATE item_dependency_waits SET state='started' WHERE item_id='ST-1'",
@@ -112,6 +127,15 @@ mod tests {
                 )?;
                 w.conn.execute(
                     "INSERT INTO item_deps(item_id,dep_id,created) VALUES ('ST-1','ST-2',0)",
+                    [],
+                )?;
+                assert_eq!(
+                    session_blocker(w, "s1")?,
+                    Some(GateBlocker::OpenPrerequisite)
+                );
+
+                w.conn.execute(
+                    "UPDATE item_dependency_waits SET state='timed_out' WHERE item_id='ST-1'",
                     [],
                 )?;
                 assert_eq!(
