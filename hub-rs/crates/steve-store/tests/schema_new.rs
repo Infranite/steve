@@ -1744,13 +1744,12 @@ fn migration_128_strips_main_bot_from_teams_and_rewrites_steve_fallback() {
 }
 
 #[test]
-<<<<<<< HEAD
-fn migration_143_adds_file_truth_memory_tables_and_supersedes_mem_confirm_cards() {
-    let before_143 = db::MIGRATIONS
+fn migration_144_adds_file_truth_memory_tables_and_supersedes_mem_confirm_cards() {
+    let before_144 = db::MIGRATIONS
         .iter()
         .position(|sql| sql.contains("CREATE TABLE memory_entries"))
         .unwrap();
-    let (_dir, path) = at_version(before_143);
+    let (_dir, path) = at_version(before_144);
     let c = Connection::open(&path).unwrap();
     c.execute_batch(
         r#"INSERT INTO kb_sources(id,workspace_id,kind,name,config,visibility,level,created_by,created,updated)
@@ -1835,7 +1834,9 @@ fn migration_143_adds_file_truth_memory_tables_and_supersedes_mem_confirm_cards(
             Ok(())
         })
         .unwrap();
-=======
+}
+
+#[test]
 fn migration_141_rebinds_work_tidy_to_item_lifecycle_preserving_cursor() {
     let (_dir, path) = at_version(140);
     let c = Connection::open(&path).unwrap();
@@ -1897,5 +1898,4 @@ fn migration_141_rebinds_work_tidy_to_item_lifecycle_preserving_cursor() {
         ),
         1
     );
->>>>>>> origin/main
 }
