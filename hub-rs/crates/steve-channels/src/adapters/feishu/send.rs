@@ -172,12 +172,39 @@ pub async fn send_with(
             content.space_ext_id.clone(),
         ),
     };
-    let (v, retries) = ratelimit::with_retries(ratelimit::SEND_RETRIES, || async {
+    let started = std::time::Instant::now();
+    let res = ratelimit::with_retries(ratelimit::SEND_RETRIES, || async {
         limiter.bot_send(&conn, chat.as_deref()).await;
         client.post(cx, &path, &query, &body).await
     })
-    .await?;
-    sent(&v, uuid, retries)
+    .await
+    .and_then(|(v, retries)| sent(&v, uuid, retries));
+    record_feishu_send(
+        match &res {
+            Ok(_) => "ok",
+            Err(e) => super::client::feishu_error_label(e),
+        },
+        started.elapsed().as_secs_f64(),
+    );
+    res
+}
+
+fn record_feishu_send(result: &'static str, elapsed_secs: f64) {
+    thread_local! {
+        static SENDS: std::cell::RefCell<std::collections::HashMap<&'static str, metrics::Counter>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+        static DUR: std::cell::OnceCell<metrics::Histogram> = const { std::cell::OnceCell::new() };
+    }
+    SENDS.with(|c| {
+        c.borrow_mut()
+            .entry(result)
+            .or_insert_with(|| metrics::counter!("steve_feishu_sends_total", "result" => result))
+            .increment(1);
+    });
+    DUR.with(|cell| {
+        cell.get_or_init(|| metrics::histogram!("steve_feishu_send_duration_seconds"))
+            .record(elapsed_secs);
+    });
 }
 
 /// Feishu's `emoji_type` for each reaction kind (open platform “表情文案说明”): `OnIt` (在处理),

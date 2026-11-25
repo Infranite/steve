@@ -1,13 +1,17 @@
-/* The web client's own performance and navigation usage, for the Hub's telemetry (`steve_web_*`): main-thread tasks
- * over 50 ms, the latency of each interaction (input to next paint: the samples INP is taken from), gathered with
- * PerformanceObserver, how long merging each patch frame took, and menu item open counts (`steve_web_nav_opens_total`);
- * sent via the one `POST /api/system/web-perf` pipeline. */
+/* The web client's own performance, errors, SSE reconnects, and navigation usage, for the Hub's telemetry (`steve_web_*`):
+ * main-thread tasks over 50 ms, the latency of each interaction (input to next paint: the samples INP is taken from),
+ * gathered with PerformanceObserver, how long merging each patch frame took, menu item open counts
+ * (`steve_web_nav_opens_total`), uncaught JS errors (`steve_web_errors_total`), and SSE reconnect counts
+ * (`steve_web_sse_reconnects_total`); sent via the one `POST /api/system/web-perf` pipeline. */
 /* relative .ts import so node --test loads this file without a bundler */
 import { navItemOf, type NavItemKey } from "./nav.ts"
+import type { ReconnectReason } from "./stream-cursor.ts"
 
 /** The most samples of each kind one report carries (what the Hub accepts), and the longest one (ms). */
 export const MAX_SAMPLES = 500
 const MAX_MS = 60_000
+
+export type WebErrorKind = "error" | "unhandledrejection"
 
 export type PerfReport = {
   page?: Page
@@ -18,17 +22,19 @@ export type PerfReport = {
   transcript_open?: number[]
   dom_nodes?: number
   nav_opens?: Record<string, number>
+  errors?: Record<string, number>
+  sse_reconnects?: Record<string, number>
 }
 
 /** The pages the Hub labels figures with (a bounded set: steve-hub `metrics::WEB_PAGES`). */
-export type Page = "chat" | "items" | "item" | "sessions" | "session" | "inbox" | "other"
+export type Page = NavItemKey | "item" | "session" | "other"
 export function pageOf(hash: string): Page {
-  const [a, b] = hash.replace(/^#\/?/, "").split(/[/?]/)
+  const clean = hash.replace(/^#\/?/, "").split("?")[0]
+  const [a = "", b = ""] = clean.split("/")
   if (!a) return "chat"
-  if (a === "inbox") return "inbox"
   if (a === "items") return b ? "item" : "items"
   if (a === "sessions") return b ? "session" : "sessions"
-  return "other"
+  return navItemOf(hash) ?? "other"
 }
 
 /** What happened since the last `take`: an interaction counts once, at its slowest event. */
@@ -60,24 +66,50 @@ export function recordTranscriptOpen(ms: number) {
 let navSender: ((r: PerfReport) => Promise<unknown>) | null = null
 let lastNav: NavItemKey | null = null
 const pendingNav = new Map<NavItemKey, number>()
+const pendingErrors = new Map<WebErrorKind, number>()
+const pendingReconnects = new Map<ReconnectReason, number>()
 let inflightNav: Promise<void> = Promise.resolve()
+let globalErrorListenersAttached = false
 
-function takeNavOpens(): Record<string, number> | undefined {
-  if (!pendingNav.size) return undefined
+function takeMap<K extends string>(m: Map<K, number>): Record<string, number> | undefined {
+  if (!m.size) return undefined
   const out: Record<string, number> = {}
-  for (const [k, v] of pendingNav) out[k] = v
-  pendingNav.clear()
+  for (const [k, v] of m) out[k] = v
+  m.clear()
   return out
 }
 
-/** Flushes queued navigation open counts through the registered web telemetry sender. */
+function takeNavOpens(): Record<string, number> | undefined {
+  return takeMap(pendingNav)
+}
+
+/** Records one uncaught browser error or unhandled promise rejection (bounded label). */
+export function recordWebError(kind: WebErrorKind) {
+  pendingErrors.set(kind, (pendingErrors.get(kind) ?? 0) + 1)
+}
+
+/** Records one SSE reconnect attempt (bounded reason: error, stale, wake). */
+export function recordSseReconnect(reason: ReconnectReason) {
+  pendingReconnects.set(reason, (pendingReconnects.get(reason) ?? 0) + 1)
+}
+
+/** Flushes queued navigation open, JS error, and SSE reconnect counts through the registered web telemetry sender. */
 export function flushNavOpens(): Promise<void> {
-  if (!navSender || !pendingNav.size) return inflightNav
+  if (!navSender || (!pendingNav.size && !pendingErrors.size && !pendingReconnects.size)) return inflightNav
   const nav_opens = takeNavOpens()
-  if (!nav_opens) return inflightNav
+  const errors = takeMap(pendingErrors)
+  const sse_reconnects = takeMap(pendingReconnects)
+  if (!nav_opens && !errors && !sse_reconnects) return inflightNav
   const page = typeof location === "undefined" ? "other" : pageOf(location.hash)
   const send = navSender
-  inflightNav = inflightNav.then(() => send({ page, long_tasks: [], interactions: [], nav_opens }).then(() => {}, () => {}))
+  inflightNav = inflightNav.then(() => send({
+    page,
+    long_tasks: [],
+    interactions: [],
+    ...(nav_opens ? { nav_opens } : {}),
+    ...(errors ? { errors } : {}),
+    ...(sse_reconnects ? { sse_reconnects } : {}),
+  }).then(() => {}, () => {}))
   return inflightNav
 }
 
@@ -92,17 +124,24 @@ export function recordNavOpen(hash: string): boolean {
   return true
 }
 
-/** Resets in-memory navigation tracking state (for tests). */
+/** Resets in-memory navigation, error, and reconnect tracking state (for tests). */
 export function resetNavTracker(sender: ((r: PerfReport) => Promise<unknown>) | null = null) {
   navSender = sender
   lastNav = null
   pendingNav.clear()
+  pendingErrors.clear()
+  pendingReconnects.clear()
   inflightNav = Promise.resolve()
 }
 
 /** Observes this page for as long as it is open; `send` posts a report (failures are dropped with it). */
 export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_000, patches: () => number[] = () => [], snapshots: () => number[] = () => []) {
   navSender = send
+  if (!globalErrorListenersAttached && typeof window !== "undefined") {
+    globalErrorListenersAttached = true
+    window.addEventListener("error", () => recordWebError("error"))
+    window.addEventListener("unhandledrejection", () => recordWebError("unhandledrejection"))
+  }
   if (typeof PerformanceObserver === "undefined") return
   const c = collector()
   const observe = (type: string, init: object, f: (e: PerformanceEntry) => void) => {
@@ -116,16 +155,30 @@ export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_
     const r = c.take(), p = samples(patches()), s = samples(snapshots())
     const opens = transcriptOpens.splice(0)
     const nav_opens = takeNavOpens()
+    const errors = takeMap(pendingErrors)
+    const sse_reconnects = takeMap(pendingReconnects)
     const dom = sampleDom ? document.getElementsByTagName("*").length : undefined
-    if (r || p.length || s.length || opens.length || nav_opens || dom != null) void send({ ...(r ?? { long_tasks: [], interactions: [] }), page, patch_apply: p, snapshots: s, transcript_open: opens, dom_nodes: dom, ...(nav_opens ? { nav_opens } : {}) }).catch(() => {})
+    if (r || p.length || s.length || opens.length || nav_opens || errors || sse_reconnects || dom != null) {
+      void send({
+        ...(r ?? { long_tasks: [], interactions: [] }),
+        page,
+        patch_apply: p,
+        snapshots: s,
+        transcript_open: opens,
+        dom_nodes: dom,
+        ...(nav_opens ? { nav_opens } : {}),
+        ...(errors ? { errors } : {}),
+        ...(sse_reconnects ? { sse_reconnects } : {}),
+      }).catch(() => {})
+    }
   }
   addEventListener("hashchange", () => {
     const next = pageOf(location.hash)
     if (next !== page) { flush(); page = next }
-    else if (pendingNav.size) flush()
+    else if (pendingNav.size || pendingErrors.size || pendingReconnects.size) flush()
   })
   if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") void flushNavOpens() })
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flush() })
   }
   setInterval(() => flush(true), every)
 }

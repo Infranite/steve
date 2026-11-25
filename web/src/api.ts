@@ -4,6 +4,7 @@ import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Sna
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
+import { recordSseReconnect } from "./perf"
 import { resumableStream } from "./stream-cursor"
 import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { ItemDispatch } from "./bot-dispatch"
@@ -464,7 +465,7 @@ export function stream(on: (e: HubEvent) => void, onOpen: (resumed: boolean) => 
     url: (after) => withWs(`/api/stream?lang=${encodeURIComponent(lang())}${after ? "&after=" + encodeURIComponent(after) : ""}`), // the workspace and language at each (re)connect
     source: (url) => new EventSource(url, { withCredentials: true }),
     on: (data) => { try { on(JSON.parse(data)) } catch {} },
-    onOpen, cursor, onDown,
+    onOpen, cursor, onDown, onReconnect: recordSseReconnect,
     setTimeout: (f, ms) => setTimeout(f, ms), clearTimeout: (x) => clearTimeout(x as ReturnType<typeof setTimeout>), now: Date.now,
     win: window, doc: document,
   })
