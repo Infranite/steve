@@ -1615,6 +1615,28 @@ impl Tx<'_> {
         Ok(out)
     }
 
+    /// Count active sessions per harness id (active turn, live harness process, or open session op).
+    pub fn active_sessions_by_harness(&self) -> ApiResult<std::collections::BTreeMap<String, u32>> {
+        let rows: Vec<(String, String, String)> =
+            self.rows("SELECT id, open, view FROM sessions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+        let mut counts = std::collections::BTreeMap::new();
+        for (id, open, view) in rows {
+            let open: OpenSession = from(&open).map_err(internal)?;
+            let view: SessionView = from(&view).map_err(internal)?;
+            let sid = SessionId::new(id).map_err(internal)?;
+            let live_proc = self
+                .proc_of(&sid)?
+                .is_some_and(|p| !crate::procs::state(p.pgid, p.started).gone());
+            let open_ops = !self.open_ops_of(&sid)?.is_empty();
+            if view.active.is_some() || live_proc || open_ops {
+                *counts.entry(open.choice.harness).or_insert(0) += 1;
+            }
+        }
+        Ok(counts)
+    }
+
     pub fn put_session(&self, s: &SessionRow) -> ApiResult<()> {
         self.c()
             .execute(

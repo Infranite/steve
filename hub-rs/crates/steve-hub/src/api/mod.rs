@@ -12,7 +12,7 @@ mod deliveries;
 mod diagnostics;
 pub(crate) mod feed;
 mod files;
-mod harness_updates;
+pub mod harness_updates;
 mod hub_metadata;
 mod items;
 pub(crate) mod misc;
@@ -77,9 +77,9 @@ pub struct Inner {
     pub history: Option<Arc<dyn steve_node_api::Discovery>>,
     /// Where projects' and items' files are (which Node); `None` reads the Hub's own disk.
     pub workspaces: Option<Arc<crate::wire::workspaces::Workspaces>>,
-    /// Single sign-on as configured now (A4b): set up or changed in the settings without a restart.
+    /// Single sign-on as configured now: set up or changed in the settings without a restart.
     pub oidc: Option<Arc<dyn crate::access::OidcSwitch>>,
-    /// Which signed-in clients hold the live stream open now (G6).
+    /// Which signed-in clients hold the live stream open now.
     pub presence: Arc<crate::presence::Presence>,
     pub jobs: Arc<crate::jobs::Tasks>,
     /// The read projection (views, snapshots, patches), on the modules' store.
