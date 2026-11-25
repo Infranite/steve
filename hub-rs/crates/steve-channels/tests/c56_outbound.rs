@@ -4987,9 +4987,7 @@ async fn review_refusal(h: &H, managed: bool) -> (String, String) {
 fn restore_review_permission(h: &H, managed: bool, message: &str) {
     if managed {
         let p = steve_channels::recovery::propose(&h.ch, &caller(WS, ME), message).unwrap();
-        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &p.id)
-            .unwrap()
-            .unwrap();
+        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &p.id).unwrap();
     } else {
         *h.fake.block_target_send.lock().unwrap() = None;
     }
@@ -5514,17 +5512,9 @@ async fn recovery_permission_missing_is_reviewed_undoable_and_separate_from_retr
         0,
         "creating a proposal grants and sends nothing"
     );
-    assert!(
-        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), id)
-            .unwrap()
-            .is_ok()
-    );
+    assert!(steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), id).is_ok());
     assert_eq!(status(&h, &m), "failed", "authorization does not send");
-    assert!(
-        steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), id)
-            .unwrap()
-            .is_ok()
-    );
+    assert!(steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), id).is_ok());
     decide(&h, &d, "retry", "").unwrap();
     h.outbox.send_due(&h.ch).await;
     assert_eq!(
@@ -5545,7 +5535,6 @@ async fn recovery_permission_missing_is_reviewed_undoable_and_separate_from_retr
         &caller(WS, ME),
         proposal["id"].as_str().unwrap(),
     )
-    .unwrap()
     .unwrap();
     decide(&h, &d2, "retry", "").unwrap();
     h.outbox.send_due(&h.ch).await;
@@ -5787,23 +5776,15 @@ async fn recovery_permission_proposal_rechecks_owner_revision_and_preserves_newe
             &caller(WS, steve_modules::testkit::OTHER),
             &proposal.id
         )
-        .unwrap()
         .is_err()
     );
     seed::connections::set_connection_revision(h.env.store(), &h.me).unwrap();
-    assert!(
-        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id)
-            .unwrap()
-            .is_err()
-    );
+    assert!(steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id).is_err());
     let proposal = steve_channels::recovery::propose(&h.ch, &caller(WS, ME), &m).unwrap();
-    steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id)
-        .unwrap()
-        .unwrap();
+    steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id).unwrap();
     seed::connections::set_connection_revision(h.env.store(), &h.me).unwrap();
-    let undone = steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), &proposal.id)
-        .unwrap()
-        .unwrap();
+    let undone =
+        steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), &proposal.id).unwrap();
     assert!(
         undone["kept"].as_array().is_some_and(|v| !v.is_empty()),
         "{undone}"

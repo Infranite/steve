@@ -72,13 +72,11 @@ fn stored_ops(t: &TestEnv, cs: &str) -> Vec<Value> {
 }
 
 fn apply(t: &TestEnv, cs: &str) -> Result<Value, ApiError> {
-    changes::apply(&t.modules, &me(), cs).expect("stored changeset")
+    changes::apply(&t.modules, &me(), cs)
 }
 
 fn undo(t: &TestEnv, cs: &str) {
-    changes::undo(&t.modules, &me(), cs)
-        .expect("stored changeset")
-        .expect("undo");
+    changes::undo(&t.modules, &me(), cs).expect("undo");
 }
 
 struct World {
@@ -911,9 +909,7 @@ async fn an_undo_keeps_a_field_edited_since() {
         json!({ "important": true }),
     )
     .await;
-    let out = changes::undo(&t.modules, &me(), &p.id)
-        .expect("stored changeset")
-        .expect("undo");
+    let out = changes::undo(&t.modules, &me(), &p.id).expect("undo");
     assert_eq!(out["kept"], json!(["和你的关系"]));
     let c = ok(&r, "GET", &format!("/contacts/{}", w.lilei), Value::Null).await;
     assert_eq!(c["rels"], json!(["friend"]), "your edit is kept");

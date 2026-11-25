@@ -172,6 +172,7 @@ pub struct OpCx<'a> {
     pub changeset_id: &'a str,
     vars: &'a RefCell<BTreeMap<String, Value>>,
     kept: &'a RefCell<Vec<String>>,
+    extra: &'a RefCell<Map<String, Value>>,
 }
 
 impl OpCx<'_> {
@@ -183,6 +184,11 @@ impl OpCx<'_> {
     /// An undo left the field `label` as it is: it was changed again since this changeset wrote it.
     pub fn keep(&self, label: String) {
         self.kept.borrow_mut().push(label);
+    }
+
+    /// Adds an extra top-level field to the `apply` response JSON (e.g. `bot` for a newly created bot).
+    pub fn set_result(&self, key: &str, value: Value) {
+        self.extra.borrow_mut().insert(key.into(), value);
     }
 }
 
@@ -226,7 +232,7 @@ pub trait ChangeOp: Send + Sync {
     ) -> ApiResult<()>;
 }
 
-/// The response of `POST /api/config/draft`, same shape as the in-memory drafts.
+/// The response of `POST /api/config/draft`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Proposal {
     pub id: String,
@@ -234,6 +240,8 @@ pub struct Proposal {
     pub target: Value,
     pub href: String,
     pub changes: Vec<Change>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<Map<String, Value>>,
 }
 
 impl Proposal {
@@ -249,7 +257,14 @@ impl Proposal {
             target: Value::Object(target),
             href: cs.href.clone(),
             changes: cs.changes.clone(),
+            patch: None,
         }
+    }
+
+    /// Attaches the drafted field patch (used by bot prompt/rules editor drafts).
+    pub fn with_patch(mut self, patch: Map<String, Value>) -> Self {
+        self.patch = Some(patch);
+        self
     }
 }
 
@@ -400,9 +415,9 @@ pub fn stored<R>(f: impl Fn() -> ApiResult<R>) -> ApiResult<R> {
     steve_i18n::stored(&f).or_else(|_| f())
 }
 
-/// Stores an already planned changeset (one-click corrections, signal suggestions) and returns it as a
-/// draft; the caller may [`apply`] it right away. Build `prepared.title` and `plan.changes` under
-/// [`steve_i18n::stored`]: they are stored for every member to read.
+/// Stores an already planned changeset (one-click corrections, signal suggestions, core drafts)
+/// and returns it as a draft; the caller may [`apply`] it right away. Build `prepared.title` and
+/// `plan.changes` under [`steve_i18n::stored`]: they are stored for every member to read.
 pub fn store_plan(
     m: &Modules,
     caller: &Caller,
@@ -410,6 +425,19 @@ pub fn store_plan(
     prepared: &Prepared,
     plan: Plan,
     origin: Origin,
+) -> ApiResult<Proposal> {
+    store_plan_with_request(m, caller, kind, prepared, plan, origin, "")
+}
+
+/// [`store_plan`] recording the user's original request text on the stored changeset.
+pub fn store_plan_with_request(
+    m: &Modules,
+    caller: &Caller,
+    kind: &str,
+    prepared: &Prepared,
+    plan: Plan,
+    origin: Origin,
+    request: &str,
 ) -> ApiResult<Proposal> {
     let cs = m.store.write(|tx| {
         ChangeSets(tx).create(
@@ -423,7 +451,7 @@ pub fn store_plan(
                 changes: plan.changes,
                 ops: plan.ops,
                 origin: origin.origin,
-                request: String::new(),
+                request: request.into(),
                 basis: origin.basis,
                 created_by: caller.me.clone(),
             },
@@ -458,140 +486,155 @@ fn op_of<'a>(m: &'a Modules, op: &Value) -> ApiResult<&'a dyn ChangeOp> {
 }
 
 enum Outcome {
-    Applied,
+    Applied(Map<String, Value>),
     Stale,
 }
 
-/// `POST /api/config/:id/apply` for stored drafts. `None` = no such changeset (try the in-memory drafts).
-/// Not a draft any more, another workspace, or the target's revision moved since drafting →
+/// `POST /api/config/:id/apply` for stored drafts. Missing, not a draft any more, another
+/// workspace, or the target's revision moved since drafting →
 /// `409 这份草稿已经失效，请重新说一次` (a moved target also marks the draft `stale`). Otherwise every
-/// operation is validated and applied in order in one transaction; `{ok:true, undo:id}`.
-pub fn apply(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>> {
-    let cs = m.store.read(|c| ChangeSets(c).get(id)).ok()??;
-    Some((|| {
-        if cs.workspace_id != caller.ws || cs.status != "draft" {
+/// operation is validated and applied in order in one transaction; `{ok:true, undo:id, ...}`.
+pub fn apply(m: &Modules, caller: &Caller, id: &str) -> ApiResult<Value> {
+    let cs = m
+        .store
+        .read(|c| ChangeSets(c).get(id))?
+        .ok_or_else(|| ApiError::conflict(stale()))?;
+    if cs.workspace_id != caller.ws || cs.status != "draft" {
+        return Err(ApiError::conflict(stale()));
+    }
+    let outcome = m.store.write(|tx| {
+        let cs = ChangeSets(tx)
+            .get(id)?
+            .ok_or_else(|| ApiError::conflict(stale()))?;
+        if cs.status != "draft" {
             return Err(ApiError::conflict(stale()));
         }
-        let outcome = m.store.write(|tx| {
-            let cs = ChangeSets(tx).get(id)?.ok_or_else(|| ApiError::conflict(stale()))?;
-            if cs.status != "draft" {
-                return Err(ApiError::conflict(stale()));
+        if let (Some(tid), Some(rev)) = (&cs.target_id, cs.target_revision) {
+            let t = m
+                .registry
+                .targets
+                .get(&cs.target_type)
+                .ok_or_else(|| ApiError::conflict(stale()))?;
+            if t.revision(&m.store, tx, &cs.workspace_id, tid)? != Some(rev) {
+                ChangeSets(tx).close_draft(&cs, "stale")?;
+                return Ok(Outcome::Stale);
             }
-            if let (Some(tid), Some(rev)) = (&cs.target_id, cs.target_revision) {
-                let t = m
-                    .registry
-                    .targets
-                    .get(&cs.target_type)
-                    .ok_or_else(|| ApiError::conflict(stale()))?;
-                if t.revision(&m.store, tx, &cs.workspace_id, tid)? != Some(rev) {
-                    ChangeSets(tx).close_draft( &cs, "stale")?;
-                    return Ok(Outcome::Stale);
-                }
-            }
-            let vars = RefCell::new(BTreeMap::new());
-            let kept = RefCell::new(Vec::new());
-            let cx = OpCx {
-                ws: &cs.workspace_id,
-                actor: &caller.me,
-                changeset_id: &cs.id,
-                vars: &vars,
-                kept: &kept,
-            };
-            let mut before = Vec::with_capacity(cs.ops.len());
-            for raw in &cs.ops {
-                let op = substitute(raw, &vars.borrow());
-                let h = op_of(m, &op)?;
-                h.validate(tx, &cx, &op)?;
-                let b = h.apply(tx, &cx, &op)?;
-                before.push(json!({ "op": op, "before": b }));
-            }
-            if !ChangeSets(tx).mark_applied( &cs, &before)? {
-                return Err(ApiError::conflict(stale()));
-            }
-            tx.audit(
-                &cs.workspace_id,
-                &caller.me,
-                "config.apply",
-                &cs.id,
-                &json!({ "target": { "kind": cs.target_type, "id": cs.target_id }, "ops": cs.ops.len() }),
-            )?;
-            Ok(Outcome::Applied)
-        })?;
-        match outcome {
-            Outcome::Applied => Ok(json!({ "ok": true, "undo": id })),
-            Outcome::Stale => Err(ApiError::conflict(stale())),
         }
-    })())
+        let vars = RefCell::new(BTreeMap::new());
+        let kept = RefCell::new(Vec::new());
+        let extra = RefCell::new(Map::new());
+        let cx = OpCx {
+            ws: &cs.workspace_id,
+            actor: &caller.me,
+            changeset_id: &cs.id,
+            vars: &vars,
+            kept: &kept,
+            extra: &extra,
+        };
+        let mut before = Vec::with_capacity(cs.ops.len());
+        for raw in &cs.ops {
+            let op = substitute(raw, &vars.borrow());
+            let h = op_of(m, &op)?;
+            h.validate(tx, &cx, &op)?;
+            let b = h.apply(tx, &cx, &op)?;
+            before.push(json!({ "op": op, "before": b }));
+        }
+        if !ChangeSets(tx).mark_applied(&cs, &before)? {
+            return Err(ApiError::conflict(stale()));
+        }
+        tx.audit(
+            &cs.workspace_id,
+            &caller.me,
+            "config.apply",
+            &cs.id,
+            &json!({ "target": { "kind": cs.target_type, "id": cs.target_id }, "ops": cs.ops.len() }),
+        )?;
+        Ok(Outcome::Applied(extra.into_inner()))
+    })?;
+    match outcome {
+        Outcome::Applied(extra) => {
+            let mut r = Map::new();
+            r.insert("ok".into(), Value::Bool(true));
+            r.insert("undo".into(), json!(id));
+            r.extend(extra);
+            Ok(Value::Object(r))
+        }
+        Outcome::Stale => Err(ApiError::conflict(stale())),
+    }
 }
 
-/// `POST /api/config/:id/undo` for stored changesets. `None` = no such changeset. Not applied, another
+/// `POST /api/config/:id/undo` for stored changesets. Missing, not applied, another
 /// workspace, or applied more than 24 hours ago → `409 这次改动已经不能撤销了`. Undoes in reverse order
 /// in one transaction; a field changed again since keeps its value and is named in `kept`;
 /// `{ok:true, kept?}`.
-pub fn undo(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>> {
+pub fn undo(m: &Modules, caller: &Caller, id: &str) -> ApiResult<Value> {
     undo_at(m, caller, id, now())
 }
 
 /// [`undo`] with an explicit clock (tests of the 24-hour window).
-pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> Option<ApiResult<Value>> {
-    let cs = m.store.read(|c| ChangeSets(c).get(id)).ok()??;
-    Some((|| {
-        if cs.workspace_id != caller.ws || !cs.undoable(at) {
+pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> ApiResult<Value> {
+    let cs = m
+        .store
+        .read(|c| ChangeSets(c).get(id))?
+        .ok_or_else(|| ApiError::conflict(not_undoable()))?;
+    if cs.workspace_id != caller.ws || !cs.undoable(at) {
+        return Err(ApiError::conflict(not_undoable()));
+    }
+    m.store.write(|tx| {
+        let cs = ChangeSets(tx)
+            .get(id)?
+            .filter(|c| c.undoable(at))
+            .ok_or_else(|| ApiError::conflict(not_undoable()))?;
+        let vars = RefCell::new(BTreeMap::new());
+        let kept = RefCell::new(Vec::new());
+        let extra = RefCell::new(Map::new());
+        let cx = OpCx {
+            ws: &cs.workspace_id,
+            actor: &caller.me,
+            changeset_id: &cs.id,
+            vars: &vars,
+            kept: &kept,
+            extra: &extra,
+        };
+        for entry in cs.before.iter().flatten().rev() {
+            let op = entry.get("op").cloned().unwrap_or(Value::Null);
+            let before = entry.get("before").cloned().unwrap_or(Value::Null);
+            op_of(m, &op)?.undo(tx, &cx, &op, &before)?;
+        }
+        if !ChangeSets(tx).mark_undone(&cs)? {
             return Err(ApiError::conflict(not_undoable()));
         }
-        m.store.write(|tx| {
-            let cs = ChangeSets(tx)
-                .get(id)?
-                .filter(|c| c.undoable(at))
-                .ok_or_else(|| ApiError::conflict(not_undoable()))?;
-            let vars = RefCell::new(BTreeMap::new());
-            let kept = RefCell::new(Vec::new());
-            let cx = OpCx {
-                ws: &cs.workspace_id,
-                actor: &caller.me,
-                changeset_id: &cs.id,
-                vars: &vars,
-                kept: &kept,
-            };
-            for entry in cs.before.iter().flatten().rev() {
-                let op = entry.get("op").cloned().unwrap_or(Value::Null);
-                let before = entry.get("before").cloned().unwrap_or(Value::Null);
-                op_of(m, &op)?.undo(tx, &cx, &op, &before)?;
-            }
-            if !ChangeSets(tx).mark_undone(&cs)? {
-                return Err(ApiError::conflict(not_undoable()));
-            }
-            let kept = kept.into_inner();
-            tx.audit(
-                &cs.workspace_id,
-                &caller.me,
-                "config.undo",
-                &cs.id,
-                &json!({ "kept": kept }),
-            )?;
-            let mut r = json!({ "ok": true });
-            if !kept.is_empty() {
-                r["kept"] = json!(kept);
-            }
-            Ok(r)
-        })
-    })())
+        let kept = kept.into_inner();
+        tx.audit(
+            &cs.workspace_id,
+            &caller.me,
+            "config.undo",
+            &cs.id,
+            &json!({ "kept": kept }),
+        )?;
+        let mut r = json!({ "ok": true });
+        if !kept.is_empty() {
+            r["kept"] = json!(kept);
+        }
+        Ok(r)
+    })
 }
 
-/// Throws a draft away (`dropped`); `None` = no such changeset, `409` if it is no longer a draft.
-pub fn drop_draft(m: &Modules, caller: &Caller, id: &str) -> Option<ApiResult<Value>> {
-    let cs = m.store.read(|c| ChangeSets(c).get(id)).ok()??;
-    Some((|| {
-        if cs.workspace_id != caller.ws {
+/// Throws a draft away (`dropped`); `409` if missing, another workspace, or no longer a draft.
+pub fn drop_draft(m: &Modules, caller: &Caller, id: &str) -> ApiResult<Value> {
+    let cs = m
+        .store
+        .read(|c| ChangeSets(c).get(id))?
+        .ok_or_else(|| ApiError::conflict(stale()))?;
+    if cs.workspace_id != caller.ws {
+        return Err(ApiError::conflict(stale()));
+    }
+    m.store.write(|tx| {
+        if !ChangeSets(tx).close_draft(&cs, "dropped")? {
             return Err(ApiError::conflict(stale()));
         }
-        m.store.write(|tx| {
-            if !ChangeSets(tx).close_draft(&cs, "dropped")? {
-                return Err(ApiError::conflict(stale()));
-            }
-            Ok(json!({ "ok": true }))
-        })
-    })())
+        Ok(json!({ "ok": true }))
+    })
 }
 
 /// A module target as it is now (fields with their current values), after the ownership check; no

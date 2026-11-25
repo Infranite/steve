@@ -2,6 +2,8 @@ use super::*;
 
 install! { install(reg, cx) [declared, disclosure, kb_hooks, out_link, registry, uses] => [declared, modules, uses] {
     let Env { store, core, .. } = cx.clone();
+    let mut registry = registry;
+    core.register_change_ops(&mut registry);
     let modules = Modules::new(store.clone(), core.module_gateway(), registry);
     // the handle systems the extensions declared, there before anything names a sender in one
     if !declared.systems.is_empty() {

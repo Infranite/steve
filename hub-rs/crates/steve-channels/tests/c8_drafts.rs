@@ -152,11 +152,11 @@ fn ops_of(h: &H, id: &str) -> Vec<Value> {
 }
 
 fn apply(h: &H, id: &str) -> Result<Value, ApiError> {
-    changes::apply(&h.env.modules, &me(), id).expect("stored")
+    changes::apply(&h.env.modules, &me(), id)
 }
 
 fn undo(h: &H, id: &str) -> Result<Value, ApiError> {
-    changes::undo(&h.env.modules, &me(), id).expect("stored")
+    changes::undo(&h.env.modules, &me(), id)
 }
 
 fn set(key: &str, value: Value) -> Value {
@@ -827,11 +827,7 @@ async fn a_disconnected_space_can_only_be_viewed() {
     };
     // the connection gone (ON DELETE SET NULL), settings still there: the op itself refuses
     seed::spaces::detach_connection_spaces(h.env.store(), &h.con).expect("disconnect");
-    refused(
-        changes::apply(&h.env.modules, &me(), &p.id)
-            .expect("stored")
-            .expect_err("apply refused"),
-    );
+    refused(changes::apply(&h.env.modules, &me(), &p.id).expect_err("apply refused"));
     // and what ChannelUsage leaves: no settings
     seed::spaces::clear_space_settings(h.env.store(), &g1).expect("settings");
     let shown = get(&h, &format!("/spaces/{g1}")).await;

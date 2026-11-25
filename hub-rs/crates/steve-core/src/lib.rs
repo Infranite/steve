@@ -125,8 +125,6 @@ pub(crate) struct State {
     quota_waits: HashMap<String, quota::QuotaWait>,
     releasing: Option<Releasing>,
     release_generation: u64,
-    drafts: HashMap<String, changes::Proposal>,
-    applied: HashMap<String, changes::Applied>,
     /// Item hook calls collected in this critical section, run once the lock is gone.
     hooks: Vec<modules::HookEvent>,
     /// Items the user marked done, with what to restore if they undo it from the toast.

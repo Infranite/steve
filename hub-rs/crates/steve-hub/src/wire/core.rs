@@ -1520,28 +1520,6 @@ impl Domain for CoreDomain {
         }
         to_obj(self.core.draft(ws, t, text).await.map_err(cerr)?)
     }
-    async fn config_apply(&self, id: &str, actor: &str, ws: &str) -> BResult<Obj> {
-        let (c, id, actor, ws) = (
-            self.core.clone(),
-            id.to_string(),
-            actor.to_string(),
-            ws.to_string(),
-        );
-        to_obj(blocking(move || c.apply(&id, &actor, &ws)).await?)
-    }
-    async fn config_undo(&self, id: &str, actor: &str, ws: &str) -> BResult<Obj> {
-        let (c, id, actor, ws) = (
-            self.core.clone(),
-            id.to_string(),
-            actor.to_string(),
-            ws.to_string(),
-        );
-        to_obj(blocking(move || c.undo(&id, &actor, &ws)).await?)
-    }
-    async fn config_drop(&self, id: &str, ws: &str) -> BResult<Obj> {
-        let (c, id, ws) = (self.core.clone(), id.to_string(), ws.to_string());
-        to_obj(blocking(move || c.drop_draft(&id, &ws)).await?)
-    }
     async fn config_mark(&self, ws: &str, id: &str, state: Option<&str>) -> BResult<()> {
         let (c, id, ws, state) = (
             self.core.clone(),

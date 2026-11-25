@@ -728,10 +728,8 @@ fn record(
         context: Value::Null,
     };
     let p = changes::store_plan(m, who, "contact", &prepared, plan, origin)?;
-    match changes::apply(m, who, &p.id) {
-        Some(r) => r.map(|_| Some(p.id)),
-        None => Err(ApiError::Internal("steward changeset vanished".into())),
-    }
+    changes::apply(m, who, &p.id)?;
+    Ok(Some(p.id))
 }
 
 /// `PUT /stewards/:type/:id {person_id, role?, replace?}`.

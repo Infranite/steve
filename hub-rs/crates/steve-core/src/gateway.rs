@@ -1558,16 +1558,7 @@ pub async fn answer(
     }
 }
 
-/// A field the config draft may change.
-#[derive(Debug, Clone)]
-pub struct FieldSpec {
-    pub key: String,
-    pub label: String,
-    /// text | enum | number
-    pub ty: &'static str,
-    pub values: Option<Vec<String>>,
-    pub current: Value,
-}
+pub use steve_modules::changes::FieldSpec;
 
 /// Map a request onto fields; returns `(key, value)` for known keys only.
 pub async fn draft_fields(
