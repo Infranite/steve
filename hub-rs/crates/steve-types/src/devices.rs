@@ -342,7 +342,8 @@ pub struct NodeHarnessRefreshResponse {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum ServicePathSource {
-    LoginShell,
+    InteractiveLogin,
+    Login,
     ProcessEnv,
     DefaultFallback,
 }
@@ -389,8 +390,20 @@ pub struct ServiceCommandDiagnostic {
 
 pub const LOGIN_SHELL_PATH_BEGIN: &str = "__STEVE_LOGIN_PATH_BEGIN__";
 pub const LOGIN_SHELL_PATH_END: &str = "__STEVE_LOGIN_PATH_END__";
+/// Upper bound on each shell startup invocation while probing the user's `PATH`, so a slow or
+/// misconfigured interactive rc file falls back promptly instead of hanging setup or probes.
+pub const LOGIN_SHELL_PROBE_TIMEOUT_SECS: u64 = 5;
 
-/// Shell snippet executed via `<shell> -l -c <script>` to emit `$PATH` framed by sentinels so
+/// Whether `shell` supports `-l -i -c` so interactive rc files (such as `~/.zshrc`) load alongside
+/// login profiles during `PATH` capture.
+pub fn shell_supports_interactive_login(shell: &std::path::Path) -> bool {
+    shell
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("zsh") || n.eq_ignore_ascii_case("bash"))
+}
+
+/// Shell snippet executed via `<shell> -l [-i] -c <script>` to emit `$PATH` framed by sentinels so
 /// profile banners or MOTD output cannot corrupt the captured value.
 pub fn login_shell_path_script(shell: &std::path::Path) -> String {
     let is_fish = shell
@@ -965,5 +978,13 @@ mod login_shell_path_tests {
             )),
             None
         );
+        assert!(shell_supports_interactive_login(Path::new("/bin/zsh")));
+        assert!(shell_supports_interactive_login(Path::new(
+            "/opt/homebrew/bin/bash"
+        )));
+        assert!(!shell_supports_interactive_login(Path::new("/bin/sh")));
+        assert!(!shell_supports_interactive_login(Path::new(
+            "/opt/homebrew/bin/fish"
+        )));
     }
 }
