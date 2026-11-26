@@ -12,8 +12,15 @@ const remote = { node_id: "fixture-remote", name: "Remote laptop", fingerprint: 
     file_access: { status: "missing", locations: [{ location: "documents", status: "missing" }] } },
   link: { route: "loopback", via: "tailcat", tls: false, since: 0, latency_ms: 38.2, latency_at: Date.now() },
   upgrade: { build: { version: "0.2.112", commit: "abc", target: "x" }, policy: "notify", own_policy: null, can: false, reason: "current", latest: null } }
-const sample = { at: Date.now() - 20_000, cpus: 12, load: [6, 5, 4], mem_total: 36 * 2 ** 30, mem_available: 18 * 2 ** 30, rtt_ms: 38, network: { rx_bytes_per_second: 1e6, tx_bytes_per_second: 64_000 } }
-const vitals = { "fixture-remote": { sampling: { interval_ms: 60_000, stale_after_ms: 180_000, now: Date.now() }, latest: sample, tokens: { per_minute: 130_000, today: 46_900_000 }, series: [{ at: Date.now() - 120_000, load: 0.4, mem: 0.5, rtt: 40 }, { at: Date.now() - 60_000, load: null, mem: 0.5, rtt: 38 }, { at: Date.now() - 20_000, load: 0.5, mem: 0.5, rtt: 38, network: sample.network }] } }
+const sample = {
+  at: Date.now() - 20_000, sampled_at: Date.now() - 20_000, cpus: 12, load: [6, 5, 4], mem_total: 36 * 2 ** 30, mem_available: 18 * 2 ** 30, rtt_ms: 38,
+  roots: [], sessions: 1,
+  network: { rx_bytes_per_second: 1e6, tx_bytes_per_second: 64_000 },
+  process: { cpu_seconds: 4, resident_bytes: 67_108_864, disk_written_bytes: 10_485_760 },
+  adapter_disk_written_bytes: 52_428_800,
+  session_vitals: [{ session_id: "ses_demo", cpu_seconds: 12.5, resident_bytes: 268_435_456, disk_written_bytes: 52_428_800 }],
+}
+const vitals = { "fixture-remote": { sampling: { interval_ms: 60_000, stale_after_ms: 180_000, now: Date.now() }, latest: sample, tokens: { per_minute: 130_000, today: 46_900_000, total_cost_usd: 42.5, today_cost_usd: 6.25 }, series: [{ at: Date.now() - 120_000, load: 0.4, mem: 0.5, rtt: 40 }, { at: Date.now() - 60_000, load: null, mem: 0.5, rtt: 38 }, { at: Date.now() - 20_000, load: 0.5, mem: 0.5, rtt: 38, network: sample.network }] } }
 let nodes = [{ ...remote }, { ...remote }, { ...remote, node_id: "fixture-local", local: true }]
 let status = 200, release, reads = 0
 const held = new Promise(resolve => { release = resolve })
@@ -83,6 +90,8 @@ try {
   await page.locator("[data-node-sub]").getByText("经 tailcat 连到 Hub", { exact: true }).waitFor()
   assert.equal(await detail.locator("[data-running]").getAttribute("data-running"), "32")
   assert.equal(await detail.locator("[data-running]").getAttribute("data-waiting"), "2")
+  assert.match((await detail.locator('[data-vital="disk-written"]').innerText()).replace(/\s+/g, " "), /磁盘写入 60 MB/)
+  assert.match((await detail.locator('[data-vital="cost"]').innerText()).replace(/\s+/g, " "), /累计费用 \$42\.50 · 今日 \$6\.25/)
   await detail.locator('[data-node-action="fileAccess"]').waitFor()
   // Diagnostics tab holds identity & fingerprint
   await detail.locator('[data-node-tab="diagnostics"]').click()
@@ -104,9 +113,14 @@ try {
   await fileAccess.locator("[data-node-file-access-recheck]").click()
   await detail.locator('[data-node-file-access="granted"] [data-file-access-location="documents"]').getByText("已确认可访问", { exact: true }).waitFor()
   assert.deepEqual(writes, ["POST /api/nodes/fixture-remote/file-access"])
-  // Work & Resources tab holds 24h trends & capacity limit
+  // Work & Resources tab holds 24h trends, disk writes, cost, per-session resource table & capacity limit
   await detail.locator('[data-node-tab="work"]').click()
   await detail.locator("[data-node-trends]").waitFor()
+  assert.match((await detail.locator('[data-resource="disk-written"]').innerText()).replace(/\s+/g, " "), /60 MB.*进程 10 MB · 活跃会话 50 MB/)
+  assert.match((await detail.locator('[data-resource="cost"]').innerText()).replace(/\s+/g, " "), /\$42\.50.*今日 \$6\.25/)
+  const svRow = detail.locator('[data-node-session-vitals] [data-node-session-vital="ses_demo"]')
+  await svRow.waitFor()
+  assert.match((await svRow.innerText()).replace(/\s+/g, " "), /ses_demo 12\.5 s 256 MB 50 MB/)
   // Capacity changes are explicit saves, not new pairing or execution approvals.
   const capacity = detail.locator("[data-session-limit-input]")
   assert.equal(await capacity.getAttribute("aria-valuenow"), "32")

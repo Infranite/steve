@@ -300,6 +300,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/142.sql"),
     // 143: rebind work.tidy consumer to work.item.lifecycle so all close kinds clean worktrees.
     include_str!("../migrations/143.sql"),
+    // 144: attribute usage_records, agent_turns, gateway_calls, and stat_daily to Node (`node_id`).
+    include_str!("../migrations/144.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

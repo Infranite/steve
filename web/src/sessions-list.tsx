@@ -7,7 +7,8 @@ import { api } from "@/api"
 import { Button } from "@/components/ui/button"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { t as tr, useT } from "@/i18n"
-import { hm, monthDay, weekday } from "@/i18n/format"
+import { hm, monthDay, num, weekday } from "@/i18n/format"
+import { fmtBytes, fmtN, fmtUsd } from "@/stats/format"
 import { SessionsHeatmap } from "@/sessions-heatmap"
 import { SS, type Sess } from "@/store"
 import { Empty, Group, ItemNo, openSheet, Page, SectionLabel, StatusDot, SearchField } from "@/ui"
@@ -68,7 +69,21 @@ const SessRow = memo(function SessRow({ s, when, hit, status }: { s: Sess; when:
           {itemTitle && <span className="hidden min-w-0 shrink-[2] truncate type-footnote text-muted-foreground md:block" data-session-item-title>{itemTitle}</span>}
 
         </span>
-        <span className="mt-0.5 flex min-w-0 type-footnote text-muted-foreground" data-session-model><SessionIdentity session={s} /></span>
+        <span className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-0.5 type-footnote text-muted-foreground" data-session-model>
+          <SessionIdentity session={s} />
+          {(s.tokens != null || s.costUsd != null) && (
+            <span className="inline-flex shrink-0 items-center gap-1 tabular-nums text-muted-foreground" data-session-cost
+              title={t("views:sessions.costTip", { tokens: fmtN(s.tokens ?? 0), usd: fmtUsd(s.costUsd ?? 0) })}>
+              {[s.tokens != null ? fmtN(s.tokens) : null, s.costUsd != null ? fmtUsd(s.costUsd) : null].filter(Boolean).join(" · ")}
+            </span>
+          )}
+          {live(s) && s.vitals && (
+            <span className="inline-flex shrink-0 items-center gap-1 tabular-nums text-tertiary" data-session-vitals
+              title={t("views:sessions.vitalsTip", { cpu: num(Math.round(s.vitals.cpu_seconds * 10) / 10), mem: fmtBytes(s.vitals.resident_bytes), disk: fmtBytes(s.vitals.disk_written_bytes) })}>
+              {t("views:sessions.memShort", { mem: fmtBytes(s.vitals.resident_bytes) })} · {t("views:sessions.diskShort", { disk: fmtBytes(s.vitals.disk_written_bytes) })}
+            </span>
+          )}
+        </span>
         {hit && <span className="mt-0.5 truncate type-footnote text-blue" data-session-hit>{t("views:sessions.contentHit", { q: hit })}</span>}
       </span>
       <span className="flex shrink-0 items-center gap-4 type-footnote text-muted-foreground">

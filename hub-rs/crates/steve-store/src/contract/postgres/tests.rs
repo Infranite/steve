@@ -105,6 +105,7 @@ impl Fixture {
         let result = f(&mut R {
             db: &mut self.pg,
             conn: &self.no_sqlite,
+            windows: None,
         });
         self.pg
             .batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;

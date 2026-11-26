@@ -13,6 +13,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { st } from "@/store"
 import { Page, Segmented, Empty } from "@/ui"
 import { Select } from "@/view-shared"
+import { api } from "@/api"
 import { stats, statsSeed, type Filter, type RangeKind, type Summary } from "@/api/stats"
 import { KeyNumbers } from "@/stats/kpi"
 import { Section } from "@/stats/tables"
@@ -26,7 +27,7 @@ import { EventsSection } from "@/stats/events"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 import { useHubQuery } from "@/data/use-hub-query"
-import { fmtN, fmtUsage, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName } from "@/stats/format"
+import { fmtBytes, fmtEst, fmtN, fmtUsage, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName } from "@/stats/format"
 
 export function StatsRoute({ b, c }: { b?: string; c?: string }) {
   if (b === "items" && c) return <StatsItemView key={c} id={c} />
@@ -121,6 +122,7 @@ function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f:
   return (
     <div className="flex flex-col gap-10">
       <KeyNumbers s={s} prevName={prevName} />
+      <StatsInfraStrip f={f} fkey={fkey} live={live} />
       {s.human.approval && <Section k="approval" title={t("core:approval.stats")}>
         <dl className="grid gap-4 sm:grid-cols-4" data-stats-approval>
           {(["sessions", "turns", "permissions", "questions"] as const).map((key) => <div key={key}>
@@ -168,6 +170,42 @@ function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f:
           reprice: t("stats:page.foot.reprice"),
         })}
       </footer>
+    </div>
+  )
+}
+
+/** Overview strip below KeyNumbers: cross-Node disk written bytes (from /api/vitals) and Top Node by spend. */
+function StatsInfraStrip({ f, fkey, live }: { f: Filter; fkey: string; live: boolean }) {
+  const t = useT()
+  const vitals = useHubQuery(["stats", "infra-vitals"], () => api.vitals().catch(() => null), { events: ["node"], debounceMs: 500, live })
+  const byNode = useHubQuery(["stats", "infra-nodes", fkey], () => stats.usage(f, "node").catch(() => null), { events: ["stats"], debounceMs: 200, live })
+  const nodes = Object.values(vitals.data?.nodes ?? {})
+  let procDisk = 0, adapterDisk = 0, hasDisk = false
+  for (const n of nodes) {
+    const p = n.latest?.process?.disk_written_bytes
+    const a = n.latest?.adapter_disk_written_bytes ?? 0
+    if (p != null || a > 0) hasDisk = true
+    procDisk += p ?? 0
+    adapterDisk += a
+  }
+  const topNode = byNode.data?.rows?.slice().sort((a, b) => (b.est - a.est) || (b.total - a.total))[0] ?? null
+  if (!hasDisk && !topNode) return null
+  return (
+    <div className="grid gap-3 sm:grid-cols-2" data-stats-infra>
+      <div className="flex min-w-0 flex-col gap-1 rounded-xl border border-border/70 bg-card px-4 py-3" data-stats-disk-writes>
+        <span className="type-footnote text-muted-foreground">{t("stats:v2.infra.diskWrites")}</span>
+        <span className="type-title-3 font-medium tabular-nums text-foreground">{hasDisk ? fmtBytes(procDisk + adapterDisk) : "—"}</span>
+        <span className="truncate type-footnote tabular-nums text-muted-foreground">
+          {hasDisk ? t("stats:v2.infra.diskWritesSub", { proc: fmtBytes(procDisk), sessions: fmtBytes(adapterDisk) }) : t("stats:v2.infra.diskWritesEmpty")}
+        </span>
+      </div>
+      <div className="flex min-w-0 flex-col gap-1 rounded-xl border border-border/70 bg-card px-4 py-3" data-stats-top-node>
+        <span className="type-footnote text-muted-foreground">{t("stats:v2.infra.topNode")}</span>
+        <span className="truncate type-title-3 font-medium text-foreground">{topNode ? (topNode.label || t("stats:word.unknown")) : "—"}</span>
+        <span className="truncate type-footnote tabular-nums text-muted-foreground">
+          {topNode ? t("stats:v2.infra.topNodeSub", { tokens: fmtN(topNode.total), usd: fmtEst(topNode.est, topNode.unpriced_tokens) }) : t("stats:v2.infra.topNodeEmpty")}
+        </span>
+      </div>
     </div>
   )
 }

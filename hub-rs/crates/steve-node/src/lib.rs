@@ -4364,9 +4364,14 @@ impl Discovery for LocalNode {
         let sessions = self.0.actors.lock().unwrap().len() as u32;
         let inner = self.0.clone();
         // statvfs, vm_stat and the journal's backlog may block for a moment on a slow disk
-        tokio::task::spawn_blocking(move || NodeVitals {
-            meters: Some(vitals::meters(&inner.j)),
-            ..vitals::measure(&roots, sessions)
+        tokio::task::spawn_blocking(move || {
+            let sampled = vitals::meters(&inner.j);
+            NodeVitals {
+                adapter_disk_written_bytes: sampled.adapter_disk_written_bytes,
+                session_vitals: sampled.session_vitals,
+                meters: Some(sampled.meters),
+                ..vitals::measure(&roots, sessions)
+            }
         })
         .await
         .map_err(|e| Error::new(Code::Internal, e.to_string()))

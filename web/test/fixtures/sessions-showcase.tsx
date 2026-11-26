@@ -39,6 +39,11 @@ for (let n = 0; n < 46; n++) {
     used: n % 6 === 1 ? undefined : [54, 77, 70, 81, 12, 28, 70, 60, 71, 67, 30, 34, 78, 74, 91][n % 15] * 2000, size: 200000,
     title: imported ? "本机 Codex：排查构建缓存" : title, device_id: "hub", source: imported ? "本机 Codex" : "Steve",
     readonly: imported, busy: status === "running",
+    tokens: (n + 1) * 45_000,
+    cost_usd: Number(((n + 1) * 0.18).toFixed(2)),
+    vitals: status === "running"
+      ? { cpu_seconds: 12.4 + n * 3, resident_bytes: (256 + n * 64) * 1024 * 1024, disk_written_bytes: (40 + n * 15) * 1024 * 1024 }
+      : undefined,
     created: now - (n * 3.1 + 1) * H, updated: now - n * 3.1 * H - 7 * 60_000,
   }))
 }
@@ -56,6 +61,7 @@ const state: Shell = fixtureShell({
 })
 api.shell = async () => structuredClone(state)
 api.transcript = async () => ({ events: [], next: null })
+api.endedSessions = async () => ({ rev: 1, views: sessions.filter((s) => s.status === "ended"), next: null })
 api.searchSessions = async (s: string) => (s === "缓存" ? ["s20", "s4"] : [])
 seedItemViews(items)
 seedSessionViews(sessions)

@@ -41,6 +41,7 @@ pub struct Query {
     pub bot: Option<String>,
     pub model: Option<String>,
     pub source: Option<String>,
+    pub node: Option<String>,
 }
 
 /// The price table in force: `stats.prices` of the workspace, else the defaults.
@@ -100,7 +101,7 @@ fn ratio(a: i64, b: i64) -> Option<f64> {
 
 /* ── the daily cube ── */
 
-/// A `stat_daily` row.
+/// A `stat_daily` row (optionally attributed to `session_id` when loaded via [`by_session`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Daily {
     pub coverage: crate::coverage::Coverage,
@@ -111,6 +112,8 @@ pub struct Daily {
     pub model: String,
     pub bot_id: String,
     pub project_id: String,
+    pub node_id: String,
+    pub session_id: String,
     pub input: i64,
     pub output: i64,
     pub cache_read: i64,
@@ -166,6 +169,7 @@ pub(crate) fn daily_filter(q: &Query) -> DailyFilter<'_> {
         bot: q.bot.as_deref(),
         model: q.model.as_deref(),
         source: q.source.as_deref(),
+        node: q.node.as_deref(),
     }
 }
 
@@ -180,7 +184,21 @@ pub(crate) fn report_scope(q: &Query, lo: i64, hi: i64) -> ReportScope<'_> {
 }
 
 fn daily_row(
-    (day, source, purpose, harness, model, bot_id, project_id): DailyKey,
+    (day, source, purpose, harness, model, bot_id, project_id, node_id): DailyKey,
+    m: Measures,
+) -> Daily {
+    daily_session_row(
+        (
+            day, source, purpose, harness, model, bot_id, project_id, node_id,
+        ),
+        String::new(),
+        m,
+    )
+}
+
+fn daily_session_row(
+    (day, source, purpose, harness, model, bot_id, project_id, node_id): DailyKey,
+    session_id: String,
     m: Measures,
 ) -> Daily {
     let Measures {
@@ -210,6 +228,8 @@ fn daily_row(
         model,
         bot_id,
         project_id,
+        node_id,
+        session_id,
         input,
         output,
         cache_read,
@@ -244,10 +264,11 @@ fn attach_coverage(
             d.model.clone(),
             d.bot_id.clone(),
             d.project_id.clone(),
+            d.node_id.clone(),
         );
         d.coverage = cells.remove(&key).unwrap_or_default();
     }
-    for ((day, source, purpose, harness, model, bot_id, project_id), coverage) in cells {
+    for ((day, source, purpose, harness, model, bot_id, project_id, node_id), coverage) in cells {
         rows.push(Daily {
             day,
             source,
@@ -256,6 +277,48 @@ fn attach_coverage(
             model,
             bot_id,
             project_id,
+            node_id,
+            coverage,
+            ..Daily::default()
+        });
+    }
+}
+
+fn attach_session_coverage(
+    rows: &mut Vec<Daily>,
+    mut cells: BTreeMap<crate::coverage::SessionKey, crate::coverage::Coverage>,
+) {
+    for d in rows.iter_mut() {
+        let key = (
+            (
+                d.day.clone(),
+                d.source.clone(),
+                d.purpose.clone(),
+                d.harness.clone(),
+                d.model.clone(),
+                d.bot_id.clone(),
+                d.project_id.clone(),
+                d.node_id.clone(),
+            ),
+            d.session_id.clone(),
+        );
+        d.coverage = cells.remove(&key).unwrap_or_default();
+    }
+    for (
+        ((day, source, purpose, harness, model, bot_id, project_id, node_id), session_id),
+        coverage,
+    ) in cells
+    {
+        rows.push(Daily {
+            day,
+            source,
+            purpose,
+            harness,
+            model,
+            bot_id,
+            project_id,
+            node_id,
+            session_id,
             coverage,
             ..Daily::default()
         });
@@ -275,9 +338,10 @@ pub fn hourly(c: &mut impl Read, q: &Query) -> Result<Vec<Daily>> {
         let h = crate::day::hour(ts, tz);
         h.starts_with(q.from.as_str()).then_some(h)
     };
-    let keep = |source: &str, model: &str| {
+    let keep = |source: &str, model: &str, node: &str| {
         q.source.as_deref().is_none_or(|s| s == source)
             && q.model.as_deref().is_none_or(|m| m == model)
+            && q.node.as_deref().is_none_or(|n| n == node)
     };
     let mut cells = BTreeMap::<DailyKey, Measures>::new();
     let mut first = BTreeMap::<String, String>::new();
@@ -286,7 +350,7 @@ pub fn hourly(c: &mut impl Read, q: &Query) -> Result<Vec<Daily>> {
         if let Some(id) = &u.turn {
             first.entry(id.clone()).or_insert_with(|| u.model.clone());
         }
-        if let Some(h) = hour(u.at).filter(|_| keep(&u.source, &u.model)) {
+        if let Some(h) = hour(u.at).filter(|_| keep(&u.source, &u.model, &u.node)) {
             let key = (
                 h,
                 u.source.clone(),
@@ -295,6 +359,7 @@ pub fn hourly(c: &mut impl Read, q: &Query) -> Result<Vec<Daily>> {
                 u.model.clone(),
                 u.bot.clone(),
                 u.project.clone(),
+                u.node.clone(),
             );
             add_usage(cells.entry(key).or_default(), &u);
         }
@@ -306,7 +371,7 @@ pub fn hourly(c: &mut impl Read, q: &Query) -> Result<Vec<Daily>> {
             .clone()
             .or_else(|| first.get(&t.id).cloned())
             .unwrap_or_else(|| t.fallback_model.clone());
-        if let Some(h) = hour(t.ended).filter(|_| keep("agent", &model)) {
+        if let Some(h) = hour(t.ended).filter(|_| keep("agent", &model, &t.node)) {
             let key = (
                 h,
                 "agent".into(),
@@ -315,6 +380,7 @@ pub fn hourly(c: &mut impl Read, q: &Query) -> Result<Vec<Daily>> {
                 model,
                 t.bot.clone(),
                 t.project.clone(),
+                t.node.clone(),
             );
             add_turn(cells.entry(key).or_default(), &t);
         }
@@ -326,6 +392,115 @@ pub fn hourly(c: &mut impl Read, q: &Query) -> Result<Vec<Daily>> {
         .collect();
     attach_coverage(&mut rows, crate::coverage::hourly_cells(c, q)?);
     Ok(rows)
+}
+
+/// Detail rows attributed by `session_id` (`""` for non-session gateway/research calls) so that
+/// `by=session` and `group=session` conserve exact token and spend totals with [`daily`] / [`hourly`].
+pub fn by_session(c: &mut impl Read, q: &Query, hourly: bool) -> Result<Vec<Daily>> {
+    let tz = tz_of(c, &q.workspace_id)?;
+    let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+        return Ok(vec![]);
+    };
+    let bucket_usage = |at: i64, day: &str| {
+        if hourly {
+            let h = crate::day::hour(at, tz);
+            h.starts_with(q.from.as_str()).then_some(h)
+        } else {
+            Some(day.to_string())
+        }
+    };
+    let bucket_turn = |ended: i64| {
+        if hourly {
+            let h = crate::day::hour(ended, tz);
+            h.starts_with(q.from.as_str()).then_some(h)
+        } else {
+            let d = crate::day::day(ended, tz);
+            (d.as_str() >= q.from.as_str() && d.as_str() <= q.to.as_str()).then_some(d)
+        }
+    };
+    let keep = |source: &str, model: &str, node: &str| {
+        q.source.as_deref().is_none_or(|s| s == source)
+            && q.model.as_deref().is_none_or(|m| m == model)
+            && q.node.as_deref().is_none_or(|n| n == node)
+    };
+    let mut cells = BTreeMap::<(DailyKey, String), Measures>::new();
+    let mut first = BTreeMap::<String, String>::new();
+    let f = daily_filter(q);
+    UsageFacts(c).scan(f.ws, Some((f.from, f.to)), f.project, f.bot, |u| {
+        if let Some(id) = &u.turn {
+            first.entry(id.clone()).or_insert_with(|| u.model.clone());
+        }
+        if let Some(bucket) =
+            bucket_usage(u.at, &u.day).filter(|_| keep(&u.source, &u.model, &u.node))
+        {
+            let key = (
+                (
+                    bucket,
+                    u.source.clone(),
+                    u.purpose.clone(),
+                    u.harness.clone(),
+                    u.model.clone(),
+                    u.bot.clone(),
+                    u.project.clone(),
+                    u.node.clone(),
+                ),
+                u.session.clone().unwrap_or_default(),
+            );
+            add_usage(cells.entry(key).or_default(), &u);
+        }
+        Ok(())
+    })?;
+    TurnFacts(c).scan_ended(f.ws, Some((lo, hi)), f.project, f.bot, |t| {
+        let model = t
+            .model
+            .clone()
+            .or_else(|| first.get(&t.id).cloned())
+            .unwrap_or_else(|| t.fallback_model.clone());
+        if let Some(bucket) = bucket_turn(t.ended).filter(|_| keep("agent", &model, &t.node)) {
+            let key = (
+                (
+                    bucket,
+                    "agent".into(),
+                    "turn".into(),
+                    t.harness.clone(),
+                    model,
+                    t.bot.clone(),
+                    t.project.clone(),
+                    t.node.clone(),
+                ),
+                t.session.clone(),
+            );
+            add_turn(cells.entry(key).or_default(), &t);
+        }
+        Ok(())
+    })?;
+    let mut rows = cells
+        .into_iter()
+        .map(|((key, session), measures)| daily_session_row(key, session, measures))
+        .collect();
+    attach_session_coverage(&mut rows, crate::coverage::session_cells(c, q, hourly)?);
+    Ok(rows)
+}
+
+/// Cumulative and today estimated USD spend per Node (`node_id` → `(total_cost_usd, today_cost_usd)`).
+/// Uses the workspace [`PriceBook`] (falling back to adapter `cost_reported` for unpriced models).
+pub fn node_costs(
+    c: &mut impl Read,
+    ws: &str,
+    today: &str,
+) -> Result<BTreeMap<String, (f64, f64)>> {
+    let rows = DailyRows(c).node_model_days(ws)?;
+    let prices = book_of(c, ws, rows.iter().map(|(_, model, _, _, _)| model.as_str()))?;
+    let mut out = BTreeMap::<String, (f64, f64)>::new();
+    for (node_id, model, day, tokens, reported) in rows {
+        let usd = prices.cost(&model, &day, &tokens).unwrap_or(reported);
+        let entry = out.entry(node_id).or_default();
+        entry.0 += usd;
+        if day == today {
+            entry.1 += usd;
+        }
+    }
+    Ok(out)
 }
 
 /// Token and spend totals of a set of cube rows.
@@ -410,6 +585,8 @@ pub enum By {
     Source,
     Purpose,
     Harness,
+    Node,
+    Session,
     Day,
 }
 
@@ -422,6 +599,8 @@ impl By {
             "source" => By::Source,
             "purpose" => By::Purpose,
             "harness" => By::Harness,
+            "node" => By::Node,
+            "session" => By::Session,
             "day" => By::Day,
             _ => return None,
         })
@@ -434,6 +613,8 @@ impl By {
             By::Source => &d.source,
             By::Purpose => &d.purpose,
             By::Harness => &d.harness,
+            By::Node => &d.node_id,
+            By::Session => &d.session_id,
             By::Day => &d.day,
         }
     }

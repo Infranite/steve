@@ -281,6 +281,19 @@ pub struct BuildIdentity {
     pub target: String,
 }
 
+/// Maximum number of per-session vitals snapshots reported in a single [`NodeVitals`] payload.
+/// Sessions are sorted descending by `disk_written_bytes + resident_bytes` before truncation.
+pub const MAX_REPORTED_SESSION_VITALS: usize = 64;
+
+/// Live resource counters for one active session's harness process group on a Node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionVitals {
+    pub session_id: SessionId,
+    pub cpu_seconds: f64,
+    pub resident_bytes: u64,
+    pub disk_written_bytes: u64,
+}
+
 /// How a Node's machine is doing now (B3): what the Hub samples to show on the devices page and,
 /// later, to choose where work goes. Every figure is optional: a platform that cannot say leaves it
 /// out rather than guessing.
@@ -304,6 +317,13 @@ pub struct NodeVitals {
     /// Sessions this Node is running now.
     #[serde(default)]
     pub sessions: u32,
+    /// Total bytes written to disk across all active harness/adapter process groups on this Node.
+    #[serde(default)]
+    pub adapter_disk_written_bytes: u64,
+    /// Per-session live CPU, memory, and disk-write snapshot, capped at
+    /// [`MAX_REPORTED_SESSION_VITALS`] ordered descending by `disk_written_bytes + resident_bytes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_vitals: Vec<SessionVitals>,
     /// The Node process's own meters; the Hub exports them as `steve_node_*{node}` and does not
     /// keep them with the samples.
     #[serde(default, skip_serializing_if = "Option::is_none")]

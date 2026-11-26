@@ -43,9 +43,9 @@ async fn list(
             unread: q.unread.unwrap_or(false),
         };
         m.store
-            .write(|tx| {
+            .read(|r| {
                 feed::list(
-                    tx,
+                    r,
                     &who.ws,
                     &who.me,
                     &filter,

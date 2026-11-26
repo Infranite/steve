@@ -9,7 +9,20 @@ import type { NodeId } from "./NodeId";
 import type { PlacementExplanation } from "./PlacementExplanation";
 import type { ReasoningEffort } from "./ReasoningEffort";
 import type { SessionId } from "./SessionId";
+import type { SessionLiveVitals } from "./SessionLiveVitals";
 import type { SessionWaiting } from "./SessionWaiting";
 import type { WorkspaceId } from "./WorkspaceId";
 
-export type SessionView = { placement?: PlacementExplanation, id: SessionId, ws: WorkspaceId, item_id?: ItemId, no: number, bot_id?: BotId, harness?: string, model?: string, reasoning_effort?: ReasoningEffort, effort_mapping?: EffortMapping, cwd: string, device_id?: DeviceId, node_id?: NodeId, title: string, source?: string, readonly?: boolean, status: string, harness_session_id?: string, used?: number, size?: number, cost?: number, created: Millis, updated: Millis, busy?: boolean, queued?: number, waiting?: SessionWaiting, };
+export type SessionView = { placement?: PlacementExplanation, id: SessionId, ws: WorkspaceId, item_id?: ItemId, no: number, bot_id?: BotId, harness?: string, model?: string, reasoning_effort?: ReasoningEffort, effort_mapping?: EffortMapping, cwd: string, device_id?: DeviceId, node_id?: NodeId, title: string, source?: string, readonly?: boolean, status: string, harness_session_id?: string, used?: number, size?: number, cost?: number, created: Millis, updated: Millis, busy?: boolean, queued?: number, waiting?: SessionWaiting, 
+/**
+ * Cumulative tokens across all turns recorded for this session (enriched at read time).
+ */
+tokens?: number, 
+/**
+ * Cumulative estimated (or reported) USD cost across this session (enriched at read time).
+ */
+cost_usd?: number, 
+/**
+ * Latest live CPU, memory, and disk-write snapshot for an active session (enriched in memory).
+ */
+vitals?: SessionLiveVitals, };
