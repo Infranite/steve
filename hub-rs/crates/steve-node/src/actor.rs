@@ -774,8 +774,10 @@ impl Actor {
         self.gate.0.store(0, Ordering::SeqCst);
         crate::revoke_tools(&self.inner, &self.session);
         let live = self.live.take();
-        let conn = live.as_ref().map(|l| l.conn.clone());
-        let (pgid, started) = match live {
+        if let Some(l) = &live {
+            l.retire.send_replace(true);
+        }
+        let (pgid, started) = match live.as_ref() {
             Some(l) => (l.pgid, l.started),
             None => match self.inner.j.read(|t| t.proc_of(&self.session)) {
                 Ok(Some(p)) => (p.pgid, p.started),
@@ -794,8 +796,8 @@ impl Actor {
         };
         let s = procs::stop(pgid, started).await;
         if s.gone()
-            && let Some(conn) = conn
-            && tokio::time::timeout(Duration::from_secs(1), conn.wait_exit())
+            && let Some(l) = live.as_ref()
+            && tokio::time::timeout(Duration::from_secs(1), l.conn.wait_exit())
                 .await
                 .is_err()
         {
@@ -803,6 +805,10 @@ impl Actor {
             // Keep the process record for explicit reconciliation rather than claim success.
             return Stopped::Uncertain;
         }
+        // Keep `live` alive across `procs::stop` and `conn.wait_exit()` so `Live::drop` does not
+        // pre-SIGKILL the group ahead of `procs::stop`'s ownership probe (on macOS a dying group
+        // can briefly return EPERM/leaderless and make `procs::stop` bail with `Uncertain`).
+        drop(live);
         if s.gone() && self.tx(|t| t.drop_proc(&self.session, pgid)).is_err() {
             return Stopped::Uncertain;
         }
