@@ -210,7 +210,7 @@ fn associations_cannot_be_added_to_summary_only_packet() {
 }
 
 #[test]
-fn todo_deadline_uses_source_quote_and_memory_remains_a_confirmable_candidate() {
+fn todo_deadline_uses_source_quote_and_memory_ingests_silently_via_unified_pipeline() {
     let e = env();
     let l = lease(&e);
     let mut write = chunk(&e, &l);
@@ -218,34 +218,34 @@ fn todo_deadline_uses_source_quote_and_memory_remains_a_confirmable_candidate() 
     write["memories"] = json!([{"first": 1, "last": 1, "text": "Commitment to follow up before Friday", "kind": "event", "matter_at": 1}]);
     let out = call(&e, tools::CHUNK, write).unwrap();
     let id = out["memories"][0]["id"].as_str().unwrap();
-    let (status, source, quote) = e
+    let status = out["memories"][0]["status"].as_str().unwrap();
+    assert!(
+        id.starts_with("obs_"),
+        "first implicit episode buffers: {out}"
+    );
+    assert_eq!(status, "buffered");
+    let (source, quote, open_confirm_cards) = e
         .store()
         .read::<_, steve_store::StoreError>(|r| {
-            let status = r
-                .memory_index()
-                .visible_status(&steve_store::base::Viewer::bare(WS, ME), id)?
-                .unwrap();
             let todo = Todos(r).list(WS, ME, &TodoFilter::default())?.remove(0);
-            Ok((status, todo.source, todo.fields.due_quote.unwrap()))
+            let open = steve_store::DecisionRows(r).open_confirmations(WS, "mem")?;
+            Ok((todo.source, todo.fields.due_quote.unwrap(), open))
         })
         .unwrap();
     assert_eq!(
-        (status.as_str(), source.as_str(), quote.as_str()),
-        ("candidate", "steve", "before Friday")
+        (source.as_str(), quote.as_str()),
+        ("steve", "before Friday")
     );
-    let indexed = e
-        .store()
-        .read::<_, steve_store::StoreError>(|r| Ok(r.memory_index().get(WS, id)?.ranges.len()))
-        .unwrap();
-    assert_eq!(indexed, 1);
+    assert_eq!(open_confirm_cards, 0, "zero Inbox confirmation cards");
     let report = call(&e, tools::REPORT, json!({})).unwrap();
-    for op in ["segment", "todo", "mem_new", "mem_link"] {
+    for op in ["segment", "todo", "mem_new"] {
         assert!(
             report["changes"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|v| v["op"] == op)
+                .any(|v| v["op"] == op),
+            "missing op {op} in {report}"
         );
     }
 }
@@ -408,21 +408,25 @@ fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
             .unwrap()
     );
     let id = out["memories"][1]["id"].as_str().unwrap();
+    let status = out["memories"][1]["status"].as_str().unwrap();
+    assert!(
+        id.starts_with("obs_"),
+        "new digest memory routes via unified ingest: {out}"
+    );
+    assert_eq!(status, "buffered");
     let viewer = steve_store::base::Viewer::bare(WS, ME);
-    let (old, new) = e
+    let (old, open_cards) = e
         .store()
         .read::<_, steve_store::StoreError>(|r| {
             let mut index = r.memory_index();
             Ok((
                 index.visible_status(&viewer, &visible)?.unwrap(),
-                index.visible_status(&viewer, id)?.unwrap(),
+                steve_store::DecisionRows(r).open_confirmations(WS, "mem")?,
             ))
         })
         .unwrap();
-    let replacement = fixture::supersedes(e.store(), id).unwrap().unwrap();
     assert_eq!(old, "confirmed");
-    assert_eq!(new, "candidate");
-    assert_eq!(replacement, visible);
+    assert_eq!(open_cards, 0);
 }
 
 #[test]

@@ -42,7 +42,7 @@ let nodes = [
       arch: "aarch64",
       cpus: 12,
       mem_total: 36 * GIB,
-      file_access: { status: "missing", locations: [{ location: "documents", status: "missing" }] },
+      file_access: { status: "missing", full_disk_access: "missing", locations: [{ location: "documents", status: "missing", path: "/Users/example/Documents" }] },
     },
     upgrade: {
       build: { version: "0.2.109", commit: "abc12345", target: "aarch64-apple-darwin" },
@@ -181,7 +181,7 @@ await page.route("**/*", async (route) => {
     return json(route, { operation: "nup_stale" }, 202)
   }
   if (p === "/api/nodes/n-auth/file-access" && req.method() === "POST") {
-    const report = { status: "granted", locations: [{ location: "documents", status: "granted" }] }
+    const report = { status: "granted", full_disk_access: "granted", locations: [{ location: "documents", status: "granted", path: "/Users/example/Documents" }] }
     nodes = nodes.map((n) => n.node_id === "n-auth" ? { ...n, host: { ...n.host, file_access: report } } : n)
     return json(route, report)
   }

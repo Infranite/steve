@@ -328,6 +328,10 @@ export default {
     emptySub: "Preferences and rules you add show up here and go with it into each conversation",
   },
   form: {
+    subTabIdentity: "Identity & style",
+    subTabModel: "Model & runtime",
+    subTabPermissions: "Permissions & scope",
+    scopeSection: "Default project & workspaces",
     specialties: "Specialties",
     specialtiesHint: "One label per line, up to 12 labels of 48 characters. Used when choosing among eligible Bots.",
     ask: "Tell Steve how to set up {{name}}, e.g. switch to opus, auto-accept when done, be more concise",

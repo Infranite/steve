@@ -1,7 +1,7 @@
 import { ApprovalSwitch, SessionApproval } from "@/approval"
 import type { BotPlacementError } from "@/api"
 import { useTranscript } from "@/data/transcript"
-import { SessionIdentity } from "@/components/session-identity"
+import { HarnessMark } from "@/components/harness-mark"
 import { useItemState, decisionView, useOpenDecisions, useViewKinds } from "@/data/sync"
 import { decideCards, useItemDetail, useNotices, useSessionQueue, useShellStore } from "@/store"
 import { getItem, getItems, getSession, itemDisplayStatus } from "@/store"
@@ -41,7 +41,7 @@ import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { homeTilde } from "@/lib/path"
 import { NativeIdLine } from "@/resume"
 import { ItemStatsRows } from "@/stats/drill"
-import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, defaultHarness, deleteItem, depsOpen, doFork, handoff, importSessions, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, setAcc, actOnItem, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, star, startItemCycle, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, botName, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, defaultHarness, deleteItem, depsOpen, doFork, handoff, hm, importSessions, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, setAcc, actOnItem, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, star, startItemCycle, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
 import { BotName, closeSheet, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, Row, SectionLabel, Segmented, Status, StatusDot, Tags, ThemeSwitch, Chevron, Panel, Section, Tile } from "@/ui"
 import { disambiguateActors, formatActorName, resolveActor } from "@/actor"
 import { ActorAvatar } from "@/components/actor-avatar"
@@ -600,20 +600,29 @@ export function ItemView({ id }: { id: string }) {
                   <h2 className={cn("type-headline", state.kind === "working" && "shimmer shimmer-once")} data-state-title>{t(`views:itemState.${state.kind}`)}</h2>
                   {state.move !== "none" && state.kind !== "closing" && <span className="type-footnote text-muted-foreground">{t(`views:itemState.${state.move}`)}</span>}
                 </div>
-                {state.detail && <p className="mt-1 line-clamp-3 break-words type-callout text-muted-foreground">{clip(state.detail, 360)}</p>}
+                {state.detail && !(i.waits.length > 0 && state.detail === i.waits[0].q) && <p className="mt-1 line-clamp-3 break-words type-callout text-muted-foreground">{clip(state.detail, 360)}</p>}
                 {state.kind === "idle" && <p className="mt-1 type-callout text-muted-foreground">{t("views:itemState.idleHint")}</p>}
               </div>
             </div>
             {(i.dispatch || i.placement) && <DispatchDetails dispatch={i.dispatch} placement={i.placement} unassigned={!i.b} />}
             {(() => {
+              const seen = new Set<string>()
+              const waits = i.waits.filter((w) => {
+                if (seen.has(w.decision)) return false
+                seen.add(w.decision)
+                return true
+              })
               const noExec = !i.b ? decideCards(openDecs).filter((c) => {
+                if (seen.has(c.w.decision)) return false
                 if (c.w.subject !== "no_executor") return false
                 const dv = decisionView(c.w.decision)
-                return dv?.question.kind === "key" && dv.question.template.code === "no_executor" && dv.question.template.items.some((it) => it.id === i.id)
+                if (!(dv?.question.kind === "key" && dv.question.template.code === "no_executor" && dv.question.template.items.some((it) => it.id === i.id))) return false
+                seen.add(c.w.decision)
+                return true
               }) : []
-              const hasCards = i.waits.length > 0 || noExec.length > 0
+              const hasCards = waits.length > 0 || noExec.length > 0
               return hasCards ? <div className="mt-5 flex flex-col gap-3">
-                {i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}
+                {waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}
                 {noExec.map((c) => <DecisionCard key={c.w.decision} i={c.i} w={c.w} showItem={false} />)}
               </div> : null
             })()}
@@ -644,11 +653,40 @@ export function ItemView({ id }: { id: string }) {
             <h3 className="mb-2 type-label text-tertiary">{t("views:itemState.details")}</h3>
             <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
             <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} placeholder={!i.b ? t("manage:dispatch.chooseBot") : undefined} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: st.bots[k].main ? <span><BotName k={k} /> · {t("manage:dispatch.coordinator")}</span> : <BotName k={k} /> }))} /></Prop>
-            <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.length ? i.ss.map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
-              <a href={"#/sessions/" + k} className="flex min-w-0 flex-wrap items-center gap-2 hover:underline"><span>#{getSession(k)?.n}</span>{getSession(k) && <SessionIdentity session={getSession(k)!} />}</a>
-              <SessionApproval id={k} />
-              {getSession(k)?.placement && <PlacementWhy value={getSession(k)!.placement!} />}
-              <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">{t("common:state.empty")}</span>}</div></Prop>
+            <div className="col-span-2 flex min-w-0 flex-col gap-1.5">
+              <dt className="type-callout text-muted-foreground">{t("views:item.propSessions")}</dt>
+              <dd className="flex min-w-0 flex-col gap-2">
+                {i.ss.length ? i.ss.map((k) => {
+                  const s = getSession(k)
+                  return (
+                    <div key={k} className="flex min-w-0 flex-col gap-1 rounded-lg border border-border/60 bg-background/60 px-2.5 py-2" data-item-session={k}>
+                      <a href={"#/sessions/" + k} className="flex min-w-0 flex-col gap-1 hover:opacity-85">
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="shrink-0 type-footnote tabular-nums text-tertiary">#{s?.n ?? "—"}</span>
+                          {s?.b && <ActorAvatar actorId={s.b} size={16} />}
+                          <span className="min-w-0 flex-1 truncate type-callout font-medium text-foreground">{s?.b ? botName(s.b) : t("core:unknownBot")}</span>
+                          {s && <Status s={s.st} sess className="shrink-0" />}
+                        </span>
+                        {s && (
+                          <span className="flex min-w-0 items-center gap-1.5 type-footnote text-muted-foreground">
+                            <HarnessMark harness={s.harness ?? s.h} title={s.h} className="size-3.5 shrink-0" />
+                            <span className="min-w-0 truncate">{hm(s)}</span>
+                          </span>
+                        )}
+                      </a>
+                      <details className="type-footnote text-muted-foreground" data-item-session-details>
+                        <summary className="cursor-pointer select-none text-tertiary hover:text-foreground">{t("views:item.sessionTechDetails")}</summary>
+                        <div className="mt-1 flex flex-col gap-1 border-l border-border/60 pl-2">
+                          <SessionApproval id={k} />
+                          {s?.placement && <PlacementWhy value={s.placement} />}
+                          <NativeIdLine k={k} label="ID" />
+                        </div>
+                      </details>
+                    </div>
+                  )
+                }) : <span className="type-callout text-muted-foreground">{t("common:state.empty")}</span>}
+              </dd>
+            </div>
             <ItemStatsRows id={i.id} render={(u, time, href) => <><Prop label={t("views:item.propUsage")}><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label={t("views:item.propTime")}><a href={href} className="block pt-1 hover:underline" data-item-time>{time}</a></Prop></>} />
             <Prop label={t("views:item.propProject")}><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: t("common:state.none") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />
               {i.projNext && <div className="type-footnote text-muted-foreground">{t("views:item.projNext")}</div>}</Prop>

@@ -3,4 +3,4 @@
 import type { FileAccessStatus } from "./FileAccessStatus";
 import type { ProtectedLocation } from "./ProtectedLocation";
 
-export type ProtectedAccess = { location: ProtectedLocation, status: FileAccessStatus, };
+export type ProtectedAccess = { location: ProtectedLocation, status: FileAccessStatus, path?: string, };

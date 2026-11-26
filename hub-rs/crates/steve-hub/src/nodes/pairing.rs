@@ -405,7 +405,16 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
     let rows = match blocking(move || {
         store.read(|c| {
             let default = steve_store::nodes::upgrade_default(c)?;
-            let rows = steve_store::nodes::list_for_owner(c, &caller.me)?
+            let mut rows = steve_store::nodes::list_for_owner(c, &caller.me)?;
+            if !rows.iter().any(|n| n.local)
+                && steve_store::UserRows(c).first_owner()?.as_deref() == Some(caller.me.as_str())
+                && let Some(local) =
+                    steve_store::nodes::get(c, crate::wire::local_service::NODE_ID)?
+                && local.local
+            {
+                rows.insert(0, local);
+            }
+            let rows = rows
                 .into_iter()
                 .map(|n| {
                     let latest = steve_store::nodes::upgrade_latest(c, &n.node_id)?;
@@ -526,13 +535,23 @@ pub async fn recheck_file_access(
     let Ok(node) = NodeId::new(id) else {
         return err(404, "Node not found");
     };
-    let (store, id) = (svc.store.clone(), node.to_string());
-    let owner =
-        blocking(move || store.read(|r| steve_store::node_directory::owner_if_connectable(r, &id)))
-            .await;
-    match owner {
-        Ok(owner) if owner.as_deref() == Some(caller.me.as_str()) => {}
-        Ok(_) => return err(404, "Node not found"),
+    let (store, id, me) = (svc.store.clone(), node.to_string(), caller.me.clone());
+    let allowed = blocking(move || {
+        store.read(|r| {
+            let Some(owner) = steve_store::node_directory::owner_if_connectable(r, &id)? else {
+                return Ok(false);
+            };
+            if owner == me {
+                return Ok(true);
+            }
+            Ok(id == crate::wire::local_service::NODE_ID
+                && steve_store::UserRows(r).first_owner()?.as_deref() == Some(me.as_str()))
+        })
+    })
+    .await;
+    match allowed {
+        Ok(true) => {}
+        Ok(false) => return err(404, "Node not found"),
         Err(response) => return *response,
     }
     let Some(conn) = svc

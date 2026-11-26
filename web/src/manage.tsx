@@ -26,7 +26,7 @@ import { Badge } from "@/components/affect/badge-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
-  st, botName, ownsBot, PRO, ACC, PERM, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, removeBotFromWorkspace, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  st, botName, formatBotName, ownsBot, PRO, ACC, PERM, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, removeBotFromWorkspace, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, emit, closedSt, type ExecutionSurface,
 } from "@/store"
 import { api } from "@/api"
@@ -102,13 +102,13 @@ export function BotsView() {
         right={<Button size="xs" variant="outline" onClick={() => openSheet("newBot")} data-new-bot><PlusIcon />{t("manage:list.newBot")}</Button>}>
         <div className="mb-3 flex justify-end"><Segmented size="sm" value={botFilter} onChange={(v) => { botFilter = v; r() }} options={[["全部", t("manage:list.filterAll")], ["启用", t("manage:list.filterOn")], ["停用", t("manage:list.filterOff")]] as const} /></div>
         {ks.length ? <ul className="grid gap-3 sm:grid-cols-2" data-bot-cards>{ks.map((k) => { const b = st.bots[k]; return (
-          <BotCard key={k} as="li" k={k} teams={teams} off={!b.on} title={t("manage:bot.name", { name: b.n })} sub={b.role}
+          <BotCard key={k} as="li" k={k} teams={teams} off={!b.on} title={formatBotName(b.n, b.main)} sub={b.role}
             meta={[b.h, b.m, t("manage:bot.running", { count: runOf(k) }), b.project && t("manage:list.defaultProject", { name: b.ws }), b.workspaces.length > 1 && t("manage:list.inWorkspaces", { count: b.workspaces.length }), !b.on && t("manage:bot.disabled")]}
             action={<><SetSwitch testId={"bot-on-" + k} checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:list.enabledToast", { name: b.n }) : t("manage:list.disabledToast", { name: b.n }))} label={t("manage:bot.enableNamed", { name: b.n })} /><BotMenu k={k} /></>} />) })}</ul>
           : <Empty title={Object.keys(st.bots).length > 1 ? t("manage:list.noMatch") : t("manage:list.onlySteve")} sub={t("manage:list.emptySub")} />}
       </Section>
       {others.length > 0 && <Section label={t("manage:list.elsewhere", { n: others.length })}>
-        <Panel>{others.map((b) => <Row key={b.id} title={t("manage:bot.name", { name: b.name })} sub={t("manage:list.inWorkspaces", { count: b.workspaces.length })}>{ownsBot(b.owner) && <Button size="xs" variant="outline" onClick={() => setBotWorkspaces(b.id, [...b.workspaces, st.workspace!.id])}><PlusIcon />{t("manage:list.joinHere")}</Button>}</Row>)}</Panel></Section>}
+        <Panel>{others.map((b) => <Row key={b.id} title={formatBotName(b.name)} sub={t("manage:list.inWorkspaces", { count: b.workspaces.length })}>{ownsBot(b.owner) && <Button size="xs" variant="outline" onClick={() => setBotWorkspaces(b.id, [...b.workspaces, st.workspace!.id])}><PlusIcon />{t("manage:list.joinHere")}</Button>}</Row>)}</Panel></Section>}
       </div>
     </Page>
   )
@@ -325,6 +325,8 @@ export function BotView({ k }: { k: string }) {
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const b = st.bots[k]
   const [form, setForm] = useState<any>(null)
+  const [settingsTab, setSettingsTab] = useState<"identity" | "model" | "permissions">("identity")
+  useEffect(() => { setSettingsTab("identity") }, [k])
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   const runtimes = useRuntimes(!!b)
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
@@ -336,10 +338,17 @@ export function BotView({ k }: { k: string }) {
   const specialtiesValid = specialties.length <= 12 && specialties.every(tag => tag.length <= 48)
   const set = (p: any) => setForm({ ...fm, reasoningEffort: effort, ...p })
   const tabs = BOT_TABS.map(([v, l]) => [v, t(`manage:detail.${l}`)] as const)
+  const displayName = formatBotName(b.n, b.main)
+  const saveAll = async () => {
+    await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort, fallbackSurfaces: fm.fallbackSurfaces ?? [], color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
+    if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)
+    setForm(null); botTab = "概览"; r()
+  }
+  const cancelEdit = () => { setForm(null); botTab = "概览"; r() }
   return (
     <Page back={["#/bots", "Bot"]} max={720} toolbarTop toolbar={<OwnerChip objectType="bot" objectId={k} />}
       lead={<Robot k={k} size={56} className="max-sm:size-12!" />}
-      title={<span className="block truncate">{b.main ? b.n : t("manage:bot.name", { name: b.n })}</span>}
+      title={<span className="block truncate">{displayName}</span>}
       sub={<div className="flex flex-col gap-1"><div className="text-muted-foreground">{b.role || t("manage:detail.noRole")}</div><RunsOn k={k} className="type-footnote text-muted-foreground" /></div>}
       actions={<>{!b.main && <><span className="hidden type-footnote text-muted-foreground sm:inline">{b.on ? t("manage:bot.enabled") : t("manage:bot.disabled")}</span><SetSwitch testId="bot-on" checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:bot.enabled") : t("manage:bot.disabled"))} label={t("manage:bot.enable")} /></>}<BotMenu k={k} /></>}>
       <Strip className="mb-8" watch={botTab}><Segmented full className="min-w-max" value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></Strip>
@@ -348,49 +357,75 @@ export function BotView({ k }: { k: string }) {
       {/* the channels page's list, laid into this page's section and panel */}
       {botTab === "对外身份" && <div className="anim-in"><PersonasSection bot={k} panel /></div>}
       {botTab === "定时与流程" && <BotSchedules k={k} />}
-      {botTab === "能力" && <BotCaps k={k} permName={permName(t, b.permMode)} permSub={permLabel(t, b.permMode)} onPerm={() => { botTab = "设置"; r() }} />}
+      {botTab === "能力" && <BotCaps k={k} permName={permName(t, b.permMode)} permSub={permLabel(t, b.permMode)} onPerm={() => { setSettingsTab("permissions"); botTab = "设置"; r() }} />}
       {botTab === "系统提示词" && <BotPrompt k={k} />}
       {botTab === "记忆" && <BotMemories k={k} />}
       {botTab === "设置" && (
-        <FieldGroup className="gap-8 anim-in">
-          <AskSteve key={k} ctx={{ kind: "bot", id: k }} placeholder={t("manage:form.ask", { name: b.main ? b.n : t("manage:bot.name", { name: b.n }) })} />
-          <Section label={t("manage:form.identity")}><Card className="flex flex-col gap-5 p-5">
-            <F label={t("manage:form.avatar")} hint={t("manage:form.avatarHint")}><AvatarPicker look={{ color: fm.color, round: fm.round, skin: fm.skin }} onChange={(p) => set(p)} /></F>
-            <F label={t("manage:form.name")} htmlFor="bot-name"><TextField id="bot-name" value={fm.n} onChange={(e) => set({ n: e.target.value })} data-bot-name /></F>
-            <F label={t("manage:form.role")} htmlFor="bot-role" hint={t("manage:form.roleHint")}><TextField id="bot-role" value={fm.role} onChange={(e) => set({ role: e.target.value })} data-bot-role /></F>
-            <F label={t("manage:form.specialties")} htmlFor="bot-specialties" hint={t("manage:form.specialtiesHint")}><TextArea id="bot-specialties" minRows={2} maxRows={6} value={fm.specialties} onChange={(e) => set({ specialties: e.target.value })} /></F>
-          </Card></Section>
-          <Section label={t("manage:form.personality")}><Card className="flex flex-col gap-5 p-5">
-            <F label={t("manage:form.voice")} htmlFor="bot-voice" hint={t("manage:form.voiceHint")}><TextArea id="bot-voice" minRows={3} maxRows={10} value={fm.pers} onChange={(e) => set({ pers: e.target.value })} /></F>
-            <F label={t("manage:form.pro")} hint={t("manage:form.proHint")}><Strip><Segmented size="sm" className="w-max" value={fm.pro} onChange={(v) => set({ pro: v })} options={PRO.map((v, i) => [v, proLabel(t, i)] as const)} /></Strip></F>
-          </Card></Section>
-          <Section label={t("manage:form.work")}><Card className="flex flex-col gap-5 p-5">
-            <F label={t("manage:form.rule")} htmlFor="bot-rule" hint={t("manage:form.ruleHint")}><TextArea id="bot-rule" minRows={3} maxRows={12} value={fm.rule} onChange={(e) => set({ rule: e.target.value })} /></F>
-          </Card></Section>
-          {/* affectUI's Agent / Permissions: what it may do without asking, one choice each, said in plain words */}
-          <Section label={t("manage:form.permSection")} data-bot-perms><AutonomyChoice testId="bot-perm" label={t("manage:form.permSection")} value={fm.permMode} onChange={(v) => set({ permMode: v })}
-            options={[...new Set([fm.permMode, ...permModes(fm.harness)])].map((v) => ({ value: v, name: permName(t, v), text: (PERM_KEYS as readonly string[]).includes(v) ? t(`manage:form.permText.${v as (typeof PERM_KEYS)[number]}`) : permLabel(t, v), icon: PERM_ICON[v] }))}
-            means={<><ShieldAlertIcon aria-hidden />{t("manage:form.permHint")}</>} /><RuntimePermissionNotice harness={fm.harness} mode={fm.permMode} /></Section>
-          <Section label={t("manage:form.acc")} data-bot-acc><AutonomyChoice testId="bot-acc" label={t("manage:form.acc")} value={fm.acc} onChange={(v) => set({ acc: v })}
-            options={ACC_KEYS.map((key) => ({ value: ACC[key], name: accLabel(t, key), text: t(`manage:form.accText.${key}`), icon: ACC_ICON[key] }))} /></Section>
-          <Section label={t("manage:form.run")}><Card className="flex flex-col gap-5 p-5">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <F label="Harness"><RuntimeSelect testId="bot-harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "" })} /><RuntimeSetupLink /></F>
-              <F label={t("manage:form.model")}><ModelPicker field harness={fm.harness} value={fm.model ?? ""} allowDefault testId="bot-model" onChange={(m) => set({ model: m })} /></F>
-              <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><EffortPicker wide testId="bot-effort" label={t("manage:form.effort")} harness={fm.harness} model={fm.model} value={effort} onChange={(v) => set({ reasoningEffort: v })} /></F>
+        <FieldGroup className="gap-6 anim-in" data-bot-settings-tab={settingsTab}>
+          <div className="sticky top-0 z-10 -mx-1 flex flex-wrap items-center justify-between gap-2 border-b border-border/60 bg-background/90 px-1 py-2 backdrop-blur-md" data-bot-settings-bar>
+            <div className="min-w-0" data-bot-settings-tabs>
+              <Segmented size="sm" value={settingsTab} onChange={setSettingsTab} options={[
+                ["identity", t("manage:form.subTabIdentity")],
+                ["model", t("manage:form.subTabModel")],
+                ["permissions", t("manage:form.subTabPermissions")],
+              ] as const} />
             </div>
-            <RuntimeAvailability harness={fm.harness} />
-            <FallbackSurfacesEditor value={fm.fallbackSurfaces ?? []} onChange={(fallbackSurfaces) => set({ fallbackSurfaces })} />
-            {b.main && <SteveJudges harness={fm.harness} model={fm.model ?? ""} />}
-            <F label={t("manage:form.project")} hint={t("manage:form.projectHint")}><SetSelect wide testId="bot-project" label={t("manage:form.project")} value={fm.project} onChange={(v) => set({ project: v })} options={[{ v: "none", l: t("manage:form.projectInfer") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} /></F>
-            {!b.main && <F label={t("manage:form.workspaces")} hint={t("manage:form.workspacesHint")}>
-              <div className="flex flex-col gap-1.5">{st.workspaces.map((w) => <label key={w.id} className="flex items-center gap-2 type-callout"><Checkbox checked={fm.ws.includes(w.id)} disabled={fm.ws.length === 1 && fm.ws.includes(w.id)} onCheckedChange={(v) => set({ ws: v ? [...fm.ws, w.id] : fm.ws.filter((x: string) => x !== w.id) })} />{w.name}</label>)}</div></F>}
-          </Card></Section>
-          {!b.main && <ExecutionNodes key={`${st.workspace?.id}:${k}`} bot={k} />}
-          <div className="flex gap-2"><Button data-save-bot disabled={!modeSupported || !specialtiesValid} onClick={async () => {
-            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort, fallbackSurfaces: fm.fallbackSurfaces ?? [], color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
-            if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)
-            setForm(null); botTab = "概览"; r() }}>{t("common:action.save")}</Button><Button variant="ghost" onClick={() => { setForm(null); botTab = "概览"; r() }}>{t("common:action.cancel")}</Button></div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button size="sm" variant="ghost" onClick={cancelEdit}>{t("common:action.cancel")}</Button>
+              <Button size="sm" data-save-bot disabled={!modeSupported || !specialtiesValid} onClick={() => void saveAll()}>{t("common:action.save")}</Button>
+            </div>
+          </div>
+
+          {settingsTab === "identity" && (
+            <>
+              <AskSteve key={k} ctx={{ kind: "bot", id: k }} placeholder={t("manage:form.ask", { name: displayName })} />
+              <Section label={t("manage:form.identity")}><Card className="flex flex-col gap-5 p-5">
+                <F label={t("manage:form.avatar")} hint={t("manage:form.avatarHint")}><AvatarPicker look={{ color: fm.color, round: fm.round, skin: fm.skin }} onChange={(p) => set(p)} /></F>
+                <F label={t("manage:form.name")} htmlFor="bot-name"><TextField id="bot-name" value={fm.n} onChange={(e) => set({ n: e.target.value })} data-bot-name /></F>
+                <F label={t("manage:form.role")} htmlFor="bot-role" hint={t("manage:form.roleHint")}><TextField id="bot-role" value={fm.role} onChange={(e) => set({ role: e.target.value })} data-bot-role /></F>
+                <F label={t("manage:form.specialties")} htmlFor="bot-specialties" hint={t("manage:form.specialtiesHint")}><TextArea id="bot-specialties" minRows={2} maxRows={6} value={fm.specialties} onChange={(e) => set({ specialties: e.target.value })} /></F>
+              </Card></Section>
+              <Section label={t("manage:form.personality")}><Card className="flex flex-col gap-5 p-5">
+                <F label={t("manage:form.voice")} htmlFor="bot-voice" hint={t("manage:form.voiceHint")}><TextArea id="bot-voice" minRows={3} maxRows={10} value={fm.pers} onChange={(e) => set({ pers: e.target.value })} /></F>
+                <F label={t("manage:form.pro")} hint={t("manage:form.proHint")}><Strip><Segmented size="sm" className="w-max" value={fm.pro} onChange={(v) => set({ pro: v })} options={PRO.map((v, i) => [v, proLabel(t, i)] as const)} /></Strip></F>
+              </Card></Section>
+              <Section label={t("manage:form.work")}><Card className="flex flex-col gap-5 p-5">
+                <F label={t("manage:form.rule")} htmlFor="bot-rule" hint={t("manage:form.ruleHint")}><TextArea id="bot-rule" minRows={3} maxRows={12} value={fm.rule} onChange={(e) => set({ rule: e.target.value })} /></F>
+              </Card></Section>
+            </>
+          )}
+
+          {settingsTab === "model" && (
+            <>
+              <Section label={t("manage:form.run")}><Card className="flex flex-col gap-5 p-5">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <F label="Harness"><RuntimeSelect testId="bot-harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "" })} /><RuntimeSetupLink /></F>
+                  <F label={t("manage:form.model")}><ModelPicker field harness={fm.harness} value={fm.model ?? ""} allowDefault testId="bot-model" onChange={(m) => set({ model: m })} /></F>
+                  <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><EffortPicker wide testId="bot-effort" label={t("manage:form.effort")} harness={fm.harness} model={fm.model} value={effort} onChange={(v) => set({ reasoningEffort: v })} /></F>
+                </div>
+                <RuntimeAvailability harness={fm.harness} />
+                <FallbackSurfacesEditor value={fm.fallbackSurfaces ?? []} onChange={(fallbackSurfaces) => set({ fallbackSurfaces })} />
+                {b.main && <SteveJudges harness={fm.harness} model={fm.model ?? ""} />}
+              </Card></Section>
+              {!b.main && <ExecutionNodes key={`${st.workspace?.id}:${k}`} bot={k} />}
+            </>
+          )}
+
+          {settingsTab === "permissions" && (
+            <>
+              {/* affectUI's Agent / Permissions: what it may do without asking, one choice each, said in plain words */}
+              <Section label={t("manage:form.permSection")} data-bot-perms><AutonomyChoice testId="bot-perm" label={t("manage:form.permSection")} value={fm.permMode} onChange={(v) => set({ permMode: v })}
+                options={[...new Set([fm.permMode, ...permModes(fm.harness)])].map((v) => ({ value: v, name: permName(t, v), text: (PERM_KEYS as readonly string[]).includes(v) ? t(`manage:form.permText.${v as (typeof PERM_KEYS)[number]}`) : permLabel(t, v), icon: PERM_ICON[v] }))}
+                means={<><ShieldAlertIcon aria-hidden />{t("manage:form.permHint")}</>} /><RuntimePermissionNotice harness={fm.harness} mode={fm.permMode} /></Section>
+              <Section label={t("manage:form.acc")} data-bot-acc><AutonomyChoice testId="bot-acc" label={t("manage:form.acc")} value={fm.acc} onChange={(v) => set({ acc: v })}
+                options={ACC_KEYS.map((key) => ({ value: ACC[key], name: accLabel(t, key), text: t(`manage:form.accText.${key}`), icon: ACC_ICON[key] }))} /></Section>
+              <Section label={t("manage:form.scopeSection")}><Card className="flex flex-col gap-5 p-5">
+                <F label={t("manage:form.project")} hint={t("manage:form.projectHint")}><SetSelect wide testId="bot-project" label={t("manage:form.project")} value={fm.project} onChange={(v) => set({ project: v })} options={[{ v: "none", l: t("manage:form.projectInfer") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} /></F>
+                {!b.main && <F label={t("manage:form.workspaces")} hint={t("manage:form.workspacesHint")}>
+                  <div className="flex flex-col gap-1.5">{st.workspaces.map((w) => <label key={w.id} className="flex items-center gap-2 type-callout"><Checkbox checked={fm.ws.includes(w.id)} disabled={fm.ws.length === 1 && fm.ws.includes(w.id)} onCheckedChange={(v) => set({ ws: v ? [...fm.ws, w.id] : fm.ws.filter((x: string) => x !== w.id) })} />{w.name}</label>)}</div></F>}
+              </Card></Section>
+            </>
+          )}
         </FieldGroup>
       )}
     </Page>

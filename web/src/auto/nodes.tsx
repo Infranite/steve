@@ -15,7 +15,7 @@ import { SOURCE_LABEL, type FlowSummary, type GEdge, type GNode, type Graph, typ
 import { Pick, Json, botOptions, srcIcon, ms } from "@/auto/common"
 import { t, useT } from "@/i18n"
 import { branchLabels, renameBranchEdges, RENAMES_EDGES } from "@/auto/branches"
-export { branchLabels, renameBranchEdges, branchWarnings, unreachableNodes, type BranchWarning } from "@/auto/branches"
+export { branchLabels, renameBranchEdges, branchWarnings, unreachableNodes, ruleConflicts, type BranchWarning, type RuleConflict } from "@/auto/branches"
 
 type Grp = "trigger" | "logic" | "code" | "connect" | "ai" | "wait" | "result"
 /* [icon, group]; the group drives the palette and the inspector heading */

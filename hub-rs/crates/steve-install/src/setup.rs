@@ -1542,14 +1542,68 @@ fn opener() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Run the one-time macOS TCC file-access guide once after service registration so setup
+/// confirms permissions without repeatedly interrupting later starts.
+fn run_setup_file_access_guide(
+    wizard: &mut Wizard<'_>,
+    role: &str,
+    home: &Path,
+    first_boot: bool,
+) -> Result<crate::service::file_access::GuideOutcome> {
+    if !cfg!(target_os = "macos") {
+        return Ok(crate::service::file_access::GuideOutcome::NotApplicable);
+    }
+    if wizard.record["steps"]
+        .as_array()
+        .is_some_and(|steps| steps.iter().any(|v| v == "file_access"))
+    {
+        return Ok(crate::service::file_access::GuideOutcome::Ready);
+    }
+    let outcome = crate::service::file_access::guide_for_role(role, home, first_boot, false)?;
+    wizard.record["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push("file_access".into());
+    wizard.save()?;
+    Ok(outcome)
+}
+
+#[cfg(test)]
+fn run_setup_file_access_guide_with(
+    wizard: &mut Wizard<'_>,
+    role: &str,
+    home: &Path,
+    first_boot: bool,
+    is_macos: bool,
+    driver: &mut dyn crate::service::file_access::GuideDriver,
+) -> Result<crate::service::file_access::GuideOutcome> {
+    if !is_macos {
+        return Ok(crate::service::file_access::GuideOutcome::NotApplicable);
+    }
+    if wizard.record["steps"]
+        .as_array()
+        .is_some_and(|steps| steps.iter().any(|v| v == "file_access"))
+    {
+        return Ok(crate::service::file_access::GuideOutcome::Ready);
+    }
+    let outcome =
+        crate::service::file_access::run_guide_macos(role, home, first_boot, false, driver)?;
+    wizard.record["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push("file_access".into());
+    wizard.save()?;
+    Ok(outcome)
+}
+
 /// The end of a Hub's setup on a terminal: what to sign in with, then start it and open the page.
 fn finish_hub(
-    input: &mut dyn Prompts,
+    wizard: &mut Wizard<'_>,
     service: &mut crate::service::Service,
     home: &Path,
     environment: &Value,
     flags: &str,
-) -> Result<()> {
+) -> Result<i32> {
     let (api, web) = hub_addresses(|key| environment[key].as_str().map(str::to_owned))
         .context(t!("install.setup.listen_host_missing"))?;
     let saved = fs::read_to_string(home.join(OWNER_TOKEN)).unwrap_or_default();
@@ -1575,13 +1629,17 @@ fn finish_hub(
     ));
     ui::gap();
     let how = &t!("install.setup.finish.first_visit");
-    if !input.confirm(&t!("install.setup.finish.start_now"), true)? {
+    if !wizard
+        .input
+        .confirm(&t!("install.setup.finish.start_now"), true)?
+    {
+        let fa = run_setup_file_access_guide(wizard, "hub", home, false)?;
         ui::outro(&t!(
             "install.setup.finish.start_later",
             flags = flags,
             how = how
         ));
-        return Ok(());
+        return Ok(fa.exit_code());
     }
     let spinner = ui::Spinner::start(&t!("install.setup.finish.starting"));
     if let Err(error) = service.dispatch("start", None, 30) {
@@ -1595,12 +1653,17 @@ fn finish_hub(
         ),
         None => {
             spinner.warn(&t!("install.setup.finish.no_answer"));
+            let fa = run_setup_file_access_guide(wizard, "hub", home, false)?;
             ui::outro(&t!("install.setup.finish.see_why", flags = flags));
-            return Ok(());
+            return Ok(fa.exit_code());
         }
     }
+    let fa = run_setup_file_access_guide(wizard, "hub", home, true)?;
     if let Some(open) = opener() {
-        if input.confirm(&t!("install.setup.finish.open_browser"), true)? {
+        if wizard
+            .input
+            .confirm(&t!("install.setup.finish.open_browser"), true)?
+        {
             let _ = std::process::Command::new(open)
                 .arg(&web)
                 .stdout(std::process::Stdio::null())
@@ -1609,7 +1672,7 @@ fn finish_hub(
         }
     }
     ui::outro(how);
-    Ok(())
+    Ok(fa.exit_code())
 }
 
 /// The pairing code `steve-node pair` reads, when it is not typed.
@@ -2117,9 +2180,10 @@ fn register_setup(
     Ok(service)
 }
 
-pub fn run(source: &Path, options: Options) -> Result<()> {
+pub fn run(source: &Path, options: Options) -> Result<i32> {
     if options.reconfigure {
-        return reconfigure_existing(options);
+        reconfigure_existing(options)?;
+        return Ok(0);
     }
     validate_options(&options)?;
     let mut input = Terminal;
@@ -2134,7 +2198,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         role, home, flags, ..
     } = &target;
     if target.keep_existing(&options, &expected, &mut input)? {
-        return Ok(());
+        return Ok(0);
     }
     verify_setup_package(source, &expected, home, &version)?;
     let mut wizard = Wizard::claim(source, home, role, &expected, &mut input)?;
@@ -2173,8 +2237,9 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         options.label.as_deref(),
     )?;
     if let (true, Some(env)) = (rich, &env) {
-        return finish_hub(&mut *wizard.input, &mut service, &home, env, &flags);
+        return finish_hub(&mut wizard, &mut service, &home, env, &flags);
     }
+    let fa = run_setup_file_access_guide(&mut wizard, role, home, false)?;
     ui::gap();
     for line in completion_lines(
         &role,
@@ -2186,7 +2251,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         ui::info(&line);
     }
     ui::outro("");
-    Ok(())
+    Ok(fa.exit_code())
 }
 
 #[cfg(test)]
@@ -3020,5 +3085,204 @@ exit 2"#,
             adapter_choice(&mut w3, "hub", &release, Some("none")).unwrap(),
             Some(vec![])
         );
+    }
+
+    #[test]
+    fn setup_triggers_macos_file_access_guide_once_in_desktop_and_headless_modes() {
+        use crate::service::file_access::{
+            EXIT_ACCESS_MISSING, GuideDriver, GuideOutcome, SessionKind, tcc_executable_path,
+        };
+        use std::collections::VecDeque;
+        use steve_types::devices::{
+            FileAccessReport, FileAccessStatus, ProtectedAccess, ProtectedLocation,
+        };
+
+        struct FakeGuide {
+            session: SessionKind,
+            reports: VecDeque<FileAccessReport>,
+            confirms: VecDeque<bool>,
+            probes: usize,
+            opened: Vec<String>,
+            done: Vec<(String, String)>,
+            info: Vec<String>,
+        }
+
+        impl GuideDriver for FakeGuide {
+            fn probe(&mut self, _wait: Duration) -> FileAccessReport {
+                self.probes += 1;
+                self.reports
+                    .pop_front()
+                    .unwrap_or_else(FileAccessReport::unknown)
+            }
+            fn session(&self) -> SessionKind {
+                self.session
+            }
+            fn confirm(&mut self, _prompt: &str, _default: bool) -> Result<bool> {
+                Ok(self
+                    .confirms
+                    .pop_front()
+                    .expect("unexpected confirm prompt"))
+            }
+            fn open_settings(&mut self, url: &str) -> bool {
+                self.opened.push(url.to_owned());
+                true
+            }
+            fn emit_done(&mut self, text: &str, detail: &str) {
+                self.done.push((text.to_owned(), detail.to_owned()));
+            }
+            fn emit_info(&mut self, text: &str) {
+                self.info.push(text.to_owned());
+            }
+            fn emit_warn(&mut self, _text: &str) {}
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("package");
+        private_dir(&source).unwrap();
+
+        // 1. Desktop macOS setup with missing permission -> guides once, opens settings, rechecks -> granted.
+        let hub_home = temp.path().join("hub-desktop");
+        let hub_exe = tcc_executable_path("hub", &hub_home)
+            .to_string_lossy()
+            .into_owned();
+        let mut input = Answers(vec![]);
+        let mut wizard =
+            Wizard::claim(&source, &hub_home, "hub", &meta("1.0.0"), &mut input).unwrap();
+        let mut desktop = FakeGuide {
+            session: SessionKind::Desktop,
+            reports: VecDeque::from([
+                FileAccessReport {
+                    status: FileAccessStatus::Missing,
+                    full_disk_access: FileAccessStatus::Missing,
+                    locations: vec![ProtectedAccess {
+                        location: ProtectedLocation::Desktop,
+                        status: FileAccessStatus::Missing,
+                        path: Some("/Users/example/Desktop".into()),
+                    }],
+                    executable_path: Some(hub_exe.clone()),
+                },
+                FileAccessReport {
+                    status: FileAccessStatus::Granted,
+                    full_disk_access: FileAccessStatus::Granted,
+                    locations: vec![ProtectedAccess {
+                        location: ProtectedLocation::Desktop,
+                        status: FileAccessStatus::Granted,
+                        path: Some("/Users/example/Desktop".into()),
+                    }],
+                    executable_path: Some(hub_exe.clone()),
+                },
+            ]),
+            confirms: VecDeque::from([true, true]),
+            probes: 0,
+            opened: Vec::new(),
+            done: Vec::new(),
+            info: Vec::new(),
+        };
+        let first = run_setup_file_access_guide_with(
+            &mut wizard,
+            "hub",
+            &hub_home,
+            true,
+            true,
+            &mut desktop,
+        )
+        .unwrap();
+        assert_eq!(first, GuideOutcome::GuidedAndGranted);
+        assert_eq!(first.exit_code(), 0);
+        assert_eq!(desktop.probes, 2);
+        assert_eq!(desktop.opened.len(), 1);
+        assert!(
+            wizard.record["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s == "file_access")
+        );
+        // Re-running setup does not repeatedly interrupt once guided.
+        let second = run_setup_file_access_guide_with(
+            &mut wizard,
+            "hub",
+            &hub_home,
+            false,
+            true,
+            &mut desktop,
+        )
+        .unwrap();
+        assert_eq!(second, GuideOutcome::Ready);
+        assert_eq!(desktop.probes, 2, "must not re-prompt after one-time guide");
+
+        // 2. Headless macOS setup (SSH / no desktop) -> non-blocking CLI guidance, exit code 2, no popup.
+        let node_home = temp.path().join("node-headless");
+        let node_exe = tcc_executable_path("node", &node_home)
+            .to_string_lossy()
+            .into_owned();
+        let mut input2 = Answers(vec![]);
+        let mut wizard2 =
+            Wizard::claim(&source, &node_home, "node", &meta("1.0.0"), &mut input2).unwrap();
+        let mut headless = FakeGuide {
+            session: SessionKind::Headless,
+            reports: VecDeque::from([FileAccessReport {
+                status: FileAccessStatus::Missing,
+                full_disk_access: FileAccessStatus::Missing,
+                locations: vec![ProtectedAccess {
+                    location: ProtectedLocation::Documents,
+                    status: FileAccessStatus::Missing,
+                    path: Some("/Users/example/Documents".into()),
+                }],
+                executable_path: Some(node_exe.clone()),
+            }]),
+            confirms: VecDeque::new(),
+            probes: 0,
+            opened: Vec::new(),
+            done: Vec::new(),
+            info: Vec::new(),
+        };
+        let outcome = run_setup_file_access_guide_with(
+            &mut wizard2,
+            "node",
+            &node_home,
+            false,
+            true,
+            &mut headless,
+        )
+        .unwrap();
+        assert_eq!(outcome, GuideOutcome::MissingActionRequired);
+        assert_eq!(outcome.exit_code(), EXIT_ACCESS_MISSING);
+        assert_eq!(headless.probes, 1);
+        assert!(headless.opened.is_empty());
+        assert!(
+            headless
+                .info
+                .iter()
+                .any(|line| line.contains(&node_exe) && line.contains("steve node file-access")),
+            "expected headless guidance with executable path and command: {:?}",
+            headless.info
+        );
+
+        // 3. Non-macOS setup -> NotApplicable without running probes.
+        let linux_home = temp.path().join("hub-linux");
+        let mut input3 = Answers(vec![]);
+        let mut wizard3 =
+            Wizard::claim(&source, &linux_home, "hub", &meta("1.0.0"), &mut input3).unwrap();
+        let mut non_mac = FakeGuide {
+            session: SessionKind::Headless,
+            reports: VecDeque::new(),
+            confirms: VecDeque::new(),
+            probes: 0,
+            opened: Vec::new(),
+            done: Vec::new(),
+            info: Vec::new(),
+        };
+        let linux_outcome = run_setup_file_access_guide_with(
+            &mut wizard3,
+            "hub",
+            &linux_home,
+            false,
+            false,
+            &mut non_mac,
+        )
+        .unwrap();
+        assert_eq!(linux_outcome, GuideOutcome::NotApplicable);
+        assert_eq!(non_mac.probes, 0);
     }
 }

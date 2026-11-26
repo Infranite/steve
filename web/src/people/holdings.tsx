@@ -6,7 +6,7 @@ import { cn } from "cn"
 import { AtSignIcon, BotIcon, ChevronRightIcon, PlugIcon, PlusIcon, ServerIcon, UsersIcon, VenetianMaskIcon, XIcon } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
+import { CommandMenu } from "@/components/affect/command-menu-clean"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { api } from "@/api"
 import { go, Group, Panel, Row, SectionLabel, Meta } from "@/ui"
@@ -96,11 +96,28 @@ function AddHolding({ person, name, isMe }: { person: string; name: string; isMe
       <PopoverTrigger render={<Button size="xs" variant="ghost" className="text-muted-foreground" data-add-holding />}><PlusIcon />{t("common:action.add")}</PopoverTrigger>
       <PopoverContent align="end" className="w-[min(320px,calc(100vw-24px))] gap-0 rounded-2xl p-0" data-add-holding-menu>
         <div className="border-b px-3 py-2 type-footnote text-muted-foreground">{t("people:holdings.unownedHead")}</div>
-        <Command className="rounded-b-2xl"><CommandList className="max-h-[min(320px,50vh)]">
-          <CommandEmpty>{xs ? t("people:holdings.allOwned") : t("people:shared.loading")}</CommandEmpty>
-          {xs && xs.length > 0 && <CommandGroup>{xs.map((o) => <CommandItem key={o.object_type + o.object_id} value={o.object_type + ":" + o.object_id} onSelect={() => void pick(o)} data-add-holding-opt={o.name}>
-            <span className="min-w-0 flex-1 truncate">{o.name}</span><span className="shrink-0 type-footnote text-muted-foreground">{o.type_label}</span></CommandItem>)}</CommandGroup>}
-        </CommandList></Command>
+        <CommandMenu
+          bare
+          showSearch={false}
+          showFooter={false}
+          shouldFilter={false}
+          onClose={() => setOpen(false)}
+          labels={{ empty: xs ? t("people:holdings.allOwned") : t("people:shared.loading") }}
+          groups={xs && xs.length > 0 ? [{
+            id: "unowned",
+            label: "",
+            commands: xs.map((o) => ({
+              id: `${o.object_type}:${o.object_id}`,
+              label: o.name,
+              trailing: <span className="type-footnote text-muted-foreground">{o.type_label}</span>,
+              data: { "data-add-holding-opt": o.name },
+            })),
+          }] : []}
+          onRun={(id) => {
+            const o = xs?.find((x) => `${x.object_type}:${x.object_id}` === id)
+            if (o) void pick(o)
+          }}
+        />
       </PopoverContent>
     </Popover>
   )

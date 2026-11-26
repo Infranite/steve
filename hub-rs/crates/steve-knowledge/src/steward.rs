@@ -24,14 +24,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
-use steve_store::base::mems::{Mem, MemFilter, MemPatch};
-use steve_store::base::{Level, ObjRef, Viewer};
+use steve_store::base::mems::{Mem, MemFilter, MemPatch, NewMem};
+use steve_store::base::{Level, ObjRef, Viewer, Visibility};
 use steve_store::knowledge::{
     CandidateRows, Documents, Memories, MemoryChange, MemoryChanges, NewMemoryChange,
 };
 use steve_store::{ItemReads, Members, MemoryIndex, Read, References, W, WorkspaceSettings};
 
-use crate::candidates::{self, NewCandidate, Origin, OriginKind};
+use crate::candidates;
 use crate::extract::Names;
 use crate::provenance;
 use crate::service::{mem_json_for, prepare};
@@ -307,46 +307,41 @@ impl Tidying<'_, '_> {
                 about.push(a.clone());
             }
         }
-        let origin = Origin {
-            ws: ws.clone(),
-            kind: OriginKind::Tool,
-            id: run.clone(),
-            label: match &cx.item_id {
-                Some(i) => format!("{i} 的会话"),
-                None => "Agent 会话".into(),
-            },
-            user: cx.user.clone(),
-            writer: writer.clone(),
-            default_level: Level::Conclusion,
-            item_id: cx.item_id.clone(),
-            session_id: cx.session_id.clone(),
-        };
         let level = list
             .iter()
             .map(|x| x.level)
             .max_by_key(|l| level_rank(*l))
-            .unwrap_or(Level::Conclusion);
-        let new = candidates::propose_in(
-            tx,
-            &origin,
-            &NewCandidate {
+            .unwrap_or(Level::Reasoning);
+        let source_label = match &cx.item_id {
+            Some(i) => format!("{i} 的会话"),
+            None => "Agent 会话".into(),
+        };
+        let now = steve_store::now();
+        let new = Memories(tx).create(
+            ws,
+            &NewMem {
                 kind: list[0].kind.clone(),
                 text: text.clone(),
-                about,
+                source_type: if cx.item_id.is_some() {
+                    "item".into()
+                } else {
+                    "steve".into()
+                },
+                source_id: cx.item_id.clone().or_else(|| cx.session_id.clone()),
+                source_label,
+                visibility: Visibility::Private,
                 level,
-                evidence: list
-                    .iter()
-                    .map(|x| x.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" / "),
-                supersedes: Some(list[0].id.clone()),
-                why: reason.clone(),
-                scope: String::new(),
-                owner_said: false,
+                status: "confirmed".into(),
+                writer: writer.clone(),
+                created_by: cx.user.clone(),
+                about,
+                ..Default::default()
             },
         )?;
+        sync::sync_mem(tx, &new.id, now)?;
         for x in list {
             CandidateRows(tx).supersede(&new.id, &x.id)?;
+            set_status(tx, &x.id, "stale")?;
         }
         let id = record(
             tx,
@@ -362,7 +357,7 @@ impl Tidying<'_, '_> {
             "applied",
         )?;
         Ok(format!(
-            "Merged into candidate {} (change {id}); the user confirms it, and then it replaces {}.",
+            "Merged silently into {} (change {id}); replaced {} (undoable).",
             new.id,
             ids.join(", ")
         ))

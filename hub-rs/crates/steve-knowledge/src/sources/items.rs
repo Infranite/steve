@@ -11,13 +11,13 @@ use async_trait::async_trait;
 use serde_json::Value;
 use steve_modules::hooks::ItemHooks;
 use steve_modules::{ApiError, ApiResult, Modules};
-use steve_store::base::mems::Mem;
 use steve_store::base::{Level, ObjRef};
-use steve_store::knowledge::Documents;
+use steve_store::knowledge::{Documents, OriginClass, SourceTrustTier};
 use steve_store::{Item, ItemEvidence, Members, Read, References};
 
 use crate::candidates::{Origin, OriginKind};
 use crate::extract::{self, MAX_INPUT, clip};
+use crate::ingest::IngestOutcome;
 use crate::state::Knowledge;
 
 /// What item completion extraction reads from the store.
@@ -132,38 +132,44 @@ pub fn initiator(c: &mut impl Read, ws: &str, item: &str) -> ApiResult<String> {
     })
 }
 
-/// The extraction input: project, goal versions, what you said, answered questions, review notes and
-/// the delivery summary; at most 12000 characters. The goals are marked as this item's own business:
-/// the model is told restating them is no memory, and [`extract::check`] drops what does.
+/// Section marker identifying the Agent's delivery summary (eligible ONLY for codebase/skill
+/// `AGENTS.md`/`SKILL.md` proposals, NEVER as owner preference/rule evidence).
+pub const AGENT_SUMMARY_TAG: &str = "[AGENT_SUMMARY]";
+/// Section marker identifying owner rework feedback (high-signal Tier 1 evidence).
+pub const OWNER_REWORK_TAG: &str = "[OWNER_REWORK]";
+
+/// The extraction input: project, goal versions, owner supplements/answers/rework notes, and
+/// tagged `[AGENT_SUMMARY]` (kept strictly separated from owner preference evidence).
 pub fn extract_text(f: &ItemFacts) -> String {
-    let mut s = format!("事项 {}：{}\n", f.id, f.title);
+    let mut s = format!("Item {}: {}\n", f.id, f.title);
     if let Some(project) = f.project_name.as_deref().filter(|p| !p.is_empty()) {
-        s.push_str(&format!("所属项目：{project}\n"));
+        s.push_str(&format!("Project: {project}\n"));
     }
     if !f.goals.is_empty() {
-        s.push_str("\n（下面的目标是这件事要做的事，属于事项记录）\n");
+        s.push_str("\n[ITEM_GOAL]\n");
     }
     for (i, g) in f.goals.iter().enumerate() {
-        s.push_str(&format!("\n目标 v{}：{g}\n", i + 1));
+        s.push_str(&format!("Goal v{}: {g}\n", i + 1));
     }
     for t in &f.said {
-        s.push_str(&format!("\n你补充：{t}\n"));
+        s.push_str(&format!("\n[OWNER_SUPPLEMENT]\n{t}\n"));
     }
     for (q, a) in &f.answers {
-        s.push_str(&format!("\n问题：{q}\n你的回答：{a}\n"));
+        s.push_str(&format!("\n[OWNER_ANSWER]\nQ: {q}\nA: {a}\n"));
     }
     for r in &f.reviews {
-        s.push_str(&format!("\n验收意见：{r}\n"));
+        s.push_str(&format!("\n{OWNER_REWORK_TAG}\n{r}\n"));
     }
     if !f.summary.trim().is_empty() {
-        s.push_str(&format!("\n交付摘要：{}\n", f.summary.trim()));
+        s.push_str(&format!("\n{AGENT_SUMMARY_TAG}\n{}\n", f.summary.trim()));
     }
     clip(&s, MAX_INPUT)
 }
 
-/// After `finish`: extracts knowledge candidates and project `AGENTS.md` proposals once for this
+/// After `finish`: runs unified extraction for personal memories (silent file writes / buffered
+/// observations, zero Inbox cards) and project `AGENTS.md` / `SKILL.md` proposals once per
 /// completion. Does not index the item as a knowledge document.
-pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<Vec<Mem>> {
+pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<Vec<IngestOutcome>> {
     let id = item_id.to_string();
     let f = m
         .blocking(move |m| crate::read_api(&m.store, |c| facts(c, &id)))
@@ -192,9 +198,15 @@ pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<V
         label: format!("{} 交付时", f.id),
         user: f.user.clone(),
         writer: "steve".into(),
-        default_level: Level::Conclusion,
+        default_level: Level::Reasoning,
         item_id: Some(f.id.clone()),
         session_id: None,
+        origin_class: if !f.reviews.is_empty() {
+            OriginClass::OwnerRework
+        } else {
+            OriginClass::ImplicitPattern
+        },
+        source_tier: SourceTrustTier::Tier1Owner,
     };
     let task = extract::Task {
         goals: &f.goals,
@@ -203,14 +215,15 @@ pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<V
     };
     let prepared = extract::prepare(m, kb, &origin, &extract_text(&f), Some(&f.id), task).await?;
     let now = m.clock.now();
+    let policy = kb.folder_policy().clone();
     m.blocking(move |m| {
         m.store.write(|tx| {
             if Documents(tx).mark(&origin.ws, &mark)?.as_deref() == Some(stamp.as_str()) {
                 return Ok(Vec::new());
             }
-            let made = extract::commit_in(tx, &origin, &prepared)?;
+            let report = extract::commit_in(tx, &policy, &origin, &prepared, now)?;
             Documents(tx).set_mark(&origin.ws, &mark, &stamp, now)?;
-            Ok(made)
+            Ok(report.outcomes)
         })
     })
     .await

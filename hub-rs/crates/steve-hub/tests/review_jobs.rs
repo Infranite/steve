@@ -397,11 +397,7 @@ async fn review_job_timeout_late_final() {
         )
         .await
     });
-    eventually_sync("started", || {
-        node.log().iter().any(|(m, _)| *m == "start_job")
-    })
-    .await;
-    let e = exec(&store);
+    let e = wait_for_fake_job_started(&node, &store).await;
     let r = UsageReport {
         report_id: "live".into(),
         meter_epoch: Epoch::new("e").unwrap(),
@@ -571,6 +567,29 @@ async fn fake_gateway(
     );
     (node, rt, gw, sent)
 }
+/// Per-call gateway deadline used by fake-Node job tests.
+const FAKE_CALL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Bound for a failed gateway call to settle once `AttemptEnded` is durably applied.
+/// Strictly shorter than [`FAKE_CALL_TIMEOUT`] so an unwanted second job attempt fails fast
+/// instead of silently hitting the call deadline, while still giving ample margin on slow CI.
+const FAILED_PLAN_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Waits for `FakeNode` to accept `start_job` AND for the Hub to durably apply and acknowledge
+/// its `AttemptStarted` event (`seq = 1`). Polling only `node.log()` races with
+/// `FakeNode::finish_accept`'s in-flight commit, allowing a subsequent `node.emit` (`seq = 2`)
+/// to reach `NodeRuntime::receive` ahead of `seq = 1` and get dropped by strict in-order stream
+/// application (leaving later `AttemptEnded` events unapplied as well).
+async fn wait_for_fake_job_started(node: &FakeNode, store: &Store) -> ExecutionRef {
+    eventually_sync("job started and acknowledged", || {
+        node.log().iter().filter(|(m, _)| *m == "start_job").count() == 1
+            && node_checks::runtime_job_attempts_count_by_state(store, "running").unwrap() == 1
+            && node.unacked() == 0
+    })
+    .await;
+    exec(store)
+}
+
 fn start_fake_call(
     gw: RecordingGateway,
     item: String,
@@ -584,7 +603,7 @@ fn start_fake_call(
                 gw.attempt(
                     "test",
                     Tier::Smart,
-                    Duration::from_secs(15),
+                    FAKE_CALL_TIMEOUT,
                     &ThinkTools::None,
                     None,
                 ),
@@ -600,8 +619,7 @@ async fn dropped_waiter_keeps_late_final_on_the_same_failed_bill() {
     let item = seed_item(&store);
     let (node, rt, gw, sent) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item.clone());
-    eventually_sync("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
-    let e = exec(&store);
+    let e = wait_for_fake_job_started(&node, &store).await;
     node.emit(
         Subject::Execution(e.clone()),
         EventBody::Usage {
@@ -671,11 +689,7 @@ async fn failed_gateway_job_keeps_one_billed_attempt_without_reissuing() {
         let (node, rt, gw, _) =
             fake_gateway(dir.path(), &store, vec!["first".into(), second.into()]).await;
         let task = start_fake_call(gw, item.clone());
-        eventually_sync("first job accepted", || {
-            node.log().iter().filter(|(m, _)| *m == "start_job").count() == 1
-        })
-        .await;
-        let first = exec(&store);
+        let first = wait_for_fake_job_started(&node, &store).await;
         let call = node_checks::gateway_calls_call_id(&store).unwrap();
         node.emit(
             Subject::Execution(first.clone()),
@@ -690,7 +704,17 @@ async fn failed_gateway_job_keeps_one_billed_attempt_without_reissuing() {
         failed.stop_reason = "error".into();
         failed.error = Some(Error::new(Code::Internal, "503 busy"));
         node.finish(&first, failed).await.unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(5), task)
+        assert_eq!(
+            node.unacked(),
+            0,
+            "Usage and AttemptEnded must be durably applied and acknowledged"
+        );
+        assert_eq!(
+            node_checks::runtime_job_attempts_count_by_state(&store, "finished").unwrap(),
+            1,
+            "AttemptEnded must finish the job attempt before the caller settles"
+        );
+        let result = tokio::time::timeout(FAILED_PLAN_SETTLE_TIMEOUT, task)
             .await
             .expect("the failed plan settles without waiting for another job")
             .unwrap();
@@ -797,8 +821,7 @@ async fn rolled_back_completion_does_not_wake_core_or_settle_the_call() {
     let item = seed_item(&store);
     let (node, rt, gw, sent) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item);
-    eventually_sync("job", || node.log().iter().any(|(m, _)| *m == "start_job")).await;
-    let execution = exec(&store);
+    let execution = wait_for_fake_job_started(&node, &store).await;
     node.emit(
         Subject::Execution(execution.clone()),
         EventBody::Usage {
@@ -888,11 +911,7 @@ async fn research_job_run_dropped_waiter_applies_late_final_to_the_same_failed_c
     )
     .await
     .unwrap();
-    eventually_sync("research accepted", || {
-        node.log().iter().any(|(m, _)| *m == "start_job")
-    })
-    .await;
-    let execution = exec(&store);
+    let execution = wait_for_fake_job_started(&node, &store).await;
     node.emit(
         Subject::Execution(execution.clone()),
         EventBody::Usage {
@@ -955,11 +974,7 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     let item = seed_item(&store);
     let (node, rt, gw, sent) = fake_gateway(dir.path(), &store, vec!["m".into()]).await;
     let task = start_fake_call(gw, item.clone());
-    eventually_sync("accepted", || {
-        node.log().iter().any(|(m, _)| *m == "start_job")
-    })
-    .await;
-    let execution = exec(&store);
+    let execution = wait_for_fake_job_started(&node, &store).await;
     node.emit(
         Subject::Execution(execution.clone()),
         EventBody::Usage {

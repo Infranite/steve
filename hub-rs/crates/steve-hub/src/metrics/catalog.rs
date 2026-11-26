@@ -598,6 +598,11 @@ pub(super) fn describe() {
         "How long a link lasted. Labels: node."
     );
     describe_counter!(
+        "steve_node_file_access_probes_total",
+        Count,
+        "macOS TCC file-access probes performed by a Node. Label: outcome (granted, missing, unknown, not_applicable, timeout, busy)."
+    );
+    describe_counter!(
         "steve_subtask_updates_total",
         Count,
         "Subtask state updates observed from Nodes. Labels: origin (subagent, background_task, native_workflow), status."
@@ -1082,6 +1087,36 @@ pub(super) fn describe() {
         "steve_memory_uses_total",
         Count,
         "Memory hits injected into or cited by a consumer. Labels: consumer (session, chat, draft, reply, search, flow, other), stage (injected, cited)."
+    );
+    describe_counter!(
+        "steve_memory_writes_total",
+        Count,
+        "Unified memory ingestion and file write outcomes. Labels: mode (ingest, buffer, read_only, propose, direct_write, non_memory), result."
+    );
+    describe_counter!(
+        "steve_memory_reverted_total",
+        Count,
+        "Silent memory writes deleted or reverted by the owner, plus revert-rate health alerts. Labels: reason."
+    );
+    describe_counter!(
+        "steve_memory_repeat_corrections_total",
+        Count,
+        "Repeated owner corrections to the same memory rule or anchor."
+    );
+    describe_counter!(
+        "steve_memory_synthesis_tokens_total",
+        Count,
+        "Model tokens consumed by event-driven memory overview synthesis. Labels: kind, direction (input, output)."
+    );
+    describe_counter!(
+        "steve_memory_refresh_skipped_total",
+        Count,
+        "Memory overview synthesis evaluations skipped without calling a model. Labels: kind, reason (no_change, below_threshold)."
+    );
+    describe_counter!(
+        "steve_memory_reconcile_total",
+        Count,
+        "File-as-truth memory anchor reconciliations executed. Labels: result."
     );
     describe_counter!(
         "steve_security_refusals_total",

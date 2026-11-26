@@ -56,6 +56,9 @@ export default {
     fields: { call: "Steve calls you", call_external: "Introduce you as", role: "Role", project: "Main projects", repository: "Repositories", tools: "Tools", email: "Email", phone: "Phone", website: "Website", lang: "Language", tz: "Timezone", communication: "Communication" },
   },
   contact: {
+    tabProfile: "Profile",
+    tabAssets: "Accounts & assets",
+    tabActivity: "Activity & notes",
     notFound: "Contact not found",
     loadFailed: "Couldn't load the contact",
     goneSub: "It may have been deleted or merged.",

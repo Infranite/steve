@@ -23,6 +23,10 @@ export type Command = {
   /** "logo" sits on a small tile; "icon" is a plain glyph */
   icon?: ReactNode;
   logo?: ReactNode;
+  /** Steve: custom row content replacing icon + label + hint when a caller needs composite layout */
+  content?: ReactNode;
+  /** Steve: right-side adornment (e.g. a checkmark or badge) */
+  trailing?: ReactNode;
   /** Keys shown on the right, e.g. ["G", "I"] – suggestions get ⌘1–⌘5 automatically */
   keys?: string[];
   /** Extra words that should find this command */
@@ -35,7 +39,7 @@ export type Command = {
   data?: Record<string, string>;
 };
 
-export type CommandGroup = { id: string; label: string; commands: Command[] };
+export type CommandGroup = { id: string; label: string; header?: ReactNode; commands: Command[] };
 
 const defaultLabels = {
   placeholder: "Type a command or search…",
@@ -60,6 +64,21 @@ export type CommandMenuProps = {
   labels?: CommandMenuLabels;
   /** Focus the field when the menu appears */
   autoFocus?: boolean;
+  /** Show the built-in search input (default true) */
+  showSearch?: boolean;
+  /** Show the keyboard-hint footer (default true) */
+  showFooter?: boolean;
+  /** Render flat inside an enclosing PopoverContent without duplicate card chrome */
+  bare?: boolean;
+  /** Filter rows client-side as the user types (default true; set false for server-filtered lists) */
+  shouldFilter?: boolean;
+  /** Optional externally controlled active command id (e.g. composer autocomplete) */
+  activeId?: string;
+  onActiveIdChange?: (id: string) => void;
+  /** Keep focus on an external field when clicking rows (e.g. composer textarea) */
+  preventFocus?: boolean;
+  /** Extra data-* attributes on the search input */
+  inputData?: Record<string, string>;
   className?: string;
 };
 
@@ -99,11 +118,12 @@ type ItemProps = {
   ran: boolean;
   mod: string;
   q: string;
+  preventFocus?: boolean;
   on: { current: { move: (cmd: Row) => void; run: (cmd: Row) => void } };
 };
 
 /** One row – memoized, so moving the highlight through thousands of commands only redraws two rows */
-const Item = memo(function Item({ cmd, domId, selected, ran, mod, q, on }: ItemProps) {
+const Item = memo(function Item({ cmd, domId, selected, ran, mod, q, preventFocus, on }: ItemProps) {
   const keys = cmd.n ? [mod, String(cmd.n)] : cmd.keys;
   return (
     <button
@@ -116,28 +136,36 @@ const Item = memo(function Item({ cmd, domId, selected, ran, mod, q, on }: ItemP
       className="ui-cmc__item"
       tabIndex={-1}
       {...cmd.data}
+      onMouseDown={preventFocus ? (e) => e.preventDefault() : undefined}
       onMouseMove={() => on.current.move(cmd)}
       onClick={() => on.current.run(cmd)}
     >
-      {cmd.logo ? (
-        <span className="ui-cmc__logo" data-letter={initial(cmd.label)} onErrorCapture={onBroken}>
-          {cmd.logo}
-        </span>
+      {cmd.content !== undefined ? (
+        cmd.content
       ) : (
-        <span className="ui-cmc__icon" data-letter={initial(cmd.label)} onErrorCapture={onBroken}>
-          {cmd.icon}
-        </span>
-      )}
-      <span className="ui-cmc__text">
-        <span className="ui-cmc__name" dir="auto" title={cmd.label}>
-          <Highlight text={cmd.label} query={q} />
-        </span>
-        {cmd.hint && (
-          <span className="ui-cmc__hint" dir="auto" title={cmd.hint} data-mono={cmd.mono || undefined}>
-            <Highlight text={cmd.hint} query={q} />
+        <>
+          {cmd.logo ? (
+            <span className="ui-cmc__logo" data-letter={initial(cmd.label)} onErrorCapture={onBroken}>
+              {cmd.logo}
+            </span>
+          ) : cmd.icon !== undefined ? (
+            <span className="ui-cmc__icon" data-letter={initial(cmd.label)} onErrorCapture={onBroken}>
+              {cmd.icon}
+            </span>
+          ) : null}
+          <span className="ui-cmc__text">
+            <span className="ui-cmc__name" dir="auto" title={cmd.label}>
+              <Highlight text={cmd.label} query={q} />
+            </span>
+            {cmd.hint && (
+              <span className="ui-cmc__hint" dir="auto" title={cmd.hint} data-mono={cmd.mono || undefined}>
+                <Highlight text={cmd.hint} query={q} />
+              </span>
+            )}
           </span>
-        )}
-      </span>
+        </>
+      )}
+      {cmd.trailing && <span className="ui-cmc__trailing">{cmd.trailing}</span>}
       {keys && (
         <span className="ui-cmc__keys" aria-hidden="true">
           {keys.map((k, i) => (
@@ -159,6 +187,14 @@ export function CommandMenu({
   busy,
   labels: labelProp,
   autoFocus,
+  showSearch = true,
+  showFooter = true,
+  bare = false,
+  shouldFilter = true,
+  activeId,
+  onActiveIdChange,
+  preventFocus = false,
+  inputData,
   className,
 }: CommandMenuProps) {
   const labels = { ...defaultLabels, ...labelProp };
@@ -182,6 +218,7 @@ export function CommandMenu({
         key: `g${gi}`,
         id: g.id,
         label: String(g.label ?? ""),
+        header: g.header,
         commands: (Array.isArray(g.commands) ? g.commands : []).filter(Boolean).map((c, ci) => {
           const label = String(c.label ?? "");
           const hint = c.hint == null || c.hint === "" ? undefined : String(c.hint);
@@ -193,7 +230,7 @@ export function CommandMenu({
   );
   const q = query.trim();
   const shown = useMemo(() => {
-    const needle = fold(q);
+    const needle = shouldFilter ? fold(q) : "";
     const result = all
       .map((g) => ({
         ...g,
@@ -204,10 +241,10 @@ export function CommandMenu({
       }))
       .filter((g) => g.commands.length);
     return result;
-  }, [all, q]);
+  }, [all, q, shouldFilter]);
   const order = useMemo(() => shown.flatMap((g) => g.commands), [shown]);
   const suggestions = order.filter((c) => c.n);
-  const current = order.find((c) => c.key === active) ?? order[0];
+  const current = (activeId !== undefined ? order.find((c) => c.id === activeId) : order.find((c) => c.key === active)) ?? order[0];
 
   // Keyboard moves keep the active row in view; the mouse never scrolls the list
   const byKeyboard = useRef(false);
@@ -268,11 +305,14 @@ export function CommandMenu({
   on.current = {
     move: (cmd) => {
       setLit(true);
-      if (cmd.key !== current?.key) setActive(cmd.key);
+      if (cmd.key !== current?.key) {
+        setActive(cmd.key);
+        onActiveIdChange?.(cmd.id);
+      }
     },
     run: (cmd) => {
       run(cmd);
-      input.current?.focus({ preventScroll: true });
+      if (!preventFocus) input.current?.focus({ preventScroll: true });
     },
   };
 
@@ -317,46 +357,49 @@ export function CommandMenu({
   };
 
   return (
-    <div className={["ui-cmc", className].filter(Boolean).join(" ")}>
+    <div className={["ui-cmc", className].filter(Boolean).join(" ")} data-bare={bare || undefined}>
       {/* React 19 hoists this into <head> once, no matter how many instances render */}
       <style href="ui-command-menu-clean" precedence="default">
         {css}
       </style>
 
       <div className="ui-cmc__card">
-        <label className="ui-cmc__search">
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <circle cx="7.25" cy="7.25" r="4.75" />
-            <path d="m13.5 13.5-2.9-2.9" />
-          </svg>
-          <input
-            ref={input}
-            value={query}
-            dir="auto"
-            placeholder={labels.placeholder}
-            aria-label={labels.field}
-            data-command-input=""
-            role="combobox"
-            aria-expanded="true"
-            aria-controls={`${id}-list`}
-            aria-activedescendant={current ? `${id}-${current.key}` : undefined}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              onQueryChange?.(e.target.value);
-              setActive(null);
-            }}
-            onKeyDown={onKeyDown}
-          />
-          {busy ? (
-            <span className="ui-cmc__busy" aria-hidden="true" data-command-busy="" />
-          ) : (
-            <kbd className="ui-cmc__enter" aria-hidden="true">
-              <svg viewBox="0 0 16 16">
-                <path d="M12.5 4v3a2 2 0 0 1-2 2h-7M6 6.5 3.5 9 6 11.5" />
-              </svg>
-            </kbd>
-          )}
-        </label>
+        {showSearch && (
+          <label className="ui-cmc__search">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="7.25" cy="7.25" r="4.75" />
+              <path d="m13.5 13.5-2.9-2.9" />
+            </svg>
+            <input
+              ref={input}
+              value={query}
+              dir="auto"
+              placeholder={labels.placeholder}
+              aria-label={labels.field}
+              data-command-input=""
+              {...inputData}
+              role="combobox"
+              aria-expanded="true"
+              aria-controls={`${id}-list`}
+              aria-activedescendant={current ? `${id}-${current.key}` : undefined}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                onQueryChange?.(e.target.value);
+                setActive(null);
+              }}
+              onKeyDown={onKeyDown}
+            />
+            {busy ? (
+              <span className="ui-cmc__busy" aria-hidden="true" data-command-busy="" />
+            ) : (
+              <kbd className="ui-cmc__enter" aria-hidden="true">
+                <svg viewBox="0 0 16 16">
+                  <path d="M12.5 4v3a2 2 0 0 1-2 2h-7M6 6.5 3.5 9 6 11.5" />
+                </svg>
+              </kbd>
+            )}
+          </label>
+        )}
 
         <div
           ref={listRef}
@@ -375,10 +418,10 @@ export function CommandMenu({
             </p>
           )}
           {shown.map((group) => (
-            <div key={group.key} role="group" aria-label={group.label} className="ui-cmc__group" data-command-group={group.id}>
-              {group.label && (
+            <div key={group.key} role="group" aria-label={group.label || undefined} className="ui-cmc__group" data-command-group={group.id}>
+              {(group.header || group.label) && (
                 <span className="ui-cmc__label" dir="auto">
-                  {group.label}
+                  {group.header ?? group.label}
                 </span>
               )}
               {group.commands.map((cmd) => (
@@ -389,7 +432,8 @@ export function CommandMenu({
                   selected={cmd.key === current?.key}
                   ran={ran?.id === cmd.key}
                   mod={mod}
-                  q={q}
+                  q={shouldFilter ? q : ""}
+                  preventFocus={preventFocus}
                   on={on}
                 />
               ))}
@@ -398,28 +442,30 @@ export function CommandMenu({
           </div>
         </div>
 
-        {/* The last row of the panel, under a hairline: a hint, or what just ran */}
-        <footer className="ui-cmc__foot" aria-live="polite">
-          {ran ? (
-            <span className="ui-cmc__done" key={ran.label}>
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="m3.5 8.5 3 3 6-7" />
-              </svg>
-              <span className="ui-cmc__done-text">{ran.label}</span>
+        {showFooter && (
+          /* The last row of the panel, under a hairline: a hint, or what just ran */
+          <footer className="ui-cmc__foot" aria-live="polite">
+            {ran ? (
+              <span className="ui-cmc__done" key={ran.label}>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m3.5 8.5 3 3 6-7" />
+                </svg>
+                <span className="ui-cmc__done-text">{ran.label}</span>
+              </span>
+            ) : (
+              <span className="ui-cmc__tip">
+                <kbd>Tab</kbd> {labels.tabTip}
+              </span>
+            )}
+            <span className="ui-cmc__foot-right">
+              <span className="ui-cmc__keys">
+                <kbd>{mod}</kbd>
+                <kbd>K</kbd>
+              </span>
+              {labels.openTip}
             </span>
-          ) : (
-            <span className="ui-cmc__tip">
-              <kbd>Tab</kbd> {labels.tabTip}
-            </span>
-          )}
-          <span className="ui-cmc__foot-right">
-            <span className="ui-cmc__keys">
-              <kbd>{mod}</kbd>
-              <kbd>K</kbd>
-            </span>
-            {labels.openTip}
-          </span>
-        </footer>
+          </footer>
+        )}
       </div>
     </div>
   );
@@ -468,6 +514,9 @@ const css = /* css */ `
 
 /* One white panel: search, results and the last row – the edge is a shadow, not a border */
 .ui-cmc__card { overflow: hidden; border-radius: calc(var(--aui-radius-lg, 10px) + 2px); background: var(--ui-cmc-card); box-shadow: var(--ui-cmc-shadow); }
+.ui-cmc[data-bare] .ui-cmc__card { border-radius: 0; background: transparent; box-shadow: none; }
+.ui-cmc[data-bare] .ui-cmc__search { height: 40px; padding: 0 10px 0 12px; gap: 8px; }
+.ui-cmc__trailing { display: inline-flex; flex: none; align-items: center; gap: 4px; color: var(--ui-cmc-muted); }
 
 /* Search row */
 .ui-cmc__search { display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 12px 0 14px; border-bottom: 0.5px solid var(--ui-cmc-line); cursor: text; }

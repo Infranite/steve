@@ -9,12 +9,12 @@ import type { ReactNode } from "react"
 
 /** a choice in a settings row; an option's `icon` (a harness's mark) shows before its name, in the list and the field. `wide` for a field that fills its column (a sheet), otherwise a fixed width so the
  *  selects down one card line up on their right edge */
-export function SetSelect({ value, options, onChange, testId, label, wide, disabled, className }: { value: string; options: [string, string][] | { v: string; l: string; icon?: ReactNode; disabled?: boolean; description?: string }[]; onChange: (v: string) => void; testId?: string; label?: string; wide?: boolean; disabled?: boolean; className?: string }) {
+export function SetSelect({ value, options, onChange, testId, label, placeholder, wide, disabled, className }: { value: string; options: [string, string][] | { v: string; l: string; icon?: ReactNode; disabled?: boolean; description?: string }[]; onChange: (v: string) => void; testId?: string; label?: string; placeholder?: string; wide?: boolean; disabled?: boolean; className?: string }) {
   const t = useT()
   const os = options.map((o) => (Array.isArray(o) ? { value: o[0], label: o[1] } : { value: o.v, label: o.l, icon: o.icon, disabled: o.disabled, description: o.description }))
   return (
     <div data-set-select={wide ? undefined : ""} className={cn("min-w-0", wide ? "w-full" : "w-40 max-w-full", className)}>
-      <Select size={wide ? "md" : "sm"} value={value} options={os} placeholder={t("common:picker.choose")} onChange={(v) => onChange(v)} aria-label={label} disabled={disabled} data-select={testId} />
+      <Select size={wide ? "md" : "sm"} value={value} options={os} placeholder={placeholder ?? t("common:picker.choose")} onChange={(v) => onChange(v)} aria-label={label} disabled={disabled} data-select={testId} />
     </div>
   )
 }

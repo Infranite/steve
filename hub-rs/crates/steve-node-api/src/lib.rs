@@ -40,9 +40,9 @@ pub use intent::{Intent, IntentKey};
 pub use ports::*;
 pub use run::*;
 pub use steve_types::devices::{
-    FileAccessReport, FileAccessStatus, MissingCommandDiagnostic, NODE_BOOT_SERVICE_ENV,
-    NODE_FILE_ACCESS_SOCKET, ProtectedAccess, ProtectedLocation, extract_login_shell_path,
-    login_shell_path_script,
+    FileAccessReport, FileAccessStatus, LOGIN_SHELL_PROBE_TIMEOUT_SECS, MissingCommandDiagnostic,
+    NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET, ProtectedAccess, ProtectedLocation,
+    extract_login_shell_path, login_shell_path_script, shell_supports_interactive_login,
 };
 pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};
 pub use steve_types::{

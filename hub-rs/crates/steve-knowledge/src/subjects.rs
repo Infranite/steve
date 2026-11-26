@@ -184,11 +184,13 @@ pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
             }
         }
         for p in ProjectProposals(c).list(&viewer.ws, None, Some("pending"))? {
-            let at = p.updated;
-            bump(ObjRef::new("project", &p.project_id), &|t| {
-                t.proposals += 1;
-                t.last = t.last.max(at);
-            });
+            if let Some(pid) = p.project_id.as_deref() {
+                let at = p.updated;
+                bump(ObjRef::new("project", pid), &|t| {
+                    t.proposals += 1;
+                    t.last = t.last.max(at);
+                });
+            }
         }
         let mut out = Vec::new();
         for r in order {

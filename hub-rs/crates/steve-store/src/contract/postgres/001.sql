@@ -182,8 +182,9 @@ CREATE TABLE kb_marks (
 CREATE TABLE project_proposals (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-    project_id TEXT NOT NULL,
+    project_id TEXT,
     kind TEXT NOT NULL DEFAULT 'agents_md',
+    target_path TEXT NOT NULL DEFAULT 'AGENTS.md',
     text TEXT NOT NULL,
     reason TEXT NOT NULL DEFAULT '',
     evidence TEXT NOT NULL DEFAULT '',

@@ -7,7 +7,7 @@ import { Select as UISelect, SelectContent, SelectItem, SelectTrigger, SelectVal
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Page, Empty } from "@/ui"
 import { Spinner } from "@/components/ui/spinner"
-import { st } from "@/store"
+import { formatBotName, st } from "@/store"
 import { t, useT } from "@/i18n"
 
 export const SOURCE_ICON: Record<string, LucideIcon> = { mail: MailIcon, cal: CalendarIcon, im: MessageSquareIcon, github: GitPullRequestIcon, webhook: SirenIcon, time: ClockIcon, item: ListTodoIcon, manual: HandIcon, notify: BellIcon }
@@ -45,7 +45,7 @@ export function Failed({ title, back, msg, retry }: { title: string; back?: [str
 }
 
 /** bots of this workspace, the main one first */
-export const botOptions = () => Object.keys(st.bots).filter((k) => st.bots[k].on || st.bots[k].main).sort((a, b) => Number(!!st.bots[b].main) - Number(!!st.bots[a].main)).map((k) => ({ v: k, l: st.bots[k].main ? st.bots[k].n : t("auto:bot.named", { name: st.bots[k].n }) }))
+export const botOptions = () => Object.keys(st.bots).filter((k) => st.bots[k].on || st.bots[k].main).sort((a, b) => Number(!!st.bots[b].main) - Number(!!st.bots[a].main)).map((k) => ({ v: k, l: formatBotName(st.bots[k].n, st.bots[k].main) }))
 export const mainBot = () => Object.keys(st.bots).find((k) => st.bots[k].main) ?? "steve"
 
 /** a future time: “今天 08:30”“明天 08:30”“周五 09:00”“11-12 09:00” */

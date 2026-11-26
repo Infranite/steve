@@ -1104,6 +1104,30 @@ async fn release_finishes_once_the_harness_is_gone() {
     assert!(ok(&finished(&n, "op_rel").await));
     let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
     assert_eq!(v.phase, SessionPhase::Released);
+    // `stop_process` must stop a live harness through `procs::stop` (SIGTERM first), not let
+    // `Live::drop` pre-empt it with SIGKILL before leader identity is verified.
+    t.wait_for("adapter exit diagnostic", |t| {
+        t.sink.events().into_iter().any(|e| {
+            matches!(
+                e.body,
+                EventBody::Diagnostic { ref code, .. } if code == "adapter_exited"
+            )
+        })
+    })
+    .await;
+    let signal = t.sink.events().into_iter().find_map(|e| match e.body {
+        EventBody::Diagnostic {
+            code,
+            details: Some(details),
+            ..
+        } if code == "adapter_exited" => details.signal,
+        _ => None,
+    });
+    assert_eq!(
+        signal,
+        Some(libc::SIGTERM),
+        "live release must escalate via procs::stop (SIGTERM) instead of Live::drop SIGKILL"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

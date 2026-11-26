@@ -154,6 +154,7 @@ try {
   await page.addInitScript(() => { localStorage.setItem('steve-lang', 'zh-CN') })
   await page.goto(base + '/#/bots/dev')
   await page.locator('[data-slot=tabs-trigger]:has-text("设置")').click()
+  await page.locator('[data-bot-settings-tabs] [data-seg="model"]').click()
   const effortBtn = page.locator('[data-select="bot-effort"]')
   await effortBtn.waitFor()
 
@@ -169,13 +170,15 @@ try {
   await options.nth(3).click()
   assert.match(await page.locator('[data-effort-picker="bot-effort"] [data-effort-note="mapped"]').innerText(), /实际生效：xhigh/)
 
-  // Save canonical "high" (never native "xhigh")
+  // Save canonical "high" (never native "xhigh"), waiting for saveBot + refresh to settle and leave Settings
   await page.locator('[data-save-bot]').click()
-  for (let i = 0; i < 40 && patches.length < 1; i++) await page.waitForTimeout(50)
+  await page.locator('[data-save-bot]').waitFor({ state: 'detached' })
+  assert.equal(patches.length, 1)
   assert.equal(patches[0].reasoning_effort, 'high', 'saves canonical level, not native xhigh')
 
   // 2) Switch to Antigravity gemini-pro-orchestrator-neon: explicit levels greyed out + model-decides note
   await page.locator('[data-slot=tabs-trigger]:has-text("设置")').click()
+  await page.locator('[data-bot-settings-tabs] [data-seg="model"]').click()
   await page.locator('[data-select="bot-harness"]').scrollIntoViewIfNeeded()
   await page.locator('[data-select="bot-harness"]').click()
   await page.getByRole('option', { name: /Antigravity/ }).click()
@@ -197,6 +200,7 @@ try {
   // 3) ModelVariant strategy on gemini-4-neon: max -> gemini-4-neon-xhigh
   await page.locator('[data-model-picker="bot-model"]').click()
   await page.locator('[data-model-opt="gemini-4-neon"]').click()
+  await page.locator('[data-model-menu="bot-model"]').waitFor({ state: 'detached' })
   await effortBtn.click()
   await page.getByRole('listbox').waitFor({ state: 'visible' })
   const varOpts = page.getByRole('option')
@@ -208,18 +212,18 @@ try {
 
   // 4a) Session view & panel showing recorded Codex effort mapping + transcript system event
   await page.goto(base + '/#/sessions/s-codex')
-  await page.locator('[data-session-effort-mapping]').waitFor()
+  await page.locator('[data-transcript="s-codex"] [data-sys]').waitFor()
   assert.equal(await page.locator('[data-session-effort-mapping]').innerText(), '高 → Codex xhigh')
   await page.locator('[data-session-panel] [data-runtime-toggle]').click()
   assert.equal(await page.locator('[data-session-panel] [data-session-panel-effort-mapping]').innerText(), '高 → Codex xhigh')
-  assert.match(await page.locator('body').innerText(), /思考强度：高 → codex xhigh/)
+  assert.match(await page.locator('[data-transcript="s-codex"] [data-sys]').innerText(), /思考强度：高 → codex xhigh/)
   await shot('effort-session-codex')
 
   // 4b) Session view showing recorded Antigravity unsupported fallback mapping
   await page.goto(base + '/#/sessions/s-agy')
-  await page.locator('[data-session-effort-mapping]').waitFor()
+  await page.locator('[data-transcript="s-agy"] [data-sys]').waitFor()
   assert.equal(await page.locator('[data-session-effort-mapping]').innerText(), '高 → 由模型自己决定')
-  assert.match(await page.locator('body').innerText(), /思考强度：高 → 由模型自己决定/)
+  assert.match(await page.locator('[data-transcript="s-agy"] [data-sys]').innerText(), /思考强度：高 → 由模型自己决定/)
   await shot('effort-session-agy-fallback')
 
   assert.deepEqual(errors, [])

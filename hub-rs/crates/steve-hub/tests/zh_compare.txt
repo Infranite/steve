@@ -577,8 +577,6 @@ steve-hub/src/wire/output_files.rs	"本次交付摘要"	1
 steve-hub/src/wire/output_files.rs	"本次交付正文"	1
 steve-install/src/setup.rs	"否"	1
 steve-install/src/setup.rs	"是"	1
-steve-knowledge/src/candidates.rs	"以后"	1
-steve-knowledge/src/candidates.rs	"记住"	1
 steve-knowledge/src/context.rs	"使用规则：“仅用于推理”的内容不要原样写进任何会发给别人的东西（邮件、群消息、PR 评论）；“可转述结论”只说结论，不提来源和细节；用到哪条就在句末标 [K1]。"	1
 steve-knowledge/src/context.rs	"相关知识（Steve 按这件事检索到的，可能不全；需要更多时调用 steve_knowledge_search）："	1
 steve-knowledge/src/drafts.rs	"不使用"	1
@@ -623,34 +621,6 @@ steve-knowledge/src/drafts.rs	"规则"	2
 steve-knowledge/src/drafts.rs	"跟随"	1
 steve-knowledge/src/drafts.rs	"跟随来源"	1
 steve-knowledge/src/drafts.rs	"默认"	1
-steve-knowledge/src/extract.rs	"一律"	1
-steve-knowledge/src/extract.rs	"一直"	1
-steve-knowledge/src/extract.rs	"一般都"	1
-steve-knowledge/src/extract.rs	"上次说过"	1
-steve-knowledge/src/extract.rs	"下次"	1
-steve-knowledge/src/extract.rs	"不要再"	1
-steve-knowledge/src/extract.rs	"之前说过"	1
-steve-knowledge/src/extract.rs	"习惯"	1
-steve-knowledge/src/extract.rs	"今后"	1
-steve-knowledge/src/extract.rs	"从现在起"	1
-steve-knowledge/src/extract.rs	"以后"	1
-steve-knowledge/src/extract.rs	"再也不"	1
-steve-knowledge/src/extract.rs	"凡是"	1
-steve-knowledge/src/extract.rs	"别再"	1
-steve-knowledge/src/extract.rs	"同类"	1
-steve-knowledge/src/extract.rs	"后续"	1
-steve-knowledge/src/extract.rs	"始终"	1
-steve-knowledge/src/extract.rs	"往后"	1
-steve-knowledge/src/extract.rs	"总是"	1
-steve-knowledge/src/extract.rs	"每一次"	1
-steve-knowledge/src/extract.rs	"每回"	1
-steve-knowledge/src/extract.rs	"每次"	1
-steve-knowledge/src/extract.rs	"永远"	1
-steve-knowledge/src/extract.rs	"类似的"	1
-steve-knowledge/src/extract.rs	"说过了"	1
-steve-knowledge/src/extract.rs	"说过很多次"	1
-steve-knowledge/src/extract.rs	"这类"	1
-steve-knowledge/src/extract.rs	"通常"	1
 steve-knowledge/src/sources.rs	"Bot 记忆"	2
 steve-knowledge/src/sources.rs	"上传的文件"	2
 steve-knowledge/src/sources.rs	"我的笔记"	2

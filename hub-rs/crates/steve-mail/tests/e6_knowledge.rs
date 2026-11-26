@@ -143,10 +143,13 @@ async fn a_thread_added_to_the_knowledge_base_is_searchable_for_reasoning_only()
     assert!(e.mail.to_knowledge(&caller(WS2, ME), &e.thread).is_err());
 }
 
-const CANDIDATES: &str = r#"{"items":[{"kind":"fact","scope":"person","text":"预算审批分三步：部门负责人、财务、CFO","about":["我"],"level":"public","evidence":"三步：部门负责人、财务、CFO","dup_of":null,"conflicts":null}]}"#;
+const CANDIDATES: &str = r#"{"items":[{"changes_future_behavior":true,"kind":"fact","scope":"person","text":"预算审批分三步：部门负责人、财务、CFO","about":["我"],"level":"public","when":"预算审批","why":"影响后续预算流程准备","evidence":"三步：部门负责人、财务、CFO","dup_of":null,"conflicts":null}]}"#;
 
-fn candidates(h: &H) -> Vec<(String, String, String, String, String)> {
-    db::candidate_mems(h.env.store())
+fn ingested_observations(h: &H) -> Vec<steve_store::knowledge::ObservationRow> {
+    h.env
+        .store()
+        .read(|c| steve_store::knowledge::Observations(c).list_pending(WS))
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -170,23 +173,33 @@ async fn a_done_thread_submits_candidates_once() {
             .unwrap()
             .unwrap();
     assert_eq!(t.state, "done");
-    let got = candidates(&e.h);
+    let got = ingested_observations(&e.h);
     assert_eq!(got.len(), 1, "{got:?}");
-    let (text, level, status, origin, origin_id) = &got[0];
-    assert_eq!(text, "预算审批分三步：部门负责人、财务、CFO");
     assert_eq!(
-        level, "reasoning",
-        "the stricter of public and the mail default"
+        got[0].proposed_text,
+        "预算审批分三步：部门负责人、财务、CFO"
     );
-    assert_eq!(status, "candidate");
-    assert_eq!(origin, "mail");
-    assert_eq!(origin_id, &e.thread);
+    assert_eq!(
+        got[0].level,
+        steve_store::base::Level::Reasoning,
+        "the stricter of public and the automatic silent-write ceiling"
+    );
+    // ZERO Inbox confirmation cards opened for memories.
+    assert_eq!(
+        e.h.env
+            .store()
+            .read(|c| steve_store::DecisionRows(c).open_confirmations(WS, "mem"))
+            .unwrap(),
+        0
+    );
 
-    // the model saw what you sent and the last reply, not the first question
+    // Complete thread is provided to extraction, with `[OWNER_SENT]` / `[EXTERNAL_RECEIVED]` tags.
     let p = e.h.env.gateway.last_prompt().unwrap();
     assert!(p.contains("三步：部门负责人、财务、CFO"), "{p}");
     assert!(p.contains("收到，谢谢"), "{p}");
-    assert!(!p.contains("下周之前要提交"), "{p}");
+    assert!(p.contains("下周之前要提交"), "{p}");
+    assert!(p.contains("[OWNER_SENT]"), "{p}");
+    assert!(p.contains("[EXTERNAL_RECEIVED]"), "{p}");
     assert!(p.contains("邮件往来「"), "{p}");
 
     // finishing again (already done) does not ask again; neither does a direct second submit
@@ -194,7 +207,7 @@ async fn a_done_thread_submits_candidates_once() {
     e.mail.on_item_finished(WS, "ST-7").await.unwrap();
     assert_eq!(e.mail.submit_done(WS, &e.thread).await.unwrap(), 0);
     assert_eq!(e.h.env.gateway.prompts.lock().unwrap().len(), calls);
-    assert_eq!(candidates(&e.h).len(), 1);
+    assert_eq!(ingested_observations(&e.h).len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -216,8 +229,8 @@ async fn a_failed_archive_on_done_still_submits_candidates() {
     let archived = e.mail.on_item_finished(WS, "ST-7").await.unwrap();
     assert!(archived.is_empty(), "{archived:?}");
     assert_eq!(e.h.imap.messages(ADDR, "INBOX").unwrap().len(), 2);
-    // the thread is done and its memories were asked for anyway
-    assert_eq!(candidates(&e.h).len(), 1);
+    // the thread is done and its memories were ingested anyway
+    assert_eq!(ingested_observations(&e.h).len(), 1);
 }
 
 const EXAMPLE: &str = "邮件签名改成 — Peng，回客户的信先给结论";

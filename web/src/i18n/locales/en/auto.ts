@@ -92,9 +92,6 @@ export default {
     footer: "Accounts are authorized in <accounts>Accounts</accounts>; groups and direct chats are managed in <channels>Chats</channels>.",
     notConnected: "No account connected",
   },
-  bot: {
-    named: "{{name}} bot",
-  },
   runStatus: {
     running: "Running",
     waiting: "Waiting",
@@ -216,6 +213,11 @@ export default {
     warnEdge: "The edge “{{label}}” of “{{node}}” matches none of its branches, so it is never taken",
     warnBranch: "The branch “{{label}}” of “{{node}}” has no edge, so a run that takes it stops there",
     warnUnreachable: "Nothing leads from the trigger to “{{node}}”; connect it to the flow before saving",
+    conflictDupBranch: "Rule conflict: “{{node}}” defines branch “{{label}}” more than once",
+    conflictShadowed: "Rule conflict: condition “{{earlier}}” in “{{node}}” shadows “{{shadowed}}” below it",
+    conflictDupEdge: "Rule conflict: “{{node}}” has multiple outgoing edges labeled “{{label}}”; only the first is taken",
+    conflictDupDefaultEdge: "Rule conflict: “{{node}}” has multiple unlabeled outgoing edges; only the first is taken",
+    conflictOverlap: "Trigger overlap: enabled flow “{{flow}}” also handles matching “{{source}}” events",
     page: "Flow",
     notFound: "Flow not found",
     notFoundSub: "It may have been deleted.",
