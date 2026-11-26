@@ -231,12 +231,14 @@ html.font-large { --type-scale: 1.125; }
 @keyframes steve-breathe { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.82); } }
 .dot-running { animation: steve-breathe 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after, details::details-content { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-property: none !important; transition-duration: 0s !important; }
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-property: none !important; transition-duration: 1ms !important; }
+  details::details-content { transition-property: none !important; transition-duration: 1ms !important; }
 }
 /* the reduced-motion setting (Settings → 外观) does the same as the system preference, on any system */
-html.reduce-motion *, html.reduce-motion *::before, html.reduce-motion *::after, html.reduce-motion details::details-content {
-  animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-property: none !important; transition-duration: 0s !important; scroll-behavior: auto !important;
+html.reduce-motion *, html.reduce-motion *::before, html.reduce-motion *::after {
+  animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-property: none !important; transition-duration: 1ms !important; scroll-behavior: auto !important;
 }
+html.reduce-motion details::details-content { transition-property: none !important; transition-duration: 1ms !important; }
 html.reduce-motion::view-transition-group(*), html.reduce-motion::view-transition-old(*), html.reduce-motion::view-transition-new(*) { animation: none !important; }
 
 /* React Flow — quiet chrome */
