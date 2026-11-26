@@ -529,6 +529,59 @@ impl RoutedRuntime {
             steve_i18n::t!("hub.node.refused", why = why)
         })
     }
+    /// Asynchronously probes a single session's colocated working directory outside Core's lock
+    /// so [`steve_core::AgentRuntime::cwd_usable`] reads a fresh cached value without blocking.
+    pub async fn prefetch_cwd_usable(&self, session_id: &str) {
+        let cwd = match self.store.sessions().get(session_id) {
+            Ok(Some(s)) if !s.cwd.is_empty() => s.cwd,
+            _ => return,
+        };
+        if let Some(node) = node_of(&self.store, session_id).filter(|n| !n.is_empty())
+            && node != super::local_service::NODE_ID
+        {
+            return;
+        }
+        if self
+            .node_for(session_id)
+            .is_some_and(|n| n.pending_workspace_prepare(session_id).unwrap_or(false))
+        {
+            return;
+        }
+        let _ = self.workspaces.probe_cwd_usable(&cwd).await;
+    }
+
+    /// Asynchronously probes working directories of all sessions that currently have queued
+    /// messages, outside Core's lock, before `flush_queued` runs inside a Core transaction.
+    pub async fn prefetch_queued_cwds(&self) {
+        let sids = match self
+            .store
+            .read(|r| steve_store::session_repo::with_queued_input(r))
+        {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut seen = std::collections::HashSet::new();
+        for sid in sids {
+            let cwd = match self.store.sessions().get(&sid) {
+                Ok(Some(s)) if s.status != "ended" && !s.cwd.is_empty() => s.cwd,
+                _ => continue,
+            };
+            if let Some(node) = node_of(&self.store, &sid).filter(|n| !n.is_empty())
+                && node != super::local_service::NODE_ID
+            {
+                continue;
+            }
+            if self
+                .node_for(&sid)
+                .is_some_and(|n| n.pending_workspace_prepare(&sid).unwrap_or(false))
+            {
+                continue;
+            }
+            if seen.insert(cwd.clone()) {
+                let _ = self.workspaces.probe_cwd_usable(&cwd).await;
+            }
+        }
+    }
 }
 
 impl steve_core::AgentRuntime for RoutedRuntime {
@@ -833,12 +886,11 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             .is_some_and(|n| n.is_uncertain(session_id))
     }
     fn cwd_usable(&self, session_id: &str, cwd: &str) -> bool {
-        const CWD_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
         if cwd.is_empty() {
             return false;
         }
-        // Only check colocated local Node paths synchronously; remote Nodes verify workspace
-        // usability on open/turn without stalling the Core lock on WAN RTT.
+        // Only check colocated local Node paths; remote Nodes verify workspace usability on
+        // open/turn without stalling the Core lock on WAN RTT.
         if let Some(node) = node_of(&self.store, session_id).filter(|n| !n.is_empty())
             && node != super::local_service::NODE_ID
         {
@@ -850,24 +902,20 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         {
             return true;
         }
-        let Some(local) = self.workspaces.local_node() else {
-            return true;
-        };
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return true;
-        };
-        let path = cwd.to_string();
-        match block_here(|| {
-            handle.block_on(tokio::time::timeout(
-                CWD_CHECK_TIMEOUT,
-                local.path_check(steve_node_api::PathCheckRequest { path }),
-            ))
-        }) {
-            Ok(Ok(resp)) => resp.exists && resp.is_dir && resp.writable,
-            // Offline / updating / timeout is handled by normal queueing rather than misreporting
-            // a missing working directory.
-            _ => true,
+        // Never block Core's lock/transaction on a Node RPC: read the bounded TTL cache populated
+        // asynchronously by `prefetch_cwd_usable` / `prefetch_queued_cwds`, and on a cold miss
+        // trigger an async background refresh while defaulting to `true`.
+        if let Some(usable) = self.workspaces.cached_cwd_usable(cwd) {
+            return usable;
         }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let ws = self.workspaces.clone();
+            let path = cwd.to_string();
+            handle.spawn(async move {
+                let _ = ws.probe_cwd_usable(&path).await;
+            });
+        }
+        true
     }
     /// Not `route()`: its park-on-doubt suits messages (undone by a later call), but here a yes
     /// drops the session's resume intent for good, so an unreadable binding counts as unbound.
@@ -1093,6 +1141,7 @@ impl CoreDomain {
                 .maintenance_hold(true)
                 .map_err(|e| BackendError::msg(e.to_string()))?;
         } else if action == "cancel" {
+            self.routed.prefetch_queued_cwds().await;
             store
                 .maintenance_set(false)
                 .map_err(|e| BackendError::msg(e.to_string()))?;
@@ -1135,6 +1184,7 @@ impl CoreDomain {
     /// Never fails the Hub: what could not be resumed is logged and reported on `/healthz`
     /// (`recovery`), and its durable intent stays for the next boot.
     pub async fn ready(&self) -> BResult<()> {
+        self.routed.prefetch_queued_cwds().await;
         let c = self.core.clone();
         let recover_failed = self.thread_recover_failed.clone();
         let r = blocking(move || {
@@ -1541,6 +1591,7 @@ impl CoreDomain {
         to_obj(blocking(move || c.queued_remove(&sid, &id, &actor)).await?)
     }
     pub async fn queued_send_now(&self, session: &str, id: &str) -> BResult<Obj> {
+        self.routed.prefetch_cwd_usable(session).await;
         let (c, sid, id) = (self.core.clone(), session.to_string(), id.to_string());
         to_obj(
             match blocking(move || c.queued_send_now(&sid, &id)).await? {
@@ -2500,5 +2551,87 @@ mod routed_tests {
             assert_eq!(got_en.status, status);
             assert_eq!(got_en.message, en);
         }
+    }
+
+    /// N3: `RoutedRuntime::cwd_usable` never blocks on a Node RPC inside Core's lock; it reads
+    /// the bounded TTL cache populated asynchronously by `Workspaces::probe_cwd_usable` /
+    /// `RoutedRuntime::prefetch_cwd_usable`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cwd_usable_reads_prefetched_cache_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            steve_store::Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher)
+                .unwrap();
+        let node = Arc::new(
+            steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
+                node: steve_node_api::NodeId::new("local").unwrap(),
+                home: dir.path().join("node"),
+                acp: steve_acp::AcpConfig {
+                    declared: Default::default(),
+                    adapters: Default::default(),
+                    node: "node".into(),
+                    claude_executable: "/usr/bin/false".into(),
+                    claude_config_dir: None,
+                    steve_home: dir.path().join("steve"),
+                    codex_home: dir.path().join("codex"),
+                    user_home: dir.path().to_path_buf(),
+                    version: "test".into(),
+                },
+                roots: vec![],
+                capacity: steve_node_api::Capacity {
+                    sessions: 0,
+                    jobs: 0,
+                    execs: 0,
+                },
+                storage: Default::default(),
+            })
+            .unwrap(),
+        );
+        node.enable_host_ops();
+        let nr = super::super::node_runtime::NodeRuntime::new(
+            store.clone(),
+            node.clone(),
+            Arc::new(super::super::node_tools::tests::Ends),
+        );
+        let ws = super::super::workspaces::Workspaces::new(
+            store.clone(),
+            Some(super::super::workspaces::LocalFace {
+                node,
+                runtime: nr.clone(),
+            }),
+            None,
+            vec![],
+        );
+        let host = Arc::new(super::HubHost {
+            store: store.clone(),
+            data_dir: dir.path().into(),
+            core: OnceLock::new(),
+            flow: OnceLock::new(),
+            approval: Default::default(),
+            local_node: OnceLock::new(),
+        });
+        let rt = super::RoutedRuntime {
+            node: Some(nr),
+            fleet: None,
+            store,
+            host,
+            workspaces: ws.clone(),
+            worktrees: None,
+            dispatch_harnesses: None,
+        };
+        let target = dir.path().join("missing-cwd");
+        let target_str = target.to_string_lossy().to_string();
+        // Before prefetch (cold cache): non-blocking default returns true rather than blocking.
+        assert_eq!(ws.cached_cwd_usable(&target_str), None);
+        // Async prefetch outside Core's lock detects missing directory and caches `false`.
+        assert!(!ws.probe_cwd_usable(&target_str).await);
+        assert!(!rt.cwd_usable("s1", &target_str));
+        // Creating the directory and re-probing asynchronously updates cache to `true`.
+        std::fs::create_dir_all(&target).unwrap();
+        assert!(ws.probe_cwd_usable(&target_str).await);
+        assert!(rt.cwd_usable("s1", &target_str));
+        // Empty cwd is immediately rejected without RPC.
+        assert!(!rt.cwd_usable("s1", ""));
     }
 }

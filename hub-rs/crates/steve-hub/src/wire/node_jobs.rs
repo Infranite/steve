@@ -804,21 +804,24 @@ impl OneModel for NodePrint {
                 }
             }
         }
-        let probe = match self.runtime.node.probe(false).await {
-            Ok(p) => p,
-            Err(e)
-                if e.reason
-                    .as_ref()
-                    .is_some_and(|r| r.is(NodeReason::LocalNodeUpdating)) =>
-            {
-                return Err(GatewayError::LocalNodeUpdating.into());
-            }
-            Err(_) if !needs_tools && !needs_images => {
-                // Transient offline state (e.g. cold boot or reconnect) still queues in `once`
-                // until the call's deadline instead of failing preflight immediately.
-                return Ok(());
-            }
-            Err(_) => return Err(GatewayError::MissingCapability.into()),
+        let probe = match self.runtime.node.cached_capabilities() {
+            Some(p) => p,
+            None => match self.runtime.node.probe(false).await {
+                Ok(p) => p,
+                Err(e)
+                    if e.reason
+                        .as_ref()
+                        .is_some_and(|r| r.is(NodeReason::LocalNodeUpdating)) =>
+                {
+                    return Err(GatewayError::LocalNodeUpdating.into());
+                }
+                Err(_) if !needs_tools && !needs_images => {
+                    // Transient offline state (e.g. cold boot or reconnect) still queues in `once`
+                    // until the call's deadline instead of failing preflight immediately.
+                    return Ok(());
+                }
+                Err(_) => return Err(GatewayError::MissingCapability.into()),
+            },
         };
         if !probe.supports_jobs() {
             return Err(GatewayError::LocalNodeUpdating.into());
@@ -848,7 +851,10 @@ impl OneModel for NodePrint {
 
     async fn multimodal_harness(&self, call: &OneCall<'_>) -> Option<String> {
         let needs_tools = matches!(call.spec.required_tools, ThinkTools::Read(_));
-        let probe = self.runtime.node.probe(false).await.ok()?;
+        let probe = match self.runtime.node.cached_capabilities() {
+            Some(p) => p,
+            None => self.runtime.node.probe(false).await.ok()?,
+        };
         probe
             .harnesses
             .iter()

@@ -157,8 +157,10 @@ async fn create_source(
     who: Caller,
     Body(b): Body<folder::SourceBody>,
 ) -> ApiResult<Json<Value>> {
+    // Probe the path on the Node asynchronously before entering the blocking pool / write tx.
+    let checked = folder::check_new_async(&kb, &b).await?;
     m.blocking(move |m| {
-        let s = folder::create(m, &kb, &who, b)?;
+        let s = folder::create_checked(m, &who, &checked)?;
         folder::spawn_sync(m, &kb, &s.id)?;
         let value = m.store.read(|r| {
             let source = steve_store::knowledge::Documents(r)

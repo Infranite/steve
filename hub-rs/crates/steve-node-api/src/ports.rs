@@ -212,6 +212,12 @@ pub trait Discovery: Send + Sync {
         false
     }
 
+    /// Capabilities last observed on the live link generation, if already probed.
+    /// Returns `None` when no cached probe exists yet (callers may fall back to [`Self::probe`]).
+    fn cached_capabilities(&self) -> Option<Capabilities> {
+        None
+    }
+
     /// The frozen upgrade channel's minimal discovery; no ordinary capability payload crosses it.
     /// This must not fall back to a harness probe on an incompatible link.
     async fn probe_build(&self) -> ApiResult<crate::upgrade_v1::ProbeBuildResponse> {

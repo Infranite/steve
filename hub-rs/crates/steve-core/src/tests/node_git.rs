@@ -27,7 +27,7 @@ struct OnNode {
     root: PathBuf,
     store: crate::repo::Db,
     items: Mutex<HashSet<String>>,
-    workspaces: Mutex<HashMap<String, WorkspaceRef>>,
+    workspaces: Mutex<HashMap<(String, String), WorkspaceRef>>,
     offline: AtomicBool,
     /// How long each read takes.
     slow: Mutex<Duration>,
@@ -129,24 +129,25 @@ impl OnNode {
         self.items.lock().unwrap().insert(item.into());
     }
 
-    /// The item's workspace: its `cwd` under the root, prepared once.
+    /// The item's workspace: its `cwd` under the root, prepared once per `(item, cwd)`.
     async fn workspace(&self, item: &str) -> ApiResult<WorkspaceRef> {
-        if let Some(w) = self.workspaces.lock().unwrap().get(item) {
+        let cwd = self.store.item(item).unwrap().unwrap().cwd.unwrap();
+        let key = (item.to_string(), cwd.clone());
+        if let Some(w) = self.workspaces.lock().unwrap().get(&key) {
             return Ok(w.clone());
         }
-        let cwd = self.store.item(item).unwrap().unwrap().cwd.unwrap();
         let rel = Path::new(&cwd)
             .strip_prefix(&self.root)
             .unwrap()
             .to_string_lossy()
             .to_string();
-        let op = format!("prep-{item}");
+        let op = format!("prep-{item}-{}", crate::util::uid("w"));
         let r = self
             .node
             .prepare_workspace(command(
                 &op,
                 Prepare {
-                    resource: format!("item:{item}"),
+                    resource: format!("item:{item}:{}", crate::util::uid("r")),
                     kind: PrepareKind::Existing {
                         dir: RootPath {
                             root: RootId::new("home").unwrap(),
@@ -166,7 +167,7 @@ impl OnNode {
         self.workspaces
             .lock()
             .unwrap()
-            .insert(item.into(), v.workspace.clone());
+            .insert(key, v.workspace.clone());
         Ok(v.workspace)
     }
 
@@ -583,6 +584,74 @@ fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
         !kinds.iter().any(|k| k == "approve" || k == "fail"),
         "{kinds:?}"
     );
+}
+
+#[test]
+fn stale_no_git_result_from_prior_cwd_is_not_reused_after_worktree_attaches() {
+    let k = Kit::new();
+    let port = OnNode::new(&k);
+    let r = repo(k.home());
+    let i = k.item("run", "先在非 git 目录交付，再挂 worktree", None);
+    let non_git = k.home().to_string_lossy().to_string();
+    k.db()
+        .item_patch(&i, patch![cwd: non_git.as_str()])
+        .unwrap();
+    k.session(&i, "idle");
+    port.put(&i);
+
+    // First delivery gathers `Ok(None)` because `k.home()` is not a git repository.
+    k.core
+        .tx()
+        .request_delivery_close(
+            &i,
+            "dev",
+            crate::cycle::ClosePolicy::Human,
+            false,
+            "交付 1",
+            None,
+            vec![],
+        )
+        .unwrap();
+    steve_runtime::testkit::eventually_blocking("The initial non-git gathering finishes.", || {
+        !closing(&k, &i).print_pending
+    });
+    assert!(closing(&k, &i).fingerprint.is_none());
+
+    // Attach a real worktree and redeliver: the cached `Ok(None)` from `k.home()` must not
+    // satisfy `git_take` for the new `cwd`/`branch`.
+    let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "x.txt", "first\n");
+    k.db()
+        .item_patch(
+            &i,
+            patch![cwd: wt.to_string_lossy().to_string(), branch: name.as_str()],
+        )
+        .unwrap();
+    k.core
+        .tx()
+        .invalidate_delivery(&i, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
+    k.core
+        .tx()
+        .request_delivery_close(
+            &i,
+            "dev",
+            crate::cycle::ClosePolicy::Human,
+            false,
+            "交付 2",
+            None,
+            vec![],
+        )
+        .unwrap();
+    steve_runtime::testkit::eventually_blocking(
+        "The worktree fingerprint is frozen after cwd changed.",
+        || {
+            let c = closing(&k, &i);
+            !c.print_pending && c.fingerprint.is_some()
+        },
+    );
+    let frozen = closing(&k, &i).fingerprint.unwrap();
+    let probe = crate::testkit::TestNodeGit::new(k.home(), k.core.store().clone());
+    assert_eq!(Some(&frozen), probe.fingerprint_dir(&wt).as_ref());
 }
 
 /* ── what the goal asks to be shown (ST-57), for an item whose git is on a Node ── */

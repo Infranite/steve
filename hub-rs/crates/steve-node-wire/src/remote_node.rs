@@ -580,6 +580,10 @@ impl Discovery for RemoteNode {
         self.is_upgrade()
     }
 
+    fn cached_capabilities(&self) -> Option<Capabilities> {
+        RemoteNode::cached_capabilities(self)
+    }
+
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
         self.go(NODE_SESSION_CAPACITY, &sessions, None, false).await
     }

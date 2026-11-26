@@ -305,7 +305,11 @@ impl ResearchAdapter {
                 ..Default::default()
             };
         }
-        match node.runtime.node().probe(false).await {
+        let caps = match node.runtime.node().cached_capabilities() {
+            Some(c) => Ok(c),
+            None => node.runtime.node().probe(false).await,
+        };
+        match caps {
             Ok(caps) if !caps.supports_research() => {
                 return ResearchOutcome {
                     end: RunEnd::Failed,

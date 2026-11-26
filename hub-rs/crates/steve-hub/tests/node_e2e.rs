@@ -1019,11 +1019,11 @@ async fn drained(h: &Home, token: &str, secs: u64) -> Option<Value> {
 
 /// D1: the local service Node runs in its own process and survives Hub restarts/upgrades, so its
 /// active turns and open permission cards do NOT block Hub upgrade drain. Drain seals immediately
-/// once Hub-side activities finish, blocks new Hub business mutations with 503, keeps session
-/// messages queued, and continues accepting permission and decision answers so running Node turns
-/// can proceed across maintenance.
+/// once Hub-side activities finish, blocks new Hub business mutations and decisions with 503 once
+/// sealed, keeps session messages queued, and once the drain is lifted (or the new Hub boots) the
+/// running Node turn's permission card can still be answered and queued prompts proceed.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_upgrade_drain_waits_for_node_turns() {
+async fn the_upgrade_drain_does_not_wait_for_service_node_turns() {
     let h = Home::new();
     let token = control_token(&h);
     let _hub = spawn(&h, true, &[("STEVE_TAKEOVER_CONTINUES", "0")]);
@@ -1062,7 +1062,7 @@ async fn the_upgrade_drain_waits_for_node_turns() {
         "independent service Node must not block Hub drain: {d}"
     );
 
-    // New Hub business writes are rejected with 503 while drained.
+    // New Hub business writes and non-permission decisions are rejected with 503 while sealed.
     let (st, v) = c
         .call(
             "POST",
@@ -1075,8 +1075,20 @@ async fn the_upgrade_drain_waits_for_node_turns() {
         (503, &json!(true)),
         "business write during drain: {v}"
     );
+    let (st, v) = c
+        .call(
+            "POST",
+            "/api/decisions/dec_non_permission",
+            Some(json!({"choice": "approve"})),
+        )
+        .await;
+    assert_eq!(
+        (st, &v["maintenance"]),
+        (503, &json!(true)),
+        "non-permission decision during sealed drain must be rejected: {v}"
+    );
 
-    // Cancel the sleeping turn so we can test permission answers under sealed drain.
+    // Cancel the sleeping turn so we can test permission cards across drain & lift.
     let (st, v) = c
         .call("POST", &format!("/api/sessions/{sid}/cancel"), None)
         .await;
@@ -1089,8 +1101,8 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     )
     .await;
 
-    // ── a turn waiting for a permission answer also does not block drain, AND its answer still
-    //    succeeds even after drain is sealed
+    // ── a turn waiting for a permission answer also does not block drain; once sealed, late
+    //    mutations are rejected so nothing races ready=true; lifting drain restores answering
     c.say(&sid, "@perm Bash").await;
     let mut card = None;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
@@ -1122,8 +1134,25 @@ async fn the_upgrade_drain_waits_for_node_turns() {
         )
         .await;
     assert_eq!(
+        (st, &v["maintenance"]),
+        (503, &json!(true)),
+        "sealed drain rejects even late permission answers so no write races ready=true: {v}"
+    );
+    assert_eq!(h.got("排空验收-排队"), 0, "not sent while drained");
+
+    // ── lifting the drain lets the open permission card be answered and sends what waited
+    let d = drain(&h, "DELETE", &token).await;
+    assert_eq!(d["maintenance"], false, "{d}");
+    let (st, v) = c
+        .call(
+            "POST",
+            &format!("/api/decisions/{card}"),
+            Some(json!({"choice": "allow_once"})),
+        )
+        .await;
+    assert_eq!(
         st, 200,
-        "permission answer must remain accepted while drained/sealed: {v}"
+        "permission answer succeeds once drain is lifted: {v}"
     );
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
@@ -1132,11 +1161,6 @@ async fn the_upgrade_drain_waits_for_node_turns() {
         )
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "perm:selected:") > 0).await;
-    assert_eq!(h.got("排空验收-排队"), 0, "not sent while drained");
-
-    // ── lifting the drain sends what waited
-    let d = drain(&h, "DELETE", &token).await;
-    assert_eq!(d["maintenance"], false, "{d}");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The queued prompt is sent after the upgrade drain is lifted; Hub log:\n{}",

@@ -580,6 +580,7 @@ impl Tx<'_> {
             Ok(())
         })?;
         self.mark_invalidate(&i.workspace_id, item_id, code, why); // stats
+        self.git_invalidate(item_id);
         Ok(true)
     }
 

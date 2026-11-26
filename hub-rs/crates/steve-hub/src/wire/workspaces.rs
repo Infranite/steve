@@ -20,8 +20,17 @@
 
 #[cfg(test)]
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Bounded timeout for async colocated Node `path_check` probes before entering Core's lock.
+const CWD_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+/// Short TTL for cached colocated Node `cwd_usable` results read inside Core's lock.
+const CWD_CACHE_TTL: Duration = Duration::from_secs(5);
+/// Hard cap on cached `cwd_usable` entries to prevent unbounded memory growth.
+const CWD_CACHE_MAX_ENTRIES: usize = 256;
 
 use steve_node_api::*;
 use steve_store::{Read, Store, StoreError, node_sessions::placements};
@@ -157,6 +166,9 @@ pub struct Workspaces {
     /// Held from reading the store to setting the roots, so a rebuild that read earlier never
     /// replaces a later one ([`Workspaces::follow`] and a session's bind both rebuild).
     rebuild: Mutex<()>,
+    /// Bounded TTL cache of colocated Node `path_check` usability results populated asynchronously
+    /// outside Core's lock so [`crate::wire::core::RoutedRuntime::cwd_usable`] never blocks on RPC.
+    cwd_cache: Mutex<HashMap<String, (bool, Instant)>>,
 }
 
 /// Where a thing is, as the store says, before any Node is asked.
@@ -178,7 +190,60 @@ impl Workspaces {
             fleet,
             extra,
             rebuild: Mutex::new(()),
+            cwd_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Probes `cwd` on the colocated Node asynchronously (outside any Core/SQLite lock) and
+    /// caches the result for [`Self::cached_cwd_usable`]. Returns `true` when the local Node is
+    /// offline/updating/timed out so normal queueing handles transient unavailability.
+    pub async fn probe_cwd_usable(&self, cwd: &str) -> bool {
+        if cwd.is_empty() {
+            return false;
+        }
+        let Some(local) = self.local_node() else {
+            return true;
+        };
+        match tokio::time::timeout(
+            CWD_CHECK_TIMEOUT,
+            local.path_check(PathCheckRequest {
+                path: cwd.to_string(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => {
+                let usable = resp.exists && resp.is_dir && resp.writable;
+                self.record_cwd_usable(cwd, usable);
+                usable
+            }
+            _ => true,
+        }
+    }
+
+    /// Non-blocking cache lookup for [`crate::wire::core::RoutedRuntime::cwd_usable`].
+    pub fn cached_cwd_usable(&self, cwd: &str) -> Option<bool> {
+        let now = Instant::now();
+        let mut cache = self.cwd_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let (usable, at) = *cache.get(cwd)?;
+        if now.saturating_duration_since(at) <= CWD_CACHE_TTL {
+            Some(usable)
+        } else {
+            cache.remove(cwd);
+            None
+        }
+    }
+
+    fn record_cwd_usable(&self, cwd: &str, usable: bool) {
+        let now = Instant::now();
+        let mut cache = self.cwd_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= CWD_CACHE_MAX_ENTRIES && !cache.contains_key(cwd) {
+            cache.retain(|_, (_, at)| now.saturating_duration_since(*at) <= CWD_CACHE_TTL);
+            if cache.len() >= CWD_CACHE_MAX_ENTRIES {
+                cache.clear();
+            }
+        }
+        cache.insert(cwd.to_string(), (usable, now));
     }
 
     /// The Node and the place of `what`.

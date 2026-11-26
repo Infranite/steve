@@ -460,3 +460,30 @@ async fn remote_node_server_refuses_all_host_disk_and_mcp_rpcs() {
         );
     }
 }
+
+/// N4: `Discovery::cached_capabilities()` returns the live link generation's probed capabilities
+/// in O(1) without sending repeat `harness.probe` RPCs on every model/research preflight.
+#[tokio::test]
+async fn discovery_cached_capabilities_avoids_repeat_probe_rpcs() {
+    let fake = FakeNode::new("n_cached");
+    let w = wire(fake, 1);
+    let disc: &dyn Discovery = &*w.remote;
+    assert!(
+        disc.cached_capabilities().is_none(),
+        "uncached before first probe"
+    );
+    let probed = disc.probe(false).await.unwrap();
+    let cached = disc
+        .cached_capabilities()
+        .expect("cached immediately after initial probe");
+    assert_eq!(cached.node, probed.node);
+    assert_eq!(cached.version, probed.version);
+    assert_eq!(cached.capacity.jobs, probed.capacity.jobs);
+    assert_eq!(cached.features, probed.features);
+    // Closing the link invalidates the cached generation so stale capabilities are never served.
+    w.hub_conn.close(None, 1000, "closed");
+    assert!(
+        disc.cached_capabilities().is_none(),
+        "closed link must not return stale cached capabilities"
+    );
+}

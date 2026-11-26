@@ -62,9 +62,25 @@ struct LegacyNode {
 
 impl LegacyNode {
     async fn disconnect(self) {
+        let weak = Arc::downgrade(&self.node);
         self.hub_conn.close(None, 1000, "upgrade replaced");
         self.node_conn.close(None, 1000, "upgrade replaced");
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.hub_conn.closed()).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.node_conn.closed()).await;
         self.node.shutdown().await;
+        drop(self.node);
+        drop(self.hub_conn);
+        drop(self.node_conn);
+        // Wait for the closed Conn task to drop its NodeServer's Arc<LocalNode> so HomeLock
+        // releases `node.lock` before the upgraded LocalNode opens the same home directory.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while weak.upgrade().is_some() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            weak.upgrade().is_none(),
+            "legacy LocalNode still referenced after disconnect"
+        );
     }
 }
 

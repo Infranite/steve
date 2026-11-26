@@ -96,13 +96,7 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
         || (path.starts_with("/api/sessions/") && path.ends_with("/cancel"))
         || (*req.method() == axum::http::Method::DELETE && path.starts_with("/api/thread/runs/"))
         || path.starts_with("/api/thread/queued/");
-    // Independent local/remote Node turns continue across Hub upgrade drain, so permission and
-    // decision answers stay open even after Hub maintenance seals against new business writes.
-    let decision_answer = *req.method() == axum::http::Method::POST
-        && path
-            .strip_prefix("/api/decisions/")
-            .is_some_and(|id| !id.is_empty() && !id.contains('/'));
-    if read || queues || decision_answer || path.starts_with("/internal/") {
+    if read || queues || path.starts_with("/internal/") {
         return next.run(req).await;
     }
     let Some(modules) = &st.modules else {
@@ -117,8 +111,10 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
                 .get(header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "));
-            // a Node turn waiting for a permission holds the drain until it is answered (D1), so
-            // its answer must get through
+            // While maintenance is draining (before seal), only a waiting permission card of a
+            // currently running Node turn is admitted through `continuing_activity`, holding an
+            // activity permit until the handler finishes so seal waits for it; all other decisions
+            // and any late mutation after seal receive 503.
             let card = (*req.method() == axum::http::Method::POST)
                 .then(|| path.strip_prefix("/api/decisions/"))
                 .flatten()

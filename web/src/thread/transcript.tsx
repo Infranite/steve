@@ -20,6 +20,7 @@ import { PermissionRecord } from "@/components/permission"
 import { getSession, permissionDecision, botName, type Reply, useDeviceInventory } from "@/store"
 import { useDecisionView, useSettledVersion } from "@/data/sync"
 import { Brief } from "@/thread/brief"
+import { toolShort } from "@/thread/tools"
 import { Files } from "@/attach"
 import { useTurnUsage } from "@/session/turn-usage"
 import { fmtUsageCost, fmtUsage } from "@/stats/format"
@@ -126,14 +127,14 @@ function stepItem(e: any[], j: number, evs: any[], ts: number[], t1: number | un
     const at = ts[j] || 0, next = j + 1 < evs.length ? ts[j + 1] : t1
     return { t: "think", key, text: String(e[1] ?? ""), live: live && j === evs.length - 1, t0: at || undefined, ms: at && next ? next - at : undefined }
   }
-  const v = stepView(e), tool = String(e[9] ?? ""), state = e[5] === 1 ? "run" : e[8] === 1 ? "fail" : "done"
+  const v = stepView(e), tool = String(e[9] ?? ""), shortTool = toolShort(tool), state = e[5] === 1 ? "run" : e[8] === 1 ? "fail" : "done"
   const [verb, group, chip]: [[string, string], string | undefined, Chip | undefined] =
     e[1] === "read" ? [[t("core:trail.live.read"), v.verb], "read", { label: v.subj, title: v.full, mono: true, icon: FileTextIcon }]
     : e[1] === "edit" ? [[t("core:trail.live.edit"), v.verb], "edit", { label: v.subj, title: v.full, mono: true, icon: v.I }]
     : e[1] === "fetch" ? [[t("core:trail.live.webSearch"), v.verb], "fetch", { label: v.subj, title: v.full, mono: false, icon: v.I }]
     : e[1] === "search" ? [[t("core:trail.live.search"), v.verb], "search", { label: v.subj, title: v.full, mono: true, icon: v.I }]
     : e[1] === "run" ? [e[10] ? [v.verb, v.verb] : [t("core:trail.live.run"), v.verb], "run", { label: e[10] || v.subj, title: v.full, mono: !e[10], icon: TerminalIcon }]
-    : [[v.verb, v.verb], e[12]?.length || SAY.includes(tool) ? undefined : "tool:" + tool, v.subj ? { label: v.subj, mono: v.mono } : undefined]
+    : [[v.verb, v.verb], e[12]?.length || SAY.includes(shortTool) ? undefined : "tool:" + shortTool, v.subj ? { label: v.subj, mono: v.mono } : undefined]
   const g = group?.startsWith("tool:") ? "tool" : group
   const merged = g ? (calls: number, distinct: number, running: boolean) => g === "tool" ? t("core:trail.group.tool", { name: v.verb, count: calls })
     : t(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : undefined
@@ -143,7 +144,7 @@ function stepItem(e: any[], j: number, evs: any[], ts: number[], t1: number | un
    * and what came back, its time from adapter duration_ms or the update that settled it ([13]) */
   const out = String(e[4] ?? "").trim().replace(/^```[a-z]*\n?/, "").replace(/\n?```$/, "").trim(), t0 = ts[j] || undefined
   const observedMs = toolDurationMs(e) ?? (e[13] && t0 && e[13] > t0 ? e[13] - t0 : undefined)
-  const card = { name: (tool || String(e[2] ?? "")).replace(/^mcp__[^_]+__/, ""), icon: <v.I strokeWidth={1.5} aria-hidden />,
+  const card = { name: toolShort(tool || String(e[2] ?? "")), icon: <v.I strokeWidth={1.5} aria-hidden />,
     args: e[1] === "steve" ? e[14] ?? (e[10] || undefined) : e[1] === "run" ? v.full ?? v.subj : e[11] ?? (e[3] && e[3] !== "Steve" ? e[3] : undefined),
     result: state === "fail" ? undefined : plan ? (j === lastPlan ? undefined : plan.map(([x, d]) => (d ? "✓ " : "○ ") + x).join("\n")) : out || undefined,
     resultView: plan && j !== lastPlan ? <SubSteps steps={plan} live={false} /> : e[1] === "edit" && out ? <Detail text={out} /> : undefined,

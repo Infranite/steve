@@ -165,9 +165,9 @@ fn check_canonical_policy(
     Ok(c)
 }
 
-/// Probes `raw` via the wired [`folder_node::FolderPlaces`] Node boundary without touching Hub
-/// local disk. Used synchronously by folder creation and draft planning/apply.
-pub(crate) fn probe_path_sync(
+/// Probes `raw` asynchronously via the wired [`folder_node::FolderPlaces`] Node boundary without
+/// touching Hub local disk or blocking a SQLite transaction.
+pub(crate) async fn probe_path(
     kb: &Knowledge,
     raw: &str,
 ) -> ApiResult<steve_node_api::PathCheckResponse> {
@@ -176,9 +176,23 @@ pub(crate) fn probe_path_sync(
         .places()
         .ok_or_else(|| ApiError::rule(folder_node::OFFLINE))?
         .clone();
+    places
+        .check_path(raw)
+        .await
+        .map_err(|u| ApiError::rule(folder_node::unplaced(&u)))?
+        .ok_or_else(|| ApiError::rule(folder_node::OFFLINE))
+}
+
+/// Probes `raw` via the wired [`folder_node::FolderPlaces`] Node boundary without touching Hub
+/// local disk. Callers must invoke this *before* opening a SQLite write transaction.
+pub(crate) fn probe_path_sync(
+    kb: &Knowledge,
+    raw: &str,
+) -> ApiResult<steve_node_api::PathCheckResponse> {
+    let kb = kb.clone();
     let path = raw.to_string();
-    let fut = async move { places.check_path(&path).await };
-    let probed = match tokio::runtime::Handle::try_current() {
+    let fut = async move { probe_path(&kb, &path).await };
+    match tokio::runtime::Handle::try_current() {
         Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| h.block_on(fut))
         }
@@ -196,26 +210,50 @@ pub(crate) fn probe_path_sync(
             .build()
             .map_err(|e| ApiError::Internal(e.to_string()))?
             .block_on(fut),
-    };
-    probed
-        .map_err(|u| ApiError::rule(folder_node::unplaced(&u)))?
-        .ok_or_else(|| ApiError::rule(folder_node::OFFLINE))
+    }
 }
 
-/// Validates `raw` for `role` through the single Node-probed path policy.
+fn check_raw_syntax(raw: &str) -> std::result::Result<&str, String> {
+    let trimmed = raw.trim();
+    let p = Path::new(trimmed);
+    if trimmed.is_empty() || !p.is_absolute() {
+        return Err(steve_i18n::t!("knowledge.folder.need_absolute"));
+    }
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(steve_i18n::t!("knowledge.folder.parent_dir"));
+    }
+    Ok(trimmed)
+}
+
+/// Validates `raw` asynchronously for `role` through the single Node-probed path policy.
+pub(crate) async fn check_path_via_node_async(
+    kb: &Knowledge,
+    raw: &str,
+    role: SourceRole,
+) -> ApiResult<std::result::Result<PathBuf, String>> {
+    let trimmed = match check_raw_syntax(raw) {
+        Ok(t) => t,
+        Err(why) => return Ok(Err(why)),
+    };
+    let probe = probe_path(kb, trimmed).await?;
+    Ok(check_path_probe_for_role(
+        kb.folder_policy(),
+        trimmed,
+        &probe,
+        role,
+    ))
+}
+
+/// Validates `raw` for `role` through the single Node-probed path policy (must run outside write tx).
 pub(crate) fn check_path_via_node(
     kb: &Knowledge,
     raw: &str,
     role: SourceRole,
 ) -> ApiResult<std::result::Result<PathBuf, String>> {
-    let trimmed = raw.trim();
-    let p = Path::new(trimmed);
-    if trimmed.is_empty() || !p.is_absolute() {
-        return Ok(Err(steve_i18n::t!("knowledge.folder.need_absolute")));
-    }
-    if p.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Ok(Err(steve_i18n::t!("knowledge.folder.parent_dir")));
-    }
+    let trimmed = match check_raw_syntax(raw) {
+        Ok(t) => t,
+        Err(why) => return Ok(Err(why)),
+    };
     let probe = probe_path_sync(kb, trimmed)?;
     Ok(check_path_probe_for_role(
         kb.folder_policy(),
@@ -900,7 +938,7 @@ pub struct SourceBody {
 
 /// A folder source that passed the request and path checks, ready to insert. Shared by
 /// `POST /kb/sources` and the `kb.source.create` draft operation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
 pub struct NewFolder {
     pub name: String,
     /// Canonical.
@@ -913,9 +951,7 @@ pub struct NewFolder {
     pub write_mode: WriteMode,
 }
 
-/// Checks a `POST /kb/sources` body: fields (`400 参数不对`) and the single Node-probed path rules
-/// (`400 这个目录不能加入知识库：<原因>`). Overlap and scopes are checked by [`insert_folder`].
-pub fn check_new(kb: &Knowledge, b: &SourceBody) -> ApiResult<NewFolder> {
+fn validate_new_fields(b: &SourceBody) -> ApiResult<(SourceRole, WriteMode)> {
     let mut ck = Check::new();
     ck.one_of("kind", &b.kind, &["folder"])
         .len("name", b.name.trim(), 1, 40)
@@ -923,9 +959,19 @@ pub fn check_new(kb: &Knowledge, b: &SourceBody) -> ApiResult<NewFolder> {
     check_patterns(&mut ck, "include", b.include.as_ref(), 20);
     check_patterns(&mut ck, "exclude", b.exclude.as_ref(), 50);
     ck.done()?;
-    let role = b.role.unwrap_or(SourceRole::Knowledge);
-    let write_mode = b.write_mode.unwrap_or(WriteMode::ReadOnly);
-    let path = check_path_via_node(kb, &b.path, role)?.map_err(|r| refused(&r))?;
+    Ok((
+        b.role.unwrap_or(SourceRole::Knowledge),
+        b.write_mode.unwrap_or(WriteMode::ReadOnly),
+    ))
+}
+
+fn finish_new(
+    kb: &Knowledge,
+    b: &SourceBody,
+    path: PathBuf,
+    role: SourceRole,
+    write_mode: WriteMode,
+) -> ApiResult<NewFolder> {
     let include = match &b.include {
         Some(i) if !i.is_empty() => i.clone(),
         _ => default_include(),
@@ -941,6 +987,25 @@ pub fn check_new(kb: &Knowledge, b: &SourceBody) -> ApiResult<NewFolder> {
         role,
         write_mode,
     })
+}
+
+/// Async counterpart of [`check_new`] for HTTP handlers so Node RPC runs before any blocking pool
+/// thread or SQLite transaction is entered.
+pub async fn check_new_async(kb: &Knowledge, b: &SourceBody) -> ApiResult<NewFolder> {
+    let (role, write_mode) = validate_new_fields(b)?;
+    let path = check_path_via_node_async(kb, &b.path, role)
+        .await?
+        .map_err(|r| refused(&r))?;
+    finish_new(kb, b, path, role, write_mode)
+}
+
+/// Checks a `POST /kb/sources` body: fields (`400 参数不对`) and the single Node-probed path rules
+/// (`400 这个目录不能加入知识库：<原因>`). Overlap and scopes are checked by [`insert_folder`].
+/// Must be called outside any SQLite write transaction.
+pub fn check_new(kb: &Knowledge, b: &SourceBody) -> ApiResult<NewFolder> {
+    let (role, write_mode) = validate_new_fields(b)?;
+    let path = check_path_via_node(kb, &b.path, role)?.map_err(|r| refused(&r))?;
+    finish_new(kb, b, path, role, write_mode)
 }
 
 fn default_include() -> Vec<String> {
@@ -1003,16 +1068,21 @@ pub fn insert_folder(
         .ok_or_else(|| ApiError::not_found(NOUN_SOURCE))
 }
 
-/// Creates a folder source after the checks. The caller then starts its first scan.
-pub fn create(m: &Modules, kb: &Knowledge, who: &Caller, b: SourceBody) -> ApiResult<SourceRow> {
-    let f = check_new(kb, &b)?;
+/// Inserts an already Node-probed [`NewFolder`] in a single write transaction.
+pub fn create_checked(m: &Modules, who: &Caller, f: &NewFolder) -> ApiResult<SourceRow> {
     service::prepare(m, who)?;
     let now = m.clock.now();
     m.store.write(|tx| {
-        let s = insert_folder(tx, &who.ws, &who.me, &f, now)?;
+        let s = insert_folder(tx, &who.ws, &who.me, f, now)?;
         crate::state::emit_change(tx, &who.ws, &s.id);
         Ok(s)
     })
+}
+
+/// Creates a folder source after the checks. The caller then starts its first scan.
+pub fn create(m: &Modules, kb: &Knowledge, who: &Caller, b: SourceBody) -> ApiResult<SourceRow> {
+    let f = check_new(kb, &b)?;
+    create_checked(m, who, &f)
 }
 
 /// `403` for a visibility or level change of a built-in source by anyone but the owner.
