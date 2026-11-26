@@ -88,6 +88,7 @@ fn inbound_names_and_persona_or_none_drafts_use_the_owners_write_paths() {
                     thread_key: None,
                     persona_id: persona.clone(),
                     source_message_id: None,
+                    burst_id: None,
                 };
                 let (draft, _) = steve_channels::respond::open_draft_to(w, &target, "not sent", AT)
                     .map_err(|e| StoreError::Hook(e.to_string()))?;

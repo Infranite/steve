@@ -26,6 +26,14 @@ export type PerfReport = {
   sse_reconnects?: Record<string, number>
 }
 
+/** Known non-sidebar routes mapped into the bounded Hub WEB_PAGES set so zero known routes fall into "other". */
+const EXTRA_PAGE_ROUTES: Record<string, Page> = {
+  more: "settings",
+  design: "settings",
+  hub: "devices",
+  d: "publications",
+}
+
 /** The pages the Hub labels figures with (a bounded set: steve-hub `metrics::WEB_PAGES`). */
 export type Page = NavItemKey | "item" | "session" | "other"
 export function pageOf(hash: string): Page {
@@ -34,7 +42,9 @@ export function pageOf(hash: string): Page {
   if (!a) return "chat"
   if (a === "items") return b ? "item" : "items"
   if (a === "sessions") return b ? "session" : "sessions"
-  return navItemOf(hash) ?? "other"
+  const nav = navItemOf(hash)
+  if (nav) return nav
+  return Object.prototype.hasOwnProperty.call(EXTRA_PAGE_ROUTES, a) ? EXTRA_PAGE_ROUTES[a] : "other"
 }
 
 /** What happened since the last `take`: an interaction counts once, at its slowest event. */

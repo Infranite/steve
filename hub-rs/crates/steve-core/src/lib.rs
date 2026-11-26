@@ -115,7 +115,7 @@ pub(crate) struct Inner {
     /// Out-of-process JS workflow step executor (`StepRunner` wired by `steve-hub`).
     workflow_executor: OnceLock<Arc<dyn workflow_run::WorkflowStepExecutor>>,
     /// Per-run async locks serializing `step_workflow_run` executions for the same `run_id`.
-    workflow_run_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    workflow_run_locks: Mutex<HashMap<String, workflow_run::WorkflowRunLockEntry>>,
     /// Global concurrency cap across simultaneous `step_workflow_run` executions.
     workflow_step_permits: Arc<tokio::sync::Semaphore>,
     /// Per-run cache of `(script_version, call_id)` pairs already verified for cross-version

@@ -169,6 +169,7 @@ fn reachable(
         thread_key: None,
         persona_id: None,
         source_message_id: None,
+        burst_id: None,
     })
 }
 

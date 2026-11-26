@@ -77,7 +77,11 @@ export function AccountView({ id }: { id: string }) {
           {me && <div className="mb-2 type-footnote text-muted-foreground">{t("channels:account.selfSub")}</div>}
           <Rules rules={rulesNow} self={me} onChange={setRules} note={t("channels:account.rulesNote")} />
           {rules && <div className="mt-2 flex gap-2"><Button size="sm" disabled={busy || !rules.every(ruleOk)} onClick={() => void patch({ rules }, t("channels:word.rulesSaved")).then((ok) => ok && setRules(null))} data-acc-rules-save>{t("channels:word.saveRules")}</Button><Button size="sm" variant="ghost" onClick={() => setRules(null)}>{t("channels:word.revert")}</Button></div>}
-          <Group className="mt-2"><Row title={t("channels:account.sendDelayTitle")} sub={t("channels:account.sendDelaySub")}>
+          <Group className="mt-2">
+            {me && <Row title={t("channels:account.aiMarkTitle")} sub={t("channels:account.aiMarkSub")}>
+              <Switch aria-label={t("channels:account.aiMarkTitle")} checked={a.aiMark} disabled={busy}
+                onCheckedChange={(v) => void patch({ ai_mark: v }, t(v ? "channels:account.aiMarkOn" : "channels:account.aiMarkOff"))} data-acc-ai-mark /></Row>}
+            <Row title={t("channels:account.sendDelayTitle")} sub={t("channels:account.sendDelaySub")}>
             <Select align="end" testId="acc-send-delay" value={a.sendDelay.set === null ? "default" : String(a.sendDelay.set)}
               onChange={(v) => void patch({ send_delay_s: v === "default" ? null : Number(v) }, t("channels:account.sendDelaySaved"))}
               options={[{ v: "default", l: t("channels:account.sendDelayDefault", { n: a.sendDelay.def }) }, ...SEND_DELAYS.map((n) => ({ v: String(n), l: t("channels:account.sendDelaySeconds", { n }) }))]} /></Row></Group>

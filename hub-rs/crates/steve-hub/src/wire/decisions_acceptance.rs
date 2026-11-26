@@ -384,6 +384,7 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                         member_count: 2,
                         has_external: false,
                         disclosure: "public",
+                        muted: false,
                         platform: Some("feishu"),
                         now,
                     },
@@ -554,8 +555,8 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                 kind: "ask".into(),
                 subject_type: "space".into(),
                 subject_id: space_id.clone(),
-                question: "Configure space?".into(),
-                options: Some(vec!["mute".into(), "quiet".into(), "block".into()]),
+                question: "Record only in this space?".into(),
+                options: Some(vec!["record_only".into(), "keep".into()]),
                 requested_by: "steve".into(),
                 source: Some(DecisionSource::Revision {
                     revision: "accept:space:1".into(),
@@ -573,7 +574,15 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
             "",
             "space invalid",
         );
-        assert_success_replay_and_conflict(&h.w, store, &owner, &d.id, "mute", "block", "space");
+        assert_success_replay_and_conflict(
+            &h.w,
+            store,
+            &owner,
+            &d.id,
+            "record_only",
+            "keep",
+            "space",
+        );
         let settings = store
             .read(|r| steve_channels::spaces::settings(r, &space_id))
             .unwrap();
@@ -1460,8 +1469,9 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                 ProjectProposals(tx).create(
                     ws,
                     &NewProjectProposal {
-                        project_id: &project.id,
+                        project_id: Some(&project.id),
                         kind: "agents_md",
+                        target_path: "AGENTS.md",
                         text: "Run cargo check before handoff",
                         reason: "Avoid warnings",
                         evidence: "Always run cargo check",

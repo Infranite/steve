@@ -118,6 +118,8 @@ try {
       await p.keyboard.press('Escape')
       await open('#/bots/scope-bot')
       await p.locator('[data-slot=tabs-trigger]').filter({ hasText: lang === 'en' ? /^Settings$/ : /^设置$/ }).click()
+      if (!before) await p.locator('[data-bot-name]').fill('Saved while local unavailable')
+      await p.locator('[data-bot-settings-tabs] [data-seg="model"]').click()
       await p.locator('[data-select=bot-harness]').click()
       result.runtimeOptionDisabled = await p.getByRole('option', { name: /Registry fixture/ }).getAttribute('aria-disabled') === 'true'
       await p.keyboard.press('Escape')
@@ -126,7 +128,6 @@ try {
       if (!before) {
         assert.equal(result.runtimeOptionDisabled, false); assert.equal(result.modelPickerHidden, false); assert.equal(result.botSaveDisabled, false)
         assert.match(await p.locator('[data-model-picker=bot-model]').innerText(), /existing-target-model/)
-        await p.locator('[data-bot-name]').fill('Saved while local unavailable')
         await p.locator('[data-model-picker=bot-model]').click()
         await p.locator('[data-model-opt=""]').waitFor()
         assert.match(await p.locator('[data-model-scope]').innerText(), lang === 'en' ? /Hub local Node/ : /Hub 本机 Node/)

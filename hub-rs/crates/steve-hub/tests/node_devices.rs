@@ -170,7 +170,9 @@ async fn only_the_node_owner_can_recheck_file_access_and_devices_read_it_back() 
     );
     fake.set_file_access(FileAccessReport {
         status: FileAccessStatus::Granted,
+        full_disk_access: FileAccessStatus::Granted,
         locations: vec![],
+        executable_path: None,
     });
     let path = format!("/api/nodes/{node}/file-access");
     assert_eq!(h.post("u2", &path, json!({})).await.0, 404);
@@ -179,6 +181,93 @@ async fn only_the_node_owner_can_recheck_file_access_and_devices_read_it_back() 
     assert_eq!(report["status"], "granted");
     assert_eq!(row(&h, node.as_str()).await["host"]["file_access"], report);
     assert_eq!(node_events(&seen, node.as_str()), 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_node_file_access_recheck_works_for_hub_owner_even_when_registered_as_system() {
+    use steve_node_api::{
+        FileAccessReport, FileAccessStatus, NodeId, ProtectedAccess, ProtectedLocation,
+    };
+    use steve_node_wire::Identity;
+
+    let (h, _seen) = watched().await;
+    let id = Identity::generate().unwrap();
+    let pubkey = id.public();
+    let fp = steve_node_wire::identity::fingerprint(&pubkey);
+    h.store
+        .write(|w| {
+            steve_store::node_directory::register_local(
+                w,
+                &steve_store::nodes::NewNode {
+                    node_id: "local",
+                    name: "Local Hub Mac",
+                    pubkey: &pubkey,
+                    fingerprint: &fp,
+                },
+                "system",
+                1,
+            )?;
+            steve_store::UserRows(w).insert("u1", "default", "u1", "Owner", "owner", 1)?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+
+    let node = NodeId::new("local").unwrap();
+    let fake = FakeNode::new(node.as_str());
+    fake.set_file_access(FileAccessReport {
+        status: FileAccessStatus::Missing,
+        full_disk_access: FileAccessStatus::Missing,
+        locations: vec![ProtectedAccess {
+            location: ProtectedLocation::Documents,
+            status: FileAccessStatus::Missing,
+            path: Some("/Users/example/Documents".into()),
+        }],
+        executable_path: Some("/Users/example/.steve/current/bin/steve-hub".into()),
+    });
+    let _link = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
+    eventually_sync("local host observation", || {
+        h.svc.registry.current("local").is_some()
+            && h.store
+                .read(|r| steve_store::nodes::get(r, "local"))
+                .unwrap()
+                .and_then(|n| n.host)
+                .is_some()
+    })
+    .await;
+
+    let initial = row(&h, "local").await;
+    assert_eq!(initial["local"], true);
+    assert_eq!(initial["host"]["file_access"]["status"], "missing");
+    assert_eq!(
+        initial["host"]["file_access"]["executable_path"],
+        "/Users/example/.steve/current/bin/steve-hub"
+    );
+
+    // Non-owner cannot recheck the local Node.
+    assert_eq!(
+        h.post("u2", "/api/nodes/local/file-access", json!({}))
+            .await
+            .0,
+        404
+    );
+
+    fake.set_file_access(FileAccessReport {
+        status: FileAccessStatus::Granted,
+        full_disk_access: FileAccessStatus::Granted,
+        locations: vec![ProtectedAccess {
+            location: ProtectedLocation::Documents,
+            status: FileAccessStatus::Granted,
+            path: Some("/Users/example/Documents".into()),
+        }],
+        executable_path: Some("/Users/example/.steve/current/bin/steve-hub".into()),
+    });
+    let (status, report) = h
+        .post("u1", "/api/nodes/local/file-access", json!({}))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(report["status"], "granted");
+    assert_eq!(report["full_disk_access"], "granted");
+    assert_eq!(row(&h, "local").await["host"]["file_access"], report);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

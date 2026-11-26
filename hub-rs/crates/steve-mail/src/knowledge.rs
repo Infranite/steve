@@ -62,23 +62,53 @@ pub fn thread_text(msgs: &[MessageRow]) -> String {
         .join("\n\n")
 }
 
-/// The extraction input of a finished thread: every message you sent and the other side's last one.
-/// Empty when there is neither.
+/// The extraction input of a finished thread: the COMPLETE email thread (every incoming and
+/// outgoing message, bounded from the newest messages backwards to [`MAIL_THREAD_MAX_CHARS`]),
+/// explicitly tagged `[OWNER_SENT]` vs `[EXTERNAL_RECEIVED]` so downstream extraction enforces
+/// Tier 1 vs Tier 3 trust isolation (0% external pollution of `me`/global rules).
 pub fn candidate_text(msgs: &[MessageRow]) -> String {
-    let last_in = msgs.iter().rposition(|m| m.direction == "in");
-    msgs.iter()
-        .enumerate()
-        .filter(|(i, m)| m.direction == "out" || Some(*i) == last_in)
-        .map(|(_, m)| {
-            let who = if m.direction == "out" {
-                format!("你发出的邮件（{}）", date(m.date))
+    if msgs.is_empty() {
+        return String::new();
+    }
+    let blocks: Vec<String> = msgs
+        .iter()
+        .map(|m| {
+            if m.direction == "out" {
+                format!(
+                    "{}\nSent ({}):\n{}",
+                    steve_knowledge::extract::TAG_OWNER_SENT,
+                    date(m.date),
+                    body(m)
+                )
             } else {
-                format!("对方最后一封（{}，{}）", sender(m), date(m.date))
-            };
-            format!("{who}：\n{}", body(m))
+                format!(
+                    "{}\nFrom: {} ({}):\n{}",
+                    steve_knowledge::extract::TAG_EXTERNAL_RECEIVED,
+                    sender(m),
+                    date(m.date),
+                    body(m)
+                )
+            }
         })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .collect();
+    let budget = steve_knowledge::policy::MAIL_THREAD_MAX_CHARS;
+    let mut kept = Vec::new();
+    let mut used = 0usize;
+    for b in blocks.into_iter().rev() {
+        let len = b.chars().count();
+        let sep = if kept.is_empty() { 0 } else { 2 };
+        if !kept.is_empty() && used + sep + len > budget {
+            break;
+        }
+        if len > budget {
+            kept.push(b.chars().take(budget).collect());
+            break;
+        }
+        used += sep + len;
+        kept.push(b);
+    }
+    kept.reverse();
+    kept.join("\n\n")
 }
 
 fn extracted(text: String) -> Extracted {
@@ -320,11 +350,13 @@ mod tests {
         assert!(t.contains("（正文已过本地保留期限，摘要：摘要）"));
         assert!(t.contains("## d@example.com · 1970-01-01 00:03\n\n好的"));
         let c = candidate_text(&msgs);
-        assert!(c.contains("你发出的邮件（1970-01-01 00:01）：\n可以，两点见。"));
-        assert!(c.contains("对方最后一封（d@example.com，1970-01-01 00:03）：\n好的"));
+        assert!(c.contains("[OWNER_SENT]"));
+        assert!(c.contains("可以，两点见。"));
+        assert!(c.contains("[EXTERNAL_RECEIVED]"));
+        assert!(c.contains("好的"));
         assert!(
-            !c.contains("能改到两点吗"),
-            "only the last incoming message"
+            c.contains("能改到两点吗"),
+            "complete email thread is preserved with trust tags"
         );
         assert_eq!(
             senders(&msgs),

@@ -332,7 +332,7 @@ async fn find_includes_private_but_preserves_disclosure_levels() {
 }
 
 #[tokio::test]
-async fn remember_writes_a_candidate_with_a_decision() {
+async fn remember_writes_silently_without_a_decision() {
     let t = env();
     let r = app(&t);
     let sarah = contact(
@@ -352,24 +352,19 @@ async fn remember_writes_a_candidate_with_a_decision() {
         &json!({"who": "sarah", "text": " 周五不开会 ", "kind": "fact"}),
     )
     .unwrap();
-    assert_eq!(out, "Saved as a candidate; the user will confirm it.");
-    let mm = fixture::candidate_memory(t.store()).unwrap();
+    assert_eq!(out, mcp::SAVED);
+    assert_eq!(fixture::open_memory_decisions(t.store()).unwrap(), 0);
+    assert_eq!(fixture::candidate_count(t.store()).unwrap(), 0);
+    let mm = fixture::only_memory(t.store()).unwrap();
     assert_eq!(
         fixture::memory_details(t.store(), &mm).unwrap(),
-        "candidate|bot_dev|private|usr_dev|item|ST-1"
+        "confirmed|bot_dev|private|usr_dev|item|ST-1"
     );
     assert_eq!(fixture::memory_subject(t.store(), &mm).unwrap(), sarah);
-    assert_eq!(
-        fixture::memory_origin(t.store(), &mm).unwrap(),
-        "tool|ST-1|ST-1 的会话"
-    );
-    assert_eq!(
-        fixture::memory_decision(t.store(), &mm).unwrap(),
-        "confirm|mem|存为知识条目吗？周五不开会|bot_dev|[\"yes\",\"no\"]"
-    );
-    // a candidate is not confirmed knowledge: find does not show it
+    // silently written memories default to Level::Reasoning and are visible in find
     let found = mcp::call_sync(m(&t), &p, &cx(ME), mcp::FIND, &json!({"query": "Sarah"})).unwrap();
-    assert!(!found.contains("周五不开会"));
+    assert!(found.contains("周五不开会"), "{found}");
+    assert!(found.contains("(level: reasoning)"), "{found}");
     // by id; never a guess
     assert!(
         mcp::call_sync(
@@ -414,7 +409,7 @@ async fn remember_writes_a_candidate_with_a_decision() {
         e.ends_with("Invalid option: expected one of \"fact\"|\"preference\"|\"event\" at kind"),
         "{e}"
     );
-    // at most 20 open memory decisions; the rest wait without one
+    // zero Inbox confirmation cards even after many writes
     for i in 0..25 {
         mcp::call_sync(
             m(&t),
@@ -425,14 +420,13 @@ async fn remember_writes_a_candidate_with_a_decision() {
         )
         .unwrap();
     }
-    assert_eq!(fixture::open_memory_decisions(t.store()).unwrap(), 20);
-    assert_eq!(fixture::unbound_candidates(t.store()).unwrap(), 7);
+    assert_eq!(fixture::open_memory_decisions(t.store()).unwrap(), 0);
+    assert_eq!(fixture::candidate_count(t.store()).unwrap(), 0);
 
-    // deleting the contact deletes its candidates with their rows and closes their decisions
+    // deleting the contact deletes its memories
     let (s, b) = req(&r, &me(), "DELETE", &format!("/contacts/{sarah}"), None).await;
     assert_eq!(s, 200, "{b}");
     assert_eq!(fixture::memory_count(t.store()).unwrap(), 0);
-    assert_eq!(fixture::candidate_count(t.store()).unwrap(), 0);
     assert_eq!(fixture::open_memory_decisions(t.store()).unwrap(), 0);
 }
 
@@ -572,36 +566,6 @@ async fn memory_routes() {
     let (s, _) = req(&r, &me(), "DELETE", &format!("/mems/{mm}"), None).await;
     assert_eq!(s, 404);
     assert_eq!(fixture::memory_audits(t.store()).unwrap(), 5);
-}
-
-#[tokio::test]
-async fn confirming_a_candidate_by_hand_settles_its_decision() {
-    let t = env();
-    let r = app(&t);
-    let sarah = contact(&r, &me(), json!({"name": "Sarah"})).await;
-    mcp::call_sync(
-        m(&t),
-        &Ports::default(),
-        &cx(ME),
-        mcp::REMEMBER,
-        &json!({"who": sarah, "text": "周五不开会", "kind": "fact"}),
-    )
-    .unwrap();
-    let mm = fixture::only_memory(t.store()).unwrap();
-    let (s, b) = req(
-        &r,
-        &me(),
-        "PATCH",
-        &format!("/mems/{mm}"),
-        Some(json!({"status": "confirmed"})),
-    )
-    .await;
-    assert_eq!(s, 200, "{b}");
-    assert_eq!(
-        fixture::decision_result(t.store()).unwrap(),
-        "resolved|{\"choice\":\"yes\",\"by\":\"edit\"}"
-    );
-    assert_eq!(fixture::candidate_count(t.store()).unwrap(), 0);
 }
 
 // ---------------------------------------------------------------- item people

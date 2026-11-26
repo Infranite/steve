@@ -216,15 +216,15 @@ pub fn session_context(
     })
 }
 
-fn session_snippets(
+/// Owner's `me` personal memory context (#573), bounded by [`L1_ME_MAX_CHARS`] and
+/// [`SESSION_CONTEXT_MAX_TOKENS`], workspace-filtered in multi-member workspaces. Shared by
+/// Agent session assembly ([`session_context`]) and owner-voice channel reply composition (#275).
+pub fn owner_personal_mems(
     c: &mut R<'_>,
-    kb: &Knowledge,
-    item: &Item,
+    viewer: &Viewer,
     now: i64,
-    viewer: Viewer,
-    cards: Vec<ContactCard>,
-) -> ApiResult<SessionCtx> {
-    let ws = item.workspace_id.as_str();
+) -> ApiResult<(Vec<Hit>, String)> {
+    let ws = viewer.ws.as_str();
     let multi_member = Members::new(c).count(ws)? > 1;
     let me_party = if !viewer.user.is_empty() {
         Contacts::new(c).user_party(ws, &viewer.user)?
@@ -232,24 +232,10 @@ fn session_snippets(
         None
     };
 
-    let mut entity_anchors = vec![ObjRef::new("item", &item.id)];
-    if let Some(p) = item.project_id.as_deref().filter(|p| !p.is_empty()) {
-        entity_anchors.push(ObjRef::new("project", p));
-    }
-    for k in &cards {
-        if me_party.as_deref() != Some(k.party_id.as_str()) {
-            entity_anchors.push(ObjRef::new("party", &k.party_id));
-        }
-    }
-    let mut all_anchors = entity_anchors.clone();
-    if let Some(ref me) = me_party {
-        all_anchors.push(ObjRef::new("party", me));
-    }
-
     let mut me_hits = match me_party.as_deref() {
         Some(me) => anchor_mems(
             c,
-            &viewer,
+            viewer,
             &[ObjRef::new("party", me)],
             L1_ME_MAX_CHARS,
             multi_member,
@@ -292,6 +278,40 @@ fn session_snippets(
     if estimate_tokens(&user_context) > SESSION_CONTEXT_MAX_TOKENS {
         user_context = cut_to_token_budget(&user_context, SESSION_CONTEXT_MAX_TOKENS);
     }
+    Ok((me_hits, user_context))
+}
+
+fn session_snippets(
+    c: &mut R<'_>,
+    kb: &Knowledge,
+    item: &Item,
+    now: i64,
+    viewer: Viewer,
+    cards: Vec<ContactCard>,
+) -> ApiResult<SessionCtx> {
+    let ws = item.workspace_id.as_str();
+    let multi_member = Members::new(c).count(ws)? > 1;
+    let me_party = if !viewer.user.is_empty() {
+        Contacts::new(c).user_party(ws, &viewer.user)?
+    } else {
+        None
+    };
+
+    let mut entity_anchors = vec![ObjRef::new("item", &item.id)];
+    if let Some(p) = item.project_id.as_deref().filter(|p| !p.is_empty()) {
+        entity_anchors.push(ObjRef::new("project", p));
+    }
+    for k in &cards {
+        if me_party.as_deref() != Some(k.party_id.as_str()) {
+            entity_anchors.push(ObjRef::new("party", &k.party_id));
+        }
+    }
+    let mut all_anchors = entity_anchors.clone();
+    if let Some(ref me) = me_party {
+        all_anchors.push(ObjRef::new("party", me));
+    }
+
+    let (me_hits, user_context) = owner_personal_mems(c, &viewer, now)?;
 
     let entity_hits = anchor_mems(
         c,

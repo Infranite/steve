@@ -598,6 +598,11 @@ pub(super) fn describe() {
         "How long a link lasted. Labels: node."
     );
     describe_counter!(
+        "steve_node_file_access_probes_total",
+        Count,
+        "macOS TCC file-access probes performed by a Node. Label: outcome (granted, missing, unknown, not_applicable, timeout, busy)."
+    );
+    describe_counter!(
         "steve_subtask_updates_total",
         Count,
         "Subtask state updates observed from Nodes. Labels: origin (subagent, background_task, native_workflow), status."
@@ -1084,9 +1089,110 @@ pub(super) fn describe() {
         "Memory hits injected into or cited by a consumer. Labels: consumer (session, chat, draft, reply, search, flow, other), stage (injected, cited)."
     );
     describe_counter!(
+        "steve_memory_writes_total",
+        Count,
+        "Unified memory ingestion and file write outcomes. Labels: mode (ingest, buffer, read_only, propose, direct_write, non_memory), result."
+    );
+    describe_counter!(
+        "steve_memory_reverted_total",
+        Count,
+        "Silent memory writes deleted or reverted by the owner, plus revert-rate health alerts. Labels: reason."
+    );
+    describe_counter!(
+        "steve_memory_repeat_corrections_total",
+        Count,
+        "Repeated owner corrections to the same memory rule or anchor."
+    );
+    describe_counter!(
+        "steve_memory_synthesis_tokens_total",
+        Count,
+        "Model tokens consumed by event-driven memory overview synthesis. Labels: kind, direction (input, output)."
+    );
+    describe_counter!(
+        "steve_memory_refresh_skipped_total",
+        Count,
+        "Memory overview synthesis evaluations skipped without calling a model. Labels: kind, reason (no_change, below_threshold)."
+    );
+    describe_counter!(
+        "steve_memory_reconcile_total",
+        Count,
+        "File-as-truth memory anchor reconciliations executed. Labels: result."
+    );
+    describe_counter!(
         "steve_security_refusals_total",
         Count,
         "Actions refused at a security or tenant boundary. Labels: boundary, reason."
+    );
+    // Channel reply pipeline (#258, #268, #275, #277, #278)
+    describe_counter!(
+        "steve_channel_incoming_reactions_total",
+        Count,
+        "Incoming channel reaction events processed. Labels: change (created, removed), origin (manual, automated, unknown), matched (yes, pending), superseded (yes, no)."
+    );
+    describe_histogram!(
+        "steve_channel_context_assembly_seconds",
+        Seconds,
+        "Time spent assembling deterministic conversation context for a channel reply."
+    );
+    describe_counter!(
+        "steve_channel_group_gate_total",
+        Count,
+        "Group chat addressee gate decisions before invoking the composer. Labels: result (addressed_to_others, pass)."
+    );
+    describe_histogram!(
+        "steve_channel_burst_messages",
+        Count,
+        "Number of inbound messages grouped into one reply burst."
+    );
+    describe_counter!(
+        "steve_channel_burst_coalesced_total",
+        Count,
+        "Inbound messages coalesced into a later message within the burst settle window."
+    );
+    describe_counter!(
+        "steve_channel_reply_splits_total",
+        Count,
+        "Burst reply deliveries split vs single. Labels: split (single, multi)."
+    );
+    describe_counter!(
+        "steve_channel_cross_context_hits_total",
+        Count,
+        "Cross-context entries assembled for owner-voice replies. Labels: source (me_mem, other_chat, main_thread, item)."
+    );
+    describe_histogram!(
+        "steve_channel_cross_context_seconds",
+        Seconds,
+        "Time spent assembling owner-voice cross-context."
+    );
+    describe_counter!(
+        "steve_channel_media_prepare_total",
+        Count,
+        "Channel media preparation outcomes. Labels: outcome (ok, cached, unsupported, failed, timeout)."
+    );
+    describe_histogram!(
+        "steve_channel_media_prepare_seconds",
+        Seconds,
+        "Time spent fetching and extracting media attachments for a channel reply."
+    );
+    describe_counter!(
+        "steve_gateway_multimodal_reroute_total",
+        Count,
+        "Image-bearing gateway calls rerouted to a multimodal-capable harness. Labels: from, to."
+    );
+    describe_counter!(
+        "steve_channel_draft_escalated_total",
+        Count,
+        "Unhandled @-mention or DM drafts escalated to Inbox after working-hour timeout. Labels: kind (dm, mention)."
+    );
+    describe_counter!(
+        "steve_channel_ignore_rule_suggestion_total",
+        Count,
+        "Record-only rule suggestions opened after repeated ignores of similar messages. Labels: category (dm, bot, mention, group)."
+    );
+    describe_counter!(
+        "steve_channel_new_group_silent_total",
+        Count,
+        "Newly discovered bot groups initialized in default silent-record mode instead of opening an inbox ask card."
     );
     describe_counter!(
         "steve_window_cache_requests_total",

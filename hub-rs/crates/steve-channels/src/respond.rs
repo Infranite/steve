@@ -163,6 +163,9 @@ pub struct Plan {
     pub muted: bool,
     /// Trigger words: the instruction after them (the act is then `reply`, as you).
     pub trigger: Option<String>,
+    /// All inbound message ids belonging to the same burst turn (populated by [`crate::Replies`]
+    /// when a burst spans multiple messages, so multimodal prep covers the whole burst; #268/#278).
+    pub burst_message_ids: Vec<String>,
 }
 
 /// What a responder did.
@@ -283,6 +286,12 @@ pub(crate) fn open_draft_as(
             created: now,
         },
     )?;
+    if let Some(src) = t.source_message_id.as_deref() {
+        repo::incoming_reactions::record_reply_source(w, &id, src)?;
+    }
+    if let Some(burst) = t.burst_id.as_deref() {
+        repo::outbound::set_burst_id(w, &id, burst)?;
+    }
     let name = spaces::display_title(w, &space)?;
     let question = match (&persona, t.mode) {
         (Some(p), _) => format!("以{}发到「{name}」", p.name),
@@ -319,7 +328,8 @@ pub(crate) fn open_draft_as(
 
 // Superseded versions keep their original body and decision in history. The decision tier
 // protects starred contacts and required reviews from the conversation's ordinary draft slot.
-fn retire_previous_drafts(
+// Drafts belonging to the same multi-topic burst (`burst_id`) stay open together (#268).
+pub(crate) fn retire_previous_drafts(
     w: &mut W<'_>,
     ws: &str,
     space: &str,
@@ -328,17 +338,21 @@ fn retire_previous_drafts(
     let mut views = w.decision_views();
     let ids = views.open_about_chat(ws, space)?;
     let views = views.of(ws, &ids)?;
-    if !views
+    let Some(cur) = views
         .iter()
-        .any(|d| d.id.as_str() == current && d.tier == DecisionTier::Draft)
-    {
+        .find(|d| d.id.as_str() == current && d.tier == DecisionTier::Draft)
+    else {
         return Ok(());
-    }
+    };
+    let current_burst = repo::outbound::burst_id_of(w, &cur.subject_id)?;
     for d in views
         .into_iter()
         .filter(|d| d.id.as_str() != current && d.tier == DecisionTier::Draft)
     {
         let id = &d.subject_id;
+        if current_burst.is_some() && repo::outbound::burst_id_of(w, id)? == current_burst {
+            continue;
+        }
         if let Some(row) = repo::outbound::approval(w, ws, id)? {
             repo::delivery::transition(
                 w,
@@ -458,6 +472,28 @@ impl Channels {
         }
         if self.apply_owner_gates(plan, &mut r)?.is_break() {
             return Ok(r);
+        }
+        // Coalesce rapid multi-message bursts from the same sender before invoking the composer (#268).
+        if plan.mode == Mode::Own
+            && plan.trigger.is_none()
+            && matches!(plan.act, Act::Reply | Act::Draft)
+        {
+            let sender = plan
+                .sender_party_id
+                .as_deref()
+                .or(plan.sender_account_id.as_deref())
+                .unwrap_or_default();
+            if self.burst_gate().wait(&plan.space_id, sender).await
+                == crate::burst::BurstDecision::Coalesced
+            {
+                r.act = Act::Record;
+                r.label = crate::presence::BY_LATER.into();
+                return Ok(r);
+            }
+            // Re-check owner gates after the burst settle window in case the owner replied/reacted meanwhile.
+            if self.apply_owner_gates(plan, &mut r)?.is_break() {
+                return Ok(r);
+            }
         }
         let now = self.now();
         if plan.act == Act::Handoff {

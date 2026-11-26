@@ -61,6 +61,9 @@ export default {
     fields: { call: "Steve 叫你", call_external: "向别人介绍你", role: "角色", project: "主力项目", repository: "常用仓库", tools: "常用工具", email: "邮箱", phone: "电话", website: "网站", lang: "语言", tz: "时区", communication: "沟通习惯" },
   },
   contact: {
+    tabProfile: "概览与资料",
+    tabAssets: "关联账号与资产",
+    tabActivity: "互动记录与待办",
     notFound: "联系人不存在",
     loadFailed: "联系人载入失败",
     goneSub: "可能已经被删除或合并。",

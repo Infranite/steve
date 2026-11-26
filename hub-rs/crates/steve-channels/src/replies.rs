@@ -152,6 +152,9 @@ impl Replies {
             Vec::new()
         };
         let mut whole = plan.clone();
+        if !turn.is_empty() {
+            whole.burst_message_ids = turn.iter().map(|(id, _)| id.clone()).collect();
+        }
         if turn.len() > 1 {
             whole.text = turn
                 .iter()
@@ -159,6 +162,8 @@ impl Replies {
                 .collect::<Vec<_>>()
                 .join("\n");
         }
+        metrics::histogram!("steve_channel_burst_messages")
+            .record(whole.burst_message_ids.len().max(1) as f64);
         let plan = &whole;
         let r = match self
             .composer
@@ -226,17 +231,63 @@ impl Replies {
         plan: &Plan,
         r: compose::Reply,
     ) -> ChannelResult<Option<Acted>> {
+        let auth_of = || {
+            if plan.act == Act::Reply && plan.mode == Mode::Bot {
+                Auth::Rule {
+                    source: plan.message_id.clone(),
+                    act: Act::Reply,
+                }
+            } else {
+                Auth::None
+            }
+        };
+        // Multi-topic burst split (#268): only when the composer explicitly split distinct topics.
+        if r.generation.replies.len() > 1 {
+            let burst_id = steve_store::uid("bst");
+            let parts: Vec<_> = r
+                .generation
+                .replies
+                .iter()
+                .take(crate::presence::MAX_TOPIC_SPLITS)
+                .cloned()
+                .collect();
+            metrics::counter!("steve_channel_reply_splits_total", "split" => "multi").increment(1);
+            let mut last = Delivered::Skipped;
+            for part in parts {
+                let mut target = OutTarget::reply(plan);
+                target.burst_id = Some(burst_id.clone());
+                let mut g = r.generation.clone();
+                g.replies.clear();
+                g.needs_approval |= part.needs_approval;
+                if !part.why.is_empty() {
+                    g.why = part.why;
+                } else if !part.topic.is_empty() {
+                    g.why = part.topic;
+                }
+                let approve = plan.act == Act::Draft || plan.mode == Mode::Own || g.needs_approval;
+                last = self
+                    .outbound
+                    .deliver(
+                        ch,
+                        &OutRequest {
+                            target,
+                            text: part.text,
+                            purpose: Purpose::Reply,
+                            approve,
+                            generation: Some(g),
+                            auth: auth_of(),
+                            operation_id: None,
+                        },
+                    )
+                    .await?;
+            }
+            return Ok(Some(acted(&last, None, None)));
+        }
+
+        metrics::counter!("steve_channel_reply_splits_total", "split" => "single").increment(1);
         // needs_approval already carries needs_commitment (decide::settle)
         let approve =
             plan.act == Act::Draft || plan.mode == Mode::Own || r.generation.needs_approval;
-        let auth = if plan.act == Act::Reply && plan.mode == Mode::Bot {
-            Auth::Rule {
-                source: plan.message_id.clone(),
-                act: Act::Reply,
-            }
-        } else {
-            Auth::None
-        };
         let d = self
             .outbound
             .deliver(
@@ -247,7 +298,7 @@ impl Replies {
                     purpose: Purpose::Reply,
                     approve,
                     generation: Some(r.generation),
-                    auth,
+                    auth: auth_of(),
                     operation_id: None,
                 },
             )

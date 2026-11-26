@@ -42,12 +42,22 @@ export type Space = {
   attention: Attention; reply_as_you: ReplyAsYou; bot_notices: BotNotices; role: Role; voice: (SpaceIdentity & { chosen: boolean }) | null; identities: SpaceIdentity[]
   title: string; counterpart: { account_id: string; party_id: string | null; name: string; is_bot: boolean; avatar?: unknown } | null; self_chat: boolean
   suggest_quiet: string | null; conflicts: Conflict[]
-  /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none */
+  /** opens the chat in its platform's own client; null when it has none */
   open_url: string | null
+  /** platform id owning `open_url` (e.g. `feishu`, `slack`) */
+  open_provider?: string | null
+  /** per-space `[AI]` prefix override on your own account (`null` = follow account) */
+  ai_mark?: boolean | null
+  /** resolved `[AI]` prefix setting for outgoing replies in this space */
+  effective_ai_mark?: boolean
 }
 export type BasisEntry = { source_type: string; source_id: string; source_label: string; level: Level; effective: Level; used: string; out: "verbatim" | "conclusion" | "reasoning" | "blocked" }
 /** `unchecked`: the check model gave no answer (not a leak); `checking`: it still runs after the draft was written */
 export type Basis = { verdict: "pass" | "rewritten" | "drafted" | "unchecked" | "checking"; entries: BasisEntry[]; rewrites: { from: string; to: string; reason: string }[] }
+export type ChanReaction = {
+  actor: { name: string; party_id: string | null; account_id?: string | null }
+  emoji: string; origin: string; at: number
+}
 export type ChanMessage = {
   attachments?: ChannelAttachment[]
   id: string; space_id: string; direction: "in" | "out"; sender: { name: string; party_id: string | null; account_id?: string | null; avatar?: unknown }; persona_id: string | null; on_behalf: "none" | "persona" | "proxy"
@@ -56,6 +66,10 @@ export type ChanMessage = {
   history?: "before" | "late" | "backfill" | null
   /** opens it, or its chat where the platform has no link to one message, in the platform's own client (newer Hubs) */
   open_url?: string | null
+  /** platform id owning `open_url` (newer Hubs) */
+  open_provider?: string | null
+  /** active incoming reactions on this message (#277) */
+  reactions?: ChanReaction[]
 }
 export type SpaceDetail = Space & { recent: ChanMessage[] }
 export type Reveal = { name: boolean; role: boolean; ai: boolean; steve: boolean; owner: boolean }
@@ -64,7 +78,7 @@ export type Persona = {
   used_by: { accounts: { account_id: string; name: string }[]; spaces: { id: string; name: string; own: boolean }[] }; revision: number
 }
 export type PersonaInput = { name?: string; bot_id?: string; intro?: string; soul?: string; reveal?: Partial<Reveal>; signature?: string }
-export type SpacePatch = Partial<{ persona_id: string | null; duty: string; rules: Rule[] | null; muted: boolean; attention: Attention; reply_as_you: ReplyAsYou; bot_notices: BotNotices; voice: string | null; collab: boolean; memory_scope: "space" | "persona"; disclosure: Level; item_defaults: Space["item_defaults"] }>
+export type SpacePatch = Partial<{ persona_id: string | null; duty: string; rules: Rule[] | null; muted: boolean; attention: Attention; reply_as_you: ReplyAsYou; bot_notices: BotNotices; ai_mark: boolean | null; voice: string | null; collab: boolean; memory_scope: "space" | "persona"; disclosure: Level; item_defaults: Space["item_defaults"] }>
 /** `who`: "me", "*" (anyone where the words work) or contact ids; `reply`: where the answer goes */
 export type Trigger = { on: boolean; words: string[]; where: string[]; who: string[]; reply: "thread" | "quote" | "message"; mark: boolean; ignore_prefixes?: string[] }
 /** a permission row the Hub checked when it verified the bot (feishu.md §2.5) */
@@ -83,6 +97,8 @@ export type ChannelAccount = {
   receive: string | null
   /** the wait after you approve a message before it goes out, in seconds: as set (`null`: the default) and the default */
   sendDelay: { set: number | null; def: number }
+  /** whether outgoing replies sent as you carry the `[AI]` prefix by default (true when absent) */
+  aiMark: boolean
 }
 
 export type FeishuRegistration = {
@@ -95,7 +111,7 @@ export type FeishuRegistration = {
 export const FEISHU_APP = "feishu_app"
 type Providers = ReturnType<typeof providerByAdapter>
 const providers = () => integrationsApi.all().then(providerByAdapter)
-type SpecAccount = { connection_id: string; mode: "bot" | "self"; permissions: PermissionCheck[] | null; persona: PersonaRef | null; rules: Rule[]; trigger: Trigger | null; receive: string | null; send_delay_s: number | null; send_delay_default_s: number }
+type SpecAccount = { connection_id: string; mode: "bot" | "self"; permissions: PermissionCheck[] | null; persona: PersonaRef | null; rules: Rule[]; trigger: Trigger | null; receive: string | null; send_delay_s: number | null; send_delay_default_s: number; ai_mark?: boolean }
 
 async function compose(c: RConnection, spec: SpecAccount, ps: Persona[], spaces: Space[], pv: Providers): Promise<ChannelAccount> {
   const account = await accountsApi.account(c.account_id)
@@ -106,6 +122,7 @@ async function compose(c: RConnection, spec: SpecAccount, ps: Persona[], spaces:
     connection: c, account, mode, name: account.display_name || account.handle, provider, persona, personaBot: persona ? ps.find((p) => p.id === persona.id)?.bot_id ?? null : null,
     rules: spec.rules, trigger: spec.trigger, spaces, permissions, receive: spec.receive,
     sendDelay: { set: spec.send_delay_s, def: spec.send_delay_default_s },
+    aiMark: spec.ai_mark ?? true,
   }
 }
 
@@ -127,7 +144,7 @@ export const channelsApi = {
     const [spec, spaces] = await Promise.all([get<SpecAccount>("/channels/" + e(c.id)), channelsApi.spaces({ connection: c.id })])
     return compose(c, spec, ps, spaces, pv)
   },
-  patchAccount: (connection: string, b: { duty?: string; rules?: Rule[]; trigger?: Partial<Trigger>; persona_id?: string; send_delay_s?: number | null }) => patch<SpecAccount>("/channels/" + e(connection), b),
+  patchAccount: (connection: string, b: { duty?: string; rules?: Rule[]; trigger?: Partial<Trigger>; persona_id?: string; send_delay_s?: number | null; ai_mark?: boolean }) => patch<SpecAccount>("/channels/" + e(connection), b),
   /** Connect the Feishu bot and bind its default persona. */
   connectBot: (fields: Record<string, string>, persona_id?: string) => post<{ connection_id: string; account_id: string; permissions: PermissionCheck[] | null }>("/channels", { adapter: FEISHU_APP, fields, persona_id }),
   /** “授权你本人”: the browser flow on the bot's app (merges a contact the bot already made for you into “我”) */
@@ -212,8 +229,16 @@ export type SendRecoveryInfo = {
 export const sendAuthorizationUrl = (id: string) => "/api/chan-messages/" + e(id) + "/authorization"
 export const sendAuthorization = (id: string) => modReq<Proposal>("POST", sendAuthorizationUrl(id).slice(4), {})
 export type ROutContext = {
-  space: { id: string; name: string; kind: string; external: boolean }
+  space: { id: string; name: string; kind: string; external: boolean; member_count?: number }
+  recipient?: { space_id: string; space_name: string; kind: string; member_count: number; has_external: boolean; reply_to_sender?: string | null }
+  speaker?: { as_you: boolean; mode: "self" | "bot" | string; name: string }
   as_you: boolean; persona: string | null; text: string | null
+  ai_mark?: boolean
+  why?: string | null
+  disclosure?: { verdict: string; spans?: unknown[] } | null
+  burst_id?: string | null
+  open_url?: string | null
+  open_provider?: string | null
   reply_to: { id: string; sender: string; text: string | null; at: number } | null
   before: { sender: string; text: string | null; at: number }[]
 }

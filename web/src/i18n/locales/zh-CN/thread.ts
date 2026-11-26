@@ -254,6 +254,7 @@ export default {
   /* what became of Steve's message in the space */
   chanOut: {
     draftBubble: "回复草稿",
+    draftPart: "主题 {{index}} / {{total}}",
     send: "发送",
     withReason: "{{label}}：{{reason}}",
     notSent: "未发送到聊天",

@@ -187,43 +187,65 @@ async fn pushed_message_creates_space_identifies_sender_and_records_event() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn new_group_opens_one_decision_dm_and_existing_spaces_none() {
+async fn new_group_defaults_to_silent_record_with_no_inbox_decision() {
     let h = setup();
     let r = push(&h, FakeChannel::message("G1", "m1", "ualice", "hi")).await;
-    let d = r.decision_id.clone().expect("decision");
-    let row = inspect::decisions::decision_kind_subject_type_subject_id_question(h.env.store(), &d)
-        .unwrap();
-    assert_eq!(
-        row,
-        vec![
-            json!("ask"),
-            json!("space"),
-            json!(r.space_id),
-            json!("测试机器人被拉进了「运维群」，要设置它在这里做什么吗？"),
-            json!("[\"open\",\"mute\",\"quiet\",\"block\"]"),
-            json!("open"),
-            Value::Null,
-        ]
+    assert!(
+        r.decision_id.is_none(),
+        "new bot groups must not open a 4-choice inbox ask card"
     );
+    let set = h
+        .env
+        .store()
+        .read(|db| steve_channels::spaces::settings(db, &r.space_id))
+        .unwrap();
+    assert!(set.muted, "new bot groups default to silent record");
+    assert!(!set.configured);
     push(&h, FakeChannel::message("G1", "m2", "ubob", "hi")).await;
 
-    // a DM: no decision; named after the other person; DMs default to `reasoning`
+    // One-click rule change via PATCH /spaces/:id enables default rules and marks configured.
+    let (status, sp) = call(
+        &h.api,
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &format!("/spaces/{}", r.space_id),
+        Some(&json!({"muted": false})),
+    )
+    .await;
+    assert_eq!(status, 200, "{sp}");
+    assert_eq!(sp["muted"], false);
+    assert_eq!(sp["configured"], true);
+
+    // a DM: no decision; named after the other person; DMs stay active (not muted) and default to `reasoning`
     let dm = push(&h, FakeChannel::message("D1", "d1", "ualice", "私下问一句")).await;
     assert!(dm.space_created && dm.decision_id.is_none());
     assert_eq!(dm.type_key, "im.dm");
+    let dm_set = h
+        .env
+        .store()
+        .read(|db| steve_channels::spaces::settings(db, &dm.space_id))
+        .unwrap();
+    assert!(!dm_set.muted, "DMs are not muted by default");
     assert_eq!(
         inspect::spaces::space_name_kind_disclosure(h.env.store(), &dm.space_id).unwrap(),
         vec![json!("王小丽"), json!("dm"), json!("reasoning")]
     );
-    // a customer group: `reasoning`, has_external
+    // a customer group: `reasoning`, has_external, default silent record, no inbox decision
     let x = push(&h, FakeChannel::message("X1", "x1", "uext", "方案呢")).await;
+    assert!(x.decision_id.is_none());
     assert_eq!(
         inspect::spaces::space_has_external_disclosure(h.env.store(), &x.space_id).unwrap(),
         vec![json!(1), json!("reasoning")]
     );
+    let x_set = h
+        .env
+        .store()
+        .read(|db| steve_channels::spaces::settings(db, &x.space_id))
+        .unwrap();
+    assert!(x_set.muted);
     assert_eq!(
         inspect::decisions::count_decisions_by_space(h.env.store()).unwrap(),
-        2
+        0
     );
 }
 
@@ -427,6 +449,16 @@ async fn types_mention_reply_and_mentions_column() {
 async fn many_replies_do_not_silence_the_space() {
     let h = setup();
     let r = push(&h, FakeChannel::message("G1", "m0", "ualice", "hi")).await;
+    // Enable the new group with one click first (new bot groups default to silent record; #213).
+    let (status, _) = call(
+        &h.api,
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &format!("/spaces/{}", r.space_id),
+        Some(&json!({"muted": false})),
+    )
+    .await;
+    assert_eq!(status, 200);
     let now = h.ch.now();
     seed::messages::seed_recent_outbound(h.env.store(), &r.space_id, now).unwrap();
     push(&h, FakeChannel::message("G1", "m1", "ualice", "再来")).await;

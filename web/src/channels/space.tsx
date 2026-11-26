@@ -1,5 +1,6 @@
 import { ChannelMessageBody } from "@/channels/message-body"
-import { OpenInFeishu } from "@/channels/open-in-app"
+import { channelConversationHref } from "@/channels/open-link"
+import { OpenInSourceApp } from "@/channels/open-in-app"
 /* 群和私聊 (channels-personas.md §2.2–§2.6, §8; prototype channels.tsx SpaceView): who speaks here, the duty, when to
  * respond, how far its content may travel, collaboration, members and the recent messages with their basis.
  * Route #/channels/space/:id. Changing settings never sends anything to the chat. */
@@ -62,12 +63,21 @@ export function SpaceView({ id }: { id: string }) {
   const shownMsgs = allMsgs ? recent : recent.slice(0, MSG_PREVIEW)
   const personaOwn = !!s.persona && !s.persona.inherited
   return (
-    <Page title={title} back={acc ? ["#/channels/acc/" + acc.connection.id, accName] : home} max={720} actions={<OpenInFeishu url={s.open_url} />}
+    <Page title={title} back={acc ? ["#/channels/acc/" + acc.connection.id, accName] : home} max={720} actions={<OpenInSourceApp url={s.open_url} provider={s.open_provider ?? acc?.provider.id} />}
       sub={<span className="flex min-w-0 items-center gap-2"><SpaceAvatar s={s} size={22} /><Meta>{s.counterpart && s.counterpart.name !== title && <span>{s.counterpart.name}</span>}<span>{kind}</span>{s.has_external && <span>{t("channels:word.externalMembers")}</span>}<span>{acc ? t("channels:space.viaProvider", { name: accName, provider: acc.provider.name }) : accName}</span>{s.status !== "active" && <span>{t(s.status === "left" ? "channels:space.left" : "channels:space.archived")}</span>}</Meta></span>}>
       <div className="flex flex-col gap-8" data-space={s.id}>
         {(!s.configured || waiting.length > 0) && <div className="flex flex-col gap-2">
-          {!s.configured && <Notice tone="info" data-space-new>{t("channels:space.newNote", { kind: kind.split(" · ")[0] })}{s.suggest_quiet && <span className="mt-1 block text-muted-foreground">{t("channels:space.suggestQuiet", { reason: s.suggest_quiet })}</span>}</Notice>}
-          {waiting.length > 0 && <Notice tone="attention" data-space-waiting action={<Button size="sm" variant="outline" onClick={() => go("#/inbox")}>{t("channels:space.toInbox")}</Button>}>{t("channels:space.waiting", { count: waiting.length })}</Notice>}
+          {!s.configured && <Notice tone="info" data-space-new>
+            <div>{t(s.muted ? "channels:space.newSilentNote" : "channels:space.newNote", { kind: kind.split(" · ")[0] })}</div>
+            {s.suggest_quiet && <span className="mt-1 block text-muted-foreground">{t("channels:space.suggestQuiet", { reason: s.suggest_quiet })}</span>}
+            <div className="mt-2 flex flex-wrap gap-1.5" data-space-new-actions>
+              {s.muted && <Button size="xs" variant="default" disabled={busy} onClick={() => void save({ muted: false }, t("channels:space.mutedOff"))} data-space-new-enable>{t("channels:space.enableRules")}</Button>}
+              <Button size="xs" variant="outline" disabled={busy} onClick={() => void save({ muted: true }, t("channels:space.mutedOn"))} data-space-new-record>{t(s.muted ? "channels:space.keepRecord" : "channels:word.recordOnly")}</Button>
+              <Button size="xs" variant="outline" disabled={busy} onClick={() => setAttention("quiet")} data-space-new-quiet>{t("channels:space.quietAction")}</Button>
+              <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => setAttention("blocked")} data-space-new-block>{t("channels:space.blockAction")}</Button>
+            </div>
+          </Notice>}
+          {waiting.length > 0 && <Notice tone="attention" data-space-waiting action={<Button size="sm" variant="outline" onClick={() => go(channelConversationHref(s.id))} data-space-waiting-open>{t("channels:space.toInbox")}</Button>}>{t("channels:space.waiting", { count: waiting.length })}</Notice>}
         </div>}
         <Section label={t("channels:space.steveHere")} data-role>
           <Panel>
@@ -78,6 +88,13 @@ export function SpaceView({ id }: { id: string }) {
               <Segmented size="sm" value={s.reply_as_you} onChange={(v: ReplyAsYou) => v !== s.reply_as_you && void save({ reply_as_you: v }, t("channels:space.replyAsYouSaved", { level: REPLY_AS_YOU[v][0] }))} options={(Object.keys(REPLY_AS_YOU) as ReplyAsYou[]).map((a) => [a, REPLY_AS_YOU[a][0]] as const)} /></Row>}
             {s.bot_notices !== undefined && s.voice?.mode === "self" && s.counterpart?.is_bot && <Row title={t("channels:space.botNotices")} sub={BOT_NOTICES[s.bot_notices][1]} data-bot-notices>
               <Segmented size="sm" value={s.bot_notices} onChange={(v: BotNotices) => v !== s.bot_notices && void save({ bot_notices: v }, t("channels:space.botNoticesSaved", { level: BOT_NOTICES[v][0] }))} options={(Object.keys(BOT_NOTICES) as BotNotices[]).map((a) => [a, BOT_NOTICES[a][0]] as const)} /></Row>}
+            {s.voice?.mode === "self" && <Row title={t("channels:space.aiMark")} sub={t(s.effective_ai_mark === false ? "channels:space.aiMarkOffSub" : "channels:space.aiMarkOnSub")} data-space-ai-mark>
+              <Segmented size="sm" value={s.ai_mark === null || s.ai_mark === undefined ? "follow" : s.ai_mark ? "on" : "off"}
+                onChange={(v: "follow" | "on" | "off") => {
+                  const next = v === "follow" ? null : v === "on"
+                  if (next !== (s.ai_mark ?? null)) void save({ ai_mark: next }, t("common:state.saved"))
+                }}
+                options={[["follow", t("channels:space.aiMarkFollow")], ["on", t("channels:space.aiMarkOn")], ["off", t("channels:space.aiMarkOff")]] as const} /></Row>}
             <Row title={t("channels:word.recordOnly")} sub={t("channels:space.mutedSub")}><Switch checked={s.muted} disabled={busy} onCheckedChange={(v) => void save({ muted: v }, t(v ? "channels:space.mutedOn" : "channels:space.mutedOff"))} aria-label={t("channels:word.recordOnly")} data-space-on /></Row>
             {me ? <Row icon={<ActorAvatar actorId="me" size={32} />} title={t("channels:word.you")} sub={t("channels:space.selfSub")} data-space-persona-row />
               : <Row icon={<ActorAvatar actorId={persona?.bot_id ?? "me"} size={32} />} controls onClick={persona ? () => go("#/channels/personas/" + persona.id) : undefined} data-space-persona-row
@@ -93,7 +110,7 @@ export function SpaceView({ id }: { id: string }) {
           {!me && s.has_external && persona?.reveal.steve && <Note>{t("channels:space.revealsSteve", { name: persona.name })}</Note>}
         </Section>
         <section><SectionLabel right={recent.length > MSG_PREVIEW && !allMsgs && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setAllMsgs(true)} data-all-msgs>{t("channels:space.allMessages", { count: recent.length })}</Button>}>{t("channels:space.recent")}</SectionLabel>
-          {recent.length ? <div className="flex flex-col gap-1" data-recent>{shownMsgs.map((m) => <Msg key={m.id} m={m} bot={persona?.bot_id} me={me} />)}
+          {recent.length ? <div className="flex flex-col gap-1" data-recent>{shownMsgs.map((m) => <Msg key={m.id} m={m} spaceId={s.id} provider={s.open_provider ?? acc?.provider.id} bot={persona?.bot_id} me={me} />)}
             {allMsgs && more !== "end" && recent.length >= 30 && <Button size="sm" variant="ghost" className="self-center text-muted-foreground" disabled={more === "loading"} onClick={() => void loadOlder()} data-older>{more === "loading" && <Spinner />}{t("channels:space.older")}</Button>}</div>
             : <Blank>{t("channels:space.noMessagesLine")}</Blank>}
         </section>
@@ -141,7 +158,7 @@ export function SpaceView({ id }: { id: string }) {
   )
 }
 
-function Msg({ m, bot, me }: { m: ChanMessage; bot?: string; me: boolean }) {
+function Msg({ m, spaceId, provider, bot, me }: { m: ChanMessage; spaceId: string; provider?: string | null; bot?: string; me: boolean }) {
   const t = useT()
   const out = m.direction === "out"
   return (
@@ -149,9 +166,9 @@ function Msg({ m, bot, me }: { m: ChanMessage; bot?: string; me: boolean }) {
       {out ? <ActorAvatar actorId={me ? "me" : (bot ?? "me")} size={24} /> : <ActorAvatar actor={partyActor({ id: m.sender.party_id, name: m.sender.name || "?", avatar: m.sender.avatar })} size={24} />}
       <div className="min-w-0 flex-1">
         <div className="type-footnote text-muted-foreground"><span className="font-medium text-foreground/80">{m.sender.name || t("channels:space.unknownSender")}</span> · <span className="tabular-nums">{tm(m.created)}</span>{MSG_STATUS[m.status] && <span className={m.status === "failed" ? "text-destructive" : undefined}> · {MSG_STATUS[m.status]}</span>}{m.on_behalf === "proxy" && ` · ${t("channels:space.proxy")}`}{m.history && <span title={t(m.history === "late" ? "channels:space.historyLateHint" : m.history === "backfill" ? "channels:space.historyBackfillHint" : "channels:space.historyBeforeHint")}> · {t("channels:space.history")}</span>}</div>
-        <ChannelMessageBody message={m} />
+        <ChannelMessageBody message={m} provider={provider} />
         {m.work_item_id && <button type="button" className="mt-1 type-footnote text-blue hover:underline" onClick={() => go("#/items/" + m.work_item_id)}>{t("channels:space.madeItem", { id: m.work_item_id })}</button>}
-        {m.decision_id && m.status === "draft" && <button type="button" className="mt-1 block type-footnote text-blue hover:underline" onClick={() => go("#/inbox")}>{t("channels:space.approve")}</button>}
+        {m.decision_id && m.status === "draft" && <button type="button" className="mt-1 block type-footnote text-blue hover:underline" onClick={() => go(channelConversationHref(spaceId))} data-msg-draft-open={m.id}>{t("channels:space.approve")}</button>}
         <BasisView b={m.basis} />
       </div>
     </div>

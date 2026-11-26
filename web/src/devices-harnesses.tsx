@@ -1,4 +1,4 @@
-import { useId, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   ArrowUpCircleIcon,
   CheckIcon,
@@ -9,7 +9,7 @@ import {
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react"
-import { api } from "@/api"
+import { api, type RNodeHarness, type RNodeHarnessReport, type RRuntime } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/affect/badge-clean"
 import { Card } from "@/components/affect/card-clean"
@@ -41,7 +41,9 @@ import {
   partitionNodeHarnesses,
 } from "@/node-harness-model"
 import type { NodeTab } from "@/node-detail-model"
-import { st, toast, useStore } from "@/store"
+import { canInstallRuntime, supportsPermission } from "@/runtime-status"
+import { setRuntimes, st, toast, useRuntimesQuery, useStore } from "@/store"
+import { go, openSheet } from "@/ui"
 import {
   DEFAULT_AUTO_POLICY,
   HarnessUpgradeBanner,
@@ -67,10 +69,132 @@ type HarnessActionSlice = Pick<
 >
 
 const COPY_FEEDBACK_MS = 1800
+const LOCAL_INSTALL_POLL_MS = 1500
+const EMPTY_RUNTIMES: RRuntime[] = []
 
 function stripSourcePrefixForChip(id: string, source: ModelSource): string {
   if (source === "direct") return id
   return id.replace(/^(?:passthrough\/local\/|local\/passthrough\/|passthrough\/|local\/)/i, "")
+}
+
+/** Project one local `/api/runtimes` record into the unified `RNodeHarness` contract. */
+function runtimeToNodeHarness(
+  rt: RRuntime,
+  opts: { pending?: boolean; message?: string; restart?: boolean },
+): RNodeHarness {
+  const setup = rt.setup
+  const active = !!opts.pending || setup?.state === "installing"
+  const installError = opts.message || setup?.error || null
+  const hasComponentPresence = !!setup?.components.some((c) => c.status === "installed" || !!c.detected)
+  const installed =
+    rt.ok ||
+    active ||
+    !!installError ||
+    !!opts.restart ||
+    hasComponentPresence ||
+    (setup != null ? setup.state !== "not_installed" : true)
+
+  let degraded: RNodeHarness["degraded_reason"] = null
+  if (active) degraded = "installing"
+  else if (!rt.ok) {
+    if (installError) degraded = "install_failed"
+    else if (setup?.state === "unknown") degraded = "probe_unknown"
+    else if (setup?.state === "unavailable") degraded = canInstallRuntime(rt, opts.message) ? "adapter_missing" : "runtime_incompatible"
+    else if (setup?.state === "not_installed") degraded = hasComponentPresence || opts.restart ? "adapter_missing" : null
+    else degraded = "session_unavailable"
+  }
+
+  return {
+    id: rt.id,
+    name: rt.name,
+    available: active ? false : rt.ok,
+    installed,
+    version: rt.version || "",
+    adapter_version: rt.adapter_version ?? null,
+    models: rt.models ?? [],
+    default_model: rt.default_model ?? undefined,
+    degraded_reason: degraded,
+    error: rt.error ?? null,
+    install_hint: rt.install_hint ?? undefined,
+    setup: setup
+      ? {
+          state: active ? "installing" : setup.state,
+          can_install: canInstallRuntime(rt, opts.message),
+          reason: setup.reason ?? undefined,
+          help: setup.help ?? undefined,
+          error: installError ?? undefined,
+          components: setup.components.map((c) => ({
+            id: c.id,
+            name: c.name,
+            package: c.package,
+            status: c.status,
+            version: c.version ?? undefined,
+            path: c.path ?? undefined,
+            detected: c.detected ? { path: c.detected.path, version: c.detected.version ?? undefined } : undefined,
+          })),
+        }
+      : null,
+  }
+}
+
+/** Merge per-Node probe evidence with local runtime setup/install metadata into a single coherent report. */
+function buildUnifiedReport(
+  v: NodeView,
+  report: RNodeHarnessReport | undefined,
+  runtimes: readonly RRuntime[] | undefined,
+  pending: readonly string[],
+  messages: Record<string, string>,
+  restarts: readonly string[],
+): RNodeHarnessReport | undefined {
+  if (!v.local || !runtimes) return report
+  const byId = new Map(runtimes.map((rt) => [rt.id, rt]))
+  if (report?.state === "reported" && report.harnesses.length > 0) {
+    const merged: RNodeHarness[] = report.harnesses.map((h) => {
+      const rt = byId.get(h.id)
+      const isPending = pending.includes(h.id)
+      const msg = messages[h.id]
+      const hasRestart = restarts.includes(h.id)
+      if (!rt && !isPending && !msg && !hasRestart) return h
+      const fallback = rt ? runtimeToNodeHarness(rt, { pending: isPending, message: msg, restart: hasRestart }) : null
+      const active = isPending || h.setup?.state === "installing" || rt?.setup?.state === "installing"
+      const mergedSetup = h.setup ?? fallback?.setup ?? null
+      return {
+        ...h,
+        available: active ? false : h.available,
+        degraded_reason: active
+          ? "installing"
+          : msg
+            ? "install_failed"
+            : h.degraded_reason ?? fallback?.degraded_reason ?? null,
+        error: h.error ?? fallback?.error ?? null,
+        install_hint: h.install_hint ?? fallback?.install_hint,
+        setup: mergedSetup
+          ? {
+              ...mergedSetup,
+              state: active ? "installing" : mergedSetup.state,
+              can_install: rt ? canInstallRuntime(rt, msg) : mergedSetup.can_install,
+              error: msg || mergedSetup.error || undefined,
+            }
+          : null,
+      }
+    })
+    return { ...report, harnesses: merged }
+  }
+  return {
+    state: "reported",
+    checked_at: report?.checked_at ?? null,
+    attempted_at: report?.attempted_at ?? null,
+    stale: false,
+    refreshing: report?.refreshing ?? false,
+    error: report?.error ?? null,
+    harnesses: runtimes.map((rt) =>
+      runtimeToNodeHarness(rt, {
+        pending: pending.includes(rt.id),
+        message: messages[rt.id],
+        restart: restarts.includes(rt.id),
+      }),
+    ),
+  }
 }
 
 /** Unified per-Node Harness inventory partitioned into Available, Needs Attention, and Not Installed. */
@@ -87,35 +211,131 @@ export function NodeHarnesses({
 }) {
   useStore()
   const t = useT(), { hubVersion, harnesses, harnessesError, refreshHarnesses } = useDevices()
-  const r = harnesses?.[v.id], [ownBusy, setOwnBusy] = useState(false), [ownError, setOwnError] = useState("")
-  const [installingId, setInstallingId] = useState<string | null>(null)
+  const localRuntimesQuery = useRuntimesQuery(v.local)
+  const localRuntimes = v.local ? localRuntimesQuery.data : undefined
+  const localRuntimeById = useMemo(
+    () => new Map((localRuntimes ?? EMPTY_RUNTIMES).map((rt) => [rt.id, rt])),
+    [localRuntimes],
+  )
+  const rawReport = harnesses?.[v.id]
+  const [ownBusy, setOwnBusy] = useState(false), [ownError, setOwnError] = useState("")
+  const [localRefreshError, setLocalRefreshError] = useState("")
+  const [pending, setPending] = useState<string[]>([])
+  const [installMessages, setInstallMessages] = useState<Record<string, string>>({})
+  const [restarts, setRestarts] = useState<string[]>([])
   const [availableOpen, setAvailableOpen] = useState(true)
   const [attentionOpen, setAttentionOpen] = useState(true)
   const [notInstalledOpen, setNotInstalledOpen] = useState(false)
+  const installingRef = useRef(new Set<string>())
+  const installEpoch = useRef(0)
+  const readingLocal = useRef<Promise<RRuntime[] | null> | null>(null)
 
-  const busy = actions ? actions.harnessBusy : ownBusy
-  const error = actions ? actions.harnessError : ownError
+  const r = useMemo(
+    () => buildUnifiedReport(v, rawReport, localRuntimes, pending, installMessages, restarts),
+    [v, rawReport, localRuntimes, pending, installMessages, restarts],
+  )
+  const hasLocalFallback = v.local && localRuntimes !== undefined
+  const initialLocalLoading = v.local && !rawReport && localRuntimes === undefined && localRuntimesQuery.isPending
+
+  const busy = (actions ? actions.harnessBusy : ownBusy) || ownBusy
+  const error =
+    localRefreshError ||
+    (hasLocalFallback ? "" : (actions ? actions.harnessError : ownError)) ||
+    (v.local && localRuntimesQuery.error instanceof Error ? localRuntimesQuery.error.message : "")
+  const effectiveHarnessesError = hasLocalFallback ? "" : harnessesError
   const updates = actions?.harnessUpdates
   const upgradeOnly = isUpgradeOnlyLink(v) || r?.state === "upgrade_required"
-  const stale = !v.linked || !!r?.stale || !!harnessesError || r?.state !== "reported"
+  const stale = !v.linked || !!r?.stale || !!effectiveHarnessesError || r?.state !== "reported"
 
-  const refresh = async () => {
+  const reloadLocalRuntimes = useCallback(async () => {
+    if (!v.local) return null
+    if (readingLocal.current) return readingLocal.current
+    const epoch = installEpoch.current
+    const load = (async () => {
+      try {
+        const result = await api.runtimes(true)
+        setRuntimes(result)
+        setLocalRefreshError("")
+        if (epoch === installEpoch.current) {
+          setPending((ids) =>
+            ids.filter((id) => installingRef.current.has(id) || result.find((rt) => rt.id === id)?.setup?.state === "installing"),
+          )
+        }
+        return result
+      } catch (e) {
+        setLocalRefreshError((e as Error).message)
+        throw e
+      } finally {
+        readingLocal.current = null
+      }
+    })()
+    readingLocal.current = load
+    return load
+  }, [v.local])
+
+  const refresh = useCallback(async () => {
+    if (v.local) {
+      setOwnBusy(true)
+      setOwnError("")
+      try {
+        const nodeProbe = actions
+          ? actions.probeHarnesses().catch(() => undefined)
+          : refreshHarnesses(v.id).catch(() => undefined)
+        await Promise.all([nodeProbe, reloadLocalRuntimes()])
+      } catch (e) {
+        setLocalRefreshError((e as Error).message)
+      } finally {
+        setOwnBusy(false)
+      }
+      return
+    }
     if (actions) { await actions.probeHarnesses(); return }
     setOwnBusy(true); setOwnError("")
     try { await refreshHarnesses(v.id) } catch (e) { setOwnError((e as Error).message) } finally { setOwnBusy(false) }
-  }
+  }, [v.local, v.id, actions, refreshHarnesses, reloadLocalRuntimes])
+
+  const localPolling =
+    v.local && (pending.length > 0 || (localRuntimes ?? EMPTY_RUNTIMES).some((rt) => rt.setup?.state === "installing"))
+
+  useEffect(() => {
+    if (!localPolling) return
+    let live = true
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      if (!live) return
+      if (!document.hidden) {
+        try { await reloadLocalRuntimes() } catch { /* surfaced inline; keep polling while installing */ }
+      }
+      if (live) timer = setTimeout(() => void poll(), LOCAL_INSTALL_POLL_MS)
+    }
+    timer = setTimeout(() => void poll(), LOCAL_INSTALL_POLL_MS)
+    return () => { live = false; clearTimeout(timer) }
+  }, [localPolling, reloadLocalRuntimes])
+
+  const canManageLocal = v.local && (st.owner || !!v.device?.can_configure)
 
   const installLocal = async (id: string) => {
-    if (!v.local || !st.owner || installingId) return
-    setInstallingId(id)
+    if (!canManageLocal || installingRef.current.has(id)) return
+    const rt = localRuntimeById.get(id)
+    if (rt && (!canInstallRuntime(rt, installMessages[id]) || rt.setup?.state === "installing")) return
+    installEpoch.current++
+    installingRef.current.add(id)
+    setPending((ids) => [...new Set([...ids, id])])
+    setInstallMessages((ms) => ({ ...ms, [id]: "" }))
     try {
       const res = await api.installHarness(id)
-      if (!res.accepted) toast(t("devices:harness.action.installNotAccepted"))
-      await refresh()
+      if (res.restart) setRestarts((ids) => [...new Set([...ids, id])])
+      if (!res.accepted) {
+        const msg = t("shell:runtimeSetup.notAccepted")
+        setInstallMessages((ms) => ({ ...ms, [id]: msg }))
+        toast(t("devices:harness.action.installNotAccepted"))
+      }
     } catch (e) {
-      toast((e as Error).message)
+      setInstallMessages((ms) => ({ ...ms, [id]: (e as Error).message }))
     } finally {
-      setInstallingId(null)
+      installingRef.current.delete(id)
+      try { await readingLocal.current } catch { /* fresh probe below recovers */ }
+      try { await refresh() } catch { /* keep operation and refresh errors visible */ }
     }
   }
 
@@ -123,6 +343,7 @@ export function NodeHarnesses({
     () => partitionNodeHarnesses(mergeNodeHarnesses(r, updates?.data)),
     [r, updates?.data],
   )
+  const totalMerged = available.length + attention.length + notInstalled.length
   const policy = updates?.data?.auto_upgrade ?? DEFAULT_AUTO_POLICY
   const showUpdatesChrome = !!updates && v.state !== "revoked" && !upgradeOnly
   const updatesUnavailable = !!updates?.unavailable
@@ -262,15 +483,15 @@ export function NodeHarnesses({
           <p className="px-2 type-footnote text-muted-foreground">{t("devices:harnessUpdates.owner")}</p>
         )}
 
-        {(error || harnessesError) && (
+        {(error || effectiveHarnessesError) && (
           <p role="alert" className="px-2 type-footnote text-attention" data-node-harness-error>
             {t("devices:harness.readFailed")}
           </p>
         )}
-        {(error || harnessesError || r?.error) && (
+        {(error || effectiveHarnessesError || r?.error) && (
           <details className="px-2 type-footnote text-muted-foreground" data-node-harness-error-details>
             <summary className="cursor-pointer">{t("devices:harness.details")}</summary>
-            <p className="mt-1 break-words whitespace-pre-wrap">{error || harnessesError || r?.error}</p>
+            <p className="mt-1 break-words whitespace-pre-wrap">{error || effectiveHarnessesError || r?.error}</p>
           </details>
         )}
 
@@ -292,6 +513,18 @@ export function NodeHarnesses({
           </div>
         )}
 
+        {initialLocalLoading && (
+          <div className="flex justify-center px-4 py-6" data-node-harness-loading>
+            <Spinner className="size-4 text-muted-foreground" />
+          </div>
+        )}
+
+        {!initialLocalLoading && v.local && totalMerged === 0 && (
+          <p className="px-2 py-2 type-callout text-muted-foreground" data-node-harness-empty>
+            {t("shell:devices.noRuntimes")}
+          </p>
+        )}
+
         {available.length > 0 && (
           <HarnessSectionGroup
             kind="available"
@@ -308,6 +541,7 @@ export function NodeHarnesses({
                   v={v}
                   item={item}
                   stale={stale}
+                  localRuntime={localRuntimeById.get(item.id)}
                   updates={showUpdatesChrome ? updates : undefined}
                   policy={policy}
                 />
@@ -333,7 +567,11 @@ export function NodeHarnesses({
                   item={item}
                   stale={stale}
                   busy={busy}
-                  installing={installingId === item.id}
+                  canManageLocal={canManageLocal}
+                  installing={pending.includes(item.id) || item.probe?.setup?.state === "installing"}
+                  pendingInstall={pending.includes(item.id)}
+                  restart={restarts.includes(item.id)}
+                  localRuntime={localRuntimeById.get(item.id)}
                   updates={showUpdatesChrome ? updates : undefined}
                   policy={policy}
                   onRefresh={() => void refresh()}
@@ -358,9 +596,10 @@ export function NodeHarnesses({
                 {notInstalled.map((item) => (
                   <NotInstalledHarnessRow
                     key={item.id}
-                    v={v}
                     item={item}
-                    installing={installingId === item.id}
+                    canManageLocal={canManageLocal}
+                    installing={pending.includes(item.id)}
+                    localRuntime={localRuntimeById.get(item.id)}
                     onInstall={() => void installLocal(item.id)}
                   />
                 ))}
@@ -370,8 +609,7 @@ export function NodeHarnesses({
         )}
 
         {children && (
-          <div className="mt-1" data-node-harness-manage>
-            <p className="mb-3 px-2 type-footnote text-muted-foreground">{t("devices:harness.manageLocal")}</p>
+          <div className="mt-1 px-2" data-node-harness-manage>
             {children}
           </div>
         )}
@@ -436,12 +674,14 @@ function AvailableHarnessCard({
   v,
   item,
   stale,
+  localRuntime,
   updates,
   policy,
 }: {
   v: NodeView
   item: MergedNodeHarness
   stale: boolean
+  localRuntime?: RRuntime
   updates?: NodeHarnessUpdatesState
   policy: typeof DEFAULT_AUTO_POLICY
 }) {
@@ -452,6 +692,9 @@ function AvailableHarnessCard({
   const selfOnly = update ? !hasUpdate && selfUpdateTargets(update).length > 0 : false
   const activeSessions = update?.active_sessions ?? 0
   const autoOn = !!update && supportsAutoUpgrade(update) && effectiveAutoUpgrade(policy, item.id)
+  const bot = v.local && localRuntime
+    ? Object.values(st.bots).find((b) => b.on && b.harness === item.id && supportsPermission(localRuntime, b.permMode))
+    : undefined
 
   const updateBadge =
     uStatus === "waiting" ? (
@@ -511,7 +754,21 @@ function AvailableHarnessCard({
     >
       {probe && !stale && (
         <IntegrationSection>
-          <HarnessModelsSummary models={probe.models} defaultModel={probe.default_model ?? null} />
+          <div className="flex flex-col gap-2">
+            <HarnessModelsSummary models={probe.models} defaultModel={probe.default_model ?? null} />
+            {v.local && localRuntime && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => (bot ? openSheet("newItem", { bot: bot.id }) : go("#/bots"))}
+                  data-harness-use={item.id}
+                >
+                  {t(bot ? "shell:runtimeSetup.start" : "shell:runtimeSetup.configureBot")}
+                </Button>
+              </div>
+            )}
+          </div>
         </IntegrationSection>
       )}
 
@@ -528,6 +785,7 @@ function AvailableHarnessCard({
 
       <HarnessDetailsSection
         item={item}
+        localRuntime={localRuntime}
         updates={updates}
         policy={policy}
         showReportedModels={stale}
@@ -543,7 +801,11 @@ function AttentionHarnessCard({
   item,
   stale,
   busy,
+  canManageLocal,
   installing,
+  pendingInstall,
+  restart,
+  localRuntime,
   updates,
   policy,
   onRefresh,
@@ -553,7 +815,11 @@ function AttentionHarnessCard({
   item: MergedNodeHarness
   stale: boolean
   busy: boolean
+  canManageLocal: boolean
   installing: boolean
+  pendingInstall: boolean
+  restart: boolean
+  localRuntime?: RRuntime
   updates?: NodeHarnessUpdatesState
   policy: typeof DEFAULT_AUTO_POLICY
   onRefresh: () => void
@@ -566,7 +832,7 @@ function AttentionHarnessCard({
   const uStatus = receiptStatus(receipt)
   const hasUpdate = update ? Object.keys(updateTargets(update)).length > 0 : false
 
-  const canInstallLocal = v.local && st.owner && !!probe?.setup?.can_install && !installing
+  const canInstallLocal = canManageLocal && !!probe?.setup?.can_install && !installing
   const upgradeDisabled =
     !updates ||
     !st.owner ||
@@ -658,6 +924,16 @@ function AttentionHarnessCard({
             <p className="type-footnote text-foreground/90">
               {t(`devices:harness.degraded.${reason}`)}
             </p>
+            {installing && (
+              <p className="type-footnote text-muted-foreground" role="status" data-harness-installing-status>
+                {t(pendingInstall && localRuntime?.setup?.state !== "installing" ? "shell:runtimeSetup.requesting" : "shell:runtimeSetup.polling")}
+              </p>
+            )}
+            {restart && (
+              <p className="break-words type-callout text-attention" role="status" data-harness-restart>
+                {t("shell:runtimeSetup.restart")}
+              </p>
+            )}
             {probe?.missing_command && (
               <div
                 className="flex flex-col gap-1.5 rounded-md border border-border/70 bg-muted/40 px-3 py-2 type-footnote"
@@ -732,12 +1008,22 @@ function AttentionHarnessCard({
                 {updates.requesting === item.id || uStatus === "running" || uStatus === "waiting" ? <Spinner /> : <DownloadIcon />}
                 {t("devices:harnessUpdates.upgrade")}
               </Button>
-            ) : primaryAction === "install" || primaryAction === "retry_install" ? (
+            ) : installing ? (
+              <Button
+                size="sm"
+                disabled
+                data-harness-attention-action="installing"
+                data-harness-install={item.id}
+              >
+                <Spinner />
+                {t("devices:harness.action.installing")}
+              </Button>
+            ) : primaryAction === "install" || primaryAction === "retry_install" || (reason === "probe_unknown" && canInstallLocal) ? (
               <Button
                 size="sm"
                 disabled={installing || !canInstallLocal}
                 onClick={onInstall}
-                data-harness-attention-action={primaryAction}
+                data-harness-attention-action={primaryAction === "retry_install" ? "retry_install" : "install"}
                 data-harness-install={item.id}
               >
                 {installing ? <Spinner /> : <DownloadIcon />}
@@ -797,6 +1083,7 @@ function AttentionHarnessCard({
 
       <HarnessDetailsSection
         item={item}
+        localRuntime={localRuntime}
         updates={updates}
         policy={policy}
         showReportedModels
@@ -808,24 +1095,28 @@ function AttentionHarnessCard({
 /* ───────────────────── Section 3: Compact Not Installed Row ───────────────────── */
 
 function NotInstalledHarnessRow({
-  v,
   item,
+  canManageLocal,
   installing,
+  localRuntime,
   onInstall,
 }: {
-  v: NodeView
   item: MergedNodeHarness
+  canManageLocal: boolean
   installing: boolean
+  localRuntime?: RRuntime
   onInstall: () => void
 }) {
   const t = useT()
   const [copied, setCopied] = useState(false)
   const { probe } = item
-  const canInstallLocal = v.local && st.owner && !!probe?.setup?.can_install
+  const canInstallLocal = canManageLocal && !!probe?.setup?.can_install
   const installCmd = formatInstallCommand(probe?.install_hint)
   const probeDetails = probe
     ? [...new Set([probe.setup?.reason, probe.setup?.error, probe.error, probe.setup?.help].filter(Boolean))]
     : []
+  const components = probe?.setup?.components ?? []
+  const hasDetails = probeDetails.length > 0 || components.length > 0 || !!localRuntime?.path
 
   const copyCommand = async () => {
     if (!installCmd) return
@@ -882,13 +1173,15 @@ function NotInstalledHarnessRow({
         </div>
       </div>
 
-      {probeDetails.length > 0 && (
+      {hasDetails && (
         <details className="pl-10 type-footnote text-muted-foreground" data-node-harness-details>
           <summary className="cursor-pointer select-none">{t("devices:harness.details")}</summary>
-          <div className="mt-1.5 flex flex-col gap-1 break-words whitespace-pre-wrap">
+          <div className="mt-1.5 flex flex-col gap-1.5 break-words whitespace-pre-wrap">
+            {localRuntime?.path && <p className="break-all font-mono">{localRuntime.path}</p>}
             {probeDetails.map((d) => (
               <p key={d}>{d}</p>
             ))}
+            {components.length > 0 && <ComponentEvidenceList components={components} />}
           </div>
         </details>
       )}
@@ -1089,33 +1382,103 @@ function ModelEntryRow({ entry, query }: { entry: GroupedModelEntry; query: stri
 
 /* ───────────────────── Unified Secondary Details Fold ───────────────────── */
 
+function ComponentEvidenceList({ components }: { components: NonNullable<RNodeHarness["setup"]>["components"] }) {
+  const t = useT()
+  return (
+    <div className="flex flex-col gap-2">
+      <span className="font-medium text-foreground">{t("shell:runtimeSetup.components")}</span>
+      {components.map((c) => (
+        <div key={c.id} className="flex min-w-0 flex-col gap-0.5" data-node-harness-component={c.id}>
+          <span className="flex flex-wrap items-center gap-1.5">
+            <span className="font-medium text-foreground">{c.name}</span>
+            <Badge
+              tone={c.status === "installed" ? "success" : c.status === "unknown" ? "neutral" : "warning"}
+              data-component-status={c.status}
+            >
+              {t(
+                c.status === "installed"
+                  ? "shell:runtimeSetup.installed"
+                  : c.status === "unknown"
+                    ? "shell:runtimeSetup.componentUnknown"
+                    : "shell:runtimeSetup.state.not_installed",
+              )}
+            </Badge>
+            <span className="font-mono text-muted-foreground">{c.version || t("devices:harness.versionUnknown")}</span>
+          </span>
+          {c.package && <span className="break-all font-mono">{c.package}</span>}
+          {c.path && (
+            <p className="break-all" data-component-target>
+              {t("shell:runtimeSetup.componentTarget")} <span className="font-mono">{c.path}</span>
+            </p>
+          )}
+          {c.status === "unknown" && (
+            <p className="break-words" data-component-evidence>{t("shell:runtimeSetup.componentUnknownHelp")}</p>
+          )}
+          {c.detected && (
+            <div className="flex min-w-0 flex-col gap-0.5" data-component-detected>
+              <span className="break-words">{t("shell:runtimeSetup.otherInstallation")}</span>
+              <span className="break-all font-mono">
+                {c.detected.path}
+                {c.detected.version ? ` (${c.detected.version})` : ""}
+              </span>
+              {c.status !== "installed" && (
+                <span className="break-words">{t("shell:runtimeSetup.targetIncomplete")}</span>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function HarnessDetailsSection({
   item,
+  localRuntime,
   updates,
   policy,
   showReportedModels,
 }: {
   item: MergedNodeHarness
+  localRuntime?: RRuntime
   updates?: NodeHarnessUpdatesState
   policy: typeof DEFAULT_AUTO_POLICY
   showReportedModels: boolean
 }) {
   const t = useT()
   const { probe, update, receipt } = item
+  const hideReadyHelp = !!probe?.available && probe.setup?.state === "ready"
+  const helpText = !hideReadyHelp ? probe?.setup?.help : undefined
   const probeDetails = probe
-    ? [...new Set([probe.setup?.reason, probe.setup?.error, probe.error, probe.setup?.help].filter(Boolean))]
+    ? [...new Set([probe.setup?.reason, probe.setup?.error, probe.error].filter(Boolean) as string[])]
     : []
   const componentMeta = (update?.components ?? []).filter((c) => c.upgrade_command || c.package || c.checked)
   const reportedModels = showReportedModels && probe?.models.length ? probe.models : []
   const canEditAuto = st.owner && !!updates?.data && !updates.unavailable
+  const caps = localRuntime?.caps
+  const capChips = caps
+    ? ([
+        ["sessions", caps.sessions],
+        ["judge", caps.jobs],
+        ["images", caps.images],
+        ["resume", caps.resume],
+        ["history", caps.history],
+      ] as const)
+        .filter(([, on]) => on)
+        .map(([k]) => t(`shell:devices.harness.cap.${k}`))
+    : []
+  const modeChips = (localRuntime?.modes ?? []).map((m) => t(`shell:devices.harness.mode.${m}`, { defaultValue: m }))
+  const localChips = [...capChips, ...modeChips]
 
   const hasDetails =
     reportedModels.length > 0 ||
     !!update ||
     probeDetails.length > 0 ||
+    !!helpText ||
     !!probe?.setup?.components.length ||
     componentMeta.length > 0 ||
-    !!receipt
+    !!receipt ||
+    !!localRuntime
 
   if (!hasDetails) return null
 
@@ -1143,39 +1506,34 @@ function HarnessDetailsSection({
             />
           )}
 
-          {probeDetails.length > 0 && (
+          {localRuntime && (
+            <div className="flex min-w-0 flex-col gap-1">
+              <span>{t(localRuntime.custom ? "shell:devices.harness.custom" : "shell:devices.harness.builtin")}</span>
+              {localRuntime.auth && localRuntime.auth.length > 0 && (
+                <span data-node-harness-auth>
+                  {t("shell:devices.harness.auth", { methods: localRuntime.auth.map((a) => a.name).join(t("shell:list.sep")) })}
+                </span>
+              )}
+              {localRuntime.note && <span className="break-words whitespace-pre-wrap">{localRuntime.note}</span>}
+              {localRuntime.path && <span className="break-all font-mono">{localRuntime.path}</span>}
+              {localChips.length > 0 && (
+                <span className="mt-0.5 flex flex-wrap gap-1" data-node-harness-caps>
+                  {localChips.map((c) => <Badge key={c}>{c}</Badge>)}
+                </span>
+              )}
+            </div>
+          )}
+
+          {(probeDetails.length > 0 || helpText) && (
             <div className="flex flex-col gap-1 whitespace-pre-wrap">
               {probeDetails.map((d) => (
                 <p key={d}>{d}</p>
               ))}
+              {helpText && <p data-harness-help>{helpText}</p>}
             </div>
           )}
 
-          {!!probe?.setup?.components.length && (
-            <div className="flex flex-col gap-1.5">
-              {probe.setup.components.map((c) => (
-                <div key={c.id} data-node-harness-component={c.id}>
-                  <span>
-                    {c.name} · {c.version || t("devices:harness.versionUnknown")} ·{" "}
-                    {t(
-                      c.status === "installed"
-                        ? "devices:harness.componentInstalled"
-                        : c.status === "unknown"
-                          ? "devices:harness.state.unknown"
-                          : "devices:harness.state.not_installed",
-                    )}
-                  </span>
-                  {c.path && <p className="break-all font-mono">{c.path}</p>}
-                  {c.detected && (
-                    <p className="break-all font-mono">
-                      {c.detected.path}
-                      {c.detected.version ? ` (${c.detected.version})` : ""}
-                    </p>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
+          {!!probe?.setup?.components.length && <ComponentEvidenceList components={probe.setup.components} />}
 
           {componentMeta.length > 0 && (
             <div className="flex flex-col gap-1.5">

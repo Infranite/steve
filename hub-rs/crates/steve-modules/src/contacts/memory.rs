@@ -11,17 +11,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use steve_store::base::mems::{Mem, MemFilter, MemPatch, NewMem};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
-use steve_store::knowledge::{CandidateOrigin, CandidateRows, Memories};
+use steve_store::knowledge::{CandidateRows, Memories};
 use steve_store::{Contacts, DecisionRows, Read, Teams, W};
 
 use super::repo::{PARTY, Party};
 use super::service::start;
-use crate::{ApiError, ApiResult, Caller, Check, Modules, decisions};
+use crate::{ApiError, ApiResult, Caller, Check, Modules};
 
 /// Kinds a memory about a party may have.
 const KINDS: [&str; 4] = ["fact", "preference", "rule", "event"];
-/// Open memory decisions per workspace before new candidates stop opening one.
-pub const MAX_OPEN_CONFIRMS: i64 = 20;
 
 /// What a memory of `kind` is called on screen (ST-41): preferences and rules are 长期记忆, facts,
 /// events and summaries are 知识条目.
@@ -30,12 +28,6 @@ pub fn record_name(kind: &str) -> &'static str {
         "preference" | "rule" => "长期记忆",
         _ => "知识条目",
     }
-}
-
-/// The question of a candidate's `confirm` decision: “存为长期记忆吗？<text>” or “存为知识条目吗？<text>”.
-/// Decisions opened before ST-41 say “记住这条吗？”.
-pub fn confirm_question(kind: &str, text: &str) -> String {
-    format!("存为{}吗？{text}", record_name(kind))
 }
 
 /// The `Mem` shape (also what the knowledge module's `Candidate.mem` embeds).
@@ -301,9 +293,8 @@ pub struct Proposal {
     pub origin_label: String,
 }
 
-/// Writes `p` as a private `candidate` of `viewer.user` plus its `confirm` decision (`subject_type =
-/// "mem"`, question [`confirm_question`]), unless 20 memory decisions are already open; then it waits on
-/// the knowledge page without a decision. Returns the memory.
+/// Records a silent memory about a party (zero Inbox confirmation cards; in the Hub,
+/// `steve_contacts_remember` routes directly through `steve_knowledge::ingest::remember_contact_tool`).
 pub fn propose(w: &mut W<'_>, viewer: &Viewer, p: &Proposal) -> ApiResult<Mem> {
     let ws = viewer.ws.as_str();
     let (source_type, source_id) = match &p.item_id {
@@ -319,58 +310,18 @@ pub fn propose(w: &mut W<'_>, viewer: &Viewer, p: &Proposal) -> ApiResult<Mem> {
             source_id,
             source_label: format!("{} · Agent 记下", p.origin_label),
             visibility: Visibility::Private,
-            level: Level::Conclusion,
-            status: "candidate".into(),
+            level: Level::Reasoning,
+            status: "confirmed".into(),
             writer: p.bot_id.clone(),
             created_by: viewer.user.clone(),
             about: vec![ObjRef::new(PARTY, &p.party_id)],
             ..Default::default()
         },
     )?;
-    let origin_id = p
-        .item_id
-        .clone()
-        .or_else(|| p.session_id.clone())
-        .unwrap_or_default();
-    CandidateRows(w).record(
-        ws,
-        &mem.id,
-        CandidateOrigin {
-            kind: "tool",
-            id: &origin_id,
-            label: &p.origin_label,
-            evidence: "",
-            supersedes: None,
-            created: steve_store::now(),
-        },
-    )?;
-    let mut mem = mem;
-    if DecisionRows(w).open_confirmations(ws, "mem")? < MAX_OPEN_CONFIRMS {
-        let mut nd = decisions::confirm(
-            ws,
-            "mem",
-            &mem.id,
-            &confirm_question(&p.kind, &p.text),
-            &p.bot_id,
-        );
-        nd.draft = Some(format!("来源：{}", p.origin_label));
-        nd.session_id = p.session_id.clone();
-        nd.source = Some(steve_store::DecisionSource::Record);
-        let d = DecisionRows(w).open(&nd)?;
-        mem = Memories(w)
-            .patch(
-                &mem.id,
-                &MemPatch {
-                    decision_id: Some(Some(d.id)),
-                    ..Default::default()
-                },
-            )?
-            .ok_or_else(|| ApiError::not_found("记忆"))?;
-    }
     w.audit(
         ws,
         &p.bot_id,
-        "mm.propose",
+        "mm.silent_create",
         &mem.id,
         &json!({ "about": p.party_id, "kind": p.kind }),
     )?;

@@ -34,7 +34,7 @@ export function ApprovalSwitch() {
     disabled={!data.editable || update.isPending} onChange={(e) => toggle(e.currentTarget.checked)} />
 }
 
-export function SessionApproval({ id }: { id: string }) {
+export function SessionApproval({ id, showApplied = true }: { id: string; showApplied?: boolean }) {
   const t = useT()
   const state = useQuery({
     queryKey: ["detail", scopeKey(), "approval-policy", id],
@@ -48,10 +48,10 @@ export function SessionApproval({ id }: { id: string }) {
   const pending = d.desired ?? (d.applied ? d.target : null)
   const applied = (d.unknown || d.released) ? null : d.applied
   const modeLabel = applied === "auto" ? d.native_id ?? applied : applied
-  return <span data-session-approval={d.status} title={d.refused ?? undefined}>
-    {t(`core:approval.${d.status}`)}{" · "}
-    {t("core:approval.applied", { mode: modeLabel ?? t("core:approval.unreported") })}
+  return <span data-session-approval={d.status}>
+    {t(`core:approval.${d.status}`)}
+    {showApplied && <>{" · "}{t("core:approval.applied", { mode: modeLabel ?? t("core:approval.unreported") })}</>}
     {!d.refused && pending && pending !== applied && <>{" · "}{t("core:approval.pending", { mode: pending === "auto" ? d.native_id ?? pending : pending })}</>}
-    {d.refused && <>{" · "}{t("core:approval.refused")}</>}
+    {d.refused && <>{" · "}<span className="text-attention" data-approval-refused>{t("core:approval.refused", { reason: d.refused })}</span></>}
   </span>
 }

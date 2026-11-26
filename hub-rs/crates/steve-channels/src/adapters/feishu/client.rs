@@ -117,6 +117,7 @@ impl FeishuEnv {
     /// Applies it to this process: the default base of every Feishu client, the host guard. Call
     /// once at startup, before the providers are built.
     pub fn install(&self) {
+        super::register_platform();
         *DEFAULT_BASE.write().unwrap_or_else(|e| e.into_inner()) = self.api_base.clone();
         if self.forbid_real_hosts {
             forbid_real_hosts();
@@ -128,6 +129,7 @@ impl FeishuEnv {
 
     /// The `feishu_user` provider on the test base, or on the real hosts of `domain`.
     pub fn user_provider(&self, domain: Domain) -> super::FeishuUser {
+        super::register_platform();
         match &self.api_base {
             Some(b) => super::FeishuUser::with_base(b),
             None => super::FeishuUser::new(domain),

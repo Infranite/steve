@@ -37,6 +37,8 @@ export type Sess = { id: string; n: number; item: string | null; b: string | nul
   vitals?: SessionLiveVitals }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
   recovery?: SendRecoveryInfo
+  /** True when an unhandled @-mention or DM draft escalated to Inbox after 4 working hours (#213). */
+  escalated?: boolean
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
   tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; revision: number; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
@@ -350,7 +352,8 @@ function waitOf(d: DecisionView): Wait {
   const cached = waitsByView.get(d)
   if (cached) return cached
   const w: Wait = { type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, draft: d.draft, opts: d.kind === "ask" ? d.options : undefined, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, get busy() { return agentBusy(d) }, tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
-    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined }
+    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined,
+    escalated: d.subject_type === "chan_message" && d.kind === "approve" ? resultOf(d).escalated === true : undefined }
   waitsByView.set(d, w)
   return w
 }
@@ -1090,7 +1093,14 @@ export function clearStoreMe() {
   st.members = []
 }
 
-export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? (st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot") : k === "agent" ? "Agent" : k)
+const BOT_SUFFIX_RE = /\bbot$/i
+/** Format a Bot's display name without doubling a trailing "Bot" suffix (e.g. "后端 Bot" stays "后端 Bot"). */
+export const formatBotName = (name: string, main?: boolean): string => {
+  const trimmed = name.trim()
+  if (!trimmed || main || BOT_SUFFIX_RE.test(trimmed)) return trimmed
+  return t("manage:bot.name", { name: trimmed })
+}
+export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? formatBotName(st.bots[k].n, st.bots[k].main) : k === "agent" ? "Agent" : k)
 export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:unknownModel") })
 export const isThinking = () => chatLive().thinking
 export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? t("common:state.none")
@@ -1491,14 +1501,14 @@ export function ownsBot(owner: string | null | undefined): boolean {
   return owner ? owner === st.me?.user_id : st.owner
 }
 export async function deleteBot(k: string, to: string, mem: "delete" | "export") {
-  const b = st.bots[k]; const r = await shellCall(api.deleteBot(k, to, mem)); if (!r) return
+  const b = st.bots[k]; const label = formatBotName(b?.n ?? k, b?.main); const r = await shellCall(api.deleteBot(k, to, mem)); if (!r) return
   if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
-  toast(t(mem === "export" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: b?.n, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: b?.n })) } })
+  toast(t(mem === "export" ? "core:toast.botDeletedExported" : "core:toast.botDeleted", { name: label, count: r.moved.length, to: botName(to) }), { action: { label: t("core:toast.undo"), onClick: () => void shellCall(api.restoreBot(k), t("core:toast.botRestored", { name: label })) } })
 }
 export async function removeBotFromWorkspace(k: string, to: string, mem: "delete" | "export") {
-  const b = st.bots[k]; const r = await shellCall(api.removeBotFromWorkspace(k, to, mem)); if (!r) return
+  const b = st.bots[k]; const label = formatBotName(b?.n ?? k, b?.main); const r = await shellCall(api.removeBotFromWorkspace(k, to, mem)); if (!r) return
   if (mem === "export" && r.memories.length) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.memories, null, 2)], { type: "application/json" })); a.download = t("core:toast.memoryFile", { name: b?.n ?? k }); a.click() }
-  toast(t(mem === "export" ? "core:toast.botRemovedFromWorkspaceExported" : "core:toast.botRemovedFromWorkspace", { name: b?.n, count: r.moved.length, to: botName(to) }))
+  toast(t(mem === "export" ? "core:toast.botRemovedFromWorkspaceExported" : "core:toast.botRemovedFromWorkspace", { name: label, count: r.moved.length, to: botName(to) }))
 }
 export async function dupBot(k: string) { const r = await shellCall(api.dupBot(k), t("core:toast.botCopied")); return r?.id }
 export function addMem(k: string, text: string) { void changeBotMemory(k, api.addMemory(k, text), t("core:toast.memoryAdded")) }

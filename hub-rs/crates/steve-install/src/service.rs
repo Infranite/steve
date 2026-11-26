@@ -16,13 +16,15 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steve_types::devices::{
-    ServiceCommandDiagnostic, ServiceEnvDiagnosticReason, ServicePathSource,
-    extract_login_shell_path, login_shell_path_script,
+    LOGIN_SHELL_PROBE_TIMEOUT_SECS, ServiceCommandDiagnostic, ServiceEnvDiagnosticReason,
+    ServicePathSource, extract_login_shell_path, login_shell_path_script,
+    shell_supports_interactive_login,
 };
 use uuid::Uuid;
 use wait_timeout::ChildExt;
@@ -40,10 +42,14 @@ struct Output {
     stderr: String,
 }
 type Runner = Arc<dyn Fn(&[String]) -> Result<Output> + Send + Sync>;
+type ShellProbeRunner =
+    Arc<dyn Fn(&[String], Duration, &[(&str, &str)]) -> Result<Output> + Send + Sync>;
 type BootRegistrar =
     Arc<dyn Fn(&[String], &mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync>;
 
 const MANAGED_RELEASE_COMMIT_PREFIX_LEN: usize = 8;
+const SERVICE_COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(LOGIN_SHELL_PROBE_TIMEOUT_SECS);
 const NODE_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const LINUX_UPDATE_STOP_WAIT_MIN_SECS: u64 = 15;
 const DARWIN_DEFAULT_SERVICE_PATH: &str =
@@ -119,6 +125,7 @@ pub struct Service {
     config: PathBuf,
     config_uid: u32,
     runner: Runner,
+    shell_runner: ShellProbeRunner,
     boot_registrar: BootRegistrar,
     node_signer: Arc<dyn boot::NodeSigner>,
     node_exit_wait: Duration,
@@ -392,8 +399,28 @@ fn directory(path: &Path) -> Result<()> {
 }
 
 fn execute(args: &[String]) -> Result<Output> {
+    execute_with(args, SERVICE_COMMAND_TIMEOUT, &[], false)
+}
+
+fn execute_shell_probe(
+    args: &[String],
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+) -> Result<Output> {
+    execute_with(args, timeout, extra_env, true)
+}
+
+fn execute_with(
+    args: &[String],
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+    isolate_pgroup: bool,
+) -> Result<Output> {
     let mut command = Command::new(&args[0]);
     command.args(&args[1..]);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
     if args[0] == "/usr/bin/sudo" {
         // Explicit CLI actions only. Inherit the terminal for the admin prompt.
         let output = command.stdin(Stdio::inherit()).output()?;
@@ -402,6 +429,20 @@ fn execute(args: &[String]) -> Result<Output> {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
+    }
+    if isolate_pgroup {
+        // Start a detached session (`setsid`) so interactive shells have no controlling `/dev/tty`
+        // (avoiding SIGTTIN/SIGTTOU stops or `/dev/tty` prompts) while still owning a dedicated
+        // process group (`pgid == pid`) that we can SIGKILL as a whole on timeout.
+        // SAFETY: `libc::setsid` is async-signal-safe per POSIX.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     let mut child = command
         .stdin(Stdio::null())
@@ -420,11 +461,22 @@ fn execute(args: &[String]) -> Result<Output> {
         let mut bytes = Vec::new();
         stderr.read_to_end(&mut bytes).map(|_| bytes)
     });
-    let status = child.wait_timeout(Duration::from_secs(20))?;
+    let status = child.wait_timeout(timeout)?;
     if status.is_none() {
+        if isolate_pgroup {
+            let pid = child.id() as libc::pid_t;
+            // SAFETY: child was spawned in its own process group (`process_group(0)`), so `-pid`
+            // kills only the timed-out probe and any subshell it spawned.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
         let _ = child.kill();
         let _ = child.wait();
-        bail!("service manager unavailable: command timed out after 20 seconds");
+        bail!(
+            "service manager unavailable: command timed out after {} seconds",
+            timeout.as_secs()
+        );
     }
     let stdout = out
         .join()
@@ -472,14 +524,16 @@ impl Service {
             "run steve as the original Node account, not through sudo"
         );
         let user_home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-        Self::with_runner(
+        let mut service = Self::with_runner(
             component,
             home,
             label,
             system,
             &user_home,
             Arc::new(execute),
-        )
+        )?;
+        service.shell_runner = Arc::new(execute_shell_probe);
+        Ok(service)
     }
 
     /// Inspect only: do not ask the service manager for state or recreate its
@@ -638,6 +692,10 @@ impl Service {
             label,
             config,
             config_uid: if boot { 0 } else { unsafe { libc::getuid() } },
+            shell_runner: {
+                let runner = runner.clone();
+                Arc::new(move |args, _timeout, _env| runner(args))
+            },
             runner,
             boot_registrar: Arc::new(boot::execute_register),
             node_signer: Arc::new(boot::LocalNodeSigner(crate::signing::Tools::default())),
@@ -1158,25 +1216,53 @@ impl Service {
         }
     }
 
-    pub(super) fn probe_login_shell_path(&self) -> Option<(String, String)> {
+    pub(super) fn probe_login_shell_path(&self) -> Option<(String, String, ServicePathSource)> {
         let shell = self.resolve_user_shell();
-        let script = login_shell_path_script(Path::new(&shell));
-        let out = self
-            .command(vec![shell.clone(), "-l".into(), "-c".into(), script], false)
-            .ok()?;
+        self.probe_shell_path(&shell, LOGIN_SHELL_PROBE_TIMEOUT, &[])
+    }
+
+    fn probe_shell_path(
+        &self,
+        shell: &str,
+        timeout: Duration,
+        extra_env: &[(&str, &str)],
+    ) -> Option<(String, String, ServicePathSource)> {
+        let script = login_shell_path_script(Path::new(shell));
+        let mut env = Vec::with_capacity(extra_env.len() + 1);
+        env.push(("TERM", "dumb"));
+        env.extend_from_slice(extra_env);
+
+        if shell_supports_interactive_login(Path::new(shell)) {
+            let args = vec![
+                shell.to_owned(),
+                "-l".into(),
+                "-i".into(),
+                "-c".into(),
+                script.clone(),
+            ];
+            if let Ok(out) = (self.shell_runner)(&args, timeout, &env)
+                && out.code == 0
+                && let Some(path) = extract_login_shell_path(&out.stdout)
+            {
+                return Some((shell.to_owned(), path, ServicePathSource::InteractiveLogin));
+            }
+        }
+
+        let args = vec![shell.to_owned(), "-l".into(), "-c".into(), script];
+        let out = (self.shell_runner)(&args, timeout, &env).ok()?;
         if out.code != 0 {
             return None;
         }
         let path = extract_login_shell_path(&out.stdout)?;
-        Some((shell, path))
+        Some((shell.to_owned(), path, ServicePathSource::Login))
     }
 
     pub(super) fn resolve_service_path(&self) -> ServicePath {
         let captured_at = utc_now_rfc3339();
-        if let Some((shell, path)) = self.probe_login_shell_path() {
+        if let Some((shell, path, source)) = self.probe_login_shell_path() {
             return ServicePath {
                 path,
-                source: ServicePathSource::LoginShell,
+                source,
                 shell: Some(shell),
                 captured_at,
             };
@@ -1940,7 +2026,7 @@ impl Service {
             }
             let login_env = self.probe_login_shell_path();
             let mut command_diagnostics = Vec::new();
-            if let Some((login_shell, login_path)) = &login_env {
+            if let Some((login_shell, login_path, _source)) = &login_env {
                 let mut env_obj = report
                     .get("service_env")
                     .and_then(Value::as_object)
@@ -2019,6 +2105,7 @@ mod tests {
         lsof_pids: Option<Vec<u32>>,
         ps_commands: BTreeMap<u32, String>,
         login_shell_path: Option<String>,
+        interactive_login_fails: bool,
     }
 
     struct FakeNodeSigner(Arc<Mutex<Manager>>);
@@ -2173,12 +2260,20 @@ mod tests {
             {
                 result.code = 1;
                 result.stderr = "fake manager failure".into();
-            } else if args.len() == 4
+            } else if (args.len() == 5
                 && args[1] == "-l"
-                && args[2] == "-c"
-                && args[3].contains(steve_types::devices::LOGIN_SHELL_PATH_BEGIN)
+                && args[2] == "-i"
+                && args[3] == "-c"
+                && args[4].contains(steve_types::devices::LOGIN_SHELL_PATH_BEGIN))
+                || (args.len() == 4
+                    && args[1] == "-l"
+                    && args[2] == "-c"
+                    && args[3].contains(steve_types::devices::LOGIN_SHELL_PATH_BEGIN))
             {
-                if let Some(path) = &self.login_shell_path {
+                let interactive = args.len() == 5;
+                if interactive && self.interactive_login_fails {
+                    result.code = 1;
+                } else if let Some(path) = &self.login_shell_path {
                     result.stdout = format!(
                         "welcome banner\n{}\n{path}\n{}\n",
                         steve_types::devices::LOGIN_SHELL_PATH_BEGIN,
@@ -3977,16 +4072,19 @@ esac
             assert_eq!(s.configured_service_path().as_deref(), Some(login_path));
             let receipt = object(&s.record_path).unwrap();
             assert_eq!(receipt["service_env"]["path"], login_path, "{system:?}");
+            let path_shell = receipt["service_env"]["path_shell"]
+                .as_str()
+                .expect("path_shell recorded");
+            assert!(path_shell.starts_with('/'), "{system:?}: {path_shell}");
+            let supports_interactive = shell_supports_interactive_login(Path::new(path_shell));
+            let expected_source = if supports_interactive {
+                "interactive_login"
+            } else {
+                "login"
+            };
             assert_eq!(
-                receipt["service_env"]["path_source"], "login_shell",
+                receipt["service_env"]["path_source"], expected_source,
                 "{system:?}"
-            );
-            assert!(
-                receipt["service_env"]["path_shell"]
-                    .as_str()
-                    .is_some_and(|sh| sh.starts_with('/')),
-                "{system:?}: {:?}",
-                receipt["service_env"]
             );
             assert!(
                 receipt["service_env"]["path_captured_at"]
@@ -3995,16 +4093,40 @@ esac
                 "{system:?}: {:?}",
                 receipt["service_env"]
             );
-            // Verify the shell was invoked with `-l -c`.
+            // Verify zsh/bash was invoked with `-l -i -c`, and other shells with `-l -c`.
             assert!(
-                manager
-                    .lock()
-                    .unwrap()
-                    .calls
-                    .iter()
-                    .any(|c| c.len() == 4 && c[1] == "-l" && c[2] == "-c"),
+                manager.lock().unwrap().calls.iter().any(|c| {
+                    if supports_interactive {
+                        c.len() == 5 && c[1] == "-l" && c[2] == "-i" && c[3] == "-c"
+                    } else {
+                        c.len() == 4 && c[1] == "-l" && c[2] == "-c"
+                    }
+                }),
                 "{system:?}"
             );
+
+            // When interactive login fails on zsh/bash, refresh-env falls back to `-l -c` and records `login`.
+            if supports_interactive {
+                let fallback_path = "/opt/homebrew/bin:/usr/bin:/bin";
+                {
+                    let mut m = manager.lock().unwrap();
+                    m.interactive_login_fails = true;
+                    m.login_shell_path = Some(fallback_path.into());
+                    m.calls.clear();
+                }
+                let refreshed = s.dispatch("refresh-env", None, 0).unwrap();
+                assert_eq!(refreshed["service_env"]["path"], fallback_path);
+                assert_eq!(refreshed["service_env"]["path_source"], "login");
+                assert!(
+                    manager
+                        .lock()
+                        .unwrap()
+                        .calls
+                        .iter()
+                        .any(|c| c.len() == 4 && c[1] == "-l" && c[2] == "-c"),
+                    "expected -l -c fallback call"
+                );
+            }
         }
     }
 
@@ -4145,5 +4267,224 @@ esac
                 "{clean:?}"
             );
         }
+    }
+
+    #[test]
+    fn enable_boot_rejects_legacy_launch_agent_before_sudo_with_actionable_migration_hint() {
+        let f = Fixture::new();
+        let (mut s, manager) = f.service(System::Darwin, "node");
+        s.dispatch("install", Some(&f.release), 0).unwrap();
+        let legacy_dir = f.root.join("Library/LaunchAgents");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_plist = legacy_dir.join(format!("{}.plist", s.label));
+        fs::write(&legacy_plist, b"<plist/>").unwrap();
+
+        manager.lock().unwrap().calls.clear();
+        let err = s.dispatch("enable-boot", None, 0).unwrap_err().to_string();
+        assert!(
+            err.contains("legacy LaunchAgent"),
+            "must name legacy LaunchAgent migration: {err}"
+        );
+        assert!(
+            err.contains("launchctl bootout gui/$(id -u)/")
+                && err.contains("rm -f")
+                && err.contains("steve node enable-boot"),
+            "must include actionable bootout, remove, and retry commands: {err}"
+        );
+        assert!(
+            !manager
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|c| c.first().map(String::as_str) == Some("/usr/bin/sudo")),
+            "must fail before requesting sudo when a legacy LaunchAgent exists"
+        );
+    }
+
+    #[test]
+    fn node_upgrade_keeps_stable_tcc_runner_path_and_signing_identity_across_bundles() {
+        let f = Fixture::new();
+        let (mut s, manager) = f.service(System::Darwin, "node");
+        s.dispatch("install", Some(&f.release), 0).unwrap();
+        s.dispatch("enable-boot", None, 0).unwrap();
+
+        let expected_tcc_path = file_access::tcc_executable_path("node", &f.home);
+        let setup_plist: Value = plist::from_bytes(&fs::read(&s.config).unwrap()).unwrap();
+        assert_eq!(
+            setup_plist["ProgramArguments"][0].as_str(),
+            Some(text(&expected_tcc_path).unwrap().as_str())
+        );
+        let v1_req = s.record["code_requirement"].as_str().unwrap().to_owned();
+        let v1_sig = manager
+            .lock()
+            .unwrap()
+            .node_signatures
+            .get(&f.release.join("bin/steve-node"))
+            .cloned()
+            .unwrap();
+        assert_eq!(v1_sig, v1_req);
+
+        // Upgrade from v1 bundle to v2 bundle: TCC path, identifier and requirement stay identical.
+        let updated = s.dispatch("update", Some(&f.next), 0).unwrap();
+        assert_eq!(updated["changed"], true);
+        let managed_v2 = PathBuf::from(s.record["boot_release"].as_str().unwrap());
+        let v2_req = s.record["code_requirement"].as_str().unwrap().to_owned();
+        assert_eq!(v2_req, v1_req);
+        let v2_sig = manager
+            .lock()
+            .unwrap()
+            .node_signatures
+            .get(&managed_v2.join("bin/steve-node"))
+            .cloned()
+            .unwrap();
+        assert_eq!(v2_sig, v1_sig);
+        let upgrade_plist: Value = plist::from_bytes(&fs::read(&s.config).unwrap()).unwrap();
+        assert_eq!(
+            upgrade_plist["ProgramArguments"][0].as_str(),
+            Some(text(&expected_tcc_path).unwrap().as_str())
+        );
+    }
+
+    #[test]
+    fn probe_shell_path_captures_zshrc_only_path_and_falls_back_to_login_on_timeout() {
+        let f = Fixture::new();
+        let (mut s, _manager) = f.service(System::Darwin, "node");
+        s.shell_runner = Arc::new(execute_shell_probe);
+
+        let rc_bin = f.root.join("zshrc-local-bin");
+        let login_bin = f.root.join("zprofile-bin");
+        let zdotdir = f.root.join("zdotdir");
+        fs::create_dir_all(&rc_bin).unwrap();
+        fs::create_dir_all(&login_bin).unwrap();
+        fs::create_dir_all(&zdotdir).unwrap();
+        let agy = rc_bin.join("agy");
+        fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&agy, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // PATH is written ONLY in .zshrc (no .zprofile, no .zshenv). Also read stdin and require
+        // TERM=dumb to verify interactive rc scripts cannot hang or observe an interactive terminal.
+        let rc_bin_quoted = shell_quote(&text(&rc_bin).unwrap());
+        let login_bin_quoted = shell_quote(&text(&login_bin).unwrap());
+        fs::write(
+            zdotdir.join(".zshrc"),
+            format!(
+                "if [ \"$TERM\" != \"dumb\" ]; then exit 42; fi\nread _ignored || true\nexport PATH={rc_bin_quoted}:\"$PATH\"\n",
+            ),
+        )
+        .unwrap();
+
+        // Portable fixture zsh so Linux CI without /bin/zsh still runs the real subprocess probe.
+        let fake_zsh = f.root.join("zsh");
+        fs::write(
+            &fake_zsh,
+            r#"#!/bin/sh
+interactive=0
+login=0
+script=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -l) login=1; shift ;;
+    -i) interactive=1; shift ;;
+    -c) script="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$login" = "1" ] && [ -f "$ZDOTDIR/.zprofile" ]; then
+  . "$ZDOTDIR/.zprofile"
+fi
+if [ "$interactive" = "1" ] && [ -f "$ZDOTDIR/.zshrc" ]; then
+  . "$ZDOTDIR/.zshrc"
+fi
+exec /bin/sh -c "$script"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&fake_zsh, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let zdotdir_str = text(&zdotdir).unwrap();
+        let env = [
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", zdotdir_str.as_str()),
+            ("ZDOTDIR", zdotdir_str.as_str()),
+        ];
+
+        // 1. Plain `-l -c` misses .zshrc-only PATH, while interactive login captures it.
+        let script = login_shell_path_script(&fake_zsh);
+        let login_only = execute_shell_probe(
+            &[text(&fake_zsh).unwrap(), "-l".into(), "-c".into(), script],
+            LOGIN_SHELL_PROBE_TIMEOUT,
+            &[
+                ("TERM", "dumb"),
+                ("PATH", "/usr/bin:/bin"),
+                ("HOME", &zdotdir_str),
+                ("ZDOTDIR", &zdotdir_str),
+            ],
+        )
+        .unwrap();
+        let login_only_path = extract_login_shell_path(&login_only.stdout).unwrap();
+        assert_eq!(which_in_path("agy", &login_only_path), None);
+
+        let (shell, path, source) = s
+            .probe_shell_path(&text(&fake_zsh).unwrap(), LOGIN_SHELL_PROBE_TIMEOUT, &env)
+            .expect("interactive login probe should capture .zshrc-only PATH");
+        assert_eq!(shell, text(&fake_zsh).unwrap());
+        assert_eq!(source, ServicePathSource::InteractiveLogin);
+        assert_eq!(which_in_path("agy", &path), Some(agy.clone()));
+
+        // 2. When real /bin/zsh is installed (macOS / zsh Linux), verify real /bin/zsh loads .zshrc.
+        if is_executable_file(Path::new("/bin/zsh")) {
+            let real_script = login_shell_path_script(Path::new("/bin/zsh"));
+            let real_login_only = execute_shell_probe(
+                &["/bin/zsh".into(), "-l".into(), "-c".into(), real_script],
+                LOGIN_SHELL_PROBE_TIMEOUT,
+                &[
+                    ("TERM", "dumb"),
+                    ("PATH", "/usr/bin:/bin"),
+                    ("HOME", &zdotdir_str),
+                    ("ZDOTDIR", &zdotdir_str),
+                ],
+            )
+            .unwrap();
+            let real_login_path = extract_login_shell_path(&real_login_only.stdout).unwrap();
+            assert_eq!(
+                which_in_path("agy", &real_login_path),
+                None,
+                "plain /bin/zsh -l -c should not load .zshrc"
+            );
+
+            let (real_shell, real_path, real_source) = s
+                .probe_shell_path("/bin/zsh", LOGIN_SHELL_PROBE_TIMEOUT, &env)
+                .expect("real /bin/zsh -l -i -c should load .zshrc");
+            assert_eq!(real_shell, "/bin/zsh");
+            assert_eq!(real_source, ServicePathSource::InteractiveLogin);
+            assert_eq!(
+                which_in_path("agy", &real_path),
+                Some(agy.clone()),
+                "real /bin/zsh interactive login probe must find agy from .zshrc: {real_path}"
+            );
+        }
+
+        // 3. Hanging .zshrc times out at the configured deadline and falls back to `-l -c` (.zprofile).
+        fs::write(
+            zdotdir.join(".zprofile"),
+            format!("export PATH={login_bin_quoted}:\"$PATH\"\n"),
+        )
+        .unwrap();
+        fs::write(zdotdir.join(".zshrc"), "sleep 10\n").unwrap();
+        let start = Instant::now();
+        let (_fb_shell, fb_path, fb_source) = s
+            .probe_shell_path(&text(&fake_zsh).unwrap(), Duration::from_millis(250), &env)
+            .expect("should fall back to login shell after interactive timeout");
+        assert_eq!(fb_source, ServicePathSource::Login);
+        assert!(
+            std::env::split_paths(OsStr::new(&fb_path)).any(|p| p == login_bin),
+            "fallback login PATH must include .zprofile dir: {fb_path}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "interactive timeout fallback must return promptly, took {:?}",
+            start.elapsed()
+        );
     }
 }

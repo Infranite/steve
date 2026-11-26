@@ -483,14 +483,14 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
             const beforeAt = before?.k === "rec" ? before.r.created : before?.m.created
             const at = entry.k === "rec" ? entry.r.created : entry.m.created
             const day = !!at && (!beforeAt || new Date(beforeAt).toDateString() !== new Date(at).toDateString())
-            if (entry.k === "rec") return <><Day at={day ? at : undefined} /><RecordRow r={entry.r} last={entry.r.id === im?.records.at(-1)?.id} /></>
+            if (entry.k === "rec") return <><Day at={day ? at : undefined} /><RecordRow r={entry.r} provider={im?.badge.open_provider ?? im?.badge.provider} last={entry.r.id === im?.records.at(-1)?.id} /></>
             const m = entry.m, id = m.id
             return <MessageRow id={id} channel={conv ? m : undefined} previous={before?.k === "msg" ? before.m : undefined}
               day={day} last={id === (m.k === "me" ? lastMe : lastSteve)} flashing={id === flash}
               raw={id ? im?.raw.get(id) : undefined} handling={id ? woven?.byTurn.get(id)?.handling : undefined}
-              openUrl={im?.badge.open_url} memory={processMemory} name={S?.n ?? "Steve"} />
+              openUrl={im?.badge.open_url} openProvider={im?.badge.open_provider ?? im?.badge.provider} memory={processMemory} name={S?.n ?? "Steve"} />
           }} /></ReadingPosition>}
-          {conv && im ? <ConversationDraft conv={conv} decisionIds={imDecisions} /> : !conv && <LiveTail memory={processMemory} />}
+          {conv && im ? <ConversationDraft conv={conv} decisionIds={imDecisions} provider={im.badge.open_provider ?? im.badge.provider} /> : !conv && <LiveTail memory={processMemory} />}
           {!conv && !list.length && st.ready && st.onboard < 0 && <div className="flex flex-col items-center gap-3 px-6 pt-[18vh] text-center anim-in" data-chat-empty>
             <ActorAvatar actorId="steve" size={48} tooltip={false} />
             <div className="type-title">{t("pages:chat.emptyHead", { name: S?.n ?? "Steve" })}</div>
@@ -561,9 +561,9 @@ function LiveReply({ mid }: { mid: string }) {
   return text ? <SteveSays still><Markdown text={text} streaming /></SteveSays> : null
 }
 
-const MessageRow = memo(function MessageRow({ id, channel, previous, day, last, flashing, raw, handling, openUrl, memory, name }: {
+const MessageRow = memo(function MessageRow({ id, channel, previous, day, last, flashing, raw, handling, openUrl, openProvider, memory, name }: {
   id?: string; channel?: Msg; previous?: Msg; day: boolean; last: boolean; flashing: boolean
-  raw?: ConvMessage; handling?: ComponentProps<typeof HandlingLine>["h"]; openUrl?: string | null
+  raw?: ConvMessage; handling?: ComponentProps<typeof HandlingLine>["h"]; openUrl?: string | null; openProvider?: string | null
   memory: ProcessMemory; name: string
 }) {
   const selected = useThreadMessage(channel ? undefined : id)
@@ -586,11 +586,11 @@ const MessageRow = memo(function MessageRow({ id, channel, previous, day, last, 
       {dayLabel}
       {conv ? <div className="group/me relative flex flex-col gap-1.5" data-msg={id} data-im-turn>
         <SenderLine m={raw} />
-        {raw?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={raw.channel_message} /></div>
+        {raw?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={raw.channel_message} provider={openProvider} /></div>
           : <Me t={m.t ?? ""} files={m.files} />}
         <HandlingLine h={handling} reacted={!!raw?.reaction && raw.reaction.state !== "cleared"} />
         <QueuedNote m={m} />
-        <ImMsgActions url={raw?.channel_message?.open_url ?? openUrl} side="end" last={last} />
+        <ImMsgActions url={raw?.channel_message?.open_url ?? openUrl} provider={raw?.channel_message?.open_provider ?? openProvider} side="end" last={last} />
       </div> : <div tabIndex={-1}
         className={cn("group/me relative flex flex-col gap-1.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)}
         data-msg={id} data-flash={lit ? "" : undefined}>

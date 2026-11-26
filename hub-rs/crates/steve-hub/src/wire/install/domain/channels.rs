@@ -52,7 +52,16 @@ install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, mod
     for d in declared.decls() {
         channels = channels.decl(d.clone());
     }
+    for l in &declared.links {
+        channels = channels.links(l.clone());
+    }
+    for s in &declared.syntaxes {
+        channels = channels.syntax(s.clone());
+    }
     let channels = channels
+        .burst_settle(std::time::Duration::from_millis(
+            steve_channels::presence::BURST_SETTLE_MS,
+        ))
         .party_hooks(ports.hooks.clone())
         .flow(flow.clone())
         .responder(replies)

@@ -503,11 +503,18 @@ async fn member_and_chat_events_over_the_long_connection() {
         ]
     );
     let space = s[0].as_str().unwrap().to_string();
-    assert_eq!(
+    assert!(
         inspect::decisions::decision_question_options_by_space_and_subject(h.env.store(), &space)
-            .unwrap()[0][0],
-        json!("值班小运被拉进了「新项目群」，要设置它在这里做什么吗？")
+            .unwrap()
+            .is_empty(),
+        "new bot groups default to silent record instead of opening an inbox ask card"
     );
+    let set = h
+        .env
+        .store()
+        .read(|db| steve_channels::spaces::settings(db, &space))
+        .unwrap();
+    assert!(set.muted);
     assert_eq!(
         inspect::spaces::count_space_members_by_space_count(h.env.store(), &space).unwrap(),
         4,
@@ -568,7 +575,7 @@ async fn member_and_chat_events_over_the_long_connection() {
     })
     .await;
 
-    // the bot removed: left; added back while still unconfigured: active and asked again
+    // the bot removed: left; added back while still unconfigured: active and still silent record
     h.push(fixture("bot_deleted").unwrap()).await;
     steve_runtime::testkit::eventually("count_spaces_by_left_and_id", || {
         std::future::ready(
@@ -591,7 +598,7 @@ async fn member_and_chat_events_over_the_long_connection() {
     assert_eq!(
         inspect::decisions::count_decisions_by_space_and_open_and_subject(h.env.store(), &group)
             .unwrap(),
-        1
+        0
     );
 
     // disbanded: archived (the topic group, known from a message first)
@@ -636,7 +643,9 @@ async fn member_and_chat_events_over_the_long_connection() {
     let at = h
         .env
         .store()
-        .read(|r| steve_store::accounts::feishu_mention_handle(r, WS, &h.con, &alice))
+        .read(|r| {
+            steve_store::accounts::connection_mention_handle(r, WS, &h.con, &alice, Some("ou_"))
+        })
         .unwrap();
     assert_eq!(at.as_deref(), Some(ids::ALICE.open_id));
     lc.stop().await.unwrap();
@@ -734,7 +743,7 @@ async fn authenticated_provider_bytes_reach_the_channel_composer() {
         r#"{"outcome":"reply","text":"已读取附件","needs_approval":false,"why":"基于原件"}"#,
     );
     let composer = steve_channels::compose::Composer::new()
-        .media(Arc::new(steve_channels::media_agent::FeishuMediaSource));
+        .media(Arc::new(steve_channels::media_agent::ChannelMediaSource));
     composer
         .generate(
             &h.ch,

@@ -493,14 +493,13 @@ impl Channels {
                 name: &info.name,
                 member_count,
                 has_external,
+                muted: spaces::default_new_space_muted(mode, info.kind),
                 now,
                 platform: facts.platform.as_deref(),
             },
         )?;
-        let mut rejoined = false;
         if !created {
             // added back after leaving (or a space first seen through a message): refresh it
-            rejoined = space.status != "active";
             registration::set_state(w, &space.id, registration::State::Active, now)?;
             apply_info(
                 w,
@@ -517,30 +516,20 @@ impl Channels {
         member_repo::add(w, ws, &space.id, &facts.account_id, "bot", now)?;
         let n = add_members(w, ws, conn, facts, &space, members, now)?;
         let space = reload(w, &space.id)?;
-        let mut decision_id = None;
-        let kind = SpaceKind::parse(&space.kind).unwrap_or(info.kind);
-        if mode == Mode::Bot
-            && kind.is_group()
-            && (created || (rejoined && !spaces::settings(w, &space.id)?.configured))
-        {
-            decision_id = Some(spaces::open_new_space_decision(
-                w,
-                ws,
-                &space,
-                &facts.account_name,
-            )?);
-        }
+        // New bot groups default to silent record (`muted = true`, `configured = false`) and never
+        // push a 4-choice ask card into Inbox (#213); users can change the rule with one click on
+        // the space page.
         registration::emit(w, ws, &space.id);
         Ok(SpaceChange {
             created,
-            decision_id,
+            decision_id: None,
             members_changed: n,
             ..SpaceChange::of(&space)
         })
     }
 
     /// Creates the spaces of the groups connection `conn` is already in:
-    /// `configured=0`, no “新群” decision each (the spaces page points them out).
+    /// `configured=0`, default silent record for bot groups, no Inbox ask decision each.
     /// Known spaces are left as they are. Returns how many were created.
     pub async fn sync_spaces(
         &self,
@@ -552,7 +541,7 @@ impl Channels {
         let facts = self.facts(ws, conn)?;
         let now = self.now();
         store.write(|w| {
-            mode_of(w, ws, conn, &facts, now)?;
+            let mode = mode_of(w, ws, conn, &facts, now)?;
             let system = facts_system(w, &facts.account_id)?;
             let mut n = 0;
             for (ext, info) in chats {
@@ -570,6 +559,7 @@ impl Channels {
                         name: &info.name,
                         member_count: info.member_count,
                         has_external: info.has_external,
+                        muted: spaces::default_new_space_muted(mode, info.kind),
                         now,
                         platform: facts.platform.as_deref(),
                     },

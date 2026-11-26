@@ -775,44 +775,70 @@ fn think_reply(
 #[async_trait]
 impl OneModel for NodePrint {
     async fn preflight(&self, call: &OneCall<'_>) -> steve_core::Result<()> {
-        let ThinkTools::Read(required) = call.spec.required_tools else {
+        let needs_tools = matches!(call.spec.required_tools, ThinkTools::Read(_));
+        let needs_images = !call.images.is_empty();
+        if !needs_tools && !needs_images {
             return Ok(());
-        };
-        let workspace = think_workspace();
-        self.runtime
-            .owners_work_in(&workspace)
-            .map_err(|_| GatewayError::ToolDenied)?;
-        for file in required {
-            let authorized = self
-                .runtime
-                .store
-                .files()
-                .get(&file.file_id)?
-                .is_some_and(|row| row.workspace_id == workspace && row.size >= 0);
-            if !authorized {
-                return Err(GatewayError::ToolDenied.into());
+        }
+        if let ThinkTools::Read(required) = call.spec.required_tools {
+            let workspace = think_workspace();
+            self.runtime
+                .owners_work_in(&workspace)
+                .map_err(|_| GatewayError::ToolDenied)?;
+            for file in required {
+                let authorized = self
+                    .runtime
+                    .store
+                    .files()
+                    .get(&file.file_id)?
+                    .is_some_and(|row| row.workspace_id == workspace && row.size >= 0);
+                if !authorized {
+                    return Err(GatewayError::ToolDenied.into());
+                }
             }
         }
-        let supports = self
+        let probe = self
             .runtime
             .node
             .probe(false)
             .await
-            .map_err(|_| GatewayError::MissingCapability)?
+            .map_err(|_| GatewayError::MissingCapability)?;
+        let harness = probe.harnesses.iter().find(|h| {
+            h.name == call.harness
+                && h.jobs
+                && h.adapter
+                    .as_ref()
+                    .is_none_or(|a| a.status == AdapterStatus::Ready)
+        });
+        if needs_tools && !harness.is_some_and(|h| h.read_attached) {
+            return Err(GatewayError::MissingCapability.into());
+        }
+        if needs_images && !harness.is_some_and(|h| h.images) {
+            return Err(GatewayError::UnsupportedMultimodal(format!(
+                "运行环境 `{}` 不支持读取图片",
+                call.harness
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    async fn multimodal_harness(&self, call: &OneCall<'_>) -> Option<String> {
+        let needs_tools = matches!(call.spec.required_tools, ThinkTools::Read(_));
+        let probe = self.runtime.node.probe(false).await.ok()?;
+        probe
             .harnesses
             .iter()
-            .any(|h| {
-                h.name == call.harness
+            .find(|h| {
+                h.name != call.harness
                     && h.jobs
-                    && h.read_attached
+                    && h.images
+                    && (!needs_tools || h.read_attached)
                     && h.adapter
                         .as_ref()
                         .is_none_or(|a| a.status == AdapterStatus::Ready)
-            });
-        if !supports {
-            return Err(GatewayError::MissingCapability.into());
-        }
-        Ok(())
+            })
+            .map(|h| h.name.clone())
     }
 
     async fn once(

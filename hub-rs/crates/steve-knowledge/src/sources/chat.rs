@@ -8,12 +8,14 @@ use chrono::{NaiveDate, Timelike};
 use steve_modules::{ApiError, ApiResult, Modules};
 use steve_runtime::tz::Zone;
 use steve_store::base::Level;
-use steve_store::base::mems::Mem;
-use steve_store::knowledge::Documents;
+use steve_store::knowledge::{Documents, OriginClass, SourceTrustTier};
 use steve_store::{MessageEvidence, Read, Workspaces};
 
 use crate::candidates::{Origin, OriginKind};
 use crate::extract;
+use crate::ingest::IngestOutcome;
+use crate::policy::{CHAT_WINDOW_MAX_CHARS, CHAT_WINDOW_OVERLAP_LINES};
+use crate::sources::folder::FolderPolicy;
 use crate::state::Knowledge;
 
 /// The main thread's `messages.space`.
@@ -72,9 +74,65 @@ fn short_label(day: &str) -> String {
     format!("{} 的对话", day.get(5..).unwrap_or(day))
 }
 
-/// Extracts candidates and proposals from one day's conversation, once (`kb_marks extract:chat:<day>`).
-/// Returns the memory candidates written.
-pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> ApiResult<Vec<Mem>> {
+/// Splits a long day's transcript into overlapping windows capped at `max_chars`, so evening
+/// conversations are never silently truncated.
+pub fn split_chat_windows(text: &str, max_chars: usize, overlap_lines: usize) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.chars().count() <= max_chars {
+        return vec![trimmed.to_string()];
+    }
+    let blocks: Vec<&str> = trimmed
+        .split("\n\n")
+        .filter(|b| !b.trim().is_empty())
+        .collect();
+    let mut windows = Vec::new();
+    let mut idx = 0usize;
+    while idx < blocks.len() {
+        let mut cur = String::new();
+        let mut count = 0usize;
+        let start = idx;
+        while idx < blocks.len() {
+            let sep = if cur.is_empty() { 0 } else { 2 };
+            let b_len = blocks[idx].chars().count();
+            if !cur.is_empty() && count + sep + b_len > max_chars {
+                break;
+            }
+            if !cur.is_empty() {
+                cur.push_str("\n\n");
+                count += 2;
+            }
+            if b_len > max_chars {
+                let clipped: String = blocks[idx].chars().take(max_chars).collect();
+                cur.push_str(&clipped);
+                idx += 1;
+                break;
+            }
+            cur.push_str(blocks[idx]);
+            count += b_len;
+            idx += 1;
+        }
+        windows.push(cur);
+        if idx >= blocks.len() {
+            break;
+        }
+        let back = overlap_lines.min(idx.saturating_sub(start + 1));
+        idx -= back;
+    }
+    windows
+}
+
+/// Extracts memories and proposals from one day's conversation, once (`kb_marks extract:chat:<day>`).
+/// Zero-change days make 0 model calls. Long days are windowed instead of truncated.
+/// Writes silently to file-backed personal context (zero Inbox cards, zero 03:40 notices).
+pub async fn extract_day(
+    m: &Modules,
+    kb: &Knowledge,
+    ws: &str,
+    day: &str,
+) -> ApiResult<Vec<IngestOutcome>> {
     let mark = format!("extract:chat:{day}");
     let now = m.clock.now();
     let (w, d) = (ws.to_string(), day.to_string());
@@ -113,33 +171,48 @@ pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> Ap
         label: short_label(day),
         user,
         writer: "steve".into(),
-        default_level: Level::Conclusion,
+        default_level: Level::Reasoning,
         item_id: None,
         session_id: None,
+        origin_class: OriginClass::ImplicitPattern,
+        source_tier: SourceTrustTier::Tier1Owner,
     };
-    let prepared = extract::prepare(m, kb, &origin, &text, None, extract::Task::default()).await?;
+    let windows = split_chat_windows(&text, CHAT_WINDOW_MAX_CHARS, CHAT_WINDOW_OVERLAP_LINES);
+    let mut prepared_all = extract::Prepared::default();
+    for win in windows {
+        let p = extract::prepare(m, kb, &origin, &win, None, extract::Task::default()).await?;
+        prepared_all.extend(p);
+    }
     let mark = format!("extract:chat:{day}");
-    m.blocking(move |m| commit_extraction(m, &origin, &prepared, &mark, now, || {}))
-        .await
+    let policy = kb.folder_policy().clone();
+    let ws_for_synth = ws.to_string();
+    let outcomes = m
+        .blocking(move |m| commit_extraction(m, &policy, &origin, &prepared_all, &mark, now, || {}))
+        .await?;
+    // Event-driven overview refresh: 0 model calls unless dirty thresholds are crossed.
+    let _ = crate::synthesis::maybe_refresh_ws_overviews(m, &ws_for_synth, now).await;
+    Ok(outcomes)
 }
 
 fn commit_extraction(
     m: &Modules,
+    policy: &FolderPolicy,
     origin: &Origin,
     prepared: &extract::Prepared,
     mark: &str,
     now: i64,
     before_mark: impl FnOnce(),
-) -> ApiResult<Vec<Mem>> {
+) -> ApiResult<Vec<IngestOutcome>> {
     m.store.write(|tx| {
         // Serialize concurrent extractions of the same day after their model work completes.
         if Documents(tx).mark(&origin.ws, mark)?.is_some() {
             return Ok(Vec::new());
         }
-        let made = extract::commit_in(tx, origin, prepared)?;
+        let report = extract::commit_in(tx, policy, origin, prepared, now)?;
         before_mark();
         Documents(tx).set_mark(&origin.ws, mark, "done", now)?;
-        Ok(made)
+        let _ = crate::synthesis::maybe_emit_weekly_feed_summary(tx, &origin.ws, now)?;
+        Ok(report.outcomes)
     })
 }
 
@@ -229,6 +302,7 @@ mod tests {
         let mut env = TestEnv::new(|r| {
             r.decision(candidates::SUBJECT, Box::new(candidates::MemDecisions));
         });
+        let policy = FolderPolicy::new(env.dir.path(), env.dir.path().join("steve_home"));
         let origin = Origin {
             ws: WS.into(),
             kind: OriginKind::Chat,
@@ -236,23 +310,28 @@ mod tests {
             label: "10-31 的对话".into(),
             user: steve_modules::testkit::ME.into(),
             writer: "steve".into(),
-            default_level: Level::Conclusion,
+            default_level: Level::Reasoning,
             item_id: None,
             session_id: None,
+            origin_class: OriginClass::OwnerExplicit,
+            source_tier: SourceTrustTier::Tier1Owner,
         };
         let candidate = NewCandidate {
             kind: "rule".into(),
-            text: "周五不部署".into(),
-            evidence: "以后周五不部署".into(),
+            text: "Never deploy on Fridays".into(),
+            evidence: "Never deploy on Fridays".into(),
             about: vec![],
-            level: Level::Conclusion,
+            level: Level::Reasoning,
             supersedes: None,
-            why: String::new(),
-            scope: String::new(),
-            owner_said: false,
+            why: "Avoids weekend production incidents".into(),
+            scope: "deployment".into(),
+            changes_future_behavior: true,
+            origin_class: OriginClass::OwnerExplicit,
+            source_tier: SourceTrustTier::Tier1Owner,
+            is_explicit_rule: true,
         };
         let prepared = extract::Prepared {
-            text: "我（10:00）：以后周五不部署".into(),
+            text: "我（10:00）：Never deploy on Fridays".into(),
             candidates: vec![candidate],
             proposals: Vec::new(),
         };
@@ -261,8 +340,8 @@ mod tests {
         let clock = steve_runtime::clock::FakeClock::new(1_793_491_200_000);
         let now = steve_runtime::clock::Clock::now(&clock);
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            commit_extraction(&env.modules, &origin, &prepared, mark, now, || {
-                panic!("crash after candidates and notice, before receipt")
+            commit_extraction(&env.modules, &policy, &origin, &prepared, mark, now, || {
+                panic!("crash before receipt")
             })
         }));
         assert!(crashed.is_err());
@@ -278,27 +357,45 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let count = || {
-            steve_store::testkit::knowledge::candidate_count(&env.modules.store, "chat:2026-10-31")
+        let entries_count = || {
+            env.modules
+                .store
+                .read(|c| steve_store::knowledge::MemoryEntries(c).list_active_ws(WS))
                 .unwrap()
+                .len()
         };
-        assert_eq!(count(), 0);
-        assert_eq!(
-            commit_extraction(&env.modules, &origin, &prepared, mark, now, || {})
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(entries_count(), 0);
+        let first =
+            commit_extraction(&env.modules, &policy, &origin, &prepared, mark, now, || {}).unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].is_written());
         assert!(
-            commit_extraction(&env.modules, &origin, &prepared, mark, now, || {})
+            commit_extraction(&env.modules, &policy, &origin, &prepared, mark, now, || {})
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(count(), 1);
-        let notices = steve_store::testkit::knowledge::notice_text(&env.modules.store)
-            .unwrap()
-            .len();
-        assert_eq!(notices, 1);
+        assert_eq!(entries_count(), 1);
+        // Zero Inbox confirmation cards opened for memories!
+        let open_mem_cards = env
+            .modules
+            .store
+            .read(|c| steve_store::DecisionRows(c).open_confirmations(WS, candidates::SUBJECT))
+            .unwrap();
+        assert_eq!(open_mem_cards, 0);
+    }
+
+    #[test]
+    fn windows_cover_long_day_without_truncating_evening() {
+        let mut parts = Vec::new();
+        for i in 0..40 {
+            parts.push(format!("我（{:02}:00）：{}", i % 24, "x".repeat(400)));
+        }
+        parts.push("我（23:55）：EVENING_MARKER_RULE".to_string());
+        let full = parts.join("\n\n");
+        assert!(full.chars().count() > CHAT_WINDOW_MAX_CHARS);
+        let wins = split_chat_windows(&full, CHAT_WINDOW_MAX_CHARS, CHAT_WINDOW_OVERLAP_LINES);
+        assert!(wins.len() >= 2);
+        assert!(wins.last().unwrap().contains("EVENING_MARKER_RULE"));
     }
 
     #[test]

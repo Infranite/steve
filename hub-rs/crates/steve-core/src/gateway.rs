@@ -245,7 +245,13 @@ fn call_error(e: OneShotError) -> CoreError {
         OneShotError::Failed(err) => GatewayError::Startup(js_head(&err, 300).to_string()).into(),
         OneShotError::ToolRefused => GatewayError::NeedsTools.into(),
         OneShotError::Harness { text, .. } => msg(js_head(&text, 300).to_string()),
-        e @ OneShotError::Unsupported(_) => msg(e.to_string()),
+        OneShotError::Unsupported(cap) => {
+            if cap.to_ascii_lowercase().contains("image") {
+                GatewayError::UnsupportedMultimodal(cap.to_string()).into()
+            } else {
+                msg(OneShotError::Unsupported(cap).to_string())
+            }
+        }
         OneShotError::Io(e) => CoreError::Io(e),
     }
 }
@@ -302,6 +308,14 @@ pub trait OneModel: Send + Sync {
         } else {
             Ok(())
         }
+    }
+
+    /// Optional fallback harness discovery for image-bearing calls (#278): when the primary
+    /// harness lacks multimodal support, returns another ready harness on the backend that
+    /// supports image input (if any).
+    async fn multimodal_harness(&self, call: &OneCall<'_>) -> Option<String> {
+        let _ = call;
+        None
     }
 
     /// Runs `model` (empty: the harness's default) once; streaming when `on_text` is given.
@@ -496,44 +510,94 @@ impl<M: OneModel> SingleModelGateway<M> {
     ) -> Attempt {
         let t0 = tokio::time::Instant::now();
         let choice = self.choice(tier);
-        let model = choice.models.first().map_or("", String::as_str);
+        let primary_harness = choice.harness.clone();
+        let primary_model = choice.models.first().cloned().unwrap_or_default();
         let images = current_images().map(|b| images_of(&b)).unwrap_or_default();
-        let call = OneCall {
-            prompt,
-            spec: CallSpec {
-                purpose: crate::stats::current_tag().purpose,
-                required_tools: tools,
-                auth_scope: tools, // the legacy call form supplies only its explicit attachment grants
-                deadline: t0 + timeout,
-            },
-            harness: &choice.harness,
-            images: &images,
-        };
+        let purpose = crate::stats::current_tag().purpose;
+        let deadline = t0 + timeout;
         let queue_timeout = || GatewayError::Timeout(TimeoutPhase::Queue).into();
-        let preflight = async {
-            call.spec.authorize()?;
-            self.one.preflight(&call).await
-        };
-        let preflight = if tokio::time::Instant::now() >= call.spec.deadline {
-            Err(queue_timeout())
-        } else {
-            tokio::time::timeout_at(call.spec.deadline, preflight)
-                .await
-                .unwrap_or_else(|_| Err(queue_timeout()))
+        let preflight = {
+            let fut = async {
+                let call = OneCall {
+                    prompt,
+                    spec: CallSpec {
+                        purpose,
+                        required_tools: tools,
+                        auth_scope: tools, // the legacy call form supplies only its explicit attachment grants
+                        deadline,
+                    },
+                    harness: &primary_harness,
+                    images: &images,
+                };
+                call.spec.authorize()?;
+                match self.one.preflight(&call).await {
+                    Ok(()) => Ok((primary_harness.clone(), primary_model.clone())),
+                    Err(CoreError::Gateway(GatewayError::UnsupportedMultimodal(detail)))
+                        if !images.is_empty() =>
+                    {
+                        if let Some(alt) = self.one.multimodal_harness(&call).await {
+                            let alt_call = OneCall {
+                                prompt,
+                                spec: CallSpec {
+                                    purpose,
+                                    required_tools: tools,
+                                    auth_scope: tools,
+                                    deadline,
+                                },
+                                harness: &alt,
+                                images: &images,
+                            };
+                            self.one.preflight(&alt_call).await?;
+                            metrics::counter!(
+                                "steve_gateway_multimodal_reroute_total",
+                                "from" => primary_harness.clone(),
+                                "to" => alt.clone(),
+                            )
+                            .increment(1);
+                            Ok((alt, String::new()))
+                        } else {
+                            Err(GatewayError::UnsupportedMultimodal(detail).into())
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            };
+            if tokio::time::Instant::now() >= deadline {
+                Err(queue_timeout())
+            } else {
+                tokio::time::timeout_at(deadline, fut)
+                    .await
+                    .unwrap_or_else(|_| Err(queue_timeout()))
+            }
         };
 
+        let mut harness = primary_harness;
+        let mut model = primary_model;
         let mut attempts = 0;
         let tried = async {
-            preflight?;
-            if tokio::time::Instant::now() >= call.spec.deadline {
+            let (selected_harness, selected_model) = preflight?;
+            harness = selected_harness;
+            model = selected_model;
+            if tokio::time::Instant::now() >= deadline {
                 return Err(queue_timeout());
             }
+            let call = OneCall {
+                prompt,
+                spec: CallSpec {
+                    purpose,
+                    required_tools: tools,
+                    auth_scope: tools,
+                    deadline,
+                },
+                harness: &harness,
+                images: &images,
+            };
             let account = crate::stats::current_call()
-                .map(|c| c.attempt(&choice.harness, model))
+                .map(|c| c.attempt(&harness, &model))
                 .transpose()
                 .map_err(|e| msg(format!("usage ownership: {e}")))?;
             attempts = 1;
-            let run = self.one.once(&call, model, choice.effort, on_text);
+            let run = self.one.once(&call, &model, choice.effort, on_text);
             let tried = match &account {
                 Some(a) => a.scope(run).await,
                 None => run.await,
@@ -558,7 +622,7 @@ impl<M: OneModel> SingleModelGateway<M> {
         let result = tried.reply.map(|(text, cost_usd)| Printed {
             text,
             cost_usd,
-            model: model.to_string(),
+            model: model.clone(),
             reported_model: tried.reported_model,
             usage: tried.usage.clone(),
             attempts,
@@ -569,7 +633,7 @@ impl<M: OneModel> SingleModelGateway<M> {
             .err()
             .map(|e| {
                 let detail = js_head(&e.to_string(), 200).to_string();
-                tracing::warn!(harness = %choice.harness, model, "gateway: {detail}");
+                tracing::warn!(harness = %harness, model = %model, "gateway: {detail}");
                 format!("{model}: {detail}")
             })
             .into_iter()
@@ -579,9 +643,9 @@ impl<M: OneModel> SingleModelGateway<M> {
             attempts,
             duration_ms,
             usage: tried.usage,
-            model: model.to_string(),
+            model,
             failures,
-            harness: choice.harness.clone(),
+            harness,
         }
     }
 }
@@ -2282,7 +2346,11 @@ mod tests {
         );
         assert_eq!(
             said(OneShotError::Unsupported("images")),
-            "unsupported: images"
+            "当前模型或运行环境不支持读取图片：images"
+        );
+        assert_eq!(
+            said(OneShotError::Unsupported("audio")),
+            "unsupported: audio"
         );
     }
 

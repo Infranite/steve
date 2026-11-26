@@ -59,6 +59,62 @@ impl ReactionKind {
     }
 }
 
+/// Provenance of an incoming reaction event from a channel provider or bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionOrigin {
+    /// Confirmed manual human action.
+    Manual,
+    /// Automated or bot action (never counts as owner-handled).
+    Automated,
+    /// Origin not distinguished by the provider (e.g. native user-account reaction).
+    Unknown,
+}
+
+impl ReactionOrigin {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Automated => "automated",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Where an incoming reaction's timestamp came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionTimeSource {
+    Provider,
+    Observed,
+}
+
+impl ReactionTimeSource {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Observed => "observed",
+        }
+    }
+}
+
+/// An incoming reaction creation or removal event on a channel message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionEvent {
+    pub space_ext_id: Option<String>,
+    pub message_ext_id: Option<String>,
+    pub message_source_id: Option<String>,
+    pub actor: HandleRef,
+    pub actor_name: Option<String>,
+    pub actor_is_bot: bool,
+    pub origin: ReactionOrigin,
+    pub emoji: String,
+    pub at: i64,
+    pub time_source: ReactionTimeSource,
+    pub revision: Option<i64>,
+    pub removed: bool,
+}
+
 /// `spaces.kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -178,9 +234,9 @@ pub struct OutContent {
     pub text: String,
     /// Idempotency key (the outbound `cm_…`): a retry does not send twice.
     pub uuid: Option<String>,
-    /// People to @ at the start, as the provider's per-connection ids (Feishu `open_id`, found with
-    /// `steve_store::accounts::feishu_mention_handle`). C6 passes the person replied to in a group; empty in
-    /// DMs.
+    /// People to @ at the start, as the provider's per-connection ids (found with
+    /// `steve_store::accounts::connection_mention_handle`). C6 passes the person replied to in a
+    /// group; empty in DMs.
     pub at: Vec<String>,
     /// The space's provider id when known (for a reply: the space of the replied-to message). It
     /// keys the per-space send rate; without it only the per-connection rate applies.
@@ -815,6 +871,12 @@ impl ProfileAnswer {
 pub trait ProfileAdapter: Send + Sync {
     /// The `connections.adapter` it serves.
     fn adapter_id(&self) -> &str;
+
+    /// The provider permission scope required to query the organization directory by handle,
+    /// if the platform reports missing directory scopes separately from chat member reads.
+    fn directory_scope(&self) -> Option<&'static str> {
+        None
+    }
 
     /// One lookup. Missing permissions are reported in the answer, not as an error; `Err` is for
     /// the connection itself failing (token refused, network).

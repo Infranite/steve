@@ -22,7 +22,6 @@ mod space;
 
 mod bot_skills;
 mod exec;
-#[cfg(target_os = "macos")]
 mod file_access;
 pub mod git;
 mod harness_context;
@@ -4481,9 +4480,8 @@ impl Discovery for LocalNode {
         let host = tokio::task::spawn_blocking(host::this_machine)
             .await
             .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
-        #[cfg(target_os = "macos")]
         let host = HostInfo {
-            file_access: self.file_access().await,
+            file_access: Some(self.file_access().await),
             ..host
         };
         Ok(host)

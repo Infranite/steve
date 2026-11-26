@@ -92,6 +92,7 @@ fn tier(
     replied: bool,
     unsendable: bool,
     recovery: bool,
+    escalated: bool,
 ) -> (DecisionTier, Option<FoldReason>) {
     let chat = d.subject_type == ABOUT_CHAT_MESSAGE;
     let draft = chat && d.kind == "approve";
@@ -107,7 +108,11 @@ fn tier(
     } else if draft && unsendable {
         (DecisionTier::Folded, Some(FoldReason::Unsendable))
     } else if draft && d.status == DecisionStatus::Open {
-        (DecisionTier::Draft, None)
+        if escalated {
+            (DecisionTier::Decide, None)
+        } else {
+            (DecisionTier::Draft, None)
+        }
     } else if is_decide_kind(d) {
         (DecisionTier::Decide, None)
     } else {
@@ -217,6 +222,7 @@ fn select() -> SelectStatement {
 struct Candidate {
     view: DecisionView,
     recovery: bool,
+    escalated: bool,
     starred: bool,
     unsendable: bool,
 }
@@ -233,16 +239,21 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
     let undo_until = crate::decision_repo::undo_until(status, resolved, undo.as_ref());
     let options: Option<Json<Vec<String>>> = r.get(9).ok();
     let (kind, subject_type): (String, String) = (r.get(2)?, r.get(3)?);
-    let recovery = subject_type == ABOUT_CHAT_MESSAGE
-        && kind == "approve"
-        && result
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .and_then(|r| {
-                r.get("recovery_review")
-                    .and_then(serde_json::Value::as_bool)
-            })
-            == Some(true);
+    let parsed_result = (subject_type == ABOUT_CHAT_MESSAGE && kind == "approve")
+        .then(|| {
+            result
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        })
+        .flatten();
+    let recovery = parsed_result.as_ref().and_then(|r| {
+        r.get("recovery_review")
+            .and_then(serde_json::Value::as_bool)
+    }) == Some(true);
+    let escalated = parsed_result
+        .as_ref()
+        .and_then(|r| r.get("escalated").and_then(serde_json::Value::as_bool))
+        == Some(true);
     let wait =
         crate::wait_repo::decode_contract(r.get(21)?, r.get(22)?, r.get(23)?, r.get(24)?).ok();
     let view = DecisionView {
@@ -275,6 +286,7 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
     Ok(Candidate {
         view,
         recovery,
+        escalated,
         starred: r.get(17)?,
         unsendable: r.get::<Option<bool>>(18)?.unwrap_or(false),
     })
@@ -306,6 +318,7 @@ impl<C: Read> DecisionViews<'_, C> {
                     replied.contains(view.id.as_str()),
                     r.unsendable,
                     r.recovery,
+                    r.escalated,
                 );
                 view
             })
@@ -496,7 +509,7 @@ mod tests {
         ] {
             let view = sample(kind, subject);
             assert_eq!(
-                tier(&view, false, false, false, false),
+                tier(&view, false, false, false, false, false),
                 (DecisionTier::Decide, None),
                 "{kind}/{subject} should be Decide"
             );
@@ -513,10 +526,38 @@ mod tests {
         ] {
             let view = sample(kind, subject);
             assert_eq!(
-                tier(&view, false, false, false, false),
+                tier(&view, false, false, false, false, false),
                 (DecisionTier::Folded, Some(FoldReason::LowPriority)),
                 "{kind}/{subject} should fold as LowPriority"
             );
         }
+    }
+
+    #[test]
+    fn escalated_chat_draft_surfaces_as_decide_until_folded() {
+        let open_draft = sample("approve", ABOUT_CHAT_MESSAGE);
+        assert_eq!(
+            tier(&open_draft, false, false, false, false, false),
+            (DecisionTier::Draft, None),
+        );
+        assert_eq!(
+            tier(&open_draft, false, false, false, false, true),
+            (DecisionTier::Decide, None),
+        );
+        // Replying, becoming unsendable, or expiring still folds an escalated draft.
+        assert_eq!(
+            tier(&open_draft, false, true, false, false, true),
+            (DecisionTier::Folded, Some(FoldReason::Replied)),
+        );
+        assert_eq!(
+            tier(&open_draft, false, false, true, false, true),
+            (DecisionTier::Folded, Some(FoldReason::Unsendable)),
+        );
+        let mut expired = open_draft;
+        expired.status = DecisionStatus::Expired;
+        assert_eq!(
+            tier(&expired, false, false, false, false, true),
+            (DecisionTier::Folded, Some(FoldReason::Expired)),
+        );
     }
 }

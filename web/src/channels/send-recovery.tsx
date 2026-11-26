@@ -9,7 +9,7 @@ import { date } from "@/i18n/format"
 import { decide, emit, st, useHubEvents, type Item, type Wait } from "@/store"
 import { readViews } from "@/data/sync"
 import { OutContext } from "./out-context"
-import { MessageOpenInFeishu, OpenInFeishu } from "./open-in-app"
+import { MessageOpenInSourceApp, OpenInSourceApp } from "./open-in-app"
 import { SendAuthorization } from "./send-authorization"
 
 export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
@@ -99,7 +99,7 @@ export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
       {status === "sent" && <p className="w-full" data-send-receipt>{record?.sent ? t("core:sendRecovery.sentAt", { at: date(record.sent, { dateStyle: "short", timeStyle: "medium" }) }) : t("core:sendRecovery.markedSent")} {t("core:sendRecovery.noReceipt")}</p>}
       {stale && <p className="w-full" data-send-stale>{t("core:sendRecovery.changed")}</p>}
     </div>
-    {record?.open_url ? <OpenInFeishu url={record.open_url} className="self-start" /> : <MessageOpenInFeishu message={w.subjectId} className="self-start" />}
+    {record?.open_url ? <OpenInSourceApp url={record.open_url} provider={record.open_provider ?? context?.open_provider} className="self-start" /> : <MessageOpenInSourceApp message={w.subjectId} provider={context?.open_provider} className="self-start" />}
     {w.options.includes("rewrite") && (editing ? <div className="flex min-w-0 flex-col gap-2" data-send-editor>
       <label htmlFor={fieldId} className="font-medium text-foreground">{t("core:sendRecovery.edit")}</label>
       <Textarea id={fieldId} value={text} onChange={(e) => setText(e.target.value)} disabled={locked} rows={4} maxRows={12} data-send-edit />

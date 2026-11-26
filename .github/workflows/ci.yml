@@ -24,7 +24,7 @@ permissions:
 env:
   # How many runners share each platform's Rust tests (`--partition hash:k/N`). Linux runners are
   # plentiful; macOS ones are scarce (and run only on main), so it takes fewer of them.
-  RUST_TEST_SHARDS: '{"ubuntu-22.04": 4, "macos-15": 2}'
+  RUST_TEST_SHARDS: '{"ubuntu-22.04": 4, "macos-15": 3}'
 concurrency:
   group: ci-${{ github.event_name == 'push' && 'main' || github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

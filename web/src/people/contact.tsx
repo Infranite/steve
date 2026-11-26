@@ -1,6 +1,6 @@
 import { getItem } from "@/store"
 /* #/contacts/:id and #/contacts/me — one contact (prototype people.tsx ContactView) */
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { itemDisplayStatus } from "@/store"
 import { cn } from "cn"
 import { CheckIcon, ChevronRightIcon, EllipsisIcon, ListTodoIcon, MailIcon, PencilIcon, MessageSquareIcon, CalendarIcon, PlusIcon, StarIcon, XIcon, ZapIcon } from "lucide-react"
@@ -15,7 +15,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { tm } from "@/store"
 import { t as tr, useT } from "@/i18n"
 import { date } from "@/i18n/format"
-import { go, Page, Row, Meta, Empty, Tags, ItemNo, Status, Panel } from "@/ui"
+import { go, Page, Row, Meta, Empty, Tags, ItemNo, Status, Panel, Segmented } from "@/ui"
 import { AskSteve, type Ctx } from "@/config-ui"
 import { nameOf, people, type AccountBrief, type Attr, type Contact, type Level, type Mem, type ProfileField } from "@/api/people"
 import { channelsApi } from "@/api/channels"
@@ -58,6 +58,8 @@ export function ContactView({ id }: { id: string }) {
 function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
   const t = useT()
   const [del, setDel] = useState(false), [edit, setEdit] = useState(false), [merge, setMerge] = useState(false), [job, setJob] = useState(false)
+  const [tab, setTab] = useState<"profile" | "assets" | "activity">("profile")
+  useEffect(() => { setTab("profile") }, [c.id])
   const items = useHubQuery(["people", "items", c.id], () => people.items(c.id), { events: ["party", "item"] })
   const tl = useHubQuery(["people", "timeline", c.id], () => people.timeline(c.id), { events: PEOPLE_EVENTS })
   const mems = useHubQuery(["people", "memories", c.id], () => people.memories(c.id), { events: PEOPLE_EVENTS })
@@ -110,31 +112,50 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
             {!c.is_me && <DropdownMenu><DropdownMenuTrigger render={<button type="button" className="type-footnote text-muted-foreground hover:text-foreground" data-rel-menu />}>{rels.length ? t("people:contact.changeRel") : t("people:contact.addRel")}</DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="min-w-36">{codes("rel").filter((x) => x !== "me").map((x) => <DropdownMenuItem key={x} onClick={() => setRels(x)} data-rel-opt={x}>{c.rels.includes(x) ? <CheckIcon /> : <span className="size-4" />}{label("rel", x)}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>}</div>}
         </div>
-        <Facts c={c} accounts={accts.data} emails={accts.data?.filter((a) => a.system.id === "mail").map((a) => a.handle) ?? null} onJob={() => setJob(true)} reload={() => { reload(); accts.reload() }} />
-        <AskSteve key={c.id} ctx={ctxOf("contact", c.id)} placeholder={c.is_me ? t("people:contact.askMe") : t("people:contact.askOther", { name: first(c.name) })} className="-mt-4" />
-        {!c.is_me && !!accts.data?.length && <Section label={t("people:contact.linked")} data-linked><Panel>{accts.data.map((a) => <Row key={a.id} title={<span className="break-all">{a.handle}</span>} sub={t("people:contact.accountSub", { system: a.system.name, source: a.source_label })} onClick={() => go("#/accounts/" + a.id)} data-linked-acct={a.handle}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
-        {c.kind === "bot" ? <HoldingsSection person={c.id} name={first(c.name)} isMe={c.is_me} isBot /> : <ResponsibleSection person={c.id} name={first(c.name)} isMe={c.is_me} />}
-        {c.teams.length > 0 && <Section label={t("people:contact.teams", { n: c.teams.length })}><Panel>{c.teams.map((g) => <Row key={g.id} icon={<ActorAvatar actor={partyActor({ id: g.id, name: g.name, type: "team" })} size={28} />} title={g.name} sub={`${label("teamKind", g.kind)} · ${label("role", g.role)}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
-        {!!items.data?.length && <Section label={t("people:shared.relatedItems", { n: items.data.length })}>
-          <Panel>{items.data.map((x) => { const i = getItem(x.item_id); return (
-            <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={<Meta inline><span>{label("itemRole", x.role)}</span>{x.confidence < 1 && <span>{t("people:shared.inferred")}</span>}</Meta>} onClick={() => go("#/items/" + x.item_id)} data-party-item={x.item_id}>{i && <Status s={itemDisplayStatus(i)} />}</Row>) })}</Panel>
-        </Section>}
-        {!!tl.data?.length && <Section label={t("people:contact.touches")}>
-          <div className="flex flex-col" data-touches>{tl.data.map((x, n) => { const I = TOUCH_I[x.kind] ?? ZapIcon; return (
-            <button key={n} type="button" disabled={!x.href} onClick={() => x.href && go(x.href)} className="flex items-start gap-3 rounded-lg px-2 py-2 text-left transition-colors enabled:hover:bg-accent">
-              <I className="mt-0.5 size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} aria-hidden /><span className="min-w-0 flex-1 type-callout">{x.text}</span><span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{label("touch", x.kind)} · {tm(x.ts)}</span></button>) })}</div>
-        </Section>}
-        {c.is_me && !!c.note.trim() && <details className="rounded-xl bg-card px-4 py-3 shadow-[var(--lift)]" data-original-note>
-          <summary className="cursor-pointer type-callout text-muted-foreground">{t("people:me.originalNote")}</summary>
-          <p className="mt-3 whitespace-pre-wrap break-words type-body">{c.note}</p>
-          <p className="mt-2 type-footnote text-muted-foreground">{t("people:me.noteHint")}</p>
-          <Button size="xs" variant="ghost" onClick={() => setEdit(true)}>{t("people:contact.editInfo")}</Button>
-        </details>}
-        <MemSection party={c.id} mems={mems.data} label={c.is_me ? t("people:contact.notedMe") : t("people:contact.notedOther", { name: first(c.name) })} hideEmpty fold={MEM_FOLD} />
-        {c.merges.length > 0 && <Section label={t("people:contact.merges")}><Panel>{c.merges.map((m) => (
-          <Row key={m.id} title={t("people:contact.mergedFrom", { name: m.from_name })} sub={m.splittable ? t("people:contact.mergeSplittable", { day: day(m.created) }) : day(m.created)} data-merge-rec={m.id}>
-            {m.splittable && <Button size="xs" variant="outline" onClick={() => void act(people.split(m.id), t("people:contact.splitDone"))} data-split={m.id}>{t("people:contact.split")}</Button>}</Row>))}</Panel></Section>}
-        {mates.length > 0 && (() => { const md = disambiguateActors(mates.map((x) => ({ key: x.id, name: x.name, subtitle: x.title, fallbackId: x.id }))); return <Section label={t("people:contact.mates")}><Panel>{mates.map((x) => { const extra = md.get(x.id); return <Row key={x.id} icon={<ActorAvatar actor={partyActor({ id: x.id, name: x.name, avatar: x.avatar, subtitle: x.title })} disambiguator={extra} size={28} />} title={formatActorName(x.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex }))} sub={x.title ?? undefined} onClick={() => go("#/contacts/" + x.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row> })}</Panel></Section> })()}
+        <div className="-mt-2" data-contact-tabs>
+          <Segmented size="sm" value={tab} onChange={setTab} options={[
+            ["profile", t("people:contact.tabProfile")],
+            ["assets", t("people:contact.tabAssets")],
+            ["activity", t("people:contact.tabActivity")],
+          ] as const} />
+        </div>
+        {tab === "profile" && (
+          <div className="flex flex-col gap-6 anim-in" data-contact-tab="profile">
+            <Facts c={c} accounts={accts.data} emails={accts.data?.filter((a) => a.system.id === "mail").map((a) => a.handle) ?? null} onJob={() => setJob(true)} reload={() => { reload(); accts.reload() }} />
+            <AskSteve key={c.id} ctx={ctxOf("contact", c.id)} placeholder={c.is_me ? t("people:contact.askMe") : t("people:contact.askOther", { name: first(c.name) })} />
+            {c.is_me && !!c.note.trim() && <details className="rounded-xl bg-card px-4 py-3 shadow-[var(--lift)]" data-original-note>
+              <summary className="cursor-pointer type-callout text-muted-foreground">{t("people:me.originalNote")}</summary>
+              <p className="mt-3 whitespace-pre-wrap break-words type-body">{c.note}</p>
+              <p className="mt-2 type-footnote text-muted-foreground">{t("people:me.noteHint")}</p>
+              <Button size="xs" variant="ghost" onClick={() => setEdit(true)}>{t("people:contact.editInfo")}</Button>
+            </details>}
+          </div>
+        )}
+        {tab === "assets" && (
+          <div className="flex flex-col gap-6 anim-in" data-contact-tab="assets">
+            {!c.is_me && !!accts.data?.length && <Section label={t("people:contact.linked")} data-linked><Panel>{accts.data.map((a) => <Row key={a.id} title={<span className="break-all">{a.handle}</span>} sub={t("people:contact.accountSub", { system: a.system.name, source: a.source_label })} onClick={() => go("#/accounts/" + a.id)} data-linked-acct={a.handle}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
+            {c.kind === "bot" ? <HoldingsSection person={c.id} name={first(c.name)} isMe={c.is_me} isBot /> : <ResponsibleSection person={c.id} name={first(c.name)} isMe={c.is_me} />}
+            {c.teams.length > 0 && <Section label={t("people:contact.teams", { n: c.teams.length })}><Panel>{c.teams.map((g) => <Row key={g.id} icon={<ActorAvatar actor={partyActor({ id: g.id, name: g.name, type: "team" })} size={28} />} title={g.name} sub={`${label("teamKind", g.kind)} · ${label("role", g.role)}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
+            {mates.length > 0 && (() => { const md = disambiguateActors(mates.map((x) => ({ key: x.id, name: x.name, subtitle: x.title, fallbackId: x.id }))); return <Section label={t("people:contact.mates")}><Panel>{mates.map((x) => { const extra = md.get(x.id); return <Row key={x.id} icon={<ActorAvatar actor={partyActor({ id: x.id, name: x.name, avatar: x.avatar, subtitle: x.title })} disambiguator={extra} size={28} />} title={formatActorName(x.name, extra, (n, ex) => t("common:actor.disambiguated", { name: n, extra: ex }))} sub={x.title ?? undefined} onClick={() => go("#/contacts/" + x.id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row> })}</Panel></Section> })()}
+          </div>
+        )}
+        {tab === "activity" && (
+          <div className="flex flex-col gap-6 anim-in" data-contact-tab="activity">
+            {!!items.data?.length && <Section label={t("people:shared.relatedItems", { n: items.data.length })}>
+              <Panel>{items.data.map((x) => { const i = getItem(x.item_id); return (
+                <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={<Meta inline><span>{label("itemRole", x.role)}</span>{x.confidence < 1 && <span>{t("people:shared.inferred")}</span>}</Meta>} onClick={() => go("#/items/" + x.item_id)} data-party-item={x.item_id}>{i && <Status s={itemDisplayStatus(i)} />}</Row>) })}</Panel>
+            </Section>}
+            {!!tl.data?.length && <Section label={t("people:contact.touches")}>
+              <div className="flex flex-col" data-touches>{tl.data.map((x, n) => { const I = TOUCH_I[x.kind] ?? ZapIcon; return (
+                <button key={n} type="button" disabled={!x.href} onClick={() => x.href && go(x.href)} className="flex items-start gap-3 rounded-lg px-2 py-2 text-left transition-colors enabled:hover:bg-accent">
+                  <I className="mt-0.5 size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} aria-hidden /><span className="min-w-0 flex-1 type-callout">{x.text}</span><span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{label("touch", x.kind)} · {tm(x.ts)}</span></button>) })}</div>
+            </Section>}
+            <MemSection party={c.id} mems={mems.data} label={c.is_me ? t("people:contact.notedMe") : t("people:contact.notedOther", { name: first(c.name) })} fold={MEM_FOLD} />
+            {c.merges.length > 0 && <Section label={t("people:contact.merges")}><Panel>{c.merges.map((m) => (
+              <Row key={m.id} title={t("people:contact.mergedFrom", { name: m.from_name })} sub={m.splittable ? t("people:contact.mergeSplittable", { day: day(m.created) }) : day(m.created)} data-merge-rec={m.id}>
+                {m.splittable && <Button size="xs" variant="outline" onClick={() => void act(people.split(m.id), t("people:contact.splitDone"))} data-split={m.id}>{t("people:contact.split")}</Button>}</Row>))}</Panel></Section>}
+          </div>
+        )}
       </div>
     </Page>
   )

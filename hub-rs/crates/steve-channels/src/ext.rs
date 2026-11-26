@@ -13,13 +13,17 @@ use steve_modules::accounts::connections::ConnectionProvider;
 
 use crate::channel::{ActAsUser, ChannelAdapter, ChannelFeatures, ProfileAdapter};
 
-pub use crate::channel::{ActTarget, MessageRef, SendKey, Sent};
+pub use crate::channel::{
+    ActTarget, MessageRef, ReactionEvent, ReactionOrigin, ReactionTimeSource, SendKey, Sent,
+};
 pub use crate::connector::ConnectorTools;
 pub use crate::history::HistoryRead;
 pub use crate::lifecycle::{ConnRun, ConnSink, ConnState, ConnectionHook};
 pub use crate::media::{MediaError, MediaFetch};
+pub use crate::open_link::PlatformLinks;
 pub use crate::queries::{ConnQueries, Queries};
 pub use crate::spaces::Mode;
+pub use crate::syntax::PlatformSyntax;
 pub use steve_modules::accounts::connections::{PAIR_KEY, Paired, Pairing};
 pub use tokio_util::sync::CancellationToken;
 
@@ -170,6 +174,10 @@ pub struct ChannelSide {
     pub history: Option<Arc<dyn HistoryRead>>,
     /// Declared, explicitly invoked connector operations on this account.
     pub connector: Option<Arc<dyn ConnectorTools>>,
+    /// Client deep-links for opening chats/messages in the platform's own app.
+    pub links: Option<Arc<dyn PlatformLinks>>,
+    /// Platform-specific syntax, threading and raw payload helpers.
+    pub syntax: Option<Arc<dyn PlatformSyntax>>,
 }
 
 impl ChannelSide {
@@ -183,7 +191,19 @@ impl ChannelSide {
             media: None,
             history: None,
             connector: None,
+            links: None,
+            syntax: None,
         }
+    }
+
+    pub fn links(mut self, l: Arc<dyn PlatformLinks>) -> Self {
+        self.links = Some(l);
+        self
+    }
+
+    pub fn syntax(mut self, s: Arc<dyn PlatformSyntax>) -> Self {
+        self.syntax = Some(s);
+        self
     }
 
     pub fn adapter(mut self, a: Arc<dyn ChannelAdapter>) -> Self {

@@ -1318,6 +1318,7 @@ impl Channels {
 fn badge(r: &mut impl steve_store::Read, space: &crate::spaces::SpaceRow) -> ChannelResult<Value> {
     let provider = steve_store::Systems(r).provider_label(&space.workspace_id, &space.system_id)?;
     let mode = crate::arbiter::mode_of(r, &space.workspace_id, &space.connection_id)?;
+    let link = crate::open_link::space_link(r, space)?;
     Ok(json!({
         "space": conv_space(&space.id),
         "space_id": space.id,
@@ -1331,8 +1332,9 @@ fn badge(r: &mut impl steve_store::Read, space: &crate::spaces::SpaceRow) -> Cha
         "mode": mode.code(),
         // the channel account that speaks there (its voice); `null` once disconnected
         "connection": (!space.connection_id.is_empty()).then_some(&space.connection_id),
-        // opens the chat in its platform's client (“在飞书中打开”); `null` without one
-        "open_url": crate::open_link::space_url(r, space)?,
+        // opens the chat in its platform's client; `null` without one
+        "open_url": link.as_ref().map(|l| l.url.as_str()),
+        "open_provider": link.as_ref().map(|l| l.provider.as_str()),
     }))
 }
 

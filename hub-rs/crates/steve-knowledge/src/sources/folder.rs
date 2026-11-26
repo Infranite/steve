@@ -29,8 +29,9 @@ use crate::service;
 use crate::sources::folder_node::{self, NodeFolders, NodeRead};
 use crate::sources::{is_builtin, source_json};
 use crate::state::Knowledge;
-use steve_store::knowledge::Documents;
-use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
+use steve_store::knowledge::{
+    DocRow, Documents, MemoryEntries, NewDoc, SourceRole, SourceRow, WriteMode,
+};
 
 /// `kb_docs.error` of a file over 2 MB.
 pub const TOO_BIG: &str = "文件超过 2 MB，没有索引";
@@ -71,6 +72,22 @@ impl FolderPolicy {
         let steve = std::path::absolute(&steve).unwrap_or(steve);
         Self::new(home, steve)
     }
+    /// Default personal context directory when no custom memory folder is configured:
+    /// `$STEVE_HOME/context` for the `default` workspace, `$STEVE_HOME/context/<ws>` for others.
+    pub fn default_context_dir(&self, ws: &str) -> PathBuf {
+        let base = self.steve_home.join("context");
+        if ws.is_empty() || ws == "default" {
+            base
+        } else {
+            base.join(ws)
+        }
+    }
+
+    /// True when canonical path `c` is `$STEVE_HOME/context` or a direct per-workspace child of it.
+    pub fn is_default_context_dir(&self, c: &Path) -> bool {
+        let base = canon(&self.steve_home.join("context"));
+        c == base || c.parent().is_some_and(|p| p == base)
+    }
 }
 
 /// Policy check on a Node-supplied [`steve_node_api::PathCheckResponse`] without touching local disk.
@@ -78,6 +95,18 @@ pub fn check_path_probe(
     policy: &FolderPolicy,
     raw: &str,
     probe: &steve_node_api::PathCheckResponse,
+) -> std::result::Result<PathBuf, String> {
+    check_path_probe_for_role(policy, raw, probe, SourceRole::Knowledge)
+}
+
+/// Node-probe path rules parameterized by [`SourceRole`]: `$STEVE_HOME/context` (and its
+/// per-workspace directory) is permitted ONLY for `SourceRole::Memory` sources, while
+/// `$STEVE_HOME` itself and every other internal subdirectory remain strictly refused.
+pub fn check_path_probe_for_role(
+    policy: &FolderPolicy,
+    raw: &str,
+    probe: &steve_node_api::PathCheckResponse,
+    role: SourceRole,
 ) -> std::result::Result<PathBuf, String> {
     let p = Path::new(raw.trim());
     if raw.trim().is_empty() || !p.is_absolute() {
@@ -97,15 +126,19 @@ pub fn check_path_probe(
         .as_deref()
         .map(PathBuf::from)
         .ok_or_else(|| steve_i18n::t!("knowledge.folder.missing"))?;
-    check_canonical_policy(policy, c)
+    check_canonical_policy(policy, c, role)
 }
 
 fn check_canonical_policy(
     policy: &FolderPolicy,
     c: PathBuf,
+    role: SourceRole,
 ) -> std::result::Result<PathBuf, String> {
     if c.parent().is_none() {
         return Err(steve_i18n::t!("knowledge.folder.root"));
+    }
+    if role == SourceRole::Memory && policy.is_default_context_dir(&c) {
+        return Ok(c);
     }
     if c == policy.home {
         return Err(steve_i18n::t!("knowledge.folder.whole_home"));
@@ -132,10 +165,21 @@ fn check_canonical_policy(
     Ok(c)
 }
 
-/// The path rules. Returns the canonical directory, or the reason it is refused (in the request's
-/// language: zh-CN in the background scan, which stores it).
+/// The path rules for a knowledge folder. Returns the canonical directory, or the reason it is
+/// refused (in the request's language: zh-CN in the background scan, which stores it).
 /// Overlap with existing folder sources is [`overlap`].
 pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathBuf, String> {
+    check_path_for_role(policy, raw, SourceRole::Knowledge)
+}
+
+/// Path rules parameterized by [`SourceRole`]: `$STEVE_HOME/context` (and its per-workspace
+/// directory) is permitted ONLY for `SourceRole::Memory` sources, while `$STEVE_HOME` itself and
+/// every other internal subdirectory remain strictly refused.
+pub fn check_path_for_role(
+    policy: &FolderPolicy,
+    raw: &str,
+    role: SourceRole,
+) -> std::result::Result<PathBuf, String> {
     let p = Path::new(raw.trim());
     if raw.trim().is_empty() || !p.is_absolute() {
         return Err(steve_i18n::t!("knowledge.folder.need_absolute"));
@@ -151,7 +195,7 @@ pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathB
         return Err(steve_i18n::t!("knowledge.folder.not_dir"));
     }
     let c = std::fs::canonicalize(p).map_err(|_| steve_i18n::t!("knowledge.folder.missing"))?;
-    check_canonical_policy(policy, c)
+    check_canonical_policy(policy, c, role)
 }
 
 /// The cloud-drive folders of `~/Library` (iCloud Drive, Dropbox, OneDrive, Google Drive …): a
@@ -542,13 +586,16 @@ async fn run(
         .map_err(|u| folder_node::unplaced(&u))?
         .ok_or_else(|| folder_node::OFFLINE.to_string())?;
     let policy = kb.folder_policy().clone();
+    let role = src.role;
     let root_str = root.to_string_lossy().into_owned();
     let canonical = match places
         .check_path(&root_str)
         .await
         .map_err(|u| folder_node::unplaced(&u))?
     {
-        Some(probe) => check_path_probe(&policy, &root_str, &probe).map_err(|r| refusal(&r))?,
+        Some(probe) => {
+            check_path_probe_for_role(&policy, &root_str, &probe, role).map_err(|r| refusal(&r))?
+        }
         None => return Err(folder_node::OFFLINE.to_string()),
     };
     if canonical != root {
@@ -699,6 +746,9 @@ fn reconcile(
                 rep.kept += 1;
                 continue;
             }
+            if src.role == SourceRole::Memory {
+                crate::memory_file::mark_file_deleted(tx, src, &d.r#ref, now)?;
+            }
             index::remove(tx, "chunk", &d.id)?;
             Documents(tx).set_doc_indexed(&d.id, "", 0, "deleted", None, now)?;
             rep.deleted += 1;
@@ -815,6 +865,10 @@ pub struct SourceBody {
     pub visibility: Option<Visibility>,
     #[serde(default)]
     pub level: Option<Level>,
+    #[serde(default)]
+    pub role: Option<SourceRole>,
+    #[serde(default)]
+    pub write_mode: Option<WriteMode>,
 }
 
 /// A folder source that passed the request and path checks, ready to insert. Shared by
@@ -828,6 +882,8 @@ pub struct NewFolder {
     pub exclude: Vec<String>,
     pub visibility: Visibility,
     pub level: Level,
+    pub role: SourceRole,
+    pub write_mode: WriteMode,
 }
 
 /// Checks a `POST /kb/sources` body: fields (`400 参数不对`) and the path rules
@@ -840,7 +896,9 @@ pub fn check_new(policy: &FolderPolicy, b: &SourceBody) -> ApiResult<NewFolder> 
     check_patterns(&mut ck, "include", b.include.as_ref(), 20);
     check_patterns(&mut ck, "exclude", b.exclude.as_ref(), 50);
     ck.done()?;
-    let path = check_path(policy, &b.path).map_err(|r| refused(&r))?;
+    let role = b.role.unwrap_or(SourceRole::Knowledge);
+    let write_mode = b.write_mode.unwrap_or(WriteMode::ReadOnly);
+    let path = check_path_for_role(policy, &b.path, role).map_err(|r| refused(&r))?;
     let include = match &b.include {
         Some(i) if !i.is_empty() => i.clone(),
         _ => default_include(),
@@ -853,6 +911,8 @@ pub fn check_new(policy: &FolderPolicy, b: &SourceBody) -> ApiResult<NewFolder> 
         exclude: b.exclude.clone().unwrap_or_default(),
         visibility: b.visibility.clone().unwrap_or(Visibility::Private),
         level: b.level.unwrap_or(Level::Conclusion),
+        role,
+        write_mode,
     })
 }
 
@@ -899,6 +959,8 @@ pub fn insert_folder(
         &config,
         &f.visibility,
         f.level,
+        f.role,
+        f.write_mode,
         me,
         now,
     )?;
@@ -949,6 +1011,10 @@ pub struct SourcePatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<Level>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<SourceRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_mode: Option<WriteMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude: Option<Vec<String>>,
@@ -963,6 +1029,8 @@ impl SourcePatch {
             paused: Some(s.paused),
             visibility: Some(s.visibility.clone()),
             level: Some(s.level),
+            role: Some(s.role),
+            write_mode: Some(s.write_mode),
             include: folder.then(|| str_list(&s.config, "include")),
             exclude: folder.then(|| str_list(&s.config, "exclude")),
         }
@@ -972,6 +1040,7 @@ impl SourcePatch {
 fn snapshot(s: &SourceRow) -> Value {
     json!({
         "name": s.name, "paused": s.paused, "visibility": s.visibility, "level": s.level,
+        "role": s.role, "write_mode": s.write_mode,
         "include": s.config.get("include"), "exclude": s.config.get("exclude"),
     })
 }
@@ -1043,6 +1112,12 @@ pub fn patch_tx(
     if let Some(l) = b.level {
         s.level = l;
     }
+    if let Some(role) = b.role {
+        s.role = role;
+    }
+    if let Some(wm) = b.write_mode {
+        s.write_mode = wm;
+    }
     if let Some(cfg) = s.config.as_object_mut() {
         if let Some(i) = &b.include {
             let i = if i.is_empty() {
@@ -1088,6 +1163,7 @@ pub fn patch_tx(
     let rescan = folder
         && !s.paused
         && (old.paused
+            || s.role != old.role
             || s.config.get("include") != old.config.get("include")
             || s.config.get("exclude") != old.config.get("exclude"));
     let s = Documents(tx)
@@ -1131,9 +1207,13 @@ pub fn delete_tx(tx: &mut W<'_>, who: &Caller, id: &str) -> ApiResult<()> {
     }
     let docs = Documents(tx).docs_of_source(&s.id)?;
     for d in &docs {
+        for entry in MemoryEntries(tx).by_source_path(&s.id, &d.r#ref)? {
+            index::remove(tx, "memory_entry", &entry.id)?;
+        }
         index::delete_doc(tx, &d.id)?;
         Documents(tx).delete_mark(&s.workspace_id, &front_mark(&d.id))?;
     }
+    MemoryEntries(tx).delete_by_source(&s.id)?;
     Documents(tx).delete_source_row(&s.id)?;
     tx.audit(
         &who.ws,
@@ -1204,5 +1284,31 @@ mod tests {
             "You can only add folders in your home folder or on an external disk"
         );
         assert_eq!(en.2, "Only the workspace owner can change built-in sources");
+    }
+
+    #[test]
+    fn check_path_probe_for_role_permits_context_only_for_memory() {
+        let p = FolderPolicy::new(
+            PathBuf::from("/srv/demo"),
+            PathBuf::from("/srv/demo/.steve"),
+        );
+        let ctx = "/srv/demo/.steve/context";
+        let probe = steve_node_api::PathCheckResponse {
+            exists: true,
+            is_dir: true,
+            canonical: Some(ctx.into()),
+        };
+        assert_eq!(
+            check_path_probe_for_role(&p, ctx, &probe, SourceRole::Memory),
+            Ok(PathBuf::from(ctx))
+        );
+        assert!(check_path_probe_for_role(&p, ctx, &probe, SourceRole::Knowledge).is_err());
+        let data = "/srv/demo/.steve/data";
+        let data_probe = steve_node_api::PathCheckResponse {
+            exists: true,
+            is_dir: true,
+            canonical: Some(data.into()),
+        };
+        assert!(check_path_probe_for_role(&p, data, &data_probe, SourceRole::Memory).is_err());
     }
 }

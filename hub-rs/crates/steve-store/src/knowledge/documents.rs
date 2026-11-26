@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use crate::base::{Level, ObjRef, Viewer, Visibility};
 use crate::contract::Row;
+use crate::knowledge::memory_files::{SourceRole, WriteMode};
 use crate::{Read, Result, W};
 
 const BUILTIN_KINDS: [&str; 4] = ["notes", "files", "mems", "bot_mems"];
@@ -30,6 +31,8 @@ pub struct SourceRow {
     pub created_by: String,
     pub created: i64,
     pub updated: i64,
+    pub role: SourceRole,
+    pub write_mode: WriteMode,
 }
 
 impl SourceRow {
@@ -51,6 +54,8 @@ impl SourceRow {
             created_by: r.get(13)?,
             created: r.get(14)?,
             updated: r.get(15)?,
+            role: SourceRole::from_db(&r.get::<String>(16)?),
+            write_mode: WriteMode::from_db(&r.get::<String>(17)?),
         })
     }
 }
@@ -156,7 +161,7 @@ pub struct DocFilter {
     pub limit: i64,
 }
 
-const SOURCE_COLUMNS: [&str; 16] = [
+const SOURCE_COLUMNS: [&str; 18] = [
     "id",
     "workspace_id",
     "kind",
@@ -173,6 +178,8 @@ const SOURCE_COLUMNS: [&str; 16] = [
     "created_by",
     "created",
     "updated",
+    "role",
+    "write_mode",
 ];
 const DOC_COLUMNS: [&str; 21] = [
     "id",
@@ -479,6 +486,18 @@ impl<C: Read> Documents<'_, C> {
         self.0.all(&q, SourceRow::from_row)
     }
 
+    pub fn memory_folder_sources(&mut self, ws: &str) -> Result<Vec<SourceRow>> {
+        self.0.all(
+            source_projection()
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("kind").eq("folder"))
+                .and_where(Expr::col("role").eq(SourceRole::Memory.code()))
+                .order_by("created", Order::Asc)
+                .order_by("id", Order::Asc),
+            SourceRow::from_row,
+        )
+    }
+
     pub fn docs_of_source(&mut self, source: &str) -> Result<Vec<DocRow>> {
         self.0.all(
             doc_projection()
@@ -500,6 +519,8 @@ impl Documents<'_, W<'_>> {
         config: &Value,
         visibility: &Visibility,
         level: Level,
+        role: SourceRole,
+        write_mode: WriteMode,
         by: &str,
         now: i64,
     ) -> Result<()> {
@@ -514,6 +535,8 @@ impl Documents<'_, W<'_>> {
                     "config",
                     "visibility",
                     "level",
+                    "role",
+                    "write_mode",
                     "created_by",
                     "created",
                     "updated",
@@ -526,6 +549,8 @@ impl Documents<'_, W<'_>> {
                     config.to_string().into(),
                     visibility.code().into(),
                     level.code().into(),
+                    role.code().into(),
+                    write_mode.code().into(),
                     by.into(),
                     now.into(),
                     now.into(),
@@ -692,6 +717,8 @@ impl Documents<'_, W<'_>> {
                 ("config", source.config.to_string().into()),
                 ("visibility", source.visibility.code().into()),
                 ("level", source.level.code().into()),
+                ("role", source.role.code().into()),
+                ("write_mode", source.write_mode.code().into()),
                 ("paused", i64::from(source.paused).into()),
                 ("revision", source.revision.into()),
                 ("updated", now.into()),

@@ -111,11 +111,23 @@ pub trait DraftHooks: Send + Sync {
 pub struct NoHooks;
 impl DraftHooks for NoHooks {}
 
+#[derive(Debug, Clone)]
+struct DraftEditDiff {
+    ws: String,
+    user: String,
+    draft_id: String,
+    subject: String,
+    before: String,
+    after: String,
+}
+
 struct LinkInner {
     clock: OnceLock<Arc<dyn Clock>>,
     hooks: OnceLock<Arc<dyn DraftHooks>>,
     /// Drafts whose approval answered 409 because the content changed: reopened with the new version.
     stale: Mutex<BTreeSet<String>>,
+    /// Owner edits made on AI-composed drafts at approval time, drained into unified memory ingest.
+    edited_diffs: Mutex<Vec<DraftEditDiff>>,
 }
 
 /// Shared between the decision handler (registered before `Modules` exists) and [`Mail`]. Cheap to
@@ -135,6 +147,7 @@ impl DraftLink {
             clock: OnceLock::new(),
             hooks: OnceLock::new(),
             stale: Mutex::new(BTreeSet::new()),
+            edited_diffs: Mutex::new(Vec::new()),
         }))
     }
 
@@ -171,6 +184,14 @@ impl DraftLink {
         std::mem::take(&mut *lock(&self.0.stale))
             .into_iter()
             .collect()
+    }
+
+    fn push_edited_diff(&self, diff: DraftEditDiff) {
+        lock(&self.0.edited_diffs).push(diff);
+    }
+
+    fn take_edited_diffs(&self) -> Vec<DraftEditDiff> {
+        std::mem::take(&mut *lock(&self.0.edited_diffs))
     }
 }
 
@@ -210,9 +231,20 @@ impl MailDraftHandler {
                     if cx.text.chars().count() > drafts::MAX_BODY_CHARS {
                         return Err(ApiError::invalid("text").into());
                     }
+                    let before_body = draft.body.clone();
                     draft.body = cx.text.to_string();
                     draft.content_hash = content_hash(&draft);
                     repo::update_draft_content(tx, &draft, now)?;
+                    if before_body.trim() != draft.body.trim() {
+                        self.0.push_edited_diff(DraftEditDiff {
+                            ws: cx.ws.to_string(),
+                            user: cx.actor.to_string(),
+                            draft_id: draft.id.clone(),
+                            subject: draft.subject.clone(),
+                            before: before_body,
+                            after: draft.body.clone(),
+                        });
+                    }
                 } else if content_hash(&draft) != draft.content_hash {
                     self.0.mark_stale(&draft.id);
                     return Err(ApiError::conflict(steve_i18n::t!("mail.draft.edited")).into());
@@ -1074,6 +1106,27 @@ impl Mail {
         self.repair_unknown_decisions()?;
         if let Err(e) = self.refresh_stale() {
             tracing::warn!(error = %e, "mail drafts: reopening approvals");
+        }
+        if let Some(kb) = self.0.kb.clone() {
+            for diff in self.0.link.take_edited_diffs() {
+                let label = format!("Mail draft: {}", diff.subject);
+                if let Err(e) = steve_knowledge::ingest::submit_draft_diff(
+                    &self.0.m,
+                    &kb,
+                    &diff.ws,
+                    &diff.user,
+                    "mail_draft",
+                    &diff.draft_id,
+                    &label,
+                    None,
+                    &diff.before,
+                    &diff.after,
+                )
+                .await
+                {
+                    tracing::debug!(draft = %diff.draft_id, "mail draft diff ingest skipped: {e}");
+                }
+            }
         }
         let due = self
             .0

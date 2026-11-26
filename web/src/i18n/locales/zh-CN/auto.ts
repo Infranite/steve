@@ -85,9 +85,6 @@ export default {
     footer: "账号在<accounts>账号</accounts>里授权；群和私聊在<channels>群聊与私聊</channels>里管理。",
     notConnected: "还没连接账号",
   },
-  bot: {
-    named: "{{name}} Bot",
-  },
   runStatus: {
     running: "运行中",
     waiting: "等待中",
@@ -207,6 +204,11 @@ export default {
     warnEdge: "「{{node}}」的连线「{{label}}」对不上任何分支，这条线永远走不到",
     warnBranch: "「{{node}}」的分支「{{label}}」没有连线，走到这里流程就停了",
     warnUnreachable: "「{{node}}」没有从触发器连过来，把它接进流程后才能保存",
+    conflictDupBranch: "规则冲突：「{{node}}」重复定义了分支「{{label}}」，后面的规则不会按预期区分",
+    conflictShadowed: "规则冲突：「{{node}}」的条件「{{earlier}}」会先命中并覆盖后面的「{{shadowed}}」",
+    conflictDupEdge: "规则冲突：「{{node}}」有多条同名出边「{{label}}」，运行时只会走第一条",
+    conflictDupDefaultEdge: "规则冲突：「{{node}}」有多条未命名出边，运行时只会走第一条",
+    conflictOverlap: "触发冲突：同事件源「{{source}}」下已启用的流程「{{flow}}」会同时命中同类事件",
     page: "流程",
     notFound: "流程不存在",
     notFoundSub: "可能已经删除。",

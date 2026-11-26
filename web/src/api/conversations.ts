@@ -4,8 +4,10 @@ import { modReq, type ConversationMessage } from "@/api"
 
 /** where a conversation lives: provider, space, group or DM */
 export type ConvBadge = { space: string; space_id: string; name: string; kind: string; dm: boolean; system: string; provider: string; has_external: boolean; member_count: number; mode: "bot" | "self"
-  /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none (newer Hubs) */
+  /** opens the chat in its platform's own client; null when it has none (newer Hubs) */
   open_url?: string | null
+  /** platform id owning `open_url` (newer Hubs) */
+  open_provider?: string | null
   /** the channel account that speaks there; null once disconnected (newer Hubs) */
   connection?: string | null }
 /** `unread`: new messages since you last opened it here, counted up to 100 (newer Hubs) */

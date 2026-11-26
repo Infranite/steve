@@ -105,7 +105,22 @@ export type RInstallProgress = { phase: string; done: number; total: number | nu
 /** a step of a remote install: `elapsed_ms` is up to now while it runs */
 export type RInstallStep = { kind: RInstallKind; at: number; text: string; ended?: number | null; elapsed_ms?: number; progress?: RInstallProgress | null; transfer_ms?: number; unpack_ms?: number }
 export type RTailcat = { available: boolean; enabled: boolean; running?: boolean; address?: string | null; hub_url?: string | null; port?: number; error?: string | null }
-/* `custom`: an adapter declared by the Hub's harness manifest, with `error` and `install_hint` when it has them */
+/** Strongly-typed adapter properties accepted by `POST /api/system/harnesses` (`steve-harness-spec::PropertiesPatch`). */
+export type AddHarnessModes = Partial<Record<"plan" | "ask" | "accept_edits" | "auto" | "full_access", string>>
+export type AddHarnessProperties = {
+  modes?: AddHarnessModes
+  nested_sandbox?: boolean
+  resume_cli?: string | null
+  probe_initialize?: boolean
+}
+export type AddHarnessInput = {
+  id: string
+  name?: string
+  command: string
+  args?: string[]
+  properties?: AddHarnessProperties
+}
+/** `custom`: an adapter declared by the Hub's harness manifest, with `error` and `install_hint` when it has them */
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
@@ -370,7 +385,7 @@ export const api = {
   settledDecisions: (since: number, limit = 100, before?: string) => get<PageOf<DecisionView>>(`/views/page${qs({ kind: "decision", status: "settled", since, limit, before })}`),
   editReplyDraft: (id: string, previous: string, text: string) => patch(`/decisions/${encodeURIComponent(id)}/draft`, { previous, text }),
   /** the link that opens a chat message in its platform's own client, asked when its card shows */
-  messageOpenUrl: (id: string) => get<{ url: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
+  messageOpenUrl: (id: string) => get<{ url: string | null; provider?: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
   shell: (signal?: AbortSignal) => get<Shell>("/shell", signal),
   summary: () => get<Summary>("/summary"),
   notifications: () => get<RNotice[]>("/notifications"),
@@ -467,7 +482,7 @@ export const api = {
   setHarnessAutoUpgrade: (node: string, body: import("./harness-update-status").SetHarnessAutoUpgrade) =>
     put<import("./harness-update-status").HarnessAutoUpgradePolicy>("/node-harness-updates/" + encodeURIComponent(node) + "/auto-upgrade", body),
   /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
-  addHarness: (p: { id: string; name?: string; command: string; args?: string[]; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
+  addHarness: (p: AddHarnessInput) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),
   /** `off`: this Hub does not listen for remote Nodes (STEVE_NODE_LISTEN=0, or a read-only copy) */
   nodes: () => get<{ nodes: RNode[]; off?: boolean; hub_version?: string }>("/nodes"),
