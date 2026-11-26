@@ -35,6 +35,9 @@ pub struct CoreConfig {
     pub default_models: HashMap<String, String>,
     /// `STEVE_REPO`: Steve's own repository (seed project, router hint).
     pub steve_repo: PathBuf,
+    /// `STEVE_MAINTAINER_WORKFLOW=1`: allow maintainer release-cutting (`ops/cut-release.py`).
+    /// Ordinary installations never enable this and receive `CoreError::MaintainerWorkflowRequired`.
+    pub maintainer_workflow: bool,
     /// `STEVE_DEBUG_ROUTE`: log the router's raw output.
     pub debug_route: bool,
     /// Delay before resuming interrupted turns after boot (3 s: after the listener is up).
@@ -101,6 +104,7 @@ impl CoreConfig {
                 "claude-opus-5-5".to_string(),
             )]),
             steve_repo: home.join("no-repo"),
+            maintainer_workflow: false,
             debug_route: false,
             resume_delay: Duration::from_secs(3),
             no_resume: false,

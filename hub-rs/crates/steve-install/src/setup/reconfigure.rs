@@ -495,7 +495,7 @@ fn confirm(input: &mut dyn Prompts, title: &str) -> Result<bool> {
     Ok(answer)
 }
 
-fn locks(home: &Path) -> Result<(File, File)> {
+fn locks(home: &Path) -> Result<(File, crate::release::ReleaseLock)> {
     let path = home.join(".setup.lock");
     let setup = OpenOptions::new()
         .read(true)

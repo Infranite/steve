@@ -1,9 +1,10 @@
 //! The local release runner reads its signing password from the installation's key store.
+use std::io::IsTerminal as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, ensure};
-use steve_modules::vault::keystore::{KeyStore, signing};
+use anyhow::{Context, Result, bail, ensure};
+use steve_modules::vault::keystore::{KeyStore, KeyStoreError, signing};
 use zeroize::Zeroizing;
 
 pub(super) fn provision(home: &Path, password: &str) -> Result<()> {
@@ -25,6 +26,108 @@ pub(super) fn password(store: Option<&dyn KeyStore>) -> Result<Option<Zeroizing<
         .transpose()
         .map(Option::flatten)
         .map_err(Into::into)
+}
+
+/// Resolve the signing keychain password for an explicit terminal maintenance command (such as
+/// `steve-hub --local-release upgrade-macos`). Respects `STEVE_VAULT_KEYSTORE` / `STEVE_VAULT_KEY_DIR`
+/// loaded from `<home>/steve.env`, tries `steve-keyhelper` first, and on macOS falls back to an
+/// interactive login-keychain read when running from an unsigned release tarball binary.
+pub(super) fn resolve_maintenance_password(
+    home: &Path,
+    vars: &impl Fn(&str) -> Option<String>,
+    stdin_password: Option<Zeroizing<String>>,
+) -> Result<Option<Zeroizing<String>>> {
+    let vault_service = vault_service_for_home(home);
+    resolve_maintenance_password_with(
+        home,
+        vars,
+        stdin_password,
+        std::io::stdin().is_terminal(),
+        |notice| {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "{notice}");
+        },
+        || {
+            #[cfg(target_os = "macos")]
+            {
+                let configured = vars("STEVE_KEYHELPER");
+                let Some(helper) =
+                    steve_modules::vault::keystore::HelperStore::find(home, configured.as_deref())
+                else {
+                    return Ok(None);
+                };
+                signing::get(&helper)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Ok(None)
+            }
+        },
+        || {
+            #[cfg(target_os = "macos")]
+            {
+                signing::get_interactive_keychain(&vault_service)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = &vault_service;
+                Ok(None)
+            }
+        },
+    )
+}
+
+fn vault_service_for_home(home: &Path) -> String {
+    super::read::<serde_json::Value>(&home.join("signing/identity.json"))
+        .ok()
+        .and_then(|v| v["vault_service"].as_str().map(str::to_owned))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| steve_modules::vault::keystore::SERVICE.to_owned())
+}
+
+pub(super) fn resolve_maintenance_password_with(
+    home: &Path,
+    vars: &impl Fn(&str) -> Option<String>,
+    stdin_password: Option<Zeroizing<String>>,
+    is_tty: bool,
+    on_interactive_prompt: impl FnOnce(&str),
+    helper_lookup: impl FnOnce() -> Result<Option<Zeroizing<String>>, KeyStoreError>,
+    interactive_lookup: impl FnOnce() -> Result<Option<Zeroizing<String>>, KeyStoreError>,
+) -> Result<Option<Zeroizing<String>>> {
+    if let Some(pass) = stdin_password {
+        let normalized = signing::normalize_stdin_password(&pass);
+        ensure!(
+            !normalized.is_empty(),
+            "--keychain-pass-stdin received an empty password"
+        );
+        return Ok(Some(normalized));
+    }
+    if !home.join("signing/identity.json").is_file() {
+        return Ok(None);
+    }
+    if let Some(kind) = vars("STEVE_VAULT_KEYSTORE")
+        && matches!(kind.trim(), "dir" | "file")
+    {
+        let store = steve_modules::vault::keystore::from_env(home, vars)
+            .context("open installation key store configured in steve.env")?;
+        return signing::get(store.as_ref()).map_err(Into::into);
+    }
+    if let Ok(Some(pass)) = helper_lookup() {
+        return Ok(Some(pass));
+    }
+    ensure!(
+        is_tty,
+        "interactive macOS Keychain access requires a terminal (stdin is not a TTY); run in Terminal or pipe the signing password with --keychain-pass-stdin"
+    );
+    let notice = steve_i18n::t!("hub.upgrade.interactive_keychain_notice");
+    on_interactive_prompt(&notice);
+    match interactive_lookup() {
+        Ok(Some(pass)) => Ok(Some(pass)),
+        Ok(None) => Ok(None),
+        Err(err) => bail!(
+            "cannot read signing keychain password interactively ({err}); run in a macOS GUI session or pass --keychain-pass-stdin"
+        ),
+    }
 }
 
 /// The vault's own key directory, when the vault keeps its keys in one (`STEVE_VAULT_KEYSTORE=dir`

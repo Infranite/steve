@@ -167,7 +167,7 @@ try {
 
   // Installations Steve doesn't switch itself: this machine's commands instead of a button, then a read-back.
   const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"
-  const localReason = "这台机器的 Hub 是本机签名构建（ops/local-release.py），靠本机签名身份和 steve-keyhelper 读取 Keychain 里的密钥。"
+  const localReason = "这台机器的 Hub 使用本机签名身份，靠本机签名身份和 steve-keyhelper 读取 Keychain 里的密钥。"
   state = { ...state, current: { hub: "v1.1.0", web: "v1.1.0" }, capability: { managed: false, can_execute: false, reason: localReason }, install: { kind: "local_release", home, release: "1.1.0-local-51826fc", repo }, check: check("available"), operation: null, backup: null }
   await page.reload(); await page.locator('[data-upgrade-guide="local_release"]').waitFor()
   assert.equal(await page.locator("[data-upgrade-execute]").count(), 0)
@@ -181,7 +181,7 @@ try {
   /* the details open with a height transition (visual system v2): read the commands once they are laid out */
   await page.waitForFunction(() => [...document.querySelectorAll("[data-upgrade-services] [data-upgrade-command] pre")].every((e) => e.innerText.trim()))
   const commands = await page.locator("[data-upgrade-services] [data-upgrade-command] pre").allInnerTexts()
-  assert.deepEqual(commands.map(c => c.trim()), ["status", "doctor"].map(action => `python3 ${home}/current/ops/steve-service.py hub ${action} --home ${home}`))
+  assert.deepEqual(commands.map(c => c.trim()), ["status", "doctor"].map(action => `steve hub ${action} --home ${home}`))
   assert.match(await page.locator("[data-upgrade-backup]").innerText(), /\/Users\/example\/\.steve\/backups/)
   assert.match(await page.locator("[data-upgrade-recovery]").innerText(), /新版本和数据库会保留/)
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "commands wrap on a phone")
@@ -229,9 +229,9 @@ try {
   await phase("rolled_back")
   const rolled = await page.locator('[data-upgrade-recovery="rolled_back"]').innerText()
   assert.match(rolled, /a{64}/); assert.match(rolled, /已自动恢复/); assert.match(rolled, /releases\/1\.1\.0/)
-  state.operation = { ...state.operation, phase: "failed", error: "升级已提交，业务启动失败；保留新数据库，禁止自动回滚：boom" }
+  state.operation = { ...state.operation, phase: "failed", error_code: "committed_startup_failed", error: "升级已提交，业务启动失败；保留新数据库，禁止自动回滚：boom" }
   await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "按设计不自动回退" }).waitFor()
-  state.operation = { ...state.operation, phase: "failed", error: "维护排空超时；当前版本保留，尚未停止或切换" }; state.backup = { snapshot_id: null, dir: `${home}/backups/restic` }
+  state.operation = { ...state.operation, phase: "failed", error_code: null, error: "维护排空超时；当前版本保留，尚未停止或切换" }; state.backup = { snapshot_id: null, dir: `${home}/backups/restic` }
   await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "旧版本和数据库没有改动" }).waitFor()
   // success is only claimed once the Hub, the served web, this page and health agree
   state.operation = { ...state.operation, phase: "succeeded", error: null }; state.current = { hub: "v1.2.0", web: "v1.2.0" }; state.check = check("up_to_date")
@@ -308,9 +308,9 @@ try {
   const back = await page.locator('[data-upgrade-recovery="rolled_back"]').innerText()
   assert.match(back, /b{64}/); assert.match(back, /已自动恢复/); assert.match(back, /upgrade-1\.2\.0-up_local\.log/)
   await page.locator("[data-upgrade-retry]").waitFor()
-  state.operation = localOp("failed", { error: `升级已提交：1.2.0 启动后没有正常起来；发布前的备份在 ${home}/backups/pre-1.2.0.sqlite3` })
+  state.operation = localOp("failed", { error_code: "committed_startup_failed", error: `升级已提交：1.2.0 启动后没有正常起来；发布前的备份在 ${home}/backups/pre-1.2.0.sqlite3` })
   await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "按设计不自动回退" }).waitFor()
-  state.operation = localOp("failed", { error: "发行包校验失败，当前版本没有改动。" }); state.backup = { snapshot_id: null, dir: `${home}/backups/restic` }
+  state.operation = localOp("failed", { error_code: null, error: "发行包校验失败，当前版本没有改动。" }); state.backup = { snapshot_id: null, dir: `${home}/backups/restic` }
   await page.locator('[data-upgrade-recovery="failed"]').filter({ hasText: "旧版本和数据库没有改动" }).waitFor()
   await page.getByText("发行包校验失败", { exact: false }).first().waitFor()
   state.operation = localOp("succeeded"); state.current = { hub: "1.2.0", web: "1.2.0" }; state.check = check("up_to_date")
@@ -318,6 +318,58 @@ try {
   await page.goto(base + "/test/fixtures/updates.html?web=1.2.0"); await phase("succeeded")
   await page.locator('[data-upgrade-verify="passed"]').waitFor({ timeout: 8000 })
   assert.equal(await page.locator("[data-sidebar-hub-update]").count(), 0, "no notice once nothing newer is known")
+  // Legacy macOS launchd service: no one-click button; simultaneously shows #602 latest upgrade record/history AND the one-shot Rust migration command.
+  state = {
+    repository: "Infranite/steve",
+    current: { hub: "0.12.0", web: "0.12.0" },
+    capability: {
+      managed: false,
+      can_execute: false,
+      owner: true,
+      reason: "这台 macOS 上的 Hub 仍通过旧版脚本包装 plist 启动。",
+      reason_code: "legacy_macos_service",
+    },
+    install: { kind: "legacy_macos_service", home, legacy_service: "run_sh" },
+    check: check("available"),
+    operation: {
+      id: "macos-upgrade-0.13.0-20261126-220000",
+      idempotency_key: "",
+      version: "0.13.0",
+      phase: "rolled_back",
+      source: "terminal_deploy",
+      created_at: Date.now() - 60_000,
+      updated_at: Date.now() - 30_000,
+      requested_by: "terminal",
+      error: "probe failed: database busy",
+      previous: `${home}/releases/0.12.0`,
+      previous_version: "0.12.0",
+      target: `${home}/releases/0.13.0-aaaaaaaa`,
+    },
+    history: [{
+      id: "up_old_failed",
+      idempotency_key: "web-upgrade:Infranite/steve:0.13.0",
+      version: "0.13.0",
+      phase: "failed",
+      source: "in_app",
+      created_at: Date.now() - 7200_000,
+      updated_at: Date.now() - 7100_000,
+      requested_by: "owner",
+      error: "legacy wrapper cannot self-upgrade",
+      previous: `${home}/releases/0.12.0`,
+      previous_version: "0.12.0",
+      target: null,
+    }],
+    backup: null,
+  }
+  await page.reload()
+  await page.locator('[data-upgrade-unavailable][data-install-kind="legacy_macos_service"]').waitFor()
+  assert.equal(await page.locator("[data-upgrade-execute]").count(), 0, "legacy macOS service never offers one-click upgrade")
+  await page.locator('[data-upgrade-phase="rolled_back"][data-upgrade-source="terminal_deploy"]').waitFor()
+  assert.equal(await page.locator("[data-upgrade-record-title]").innerText(), "升级到 0.13.0 失败，已恢复到 0.12.0")
+  await page.locator("[data-upgrade-history] summary").waitFor()
+  await page.locator('[data-upgrade-guide="legacy_macos_service"]').waitFor()
+  const macosCmd = await page.locator('[data-upgrade-guide="legacy_macos_service"] [data-upgrade-command]').first().innerText()
+  assert.match(macosCmd, /--local-release upgrade-macos --home/)
   // someone else: no check of their own, no button
   state.capability = { managed: false, can_execute: false, owner: false, reason: "仅实例管理员可批准和执行升级" }; state.check = null; state.operation = null; state.history = []
   const checksNow = checks

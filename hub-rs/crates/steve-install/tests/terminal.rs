@@ -181,13 +181,7 @@ fn installer(root: &Path) -> PathBuf {
         );
     }
     // These cannot initialize a keychain or start a service even if cancellation regresses.
-    for relative in [
-        "bin/steve-keyhelper",
-        "bin/restic",
-        "ops/run.sh",
-        "ops/sign-setup.sh",
-        "ops/release-lib.sh",
-    ] {
+    for relative in ["bin/steve-keyhelper", "bin/restic"] {
         executable(&package.join(relative), "#!/bin/sh\nexit 95\n");
     }
     fs::write(package.join("bin/restic.LICENSE"), "BSD-2-Clause\n").unwrap();

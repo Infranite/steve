@@ -19,6 +19,8 @@ The full test suite runs in CI, not on your machine: locally, run the checks of 
 python3 scripts/test-public-boundary.py
 python3 scripts/check-public-boundary.py
 python3 ops/test-cut-release.py
+python3 ops/test-check-migration-lock.py
+bash ops/check-migration-lock.sh --offline
 cargo test --locked --manifest-path hub-rs/Cargo.toml -p steve-install
 python3 packaging/homebrew/test-sync.py
 python3 ops/cut-release.py lint
@@ -115,7 +117,7 @@ Versions and release notes are generated automatically from commits at release t
     ```
 
     Direct commits without a merged PR use their commit subject.
-  - CI rejects pull requests whose title does not follow this format, whose release trailers are empty, whose commits contain an `Upgrade:` trailer while the PR description has none (except `chore(integration)` carrier PRs), whose `## Release note` section contains a `Checks:` paragraph or a signature/attribution line (move them under a separate heading such as `## Checks`), or that add/modify files under `docs/releases/` (except a `chore(release): vX.Y.Z` release PR adding `docs/releases/X.Y.Z.md` alone), via `ops/cut-release.py lint --github-event`. Locally, `python3 ops/cut-release.py lint` enforces the same rules on the current branch (use `--range A..B` to check any commit range, or `--pr-title`/`--pr-body` with optional `--base`/`--range` to check a PR description against its commits).
+  - CI rejects pull requests whose title does not follow this format, whose description lacks an issue link (`Closes #N`, `Fixes #N`, or `Resolves #N` outside fenced code blocks; `chore(release):` PRs are exempt), whose release trailers are empty, whose commits contain an `Upgrade:` trailer while the PR description has none (except `chore(integration)` carrier PRs), whose `## Release note` section contains a `Checks:` paragraph or a signature/attribution line (move them under a separate heading such as `## Checks`), or that add, modify, or delete files under `docs/releases/` (except a `chore(release): vX.Y.Z` release PR adding `docs/releases/X.Y.Z.md` alone), via `ops/cut-release.py lint --github-event` (re-run on PR `edited` events as well). Locally, `python3 ops/cut-release.py lint` enforces the same rules on the current branch (use `--range A..B` to check any commit range, or `--pr-title`/`--pr-body` with optional `--base`/`--range` to check a PR description against its commits).
 - **Automatic version calculation and release notes.**
   - `ops/cut-release.py` lists merged pull requests from GitHub via GraphQL over the release range's time window, keeps those whose `mergeCommit.oid` lies in the release range since the highest `vX.Y.Z` tag (covering both direct merges and sub-PRs sharing an integration PR's merge commit), uses live PR titles and descriptions from GitHub (so editing a merged PR's title or description on GitHub takes effect immediately), and computes the next version automatically across all resolved PRs and direct commits:
     - `!` or `BREAKING CHANGE:` → **MAJOR** after `1.0`, **MINOR** before `1.0`;

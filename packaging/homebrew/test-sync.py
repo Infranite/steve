@@ -21,7 +21,7 @@ API = "https://api.github.com/repos/Infranite/steve/"
 
 
 def bundle(manifest, change=None, target="aarch64-apple-darwin"):
-    files = {name: (b"#!/bin/sh\nexit 0\n" if name.startswith(("bin/", "ops/")) and name != "bin/restic.LICENSE" else b"fixture\n")
+    files = {name: (b"#!/bin/sh\nexit 0\n" if name.startswith("bin/") and name != "bin/restic.LICENSE" else b"fixture\n")
              for name in sync.REQUIRED}
     files["release.json"] = sync.json_bytes(dict(manifest, assets=[]))
     files["bin/steve"] = (b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" + b"\0" * 24
@@ -33,7 +33,7 @@ def bundle(manifest, change=None, target="aarch64-apple-darwin"):
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
         for name, data in sorted(files.items()):
             item = tarfile.TarInfo(name)
-            item.mode = 0o755 if name.startswith(("bin/", "ops/")) and name != "bin/restic.LICENSE" else 0o644
+            item.mode = 0o755 if name.startswith("bin/") and name != "bin/restic.LICENSE" else 0o644
             if isinstance(data, tarfile.TarInfo):
                 archive.addfile(data)
             else:
@@ -205,7 +205,9 @@ class SyncTests(unittest.TestCase):
                  lambda files: files.pop("bin/restic.LICENSE"), wrong_identity, symlink,
                  lambda files: files.update({"bin/steve": b"#!/usr/bin/env python3\n"}),
                  lambda files: files.update({"bin/steve": b"\x7fELF\x02\x01" + b"\0" * 12 + b"\xb7\x00"}),
-                 lambda files: files.update({"ops/upgrade.py": b"legacy bridge must stay in runtime\n"}),
+                 lambda files: files.update({"ops/upgrade.py": b"legacy bridge forbidden\n"}),
+                 lambda files: files.update({"ops/run.sh": b"#!/bin/sh\nexit 0\n"}),
+                 lambda files: files.update({"web/dist/helper.sh": b"#!/bin/sh\nexit 0\n"}),
                  lambda files: files.update({"../escape": b"outside"})]
         for change in cases:
             with self.subTest(change=change):

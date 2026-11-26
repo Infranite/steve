@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { CHECK_RATE_LIMITED_STALE_MS, CHECK_TRANSIENT_STALE_MS, checkStale, committedFailure, downloadPercent, enableOneClick, operationTitle, restoredVersion, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
+import { CHECK_RATE_LIMITED_STALE_MS, CHECK_TRANSIENT_STALE_MS, checkStale, committedFailure, downloadPercent, enableOneClick, installLabel, macosConfirmCommand, macosOneShotUpgradeCommand, macosRollbackCommand, operationTitle, restoredVersion, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
 import i18n from "../src/i18n/index.ts"
 
 const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"
@@ -13,22 +13,29 @@ test("a local signing identity uses release packages and has an offline diagnost
   assert.match(g.backup, /\/Users\/example\/\.steve\/backups/)
   assert.match(g.recovery.join("\n"), /新版本和数据库会保留/)
   assert.deepEqual(serviceCommands("/opt/Steve data"), [
-    "python3 '/opt/Steve data/current/ops/steve-service.py' hub status --home '/opt/Steve data'",
-    "python3 '/opt/Steve data/current/ops/steve-service.py' hub doctor --home '/opt/Steve data'",
+    "steve hub status --home '/opt/Steve data'",
+    "steve hub doctor --home '/opt/Steve data'",
   ])
   assert.equal(g.steps.at(-1).title, "回到本页核对")
 })
 
-test("each other installation gets its own way, never another's script", () => {
+test("each other installation gets its own way, never legacy scripts", () => {
   const script = upgradeGuide({ kind: "release_script", home, repo }, "0.2.20")
-  assert.ok(script.steps.some(s => s.command === `zsh ${repo}/ops/release.sh main`))
-  assert.match(script.recovery.join("\n"), /release\.sh --rollback/)
+  assert.ok(script.steps.some(s => s.command === `steve hub doctor --home ${home}`))
+  assert.ok(script.steps.some(s => s.command === `steve setup --home ${home}`))
+  assert.match(script.recovery.join("\n"), /steve hub restart --home/)
   const source = upgradeGuide({ kind: "source", home, repo }, "0.2.20")
   assert.match(source.steps[0].command, /steve-hub --admin backup --reason pre-upgrade/, "source runs back up before anything else")
   assert.ok(source.steps.some(s => s.command?.includes("git -C /Users/example/Agents/steve checkout v0.2.20")))
   const external = upgradeGuide({ kind: "external", home }, "0.2.20")
   assert.equal(external.steps.filter(s => s.command).length, 0, "nothing to run when Steve can't tell who owns the files")
-  for (const g of [script, source, external]) assert.ok(!JSON.stringify(g).includes("local-release.py"))
+  for (const g of [script, source, external]) {
+    const serialized = JSON.stringify(g)
+    assert.ok(!serialized.includes("local-release.py"))
+    assert.ok(!serialized.includes("ops/release.sh"))
+    assert.ok(!serialized.includes("steve-service.py"))
+    assert.ok(!serialized.includes("run-managed.sh"))
+  }
 })
 
 test("progress follows the supervisor's journal and ends with this page's own check", () => {
@@ -65,7 +72,8 @@ test("only measured download bytes supply a percentage", () => {
   assert.equal(stageLabel("staging"), "下载并校验")
   assert.equal(stageLabel("backingUp"), "备份数据库")
   assert.equal(enableOneClick("local_release"), undefined, "no Keychain migration asked of a local build any more")
-  assert.match(enableOneClick("release_script"), /run-managed\.sh/)
+  assert.match(enableOneClick("release_script"), /steve setup/)
+  assert.doesNotMatch(enableOneClick("release_script"), /run-managed\.sh/)
 })
 
 test("the instance manager's page checks by itself when the last answer is missing or old, never during an upgrade", () => {
@@ -81,11 +89,32 @@ test("the instance manager's page checks by itself when the last answer is missi
   assert.equal(checkStale({ capability, check: null, operation: { phase: "failed" } }, now), true)
 })
 
-test("a failure after the switch is recognised in either language", () => {
-  assert.equal(committedFailure({ phase: "failed", error: "升级已提交：0.3.0 启动后没有正常起来" }), true)
-  assert.equal(committedFailure({ phase: "failed", error: "Upgrade committed, but the new version didn't come up" }), true)
-  assert.equal(committedFailure({ phase: "failed", error: "部署在切换前停止" }), false)
-  assert.equal(committedFailure({ phase: "rolled_back", error: "升级已提交" }), false)
+test("a failure after the switch is recognised by typed error_code regardless of error wording", () => {
+  assert.equal(committedFailure({ phase: "failed", error: "any localized text", error_code: "committed_startup_failed" }), true)
+  assert.equal(committedFailure({ phase: "failed", error: "Upgrade committed without code" }), false)
+  assert.equal(committedFailure({ phase: "failed", error: "部署在切换前停止", error_code: null }), false)
+  assert.equal(committedFailure({ phase: "rolled_back", error: "x", error_code: "committed_startup_failed" }), false)
+})
+
+test("legacy macOS launchd service provides the Rust one-shot upgrade command and manual rollback", () => {
+  assert.ok(installLabel("legacy_macos_service").length > 0)
+  const gWithVer = upgradeGuide({ kind: "legacy_macos_service", home, legacy_service: "run_sh" }, "v0.13.0", "Infranite/steve")
+  assert.equal(
+    gWithVer.steps[0].command,
+    macosOneShotUpgradeCommand(home, "v0.13.0", "Infranite/steve"),
+  )
+  assert.match(gWithVer.steps[0].command, /\/tmp\/steve-upgrade\/bin\/steve-hub --local-release upgrade-macos --home \/Users\/example\/\.steve/)
+  assert.match(gWithVer.steps[0].command, /releases\/download\/v0\.13\.0\/steve-0\.13\.0-aarch64-apple-darwin\.tar\.gz/)
+  assert.equal(gWithVer.steps.length, 2)
+  assert.ok(gWithVer.recovery.join("\n").includes(macosRollbackCommand(home)))
+  assert.ok(gWithVer.recovery.join("\n").includes(macosConfirmCommand(home)))
+  const gUnchecked = upgradeGuide({ kind: "legacy_macos_service", home, legacy_service: "run_managed_sh" }, "")
+  assert.match(gUnchecked.steps[0].command, /brew upgrade steve && "\$\(brew --prefix steve\)\/libexec\/bin\/steve-hub" --local-release upgrade-macos --home \/Users\/example\/\.steve/)
+  assert.equal(gUnchecked.steps.length, 1)
+  const serialized = JSON.stringify([gWithVer, gUnchecked])
+  assert.ok(!serialized.includes("ops/run.sh"))
+  assert.ok(!serialized.includes("run-managed.sh"))
+  assert.ok(!serialized.includes("steve-service.py"))
 })
 
 test("transient unavailable checks become stale sooner than healthy checks", () => {
