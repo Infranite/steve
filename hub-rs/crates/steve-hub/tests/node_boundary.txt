@@ -112,7 +112,7 @@ Spawn	steve-core/src/release.rs	1
 Spawn	steve-core/src/workspace.rs	1
 Spawn	steve-github/src/push.rs	1
 Spawn	steve-github/src/repos.rs	1
-Spawn	steve-hub/src/backup/engine.rs	1
+Spawn	steve-hub/src/backup/engine.rs	14
 Spawn	steve-hub/src/config.rs	1
 Spawn	steve-hub/src/nodes/install.rs	2
 Spawn	steve-hub/src/nodes/tailcat.rs	2

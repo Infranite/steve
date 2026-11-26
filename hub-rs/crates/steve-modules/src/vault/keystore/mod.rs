@@ -26,6 +26,7 @@ pub mod signing;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(unix)]
 pub use dir::DirKeyStore;
@@ -63,6 +64,9 @@ pub enum KeyStoreError {
     /// Refused to start (`FileKeyStore` for `~/.steve`, unknown backend, no store on this system).
     #[error("{0}")]
     Refused(String),
+    /// The external key store helper did not finish within its deadline and its process group was killed.
+    #[error("key store timed out after {:.1}s", .0.as_secs_f64())]
+    TimedOut(Duration),
     /// Anything else: an OS status code or an I/O error, never the value.
     #[error("key store: {0}")]
     Other(String),

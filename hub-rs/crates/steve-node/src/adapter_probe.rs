@@ -20,6 +20,11 @@ use steve_node_api::{
 const TTL: Duration = Duration::from_secs(1800);
 const INITIALIZE: Duration = Duration::from_secs(20);
 const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(LOGIN_SHELL_PROBE_TIMEOUT_SECS);
+/// Grace period after the shell exits to drain stdout before killing lingering `.zshrc`
+/// background descendants holding the pipe open.
+const SHELL_PROBE_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(200);
+/// Upper bound to reap the shell or finish pipe EOF after sending `SIGKILL` to its process group.
+const SHELL_PROBE_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoginShellEnv {
@@ -56,6 +61,17 @@ fn resolve_user_login_shell() -> String {
     "/bin/sh".to_owned()
 }
 
+#[cfg(unix)]
+fn kill_probe_group(pid: Option<u32>) {
+    if let Some(pid) = pid.filter(|&p| p > 1) {
+        // SAFETY: the probe shell runs in its own detached session/process group (`setsid()`),
+        // so `-pid` kills only the probe shell and any descendants it spawned.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+}
+
 async fn run_shell_probe(
     shell: &str,
     args: &[&str],
@@ -76,7 +92,7 @@ async fn run_shell_probe(
     {
         // Start a detached session (`setsid`) so interactive shells have no controlling `/dev/tty`
         // (avoiding SIGTTIN/SIGTTOU stops or `/dev/tty` prompts) while still owning a dedicated
-        // process group (`pgid == pid`) that we can SIGKILL as a whole on timeout.
+        // process group (`pgid == pid`) that we can SIGKILL as a whole on timeout or pipe cleanup.
         // SAFETY: `libc::setsid` is async-signal-safe per POSIX.
         unsafe {
             cmd.pre_exec(|| {
@@ -90,7 +106,7 @@ async fn run_shell_probe(
     let mut child = cmd.spawn().ok()?;
     let pid = child.id();
     let mut stdout_pipe = child.stdout.take()?;
-    let read_task = tokio::spawn(async move {
+    let mut read_task = tokio::spawn(async move {
         use tokio::io::AsyncReadExt as _;
         let mut buf = Vec::new();
         let _ = stdout_pipe.read_to_end(&mut buf).await;
@@ -100,24 +116,46 @@ async fn run_shell_probe(
         Ok(Ok(status)) => status,
         _ => {
             #[cfg(unix)]
-            if let Some(pid) = pid {
-                // SAFETY: child runs in its own process group (`process_group(0)`), so `-pid`
-                // terminates only the timed-out shell probe and its descendants.
-                unsafe {
-                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-                }
-            }
+            kill_probe_group(pid);
             let _ = child.kill().await;
-            let _ = child.wait().await;
+            let _ = tokio::time::timeout(SHELL_PROBE_KILL_REAP_TIMEOUT, child.wait()).await;
             read_task.abort();
             return None;
         }
     };
     if !status.success() {
+        #[cfg(unix)]
+        kill_probe_group(pid);
         read_task.abort();
         return None;
     }
-    let stdout = read_task.await.ok()?;
+    let stdout = match tokio::time::timeout(SHELL_PROBE_PIPE_DRAIN_GRACE, &mut read_task).await {
+        Ok(Ok(bytes)) => {
+            // Even when stdout closed cleanly, terminate any detached background helpers launched
+            // by `.zshrc` so probe sessions never leak processes.
+            #[cfg(unix)]
+            kill_probe_group(pid);
+            bytes
+        }
+        Ok(Err(_)) => {
+            #[cfg(unix)]
+            kill_probe_group(pid);
+            return None;
+        }
+        Err(_) => {
+            // A background grandchild spawned by `.zshrc` inherited stdout and prevented EOF.
+            // Kill the probe's process group so the pipe closes and we can collect the captured PATH.
+            #[cfg(unix)]
+            kill_probe_group(pid);
+            match tokio::time::timeout(SHELL_PROBE_KILL_REAP_TIMEOUT, &mut read_task).await {
+                Ok(Ok(bytes)) => bytes,
+                _ => {
+                    read_task.abort();
+                    return None;
+                }
+            }
+        }
+    };
     extract_login_shell_path(&String::from_utf8_lossy(&stdout))
 }
 
@@ -683,5 +721,50 @@ exec /bin/sh -c "$script"
             "expected login_bin from .zprofile fallback in {:?}",
             fallback.path
         );
+
+        // Background grandchild launched by .zshrc inheriting stdout must not hang read_task or survive.
+        let bg_pid_file = dir.path().join("zshrc-bg.pid");
+        std::fs::write(
+            zdotdir.join(".zshrc"),
+            format!(
+                "/bin/sleep 60 & printf '%s' \"$!\" > '{}'\nexport PATH=\"{}:$PATH\"\n",
+                bg_pid_file.display(),
+                rc_bin.display()
+            ),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let bg_probed =
+            probe_shell_env_for(fake_zsh.to_str().unwrap(), &env, LOGIN_SHELL_PROBE_TIMEOUT)
+                .await
+                .expect("background grandchild holding stdout must not hang shell probe");
+        assert_eq!(
+            steve_acp::which_in("agy", Some(OsStr::new(&bg_probed.path))),
+            Some(agy),
+            "expected agy from .zshrc despite background child: {:?}",
+            bg_probed.path
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "grandchild pipe cleanup must return promptly, took {:?}",
+            started.elapsed()
+        );
+        #[cfg(unix)]
+        {
+            let bg_pid: libc::pid_t = std::fs::read_to_string(&bg_pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while unsafe { libc::kill(bg_pid, 0) } == 0 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                unsafe { libc::kill(bg_pid, 0) },
+                -1,
+                "background .zshrc child {bg_pid} survived shell probe"
+            );
+        }
     }
 }

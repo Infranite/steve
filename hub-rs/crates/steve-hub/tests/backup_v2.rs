@@ -1,13 +1,22 @@
-//! The real Hub CLI with the verified release engine staged next to it by CI.
+//! The real Hub CLI with the verified release engine resolved deterministically via
+//! `STEVE_BACKUP_ENGINE` (or build-time dev discovery), never via runtime `PATH`.
 use std::{
     fs,
+    io::Read,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
-    process::Output,
+    process::{Output, Stdio},
+    sync::mpsc,
+    time::{Duration, Instant},
 };
 use steve_runtime::testkit::process::Command;
 use steve_store::testkit::hub::backup as fixture;
 use steve_types::backup::{BackupPurpose, BackupReceipt};
+
+/// Upper bound for a single `steve-hub --admin` invocation in this test suite.
+const BACKUP_CLI_TIMEOUT: Duration = Duration::from_secs(60);
+const BACKUP_CLI_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const BACKUP_CLI_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 fn home() -> tempfile::TempDir {
     let home = tempfile::tempdir_in("/tmp").unwrap();
@@ -35,6 +44,9 @@ fn hub_command(home: &Path) -> Command {
         .env("STEVE_NODE_LISTEN", "0")
         .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false");
+    if let Some(engine) = std::env::var_os("STEVE_BACKUP_ENGINE").filter(|v| !v.is_empty()) {
+        command.env("STEVE_BACKUP_ENGINE", engine);
+    }
     command
 }
 
@@ -42,6 +54,62 @@ fn command(home: &Path) -> Command {
     let mut command = hub_command(home);
     command.arg("--admin");
     command
+}
+
+fn run_bounded(mut cmd: Command, label: &str) -> Output {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    let mut stdout_pipe = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().unwrap();
+    let (out_tx, out_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        let _ = out_tx.send(buf);
+    });
+    let (err_tx, err_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        let _ = err_tx.send(buf);
+    });
+    let started = Instant::now();
+    let deadline = started + BACKUP_CLI_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let pid = child.id();
+            let _ = child.kill();
+            let stdout = out_rx
+                .recv_timeout(BACKUP_CLI_PIPE_DRAIN_GRACE)
+                .unwrap_or_default();
+            let stderr = err_rx
+                .recv_timeout(BACKUP_CLI_PIPE_DRAIN_GRACE)
+                .unwrap_or_default();
+            panic!(
+                "backup_v2 command '{label}' (pid {pid}) timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
+                started.elapsed(),
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
+        }
+        std::thread::sleep(BACKUP_CLI_POLL_INTERVAL);
+    };
+    let stdout = out_rx
+        .recv_timeout(BACKUP_CLI_PIPE_DRAIN_GRACE)
+        .expect("stdout did not reach EOF after CLI exit");
+    let stderr = err_rx
+        .recv_timeout(BACKUP_CLI_PIPE_DRAIN_GRACE)
+        .expect("stderr did not reach EOF after CLI exit");
+    Output {
+        status,
+        stdout,
+        stderr,
+    }
 }
 
 fn success(output: Output) -> String {
@@ -53,12 +121,12 @@ fn success(output: Output) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 fn copy(home: &Path, purpose: BackupPurpose) -> BackupReceipt {
-    let out = success(
-        command(home)
-            .args(["backup", "--reason", purpose.code()])
-            .output()
-            .unwrap(),
-    );
+    let mut cmd = command(home);
+    cmd.args(["backup", "--reason", purpose.code()]);
+    let out = success(run_bounded(
+        cmd,
+        &format!("backup --reason {}", purpose.code()),
+    ));
     let receipt: BackupReceipt = serde_json::from_str(&out).unwrap();
     assert_eq!(receipt.purpose, purpose);
     receipt
@@ -100,19 +168,20 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
     let trap = foreign.path().join("restic");
     fs::write(&trap, "#!/bin/sh\nexit 97\n").unwrap();
     fs::set_permissions(&trap, fs::Permissions::from_mode(0o700)).unwrap();
-    let out = success(
-        command(h)
-            .args(["backup", "--reason", "daily"])
-            .env("PATH", foreign.path())
-            .env("RESTIC_REPOSITORY", foreign.path().join("repo"))
-            .env("RESTIC_REPOSITORY_FILE", foreign.path().join("repo-file"))
-            .env("RESTIC_PASSWORD", "wrong")
-            .env("RESTIC_PASSWORD_FILE", foreign.path().join("password"))
-            .env("RESTIC_PASSWORD_COMMAND", &trap)
-            .env("RESTIC_CACHE_DIR", foreign.path().join("cache"))
-            .output()
-            .unwrap(),
-    );
+    let mut second_cmd = command(h);
+    second_cmd
+        .args(["backup", "--reason", "daily"])
+        .env("PATH", foreign.path())
+        .env("RESTIC_REPOSITORY", foreign.path().join("repo"))
+        .env("RESTIC_REPOSITORY_FILE", foreign.path().join("repo-file"))
+        .env("RESTIC_PASSWORD", "wrong")
+        .env("RESTIC_PASSWORD_FILE", foreign.path().join("password"))
+        .env("RESTIC_PASSWORD_COMMAND", &trap)
+        .env("RESTIC_CACHE_DIR", foreign.path().join("cache"));
+    let out = success(run_bounded(
+        second_cmd,
+        "backup --reason daily (with PATH trap)",
+    ));
     let second: BackupReceipt = serde_json::from_str(&out).unwrap();
     assert_eq!(second.database.sha256, first.database.sha256);
     assert_ne!(first.snapshot_id, second.snapshot_id);
@@ -131,21 +200,18 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
         copy(h, BackupPurpose::Manual),
         copy(h, BackupPurpose::Diagnostic),
     ];
+    let mut list_cmd = command(h);
+    list_cmd.arg("backup-list");
     let inventory: Vec<serde_json::Value> =
-        serde_json::from_str(&success(command(h).arg("backup-list").output().unwrap())).unwrap();
+        serde_json::from_str(&success(run_bounded(list_cmd, "backup-list"))).unwrap();
     assert_eq!(inventory.len(), receipts.len());
     for receipt in &receipts {
         let target = tempfile::tempdir_in("/tmp").unwrap();
-        let path = PathBuf::from(
-            success(
-                command(h)
-                    .args(["restore", receipt.snapshot_id.as_str(), "--to"])
-                    .arg(target.path())
-                    .output()
-                    .unwrap(),
-            )
-            .trim(),
-        );
+        let mut restore_cmd = command(h);
+        restore_cmd
+            .args(["restore", receipt.snapshot_id.as_str(), "--to"])
+            .arg(target.path());
+        let path = PathBuf::from(success(run_bounded(restore_cmd, "restore --to")).trim());
         assert!(path.starts_with(target.path().canonicalize().unwrap()));
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
         assert_eq!(
@@ -181,16 +247,13 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
     assert_eq!(fs::read(h.join("backups/old-copy")).unwrap(), b"keep");
     fixture::set_probe_evidence(&db(h), "probe").unwrap();
     assert_eq!(fixture::evidence(&db(h)).unwrap(), "probe");
-    success(
-        command(h)
-            .args([
-                "restore",
-                receipts[2].snapshot_id.as_str(),
-                "--database-only",
-            ])
-            .output()
-            .unwrap(),
-    );
+    let mut db_restore = command(h);
+    db_restore.args([
+        "restore",
+        receipts[2].snapshot_id.as_str(),
+        "--database-only",
+    ]);
+    success(run_bounded(db_restore, "restore --database-only"));
     assert_eq!(fixture::evidence(&db(h)).unwrap(), "original");
     assert!(fs::read_dir(h.join("data")).unwrap().flatten().any(|p| {
         p.file_name()
@@ -210,7 +273,9 @@ fn busy_installation_reports_lock_conflict_and_can_retry() {
         .open(h.join("backups/.restic.lock"))
         .unwrap();
     lock.try_lock().unwrap();
-    let refused = command(h).arg("backup").output().unwrap();
+    let mut refused_cmd = command(h);
+    refused_cmd.arg("backup");
+    let refused = run_bounded(refused_cmd, "backup (locked)");
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("backup_repository_locked"));
     drop(lock);
@@ -218,11 +283,15 @@ fn busy_installation_reports_lock_conflict_and_can_retry() {
     assert_eq!(retry.database.sha256, original.database.sha256);
 
     let _unsupported = std::os::unix::net::UnixListener::bind(h.join("data/files/socket")).unwrap();
-    let incomplete = command(h).arg("backup").output().unwrap();
+    let mut incomplete_cmd = command(h);
+    incomplete_cmd.arg("backup");
+    let incomplete = run_bounded(incomplete_cmd, "backup (socket)");
     assert!(!incomplete.status.success());
     assert!(String::from_utf8_lossy(&incomplete.stderr).contains("backup_source_incomplete"));
+    let mut list_cmd = command(h);
+    list_cmd.arg("backup-list");
     let snapshots: Vec<serde_json::Value> =
-        serde_json::from_str(&success(command(h).arg("backup-list").output().unwrap())).unwrap();
+        serde_json::from_str(&success(run_bounded(list_cmd, "backup-list"))).unwrap();
     assert_eq!(snapshots.len(), 2);
 }
 
@@ -231,9 +300,7 @@ fn backup_uses_live_management_socket_and_offline_respects_instance_lock() {
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
-        process::Stdio,
         thread,
-        time::{Duration, Instant},
     };
 
     let home = tempfile::tempdir_in("/tmp").unwrap();
@@ -250,7 +317,9 @@ fn backup_uses_live_management_socket_and_offline_respects_instance_lock() {
         assert!(Instant::now() < deadline, "temporary Hub did not start");
         thread::sleep(Duration::from_millis(20));
     }
-    let denied = command(h).args(["backup", "--offline"]).output().unwrap();
+    let mut denied_cmd = command(h);
+    denied_cmd.args(["backup", "--offline"]);
+    let denied = run_bounded(denied_cmd, "backup --offline");
     assert!(
         !denied.status.success(),
         "offline call bypassed instance lock"

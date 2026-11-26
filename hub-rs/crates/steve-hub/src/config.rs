@@ -428,16 +428,23 @@ fn npm_root() -> String {
     {
         return root.to_string_lossy().into_owned();
     }
-    std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/opt/homebrew/lib/node_modules".into())
+    const NPM_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const NPM_ROOT_MAX_OUTPUT: u64 = 64 * 1024;
+    let mut command = std::process::Command::new("npm");
+    command.args(["root", "-g"]);
+    steve_install::common::run_bounded(
+        &mut command,
+        "npm",
+        steve_install::common::BoundedOptions {
+            max_output_bytes: Some(NPM_ROOT_MAX_OUTPUT),
+            ..steve_install::common::BoundedOptions::capture(NPM_ROOT_TIMEOUT)
+        },
+    )
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| "/opt/homebrew/lib/node_modules".into())
 }
 
 /// codex-acp's bin is a Node wrapper that spawnSyncs a native binary; killing the wrapper would orphan it,

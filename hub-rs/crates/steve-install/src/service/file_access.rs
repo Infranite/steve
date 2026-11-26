@@ -381,10 +381,15 @@ impl GuideDriver for LiveDriver<'_> {
     }
 
     fn open_settings(&mut self, url: &str) -> bool {
-        Command::new("/usr/bin/open")
-            .arg(url)
-            .status()
-            .is_ok_and(|exit| exit.success())
+        const OPEN_SETTINGS_TIMEOUT: Duration = Duration::from_secs(10);
+        let mut command = Command::new("/usr/bin/open");
+        command.arg(url);
+        crate::common::run_bounded(
+            &mut command,
+            "/usr/bin/open",
+            crate::common::BoundedOptions::silent(OPEN_SETTINGS_TIMEOUT),
+        )
+        .is_ok_and(|out| out.status.success())
     }
 
     fn emit_done(&mut self, text: &str, detail: &str) {

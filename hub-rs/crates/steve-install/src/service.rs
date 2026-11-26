@@ -16,7 +16,6 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
-use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -27,7 +26,6 @@ use steve_types::devices::{
     shell_supports_interactive_login,
 };
 use uuid::Uuid;
-use wait_timeout::ChildExt;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum System {
@@ -414,7 +412,7 @@ fn execute_with(
     args: &[String],
     timeout: Duration,
     extra_env: &[(&str, &str)],
-    isolate_pgroup: bool,
+    detached_session: bool,
 ) -> Result<Output> {
     let mut command = Command::new(&args[0]);
     command.args(&args[1..]);
@@ -430,64 +428,32 @@ fn execute_with(
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
-    if isolate_pgroup {
-        // Start a detached session (`setsid`) so interactive shells have no controlling `/dev/tty`
-        // (avoiding SIGTTIN/SIGTTOU stops or `/dev/tty` prompts) while still owning a dedicated
-        // process group (`pgid == pid`) that we can SIGKILL as a whole on timeout.
-        // SAFETY: `libc::setsid` is async-signal-safe per POSIX.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("service manager unavailable: {}", args[0]))?;
-    // Drain both pipes while waiting, so a verbose manager cannot deadlock the timeout.
-    let mut stdout = child.stdout.take().context("stdout unavailable")?;
-    let mut stderr = child.stderr.take().context("stderr unavailable")?;
-    let out = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let err = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let status = child.wait_timeout(timeout)?;
-    if status.is_none() {
-        if isolate_pgroup {
-            let pid = child.id() as libc::pid_t;
-            // SAFETY: child was spawned in its own process group (`process_group(0)`), so `-pid`
-            // kills only the timed-out probe and any subshell it spawned.
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        bail!(
-            "service manager unavailable: command timed out after {} seconds",
-            timeout.as_secs()
-        );
-    }
-    let stdout = out
-        .join()
-        .map_err(|_| anyhow::anyhow!("stdout reader failed"))??;
-    let stderr = err
-        .join()
-        .map_err(|_| anyhow::anyhow!("stderr reader failed"))??;
+    let opts = crate::common::BoundedOptions {
+        timeout,
+        isolation: if detached_session {
+            crate::common::ProcessIsolation::DetachedSession
+        } else {
+            crate::common::ProcessIsolation::ProcessGroup
+        },
+        stdin: crate::common::BoundedStdin::Null,
+        capture_output: true,
+        max_output_bytes: None,
+        kill_group_after_exit: detached_session,
+    };
+    let output =
+        crate::common::run_bounded(&mut command, &args[0], opts).map_err(|err| match err {
+            crate::common::CommandError::TimedOut { timeout, .. } => anyhow::anyhow!(
+                "service manager unavailable: command timed out after {} seconds",
+                timeout.as_secs()
+            ),
+            crate::common::CommandError::Spawn { source, .. } => anyhow::Error::new(source)
+                .context(format!("service manager unavailable: {}", args[0])),
+            other => anyhow::Error::new(other),
+        })?;
     Ok(Output {
-        code: status.unwrap().code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
 }
 
@@ -4484,6 +4450,43 @@ exec /bin/sh -c "$script"
             start.elapsed() < Duration::from_secs(3),
             "interactive timeout fallback must return promptly, took {:?}",
             start.elapsed()
+        );
+
+        // 4. A background grandchild launched by .zshrc inheriting stdout/stderr must neither
+        //    hang the probe waiting for EOF nor survive after the probe returns.
+        let bg_pid_file = f.root.join("zshrc-bg.pid");
+        fs::write(
+            zdotdir.join(".zshrc"),
+            format!(
+                "/bin/sleep 60 & printf '%s' \"$!\" > {}\nexport PATH={rc_bin_quoted}:\"$PATH\"\n",
+                shell_quote(&text(&bg_pid_file).unwrap()),
+            ),
+        )
+        .unwrap();
+        let bg_start = Instant::now();
+        let (_bg_shell, bg_path, bg_source) = s
+            .probe_shell_path(&text(&fake_zsh).unwrap(), LOGIN_SHELL_PROBE_TIMEOUT, &env)
+            .expect("background grandchild holding stdout must not hang interactive login probe");
+        assert_eq!(bg_source, ServicePathSource::InteractiveLogin);
+        assert_eq!(which_in_path("agy", &bg_path), Some(agy));
+        assert!(
+            bg_start.elapsed() < Duration::from_secs(3),
+            "grandchild pipe cleanup must return promptly, took {:?}",
+            bg_start.elapsed()
+        );
+        let bg_pid: libc::pid_t = fs::read_to_string(&bg_pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let reap_deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(bg_pid, 0) } == 0 && Instant::now() < reap_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            unsafe { libc::kill(bg_pid, 0) },
+            -1,
+            "background .zshrc child {bg_pid} must be terminated when probe finishes"
         );
     }
 }

@@ -4,13 +4,18 @@
 use super::*;
 use crate::signing::{NodeSigningIdentity, Tools};
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use steve_types::devices::NODE_BOOT_SERVICE_ENV;
+use wait_timeout::ChildExt;
 
 // launchd starts this executable directly as the original account. macOS can
 // attribute the Node and its ordinary children to the same responsible code.
 pub(super) const RUNNER: &str = "services/node-boot-runner";
 const RUNNER_ARG: &str = "__node-boot-run";
 const LOCK_PID_READ_LIMIT: usize = 64;
+const NODE_SUPERVISE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const NODE_SUPERVISE_STOP_GRACE: Duration = Duration::from_secs(15);
+const NODE_SUPERVISE_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
 const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
 
@@ -288,11 +293,13 @@ pub(super) fn supervise(home: &Path, stopping: impl Fn() -> bool) -> Result<()> 
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
-        .env_remove("STEVE_NODE_LOOPBACK_PLAINTEXT");
+        .env_remove("STEVE_NODE_LOOPBACK_PLAINTEXT")
+        .process_group(0);
     if read_json(&home.join("node/node.json"))?["loopback"] == true {
         command.env("STEVE_NODE_LOOPBACK_PLAINTEXT", "1");
     }
     let mut node = command.spawn().context("start configured Node release")?;
+    let pid = node.id() as libc::pid_t;
     loop {
         if let Some(status) = node.try_wait()? {
             ensure!(status.success(), "Node process exited: {status}");
@@ -301,17 +308,31 @@ pub(super) fn supervise(home: &Path, stopping: impl Fn() -> bool) -> Result<()> 
         if stopping() || boot_release(home).is_ok_and(|next| next != release) {
             // We are the sole waiter. If the child has already exited, its PID cannot have been
             // recycled before we reap it. Let the Node close its link and journal before launchd
-            // starts the next generation.
-            if unsafe { libc::kill(node.id() as libc::pid_t, libc::SIGTERM) } != 0 {
+            // starts the next generation, then force-kill its process group if it stalls.
+            if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() != Some(libc::ESRCH) {
                     return Err(error).context("stop Node child");
                 }
             }
-            node.wait().context("wait for Node child to exit")?;
+            if node
+                .wait_timeout(NODE_SUPERVISE_STOP_GRACE)
+                .context("wait for Node child to exit")?
+                .is_none()
+            {
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                    libc::kill(pid, libc::SIGKILL);
+                }
+                let _ = node.wait_timeout(NODE_SUPERVISE_KILL_REAP_TIMEOUT);
+            } else {
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                }
+            }
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(NODE_SUPERVISE_POLL_INTERVAL);
     }
 }
 

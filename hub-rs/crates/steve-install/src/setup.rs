@@ -1664,11 +1664,15 @@ fn finish_hub(
             .input
             .confirm(&t!("install.setup.finish.open_browser"), true)?
         {
-            let _ = std::process::Command::new(open)
-                .arg(&web)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            const OPEN_BROWSER_TIMEOUT: Duration = Duration::from_secs(10);
+            let mut command = std::process::Command::new(&open);
+            command.arg(&web);
+            let program = open.to_string_lossy();
+            let _ = crate::common::run_bounded(
+                &mut command,
+                &program,
+                crate::common::BoundedOptions::silent(OPEN_BROWSER_TIMEOUT),
+            );
         }
     }
     ui::outro(how);

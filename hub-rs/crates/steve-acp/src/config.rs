@@ -2,8 +2,18 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+/// Upper bound for `npm root -g` discovery before falling back to the default global prefix.
+const NPM_ROOT_TIMEOUT: Duration = Duration::from_secs(5);
+const NPM_ROOT_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(200);
+const NPM_ROOT_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+const NPM_ROOT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const NPM_ROOT_MAX_STDOUT: u64 = 64 * 1024;
 
 /// Everything the ACP driver needs from the configuration (the Node's, built from the Hub's).
 #[derive(Debug, Clone)]
@@ -52,14 +62,79 @@ pub fn npm_root() -> PathBuf {
             }
         }
     }
-    Command::new("npm")
-        .args(["root", "-g"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    let mut cmd = Command::new("npm");
+    cmd.args(["root", "-g"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let Ok(mut child) = cmd.spawn() else {
+        return PathBuf::from("/opt/homebrew/lib/node_modules");
+    };
+    let pid = child.id();
+    let Some(stdout_pipe) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return PathBuf::from("/opt/homebrew/lib/node_modules");
+    };
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let res = stdout_pipe
+            .take(NPM_ROOT_MAX_STDOUT)
+            .read_to_end(&mut bytes);
+        let _ = tx.send(res.map(|_| bytes));
+    });
+    let kill_group = || {
+        #[cfg(unix)]
+        if pid > 1 {
+            // SAFETY: spawned with `process_group(0)`.
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    };
+    let deadline = Instant::now() + NPM_ROOT_TIMEOUT;
+    let exited = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+                    kill_group();
+                    let _ = child.kill();
+                    let reap_until = Instant::now() + NPM_ROOT_KILL_REAP_TIMEOUT;
+                    while Instant::now() < reap_until && matches!(child.try_wait(), Ok(None)) {
+                        std::thread::sleep(NPM_ROOT_POLL_INTERVAL);
+                    }
+                    break None;
+                };
+                std::thread::sleep(NPM_ROOT_POLL_INTERVAL.min(rem));
+            }
+            Err(_) => {
+                kill_group();
+                let _ = child.kill();
+                break None;
+            }
+        }
+    };
+    let stdout = match rx.recv_timeout(NPM_ROOT_PIPE_DRAIN_GRACE) {
+        Ok(Ok(bytes)) => Some(bytes),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            kill_group();
+            rx.recv_timeout(NPM_ROOT_KILL_REAP_TIMEOUT)
+                .ok()
+                .and_then(Result::ok)
+        }
+        _ => None,
+    };
+    exited
+        .filter(|s| s.success())
+        .and(stdout)
+        .map(|o| String::from_utf8_lossy(&o).trim().to_owned())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/opt/homebrew/lib/node_modules"))

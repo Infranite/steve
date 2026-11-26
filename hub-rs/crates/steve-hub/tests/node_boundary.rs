@@ -317,7 +317,7 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-modules/src/net.rs", Hub, "test support: reruns one test in a child"),
     e(Dir, "steve-hub/src/upgrades/mod.rs", Hub, "upgrade operations in the Hub data dir"),
     e(Fs, "steve-store-sqlite/src/backup/offline.rs", Hub, "the SQLite driver stages a private online snapshot and verifies the checksum of a private restored copy"),
-    e(Spawn, "steve-hub/src/backup/engine.rs", Hub, "runs the verified release's restic executable for the installation repository with a cleared environment and a pipe for its key"),
+    e(Spawn, "steve-hub/src/backup/engine.rs", Hub, "runs the verified release's restic executable for the installation repository with a cleared environment and a pipe for its key (macOS uses posix_spawn to avoid multithreaded fork() deadlocks while inheriting the repository lock fd; non-macOS uses Command::new)"),
     e(Dir, "steve-hub/src/backup/engine.rs", Hub, "cleans the private backup staging directory while the installation repository lock is held"),
     e(Fs, "steve-hub/src/backup/engine.rs", Hub, "owns the private repository lock, cache and temporary staging lifecycle"),
     e(Dir, "steve-hub/src/backup/files.rs", Hub, "walks the Hub's allowlisted backup sources and excludes regenerable workspaces and key storage"),

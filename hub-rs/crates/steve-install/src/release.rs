@@ -18,6 +18,21 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steve_store::db::inspect_schema;
 use steve_types::backup::{BackupPurpose, BackupReceipt, SnapshotId};
+use wait_timeout::ChildExt;
+
+const ENV_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(30);
+const CHECK_CONFIG_TIMEOUT: Duration = Duration::from_secs(120);
+const PRE_UPGRADE_BACKUP_TIMEOUT: Duration = Duration::from_secs(120);
+const DATABASE_RESTORE_TIMEOUT: Duration = Duration::from_secs(3600);
+const CONTROL_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const STOP_PORT_WAIT_MAX: Duration = Duration::from_secs(15);
+const STOP_PORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const PROBE_STOP_GRACE: Duration = Duration::from_secs(10);
+const PROBE_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct DeployOutcome {
     pub exit_code: i32,
@@ -184,7 +199,7 @@ fn environment(home: &Path, tools: &Tools) -> Result<BTreeMap<String, String>> {
             .env_clear()
             .envs(&values)
             .stdin(Stdio::null());
-        let output = successful(&mut command, Duration::from_secs(30))?;
+        let output = successful(&mut command, ENV_LOAD_TIMEOUT)?;
         for entry in output.stdout.split(|b| *b == 0) {
             if let Some(index) = entry.iter().position(|b| *b == b'=') {
                 let key = String::from_utf8(entry[..index].to_vec())?;
@@ -272,13 +287,13 @@ impl Runtime {
             client: Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(10))
+                .timeout(CONTROL_HTTP_TIMEOUT)
                 .build()?,
             address,
             tools,
             launchctl: "/bin/launchctl".into(),
             service_home,
-            health_timeout: Duration::from_secs(60),
+            health_timeout: DEFAULT_HEALTH_TIMEOUT,
             #[cfg(test)]
             simulated_service: false,
         })
@@ -314,7 +329,7 @@ impl Runtime {
     fn health(&self) -> Option<Value> {
         self.client
             .get(format!("http://{}/healthz", self.address))
-            .timeout(Duration::from_secs(2))
+            .timeout(HEALTH_PROBE_TIMEOUT)
             .send()
             .ok()?
             .error_for_status()
@@ -334,7 +349,7 @@ impl Runtime {
                 Instant::now() < deadline,
                 "Hub did not answer with the expected health identity"
             );
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(POLL_INTERVAL);
         }
     }
     fn lift(&self) -> Result<()> {
@@ -351,7 +366,7 @@ impl Runtime {
                 Instant::now() < deadline,
                 "maintenance drain could not be lifted"
             );
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(POLL_INTERVAL);
         }
     }
     fn service(&self, action: &str, ident: &Value) -> Result<()> {
@@ -367,23 +382,24 @@ impl Runtime {
                     .join(format!("{label}.plist")),
             );
         }
-        successful(command.stdin(Stdio::null()), Duration::from_secs(30))?;
+        successful(command.stdin(Stdio::null()), LAUNCHCTL_TIMEOUT)?;
         if action == "stop" {
             #[cfg(test)]
             if self.simulated_service {
                 return Ok(());
             }
-            let deadline = Instant::now() + self.health_timeout.min(Duration::from_secs(15));
+            let deadline = Instant::now() + self.health_timeout.min(STOP_PORT_WAIT_MAX);
             let addresses: Vec<_> = self.address.to_socket_addrs()?.collect();
             ensure!(!addresses.is_empty(), "local Hub address did not resolve");
-            while addresses.iter().any(|address| {
-                TcpStream::connect_timeout(address, Duration::from_millis(100)).is_ok()
-            }) {
+            while addresses
+                .iter()
+                .any(|address| TcpStream::connect_timeout(address, STOP_PORT_POLL_INTERVAL).is_ok())
+            {
                 ensure!(
                     Instant::now() < deadline,
                     "old Hub still listens after bootout"
                 );
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(STOP_PORT_POLL_INTERVAL);
             }
         }
         Ok(())
@@ -402,7 +418,7 @@ impl Runtime {
         }
         let mut command = self.hub_command(candidate);
         command.arg("--check-config").stdin(Stdio::null());
-        let output = signing::output(&mut command, Duration::from_secs(120))?;
+        let output = signing::output(&mut command, CHECK_CONFIG_TIMEOUT)?;
         let report: Value = serde_json::from_slice(&output.stdout)
             .context("candidate returned no configuration report")?;
         ensure!(
@@ -455,7 +471,7 @@ impl Runtime {
                 let health = self
                     .client
                     .get(format!("http://127.0.0.1:{port}/healthz"))
-                    .timeout(Duration::from_secs(2))
+                    .timeout(HEALTH_PROBE_TIMEOUT)
                     .send()
                     .and_then(|r| r.error_for_status())
                     .and_then(|r| r.json::<Value>());
@@ -468,7 +484,7 @@ impl Runtime {
                         let response = self
                             .client
                             .get(format!("http://127.0.0.1:{port}/api/summary"))
-                            .timeout(Duration::from_secs(2))
+                            .timeout(HEALTH_PROBE_TIMEOUT)
                             .send()?;
                         ensure!(
                             response.status().as_u16() == 503,
@@ -477,7 +493,7 @@ impl Runtime {
                         return Ok(health);
                     }
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(POLL_INTERVAL);
             }
         })();
         let _ = fs::remove_file(operation);
@@ -487,18 +503,27 @@ impl Runtime {
 struct ProbeProcess(Child);
 impl Drop for ProbeProcess {
     fn drop(&mut self) {
-        let group = self.0.id() as i32;
+        let group = self.0.id() as libc::pid_t;
         unsafe {
             libc::kill(-group, libc::SIGTERM);
         }
-        let until = Instant::now() + Duration::from_secs(10);
-        while self.0.try_wait().ok().flatten().is_none() && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
+        if self
+            .0
+            .wait_timeout(PROBE_STOP_GRACE)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+                libc::kill(group, libc::SIGKILL);
+            }
+            let _ = self.0.wait_timeout(PROBE_KILL_REAP_TIMEOUT);
+        } else {
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
         }
-        unsafe {
-            libc::kill(-group, libc::SIGKILL);
-        }
-        let _ = self.0.wait();
     }
 }
 /// Take the pre-upgrade snapshot with the verified candidate, after stopping the running Hub.
@@ -507,7 +532,7 @@ fn backup(runtime: &Runtime, candidate: &Path) -> Result<SnapshotId> {
     command
         .args(["--admin", "backup", "--reason", "pre-upgrade", "--offline"])
         .stdin(Stdio::null());
-    let output = signing::output(&mut command, Duration::from_secs(120))?;
+    let output = signing::output(&mut command, PRE_UPGRADE_BACKUP_TIMEOUT)?;
     ensure!(
         output.status.success(),
         "candidate backup failed: {}",
@@ -588,7 +613,7 @@ fn restore(
                 command
                     .args(["--admin", "restore", saved.as_str(), "--database-only"])
                     .stdin(Stdio::null());
-                let output = signing::output(&mut command, Duration::from_secs(3600))?;
+                let output = signing::output(&mut command, DATABASE_RESTORE_TIMEOUT)?;
                 ensure!(
                     output.status.success(),
                     "candidate restore failed: {}",
@@ -717,7 +742,7 @@ fn deploy_with(
                 Instant::now() < until,
                 "Hub did not drain before its deadline"
             );
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(POLL_INTERVAL);
         }
         phase = "backup";
         journal.update("stopping", None, None, json!({}))?;

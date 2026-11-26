@@ -27,7 +27,7 @@ pub use steve_types::backup::{
 
 const DATABASE_ENTRY: &str = "/data/steve.sqlite3";
 const CHECKSUM_ENTRY: &str = "/data/steve.sqlite3.sha256";
-const UPGRADE_BUDGET: Duration = Duration::from_secs(120);
+pub(crate) const UPGRADE_BUDGET: Duration = Duration::from_secs(120);
 pub(crate) const BACKUP_BUDGET: Duration = Duration::from_secs(3600);
 const STATUS_BUDGET: Duration = Duration::from_secs(15);
 const DAY_MS: u64 = 86_400_000;
@@ -209,7 +209,7 @@ fn restore_verified(
 
 /// Restore every backed-up file into a newly allocated private directory within `parent`.
 pub fn restore_to(home: &Path, id: &SnapshotId, parent: &Path) -> Result<PathBuf> {
-    restore_operation(home, id, |repo, purpose| {
+    restore_operation(home, id, BACKUP_BUDGET, |repo, purpose| {
         let parent = parent.canonicalize()?;
         let path = repo.path();
         ensure!(
@@ -225,7 +225,18 @@ pub fn restore_to(home: &Path, id: &SnapshotId, parent: &Path) -> Result<PathBuf
 /// Restore the database with the installation instance lock held by the offline caller. Keep the failed probe
 /// next to the database, then publish the verified replacement with one same-filesystem rename.
 pub fn restore_database(home: &Path, db: &Path, id: &SnapshotId) -> Result<()> {
-    restore_operation(home, id, |repo, purpose| {
+    restore_database_within(home, db, id, BACKUP_BUDGET)
+}
+
+/// Same as [`restore_database`] with an explicit wall-clock budget (used by upgrade rollback so a
+/// hung backup engine cannot block rollback for an hour).
+pub(crate) fn restore_database_within(
+    home: &Path,
+    db: &Path,
+    id: &SnapshotId,
+    budget: Duration,
+) -> Result<()> {
+    restore_operation(home, id, budget, |repo, purpose| {
         let parent = db.parent().context("missing database parent")?;
         let stage = private_tempdir(parent, ".steve-restore-")?;
         let (verified, bytes) = restore_verified(home, repo, id, purpose, stage.path(), true)?;
@@ -254,14 +265,15 @@ pub fn restore_database(home: &Path, db: &Path, id: &SnapshotId) -> Result<()> {
 fn restore_operation<T>(
     home: &Path,
     id: &SnapshotId,
+    budget: Duration,
     restore: impl FnOnce(&Repository, Purpose) -> Result<(T, u64)>,
 ) -> Result<T> {
     let _telemetry = telemetry::scope(home);
     let start = Instant::now();
     let mut purpose = None;
     let result = (|| {
-        let repo = Repository::open(home, start + BACKUP_BUDGET, false)?
-            .context("backup_repository_missing")?;
+        let repo =
+            Repository::open(home, start + budget, false)?.context("backup_repository_missing")?;
         let found = valid_snapshot(&repo, id)?;
         purpose = Some(found);
         restore(&repo, found)
