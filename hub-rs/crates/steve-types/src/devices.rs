@@ -376,12 +376,14 @@ pub enum ServiceEnvDiagnosticReason {
 }
 
 /// Strongly-typed diagnosis explaining why a harness adapter command could not be started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum MissingCommandKind {
     /// The adapter executable (or its `node` interpreter) is absent from the service `PATH`,
     /// but was found on the user's login shell `$PATH`. Refreshing the service environment fixes it.
+    /// The default, so a Node that predates `kind` still decodes on this Hub (no protocol bump).
+    #[default]
     CommandNotInServicePath,
     /// The underlying harness CLI (`detect_bins`) is present, but the ACP adapter package or
     /// binary required by the harness spec is not installed.
@@ -396,6 +398,7 @@ pub enum MissingCommandKind {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct MissingCommandDiagnostic {
     /// Deterministic diagnosis derived from the harness spec (`command` kind and `detect_bins`).
+    #[serde(default)]
     pub kind: MissingCommandKind,
     /// Executable name or path the Node attempted to start (for example `agy`, `openma-pi-acp`, `node`).
     pub command: String,
