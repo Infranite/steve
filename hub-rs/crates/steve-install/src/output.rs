@@ -205,11 +205,20 @@ impl Summary<'_> {
         }
         if let Some(source) = env.get("path_source").and_then(Value::as_str) {
             let source_label = match source {
-                "login_shell" => match env.get("path_shell").and_then(Value::as_str) {
+                "interactive_login" => match env.get("path_shell").and_then(Value::as_str) {
                     Some(shell) if !shell.is_empty() => {
-                        t!("install.status.path_source.login_shell", shell = shell)
+                        t!(
+                            "install.status.path_source.interactive_login",
+                            shell = shell
+                        )
                     }
-                    _ => t!("install.status.path_source.login_shell_unknown"),
+                    _ => t!("install.status.path_source.interactive_login_unknown"),
+                },
+                "login" => match env.get("path_shell").and_then(Value::as_str) {
+                    Some(shell) if !shell.is_empty() => {
+                        t!("install.status.path_source.login", shell = shell)
+                    }
+                    _ => t!("install.status.path_source.login_unknown"),
                 },
                 "process_env" => t!("install.status.path_source.process_env"),
                 "default_fallback" => t!("install.status.path_source.default_fallback"),
@@ -607,7 +616,7 @@ mod tests {
                     "build": {"version": "1.2.5"},
                     "service_env": {
                         "path": "/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
-                        "path_source": "login_shell",
+                        "path_source": "interactive_login",
                         "path_shell": "/bin/zsh",
                         "path_captured_at": "2026-11-25T11:30:00Z"
                     }
@@ -617,7 +626,7 @@ mod tests {
                     "服务配置：已更新",
                     "服务进程：已重启",
                     "服务 PATH：/Users/example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
-                    "PATH 来源：登录 shell（/bin/zsh） · 2026-11-25T11:30:00Z",
+                    "PATH 来源：交互式登录 shell（/bin/zsh） · 2026-11-25T11:30:00Z",
                     "steve node doctor",
                 ],
                 vec!["本次操作未启动服务", "steve node start"],

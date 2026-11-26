@@ -342,7 +342,8 @@ pub struct NodeHarnessRefreshResponse {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum ServicePathSource {
-    LoginShell,
+    InteractiveLogin,
+    Login,
     ProcessEnv,
     DefaultFallback,
 }
@@ -389,8 +390,20 @@ pub struct ServiceCommandDiagnostic {
 
 pub const LOGIN_SHELL_PATH_BEGIN: &str = "__STEVE_LOGIN_PATH_BEGIN__";
 pub const LOGIN_SHELL_PATH_END: &str = "__STEVE_LOGIN_PATH_END__";
+/// Upper bound on each shell startup invocation while probing the user's `PATH`, so a slow or
+/// misconfigured interactive rc file falls back promptly instead of hanging setup or probes.
+pub const LOGIN_SHELL_PROBE_TIMEOUT_SECS: u64 = 5;
 
-/// Shell snippet executed via `<shell> -l -c <script>` to emit `$PATH` framed by sentinels so
+/// Whether `shell` supports `-l -i -c` so interactive rc files (such as `~/.zshrc`) load alongside
+/// login profiles during `PATH` capture.
+pub fn shell_supports_interactive_login(shell: &std::path::Path) -> bool {
+    shell
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("zsh") || n.eq_ignore_ascii_case("bash"))
+}
+
+/// Shell snippet executed via `<shell> -l [-i] -c <script>` to emit `$PATH` framed by sentinels so
 /// profile banners or MOTD output cannot corrupt the captured value.
 pub fn login_shell_path_script(shell: &std::path::Path) -> String {
     let is_fish = shell
@@ -429,13 +442,15 @@ pub fn extract_login_shell_path(stdout: &str) -> Option<String> {
 pub const NODE_FILE_ACCESS_SOCKET: &str = "services/node-file-access.sock";
 pub const NODE_BOOT_SERVICE_ENV: &str = "STEVE_NODE_BOOT_SERVICE";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum FileAccessStatus {
     Granted,
     Missing,
+    #[default]
     Unknown,
+    NotApplicable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
@@ -454,20 +469,40 @@ pub enum ProtectedLocation {
 pub struct ProtectedAccess {
     pub location: ProtectedLocation,
     pub status: FileAccessStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct FileAccessReport {
     pub status: FileAccessStatus,
+    #[serde(default)]
+    pub full_disk_access: FileAccessStatus,
+    #[serde(default)]
     pub locations: Vec<ProtectedAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub executable_path: Option<String>,
 }
 
 impl FileAccessReport {
     pub fn unknown() -> Self {
         Self {
             status: FileAccessStatus::Unknown,
+            full_disk_access: FileAccessStatus::Unknown,
             locations: Vec::new(),
+            executable_path: None,
+        }
+    }
+
+    pub fn not_applicable() -> Self {
+        Self {
+            status: FileAccessStatus::NotApplicable,
+            full_disk_access: FileAccessStatus::NotApplicable,
+            locations: Vec::new(),
+            executable_path: None,
         }
     }
 }
@@ -978,5 +1013,13 @@ mod login_shell_path_tests {
             )),
             None
         );
+        assert!(shell_supports_interactive_login(Path::new("/bin/zsh")));
+        assert!(shell_supports_interactive_login(Path::new(
+            "/opt/homebrew/bin/bash"
+        )));
+        assert!(!shell_supports_interactive_login(Path::new("/bin/sh")));
+        assert!(!shell_supports_interactive_login(Path::new(
+            "/opt/homebrew/bin/fish"
+        )));
     }
 }

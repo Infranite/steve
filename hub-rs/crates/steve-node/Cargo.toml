@@ -14,6 +14,7 @@ rmcp = { version = "=3.8.0", default-features = false, features = ["server", "tr
 hex = "=0.4.3"
 libc = "=0.2.191"
 markdown = "=1.0.0"
+metrics = "=0.24.6"
 pulldown-cmark = { version = "=0.13.6", default-features = false }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }

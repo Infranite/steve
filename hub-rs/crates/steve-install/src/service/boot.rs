@@ -210,7 +210,7 @@ pub(super) fn execute_register(
         output.read_line(&mut ready)?;
         ensure!(
             ready == "detached\n",
-            "administrator authorization did not complete"
+            "administrator authorization did not complete; run `steve node enable-boot` in an interactive terminal on this Mac (or verify `sudo` access in headless/SSH sessions) and retry"
         );
         finish()?;
         writeln!(input, "ready")?;
@@ -222,7 +222,7 @@ pub(super) fn execute_register(
     let status = status?;
     ensure!(
         status.success(),
-        "system Node registration failed ({status}); run enable-boot again"
+        "system Node registration failed ({status}); if running over SSH without a desktop session, verify `sudo` access and retry `steve node enable-boot`"
     );
     Ok(())
 }
@@ -826,6 +826,25 @@ impl Service {
                 self.replace_boot_definition(&account, &service_path, reload)?;
             }
         } else {
+            let legacy_agent = self
+                .user_home
+                .join("Library/LaunchAgents")
+                .join(format!("{}.plist", self.label));
+            if exists(&legacy_agent) {
+                let mut retry = format!(
+                    "steve node enable-boot --home {}",
+                    shell_quote(&text(&self.home)?)
+                );
+                if self.label != "io.github.infranite.steve.node" {
+                    retry.push_str(&format!(" --label {}", shell_quote(&self.label)));
+                }
+                bail!(
+                    "legacy LaunchAgent service definition still exists at {}; stop and remove it before enabling the system boot service:\n  launchctl bootout gui/$(id -u)/{} 2>/dev/null || true\n  rm -f {}\nthen re-run: {retry}",
+                    legacy_agent.display(),
+                    self.label,
+                    shell_quote(&text(&legacy_agent)?)
+                );
+            }
             self.wait_unloaded("system", &self.config, 0)?;
             let (release, info) = self.bundle(&release)?;
             let identity = self.node_signing_identity()?;
@@ -947,7 +966,8 @@ impl Service {
                     drop(lock);
                     let detail = self.describe_lock_holders(&lock_path, recorded_pid);
                     bail!(
-                        "a Node process still owns the runtime lock{detail}; stop it before starting the boot service"
+                        "a Node process still owns the runtime lock{detail}; stop it before starting the boot service (for example, unload any legacy LaunchAgent with `launchctl bootout gui/$(id -u)/{}` or stop the listed PID, then re-run `steve node enable-boot`)",
+                        self.label
                     );
                 }
                 Err(std::fs::TryLockError::Error(e)) => {

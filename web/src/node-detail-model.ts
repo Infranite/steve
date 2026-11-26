@@ -158,8 +158,11 @@ export function nodeActionItems(v: NodeView, ctx: NodeActionContext = {}): NodeA
     })
   }
 
-  // macOS Full Disk Access / protected folders missing
-  const fileAccess = v.linked && !v.local && v.node?.host?.os === "macos" ? v.node?.host?.file_access : undefined
+  // macOS Full Disk Access / protected folders missing (applies to both local and remote macOS Nodes)
+  const isMac = v.node?.host?.os === "macos" || (!v.node?.host && hostOf(v).kind === "mac")
+  const fileAccess = v.linked && isMac && v.node?.host?.file_access?.status !== "not_applicable"
+    ? v.node?.host?.file_access
+    : undefined
   if (fileAccess?.status === "missing") {
     out.push({
       kind: "fileAccess",

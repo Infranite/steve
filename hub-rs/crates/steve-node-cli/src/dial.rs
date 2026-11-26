@@ -283,6 +283,17 @@ pub async fn serve_until_stopped(
     if let Some(build) = crate::upgrade::own_build() {
         node.set_build(build);
     }
+    #[cfg(target_os = "macos")]
+    let _setup_probe =
+        home.and_then(
+            |dir| match crate::file_access::SetupProbe::start(dir, node.clone()) {
+                Ok(probe) => probe,
+                Err(error) => {
+                    tracing::warn!("local node file-access setup socket unavailable: {error:#}");
+                    None
+                }
+            },
+        );
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("installing the termination signal handler")?;
