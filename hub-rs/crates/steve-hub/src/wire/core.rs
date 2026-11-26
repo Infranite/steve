@@ -830,10 +830,11 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node.as_ref().map_or(0, |n| n.running_turns())
             + self.fleet.as_ref().map_or(0, |f| f.running_turns())
     }
-    /// What a release waits for: the colocated Node runs in its own `steve-node` process and
-    /// outlives Hub restarts, so Hub-in-process working turns are always 0.
+    /// What a release waits for: active work on the colocated local Node (including turns waiting
+    /// for a permission answer or whose outcome is unknown), so upgrade drain does not seal while
+    /// an active turn or permission card still needs Hub coordination to finish.
     fn node_working(&self) -> usize {
-        0
+        self.node.as_ref().map_or(0, |n| n.working())
     }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
         use super::node_runtime::Planned;

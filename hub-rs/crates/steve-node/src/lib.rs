@@ -3286,6 +3286,60 @@ impl ExecutionControl for LocalNode {
     }
 }
 
+fn local_output_paths(
+    input: &Path,
+    home: &Path,
+    raw_home: &Path,
+    item: &str,
+) -> Option<(PathBuf, PathBuf)> {
+    let prefix = Path::new("workspaces").join(item).join("outputs");
+    if let Ok(path) = input
+        .strip_prefix(home)
+        .or_else(|_| input.strip_prefix(raw_home))
+    {
+        let rel = path.strip_prefix(&prefix).ok()?;
+        return (!rel.as_os_str().is_empty()).then(|| (path.to_path_buf(), rel.to_path_buf()));
+    }
+    if !input.is_absolute()
+        || input.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    // Match an OS symlink alias above `home` (e.g. macOS `/var` -> `/private/var`) without
+    // canonicalizing the assistant-supplied file or any component beneath `outputs`.
+    let comps: Vec<_> = input.components().collect();
+    for i in 1..comps.len() {
+        let std::path::Component::Normal(a) = comps[i] else {
+            continue;
+        };
+        if a != "workspaces" {
+            continue;
+        }
+        if i + 3 >= comps.len() {
+            break;
+        }
+        let (std::path::Component::Normal(b), std::path::Component::Normal(c)) =
+            (comps[i + 1], comps[i + 2])
+        else {
+            continue;
+        };
+        if b != item || c != "outputs" {
+            continue;
+        }
+        let cand_home: PathBuf = comps[..i].iter().collect();
+        if std::fs::canonicalize(&cand_home).ok().as_deref() == Some(home) {
+            let rel: PathBuf = comps[i + 3..].iter().collect();
+            return (!rel.as_os_str().is_empty()).then(|| (prefix.join(&rel), rel));
+        }
+    }
+    None
+}
+
 fn check_reply_path(rel: &Path, path: &Path, protected: &[PathBuf]) -> ApiResult<()> {
     if inline_images::protected_path(rel, path, protected)
         || rel.components().any(|c| {
@@ -4019,14 +4073,13 @@ impl WorkspaceExecutor for LocalNode {
                 {
                     let prefix = Path::new("workspaces").join(item).join("outputs");
                     let input = Path::new(&q.location);
-                    if let Ok(path) = input
-                        .strip_prefix(home)
-                        .or_else(|_| input.strip_prefix(&self.0.cfg.acp.steve_home))
-                        && let Ok(rel) = path.strip_prefix(&prefix)
+                    if let Some((path, rel)) =
+                        local_output_paths(input, home, &self.0.cfg.acp.steve_home, item)
                     {
-                        let full = home.join(path);
-                        check_reply_path(rel, &full, &protected)?;
-                        if t.overlaps_other_workspace(&q.workspace.id, &home.join(prefix), &full)? {
+                        let full = home.join(&path);
+                        check_reply_path(&rel, &full, &protected)?;
+                        if t.overlaps_other_workspace(&q.workspace.id, &home.join(&prefix), &full)?
+                        {
                             return Err(denied());
                         }
                         output = Some((
@@ -5035,5 +5088,37 @@ mod fit_tests {
         let probed = node.probe_build().await.unwrap();
         assert!(!probed.upgradable);
         assert_eq!(probed.build, Some(build.into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_output_paths_matches_symlinked_home_alias_and_rejects_foreign_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let home = real.join("steve");
+        std::fs::create_dir_all(home.join("workspaces/ST-1/outputs")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces/ST-2/outputs")).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let canon_home = home.canonicalize().unwrap();
+
+        let own = alias.join("steve/workspaces/ST-1/outputs/sub/result.txt");
+        assert_eq!(
+            local_output_paths(&own, &canon_home, &canon_home, "ST-1"),
+            Some((
+                PathBuf::from("workspaces/ST-1/outputs/sub/result.txt"),
+                PathBuf::from("sub/result.txt"),
+            ))
+        );
+        let foreign = alias.join("steve/workspaces/ST-2/outputs/result.txt");
+        assert_eq!(
+            local_output_paths(&foreign, &canon_home, &canon_home, "ST-1"),
+            None
+        );
+        let traversal = alias.join("steve/workspaces/ST-1/outputs/../ST-2/outputs/result.txt");
+        assert_eq!(
+            local_output_paths(&traversal, &canon_home, &canon_home, "ST-1"),
+            None
+        );
     }
 }

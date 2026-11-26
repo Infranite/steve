@@ -6431,7 +6431,25 @@ fn verify_design_file(
     if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(crate::cycle::conflict("设计文件缺少内容校验"));
     }
-    if !path.starts_with(&root)
+    let Ok(canon_root) = std::fs::canonicalize(&root) else {
+        return Err(crate::cycle::conflict("设计文件不在事项持久目录中"));
+    };
+    let Ok(canon_path) = std::fs::canonicalize(&path) else {
+        return Err(crate::cycle::conflict("设计文件不在事项持久目录中"));
+    };
+    let Ok(rel) = canon_path.strip_prefix(&canon_root) else {
+        return Err(crate::cycle::conflict("设计文件不在事项持久目录中"));
+    };
+    let mut cursor = root.clone();
+    let mut inside_clean = !rel.as_os_str().is_empty();
+    for comp in rel.components() {
+        cursor.push(comp);
+        if !std::fs::symlink_metadata(&cursor).is_ok_and(|m| !m.file_type().is_symlink()) {
+            inside_clean = false;
+            break;
+        }
+    }
+    if !inside_clean
         || [
             root.parent().unwrap().parent().unwrap(),
             root.parent().unwrap(),
@@ -6443,7 +6461,8 @@ fn verify_design_file(
     {
         return Err(crate::cycle::conflict("设计文件不在事项持久目录中"));
     }
-    let bytes = std::fs::read(&path).map_err(|_| crate::cycle::conflict("设计文件无法读取"))?;
+    let bytes =
+        std::fs::read(&canon_path).map_err(|_| crate::cycle::conflict("设计文件无法读取"))?;
     let actual = Sha256::digest(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))

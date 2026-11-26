@@ -927,7 +927,7 @@ async fn the_supervisor_asks_the_candidate_about_this_environment_before_drainin
     );
     assert_eq!(
         fs::read_to_string(&asked).unwrap().trim(),
-        format!("127.0.0.1,::1|9123|{}", home.path().display())
+        format!("127.0.0.1,::1|9123|{}", cfg.home.display())
     );
 
     let (d, asked) = bundle("old", false);

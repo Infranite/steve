@@ -1689,12 +1689,13 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
         let design_item = create_item(store, ws, "Design item", "Design only");
         let design_content = "# Design\n\nDetails\n";
         let design_sha = steve_store::sha(design_content);
-        let design_dir = h
-            ._dir
-            .path()
-            .join("steve/workspaces")
-            .join(&design_item.id)
-            .join("outputs");
+        let design_dir = crate::config::resolve(
+            &h._dir
+                .path()
+                .join("steve/workspaces")
+                .join(&design_item.id)
+                .join("outputs"),
+        );
         std::fs::create_dir_all(&design_dir).unwrap();
         let design_path = design_dir.join(format!("output-{design_sha}.md"));
         std::fs::write(&design_path, design_content).unwrap();

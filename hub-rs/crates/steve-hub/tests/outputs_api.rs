@@ -376,9 +376,17 @@ async fn the_local_node_shows_outputs_as_the_hub_did() {
     assert_eq!(got.len(), PREVIEWS.len() + 9);
     assert_eq!(got[0]["body"]["text"], "# 标题\n\n正文");
     assert_eq!(got[1]["body"]["type"], "dir");
+    let entry_names: Vec<&str> = got[1]["body"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    assert_eq!(entry_names, vec!["a.png", "b.bin"]);
     assert_eq!(got[2]["body"]["type"], "image");
     assert_eq!(got[3]["body"]["type"], "binary");
-    assert_eq!(got[4]["body"]["type"], "missing");
+    assert_eq!(got[4]["body"]["type"], "text");
+    assert_eq!(got[4]["body"]["text"], "x");
     assert_eq!(got[5]["body"]["type"], "missing");
     assert_eq!(got[6]["body"]["text"], "# 标题\n\n正文");
     assert_eq!(got[7]["body"]["type"], "missing");

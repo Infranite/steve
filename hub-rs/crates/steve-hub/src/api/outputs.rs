@@ -112,11 +112,10 @@ async fn load(
     // Durable deliverables belong to the Hub, even when the item ran on a remote Node that is
     // now offline. `locate` still canonicalizes and checks the Hub-owned durable outputs dir only.
     let durable = st.cfg.home.join("workspaces").join(&item).join("outputs");
-    let v = if o
-        .loc
-        .as_ref()
-        .is_some_and(|loc| FsPath::new(loc).starts_with(&durable))
-    {
+    let v = if o.loc.as_ref().is_some_and(|loc| {
+        let p = FsPath::new(loc);
+        p.is_absolute() && crate::config::resolve(p).starts_with(&durable)
+    }) {
         o.roots = vec![durable];
         None
     } else if o
