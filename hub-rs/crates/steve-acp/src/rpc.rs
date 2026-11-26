@@ -287,7 +287,31 @@ impl Conn {
         let pending = conn.pending.clone();
         let observed = Arc::downgrade(&conn);
         tokio::spawn(async move {
-            let status = child.wait().await;
+            // Ensure cancelling/dropping this wait task (e.g. test panic or runtime teardown)
+            // kills the entire adapter process group — including grandchildren under sandbox-exec
+            // or bwrap — rather than only the direct child PID (`kill_on_drop`).
+            struct GroupChild {
+                child: tokio::process::Child,
+                pgid: u32,
+                reaped: bool,
+            }
+            impl Drop for GroupChild {
+                fn drop(&mut self) {
+                    if !self.reaped && self.pgid > 1 && self.pgid <= i32::MAX as u32 {
+                        // SAFETY: child is unreaped, so its process group ID cannot be reused.
+                        unsafe {
+                            libc::kill(-(self.pgid as libc::pid_t), libc::SIGKILL);
+                        }
+                    }
+                }
+            }
+            let mut guarded = GroupChild {
+                child,
+                pgid: pid,
+                reaped: false,
+            };
+            let status = guarded.child.wait().await;
+            guarded.reaped = status.is_ok();
             // No more stdin can reach the exited child. A retained Conn or a full pipe must
             // not keep its writer alive. Drain both output streams within one shared window:
             // a descendant or a concurrent fork can still hold a pipe's write end open.

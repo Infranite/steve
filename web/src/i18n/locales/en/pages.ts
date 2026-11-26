@@ -96,7 +96,7 @@ export default {
       saveRetry: "Save and retry",
       saving: "Saving…",
       saved: "Saved; applies to the next turn",
-      required: "Choose and save a model first, or skip the introduction for now.",
+      noHarnessTitle: "Install or sign in to a Harness",
       noHarness: "No installed harness supports Steve’s read-only judgments yet. Install or sign in from Devices, then return here.",
       noModels: "No model list; use the harness default or enter an ID",
       reload: "Reload current choices",
@@ -385,7 +385,7 @@ export default {
     onboard: {
       hello: "I take things off your plate, keep track of progress, and call you when a decision is yours. First, a minute on what I found on this machine.",
       start: "Start",
-      runtimes: "Found runtimes including {{first}}. Choose the model you prefer, or set it up later.",
+      runtimes: "Detected ready runtime {{first}} and pre-filled its default model. Continue right away, or adjust per-purpose models later in Settings · Models.",
       noRuntime: "No usable harness on this machine yet. Install one before handing things over.",
       runtime: "Runtime",
       projects_one: "Work is organized by space and project: you're in “{{space}}”, with {{count}} project. A project is a folder, and an item with a project works there.",

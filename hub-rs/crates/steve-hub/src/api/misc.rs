@@ -57,11 +57,6 @@ struct OfferBody {
 }
 
 #[derive(serde::Deserialize)]
-struct SuggestBody {
-    choice: String,
-}
-
-#[derive(serde::Deserialize)]
 struct A2uiBody {
     block: String,
     #[serde(rename = "surfaceId")]
@@ -739,20 +734,6 @@ pub async fn thread_offer(
 ) -> ApiResult {
     let req: OfferBody = json_body(&b)?;
     thread_result(st.domain.offer(&c.ws, &id, req.take, &c.me).await?)
-}
-
-/// `POST /api/thread/:id/suggest {choice: "here" | "item" | "new"}`.
-pub async fn thread_suggest(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path(id): Path<String>,
-    b: Bytes,
-) -> ApiResult {
-    let req: SuggestBody = json_body(&b)?;
-    if !matches!(req.choice.as_str(), "here" | "item" | "new") {
-        return Err(ApiError::Invalid(vec!["choice".into()]));
-    }
-    thread_result(st.domain.suggest(&c.ws, &id, &req.choice, &c.me).await?)
 }
 
 /// `POST /api/thread/:id/a2ui` (ST-46): a button of an A2UI interface in Steve's reply. Answers the record
@@ -1863,7 +1844,6 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         .route("/thread/{id}/promote", post(misc::thread_promote))
         .route("/thread/{id}/reroute", post(misc::thread_reroute))
         .route("/thread/{id}/offer", post(misc::thread_offer))
-        .route("/thread/{id}/suggest", post(misc::thread_suggest))
         .route("/thread/{id}/a2ui", post(misc::thread_a2ui))
         .route("/thread/runs/{id}/stop", post(misc::thread_run_stop))
         .route("/thread/runs/{id}", delete(misc::thread_run_stop))

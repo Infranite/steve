@@ -27,8 +27,8 @@ try {
     const side = page.locator("[data-sidebar-running] .ui-rnc__trigger")
     await side.waitFor()
     assert.equal(await page.locator(".steve-rn-head:visible").count(), 0, "no second pill in the header beside the sidebar")
-    // the same counts as the items page: one in progress, one waiting on you; paused items are under the pill, not in its count
-    assert.equal((await side.innerText()).replace(/\s+/g, " ").trim(), "1 进行中 · 1 等你")
+    // running pill trigger shows only active progress (waiting count belongs solely to sidebar 待我决定)
+    assert.equal((await side.innerText()).replace(/\s+/g, " ").trim(), "1 进行中")
     const pill = page.locator("[data-sidebar-running]"), rows = pill.locator(".ui-rnc__row")
     assert.equal(await page.locator(".ui-rnc__row").count(), 0, "closed panels do not mount rows in either layout")
     await side.click()

@@ -349,7 +349,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use steve_store::NewDecision;
 
 use super::{
     DRY_EFFECT, DRY_WRITE, Grant, NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, req_str,
@@ -895,7 +894,8 @@ impl Action for ItemLink {
 pub const SIGNAL_SUBJECT: &str = "signal";
 pub const NOTIFY_OPTIONS: [&str; 2] = ["done", "to_item"];
 
-/// `notify {text}`: an `ask` decision about the event.
+/// `notify {text}`: publishes a passive reminder into the workspace Feed (`feed_entries`),
+/// never opening an `ask` decision card.
 pub struct Notify;
 
 #[async_trait]
@@ -911,37 +911,38 @@ impl Action for Notify {
     }
     async fn run(&self, cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -> NodeOutcome {
         let text = cx.render(cfg["text"].as_str().unwrap_or(""), input);
-        let subject = cx
-            .event_id()
-            .map(String::from)
-            .unwrap_or_else(|| cx.run.id.clone());
-        let d = NewDecision {
-            workspace_id: cx.ws().to_string(),
-            kind: "ask".into(),
-            subject_type: SIGNAL_SUBJECT.into(),
-            subject_id: subject,
-            item_id: None,
-            session_id: None,
-            question: text.clone(),
-            draft: None,
-            options: Some(NOTIFY_OPTIONS.map(String::from).to_vec()),
-            requested_by: "steve".into(),
-            question_template: None,
-            source: Some(steve_store::DecisionSource::Revision {
-                revision: format!("notify:{}:{}:{}", cx.run.id, cx.node.id, cx.run.attempts),
-            }),
-            wait: None,
+        let title = text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| cut(line, 80))
+            .unwrap_or_else(|| cut(&text, 80));
+        let content = steve_store::feed::Content {
+            title,
+            markdown: text.clone(),
+            ..Default::default()
         };
-        let opened = cx
-            .flow
-            .store()
-            .write(|w| steve_store::DecisionRows(w).open(&d));
-        match opened {
-            Ok(d) => {
+        let ws = cx.ws().to_string();
+        let flow = cx.run.flow_id.clone();
+        let run = cx.run.id.clone();
+        let node = cx.node.id.clone();
+        let now = cx.now();
+        let base_result = json!({ "text": text, "notify": true });
+        let published = cx.flow.store().write(|w| {
+            w.publish_report(&steve_store::feed::RunReport {
+                ws: &ws,
+                flow: &flow,
+                run: &run,
+                node: &node,
+                content: &content,
+                result: &base_result,
+                now,
+            })
+        });
+        match published {
+            Ok((result, _)) => {
                 cx.effects.outcome = Some("need".into());
                 cx.effects.label = Some(cut(&text, 60));
-                cx.effects.decision_id = Some(d.id.clone());
-                NodeOutcome::next(json!({ "decision_id": d.id }))
+                NodeOutcome::next(result)
             }
             Err(e) => NodeOutcome::Fail(e.to_string()),
         }

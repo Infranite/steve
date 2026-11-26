@@ -493,7 +493,8 @@ impl std::fmt::Display for DecisionStatus {
 
 /// The tiers of 待处理, decided by the Hub in a fixed order of rules: an approved send that failed
 /// and a starred contact's message always ask you; a conversation you answered yourself folds; a
-/// reply drafted for you is a draft; everything else asks you.
+/// reply drafted for you is a draft; only whitelisted high-stakes / irreversible kinds ask you;
+/// everything else folds into passive review.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -516,6 +517,8 @@ pub enum FoldReason {
     Expired,
     /// The draft has lost its sending route.
     Unsendable,
+    /// Low-risk or informational suggestion folded out of the high-priority decision box.
+    LowPriority,
 }
 
 /// One stored turn in the main conversation. Metadata keeps the thread's structured cards.

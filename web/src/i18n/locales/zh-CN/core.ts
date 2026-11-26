@@ -146,8 +146,6 @@ export default {
     withdrawnToComposer: "已撤回，放回输入框了",
     queuedEdited: "已修改排队的消息",
     madeItem: "已做成 {{id}}",
-    appendedTo: "已追加到 {{id}}",
-    createdItem: "已建成 {{id}}",
     sentTo: "已送到 {{id}}",
     answerHere: "改成在这里回答",
     changed: "已改",

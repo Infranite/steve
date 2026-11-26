@@ -284,3 +284,5 @@ mod tests {
 /// Unix test process ownership, opt-in with this testkit module.
 #[cfg(unix)]
 pub mod process;
+#[cfg(unix)]
+pub use process::{AsyncProcessGuard, GroupGuard, ProcessGuard};

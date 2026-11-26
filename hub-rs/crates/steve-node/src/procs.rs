@@ -336,12 +336,9 @@ mod tests {
 
     #[test]
     fn started_by_needs_the_recorded_leader() {
-        use std::os::unix::process::CommandExt;
-        let mut leader = std::process::Command::new("sh")
-            .args(["-c", "sleep 5 & wait"])
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 5 & wait"]);
+        let mut leader = steve_runtime::testkit::ProcessGuard::spawn_direct(&mut cmd).unwrap();
         let pgid = leader.id() as i64;
         let started = start_time(pgid);
         let mut kids = vec![];
@@ -354,7 +351,7 @@ mod tests {
         );
         // a wrong start time is a reused pid: nothing is the harness's
         let reused = started_by(pgid, started.map(|s| s + 1));
-        unsafe { libc::kill(-(pgid as libc::pid_t), libc::SIGKILL) };
+        leader.kill().unwrap();
         let _ = leader.wait();
         assert!(!kids.is_empty(), "the sleep is the leader's");
         assert!(
@@ -431,13 +428,11 @@ mod tests {
     /// The leader exits on TERM before the rest of its group does.
     #[tokio::test]
     async fn a_group_whose_leader_dies_first_is_stopped() {
-        use std::os::unix::process::CommandExt;
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", "(trap '' TERM; exec sleep 30) & wait"])
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "(trap '' TERM; exec sleep 30) & wait"]);
+        let mut child = steve_runtime::testkit::ProcessGuard::spawn_direct(&mut cmd).unwrap();
         let pid = child.id() as i64;
+        let _guard = steve_runtime::testkit::GroupGuard::new(pid as i32);
         std::thread::spawn(move || {
             let _ = child.wait();
         });
@@ -453,13 +448,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_group_is_stopped_with_proof() {
-        use std::os::unix::process::CommandExt;
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let mut child = steve_runtime::testkit::ProcessGuard::spawn_direct(&mut cmd).unwrap();
         let pid = child.id() as i64;
+        let _guard = steve_runtime::testkit::GroupGuard::new(pid as i32);
         // reaped as it exits (a zombie still counts as a process of the group)
         std::thread::spawn(move || {
             let _ = child.wait();

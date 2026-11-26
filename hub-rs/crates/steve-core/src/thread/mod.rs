@@ -13,7 +13,6 @@ mod offer;
 pub mod onboard;
 mod reroute;
 pub mod research;
-mod suggest;
 
 pub use a2ui::{A2uiActed, A2uiAction};
 pub use offer::Handled;

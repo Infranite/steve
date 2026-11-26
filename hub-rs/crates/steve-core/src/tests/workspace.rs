@@ -135,8 +135,9 @@ fn a_closed_item_gives_back_its_caches_and_a_landed_worktree_keeps_its_branch() 
     );
     let tl = k.timeline_texts(&done);
     assert!(
-        tl.iter()
-            .any(|t| t.starts_with("删除了工作区") && t.contains("保留在")),
+        tl.iter().any(|t| t.starts_with("删除了工作区")
+            && t.contains("未合并分支")
+            && t.contains("已保留")),
         "{tl:?}"
     );
     assert!(
@@ -171,6 +172,8 @@ fn a_closed_item_gives_back_its_toolchain_outputs_even_when_its_worktree_stays()
     };
     let (done, branch, wt) = item_with_caches(&k, &r, &p, "done");
     let (open, _, open_wt) = item_with_caches(&k, &r, &p, "run");
+    // Uncommitted work keeps the worktree in place while rebuildable toolchain outputs still go.
+    fs::write(wt.join("notes.txt"), "uncommitted").unwrap();
     build(&wt);
     build(&open_wt);
     let built = |wt: &Path| {
@@ -181,10 +184,7 @@ fn a_closed_item_gives_back_its_toolchain_outputs_even_when_its_worktree_stays()
 
     let res = k.core.reclaim_workspaces().unwrap();
     assert!(freed_of(&res, &done) >= 3 << 20, "{res:?}");
-    assert!(
-        wt.join("x.txt").exists(),
-        "unmerged work keeps its worktree"
-    );
+    assert!(wt.join("x.txt").exists(), "dirty work keeps its worktree");
     assert!(!built(&wt), "{res:?}");
     assert!(
         wt.join(steve_toolchains::ITEM_BUILD_DIR)
@@ -202,7 +202,7 @@ fn a_closed_item_gives_back_its_toolchain_outputs_even_when_its_worktree_stays()
 }
 
 #[test]
-fn unmerged_work_keeps_its_worktree_until_archived_and_dirty_work_stays() {
+fn clean_unmerged_closed_worktree_is_removed_keeping_branch_and_dirty_work_stays() {
     let k = Kit::new();
     let (r, p) = project(&k);
     let (done, branch, wt) = item_with_caches(&k, &r, &p, "done");
@@ -266,8 +266,13 @@ fn unmerged_work_keeps_its_worktree_until_archived_and_dirty_work_stays() {
     };
 
     let res = k.core.reclaim_workspaces().unwrap();
-    assert!(wt.join("x.txt").exists(), "{}", diagnose(&res));
-    assert!(!wt.join("target").exists(), "{}", diagnose(&res));
+    assert_eq!(res.removed, vec![done.clone()], "{}", diagnose(&res));
+    assert!(!wt.exists(), "{}", diagnose(&res));
+    assert_eq!(
+        g(&r, &["rev-list", "--count", &format!("main..{branch}")]),
+        "1",
+        "the unmerged commit stays on its branch"
+    );
     assert!(dirty_wt.join("notes.txt").exists(), "{}", diagnose(&res));
     assert!(
         !dirty_wt.join("node_modules").exists(),
@@ -281,26 +286,17 @@ fn unmerged_work_keeps_its_worktree_until_archived_and_dirty_work_stays() {
             .map(|x| x.reason.clone())
     };
     assert!(
-        reason(&done).is_some_and(|r| r.contains("还没合入主线")),
-        "{}",
-        diagnose(&res)
-    );
-    assert!(
         reason(&dirty).is_some_and(|r| r.contains("未提交")),
         "{}",
         diagnose(&res)
     );
-
-    k.db().item_patch(&done, patch![archived: true]).unwrap();
-    let res = k.core.reclaim_workspaces().unwrap();
-    assert_eq!(res.removed, vec![done.clone()], "{}", diagnose(&res));
-    assert!(!wt.exists(), "{}", diagnose(&res));
-    assert_eq!(
-        g(&r, &["rev-list", "--count", &format!("main..{branch}")]),
-        "1",
-        "the commit stays on its branch"
+    assert!(
+        k.timeline_texts(&dirty)
+            .iter()
+            .any(|t| t.contains("工作区清理失败")),
+        "dirty cleanup failure must be shown on the item: {:?}",
+        k.timeline_texts(&dirty)
     );
-    assert!(dirty_wt.join("notes.txt").exists(), "{}", diagnose(&res));
 }
 
 #[test]
@@ -311,7 +307,7 @@ fn busy_sessions_and_running_processes_keep_everything() {
     let s = k.session(&busy, "running");
     k.rt.st().turning.insert(s);
     let (served, _, served_wt) = item_with_caches(&k, &r, &p, "done");
-    let mut child = std::process::Command::new("sleep")
+    let mut child = steve_runtime::testkit::process::Command::new("sleep")
         .arg("30")
         .current_dir(&served_wt)
         .spawn()

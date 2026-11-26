@@ -15,7 +15,7 @@ import { useT } from "@/i18n"
 import { Loading, Reveal, Turn } from "@/ui"
 import { CpuIcon } from "lucide-react"
 
-export function SteveModelForm({ first = false, onSaved, onDirty, afterSave }: { first?: boolean; onSaved?: () => void; onDirty?: () => void; afterSave?: () => Promise<unknown> }) {
+export function SteveModelForm({ first = false, onSaved, onDirty, onReady, afterSave }: { first?: boolean; onSaved?: () => void; onDirty?: () => void; onReady?: (ready: boolean) => void; afterSave?: () => Promise<unknown> }) {
   useShellStore()
   const t = useT(), ws = st.workspace?.id
   const [view, setView] = useState<View | null>(null), [error, setError] = useState("")
@@ -32,7 +32,11 @@ export function SteveModelForm({ first = false, onSaved, onDirty, afterSave }: {
       if (!alive.current || st.workspace?.id !== ws) return
       setView(v)
       setLightOn(!!v.lightweight); setLightHarness(v.lightweight?.harness ?? ""); setLightModel(v.lightweight?.models[0] ?? "")
-      if (!first) { setHarness(v.steve.harness); setModel(v.steve.model ?? "__default") }
+      const ready = v.harnesses.filter((h) => h.ready !== false && h.judgments)
+      const picked = ready.some((h) => h.id === v.steve.harness) ? v.steve.harness : (ready[0]?.id ?? "")
+      setHarness(picked)
+      setModel(picked ? (picked === v.steve.harness ? (v.steve.model ?? "__default") : "__default") : "__unselected")
+      onReady?.(ready.length > 0)
     }, (e) => alive.current && setError(String(e.message ?? e)))
   }
   useEffect(() => { alive.current = true; load(); return () => { alive.current = false } }, [])
@@ -53,15 +57,21 @@ export function SteveModelForm({ first = false, onSaved, onDirty, afterSave }: {
   if (!view) return <div className="flex flex-col gap-3">{error ? <><p role="alert" className="type-callout text-destructive">{error}</p><Button type="button" variant="outline" onClick={load}>{t("common:action.retry")}</Button></> : <Loading />}</div>
   const overrides = view.purposes.filter((p) => !p.follows)
   const available = view.harnesses.filter((h) => h.ready !== false && h.judgments)
+  if (!available.length) {
+    return <div className="flex min-w-0 flex-col gap-2 rounded-lg bg-muted/50 p-4" role="status" data-steve-model-form data-no-harness-card>
+      <p className="type-callout font-medium text-foreground">{t("pages:models.setup.noHarnessTitle")}</p>
+      <p className="type-callout text-muted-foreground">{t("pages:models.setup.noHarness")}</p>
+    </div>
+  }
   const current = view.steve.models.join(" → ") || t("pages:models.setup.adapterDefault")
   const choices = [{ id: "__default", name: cat?.default ? t("pages:models.setup.defaultIs", { model: cat.default }) : t("pages:models.setup.adapterDefault"), description: t("pages:models.setup.quotaUnknown"), icon: <HarnessMark harness={harness} /> }, ...(cat?.models ?? []).map((m) => ({ id: m.id, name: m.label || m.id, description: m.note ?? m.id, icon: <ModelMark model={m.id} /> }))]
   if (model !== "__unselected" && model !== "__default" && !choices.some((m) => m.id === model)) choices.push({ id: model, name: model, description: t("pages:models.setup.custom"), icon: <ModelMark model={model} /> })
   return <div className="flex min-w-0 flex-col gap-4" data-steve-model-form>
     <p className="type-callout text-muted-foreground" data-current-model>{t("pages:models.setup.current", { harness: view.harnesses.find((h) => h.id === view.steve.harness)?.name ?? harnessName(view.steve.harness), model: current })}</p>
     <div className="flex flex-col gap-2 type-callout"><span>{t("pages:models.setup.harness")}</span>
-      <Select value={harness} label={t("pages:models.setup.harness")} placeholder={t("pages:models.setup.chooseHarness")} disabled={busy} testId="steve-harness" options={available.map((h) => ({ v: h.id, l: h.name }))} onChange={(h) => { dirty(); setHarness(h); setModel("__unselected"); setManual(false) }} />
+      <Select value={harness} label={t("pages:models.setup.harness")} placeholder={t("pages:models.setup.chooseHarness")} disabled={busy} testId="steve-harness" options={available.map((h) => ({ v: h.id, l: h.name }))} onChange={(h) => { dirty(); setHarness(h); setModel("__default"); setManual(false) }} />
     </div>
-    <p className="type-footnote text-muted-foreground">{t("pages:models.roles.primaryUses")}</p>
+    {!first && <p className="type-footnote text-muted-foreground">{t("pages:models.roles.primaryUses")}</p>}
     {harness && <div className="flex min-w-0 flex-col gap-2" data-steve-model-picker>
       <span className="type-callout">{t("pages:models.setup.model")}</span>
       <fieldset disabled={busy} className="min-w-0">
@@ -70,26 +80,27 @@ export function SteveModelForm({ first = false, onSaved, onDirty, afterSave }: {
       <Button type="button" size="xs" variant="ghost" className="self-start text-muted-foreground" disabled={busy} onClick={() => setManual(!manual)} data-steve-model-manual>{t("pages:models.setup.custom")}</Button>
       {manual && <Input aria-label={t("pages:models.setup.modelId")} placeholder={t("pages:models.setup.modelId")} disabled={busy} value={model.startsWith("__") ? "" : model} onChange={(e) => { dirty(); setModel(e.target.value.trim() || "__unselected") }} />}
     </div>}
-    <div className="border-t pt-4" data-lightweight-config>
-      <Checkbox label={t("pages:models.roles.enableLight")} disabled={busy} checked={lightOn} onCheckedChange={(v) => { dirty(); setLightOn(v); if (v && !lightHarness) setLightHarness(harness) }} data-lightweight-enable />
-      <p className="mt-2 type-footnote text-muted-foreground">{t("pages:models.roles.lightUses")}</p>
-      {lightOn ? <div className="mt-3 flex flex-col gap-3">
-        <Select value={lightHarness} label={t("pages:models.roles.lightHarness")} placeholder={t("pages:models.setup.chooseHarness")} disabled={busy} testId="lightweight-harness" options={available.map((h) => ({ v: h.id, l: h.name }))} onChange={(h) => { dirty(); setLightHarness(h); setLightModel("") }} />
-        {lightHarness && <fieldset disabled={busy} data-lightweight-picker><CatalogPicker harness={lightHarness} value={lightModel} onChange={(m) => { dirty(); setLightModel(m) }} allowDefault testId="lightweight-model" /></fieldset>}
-      </div> : <p className="mt-2 type-callout text-muted-foreground">{t("pages:models.roles.lightFollows")}</p>}
-    </div>
-    <p className="type-footnote text-muted-foreground">{t("pages:models.setup.quotaUnknown")}</p>
-    <div><button type="button" className="flex items-center gap-2 type-callout text-muted-foreground" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)} data-role-advanced-toggle><Turn open={advanced} />{t("pages:models.roles.advanced")}</button><Reveal open={advanced}><div className="pt-3">    <Checkbox label={t("pages:models.setup.follow")} disabled={busy} checked={follow} onCheckedChange={(v) => { dirty(); setFollow(v === true) }} data-steve-follow /></div></Reveal></div>
-    {overrides.length > 0 && <p className="type-footnote text-muted-foreground" data-model-overrides>{t(follow ? "pages:models.setup.clearOverrides" : "pages:models.setup.keepOverrides", { purposes: overrides.map((p) => p.label).join(t("pages:listSep")) })}</p>}
-    <p className="type-footnote text-muted-foreground">{t("pages:models.setup.scope")}</p>
-    {!available.length && <p role="status" className="type-callout text-attention">{t("pages:models.setup.noHarness")}</p>}
-    <div data-role-preview><button type="button" className="flex items-center gap-2 type-callout text-muted-foreground" aria-expanded={preview} onClick={() => setPreview(!preview)} data-role-preview-toggle><Turn open={preview} />{t("pages:models.roles.preview", { count: view.purposes.length })}</button><Reveal open={preview}>
-      <ul className="mt-2 flex flex-col divide-y divide-border">{view.purposes.map((p) => {
-        const light = lightOn && p.role === "lightweight"
-        const chosen = !follow && !p.follows ? p.effective : light ? { harness: lightHarness, models: lightModel ? [lightModel] : [] } : { harness, models: model.startsWith("__") ? [] : [model] }
-        return <li key={p.key} className="flex flex-wrap justify-between gap-1 py-2 type-footnote" data-role-preview-purpose={p.key}><span>{p.label}</span><span className="break-all text-muted-foreground">{chosen.harness ? harnessName(chosen.harness) : t("pages:models.setup.chooseHarness")} · {chosen.models.join(" → ") || t("pages:models.setup.adapterDefault")}</span></li>
-      })}</ul></Reveal>
-    </div>
+    {!first && <>
+      <div className="border-t pt-4" data-lightweight-config>
+        <Checkbox label={t("pages:models.roles.enableLight")} disabled={busy} checked={lightOn} onCheckedChange={(v) => { dirty(); setLightOn(v); if (v && !lightHarness) setLightHarness(harness) }} data-lightweight-enable />
+        <p className="mt-2 type-footnote text-muted-foreground">{t("pages:models.roles.lightUses")}</p>
+        {lightOn ? <div className="mt-3 flex flex-col gap-3">
+          <Select value={lightHarness} label={t("pages:models.roles.lightHarness")} placeholder={t("pages:models.setup.chooseHarness")} disabled={busy} testId="lightweight-harness" options={available.map((h) => ({ v: h.id, l: h.name }))} onChange={(h) => { dirty(); setLightHarness(h); setLightModel("") }} />
+          {lightHarness && <fieldset disabled={busy} data-lightweight-picker><CatalogPicker harness={lightHarness} value={lightModel} onChange={(m) => { dirty(); setLightModel(m) }} allowDefault testId="lightweight-model" /></fieldset>}
+        </div> : <p className="mt-2 type-callout text-muted-foreground">{t("pages:models.roles.lightFollows")}</p>}
+      </div>
+      <p className="type-footnote text-muted-foreground">{t("pages:models.setup.quotaUnknown")}</p>
+      <div><button type="button" className="flex items-center gap-2 type-callout text-muted-foreground" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)} data-role-advanced-toggle><Turn open={advanced} />{t("pages:models.roles.advanced")}</button><Reveal open={advanced}><div className="pt-3">    <Checkbox label={t("pages:models.setup.follow")} disabled={busy} checked={follow} onCheckedChange={(v) => { dirty(); setFollow(v === true) }} data-steve-follow /></div></Reveal></div>
+      {overrides.length > 0 && <p className="type-footnote text-muted-foreground" data-model-overrides>{t(follow ? "pages:models.setup.clearOverrides" : "pages:models.setup.keepOverrides", { purposes: overrides.map((p) => p.label).join(t("pages:listSep")) })}</p>}
+      <p className="type-footnote text-muted-foreground">{t("pages:models.setup.scope")}</p>
+      <div data-role-preview><button type="button" className="flex items-center gap-2 type-callout text-muted-foreground" aria-expanded={preview} onClick={() => setPreview(!preview)} data-role-preview-toggle><Turn open={preview} />{t("pages:models.roles.preview", { count: view.purposes.length })}</button><Reveal open={preview}>
+        <ul className="mt-2 flex flex-col divide-y divide-border">{view.purposes.map((p) => {
+          const light = lightOn && p.role === "lightweight"
+          const chosen = !follow && !p.follows ? p.effective : light ? { harness: lightHarness, models: lightModel ? [lightModel] : [] } : { harness, models: model.startsWith("__") ? [] : [model] }
+          return <li key={p.key} className="flex flex-wrap justify-between gap-1 py-2 type-footnote" data-role-preview-purpose={p.key}><span>{p.label}</span><span className="break-all text-muted-foreground">{chosen.harness ? harnessName(chosen.harness) : t("pages:models.setup.chooseHarness")} · {chosen.models.join(" → ") || t("pages:models.setup.adapterDefault")}</span></li>
+        })}</ul></Reveal>
+      </div>
+    </>}
     {error && <div role="alert" className="flex flex-col gap-2 type-callout text-destructive" data-steve-model-error>{error}<Button type="button" variant="outline" size="sm" className="self-start" onClick={load} disabled={busy}>{t("pages:models.setup.reload")}</Button></div>}
     <div className="flex flex-wrap items-center gap-3">
       <Button type="button" disabled={busy || !available.some((h) => h.id === harness) || lightOn && !available.some((h) => h.id === lightHarness) || model === "__unselected" || saved && !afterSave} onClick={() => void save()} data-steve-model-save>{busy ? t("pages:models.setup.saving") : afterSave ? t("pages:models.setup.saveRetry") : t("pages:models.setup.save")}</Button>

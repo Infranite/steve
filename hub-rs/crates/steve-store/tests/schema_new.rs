@@ -1742,3 +1742,67 @@ fn migration_128_strips_main_bot_from_teams_and_rewrites_steve_fallback() {
         })
         .unwrap();
 }
+
+#[test]
+fn migration_141_rebinds_work_tidy_to_item_lifecycle_preserving_cursor() {
+    let (_dir, path) = at_version(140);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "INSERT INTO outbox_events (seq, id, workspace_id, topic, version, payload, created)
+         VALUES
+           (10, 'evt_10', 'default', 'work.item.done', 1, '{}', 100),
+           (25, 'evt_25', 'default', 'work.item.done', 1, '{}', 200);
+         INSERT INTO outbox_consumers (id, topic, since_seq, enabled, registered)
+         VALUES
+           ('work.tidy', 'work.item.done', 0, 1, 100),
+           ('flow.item_events', 'work.item.done', 0, 1, 100);
+         INSERT INTO outbox_receipts (event_seq, consumer_id, workspace_id, done, outcome)
+         VALUES
+           (10, 'work.tidy', 'default', 150, 'ok'),
+           (25, 'work.tidy', 'default', 250, 'ok'),
+           (25, 'flow.item_events', 'default', 250, 'ok');
+         INSERT INTO outbox_leases (event_seq, consumer_id, attempts, last_error, next_at, dead, failing_since, updated)
+         VALUES (25, 'work.tidy', 2, 'retry', 300, 0, 200, 250);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    db::migrate(&c).unwrap();
+    let (topic, since_seq): (String, i64) = c
+        .query_row(
+            "SELECT topic, since_seq FROM outbox_consumers WHERE id = 'work.tidy'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(topic, "work.item.lifecycle");
+    assert_eq!(since_seq, 25);
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM outbox_receipts WHERE consumer_id = 'work.tidy'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM outbox_leases WHERE consumer_id = 'work.tidy'"
+        ),
+        0
+    );
+    let other_topic: String = c
+        .query_row(
+            "SELECT topic FROM outbox_consumers WHERE id = 'flow.item_events'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(other_topic, "work.item.done");
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM outbox_receipts WHERE consumer_id = 'flow.item_events'"
+        ),
+        1
+    );
+}

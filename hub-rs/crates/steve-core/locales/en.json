@@ -140,7 +140,6 @@
   "core.draft.value.forever": "Forever",
   "core.draft.value.no_report": "No reports",
   "core.draft.value.no_archive": "Never archive automatically",
-  "core.draft.value.no_handoff": "Never",
   "core.draft.value.no_wait": "Don't wait",
   "core.draft.value.load": "Load",
   "core.draft.value.no_load": "Don't load",
@@ -185,7 +184,6 @@
   "core.draft.setting.depsAfter": "When prerequisites finish",
   "core.draft.setting.quotaAutoHandoff": "Auto-handoff on quota exhaustion",
   "core.draft.setting.quotaWaitMinutes": "Quota recovery wait threshold",
-  "core.draft.setting.handoff": "Handoff threshold",
   "core.draft.setting.archDays": "Archive automatically after finishing",
   "core.draft.setting.quiet": "Do not disturb",
   "core.draft.setting.fontSize": "Font size",
@@ -313,5 +311,15 @@
   "core.sweep.follow_up": "Stopped; Steve would follow up",
   "core.sweep.stall_question": "The turn has had no new output for a while: one status question",
   "core.sweep.long_wait": "The wait has been looked at many times",
-  "core.sweep.silent": "Waiting, with nothing recorded for a long time"
+  "core.sweep.silent": "Waiting, with nothing recorded for a long time",
+  "core.worktree.removed_merged": "Removed workspace %{cwd}; deleted merged branch %{branch}",
+  "core.worktree.removed_unmerged": "Removed workspace %{cwd}; preserved unmerged branch %{branch} (at %{head}) for future reuse",
+  "core.worktree.removed_unmerged_no_sha": "Removed workspace %{cwd}; preserved unmerged branch %{branch} for future reuse",
+  "core.worktree.removed_only": "Removed workspace %{cwd}",
+  "core.worktree.removed_branch_failed": "Removed workspace %{cwd}; failed to delete merged branch %{branch}: %{error}",
+  "core.worktree.cleanup_failed": "Workspace cleanup failed (%{cwd}): %{error}",
+  "core.worktree.cleanup_in_use": "Workspace cleanup deferred (%{cwd}): another process is still using this directory",
+  "core.worktree.branch_deleted": "Deleted merged branch %{branch}",
+  "core.worktree.branch_delete_failed": "Failed to delete merged branch %{branch}: %{error}",
+  "core.worktree.branch_preserved": "Preserved unmerged branch %{branch} (at %{head})"
 }

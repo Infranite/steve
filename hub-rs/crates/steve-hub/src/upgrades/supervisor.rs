@@ -3,7 +3,7 @@ use super::*;
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(test)]
-use steve_runtime::testkit::process::{AsyncChild as Child, AsyncCommand as Command};
+use steve_runtime::testkit::process::{AsyncCommand as Command, AsyncProcessGuard as Child};
 #[cfg(not(test))]
 use tokio::process::{Child, Command};
 const STOP_GRACE: Duration = Duration::from_secs(15);

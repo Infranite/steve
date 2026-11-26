@@ -36,7 +36,7 @@ function dayLabel(ts: number, today: number) {
   return monthDay(ts)
 }
 
-/** context used: a short bar and the figure; amber from 80%, where a new turn starts over with a handoff */
+/** context used: a short bar and the figure; amber from 80% */
 function Ctx({ s }: { s: Sess }) {
   const t = useT()
   if (!s.contextKnown) return null
