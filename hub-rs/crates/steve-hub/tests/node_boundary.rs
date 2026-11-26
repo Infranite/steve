@@ -315,7 +315,7 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-keyhelper/src/mac.rs", Hub, "the keychain helper"),
     e(Spawn, "steve-modules/src/vault/keystore/helper.rs", Hub, "the vault keystore helper"),
     e(Spawn, "steve-modules/src/net.rs", Hub, "test support: reruns one test in a child"),
-    e(Dir, "steve-hub/src/upgrades/mod.rs", Hub, "upgrade operations in the Hub data dir"),
+    e(Dir, "steve-hub/src/upgrades/mod.rs", Hub, "upgrade operations and release receipts in the Hub data dir"),
     e(Fs, "steve-store-sqlite/src/backup/offline.rs", Hub, "the SQLite driver stages a private online snapshot and verifies the checksum of a private restored copy"),
     e(Spawn, "steve-hub/src/backup/engine.rs", Hub, "runs the verified release's restic executable for the installation repository with a cleared environment and a pipe for its key"),
     e(Dir, "steve-hub/src/backup/engine.rs", Hub, "cleans the private backup staging directory while the installation repository lock is held"),

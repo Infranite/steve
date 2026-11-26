@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { checkStale, committedFailure, downloadPercent, enableOneClick, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
+import { CHECK_RATE_LIMITED_STALE_MS, CHECK_TRANSIENT_STALE_MS, checkStale, committedFailure, downloadPercent, enableOneClick, operationTitle, restoredVersion, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
+import i18n from "../src/i18n/index.ts"
 
 const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"
 
@@ -85,4 +86,35 @@ test("a failure after the switch is recognised in either language", () => {
   assert.equal(committedFailure({ phase: "failed", error: "Upgrade committed, but the new version didn't come up" }), true)
   assert.equal(committedFailure({ phase: "failed", error: "部署在切换前停止" }), false)
   assert.equal(committedFailure({ phase: "rolled_back", error: "升级已提交" }), false)
+})
+
+test("transient unavailable checks become stale sooner than healthy checks", () => {
+  const now = 10 * 3600_000
+  const capability = { managed: false, can_execute: true, reason: "", owner: true }
+  const unavailable = (age, error_kind = "upstream_server") => ({ status: "unavailable", error_kind, checked_at: now - age, version: null, release_url: null, notes: null, error: "HTTP 500" })
+  assert.equal(checkStale({ capability, check: unavailable(30_000), operation: null }, now), false)
+  assert.equal(checkStale({ capability, check: unavailable(CHECK_TRANSIENT_STALE_MS + 1), operation: null }, now), true)
+  assert.equal(checkStale({ capability, check: unavailable(CHECK_TRANSIENT_STALE_MS + 1, "rate_limited"), operation: null }, now), false)
+  assert.equal(checkStale({ capability, check: unavailable(CHECK_RATE_LIMITED_STALE_MS + 1, "rate_limited"), operation: null }, now), true)
+})
+
+test("rolled-back and terminal-deploy titles name the exact target and restored versions in zh-CN and en", async () => {
+  assert.equal(restoredVersion({ previous_version: "0.11.0", previous: "/Users/example/.steve/releases/0.11.0-local-51826fc" }), "0.11.0")
+  assert.equal(restoredVersion({ previous: "/Users/example/.steve/releases/0.11.0-local-51826fc" }), "0.11.0")
+  assert.equal(restoredVersion({ previous: "/Users/example/.steve/releases/0.11.0-550e8400-e29b-41d4-a716-446655440000" }), "0.11.0")
+  assert.equal(restoredVersion({ previous: "/Users/example/.steve/releases/20261102-092840-46ac3591" }), null)
+
+  assert.equal(operationTitle({ phase: "rolled_back", version: "0.12.0", previous_version: "0.11.0", previous: null }), "升级到 0.12.0 失败，已恢复到 0.11.0")
+  assert.equal(operationTitle({ phase: "rolled_back", version: "v0.12.0", previous: "/Users/example/.steve/releases/0.11.0-local-51826fc" }), "升级到 0.12.0 失败，已恢复到 0.11.0")
+  assert.equal(operationTitle({ phase: "rolled_back", version: "0.12.0", previous: null }), "升级到 0.12.0 失败，已恢复旧版本")
+  assert.equal(operationTitle({ phase: "succeeded", version: "0.12.0", previous: null, source: "terminal_deploy" }), "已通过终端部署 0.12.0")
+
+  await i18n.changeLanguage("en")
+  try {
+    assert.equal(operationTitle({ phase: "rolled_back", version: "0.12.0", previous_version: "0.11.0", previous: null }), "Upgrade to 0.12.0 failed, restored to 0.11.0")
+    assert.equal(operationTitle({ phase: "rolled_back", version: "0.12.0", previous: null }), "Upgrade to 0.12.0 failed, restored to previous version")
+    assert.equal(operationTitle({ phase: "succeeded", version: "0.12.0", previous: null, source: "terminal_deploy" }), "Deployed 0.12.0 via terminal")
+  } finally {
+    await i18n.changeLanguage("zh-CN")
+  }
 })

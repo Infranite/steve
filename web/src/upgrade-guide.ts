@@ -130,7 +130,44 @@ export function verifyUpgrade(target: string, health: Health | null, loadedWeb: 
 
 /** A version check older than this is repeated when the instance manager opens the page (the Hub caches it 10 minutes). */
 export const CHECK_STALE_MS = 3600_000
-export const checkStale = (state: Pick<UpdateState, "capability" | "check" | "operation">, now = Date.now()) =>
-  state.capability.owner === true && !(state.operation && !["succeeded", "rolled_back", "failed"].includes(state.operation.phase)) && (!state.check || now - state.check.checked_at > CHECK_STALE_MS)
+/** Transient upstream failures re-check automatically after the Hub's 1-minute failure cache expires. */
+export const CHECK_TRANSIENT_STALE_MS = 60_000
+/** Rate-limited checks wait for the Hub's 10-minute rate-limit cache before re-checking automatically. */
+export const CHECK_RATE_LIMITED_STALE_MS = 600_000
+export function checkStale(state: Pick<UpdateState, "capability" | "check" | "operation">, now = Date.now()): boolean {
+  if (state.capability.owner !== true) return false
+  if (state.operation && !["succeeded", "rolled_back", "failed"].includes(state.operation.phase)) return false
+  if (!state.check) return true
+  const ttl = state.check.status === "unavailable"
+    ? (state.check.error_kind === "rate_limited" ? CHECK_RATE_LIMITED_STALE_MS : CHECK_TRANSIENT_STALE_MS)
+    : CHECK_STALE_MS
+  return now - state.check.checked_at > ttl
+}
+/** Extract a clean release version from `previous_version` or a release directory path (never returns a raw path). */
+export function restoredVersion(op: Pick<UpdateOperation, "previous_version" | "previous">): string | null {
+  if (op.previous_version) return op.previous_version.replace(/^v/, "")
+  if (!op.previous) return null
+  const base = op.previous.replace(/\/+$/, "").split("/").pop() ?? ""
+  const match = /^v?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)$/.exec(base)
+  if (!match) return null
+  return match[1].replace(/-(?:local-[0-9a-f]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i, "")
+}
+/** Human-readable heading for an upgrade or terminal-deployment record. */
+export function operationTitle(op: Pick<UpdateOperation, "phase" | "version" | "previous_version" | "previous" | "source">): string {
+  const target = op.version.replace(/^v/, "")
+  if (op.phase === "rolled_back") {
+    const previous = restoredVersion(op)
+    return previous
+      ? t("pages:upgrade.record.rolledBack", { target, previous })
+      : t("pages:upgrade.record.rolledBackUnknown", { target })
+  }
+  if (op.phase === "failed") {
+    return t("pages:upgrade.record.failed", { target })
+  }
+  if (op.phase === "succeeded" && op.source === "terminal_deploy") {
+    return t("pages:upgrade.record.terminalSucceeded", { target })
+  }
+  return `${t(`misc:update.phase.${op.phase}`)} · ${op.version}`
+}
 /** A failure after the switch: the new version stays (supervisor and ops/local-release.py both say so). */
 export const committedFailure = (op: UpdateOperation) => op.phase === "failed" && !!op.error && /升级已提交|Upgrade committed/.test(op.error)
