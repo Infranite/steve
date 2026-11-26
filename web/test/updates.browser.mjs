@@ -319,12 +319,55 @@ try {
   await page.locator('[data-upgrade-verify="passed"]').waitFor({ timeout: 8000 })
   assert.equal(await page.locator("[data-sidebar-hub-update]").count(), 0, "no notice once nothing newer is known")
   // someone else: no check of their own, no button
-  state.capability = { managed: false, can_execute: false, owner: false, reason: "仅实例管理员可批准和执行升级" }; state.check = null; state.operation = null
+  state.capability = { managed: false, can_execute: false, owner: false, reason: "仅实例管理员可批准和执行升级" }; state.check = null; state.operation = null; state.history = []
   const checksNow = checks
   await page.reload(); await page.locator("[data-upgrade-unavailable]").waitFor()
   assert.equal(await page.locator("[data-upgrade-check]").isDisabled(), true)
   await page.waitForTimeout(500)
   assert.equal(checks, checksNow, "a member's page never spends the GitHub allowance")
+
+  // Transient upstream 500: calm auto-retry copy, raw URL/exception hidden inside collapsible details.
+  const raw500 = "HTTP status server error (500 Internal Server Error) for url (https://github.com/Infranite/steve/releases/download/v0.12.0/steve-release.json)"
+  state = {
+    repository: "Infranite/steve",
+    current: { hub: "0.12.0", web: "0.12.0" },
+    capability: { managed: false, can_execute: true, owner: true, reason: "local_release runner" },
+    install: { kind: "local_release", home, release: "0.12.0-local-1234567", repo },
+    check: { status: "unavailable", error_kind: "upstream_server", checked_at: Date.now(), version: "0.12.0", release_url: "https://github.com/Infranite/steve/releases/tag/v0.12.0", notes: null, error: raw500 },
+    operation: { id: "local-0.12.0-20261126-150000", idempotency_key: "", version: "0.12.0", phase: "succeeded", source: "terminal_deploy", created_at: Date.now() - 10_000, updated_at: Date.now() - 5_000, requested_by: "terminal", error: null, previous: `${home}/releases/0.11.0-local-aaaaaaa`, previous_version: "0.11.0", target: `${home}/releases/0.12.0-local-1234567` },
+    history: [{ id: "up_stale_failed", idempotency_key: "web-upgrade:Infranite/steve:0.12.0", version: "0.12.0", phase: "rolled_back", source: "in_app", created_at: Date.now() - 3600_000, updated_at: Date.now() - 3500_000, requested_by: "owner", error: "backup failed: restic unavailable", previous: `${home}/releases/0.11.0-local-aaaaaaa`, previous_version: "0.11.0", target: `${home}/releases/0.12.0` }],
+    backup: null,
+  }
+  health = { ok: true, version: "0.12.0", web_version: "0.12.0", drain: false, recovery: { state: "ok" } }
+  await page.goto(base + "/test/fixtures/updates.html?web=0.12.0")
+  const unavailableBox = page.locator('[data-upgrade-check-status="unavailable"]')
+  await unavailableBox.getByText("暂时连不上 GitHub，稍后会自动重试。").waitFor()
+  await unavailableBox.getByText("GitHub 服务暂时返回异常，通常几分钟内会恢复。").waitFor()
+  assert.equal(await unavailableBox.locator("[data-upgrade-check-details]").isVisible(), false, "raw URL and English error stay collapsed inside Details")
+  await unavailableBox.locator("summary").click()
+  await unavailableBox.locator("[data-upgrade-check-details]").filter({ hasText: raw500 }).waitFor()
+  // Latest terminal deploy replaces stale in-app failure; stale failure lives only in collapsed history with accurate X/Y.
+  await page.locator('[data-upgrade-phase="succeeded"][data-upgrade-source="terminal_deploy"]').waitFor()
+  assert.equal(await page.locator("[data-upgrade-record-title]").innerText(), "已通过终端部署 0.12.0")
+  assert.equal(await page.locator('[data-upgrade-phase="rolled_back"]').count(), 0)
+  assert.equal(await page.locator("[data-upgrade-history-item]").isVisible(), false, "stale failure stays collapsed in history")
+  await page.locator("[data-upgrade-history] summary").click()
+  await page.locator('[data-upgrade-history-item="rolled_back"]').getByText("升级到 0.12.0 失败，已恢复到 0.11.0").waitFor()
+
+  // Permanent manifest error vs rolled-back active card label (X=0.12.0, Y=0.11.0).
+  state.current = { hub: "0.11.0", web: "0.11.0" }
+  state.check = { status: "error", error_kind: "invalid_manifest", checked_at: Date.now(), version: "0.12.0", release_url: null, notes: null, error: "incompatible or mismatched release manifest" }
+  state.operation = state.history[0]
+  state.history = []
+  await page.reload()
+  const errBox = page.locator('[data-upgrade-check-status="error"]')
+  await errBox.getByText("发行版清单校验失败").waitFor()
+  assert.equal(await errBox.locator("[data-upgrade-check-details]").isVisible(), false, "raw manifest error stays collapsed inside Details")
+  await errBox.locator("summary").click()
+  await errBox.locator("[data-upgrade-check-details]").filter({ hasText: "incompatible or mismatched release manifest" }).waitFor()
+  await phase("rolled_back")
+  assert.equal(await page.locator("[data-upgrade-record-title]").innerText(), "升级到 0.12.0 失败，已恢复到 0.11.0")
+
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["source check only", "owner capability", "agent approve and reject", "ambiguous POST recovery", "restart disconnect", "reload without POST", "stable version key", "manual refresh preserves draft", "rollback and explicit retry", "ahead and unknown versions", "390px layout", "keychain capability reason", "drain and rollback health phases", "unrelated receipt cannot clear errors", "definite 4xx", "8s status timeout recovery", "same-version paired repair after old success", "stable repair intent", "repair refresh never POSTs", "later explicit repair gets fresh key", "local signing uses release packages and offline diagnostics", "read-back retries through restart and outage", "old page needs reload", "non-owner gets no paths", "per-install guides", "managed progress steps", "rollback backup and recovery", "committed failure keeps new database", "pre-switch failure untouched", "upgraded only after health and versions agree", "local: found by itself", "local: sidebar notice", "local: one click, no commands", "local: measured bytes and indeterminate signing", "local: last snapshot survives disconnect", "local: unknown totals", "local: drain blocker links and legacy counts", "local: progress across restart", "local: rolled back with backup", "local: committed failure", "local: refused before switch", "local: upgraded", "member: no check, no button"], gets, writes: writes.length, approvals, rejections }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["source check only", "owner capability", "agent approve and reject", "ambiguous POST recovery", "restart disconnect", "reload without POST", "stable version key", "manual refresh preserves draft", "rollback and explicit retry", "ahead and unknown versions", "390px layout", "keychain capability reason", "drain and rollback health phases", "unrelated receipt cannot clear errors", "definite 4xx", "8s status timeout recovery", "same-version paired repair after old success", "stable repair intent", "repair refresh never POSTs", "later explicit repair gets fresh key", "local signing uses release packages and offline diagnostics", "read-back retries through restart and outage", "old page needs reload", "non-owner gets no paths", "per-install guides", "managed progress steps", "rollback backup and recovery", "committed failure keeps new database", "pre-switch failure untouched", "upgraded only after health and versions agree", "local: found by itself", "local: sidebar notice", "local: one click, no commands", "local: measured bytes and indeterminate signing", "local: last snapshot survives disconnect", "local: unknown totals", "local: drain blocker links and legacy counts", "local: progress across restart", "local: rolled back with backup", "local: committed failure", "local: refused before switch", "local: upgraded", "member: no check, no button", "transient upstream 500 with collapsible details", "terminal deploy supersedes stale failure into history", "manifest error with collapsible details", "rolled-back card labels target and restored versions"], gets, writes: writes.length, approvals, rejections }))
 } catch (e) { console.error(await page.locator("body").innerText(), errors); throw e } finally { await browser.close() }

@@ -1,6 +1,81 @@
 use super::*;
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
+use steve_runtime::policy::Retry;
+
+/// Maximum size in bytes of a downloaded `steve-release.json` manifest.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug)]
+pub(super) struct CheckFailure {
+    pub kind: CheckErrorKind,
+    pub detail: String,
+}
+
+impl CheckFailure {
+    pub(super) fn is_transient(&self) -> bool {
+        matches!(
+            self.kind,
+            CheckErrorKind::UpstreamServer
+                | CheckErrorKind::Timeout
+                | CheckErrorKind::Connect
+                | CheckErrorKind::RateLimited
+        )
+    }
+
+    pub(super) fn is_retryable(&self) -> bool {
+        matches!(
+            self.kind,
+            CheckErrorKind::UpstreamServer | CheckErrorKind::Timeout | CheckErrorKind::Connect
+        )
+    }
+
+    pub(super) fn status(&self) -> CheckStatus {
+        if self.is_transient() {
+            CheckStatus::Unavailable
+        } else {
+            CheckStatus::Error
+        }
+    }
+
+    pub(super) fn retry_action(&self) -> Retry {
+        if self.is_retryable() {
+            Retry::Backoff
+        } else {
+            Retry::Stop
+        }
+    }
+}
+
+pub(super) fn classify_http_status(status: reqwest::StatusCode, detail: String) -> CheckFailure {
+    let kind = if status.is_server_error() {
+        CheckErrorKind::UpstreamServer
+    } else if status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        CheckErrorKind::RateLimited
+    } else {
+        CheckErrorKind::Other
+    };
+    CheckFailure { kind, detail }
+}
+
+fn classify_reqwest_error(error: reqwest::Error) -> CheckFailure {
+    let detail = error.to_string();
+    if let Some(status) = error.status() {
+        return classify_http_status(status, detail);
+    }
+    let kind = if error.is_timeout() {
+        CheckErrorKind::Timeout
+    } else if error.is_connect() || error.is_body() || error.is_request() {
+        CheckErrorKind::Connect
+    } else if error.is_decode() {
+        CheckErrorKind::InvalidRelease
+    } else {
+        CheckErrorKind::Other
+    };
+    CheckFailure { kind, detail }
+}
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Release {
@@ -31,59 +106,209 @@ impl Release {
     }
 }
 impl Updates {
-    pub(super) async fn latest(&self) -> Result<Option<Release>> {
+    pub(super) async fn latest_checked(
+        &self,
+    ) -> std::result::Result<Option<Release>, CheckFailure> {
         let cache_path = self.dir().join("github-cache.json");
         let cache = read::<Value>(&cache_path).ok();
-        let mut request = self.client.get(format!(
-            "{}/repos/{}/releases/latest",
-            self.api_base, self.repository
-        ));
-        if let Some(etag) = cache
+        let cached_etag = cache
             .as_ref()
             .filter(|v| v["repository"] == self.repository)
             .and_then(|v| v["etag"].as_str())
-        {
-            request = request.header("If-None-Match", etag)
-        }
-        let r = request.send().await?;
-        if r.status() == 304 {
-            let cached = cache.context("GitHub 304 without cache")?;
-            return Ok(Some(serde_json::from_value(cached["release"].clone())?));
-        }
-        if r.status() == 404 {
-            return Ok(None);
-        }
-        if r.status() == 403 || r.status() == 429 {
-            bail!("GitHub rate limited; retry after reset")
-        }
-        let etag = r
-            .headers()
-            .get("etag")
-            .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        let r: Release = r.error_for_status()?.json().await?;
-        atomic(
-            &cache_path,
-            &json!({"repository":self.repository,"etag":etag,"release":r}),
-        )?;
-        if r.draft || r.prerelease {
-            return Ok(None);
-        };
-        Ok(Some(r))
+        let url = format!(
+            "{}/repos/{}/releases/latest",
+            self.api_base, self.repository
+        );
+
+        enum ApiOutcome {
+            NotModified,
+            NotFound,
+            Release {
+                etag: Option<String>,
+                release: Release,
+            },
+        }
+
+        let outcome = self
+            .check_backoff
+            .retry(
+                || async {
+                    let mut request = self.client.get(&url).timeout(self.check_timeout);
+                    if let Some(etag) = cached_etag.as_deref() {
+                        request = request.header("If-None-Match", etag);
+                    }
+                    let r = request.send().await.map_err(classify_reqwest_error)?;
+                    let status = r.status();
+                    if status == reqwest::StatusCode::NOT_MODIFIED {
+                        return Ok(ApiOutcome::NotModified);
+                    }
+                    if status == reqwest::StatusCode::NOT_FOUND {
+                        return Ok(ApiOutcome::NotFound);
+                    }
+                    if status == reqwest::StatusCode::FORBIDDEN
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    {
+                        return Err(CheckFailure {
+                            kind: CheckErrorKind::RateLimited,
+                            detail: format!("GitHub rate limited ({status}) for url ({url})"),
+                        });
+                    }
+                    if !status.is_success() {
+                        return Err(classify_http_status(
+                            status,
+                            format!("HTTP status {status} for url ({url})"),
+                        ));
+                    }
+                    let etag = r
+                        .headers()
+                        .get("etag")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    let release: Release = r.json().await.map_err(classify_reqwest_error)?;
+                    Ok(ApiOutcome::Release { etag, release })
+                },
+                CheckFailure::retry_action,
+            )
+            .await?;
+
+        match outcome {
+            ApiOutcome::NotModified => {
+                let cached = cache.ok_or_else(|| CheckFailure {
+                    kind: CheckErrorKind::InvalidRelease,
+                    detail: "GitHub 304 without cache".into(),
+                })?;
+                let release: Release =
+                    serde_json::from_value(cached["release"].clone()).map_err(|e| {
+                        CheckFailure {
+                            kind: CheckErrorKind::InvalidRelease,
+                            detail: e.to_string(),
+                        }
+                    })?;
+                Ok(Some(release))
+            }
+            ApiOutcome::NotFound => Ok(None),
+            ApiOutcome::Release { etag, release } => {
+                let _ = atomic(
+                    &cache_path,
+                    &json!({"repository": self.repository, "etag": etag, "release": &release}),
+                );
+                if release.draft || release.prerelease {
+                    return Ok(None);
+                }
+                Ok(Some(release))
+            }
+        }
     }
+
+    /// Fetch a small release metadata asset with bounded retries on transient upstream errors.
+    async fn fetch_checked(
+        &self,
+        url: &str,
+        limit: u64,
+        not_found_kind: CheckErrorKind,
+    ) -> std::result::Result<Vec<u8>, CheckFailure> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| CheckFailure {
+            kind: CheckErrorKind::InvalidRelease,
+            detail: e.to_string(),
+        })?;
+        if parsed.scheme() != "https" && !(cfg!(test) && parsed.host_str() == Some("127.0.0.1")) {
+            return Err(CheckFailure {
+                kind: CheckErrorKind::InvalidRelease,
+                detail: "release asset requires HTTPS".into(),
+            });
+        }
+        self.check_backoff
+            .retry(
+                || async {
+                    let r = self
+                        .client
+                        .get(parsed.clone())
+                        .timeout(self.check_timeout)
+                        .send()
+                        .await
+                        .map_err(classify_reqwest_error)?;
+                    let status = r.status();
+                    if status == reqwest::StatusCode::NOT_FOUND {
+                        return Err(CheckFailure {
+                            kind: not_found_kind,
+                            detail: format!("HTTP status {status} for url ({url})"),
+                        });
+                    }
+                    if !status.is_success() {
+                        return Err(classify_http_status(
+                            status,
+                            format!("HTTP status {status} for url ({url})"),
+                        ));
+                    }
+                    if r.content_length().is_some_and(|n| n > limit) {
+                        return Err(CheckFailure {
+                            kind: CheckErrorKind::InvalidManifest,
+                            detail: "asset exceeds size limit".into(),
+                        });
+                    }
+                    let mut bytes = Vec::new();
+                    let mut stream = r.bytes_stream();
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk.map_err(classify_reqwest_error)?;
+                        if bytes.len() as u64 + chunk.len() as u64 > limit {
+                            return Err(CheckFailure {
+                                kind: CheckErrorKind::InvalidManifest,
+                                detail: "asset exceeds size limit".into(),
+                            });
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    Ok(bytes)
+                },
+                CheckFailure::retry_action,
+            )
+            .await
+    }
+
     /// Validate installability during checks; never advertise a tag alone as an executable update.
-    pub(super) async fn inspect_release(&self, release: &Release) -> Result<bool> {
-        let remote = release
-            .assets
-            .iter()
-            .find(|asset| asset.name == "steve-release.json")
-            .context("release has no steve-release.json")?;
-        let manifest: Manifest = serde_json::from_slice(
-            &self
-                .fetch(&remote.browser_download_url, 1024 * 1024)
-                .await?,
-        )?;
-        validate_manifest(&manifest, &release.version()?.to_string())?;
+    pub(super) async fn inspect_release_checked(
+        &self,
+        release: &Release,
+        prefetched: Option<&Manifest>,
+    ) -> std::result::Result<bool, CheckFailure> {
+        let version = release.version().map_err(|e| CheckFailure {
+            kind: CheckErrorKind::InvalidRelease,
+            detail: e.to_string(),
+        })?;
+        let owned_manifest;
+        let manifest = match prefetched {
+            Some(m) => m,
+            None => {
+                let remote = release
+                    .assets
+                    .iter()
+                    .find(|asset| asset.name == "steve-release.json")
+                    .ok_or_else(|| CheckFailure {
+                        kind: CheckErrorKind::InvalidManifest,
+                        detail: "release has no steve-release.json".into(),
+                    })?;
+                let bytes = self
+                    .fetch_checked(
+                        &remote.browser_download_url,
+                        MAX_MANIFEST_BYTES,
+                        CheckErrorKind::InvalidManifest,
+                    )
+                    .await?;
+                owned_manifest =
+                    serde_json::from_slice::<Manifest>(&bytes).map_err(|e| CheckFailure {
+                        kind: CheckErrorKind::InvalidManifest,
+                        detail: format!("invalid steve-release.json: {e}"),
+                    })?;
+                validate_manifest(&owned_manifest, &version.to_string()).map_err(|e| {
+                    CheckFailure {
+                        kind: CheckErrorKind::InvalidManifest,
+                        detail: e.to_string(),
+                    }
+                })?;
+                &owned_manifest
+            }
+        };
         Ok(manifest.assets.iter().any(|asset| {
             asset.target == platform()
                 && release
@@ -157,52 +382,112 @@ impl Updates {
     }
     /// Which tag `latest` is, from github.com's redirect (not the rate-limited API), with the
     /// manifest published beside it. No release notes: those only come from the API.
-    pub(super) async fn latest_web(&self) -> Result<Option<Release>> {
-        let client = reqwest::Client::builder()
+    pub(super) async fn latest_web_checked(
+        &self,
+    ) -> std::result::Result<Option<(Release, Manifest)>, CheckFailure> {
+        let builder = reqwest::Client::builder()
             .user_agent("Steve-updater/1")
-            .timeout(std::time::Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        let r = client
-            .get(format!(
-                "{}/{}/releases/latest",
-                self.web_base, self.repository
-            ))
-            .send()
+            .timeout(self.check_timeout)
+            .redirect(reqwest::redirect::Policy::none());
+        #[cfg(test)]
+        let builder = if self.web_base.starts_with("http://127.0.0.1") {
+            builder.no_proxy()
+        } else {
+            builder
+        };
+        let client = builder.build().map_err(classify_reqwest_error)?;
+        let url = format!("{}/{}/releases/latest", self.web_base, self.repository);
+        let location = self
+            .check_backoff
+            .retry(
+                || async {
+                    let r = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .map_err(classify_reqwest_error)?;
+                    let status = r.status();
+                    if status == reqwest::StatusCode::NOT_FOUND {
+                        return Ok(None);
+                    }
+                    if status.is_server_error() {
+                        return Err(CheckFailure {
+                            kind: CheckErrorKind::UpstreamServer,
+                            detail: format!("HTTP status {status} for url ({url})"),
+                        });
+                    }
+                    if status == reqwest::StatusCode::FORBIDDEN
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    {
+                        return Err(CheckFailure {
+                            kind: CheckErrorKind::RateLimited,
+                            detail: format!("HTTP status {status} for url ({url})"),
+                        });
+                    }
+                    if !status.is_redirection() {
+                        return Err(CheckFailure {
+                            kind: CheckErrorKind::InvalidRelease,
+                            detail: format!("github.com answered {status} for the latest release"),
+                        });
+                    }
+                    let loc = r
+                        .headers()
+                        .get("location")
+                        .and_then(|v| v.to_str().ok())
+                        .ok_or_else(|| CheckFailure {
+                            kind: CheckErrorKind::InvalidRelease,
+                            detail: "no redirect target for the latest release".into(),
+                        })?;
+                    Ok(Some(loc.to_owned()))
+                },
+                CheckFailure::retry_action,
+            )
             .await?;
-        if r.status() == 404 {
+        let Some(location) = location else {
             return Ok(None);
-        }
-        if !r.status().is_redirection() {
-            bail!("github.com answered {} for the latest release", r.status())
-        }
-        let location = r
-            .headers()
-            .get("location")
-            .and_then(|v| v.to_str().ok())
-            .context("no redirect target for the latest release")?;
+        };
         let tag = location
             .rsplit_once("/releases/tag/")
             .map(|(_, tag)| tag.trim_end_matches('/'))
-            .context("the latest release redirect names no tag")?;
-        let version = semver::Version::parse(tag.trim_start_matches('v'))?;
-        Ok(Some(self.web_release(&version).await?.0))
+            .ok_or_else(|| CheckFailure {
+                kind: CheckErrorKind::InvalidRelease,
+                detail: "the latest release redirect names no tag".into(),
+            })?;
+        let version =
+            semver::Version::parse(tag.trim_start_matches('v')).map_err(|e| CheckFailure {
+                kind: CheckErrorKind::InvalidRelease,
+                detail: e.to_string(),
+            })?;
+        Ok(Some(self.web_release_checked(&version).await?))
     }
     /// A published release read from its download URLs only: the manifest names its assets.
-    async fn web_release(&self, version: &semver::Version) -> Result<(Release, Manifest)> {
+    async fn web_release_checked(
+        &self,
+        version: &semver::Version,
+    ) -> std::result::Result<(Release, Manifest), CheckFailure> {
         let download = format!(
             "{}/{}/releases/download/v{version}",
             self.web_base, self.repository
         );
-        let manifest: Manifest = serde_json::from_slice(
-            &self
-                .fetch(&format!("{download}/steve-release.json"), 1024 * 1024)
-                .await?,
-        )?;
-        validate_manifest(&manifest, &version.to_string())?;
+        let manifest_url = format!("{download}/steve-release.json");
+        let bytes = self
+            .fetch_checked(
+                &manifest_url,
+                MAX_MANIFEST_BYTES,
+                CheckErrorKind::InvalidManifest,
+            )
+            .await?;
+        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| CheckFailure {
+            kind: CheckErrorKind::InvalidManifest,
+            detail: format!("invalid steve-release.json: {e}"),
+        })?;
+        validate_manifest(&manifest, &version.to_string()).map_err(|e| CheckFailure {
+            kind: CheckErrorKind::InvalidManifest,
+            detail: e.to_string(),
+        })?;
         let mut assets = vec![RemoteAsset {
             name: "steve-release.json".into(),
-            browser_download_url: format!("{download}/steve-release.json"),
+            browser_download_url: manifest_url,
         }];
         assets.extend(manifest.assets.iter().map(|a| RemoteAsset {
             name: a.name.clone(),
@@ -250,13 +535,16 @@ impl Updates {
                     .context("release has no steve-release.json")?;
                 let manifest: Manifest = serde_json::from_slice(
                     &self
-                        .fetch(&remote.browser_download_url, 1024 * 1024)
+                        .fetch(&remote.browser_download_url, MAX_MANIFEST_BYTES)
                         .await?,
                 )?;
                 (r, manifest)
             }
             // rate limited: the download URLs exist only for a published (not draft) release
-            Err(error) => match self.web_release(&semver::Version::parse(version)?).await {
+            Err(error) => match self
+                .web_release_checked(&semver::Version::parse(version)?)
+                .await
+            {
                 Ok(found) => found,
                 Err(_) => return Err(error),
             },
