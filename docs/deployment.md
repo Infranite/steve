@@ -769,7 +769,7 @@ Snapshots are sampled reads, not a distributed transaction. `changed_during_read
 
 ## Several machines
 
-Steve runs work on Nodes. The Hub can run its own colocated Node (`local`) in a separate `steve-node --local-node` process (`STEVE_NODE_MODE=service`, the default), so a Hub restart or upgrade leaves its turns running; `STEVE_NODE_MODE=off` disables the colocated Node for remote-only deployments. Any other machine can become a Node as well. A typical arrangement is an always-on Hub with other machines added as Nodes, but none is assumed: one machine on its own is a complete Steve.
+Steve runs work on Nodes. The Hub runs its own colocated Node (`local`) in a separate `steve-node --local-node` process (`STEVE_NODE_MODE=service`, the only normal mode), so a Hub restart or upgrade leaves its turns running; only diagnostic `STEVE_NO_RESUME=1` copies start without a colocated Node. Any other machine can become a Node as well. A typical arrangement is an always-on Hub with other machines added as Nodes, but none is assumed: one machine on its own is a complete Steve.
 
 - **Reaching the Hub:** a Node dials the Hub, never the other way round. It can use the Hub's HTTPS address (a reverse proxy that terminates TLS, see [Remote Nodes](#remote-nodes)) or [tailcat](#remote-nodes-over-tailcat) when there is no public address or VPN.
 - **Adding a machine:** pair it from Devices with a code ([Pairing a separate Node](#pairing-a-separate-node)), or let the Hub [install it over tailcat](#installing-a-node-remotely-over-tailcat).
@@ -1209,7 +1209,7 @@ The new Node reaches the Hub over tailcat when [Connect over tailcat](#remote-no
 
 ## The Hub's own Node in a process of its own
 
-The Hub's own Node, which runs sessions, model/research jobs, git operations, project setup, and `stdio` MCP servers on the Hub's machine, runs as `steve-node --local-node`, a process of its own (`STEVE_NODE_MODE=service`, the default), so a turn goes on while the Hub restarts or upgrades (`STEVE_NODE_MODE=local` has been removed; set `STEVE_NODE_MODE=off` to disable the colocated Node):
+The Hub's own Node, which runs sessions, model/research jobs, git operations, project setup, and `stdio` MCP servers on the Hub's machine, runs as `steve-node --local-node`, a process of its own (`STEVE_NODE_MODE=service`, the only normal mode), so a turn goes on while the Hub restarts or upgrades (`STEVE_NODE_MODE=local` and `STEVE_NODE_MODE=off` have been removed):
 
 - The Hub starts the process when no Node is linked: in a session of its own and, when the Hub runs under systemd, in a scope of its own (`systemd-run --user --scope`). A restart or upgrade of the Hub's service therefore leaves it running. `steve hub stop` (and so the stop before `steve hub uninstall`) stops it too.
 - It keeps the Node's id (`local`) and home (`<data>/node`), so sessions from before carry on there.

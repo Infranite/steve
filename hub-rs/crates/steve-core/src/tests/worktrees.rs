@@ -121,11 +121,16 @@ fn a_late_answer_for_an_older_session_changes_nothing() {
     assert_eq!(after.cwd.as_deref(), Some(new.cwd.as_str()));
     assert_ne!(after.branch.as_deref(), Some("steve/x"));
     // nor does a prepare failure of it raise a card
-    k.core.workspace_failed(&old.id, false, "boom").unwrap();
+    k.core
+        .workspace_failed(&old.id, crate::WorkspaceFailure::Other("boom"))
+        .unwrap();
     assert!(!k.open_kinds(&i.id).contains(&"fail".to_string()));
     // the current one's does, in the start's words
     k.core
-        .workspace_failed(&new.id, false, "git worktree: not a worktree")
+        .workspace_failed(
+            &new.id,
+            crate::WorkspaceFailure::Other("git worktree: not a worktree"),
+        )
         .unwrap();
     let cards = k.db().decisions_of_item(&i.id).unwrap();
     assert!(
@@ -156,7 +161,9 @@ fn below_the_floor_the_backends_refusal_reads_as_steves() {
     let i = create(&k, &p);
     let s = k.db().sessions_of_item(&i.id).unwrap().pop().unwrap();
     assert!(k.open_kinds(&i.id).is_empty());
-    k.core.workspace_failed(&s.id, true, "disk low").unwrap();
+    k.core
+        .workspace_failed(&s.id, crate::WorkspaceFailure::DiskLow)
+        .unwrap();
     let cards = k.db().decisions_of_item(&i.id).unwrap();
     assert!(
         cards.iter().any(|d| d.kind == "fail"

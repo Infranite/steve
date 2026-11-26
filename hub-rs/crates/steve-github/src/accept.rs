@@ -205,7 +205,7 @@ impl GitHub {
             .filter(|r| r.enabled)
             .ok_or("项目没有关联可用的仓库".to_string())?;
         let nodes = self.git_nodes().ok_or_else(|| {
-            push::PushError::NoNodeAvailable("请确认本地或目标设备节点已连接".into()).to_string()
+            push::PushError::NoNodeAvailable(steve_i18n::t!("github.push.no_git_nodes")).to_string()
         })?;
         let conn = self.effect_conn(&ws, &r.connection_id)?;
         let sha = match e.result["sha"].as_str() {
@@ -215,9 +215,7 @@ impl GitHub {
                     .head_of(item_id, &branch)
                     .await
                     .ok_or_else(|| {
-                        push::PushError::NoNodeAvailable(
-                            "事项工作区未绑定到在线节点，无法读取分支提交".into(),
-                        )
+                        push::PushError::NoNodeAvailable(steve_i18n::t!("github.push.no_node_head"))
                     })
                     .and_then(|h| h)
                     .map_err(|e| e.to_string())?;
@@ -270,9 +268,9 @@ impl GitHub {
                     }
                     Some(Err(e)) => return Err(e.to_string().into()),
                     None => {
-                        return Err(push::PushError::NoNodeAvailable(
-                            "事项工作区未绑定到在线节点，无法推送分支".into(),
-                        )
+                        return Err(push::PushError::NoNodeAvailable(steve_i18n::t!(
+                            "github.push.no_node_push"
+                        ))
                         .to_string()
                         .into());
                     }

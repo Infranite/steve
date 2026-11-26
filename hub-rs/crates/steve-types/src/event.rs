@@ -319,7 +319,7 @@ impl From<crate::WorkLiveEvent> for BusEvent {
 /// Every SSE wire type a bus event can have, one per variant across all domain and live sub-enums.
 /// Tests on both sides of the wire iterate this list (steve-types `tests/wire.rs` checks it against the
 /// variant counts), so a new variant cannot be missed by one of them.
-pub const WIRE_TYPES: [&str; 38] = [
+pub const WIRE_TYPES: [&str; 39] = [
     "item",
     "decision",
     "session",
@@ -330,6 +330,7 @@ pub const WIRE_TYPES: [&str; 38] = [
     "steve.tool",
     "workflow.run",
     "release.hold",
+    "local_node.updating",
     "bot",
     "project",
     "tag",

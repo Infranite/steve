@@ -312,7 +312,10 @@ fn a_missing_project_dir_is_a_fail_card() {
         .unwrap();
     let s = only_session(&k, &i.id);
     k.core
-        .workspace_failed(&s.id, false, "项目目录不存在：/nonexistent/steve-test")
+        .workspace_failed(
+            &s.id,
+            crate::WorkspaceFailure::DirMissing("/nonexistent/steve-test"),
+        )
         .unwrap();
     assert_eq!(
         k.open_fails(&i.id),

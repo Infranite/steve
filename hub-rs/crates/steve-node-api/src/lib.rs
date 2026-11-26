@@ -42,9 +42,11 @@ pub use oneshot::*;
 pub use ports::*;
 pub use run::*;
 pub use steve_types::devices::{
-    FileAccessReport, FileAccessStatus, LOGIN_SHELL_PROBE_TIMEOUT_SECS, MissingCommandDiagnostic,
-    NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET, ProtectedAccess, ProtectedLocation,
-    extract_login_shell_path, login_shell_path_script, shell_supports_interactive_login,
+    DEFAULT_DISK_FLOOR_BYTES, FileAccessReport, FileAccessStatus, LOCAL_SERVICE_LINK_FILE,
+    LOCAL_SERVICE_PID_FILE, LOGIN_SHELL_PROBE_TIMEOUT_SECS, LocalServiceLink, LocalServicePid,
+    MissingCommandDiagnostic, NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET, ProtectedAccess,
+    ProtectedLocation, extract_login_shell_path, login_shell_path_script,
+    shell_supports_interactive_login,
 };
 pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};
 pub use steve_types::{
@@ -55,8 +57,10 @@ pub use stop::*;
 pub use tools::*;
 pub use workspace::*;
 
-/// Exact ordinary wire contract. Every wire-format change increments this in the same commit.
-/// A different value permits only the independent, permanent upgrade protocol.
+/// Exact ordinary wire contract. Every breaking wire-format change increments this in the same
+/// commit; additive RPCs that the Hub calls only when advertised via [`Capabilities::features`]
+/// (or [`Capacity`]) keep the protocol version unchanged so running Nodes remain connected across
+/// upgrades. A different value permits only the independent, permanent upgrade protocol.
 pub const PROTOCOL: u32 = 17;
 
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness

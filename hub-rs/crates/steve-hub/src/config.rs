@@ -308,10 +308,6 @@ pub struct Config {
     pub declared_adapters: BTreeMap<String, steve_harness_spec::Declaration>,
     /// Adapter ids explicitly listed in the Hub's harness manifest (`harness.json`).
     pub manifest_adapters: std::collections::BTreeSet<String>,
-    /// Adapter commands declared in the Hub's harness manifest (`harness.json`), for preflight checks.
-    pub(crate) manifest_commands: BTreeMap<String, PathBuf>,
-    /// Optional Node.js override declared in the Hub's harness manifest (`harness.json`).
-    pub(crate) manifest_node: Option<PathBuf>,
     /// Where that manifest is (the runtimes page adds adapters to it).
     pub harness_manifest: PathBuf,
     pub models: Models,
@@ -817,7 +813,7 @@ impl Config {
             .filter(|p| !p.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join("harness.json"));
-        let (manifest_commands, declared_adapters, manifest_node) = harness_manifest(&manifest);
+        let (manifest_commands, declared_adapters, _manifest_node) = harness_manifest(&manifest);
         let manifest_adapters: std::collections::BTreeSet<String> =
             manifest_commands.keys().cloned().collect();
 
@@ -919,8 +915,6 @@ impl Config {
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
             declared_adapters,
             manifest_adapters,
-            manifest_commands,
-            manifest_node,
             harness_manifest: manifest,
             models: Models {
                 // none by default: every call follows the harness's own default model

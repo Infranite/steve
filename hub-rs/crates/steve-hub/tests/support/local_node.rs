@@ -137,6 +137,8 @@ pub async fn attach(
     };
     let local = Arc::new(steve_node::LocalNode::open(node_cfg).expect("open test LocalNode"));
     local.follow_roots_file(rf);
+    local.enable_host_ops();
+    local.enable_capability_sandbox();
     local.enable_research(steve_research::ResearchConfig::new(
         cfg.scratch.join("research"),
     ));
@@ -148,7 +150,7 @@ pub async fn attach(
         files: Some(svc.fleet.files_for(&node_id)),
         secrets: svc.secrets.get().map(|s| s.for_node(node_id.clone())),
     });
-    let node_server = steve_node_wire::NodeServer::new(local.clone());
+    let node_server = steve_node_wire::NodeServer::colocated(local.clone());
     let hub_conn = steve_node_wire::Conn::spawn(
         hub_end.sink,
         hub_end.stream,

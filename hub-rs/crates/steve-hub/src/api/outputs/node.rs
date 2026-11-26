@@ -224,7 +224,7 @@ impl Addr {
     /// its directory's listing.
     async fn stat(&self) -> Result<Seen, ApiError> {
         let seen = |e: na::Error| match e.code {
-            na::Code::Invalid => Ok(Seen::Gone),
+            na::Code::Invalid | na::Code::NotFound => Ok(Seen::Gone),
             na::Code::Forbidden => Ok(Seen::Outside),
             _ => Err(node_error(e)),
         };
@@ -271,7 +271,12 @@ impl Addr {
         loop {
             let page = match self.page(cursor, 1000).await {
                 Ok(p) => p,
-                Err(e) if matches!(e.code, na::Code::Invalid | na::Code::Forbidden) => {
+                Err(e)
+                    if matches!(
+                        e.code,
+                        na::Code::Invalid | na::Code::NotFound | na::Code::Forbidden
+                    ) =>
+                {
                     return Ok(out);
                 }
                 Err(e) => return Err(node_error(e)),
@@ -562,19 +567,45 @@ pub(crate) async fn locate(o: &Out, v: &View, sub: Option<&str>) -> Result<Locat
             return Err(outside());
         };
         let p = PathBuf::from(normalize(&loc));
-        let resolved = crate::config::resolve(&p);
         let target = if l
             .places
             .iter()
             .any(|r| p.starts_with(normalize(&r.to_string_lossy())))
         {
             Some(p)
-        } else if l
-            .places
-            .iter()
-            .any(|r| resolved.starts_with(crate::config::resolve(r)))
-        {
-            Some(resolved)
+        } else if let Some(local_node) = l.ws.local_node() {
+            // Resolve symlinks (e.g. macOS `/var` -> `/private/var`) on the colocated Node so the
+            // Hub never calls `canonicalize` on project/worktree paths directly.
+            let resolved = local_node
+                .path_check(na::PathCheckRequest {
+                    path: p.to_string_lossy().into_owned(),
+                })
+                .await
+                .ok()
+                .and_then(|r| r.canonical)
+                .map(PathBuf::from);
+            let mut matched = None;
+            if let Some(resolved) = resolved {
+                for r in &l.places {
+                    let norm_r = normalize(&r.to_string_lossy());
+                    if resolved.starts_with(&norm_r) {
+                        matched = Some(resolved.clone());
+                        break;
+                    }
+                    if let Ok(rc) = local_node
+                        .path_check(na::PathCheckRequest {
+                            path: r.to_string_lossy().into_owned(),
+                        })
+                        .await
+                        && let Some(canon_r) = rc.canonical
+                        && resolved.starts_with(FsPath::new(&canon_r))
+                    {
+                        matched = Some(resolved.clone());
+                        break;
+                    }
+                }
+            }
+            matched
         } else {
             None
         };

@@ -1,25 +1,23 @@
 //! Colocated local Node runner (`steve-node --local-node`): runs the Hub's own Node in a separate
 //! process, linking over loopback and surviving Hub restarts/upgrades.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use steve_node::{LocalNode, NodeConfig, PolicyCeiling, Root, Storage};
-use steve_node_api::{Capacity, NodeId};
+use steve_node_api::{
+    Capacity, HarnessPreflight, LOCAL_SERVICE_LINK_FILE, LOCAL_SERVICE_PID_FILE, LocalServiceLink,
+    LocalServicePid, NodeId,
+};
 use steve_node_wire::Identity;
 
 use crate::config::{Home, Pairing, canonicalize_path};
 
 const NODE_ID: &str = "local";
 const KEY: &str = "service-identity.key";
-const LINK: &str = "service.json";
-const PID: &str = "service.pid";
 const ROOTS: &str = "host-roots.json";
 const INSTALLATION_CHECK: Duration = Duration::from_secs(1);
-/// Default worktree disk floor (10 GiB), matching `steve_core::workspace::DiskPolicy::default`.
-const DEFAULT_DISK_FLOOR_BYTES: u64 = 10 << 30;
 /// Concurrent command/push slots on the colocated Node.
 const LOCAL_EXEC_CAPACITY: u32 = 16;
 
@@ -73,8 +71,8 @@ async fn wait_for_retirement(home: &Path, executable: &Path) {
 }
 
 fn read_pid(home: &Path) -> Option<u32> {
-    let text = std::fs::read_to_string(home.join(PID)).unwrap_or_default();
-    text.lines().next().and_then(|l| l.trim().parse().ok())
+    let text = std::fs::read_to_string(home.join(LOCAL_SERVICE_PID_FILE)).unwrap_or_default();
+    LocalServicePid::parse(&text).map(|p| p.pid)
 }
 
 fn discovery_config(
@@ -82,49 +80,35 @@ fn discovery_config(
     acp: &steve_acp::AcpConfig,
 ) -> steve_node::history::DiscoveryConfig {
     let path_env = std::env::var_os("PATH");
-    let mut state_dirs = BTreeMap::new();
-    let mut bins = BTreeMap::new();
-    for b in steve_harness_spec::builtins() {
-        if let Some(state) = &b.properties.state {
-            let dir = match state.env.as_str() {
-                "CLAUDE_CONFIG_DIR" => Some(
-                    acp.claude_config_dir
-                        .clone()
-                        .unwrap_or_else(|| acp.user_home.join(&state.default)),
-                ),
-                "CODEX_HOME" => Some(acp.codex_home.clone()),
-                _ => None,
-            };
-            if let Some(dir) = dir {
-                state_dirs.insert(b.id.to_string(), dir);
-            }
-        }
-        if b.properties.executable_env.as_deref() == Some("CLAUDE_CODE_EXECUTABLE") {
-            if !acp.claude_executable.as_os_str().is_empty() {
-                bins.insert(b.id.to_string(), acp.claude_executable.clone());
-            }
-        } else if b.properties.usage_fallback == steve_harness_spec::UsageFallback::CodexRollout {
-            let detected = std::env::var_os("CODEX_EXECUTABLE")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| {
-                    b.detect_bins
-                        .iter()
-                        .find_map(|name| steve_acp::which_in(name, path_env.as_deref()))
-                });
-            if let Some(bin) = detected {
-                bins.insert(b.id.to_string(), bin);
-            }
-        }
-    }
     steve_node::history::DiscoveryConfig {
         homes: steve_node::history::Homes {
             user_home: acp.user_home.clone(),
             steve_home: steve_home.to_path_buf(),
-            state_dirs,
+            state_dirs: acp.discovery_state_dirs(),
         },
-        binaries: steve_node::history::Binaries { bins },
+        binaries: steve_node::history::Binaries {
+            bins: acp.discovery_binaries(|k| std::env::var_os(k), path_env.as_deref()),
+        },
     }
+}
+
+/// Offline harness/adapter preflight run by `steve-node harness-probe` (invoked by
+/// `steve-hub --check-config` and boot warnings), delegating all harness rules to `steve-acp`.
+pub fn probe_harnesses(var: impl Fn(&str) -> Option<String>) -> HarnessPreflight {
+    let user_home = var("HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let steve_home = var("STEVE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| user_home.join(".steve"));
+    let steve_home = std::path::absolute(&steve_home).unwrap_or(steve_home);
+    let manifest_path = var("STEVE_HARNESS_MANIFEST")
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| steve_home.join("harness.json"));
+    steve_acp::probe_harnesses(&steve_home, &manifest_path, var)
 }
 
 /// Run the Hub's colocated local Node until stopped by signal or installation retirement.
@@ -141,10 +125,11 @@ pub async fn run() -> Result<()> {
     }
     let data_dir = data_dir_from_env(&steve_home);
     let node_home = data_dir.join("node");
-    let link: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(node_home.join(LINK))
+    let link: LocalServiceLink = serde_json::from_slice(
+        &std::fs::read(node_home.join(LOCAL_SERVICE_LINK_FILE))
             .context("the Hub has not set up its local Node yet")?,
-    )?;
+    )
+    .context("invalid local Node service link")?;
     let id = Identity::load(&node_home.join(KEY)).context("the local Node's key")?;
     let roots_file = node_home.join(ROOTS);
     let roots: Vec<Root> = std::fs::read(&roots_file)
@@ -154,9 +139,7 @@ pub async fn run() -> Result<()> {
     let acp = Home(steve_home.clone()).acp()?;
     let version = acp.version.clone();
     let discovery = discovery_config(&steve_home, &acp);
-    let worktree_floor = link["disk_floor"]
-        .as_u64()
-        .unwrap_or(DEFAULT_DISK_FLOOR_BYTES);
+    let worktree_floor = link.disk_floor;
     let node_id = NodeId::new(NODE_ID).expect("constant node id");
     let node = LocalNode::open(NodeConfig {
         ceiling: PolicyCeiling::unlimited(),
@@ -176,26 +159,28 @@ pub async fn run() -> Result<()> {
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     node.follow_roots_file(roots_file);
+    node.enable_host_ops();
     node.enable_research_in(steve_home.join("scratch").join("research"));
     node.enable_capability_sandbox();
     node.set_discovery(discovery);
     let pairing = Pairing {
-        hub_url: link["hub_url"].as_str().context("hub_url")?.to_string(),
+        hub_url: link.hub_url,
         node_id: NODE_ID.into(),
-        hub_id: link["hub_id"].as_str().context("hub_id")?.to_string(),
+        hub_id: link.hub_id,
         pin: None,
         loopback: true,
-        hub_key: link["hub_key"].as_str().map(str::to_string),
+        hub_key: link.hub_key,
         name: NODE_ID.into(),
     };
     tracing::info!(
         "the local Node, in a process of its own, links to {}",
         pairing.hub_url
     );
-    std::fs::write(
-        node_home.join(PID),
-        format!("{}\n{}\n", std::process::id(), version),
-    )?;
+    let pid_record = LocalServicePid {
+        pid: std::process::id(),
+        version: Some(version),
+    };
+    std::fs::write(node_home.join(LOCAL_SERVICE_PID_FILE), pid_record.format())?;
     let r = crate::dial::serve_until_stopped(
         node,
         Some(&node_home),
@@ -206,7 +191,7 @@ pub async fn run() -> Result<()> {
     )
     .await;
     if read_pid(&node_home) == Some(std::process::id()) {
-        let _ = std::fs::remove_file(node_home.join(PID));
+        let _ = std::fs::remove_file(node_home.join(LOCAL_SERVICE_PID_FILE));
     }
     r
 }

@@ -96,7 +96,13 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
         || (path.starts_with("/api/sessions/") && path.ends_with("/cancel"))
         || (*req.method() == axum::http::Method::DELETE && path.starts_with("/api/thread/runs/"))
         || path.starts_with("/api/thread/queued/");
-    if read || queues || path.starts_with("/internal/") {
+    // Independent local/remote Node turns continue across Hub upgrade drain, so permission and
+    // decision answers stay open even after Hub maintenance seals against new business writes.
+    let decision_answer = *req.method() == axum::http::Method::POST
+        && path
+            .strip_prefix("/api/decisions/")
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'));
+    if read || queues || decision_answer || path.starts_with("/internal/") {
         return next.run(req).await;
     }
     let Some(modules) = &st.modules else {
@@ -242,18 +248,29 @@ fn health_routes(st: &AppState) -> Router {
         .route("/healthz", get({
             let cfg = st.cfg.clone();
             let store = st.modules.as_ref().map(|m| m.store.clone());
-            let (local, remote) = (st.node.clone(), st.nodes.is_some());
+            let (local, nodes) = (st.node.clone(), st.nodes.clone());
+            let remote = nodes.is_some();
             move || async move {
                 // the outbox (owed / dead deliveries) is information; `ok` stays the liveness answer.
                 // `drain`: the durable maintenance drain is on (business answers 503) and a release script
                 // must lift it. Not `maintenance`, which only the supervisor's candidate gate reports.
                 // `node`: the Node path for rollout and rollback decisions (node_runtime::health)
                 let drain = store.as_ref().map(|s| s.maintenance());
+                let linked = nodes.as_ref().is_some_and(|svc| {
+                    svc.registry
+                        .conn(crate::wire::local_service::NODE_ID)
+                        .is_some_and(|c| !c.is_closed() && !c.is_upgrade())
+                });
                 let (outbox, node) = match store {
                     Some(s) => tokio::task::spawn_blocking(move || {
-                        let node = crate::wire::node_runtime::health(&s, local.as_deref(), remote)
-                            .inspect_err(|e| tracing::warn!("healthz node: {e}"))
-                            .ok();
+                        let node = crate::wire::node_runtime::health(
+                            &s,
+                            local.as_deref(),
+                            remote,
+                            linked,
+                        )
+                        .inspect_err(|e| tracing::warn!("healthz node: {e}"))
+                        .ok();
                         (s.read(|r| steve_store::outbox::stats(r)).ok(), node)
                     })
                     .await

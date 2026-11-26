@@ -170,6 +170,7 @@ impl FolderPlaces for Places {
             Ok(meta) => Ok(Some(steve_node_api::PathCheckResponse {
                 exists: true,
                 is_dir: meta.is_dir(),
+                writable: meta.is_dir(),
                 canonical: fs::canonicalize(p)
                     .ok()
                     .map(|c| c.to_string_lossy().into_owned()),
@@ -177,6 +178,7 @@ impl FolderPlaces for Places {
             Err(_) => Ok(Some(steve_node_api::PathCheckResponse {
                 exists: false,
                 is_dir: false,
+                writable: false,
                 canonical: None,
             })),
         }

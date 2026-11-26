@@ -569,7 +569,9 @@ impl EventCapability {
             "calendar" => Ok(Self::Calendar),
             "mail" => Ok(Self::Mail),
             "gh" => Ok(Self::Github),
-            "device" | "node" | "client" | "release.hold" => Ok(Self::Devices),
+            "device" | "node" | "client" | "release.hold" | "local_node.updating" => {
+                Ok(Self::Devices)
+            }
             "approval_policy" => Ok(Self::Autonomy),
             "stats" => Ok(Self::Stats),
             _ => Err(EventTypeRefusal::Unknown),

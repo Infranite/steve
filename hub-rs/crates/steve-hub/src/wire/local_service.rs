@@ -22,10 +22,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::json;
-use steve_node_api::{Node, NodeId};
+use steve_node_api::{
+    LOCAL_SERVICE_LINK_FILE, LOCAL_SERVICE_PID_FILE, LocalServiceLink, LocalServicePid, Node,
+    NodeId,
+};
 use steve_node_wire::Identity;
 use steve_store::Store;
+use steve_types::devices::LocalNodeUpdating;
 
 use super::host_node::{HostNode, ServiceNode};
 use super::node_runtime::NodeRuntime;
@@ -35,8 +38,6 @@ use crate::error::BackendError;
 
 pub const NODE_ID: &str = "local";
 const KEY: &str = "service-identity.key";
-const LINK: &str = "service.json";
-const PID: &str = "service.pid";
 /// Maximum consecutive restarts before assuming the newly spawned binary still fails to match
 /// the Hub and refusing to enter a kill loop.
 const MAX_CONSECUTIVE_RESTARTS: u32 = 3;
@@ -45,6 +46,40 @@ const SUPERVISE_INTERVAL: Duration = Duration::from_secs(10);
 /// Grace window for an already-running local Node from a prior Hub boot to reconnect before
 /// supervision inspects or restarts it.
 const PRIOR_LINK_GRACE: Duration = Duration::from_secs(3);
+
+/// Shared live updating state and immediate wake handle for the colocated local service Node.
+#[derive(Default)]
+pub(crate) struct LocalNodeStatus {
+    updating: Mutex<Option<LocalNodeUpdating>>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl LocalNodeStatus {
+    pub(crate) fn get(&self) -> Option<LocalNodeUpdating> {
+        self.updating.lock().unwrap().clone()
+    }
+
+    pub(crate) fn set(&self, next: Option<LocalNodeUpdating>, store: &Store) {
+        let mut guard = self.updating.lock().unwrap();
+        if *guard == next {
+            return;
+        }
+        *guard = next.clone();
+        drop(guard);
+        metrics::gauge!("steve_local_node_updating").set(if next.is_some() { 1.0 } else { 0.0 });
+        store.publish(steve_types::DomainEvent::from(
+            steve_types::DevicesEvent::LocalNodeUpdating { updating: next },
+        ));
+    }
+
+    pub(crate) fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    pub(crate) fn notifier(&self) -> Arc<tokio::sync::Notify> {
+        self.wake.clone()
+    }
+}
 
 /// The Hub's side of its service Node: what routing and workspaces use.
 pub(crate) struct ServiceHost {
@@ -131,15 +166,15 @@ pub(crate) fn host(
     let port = addr.port();
     let _ = svc.local_listener.set(addr);
     let hub_key = svc.identity.get().map(|k| hex::encode(k.public()));
+    let link = LocalServiceLink {
+        hub_url: format!("http://127.0.0.1:{port}"),
+        hub_id: svc.hub_id.clone(),
+        hub_key,
+        disk_floor: cfg.disk.floor,
+    };
     std::fs::write(
-        home.join(LINK),
-        serde_json::to_vec_pretty(&json!({
-            "hub_url": format!("http://127.0.0.1:{port}"),
-            "hub_id": svc.hub_id,
-            "hub_key": hub_key,
-            "disk_floor": cfg.disk.floor,
-        }))
-        .unwrap_or_default(),
+        home.join(LOCAL_SERVICE_LINK_FILE),
+        serde_json::to_vec_pretty(&link).unwrap_or_default(),
     )
     .map_err(|e| err(&e))?;
     let node_id = NodeId::new(NODE_ID).expect("constant node id");
@@ -154,6 +189,7 @@ pub(crate) fn host(
     let tools = NodeTools::open(store.clone(), node_id.clone(), &home).map_err(|e| err(&e))?;
     let runtime = NodeRuntime::new(store.clone(), remote, domain);
     runtime.require_transport_link();
+    runtime.set_turn_end_notify(svc.local_status.notifier());
     runtime.set_configured_roots(super::workspaces::configured(cfg));
     runtime.set_principal_state(super::principal_state(vars));
     runtime.set_idle_release(cfg.idle_release_ms as i64);
@@ -217,14 +253,11 @@ fn pid_alive(pid: u32) -> bool {
 
 /// The Node's `service.pid`: its pid, then the build it runs.
 fn read_service(home: &Path) -> (Option<u32>, Option<String>) {
-    let text = std::fs::read_to_string(home.join(PID)).unwrap_or_default();
-    let mut lines = text.lines();
-    let pid = lines.next().and_then(|l| l.trim().parse().ok());
-    let version = lines
-        .next()
-        .map(|l| l.trim().to_owned())
-        .filter(|v| !v.is_empty());
-    (pid, version)
+    let text = std::fs::read_to_string(home.join(LOCAL_SERVICE_PID_FILE)).unwrap_or_default();
+    match LocalServicePid::parse(&text) {
+        Some(record) => (Some(record.pid), record.version),
+        None => (None, None),
+    }
 }
 
 /// The running local service Node's version from `service.pid`, when that process is still alive.
@@ -265,16 +298,36 @@ enum SuperviseAction {
     RestartCapReached(u32),
 }
 
-struct SuperviseObservation {
-    linked: bool,
-    upgrade_only: bool,
-    running_turns: usize,
-    pid: Option<u32>,
-    built: Option<String>,
+pub(crate) struct SuperviseObservation {
+    pub(crate) linked: bool,
+    pub(crate) upgrade_only: bool,
+    pub(crate) missing_capabilities: bool,
+    pub(crate) running_turns: usize,
+    pub(crate) pid: Option<u32>,
+    pub(crate) built: Option<String>,
+}
+
+fn needs_replacement(obs: &SuperviseObservation, hub_version: &str) -> bool {
+    let version_mismatch = obs.pid.is_some() && obs.built.as_deref() != Some(hub_version);
+    obs.upgrade_only || version_mismatch || obs.missing_capabilities
+}
+
+pub(crate) fn updating_status(
+    obs: &SuperviseObservation,
+    hub_version: &str,
+) -> Option<LocalNodeUpdating> {
+    if needs_replacement(obs, hub_version) && (obs.linked || obs.pid.is_some()) {
+        Some(LocalNodeUpdating {
+            running: u32::try_from(obs.running_turns).unwrap_or(u32::MAX),
+        })
+    } else {
+        None
+    }
 }
 
 /// Deterministic supervision step: restarts the local service Node without touching ordinary
-/// protocol RPCs whenever its link is upgrade-only or its recorded build differs from the Hub.
+/// protocol RPCs whenever its link is upgrade-only, lacks required capabilities, or its recorded
+/// build differs from the Hub.
 fn supervise_step(
     state: &mut SuperviseState,
     obs: SuperviseObservation,
@@ -296,9 +349,7 @@ fn supervise_step(
         };
     }
 
-    let version_mismatch = obs.built.as_deref() != Some(hub_version);
-    let needs_restart = obs.upgrade_only || version_mismatch;
-    if !needs_restart {
+    if !needs_replacement(&obs, hub_version) {
         if obs.linked {
             state.consecutive_restarts = 0;
             state.restart_cap_logged = false;
@@ -323,6 +374,7 @@ fn supervise_step(
                 built = obs.built.as_deref().unwrap_or("unknown"),
                 hub = hub_version,
                 upgrade_only = obs.upgrade_only,
+                missing_capabilities = obs.missing_capabilities,
                 restarts = state.consecutive_restarts,
                 "local Node still mismatches Hub after repeated restarts; stopping restart loop"
             );
@@ -338,6 +390,7 @@ fn supervise_step(
         hub = hub_version,
         linked = obs.linked,
         upgrade_only = obs.upgrade_only,
+        missing_capabilities = obs.missing_capabilities,
         attempt = state.consecutive_restarts,
         "restarting the local Node to match this Hub"
     );
@@ -348,7 +401,14 @@ fn supervise_step(
     SuperviseAction::Signaled(pid)
 }
 
-fn observe_local_service(
+fn capabilities_complete(caps: &steve_node_api::Capabilities) -> bool {
+    caps.supports_jobs()
+        && caps.supports_research()
+        && caps.supports_colocated_host()
+        && caps.supports_resume_probe()
+}
+
+pub(crate) fn observe_local_service(
     home: &Path,
     svc: &crate::nodes::NodeService,
     runtime: &NodeRuntime,
@@ -357,17 +417,52 @@ fn observe_local_service(
     let conn = svc.registry.conn(NODE_ID).filter(|c| !c.is_closed());
     let linked = conn.is_some();
     let upgrade_only = conn.is_some_and(|c| c.is_upgrade());
+    let missing_capabilities = if linked && !upgrade_only {
+        let node_id = NodeId::new(NODE_ID).expect("constant node id");
+        svc.fleet
+            .remote(&node_id)
+            .cached_capabilities()
+            .is_some_and(|caps| !capabilities_complete(&caps))
+    } else {
+        false
+    };
     let (pid, built) = read_service(home);
     SuperviseObservation {
         linked,
         upgrade_only,
+        missing_capabilities,
         running_turns: runtime.running_turns(),
         pid: pid.filter(|p| is_alive(*p)),
         built,
     }
 }
 
-/// Starts the Node's process when none runs, and replaces one of another build once it is idle.
+/// Evaluates the local service Node's current state and publishes any `local_node.updating`
+/// status transition (used by the supervisor loop and upgrade-scenario tests).
+pub fn sync_updating_status(
+    home: &Path,
+    svc: &crate::nodes::NodeService,
+    runtime: &NodeRuntime,
+    hub_version: &str,
+) -> Option<LocalNodeUpdating> {
+    let obs = refresh_updating_status(home, svc, runtime, hub_version);
+    updating_status(&obs, hub_version)
+}
+
+pub(crate) fn refresh_updating_status(
+    home: &Path,
+    svc: &crate::nodes::NodeService,
+    runtime: &NodeRuntime,
+    hub_version: &str,
+) -> SuperviseObservation {
+    let obs = observe_local_service(home, svc, runtime, pid_alive);
+    svc.local_status
+        .set(updating_status(&obs, hub_version), &svc.store);
+    obs
+}
+
+/// Starts the Node's process when none runs, and replaces one of another build or lacking required
+/// capabilities immediately once its active turns end.
 fn keep_running_task(
     home: PathBuf,
     svc: Arc<crate::nodes::NodeService>,
@@ -375,33 +470,40 @@ fn keep_running_task(
     version: String,
 ) -> steve_runtime::Task {
     let state = Arc::new(Mutex::new(SuperviseState::default()));
-    // Wait briefly only when a local Node from a prior Hub boot is already alive and reconnecting;
-    // on a cold start with no running local Node, spawn immediately so APIs do not observe 503.
-    let first_run = if read_service(&home).0.is_some_and(pid_alive) {
-        steve_runtime::FirstRun::After(PRIOR_LINK_GRACE)
-    } else {
-        steve_runtime::FirstRun::Immediate
-    };
-    steve_runtime::every_after(
-        "node.service.supervise",
-        Arc::new(steve_runtime::SystemClock),
-        SUPERVISE_INTERVAL,
-        first_run,
-        move || {
-            let (home, svc, runtime, version, state) = (
-                home.clone(),
-                svc.clone(),
-                runtime.clone(),
-                version.clone(),
-                state.clone(),
-            );
-            async move {
-                let obs = observe_local_service(&home, &svc, &runtime, pid_alive);
-                let mut guard = state.lock().unwrap();
-                supervise_step(&mut guard, obs, &version, send_sigterm, || spawn(&home));
+    let clock: Arc<dyn steve_runtime::Clock> = Arc::new(steve_runtime::SystemClock);
+    steve_runtime::jobs::supervise("node.service.supervise", clock, move || {
+        let (home, svc, runtime, version, state) = (
+            home.clone(),
+            svc.clone(),
+            runtime.clone(),
+            version.clone(),
+            state.clone(),
+        );
+        async move {
+            let wake = svc.local_status.notifier();
+            // Wait briefly only when a local Node from a prior Hub boot is already alive and
+            // reconnecting; on a cold start with no running local Node, spawn immediately so APIs
+            // do not observe 503.
+            if read_service(&home).0.is_some_and(pid_alive) {
+                tokio::select! {
+                    _ = tokio::time::sleep(PRIOR_LINK_GRACE) => {}
+                    _ = wake.notified() => {}
+                }
             }
-        },
-    )
+            loop {
+                steve_runtime::jobs::round("node.service.supervise", async {
+                    let obs = refresh_updating_status(&home, &svc, &runtime, &version);
+                    let mut guard = state.lock().unwrap();
+                    supervise_step(&mut guard, obs, &version, send_sigterm, || spawn(&home));
+                })
+                .await;
+                tokio::select! {
+                    _ = tokio::time::sleep(SUPERVISE_INTERVAL) => {}
+                    _ = wake.notified() => {}
+                }
+            }
+        }
+    })
 }
 
 /// `steve-node --local-node`, detached from the Hub: its own session, and its own systemd scope
@@ -490,7 +592,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let node_home = dir.path().join("node");
         std::fs::create_dir_all(&node_home).unwrap();
-        std::fs::write(node_home.join(PID), "4242\n0.9.0\n").unwrap();
+        std::fs::write(node_home.join(LOCAL_SERVICE_PID_FILE), "4242\n0.9.0\n").unwrap();
 
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
@@ -604,23 +706,68 @@ mod tests {
     fn supervise_waits_for_running_turns_reports_spawn_errors_and_caps_restart_loops() {
         let mut state = SuperviseState::default();
 
-        // Active turns defer restart even when upgrade-only or mismatched.
+        // Active turns defer restart even when upgrade-only or mismatched, while advertising
+        // local_node_updating with the live turn count.
+        let waiting_obs = SuperviseObservation {
+            linked: true,
+            upgrade_only: true,
+            missing_capabilities: false,
+            running_turns: 2,
+            pid: Some(100),
+            built: Some("0.9.0".into()),
+        };
+        assert_eq!(
+            updating_status(&waiting_obs, "0.11.1"),
+            Some(LocalNodeUpdating { running: 2 })
+        );
         assert_eq!(
             supervise_step(
                 &mut state,
-                SuperviseObservation {
-                    linked: true,
-                    upgrade_only: true,
-                    running_turns: 2,
-                    pid: Some(100),
-                    built: Some("0.9.0".into()),
-                },
+                waiting_obs,
                 "0.11.1",
                 |_| panic!("must not signal while turns are running"),
                 || panic!("must not spawn while old process runs"),
             ),
             SuperviseAction::WaitingForTurns
         );
+
+        // Capability-deficient old service Node (same protocol, jobs: 0) also waits for turns,
+        // reports local_node_updating, and immediately replaces once turns reach 0.
+        let cap_waiting = SuperviseObservation {
+            linked: true,
+            upgrade_only: false,
+            missing_capabilities: true,
+            running_turns: 1,
+            pid: Some(101),
+            built: Some("0.11.1".into()),
+        };
+        assert_eq!(
+            updating_status(&cap_waiting, "0.11.1"),
+            Some(LocalNodeUpdating { running: 1 })
+        );
+        assert_eq!(
+            supervise_step(
+                &mut state,
+                cap_waiting,
+                "0.11.1",
+                |_| panic!("must wait for active turn"),
+                || panic!("must not spawn while old process runs"),
+            ),
+            SuperviseAction::WaitingForTurns
+        );
+        let cap_idle = SuperviseObservation {
+            linked: true,
+            upgrade_only: false,
+            missing_capabilities: true,
+            running_turns: 0,
+            pid: Some(101),
+            built: Some("0.11.1".into()),
+        };
+        assert_eq!(
+            supervise_step(&mut state, cap_idle, "0.11.1", |_| Ok(()), || Ok(())),
+            SuperviseAction::Signaled(101)
+        );
+        state.consecutive_restarts = 0;
 
         // Spawn failure reports error without panicking or looping kills.
         assert_eq!(
@@ -629,6 +776,7 @@ mod tests {
                 SuperviseObservation {
                     linked: false,
                     upgrade_only: false,
+                    missing_capabilities: false,
                     running_turns: 0,
                     pid: None,
                     built: None,
@@ -649,6 +797,7 @@ mod tests {
                     SuperviseObservation {
                         linked: true,
                         upgrade_only: true,
+                        missing_capabilities: false,
                         running_turns: 0,
                         pid: Some(pid),
                         built: Some("0.9.0".into()),
@@ -666,6 +815,7 @@ mod tests {
                 SuperviseObservation {
                     linked: true,
                     upgrade_only: true,
+                    missing_capabilities: false,
                     running_turns: 0,
                     pid: Some(999),
                     built: Some("0.9.0".into()),

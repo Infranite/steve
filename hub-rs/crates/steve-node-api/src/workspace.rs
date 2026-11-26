@@ -697,6 +697,9 @@ pub struct PathCheckResponse {
     pub is_dir: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical: Option<String>,
+    /// True when the path is an existing directory writable by the Node process.
+    #[serde(default)]
+    pub writable: bool,
 }
 
 /// Typed refusal reasons for owner-initiated project directory provisioning on the colocated Node.

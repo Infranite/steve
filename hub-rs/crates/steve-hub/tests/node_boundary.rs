@@ -12,8 +12,9 @@
 //! - [`Rule::Harness`]: a harness execution entry point, a handle on one, or a direct `steve_node`
 //!   call/import.
 //! - [`Rule::Dir`]: a directory listing or a folder walk (`read_dir`, `scan::walk`).
-//! - [`Rule::Fs`]: a file opened, read, written, copied, renamed or removed, or a directory created
-//!   or removed (`std::fs` and `tokio::fs`).
+//! - [`Rule::Fs`]: a file opened, read, written, copied, renamed, removed, or probed via
+//!   metadata/canonicalize/existence/directory checks, or a directory created or removed
+//!   (`std::fs`, `tokio::fs`, and `Path` probe methods).
 //!
 //! A call is found by its text, and an import by its item: `use a::{b::{c as d}}` counts as
 //! `a::b::c as d`, so a braced, renamed or glob import of a listed item counts where the call
@@ -109,6 +110,14 @@ impl Rule {
                 "fs::remove_file(",
                 "fs::remove_dir(",
                 "fs::remove_dir_all(",
+                "fs::metadata(",
+                "fs::symlink_metadata(",
+                "fs::canonicalize(",
+                "fs::try_exists(",
+                ".canonicalize()",
+                ".try_exists()",
+                ".exists()",
+                ".is_dir()",
             ],
         }
     }
@@ -147,7 +156,7 @@ impl Rule {
 
 /// The `std::fs` and `tokio::fs` items of [`Rule::Fs`]: a type is used by its name
 /// (`File::open(`), a function bare once imported (`remove_dir_all(`).
-const FS_IMPORTS: [(&str, Import); 30] = [
+const FS_IMPORTS: [(&str, Import); 38] = [
     ("std::fs::File", Renamed),
     ("std::fs::OpenOptions", Renamed),
     ("std::fs::read", Any),
@@ -162,6 +171,10 @@ const FS_IMPORTS: [(&str, Import); 30] = [
     ("std::fs::remove_file", Any),
     ("std::fs::remove_dir", Any),
     ("std::fs::remove_dir_all", Any),
+    ("std::fs::metadata", Any),
+    ("std::fs::symlink_metadata", Any),
+    ("std::fs::canonicalize", Any),
+    ("std::fs::try_exists", Any),
     ("std::os::unix::fs::symlink", Any),
     ("tokio::fs::File", Renamed),
     ("tokio::fs::OpenOptions", Renamed),
@@ -177,6 +190,10 @@ const FS_IMPORTS: [(&str, Import); 30] = [
     ("tokio::fs::remove_file", Any),
     ("tokio::fs::remove_dir", Any),
     ("tokio::fs::remove_dir_all", Any),
+    ("tokio::fs::metadata", Any),
+    ("tokio::fs::symlink_metadata", Any),
+    ("tokio::fs::canonicalize", Any),
+    ("tokio::fs::try_exists", Any),
     ("tokio::fs::symlink", Any),
 ];
 
@@ -220,12 +237,16 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-confine/src/lib.rs", Library, "fresh login environment, confined host capability process (`spawn_capability`), and OS-confined pure-compute subprocess (--workflow-step); callers never construct these processes"),
     e(Spawn, "steve-confine/src/probe.rs", Library, "the single sandbox probe, with a minimal or control-plane policy on /usr/bin/true"),
     e(Dir, "steve-confine/src/control.rs", Library, "protected filename prefixes in the shared bubblewrap control-plane plan"),
+    e(Fs, "steve-confine/src/control.rs", Library, "canonicalizes steve_home/node_home and checks run directories for the shared bubblewrap control-plane plan"),
+    e(Fs, "steve-confine/src/probe.rs", Library, "checks whether the host sandbox executable (sandbox-exec / bwrap) exists"),
     e(Dir, "steve-confine/src/profile.rs", Library, "hide other entries when explicitly opening a harness credential store"),
+    e(Fs, "steve-confine/src/profile.rs", Library, "canonicalizes sandbox mount paths and checks directory mounts when building Seatbelt/bwrap profiles"),
     e(Fs, "steve-confine/src/lib.rs", Library, "sandbox mount directories and a worktree's gitdir/commondir for its writable policy"),
     /* the harness libraries: what they start is reached only through the Node (Rule::Harness) */
     e(Spawn, "steve-acp/src/rpc.rs", Library, "an ACP adapter process"),
     e(Spawn, "steve-acp/src/config.rs", Library, "`npm root -g`, to find the adapters"),
     e(Fs, "steve-acp/src/config.rs", Library, "extensionless npm bin shebang check (`#!/usr/bin/env node`), so Node runs JS adapters directly"),
+    e(Fs, "steve-acp/src/state_dir.rs", Library, "checks `$HOME/.gitconfig` existence when preparing a harness state directory on the Node"),
     e(Fs, "steve-acp/src/adapters.rs", Library, "adapter package.json `bin` entry resolution under `<steve-home>/adapters` or `npm root -g`"),
     e(Dir, "steve-acp/src/adapter/claude_code.rs", Library, "Claude project transcript directory listing encapsulated in the adapter module"),
     e(Fs, "steve-acp/src/adapter/claude_code.rs", Library, "Claude transcript read/peek encapsulated in the adapter module"),
@@ -233,7 +254,9 @@ const RATIONALE: &[Entry] = &[
     e(Dir, "steve-acp/src/adapter/history.rs", Library, "sorted transcript directory listing shared by harness adapters in steve-acp"),
     e(Fs, "steve-acp/src/adapter/history.rs", Library, "shared transcript file read inside steve-acp"),
     e(Dir, "steve-toolchains/src/lib.rs", Library, "project marker listings for per-project discovery; Hub callers use only the data definitions"),
+    e(Fs, "steve-toolchains/src/lib.rs", Library, "symlink-safe root and entry checks in per-project toolchain discovery; executed by the Node"),
     e(Dir, "steve-knowledge/src/scan.rs", Library, "the folder walk the Node's scan reuses"),
+    e(Fs, "steve-knowledge/src/scan.rs", Library, "symlink canonicalization and file metadata in the folder walk library executed by the Node"),
     e(Spawn, "steve-acp/src/managed.rs", Library, "npm, to install and check the adapters Steve keeps (the Node's daily check, steve setup)"),
     e(Fs, "steve-acp/src/managed.rs", Library, "the installed adapters' package.json, selected ids, and own prefix directory/lease shared by Node execution and the operator CLI; never a workspace or client-chosen destination"),
     e(Dir, "steve-acp/src/rollout.rs", Library, "Codex rollout files: the Node's history, the stats repair"),
@@ -241,6 +264,7 @@ const RATIONALE: &[Entry] = &[
     e(Dir, "steve-acp/src/transcript.rs", Library, "the shared ACP sampler reads the Node adapter's configured home: exact session transcript and its subagent files, with bounded discovery"),
     e(Fs, "steve-acp/src/transcript.rs", Library, "read-only assistant usage for that Node attempt, shared by sessions and one-shot calls; no Hub/project filesystem effects"),
     e(Fs, "steve-research/src/attach.rs", Library, "attachments in a research run's dir"),
+    e(Fs, "steve-research/src/guard.rs", Library, "canonicalizes path prefixes inside the Node-side research path guard"),
     /* Hub-host process meters and metrics */
     e(Fs, "steve-hub/src/metrics.rs", Hub, "metrics socket mode 0600 and read-only /proc/self/io process counter on Linux; no workspace data"),
     e(Dir, "steve-hub/src/metrics/backup.rs", Hub, "discovers observations in the private installation directory used by offline backup and restore commands"),
@@ -298,7 +322,7 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-install/src/release.rs", Hub, "trusted updater uses the installation's environment, launchd service and candidate maintenance probe"),
     e(Dir, "steve-install/src/release.rs", Hub, "trusted updater inventories only the installation’s release receipts and retired bundles"),
     e(Fs, "steve-install/src/release.rs", Hub, "trusted updater uses the release lock, atomic links and protected deployment receipts"),
-    e(Spawn, "steve-hub/src/upgrades/supervisor.rs", Hub, "the supervisor starts the Hub, and asks a candidate's binary about this environment first"),
+    e(Spawn, "steve-hub/src/upgrades/supervisor.rs", Hub, "the supervisor starts the Hub, verifies the candidate's sibling steve-node binary, and asks a candidate's binary about this environment first"),
     e(Spawn, "steve-keyhelper/src/mac.rs", Hub, "the keychain helper"),
     e(Spawn, "steve-modules/src/vault/keystore/helper.rs", Hub, "the vault keystore helper"),
     e(Spawn, "steve-modules/src/net.rs", Hub, "test support: reruns one test in a child"),
@@ -321,7 +345,8 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-core/src/orchestrator.rs", Hub, "the scratch dir of an item with no project and verification of a Hub-owned design report before approval"),
     e(Fs, "steve-hub/src/api/files.rs", Hub, "a blob download"),
     e(Fs, "steve-hub/src/app.rs", Hub, "the upgrade control token"),
-    e(Fs, "steve-hub/src/check.rs", Hub, "preflight reads the installation's managed-adapter selection, package manifests, and adapter script shebang headers to verify harness and Node.js availability"),
+    e(Spawn, "steve-hub/src/check.rs", Hub, "offline preflight delegates harness and Node.js discovery to the sibling `steve-node harness-probe` command"),
+    e(Fs, "steve-hub/src/check.rs", Hub, "preflight checks the Hub's own STEVE_HOME/metrics directories and local tailcat availability"),
     e(Fs, "steve-hub/src/config.rs", Hub, "the Hub's dirs, steve.env, and harness manifest"),
     e(Fs, "steve-hub/src/files.rs", Hub, "the blob store (atomic temp file + rename and no-follow integrity read)"),
     e(Fs, "steve-hub/src/system.rs", Hub, "host facts (/proc/meminfo)"),
@@ -345,8 +370,21 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-mail/src/usage.rs", Hub, "raw mail in the Hub home"),
     e(Fs, "steve-modules/src/vault/keystore/dir.rs", Hub, "the vault keystore"),
     e(Fs, "steve-modules/src/vault/keystore/file.rs", Hub, "the vault keystore"),
+    e(Fs, "steve-modules/src/vault/keystore/helper.rs", Hub, "checks the Hub's own `<STEVE_HOME>/bin/steve-keyhelper` executable permissions"),
+    e(Fs, "steve-keyhelper/src/mac.rs", Hub, "canonicalizes old and current keyhelper binaries during macOS keychain migration"),
     e(Fs, "steve-node-wire/src/identity.rs", Hub, "the Node link identity key"),
+    e(Fs, "steve-node-wire/src/tailcat.rs", Library, "checks optional `tailcat` binary metadata when locating the tunnel executable"),
     e(Fs, "steve-hub/src/harnesses.rs", Hub, "the Hub's own harness manifest, which the runtimes page adds adapters to"),
+    e(Fs, "steve-core/src/config.rs", Hub, "locates Hub-host `gh`, running executable's own Steve checkout, and compares configured `STEVE_REPO`"),
+    e(Fs, "steve-core/src/workspace.rs", Hub, "`is_disposable_dir` checks Hub-owned backup staging directories for regenerable cache directories"),
+    e(Fs, "steve-hub/src/admin/routes.rs", Hub, "reports the Hub's own SQLite database file size in `/admin/status`"),
+    e(Fs, "steve-hub/src/extension.rs", Hub, "resolves `<STEVE_HOME>/current` when syncing the Hub's own service definition on boot"),
+    e(Fs, "steve-hub/src/upgrades/install.rs", Hub, "classifies the Hub's own installation/checkout layout and signing identity"),
+    e(Fs, "steve-hub/src/upgrades/maintenance.rs", Hub, "resolves the Hub's own executable path for maintenance CLI commands"),
+    e(Fs, "steve-install/src/main.rs", Hub, "operator CLI resolves its own executable bundle and `<home>/current` / `<home>/releases`"),
+    e(Fs, "steve-install/src/setup/reconfigure/snapshot.rs", Hub, "canonicalizes the operator-selected vault key directory to keep it outside `$STEVE_HOME`"),
+    e(Fs, "steve-knowledge/src/sources/folder.rs", Hub, "canonicalizes the Hub's own `$HOME` and `$STEVE_HOME/context` policy roots; user folder paths are probed exclusively by the Node"),
+    e(Fs, "steve-store/src/db.rs", Hub, "checks whether the Hub's own SQLite database file exists in `inspect_schema`"),
 ];
 
 /// The crates that are the Node.
@@ -937,6 +975,10 @@ fn production(state: &State, project: &Path, worktree: &Path) {
     let _ = std::fs::copy(project, worktree);
     let _ = std::fs::OpenOptions::new();
     let _ = std::fs::metadata(project);
+    let _ = std::fs::symlink_metadata(project);
+    let _ = project.canonicalize();
+    let _ = project.exists();
+    let _ = project.is_dir();
 }
 "#;
     let s = vec![Source {
@@ -951,8 +993,11 @@ fn production(state: &State, project: &Path, worktree: &Path) {
     // the renamed Command, not the plain import (its `Command::new(` is what counts)
     assert_eq!(lines(Rule::Spawn), vec![4]);
     // the imported remove_dir_all (its bare call is counted there) and the renamed File, then
-    // every operation but metadata
-    assert_eq!(lines(Rule::Fs), vec![6, 7, 16, 18, 19, 20, 21, 22, 23]);
+    // every file operation including metadata, symlink_metadata, canonicalize, exists, and is_dir
+    assert_eq!(
+        lines(Rule::Fs),
+        vec![6, 7, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+    );
     let mut found = BTreeMap::new();
     found_in("steve-x", &s, &mut found);
     assert_eq!(check(&found, &ratchet::Counts::new()).len(), 3);

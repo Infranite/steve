@@ -17,7 +17,7 @@ import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
 import { decisionText } from "./i18n/decision"
-import type { StateUpdate, RFile, PlanStep, RHold, RQueued, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RLocalNodeUpdating, RQueued, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
@@ -189,7 +189,7 @@ export const st = {
   bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
   tags: [] as Tag[],
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>,
-  localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
+  localSessions: [] as LocalSession[], hold: null as RHold | null, localNodeUpdating: null as RLocalNodeUpdating | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
   noticeSeen: 0,
   dismissedAlerts: [] as string[],
   quote: null as string | null, focus: null as { item: string; until: number } | null,
@@ -715,11 +715,14 @@ export async function refresh(): Promise<void> {
   } catch (e) { if (scope === scopeKey() && !isCancelledError(e)) fetchFailed(e) }
 }
 async function loadSummary() {
-  const scope = scopeKey(), live = chatLive(), hold = st.hold
+  const scope = scopeKey(), live = chatLive(), hold = st.hold, updating = st.localNodeUpdating
   try {
     const summary = await api.summary()
     if (scope !== scopeKey()) return
-    if (st.hold === hold) { st.hold = summary.hold; emit() }
+    let changed = false
+    if (st.hold === hold) { st.hold = summary.hold; changed = true }
+    if (st.localNodeUpdating === updating) { st.localNodeUpdating = summary.local_node_updating ?? null; changed = true }
+    if (changed) emit()
     if (chatLive() === live && live.thinking !== summary.thinking) {
       updateChat(summary.thinking ? { thinking: true } : { thinking: false, draft: null, live: null, phase: "" })
     }
@@ -857,6 +860,7 @@ function onHub(e: HubEvent) {
     return
   }
   if (e.type === "release.hold") { st.hold = e.hold as RHold | null; emit(); return }
+  if (e.type === "local_node.updating") { st.localNodeUpdating = e.updating as RLocalNodeUpdating | null; emit(); return }
   if (e.type === "steve.draft") {
     const { draft } = chatLive()
     if (nextDraft || draft?.mid !== e.mid) priorDraftReplies = new Set(messageViews().map(msgOfView).filter((m) => m.k === "steve" && m.origin === e.mid).map((m) => m.id!))
@@ -1518,7 +1522,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void shellCall(api.
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); st.ready = false; emit(); resetTranscripts(); st.noticeSeen = 0; st.hold = null; resetViews(); updateChat({}); closeStream(); await loadReadSide(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); st.ready = false; emit(); resetTranscripts(); st.noticeSeen = 0; st.hold = null; st.localNodeUpdating = null; resetViews(); updateChat({}); closeStream(); await loadReadSide(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; node?: string }) { const r = await shellCall(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }

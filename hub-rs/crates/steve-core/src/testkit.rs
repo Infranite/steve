@@ -59,6 +59,8 @@ pub struct FakeState {
     pub flush_in_runtime: Vec<bool>,
     /// Sessions whose last attempt's outcome nobody can tell ([`AgentRuntime::uncertain`]).
     pub uncertain: HashSet<String>,
+    /// Working directories simulated as unusable ([`AgentRuntime::cwd_usable`] returns `false`).
+    pub unusable_cwds: HashSet<String>,
     /// Sessions whose backend recovers them after a restart ([`AgentRuntime::recovers_itself`]).
     pub recovers_itself: HashSet<String>,
     /// Why new sessions cannot run ([`AgentRuntime::refusal`]); `None`: they run.
@@ -505,6 +507,9 @@ impl AgentRuntime for FakeRuntime {
     }
     fn uncertain(&self, sid: &str) -> bool {
         self.st().uncertain.contains(sid)
+    }
+    fn cwd_usable(&self, _sid: &str, cwd: &str) -> bool {
+        !cwd.is_empty() && !self.st().unusable_cwds.contains(cwd)
     }
     fn node_offline(&self, _sid: &str) -> Option<String> {
         self.st().node_offline.clone()

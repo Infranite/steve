@@ -127,316 +127,28 @@ pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec
     local_node_checks(cfg, vars).0
 }
 
-fn is_usable_file(p: &std::path::Path, executable: bool) -> bool {
+fn is_executable_file(p: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         p.metadata()
-            .is_ok_and(|m| m.is_file() && (!executable || m.permissions().mode() & 0o111 != 0))
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
-        let _ = executable;
         p.is_file()
     }
 }
 
-fn resolve_program(program: &str, executable: bool, path: &str) -> Option<std::path::PathBuf> {
+fn program_available(program: &str, path: &str) -> bool {
     let p = std::path::Path::new(program);
     if p.components().count() > 1 {
-        is_usable_file(p, executable).then(|| p.to_path_buf())
+        is_executable_file(p)
     } else {
         std::env::split_paths(path)
             .map(|d| d.join(p))
-            .find(|candidate| is_usable_file(candidate, executable))
+            .any(|candidate| is_executable_file(&candidate))
     }
-}
-
-fn program_available(program: &str, executable: bool, path: &str) -> bool {
-    resolve_program(program, executable, path).is_some()
-}
-
-fn read_text(path: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
-}
-
-fn shebang_runs_node(line: &str) -> bool {
-    let Some(rest) = line.strip_prefix("#!") else {
-        return false;
-    };
-    let mut parts = rest.trim().split_whitespace();
-    let Some(first) = parts.next() else {
-        return false;
-    };
-    let Some(bin) = std::path::Path::new(first)
-        .file_name()
-        .and_then(|s| s.to_str())
-    else {
-        return false;
-    };
-    let cmd = if bin == "env" {
-        let Some(c) = parts.find(|tok| !tok.starts_with('-') && !tok.contains('=')) else {
-            return false;
-        };
-        c
-    } else {
-        first
-    };
-    std::path::Path::new(cmd)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .is_some_and(|name| matches!(name, "node" | "nodejs"))
-}
-
-fn is_node_script(program: &str, path_env: &str) -> bool {
-    let resolved = resolve_program(program, false, path_env)
-        .unwrap_or_else(|| std::path::PathBuf::from(program));
-    let ext = resolved.extension().and_then(|e| e.to_str());
-    if ext.is_some_and(|e| matches!(e, "js" | "mjs" | "cjs")) {
-        return true;
-    }
-    if ext.is_some_and(|e| {
-        matches!(
-            e,
-            "py" | "sh" | "bash" | "zsh" | "rb" | "pl" | "exe" | "cmd" | "bat" | "ps1"
-        )
-    }) {
-        return false;
-    }
-    if resolved.is_file()
-        && let Ok(f) = std::fs::File::open(&resolved)
-    {
-        use std::io::Read;
-        let mut head = [0u8; 128];
-        if let Ok(n) = f.take(128).read(&mut head)
-            && head[..n].starts_with(b"#!")
-        {
-            let first = head[..n]
-                .split(|b| *b == b'\n' || *b == b'\r')
-                .next()
-                .unwrap_or_default();
-            return shebang_runs_node(&String::from_utf8_lossy(first));
-        }
-    }
-    false
-}
-
-fn codex_native_pkg() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => Some("@agentclientprotocol/codex-acp-darwin-arm64"),
-        ("macos", "x86_64") => Some("@agentclientprotocol/codex-acp-darwin-x64"),
-        ("linux", "aarch64") => Some("@agentclientprotocol/codex-acp-linux-arm64"),
-        ("linux", "x86_64") => Some("@agentclientprotocol/codex-acp-linux-x64"),
-        ("windows", "aarch64") => Some("@agentclientprotocol/codex-acp-win32-arm64"),
-        ("windows", "x86_64") => Some("@agentclientprotocol/codex-acp-win32-x64"),
-        _ => None,
-    }
-}
-
-fn resolve_npm_bin(package: &str, bin: &str, root: &std::path::Path) -> std::path::PathBuf {
-    let pkg_dir = root.join(package);
-    if let Some(raw) = read_text(&pkg_dir.join("package.json"))
-        && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw)
-    {
-        let entry = match manifest.get("bin") {
-            Some(serde_json::Value::String(s)) => Some(s.as_str()),
-            Some(serde_json::Value::Object(map)) => map
-                .get(bin)
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| {
-                    (map.len() == 1)
-                        .then(|| map.values().next()?.as_str())
-                        .flatten()
-                }),
-            _ => None,
-        };
-        if let Some(rel) = entry
-            .map(|s| s.trim_start_matches("./"))
-            .filter(|s| !s.is_empty())
-        {
-            let candidate = pkg_dir.join(rel);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    #[cfg(windows)]
-    let name = format!("{bin}.cmd");
-    #[cfg(not(windows))]
-    let name = bin;
-    let local_bin = root.join(".bin").join(name);
-    if local_bin.exists() {
-        return local_bin;
-    }
-    if root.parent().and_then(|p| p.file_name()) != Some(std::ffi::OsStr::new("adapters"))
-        && let Some(parent) = root.parent()
-    {
-        #[cfg(windows)]
-        let global_bin = parent.join(name);
-        #[cfg(not(windows))]
-        let global_bin = parent.parent().unwrap_or(parent).join("bin").join(name);
-        if global_bin.exists() {
-            return global_bin;
-        }
-    }
-    local_bin
-}
-
-fn resolve_default_in_root(
-    cmd: &steve_harness_spec::DefaultCommand,
-    root: &std::path::Path,
-) -> std::path::PathBuf {
-    match cmd {
-        steve_harness_spec::DefaultCommand::Claude => {
-            root.join("@agentclientprotocol/claude-agent-acp/dist/index.js")
-        }
-        steve_harness_spec::DefaultCommand::Codex => {
-            if let Some(pkg) = codex_native_pkg() {
-                #[cfg(windows)]
-                let bin = "bin/codex-acp.exe";
-                #[cfg(not(windows))]
-                let bin = "bin/codex-acp";
-                let native = root.join(pkg).join(bin);
-                if native.is_file() {
-                    return native;
-                }
-                let nested = root
-                    .join("@agentclientprotocol/codex-acp/node_modules")
-                    .join(pkg)
-                    .join(bin);
-                if nested.is_file() {
-                    return nested;
-                }
-            }
-            root.join("@agentclientprotocol/codex-acp/dist/index.js")
-        }
-        steve_harness_spec::DefaultCommand::NpmEntry {
-            package,
-            entry,
-            windows_entry,
-        } => {
-            let entry = if cfg!(windows) {
-                windows_entry.as_deref().unwrap_or(entry)
-            } else {
-                entry
-            };
-            root.join(package).join(entry)
-        }
-        steve_harness_spec::DefaultCommand::NpmBin { package, bin } => {
-            resolve_npm_bin(package, bin, root)
-        }
-        steve_harness_spec::DefaultCommand::Path { bin } => std::path::PathBuf::from(bin),
-    }
-}
-
-/// The Steve home whose managed adapters `command` points into (`<home>/adapters/node_modules/…`).
-fn managed_home_of(command: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut p = command;
-    while let Some(parent) = p.parent() {
-        if p.file_name().is_some_and(|n| n == "node_modules")
-            && parent.file_name().is_some_and(|n| n == "adapters")
-        {
-            return parent.parent().map(std::path::Path::to_path_buf);
-        }
-        p = parent;
-    }
-    None
-}
-
-fn managed_wanted(home: &std::path::Path, id: &str) -> bool {
-    let Some(pkg) = steve_harness_spec::builtin(id).and_then(|b| b.npm_package) else {
-        return false;
-    };
-    let manifest = home
-        .join("adapters/node_modules")
-        .join(pkg)
-        .join("package.json");
-    let installed = read_text(&manifest)
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .is_some_and(|v| {
-            v.get("version")
-                .and_then(serde_json::Value::as_str)
-                .is_some()
-        });
-    if installed {
-        return true;
-    }
-    let selection: Option<Vec<String>> = read_text(&home.join("adapters/selected.json"))
-        .and_then(|raw| serde_json::from_str(&raw).ok());
-    match selection {
-        Some(chosen) => chosen.iter().any(|c| c == id),
-        None => steve_harness_spec::DEFAULT_MANAGED_ADAPTERS.contains(&id),
-    }
-}
-
-fn global_npm_root_from_node(node: &str, path: &str) -> Option<std::path::PathBuf> {
-    let node_path = resolve_program(node, true, path)?;
-    let from_bin = |p: &std::path::Path| {
-        let bin = p.parent()?;
-        let prefix = bin.parent()?;
-        let lib = prefix.join("lib/node_modules");
-        if lib.is_dir() {
-            return Some(lib);
-        }
-        #[cfg(windows)]
-        {
-            let win = bin.join("node_modules");
-            if win.is_dir() {
-                return Some(win);
-            }
-        }
-        None
-    };
-    from_bin(&node_path).or_else(|| {
-        std::fs::canonicalize(&node_path)
-            .ok()
-            .and_then(|c| from_bin(&c))
-    })
-}
-
-/// Resolves the adapter commands that the colocated `steve-node --local-node` process will use
-/// under `cfg` and `vars`, without depending on `steve-acp` or spawning `npm`.
-fn resolved_local_adapters(
-    cfg: &Config,
-    vars: &crate::wire::Vars,
-    node: &str,
-    path: &str,
-) -> std::collections::BTreeMap<String, String> {
-    let managed_root = cfg.home.join("adapters/node_modules");
-    let mut global_root: Option<Option<std::path::PathBuf>> = None;
-    let mut adapters = std::collections::BTreeMap::new();
-    for b in steve_harness_spec::builtins() {
-        let cmd = if let Some(explicit) = vars(b.command_var).filter(|v| !v.is_empty()) {
-            explicit
-        } else if let Some(manifest_cmd) = cfg.manifest_commands.get(b.id) {
-            manifest_cmd.to_string_lossy().into_owned()
-        } else if steve_harness_spec::is_npm_managed(b.id) {
-            let own = resolve_default_in_root(&b.command, &managed_root);
-            if own.exists() {
-                own.to_string_lossy().into_owned()
-            } else if let Some(on_path) = resolve_program(b.cli_bin, true, path) {
-                on_path.to_string_lossy().into_owned()
-            } else {
-                let global = global_root
-                    .get_or_insert_with(|| global_npm_root_from_node(node, path))
-                    .as_deref()
-                    .map(|root| resolve_default_in_root(&b.command, root))
-                    .filter(|c| c.exists());
-                global.unwrap_or(own).to_string_lossy().into_owned()
-            }
-        } else {
-            resolve_program(b.cli_bin, true, path)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| b.cli_bin.to_owned())
-        };
-        adapters.insert(b.id.to_owned(), cmd);
-    }
-    for (id, cmd) in &cfg.manifest_commands {
-        adapters
-            .entry(id.clone())
-            .or_insert_with(|| cmd.to_string_lossy().into_owned());
-    }
-    adapters
 }
 
 fn check_tailcat(
@@ -452,7 +164,7 @@ fn check_tailcat(
     }
     let program = explicit.as_deref().unwrap_or("tailcat");
     let path = vars("PATH").unwrap_or_default();
-    if !program_available(program, true, &path) {
+    if !program_available(program, &path) {
         harnesses.missing_tailcat = true;
         warnings.push(steve_i18n::t!(
             "hub.check.tailcat_missing",
@@ -461,60 +173,119 @@ fn check_tailcat(
     }
 }
 
+/// Timeout for invoking the sibling `steve-node harness-probe` binary during offline preflight.
+const HARNESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn sibling_steve_node() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let candidate = exe.with_file_name("steve-node");
+    if is_executable_file(&candidate) {
+        return Some(candidate);
+    }
+    // Under `cargo test`, unit-test binaries live in `target/<profile>/deps/`; check parent dir too.
+    if let Some(parent) = exe.parent().and_then(std::path::Path::parent) {
+        let sibling = parent.join("steve-node");
+        if is_executable_file(&sibling) {
+            return Some(sibling);
+        }
+    }
+    None
+}
+
+/// Delegates offline harness & Node.js resolution to `steve-node harness-probe` (which uses
+/// `steve-acp` as the single source of truth) so `steve-hub` never duplicates adapter discovery.
+fn probe_harnesses_via_node(
+    cfg: &Config,
+    vars: &crate::wire::Vars,
+) -> Option<steve_node_api::HarnessPreflight> {
+    if let Some(bin) = sibling_steve_node() {
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg("harness-probe")
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .env("STEVE_HOME", &cfg.home)
+            .env("STEVE_HARNESS_MANIFEST", &cfg.harness_manifest);
+        for key in ["HOME", "PATH", "STEVE_NODE"] {
+            if let Some(v) = vars(key) {
+                cmd.env(key, v);
+            }
+        }
+        for (_, env_var) in steve_harness_spec::builtin_command_vars() {
+            if let Some(v) = vars(env_var) {
+                cmd.env(env_var, v);
+            }
+        }
+        if let Ok(mut child) = cmd.spawn() {
+            let deadline = std::time::Instant::now() + HARNESS_PROBE_TIMEOUT;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if status.success()
+                            && let Some(mut stdout) = child.stdout.take()
+                        {
+                            let mut buf = Vec::new();
+                            if std::io::Read::read_to_end(&mut stdout, &mut buf).is_ok()
+                                && let Ok(report) =
+                                    serde_json::from_slice::<steve_node_api::HarnessPreflight>(&buf)
+                            {
+                                return Some(report);
+                            }
+                        }
+                        break;
+                    }
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(test)]
+    {
+        return Some(steve_node_cli::local_node::probe_harnesses(|k| {
+            if k == "STEVE_HOME" {
+                Some(cfg.home.to_string_lossy().into_owned())
+            } else if k == "STEVE_HARNESS_MANIFEST" {
+                Some(cfg.harness_manifest.to_string_lossy().into_owned())
+            } else {
+                vars(k)
+            }
+        }));
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
 fn local_node_checks(cfg: &Config, vars: &crate::wire::Vars) -> (Vec<String>, HarnessCheck) {
     let mut warnings = Vec::new();
     let mut harnesses = HarnessCheck::default();
-    let path = vars("PATH").unwrap_or_default();
-    let available = |program: &str, executable: bool| program_available(program, executable, &path);
-    let node = vars("STEVE_NODE")
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            cfg.manifest_node
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "node".into());
-    let adapters = resolved_local_adapters(cfg, vars, &node, &path);
-    let path_only_bins: std::collections::HashMap<&str, (&str, &str)> =
-        steve_harness_spec::builtin_bins()
-            .zip(steve_harness_spec::builtin_command_vars())
-            .filter(|((id, ..), _)| !steve_harness_spec::is_npm_managed(id))
-            .map(|((id, bin, _), (_, var))| (id, (bin, var)))
-            .collect();
-    for (harness, adapter) in &adapters {
-        let js = is_node_script(adapter, &path);
-        if !available(adapter, !js) {
-            /* an adapter the user left out at setup (`<home>/adapters/selected.json`) is not a problem to report */
-            if managed_home_of(std::path::Path::new(adapter))
-                .is_some_and(|home| !managed_wanted(&home, harness))
-            {
-                continue;
-            }
-            /* a PATH-only built-in CLI the operator never explicitly pointed at a command is optional */
-            if let Some((bin, var)) = path_only_bins.get(harness.as_str())
-                && adapter == bin
-                && vars(var).is_none_or(|v| v.is_empty())
-                && !cfg.manifest_adapters.contains(harness)
-                && !cfg.declared_adapters.contains_key(harness)
-            {
-                continue;
-            }
-            harnesses.missing_adapters.push(harness.clone());
+    if let Some(preflight) = probe_harnesses_via_node(cfg, vars) {
+        for missing in preflight.missing_adapters {
+            harnesses.missing_adapters.push(missing.harness.clone());
             warnings.push(steve_i18n::t!(
                 "hub.check.adapter_missing",
-                harness = harness,
-                adapter = adapter
+                harness = missing.harness,
+                adapter = missing.adapter
             ));
-        } else if js && !available(&node, true) {
+        }
+        for missing in preflight.missing_node {
             harnesses.missing_node = true;
             warnings.push(steve_i18n::t!(
                 "hub.check.node_missing",
-                node = node,
-                harness = harness
+                node = missing.node,
+                harness = missing.harness
             ));
-        } else {
-            harnesses.resolved_adapters.push(harness.clone());
         }
+        harnesses.resolved_adapters = preflight.resolved_adapters;
     }
     harnesses.missing_adapters.sort();
     harnesses.resolved_adapters.sort();

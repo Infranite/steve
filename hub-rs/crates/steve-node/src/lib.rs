@@ -478,6 +478,10 @@ pub(crate) struct Inner {
     stdio_mcp: library_mcp::StdioMcpHost,
     /// Optional OS sandbox around capability servers (`stdio` MCP).
     capability_sandbox: Mutex<Option<Arc<steve_confine::Sandbox>>>,
+    /// Explicit opt-in for colocated host operations (`host.*`, `workspace.disk_*`, `mcp.stdio_*`).
+    /// Enabled only by `steve-node --local-node` (and colocated test fixtures); remote Nodes leave
+    /// this `false` so a compromised Hub cannot reach outside configured roots or spawn stdio MCP.
+    host_ops: AtomicBool,
 }
 
 impl Inner {
@@ -1554,6 +1558,7 @@ impl LocalNode {
             setup_mgr: Arc::new(project_setup::SetupManager::new()),
             stdio_mcp: Default::default(),
             capability_sandbox: Mutex::new(None),
+            host_ops: AtomicBool::new(false),
         }));
         node.0
             .j
@@ -1825,6 +1830,28 @@ impl LocalNode {
     pub fn enable_capability_sandbox(&self) {
         let sandbox = steve_confine::Sandbox::open(&self.0.cfg.acp.steve_home, &self.0.cfg.home);
         self.set_capability_sandbox(Some(sandbox));
+    }
+
+    /// Host bridge: opt this Node in to colocated host operations (`host.*`, `workspace.disk_*`,
+    /// `mcp.stdio_*`). Must ONLY be enabled for `steve-node --local-node` (never remote Nodes).
+    pub fn enable_host_ops(&self) {
+        self.0.host_ops.store(true, Ordering::Release);
+    }
+
+    fn require_host_ops(&self, op: &'static str) -> ApiResult<()> {
+        if self.0.host_ops.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        metrics::counter!(
+            "steve_security_refusals_total",
+            "boundary" => "node_host_ops",
+            "reason" => op
+        )
+        .increment(1);
+        Err(Error::new(
+            Code::Forbidden,
+            "host operations require a colocated local node",
+        ))
     }
 
     /// Host bridge, like [`Self::set_roots`]: where this machine's harnesses keep their history and
@@ -3445,7 +3472,7 @@ impl WorkspaceExecutor for LocalNode {
                             .await
                             .map_err(|e| Error::new(Code::Internal, e.to_string()))
                             .and_then(|r| r)
-                            .map(|_| (p, Some(repo), Some(branch.clone())))
+                            .map(|actual_branch| (p, Some(repo), Some(actual_branch)))
                         }
                         (Err(e), _) | (_, Err(e)) => Err(e),
                     }
@@ -4254,14 +4281,17 @@ impl WorkspaceExecutor for LocalNode {
     }
 
     async fn browse_dir(&self, q: BrowseDirRequest) -> ApiResult<BrowseDirResponse> {
+        self.require_host_ops("browse_dir")?;
         blocking(move || Ok(project_setup::browse_dir(&q.path))).await
     }
 
     async fn describe_dir(&self, q: DescribeDirRequest) -> ApiResult<DescribeDirResponse> {
+        self.require_host_ops("describe_dir")?;
         blocking(move || project_setup::describe_dir(&q.path, q.with_readme)).await
     }
 
     async fn path_check(&self, q: PathCheckRequest) -> ApiResult<PathCheckResponse> {
+        self.require_host_ops("path_check")?;
         blocking(move || Ok(project_setup::path_check(&q.path))).await
     }
 
@@ -4269,6 +4299,7 @@ impl WorkspaceExecutor for LocalNode {
         &self,
         q: ProjectSetupPreviewRequest,
     ) -> ApiResult<ProjectSetupPreview> {
+        self.require_host_ops("project_setup_preview")?;
         let mgr = self.0.setup_mgr.clone();
         blocking(move || Ok(mgr.preview(&q))).await
     }
@@ -4277,35 +4308,46 @@ impl WorkspaceExecutor for LocalNode {
         &self,
         c: Command<ProjectSetupRequest>,
     ) -> ApiResult<ProjectSetupStatus> {
+        self.require_host_ops("project_setup_start")?;
+        self.0.cfg.ceiling.check_exec()?;
         c.check_window()?;
         self.0.setup_mgr.start(c.id, c.body).await
     }
 
     async fn project_setup_status(&self, op: OperationId) -> ApiResult<ProjectSetupStatus> {
+        self.require_host_ops("project_setup_status")?;
         self.0.setup_mgr.status(&op)
     }
 
     async fn disk_inspect(&self, q: DiskInspectRequest) -> ApiResult<DiskInspectResponse> {
+        self.require_host_ops("disk_inspect")?;
         blocking(move || Ok(housekeeping::disk_inspect(&q))).await
     }
 
     async fn disk_reclaim(&self, q: DiskReclaimRequest) -> ApiResult<DiskReclaimResponse> {
+        self.require_host_ops("disk_reclaim")?;
+        self.0.cfg.ceiling.check_exec()?;
         blocking(move || Ok(housekeeping::disk_reclaim(&q))).await
     }
 
     async fn mcp_stdio_list(&self, server: McpStdioServer) -> ApiResult<Vec<McpStdioTool>> {
+        self.require_host_ops("mcp_stdio_list")?;
+        self.0.cfg.ceiling.check_exec()?;
         let sandbox = self.0.capability_sandbox.lock().unwrap().clone();
         let secrets = self.0.secrets.lock().unwrap().clone();
         self.0.stdio_mcp.list(sandbox, secrets, server).await
     }
 
     async fn mcp_stdio_call(&self, req: McpStdioCallRequest) -> ApiResult<McpStdioCallResponse> {
+        self.require_host_ops("mcp_stdio_call")?;
+        self.0.cfg.ceiling.check_exec()?;
         let sandbox = self.0.capability_sandbox.lock().unwrap().clone();
         let secrets = self.0.secrets.lock().unwrap().clone();
         self.0.stdio_mcp.call(sandbox, secrets, req).await
     }
 
     async fn mcp_stdio_sweep(&self, req: McpStdioSweepRequest) -> ApiResult<()> {
+        self.require_host_ops("mcp_stdio_sweep")?;
         self.0.stdio_mcp.sweep(&req.live);
         Ok(())
     }
@@ -4652,7 +4694,16 @@ impl Discovery for LocalNode {
             },
             // a command's secret as a temp file on this machine
             features: {
-                let mut f = vec![FEATURE_SECRET_FILE.into()];
+                let mut f = vec![FEATURE_SECRET_FILE.into(), FEATURE_RESUME_PROBE.into()];
+                if self.0.host_ops.load(Ordering::Acquire) {
+                    f.push(FEATURE_COLOCATED_HOST.into());
+                }
+                if self.0.research.is_enabled()
+                    && self.0.cfg.capacity.jobs > 0
+                    && self.0.cfg.ceiling.jobs
+                {
+                    f.push(FEATURE_RESEARCH_JOBS.into());
+                }
                 if self.0.remover.get().is_some() {
                     f.push(FEATURE_NODE_REMOVE.into());
                 }
@@ -5118,5 +5169,252 @@ mod fit_tests {
             local_output_paths(&traversal, &canon_home, &canon_home, "ST-1"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn host_ops_and_unsandboxed_stdio_mcp_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let make_node = |id: &str, ceiling: PolicyCeiling| {
+            let home = dir.path().join(id);
+            LocalNode::open(NodeConfig {
+                node: NodeId::new(id).unwrap(),
+                home: home.clone(),
+                acp: AcpConfig {
+                    adapters: Default::default(),
+                    declared: Default::default(),
+                    node: PathBuf::from("/usr/bin/false"),
+                    claude_executable: PathBuf::from("/usr/bin/false"),
+                    claude_config_dir: None,
+                    steve_home: dir.path().to_path_buf(),
+                    codex_home: dir.path().to_path_buf(),
+                    user_home: dir.path().to_path_buf(),
+                    version: "0.14.0".into(),
+                },
+                roots: vec![],
+                capacity: Capacity {
+                    sessions: 1,
+                    jobs: 0,
+                    execs: 0,
+                },
+                storage: Storage::default(),
+                ceiling,
+            })
+            .unwrap()
+        };
+        let now_ms = now();
+        let mcp_server = McpStdioServer {
+            id: "srv1".into(),
+            name: "test".into(),
+            updated: 1,
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo pwned".into()],
+            env: vec![],
+            secret_env: vec![],
+            operation: OperationId::new("op_mcp_sec").unwrap(),
+        };
+        let setup_cmd = Command {
+            id: OperationId::new("op_setup_sec").unwrap(),
+            issued_at: Timestamp(now_ms),
+            accept_before: Timestamp(now_ms + 60_000),
+            grant: GrantId::new("g_sec").unwrap(),
+            body: ProjectSetupRequest {
+                parent: dir.path().to_string_lossy().into_owned(),
+                directory: "proj".into(),
+                preview: dir.path().join("proj").to_string_lossy().into_owned(),
+                mode: ProjectSetupMode::Empty,
+            },
+        };
+
+        // 1. Default (remote) LocalNode without enable_host_ops refuses all 11 host/disk/MCP RPCs
+        //    and does not advertise FEATURE_COLOCATED_HOST.
+        let remote = make_node("n_remote_sec", PolicyCeiling::unlimited());
+        let caps = remote.probe(false).await.unwrap();
+        assert!(!caps.supports_colocated_host());
+        assert!(caps.supports_resume_probe());
+        assert_eq!(
+            remote
+                .browse_dir(BrowseDirRequest {
+                    path: dir.path().to_string_lossy().into_owned()
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .describe_dir(DescribeDirRequest {
+                    path: dir.path().to_string_lossy().into_owned(),
+                    with_readme: false
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .path_check(PathCheckRequest {
+                    path: dir.path().to_string_lossy().into_owned()
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .project_setup_preview(ProjectSetupPreviewRequest {
+                    parent: dir.path().to_string_lossy().into_owned(),
+                    directory: "proj".into()
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .project_setup_start(setup_cmd.clone())
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .project_setup_status(OperationId::new("op_setup_sec").unwrap())
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .disk_inspect(DiskInspectRequest {
+                    worktrees_root: dir.path().to_string_lossy().into_owned(),
+                    entries: vec![],
+                    scratch: vec![]
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .disk_reclaim(DiskReclaimRequest {
+                    worktrees_root: dir.path().to_string_lossy().into_owned(),
+                    git_projects: vec![],
+                    closed_worktrees: vec![],
+                    idle_worktrees: vec![],
+                    ended_scratch: vec![],
+                    low_bytes: 0,
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .mcp_stdio_list(mcp_server.clone())
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .mcp_stdio_call(McpStdioCallRequest {
+                    server: mcp_server.clone(),
+                    tool: "echo".into(),
+                    arguments: json!({})
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .mcp_stdio_sweep(McpStdioSweepRequest { live: vec![] })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        remote.shutdown().await;
+
+        // 2. Even with host_ops enabled, a ceiling with exec=false refuses mutating/exec host RPCs.
+        let no_exec = make_node("n_no_exec_sec", PolicyCeiling::default());
+        no_exec.enable_host_ops();
+        assert_eq!(
+            no_exec
+                .project_setup_start(setup_cmd)
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            no_exec
+                .disk_reclaim(DiskReclaimRequest {
+                    worktrees_root: dir.path().to_string_lossy().into_owned(),
+                    git_projects: vec![],
+                    closed_worktrees: vec![],
+                    idle_worktrees: vec![],
+                    ended_scratch: vec![],
+                    low_bytes: 0,
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            no_exec
+                .mcp_stdio_list(mcp_server.clone())
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        no_exec.shutdown().await;
+
+        // 3. Even with host_ops + unlimited ceiling, stdio MCP refuses without an active sandbox.
+        let unsandboxed = make_node("n_unsandboxed_sec", PolicyCeiling::unlimited());
+        unsandboxed.enable_host_ops();
+        assert!(
+            unsandboxed
+                .probe(false)
+                .await
+                .unwrap()
+                .supports_colocated_host()
+        );
+        let err = unsandboxed
+            .mcp_stdio_list(mcp_server.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, Code::Forbidden);
+        assert!(err.safe_detail.contains("sandbox"), "{}", err.safe_detail);
+
+        // Explicitly disabled sandbox (STEVE_CONFINE=off) is also refused.
+        unsandboxed.set_capability_sandbox(Some(steve_confine::Sandbox::choose(
+            dir.path(),
+            dir.path(),
+            Some("off".into()),
+        )));
+        let err = unsandboxed
+            .mcp_stdio_call(McpStdioCallRequest {
+                server: mcp_server,
+                tool: "echo".into(),
+                arguments: json!({}),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, Code::Forbidden);
+        assert!(err.safe_detail.contains("sandbox"), "{}", err.safe_detail);
+        unsandboxed.shutdown().await;
     }
 }

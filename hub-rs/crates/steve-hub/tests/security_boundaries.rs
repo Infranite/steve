@@ -1052,4 +1052,23 @@ async fn p0_04_cross_workspace_bot_leak_and_unauthorized_mutations() {
         .await;
     assert_eq!(s, 403, "non-owner restore must be refused: {body}");
     assert_eq!(body["reason"], "config.bot_owner_required", "{body}");
+
+    // REVIEW-606 #10: Non-owner Bob cannot probe host filesystem directories via POST /api/projects/describe.
+    let (s, body) = hub
+        .call_as(
+            &bob_cookie,
+            Some(&ws_shared_id),
+            "POST",
+            "/api/projects/describe",
+            Some(json!({ "path": proj_dir.display().to_string() })),
+        )
+        .await;
+    assert_eq!(
+        s, 403,
+        "non-owner POST /api/projects/describe must be refused: {body}"
+    );
+    assert!(
+        body["error"].as_str().is_some(),
+        "expected structured 403 error on /api/projects/describe: {body}"
+    );
 }

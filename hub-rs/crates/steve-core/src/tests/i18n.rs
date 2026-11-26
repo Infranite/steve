@@ -140,7 +140,10 @@ async fn a_start_failure_is_stored_in_zh_cn() {
     let s = k.db().sessions_of_item(&i.id).unwrap().pop().unwrap();
     en(|| {
         k.core
-            .workspace_failed(&s.id, false, "项目目录不存在：/nonexistent/steve-test")
+            .workspace_failed(
+                &s.id,
+                crate::WorkspaceFailure::DirMissing("/nonexistent/steve-test"),
+            )
             .unwrap()
     })
     .await;

@@ -246,16 +246,19 @@ pub fn path_check(raw: &str) -> PathCheckResponse {
     match std::fs::canonicalize(&p) {
         Ok(canon) => {
             let is_dir = canon.is_dir();
+            let writable = is_dir && crate::workspace::usable(&canon);
             PathCheckResponse {
                 exists: true,
                 is_dir,
                 canonical: Some(canon.to_string_lossy().into_owned()),
+                writable,
             }
         }
         Err(_) => PathCheckResponse {
             exists: p.exists(),
             is_dir: p.is_dir(),
             canonical: None,
+            writable: false,
         },
     }
 }

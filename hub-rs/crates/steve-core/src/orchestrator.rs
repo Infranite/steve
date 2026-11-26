@@ -5741,6 +5741,9 @@ impl Tx<'_> {
             self.reactivate(s.item_id.as_deref())?;
             return Ok(SendNow::Interrupted);
         }
+        if !self.rt().cwd_usable(sid, &s.cwd) {
+            return Ok(SendNow::Waiting(steve_i18n::t!("core.queue.wait_cwd")));
+        }
         if s.status == "ended" {
             self.db().session_patch(sid, patch![status: "idle"])?;
         }
@@ -6322,6 +6325,10 @@ impl Tx<'_> {
             return Ok(());
         };
         if s.status == "ended" || self.db().queued(sid)?.is_empty() {
+            return Ok(());
+        }
+        if !self.rt().cwd_usable(sid, &s.cwd) {
+            tracing::warn!("not flushing {sid}: cwd {} unusable", s.cwd);
             return Ok(());
         }
         if !self.waits_on_user(s.item_id.as_deref())? {

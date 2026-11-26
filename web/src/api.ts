@@ -199,8 +199,9 @@ export type Shell = {
   notifySeen?: number
   dismissedAlerts?: string[]
 }
-export type Summary = { ws: string; workspace_name: string; thinking: boolean; hold: RHold | null }
+export type Summary = { ws: string; workspace_name: string; thinking: boolean; hold: RHold | null; local_node_updating?: RLocalNodeUpdating | null }
 export type RHold = { item: string; running: number; since: number }
+export type RLocalNodeUpdating = { running: number }
 export type RNotice = { id: string; kind: "release" | "archive" | "system"; level: "info" | "success" | "fail"; text: string; item_id: string | null; created: number; closed?: boolean }
 export type HubEvent = Envelope<BusEvent> | StreamControl
 

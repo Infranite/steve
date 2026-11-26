@@ -258,13 +258,20 @@ impl super::node_runtime::NodeDomain for HubHost {
                     {
                         core.workspace_binding_failed(&session, &detail)
                     } else {
-                        core.workspace_failed(
-                            &session,
-                            error
-                                .as_ref()
-                                .is_some_and(|e| e.code == steve_node_api::Code::Exhausted),
-                            &detail,
-                        )
+                        let failure = match error.as_ref() {
+                            Some(e) if e.code == steve_node_api::Code::Exhausted => {
+                                steve_core::WorkspaceFailure::DiskLow
+                            }
+                            Some(e)
+                                if e.reason.as_ref().is_some_and(|r| {
+                                    r.is(steve_node_api::NodeReason::DirectoryMissing)
+                                }) =>
+                            {
+                                steve_core::WorkspaceFailure::DirMissing(&e.safe_detail)
+                            }
+                            _ => steve_core::WorkspaceFailure::Other(&detail),
+                        };
+                        core.workspace_failed(&session, failure)
                     }
                 }
                 WorkspaceFact::Tidied {
@@ -825,6 +832,43 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node_for(session_id)
             .is_some_and(|n| n.is_uncertain(session_id))
     }
+    fn cwd_usable(&self, session_id: &str, cwd: &str) -> bool {
+        const CWD_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+        if cwd.is_empty() {
+            return false;
+        }
+        // Only check colocated local Node paths synchronously; remote Nodes verify workspace
+        // usability on open/turn without stalling the Core lock on WAN RTT.
+        if let Some(node) = node_of(&self.store, session_id).filter(|n| !n.is_empty())
+            && node != super::local_service::NODE_ID
+        {
+            return true;
+        }
+        if self
+            .node_for(session_id)
+            .is_some_and(|n| n.pending_workspace_prepare(session_id).unwrap_or(false))
+        {
+            return true;
+        }
+        let Some(local) = self.workspaces.local_node() else {
+            return true;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return true;
+        };
+        let path = cwd.to_string();
+        match block_here(|| {
+            handle.block_on(tokio::time::timeout(
+                CWD_CHECK_TIMEOUT,
+                local.path_check(steve_node_api::PathCheckRequest { path }),
+            ))
+        }) {
+            Ok(Ok(resp)) => resp.exists && resp.is_dir && resp.writable,
+            // Offline / updating / timeout is handled by normal queueing rather than misreporting
+            // a missing working directory.
+            _ => true,
+        }
+    }
     /// Not `route()`: its park-on-doubt suits messages (undone by a later call), but here a yes
     /// drops the session's resume intent for good, so an unreadable binding counts as unbound.
     fn recovers_itself(&self, session_id: &str) -> bool {
@@ -834,11 +878,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node.as_ref().map_or(0, |n| n.running_turns())
             + self.fleet.as_ref().map_or(0, |f| f.running_turns())
     }
-    /// What a release waits for: active work on the colocated local Node (including turns waiting
-    /// for a permission answer or whose outcome is unknown), so upgrade drain does not seal while
-    /// an active turn or permission card still needs Hub coordination to finish.
+    /// The local Node runs in its own `steve-node --local-node` process and outlives Hub restarts
+    /// and upgrades, so its running turns and open permission cards never block Hub upgrade drain.
     fn node_working(&self) -> usize {
-        self.node.as_ref().map_or(0, |n| n.working())
+        0
     }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
         use super::node_runtime::Planned;

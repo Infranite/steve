@@ -309,7 +309,7 @@ pub async fn serve_until_stopped(
     let status = LinkStatus(home.map(|h| h.join(LINK_STATUS)));
     run_until(
         &node,
-        serve_with(node.clone(), None, status, p, id, trust),
+        serve_with(node.clone(), None, status, p, id, trust, true),
         async {
             tokio::select! {
                 r = signal => r,
@@ -400,7 +400,7 @@ pub async fn serve_at(
     trust: &Trust,
 ) -> Result<()> {
     let status = LinkStatus(home.as_ref().map(|h| h.0.join(LINK_STATUS)));
-    serve_with(node, home, status, p, id, trust).await
+    serve_with(node, home, status, p, id, trust, false).await
 }
 
 pub use steve_node_wire::LINK_STATUS;
@@ -445,6 +445,7 @@ async fn serve_with(
     p: &Pairing,
     id: &Identity,
     trust: &Trust,
+    colocated: bool,
 ) -> Result<()> {
     let known = std::sync::Mutex::new(p.hub_key.as_deref().and_then(key_of));
     // what the next link trusts: a pinned Hub may announce new pins (L4)
@@ -466,7 +467,11 @@ async fn serve_with(
         Some(_) => None,
     };
     let node_id = NodeId::new(p.node_id.clone()).map_err(|_| anyhow!("bad node id"))?;
-    let server = NodeServer::new(Arc::new(node.clone()));
+    let server = if colocated {
+        NodeServer::colocated(Arc::new(node.clone()))
+    } else {
+        NodeServer::new(Arc::new(node.clone()))
+    };
     let mut backoff = Duration::from_millis(200);
     // the fault last told to the Hub, and when
     let mut told: Option<(String, std::time::Instant)> = None;

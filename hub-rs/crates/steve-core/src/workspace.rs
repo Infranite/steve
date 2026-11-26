@@ -74,7 +74,7 @@ pub struct DiskPolicy {
 impl Default for DiskPolicy {
     fn default() -> Self {
         DiskPolicy {
-            floor: 10 * GB,
+            floor: steve_node_api::DEFAULT_DISK_FLOOR_BYTES,
             low: 40 * GB,
             idle_ms: 24 * 3_600_000,
         }
@@ -298,9 +298,9 @@ impl Core {
         entries: Vec<steve_node_api::DiskInspectTarget>,
     ) -> Result<DiskInspectResponse> {
         let Some(port) = self.node_housekeeping() else {
-            return Err(CoreError::NoNodeAvailable(
-                "本地设备节点未连接，无法检查工作区状态".into(),
-            ));
+            return Err(CoreError::NoNodeAvailable(steve_i18n::t!(
+                "core.workspace.node_unconnected_inspect"
+            )));
         };
         let req = DiskInspectRequest {
             worktrees_root: self.config().worktrees.to_string_lossy().into_owned(),
@@ -311,7 +311,10 @@ impl Core {
             .ok_or_else(|| CoreError::Msg("workspace disk inspect runtime unavailable".into()))?
             .map_err(|e| {
                 if e.code == steve_node_api::Code::Unavailable {
-                    CoreError::NoNodeAvailable(format!("本地设备节点离线：{}", e.safe_detail))
+                    CoreError::NoNodeAvailable(steve_i18n::t!(
+                        "core.workspace.node_offline",
+                        detail = e.safe_detail.as_str()
+                    ))
                 } else {
                     CoreError::Msg(e.safe_detail)
                 }
@@ -346,9 +349,9 @@ impl Core {
         target: ReclaimClosedTarget,
     ) -> Result<DiskReclaimResponse> {
         let Some(port) = self.node_housekeeping() else {
-            return Err(CoreError::NoNodeAvailable(
-                "本地设备节点未连接，无法清理工作区".into(),
-            ));
+            return Err(CoreError::NoNodeAvailable(steve_i18n::t!(
+                "core.workspace.node_unconnected_clean"
+            )));
         };
         let req = DiskReclaimRequest {
             worktrees_root: self.config().worktrees.to_string_lossy().into_owned(),
@@ -362,7 +365,10 @@ impl Core {
             .ok_or_else(|| CoreError::Msg("workspace reclaim runtime unavailable".into()))?
             .map_err(|e| {
                 if e.code == steve_node_api::Code::Unavailable {
-                    CoreError::NoNodeAvailable(format!("本地设备节点离线：{}", e.safe_detail))
+                    CoreError::NoNodeAvailable(steve_i18n::t!(
+                        "core.workspace.node_offline",
+                        detail = e.safe_detail.as_str()
+                    ))
                 } else {
                     CoreError::Msg(e.safe_detail)
                 }
@@ -391,9 +397,9 @@ impl Core {
 
     fn reclaim_pass(&self) -> Result<(Reclaimed, DiskReclaimResponse)> {
         let Some(port) = self.node_housekeeping() else {
-            return Err(CoreError::NoNodeAvailable(
-                "本地设备节点未连接，无法执行工作区回收".into(),
-            ));
+            return Err(CoreError::NoNodeAvailable(steve_i18n::t!(
+                "core.workspace.node_unconnected_reclaim"
+            )));
         };
         let (mut req, mut extra_kept, backend_candidates) = self.tx().build_reclaim_request()?;
         // Dispatch Node-managed closed worktrees through the Node workspace ledger (`tidy_workspace`)
@@ -432,7 +438,10 @@ impl Core {
             .ok_or_else(|| CoreError::Msg("workspace reclaim runtime unavailable".into()))?
             .map_err(|e| {
                 if e.code == steve_node_api::Code::Unavailable {
-                    CoreError::NoNodeAvailable(format!("本地设备节点离线：{}", e.safe_detail))
+                    CoreError::NoNodeAvailable(steve_i18n::t!(
+                        "core.workspace.node_offline",
+                        detail = e.safe_detail.as_str()
+                    ))
                 } else {
                     CoreError::Msg(e.safe_detail)
                 }
@@ -464,9 +473,9 @@ impl Core {
     /// inspected by the colocated Node.
     pub fn disk_report(&self) -> Result<DiskReport> {
         let Some(port) = self.node_housekeeping() else {
-            return Err(CoreError::NoNodeAvailable(
-                "本地设备节点未连接，无法检查工作区磁盘占用".into(),
-            ));
+            return Err(CoreError::NoNodeAvailable(steve_i18n::t!(
+                "core.workspace.node_unconnected_disk"
+            )));
         };
         let root = self.config().worktrees.to_string_lossy().into_owned();
         let (mut entries, mut scratch) = {
@@ -498,7 +507,10 @@ impl Core {
             .ok_or_else(|| CoreError::Msg("workspace disk inspect runtime unavailable".into()))?
             .map_err(|e| {
                 if e.code == steve_node_api::Code::Unavailable {
-                    CoreError::NoNodeAvailable(format!("本地设备节点离线：{}", e.safe_detail))
+                    CoreError::NoNodeAvailable(steve_i18n::t!(
+                        "core.workspace.node_offline",
+                        detail = e.safe_detail.as_str()
+                    ))
                 } else {
                     CoreError::Msg(e.safe_detail)
                 }

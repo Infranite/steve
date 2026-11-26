@@ -614,11 +614,13 @@ pub fn health(
     store: &Store,
     local: Option<&NodeRuntime>,
     remote: bool,
+    linked: bool,
 ) -> Result<Value, StoreError> {
     let counts = store.read(|r| sessions::health(r, local.is_some(), remote))?;
     Ok(json!({
         "enabled": local.is_some(),
         "remote": remote,
+        "linked": local.is_some() && linked,
         "reconciled": local.map(|n| n.is_reconciled()),
         "stopped": local.is_some_and(|n| n.is_stopped()),
         "holding": local.is_some_and(|n| n.is_holding()),

@@ -78,6 +78,7 @@ impl FolderPlaces for TestDiskRouter {
             Ok(meta) => Ok(Some(PathCheckResponse {
                 exists: true,
                 is_dir: meta.is_dir(),
+                writable: meta.is_dir(),
                 canonical: fs::canonicalize(p)
                     .ok()
                     .map(|c| c.to_string_lossy().into_owned()),
@@ -85,6 +86,7 @@ impl FolderPlaces for TestDiskRouter {
             Err(_) => Ok(Some(PathCheckResponse {
                 exists: false,
                 is_dir: false,
+                writable: false,
                 canonical: None,
             })),
         }

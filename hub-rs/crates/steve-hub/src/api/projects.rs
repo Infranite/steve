@@ -96,6 +96,12 @@ fn local_node(st: &AppState) -> Result<Arc<dyn na::Node>, ApiError> {
 }
 
 fn map_node_err(e: na::Error) -> ApiError {
+    if e.reason
+        .as_ref()
+        .is_some_and(|r| r.is(na::NodeReason::LocalNodeUpdating))
+    {
+        return ApiError::Json(503, steve_i18n::t!("hub.node.local_updating"));
+    }
     match e.code {
         na::Code::Unavailable => offline(),
         na::Code::Forbidden => ApiError::Json(403, e.safe_detail),
@@ -321,6 +327,7 @@ pub async fn describe(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
+    require_fs_owner(&c)?;
     let req: DescribeBody = json_body(&b)?;
     if req.path.is_empty() {
         return Err(ApiError::Invalid(vec!["path".into()]));

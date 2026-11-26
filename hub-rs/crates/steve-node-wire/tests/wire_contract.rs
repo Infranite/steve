@@ -10,7 +10,7 @@ use serde_json::json;
 use steve_node_api::testkit::{FakeNode, RecordingSink, build::*};
 use steve_node_api::*;
 use steve_node_wire::RemoteSink;
-use steve_node_wire::methods::Lane;
+use steve_node_wire::methods::{self, Lane};
 
 fn op(s: &str) -> OperationId {
     OperationId::new(s).unwrap()
@@ -427,4 +427,36 @@ async fn a_removal_is_begun_confirmed_and_asked_about_over_the_link() {
         fake.removal_calls(),
         vec![("begin", op.clone()), ("commit", op.clone())]
     );
+}
+
+/// Security: a paired remote Node (`NodeServer::new`) refuses every host, disk-housekeeping,
+/// project-setup, and stdio-MCP RPC even when a compromised Hub sends raw wire frames directly.
+#[tokio::test]
+async fn remote_node_server_refuses_all_host_disk_and_mcp_rpcs() {
+    let fake = FakeNode::new("n_remote");
+    let w = wire(fake, 1);
+    for method in [
+        methods::HOST_BROWSE_DIR,
+        methods::HOST_DESCRIBE_DIR,
+        methods::HOST_PATH_CHECK,
+        methods::HOST_PROJECT_SETUP_PREVIEW,
+        methods::HOST_PROJECT_SETUP_START,
+        methods::HOST_PROJECT_SETUP_STATUS,
+        methods::WORKSPACE_DISK_INSPECT,
+        methods::WORKSPACE_DISK_RECLAIM,
+        methods::MCP_STDIO_LIST,
+        methods::MCP_STDIO_CALL,
+        methods::MCP_STDIO_SWEEP,
+    ] {
+        let err = w
+            .hub_conn
+            .call(method, json!({}), None)
+            .await
+            .expect_err(&format!("{method} must be refused on remote NodeServer"));
+        assert_eq!(
+            err.code,
+            Code::Forbidden,
+            "{method} expected Forbidden, got {err}"
+        );
+    }
 }

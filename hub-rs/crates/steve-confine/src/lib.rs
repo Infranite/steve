@@ -696,6 +696,21 @@ impl Sandbox {
         Sandbox(Confine::open(steve_home, node_home))
     }
 
+    /// The sandbox selected for an explicit `STEVE_CONFINE` mode string (tests and diagnostics).
+    pub fn choose(steve_home: &Path, node_home: &Path, mode: Option<String>) -> Sandbox {
+        Sandbox(Confine::choose(steve_home, node_home, mode))
+    }
+
+    /// The active OS sandbox backend (`seatbelt`, `bubblewrap`), or why runs would be unconfined.
+    pub fn state(&self) -> Result<&'static str, String> {
+        self.0.state()
+    }
+
+    /// Whether an OS sandbox backend is active.
+    pub fn is_confined(&self) -> bool {
+        self.0.state().is_ok()
+    }
+
     /// Starts a pure-compute subprocess (`steve-hub --workflow-step`) inside a read-only,
     /// no-network OS sandbox (`seatbelt` on macOS, `bubblewrap` on Linux) with an empty temporary
     /// `cwd`, cleared environment, process-group SIGKILL cleanup on Drop, and OS `setrlimit` caps.
@@ -783,20 +798,23 @@ impl Sandbox {
 
     /// Starts a local capability server with private temporary cwd, piped MCP stdio and this
     /// sandbox (including the fresh level-2 environment). Dropping it stops its process group and
-    /// removes the scratch directory. The Hub owns protocol handling, never process construction.
+    /// removes the scratch directory. Refuses to spawn when no OS sandbox backend is active.
     pub fn spawn_capability(
-        sandbox: Option<&Self>,
+        sandbox: &Self,
         program: PathBuf,
         args: Vec<std::ffi::OsString>,
         env: Vec<(String, String)>,
     ) -> std::io::Result<CapabilityProcess> {
+        if let Err(why) = sandbox.state() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("capability process requires an active OS sandbox: {why}"),
+            ));
+        }
         let cwd = tempfile::Builder::new().prefix("steve-mcp-").tempdir()?;
-        let (program, args) = match sandbox {
-            Some(s) => s.0.wrap_in(program, args, &[], &[], Some(cwd.path())),
-            None => (program, args),
-        };
+        let (program, args) = sandbox.0.wrap_in(program, args, &[], &[], Some(cwd.path()));
         let mut command = tokio::process::Command::new(program);
-        if let Some(fresh) = sandbox.and_then(|s| s.0.fresh_env()) {
+        if let Some(fresh) = sandbox.0.fresh_env() {
             command.env_clear().envs(fresh.iter().cloned());
         }
         let child = command

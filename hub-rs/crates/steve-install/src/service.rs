@@ -2474,11 +2474,13 @@ impl Service {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| self.home.join("data"));
-        let Some(pid) = fs::read_to_string(data.join("node/service.pid"))
-            .ok()
-            .and_then(|p| p.trim().parse::<u32>().ok())
-            .filter(|p| *p > 1)
-        else {
+        let Some(pid) = fs::read_to_string(
+            data.join("node")
+                .join(steve_types::devices::LOCAL_SERVICE_PID_FILE),
+        )
+        .ok()
+        .and_then(|p| steve_types::devices::LocalServicePid::parse(&p).map(|r| r.pid))
+        .filter(|p| *p > 1) else {
             return Ok(());
         };
         let pid = pid.to_string();

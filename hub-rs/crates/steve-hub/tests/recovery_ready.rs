@@ -403,6 +403,22 @@ async fn nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_commi
         "assets": [],
     });
     atomic(&target.join("release.json"), &manifest);
+    let node_bin = target.join("bin/steve-node");
+    std::fs::create_dir_all(node_bin.parent().unwrap()).expect("bin dir");
+    std::fs::write(
+        &node_bin,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"version\":\"{VERSION}\",\"commit\":\"{}\"}}'\n",
+            "a".repeat(40)
+        ),
+    )
+    .expect("write steve-node stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&node_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod steve-node stub");
+    }
     let op_path = h
         .steve()
         .join("updates/operations")

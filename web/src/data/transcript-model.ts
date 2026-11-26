@@ -31,14 +31,14 @@ function toolName(name: string) {
 
 /** a tool's whole current view (transcript `tool`, the Node protocol's ToolView) → its transcript tuple, in place */
 function toolEv(t: Ev, v: any) {
-  const name = String(v.name ?? ""), title = String(v.title ?? "")
+  const name = String(v.name ?? ""), short = name.replace(/^mcp__[^_]+__/, ""), title = String(v.title ?? "")
   const steve = v.origin === "steve" || v.category === "steve", live = v.phase === "succeeded" || v.phase === "failed" ? 0 : 1
   const args = v.action?.type === "tool" && v.action.args && typeof v.action.args === "object" ? v.action.args : undefined
   const result: any[] = Array.isArray(v.result) ? v.result : [], diffs = result.filter((p) => p?.type === "diff")
   const text = result.filter((p) => p?.type === "text").map((p) => String(p.text ?? "")).join("\n")
   const kind = KIND[v.category] ?? (v.action?.type === "exec" ? "run" : "other")
   t.length = 0
-  if (steve) t.push("tool", "steve", toolName(name), "Steve", "", live)
+  if (steve) t.push("tool", "steve", toolName(short), "Steve", "", live)
   else t.push("tool", kind, name || title.split(" ")[0] || i18n.t("core:tool.fallback"), v.target ?? title.split(" ").slice(1).join(" ").slice(0, 80), "", live)
   if (diffs.length) { t[4] = diffs.map(diffText).join("\n⋯\n"); t[6] = diffs.reduce((n, d) => n + (d.added ?? 0), 0); t[7] = diffs.reduce((n, d) => n + (d.removed ?? 0), 0); if (!steve && diffs[0].path) t[3] = diffs[0].path }
   else if (text) t[4] = t[1] === "run" ? unfence(text) : text

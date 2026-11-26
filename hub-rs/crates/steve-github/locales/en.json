@@ -50,5 +50,9 @@
   "github.manifest.already_installed": "This GitHub App is already installed on %{login}. An app can have only one installation for now",
   "github.text.pat_name": "GitHub personal token",
   "github.text.pat_token": "Token",
-  "github.text.pat_token_hint": "GitHub Settings → Developer settings → Fine-grained tokens: pick the repositories, give Contents, Pull requests and Issues read and write, Checks and Actions read; to receive events also Webhooks read and write"
+  "github.text.pat_token_hint": "GitHub Settings → Developer settings → Fine-grained tokens: pick the repositories, give Contents, Pull requests and Issues read and write, Checks and Actions read; to receive events also Webhooks read and write",
+  "github.push.no_node": "No device Node available to run Git operation: %{detail}",
+  "github.push.no_git_nodes": "Make sure the local or target device Node is connected",
+  "github.push.no_node_head": "Item workspace is not bound to an online Node; cannot read branch commit",
+  "github.push.no_node_push": "Item workspace is not bound to an online Node; cannot push branch"
 }

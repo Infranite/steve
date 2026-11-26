@@ -272,8 +272,12 @@ impl Dispatcher {
     }
 
     /// Earliest due timestamp (ms) across all registered, enabled consumers, ignoring dead rows.
-    /// `Some(0)` means an unattempted delivery is due immediately; `None` means nothing is pending.
+    /// `Some(0)` means an unattempted delivery is due immediately; `None` means nothing is pending
+    /// (or maintenance mode has paused outbox delivery so callers do not spin while `pump` is gated).
     pub fn next_due(&self, store: &Store) -> Result<Option<i64>> {
+        if store.maintenance() {
+            return Ok(None);
+        }
         store.read(|r| {
             let mut earliest: Option<i64> = None;
             for c in &self.consumers {

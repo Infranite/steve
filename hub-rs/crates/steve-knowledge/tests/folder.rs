@@ -12,7 +12,7 @@ use steve_store::testkit::knowledge as fixture;
 use axum::Router;
 use serde_json::{Value, json};
 use steve_knowledge::sources::files::blob_path;
-use steve_knowledge::sources::folder::{self, FolderPolicy, OUTSIDE, check_path};
+use steve_knowledge::sources::folder::{self, FolderPolicy, OUTSIDE, check_path_probe};
 use steve_knowledge::{FilesLoader, Knowledge, index};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_store::base::Visibility;
@@ -216,10 +216,31 @@ async fn every_path_refusal() {
             "{path}"
         );
     }
+    let probe_disk = |raw: &Path| match fs::metadata(raw) {
+        Ok(m) => steve_node_api::PathCheckResponse {
+            exists: true,
+            is_dir: m.is_dir(),
+            writable: m.is_dir(),
+            canonical: fs::canonicalize(raw)
+                .ok()
+                .map(|c| c.to_string_lossy().into_owned()),
+        },
+        Err(_) => steve_node_api::PathCheckResponse {
+            exists: false,
+            is_dir: false,
+            writable: false,
+            canonical: None,
+        },
+    };
     // A link from inside the home to outside it is judged by where it points.
     std::os::unix::fs::symlink("/etc", h.join("etc-link")).unwrap();
+    let etc_link = h.join("etc-link");
     assert_eq!(
-        check_path(e.kb.folder_policy(), &h.join("etc-link").to_string_lossy()),
+        check_path_probe(
+            e.kb.folder_policy(),
+            &etc_link.to_string_lossy(),
+            &probe_disk(&etc_link),
+        ),
         Err("只能添加你主目录或外接磁盘里的文件夹".into())
     );
     // A link to a forbidden place is judged by where it points.
@@ -237,8 +258,9 @@ async fn every_path_refusal() {
     );
     // A directory that contains STEVE_HOME (when it is not under the home dot-dirs).
     let p = FolderPolicy::new(h, h.join("docs/wiki/sub"));
+    let docs_path = h.join("docs");
     assert_eq!(
-        check_path(&p, &h.join("docs").to_string_lossy()),
+        check_path_probe(&p, &docs_path.to_string_lossy(), &probe_disk(&docs_path)),
         Err("里面包含 Steve 自己的数据目录".into())
     );
 
@@ -344,7 +366,21 @@ async fn cloud_drive_folders_are_allowed_inside_their_roots_with_text_files_only
         .await;
     assert_eq!(s, 400, "{v}");
     assert!(refusal(&v).contains(".md 和 .txt"), "{v}");
-    assert!(check_path(e.kb.folder_policy(), &dropbox.to_string_lossy()).is_ok());
+    assert!(
+        check_path_probe(
+            e.kb.folder_policy(),
+            &dropbox.to_string_lossy(),
+            &steve_node_api::PathCheckResponse {
+                exists: true,
+                is_dir: true,
+                writable: true,
+                canonical: fs::canonicalize(&dropbox)
+                    .ok()
+                    .map(|c| c.to_string_lossy().into_owned()),
+            },
+        )
+        .is_ok()
+    );
 
     // a vault inside iCloud Drive: added, scanned, searchable
     let src = e

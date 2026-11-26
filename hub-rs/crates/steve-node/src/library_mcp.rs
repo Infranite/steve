@@ -195,6 +195,30 @@ impl StdioMcpHost {
         hub_secrets: Option<Arc<dyn HubSecrets>>,
         server: &McpStdioServer,
     ) -> ApiResult<Arc<StdioConn>> {
+        let sandbox = sandbox.ok_or_else(|| {
+            metrics::counter!(
+                "steve_security_refusals_total",
+                "boundary" => "node_stdio_mcp",
+                "reason" => "no_sandbox"
+            )
+            .increment(1);
+            Error::new(
+                Code::Forbidden,
+                "stdio MCP server refused: capability sandbox is not configured",
+            )
+        })?;
+        if let Err(why) = sandbox.state() {
+            metrics::counter!(
+                "steve_security_refusals_total",
+                "boundary" => "node_stdio_mcp",
+                "reason" => "sandbox_unavailable"
+            )
+            .increment(1);
+            return Err(Error::new(
+                Code::Forbidden,
+                format!("stdio MCP server refused: OS sandbox unavailable ({why})"),
+            ));
+        }
         let slot = self
             .conns
             .lock()
@@ -248,7 +272,7 @@ impl StdioMcpHost {
                 env.push((var_name.clone(), val.to_string()));
             }
         }
-        let stdio = Stdio::start(sandbox.as_deref(), server, env)
+        let stdio = Stdio::start(sandbox.as_ref(), server, env)
             .map_err(|e| Error::new(Code::Internal, e))?;
         let c = Arc::new(StdioConn {
             name: server.name.clone(),
@@ -378,7 +402,7 @@ struct Stdio {
 
 impl Stdio {
     fn start(
-        sandbox: Option<&steve_confine::Sandbox>,
+        sandbox: &steve_confine::Sandbox,
         server: &McpStdioServer,
         env: Vec<(String, String)>,
     ) -> Result<Stdio, String> {

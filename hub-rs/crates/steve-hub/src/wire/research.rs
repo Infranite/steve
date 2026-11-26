@@ -296,6 +296,40 @@ impl ResearchAdapter {
                 ..Default::default()
             };
         }
+        if node.runtime.node().is_upgrade_only() {
+            return ResearchOutcome {
+                end: RunEnd::Failed,
+                error: Some(steve_i18n::stored(|| {
+                    steve_i18n::t!("hub.node.local_updating")
+                })),
+                ..Default::default()
+            };
+        }
+        match node.runtime.node().probe(false).await {
+            Ok(caps) if !caps.supports_research() => {
+                return ResearchOutcome {
+                    end: RunEnd::Failed,
+                    error: Some(steve_i18n::stored(|| {
+                        steve_i18n::t!("hub.node.local_updating")
+                    })),
+                    ..Default::default()
+                };
+            }
+            Err(e)
+                if e.reason
+                    .as_ref()
+                    .is_some_and(|r| r.is(api::NodeReason::LocalNodeUpdating)) =>
+            {
+                return ResearchOutcome {
+                    end: RunEnd::Failed,
+                    error: Some(steve_i18n::stored(|| {
+                        steve_i18n::t!("hub.node.local_updating")
+                    })),
+                    ..Default::default()
+                };
+            }
+            _ => {}
+        }
         let cfg = &self.cfg;
         let slot = match self.admission.admit(&q.run, &q.ws, cfg.max_global) {
             Ok(s) => s,

@@ -59,16 +59,26 @@ struct BackfillCandidate {
     in_use: Option<bool>,
 }
 
+/// Strongly typed reason why a Node could not prepare a session's workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceFailure<'a> {
+    /// Free disk space on the Node's worktrees volume is below the configured floor.
+    DiskLow,
+    /// The project's root directory does not exist on the executing Node.
+    DirMissing(&'a str),
+    /// Any other Node preparation failure detail.
+    Other(&'a str),
+}
+
 impl Core {
     /// The worktree `session` waited for is at `path` (on `branch`).
     pub fn workspace_ready(&self, session: &str, path: &str, branch: Option<&str>) -> Result<()> {
         self.tx().workspace_ready(session, path, branch)
     }
 
-    /// The worktree `session` waited for could not be made: `disk_low` (below the floor), or
-    /// why (`detail`).
-    pub fn workspace_failed(&self, session: &str, disk_low: bool, detail: &str) -> Result<()> {
-        steve_i18n::stored(|| self.tx().workspace_failed(session, disk_low, detail))
+    /// The worktree `session` waited for could not be made: disk low, missing directory, or detail.
+    pub fn workspace_failed(&self, session: &str, failure: WorkspaceFailure<'_>) -> Result<()> {
+        steve_i18n::stored(|| self.tx().workspace_failed(session, failure))
     }
 
     /// Retire an invalid immutable binding before raising the recovery card. Continue will
@@ -520,17 +530,19 @@ impl Tx<'_> {
         Ok(())
     }
 
-    fn workspace_failed(&mut self, session: &str, disk_low: bool, detail: &str) -> Result<()> {
+    fn workspace_failed(&mut self, session: &str, failure: WorkspaceFailure<'_>) -> Result<()> {
         let Some((_, i)) = self.current(session)? else {
             return Ok(());
         };
         if i.is_closed() || i.is_paused() {
             return Ok(());
         }
-        let why = if disk_low {
-            self.c.disk_low(self.c.worktrees_free().unwrap_or(0))
-        } else {
-            detail.to_string()
+        let why = match failure {
+            WorkspaceFailure::DiskLow => self.c.disk_low(self.c.worktrees_free().unwrap_or(0)),
+            WorkspaceFailure::DirMissing(path) => {
+                steve_i18n::t!("core.project.dir_missing", path = path)
+            }
+            WorkspaceFailure::Other(detail) => detail.to_string(),
         };
         self.fail(&i.id, &format!("开不了会话：{why}"))
     }

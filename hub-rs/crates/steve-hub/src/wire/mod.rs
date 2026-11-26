@@ -450,6 +450,8 @@ pub(crate) mod test_local_node {
         };
         let local = Arc::new(steve_node::LocalNode::open(node_cfg).expect("open test LocalNode"));
         local.follow_roots_file(roots_file);
+        local.enable_host_ops();
+        local.enable_capability_sandbox();
         local.enable_research(steve_research::ResearchConfig::new(
             cfg.scratch.join("research"),
         ));
@@ -461,7 +463,7 @@ pub(crate) mod test_local_node {
             files: Some(svc.fleet.files_for(&node_id)),
             secrets: svc.secrets.get().map(|s| s.for_node(node_id.clone())),
         });
-        let node_server = steve_node_wire::NodeServer::new(local.clone());
+        let node_server = steve_node_wire::NodeServer::colocated(local.clone());
         let hub_conn = steve_node_wire::Conn::spawn(
             hub_end.sink,
             hub_end.stream,

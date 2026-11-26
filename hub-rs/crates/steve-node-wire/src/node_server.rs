@@ -15,11 +15,43 @@ use crate::methods::*;
 
 pub struct NodeServer<N: Node + ?Sized> {
     node: Arc<N>,
+    /// True only for the colocated `--local-node` transport; remote Nodes refuse all host,
+    /// disk-housekeeping, project-setup, and stdio-MCP RPCs before decoding or dispatching.
+    allow_host_ops: bool,
 }
 
 impl<N: Node + ?Sized> NodeServer<N> {
+    /// Server for a remote paired Node: refuses colocated host/disk/MCP RPCs.
     pub fn new(node: Arc<N>) -> Arc<Self> {
-        Arc::new(NodeServer { node })
+        Arc::new(NodeServer {
+            node,
+            allow_host_ops: false,
+        })
+    }
+
+    /// Server for the Hub's colocated `--local-node`: allows host/disk/MCP RPCs to reach the
+    /// Node (which still enforces its own opt-in, ceiling, and sandbox checks).
+    pub fn colocated(node: Arc<N>) -> Arc<Self> {
+        Arc::new(NodeServer {
+            node,
+            allow_host_ops: true,
+        })
+    }
+
+    fn require_host_ops(&self, method: &str) -> ApiResult<()> {
+        if self.allow_host_ops {
+            return Ok(());
+        }
+        metrics::counter!(
+            "steve_security_refusals_total",
+            "boundary" => "node_server",
+            "method" => method.to_owned()
+        )
+        .increment(1);
+        Err(Error::new(
+            Code::Forbidden,
+            "host operations are disabled on remote nodes",
+        ))
     }
 }
 
@@ -74,17 +106,50 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
                 let a: PagesArgs = de(p)?;
                 en(&n.scan_page(a.operation, a.page).await?)
             }
-            HOST_BROWSE_DIR => en(&n.browse_dir(de(p)?).await?),
-            HOST_DESCRIBE_DIR => en(&n.describe_dir(de(p)?).await?),
-            HOST_PATH_CHECK => en(&n.path_check(de(p)?).await?),
-            HOST_PROJECT_SETUP_PREVIEW => en(&n.project_setup_preview(de(p)?).await?),
-            HOST_PROJECT_SETUP_START => en(&n.project_setup_start(de(p)?).await?),
-            HOST_PROJECT_SETUP_STATUS => en(&n.project_setup_status(de(p)?).await?),
-            WORKSPACE_DISK_INSPECT => en(&n.disk_inspect(de(p)?).await?),
-            WORKSPACE_DISK_RECLAIM => en(&n.disk_reclaim(de(p)?).await?),
-            MCP_STDIO_LIST => en(&n.mcp_stdio_list(de(p)?).await?),
-            MCP_STDIO_CALL => en(&n.mcp_stdio_call(de(p)?).await?),
-            MCP_STDIO_SWEEP => en(&n.mcp_stdio_sweep(de(p)?).await?),
+            HOST_BROWSE_DIR => {
+                self.require_host_ops(method)?;
+                en(&n.browse_dir(de(p)?).await?)
+            }
+            HOST_DESCRIBE_DIR => {
+                self.require_host_ops(method)?;
+                en(&n.describe_dir(de(p)?).await?)
+            }
+            HOST_PATH_CHECK => {
+                self.require_host_ops(method)?;
+                en(&n.path_check(de(p)?).await?)
+            }
+            HOST_PROJECT_SETUP_PREVIEW => {
+                self.require_host_ops(method)?;
+                en(&n.project_setup_preview(de(p)?).await?)
+            }
+            HOST_PROJECT_SETUP_START => {
+                self.require_host_ops(method)?;
+                en(&n.project_setup_start(de(p)?).await?)
+            }
+            HOST_PROJECT_SETUP_STATUS => {
+                self.require_host_ops(method)?;
+                en(&n.project_setup_status(de(p)?).await?)
+            }
+            WORKSPACE_DISK_INSPECT => {
+                self.require_host_ops(method)?;
+                en(&n.disk_inspect(de(p)?).await?)
+            }
+            WORKSPACE_DISK_RECLAIM => {
+                self.require_host_ops(method)?;
+                en(&n.disk_reclaim(de(p)?).await?)
+            }
+            MCP_STDIO_LIST => {
+                self.require_host_ops(method)?;
+                en(&n.mcp_stdio_list(de(p)?).await?)
+            }
+            MCP_STDIO_CALL => {
+                self.require_host_ops(method)?;
+                en(&n.mcp_stdio_call(de(p)?).await?)
+            }
+            MCP_STDIO_SWEEP => {
+                self.require_host_ops(method)?;
+                en(&n.mcp_stdio_sweep(de(p)?).await?)
+            }
             HARNESS_PROBE => {
                 let a: ProbeArgs = de(p)?;
                 en(&n.probe(a.fresh).await?)

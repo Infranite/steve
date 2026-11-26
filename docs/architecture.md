@@ -36,7 +36,7 @@ flowchart LR
     CORE --- VAULT
     STORE -.-> BK
     MOD <--> PLG
-    CORE <-->|"Outbound WS · Protocol 16"| N1
+    CORE <-->|"Outbound WS · Protocol 17"| N1
     N1 --- ACP
     ACP --- WT
 ```
@@ -49,13 +49,13 @@ flowchart LR
 | **Node** | `steve-node`, `steve-node-cli`, `steve-acp`, `steve-confine`, `steve-toolchains` | Executes one attempt at a time per session on a host machine, maintains a durable local execution journal, terminates ACP/MCP/CLI protocols, enforces OS confinement. | Holds no Hub database, makes no business or permission policy decisions, never retries ambiguously. |
 | **Client** | `web/`, `apple/` | Multi-Hub UI synced over `GET /api/snapshot` and one resumable SSE stream (`/api/stream`), plus macOS menu bar status and Keychain credential storage. | Holds no authoritative state; renders typed views generated from `steve-types` (`ts-rs`). |
 
-By default (`STEVE_NODE_MODE=service`), the Hub runs its own local Node in a separate `steve-node --local-node` process over loopback (`STEVE_LOCAL_NODE_PORT`, default Hub port + 3). All coding sessions, model/research jobs, git operations, project setup, and `stdio` MCP servers execute in the independent Node process, so Hub restarts and in-place upgrades leave active turns running. Set `STEVE_NODE_MODE=off` to run a remote-only Hub without a colocated Node (`STEVE_NODE_MODE=local` is no longer supported).
+By default (`STEVE_NODE_MODE=service`), the Hub runs its own local Node in a separate `steve-node --local-node` process over loopback (`STEVE_LOCAL_NODE_PORT`, default Hub port + 3). All coding sessions, model/research jobs, git operations, project setup, and `stdio` MCP servers execute in the independent Node process, so Hub restarts and in-place upgrades leave active turns running (`STEVE_NODE_MODE=local` and `STEVE_NODE_MODE=off` have been removed; only diagnostic `STEVE_NO_RESUME=1` copies start without a local Node).
 
 Default directories and ports: `~/.steve` (Hub) and `~/.steve-node` (separate Node), overridable with `STEVE_HOME` / `--home`; Hub API `8440` (`STEVE_PORT`), separate Web UI `8441` (`STEVE_WEB_PORT`, Hub + 1 on `steve setup`), optional tailcat Node listener `8442` (`STEVE_TAILCAT_PORT`, Hub + 2), local service Node `8443` (`STEVE_LOCAL_NODE_PORT`, Hub + 3), and optional Prometheus metrics `127.0.0.1:9464` (`STEVE_METRICS=prometheus`).
 
 ## Hub–Node protocol
 
-Communication between Hub and Node uses `steve-node-api` (`PROTOCOL = 16`, `EVENT_SCHEMA = 1`) over `steve-node-wire`:
+Communication between Hub and Node uses `steve-node-api` (`PROTOCOL = 17`, `EVENT_SCHEMA = 1`) over `steve-node-wire`:
 
 - **Outbound-only dial**: Every remote `steve-node` dials out to the Hub over a single bidirectional WebSocket (direct HTTPS/TLS or optional `tailcat` loopback listener on Hub port + 2). Pairing uses a one-time code and human fingerprint confirmation in **Devices**.
 - **Typed ports**:

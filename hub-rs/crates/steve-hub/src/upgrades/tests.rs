@@ -261,6 +261,7 @@ async fn github_bundle_stages_only_after_hash_and_pair_validation() {
         ("web/dist/release.json", br#"{"version":"0.2.0"}"#.to_vec()),
         ("web/dist/index.html", b"<html>release</html>".to_vec()),
         ("bin/steve-hub", b"#!/bin/sh\nexit 0\n".to_vec()),
+        ("bin/steve-node", b"#!/bin/sh\nexit 0\n".to_vec()),
     ] {
         let mut h = tar::Header::new_gnu();
         h.set_size(bytes.len() as u64);
@@ -352,6 +353,11 @@ async fn github_bundle_stages_only_after_hash_and_pair_validation() {
             .join("bin/steve-hub")
             .exists()
     );
+    assert!(
+        PathBuf::from(op.target.clone().unwrap())
+            .join("bin/steve-node")
+            .exists()
+    );
     assert!(!home.path().join("current").exists());
     u.phase(&mut op, "failed", None).unwrap();
     corrupt.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -366,6 +372,36 @@ async fn github_bundle_stages_only_after_hash_and_pair_validation() {
     assert!(bad.target.is_none());
     assert!(!home.path().join("current").exists());
     server.abort();
+}
+
+#[test]
+fn unpack_rejects_bundle_without_steve_node() {
+    let home = tempfile::tempdir().unwrap();
+    let dest = home.path().join("unpacked");
+    fs::create_dir_all(&dest).unwrap();
+    let embedded = fixture();
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::default(),
+    ));
+    for (name, bytes) in [
+        ("release.json", serde_json::to_vec(&embedded).unwrap()),
+        ("web/dist/release.json", br#"{"version":"0.2.0"}"#.to_vec()),
+        ("web/dist/index.html", b"<html>release</html>".to_vec()),
+        ("bin/steve-hub", b"#!/bin/sh\nexit 0\n".to_vec()),
+    ] {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(bytes.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar.append_data(&mut h, name, bytes.as_slice()).unwrap();
+    }
+    let bytes = tar.into_inner().unwrap().finish().unwrap();
+    let err = super::client::unpack(&bytes, &dest, &embedded).unwrap_err();
+    assert!(
+        err.to_string().contains("Hub/Node/Web"),
+        "expected missing Hub/Node/Web error, got: {err:#}"
+    );
 }
 
 #[test]

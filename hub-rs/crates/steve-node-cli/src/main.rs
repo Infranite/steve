@@ -67,6 +67,11 @@ async fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("--local-node") {
         return steve_node_cli::local_node::run().await;
     }
+    if args.first().map(String::as_str) == Some("harness-probe") {
+        let report = steve_node_cli::local_node::probe_harnesses(|k| std::env::var(k).ok());
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
     let home = Home::from_env()?;
     match args.first().map(String::as_str) {
         // the switch helper a Hub-asked upgrade starts, outside the service (see `upgrade`)

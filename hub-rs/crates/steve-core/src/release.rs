@@ -185,7 +185,7 @@ impl Tx<'_> {
             item_id,
             branch,
             to,
-            Rebase::Error("没有可用的设备节点执行 rebase".into()),
+            Rebase::Error(steve_i18n::t!("core.release.no_node_rebase")),
         )
     }
 

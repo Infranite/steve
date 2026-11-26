@@ -179,7 +179,7 @@ fn adapter_release(home: &Path, role: &str, name: &str, calls: &Path) -> std::pa
         }),
     );
     let quoted = steve_install::common::shell_quote(calls.to_str().unwrap()).unwrap();
-    let program = release.join(format!("bin/steve-{role}"));
+    let program = release.join("bin/steve-node");
     fs::write(&program, format!("#!/bin/sh\nprintf '%s|%s|%s|%s|%s\\n' {role} {name} \"$STEVE_HOME\" \"$STEVE_LANG\" \"$*\" >> {quoted}\n[ \"$2\" = status ] && exit 3\nexit 0\n")).unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
     release
@@ -237,11 +237,7 @@ fn adapters_commands_reach_the_installed_hub_or_nodes_release() {
             );
         }
         let prefix = format!("{role}|1.1.0|{}|zh-CN|", home.display());
-        let first = if role == "hub" {
-            "--adapters"
-        } else {
-            "adapters"
-        };
+        let first = "adapters";
         let actual = fs::read_to_string(&calls).unwrap();
         let lines: Vec<_> = actual.lines().filter(|s| s.starts_with(&prefix)).collect();
         assert_eq!(

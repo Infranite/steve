@@ -25,6 +25,9 @@ pub enum OneShotError {
     },
     /// The adapter lacks what the call needs (`unsupported: images`).
     Unsupported(&'static str),
+    /// The colocated local service Node is running an older build lacking job capability and is
+    /// waiting for active turns to finish before replacing itself.
+    LocalNodeUpdating,
     Io(std::io::Error),
 }
 
@@ -50,6 +53,7 @@ impl fmt::Display for OneShotError {
             Self::ToolRefused => f.write_str("read-only policy refused a tool"),
             Self::Harness { text, .. } => f.write_str(text),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Self::LocalNodeUpdating => f.write_str("local node is updating"),
             Self::Io(err) => err.fmt(f),
         }
     }

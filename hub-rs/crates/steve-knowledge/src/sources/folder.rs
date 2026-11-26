@@ -1,13 +1,13 @@
-//! Folder sources: a Markdown / text folder on the Hub (a wiki, an Obsidian
+//! Folder sources: a Markdown / text folder on a Node (a wiki, an Obsidian
 //! vault), scanned every 10 minutes and on demand, read only, never written back.
 //!
-//! - [`check_path`]: the whitelist-style path check, `400 这个目录不能加入知识库：<原因>`;
+//! - [`check_path_probe`] / [`check_path_probe_for_role`]: the single Node-probed whitelist path
+//!   check, `400 这个目录不能加入知识库：<原因>`;
 //! - [`sync`]: one scan: walk ([`crate::scan`]), reconcile the documents by `(mtime, size)`, index
 //!   the changed ones through [`index::run_batch`] (which compares `sha256` after reading);
 //! - [`FolderLoader`]: reads one file for the index, re-checking that it is still inside the root;
 //! - [`spawn_scans`]: the `kb.folder_scan` job, started by the integrator;
-//! - through a Node when the Hub wires one ([`super::folder_node`]): the Node walks and reads, the
-//!   rest stays here;
+//! - through a Node ([`super::folder_node`]): the Node probes, walks and reads, the rest stays here;
 //! - the source writes (`POST/PATCH/DELETE /kb/sources`, `POST /kb/sources/:id/sync`).
 
 use std::collections::{HashMap, HashSet};
@@ -165,37 +165,64 @@ fn check_canonical_policy(
     Ok(c)
 }
 
-/// The path rules for a knowledge folder. Returns the canonical directory, or the reason it is
-/// refused (in the request's language: zh-CN in the background scan, which stores it).
-/// Overlap with existing folder sources is [`overlap`].
-pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathBuf, String> {
-    check_path_for_role(policy, raw, SourceRole::Knowledge)
+/// Probes `raw` via the wired [`folder_node::FolderPlaces`] Node boundary without touching Hub
+/// local disk. Used synchronously by folder creation and draft planning/apply.
+pub(crate) fn probe_path_sync(
+    kb: &Knowledge,
+    raw: &str,
+) -> ApiResult<steve_node_api::PathCheckResponse> {
+    let places = kb
+        .folder_nodes()
+        .places()
+        .ok_or_else(|| ApiError::rule(folder_node::OFFLINE))?
+        .clone();
+    let path = raw.to_string();
+    let fut = async move { places.check_path(&path).await };
+    let probed = match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| h.block_on(fut))
+        }
+        Ok(_) => std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("probe runtime")
+                .block_on(fut)
+        })
+        .join()
+        .map_err(|_| ApiError::Internal("path probe thread panicked".into()))?,
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .block_on(fut),
+    };
+    probed
+        .map_err(|u| ApiError::rule(folder_node::unplaced(&u)))?
+        .ok_or_else(|| ApiError::rule(folder_node::OFFLINE))
 }
 
-/// Path rules parameterized by [`SourceRole`]: `$STEVE_HOME/context` (and its per-workspace
-/// directory) is permitted ONLY for `SourceRole::Memory` sources, while `$STEVE_HOME` itself and
-/// every other internal subdirectory remain strictly refused.
-pub fn check_path_for_role(
-    policy: &FolderPolicy,
+/// Validates `raw` for `role` through the single Node-probed path policy.
+pub(crate) fn check_path_via_node(
+    kb: &Knowledge,
     raw: &str,
     role: SourceRole,
-) -> std::result::Result<PathBuf, String> {
-    let p = Path::new(raw.trim());
-    if raw.trim().is_empty() || !p.is_absolute() {
-        return Err(steve_i18n::t!("knowledge.folder.need_absolute"));
+) -> ApiResult<std::result::Result<PathBuf, String>> {
+    let trimmed = raw.trim();
+    let p = Path::new(trimmed);
+    if trimmed.is_empty() || !p.is_absolute() {
+        return Ok(Err(steve_i18n::t!("knowledge.folder.need_absolute")));
     }
     if p.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(steve_i18n::t!("knowledge.folder.parent_dir"));
+        return Ok(Err(steve_i18n::t!("knowledge.folder.parent_dir")));
     }
-    let meta = match std::fs::metadata(p) {
-        Ok(m) => m,
-        Err(_) => return Err(steve_i18n::t!("knowledge.folder.missing")),
-    };
-    if !meta.is_dir() {
-        return Err(steve_i18n::t!("knowledge.folder.not_dir"));
-    }
-    let c = std::fs::canonicalize(p).map_err(|_| steve_i18n::t!("knowledge.folder.missing"))?;
-    check_canonical_policy(policy, c, role)
+    let probe = probe_path_sync(kb, trimmed)?;
+    Ok(check_path_probe_for_role(
+        kb.folder_policy(),
+        trimmed,
+        &probe,
+        role,
+    ))
 }
 
 /// The cloud-drive folders of `~/Library` (iCloud Drive, Dropbox, OneDrive, Google Drive …): a
@@ -886,9 +913,9 @@ pub struct NewFolder {
     pub write_mode: WriteMode,
 }
 
-/// Checks a `POST /kb/sources` body: fields (`400 参数不对`) and the path rules
+/// Checks a `POST /kb/sources` body: fields (`400 参数不对`) and the single Node-probed path rules
 /// (`400 这个目录不能加入知识库：<原因>`). Overlap and scopes are checked by [`insert_folder`].
-pub fn check_new(policy: &FolderPolicy, b: &SourceBody) -> ApiResult<NewFolder> {
+pub fn check_new(kb: &Knowledge, b: &SourceBody) -> ApiResult<NewFolder> {
     let mut ck = Check::new();
     ck.one_of("kind", &b.kind, &["folder"])
         .len("name", b.name.trim(), 1, 40)
@@ -898,12 +925,12 @@ pub fn check_new(policy: &FolderPolicy, b: &SourceBody) -> ApiResult<NewFolder> 
     ck.done()?;
     let role = b.role.unwrap_or(SourceRole::Knowledge);
     let write_mode = b.write_mode.unwrap_or(WriteMode::ReadOnly);
-    let path = check_path_for_role(policy, &b.path, role).map_err(|r| refused(&r))?;
+    let path = check_path_via_node(kb, &b.path, role)?.map_err(|r| refused(&r))?;
     let include = match &b.include {
         Some(i) if !i.is_empty() => i.clone(),
         _ => default_include(),
     };
-    check_cloud_include(policy, &path, &include)?;
+    check_cloud_include(kb.folder_policy(), &path, &include)?;
     Ok(NewFolder {
         name: b.name.trim().to_string(),
         path,
@@ -978,7 +1005,7 @@ pub fn insert_folder(
 
 /// Creates a folder source after the checks. The caller then starts its first scan.
 pub fn create(m: &Modules, kb: &Knowledge, who: &Caller, b: SourceBody) -> ApiResult<SourceRow> {
-    let f = check_new(kb.folder_policy(), &b)?;
+    let f = check_new(kb, &b)?;
     service::prepare(m, who)?;
     let now = m.clock.now();
     m.store.write(|tx| {
@@ -1262,11 +1289,17 @@ mod tests {
             PathBuf::from("/srv/demo"),
             PathBuf::from("/srv/demo/.steve"),
         );
-        let zh = check_path(&p, "relative").map_err(|r| refusal(&r));
+        let missing = steve_node_api::PathCheckResponse {
+            exists: false,
+            is_dir: false,
+            writable: false,
+            canonical: None,
+        };
+        let zh = check_path_probe(&p, "relative", &missing).map_err(|r| refusal(&r));
         assert_eq!(zh, Err("这个目录不能加入知识库：需要绝对路径".into()));
         let en = steve_i18n::scope(steve_i18n::EN, async {
             (
-                check_path(&p, "relative").map_err(|r| refusal(&r)),
+                check_path_probe(&p, "relative", &missing).map_err(|r| refusal(&r)),
                 refusal(&outside_home()),
                 owner_only(),
             )
@@ -1296,6 +1329,7 @@ mod tests {
         let probe = steve_node_api::PathCheckResponse {
             exists: true,
             is_dir: true,
+            writable: true,
             canonical: Some(ctx.into()),
         };
         assert_eq!(
@@ -1307,6 +1341,7 @@ mod tests {
         let data_probe = steve_node_api::PathCheckResponse {
             exists: true,
             is_dir: true,
+            writable: true,
             canonical: Some(data.into()),
         };
         assert!(check_path_probe_for_role(&p, data, &data_probe, SourceRole::Memory).is_err());

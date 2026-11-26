@@ -27,7 +27,7 @@ pub enum PushError {
     #[error("{0}")]
     Node(String),
     /// No Node is attached or holds this item's workspace (Hub never falls back to local `git`).
-    #[error("没有可用的设备节点执行 Git 操作：{0}")]
+    #[error("{}", steve_i18n::t!("github.push.no_node", detail = .0))]
     NoNodeAvailable(String),
     /// A push through a Node whose end is not known (a restart, the deadline): it may have landed,
     /// and is never pushed again; what the remote branch is says.

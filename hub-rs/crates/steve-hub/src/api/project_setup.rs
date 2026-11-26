@@ -62,6 +62,12 @@ fn setup_error(e: na::ProjectSetupError) -> ApiError {
 }
 
 fn node_rpc_error(e: na::Error) -> ApiError {
+    if e.reason
+        .as_ref()
+        .is_some_and(|r| r.is(na::NodeReason::LocalNodeUpdating))
+    {
+        return ApiError::Json(503, steve_i18n::t!("hub.node.local_updating"));
+    }
     match e.code {
         na::Code::Unavailable => offline(),
         na::Code::Busy => ApiError::Json(503, steve_i18n::t!("hub.project.setup_busy")),

@@ -262,6 +262,8 @@ for line in sys.stdin:
     let node_dir = tempfile::tempdir().unwrap();
     let (node_cfg, _) = local_config(node_dir.path(), &node_id);
     let local = Arc::new(LocalNode::open(node_cfg).unwrap());
+    local.enable_host_ops();
+    local.enable_capability_sandbox();
     let secrets = NodeSecrets::new();
     local.connect_secrets(secrets.for_node(node_id.clone()));
     let service_node =
@@ -291,6 +293,23 @@ for line in sys.stdin:
         Arc::new(steve_runtime::cache::Caches::new(Default::default())),
     );
     let current = get();
+    if !steve_confine::available() {
+        let err = library
+            .tools_within(&current, "one", Duration::from_secs(5))
+            .await
+            .expect_err("stdio MCP must be refused when OS sandbox is unavailable");
+        assert!(
+            err.to_string().contains("sandbox"),
+            "unexpected refusal without OS sandbox: {err}"
+        );
+        assert_eq!(
+            node_checks::secret_uses_count_by_actor(&h.store, &id).unwrap(),
+            0,
+            "secrets must not be consumed when stdio MCP is refused for missing sandbox"
+        );
+        local.shutdown().await;
+        return;
+    }
     let (a, b) = tokio::join!(
         library.tools_within(&current, "one", Duration::from_secs(5)),
         library.tools_within(&current, "two", Duration::from_secs(5))

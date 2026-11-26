@@ -1069,7 +1069,8 @@ async fn what_the_node_cannot_read_fails_and_is_counted() {
     let w = World::new();
     let node = Hub::new(&w, "node", true, 3).await;
     let rt = node.rt.clone().unwrap();
-    let health = || steve_hub::wire::node_runtime::health(&node.store, Some(&rt), false).unwrap();
+    let health =
+        || steve_hub::wire::node_runtime::health(&node.store, Some(&rt), false, true).unwrap();
     assert_eq!(health()["research_fallbacks"], 0);
 
     // under the roots: on the Node, nothing counted

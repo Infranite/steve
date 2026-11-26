@@ -4,16 +4,18 @@
 export type ToolClass = "read" | "search" | "exec" | "edit" | "fetch" | "kb" | "item" | "meet" | "other"
 export type ToolLike = { name: string; kind?: string; args?: Record<string, unknown> }
 
-/** Strip external third-party MCP server prefixes for display (`mcp__server__tool` → `tool`). */
+/** Strip MCP server prefixes for display (`mcp__steve__steve_item_get` → `steve_item_get`, `mcp__server__tool` → `tool`). */
 export const toolShort = (name: string) => name.replace(/^mcp__[^_]+__/, "")
 const BY_KIND: Record<string, ToolClass> = { read: "read", search: "search", exec: "exec", edit: "edit", delete: "edit", move: "edit", fetch: "fetch" }
+/** Fallback for stored historical transcript steps recorded before ACP `kind` categories were persisted. */
+const BY_NAME: Record<string, ToolClass> = { Read: "read", Grep: "search", Glob: "search", LS: "search", Bash: "exec" }
 
 export function toolClass(name: string, kind?: string): ToolClass {
   const n = toolShort(name)
   if (n.startsWith("steve_onboard_")) return "meet"
   if (n.includes("knowledge")) return "kb"
   if (n.includes("steve_item")) return "item"
-  return BY_KIND[kind ?? ""] ?? "other"
+  return BY_KIND[kind ?? ""] ?? BY_NAME[name] ?? "other"
 }
 /** `profile` | `models` | `bots` | `done` for a first-meeting tool, else "" */
 export type MeetStep = "profile" | "models" | "bots" | "done"

@@ -585,6 +585,7 @@ mod tests {
             })
             .unwrap(),
         );
+        node.enable_host_ops();
         let runtime = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Ends));
         let fleet = remote.then(|| {
             NodeFleet::new(
