@@ -146,11 +146,8 @@ export default {
     },
     notInstalledDesc: "尚未在此 Node 安装",
     notInstalledHint: "安装方式：{{cmd}}",
-    componentInstalled: "已安装", manageLocal: "管理本机运行环境",
     state: {
       ready: "可用",
-      not_installed: "未安装",
-      unknown: "可用性未知",
     },
     reasonBadge: {
       authentication_required: "需要身份验证",

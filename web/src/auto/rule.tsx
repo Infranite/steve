@@ -11,13 +11,13 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Page, Row, Segmented, StatusDot, Meta, Empty, go, Panel, SectionLabel, Pill } from "@/ui"
 import { Composer } from "@/composer"
 import { tm, toast } from "@/store"
-import { flowApi, errText, type Flow, type GNode, type Graph, type Run } from "@/api/flow"
+import { flowApi, errText, sourceLabel, type Flow, type GNode, type Graph, type Run } from "@/api/flow"
 import { useHubQuery } from "@/data/use-hub-query"
 import { HubError } from "@/api"
 import { traceOf } from "@/auto/trace"
 import { lazyView } from "@/lazy"
 const FlowCanvas = lazyView(() => import("@/auto/canvas").then((m) => ({ default: m.FlowCanvas })))
-import { Inspector, toYaml, kindOf, branchWarnings, unreachableNodes } from "@/auto/nodes"
+import { Inspector, toYaml, kindOf, branchWarnings, unreachableNodes, ruleConflicts } from "@/auto/nodes"
 import { Loading, Failed, Modal, Json } from "@/auto/common"
 import { t as tr, useT } from "@/i18n"
 
@@ -78,6 +78,7 @@ export function RuleView({ id }: { id: string }) {
     if (r) { setWork(r.graph); setDirty(true); setTrace(null); setUndo({ g: before, note: r.note }); setRev((x) => x + 1); const added = r.graph.nodes.find((x) => !before.nodes.some((y) => y.id === x.id)); if (added) setSel(added.id); toast(t("auto:rule.steveDone")) }
   }
   const warnings = branchWarnings(work)
+  const conflicts = ruleConflicts(work, { id, enabled: f.enabled }, flows.data ?? [])
   /* nodes the trigger doesn't reach: the Hub refuses to save the flow (graph.rs `flow.graph.unreachable`) */
   const lost = unreachableNodes(work)
   const nodeName = (nid: string) => { const x = work.nodes.find((y) => y.id === nid); return x?.title?.trim() || nid }
@@ -137,6 +138,28 @@ export function RuleView({ id }: { id: string }) {
           {warnings.map((w) => <li key={w.kind + w.node + w.label} className="flex items-start gap-2" data-branch-warning={w.strong ? "strong" : "weak"}>
             <StatusDot s={w.strong ? "fail" : "wait"} className="mt-1.5" /><button type="button" className={"min-w-0 text-left hover:underline " + (w.strong ? "text-foreground" : "text-muted-foreground")} onClick={() => { setSel(w.node); setView("canvas") }}>
               {t(w.kind === "edge" ? "auto:rule.warnEdge" : "auto:rule.warnBranch", { node: nodeName(w.node), label: w.label })}</button></li>)}
+        </ul>}
+        {conflicts.length > 0 && <ul className="flex flex-col gap-1.5 rounded-xl border border-attention/30 bg-attention/10 px-4 py-3 type-callout anim-in" data-rule-conflicts>
+          {conflicts.map((c, idx) => (
+            <li key={`${c.kind}:${idx}`} className="flex items-start gap-2" data-rule-conflict={c.kind}>
+              <StatusDot s="wait" className="mt-1.5" />
+              {c.kind === "trigger_overlap" ? (
+                <button type="button" className="min-w-0 text-left text-foreground hover:underline" onClick={() => go("#/auto/rule/" + c.flowId)}>
+                  {t("auto:rule.conflictOverlap", { flow: c.flowName, source: sourceLabel(c.source) || c.source })}
+                </button>
+              ) : (
+                <button type="button" className="min-w-0 text-left text-foreground hover:underline" onClick={() => { setSel(c.node); setView("canvas") }}>
+                  {c.kind === "duplicate_branch"
+                    ? t("auto:rule.conflictDupBranch", { node: nodeName(c.node), label: c.label })
+                    : c.kind === "shadowed_rule"
+                      ? t("auto:rule.conflictShadowed", { node: nodeName(c.node), earlier: c.earlier, shadowed: c.shadowed })
+                      : c.label
+                        ? t("auto:rule.conflictDupEdge", { node: nodeName(c.node), label: c.label })
+                        : t("auto:rule.conflictDupDefaultEdge", { node: nodeName(c.node) })}
+                </button>
+              )}
+            </li>
+          ))}
         </ul>}
         {view === "canvas" ? <FlowCanvas className="h-[min(760px,calc(100dvh-13rem))] min-h-[520px] max-sm:h-[calc(100dvh-11rem)] max-sm:min-h-[480px]" g={work} flowId={id} flows={flows.data ?? []} sel={sel} onSel={setSel} onChange={edit}
             renderSettings={(nid) => { const x = work.nodes.find((y) => y.id === nid); return x ? nodeSettings(x) : null }}

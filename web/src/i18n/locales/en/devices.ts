@@ -151,11 +151,8 @@ export default {
     },
     notInstalledDesc: "Not installed on this Node",
     notInstalledHint: "Install: {{cmd}}",
-    componentInstalled: "Installed", manageLocal: "Manage local runtimes",
     state: {
       ready: "Available",
-      not_installed: "Not installed",
-      unknown: "Availability unknown",
     },
     reasonBadge: {
       authentication_required: "Authentication required",

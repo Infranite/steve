@@ -31,6 +31,18 @@ export type PickerModel = {
   name: string;
   /** One short line under the name, e.g. "Hardest problems" */
   description?: string;
+  /** Steve: optional family/section heading for grouped model lists */
+  group?: string;
+  /** Steve: optional short tag beside the name (e.g. gateway provider) */
+  badge?: string;
+  /** Steve: optional rich second line (e.g. recent usage indicator + note) */
+  meta?: ReactNode;
+  /** Steve: render model name in monospace face */
+  mono?: boolean;
+  /** Steve: extra search terms matched by the filter */
+  keywords?: string;
+  /** Steve: data-* attributes for the option row (test hooks) */
+  data?: Record<string, string>;
   /** Glyph in front of the name – any node, sized to 18px. Defaults to the first letter on a soft tile */
   icon?: ReactNode;
   /** Strengths from 1 to 5. Cost 5 is the most expensive. Leave all three out for a router like "Auto" */
@@ -226,12 +238,13 @@ type OptionProps = {
   selected: boolean;
   active: boolean;
   lit: boolean;
+  showRatings: boolean;
   onPoint: (index: number) => void;
   onPick: (index: number) => void;
 };
 
 /** One model row – memoized, so pointing at a row in a long list stays quick */
-const Option = memo(function Option({ model: m, index: i, optionId, selected, active, lit, onPoint, onPick }: OptionProps) {
+const Option = memo(function Option({ model: m, index: i, optionId, selected, active, lit, showRatings, onPoint, onPick }: OptionProps) {
   const rated = m.speed !== undefined || m.quality !== undefined || m.cost !== undefined;
   return (
     <div
@@ -242,6 +255,8 @@ const Option = memo(function Option({ model: m, index: i, optionId, selected, ac
       className="ui-mdpc__option"
       data-active={active ? "" : undefined}
       data-lit={lit ? "" : undefined}
+      data-checked={selected ? "true" : undefined}
+      {...m.data}
       onPointerEnter={(e) => {
         if (e.pointerType !== "mouse") return;
         onPoint(i);
@@ -251,16 +266,19 @@ const Option = memo(function Option({ model: m, index: i, optionId, selected, ac
       <Glyph model={m} />
       <span className="ui-mdpc__text">
         <span className="ui-mdpc__title">
-          <span className="ui-mdpc__title-name" dir="auto" title={m.name}>
+          <span className={m.mono ? "ui-mdpc__title-name ui-mdpc__mono" : "ui-mdpc__title-name"} dir="auto" title={m.name}>
             {m.name}
           </span>
+          {m.badge && <span className="ui-mdpc__badge">{m.badge}</span>}
           {selected && <CheckIcon />}
         </span>
-        {m.description && (
+        {m.meta ? (
+          <span className="ui-mdpc__meta">{m.meta}</span>
+        ) : m.description ? (
           <span className="ui-mdpc__desc" dir="auto" title={m.description}>
             {m.description}
           </span>
-        )}
+        ) : null}
       </span>
       {rated ? (
         <span className="ui-mdpc__bars" aria-hidden="true">
@@ -275,14 +293,193 @@ const Option = memo(function Option({ model: m, index: i, optionId, selected, ac
             );
           })}
         </span>
-      ) : (
+      ) : showRatings ? (
         <span className="ui-mdpc__varies" aria-hidden="true">
           Varies
         </span>
-      )}
+      ) : null}
     </div>
   );
 });
+
+export type ModelPickerPanelProps = {
+  models: PickerModel[];
+  value?: string;
+  onSelect: (id: string) => void;
+  onClose?: () => void;
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  query?: string;
+  onQueryChange?: (q: string) => void;
+  emptyText?: string;
+  emptyHint?: ReactNode;
+  header?: ReactNode;
+  body?: ReactNode;
+  footer?: ReactNode;
+  label?: string;
+  className?: string;
+};
+
+/** Steve: standalone searchable/grouped model list sharing affectUI Model Picker's exact row & token language,
+ *  for embedding inside a PopoverContent without duplicating a second picker implementation. */
+export function ModelPickerPanel({
+  models,
+  value,
+  onSelect,
+  onClose,
+  searchable = false,
+  searchPlaceholder = "",
+  query: queryProp,
+  onQueryChange,
+  emptyText = "No models available",
+  emptyHint,
+  header,
+  body,
+  footer,
+  label = "Model",
+  className,
+}: ModelPickerPanelProps) {
+  const uid = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [innerQuery, setInnerQuery] = useState("");
+  const query = queryProp !== undefined ? queryProp : innerQuery;
+  const setQuery = (next: string) => {
+    if (queryProp === undefined) setInnerQuery(next);
+    onQueryChange?.(next);
+  };
+  const needle = query.trim().toLowerCase();
+  const filtered = needle
+    ? models.filter((m) =>
+        `${m.id} ${m.name} ${m.group ?? ""} ${m.description ?? ""} ${m.keywords ?? ""}`.toLowerCase().includes(needle),
+      )
+    : models;
+  const chosenIndex = filtered.findIndex((m) => m.id === value);
+  const [active, setActive] = useState(Math.max(0, chosenIndex));
+  const [pointing, setPointing] = useState(false);
+
+  useEffect(() => {
+    setActive((a) => (filtered.length === 0 ? 0 : Math.min(a, filtered.length - 1)));
+  }, [filtered.length]);
+
+  useEffect(() => {
+    if (searchable && !body) inputRef.current?.focus({ preventScroll: true });
+  }, [searchable, body]);
+
+  const showRatings = filtered.some((m) => m.speed != null || m.quality != null || m.cost != null);
+  const latest = useRef({ point: (_i: number) => {}, pick: (_i: number) => {} });
+  latest.current.point = (i: number) => {
+    setActive(i);
+    setPointing(true);
+  };
+  latest.current.pick = (i: number) => {
+    const m = filtered[i];
+    if (m) onSelect(m.id);
+  };
+  const onPoint = useCallback((i: number) => latest.current.point(i), []);
+  const onPick = useCallback((i: number) => latest.current.pick(i), []);
+
+  const onNavKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      if (query) {
+        e.preventDefault();
+        e.stopPropagation();
+        setQuery("");
+      } else {
+        onClose?.();
+      }
+      return;
+    }
+    const n = filtered.length;
+    if (!n) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActive((a) => (a + 1) % n);
+      setPointing(true);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((a) => (a - 1 + n) % n);
+      setPointing(true);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      onPick(active);
+    }
+  };
+
+  let lastGroup: string | undefined;
+  return (
+    <div className={["ui-mdpc ui-mdpc--panel", className].filter(Boolean).join(" ")}>
+      <style href="ui-model-picker-clean" precedence="default">
+        {css}
+      </style>
+      {header}
+      {body ?? (
+        <>
+          {searchable && (
+            <label className="ui-mdpc__search">
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="7.25" cy="7.25" r="4.75" />
+                <path d="m13.5 13.5-2.9-2.9" />
+              </svg>
+              <input
+                ref={inputRef}
+                value={query}
+                placeholder={searchPlaceholder}
+                aria-label={searchPlaceholder || label}
+                data-model-search=""
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setActive(0);
+                }}
+                onKeyDown={onNavKey}
+              />
+            </label>
+          )}
+          <div className="ui-mdpc__card">
+            {filtered.length === 0 ? (
+              <div className="ui-mdpc__empty">{emptyText}</div>
+            ) : (
+              <div
+                ref={listRef}
+                className="ui-mdpc__list"
+                role="listbox"
+                aria-label={label}
+                tabIndex={searchable ? -1 : 0}
+                aria-activedescendant={filtered[active] ? `${uid}-opt-${active}` : undefined}
+                data-pointing={pointing ? "" : undefined}
+                onKeyDown={onNavKey}
+                onPointerLeave={() => setPointing(false)}
+              >
+                {filtered.map((m, i) => {
+                  const showHeading = m.group !== undefined && m.group !== lastGroup;
+                  lastGroup = m.group;
+                  return (
+                    <div key={m.id || "__default"} className="contents">
+                      {showHeading && m.group && <div className="ui-mdpc__group">{m.group}</div>}
+                      <Option
+                        model={m}
+                        index={i}
+                        optionId={`${uid}-opt-${i}`}
+                        selected={m.id === value}
+                        active={i === active}
+                        lit={i === active}
+                        showRatings={showRatings}
+                        onPoint={onPoint}
+                        onPick={onPick}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {emptyHint}
+          </div>
+          {footer}
+        </>
+      )}
+    </div>
+  );
+}
 
 export function ModelPicker({
   models,
@@ -607,6 +804,7 @@ export function ModelPicker({
                 selected={i === chosenIndex}
                 active={i === active}
                 lit={m.id === lit?.id}
+                showRatings={models.some((x) => x.speed != null || x.quality != null || x.cost != null)}
                 onPoint={onPoint}
                 onPick={onPick}
               />
@@ -797,6 +995,15 @@ const css = /* css */ `
 .ui-mdpc__list:focus-visible { outline: none; }
 .ui-mdpc__list:focus-visible .ui-mdpc__option[data-active] { background: var(--ui-mdpc-fill); outline: 2px solid var(--ui-mdpc-focus); outline-offset: -2px; }
 .ui-mdpc__list[data-pointing] .ui-mdpc__option:not([data-active]) { opacity: 0.55; }
+.ui-mdpc--panel { display: block; width: 100%; }
+.ui-mdpc__search { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border-bottom: 0.5px solid var(--ui-mdpc-line); cursor: text; }
+.ui-mdpc__search > svg { width: 14px; height: 14px; fill: none; stroke: var(--ui-mdpc-icon); stroke-width: 1.4; stroke-linecap: round; }
+.ui-mdpc__search input { flex: 1; min-width: 0; border: 0; background: transparent; font: inherit; color: var(--ui-mdpc-ink); outline: none; }
+.ui-mdpc__search input::placeholder { color: var(--ui-mdpc-faint); }
+.ui-mdpc__group { padding: 8px 8px 3px; font-size: 11px; font-weight: 500; line-height: 14px; color: var(--ui-mdpc-muted); }
+.ui-mdpc__mono { font-family: var(--aui-font-mono, ui-monospace, monospace); font-size: 12px; }
+.ui-mdpc__badge { flex: none; display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 5px; background: var(--ui-mdpc-wash); font-size: 11px; font-weight: 500; color: var(--ui-mdpc-text); }
+.ui-mdpc__meta { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--ui-mdpc-text); }
 .ui-mdpc__text { display: grid; flex: 1; min-width: 0; }
 .ui-mdpc__title { display: flex; align-items: center; gap: 4px; min-width: 0; font-weight: 500; color: var(--ui-mdpc-strong); }
 .ui-mdpc__title-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

@@ -1,4 +1,5 @@
-// Running Web + isolated HTTP API fixtures. No Pi installation, Node or model is exercised.
+// Running Web + isolated HTTP API fixtures against the unified local <NodeHarnesses> view.
+// Verifies R3/R4 component evidence, detected path vs target path, and deterministic HTTP gates for stale probe races.
 import assert from "node:assert/strict"
 import http from "node:http"
 import { readFile, mkdir, writeFile } from "node:fs/promises"
@@ -73,8 +74,6 @@ await new Promise(resolve => server.listen(apiPort, "127.0.0.1", resolve))
 const apiBase = `http://127.0.0.1:${server.address().port}`
 const web = await createWebProxy({ hubUrl: apiBase, cacheAssets: true })
 const base = web.url
-// One BrowserContext per locale keeps Chromium's cached Vite modules warm across viewports/scenarios
-// while each `open()` still uses a fresh Page (fresh JS realm, store, and query cache).
 const contexts = new Map()
 const contextFor = async (lang) => {
   let ctx = contexts.get(lang)
@@ -93,15 +92,15 @@ const open = async (rows, lang = "zh-CN", width = 375) => {
   page.setDefaultTimeout(12000)
   f.errors = []; page.on("pageerror", e => f.errors.push(e.message))
   await page.goto(base + "/#/devices/nodes/local/harness")
-  await page.locator("[data-panel=runtimes]").waitFor()
+  await page.locator('[data-node-harnesses="local"]').waitFor()
+  await page.locator("[data-node-harness-id], [data-harness-section-toggle]").first().waitFor()
   f.page = page
   return f
 }
-const card = (p, id = "registry-fixture") => p.locator(`[data-runtime="${id}"]`)
+const card = (p, id = "registry-fixture") => p.locator(`[data-node-harness-id="${id}"]`)
 const fits = async p => assert.ok(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no horizontal overflow")
 const shot = async (p, name) => { if (shots) await p.screenshot({ path: `${shots}/${name}.png`, fullPage: true }) }
 try {
-  // Exact review rows are kept external to Git. Only the newly agreed status fields are added.
   let external = runtime("ready", { setup: { can_install: false, components: [{ id: "adapter", name: "External adapter", package: "@example/acp", status: "unknown", path: "/fixture/external/wrapper" }] } })
   if (process.env.STEVE_REVIEW_ROWS) {
     const rows = JSON.parse(await readFile(process.env.STEVE_REVIEW_ROWS, "utf8"))
@@ -120,83 +119,83 @@ try {
   for (const lang of ["zh-CN", "en"]) for (const width of [320, 375]) {
     const f = await open([external, discovered, ready, provider, failed, interrupted], lang, width), p = f.page
     try {
-      const ext = card(p, external.id), component = ext.locator('[data-runtime-component="adapter"]')
-      await p.locator("[data-runtime-unavailable-toggle]").click()
-      for (const r of [external, discovered, provider]) await card(p, r.id).locator("[data-runtime-details-toggle]").click()
+      const ext = card(p, external.id), component = ext.locator('[data-node-harness-component="adapter"]')
+      const foldBtn = p.locator('[data-harness-section-toggle="not_installed"]')
+      if (await foldBtn.count() && await foldBtn.getAttribute("aria-expanded") === "false") await foldBtn.click()
+      for (const r of [external, discovered, provider]) await card(p, r.id).locator("[data-node-harness-details] summary").click()
       assert.equal(await component.locator("[data-component-status]").getAttribute("data-component-status"), "unknown")
       assert.match(await component.innerText(), lang === "zh-CN" ? /未核验/ : /Not verified/)
       assert.doesNotMatch(await component.innerText(), /未安装|Not installed/)
       assert.equal(await component.locator("[data-component-evidence]").count(), 1, "unknown explanation survives hidden ready help")
-      assert.equal(await ext.locator("[data-runtime-use]").count(), 1, "successful external command is usable")
-      assert.equal(await ext.locator("[data-runtime-help]").count(), 0)
-      const d = card(p, "discovered").locator('[data-runtime-component="agent"]')
+      assert.equal(await ext.locator(`[data-harness-use="${external.id}"]`).count(), 1, "successful external command is usable")
+      assert.equal(await ext.locator("[data-harness-help]").count(), 0)
+      const d = card(p, "discovered").locator('[data-node-harness-component="agent"]')
       assert.equal(await d.locator("[data-component-status]").getAttribute("data-component-status"), "missing")
       assert.match(await d.locator("[data-component-detected]").innerText(), /1\.5\.2/)
       assert.match(await d.locator("[data-component-detected]").innerText(), /\/fixture\/global\//)
       assert.match(await d.locator("[data-component-target]").innerText(), /\/fixture\/managed\//)
       assert.match(await d.innerText(), lang === "zh-CN" ? /其他安装不代表当前目标已完整/ : /does not complete the current target/)
-      assert.equal(await card(p, "discovered").locator("[data-runtime-use]").count(), 0)
-      for (const id of ["ready-noop", "provider-only"]) assert.equal(await card(p, id).locator("[data-runtime-install]").count(), 0)
-      assert.equal(await card(p, "ready-noop").locator("[data-runtime-help]").count(), 0)
+      assert.equal(await card(p, "discovered").locator("[data-harness-use]").count(), 0)
+      for (const id of ["ready-noop", "provider-only"]) assert.equal(await card(p, id).locator("[data-harness-install]").count(), 0)
+      assert.equal(await card(p, "ready-noop").locator("[data-harness-help]").count(), 0)
       assert.match(await card(p, "provider-only").innerText(), /Provider credentials missing/)
-      assert.match(await card(p, "provider-only").locator("[data-runtime-help]").innerText(), /Review provider configuration/)
-      assert.equal(await p.locator("[data-runtime-refresh]").isEnabled(), true)
+      assert.match(await card(p, "provider-only").locator("[data-harness-help]").innerText(), /Review provider configuration/)
+      assert.equal(await p.locator("[data-node-harness-refresh]").isEnabled(), true)
       for (const id of ["installer-error", "interrupted", "discovered"]) {
-        const button = card(p, id).locator("[data-runtime-install]")
+        const button = card(p, id).locator(`[data-harness-install="${id}"]`)
         await button.scrollIntoViewIfNeeded(); assert.equal(await button.isEnabled(), true)
       }
-      await card(p, "installer-error").locator("[data-runtime-install]").click()
-      await card(p, "installer-error").locator('[data-runtime-state="installing"]').waitFor()
+      await card(p, "installer-error").locator('[data-harness-install="installer-error"]').click()
+      await card(p, "installer-error").locator('[data-node-harness-state="installing"]').waitFor()
       assert.equal(f.installs, 1, "real installer failure offers an effective retry")
-      // Reopen the full matrix for the screenshot after exercising the retry.
       f.rows = [external, discovered, ready, provider, failed, interrupted]
       const refreshed = p.waitForResponse(r => new URL(r.url()).pathname === "/api/runtimes" && new URL(r.url()).searchParams.get("fresh") === "1")
-      await p.locator("[data-runtime-refresh]").click()
+      await p.locator("[data-node-harness-refresh]").click()
       await refreshed
-      await card(p, "installer-error").locator('[data-runtime-state="unavailable"]').waitFor()
+      await card(p, "installer-error").locator('[data-node-harness-state="unavailable"]').waitFor()
       await card(p, external.id).waitFor()
       await fits(p); await shot(p, `evidence-${lang}-${width}`)
       assert.deepEqual(f.errors, [])
     } finally { await p.close() }
   }
-  console.log("PASS: R4 probe JSON + optional status replay; unknown evidence remains while ready, R3 detected path/version + separate missing managed target; ready/provider-only no no-op install; installer error retry, interrupted retry; zh/en × 320/375px")
+  console.log("PASS: R3/R4 component evidence on unified NodeHarnesses; unknown evidence survives ready, detected vs managed target, installer retry; zh/en × 320/375px")
 
   {
     const missing = runtime("not_installed", { ok: false, setup: { components: [{ id: "adapter", name: "ACP", package: "@example/acp", status: "missing" }] } })
     const f = await open([missing]), p = f.page
     const old = gate([runtime("ready")]), fresh = gate()
     try {
-      await p.locator("[data-runtime-unavailable-toggle]").waitFor()
+      await p.locator('[data-harness-section-toggle="not_installed"]').waitFor()
       f.probeGates.push(old)
-      await p.locator("[data-runtime-refresh]").click()
+      await p.locator("[data-node-harness-refresh]").click()
       await entered(old)
-      await p.locator("[data-runtime-unavailable-toggle]").click()
+      await p.locator('[data-harness-section-toggle="not_installed"]').click()
       f.probeGates.push(fresh)
       const accepted = p.waitForResponse(r => r.url().endsWith("/install") && r.request().method() === "POST")
-      await card(p).locator("[data-runtime-install]").click()
+      await card(p).locator('[data-harness-install="registry-fixture"]').click()
       await accepted
       old.release.resolve()
-      await entered(fresh) // Fresh post-install request began: the stale load has already completed.
+      await entered(fresh)
       const c = card(p)
-      await c.locator('[data-runtime-state="ready"]').waitFor()
-      assert.equal(await c.locator("[data-runtime-install]").isDisabled(), true, "stale ready must not clear pending")
-      assert.equal(await c.locator("[data-runtime-use]").count(), 0, "cannot start while installing")
-      assert.match(await c.innerText(), /正在提交安装请求|安装状态会自动刷新/)
+      await c.locator('[data-node-harness-state="installing"]').waitFor()
+      assert.equal(await c.locator('[data-harness-install="registry-fixture"]').isDisabled(), true, "stale ready must not clear pending")
+      assert.equal(await c.locator("[data-harness-use]").count(), 0, "cannot start while installing")
+      assert.match(await c.locator("[data-harness-installing-status]").innerText(), /正在提交安装请求|安装状态会自动刷新/)
       await shot(p, "race-stale-runtime")
       fresh.release.resolve()
-      await c.locator('[data-runtime-state="installing"]').waitFor()
+      await c.locator('[data-node-harness-state="installing"]').waitFor()
       f.rows = [runtime("ready")]
-      await p.waitForFunction(() => !document.querySelector("[data-runtime-refresh]")?.disabled)
-      await p.locator("[data-runtime-refresh]").click()
-      await c.locator('[data-runtime-state="ready"]').waitFor()
-      await c.locator("[data-runtime-install]").waitFor({ state: "detached" })
-      assert.equal(await c.locator("[data-runtime-use]").count(), 1)
+      await p.waitForFunction(() => !document.querySelector("[data-node-harness-refresh]")?.disabled)
+      await p.locator("[data-node-harness-refresh]").click()
+      await c.locator('[data-node-harness-state="ready"]').waitFor()
+      await c.locator('[data-harness-install="registry-fixture"]').waitFor({ state: "detached" })
+      assert.equal(await c.locator('[data-harness-use="registry-fixture"]').count(), 1)
       assert.ok(f.probes >= 3)
       assert.deepEqual(f.errors, [])
       observations.push({ scenario: "pre-install runtime probe returns stale ready", result: "pending retained; fresh post-install probe sees installing; ready clears pending only after completion", probes: f.probes, installs: f.installs })
     } finally { old.release.resolve(); fresh.release.resolve(); await p.close() }
   }
-  console.log("PASS: deterministic HTTP gates for old runtime responses after install acceptance; stale ready preserves pending/disabled install; new fresh probe + polling recover; no timing sleeps")
+  console.log("PASS: deterministic HTTP gates for stale probe race after install acceptance on unified NodeHarnesses")
 } finally {
   if (shots) await writeFile(`${shots}/http-observations.json`, JSON.stringify({ data_source: "Running Web with isolated simulated HTTP API; no real Pi", observations, requests }, null, 2))
   for (const s of streams) s.end()

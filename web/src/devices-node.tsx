@@ -9,20 +9,20 @@ import { useMemo, useState, type ReactNode } from "react"
 import {
   ActivityIcon, ArrowUpCircleIcon, CheckCircle2Icon, ChevronRightIcon, CopyIcon, CpuIcon, DownloadIcon, FolderIcon,
   KeyRoundIcon, LoaderIcon, LockIcon, MessageCircleIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlusIcon,
-  RotateCcwIcon, ShieldAlertIcon, ShieldCheckIcon, StethoscopeIcon, TerminalIcon, WifiOffIcon,
+  RotateCcwIcon, ShieldAlertIcon, ShieldCheckIcon, StethoscopeIcon, TerminalIcon, WifiOffIcon, XIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
 import { CodeBlock } from "@/components/ui/code-block"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
+import { Switch } from "@/components/affect/switch-clean"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { RuntimeSetupPanel } from "@/runtime-setup"
+import { SetSelect } from "@/settings-controls"
 import { st, toast, refresh, useStore, deviceWorkEvidence } from "@/store"
-import { api } from "@/api"
+import { api, type AddHarnessModes, type AddHarnessProperties } from "@/api"
 import { go, Page, Empty, Loading } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
 import { useT } from "@/i18n"
@@ -480,7 +480,7 @@ function HarnessNodeTab({
         )
       })}
       <NodeHarnesses v={v} actions={actions} onOpenTab={onOpenTab}>
-        {v.local && !upgradeOnly && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}
+        {v.local && !upgradeOnly && v.device?.can_configure && !st.down && <AddHarness />}
       </NodeHarnesses>
     </>
   )
@@ -855,31 +855,179 @@ function Rename({ v, onClose, onDone }: { v: NodeView; onClose: () => void; onDo
   </DialogContent></Dialog>
 }
 
-/** declares a harness adapter of one's own in the Hub's manifest: an id, a name, its command, its arguments, and
- * (advanced) its declared properties as JSON. It is used once the Hub restarts. */
+const ADD_HARNESS_MODE_CHOICES = [
+  { v: "__default", lKey: "shell:devices.harness.modeDefault" },
+  { v: "default", l: "default" },
+  { v: "plan", l: "plan" },
+  { v: "acceptEdits", l: "acceptEdits" },
+  { v: "auto", l: "auto" },
+  { v: "bypassPermissions", l: "bypassPermissions" },
+] as const
+
+/** Declares a custom ACP harness adapter in the Hub's manifest using strongly-typed controls (no raw JSON). */
 function AddHarness() {
   const t = useT()
   const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("")
-  const [id, setId] = useState(""), [name, setName] = useState(""), [command, setCommand] = useState(""), [args, setArgs] = useState(""), [props, setProps] = useState("")
+  const [id, setId] = useState(""), [name, setName] = useState(""), [command, setCommand] = useState("")
+  const [args, setArgs] = useState<string[]>([]), [argDraft, setArgDraft] = useState("")
+  const [modeAsk, setModeAsk] = useState("default")
+  const [modePlan, setModePlan] = useState("plan")
+  const [modeAuto, setModeAuto] = useState("auto")
+  const [nestedSandbox, setNestedSandbox] = useState(true)
+  const [supportsResume, setSupportsResume] = useState(false)
+  const [resumeCli, setResumeCli] = useState("")
+
   if (!open) return <Button size="sm" variant="outline" onClick={() => setOpen(true)} data-add-harness><PlusIcon />{t("shell:devices.harness.add")}</Button>
+
+  const modeOptions = ADD_HARNESS_MODE_CHOICES.map((opt) => ({
+    v: opt.v,
+    l: "lKey" in opt ? t(opt.lKey) : opt.l,
+  }))
+
+  const addArg = () => {
+    const trimmed = argDraft.trim()
+    if (!trimmed) return
+    setArgs((cur) => [...cur, trimmed])
+    setArgDraft("")
+  }
+  const removeArg = (index: number) => setArgs((cur) => cur.filter((_, i) => i !== index))
+
   const save = async () => {
     setBusy(true); setError("")
     try {
-      let properties: Record<string, unknown> | undefined
-      if (props.trim()) { try { properties = JSON.parse(props) } catch { throw new Error(t("shell:devices.harness.badJson")) } }
-      await api.addHarness({ id: id.trim(), name: name.trim() || undefined, command: command.trim(), args: args.split(/\s+/).filter(Boolean), properties })
-      toast(t("shell:devices.harness.saved")); setOpen(false); await refresh()
+      const pendingArg = argDraft.trim()
+      const finalArgs = pendingArg ? [...args, pendingArg] : args
+      const modes: AddHarnessModes = {}
+      if (modeAsk !== "__default") modes.ask = modeAsk
+      if (modePlan !== "__default") modes.plan = modePlan
+      if (modeAuto !== "__default") modes.auto = modeAuto
+      const properties: AddHarnessProperties = {
+        nested_sandbox: nestedSandbox,
+        probe_initialize: true,
+        ...(Object.keys(modes).length ? { modes } : {}),
+        ...(supportsResume && resumeCli.trim() ? { resume_cli: resumeCli.trim() } : {}),
+      }
+      await api.addHarness({
+        id: id.trim(),
+        name: name.trim() || undefined,
+        command: command.trim(),
+        args: finalArgs,
+        properties,
+      })
+      toast(t("shell:devices.harness.saved"))
+      setOpen(false)
+      setId(""); setName(""); setCommand(""); setArgs([]); setArgDraft("")
+      setModeAsk("default"); setModePlan("plan"); setModeAuto("auto")
+      setNestedSandbox(true); setSupportsResume(false); setResumeCli("")
+      await refresh()
     } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
-  return <div className="anim-in flex flex-col gap-2 rounded-xl bg-muted/60 p-4" data-harness-form>
-    <div className="mb-1 type-callout text-muted-foreground">{t("shell:devices.harness.intro")}</div>
-    <Input placeholder={t("shell:devices.harness.id")} value={id} onChange={(e) => setId(e.target.value)} data-harness-id />
-    <Input placeholder={t("shell:devices.harness.name")} value={name} onChange={(e) => setName(e.target.value)} />
-    <Input placeholder={t("shell:devices.harness.command")} value={command} onChange={(e) => setCommand(e.target.value)} className="font-mono" data-harness-command />
-    <Input placeholder={t("shell:devices.harness.args")} value={args} onChange={(e) => setArgs(e.target.value)} className="font-mono" />
-    <details><summary className="cursor-pointer type-callout text-muted-foreground hover:text-foreground">{t("shell:devices.harness.advanced")}</summary>
-      <Textarea placeholder='{"modes": {"ask": "default"}, "nested_sandbox": true}' value={props} onChange={(e) => setProps(e.target.value)} className="mt-1 min-h-20 font-mono" /></details>
-    {error && <div className="type-callout text-attention" role="alert">{error}</div>}
-    <div className="mt-1 flex gap-2"><Button size="sm" disabled={busy || !id.trim() || !command.trim()} onClick={() => void save()} data-harness-save>{busy && <Spinner className="size-3" />}{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => setOpen(false)}>{t("common:action.cancel")}</Button></div>
-  </div>
+
+  return (
+    <div className="anim-in flex flex-col gap-3 rounded-xl bg-muted/60 p-4" data-harness-form>
+      <div className="type-callout text-muted-foreground">{t("shell:devices.harness.intro")}</div>
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        <label className="flex min-w-0 flex-col gap-1">
+          <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.idLabel")}</span>
+          <Input placeholder={t("shell:devices.harness.id")} value={id} onChange={(e) => setId(e.target.value)} data-harness-id />
+        </label>
+        <label className="flex min-w-0 flex-col gap-1">
+          <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.nameLabel")}</span>
+          <Input placeholder={t("shell:devices.harness.name")} value={name} onChange={(e) => setName(e.target.value)} data-harness-name />
+        </label>
+      </div>
+      <label className="flex min-w-0 flex-col gap-1">
+        <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.commandLabel")}</span>
+        <Input placeholder={t("shell:devices.harness.command")} value={command} onChange={(e) => setCommand(e.target.value)} className="font-mono" data-harness-command />
+      </label>
+      <div className="flex min-w-0 flex-col gap-1.5" data-harness-args-field>
+        <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.argsLabel")}</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <Input
+            placeholder={t("shell:devices.harness.argsPlaceholder")}
+            value={argDraft}
+            onChange={(e) => setArgDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addArg() } }}
+            className="min-w-0 flex-1 font-mono"
+            data-harness-arg-input
+          />
+          <Button type="button" size="sm" variant="outline" disabled={!argDraft.trim()} onClick={addArg} data-harness-arg-add>
+            <PlusIcon />{t("common:action.add")}
+          </Button>
+        </div>
+        {args.length > 0 && (
+          <ul className="flex flex-wrap gap-1.5" data-harness-args-list>
+            {args.map((arg, idx) => (
+              <li key={`${arg}:${idx}`} className="inline-flex items-center gap-1 rounded-md bg-background/80 px-2 py-1 font-mono type-footnote text-foreground ring-1 ring-border/70" data-harness-arg-item={arg}>
+                <span className="break-all">{arg}</span>
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground"
+                  aria-label={t("shell:devices.harness.removeArg", { arg })}
+                  onClick={() => removeArg(idx)}
+                  data-harness-arg-remove={idx}
+                >
+                  <XIcon className="size-3" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="flex min-w-0 flex-col gap-2.5 rounded-lg bg-background/60 p-3 ring-1 ring-border/60" data-harness-capabilities>
+        <div className="type-footnote font-medium text-foreground">{t("shell:devices.harness.modesTitle")}</div>
+        <div className="grid gap-2.5 sm:grid-cols-3">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.modeMapAsk")}</span>
+            <SetSelect wide testId="harness-mode-ask" label={t("shell:devices.harness.modeMapAsk")} value={modeAsk} onChange={setModeAsk} options={modeOptions} />
+          </div>
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.modeMapPlan")}</span>
+            <SetSelect wide testId="harness-mode-plan" label={t("shell:devices.harness.modeMapPlan")} value={modePlan} onChange={setModePlan} options={modeOptions} />
+          </div>
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.modeMapAuto")}</span>
+            <SetSelect wide testId="harness-mode-auto" label={t("shell:devices.harness.modeMapAuto")} value={modeAuto} onChange={setModeAuto} options={modeOptions} />
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 border-t border-border/60 pt-2.5">
+          <Switch
+            placement="end"
+            label={t("shell:devices.harness.nestedSandbox")}
+            description={t("shell:devices.harness.nestedSandboxHint")}
+            checked={nestedSandbox}
+            onChange={(e) => setNestedSandbox(e.currentTarget.checked)}
+            data-harness-nested-sandbox
+          />
+          <Switch
+            placement="end"
+            label={t("shell:devices.harness.supportsResume")}
+            description={t("shell:devices.harness.supportsResumeHint")}
+            checked={supportsResume}
+            onChange={(e) => setSupportsResume(e.currentTarget.checked)}
+            data-harness-supports-resume
+          />
+          {supportsResume && (
+            <label className="flex min-w-0 flex-col gap-1 pt-1">
+              <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.resumeCliLabel")}</span>
+              <Input
+                placeholder={t("shell:devices.harness.resumeCliPlaceholder")}
+                value={resumeCli}
+                onChange={(e) => setResumeCli(e.target.value)}
+                className="font-mono"
+                data-harness-resume-cli
+              />
+            </label>
+          )}
+        </div>
+      </div>
+      {error && <div className="type-callout text-attention" role="alert">{error}</div>}
+      <div className="mt-1 flex gap-2">
+        <Button size="sm" disabled={busy || !id.trim() || !command.trim()} onClick={() => void save()} data-harness-save>
+          {busy && <Spinner className="size-3" />}{t("common:action.save")}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>{t("common:action.cancel")}</Button>
+      </div>
+    </div>
+  )
 }

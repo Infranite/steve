@@ -1,6 +1,7 @@
 import { api, outRawUrl, type RAnnotation, type ROutPreview } from "@/api"
 import { AnnBar, AnnImage, clearMark, markText, useSelection, type Pending } from "@/annotate"
 import { size } from "@/attach"
+import { diffWords } from "@/components/affect/inline-diff-clean"
 import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -88,6 +89,49 @@ export function TextView({ p, resolve }: { p: Extract<ROutPreview, { type: "text
   )
 }
 
+/** Render paired `-` / `+` runs inside a unified diff using affectUI's `diffWords` for intra-line word highlights. */
+function renderDiffLines(body: string[]): ReactNode[] {
+  const out: ReactNode[] = []
+  let i = 0
+  while (i < body.length) {
+    const l = body[i]
+    if (l.startsWith("-") && !l.startsWith("---")) {
+      const remStart = i
+      while (i < body.length && body[i].startsWith("-") && !body[i].startsWith("---")) i++
+      const addStart = i
+      while (i < body.length && body[i].startsWith("+") && !body[i].startsWith("+++")) i++
+      const rem = body.slice(remStart, addStart)
+      const add = body.slice(addStart, i)
+      const pairs = Math.min(rem.length, add.length)
+      const segs = Array.from({ length: pairs }, (_, p) => diffWords(rem[p].slice(1), add[p].slice(1)))
+      rem.forEach((line, idx) => {
+        const s = idx < pairs ? segs[idx] : null
+        out.push(
+          <div key={`r-${remStart + idx}`} className="bg-destructive/10 px-3 whitespace-pre">
+            {s ? <>-{s.map((seg, j) => seg.type === "equal" ? <span key={j}>{seg.text}</span> : seg.remove ? <del key={j} className="rounded-xs bg-destructive/20 no-underline">{seg.remove}</del> : null)}</> : line}
+          </div>,
+        )
+      })
+      add.forEach((line, idx) => {
+        const s = idx < pairs ? segs[idx] : null
+        out.push(
+          <div key={`a-${addStart + idx}`} className="bg-success/10 px-3 whitespace-pre">
+            {s ? <>+{s.map((seg, j) => seg.type === "equal" ? <span key={j}>{seg.text}</span> : seg.insert ? <ins key={j} className="rounded-xs bg-success/20 no-underline">{seg.insert}</ins> : null)}</> : line}
+          </div>,
+        )
+      })
+      continue
+    }
+    out.push(
+      <div key={i} className={cn("px-3 whitespace-pre", l.startsWith("@@") ? "bg-blue/8 text-muted-foreground" : l.startsWith("+") ? "bg-success/10" : "")}>
+        {l || " "}
+      </div>,
+    )
+    i++
+  }
+  return out
+}
+
 /** a unified diff, one collapsible block per file */
 function Diff({ diff, truncated }: { diff: string; truncated: boolean }) {
   const t = useT()
@@ -107,9 +151,7 @@ function Diff({ diff, truncated }: { diff: string; truncated: boolean }) {
               <span className="shrink-0 type-footnote font-mono tabular-nums"><span className="text-success">+{add}</span> <span className="text-destructive">−{del}</span></span>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <pre className="max-h-[50vh] overflow-auto py-1.5 type-footnote font-mono">{body[0]?.startsWith("@@") ? body.map((l, k) => (
-                <div key={k} className={cn("px-3 whitespace-pre", l.startsWith("@@") ? "bg-blue/8 text-muted-foreground" : l.startsWith("+") ? "bg-success/10" : l.startsWith("-") ? "bg-destructive/10" : "")}>{l || " "}</div>
-              )) : <div className="px-3 text-muted-foreground">{t("pages:outputs.binaryDiff")}</div>}</pre>
+              <pre className="max-h-[50vh] overflow-auto py-1.5 type-footnote font-mono">{body[0]?.startsWith("@@") ? renderDiffLines(body) : <div className="px-3 text-muted-foreground">{t("pages:outputs.binaryDiff")}</div>}</pre>
             </CollapsibleContent>
           </Collapsible>
         )

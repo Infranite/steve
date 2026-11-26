@@ -8,12 +8,19 @@ import { Spinner } from "@/components/ui/spinner"
 import { VirtualList } from "@/components/virtual-list"
 import { useT } from "@/i18n"
 import { clockDur, date, num } from "@/i18n/format"
+import { getSession } from "@/store"
 import { cn } from "cn"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 const time = (at: number) => date(at, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error)
 const json = (value: unknown) => JSON.stringify(value, null, 2)
+const sessionOptionLabel = (id: string) => {
+  const s = getSession(id)
+  if (!s) return id
+  const parts = [s.n ? `#${s.n}` : "", s.title?.trim() || ""].filter(Boolean)
+  return parts.length ? parts.join(" ") : id
+}
 /** Estimated collapsed height (px) of one diagnostic EventRow inside VirtualList. */
 const DEBUG_EVENT_ROW_ESTIMATE_PX = 148
 const DEBUG_EVENT_ROW_GAP_PX = 8
@@ -184,8 +191,8 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
         <div className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground"><span aria-hidden>{t("views:debug.session")}</span><Select value={sessionId} onValueChange={(v) => setSessionId(v ?? "")}>
           <SelectTrigger size="default" className="w-full" aria-label={t("views:debug.session")} data-debug-session><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value="">{t("views:debug.allSessions")}</SelectItem>
-            {sessionId && !sessions.some((value) => value.id === sessionId) && <SelectItem value={sessionId}>{sessionId}</SelectItem>}
-            {sessions.map((value) => <SelectItem key={value.id} value={value.id}>{value.id}</SelectItem>)}</SelectContent>
+            {sessionId && !sessions.some((value) => value.id === sessionId) && <SelectItem value={sessionId}>{sessionOptionLabel(sessionId)}</SelectItem>}
+            {sessions.map((value) => <SelectItem key={value.id} value={value.id}>{sessionOptionLabel(value.id)}</SelectItem>)}</SelectContent>
         </Select></div>
         <label className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground">{t("views:debug.kind")}<Input className="h-8 type-footnote font-mono" value={kind} onChange={(event) => setKind(event.target.value)} list="debug-event-kinds" placeholder={t("views:debug.allKinds")} data-debug-kind /><datalist id="debug-event-kinds">{kinds.map((value) => <option key={value} value={value} />)}</datalist></label>
         <div className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground"><span aria-hidden>{t("views:debug.severity")}</span><Select value={severity} onValueChange={(v) => setSeverity(v ?? "")}>
@@ -249,7 +256,7 @@ const EventRow = memo(function EventRow({ item, event }: { item: string; event: 
       <Button size="icon-xs" variant="ghost" className="ml-auto shrink-0" aria-label={t("views:debug.copy")} onClick={copy} data-debug-copy>{copied ? <CheckIcon /> : <CopyIcon />}</Button>
     </div>
     <p className="mt-1 break-all type-footnote font-mono text-muted-foreground">{event.reason_code || t("views:debug.noReason")}</p>
-    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 type-footnote font-mono text-muted-foreground">{event.session_id && <span className="break-all">{event.session_id}</span>}{event.attempt_id && <span className="break-all">{event.attempt_id}</span>}</div>
+    {event.session_id && <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 type-footnote text-muted-foreground"><span className="truncate">{sessionOptionLabel(event.session_id)}</span></div>}
     <details className="mt-2" data-debug-detail onToggle={(e) => setDetailOpen(e.currentTarget.open)}>
       <summary className="cursor-pointer type-footnote text-muted-foreground hover:text-foreground">{t("views:debug.evidence")}</summary>
       {detailOpen && <pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all rounded-lg bg-background/70 px-3 py-2 type-footnote font-mono">{json(event)}</pre>}

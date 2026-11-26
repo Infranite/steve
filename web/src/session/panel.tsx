@@ -26,8 +26,9 @@ import { clockDur, longDur, nearTime, pastTime } from "@/i18n/format"
 import { OutDialog, type OutOpen } from "@/item-outputs"
 import { itemDisplayStatus } from "@/store"
 import { SessionKnowledge } from "@/knowledge/parts"
+import { SessionApproval } from "@/approval"
 import { homeTilde } from "@/lib/path"
-import { ResumeCard } from "@/resume"
+import { NativeIdLine, ResumeCard } from "@/resume"
 import { useHubQuery } from "@/data/use-hub-query"
 import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd } from "@/stats/format"
 import { briefHead, type Item, type Out, type Sess } from "@/store"
@@ -325,6 +326,10 @@ const Runtime = memo(function Runtime({ s }: { s: Sess }) {
           <Row k={t("views:sessionPanel.row.source")}>{s.src}</Row>
           {s.cwd && <Row k={t("views:sessionPanel.row.cwd")}><span className="break-all font-mono type-footnote text-muted-foreground">{homeTilde(s.cwd)}</span></Row>}
         </Rows>
+        <div className="mt-2.5 flex flex-col gap-1.5 type-footnote text-muted-foreground" data-session-runtime-meta>
+          <NativeIdLine k={s.id} label={t("views:session.nativeId")} />
+          <SessionApproval id={s.id} />
+        </div>
         <Collapsible className="mt-3" data-session-resume>
           <CollapsibleTrigger className={cn(LINK, "group/disc inline-flex items-center gap-1 type-callout")}>{t("views:session.resume")}<DiscChevron className="size-3" /></CollapsibleTrigger>
           <CollapsibleContent><div className="pt-3"><ResumeCard k={s.id} /></div></CollapsibleContent>
