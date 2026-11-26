@@ -41,8 +41,9 @@ pub use ports::*;
 pub use run::*;
 pub use steve_types::devices::{
     FileAccessReport, FileAccessStatus, LOGIN_SHELL_PROBE_TIMEOUT_SECS, MissingCommandDiagnostic,
-    NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET, ProtectedAccess, ProtectedLocation,
-    extract_login_shell_path, login_shell_path_script, shell_supports_interactive_login,
+    MissingCommandKind, NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET, ProtectedAccess,
+    ProtectedLocation, extract_login_shell_path, login_shell_path_script,
+    shell_supports_interactive_login,
 };
 pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};
 pub use steve_types::{
@@ -55,7 +56,7 @@ pub use workspace::*;
 
 /// Exact ordinary wire contract. Every wire-format change increments this in the same commit.
 /// A different value permits only the independent, permanent upgrade protocol.
-pub const PROTOCOL: u32 = 17;
+pub const PROTOCOL: u32 = 18;
 
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness
 /// with it, is gone): what the Hub gives up and continues on its own (B6), unlike other unknowns.

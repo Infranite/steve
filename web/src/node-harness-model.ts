@@ -14,7 +14,13 @@ export type HarnessDisplayState =
 
 export type HarnessSection = "available" | "attention" | "not_installed"
 
-export type HarnessAttentionAction = "copy_refresh_env" | "upgrade" | "install" | "retry_install" | "refresh"
+export type HarnessAttentionAction =
+  | "copy_refresh_env"
+  | "upgrade"
+  | "install"
+  | "retry_install"
+  | "copy_adapter_install"
+  | "refresh"
 
 export type PartitionedNodeHarnesses = {
   available: MergedNodeHarness[]
@@ -24,15 +30,16 @@ export type PartitionedNodeHarnesses = {
 
 const REASON_SEVERITY: Record<HarnessDegradedReason, number> = {
   authentication_required: 0,
-  command_not_in_service_path: 1,
-  version_outdated: 2,
-  runtime_incompatible: 3,
-  adapter_missing: 4,
-  install_failed: 5,
-  initialize_failed: 6,
-  session_unavailable: 7,
-  installing: 8,
-  probe_unknown: 9,
+  adapter_package_missing: 1,
+  command_not_in_service_path: 2,
+  version_outdated: 3,
+  runtime_incompatible: 4,
+  adapter_missing: 5,
+  install_failed: 6,
+  initialize_failed: 7,
+  session_unavailable: 8,
+  installing: 9,
+  probe_unknown: 10,
 }
 
 export function harnessState(h: RNodeHarness): HarnessDisplayState {
@@ -52,7 +59,10 @@ export function isHarnessInstalled(item: MergedNodeHarness): boolean {
   if (update?.components.some((c) => c.state !== "not_installed" || !!c.installed)) return true
   if (!probe) return false
   if (probe.installed === true) return true
-  if (probe.missing_command?.login_shell_path) return true
+  if (
+    probe.missing_command?.kind === "command_not_in_service_path" ||
+    probe.missing_command?.kind === "adapter_package_missing"
+  ) return true
   if (probe.degraded_reason != null) return true
   if (probe.available == null) return true
   if (probe.setup) {
@@ -84,25 +94,41 @@ export function effectiveDegradedReason(item: MergedNodeHarness): HarnessDegrade
   return "session_unavailable"
 }
 
+/** Operator CLI command to install a missing ACP adapter on the target Node host. */
+export function adapterInstallCliCommand(item: MergedNodeHarness, local: boolean): string | null {
+  const probe = item.probe
+  if (!probe) return null
+  if (probe.missing_command?.adapter_package || (probe.setup?.components.length ?? 0) > 0) {
+    return `steve adapters install ${item.id} ${local ? "hub" : "node"}`
+  }
+  return formatInstallCommand(probe.install_hint)
+}
+
 /** Choose the single concrete primary action for a card in the "Needs attention" section. */
 export function attentionActionFor(
   item: MergedNodeHarness,
   reason: HarnessDegradedReason,
-  opts: { canInstallLocal: boolean; canUpgrade: boolean },
+  opts: { canInstall?: boolean; canInstallLocal?: boolean; canUpgrade: boolean; hasAdapterInstallCommand?: boolean },
 ): HarnessAttentionAction {
+  const canInstall = opts.canInstall ?? opts.canInstallLocal ?? false
   const upgradeReady = opts.canUpgrade && !!item.update && hasUpgradeAction(item.update)
   if (reason === "command_not_in_service_path" && item.probe?.missing_command?.refresh_command) {
     return "copy_refresh_env"
   }
+  if (reason === "adapter_package_missing") {
+    if (canInstall) return "install"
+    if (opts.hasAdapterInstallCommand) return "copy_adapter_install"
+    return "refresh"
+  }
   if (reason === "install_failed") {
-    return opts.canInstallLocal ? "retry_install" : "refresh"
+    return canInstall ? "retry_install" : "refresh"
   }
   if (reason === "version_outdated") {
     if (upgradeReady) return "upgrade"
-    return opts.canInstallLocal ? "install" : "refresh"
+    return canInstall ? "install" : "refresh"
   }
   if (reason === "adapter_missing") {
-    if (opts.canInstallLocal) return "install"
+    if (canInstall) return "install"
     if (upgradeReady) return "upgrade"
     return "refresh"
   }

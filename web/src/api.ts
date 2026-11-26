@@ -6,6 +6,7 @@ import type {
   EffortMapping,
   EffortMode,
   FileAccessReport,
+  InstallNodeHarnessResponse,
   MissingCommandDiagnostic,
   NodeHarnessRefreshResponse,
   NodeHarnessReportView,
@@ -487,6 +488,8 @@ export const api = {
   nodes: () => get<{ nodes: RNode[]; off?: boolean; hub_version?: string }>("/nodes"),
   nodeHarnesses: () => get<NodeHarnessesResponse>("/node-harnesses"),
   refreshNodeHarnesses: (id: string) => get<NodeHarnessRefreshResponse>(`/node-harnesses/${encodeURIComponent(id)}?fresh=1`),
+  installNodeHarness: (node: string, harness: string) =>
+    post<InstallNodeHarnessResponse>(`/node-harnesses/${encodeURIComponent(node)}/${encodeURIComponent(harness)}/install`, {}),
   createPairing: () => post<RPairing>("/nodes/pairings"),
   vitals: () => get<import("./gen/VitalsResponse").VitalsResponse>("/vitals"),
   nodeTags: () => get<{ tags: Record<string, string[]> }>("/node-tags"),

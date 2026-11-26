@@ -267,7 +267,7 @@ async fn live_capacity_round_trips_and_reports_the_executor_value() {
 }
 
 #[tokio::test]
-async fn controlled_install_requires_a_colocated_current_node_and_serves_the_new_face() {
+async fn controlled_install_serves_both_remote_and_colocated_nodes_over_the_new_face() {
     let fake = FakeNode::new("n1");
     let w = wire(fake, 1);
     let command = cmd(
@@ -276,17 +276,17 @@ async fn controlled_install_requires_a_colocated_current_node_and_serves_the_new
             harness: "pi".into(),
         },
     );
-    assert_eq!(
-        w.remote
-            .install_harness(command.clone())
-            .await
-            .unwrap_err()
-            .code,
-        Code::Forbidden
+    // A separate Node reaches the Node's own `install_harness` face (where `LocalNode` enforces
+    // its local execution policy ceiling), rather than rejecting before the wire or falling back
+    // to filesystem operations on the Hub.
+    let error = w.remote.install_harness(command.clone()).await.unwrap_err();
+    assert_eq!(error.code, Code::Unsupported);
+    assert!(
+        error
+            .safe_detail
+            .contains("controlled harness installation unsupported")
     );
     w.remote.set_colocated(true);
-    // An up-to-date transport reaches the fake Node's default Unsupported face, rather than
-    // sending arbitrary npm arguments or falling back to filesystem operations on the Hub.
     let error = w.remote.install_harness(command).await.unwrap_err();
     assert_eq!(error.code, Code::Unsupported);
     assert!(
@@ -309,6 +309,7 @@ async fn component_integrity_and_other_installation_evidence_survive_the_wire() 
         state: SetupState::Ready,
         components: vec![component.clone()],
         can_install: false,
+        blocked_reason: None,
         reason: None,
         help: None,
         error: None,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
+  adapterInstallCliCommand,
   attentionActionFor,
   effectiveDegradedReason,
   formatInstallCommand,
@@ -86,11 +87,32 @@ test("partitionNodeHarnesses separates available, needs-attention, and not-insta
       version: "",
       degraded_reason: "command_not_in_service_path",
       missing_command: {
+        kind: "command_not_in_service_path",
         command: "agy",
         service_path: "/usr/bin:/bin",
         login_shell_path: "/Users/example/.local/bin/agy",
         login_shell: "/bin/zsh",
         refresh_command: "steve node refresh-env",
+      },
+    })),
+    item("missing-acp", "Pi", harness("pi", false, {
+      installed: true,
+      version: "",
+      degraded_reason: "adapter_package_missing",
+      missing_command: {
+        kind: "adapter_package_missing",
+        command: "openma-pi-acp",
+        adapter_package: "@openma/pi-acp",
+        detected_cli: "pi",
+        cli_service_path: "/usr/local/bin/pi",
+        service_path: "/usr/local/bin:/usr/bin:/bin",
+        refresh_command: "steve node refresh-env",
+      },
+      setup: {
+        state: "not_installed",
+        components: [{ id: "adapter", name: "Pi", package: "@openma/pi-acp", status: "missing" }],
+        can_install: false,
+        blocked_reason: "exec_denied",
       },
     })),
     item("outdated", "Outdated CLI", harness("outdated", false, { installed: true, degraded_reason: "version_outdated" })),
@@ -104,29 +126,40 @@ test("partitionNodeHarnesses separates available, needs-attention, and not-insta
   ])
 
   assert.deepEqual(partitioned.available.map((x) => x.id), ["alpha", "zebra"])
-  // Needs-attention sorts by actionable severity: auth -> service PATH mismatch -> outdated -> adapter_missing
-  assert.deepEqual(partitioned.attention.map((x) => x.id), ["need-auth", "path-mismatch", "outdated", "missing-cmd"])
+  // Needs-attention sorts by actionable severity: auth -> adapter_package_missing -> service PATH mismatch -> outdated -> adapter_missing
+  assert.deepEqual(partitioned.attention.map((x) => x.id), ["need-auth", "missing-acp", "path-mismatch", "outdated", "missing-cmd"])
   // Not-installed sorts installable first, then by name
   assert.deepEqual(partitioned.notInstalled.map((x) => x.id), ["absent-a", "absent-b"])
 
   assert.equal(harnessSection(partitioned.available[0]), "available")
   assert.equal(effectiveDegradedReason(partitioned.attention[0]), "authentication_required")
-  assert.equal(effectiveDegradedReason(partitioned.attention[1]), "command_not_in_service_path")
-  assert.equal(effectiveDegradedReason(partitioned.attention[2]), "version_outdated")
+  assert.equal(effectiveDegradedReason(partitioned.attention[1]), "adapter_package_missing")
+  assert.equal(effectiveDegradedReason(partitioned.attention[2]), "command_not_in_service_path")
+  assert.equal(effectiveDegradedReason(partitioned.attention[3]), "version_outdated")
   assert.equal(effectiveDegradedReason(partitioned.notInstalled[0]), null)
 
   assert.equal(
-    attentionActionFor(partitioned.attention[1], "command_not_in_service_path", { canInstallLocal: false, canUpgrade: false }),
+    attentionActionFor(partitioned.attention[1], "adapter_package_missing", { canInstall: true, canUpgrade: false, hasAdapterInstallCommand: true }),
+    "install",
+  )
+  assert.equal(
+    attentionActionFor(partitioned.attention[1], "adapter_package_missing", { canInstall: false, canUpgrade: false, hasAdapterInstallCommand: true }),
+    "copy_adapter_install",
+  )
+  assert.equal(
+    attentionActionFor(partitioned.attention[2], "command_not_in_service_path", { canInstallLocal: false, canUpgrade: false }),
     "copy_refresh_env",
   )
   assert.equal(
-    attentionActionFor(partitioned.attention[2], "version_outdated", { canInstallLocal: true, canUpgrade: false }),
+    attentionActionFor(partitioned.attention[3], "version_outdated", { canInstallLocal: true, canUpgrade: false }),
     "install",
   )
   assert.equal(
     attentionActionFor(partitioned.attention[0], "authentication_required", { canInstallLocal: true, canUpgrade: false }),
     "refresh",
   )
+  assert.equal(adapterInstallCliCommand(partitioned.attention[1], false), "steve adapters install missing-acp node")
+  assert.equal(adapterInstallCliCommand(partitioned.attention[1], true), "steve adapters install missing-acp hub")
   assert.equal(formatInstallCommand("@google/gemini-cli"), "npm install -g @google/gemini-cli")
   assert.equal(
     formatInstallCommand("curl -fsSL https://antigravity.google/cli/install.sh | bash"),

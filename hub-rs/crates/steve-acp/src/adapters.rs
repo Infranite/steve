@@ -956,6 +956,13 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
             "the adapter's command is missing",
         );
     }
+    let program_present = if program.components().count() > 1 || program.is_absolute() {
+        program.exists()
+    } else {
+        program.to_str().is_some_and(|name| {
+            crate::config::which_in(name, std::env::var_os("PATH").as_deref()).is_some()
+        })
+    };
     let cwd = if cwd.is_dir() {
         cwd.to_path_buf()
     } else {
@@ -980,7 +987,17 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         || {},
     ) {
         Ok(c) => c,
-        Err(e) => return Probe::failed(ProbeStatus::AdapterMissing, e.message),
+        Err(e) => {
+            // If the adapter executable is already present on disk / service PATH, a spawn
+            // failure (e.g. permission denied, bad shebang, invalid binary) is a startup failure
+            // rather than a missing adapter.
+            let status = if program_present {
+                ProbeStatus::InitializeFailed
+            } else {
+                ProbeStatus::AdapterMissing
+            };
+            return Probe::failed(status, e.message);
+        }
     };
     let mut client_caps = json!({
         "fs": { "readTextFile": false, "writeTextFile": false },

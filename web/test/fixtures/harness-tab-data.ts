@@ -233,6 +233,7 @@ export const MACBOOK_HARNESS_REPORT = {
       installed: true,
       error: "the adapter's command is missing",
       missing_command: {
+        kind: "command_not_in_service_path",
         command: "agy",
         service_path: "/usr/bin:/bin:/usr/sbin:/sbin",
         login_shell_path: "/Users/example/.local/bin/agy",
@@ -426,6 +427,203 @@ export const MACBOOK_HARNESS_UPDATES = {
   runs: {},
   retryable_unknown: [],
   auto_upgrade: { enabled: false, harnesses: { "claude-code": true } },
+  error: null,
+  code: null,
+} satisfies HarnessUpdatesResponse
+
+export const DIAG_DENIED_NODE_ID = "node-macbook-diag-denied"
+export const DIAG_ALLOWED_NODE_ID = "node-macbook-diag-allowed"
+
+/** Four distinct missing/broken diagnosis states under a remote Node with `policy.json` `"exec": false`. */
+export const DIAG_DENIED_HARNESS_REPORT = {
+  state: "reported",
+  checked_at: MACBOOK_NOW - 10_000,
+  attempted_at: MACBOOK_NOW - 10_000,
+  stale: false,
+  refreshing: false,
+  error: null,
+  exec_allowed: false,
+  harnesses: [
+    // 1. CLI in service PATH, ACP adapter package missing (`pi`) + exec_denied
+    {
+      id: "pi",
+      name: "Pi",
+      available: false,
+      version: "",
+      adapter_version: null,
+      models: [],
+      degraded_reason: "adapter_package_missing",
+      install_hint: "@openma/pi-acp",
+      installed: true,
+      error: "the adapter's command is missing",
+      missing_command: {
+        kind: "adapter_package_missing",
+        command: "openma-pi-acp",
+        adapter_package: "@openma/pi-acp",
+        detected_cli: "pi",
+        cli_service_path: "/usr/local/bin/pi",
+        service_path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        refresh_command: "steve node refresh-env",
+      },
+      setup: {
+        state: "not_installed",
+        components: [
+          {
+            id: "pi",
+            name: "Pi SDK",
+            package: "@earendil-works/pi-coding-agent",
+            status: "missing",
+            detected: { path: "/usr/local/bin/pi" },
+          },
+          {
+            id: "adapter",
+            name: "Pi",
+            package: "@openma/pi-acp",
+            status: "missing",
+          },
+        ],
+        can_install: false,
+        blocked_reason: "exec_denied",
+      },
+    },
+    // 2. CLI/adapter missing from service PATH, found in login shell (`antigravity`) -> refresh-env
+    {
+      id: "antigravity",
+      name: "Antigravity CLI",
+      available: false,
+      version: "",
+      adapter_version: null,
+      models: [],
+      degraded_reason: "command_not_in_service_path",
+      install_hint: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+      installed: true,
+      error: "the adapter's command is missing",
+      missing_command: {
+        kind: "command_not_in_service_path",
+        command: "agy",
+        service_path: "/usr/bin:/bin:/usr/sbin:/sbin",
+        login_shell_path: "/Users/example/.local/bin/agy",
+        login_shell: "/bin/zsh",
+        refresh_command: "steve node refresh-env",
+      },
+      setup: null,
+    },
+    // 3. Adapter installed, but startup / initialize failed (`codex`)
+    {
+      id: "codex",
+      name: "Codex",
+      available: false,
+      version: "0.169.0",
+      adapter_version: "0.9.1",
+      models: [],
+      degraded_reason: "initialize_failed",
+      install_hint: "@agentclientprotocol/codex-acp",
+      installed: true,
+      error: "adapter exited with status 1 before answering initialize",
+      setup: null,
+    },
+    // 4. Both CLI and adapter missing (`cursor`) -> Not installed section
+    uninstalled("cursor", "Cursor", "curl https://cursor.com/install -fsS | bash"),
+  ],
+} satisfies NodeHarnessReportView
+
+export const DIAG_DENIED_HARNESS_UPDATES = {
+  report: {
+    node: DIAG_DENIED_NODE_ID,
+    checking: false,
+    harnesses: [
+      {
+        harness: "pi",
+        name: "Pi",
+        can_upgrade: false,
+        active_sessions: 0,
+        blocked_reason: "exec_denied",
+        components: [
+          {
+            id: "adapter",
+            name: "Pi ACP",
+            package: "@openma/pi-acp",
+            managed: false,
+            source: "external",
+            upgrade_method: "unsupported",
+            can_upgrade: false,
+            state: "not_installed",
+          },
+        ],
+      },
+    ],
+  },
+  at: MACBOOK_NOW - 10_000,
+  runs: {},
+  retryable_unknown: [],
+  auto_upgrade: { enabled: false, harnesses: {} },
+  error: null,
+  code: null,
+} satisfies HarnessUpdatesResponse
+
+/** Remote Node with `"exec": true`, enabling one-click ACP adapter installation on `pi`. */
+export const DIAG_ALLOWED_HARNESS_REPORT = {
+  state: "reported",
+  checked_at: MACBOOK_NOW - 10_000,
+  attempted_at: MACBOOK_NOW - 10_000,
+  stale: false,
+  refreshing: false,
+  error: null,
+  exec_allowed: true,
+  harnesses: [
+    {
+      id: "pi",
+      name: "Pi",
+      available: false,
+      version: "",
+      adapter_version: null,
+      models: [],
+      degraded_reason: "adapter_package_missing",
+      install_hint: "@openma/pi-acp",
+      installed: true,
+      error: "the adapter's command is missing",
+      missing_command: {
+        kind: "adapter_package_missing",
+        command: "openma-pi-acp",
+        adapter_package: "@openma/pi-acp",
+        detected_cli: "pi",
+        cli_service_path: "/usr/local/bin/pi",
+        service_path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        refresh_command: "steve node refresh-env",
+      },
+      setup: {
+        state: "not_installed",
+        components: [
+          {
+            id: "pi",
+            name: "Pi SDK",
+            package: "@earendil-works/pi-coding-agent",
+            status: "missing",
+            detected: { path: "/usr/local/bin/pi" },
+          },
+          {
+            id: "adapter",
+            name: "Pi",
+            package: "@openma/pi-acp",
+            status: "missing",
+          },
+        ],
+        can_install: true,
+      },
+    },
+  ],
+} satisfies NodeHarnessReportView
+
+export const DIAG_ALLOWED_HARNESS_UPDATES = {
+  report: {
+    node: DIAG_ALLOWED_NODE_ID,
+    checking: false,
+    harnesses: [],
+  },
+  at: MACBOOK_NOW - 10_000,
+  runs: {},
+  retryable_unknown: [],
+  auto_upgrade: { enabled: false, harnesses: {} },
   error: null,
   code: null,
 } satisfies HarnessUpdatesResponse
