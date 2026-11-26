@@ -50,6 +50,7 @@ export const SMOKE = [
   "devices",
   "devices-install",
   "devices-map",
+  "devices-monitor",
   "disk",
   "effort-mapping",
   "external-write-gates",

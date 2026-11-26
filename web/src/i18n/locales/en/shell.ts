@@ -487,10 +487,24 @@ export default {
     scratchSubEnded_other: "{{count}} items without a project, cache {{cache}}; {{ended}} of ended items reclaimed when the disk runs low",
     scratchPolicy: "Items without a project work in a scratch folder: once the item ends, only cache folders such as node_modules and target are reclaimed there, and only when the disk runs low; other files stay. ",
   },
-  /* health-settings.tsx: Settings · About · Health (the Hub's /api/system/health) */
+  /* health-settings.tsx & health.ts: Settings · About summary & Devices · Monitor (the Hub's /api/system/health) */
   health: {
     title: "Health",
-    note: "Key figures of the last {{minutes}} minutes, each beside its limit; what is past one comes first. Only the instance admin sees this.",
+    summary: {
+      okTitle: "All systems healthy",
+      warnTitle_one: "{{count}} check over limit",
+      warnTitle_other: "{{count}} checks over limit",
+      criticalTitle_one: "{{count}} critical alert",
+      criticalTitle_other: "{{count}} critical alerts",
+      okBadge: "Healthy",
+      warnBadge: "Warning",
+      criticalBadge: "Critical",
+      okSub: "Last {{minutes}} min · {{measured}} checks measured · Trends and details moved to Devices · Monitor",
+      warnSingle: "{{detail}} Open Monitor to inspect.",
+      warnMore_one: "{{detail}} (+{{count}} more) — open Monitor to inspect.",
+      warnMore_other: "{{detail}} (+{{count}} more) — open Monitor to inspect.",
+      openMonitor: "Open Monitor",
+    },
     hub: "Hub",
     node: "Node {{name}}",
     plugin: "Plugin {{name}}",

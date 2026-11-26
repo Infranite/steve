@@ -29,7 +29,7 @@ macro_rules! once {
 }
 pub(crate) use once;
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -54,8 +54,6 @@ use steve_types::devices::{NodeVitalsDay, NodeVitalsLatest, NodeVitalsPoint, Vit
 
 use crate::config::ConfigError;
 
-/// Health compares now with a snapshot this old at most (one is kept a minute).
-const WINDOW_SNAPSHOTS: usize = 15;
 const UPKEEP_EVERY: Duration = Duration::from_secs(5);
 pub(crate) const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
@@ -598,8 +596,7 @@ struct Installed {
 
 #[derive(Default)]
 struct History {
-    health: VecDeque<health::Snapshot>,
-    summary: Option<health::Health>,
+    health: health::HealthHistory,
     nodes: nodes::History,
 }
 
@@ -683,15 +680,12 @@ pub(crate) async fn record_minute(observations: Vec<nodes::Observation>) {
     if let Some((home, database)) = &i.backup_paths {
         backup::collect(home, database).await;
     }
+    let now_ms = crate::nodes::now();
     let mut history = i.history.lock().unwrap_or_else(|e| e.into_inner());
-    history.nodes.record(observations, crate::nodes::now());
+    history.nodes.record(observations, now_ms);
     let text = i.render();
-    let point = health::Snapshot::parse(&text, i.started.elapsed().as_secs_f64());
-    if history.health.len() == WINDOW_SNAPSHOTS {
-        history.health.pop_front();
-    }
-    history.summary = Some(health::assess(&point, history.health.front()));
-    history.health.push_back(point);
+    let point = health::Snapshot::parse(&text, i.started.elapsed().as_secs_f64(), now_ms);
+    history.health.push(point);
 }
 
 pub(crate) fn latest_node(id: &str, since: i64) -> Option<NodeVitalsLatest> {
@@ -750,7 +744,11 @@ impl Installed {
     }
 
     fn snapshot(&self) -> health::Snapshot {
-        health::Snapshot::parse(&self.render(), self.started.elapsed().as_secs_f64())
+        health::Snapshot::parse(
+            &self.render(),
+            self.started.elapsed().as_secs_f64(),
+            crate::nodes::now(),
+        )
     }
 }
 
@@ -759,14 +757,16 @@ pub fn render() -> Option<String> {
     INSTALLED.get().map(Installed::render)
 }
 
-/// The health of the last window (since the start until a window has passed).
-pub(crate) fn health() -> Option<health::Health> {
+/// The health of the selected window (since the start until a window has passed).
+pub(crate) fn health(window: health::HealthWindow) -> Option<health::Health> {
     let i = INSTALLED.get()?;
-    let history = i.history.lock().unwrap_or_else(|e| e.into_inner());
-    history
-        .summary
-        .clone()
-        .or_else(|| Some(health::assess(&i.snapshot(), None)))
+    {
+        let history = i.history.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(report) = history.health.report(window) {
+            return Some(report);
+        }
+    }
+    Some(health::assess_single(&i.snapshot(), window))
 }
 
 /// The pages a web report may name (a bounded label covering every nav destination plus detail

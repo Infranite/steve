@@ -1508,13 +1508,25 @@ pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<C
     )
 }
 
-/// `GET /api/system/health`: the Hub's health over the last window, each figure with its limit and
-/// the ones past it (`crate::metrics::health`). The instance owner's.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct HealthQuery {
+    window: Option<String>,
+}
+
+/// `GET /api/system/health`: the Hub's health over the selected window (`15m`, `1h`, `24h`), each
+/// figure with its limit, warnings, and golden-signal time series (`crate::metrics::health`).
+/// The instance owner's.
 pub(crate) async fn system_health(
     Extension(c): Extension<Ctx>,
+    Query(query): Query<HealthQuery>,
 ) -> Result<axum::Json<crate::metrics::health::Health>, ApiError> {
     owner_or(&c, || steve_i18n::t!("hub.health.owner_only"))?;
-    crate::metrics::health()
+    let window = match query.window.as_deref().map(str::trim) {
+        None | Some("") => crate::metrics::health::HealthWindow::M15,
+        Some(raw) => crate::metrics::health::HealthWindow::parse(raw)
+            .ok_or_else(|| ApiError::Invalid(vec!["window".to_string()]))?,
+    };
+    crate::metrics::health(window)
         .map(axum::Json)
         .ok_or_else(|| ApiError::internal("metrics are not collected"))
 }
