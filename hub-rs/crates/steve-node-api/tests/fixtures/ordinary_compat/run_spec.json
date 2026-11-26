@@ -1,0 +1,39 @@
+{
+  "attempt": "att_compat_1",
+  "choice": {
+    "harness": "codex",
+    "effort": "medium"
+  },
+  "directory": {
+    "type": "workspace",
+    "workspace": {
+      "node": "node_compat_1",
+      "id": "ws_compat_1"
+    }
+  },
+  "prompt": [
+    {
+      "type": "text",
+      "text": "Inspect the failing test."
+    }
+  ],
+  "policy": {
+    "revision": "rev_1",
+    "permissions": "plan",
+    "sandbox": {
+      "type": "required",
+      "guarantees": [
+        "fs-readonly"
+      ]
+    },
+    "network": {
+      "type": "denied"
+    },
+    "tools": "grant_1"
+  },
+  "limits": {
+    "deadline": 1764200000000,
+    "offline_until": 1764200060000,
+    "max_output_bytes": 1048576
+  }
+}

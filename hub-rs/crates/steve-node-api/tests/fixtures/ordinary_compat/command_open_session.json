@@ -1,0 +1,27 @@
+{
+  "id": "op_compat_1",
+  "issued_at": 1764200000000,
+  "accept_before": 1764200060000,
+  "grant": "grant_1",
+  "body": {
+    "session": "s_compat_1",
+    "workspace": {
+      "node": "node_compat_1",
+      "id": "ws_compat_1"
+    },
+    "choice": {
+      "harness": "claude-code"
+    },
+    "policy": {
+      "revision": "rev_1",
+      "permissions": "accept_edits",
+      "sandbox": {
+        "type": "none"
+      },
+      "network": {
+        "type": "unrestricted"
+      },
+      "tools": "grant_1"
+    }
+  }
+}
