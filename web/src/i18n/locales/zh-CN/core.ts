@@ -392,6 +392,9 @@ export default {
     moreSegs_other: "前面还有 {{count}} 段 · 显示全部",
     startingShort: "正在开始",
     startingSlow: "比平时久。会话要等 Node 准备好工作区并启动 harness；一直不动时，原因在 Hub 和这台 Node 的日志里。",
+    autoModeClassifierTitle: "{{harness}} 自动模式不可用（分类器无判定）",
+    autoModeClassifierHint: "连续多次工具调用未收到安全分类器判定并被拒绝。建议切回“由我批准”继续，或检查 Node 上该 harness 的 settings.json（确认网关/代理连通，或开启本地分类器回退、取消禁发非必要流量限制）。",
+    autoModeClassifierStopped: "连续多次未收到安全分类器判定，{{harness}} 已中止本回合自动模式。建议切回“由我批准”继续，或检查 Node 上该 harness 的 settings.json（确认网关/代理连通，或开启本地分类器回退、取消禁发非必要流量限制）。",
   },
   subtask: {
     list: "子任务",

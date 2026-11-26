@@ -964,6 +964,7 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
     let conn: Arc<Conn> = match Conn::spawn(
         Spawn {
             prefix: cfg.adapter_prefix(id),
+            harness: Some(id.to_string()),
             program,
             args,
             cwd: cwd.clone(),
@@ -1992,6 +1993,7 @@ rl.on("line", (line) => {{
         let conn = Conn::spawn(
             Spawn {
                 prefix: None,
+                harness: Some("antigravity".into()),
                 program,
                 args,
                 cwd: dir.path().to_path_buf(),
@@ -2073,6 +2075,7 @@ rl.on("line", (line) => {{
         let conn = Conn::spawn(
             Spawn {
                 prefix: None,
+                harness: Some("antigravity".into()),
                 program,
                 args,
                 cwd: dir.path().to_path_buf(),

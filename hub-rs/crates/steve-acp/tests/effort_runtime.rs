@@ -40,6 +40,7 @@ fn spawn_script(dir: &std::path::Path, name: &str, body: &str) -> std::sync::Arc
     Conn::spawn(
         Spawn {
             prefix: None,
+            harness: None,
             program: path,
             args: vec![],
             cwd: dir.to_path_buf(),

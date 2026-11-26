@@ -2709,6 +2709,7 @@ async fn open_harness(
             log_tag: format!("[node {session}]"),
             clean_env: fresh.is_some(),
             prefix: inner.cfg.acp.adapter_prefix(&harness),
+            harness: Some(harness.clone()),
         },
         HARNESS_MAX_FRAME_BYTES,
         move |bytes| {
