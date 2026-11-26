@@ -247,9 +247,9 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-hub/src/metrics/backup.rs", Hub, "consumes decoded offline observations once as they enter the Hub metrics recorder"),
     e(Dir, "steve-runtime/src/process.rs", Library, "process meters: this process and its own process group (/proc on Linux, libproc on macOS); no workspace data"),
     e(Fs, "steve-runtime/src/process.rs", Library, "process meters: read-only counters of this process (/proc/self on Linux); no workspace data"),
-    /* Hub-owned durable outputs and releases */
-    e(Dir, "steve-hub/src/api/outputs.rs", Hub, "Hub-owned durable `<home>/workspaces/<id>/outputs/` listing only; every project/worktree directory is read via the Node"),
-    e(Fs, "steve-hub/src/api/outputs.rs", Hub, "Hub-owned durable `<home>/workspaces/<id>/outputs/` read only; every project/worktree file is read via the Node"),
+    /* Hub-owned durable outputs, Hub-local temp-dir outputs, and releases */
+    e(Dir, "steve-hub/src/api/outputs.rs", Hub, "Hub-owned durable `<home>/workspaces/<id>/outputs/` and Hub-local temp-dir output listing only; every project/worktree directory is read via the Node"),
+    e(Fs, "steve-hub/src/api/outputs.rs", Hub, "Hub-owned durable `<home>/workspaces/<id>/outputs/` and Hub-local temp-dir output read only; every project/worktree file is read via the Node"),
     e(Spawn, "steve-core/src/release.rs", Hub, "D12: the release script stays Hub-host for device=hub"),
     e(Fs, "steve-core/src/release.rs", Hub, "D12: release logs and manifests in the Hub home"),
     /* Hub-host work */

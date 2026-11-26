@@ -50,8 +50,13 @@ pub(crate) struct Out {
     pub roots: Vec<PathBuf>,
 }
 
+/// The temp directories an output may be in: the Hub's own.
+fn temp_dirs() -> Vec<PathBuf> {
+    vec![std::env::temp_dir(), "/tmp".into()]
+}
+
 /// The output, and where its Node reads it ([`node::view`]). Returns `None` ONLY for Hub-owned
-/// durable deliverables (`<home>/workspaces/<id>/outputs/`).
+/// durable deliverables (`<home>/workspaces/<id>/outputs/`) and external URLs.
 async fn load(
     st: &AppState,
     ws: &str,
@@ -127,7 +132,7 @@ async fn load(
         None
     } else {
         let ws = st.workspaces.clone().ok_or_else(offline)?;
-        Some(node::view(ws, item, project, &o).await?)
+        Some(node::view(ws, item, project, &o, temp_dirs()).await?)
     };
     Ok((o, v))
 }
@@ -261,6 +266,7 @@ async fn raw_source(o: Out, v: Option<node::View>, sub: Option<String>) -> Resul
         None => Src::Disk(blocking(move || on_disk(locate(&o, sub.as_deref()))).await?),
         Some(v) => match node::locate(&o, v, sub.as_deref()).await {
             Ok(node::Located::Node(a, e)) if !e.is_dir() => Src::Node(a, e),
+            Ok(node::Located::Disk(f)) => Src::Disk(blocking(move || on_disk(Ok(f))).await?),
             Ok(_) => return Err(not_a_file()),
             Err(node::Fail::Missing(r)) => return Err(ApiError::not_found(r)),
             Err(node::Fail::Api(e)) => return Err(e),
@@ -307,9 +313,16 @@ pub(crate) fn describe(o: &Out, sub: Option<&str>) -> Value {
         return json!({ "type": "link", "url": u });
     }
     match locate(o, sub) {
-        Ok(Found::Disk(p, shown)) if p.is_dir() => dir(&p, &shown),
-        Ok(Found::Disk(p, shown)) => file(&p, &shown),
+        Ok(f) => shown(f),
         Err(e) => json!({ "type": "missing", "reason": e }),
+    }
+}
+
+/// The preview of what [`locate`] found on Hub disk.
+pub(crate) fn shown(f: Found) -> Value {
+    match f {
+        Found::Disk(p, shown) if p.is_dir() => dir(&p, &shown),
+        Found::Disk(p, shown) => file(&p, &shown),
     }
 }
 

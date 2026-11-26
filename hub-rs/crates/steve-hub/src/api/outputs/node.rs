@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use steve_node_api as na;
 
 use super::{
-    DIFF_MAX, LIST_MAX, Out, TEXT_MAX, first_word, home_tilde, is_hash, media, plain, text_value,
+    DIFF_MAX, Found, LIST_MAX, Out, TEXT_MAX, first_word, home_tilde, is_hash, media, plain,
+    text_value,
 };
 use crate::api::blocking;
 use crate::api::projects::{normalize, offline, placement_error};
@@ -57,6 +58,8 @@ struct Local {
     ws: Arc<Workspaces>,
     /// The item's places as the Hub has them (its directory, project, worktree and scratch dir).
     places: Vec<PathBuf>,
+    /// The temp directories: the Hub's own, read where they are.
+    tmp: Vec<PathBuf>,
 }
 
 pub(crate) struct View {
@@ -111,6 +114,8 @@ impl From<ApiError> for Fail {
 
 pub(crate) enum Located {
     Node(Addr, Entry),
+    /// Read by the Hub (its temp directory).
+    Disk(Found),
     /// Gone from disk, kept by git: rev, path, content.
     Git(String, String, String),
 }
@@ -334,6 +339,7 @@ pub(super) async fn view(
     item: String,
     project: Option<String>,
     o: &Out,
+    tmp: Vec<PathBuf>,
 ) -> Result<View, ApiError> {
     let (cwd, proj) = (o.cwd.clone(), o.project.clone());
     let places = o.roots.clone();
@@ -405,7 +411,7 @@ pub(super) async fn view(
             bound,
             bases: rest,
             project_root,
-        } => local_view(ws, places, bound, rest, project_root).await?,
+        } => local_view(ws, places, tmp, bound, rest, project_root).await?,
         Pre::Remote(found) => {
             let mut bases = vec![];
             let mut git = Git::Elsewhere;
@@ -447,6 +453,7 @@ pub(super) async fn view(
 async fn local_view(
     ws: Arc<Workspaces>,
     places: Vec<PathBuf>,
+    tmp: Vec<PathBuf>,
     bound: Option<(Arc<dyn na::Node>, na::WorkspaceRef)>,
     rest: Vec<Addr>,
     project_root: Option<(Arc<dyn na::Node>, na::RootPath)>,
@@ -475,7 +482,7 @@ async fn local_view(
     bases.extend(rest);
     Ok(View {
         bases,
-        local: Some(Local { ws, places }),
+        local: Some(Local { ws, places, tmp }),
         git,
     })
 }
@@ -555,13 +562,36 @@ pub(crate) async fn locate(o: &Out, v: &View, sub: Option<&str>) -> Result<Locat
             return Err(outside());
         };
         let p = PathBuf::from(normalize(&loc));
-        let mine = l
+        let resolved = crate::config::resolve(&p);
+        let target = if l
             .places
             .iter()
-            .any(|r| p.starts_with(normalize(&r.to_string_lossy())));
-        if !mine {
-            return Err(outside());
-        }
+            .any(|r| p.starts_with(normalize(&r.to_string_lossy())))
+        {
+            Some(p)
+        } else if l
+            .places
+            .iter()
+            .any(|r| resolved.starts_with(crate::config::resolve(r)))
+        {
+            Some(resolved)
+        } else {
+            None
+        };
+        let Some(p) = target else {
+            // the temp directory is the Hub's own: read where it is, as always
+            let hub = Out {
+                cwd: None,
+                project: None,
+                roots: l.tmp.clone(),
+                ..o.clone()
+            };
+            let sub = sub.map(str::to_string);
+            return blocking(move || Ok(super::locate(&hub, sub.as_deref())))
+                .await?
+                .map(Located::Disk)
+                .map_err(Fail::Missing);
+        };
         let ws = l.ws.clone();
         let q = p.clone();
         let placed = blocking(move || Ok(ws.hub_path(&q))).await?;
@@ -784,6 +814,7 @@ pub(crate) async fn describe(o: Out, v: View, sub: Option<String>) -> Result<Val
     match locate(&o, &v, sub.as_deref()).await {
         Ok(Located::Node(a, e)) if e.is_dir => node_dir(&a).await,
         Ok(Located::Node(a, e)) => node_file(&a, &e).await,
+        Ok(Located::Disk(f)) => blocking(move || Ok(super::shown(f))).await,
         Ok(Located::Git(rev, rel, text)) => Ok(super::from_git(&rev, &rel, &text)),
         Err(Fail::Missing(r)) => Ok(missing(r)),
         Err(Fail::Api(e)) => Err(e),
