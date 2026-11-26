@@ -9,7 +9,7 @@ import { MemConfirm, memAsk } from "@/knowledge/parts"
 import { FlowDecisionBody } from "@/auto/decision"
 import { MODULE_CARDS } from "@/vault/decisions"
 import { MailDraftCard } from "@/mail/draft"
-import { CardTools, InlineDecision, isToolCall, mapDecision, ToolApproval } from "@/thread/decide"
+import { CardTools, ChannelApproval, InlineDecision, isChannelApproval, isPlainApproval, isToolCall, mapDecision, PlainApproval, ToolApproval } from "@/thread/decide"
 import { PeopleDecisionBody } from "@/people/pending"
 import { NoExecutorDecisionBody } from "@/bot-dispatch"
 
@@ -42,8 +42,10 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
   else if (isPeopleDecision(w)) body = <>{head(w.q)}<PeopleDecisionBody w={w} busy={busy} act={(c) => void act(c)} /></>
   else if (w.subject === "mail_draft") body = <MailDraftCard w={w} act={act} busy={busy} head={head} foot={foot} />
   else if (isModuleCard(w.subject)) body = MODULE_CARDS[w.subject]({ w, act, busy, head, foot })
-  /* everything else is affectUI's Decision Card (a tool permission its Approval Card), wired to the same answers */
+  /* approvals use affectUI ApprovalCard (visually distinct from ordinary DecisionCard); other decisions use DecisionCard (#213) */
   else if (isToolCall(w)) return <ToolApproval i={i} w={w} showItem={showItem} />
+  else if (isChannelApproval(w)) return <ChannelApproval i={i} w={w} showItem={showItem} />
+  else if (isPlainApproval(w)) return <PlainApproval i={i} w={w} showItem={showItem} />
   else { const m = mapDecision(i, w, "inline", showItem); return m ? <InlineDecision m={m} /> : null }
   return <UICard size="sm" className="gap-0 py-0 anim-in" data-decision={w.type} data-decision-wrap={i.id || w.decision} aria-busy={busy}>{busy && <div role="status" className="px-4 py-2 type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}{body}</UICard>
 }

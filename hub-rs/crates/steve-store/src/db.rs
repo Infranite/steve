@@ -304,6 +304,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/144.sql"),
     // 145: file-as-truth memory architecture (source role/write_mode, sidecar memory_entries, evidence, observations, tombstones, revisions, SKILL.md proposals).
     include_str!("../migrations/145.sql"),
+    // 146: incoming channel reactions (#277), durable reply-to-source links, burst grouping (#268), and [AI] mark preference.
+    include_str!("../migrations/146.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -27,7 +27,8 @@ pub(super) fn source() -> Expr {
            WHEN 'in' THEN m.id
            WHEN 'out' THEN (
              SELECT t.id FROM (
-               SELECT parent.id FROM chan_messages parent
+               SELECT source_message_id AS id FROM chan_reply_sources WHERE out_message_id = m.id
+               UNION ALL SELECT parent.id FROM chan_messages parent
                  WHERE parent.space_id = m.space_id AND parent.external_id = m.reply_to
                UNION ALL SELECT message_id FROM chan_reactions WHERE answer_id = m.id
                UNION ALL SELECT source_message_id FROM output_deliveries WHERE message_id = m.id
@@ -91,6 +92,50 @@ const OWNER_WORDS: &str = "EXISTS (
          OR id = (SELECT party_id FROM accounts WHERE id = reply.sender_account_id)
 )";
 
+/// Owner accounts across the workspace and personal channel spaces of the same chat.
+const OWNER_REACTED: &str = "EXISTS (
+    WITH RECURSIVE mine(id) AS (
+      SELECT p.id FROM parties p JOIN workspace_members wm ON wm.user_id = p.user_id
+        WHERE p.workspace_id = decisions.workspace_id AND wm.workspace_id = decisions.workspace_id
+          AND wm.role = 'owner'
+      UNION SELECT a.party_id FROM connections c JOIN accounts a ON a.id = c.account_id
+        JOIN channel_settings cs ON cs.connection_id = c.id AND cs.mode = 'self'
+        WHERE c.id = other.connection_id
+      UNION SELECT p.id FROM parties p JOIN mine ON p.merged_into = mine.id
+    ),
+    owner_accounts(id) AS (
+      SELECT a.id FROM accounts a WHERE a.party_id IN (SELECT id FROM mine)
+    ),
+    scoped AS (
+      SELECT r.*, row_number() OVER (
+        PARTITION BY r.connection_id, r.actor_account_id, r.emoji
+        ORDER BY (r.source_revision IS NOT NULL) DESC, r.source_revision DESC,
+                 r.action_at DESC, r.removed DESC, (r.origin <> 'manual') DESC
+      ) AS connection_rank
+      FROM chan_message_reactions r
+      WHERE r.message_id = target.id
+    ),
+    ranked AS (
+      SELECT r.*, row_number() OVER (
+        PARTITION BY r.actor_account_id, r.emoji
+        ORDER BY r.action_at DESC, r.removed DESC, (r.origin <> 'manual') DESC
+      ) AS rank
+      FROM scoped r WHERE r.connection_rank = 1
+    )
+    SELECT 1 FROM ranked r
+     WHERE r.rank = 1
+       AND r.removed = 0
+       AND r.origin IN ('manual', 'unknown')
+       AND r.actor_account_id IN (SELECT id FROM owner_accounts)
+       AND NOT EXISTS (
+         SELECT 1 FROM chan_reactions cr
+          WHERE cr.message_id = target.id AND cr.as_user = 1 AND cr.emoji = r.emoji
+       )
+)";
+
+/// Maximum DM burst window (10 messages × 60 s gap) checked for owner reactions.
+const DM_REACTION_BURST_SPAN_MS: i64 = 600_000;
+
 pub(super) fn replied(c: &mut impl Read, ids: &[&str]) -> Result<HashSet<String>> {
     let mut replied = HashSet::new();
     for ids in ids.chunks(CHUNK) {
@@ -140,6 +185,63 @@ pub(super) fn replied(c: &mut impl Read, ids: &[&str]) -> Result<HashSet<String>
             if !looks_automated(&text) {
                 replied.insert(r.get(0)?);
             }
+            Ok(())
+        })?;
+
+        // Owner emoji reactions (#277) also settle open cards for the exact reacted message
+        // (and, in DMs, earlier uninterrupted messages of the same sender's burst).
+        let mut rq = Query::select();
+        rq.expr(Expr::cust("decisions.id"))
+            .from(Alias::new("decisions"))
+            .join_as(
+                JoinType::InnerJoin,
+                Alias::new("chan_messages"),
+                Alias::new("m"),
+                Expr::cust(
+                    "m.id = decisions.subject_id AND m.workspace_id = decisions.workspace_id",
+                ),
+            );
+        join_source(&mut rq);
+        rq.join_as(
+            JoinType::InnerJoin,
+            Alias::new("spaces"),
+            Alias::new("s"),
+            Expr::cust("s.id = src.space_id AND s.workspace_id = decisions.workspace_id"),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("spaces"),
+            Alias::new("other"),
+            Expr::cust(
+                "other.workspace_id = s.workspace_id AND
+                  (other.id = s.id OR (other.system_id = s.system_id AND other.external_id = s.external_id))",
+            ),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("chan_messages"),
+            Alias::new("target"),
+            Expr::cust(format!(
+                "target.space_id = other.id AND target.direction = 'in'
+                 AND (target.id = src.id
+                      OR (s.kind = 'dm'
+                          AND target.created >= src.created
+                          AND target.created <= src.created + {DM_REACTION_BURST_SPAN_MS}
+                          AND coalesce(target.sender_party_id, target.sender_account_id, '')
+                            = coalesce(src.sender_party_id, src.sender_account_id, '')
+                          AND NOT EXISTS (
+                            SELECT 1 FROM chan_messages mid
+                             WHERE mid.space_id = target.space_id AND mid.direction = 'in'
+                               AND mid.created > src.created AND mid.created < target.created
+                               AND coalesce(mid.sender_party_id, mid.sender_account_id, '')
+                                <> coalesce(src.sender_party_id, src.sender_account_id, '')
+                          )))"
+            )),
+        )
+        .and_where(Expr::cust("decisions.id").is_in(ids.iter().copied()))
+        .and_where(Expr::cust(OWNER_REACTED));
+        c.all(&rq, |r| {
+            replied.insert(r.get(0)?);
             Ok(())
         })?;
     }

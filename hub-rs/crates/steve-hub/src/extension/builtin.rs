@@ -28,7 +28,9 @@ impl Extension for FeishuBot {
             ChannelSide::new(feishu::app_decl(&app), app.clone())
                 .adapter(app.clone())
                 .profiles(app.clone())
-                .media(Arc::new(feishu::FeishuMedia::new(app.id()))),
+                .media(Arc::new(feishu::FeishuMedia::new(app.id())))
+                .links(Arc::new(feishu::links::FeishuLinks))
+                .syntax(Arc::new(feishu::FeishuSyntax)),
         )
     }
 
@@ -80,7 +82,9 @@ impl Extension for FeishuSelf {
                 .act_as_user(user.clone())
                 .profiles(user.clone())
                 .media(Arc::new(feishu::FeishuMedia::new(user.id())))
-                .history(user.clone()),
+                .history(user.clone())
+                .links(Arc::new(feishu::links::FeishuLinks))
+                .syntax(Arc::new(feishu::FeishuSyntax)),
         )?;
         // the one its start goes with (an assembly wired again declares again)
         *self.user.lock().unwrap_or_else(|e| e.into_inner()) = Some(user);

@@ -527,6 +527,7 @@ impl Feed<'_> {
         let max_text = self.s.limits().max_text_bytes;
         let mut metas: Vec<WireMessage> = Vec::new();
         let mut bodies: Vec<Option<WireMessage>> = Vec::new();
+        let mut reactions: Vec<crate::ReactionEvent> = Vec::new();
         let mut gaps: Vec<(Option<Vec<String>>, i64, i64)> = Vec::new();
         let mut chats: Vec<(String, String)> = Vec::new();
         for (index, it) in items.iter().enumerate() {
@@ -547,6 +548,12 @@ impl Feed<'_> {
                         it,
                         &e,
                     )?,
+                },
+                Some("reaction") => match wire::reaction(it, now, &self.realm) {
+                    Ok(r) => reactions.push(r),
+                    Err(e) => {
+                        tracing::warn!(conn = self.conn(), "ext_ws: reaction dropped: {e}")
+                    }
                 },
                 Some("gap") => match gap(it, now) {
                     Ok(g) => gaps.push(g),
@@ -600,6 +607,14 @@ impl Feed<'_> {
         }
         for (list, from, to) in gaps {
             self.repair(list, from, to).await?;
+        }
+        for reaction in reactions {
+            if let Err(e) = self.run.inbound.reaction(reaction).await {
+                if self.run.inbound.is_stopped() {
+                    return Err(End::Stopped);
+                }
+                tracing::warn!(conn = self.conn(), "ext_ws: reaction not stored: {e}");
+            }
         }
         for (chat, change) in chats {
             self.chat_change(&chat, &change).await;

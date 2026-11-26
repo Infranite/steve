@@ -697,7 +697,7 @@ impl Connections {
     }
 
     /// Every registered adapter, managed ones included, by id.
-    pub(super) fn providers(&self) -> impl Iterator<Item = &Arc<dyn ConnectionProvider>> {
+    pub fn providers(&self) -> impl Iterator<Item = &Arc<dyn ConnectionProvider>> {
         self.0.providers.values()
     }
 

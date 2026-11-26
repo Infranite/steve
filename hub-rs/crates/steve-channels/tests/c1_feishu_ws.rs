@@ -212,12 +212,18 @@ async fn group_mention_over_the_long_connection() {
             json!("王小丽：@值班小运 帮我查一下昨晚告警的原因")
         ]
     );
-    let dq = &inspect::decisions::decision_question_by_space_and_subject(h.env.store(), &space)
-        .unwrap()[0];
-    assert_eq!(
-        dq[0],
-        json!("值班小运被拉进了「平台值班群」，要设置它在这里做什么吗？")
+    // New bot groups default to silent record and never open an inbox ask card (#213).
+    assert!(
+        inspect::decisions::decision_question_by_space_and_subject(h.env.store(), &space)
+            .unwrap()
+            .is_empty()
     );
+    let set = h
+        .env
+        .store()
+        .read(|db| steve_channels::spaces::settings(db, &space))
+        .unwrap();
+    assert!(set.muted);
     // the group's members (owner, Alice, Bob) and the bot
     assert_eq!(
         inspect::spaces::member_count(h.env.store(), &space).unwrap(),

@@ -717,17 +717,118 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
         );
     }
 
-    // 136..=138: Normalize `bots.perm_mode`, drop legacy `project_dir`/`worktree` columns, and
-    // canonicalize `reasoning_effort` + add `sessions.effort_mapping` (no table/row count change).
+    // 136..=137: Normalize `bots.perm_mode` and drop legacy `project_dir`/`worktree` columns
+    // (no table/row count change).
 
-    // 141: File-as-truth memory architecture (sidecar memory_entries, evidence, observation buffer,
-    // rejected_patterns tombstones, memory_revisions; project_proposals adds nullable project_id + target_path).
+    // 138: Clear cached harness update state saved before typed update reasons (#571).
+    if v_before < 138 {
+        changes.remove_rows(
+            "settings",
+            q("SELECT count(*) FROM settings WHERE key LIKE 'harness.updates.%'"),
+        );
+    }
+
+    // 139..=140: `mems.pinned`; canonical five-level `reasoning_effort` (no table/row count change).
+
+    // 141: Script workflow ledger (WF-3).
     if v_before < 141 {
+        for table in [
+            "wf_runs",
+            "wf_script_versions",
+            "wf_calls",
+            "wf_call_attempts",
+            "wf_version_calls",
+        ] {
+            changes.create_table(table, 0);
+        }
+    }
+
+    // 142: Retire non-terminal children of the removed dynamic work-graph engine. Mirrors the
+    // migration's row effects; history of closed items is untouched.
+    if v_before < 142 {
+        const LEGACY: &str =
+            "(SELECT id, cycle FROM items WHERE phase <> 'closed' AND json_valid(source)
+                                 AND json_extract(source, '$[1]') = 'workflow')";
+        changes.add_rows(
+            "item_cycles",
+            q(&format!(
+                "SELECT count(*) FROM {LEGACY} l
+                 WHERE NOT EXISTS (SELECT 1 FROM item_cycles c WHERE c.item_id = l.id AND c.cycle = l.cycle)"
+            )),
+        );
+        changes.add_rows(
+            "session_dispatch",
+            q(&format!(
+                "SELECT count(*) FROM queued q JOIN sessions s ON s.id = q.session_id
+                 JOIN {LEGACY} l ON l.id = s.item_id
+                 WHERE q.via NOT IN ('steve', 'resumed:steve')
+                   AND NOT EXISTS (SELECT 1 FROM session_dispatch d WHERE d.id = q.id)"
+            )),
+        );
+        changes.remove_rows(
+            "queued",
+            q(&format!(
+                "SELECT count(*) FROM queued WHERE session_id IN
+                   (SELECT s.id FROM sessions s JOIN {LEGACY} l ON l.id = s.item_id)"
+            )),
+        );
+        changes.remove_rows(
+            "session_resume",
+            q(&format!(
+                "SELECT count(*) FROM session_resume WHERE session_id IN
+                   (SELECT s.id FROM sessions s JOIN {LEGACY} l ON l.id = s.item_id)"
+            )),
+        );
+        changes.remove_rows(
+            "item_dependency_waits",
+            q(&format!(
+                "SELECT count(*) FROM item_dependency_waits w WHERE w.state = 'waiting'
+                   AND EXISTS (SELECT 1 FROM {LEGACY} l WHERE l.id = w.item_id AND l.cycle = w.cycle)"
+            )),
+        );
+        // `item_placement_waits` is created by a later migration than some prod copies have.
+        if q(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'item_placement_waits'",
+        ) > 0
+        {
+            changes.remove_rows(
+                "item_placement_waits",
+                q(&format!(
+                    "SELECT count(*) FROM item_placement_waits WHERE item_id IN (SELECT id FROM {LEGACY})"
+                )),
+            );
+        }
+    }
+
+    // 143: Rebind `work.tidy` to `work.item.lifecycle`; its old receipts and leases are dropped
+    // after the cursor is advanced past them.
+    if v_before < 143 {
+        changes.remove_rows(
+            "outbox_receipts",
+            q("SELECT count(*) FROM outbox_receipts WHERE consumer_id = 'work.tidy'"),
+        );
+        changes.remove_rows(
+            "outbox_leases",
+            q("SELECT count(*) FROM outbox_leases WHERE consumer_id = 'work.tidy'"),
+        );
+    }
+
+    // 144: Attribute usage and daily statistics to a Node (`stat_daily` rebuilt one row per row).
+
+    // 145: File-as-truth memory architecture (sidecar memory_entries, evidence, observation buffer,
+    // rejected_patterns tombstones, memory_revisions; project_proposals adds nullable project_id + target_path).
+    if v_before < 145 {
         changes.create_table("memory_entries", 0);
         changes.create_table("memory_evidence", 0);
         changes.create_table("observations", 0);
         changes.create_table("rejected_patterns", 0);
         changes.create_table("memory_revisions", 0);
+    }
+
+    // 146: Channel reactions, reply sources, reply bursts and the configurable [AI] mark.
+    if v_before < 146 {
+        changes.create_table("chan_message_reactions", 0);
+        changes.create_table("chan_reply_sources", 0);
     }
 
     changes

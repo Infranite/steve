@@ -241,6 +241,7 @@ impl Default for FeishuApp {
 
 impl FeishuApp {
     pub fn new() -> Self {
+        super::register_platform();
         Self {
             fields: vec![
                 FieldDef::plain("app_id", "App ID").with_hint("开发者后台 → 凭证与基础信息"),

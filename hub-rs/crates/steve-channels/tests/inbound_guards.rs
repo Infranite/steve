@@ -212,7 +212,8 @@ async fn a_batch_of_day_old_messages_arriving_now_runs_nothing() {
     assert!(page.iter().all(|m| m.history.as_deref() == Some("late")));
     assert!(inspect::spaces::count_spaces_by_g1(h.env.store()).unwrap() < now - 20 * HOUR);
 
-    // someone writes now: acted on, and the group asks “新群” now
+    // someone writes now: live message is not tagged as history, and new bot groups default to
+    // silent record with no 4-choice inbox ask card (#213).
     let live = push(
         &h,
         &h.bot,
@@ -227,8 +228,8 @@ async fn a_batch_of_day_old_messages_arriving_now_runs_nothing() {
     assert_eq!(live.next, Next::Handle);
     assert!(live.history.is_none());
     assert!(
-        live.decision_id.is_some(),
-        "“新群” on the first live message"
+        live.decision_id.is_none(),
+        "new bot groups must not open a 4-choice inbox ask card"
     );
     assert_ne!(label(&live), LABEL_HISTORY_LATE);
 }

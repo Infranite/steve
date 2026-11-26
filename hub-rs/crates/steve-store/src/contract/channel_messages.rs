@@ -4,6 +4,7 @@ use crate::{Read, Result};
 
 pub mod approval_context;
 pub mod connector_refs;
+pub mod cross_context;
 pub mod delivery;
 pub mod dialogue;
 pub mod duplicates;
@@ -11,6 +12,7 @@ pub mod duplicates;
 pub mod fixtures;
 pub mod handoffs;
 pub mod history;
+pub mod incoming_reactions;
 pub mod ingress;
 pub mod media;
 pub mod outbound;

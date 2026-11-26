@@ -146,6 +146,10 @@ pub struct ChanMessage {
     /// The link that opens it (or, where its platform has no link to one message, its chat) in its
     /// platform's own client ([`crate::open_link`]); `null` when there is none.
     pub open_url: Option<String>,
+    /// Platform id owning [`Self::open_url`] (e.g. `feishu`), for provider-aware client labels.
+    pub open_provider: Option<String>,
+    /// Active incoming reactions on this message (#277).
+    pub reactions: Vec<crate::incoming_reactions::IncomingReaction>,
 }
 
 fn projected(r: &mut impl Read, row: projection::Message) -> ChannelResult<ChanMessage> {
@@ -183,6 +187,8 @@ fn projected(r: &mut impl Read, row: projection::Message) -> ChannelResult<ChanM
         basis: Value::Null,
         history: row.history,
         open_url: None,
+        open_provider: None,
+        reactions: Vec::new(),
     };
     with_basis(r, &mut m)?;
     Ok(m)
@@ -234,10 +240,15 @@ pub(crate) fn message_ref(
 fn with_basis(r: &mut impl Read, m: &mut ChanMessage) -> ChannelResult<()> {
     if let Some(space) = steve_store::channel_spaces::rows::get(r, &m.space_id)? {
         let external = steve_store::channel_message_repo::external_id(r, &m.id)?;
-        m.open_url = crate::open_link::message_url(r, &space, external.as_deref())?;
+        if let Some(link) = crate::open_link::message_link(r, &space, external.as_deref())? {
+            m.open_url = Some(link.url);
+            m.open_provider = Some(link.provider);
+        }
     }
     if m.direction == "out" {
         m.basis = crate::basis::summary_of(r, &m.id)?;
+    } else {
+        m.reactions = crate::incoming_reactions::list(r, &m.id, -1)?;
     }
     if let Some((text, atts)) = crate::media::present(r, &m.id) {
         m.text = text;

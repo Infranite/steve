@@ -384,7 +384,7 @@ export const api = {
   settledDecisions: (since: number, limit = 100, before?: string) => get<PageOf<DecisionView>>(`/views/page${qs({ kind: "decision", status: "settled", since, limit, before })}`),
   editReplyDraft: (id: string, previous: string, text: string) => patch(`/decisions/${encodeURIComponent(id)}/draft`, { previous, text }),
   /** the link that opens a chat message in its platform's own client, asked when its card shows */
-  messageOpenUrl: (id: string) => get<{ url: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
+  messageOpenUrl: (id: string) => get<{ url: string | null; provider?: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
   shell: (signal?: AbortSignal) => get<Shell>("/shell", signal),
   summary: () => get<Summary>("/summary"),
   notifications: () => get<RNotice[]>("/notifications"),

@@ -79,6 +79,12 @@ const run = async ({ width, scheme }) => {
     await page.locator("[data-space-more] button").first().click()
     await page.locator('[data-select="space-disclosure"]').waitFor()
     await fits(); await shot("space")
+    // clicking either the waiting-drafts banner or an inline draft opens the conversation #/c/chan:<id>, never #/inbox (#213)
+    await page.locator("[data-space-waiting-open]").click()
+    assert.equal(await page.evaluate(() => location.hash), "#/c/chan%3Asp_ops")
+    await page.evaluate(() => { location.hash = "" })
+    await page.locator('[data-msg-draft-open="cm2"]').click()
+    assert.equal(await page.evaluate(() => location.hash), "#/c/chan%3Asp_ops")
     // your own account: trigger words off are one switch
     await page.goto(base + "/test/fixtures/comm-pages.html?view=account" + q); await page.locator("[data-trigger-on]").waitFor()
     assert.equal(await page.locator("[data-trigger-scope]").count(), 0)

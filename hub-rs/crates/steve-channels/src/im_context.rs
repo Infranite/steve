@@ -350,7 +350,10 @@ pub fn build(r: &mut impl steve_store::Read, plan: &Plan) -> ChannelResult<ImCon
     // the trigger settings of the identity that answers (your own account's)
     let settings = spaces::channel_settings(r, ws, &plan.connection_id)?
         .map(|s| Trigger::from_value(&s.trigger));
-    let (placement, mark) = placement_and_mark(plan, &space, chat_kind, &settings);
+    let adapter = steve_store::connections::connection_kind(r, &plan.connection_id)?
+        .map(|(_, a)| a)
+        .unwrap_or_default();
+    let (placement, mark) = placement_and_mark(plan, &space, &adapter, chat_kind, &settings);
     let trigger = plan.trigger.as_ref().map(|_| {
         let mentions = stored
             .as_ref()
@@ -496,6 +499,7 @@ fn audience_facts(
 fn placement_and_mark(
     plan: &Plan,
     space: &spaces::SpaceRow,
+    adapter: &str,
     chat_kind: ChatKind,
     settings: &Option<Trigger>,
 ) -> (Placement, Mark) {
@@ -511,7 +515,7 @@ fn placement_and_mark(
     } else {
         let kind = crate::channel::SpaceKind::parse(&space.kind)
             .unwrap_or(crate::channel::SpaceKind::Group);
-        if crate::adapters::feishu::send::reply_in_thread(kind, plan.thread_key.as_deref()) {
+        if crate::syntax::reply_in_thread(adapter, kind, plan.thread_key.as_deref()) {
             Placement::Thread
         } else {
             Placement::Quote

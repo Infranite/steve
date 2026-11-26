@@ -132,6 +132,7 @@ pub(crate) fn plan_in(
         rule: None,
         muted: set.muted,
         trigger: None,
+        burst_message_ids: Vec::new(),
     })
 }
 
@@ -468,6 +469,7 @@ impl Action for SendToSpace {
                 thread_key: None,
                 persona_id: persona.clone(),
                 source_message_id: None,
+                burst_id: None,
             })
         });
         let target = match target {

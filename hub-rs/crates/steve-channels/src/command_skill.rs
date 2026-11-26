@@ -71,6 +71,7 @@ impl Channels {
                         rule: None,
                         muted: set.muted,
                         trigger: Some(command.instruction),
+                        burst_message_ids: Vec::new(),
                     },
                     command.from_self,
                 )))
@@ -346,6 +347,7 @@ mod tests {
             rule: None,
             muted: false,
             trigger: Some("看下告警".into()),
+            burst_message_ids: Vec::new(),
         }
     }
 

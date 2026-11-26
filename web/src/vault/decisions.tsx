@@ -12,7 +12,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { api } from "@/api"
 import { refresh, toast, type Wait } from "@/store"
 import { report } from "@/accounts/load"
-import { NewSpaceCard } from "@/channels/new-space"
+import { SpaceRuleSuggestionCard } from "@/channels/space-rule-suggestion"
 import { t as tr, useT } from "@/i18n"
 
 type P = { w: Wait; act: (c: string, t?: string) => Promise<void>; busy: boolean; head: (t: ReactNode) => ReactNode; foot: (c: ReactNode) => ReactNode }
@@ -64,5 +64,5 @@ function ConnectionCard({ w, act, busy, head, foot }: P) {
 export const MODULE_CARDS: Record<ModuleCardSubject, (p: P) => ReactNode> = {
   secret_use: (p) => <SecretUseCard {...p} />,
   connection: (p) => <ConnectionCard {...p} />,
-  space: (p) => <NewSpaceCard {...p} />,
+  space: (p) => <SpaceRuleSuggestionCard {...p} />,
 }

@@ -49,6 +49,9 @@ impl Channels {
             r.act = Act::Record;
             match g {
                 crate::decide::Gate::NoContent => r.label = crate::decide::LABEL_NO_CONTENT.into(),
+                crate::decide::Gate::AddressedToOthers => {
+                    r.label = crate::decide::LABEL_ADDRESSED_TO_OTHERS.into()
+                }
                 crate::decide::Gate::Nudge { decision } => {
                     self.store()
                         .write(|tx| crate::decide::nudge(tx, &decision, &plan.text))?;

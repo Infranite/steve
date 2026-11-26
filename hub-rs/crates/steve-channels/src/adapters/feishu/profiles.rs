@@ -302,6 +302,10 @@ impl ProfileAdapter for FeishuApp {
         APP_ADAPTER
     }
 
+    fn directory_scope(&self) -> Option<&'static str> {
+        Some(CONTACT_SCOPE)
+    }
+
     async fn resolve_profiles(
         &self,
         cx: &ConnCx,
@@ -317,6 +321,10 @@ impl ProfileAdapter for FeishuApp {
 impl ProfileAdapter for FeishuUser {
     fn adapter_id(&self) -> &str {
         USER_ADAPTER
+    }
+
+    fn directory_scope(&self) -> Option<&'static str> {
+        Some(CONTACT_SCOPE)
     }
 
     async fn resolve_profiles(

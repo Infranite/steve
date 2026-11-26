@@ -55,7 +55,6 @@ use steve_store::base::DecisionKind;
 use steve_store::channel_message_repo::queue as queue_repo;
 use steve_store::{Decision, Item, NewDecision, W, uid};
 
-use crate::adapters::feishu::send::reply_in_thread;
 use crate::basis::{self, NewBasis, Rewrite};
 use crate::channel::{ActAsUser, ActTarget, MessageRef, OutContent, SendKey, Sent, SpaceKind};
 use crate::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Outbound, Purpose};
@@ -466,6 +465,9 @@ fn insert_out(w: &mut steve_store::W<'_>, n: &NewOut, now: i64) -> ChannelResult
             created: now,
         },
     )?;
+    if let Some(src) = n.t.source_message_id.as_deref() {
+        steve_store::channel_message_repo::incoming_reactions::record_reply_source(w, &id, src)?;
+    }
     Ok(id)
 }
 
@@ -1834,7 +1836,21 @@ fn prepare_send(ch: &Channels, row: &OutRow) -> ChannelResult<PreparedSend> {
                 steve_store::StoreError::Storage("sending connection disappeared".into())
             })?;
         let text = Outbox::final_text(r, &row)?;
-        let marked = trigger.as_ref().is_some_and(|t| t.mark);
+        let marked = match mode {
+            Mode::Own if row.on_behalf == "proxy" => trigger.as_ref().is_some_and(|t| t.mark),
+            Mode::Own => {
+                let per_send = match row.decision_id.as_deref() {
+                    Some(did) => steve_store::decision_repo::get(r, did)?
+                        .and_then(|d| d.result["ai_mark"].as_bool()),
+                    None => None,
+                };
+                match per_send {
+                    Some(v) => v,
+                    None => spaces::effective_ai_mark(r, &row.ws, &space.id, &space.connection_id)?,
+                }
+            }
+            Mode::Bot => false,
+        };
         let text = if marked {
             b1::with_ai_prefix(&text)
         } else {
@@ -1844,7 +1860,7 @@ fn prepare_send(ch: &Channels, row: &OutRow) -> ChannelResult<PreparedSend> {
         // a private chat has no threads to speak of: a quoting reply there
         let in_thread = match &trigger {
             Some(t) => t.reply == crate::rules::ReplyStyle::Thread && kind != SpaceKind::Dm,
-            None => reply_in_thread(kind, row.thread_key.as_deref()),
+            None => crate::syntax::reply_in_thread(&adapter, kind, row.thread_key.as_deref()),
         };
         // @ the person replied to in a group (bot accounts)
         let mut at = Vec::new();
@@ -1857,11 +1873,12 @@ fn prepare_send(ch: &Channels, row: &OutRow) -> ChannelResult<PreparedSend> {
                 reply_to,
             )?
             .filter(|sender| *sender != account)
-            && let Some(h) = steve_store::accounts::feishu_mention_handle(
+            && let Some(h) = steve_store::accounts::connection_mention_handle(
                 r,
                 &row.ws,
                 &space.connection_id,
                 &sender,
+                crate::syntax::mention_handle_prefix(&adapter),
             )?
         {
             at.push(h);
@@ -2675,6 +2692,9 @@ impl DeliveryWrite<'_> {
             },
             now,
         )?;
+        if let Some(burst) = t.burst_id.as_deref() {
+            channel_message_repo::outbound::set_burst_id(w, &id, burst)?;
+        }
         if let Some(e) = envelope {
             crate::pipeline::record(w, e, req, &id, now)?;
         }
@@ -3285,6 +3305,9 @@ impl Outbox {
         self.queue_chosen_drafts(ch);
         self.queue_disclosure_checks(ch);
         self.queue_rewrites(ch);
+        if let Err(e) = crate::draft_escalation::escalate_due(ch) {
+            tracing::warn!("draft escalation sweep: {e}");
+        }
     }
 
     fn queue_instructed_drafts(&self, ch: &Channels) {
@@ -4144,6 +4167,15 @@ impl MessageDecisions {
         if d.result["recovery_review"] == true {
             result["recovery_review"] = json!(true);
         }
+        if d.result["escalated"] == true {
+            result["escalated"] = json!(true);
+            if let Some(at) = d.result.get("escalated_at") {
+                result["escalated_at"] = at.clone();
+            }
+            if let Some(reason) = d.result.get("escalated_reason") {
+                result["escalated_reason"] = reason.clone();
+            }
+        }
         match cx.choice {
             "yes" => {
                 let edited = !cx.text.trim().is_empty();
@@ -4195,6 +4227,7 @@ impl MessageDecisions {
             }
             "no" => {
                 set_status(w, &row.id, &["draft"], DISCARDED)?;
+                result["ignored_at"] = json!(now);
                 self.0.push(After::Discarded {
                     message_id: row.id.clone(),
                 });
@@ -4205,6 +4238,14 @@ impl MessageDecisions {
                     "chan_message.reject",
                     &row.id,
                     &json!({"decision": d.id}),
+                )?;
+                let _ = crate::rule_suggestions::on_message_ignored(
+                    w,
+                    cx.ws,
+                    &row.space_id,
+                    &row.id,
+                    &d.id,
+                    now,
                 )?;
             }
             "to_item" if d.options.iter().any(|o| o == "to_item") => {
@@ -4296,6 +4337,15 @@ impl MessageDecisions {
         if let Some(recovery) = d.result.get("recovery") {
             result["recovery"] = recovery.clone();
         }
+        if d.result["escalated"] == true {
+            result["escalated"] = json!(true);
+            if let Some(at) = d.result.get("escalated_at") {
+                result["escalated_at"] = at.clone();
+            }
+            if let Some(reason) = d.result.get("escalated_reason") {
+                result["escalated_reason"] = reason.clone();
+            }
+        }
         steve_store::audit_repo::record(
             w,
             cx.ws,
@@ -4373,7 +4423,19 @@ impl MessageDecisions {
                 plan_in(w, cx.ws, &d.subject_id)?;
                 result["source_message"] = json!(d.subject_id);
             }
-            "done" => {}
+            "done" => {
+                result["ignored_at"] = json!(now);
+                if let Some(space_id) = channel_message_repo::space_of(w, cx.ws, &d.subject_id)? {
+                    let _ = crate::rule_suggestions::on_message_ignored(
+                        w,
+                        cx.ws,
+                        &space_id,
+                        &d.subject_id,
+                        &d.id,
+                        now,
+                    )?;
+                }
+            }
             _ => return Err(ApiError::invalid("choice")),
         }
         Ok(result)
@@ -4419,6 +4481,15 @@ impl DecisionHandler for MessageDecisions {
         }
         if let Some(recovery) = d.result.get("recovery") {
             result["recovery"] = recovery.clone();
+        }
+        if d.result["escalated"] == true {
+            result["escalated"] = json!(true);
+            if let Some(at) = d.result.get("escalated_at") {
+                result["escalated_at"] = at.clone();
+            }
+            if let Some(reason) = d.result.get("escalated_reason") {
+                result["escalated_reason"] = reason.clone();
+            }
         }
         if result == json!({}) {
             Value::Null
