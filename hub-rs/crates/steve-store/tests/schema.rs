@@ -478,7 +478,7 @@ fn upgrades_a_version_2_database_with_attachments() {
 }
 
 #[test]
-fn migration_141_backfills_node_id_and_preserves_stat_daily() {
+fn migration_144_backfills_node_id_and_preserves_stat_daily() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v140.sqlite3");
     {
