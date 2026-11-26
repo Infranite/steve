@@ -990,23 +990,27 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
+/// Upper bound for local `codesign`/`plutil`/`launchctl` checks invoked by `--upgrade-cli`.
 const UPGRADE_CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn bounded_output(mut command: Command) -> Result<Output> {
     let program = command.get_program().to_string_lossy().into_owned();
-    steve_install::common::run_bounded(
+    steve_runtime::process::run_bounded(
         &mut command,
         &program,
-        steve_install::common::BoundedOptions {
-            max_output_bytes: Some(MAX_JSON),
-            ..steve_install::common::BoundedOptions::capture(UPGRADE_CLI_COMMAND_TIMEOUT)
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: MAX_JSON as usize,
+            ..steve_runtime::process::BoundedOptions::capture(
+                "upgrade_cli",
+                UPGRADE_CLI_COMMAND_TIMEOUT,
+            )
         },
     )
     .map_err(|err| match err {
-        steve_install::common::CommandError::TimedOut { .. } => {
+        steve_runtime::process::CommandError::TimedOut { .. } => {
             anyhow::anyhow!("service/signature command timed out")
         }
-        steve_install::common::CommandError::OutputLimitExceeded { .. } => {
+        steve_runtime::process::CommandError::OutputLimitExceeded { .. } => {
             anyhow::anyhow!("command output exceeds limit")
         }
         other => anyhow::Error::new(other),

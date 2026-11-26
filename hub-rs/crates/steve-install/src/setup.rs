@@ -577,6 +577,17 @@ pub fn adapters(role: &str, home: &Path, release: &Path, args: &[&str]) -> Resul
     Ok(status.code().unwrap_or(1))
 }
 
+/// Upper bound for local JSON metadata/maintenance queries invoked during setup (`--build-info`,
+/// `--local-release`, etc.).
+const SETUP_CAPTURED_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for `steve-hub --check-config` during setup (unified at 120s with `release.rs`,
+/// `supervisor.rs`, and `reconfigure.rs`).
+const SETUP_CHECK_CONFIG_TIMEOUT: Duration = Duration::from_secs(120);
+/// Upper bound for local `adapters list --json` inspection during setup wizard.
+const ADAPTER_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound for `adapters install` which downloads npm adapter packages over the network.
+const ADAPTER_INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+
 fn captured(
     program: &Path,
     home: &Path,
@@ -595,9 +606,13 @@ fn captured(
             );
         }
     }
-    let output = command
-        .output()
-        .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
+    let name = program.to_string_lossy();
+    let output = steve_runtime::process::run_bounded(
+        &mut command,
+        &name,
+        steve_runtime::process::BoundedOptions::capture("setup_command", SETUP_CAPTURED_TIMEOUT),
+    )
+    .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
     if !output.status.success() {
         bail!(
             "{}",
@@ -611,9 +626,7 @@ fn captured(
 /// found the configuration wrong (exit 2, `ok: false`, the reasons under `errors`).
 fn config_report(program: &Path, home: &Path, environment: &Value) -> Result<Value> {
     let mut command = clean_command(program, Some(home));
-    command
-        .arg("--check-config")
-        .stdin(std::process::Stdio::null());
+    command.arg("--check-config");
     for (key, value) in environment.as_object().into_iter().flatten() {
         command.env(
             key,
@@ -622,9 +635,16 @@ fn config_report(program: &Path, home: &Path, environment: &Value) -> Result<Val
                 .context(t!("install.setup.env_value_not_string"))?,
         );
     }
-    let output = command
-        .output()
-        .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
+    let name = program.to_string_lossy();
+    let output = steve_runtime::process::run_bounded(
+        &mut command,
+        &name,
+        steve_runtime::process::BoundedOptions::capture(
+            "setup_check_config",
+            SETUP_CHECK_CONFIG_TIMEOUT,
+        ),
+    )
+    .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
     match serde_json::from_slice::<Value>(&output.stdout) {
         Ok(report) if report["ok"].is_boolean() => Ok(report),
         _ if !output.status.success() => bail!(
@@ -1325,9 +1345,14 @@ fn adapter_command(
 /// What the release can install (`adapters list --json`): whether npm is there, whether this home
 /// already has a choice, and each built-in adapter.
 fn adapter_listing(role: &str, home: &Path, release: &Path) -> Option<Value> {
-    let output = adapter_command(role, home, release, &["list", "--json"])
-        .output()
-        .ok()?;
+    let mut command = adapter_command(role, home, release, &["list", "--json"]);
+    let program = command.get_program().to_string_lossy().into_owned();
+    let output = steve_runtime::process::run_bounded(
+        &mut command,
+        &program,
+        steve_runtime::process::BoundedOptions::capture("setup_adapter_list", ADAPTER_LIST_TIMEOUT),
+    )
+    .ok()?;
     let listing: Value = serde_json::from_slice(&output.stdout).ok()?;
     (output.status.success() && listing["adapters"].is_array()).then_some(listing)
 }
@@ -1450,9 +1475,17 @@ fn install_adapters(
         args.extend(chosen.iter().map(String::as_str));
     }
     let later = &t!("install.setup.adapters.postponed");
-    let output = adapter_command(role, home, release, &args)
-        .output()
-        .map_err(|_| later.to_owned())?;
+    let mut command = adapter_command(role, home, release, &args);
+    let program = command.get_program().to_string_lossy().into_owned();
+    let output = steve_runtime::process::run_bounded(
+        &mut command,
+        &program,
+        steve_runtime::process::BoundedOptions::capture(
+            "setup_adapter_install",
+            ADAPTER_INSTALL_TIMEOUT,
+        ),
+    )
+    .map_err(|_| later.to_owned())?;
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
         let last = said
@@ -1664,14 +1697,19 @@ fn finish_hub(
             .input
             .confirm(&t!("install.setup.finish.open_browser"), true)?
         {
+            // `open`/`xdg-open` hands the URL to the desktop browser and exits promptly; 10s
+            // bounds a stalled desktop IPC handler.
             const OPEN_BROWSER_TIMEOUT: Duration = Duration::from_secs(10);
             let mut command = std::process::Command::new(&open);
             command.arg(&web);
             let program = open.to_string_lossy();
-            let _ = crate::common::run_bounded(
+            let _ = steve_runtime::process::run_bounded(
                 &mut command,
                 &program,
-                crate::common::BoundedOptions::silent(OPEN_BROWSER_TIMEOUT),
+                steve_runtime::process::BoundedOptions::silent(
+                    "open_browser",
+                    OPEN_BROWSER_TIMEOUT,
+                ),
             );
         }
     }

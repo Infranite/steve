@@ -6,16 +6,21 @@ use crate::signing::{NodeSigningIdentity, Tools};
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use steve_types::devices::NODE_BOOT_SERVICE_ENV;
-use wait_timeout::ChildExt;
 
 // launchd starts this executable directly as the original account. macOS can
 // attribute the Node and its ordinary children to the same responsible code.
 pub(super) const RUNNER: &str = "services/node-boot-runner";
 const RUNNER_ARG: &str = "__node-boot-run";
 const LOCK_PID_READ_LIMIT: usize = 64;
+/// Poll cadence for checking `SIGTERM`/release-switch flags in the boot runner (low idle CPU,
+/// sub-second stop response).
 const NODE_SUPERVISE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Graceful `SIGTERM` window so `steve-node` can close its Hub link and flush its journal before
+/// launchd starts the next generation.
 const NODE_SUPERVISE_STOP_GRACE: Duration = Duration::from_secs(15);
-const NODE_SUPERVISE_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounded wait to reap `steve-node` after `SIGKILL` (unified with `PROCESS_KILL_REAP_TIMEOUT`).
+const NODE_SUPERVISE_KILL_REAP_TIMEOUT: Duration =
+    steve_runtime::process::PROCESS_KILL_REAP_TIMEOUT;
 #[cfg(target_os = "macos")]
 const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
 
@@ -299,37 +304,23 @@ pub(super) fn supervise(home: &Path, stopping: impl Fn() -> bool) -> Result<()> 
         command.env("STEVE_NODE_LOOPBACK_PLAINTEXT", "1");
     }
     let mut node = command.spawn().context("start configured Node release")?;
-    let pid = node.id() as libc::pid_t;
+    let mut reaped = false;
     loop {
         if let Some(status) = node.try_wait()? {
             ensure!(status.success(), "Node process exited: {status}");
             return Ok(());
         }
         if stopping() || boot_release(home).is_ok_and(|next| next != release) {
-            // We are the sole waiter. If the child has already exited, its PID cannot have been
-            // recycled before we reap it. Let the Node close its link and journal before launchd
-            // starts the next generation, then force-kill its process group if it stalls.
-            if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error).context("stop Node child");
-                }
-            }
-            if node
-                .wait_timeout(NODE_SUPERVISE_STOP_GRACE)
-                .context("wait for Node child to exit")?
-                .is_none()
-            {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                    libc::kill(pid, libc::SIGKILL);
-                }
-                let _ = node.wait_timeout(NODE_SUPERVISE_KILL_REAP_TIMEOUT);
-            } else {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                }
-            }
+            // Observe exit without reaping first (`waitid(WNOWAIT)`) so the leader still pins its
+            // PGID when clearing descendants with `SIGKILL` to `-pid`, then reap cleanly.
+            steve_runtime::process::stop_child_group_sync(
+                &mut node,
+                &mut reaped,
+                steve_runtime::process::TermTarget::Leader,
+                NODE_SUPERVISE_STOP_GRACE,
+                NODE_SUPERVISE_KILL_REAP_TIMEOUT,
+            )
+            .context("stop Node child")?;
             return Ok(());
         }
         std::thread::sleep(NODE_SUPERVISE_POLL_INTERVAL);

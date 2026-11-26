@@ -18,7 +18,7 @@ fake = [
 ]
 
 [dependencies]
-steve-runtime = { path = "../steve-runtime", default-features = false, features = ["policy", "cache", "jobs"] }
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["policy", "cache", "jobs", "process"] }
 steve-types = { path = "../steve-types" }
 steve-flow = { path = "../steve-flow" }
 steve-modules = { path = "../steve-modules" }
@@ -43,8 +43,6 @@ tokio = { version = "=1.54.1", features = ["rt", "sync", "time", "macros"] }
 tracing = "=0.1.44"
 metrics = "=0.24.6"
 url = "=2.5.8"
-# A deadline on the git calls of a push (push.rs).
-wait-timeout = "=0.2.1"
 zeroize = "=1.9.1"
 
 rand = "=0.10.3"

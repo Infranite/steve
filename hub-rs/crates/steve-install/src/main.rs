@@ -273,13 +273,14 @@ fn upgrade_command(mut args: Vec<String>) -> Result<i32> {
     if current.parent() != Some(releases.as_path()) {
         bail!("{}", t!("install.cli.current_outside_releases"));
     }
+    // Matches `signing::BUILD_INFO_TIMEOUT` (15s) for local `--build-info` metadata queries.
     const UPGRADE_BUILD_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     let mut build_info_cmd = common::clean_command(&current.join("bin/steve-hub"), Some(&home));
     build_info_cmd.arg("--build-info");
-    let output = common::run_bounded(
+    let output = steve_runtime::process::run_bounded(
         &mut build_info_cmd,
         "steve-hub",
-        common::BoundedOptions::capture(UPGRADE_BUILD_INFO_TIMEOUT),
+        steve_runtime::process::BoundedOptions::capture("build_info", UPGRADE_BUILD_INFO_TIMEOUT),
     )?;
     let info: serde_json::Value = serde_json::from_slice(&output.stdout)
         .context(t!("install.cli.upgrade_capability_unknown"))?;

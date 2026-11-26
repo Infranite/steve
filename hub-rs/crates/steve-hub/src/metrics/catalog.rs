@@ -19,6 +19,7 @@ pub(super) const LONG: &[&str] = &[
     "steve_backup_operation_seconds",
     "steve_backup_phase_seconds",
     "steve_backup_engine_command_seconds",
+    "steve_supervisor_step_seconds",
 ];
 /// Histograms of token counts across a turn's context window.
 pub(super) const TOKENS: &[&str] = &["steve_turn_context_peak_tokens"];
@@ -986,6 +987,32 @@ pub(super) fn describe() {
         "steve_handoff_package_bytes",
         Bytes,
         "Serialized size of the working-memory opening prompt sent on session handoff. Labels: reason."
+    );
+    // Bounded subprocesses (steve_runtime::process) and upgrade supervisor boundary steps
+    describe_counter!(
+        "steve_process_runs_total",
+        Count,
+        "Bounded subprocess invocations. Labels: operation, result (ok, nonzero, timeout, pipe_drain_timeout, output_limit, cancelled, error)."
+    );
+    describe_histogram!(
+        "steve_process_duration_seconds",
+        Seconds,
+        "Wall-clock duration of one bounded subprocess invocation. Labels: operation."
+    );
+    describe_counter!(
+        "steve_process_group_kills_total",
+        Count,
+        "Subprocess process-group SIGKILLs issued before reaping. Labels: operation, reason (timeout, pipe_drain, post_exit, output_limit, cancelled, error)."
+    );
+    describe_counter!(
+        "steve_supervisor_step_total",
+        Count,
+        "Upgrade supervisor boundary step outcomes (persisted offline when --supervise has no live recorder). Labels: step (build_info, check_config, drain, stop, startup_gate, vault_probe), result (ok, timeout, pipe_drain_timeout, error)."
+    );
+    describe_histogram!(
+        "steve_supervisor_step_seconds",
+        Seconds,
+        "Wall-clock duration of one upgrade supervisor boundary step. Labels: step."
     );
     // This process (sampled when read)
     describe_gauge!(

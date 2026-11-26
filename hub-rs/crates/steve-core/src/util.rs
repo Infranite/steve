@@ -3,10 +3,8 @@
 
 use base64::Engine;
 use sha2::{Digest, Sha256};
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Unix milliseconds, like `Date.now()`.
 pub fn now() -> i64 {
@@ -96,86 +94,45 @@ impl std::fmt::Display for RunError {
 /// stderr)`, invalid UTF-8 replaced. At `deadline` the whole group is killed (a wrapper's children
 /// too: an `ssh` under `git fetch`, a credential helper), and output still held open by something it
 /// left behind is not waited for. Blocking: call it where blocking is fine (never on a runtime worker).
-pub fn run_deadline(
-    mut cmd: Command,
-    deadline: Duration,
-) -> Result<(bool, String, String), RunError> {
-    use std::os::unix::process::CommandExt;
-    let child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(RunError::Spawn)?;
-    collect_deadline(child, deadline)
+pub fn run_deadline(cmd: Command, deadline: Duration) -> Result<(bool, String, String), RunError> {
+    run_deadline_with_stdin(cmd, deadline, steve_runtime::process::BoundedStdin::Null)
 }
 
-fn collect_deadline(
-    mut child: std::process::Child,
+fn run_deadline_with_stdin(
+    mut cmd: Command,
     deadline: Duration,
+    stdin: steve_runtime::process::BoundedStdin<'_>,
 ) -> Result<(bool, String, String), RunError> {
-    let end = Instant::now() + deadline;
-    let group = child.id() as i32;
-    let kill_group = || {
-        // SAFETY: a plain kill(2) of the group this child leads; while any member lives the id is
-        // the group's and can't be another process's
-        unsafe { libc::kill(-group, libc::SIGKILL) };
-    };
-    /* the pipes are read and the child is waited for on threads of their own, which are left to end by
-     * themselves when the deadline passes: none of them is ever joined */
-    let (tx, rx) = mpsc::channel();
-    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
-        child
-            .stdout
-            .take()
-            .map(|o| Box::new(o) as Box<dyn Read + Send>),
-        child
-            .stderr
-            .take()
-            .map(|o| Box::new(o) as Box<dyn Read + Send>),
-    ];
-    for (n, pipe) in pipes.into_iter().enumerate() {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let mut b = vec![];
-            if let Some(mut r) = pipe {
-                let _ = r.read_to_end(&mut b);
-            }
-            let _ = tx.send((n, String::from_utf8_lossy(&b).into_owned()));
-        });
-    }
-    drop(tx);
-    let (done, exited) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = done.send(child.wait());
-    });
-    let status = match exited.recv_timeout(deadline) {
-        Ok(s) => s.ok(),
-        Err(_) => {
-            /* the waiting thread reaps it once it is gone */
-            kill_group();
-            None
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    let out = steve_runtime::process::run_bounded(
+        &mut cmd,
+        &program,
+        steve_runtime::process::BoundedOptions {
+            stdin,
+            held_pipe_policy: steve_runtime::process::HeldPipePolicy::FailAfterGroupKill,
+            ..steve_runtime::process::BoundedOptions::capture("core_git", deadline)
+        },
+    )
+    .map_err(|err| match err {
+        steve_runtime::process::CommandError::Spawn { source, .. } => RunError::Spawn(source),
+        steve_runtime::process::CommandError::TimedOut { timeout, .. } => {
+            RunError::Timeout(timeout)
         }
-    };
-    let mut out = [String::new(), String::new()];
-    for _ in 0..2 {
-        let left = end
-            .saturating_duration_since(Instant::now())
-            .max(Duration::from_millis(500));
-        match rx.recv_timeout(left) {
-            Ok((n, s)) => out[n] = s,
-            Err(_) => {
-                kill_group();
-                return Err(RunError::Held);
-            }
+        steve_runtime::process::CommandError::PipeDrainTimedOut { .. } => RunError::Held,
+        steve_runtime::process::CommandError::Wait { source, .. }
+        | steve_runtime::process::CommandError::PipeRead { source, .. }
+        | steve_runtime::process::CommandError::StdinConfigure { source, .. }
+        | steve_runtime::process::CommandError::StdinWrite { source, .. } => {
+            RunError::Spawn(source)
         }
-    }
-    let [o, e] = out;
-    match status {
-        Some(s) => Ok((s.success(), o, e)),
-        None => Err(RunError::Timeout(deadline)),
-    }
+        steve_runtime::process::CommandError::OutputLimitExceeded { .. }
+        | steve_runtime::process::CommandError::Cancelled { .. } => RunError::Held,
+    })?;
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    ))
 }
 
 #[cfg(test)]
@@ -205,7 +162,9 @@ mod tests {
 
     #[test]
     fn a_command_and_what_it_started_end_at_the_deadline() {
-        use std::os::{fd::OwnedFd, unix::net::UnixStream, unix::process::CommandExt};
+        use std::io::Read as _;
+        use std::os::{fd::OwnedFd, unix::net::UnixStream};
+        use std::time::Instant;
 
         // One wrapper leaves a child holding its output open. The other hangs itself.
         for stay in [false, true] {
@@ -213,33 +172,29 @@ mod tests {
             observer
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
-            let mut child = Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "exec 9<&0; /bin/sleep 30 & printf x >&9; if [ \"$1\" = wait ]; then wait; fi",
-                    "fixture",
-                    if stay { "wait" } else { "exit" },
-                ])
-                .process_group(0)
-                .stdin(OwnedFd::from(peer))
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let mut ready = [0];
-            if let Err(err) = observer.read_exact(&mut ready) {
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-                let _ = child.wait();
-                panic!("deadline fixture did not start its descendant: {err}");
-            }
-            assert_eq!(ready, *b"x");
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args([
+                "-c",
+                "exec 9<&0; /bin/sleep 30 & printf x >&9; if [ \"$1\" = wait ]; then wait; fi",
+                "fixture",
+                if stay { "wait" } else { "exit" },
+            ])
+            .stdin(OwnedFd::from(peer));
 
             let t = Instant::now();
-            let result = collect_deadline(child, Duration::from_millis(300));
+            let result = run_deadline_with_stdin(
+                cmd,
+                Duration::from_millis(300),
+                steve_runtime::process::BoundedStdin::Preserve,
+            );
             assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
-            // Both the leader and the descendant inherit fd 9. EOF proves the group
-            // closed the socket (the observer did not close its own end to force an exit).
-            assert_eq!(observer.read(&mut [0]).expect("group must close socket"), 0);
+            // The fixture writes 'x' before spawning/waiting, and both the leader and descendant
+            // inherit fd 9; reading 'x' then EOF proves the whole process group closed the socket.
+            let mut buf = Vec::new();
+            observer
+                .read_to_end(&mut buf)
+                .expect("group must close socket");
+            assert_eq!(buf, b"x");
             if stay {
                 assert!(matches!(result, Err(RunError::Timeout(_))), "{result:?}");
             } else {

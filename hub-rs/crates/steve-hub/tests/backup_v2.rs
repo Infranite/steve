@@ -2,21 +2,18 @@
 //! `STEVE_BACKUP_ENGINE` (or build-time dev discovery), never via runtime `PATH`.
 use std::{
     fs,
-    io::Read,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::{Output, Stdio},
-    sync::mpsc,
     time::{Duration, Instant},
 };
 use steve_runtime::testkit::process::Command;
 use steve_store::testkit::hub::backup as fixture;
 use steve_types::backup::{BackupPurpose, BackupReceipt};
 
-/// Upper bound for a single `steve-hub --admin` invocation in this test suite.
+/// Upper bound for a single `steve-hub --admin` invocation in this integration suite (covers cold
+/// restic repo init/backup/restore on loaded CI runners while failing fast on hangs).
 const BACKUP_CLI_TIMEOUT: Duration = Duration::from_secs(60);
-const BACKUP_CLI_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const BACKUP_CLI_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 fn home() -> tempfile::TempDir {
     let home = tempfile::tempdir_in("/tmp").unwrap();
@@ -57,59 +54,8 @@ fn command(home: &Path) -> Command {
 }
 
 fn run_bounded(mut cmd: Command, label: &str) -> Output {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().unwrap();
-    let mut stdout_pipe = child.stdout.take().unwrap();
-    let mut stderr_pipe = child.stderr.take().unwrap();
-    let (out_tx, out_rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf);
-        let _ = out_tx.send(buf);
-    });
-    let (err_tx, err_rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut buf);
-        let _ = err_tx.send(buf);
-    });
-    let started = Instant::now();
-    let deadline = started + BACKUP_CLI_TIMEOUT;
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let pid = child.id();
-            let _ = child.kill();
-            let stdout = out_rx
-                .recv_timeout(BACKUP_CLI_PIPE_DRAIN_GRACE)
-                .unwrap_or_default();
-            let stderr = err_rx
-                .recv_timeout(BACKUP_CLI_PIPE_DRAIN_GRACE)
-                .unwrap_or_default();
-            panic!(
-                "backup_v2 command '{label}' (pid {pid}) timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
-                started.elapsed(),
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr),
-            );
-        }
-        std::thread::sleep(BACKUP_CLI_POLL_INTERVAL);
-    };
-    let stdout = out_rx
-        .recv_timeout(BACKUP_CLI_PIPE_DRAIN_GRACE)
-        .expect("stdout did not reach EOF after CLI exit");
-    let stderr = err_rx
-        .recv_timeout(BACKUP_CLI_PIPE_DRAIN_GRACE)
-        .expect("stderr did not reach EOF after CLI exit");
-    Output {
-        status,
-        stdout,
-        stderr,
-    }
+    cmd.output_within(BACKUP_CLI_TIMEOUT)
+        .unwrap_or_else(|diag| panic!("backup_v2 command '{label}' failed: {diag}"))
 }
 
 fn success(output: Output) -> String {

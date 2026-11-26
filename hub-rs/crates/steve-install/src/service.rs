@@ -47,9 +47,16 @@ type BootRegistrar =
     Arc<dyn Fn(&[String], &mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync>;
 
 const MANAGED_RELEASE_COMMIT_PREFIX_LEN: usize = 8;
+/// Upper bound for local `launchctl`/`systemctl` status and control calls (no network).
 const SERVICE_COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+/// Upper bound for capturing the operator's login-shell `PATH` so slow rc files cannot stall setup.
 const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(LOGIN_SHELL_PROBE_TIMEOUT_SECS);
+/// Maximum captured bytes from a login-shell `PATH` probe (a PATH plus brief rc noise is a few KiB).
+const SHELL_PROBE_MAX_OUTPUT_BYTES: usize = 256 * 1024;
+/// Wait for a stopped local Node process to exit before replacing its service definition (matches
+/// `NODE_SUPERVISE_STOP_GRACE`).
 const NODE_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Minimum systemd stop wait on Linux service updates (matches `STOP_GRACE`).
 const LINUX_UPDATE_STOP_WAIT_MIN_SECS: u64 = 15;
 const DARWIN_DEFAULT_SERVICE_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -429,28 +436,40 @@ fn execute_with(
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
-    let opts = crate::common::BoundedOptions {
+    let opts = steve_runtime::process::BoundedOptions {
+        operation: if detached_session {
+            "service_shell_probe"
+        } else {
+            "service_manager"
+        },
         timeout,
         isolation: if detached_session {
-            crate::common::ProcessIsolation::DetachedSession
+            steve_runtime::process::ProcessIsolation::DetachedSession
         } else {
-            crate::common::ProcessIsolation::ProcessGroup
+            steve_runtime::process::ProcessIsolation::ProcessGroup
         },
-        stdin: crate::common::BoundedStdin::Null,
-        capture_output: true,
-        max_output_bytes: None,
+        stdin: steve_runtime::process::BoundedStdin::Null,
+        max_output_bytes: if detached_session {
+            SHELL_PROBE_MAX_OUTPUT_BYTES
+        } else {
+            steve_runtime::process::DEFAULT_MAX_OUTPUT_BYTES
+        },
         kill_group_after_exit: detached_session,
+        ..steve_runtime::process::BoundedOptions::capture("service_manager", timeout)
     };
-    let output =
-        crate::common::run_bounded(&mut command, &args[0], opts).map_err(|err| match err {
-            crate::common::CommandError::TimedOut { timeout, .. } => anyhow::anyhow!(
+    let output = steve_runtime::process::run_bounded(&mut command, &args[0], opts).map_err(
+        |err| match err {
+            steve_runtime::process::CommandError::TimedOut { timeout, .. } => anyhow::anyhow!(
                 "service manager unavailable: command timed out after {} seconds",
                 timeout.as_secs()
             ),
-            crate::common::CommandError::Spawn { source, .. } => anyhow::Error::new(source)
-                .context(format!("service manager unavailable: {}", args[0])),
+            steve_runtime::process::CommandError::Spawn { source, .. } => {
+                anyhow::Error::new(source)
+                    .context(format!("service manager unavailable: {}", args[0]))
+            }
             other => anyhow::Error::new(other),
-        })?;
+        },
+    )?;
     Ok(Output {
         code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

@@ -15,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 steve-harness-spec = { path = "../steve-harness-spec" }
 steve-confine = { path = "../steve-confine" }
-steve-runtime = { path = "../steve-runtime", features = ["jobs", "cache"] }
+steve-runtime = { path = "../steve-runtime", features = ["jobs", "cache", "process"] }
 steve-types = { path = "../steve-types" }
 markdown = "=1.0.0"
 steve-install = { path = "../steve-install" }

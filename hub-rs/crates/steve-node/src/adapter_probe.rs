@@ -17,14 +17,16 @@ use steve_node_api::{
     shell_supports_interactive_login,
 };
 
+/// Cache TTL for adapter discovery probes (30 minutes) unless the Hub requests a fresh probe.
 const TTL: Duration = Duration::from_secs(1800);
+/// Upper bound for ACP adapter `initialize` + scratch `session/new` handshake.
 const INITIALIZE: Duration = Duration::from_secs(20);
+/// Upper bound for probing the user's interactive/login shell `PATH` so slow rc scripts cannot
+/// block Node discovery.
 const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(LOGIN_SHELL_PROBE_TIMEOUT_SECS);
-/// Grace period after the shell exits to drain stdout before killing lingering `.zshrc`
-/// background descendants holding the pipe open.
-const SHELL_PROBE_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(200);
-/// Upper bound to reap the shell or finish pipe EOF after sending `SIGKILL` to its process group.
-const SHELL_PROBE_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum stdout/stderr bytes accepted from a login-shell `PATH` probe (256 KiB covers any real
+/// PATH plus rc banners while bounding memory).
+const SHELL_PROBE_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoginShellEnv {
@@ -61,102 +63,36 @@ fn resolve_user_login_shell() -> String {
     "/bin/sh".to_owned()
 }
 
-#[cfg(unix)]
-fn kill_probe_group(pid: Option<u32>) {
-    if let Some(pid) = pid.filter(|&p| p > 1) {
-        // SAFETY: the probe shell runs in its own detached session/process group (`setsid()`),
-        // so `-pid` kills only the probe shell and any descendants it spawned.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
-}
-
 async fn run_shell_probe(
     shell: &str,
     args: &[&str],
     extra_env: &[(&str, &str)],
     timeout: Duration,
 ) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(shell);
-    cmd.args(args)
-        .env("TERM", "dumb")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
+    let mut cmd = std::process::Command::new(shell);
+    cmd.args(args).env("TERM", "dumb");
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
-    #[cfg(unix)]
-    {
-        // Start a detached session (`setsid`) so interactive shells have no controlling `/dev/tty`
-        // (avoiding SIGTTIN/SIGTTOU stops or `/dev/tty` prompts) while still owning a dedicated
-        // process group (`pgid == pid`) that we can SIGKILL as a whole on timeout or pipe cleanup.
-        // SAFETY: `libc::setsid` is async-signal-safe per POSIX.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    let mut child = cmd.spawn().ok()?;
-    let pid = child.id();
-    let mut stdout_pipe = child.stdout.take()?;
-    let mut read_task = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt as _;
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf).await;
-        buf
-    });
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
-        _ => {
-            #[cfg(unix)]
-            kill_probe_group(pid);
-            let _ = child.kill().await;
-            let _ = tokio::time::timeout(SHELL_PROBE_KILL_REAP_TIMEOUT, child.wait()).await;
-            read_task.abort();
-            return None;
-        }
-    };
-    if !status.success() {
-        #[cfg(unix)]
-        kill_probe_group(pid);
-        read_task.abort();
+    // `DetachedSession` uses `POSIX_SPAWN_SETSID` on macOS (zero `fork()` in multithreaded
+    // `steve-node`) and `setsid()` on Linux so interactive shells have no controlling `/dev/tty`,
+    // while `kill_group_after_exit` terminates any `.zshrc` background helpers BEFORE reaping.
+    let output = steve_runtime::process::run_bounded_async(
+        cmd,
+        shell,
+        steve_runtime::process::BoundedOptions {
+            isolation: steve_runtime::process::ProcessIsolation::DetachedSession,
+            max_output_bytes: SHELL_PROBE_MAX_OUTPUT_BYTES,
+            kill_group_after_exit: true,
+            ..steve_runtime::process::BoundedOptions::capture("shell_probe", timeout)
+        },
+    )
+    .await
+    .ok()?;
+    if !output.status.success() {
         return None;
     }
-    let stdout = match tokio::time::timeout(SHELL_PROBE_PIPE_DRAIN_GRACE, &mut read_task).await {
-        Ok(Ok(bytes)) => {
-            // Even when stdout closed cleanly, terminate any detached background helpers launched
-            // by `.zshrc` so probe sessions never leak processes.
-            #[cfg(unix)]
-            kill_probe_group(pid);
-            bytes
-        }
-        Ok(Err(_)) => {
-            #[cfg(unix)]
-            kill_probe_group(pid);
-            return None;
-        }
-        Err(_) => {
-            // A background grandchild spawned by `.zshrc` inherited stdout and prevented EOF.
-            // Kill the probe's process group so the pipe closes and we can collect the captured PATH.
-            #[cfg(unix)]
-            kill_probe_group(pid);
-            match tokio::time::timeout(SHELL_PROBE_KILL_REAP_TIMEOUT, &mut read_task).await {
-                Ok(Ok(bytes)) => bytes,
-                _ => {
-                    read_task.abort();
-                    return None;
-                }
-            }
-        }
-    };
-    extract_login_shell_path(&String::from_utf8_lossy(&stdout))
+    extract_login_shell_path(&String::from_utf8_lossy(&output.stdout))
 }
 
 async fn probe_shell_env_for(

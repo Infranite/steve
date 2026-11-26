@@ -412,43 +412,6 @@ pub fn js_number(s: &str) -> f64 {
     t.parse::<f64>().unwrap_or(f64::NAN)
 }
 
-/// `npm root -g`, or the Homebrew default when npm is missing.
-fn npm_root() -> String {
-    // npm's global prefix is the directory above `node`'s bin unless an npmrc moves it; when that
-    // directory is there, that is what `npm root -g` would print, without spawning npm at boot
-    let on_path = std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|d| d.join("node"))
-        .find(|n| n.is_file());
-    if let Some(node) = on_path
-        && let Some(root) = node
-            .parent()
-            .and_then(Path::parent)
-            .map(|p| p.join("lib/node_modules"))
-        && root.is_dir()
-    {
-        return root.to_string_lossy().into_owned();
-    }
-    const NPM_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    const NPM_ROOT_MAX_OUTPUT: u64 = 64 * 1024;
-    let mut command = std::process::Command::new("npm");
-    command.args(["root", "-g"]);
-    steve_install::common::run_bounded(
-        &mut command,
-        "npm",
-        steve_install::common::BoundedOptions {
-            max_output_bytes: Some(NPM_ROOT_MAX_OUTPUT),
-            ..steve_install::common::BoundedOptions::capture(NPM_ROOT_TIMEOUT)
-        },
-    )
-    .ok()
-    .filter(|o| o.status.success())
-    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    .filter(|s| !s.is_empty())
-    .unwrap_or_else(|| "/opt/homebrew/lib/node_modules".into())
-}
-
 /// Reads a Hub-owned configuration text file (harness manifest or `steve.env`).
 fn read_config_text(path: &Path) -> std::io::Result<String> {
     std::fs::read_to_string(path)
@@ -839,14 +802,14 @@ impl Config {
         let manifest_adapters: std::collections::BTreeSet<String> =
             commands.keys().cloned().collect();
         // npm root -g only when an npm-managed adapter default is actually needed
-        let mut root: Option<String> = None;
+        let mut root: Option<PathBuf> = None;
         let path_var = get("PATH");
         let adapters: BTreeMap<String, String> = steve_acp::resolve_builtin_adapters(
             &home,
             &commands,
             |var| get(var).filter(|v| !v.is_empty()).map(PathBuf::from),
             path_var.as_deref().map(std::ffi::OsStr::new),
-            || PathBuf::from(root.get_or_insert_with(npm_root).as_str()),
+            || root.get_or_insert_with(steve_acp::npm_root).clone(),
         )
         .into_iter()
         .map(|(id, c)| (id, c.to_string_lossy().into_owned()))

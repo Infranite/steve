@@ -30,4 +30,5 @@ export default {
   "node_stop.research_budget": "The research run reached its turn or tool call limit.",
   "node_stop.stopped_by_node": "The Node stopped the run.",
   "vault.execution_node_unavailable": "No execution Node is available for this session; secret-injected commands cannot run on the Hub.",
+  "vault.key_store_timed_out": "The vault can't be opened right now because the key store timed out; please try again.",
 } as const

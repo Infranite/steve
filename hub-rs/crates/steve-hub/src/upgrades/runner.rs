@@ -407,22 +407,23 @@ fn launchd(u: &Updates, op: &Operation) -> Result<()> {
             .open(&file)?;
         f.write_all(body.as_bytes())?;
     }
+    // Matches `steve_install::release::LAUNCHCTL_TIMEOUT` (30s) for local launchd job control.
     const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(30);
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     // an earlier runner job stays loaded after it exits; the free runner lock says it isn't running
     let mut bootout = Command::new("/bin/launchctl");
     bootout.args(["bootout", &format!("{domain}/{label}")]);
-    let _ = steve_install::common::run_bounded(
+    let _ = steve_runtime::process::run_bounded(
         &mut bootout,
         "/bin/launchctl",
-        steve_install::common::BoundedOptions::silent(LAUNCHCTL_TIMEOUT),
+        steve_runtime::process::BoundedOptions::silent("launchctl", LAUNCHCTL_TIMEOUT),
     );
     let mut bootstrap = Command::new("/bin/launchctl");
     bootstrap.arg("bootstrap").arg(&domain).arg(&file);
-    let out = steve_install::common::run_bounded(
+    let out = steve_runtime::process::run_bounded(
         &mut bootstrap,
         "/bin/launchctl",
-        steve_install::common::BoundedOptions::capture(LAUNCHCTL_TIMEOUT),
+        steve_runtime::process::BoundedOptions::capture("launchctl", LAUNCHCTL_TIMEOUT),
     )?;
     if !out.status.success() {
         bail!(

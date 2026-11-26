@@ -16,6 +16,7 @@ steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"
 # Steve's events: what the ACP updates are translated into (normalize.rs).
 steve-node-api = { path = "../steve-node-api" }
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["process"] }
 steve-vault = { path = "../steve-vault" }
 base64 = "=0.23.1"
 libc = "=0.2.191"

@@ -526,8 +526,10 @@ fn check(runtime: &Runtime, home: &Path, values: &BTreeMap<String, String>) -> R
             command.env(key, value);
         }
     }
+    // Unified `--check-config` ceiling (120s, matching `release.rs`, `supervisor.rs`, and `setup.rs`).
+    const RECONFIGURE_CHECK_CONFIG_TIMEOUT: Duration = Duration::from_secs(120);
     command.env("STEVE_HOME", home);
-    let output = crate::signing::output(&mut command, Duration::from_secs(30))?;
+    let output = crate::signing::output(&mut command, RECONFIGURE_CHECK_CONFIG_TIMEOUT)?;
     let report: Value = serde_json::from_slice(&output.stdout)
         .context(t!("install.reconfigure.check.no_result"))?;
     ensure!(

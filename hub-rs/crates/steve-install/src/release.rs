@@ -21,20 +21,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steve_store::db::inspect_schema;
 use steve_types::backup::{BackupPurpose, BackupReceipt, SnapshotId};
-use wait_timeout::ChildExt;
 
+/// Upper bound for local `launchctl bootout/bootstrap` service-manager calls.
 const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for candidate `steve-hub --check-config` validation (unified at 120s across
+/// `release.rs`, `supervisor.rs`, `setup.rs`, and `reconfigure.rs`).
 const CHECK_CONFIG_TIMEOUT: Duration = Duration::from_secs(120);
+/// Pre-upgrade SQLite+state restic backup budget before switching versions; if exceeded, the
+/// existing Hub stays untouched.
 const PRE_UPGRADE_BACKUP_TIMEOUT: Duration = Duration::from_secs(120);
+/// Database restore budget during rollback (matches `BACKUP_BUDGET` = 3600s and exceeds
+/// `migration::TOTAL_TIMEOUT` = 15min so large databases are never stranded after mutation).
 const DATABASE_RESTORE_TIMEOUT: Duration = Duration::from_secs(3600);
+/// Loopback HTTP timeout for `/internal/upgrade/drain` control requests.
 const CONTROL_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Idle health verification window without forward migration progress (extended up to
+/// `migration::TOTAL_TIMEOUT` while SQLite `vm_steps` advances).
 const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
+/// Single loopback `GET /healthz` probe timeout.
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Polling interval for local health and drain checks.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Maximum wait after `launchctl bootout` for the old Hub's loopback port to close (matches `STOP_GRACE`).
 const STOP_PORT_WAIT_MAX: Duration = Duration::from_secs(15);
+/// TCP connect timeout and polling cadence while waiting for the Hub port to close.
 const STOP_PORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Graceful `SIGTERM` window for the temporary maintenance-probe Hub before forcing `SIGKILL`.
 const PROBE_STOP_GRACE: Duration = Duration::from_secs(10);
-const PROBE_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounded wait to reap the probe child after `SIGKILL` (unified with `PROCESS_KILL_REAP_TIMEOUT`).
+const PROBE_KILL_REAP_TIMEOUT: Duration = steve_runtime::process::PROCESS_KILL_REAP_TIMEOUT;
 
 #[derive(Debug)]
 pub struct DeployOutcome {
@@ -643,15 +658,17 @@ impl Runtime {
             .stderr(log)
             .process_group(0);
         let result = (|| -> Result<Value> {
-            let mut process = ProbeProcess(command.spawn()?);
-            let pid = process.0.id();
+            let process = ProbeProcess::new(command.spawn()?);
+            let pid = process.id();
             on_probe_pid(Some(pid))?;
             let mut budget =
                 crate::migration::Budget::new(&id.to_string(), pid, self.health_timeout);
             loop {
                 self.check_interrupted()?;
+                // Observe exit without reaping so `ProbeProcess::drop` can still kill any
+                // lingering descendants under `-pid` safely before reaping the leader.
                 ensure!(
-                    process.0.try_wait()?.is_none(),
+                    !process.has_exited()?,
                     "candidate exited during its maintenance probe"
                 );
                 budget.check(crate::migration::read(&self.home, &id.to_string()))?;
@@ -688,30 +705,36 @@ impl Runtime {
         result
     }
 }
-struct ProbeProcess(Child);
+struct ProbeProcess {
+    child: Child,
+    reaped: bool,
+}
+impl ProbeProcess {
+    fn new(child: Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+    fn has_exited(&self) -> std::io::Result<bool> {
+        if self.reaped {
+            return Ok(true);
+        }
+        steve_runtime::process::exited_unreaped(self.child.id(), true)
+    }
+}
 impl Drop for ProbeProcess {
     fn drop(&mut self) {
-        let group = self.0.id() as libc::pid_t;
-        unsafe {
-            libc::kill(-group, libc::SIGTERM);
-        }
-        if self
-            .0
-            .wait_timeout(PROBE_STOP_GRACE)
-            .ok()
-            .flatten()
-            .is_none()
-        {
-            unsafe {
-                libc::kill(-group, libc::SIGKILL);
-                libc::kill(group, libc::SIGKILL);
-            }
-            let _ = self.0.wait_timeout(PROBE_KILL_REAP_TIMEOUT);
-        } else {
-            unsafe {
-                libc::kill(-group, libc::SIGKILL);
-            }
-        }
+        let _ = steve_runtime::process::stop_child_group_sync(
+            &mut self.child,
+            &mut self.reaped,
+            steve_runtime::process::TermTarget::Group,
+            PROBE_STOP_GRACE,
+            PROBE_KILL_REAP_TIMEOUT,
+        );
     }
 }
 /// Take the pre-upgrade snapshot with the verified candidate, after stopping the running Hub.

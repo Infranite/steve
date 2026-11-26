@@ -381,13 +381,15 @@ impl GuideDriver for LiveDriver<'_> {
     }
 
     fn open_settings(&mut self, url: &str) -> bool {
+        // `/usr/bin/open` dispatches via LaunchServices IPC and returns immediately; 10s bounds a
+        // wedged desktop session without blocking interactive setup.
         const OPEN_SETTINGS_TIMEOUT: Duration = Duration::from_secs(10);
         let mut command = Command::new("/usr/bin/open");
         command.arg(url);
-        crate::common::run_bounded(
+        steve_runtime::process::run_bounded(
             &mut command,
             "/usr/bin/open",
-            crate::common::BoundedOptions::silent(OPEN_SETTINGS_TIMEOUT),
+            steve_runtime::process::BoundedOptions::silent("open_settings", OPEN_SETTINGS_TIMEOUT),
         )
         .is_ok_and(|out| out.status.success())
     }

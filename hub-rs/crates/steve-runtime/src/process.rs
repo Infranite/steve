@@ -1,6 +1,21 @@
 //! What a process, or a process group, uses of the machine, as the platform accounts it (Linux
-//! `/proc`, macOS `libproc`). A figure the platform does not give is `None`, never a guess. Sampling
-//! is a few system calls: callers sample on demand (a scrape, a vitals round), never on a hot path.
+//! `/proc`, macOS `libproc`), plus the workspace's unified bounded subprocess primitive (sync and
+//! async) and safe pre-reap process-group teardown. A figure the platform does not give is `None`,
+//! never a guess. Sampling is a few system calls: callers sample on demand (a scrape, a vitals
+//! round), never on a hot path.
+
+#[cfg(unix)]
+pub(crate) mod bounded;
+#[cfg(target_os = "macos")]
+pub mod macos_spawn;
+
+#[cfg(unix)]
+pub use bounded::{
+    BoundedOptions, BoundedStdin, CommandError, DEFAULT_MAX_OUTPUT_BYTES, HeldPipePolicy,
+    PIPE_DRAIN_GRACE, PIPE_POST_KILL_TIMEOUT, PROCESS_KILL_REAP_TIMEOUT, ProcessIsolation,
+    TermTarget, ZeroizingOutput, exited_unreaped, run_bounded, run_bounded_async,
+    run_bounded_zeroizing, stop_child_group_sync,
+};
 
 /// One process's use, or the sum over a process group's members.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

@@ -8,57 +8,26 @@
 //!
 //! The value travels over pipes only: `set` writes it to the helper's stdin, `get` reads its stdout.
 
-use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use super::{KeyStore, KeyStoreError, decode, encode};
+use super::{KEYHELPER_TIMEOUT, KeyStore, KeyStoreError, decode, encode};
 use crate::vault::secret::Kek;
 
-/// Upper bound for a single `steve-keyhelper` invocation (keychain read/write/delete).
-const KEYHELPER_TIMEOUT: Duration = Duration::from_secs(15);
-/// Grace period after `steve-keyhelper` exits for its pipes to reach EOF before killing its group.
-const KEYHELPER_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(200);
-/// Maximum wait to reap `steve-keyhelper` or finish pipe EOF after sending `SIGKILL`.
-const KEYHELPER_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
-/// Polling interval while waiting for non-blocking stdin writes or helper exit.
-const KEYHELPER_POLL_INTERVAL: Duration = Duration::from_millis(10);
-/// Maximum bytes read from `steve-keyhelper` stdout or stderr.
-const MAX_HELPER_STREAM_BYTES: u64 = 4096;
+/// Maximum bytes read from `steve-keyhelper` stdout or stderr. A valid base64 32-byte KEK is 44
+/// bytes; 4 KiB leaves wide room for diagnostic stderr while capping runaway output and keeping
+/// stdout pre-allocated in `Zeroizing<Vec<u8>>` without heap reallocation.
+const MAX_HELPER_STREAM_BYTES: usize = 4096;
 
 /// One helper at a time: a key rotation must not interleave a delete and an add of two calls.
 static SERIAL: Mutex<()> = Mutex::new(());
 
 /// A finished helper run: exit code, stdout (zeroized), stderr.
 type Ran = (Option<i32>, Zeroizing<Vec<u8>>, String);
-
-fn kill_helper_group(pid: libc::pid_t) {
-    if pid > 1 {
-        // SAFETY: `steve-keyhelper` was spawned with `process_group(0)`, so `-pid` targets only
-        // its own group and descendants.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-}
-
-fn kill_and_reap(child: &mut Child, pid: libc::pid_t) {
-    kill_helper_group(pid);
-    let _ = child.kill();
-    let deadline = Instant::now() + KEYHELPER_KILL_REAP_TIMEOUT;
-    while Instant::now() < deadline {
-        if !matches!(child.try_wait(), Ok(None)) {
-            return;
-        }
-        std::thread::sleep(KEYHELPER_POLL_INTERVAL);
-    }
-}
 
 pub struct HelperStore {
     bin: PathBuf,
@@ -107,8 +76,8 @@ impl HelperStore {
         timeout: Duration,
     ) -> Result<Ran, KeyStoreError> {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let deadline = Instant::now() + timeout;
-        let mut child = Command::new(&self.bin)
+        let mut command = Command::new(&self.bin);
+        command
             .args(args)
             // nothing of the Hub's environment but what the keychain needs to find the login keychain
             .env_clear()
@@ -116,163 +85,38 @@ impl HelperStore {
                 ["HOME", "USER", "LOGNAME"]
                     .iter()
                     .filter_map(|k| std::env::var_os(k).map(|v| (*k, v))),
-            )
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .map_err(|e| KeyStoreError::Other(format!("run {}: {e}", self.bin.display())))?;
-        let pid = child.id() as libc::pid_t;
-
-        let stdout_pipe = child
-            .stdout
-            .take()
-            .ok_or_else(|| KeyStoreError::Other("steve-keyhelper stdout missing".into()))?;
-        let stderr_pipe = child
-            .stderr
-            .take()
-            .ok_or_else(|| KeyStoreError::Other("steve-keyhelper stderr missing".into()))?;
-
-        let (out_tx, out_rx) = mpsc::sync_channel::<io::Result<Zeroizing<Vec<u8>>>>(1);
-        std::thread::spawn(move || {
-            let mut out = Zeroizing::new(Vec::new());
-            let res = stdout_pipe
-                .take(MAX_HELPER_STREAM_BYTES)
-                .read_to_end(&mut out)
-                .map(|_| out);
-            let _ = out_tx.send(res);
-        });
-        let (err_tx, err_rx) = mpsc::sync_channel::<io::Result<Vec<u8>>>(1);
-        std::thread::spawn(move || {
-            let mut err = Vec::new();
-            let res = stderr_pipe
-                .take(MAX_HELPER_STREAM_BYTES)
-                .read_to_end(&mut err)
-                .map(|_| err);
-            let _ = err_tx.send(res);
-        });
-
-        if let (Some(v), Some(mut stdin)) = (input, child.stdin.take()) {
-            let fd = stdin.as_raw_fd();
-            // SAFETY: `stdin` keeps `fd` valid for both flag queries.
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0
-            {
-                drop(stdin);
-                kill_and_reap(&mut child, pid);
-                return Err(KeyStoreError::Other(format!(
-                    "configure stdin for steve-keyhelper: {}",
-                    io::Error::last_os_error()
-                )));
+            );
+        let program = self.bin.to_string_lossy();
+        let output = steve_runtime::process::run_bounded_zeroizing(
+            &mut command,
+            &program,
+            steve_runtime::process::BoundedOptions {
+                stdin: match input {
+                    Some(bytes) => steve_runtime::process::BoundedStdin::Bytes(bytes),
+                    None => steve_runtime::process::BoundedStdin::Null,
+                },
+                // `steve-keyhelper` checks parent code-signing (`Denied`, exit 11) and keychain
+                // lock state (`Locked`, exit 10) before reading stdin; ignoring EPIPE ensures
+                // `map_exit` surfaces the real exit code instead of `BrokenPipe`.
+                ignore_stdin_broken_pipe: true,
+                max_output_bytes: MAX_HELPER_STREAM_BYTES,
+                ..steve_runtime::process::BoundedOptions::capture("keyhelper", timeout)
+            },
+        )
+        .map_err(|err| match err {
+            steve_runtime::process::CommandError::TimedOut { timeout, .. } => {
+                KeyStoreError::TimedOut(timeout)
             }
-            let mut written = 0;
-            while written < v.len() {
-                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                    drop(stdin);
-                    kill_and_reap(&mut child, pid);
-                    return Err(KeyStoreError::TimedOut(timeout));
-                };
-                match stdin.write(&v[written..]) {
-                    Ok(0) => {
-                        drop(stdin);
-                        kill_and_reap(&mut child, pid);
-                        return Err(KeyStoreError::Other(
-                            "write to steve-keyhelper: pipe closed".into(),
-                        ));
-                    }
-                    Ok(n) => written += n,
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(KEYHELPER_POLL_INTERVAL.min(remaining));
-                    }
-                    Err(e) => {
-                        drop(stdin);
-                        kill_and_reap(&mut child, pid);
-                        return Err(KeyStoreError::Other(format!(
-                            "write to steve-keyhelper: {e}"
-                        )));
-                    }
-                }
+            steve_runtime::process::CommandError::PipeDrainTimedOut { grace, .. } => {
+                KeyStoreError::TimedOut(grace)
             }
-            drop(stdin);
-        }
-
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        kill_and_reap(&mut child, pid);
-                        return Err(KeyStoreError::TimedOut(timeout));
-                    };
-                    std::thread::sleep(KEYHELPER_POLL_INTERVAL.min(remaining));
-                }
-                Err(e) => {
-                    kill_and_reap(&mut child, pid);
-                    return Err(KeyStoreError::Other(format!(
-                        "wait for steve-keyhelper: {e}"
-                    )));
-                }
+            steve_runtime::process::CommandError::Spawn { source, .. } => {
+                KeyStoreError::Other(format!("run {}: {source}", self.bin.display()))
             }
-        };
-
-        let drain_deadline = Instant::now() + KEYHELPER_PIPE_DRAIN_GRACE;
-        let mut out =
-            match out_rx.recv_timeout(drain_deadline.saturating_duration_since(Instant::now())) {
-                Ok(Ok(bytes)) => Some(bytes),
-                Ok(Err(e)) => {
-                    kill_helper_group(pid);
-                    return Err(KeyStoreError::Other(format!(
-                        "read from steve-keyhelper: {e}"
-                    )));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    kill_helper_group(pid);
-                    return Err(KeyStoreError::Other(
-                        "steve-keyhelper stdout reader stopped".into(),
-                    ));
-                }
-            };
-        let mut err_bytes =
-            match err_rx.recv_timeout(drain_deadline.saturating_duration_since(Instant::now())) {
-                Ok(Ok(bytes)) => Some(bytes),
-                Ok(Err(_)) => Some(Vec::new()),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => Some(Vec::new()),
-            };
-
-        if out.is_none() || err_bytes.is_none() {
-            kill_helper_group(pid);
-            let post_kill = Instant::now() + KEYHELPER_KILL_REAP_TIMEOUT;
-            if out.is_none() {
-                out = match out_rx.recv_timeout(post_kill.saturating_duration_since(Instant::now()))
-                {
-                    Ok(Ok(bytes)) => Some(bytes),
-                    Ok(Err(e)) => {
-                        return Err(KeyStoreError::Other(format!(
-                            "read from steve-keyhelper: {e}"
-                        )));
-                    }
-                    Err(_) => return Err(KeyStoreError::TimedOut(KEYHELPER_PIPE_DRAIN_GRACE)),
-                };
-            }
-            if err_bytes.is_none() {
-                err_bytes = err_rx
-                    .recv_timeout(post_kill.saturating_duration_since(Instant::now()))
-                    .ok()
-                    .and_then(Result::ok);
-            }
-        }
-
-        let out = out.unwrap_or_else(|| Zeroizing::new(Vec::new()));
-        let err = String::from_utf8_lossy(&err_bytes.unwrap_or_default()).into_owned();
-        Ok((status.code(), out, err))
+            other => KeyStoreError::Other(other.to_string()),
+        })?;
+        let err = String::from_utf8_lossy(&output.stderr).into_owned();
+        Ok((output.status.code(), output.stdout, err))
     }
 }
 
@@ -385,7 +229,7 @@ mod tests {
         std::fs::set_permissions(&hang_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let store = HelperStore::find(home.path(), hang_bin.to_str()).unwrap();
         let timeout = Duration::from_millis(200);
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         let err = store
             .run_with_timeout(&["get", "a"], None, timeout)
             .expect_err("hanging helper must time out");
@@ -394,8 +238,8 @@ mod tests {
         if let Ok(raw) = std::fs::read_to_string(&hang_pid)
             && let Ok(pid) = raw.trim().parse::<libc::pid_t>()
         {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while unsafe { libc::kill(pid, 0) } == 0 && std::time::Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
@@ -417,7 +261,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&holder_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let store = HelperStore::find(home.path(), holder_bin.to_str()).unwrap();
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         let got = store.get("a").unwrap().expect("decoded key");
         assert_eq!(got.bytes(), key.bytes());
         assert!(started.elapsed() < Duration::from_secs(3));
@@ -426,10 +270,28 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    }
+
+    #[test]
+    fn early_denied_or_locked_exit_is_not_masked_by_broken_pipe() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("tmp");
+        let key = Kek::from_slice(&[5u8; 32]).unwrap();
+        for (code, expected) in [(11, KeyStoreError::Denied), (10, KeyStoreError::Locked)] {
+            let bin = home.path().join(format!("exit-{code}.sh"));
+            std::fs::write(&bin, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let store = HelperStore::find(home.path(), bin.to_str()).unwrap();
+            assert_eq!(
+                store.set("ws/kek/v1", &key),
+                Err(expected),
+                "exit code {code} must surface even if stdin is never read"
+            );
+        }
     }
 }

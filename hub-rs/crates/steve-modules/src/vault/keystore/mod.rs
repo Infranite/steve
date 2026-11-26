@@ -47,6 +47,11 @@ pub const SERVICE: &str = match option_env!("STEVE_KEYHELPER_SERVICE") {
     None => "io.github.infranite.steve.vault",
 };
 
+/// Upper bound for a single `steve-keyhelper` invocation (keychain read/write/delete).
+/// Shared cross-platform so callers (such as `supervisor::startup_gate`) can size aggregate vault
+/// probe budgets with margin above a single helper call.
+pub const KEYHELPER_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Why a key store call failed. No variant carries key material.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyStoreError {

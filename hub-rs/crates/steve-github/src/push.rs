@@ -15,13 +15,11 @@
 //! pushed on the Node that holds its workspace instead ([`GitNodes`], N0e-E8), with the same
 //! rules; this module's own git is what runs with it off.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine;
-use wait_timeout::ChildExt;
 use zeroize::Zeroizing;
 
 use crate::repos::parse_remote;
@@ -152,47 +150,26 @@ fn run(c: Command) -> Result<String, PushError> {
     run_for(c, LOCAL_TIMEOUT)
 }
 
-/// Runs `c`, killing it after `limit`. A push that timed out may still have landed: the caller
-/// treats any `Git` error as an unknown outcome.
+/// Runs `c` in its own process group, killing the entire group after `limit`. A push that timed
+/// out may still have landed: the caller treats any `Git` error as an unknown outcome.
 fn run_for(mut c: Command, limit: Duration) -> Result<String, PushError> {
-    let mut child = c
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| PushError::Git(e.to_string()))?;
-    // read both pipes while waiting, so a chatty child cannot block on a full pipe
-    let drain = |p: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut v = Vec::new();
-            if let Some(mut p) = p {
-                let _ = p.read_to_end(&mut v);
-            }
-            v
-        })
-    };
-    let out = drain(child.stdout.take().map(|p| Box::new(p) as _));
-    let err = drain(child.stderr.take().map(|p| Box::new(p) as _));
-    let status = match child.wait_timeout(limit) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            // the readers are left behind: a helper git started may still hold the pipes
-            return Err(PushError::Git(format!("{} 秒内没有完成", limit.as_secs())));
+    let program = c.get_program().to_string_lossy().into_owned();
+    let out = steve_runtime::process::run_bounded(
+        &mut c,
+        &program,
+        steve_runtime::process::BoundedOptions::capture("git_push", limit),
+    )
+    .map_err(|err| match err {
+        steve_runtime::process::CommandError::TimedOut { timeout, .. } => {
+            PushError::Git(format!("{} 秒内没有完成", timeout.as_secs()))
         }
-        Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(PushError::Git(e.to_string()));
-        }
-    };
-    let out = out.join().unwrap_or_default();
-    let err = err.join().unwrap_or_default();
-    if !status.success() {
-        let err = String::from_utf8_lossy(&err);
+        other => PushError::Git(other.to_string()),
+    })?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
         return Err(PushError::Git(err.trim().chars().take(300).collect()));
     }
-    Ok(String::from_utf8_lossy(&out).trim().to_string())
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// The configured `origin` URL (not rewritten by `insteadOf`) must name `full_name`.

@@ -1,40 +1,72 @@
 //! The service manager owns this process, which owns the replaceable Hub child.
 use super::*;
-use std::process::Stdio;
+use crate::metrics::backup::{self as telemetry, Event, SupervisorOutcome, SupervisorStep};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use steve_modules::vault::keystore::KEYHELPER_TIMEOUT;
+use steve_runtime::process::{
+    BoundedOptions, CommandError, PROCESS_KILL_REAP_TIMEOUT, exited_unreaped, run_bounded_async,
+};
 #[cfg(test)]
 use steve_runtime::testkit::process::{AsyncCommand as Command, AsyncProcessGuard as Child};
-use tokio::io::AsyncReadExt as _;
 #[cfg(not(test))]
 use tokio::process::{Child, Command};
 
-/// Graceful shutdown wait before forcing `SIGKILL` on the Hub's process group.
+/// Graceful `SIGTERM` window before forcing `SIGKILL` on the Hub's process group (allows active
+/// HTTP/SSE connections and SQLite WAL checkpoints to settle).
 const STOP_GRACE: Duration = Duration::from_secs(15);
-/// Maximum wait after `SIGKILL` to observe exit and reap the Hub child.
-const STOP_KILL_TIMEOUT: Duration = Duration::from_secs(5);
-/// Upper bound for candidate `--build-info` and `--check-config` invocations.
-const CANDIDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
-/// Grace period after a candidate check exits for its stdout/stderr pipes to reach EOF
-/// before killing any lingering descendant holding the pipe open.
-const CANDIDATE_CHECK_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(200);
-/// Maximum wait to reap or finish pipe EOF after killing a candidate check's process group.
-const CANDIDATE_CHECK_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(5);
-/// Maximum wait for active work to drain during maintenance before aborting the upgrade.
+/// Maximum wait after `SIGKILL` to observe exit and reap the Hub child (unified with
+/// `steve_runtime::process::PROCESS_KILL_REAP_TIMEOUT`).
+const STOP_KILL_TIMEOUT: Duration = PROCESS_KILL_REAP_TIMEOUT;
+/// Upper bound for candidate `--build-info` queries (matches `steve_install::signing::BUILD_INFO_TIMEOUT`).
+const CANDIDATE_BUILD_INFO_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound for candidate `--check-config` validation (unified at 120s with `release.rs`,
+/// `setup.rs`, and `reconfigure.rs`).
+const CANDIDATE_CHECK_CONFIG_TIMEOUT: Duration = Duration::from_secs(120);
+/// Per-stream output ceiling for candidate `--build-info` / `--check-config` (JSON reports are
+/// <10 KiB; 1 MiB bounds rogue stdout/stderr without truncating real diagnostics).
+const CANDIDATE_CHECK_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Maximum wait for active work to drain during maintenance before aborting the upgrade while the
+/// current version stays untouched.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
+/// Polling interval while waiting for `/internal/upgrade/drain` to report `ready: true`.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Loopback HTTP timeout for supervisor <-> Hub `/internal/upgrade/drain` control requests
+/// (matches `steve_install::release::CONTROL_HTTP_TIMEOUT`).
 const MAINTENANCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Health verification window without forward migration progress.
+/// Health verification window without forward migration progress (`migration::Budget` extends up
+/// to `TOTAL_TIMEOUT = 15min` while SQLite `vm_steps` advances).
 const HEALTH_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Polling interval for loopback `/healthz` checks during startup and upgrade verification.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Single loopback `/healthz` HTTP probe timeout (matches `steve_install::release::HEALTH_PROBE_TIMEOUT`).
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Periodic steady-state `/healthz` liveness probe timeout (tolerates transient Hub load spikes).
 const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Steady-state supervisor loop cadence for checking queued upgrades and Hub exit.
 const SUPERVISOR_TICK_INTERVAL: Duration = Duration::from_millis(500);
-const VAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Headroom added above `probes * KEYHELPER_TIMEOUT` in `startup_gate` for SQLite reads, KEK
+/// unwraps, and blocking-pool scheduling so single- and multi-workspace probes never run with zero
+/// margin against `KEYHELPER_TIMEOUT`.
+const VAULT_PROBE_OVERHEAD: Duration = Duration::from_secs(15);
+/// Ceiling on aggregate `startup_gate` vault probe duration across many workspaces so a wedged
+/// keychain cannot block candidate verification indefinitely.
+const VAULT_PROBE_MAX_TIMEOUT: Duration = Duration::from_secs(180);
+/// Polling interval inside `startup_gate` while waiting for the supervisor to write `committed`.
 const STARTUP_GATE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Maximum wait for maintenance HTTP servers to close idle sockets before starting business routes.
 const STARTUP_GATE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Loopback TCP connect timeout for supervisor <-> Hub control HTTP clients.
 const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Compute the aggregate `startup_gate` vault-probe timeout for `probe_count` workspace KEKs.
+fn vault_probe_timeout(probe_count: usize) -> Duration {
+    let count = u32::try_from(probe_count.max(1)).unwrap_or(u32::MAX);
+    KEYHELPER_TIMEOUT
+        .saturating_mul(count)
+        .saturating_add(VAULT_PROBE_OVERHEAD)
+        .min(VAULT_PROBE_MAX_TIMEOUT)
+}
 
 /// Strongly typed errors emitted at supervisor subprocess and gate boundaries.
 #[derive(Debug, thiserror::Error)]
@@ -52,8 +84,8 @@ pub(super) enum SupervisorError {
     },
     #[error("Hub child (pid {pid}) did not exit within {:.1}s after SIGKILL", .timeout.as_secs_f64())]
     StopTimedOut { pid: u32, timeout: Duration },
-    #[error("维护排空超时；当前版本保留，尚未停止或切换")]
-    DrainTimedOut,
+    #[error("upgrade_drain_timed_out: maintenance drain did not settle within {:.0}s; current version retained without stopping or switching", .timeout.as_secs_f64())]
+    DrainTimedOut { timeout: Duration },
     #[error("upgrade startup gate timed out after {:.0}s waiting for commit", .timeout.as_secs_f64())]
     StartupGateTimedOut { timeout: Duration },
 }
@@ -66,15 +98,6 @@ fn local_client() -> Result<reqwest::Client> {
         .connect_timeout(LOCAL_CONNECT_TIMEOUT)
         .pool_max_idle_per_host(0)
         .build()?)
-}
-
-fn kill_pgid(pid: Option<u32>) {
-    if let Some(pid) = pid.filter(|&p| p > 1) {
-        // SAFETY: child was spawned with `process_group(0)`, so `-pid` targets only that group.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
 }
 
 struct HubChild {
@@ -137,20 +160,48 @@ async fn drain(
     client: &reqwest::Client,
     op: &mut Operation,
 ) -> Result<()> {
-    maintenance(cfg, client, reqwest::Method::POST).await?;
-    let deadline = tokio::time::Instant::now() + DRAIN_TIMEOUT;
-    while tokio::time::Instant::now() < deadline {
-        let observed = maintenance(cfg, client, reqwest::Method::GET).await?;
-        if op.drain.as_ref() != Some(&observed) {
-            op.drain = Some(observed.clone());
-            u.progress(op, "waiting", None)?;
+    let started = Instant::now();
+    let result: Result<()> = async {
+        maintenance(cfg, client, reqwest::Method::POST).await?;
+        let deadline = tokio::time::Instant::now() + DRAIN_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
+            let observed = maintenance(cfg, client, reqwest::Method::GET).await?;
+            if op.drain.as_ref() != Some(&observed) {
+                op.drain = Some(observed.clone());
+                u.progress(op, "waiting", None)?;
+            }
+            if observed["ready"] == true {
+                return Ok(());
+            }
+            tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
         }
-        if observed["ready"] == true {
-            return Ok(());
+        Err(SupervisorError::DrainTimedOut {
+            timeout: DRAIN_TIMEOUT,
         }
-        tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+        .into())
     }
-    Err(SupervisorError::DrainTimedOut.into())
+    .await;
+    let outcome = match &result {
+        Ok(()) => SupervisorOutcome::Ok,
+        Err(err)
+            if matches!(
+                err.downcast_ref::<SupervisorError>(),
+                Some(SupervisorError::DrainTimedOut { .. })
+            ) =>
+        {
+            SupervisorOutcome::Timeout
+        }
+        Err(_) => SupervisorOutcome::Error,
+    };
+    telemetry::emit(
+        &cfg.home,
+        Event::Supervisor {
+            step: SupervisorStep::Drain,
+            outcome,
+            elapsed: started.elapsed(),
+        },
+    );
+    result
 }
 async fn release_maintenance(cfg: &Config, client: &reqwest::Client) -> Result<()> {
     maintenance(cfg, client, reqwest::Method::DELETE).await?;
@@ -169,127 +220,69 @@ fn hub_command(cfg: &Config, bundle: &Path, manifest: &Manifest) -> Command {
     c
 }
 
+fn candidate_std_command(
+    bin: &Path,
+    cfg: Option<(&Config, &Path, &Manifest)>,
+) -> std::process::Command {
+    let mut c = std::process::Command::new(bin);
+    if let Some((cfg, bundle, manifest)) = cfg {
+        c.env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
+            .env_remove("STEVE_UPGRADE_ID")
+            .env("STEVE_PORT", cfg.listen.port.to_string())
+            .env("STEVE_HOST", cfg.listen.env_value())
+            .env("STEVE_HOME", &cfg.home)
+            .env("STEVE_VERSION", &manifest.version)
+            .env("STEVE_WEB_DIR", bundle.join("web/dist"));
+    }
+    c
+}
+
 async fn run_candidate_command(
-    step: &'static str,
-    mut command: Command,
+    home: &Path,
+    step: SupervisorStep,
+    command: std::process::Command,
     timeout: Duration,
 ) -> Result<std::process::Output> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true);
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("candidate {step}"))?;
-    let pid = child.id();
-    let mut stdout_pipe = child.stdout.take().context("candidate stdout missing")?;
-    let mut stderr_pipe = child.stderr.take().context("candidate stderr missing")?;
-    let mut out_task = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        stdout_pipe.read_to_end(&mut bytes).await.map(|_| bytes)
-    });
-    let mut err_task = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        stderr_pipe.read_to_end(&mut bytes).await.map(|_| bytes)
-    });
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(error)) => {
-            kill_pgid(pid);
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(CANDIDATE_CHECK_KILL_REAP_TIMEOUT, child.wait()).await;
-            out_task.abort();
-            err_task.abort();
-            return Err(error).with_context(|| format!("candidate {step}"));
-        }
-        Err(_) => {
-            metrics::counter!("steve_supervisor_process_timeout_total", "step" => step)
-                .increment(1);
-            kill_pgid(pid);
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(CANDIDATE_CHECK_KILL_REAP_TIMEOUT, child.wait()).await;
-            out_task.abort();
-            err_task.abort();
-            return Err(SupervisorError::CandidateCheckTimedOut { step, timeout }.into());
-        }
+    let started = Instant::now();
+    let step_code = step.code();
+    let result = run_bounded_async(
+        command,
+        format!("candidate {step_code}"),
+        BoundedOptions {
+            max_output_bytes: CANDIDATE_CHECK_MAX_OUTPUT_BYTES,
+            ..BoundedOptions::capture(step_code, timeout)
+        },
+    )
+    .await;
+    let outcome = match &result {
+        Ok(_) => SupervisorOutcome::Ok,
+        Err(CommandError::TimedOut { .. }) => SupervisorOutcome::Timeout,
+        Err(CommandError::PipeDrainTimedOut { .. }) => SupervisorOutcome::PipeDrainTimeout,
+        Err(_) => SupervisorOutcome::Error,
     };
-
-    let mut stdout =
-        match tokio::time::timeout(CANDIDATE_CHECK_PIPE_DRAIN_GRACE, &mut out_task).await {
-            Ok(Ok(Ok(bytes))) => Some(bytes),
-            Ok(Ok(Err(e))) => {
-                kill_pgid(pid);
-                err_task.abort();
-                return Err(e).with_context(|| format!("candidate {step} stdout"));
-            }
-            Ok(Err(e)) => {
-                kill_pgid(pid);
-                err_task.abort();
-                return Err(e).with_context(|| format!("candidate {step} stdout task"));
-            }
-            Err(_) => None,
-        };
-    let mut stderr =
-        match tokio::time::timeout(CANDIDATE_CHECK_PIPE_DRAIN_GRACE, &mut err_task).await {
-            Ok(Ok(Ok(bytes))) => Some(bytes),
-            Ok(Ok(Err(e))) => {
-                kill_pgid(pid);
-                out_task.abort();
-                return Err(e).with_context(|| format!("candidate {step} stderr"));
-            }
-            Ok(Err(e)) => {
-                kill_pgid(pid);
-                out_task.abort();
-                return Err(e).with_context(|| format!("candidate {step} stderr task"));
-            }
-            Err(_) => None,
-        };
-
-    if stdout.is_none() || stderr.is_none() {
-        // A grandchild inherited stdout or stderr and prevented EOF. Kill the entire process group
-        // so the pipe closes cleanly instead of hanging the upgrade.
-        kill_pgid(pid);
-        if stdout.is_none() {
-            stdout = match tokio::time::timeout(CANDIDATE_CHECK_KILL_REAP_TIMEOUT, &mut out_task)
-                .await
-            {
-                Ok(Ok(Ok(bytes))) => Some(bytes),
-                _ => {
-                    out_task.abort();
-                    err_task.abort();
-                    return Err(SupervisorError::CandidatePipeDrainTimedOut {
-                        step,
-                        stream: "stdout",
-                        grace: CANDIDATE_CHECK_PIPE_DRAIN_GRACE,
-                    }
-                    .into());
-                }
-            };
+    telemetry::emit(
+        home,
+        Event::Supervisor {
+            step,
+            outcome,
+            elapsed: started.elapsed(),
+        },
+    );
+    result.map_err(|err| match err {
+        CommandError::TimedOut { timeout, .. } => SupervisorError::CandidateCheckTimedOut {
+            step: step_code,
+            timeout,
         }
-        if stderr.is_none() {
-            stderr = match tokio::time::timeout(CANDIDATE_CHECK_KILL_REAP_TIMEOUT, &mut err_task)
-                .await
-            {
-                Ok(Ok(Ok(bytes))) => Some(bytes),
-                _ => {
-                    err_task.abort();
-                    return Err(SupervisorError::CandidatePipeDrainTimedOut {
-                        step,
-                        stream: "stderr",
-                        grace: CANDIDATE_CHECK_PIPE_DRAIN_GRACE,
-                    }
-                    .into());
-                }
-            };
+        .into(),
+        CommandError::PipeDrainTimedOut { stream, grace, .. } => {
+            SupervisorError::CandidatePipeDrainTimedOut {
+                step: step_code,
+                stream,
+                grace,
+            }
+            .into()
         }
-    }
-
-    Ok(std::process::Output {
-        status,
-        stdout: stdout.unwrap_or_default(),
-        stderr: stderr.unwrap_or_default(),
+        other => anyhow::Error::new(other).context(format!("candidate {step_code}")),
     })
 }
 
@@ -301,21 +294,36 @@ pub(super) async fn check_candidate(
     bundle: &Path,
     manifest: &Manifest,
 ) -> Result<()> {
-    check_candidate_with_timeout(cfg, bundle, manifest, CANDIDATE_CHECK_TIMEOUT).await
+    check_candidate_with_timeouts(
+        cfg,
+        bundle,
+        manifest,
+        CANDIDATE_BUILD_INFO_TIMEOUT,
+        CANDIDATE_CHECK_CONFIG_TIMEOUT,
+    )
+    .await
 }
 
-async fn check_candidate_with_timeout(
+async fn check_candidate_with_timeouts(
     cfg: &Config,
     bundle: &Path,
     manifest: &Manifest,
-    timeout: Duration,
+    build_info_timeout: Duration,
+    check_config_timeout: Duration,
 ) -> Result<()> {
     let bin = bundle.join("bin/steve-hub");
-    let mut info = Command::new(&bin);
+    let mut info = candidate_std_command(&bin, None);
     info.arg("--build-info");
     // A candidate that hangs on --build-info fails fast; an older/broken binary that exits
     // quickly without JSON is left to the startup gate after the switch, which still rolls back.
-    let asks = match run_candidate_command("build-info", info, timeout).await {
+    let asks = match run_candidate_command(
+        &cfg.home,
+        SupervisorStep::BuildInfo,
+        info,
+        build_info_timeout,
+    )
+    .await
+    {
         Ok(out) => serde_json::from_slice::<Value>(&out.stdout)
             .is_ok_and(|info| info["check_config"] == true),
         Err(error) if error.is::<SupervisorError>() => return Err(error),
@@ -324,9 +332,15 @@ async fn check_candidate_with_timeout(
     if !asks {
         return Ok(());
     }
-    let mut c = hub_command(cfg, bundle, manifest);
-    c.arg("--check-config").env_remove("STEVE_UPGRADE_ID");
-    let out = run_candidate_command("check-config", c, timeout).await?;
+    let mut c = candidate_std_command(&bin, Some((cfg, bundle, manifest)));
+    c.arg("--check-config");
+    let out = run_candidate_command(
+        &cfg.home,
+        SupervisorStep::CheckConfig,
+        c,
+        check_config_timeout,
+    )
+    .await?;
     if out.status.success() {
         return Ok(());
     }
@@ -362,77 +376,79 @@ fn spawn(cfg: &Config, bundle: &Path, op: Option<&Operation>) -> Result<HubChild
     let group = process.id().context("spawned child has no PID")?;
     Ok(HubChild { process, group })
 }
-/// Observe exit without releasing the leader's PID (and therefore its process-group number).
-fn exited_unreaped(pid: u32, options: i32) -> std::io::Result<bool> {
-    loop {
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                pid as libc::id_t,
-                &mut info,
-                libc::WEXITED | libc::WNOWAIT | options,
-            )
-        };
-        if result == 0 {
-            #[cfg(target_os = "macos")]
-            let observed = info.si_pid;
-            #[cfg(not(target_os = "macos"))]
-            let observed = unsafe { info.si_pid() };
-            return Ok(observed != 0);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
-}
 /// Must run to completion: do not put this future in a cancellable select/timeout context.
 /// The blocking waitid can return only after the child exits and cannot be aborted with the future.
-async fn stop(child: &mut HubChild, grace: Duration) -> Result<()> {
-    let Some(pid) = child.id() else {
-        // A previous wait already released this identity; never signal its cached group.
-        return Ok(());
-    };
-    let group = child.group as i32;
-    if !exited_unreaped(pid, libc::WNOHANG)? {
-        unsafe {
-            libc::kill(-group, libc::SIGTERM);
-        }
-        // Wait in the blocking pool without polling timers or reaping the leader.
-        let mut observed = tokio::task::spawn_blocking(move || exited_unreaped(pid, 0));
-        match tokio::time::timeout(grace, &mut observed).await {
-            Ok(result) => {
-                result??;
+async fn stop(home: Option<&Path>, child: &mut HubChild, grace: Duration) -> Result<()> {
+    let started = Instant::now();
+    let result: Result<()> = async {
+        let Some(pid) = child.id() else {
+            // A previous wait already released this identity; never signal its cached group.
+            return Ok(());
+        };
+        let group = child.group as i32;
+        if !exited_unreaped(pid, true)? {
+            unsafe {
+                libc::kill(-group, libc::SIGTERM);
             }
-            Err(_) => {
-                // An observation error must not turn a cached group number into a signal.
-                exited_unreaped(pid, libc::WNOHANG)?;
-                unsafe {
-                    libc::kill(-group, libc::SIGKILL);
-                    // The unreaped leader still pins its PID even if it left the recorded group.
-                    libc::kill(pid as i32, libc::SIGKILL);
+            // Wait in the blocking pool without polling timers or reaping the leader.
+            let mut observed = tokio::task::spawn_blocking(move || exited_unreaped(pid, false));
+            match tokio::time::timeout(grace, &mut observed).await {
+                Ok(result) => {
+                    result??;
                 }
-                tokio::time::timeout(STOP_KILL_TIMEOUT, &mut observed)
-                    .await
-                    .map_err(|_| SupervisorError::StopTimedOut {
-                        pid,
-                        timeout: STOP_KILL_TIMEOUT,
-                    })???;
+                Err(_) => {
+                    // An observation error must not turn a cached group number into a signal.
+                    exited_unreaped(pid, true)?;
+                    unsafe {
+                        libc::kill(-group, libc::SIGKILL);
+                        // The unreaped leader still pins its PID even if it left the recorded group.
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                    tokio::time::timeout(STOP_KILL_TIMEOUT, &mut observed)
+                        .await
+                        .map_err(|_| SupervisorError::StopTimedOut {
+                            pid,
+                            timeout: STOP_KILL_TIMEOUT,
+                        })???;
+                }
             }
         }
+        // The live or zombie leader still pins the group. Clear descendants before reaping it.
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+        tokio::time::timeout(STOP_KILL_TIMEOUT, child.wait())
+            .await
+            .map_err(|_| SupervisorError::StopTimedOut {
+                pid,
+                timeout: STOP_KILL_TIMEOUT,
+            })??;
+        Ok(())
     }
-    // The live or zombie leader still pins the group. Clear descendants before reaping it.
-    unsafe {
-        libc::kill(-group, libc::SIGKILL);
+    .await;
+    if let Some(home) = home {
+        let outcome = match &result {
+            Ok(()) => SupervisorOutcome::Ok,
+            Err(err)
+                if matches!(
+                    err.downcast_ref::<SupervisorError>(),
+                    Some(SupervisorError::StopTimedOut { .. })
+                ) =>
+            {
+                SupervisorOutcome::Timeout
+            }
+            Err(_) => SupervisorOutcome::Error,
+        };
+        telemetry::emit(
+            home,
+            Event::Supervisor {
+                step: SupervisorStep::Stop,
+                outcome,
+                elapsed: started.elapsed(),
+            },
+        );
     }
-    tokio::time::timeout(STOP_KILL_TIMEOUT, child.wait())
-        .await
-        .map_err(|_| SupervisorError::StopTimedOut {
-            pid,
-            timeout: STOP_KILL_TIMEOUT,
-        })??;
-    Ok(())
+    result
 }
 
 fn saved_snapshot(op: &Operation) -> Result<&crate::backup::SnapshotId> {
@@ -548,7 +564,7 @@ async fn apply(
         ));
     }
     u.phase(op, "stopping", None)?;
-    stop(child, STOP_GRACE).await?;
+    stop(Some(&cfg.home), child, STOP_GRACE).await?;
     u.phase(op, "backing_up", None)?;
     let copied = (|| {
         let _instance = super::instance_lock(cfg)?;
@@ -602,14 +618,14 @@ async fn rollback(
     error: String,
 ) -> Result<()> {
     u.phase(op, "rolling_back", Some(error.clone()))?;
-    stop(child, STOP_GRACE).await?;
+    stop(Some(&cfg.home), child, STOP_GRACE).await?;
     {
         let _instance = super::instance_lock(cfg)?;
         crate::backup::restore_database_within(
             &cfg.home,
             &cfg.db_path(),
             saved_snapshot(op)?,
-            crate::backup::UPGRADE_BUDGET,
+            crate::backup::ROLLBACK_RESTORE_BUDGET,
         )?;
     }
     let previous = PathBuf::from(
@@ -660,7 +676,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     &cfg.home,
                     &cfg.db_path(),
                     saved_snapshot(&op)?,
-                    crate::backup::UPGRADE_BUDGET,
+                    crate::backup::ROLLBACK_RESTORE_BUDGET,
                 )?;
                 switch(&cfg.home, &previous)?;
                 u.phase(
@@ -721,7 +737,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut live = Liveness::default();
     let mut probed = tokio::time::Instant::now();
     loop {
-        tokio::select! {_ = term.recv()=>{stop(&mut child, STOP_GRACE).await?;return Ok(())},_ = tokio::signal::ctrl_c()=>{stop(&mut child, STOP_GRACE).await?;return Ok(())},_ = tokio::time::sleep(SUPERVISOR_TICK_INTERVAL)=>{}}
+        tokio::select! {_ = term.recv()=>{stop(Some(&cfg.home), &mut child, STOP_GRACE).await?;return Ok(())},_ = tokio::signal::ctrl_c()=>{stop(Some(&cfg.home), &mut child, STOP_GRACE).await?;return Ok(())},_ = tokio::time::sleep(SUPERVISOR_TICK_INTERVAL)=>{}}
         if let Some(mut op) = u.active()?
             && op.phase == "ready"
             && let Err(e) = apply(&cfg, &u, &client, &mut child, &mut op).await
@@ -752,7 +768,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 tracing::error!(
                     "Hub did not answer /healthz {LIVENESS_MISSES} times in a row; stopping it"
                 );
-                stop(&mut child, STOP_GRACE).await?;
+                stop(Some(&cfg.home), &mut child, STOP_GRACE).await?;
                 bail!("Hub stopped answering; supervisor must be restarted by service manager")
             }
         }
@@ -814,11 +830,13 @@ pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -
     {
         bail!("candidate database schema incompatible with manifest")
     }
-    tokio::time::timeout(
-        VAULT_PROBE_TIMEOUT,
+    let probes = store.read(|r| steve_store::vault_keys::upgrade_probes(r))?;
+    drop(store);
+    let probe_timeout = vault_probe_timeout(probes.len());
+    let vault_started = Instant::now();
+    let vault_result = tokio::time::timeout(
+        probe_timeout,
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let probes = store.read(|r| steve_store::vault_keys::upgrade_probes(r))?;
-            drop(store);
             for probe in probes {
                 let key = keys
                     .get(&probe.keychain_account)
@@ -841,8 +859,21 @@ pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -
             Ok(())
         }),
     )
-    .await
-    .context("vault probe timeout")???;
+    .await;
+    let vault_outcome = match &vault_result {
+        Ok(Ok(Ok(()))) => SupervisorOutcome::Ok,
+        Err(_) => SupervisorOutcome::Timeout,
+        Ok(_) => SupervisorOutcome::Error,
+    };
+    telemetry::emit(
+        &cfg.home,
+        Event::Supervisor {
+            step: SupervisorStep::VaultProbe,
+            outcome: vault_outcome,
+            elapsed: vault_started.elapsed(),
+        },
+    );
+    vault_result.context("vault probe timeout")???;
     if crate::web::web_version(cfg) != cfg.version || !cfg.web_dir.join("index.html").is_file() {
         bail!("candidate Web version missing or incompatible")
     }
@@ -893,11 +924,20 @@ pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -
         });
     }
     drop(rx);
+    let gate_started = Instant::now();
     let gate_deadline = tokio::time::Instant::now() + steve_install::migration::TOTAL_TIMEOUT;
     loop {
         if tokio::time::Instant::now() >= gate_deadline {
             let _ = done.send(true);
             servers.abort_all();
+            telemetry::emit(
+                &cfg.home,
+                Event::Supervisor {
+                    step: SupervisorStep::StartupGate,
+                    outcome: SupervisorOutcome::Timeout,
+                    elapsed: gate_started.elapsed(),
+                },
+            );
             return Err(SupervisorError::StartupGateTimedOut {
                 timeout: steve_install::migration::TOTAL_TIMEOUT,
             }
@@ -907,6 +947,14 @@ pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -
         if unsafe { libc::getppid() } != supervisor_pid {
             let _ = done.send(true);
             servers.abort_all();
+            telemetry::emit(
+                &cfg.home,
+                Event::Supervisor {
+                    step: SupervisorStep::StartupGate,
+                    outcome: SupervisorOutcome::Error,
+                    elapsed: gate_started.elapsed(),
+                },
+            );
             bail!("upgrade supervisor disappeared before commit")
         }
         let op = u.operation(&id)?;
@@ -916,6 +964,14 @@ pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -
         if !matches!(op.phase.as_str(), "restarting" | "verifying") {
             let _ = done.send(true);
             servers.abort_all();
+            telemetry::emit(
+                &cfg.home,
+                Event::Supervisor {
+                    step: SupervisorStep::StartupGate,
+                    outcome: SupervisorOutcome::Error,
+                    elapsed: gate_started.elapsed(),
+                },
+            );
             bail!("upgrade gate aborted: {}", op.phase)
         }
     }
@@ -937,6 +993,14 @@ pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -
             servers.abort_all();
         }
     }
+    telemetry::emit(
+        &cfg.home,
+        Event::Supervisor {
+            step: SupervisorStep::StartupGate,
+            outcome: SupervisorOutcome::Ok,
+            elapsed: gate_started.elapsed(),
+        },
+    );
     Ok(())
 }
 
@@ -1014,18 +1078,16 @@ server.serve_forever()
             .unwrap();
         let pid = child.id().unwrap();
         steve_runtime::testkit::eventually_sync("leader exited without reaping", || {
-            exited_unreaped(pid, libc::WNOHANG).unwrap()
+            exited_unreaped(pid, true).unwrap()
         })
         .await;
         assert!(
-            exited_unreaped(pid, libc::WNOHANG).unwrap(),
+            exited_unreaped(pid, true).unwrap(),
             "a second observation still sees it"
         );
         assert_eq!(child.wait().await.unwrap().code(), Some(23));
         assert_eq!(
-            exited_unreaped(pid, libc::WNOHANG)
-                .unwrap_err()
-                .raw_os_error(),
+            exited_unreaped(pid, true).unwrap_err().raw_os_error(),
             Some(libc::ECHILD)
         );
     }
@@ -1049,12 +1111,14 @@ server.serve_forever()
         let group = process.id().unwrap();
         let mut child = HubChild { process, group };
         steve_runtime::testkit::eventually_sync("leader exited with a live descendant", || {
-            ready.exists() && exited_unreaped(group, libc::WNOHANG).unwrap()
+            ready.exists() && exited_unreaped(group, true).unwrap()
         })
         .await;
         let descendant: i32 = fs::read_to_string(ready).unwrap().parse().unwrap();
         assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
-        stop(&mut child, Duration::from_millis(50)).await.unwrap();
+        stop(None, &mut child, Duration::from_millis(50))
+            .await
+            .unwrap();
         assert!(child.id().is_none());
         steve_runtime::testkit::eventually_sync(
             "the old group and its descendant are gone",
@@ -1063,7 +1127,9 @@ server.serve_forever()
         .await;
         let mut canary = Command::new("/bin/sleep").arg("600").spawn().unwrap();
         child.group = canary.id().unwrap();
-        stop(&mut child, Duration::from_millis(50)).await.unwrap();
+        stop(None, &mut child, Duration::from_millis(50))
+            .await
+            .unwrap();
         assert!(canary.try_wait().unwrap().is_none());
         canary.kill().await.unwrap();
     }
@@ -1091,7 +1157,7 @@ server.serve_forever()
         // Test-only deadline: on failure the guarded children drop and release blocking waitid.
         tokio::time::timeout(
             steve_runtime::testkit::EVENTUALLY,
-            stop(&mut child, Duration::from_millis(50)),
+            stop(None, &mut child, Duration::from_millis(50)),
         )
         .await
         .expect("forced shutdown must finish before the shared test deadline")
@@ -1256,14 +1322,14 @@ server.serve_forever()
         note("wait_health_old");
         let up = wait_health(&cfg, &client, &mut child, "0.1.0", None).await;
         if taken() {
-            let _ = stop(&mut child, STOP_GRACE).await;
+            let _ = stop(None, &mut child, STOP_GRACE).await;
             return false;
         }
         up.unwrap();
         note("apply");
         let applied = apply(&cfg, &u, &client, &mut child, &mut op).await;
         if taken() {
-            let _ = stop(&mut child, STOP_GRACE).await;
+            let _ = stop(None, &mut child, STOP_GRACE).await;
             return false;
         }
         applied.unwrap();
@@ -1278,7 +1344,7 @@ server.serve_forever()
             "before-upgrade"
         );
         note("stop_final");
-        stop(&mut child, STOP_GRACE).await.unwrap();
+        stop(None, &mut child, STOP_GRACE).await.unwrap();
         true
     }
 
@@ -1305,15 +1371,20 @@ server.serve_forever()
         .unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         let started = std::time::Instant::now();
-        let err =
-            check_candidate_with_timeout(&cfg, &dir, &fixture("0.2.0"), Duration::from_millis(250))
-                .await
-                .expect_err("hanging candidate --build-info must time out");
+        let err = check_candidate_with_timeouts(
+            &cfg,
+            &dir,
+            &fixture("0.2.0"),
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+        )
+        .await
+        .expect_err("hanging candidate --build-info must time out");
         assert!(
             matches!(
                 err.downcast_ref::<SupervisorError>(),
                 Some(SupervisorError::CandidateCheckTimedOut {
-                    step: "build-info",
+                    step: "build_info",
                     ..
                 })
             ),
@@ -1354,9 +1425,15 @@ server.serve_forever()
         .unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         let started = std::time::Instant::now();
-        check_candidate_with_timeout(&cfg, &dir, &fixture("0.2.0"), Duration::from_secs(5))
-            .await
-            .expect("pipe-holding grandchild must be killed without hanging check_candidate");
+        check_candidate_with_timeouts(
+            &cfg,
+            &dir,
+            &fixture("0.2.0"),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("pipe-holding grandchild must be killed without hanging check_candidate");
         assert!(started.elapsed() < Duration::from_secs(5));
         let pid: libc::pid_t = fs::read_to_string(&pid_file)
             .unwrap()
@@ -1419,5 +1496,13 @@ server.serve_forever()
             l.probe(false),
             "hung after {LIVENESS_MISSES} misses in a row"
         );
+    }
+
+    #[test]
+    fn vault_probe_timeout_leaves_headroom_and_scales_with_workspaces() {
+        assert!(vault_probe_timeout(0) > KEYHELPER_TIMEOUT);
+        assert!(vault_probe_timeout(1) > KEYHELPER_TIMEOUT);
+        assert!(vault_probe_timeout(3) > KEYHELPER_TIMEOUT * 3);
+        assert_eq!(vault_probe_timeout(50), VAULT_PROBE_MAX_TIMEOUT);
     }
 }

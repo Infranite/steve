@@ -11,14 +11,21 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-/// Upper bounds for native maintenance / signing helper subprocesses.
+/// Upper bound for local `steve-hub --build-info` metadata queries (no network; allows cold start).
 const BUILD_INFO_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound for `codesign --verify --strict` / `-dv` hashing the binary on disk (~100 MiB).
 const CODESIGN_VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for `codesign --force --sign` hashing and writing Mach-O signatures via keychain.
 const CODESIGN_SIGN_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upper bound for local `security` CLI keychain operations (`unlock`, `import`, `find-identity`).
 const SECURITY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for RSA-3072 self-signed certificate generation during first-install setup.
 const OPENSSL_GENERATE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upper bound for `openssl x509 -fingerprint` over a single local PEM certificate.
 const OPENSSL_FINGERPRINT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound for `openssl pkcs12 -export` bundling key and certificate into a temporary `.p12`.
 const OPENSSL_EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for `steve-hub --local-release provision-signing` storing the signing password.
 const PROVISION_SIGNING_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -187,16 +194,16 @@ pub(crate) fn atomic_json(path: &Path, value: &Value) -> Result<()> {
 
 pub(crate) fn output(command: &mut Command, timeout: Duration) -> Result<Output> {
     let program = command.get_program().to_string_lossy().into_owned();
-    crate::common::run_bounded(
+    steve_runtime::process::run_bounded(
         command,
         &program,
-        crate::common::BoundedOptions::capture(timeout),
+        steve_runtime::process::BoundedOptions::capture("signing", timeout),
     )
     .map_err(|err| match err {
-        crate::common::CommandError::TimedOut { .. } => {
+        steve_runtime::process::CommandError::TimedOut { .. } => {
             anyhow::anyhow!("native maintenance command timed out")
         }
-        crate::common::CommandError::Spawn { source, .. } => {
+        steve_runtime::process::CommandError::Spawn { source, .. } => {
             anyhow::Error::new(source).context("start native maintenance command")
         }
         other => anyhow::Error::new(other),
@@ -441,17 +448,17 @@ fn run_security_stdin(
     let mut command = Command::new(security);
     command.arg("-i");
     let program = security.to_string_lossy();
-    let result = crate::common::run_bounded(
+    let result = steve_runtime::process::run_bounded(
         &mut command,
         &program,
-        crate::common::BoundedOptions {
-            stdin: crate::common::BoundedStdin::Bytes(input.as_bytes()),
-            ..crate::common::BoundedOptions::silent(timeout)
+        steve_runtime::process::BoundedOptions {
+            stdin: steve_runtime::process::BoundedStdin::Bytes(input.as_bytes()),
+            ..steve_runtime::process::BoundedOptions::silent("security_stdin", timeout)
         },
     )
     .map_err(|err| match err {
-        crate::common::CommandError::TimedOut { .. } => anyhow::anyhow!("{timeout_msg}"),
-        crate::common::CommandError::StdinConfigure { .. } => {
+        steve_runtime::process::CommandError::TimedOut { .. } => anyhow::anyhow!("{timeout_msg}"),
+        steve_runtime::process::CommandError::StdinConfigure { .. } => {
             anyhow::anyhow!("could not configure keychain input")
         }
         other => anyhow::Error::new(other),
@@ -600,12 +607,15 @@ fn provision_signing_password(home: &Path, candidate: &Path, staging: &Path) -> 
         .arg("provision-signing")
         .arg(home)
         .stdin(File::open(staging)?);
-    let result = crate::common::run_bounded(
+    let result = steve_runtime::process::run_bounded(
         &mut command,
         "steve-hub",
-        crate::common::BoundedOptions {
-            stdin: crate::common::BoundedStdin::Preserve,
-            ..crate::common::BoundedOptions::capture(PROVISION_SIGNING_TIMEOUT)
+        steve_runtime::process::BoundedOptions {
+            stdin: steve_runtime::process::BoundedStdin::Preserve,
+            ..steve_runtime::process::BoundedOptions::capture(
+                "provision_signing",
+                PROVISION_SIGNING_TIMEOUT,
+            )
         },
     )?;
     ensure!(
