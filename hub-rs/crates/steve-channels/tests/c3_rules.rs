@@ -123,6 +123,10 @@ async fn new_persona(h: &H, name: &str, bot: &str) -> String {
 }
 
 async fn setup() -> H {
+    setup_with_groups(true).await
+}
+
+async fn setup_with_groups(preseed_bot_groups: bool) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
     let env = TestEnv::new(|r| {
@@ -233,6 +237,38 @@ async fn setup() -> H {
         &h.help.clone(),
         json!([{"when": {"kind": "dm"}, "act": "reply"}]),
     );
+    // Pre-configure active bot groups for rule-evaluation tests (new bot groups default to silent
+    // record until enabled; #213).
+    if preseed_bot_groups {
+        let now = h.ch.now();
+        for (conn, ext, name, external) in [
+            (&h.oncall, "C_OPS", "运维群", false),
+            (&h.pm, "C_REQ", "产品需求群", false),
+            (&h.pm, "C_ACME", "Acme 客户群", true),
+        ] {
+            h.env
+                .store()
+                .write(|tx| {
+                    spaces::locate_or_create(
+                        tx,
+                        &spaces::NewSpace {
+                            ws: WS,
+                            system_id: FakeChannel::SYSTEM,
+                            connection_id: conn,
+                            kind: SpaceKind::Group,
+                            external_id: ext,
+                            name,
+                            member_count: 0,
+                            has_external: external,
+                            muted: false,
+                            now,
+                            platform: Some(FakeChannel::SYSTEM),
+                        },
+                    )
+                })
+                .expect("activate bot group");
+        }
+    }
     // the gateway: a fixed judgement for “是需求”; “需要动手操作” is answered per test
     h.env.gateway.script(
         format!("{INTENT_START}\n条件：是需求"),
@@ -936,7 +972,7 @@ async fn to_flow_hands_messages_to_the_flow_and_back_restores_the_rules() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_seen_through_both_connections_is_handled_once() {
-    let h = setup().await;
+    let h = setup_with_groups(false).await;
     let (me, bot) = (h.me.clone(), h.oncall.clone());
 
     // your poller reads it first (you are @-mentioned): handled by your rules

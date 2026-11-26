@@ -8,6 +8,11 @@ export function openable(url?: string | null): string | undefined {
   try { return new URL(url).protocol === "https:" ? url : undefined } catch { return undefined }
 }
 
+/** The hash route that opens a channel space's conversation directly (`#/c/chan:<id>`). */
+export function channelConversationHref(spaceId: string): string {
+  return "#/c/" + encodeURIComponent("chan:" + spaceId)
+}
+
 /** follows `url` as a click on a link would, in a new tab (where a browser stays behind the app it opens) */
 export function openInApp(url: string, doc: Pick<Document, "createElement"> = document) {
   const href = openable(url)

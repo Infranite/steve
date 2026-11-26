@@ -304,6 +304,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/144.sql"),
     // 145: file-as-truth memory architecture (source role/write_mode, sidecar memory_entries, evidence, observations, tombstones, revisions, SKILL.md proposals).
     include_str!("../migrations/145.sql"),
+    // 146: incoming channel reactions (#277), durable reply-to-source links, burst grouping (#268), and [AI] mark preference.
+    include_str!("../migrations/146.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
@@ -540,20 +542,26 @@ pub(crate) fn open_writer(path: &Path, observer: Option<MigrationObserver>) -> R
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    let mode: String = c.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        tracing::warn!(mode, "journal_mode WAL not accepted");
+    let current_mode: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+    if !current_mode.eq_ignore_ascii_case("wal") {
+        let mode: String = c.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            tracing::warn!(mode, "journal_mode WAL not accepted");
+        }
     }
     pragmas(&c)?;
     c.pragma_update(None, "cache_size", -32_768)?;
     c.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
-    migrate_observed(&c, observer)?;
-    optimize(&c, true)?;
+    let migrated = migrate_observed(&c, observer)?;
+    if migrated {
+        optimize(&c, true)?;
+    }
     Ok(c)
 }
 
-/// The db.ts runner verbatim: read the first `schema_version` row (0 if none), run the missing migrations
-/// and record the new version, all in one transaction. Like TS, the UPDATE runs on every open.
+/// Read `schema_version` (0 if none), run missing migrations and record the new version in one
+/// transaction. When the database is already at `SCHEMA_VERSION` with a compatible `schema_compat`
+/// stamp, return without opening any write transaction.
 ///
 /// A database is opened only when this build knows the schema recorded in `schema_compat` (the newest
 /// any build that opened it knew): one a newer build migrated is refused before anything is written, so an
@@ -565,7 +573,7 @@ pub(crate) fn open_writer(path: &Path, observer: Option<MigrationObserver>) -> R
 /// tables reference; `foreign_key_check` must then be empty before the transaction commits. The
 /// pragma cannot change inside a transaction, so it is switched around it and always restored.
 pub fn migrate(c: &Connection) -> Result<()> {
-    migrate_observed(c, None)
+    migrate_observed(c, None).map(|_| ())
 }
 
 /// Apply pending migrations to an existing offline database, such as a scratch backup copy.
@@ -634,11 +642,14 @@ impl Drop for MigrationTracker<'_> {
     }
 }
 
-fn migrate_observed(c: &Connection, observer: Option<MigrationObserver>) -> Result<()> {
-    let Compat {
-        schema: cur,
-        min_reader: needs,
-    } = compat(c)?;
+/// Returns `true` when schema tables or migrations were written, `false` when already up to date.
+fn migrate_observed(c: &Connection, observer: Option<MigrationObserver>) -> Result<bool> {
+    let (cur, stamped) = read_schema(c)?;
+    let needs = match stamped {
+        Some(n) => n,
+        None if cur == 0 => 0,
+        None => cur,
+    };
     if needs > SCHEMA_VERSION {
         return Err(StoreError::Incompatible {
             schema: cur,
@@ -646,16 +657,28 @@ fn migrate_observed(c: &Connection, observer: Option<MigrationObserver>) -> Resu
             ours: SCHEMA_VERSION,
         });
     }
-    c.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS schema_compat (min_reader INTEGER NOT NULL);",
-    )?;
     if cur > SCHEMA_VERSION {
         tracing::warn!(
             "database schema v{cur} is newer than this Hub (v{SCHEMA_VERSION}) but asks only for v{needs}; opening it unchanged"
         );
-        return Ok(());
+        return Ok(false);
     }
+    // Already at the current schema with schema_compat stamped: zero write transactions on startup.
+    if cur == SCHEMA_VERSION && stamped.is_some() {
+        if let Some(observer) = observer {
+            observer(MigrationProgress {
+                migration: SCHEMA_VERSION as u32,
+                target: SCHEMA_VERSION as u32,
+                vm_steps: 0,
+                complete: true,
+            });
+        }
+        return Ok(false);
+    }
+    c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS schema_compat (min_reader INTEGER NOT NULL);",
+    )?;
     let tracker = observer.map(|o| MigrationTracker::new(c, o)).transpose()?;
     if let Some(progress) = &tracker {
         progress.report((cur + 1).clamp(1, SCHEMA_VERSION) as u32, false);
@@ -665,7 +688,7 @@ fn migrate_observed(c: &Connection, observer: Option<MigrationObserver>) -> Resu
         if let Some(progress) = &tracker {
             progress.report(SCHEMA_VERSION as u32, true);
         }
-        return Ok(());
+        return Ok(true);
     }
     let fks: i64 = c.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
     c.pragma_update(None, "foreign_keys", "OFF")?;
@@ -677,7 +700,7 @@ fn migrate_observed(c: &Connection, observer: Option<MigrationObserver>) -> Resu
         progress.report(SCHEMA_VERSION as u32, true);
     }
     tracing::info!(from = cur, to = SCHEMA_VERSION, "migrated database");
-    Ok(())
+    Ok(true)
 }
 
 fn add_reasoning_effort(c: &Connection) -> Result<()> {

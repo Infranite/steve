@@ -460,12 +460,18 @@ pub(super) fn reap(u: &Updates, op: &mut Operation) -> Result<()> {
     let current = fs::canonicalize(u.home.join("current")).ok();
     let switched = current.is_some()
         && fresh.target.as_ref().and_then(|t| fs::canonicalize(t).ok()) == current;
-    let error = if switched {
-        steve_i18n::t!("hub.upgrade.local.gone_switched", log = log.as_str())
+    if switched {
+        u.fail_committed(
+            &mut fresh,
+            steve_i18n::t!("hub.upgrade.local.gone_switched", log = log.as_str()),
+        )?;
     } else {
-        steve_i18n::t!("hub.upgrade.local.gone", log = log.as_str())
-    };
-    u.phase(&mut fresh, "failed", Some(error))?;
+        u.phase(
+            &mut fresh,
+            "failed",
+            Some(steve_i18n::t!("hub.upgrade.local.gone", log = log.as_str())),
+        )?;
+    }
     *op = fresh;
     Ok(())
 }
@@ -640,8 +646,16 @@ fn finish_deploy(u: &Updates, op: &mut Operation, spec: &Spec, code: Option<i32>
         *op = fresh;
         return Ok(());
     }
-    // the deploy did not write its result: what its exit code says (ops/local-release.py's docstring)
+    // The deploy exited before writing a terminal journal phase: map its exit code.
     let unchanged = matches!(fresh.phase.as_str(), "staging" | "ready");
+    if code == Some(3) {
+        u.fail_committed(
+            &mut fresh,
+            steve_i18n::t!("hub.upgrade.local.committed_failed", log = log.as_str()),
+        )?;
+        *op = fresh;
+        return Ok(());
+    }
     let (phase, error) = match code {
         Some(0) => ("succeeded", None),
         Some(1) if unchanged => (
@@ -655,13 +669,6 @@ fn finish_deploy(u: &Updates, op: &mut Operation, spec: &Spec, code: Option<i32>
             "rolled_back",
             Some(steve_i18n::t!(
                 "hub.upgrade.local.rolled_back",
-                log = log.as_str()
-            )),
-        ),
-        Some(3) => (
-            "failed",
-            Some(steve_i18n::t!(
-                "hub.upgrade.local.committed_failed",
                 log = log.as_str()
             )),
         ),

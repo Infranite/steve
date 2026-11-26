@@ -50,6 +50,8 @@ pub struct OutTarget {
     pub persona_id: Option<String>,
     /// The inbound `cm_…` this answers, if any.
     pub source_message_id: Option<String>,
+    /// Shared burst group identifier when one burst produces multiple topic-split replies (#268).
+    pub burst_id: Option<String>,
 }
 
 impl OutTarget {
@@ -65,6 +67,7 @@ impl OutTarget {
             thread_key: plan.thread_key.clone(),
             persona_id: None,
             source_message_id: Some(plan.message_id.clone()),
+            burst_id: None,
         }
     }
 }
@@ -151,6 +154,16 @@ impl Outcome {
     }
 }
 
+/// One reply within a topic-split burst response (#268).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TopicReply {
+    pub topic: String,
+    pub text: String,
+    pub needs_approval: bool,
+    pub why: String,
+}
+
 /// What the generator said about its text (empty for fixed texts).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -196,6 +209,10 @@ pub struct Generation {
     /// (`chan_messages.composed`) for the check that runs after it is written.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub style_samples: Vec<String>,
+    /// Separate topic replies when a single burst genuinely covers distinct topics (#268).
+    /// Empty (the default) means send a single reply (`Reply::text`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replies: Vec<TopicReply>,
 }
 
 /// One message to say.
@@ -417,6 +434,7 @@ mod tests {
                 thread_key: None,
                 persona_id: None,
                 source_message_id: None,
+                burst_id: None,
             },
             text: "好".into(),
             purpose,
@@ -490,6 +508,7 @@ mod tests {
             summary: "A 问周四能不能开会".into(),
             draft: "周四可以".into(),
             style_samples: vec!["稍等".into()],
+            replies: Vec::new(),
         };
         let v = serde_json::to_value(&g).unwrap();
         assert_eq!(v["outcome"], "ask_owner");

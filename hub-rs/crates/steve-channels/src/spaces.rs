@@ -7,22 +7,27 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
-use steve_store::base::{DecisionKind, Viewer};
+use steve_store::W;
+use steve_store::base::Viewer;
 use steve_store::channel_spaces::{
     account_settings::{self, SettingsPatch},
     preferences::{self as prefs, Preference},
     registration::{self, MAX_IDENTITIES},
 };
-use steve_store::{NewDecision, W};
 
 use crate::ChannelResult;
 use crate::channel::SpaceKind;
 
-/// `subject_type` of the “新群” decision (C6 registers its handler).
+/// `subject_type` of space rule-suggestion decisions (`space_decisions`).
 pub const SUBJECT_SPACE: &str = "space";
-/// Its options: `open` jumps to the space page, `mute` silences it, `quiet` (不提醒) records it
-/// without ever asking you, `block` (屏蔽) stops processing it.
-pub const NEW_SPACE_OPTIONS: [&str; 4] = ["open", "mute", "quiet", "block"];
+/// Newly discovered bot groups default to silent record (`muted = true`) instead of pushing a
+/// 4-choice ask card into Inbox (#213). Users can change the rule with one click on the space page.
+pub const NEW_GROUP_DEFAULT_MUTED: bool = true;
+
+/// Whether a newly discovered space defaults to silent record (`muted = true`).
+pub fn default_new_space_muted(mode: Mode, kind: SpaceKind) -> bool {
+    NEW_GROUP_DEFAULT_MUTED && mode == Mode::Bot && kind.is_group()
+}
 
 /// Your attention to a space (migration 019 `space_prefs.attention`): whether
 /// its messages may disturb you. Independent of Steve's role there (静默 = `muted` = role 只记录).
@@ -525,13 +530,15 @@ pub struct NewSpace<'a> {
     pub name: &'a str,
     pub member_count: i64,
     pub has_external: bool,
+    pub muted: bool,
     pub now: i64,
     /// The platform of the connection's chats (`Channels::chat_platform`).
     pub platform: Option<&'a str>,
 }
 
-/// Finds or creates the space and, when new, its settings (`configured=0`). Returns the row and
-/// whether it was created now. Two deliveries racing for the same space create it once.
+/// Finds or creates the space and, when new, its settings (`configured=0`, `muted=n.muted`).
+/// Returns the row and whether it was created now. Two deliveries racing for the same space create
+/// it once.
 pub fn locate_or_create(
     w: &mut steve_store::W<'_>,
     n: &NewSpace,
@@ -557,54 +564,17 @@ pub fn locate_or_create(
             member_count: n.member_count,
             has_external: n.has_external,
             disclosure: default_disclosure(n.kind, n.has_external),
+            muted: n.muted,
             platform: n.platform,
             now: n.now,
         },
     )?;
+    if created && n.muted {
+        metrics::counter!("steve_channel_new_group_silent_total").increment(1);
+    }
     let space = find_as(w, n.ws, n.connection_id, n.external_id, n.platform)?
         .ok_or_else(|| ApiError::not_found("空间"))?;
     Ok((space, created))
-}
-
-/// Opens the “新群” decision for a space a bot account just found itself in.
-pub fn open_new_space_decision(
-    w: &mut W<'_>,
-    ws: &str,
-    space: &SpaceRow,
-    account_name: &str,
-) -> ChannelResult<String> {
-    let settled = steve_store::decision_repo::settled_count(
-        w,
-        ws,
-        SUBJECT_SPACE,
-        &space.id,
-        DecisionKind::Ask.code(),
-    )?;
-    let mut decisions = steve_store::DecisionRows(w);
-    if let Some(d) = decisions.open_for(ws, SUBJECT_SPACE, &space.id)? {
-        return Ok(d.id);
-    }
-    let d = decisions.open(&NewDecision {
-        workspace_id: ws.into(),
-        kind: DecisionKind::Ask.code().into(),
-        subject_type: SUBJECT_SPACE.into(),
-        subject_id: space.id.clone(),
-        item_id: None,
-        session_id: None,
-        question: format!(
-            "{account_name}被拉进了「{}」，要设置它在这里做什么吗？",
-            space.name
-        ),
-        draft: None,
-        options: Some(NEW_SPACE_OPTIONS.map(String::from).to_vec()),
-        requested_by: "steve".into(),
-        question_template: None,
-        source: Some(steve_store::DecisionSource::Revision {
-            revision: format!("space:{settled}"),
-        }),
-        wait: None,
-    })?;
-    Ok(d.id)
 }
 
 /// SSE `{type:"space", id, ws}`.
@@ -631,6 +601,27 @@ pub struct SpaceSettings {
     pub reply_as_you: ReplyAsYou,
     /// What a bot's message here becomes on your own account (097).
     pub bot_notices: BotNotices,
+    /// Per-space override of the `[AI]` prefix preference (`None` = follow account setting; 140).
+    pub ai_mark: Option<bool>,
+}
+
+/// Resolves whether outgoing replies sent on `Mode::Own` in `space` carry the `[AI]` prefix:
+/// space override (`space_prefs.ai_mark`), else account setting (`channel_settings.ai_mark`,
+/// default `true`). Always `false` for `Mode::Bot`.
+pub fn effective_ai_mark(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    space: &str,
+    conn: &str,
+) -> ChannelResult<bool> {
+    let (_, mode) = crate::bindings::connection_account(r, ws, conn)?;
+    if mode != Mode::Own {
+        return Ok(false);
+    }
+    if let Some(override_v) = prefs::settings(r, space)?.and_then(|s| s.ai_mark) {
+        return Ok(override_v);
+    }
+    Ok(channel_settings(r, ws, conn)?.map_or(true, |s| s.ai_mark))
 }
 
 pub fn settings(r: &mut impl steve_store::Read, space: &str) -> ChannelResult<SpaceSettings> {
@@ -661,6 +652,7 @@ pub fn settings(r: &mut impl steve_store::Read, space: &str) -> ChannelResult<Sp
             .as_deref()
             .and_then(BotNotices::parse)
             .unwrap_or_default(),
+        ai_mark: row.ai_mark,
     })
 }
 
@@ -689,6 +681,7 @@ pub fn settings_or_defaults(
             attention: Attention::Realtime,
             reply_as_you: ReplyAsYou::Draft,
             bot_notices: BotNotices::Auto,
+            ai_mark: None,
         }),
         r => r,
     }
@@ -733,6 +726,10 @@ pub struct SpaceOut {
     pub reply_as_you: ReplyAsYou,
     /// What a bot's message here becomes on your own account: `auto|item|record`.
     pub bot_notices: BotNotices,
+    /// Per-space `[AI]` mark override (`null` = follow account setting).
+    pub ai_mark: Option<bool>,
+    /// Effective `[AI]` mark for replies sent from this space.
+    pub effective_ai_mark: bool,
     /// Steve's role here (derived from the voice's rules and `muted`).
     pub role: Role,
     /// The identity that speaks for Steve here, `null` when none sees it any more.
@@ -751,9 +748,11 @@ pub struct SpaceOut {
     /// Settings that are on but do not apply here, and why (屏蔽 > `/bot` >
     /// 不提醒 > role rules), so the page shows it next to the setting.
     pub conflicts: Vec<Conflict>,
-    /// The link that opens the chat in its platform's own client (“在飞书中打开”); `null` when its
-    /// platform has none ([`crate::open_link`]).
+    /// The link that opens the chat in its platform's own client; `null` when its platform has
+    /// none ([`crate::open_link`]).
     pub open_url: Option<String>,
+    /// Platform id owning [`Self::open_url`] (e.g. `feishu`).
+    pub open_provider: Option<String>,
 }
 
 /// [`SpaceOut::voice`].
@@ -1145,6 +1144,10 @@ pub fn out(r: &mut impl steve_store::Read, s: &SpaceRow) -> ChannelResult<SpaceO
         Some(SpaceKind::Channel) => "topic_group".to_string(),
         _ => s.kind.clone(),
     };
+    let account_ai_mark = account.as_ref().map_or(true, |x| x.ai_mark);
+    let effective_ai_mark = voice.as_ref().is_some_and(|v| v.mode == Mode::Own)
+        && set.ai_mark.unwrap_or(account_ai_mark);
+    let open = crate::open_link::space_link(r, s)?;
     Ok(SpaceOut {
         id: s.id.clone(),
         connection_id: s.connection_id.clone(),
@@ -1170,6 +1173,8 @@ pub fn out(r: &mut impl steve_store::Read, s: &SpaceRow) -> ChannelResult<SpaceO
         attention: set.attention,
         reply_as_you: set.reply_as_you,
         bot_notices: set.bot_notices,
+        ai_mark: set.ai_mark,
+        effective_ai_mark,
         role,
         voice,
         identities: ids,
@@ -1178,7 +1183,8 @@ pub fn out(r: &mut impl steve_store::Read, s: &SpaceRow) -> ChannelResult<SpaceO
         self_chat,
         suggest_quiet,
         conflicts,
-        open_url: crate::open_link::space_url(r, s)?,
+        open_url: open.as_ref().map(|l| l.url.clone()),
+        open_provider: open.map(|l| l.provider),
     })
 }
 
@@ -1208,6 +1214,9 @@ pub struct SpacePatch {
     pub memory_scope: Option<String>,
     pub disclosure: Option<String>,
     pub item_defaults: Option<ItemDefaults>,
+    /// Absent = unchanged; `null` = follow account setting; `true|false` = override `[AI]` mark here.
+    #[serde(default, deserialize_with = "some_nullable_bool")]
+    pub ai_mark: Option<Option<bool>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -1232,6 +1241,12 @@ fn some_nullable_value<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Option<Option<Value>>, D::Error> {
     Option::<Value>::deserialize(d).map(|v| Some(v.filter(|v| !v.is_null())))
+}
+
+fn some_nullable_bool<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<bool>>, D::Error> {
+    Option::<bool>::deserialize(d).map(Some)
 }
 
 pub const MEMORY_SCOPES: [&str; 2] = ["space", "persona"];
@@ -1342,6 +1357,9 @@ pub fn patch(
     if let Some(a) = p.bot_notices.as_deref().and_then(BotNotices::parse) {
         after.bot_notices = a;
     }
+    if let Some(v) = p.ai_mark {
+        after.ai_mark = v;
+    }
     if let Some(v) = p.collab {
         after.collab = v;
     }
@@ -1373,10 +1391,12 @@ pub fn patch(
     {
         set_voice(w, ws, id, v.as_deref(), now)?;
     }
+    if after.muted && !before.muted {
+        crate::space_decisions::expire_for_space(w, ws, id, "已设为只记录")?;
+    }
     if after.attention != before.attention {
         write_attention(w, ws, id, after.attention, now)?;
         if after.attention >= Attention::Quiet {
-            // 不提醒 / 屏蔽: no “新群” prompt left waiting for this space
             crate::space_decisions::expire_for_space(
                 w,
                 ws,
@@ -1387,6 +1407,9 @@ pub fn patch(
     }
     if after.reply_as_you != before.reply_as_you {
         write_reply_as_you(w, ws, id, after.reply_as_you, now)?;
+        if after.reply_as_you != ReplyAsYou::Draft {
+            crate::space_decisions::expire_for_space(w, ws, id, "已调整替你回复设置")?;
+        }
         // no longer replying for you here: what is still waiting to be said as you closes
         if before.reply_as_you == ReplyAsYou::Draft && speaks_as_you(w, ws, id, None)? {
             crate::presence::supersede(
@@ -1401,6 +1424,9 @@ pub fn patch(
     }
     if after.bot_notices != before.bot_notices {
         write_bot_notices(w, ws, id, after.bot_notices, now)?;
+    }
+    if after.ai_mark != before.ai_mark {
+        prefs::set(w, ws, id, Preference::AiMark(after.ai_mark), now)?;
     }
     let voice_after = prefs::chosen_voice(w, id)?;
     let snap = |x: &SpaceSettings, persona: &Option<String>, voice: &Option<String>| {

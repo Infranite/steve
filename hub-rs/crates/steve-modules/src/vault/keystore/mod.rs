@@ -292,7 +292,7 @@ fn keychain(steve_home: &Path, helper: Option<&str>) -> Result<Arc<dyn KeyStore>
         None => {
             tracing::warn!(
                 "vault: steve-keyhelper is not installed in {}/bin; using the keychain in-process, so a rebuilt Hub \
-                 will be refused the keys; install steve-keyhelper with ops/release.sh",
+                 will be refused the keys; install steve-keyhelper with steve setup",
                 steve_home.display()
             );
             Ok(Arc::new(KeychainStore::login()))

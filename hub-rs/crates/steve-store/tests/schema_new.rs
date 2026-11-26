@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use steve_store::{NoPublisher, Store, db};
 
 /// One table of each module migration, in migration order.
-const NEW_TABLES: [(&str, i64); 34] = [
+const NEW_TABLES: [(&str, i64); 36] = [
     ("connections", 5),
     ("ext_events", 6),
     ("spaces", 7),
@@ -44,6 +44,8 @@ const NEW_TABLES: [(&str, i64); 34] = [
     ("thread_forwarded", 130),
     ("thread_delivery_refs", 130),
     ("thread_notices", 130),
+    ("chan_message_reactions", 146),
+    ("chan_reply_sources", 146),
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
@@ -1305,11 +1307,11 @@ fn migration_139_adds_mems_pinned_and_orders_anchors_by_pin_and_kind_priority() 
 
 #[test]
 fn migration_140_canonicalizes_reasoning_effort_and_adds_effort_mapping() {
-    let before_140 = db::MIGRATIONS
+    let before_145 = db::MIGRATIONS
         .iter()
         .position(|sql| sql.contains("ALTER TABLE sessions ADD COLUMN effort_mapping TEXT"))
         .unwrap();
-    let (_dir, path) = at_version(before_140);
+    let (_dir, path) = at_version(before_145);
     let c = Connection::open(&path).unwrap();
     c.execute_batch(
         r#"INSERT INTO bots(id,workspace_id,name,harness,reasoning_effort,updated)
@@ -1737,6 +1739,36 @@ fn migration_128_strips_main_bot_from_teams_and_rewrites_steve_fallback() {
     store
         .fixture_write(|c| {
             assert!(has_table(c, "item_placement_waits"));
+            assert_eq!(count(c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn migration_146_adds_reactions_reply_sources_burst_and_ai_mark() {
+    let before_146 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE chan_message_reactions"))
+        .unwrap();
+    let (_dir, path) = at_version(before_146);
+    let c = Connection::open(&path).unwrap();
+    assert!(!has_table(&c, "chan_message_reactions"));
+    assert!(!has_table(&c, "chan_reply_sources"));
+    assert!(!columns(&c, "channel_settings").contains(&"ai_mark".to_string()));
+    assert!(!columns(&c, "space_prefs").contains(&"ai_mark".to_string()));
+    assert!(!columns(&c, "chan_messages").contains(&"burst_id".to_string()));
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    db::migrate_file(&path).unwrap();
+    store
+        .fixture_write(|c| {
+            assert!(has_table(c, "chan_message_reactions"));
+            assert!(has_table(c, "chan_reply_sources"));
+            assert!(columns(c, "channel_settings").contains(&"ai_mark".to_string()));
+            assert!(columns(c, "space_prefs").contains(&"ai_mark".to_string()));
+            assert!(columns(c, "chan_messages").contains(&"burst_id".to_string()));
             assert_eq!(count(c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
             Ok(())
         })

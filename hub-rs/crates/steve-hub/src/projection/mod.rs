@@ -884,6 +884,7 @@ mod tests {
                         member_count: 2,
                         has_external: false,
                         disclosure: "public",
+                        muted: false,
                         platform: Some("feishu"),
                         now,
                     },

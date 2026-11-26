@@ -264,6 +264,36 @@ async fn setup() -> H {
         &h.pm.clone(),
         json!([{"when": {"kind": "intent", "text": "是需求"}, "act": "create_item", "mode": "propose"}]),
     );
+    // Pre-configure active bot groups for compose tests (new bot groups default to silent record
+    // until enabled; #213).
+    let now = h.ch.now();
+    for (conn, ext, name, external) in [
+        (&h.oncall, "C_OPS", "运维群", false),
+        (&h.pm, "C_REQ", "产品需求群", false),
+        (&h.oncall, "C_ACME", "Acme 客户群", true),
+    ] {
+        h.env
+            .store()
+            .write(|tx| {
+                spaces::locate_or_create(
+                    tx,
+                    &spaces::NewSpace {
+                        ws: WS,
+                        system_id: FakeChannel::SYSTEM,
+                        connection_id: conn,
+                        kind: SpaceKind::Group,
+                        external_id: ext,
+                        name,
+                        member_count: 0,
+                        has_external: external,
+                        muted: false,
+                        now,
+                        platform: None,
+                    },
+                )
+            })
+            .expect("activate bot group");
+    }
     h.env
         .gateway
         .script(format!("{INTENT_START}\n条件：是需求"), "{\"match\": true}");

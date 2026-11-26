@@ -12,15 +12,17 @@ use steve_modules::accounts::connections::Connections;
 use steve_store::Store;
 
 use crate::ChannelResult;
-use crate::channel::{ChannelAdapter, InboundMessage, ProfileAdapter, SpaceEvent};
+use crate::channel::{ChannelAdapter, InboundMessage, ProfileAdapter, ReactionEvent, SpaceEvent};
 use crate::conversations::Thread;
 use crate::ext::ChannelDecl;
 use crate::inbound::Inbound;
 use crate::media::MediaFetch;
 use crate::membership::SpaceChange;
 use crate::names::Names;
+use crate::open_link::PlatformLinks;
 use crate::reactions::{AdapterReactor, Locks, Reactor};
 use crate::respond::{Fallback, Responder};
+use crate::syntax::PlatformSyntax;
 use steve_modules::contacts::PartyHooks;
 
 /// Shared state of the channel module. Cheap to clone.
@@ -64,6 +66,8 @@ struct Inner {
     names: Names,
     /// Bounded TTL cache for channel intent rule judgements keyed by input hash.
     intent_cache: crate::rules::IntentCache,
+    /// Burst coalescing gate for rapid multi-message turns (#268).
+    burst_gate: crate::burst::BurstGate,
     /// Where replies' knowledge is searched (the Hub sets the workspace's store; SQLite until then).
     knowledge: std::sync::OnceLock<Arc<dyn steve_knowledge::port::KnowledgeStore>>,
 }
@@ -98,9 +102,27 @@ pub struct ChannelsBuilder {
     connectors: BTreeMap<String, Arc<dyn crate::connector::ConnectorTools>>,
     decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
+    links: Vec<Arc<dyn PlatformLinks>>,
+    syntaxes: Vec<Arc<dyn PlatformSyntax>>,
+    burst_settle: std::time::Duration,
 }
 
 impl ChannelsBuilder {
+    /// Sets the live burst settle window for coalescing rapid messages from one sender (#268).
+    pub fn burst_settle(mut self, settle: std::time::Duration) -> Self {
+        self.burst_settle = settle;
+        self
+    }
+
+    pub fn links(mut self, l: Arc<dyn PlatformLinks>) -> Self {
+        self.links.push(l);
+        self
+    }
+
+    pub fn syntax(mut self, s: Arc<dyn PlatformSyntax>) -> Self {
+        self.syntaxes.push(s);
+        self
+    }
     pub fn connector(mut self, c: Arc<dyn crate::connector::ConnectorTools>) -> Self {
         self.connectors.insert(c.adapter_id().to_string(), c);
         self
@@ -190,6 +212,12 @@ impl ChannelsBuilder {
         for m in self.media.values() {
             crate::media::publish(m);
         }
+        for l in self.links {
+            crate::open_link::register(l);
+        }
+        for s in self.syntaxes {
+            crate::syntax::register(s);
+        }
         // who can look people up, for the contact pages' “can be looked up” (by declared system)
         for id in self.profiles.keys() {
             if let Some(d) = self.decls.get(id) {
@@ -217,6 +245,7 @@ impl ChannelsBuilder {
             party_hooks: self.party_hooks,
             names,
             intent_cache: crate::rules::IntentCache::new(),
+            burst_gate: crate::burst::BurstGate::new(self.burst_settle),
             knowledge: std::sync::OnceLock::new(),
         }))
     }
@@ -245,7 +274,14 @@ impl Channels {
             connectors: BTreeMap::new(),
             decls: BTreeMap::new(),
             party_hooks: vec![Arc::new(steve_modules::accounts::AccountHooks)],
+            links: Vec::new(),
+            syntaxes: Vec::new(),
+            burst_settle: std::time::Duration::ZERO,
         }
+    }
+
+    pub fn burst_gate(&self) -> &crate::burst::BurstGate {
+        &self.0.burst_gate
     }
 
     pub fn downgrade(&self) -> WeakChannels {
@@ -411,6 +447,12 @@ pub trait MessageSink: Send + Sync {
         let _ = (ws, conn, ev);
         Ok(None)
     }
+
+    /// [`Channels::on_reaction`]. Sinks that only take messages ignore it.
+    async fn reaction(&self, ws: &str, conn: &str, ev: ReactionEvent) -> ChannelResult<()> {
+        let _ = (ws, conn, ev);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -427,5 +469,9 @@ impl MessageSink for Channels {
         ev: SpaceEvent,
     ) -> ChannelResult<Option<SpaceChange>> {
         self.on_space_event(ws, conn, ev).await
+    }
+
+    async fn reaction(&self, ws: &str, conn: &str, ev: ReactionEvent) -> ChannelResult<()> {
+        self.on_reaction(ws, conn, ev)
     }
 }

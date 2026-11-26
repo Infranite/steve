@@ -50,6 +50,8 @@ pub enum GatewayError {
     NeedsTools,
     #[error("所选运行环境未声明此请求所需的工具能力")]
     MissingCapability,
+    #[error("当前模型或运行环境不支持读取图片：{0}")]
+    UnsupportedMultimodal(String),
     #[error("这次请求未获授权使用所需工具或附件")]
     ToolDenied,
     #[error("网关在 {0} 阶段超时")]
@@ -115,7 +117,9 @@ pub trait Gateway: Send + Sync {
         if images.is_empty() {
             self.run(tier, prompt, timeout).await
         } else {
-            Err("当前模型入口不支持读取图片".into())
+            Err(GatewayError::UnsupportedMultimodal(
+                "当前模型入口不支持读取图片".into(),
+            ))
         }
     }
 

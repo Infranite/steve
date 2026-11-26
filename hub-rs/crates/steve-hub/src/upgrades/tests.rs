@@ -36,25 +36,44 @@ fn archive_links_rejected() {
     let bytes = tar.into_inner().unwrap().finish().unwrap();
     assert!(client::unpack(&bytes, dir.path(), &fixture()).is_err());
 }
-#[test]
-fn durable_request_is_idempotent_and_permission_separated() {
-    let dir = tempfile::tempdir().unwrap();
-    let u = Updates {
-        home: dir.path().into(),
+fn fast_check_backoff() -> steve_runtime::policy::Backoff {
+    steve_runtime::policy::Backoff {
+        base: Duration::from_millis(1),
+        max: Duration::from_millis(5),
+        factor: 2,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: Some(CHECK_RETRY_ATTEMPTS),
+        reset_after: None,
+    }
+}
+
+fn test_updates(home: &Path) -> Updates {
+    Updates {
+        home: home.into(),
         repository: "Infranite/steve".into(),
         current_hub: "0.1.0".into(),
         current_web: "0.1.0".into(),
         managed: true,
         blocked_reason: None,
-        client: reqwest::Client::new(),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
         api_base: String::new(),
         web_base: String::new(),
         repo: PathBuf::new(),
         kind: None,
         launch: crate::upgrades::runner::Launch::Launchd,
-    };
+        check_timeout: Duration::from_secs(2),
+        check_backoff: fast_check_backoff(),
+    }
+}
+
+#[test]
+fn durable_request_is_idempotent_and_permission_separated() {
+    let dir = tempfile::tempdir().unwrap();
+    let u = test_updates(dir.path());
     let op = u.request("0.2.0", "one", "agent:s", false).unwrap();
     assert_eq!(op.phase, "awaiting_approval");
+    assert_eq!(op.previous_version.as_deref(), Some("0.1.0"));
+    assert_eq!(op.source, OperationSource::InApp);
     assert_eq!(
         u.request("0.2.0", "one", "agent:s", false).unwrap().id,
         op.id
@@ -68,28 +87,67 @@ fn durable_request_is_idempotent_and_permission_separated() {
 fn an_unmanaged_install_names_its_kind_and_why_it_is_not_upgraded_here() {
     let dir = tempfile::tempdir().unwrap();
     let u = Updates {
-        home: dir.path().into(),
-        repository: "Infranite/steve".into(),
-        current_hub: "0.1.0".into(),
-        current_web: "0.1.0".into(),
         managed: false,
-        blocked_reason: None,
-        client: reqwest::Client::new(),
-        api_base: String::new(),
-        web_base: String::new(),
-        repo: PathBuf::new(),
-        kind: None,
-        launch: crate::upgrades::runner::Launch::Launchd,
+        ..test_updates(dir.path())
     };
     // the test binary runs from a cargo target dir: source, or external when that lives elsewhere
     let install = u.install(Path::new(""));
     let reason = install.reason().unwrap();
     let status = u.status().unwrap();
-    assert_eq!(status["install"]["kind"], install.kind);
-    assert_eq!(status["capability"]["managed"], false);
-    assert_eq!(status["capability"]["reason"], reason);
+    assert_eq!(status.install.kind, install.kind);
+    assert!(!status.capability.managed);
+    assert_eq!(status.capability.reason, reason);
     let refused = u.request("0.2.0", "one", "agent:s", false).unwrap_err();
     assert_eq!(refused.to_string(), reason);
+}
+
+#[test]
+fn legacy_macos_service_disables_one_click_and_returns_typed_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs/release");
+    fs::create_dir_all(&logs).unwrap();
+    atomic(
+        &logs.join("macos-upgrade-0.13.0-20261126-220000.json"),
+        &json!({
+            "version": "0.13.0",
+            "release": "/Users/example/.steve/releases/0.13.0-aaaaaaaa",
+            "previous": "/Users/example/.steve/releases/0.12.0",
+            "previous_version": "0.12.0",
+            "started": "20261126-220000",
+            "started_at": 1_764_165_600_000_u64,
+            "finished": "20261126-220030",
+            "finished_at": 1_764_165_630_000_u64,
+            "ok": false,
+            "recovered": true,
+            "error": "probe failed: database busy",
+        }),
+    )
+    .unwrap();
+    let u = Updates {
+        current_hub: "0.12.0".into(),
+        current_web: "0.12.0".into(),
+        kind: Some(install::InstallKind::LegacyMacosService),
+        ..test_updates(dir.path())
+    };
+    let reason = u.execution_reason().expect("one-click must be disabled");
+    let status = u.status().unwrap();
+    assert_eq!(
+        status.install.kind,
+        install::InstallKind::LegacyMacosService
+    );
+    assert_eq!(
+        status.capability.reason_code,
+        Some(CapabilityReasonCode::LegacyMacosService)
+    );
+    assert_eq!(status.capability.reason, reason);
+    let op = status
+        .operation
+        .expect("legacy macOS service must still surface latest upgrade receipt");
+    assert_eq!(op.phase, "rolled_back");
+    assert_eq!(op.version, "0.13.0");
+    assert_eq!(op.previous_version.as_deref(), Some("0.12.0"));
+    assert_eq!(op.source, OperationSource::TerminalDeploy);
+    assert!(u.request("0.13.0", "legacy-macos", "owner", true).is_err());
 }
 
 #[tokio::test]
@@ -125,69 +183,66 @@ async fn github_checks_validate_assets_and_bind_cache_to_repository_and_both_ver
     }));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let mut u = Updates {
-        home: home.path().into(),
         repository: "test/good".into(),
-        current_hub: "0.1.0".into(),
-        current_web: "0.1.0".into(),
-        managed: true,
-        blocked_reason: None,
-        client: reqwest::Client::new(),
         api_base: base,
-        web_base: String::new(),
-        repo: PathBuf::new(),
-        kind: None,
-        launch: crate::upgrades::runner::Launch::Launchd,
+        ..test_updates(home.path())
     };
-    assert_eq!(u.check().await.unwrap().status, "available");
+    assert_eq!(u.check().await.unwrap().status, CheckStatus::Available);
     let first = calls.load(Ordering::SeqCst);
-    assert_eq!(u.check().await.unwrap().status, "available");
+    assert_eq!(u.check().await.unwrap().status, CheckStatus::Available);
     assert_eq!(calls.load(Ordering::SeqCst), first);
     u.current_hub = "0.2.0".into();
-    assert!(u.status().unwrap()["check"].is_null());
-    assert_eq!(u.check().await.unwrap().status, "available");
+    assert!(u.status().unwrap().check.is_none());
+    assert_eq!(u.check().await.unwrap().status, CheckStatus::Available);
     assert_eq!(calls.load(Ordering::SeqCst), first + 1);
     u.current_web = "0.2.0".into();
-    assert_eq!(u.check().await.unwrap().status, "up_to_date");
+    assert_eq!(u.check().await.unwrap().status, CheckStatus::UpToDate);
     assert_eq!(calls.load(Ordering::SeqCst), first + 2);
     u.current_hub = "0.10.0".into();
-    assert_eq!(u.check().await.unwrap().status, "ahead");
+    assert_eq!(u.check().await.unwrap().status, CheckStatus::Ahead);
     u.current_hub = "dev".into();
-    assert_eq!(u.check().await.unwrap().status, "unknown_current");
-    for (repo, status) in [
-        ("absent", "no_release"),
-        ("no-manifest", "error"),
-        ("broken", "error"),
-        ("unsupported", "unsupported_platform"),
-        ("missing-bundle", "unsupported_platform"),
+    assert_eq!(u.check().await.unwrap().status, CheckStatus::UnknownCurrent);
+    for (repo, status, error_kind) in [
+        ("absent", CheckStatus::NoRelease, None),
+        (
+            "no-manifest",
+            CheckStatus::Error,
+            Some(CheckErrorKind::InvalidManifest),
+        ),
+        (
+            "broken",
+            CheckStatus::Error,
+            Some(CheckErrorKind::InvalidManifest),
+        ),
+        ("unsupported", CheckStatus::UnsupportedPlatform, None),
+        ("missing-bundle", CheckStatus::UnsupportedPlatform, None),
     ] {
         u.repository = format!("test/{repo}");
-        assert_eq!(u.check().await.unwrap().status, status, "{repo}");
+        let got = u.check().await.unwrap();
+        assert_eq!((got.status, got.error_kind), (status, error_kind), "{repo}");
     }
     u.repository = "test/flaky".into();
-    assert_eq!(u.check().await.unwrap().status, "error");
+    let flaky = u.check().await.unwrap();
+    assert_eq!(flaky.status, CheckStatus::Unavailable);
+    assert_eq!(flaky.error_kind, Some(CheckErrorKind::UpstreamServer));
     outage.store(false, Ordering::SeqCst);
     let before = calls.load(Ordering::SeqCst);
-    assert_eq!(u.check().await.unwrap().status, "error");
+    assert_eq!(u.check().await.unwrap().status, CheckStatus::Unavailable);
     assert_eq!(calls.load(Ordering::SeqCst), before);
     let mut cached = u.cached_check().unwrap();
     cached.result.checked_at = now() - 61_000;
     atomic(&u.dir().join("check.json"), &cached).unwrap();
-    assert_eq!(u.check().await.unwrap().status, "unknown_current");
+    assert_eq!(u.check().await.unwrap().status, CheckStatus::UnknownCurrent);
     assert_eq!(calls.load(Ordering::SeqCst), before + 1);
     u.repository = "test/limited".into();
-    assert!(
-        u.check()
-            .await
-            .unwrap()
-            .error
-            .unwrap()
-            .contains("rate limited")
-    );
+    let limited = u.check().await.unwrap();
+    assert_eq!(limited.status, CheckStatus::Unavailable);
+    assert_eq!(limited.error_kind, Some(CheckErrorKind::RateLimited));
     let before = calls.load(Ordering::SeqCst);
     let mut cached = u.cached_check().unwrap();
     cached.result.checked_at = now() - 61_000;
     atomic(&u.dir().join("check.json"), &cached).unwrap();
-    assert_eq!(u.check().await.unwrap().status, "error");
+    assert_eq!(u.check().await.unwrap().status, CheckStatus::Unavailable);
     assert_eq!(calls.load(Ordering::SeqCst), before);
     server.abort();
 }
@@ -266,18 +321,9 @@ async fn github_bundle_stages_only_after_hash_and_pair_validation() {
         );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let u = Updates {
-        home: home.path().into(),
         repository: "test/good".into(),
-        current_hub: "0.1.0".into(),
-        current_web: "0.1.0".into(),
-        managed: true,
-        blocked_reason: None,
-        client: reqwest::Client::new(),
         api_base: base,
-        web_base: String::new(),
-        repo: PathBuf::new(),
-        kind: None,
-        launch: crate::upgrades::runner::Launch::Launchd,
+        ..test_updates(home.path())
     };
     let mut op = u.request("0.2.0", "download", "owner", true).unwrap();
     let id = op.id.clone();
@@ -326,18 +372,8 @@ async fn github_bundle_stages_only_after_hash_and_pair_validation() {
 fn interrupted_journal_pointer_is_repaired_without_stealing_another_operation() {
     let home = tempfile::tempdir().unwrap();
     let u = Updates {
-        home: home.path().into(),
         repository: "test/good".into(),
-        current_hub: "0.1.0".into(),
-        current_web: "0.1.0".into(),
-        managed: true,
-        blocked_reason: None,
-        client: reqwest::Client::new(),
-        api_base: String::new(),
-        web_base: String::new(),
-        repo: PathBuf::new(),
-        kind: None,
-        launch: crate::upgrades::runner::Launch::Launchd,
+        ..test_updates(home.path())
     };
     let orphan = u.request("0.2.0", "interrupted", "owner", false).unwrap();
     fs::remove_file(u.dir().join("active.json")).unwrap();
@@ -459,35 +495,29 @@ fn managed_orphan_exit_kills_group_descendants() {
 #[test]
 fn status_names_the_backup_a_failed_upgrade_recovers_from() {
     let dir = tempfile::tempdir().unwrap();
-    let u = Updates {
-        home: dir.path().into(),
-        repository: "Infranite/steve".into(),
-        current_hub: "0.1.0".into(),
-        current_web: "0.1.0".into(),
-        managed: true,
-        blocked_reason: None,
-        client: reqwest::Client::new(),
-        api_base: String::new(),
-        web_base: String::new(),
-        repo: PathBuf::new(),
-        kind: None,
-        launch: crate::upgrades::runner::Launch::Launchd,
-    };
-    assert!(u.status().unwrap()["backup"].is_null());
+    let u = test_updates(dir.path());
+    assert!(u.status().unwrap().backup.is_none());
     let mut op = u.request("0.2.0", "one", "owner", true).unwrap();
     let status = u.status().unwrap();
+    let backup = status.backup.unwrap();
     assert!(
-        status["backup"]["snapshot_id"].is_null(),
+        backup.snapshot_id.is_none(),
         "no backup before the supervisor made one"
     );
-    assert_eq!(
-        status["backup"]["dir"],
-        crate::backup::root(&u.home).to_string_lossy().as_ref()
-    );
+    assert_eq!(backup.dir, crate::backup::root(&u.home));
     let snapshot = "a".repeat(64);
     op.backup_snapshot = Some(snapshot.clone().try_into().unwrap());
     u.save(&op).unwrap();
-    assert_eq!(u.status().unwrap()["backup"]["snapshot_id"], snapshot);
+    assert_eq!(
+        u.status()
+            .unwrap()
+            .backup
+            .unwrap()
+            .snapshot_id
+            .unwrap()
+            .as_str(),
+        snapshot
+    );
 }
 
 /// The signing keychain's password in these homes (ops/sign-setup.sh's form).
@@ -521,8 +551,10 @@ fn local(home: &Path, repo: &Path, api_base: String) -> (Updates, Arc<Mutex<Vec<
         api_base: api_base.clone(),
         web_base: api_base,
         repo: repo.into(),
-        kind: Some("local_release"),
+        kind: Some(install::InstallKind::LocalRelease),
         launch: runner::Launch::Fake(started.clone()),
+        check_timeout: Duration::from_secs(2),
+        check_backoff: fast_check_backoff(),
     };
     (u, started)
 }
@@ -582,7 +614,7 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
     // An installed release remains upgradable without a source checkout.
     assert_eq!(u.execution_reason(), None);
     assert_eq!(
-        u.status().unwrap()["capability"]["reason"],
+        u.status().unwrap().capability.reason,
         "local_release runner"
     );
     use steve_modules::vault::keystore::{FileKeyStore, KeyStore, signing};
@@ -643,28 +675,26 @@ async fn local_release_upgrades_only_to_a_newer_stable_tag_one_at_a_time_outside
         .open(u.dir().join("runner.lock"))
         .unwrap();
     held.lock().unwrap();
-    assert_eq!(u.status().unwrap()["operation"]["phase"], "staging");
+    assert_eq!(u.status().unwrap().operation.unwrap().phase, "staging");
     // the runner is gone without a result (a reboot): failed, saying the version was not switched
     drop(held);
     // a process another test forks keeps a copy of the descriptor (and the lock) until it execs
     let mut status = u.status().unwrap();
     for _ in 0..50 {
-        if status["operation"]["phase"] == "failed" {
+        if status.operation.as_ref().map(|o| o.phase.as_str()) == Some("failed") {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
         status = u.status().unwrap();
     }
-    assert_eq!(status["operation"]["phase"], "failed");
-    let error = status["operation"]["error"].as_str().unwrap();
+    let failed_op = status.operation.unwrap();
+    assert_eq!(failed_op.phase, "failed");
+    let error = failed_op.error.as_deref().unwrap();
     assert!(
         error.contains("没有切换") && error.contains("upgrade-0.3.0-"),
         "{error}"
     );
-    assert_eq!(
-        status["backup"]["dir"],
-        crate::backup::root(home.path()).to_string_lossy().as_ref()
-    );
+    assert_eq!(status.backup.unwrap().dir, crate::backup::root(home.path()));
 
     // a draft is no target, even when someone asks for it
     let mut draft = u.request("0.4.0", "k3", "owner", true).unwrap();
@@ -781,35 +811,36 @@ fn the_page_notice_reads_only_an_available_check_for_this_hub() {
     })
     .unwrap();
     assert_eq!(available(&cfg), None);
-    let cached = |status: &str, hub: &str| CachedCheck {
+    let cached = |status: CheckStatus, hub: &str| CachedCheck {
         repository: "Infranite/steve".into(),
         current_hub: hub.into(),
         current_web: crate::web::web_version(&cfg),
         result: Check {
-            status: status.into(),
+            status,
             checked_at: now(),
             version: Some("0.3.0".into()),
             release_url: None,
             notes: None,
+            error_kind: None,
             error: None,
         },
     };
     atomic(
         &home.path().join("updates/check.json"),
-        &cached("available", &cfg.version),
+        &cached(CheckStatus::Available, &cfg.version),
     )
     .unwrap();
     assert_eq!(available(&cfg).as_deref(), Some("0.3.0"));
     atomic(
         &home.path().join("updates/check.json"),
-        &cached("up_to_date", &cfg.version),
+        &cached(CheckStatus::UpToDate, &cfg.version),
     )
     .unwrap();
     assert_eq!(available(&cfg), None);
     // a check made by the Hub before an upgrade says nothing about this one
     atomic(
         &home.path().join("updates/check.json"),
-        &cached("available", "0.0.1"),
+        &cached(CheckStatus::Available, "0.0.1"),
     )
     .unwrap();
     assert_eq!(available(&cfg), None);
@@ -851,23 +882,15 @@ async fn a_rate_limited_api_falls_back_to_the_github_release_redirect() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let home = tempfile::tempdir().unwrap();
     let u = Updates {
-        home: home.path().into(),
         repository: "test/good".into(),
-        current_hub: "0.1.0".into(),
-        current_web: "0.1.0".into(),
-        managed: true,
-        blocked_reason: None,
-        client: reqwest::Client::new(),
         api_base: base.clone(),
         web_base: base,
-        repo: PathBuf::new(),
-        kind: None,
-        launch: runner::Launch::Launchd,
+        ..test_updates(home.path())
     };
     let c = u.check().await.unwrap();
     assert_eq!(
-        (c.status.as_str(), c.version.as_deref()),
-        ("available", Some("0.2.0")),
+        (c.status, c.version.as_deref()),
+        (CheckStatus::Available, Some("0.2.0")),
         "{c:?}"
     );
     server.abort();
@@ -935,4 +958,368 @@ async fn the_supervisor_asks_the_candidate_about_this_environment_before_drainin
         .await
         .expect("an older candidate is not asked");
     assert!(!asked.exists());
+}
+
+#[tokio::test]
+async fn update_check_retries_transient_5xx_and_timeout_and_distinguishes_manifest_errors() {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let recover_hits = Arc::new(AtomicUsize::new(0));
+    let always_500_hits = Arc::new(AtomicUsize::new(0));
+    let timeout_hits = Arc::new(AtomicUsize::new(0));
+    let bad_manifest_hits = Arc::new(AtomicUsize::new(0));
+
+    let url = base.clone();
+    let rh = recover_hits.clone();
+    let ah = always_500_hits.clone();
+    let th = timeout_hits.clone();
+    let bh = bad_manifest_hits.clone();
+
+    let app = axum::Router::new()
+        .route(
+            "/repos/test/{repo}/releases/latest",
+            axum::routing::get(
+                move |axum::extract::Path(repo): axum::extract::Path<String>| {
+                    let url = url.clone();
+                    async move {
+                        let asset_url = format!("{url}/manifest/{repo}");
+                        axum::Json(json!({
+                            "tag_name": "v0.12.0",
+                            "html_url": "https://github.com/test/release/v0.12.0",
+                            "body": "notes",
+                            "draft": false,
+                            "prerelease": false,
+                            "assets": [
+                                {"name": "steve-release.json", "browser_download_url": asset_url},
+                                {"name": "bundle.tar.gz", "browser_download_url": format!("{url}/bundle")},
+                            ],
+                        }))
+                        .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/manifest/{repo}",
+            axum::routing::get(
+                move |axum::extract::Path(repo): axum::extract::Path<String>| {
+                    let rh = rh.clone();
+                    let ah = ah.clone();
+                    let th = th.clone();
+                    let bh = bh.clone();
+                    async move {
+                        match repo.as_str() {
+                            "recover" => {
+                                let n = rh.fetch_add(1, Ordering::SeqCst);
+                                if n < 2 {
+                                    return axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                                        .into_response();
+                                }
+                                let mut m = fixture();
+                                m.version = "0.12.0".into();
+                                m.hub_version = "0.12.0".into();
+                                m.web_version = "0.12.0".into();
+                                m.assets.push(Asset {
+                                    target: platform(),
+                                    name: "bundle.tar.gz".into(),
+                                    size: 4,
+                                    sha256: "a".repeat(64),
+                                });
+                                axum::Json(m).into_response()
+                            }
+                            "always500" => {
+                                ah.fetch_add(1, Ordering::SeqCst);
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                            }
+                            "slow" => {
+                                th.fetch_add(1, Ordering::SeqCst);
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                                axum::http::StatusCode::OK.into_response()
+                            }
+                            "badmanifest" => {
+                                bh.fetch_add(1, Ordering::SeqCst);
+                                axum::Json(json!({"format_version": 99})).into_response()
+                            }
+                            _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+                        }
+                    }
+                },
+            ),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = tempfile::tempdir().unwrap();
+    let mut u = Updates {
+        repository: "test/recover".into(),
+        current_hub: "0.11.0".into(),
+        current_web: "0.11.0".into(),
+        api_base: base,
+        check_timeout: Duration::from_millis(80),
+        ..test_updates(home.path())
+    };
+
+    // 1) Transient 500s on steve-release.json retry with bounded backoff and succeed when upstream recovers.
+    let recovered = u.check().await.unwrap();
+    assert_eq!(recovered.status, CheckStatus::Available);
+    assert_eq!(recovered.error_kind, None);
+    assert_eq!(recovered.error, None);
+    assert_eq!(
+        recover_hits.load(Ordering::SeqCst),
+        (CHECK_RETRY_ATTEMPTS + 1) as usize
+    );
+
+    // 2) Persistent 500 exhausts bounded retries and reports typed Unavailable (not permanent Error).
+    u.repository = "test/always500".into();
+    let outage = u.check().await.unwrap();
+    assert_eq!(outage.status, CheckStatus::Unavailable);
+    assert_eq!(outage.error_kind, Some(CheckErrorKind::UpstreamServer));
+    assert!(outage.error.as_deref().unwrap_or_default().contains("500"));
+    assert_eq!(
+        always_500_hits.load(Ordering::SeqCst),
+        (CHECK_RETRY_ATTEMPTS + 1) as usize
+    );
+
+    // 3) Request timeout exhausts bounded retries and reports typed Unavailable / Timeout.
+    u.repository = "test/slow".into();
+    let timed_out = u.check().await.unwrap();
+    assert_eq!(timed_out.status, CheckStatus::Unavailable);
+    assert_eq!(timed_out.error_kind, Some(CheckErrorKind::Timeout));
+    assert_eq!(
+        timeout_hits.load(Ordering::SeqCst),
+        (CHECK_RETRY_ATTEMPTS + 1) as usize
+    );
+
+    // 4) Semantic manifest error is NOT retried and reports permanent Error / InvalidManifest.
+    u.repository = "test/badmanifest".into();
+    let invalid = u.check().await.unwrap();
+    assert_eq!(invalid.status, CheckStatus::Error);
+    assert_eq!(invalid.error_kind, Some(CheckErrorKind::InvalidManifest));
+    assert_eq!(bad_manifest_hits.load(Ordering::SeqCst), 1);
+
+    server.abort();
+}
+
+#[test]
+fn status_prefers_latest_terminal_deploy_and_enriches_restored_version() {
+    let home = tempfile::tempdir().unwrap();
+    let mut u = Updates {
+        current_hub: "0.11.0".into(),
+        current_web: "0.11.0".into(),
+        ..test_updates(home.path())
+    };
+    let op_id = uuid::Uuid::new_v4().to_string();
+    let failed_at = parse_local_stamp_ms("20261126-143012").unwrap();
+    let failed_op = Operation {
+        id: op_id.clone(),
+        idempotency_key: "web-upgrade:Infranite/steve:0.12.0".into(),
+        version: "0.12.0".into(),
+        phase: "rolled_back".into(),
+        created_at: failed_at,
+        updated_at: failed_at + 500,
+        requested_by: "owner".into(),
+        approved_by: Some("owner".into()),
+        approved_at: Some(failed_at),
+        error: Some("backup failed: restic unavailable".into()),
+        error_code: None,
+        previous: None,
+        previous_version: None,
+        target: Some("/tmp/releases/0.12.0".into()),
+        source: OperationSource::InApp,
+        runner: Some(runner::Spec {
+            kind: "release_bundle".into(),
+            source: "https://github.com/Infranite/steve.git".into(),
+            ..Default::default()
+        }),
+        backup_snapshot: None,
+        progress: None,
+        drain: None,
+    };
+    u.save(&failed_op).unwrap();
+    atomic(&u.dir().join("active.json"), &json!({"id": op_id})).unwrap();
+
+    // Matching pre-operation_id local receipt written by the same failed in-app deploy.
+    let logs = home.path().join("logs/release");
+    fs::create_dir_all(&logs).unwrap();
+    atomic(
+        &logs.join("local-0.12.0-20261126-143012.json"),
+        &json!({
+            "version": "0.12.0",
+            "release": "/tmp/releases/0.12.0",
+            "previous": "/Users/example/.steve/releases/0.11.0-local-abcdef1",
+            "started": "20261126-143012",
+            "ok": false,
+            "phase": "backup",
+            "error": "backup failed: restic unavailable",
+            "recovered": true
+        }),
+    )
+    .unwrap();
+
+    // While still running 0.11.0: the rolled-back in-app op is shown with enriched previous_version=0.11.0,
+    // and its paired local-*.json is deduplicated rather than duplicated into history.
+    let before = u.status().unwrap();
+    let current_op = before.operation.expect("active failure shown on 0.11.0");
+    assert_eq!(current_op.id, op_id);
+    assert_eq!(current_op.version, "0.12.0");
+    assert_eq!(current_op.previous_version.as_deref(), Some("0.11.0"));
+    assert!(before.history.is_empty(), "{:?}", before.history);
+
+    // Owner then upgrades to 0.12.0 via terminal `--local-release deploy`.
+    atomic(
+        &logs.join("local-0.12.0-20261126-150000.json"),
+        &json!({
+            "version": "0.12.0",
+            "release": "/Users/example/.steve/releases/0.12.0-local-1234567",
+            "previous": "/Users/example/.steve/releases/0.11.0-local-abcdef1",
+            "started": "20261126-150000",
+            "finished": "20261126-150045",
+            "ok": true
+        }),
+    )
+    .unwrap();
+    u.current_hub = "0.12.0".into();
+    u.current_web = "0.12.0".into();
+
+    let after = u.status().unwrap();
+    let latest = after
+        .operation
+        .expect("latest terminal deploy becomes current status");
+    assert_eq!(latest.source, OperationSource::TerminalDeploy);
+    assert_eq!(latest.phase, "succeeded");
+    assert_eq!(latest.version, "0.12.0");
+    assert_eq!(latest.previous_version.as_deref(), Some("0.11.0"));
+    assert_eq!(after.history.len(), 1);
+    assert_eq!(after.history[0].id, op_id);
+    assert_eq!(after.history[0].phase, "rolled_back");
+    assert_eq!(after.history[0].previous_version.as_deref(), Some("0.11.0"));
+}
+
+#[test]
+fn status_hides_stale_failure_when_running_version_already_matches_target() {
+    let home = tempfile::tempdir().unwrap();
+    let mut u = Updates {
+        current_hub: "0.12.0".into(),
+        current_web: "0.12.0".into(),
+        ..test_updates(home.path())
+    };
+    let op_id = uuid::Uuid::new_v4().to_string();
+    let failed_op = Operation {
+        id: op_id.clone(),
+        idempotency_key: "k-stale".into(),
+        version: "0.12.0".into(),
+        phase: "rolled_back".into(),
+        created_at: 1_000,
+        updated_at: 2_000,
+        requested_by: "owner".into(),
+        approved_by: Some("owner".into()),
+        approved_at: Some(1_000),
+        error: Some("backup failed".into()),
+        error_code: None,
+        previous: Some("/Users/example/.steve/releases/0.11.0-local-aaaaaaa".into()),
+        previous_version: Some("0.11.0".into()),
+        target: Some("/Users/example/.steve/releases/0.12.0".into()),
+        source: OperationSource::InApp,
+        runner: None,
+        backup_snapshot: None,
+        progress: None,
+        drain: None,
+    };
+    u.save(&failed_op).unwrap();
+    atomic(&u.dir().join("active.json"), &json!({"id": op_id})).unwrap();
+
+    // No terminal receipt at all, yet Hub + Web are already 0.12.0 -> stale failure moves to history only.
+    let status = u.status().unwrap();
+    assert!(
+        status.operation.is_none(),
+        "stale failure must not appear as current status"
+    );
+    assert_eq!(status.history.len(), 1);
+    assert_eq!(status.history[0].id, op_id);
+    assert_eq!(
+        status.history[0].previous_version.as_deref(),
+        Some("0.11.0")
+    );
+
+    // Pair mismatch (Hub 0.12.0, Web 0.11.0): a failed 0.12.0 repair is NOT stale and still shows.
+    u.current_web = "0.11.0".into();
+    let mismatched = u.status().unwrap();
+    assert_eq!(
+        mismatched.operation.as_ref().map(|o| o.id.as_str()),
+        Some(op_id.as_str())
+    );
+    assert!(mismatched.history.is_empty());
+}
+
+#[tokio::test]
+async fn check_retry_policy_retries_5xx_and_timeout_and_stops_on_manifest_error() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let backoff = fast_check_backoff();
+
+    // Transient 500 recovers on the final bounded retry.
+    let hits = AtomicUsize::new(0);
+    let recovered = backoff
+        .retry(
+            || async {
+                let n = hits.fetch_add(1, Ordering::SeqCst);
+                if n < CHECK_RETRY_ATTEMPTS as usize {
+                    Err(client::classify_http_status(
+                        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                        "500".into(),
+                    ))
+                } else {
+                    Ok("0.12.0")
+                }
+            },
+            client::CheckFailure::retry_action,
+        )
+        .await;
+    assert_eq!(recovered.unwrap(), "0.12.0");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        (CHECK_RETRY_ATTEMPTS + 1) as usize
+    );
+
+    // Persistent timeout exhausts bounded retries and maps to CheckStatus::Unavailable.
+    let timeout_hits = AtomicUsize::new(0);
+    let timed_out = backoff
+        .retry(
+            || async {
+                timeout_hits.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(client::CheckFailure {
+                    kind: CheckErrorKind::Timeout,
+                    detail: "timed out".into(),
+                })
+            },
+            client::CheckFailure::retry_action,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(timed_out.status(), CheckStatus::Unavailable);
+    assert_eq!(timed_out.kind, CheckErrorKind::Timeout);
+    assert_eq!(
+        timeout_hits.load(Ordering::SeqCst),
+        (CHECK_RETRY_ATTEMPTS + 1) as usize
+    );
+
+    // Manifest error stops immediately without retrying and maps to CheckStatus::Error.
+    let manifest_hits = AtomicUsize::new(0);
+    let invalid = backoff
+        .retry(
+            || async {
+                manifest_hits.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(client::CheckFailure {
+                    kind: CheckErrorKind::InvalidManifest,
+                    detail: "bad manifest".into(),
+                })
+            },
+            client::CheckFailure::retry_action,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.status(), CheckStatus::Error);
+    assert_eq!(invalid.kind, CheckErrorKind::InvalidManifest);
+    assert_eq!(manifest_hits.load(Ordering::SeqCst), 1);
 }

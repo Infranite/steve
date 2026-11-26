@@ -1,6 +1,6 @@
 //! Local signing of a verified private release copy. Passwords are supplied by the
 //! signed Hub runner, never discovered by the ordinary installer CLI.
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -20,14 +20,12 @@ const OPENSSL_GENERATE_TIMEOUT: Duration = Duration::from_secs(60);
 const OPENSSL_FINGERPRINT_TIMEOUT: Duration = Duration::from_secs(15);
 const OPENSSL_EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVISION_SIGNING_TIMEOUT: Duration = Duration::from_secs(30);
-const SIGN_SETUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 pub(crate) struct Tools {
     pub codesign: PathBuf,
     pub security: PathBuf,
     pub openssl: PathBuf,
-    pub shell: PathBuf,
 }
 impl Default for Tools {
     fn default() -> Self {
@@ -35,11 +33,11 @@ impl Default for Tools {
             codesign: "/usr/bin/codesign".into(),
             security: "/usr/bin/security".into(),
             openssl: "/usr/bin/openssl".into(),
-            shell: "/bin/zsh".into(),
         }
     }
 }
 
+pub(crate) const HUB_CERTIFICATE_NAME: &str = "Steve Hub";
 pub(crate) const NODE_CERTIFICATE_NAME: &str = "Steve Node";
 pub(crate) const NODE_CLI_IDENTIFIER: &str = "io.github.infranite.steve.cli";
 pub(crate) const NODE_RUNTIME_IDENTIFIER: &str = "io.github.infranite.steve.node";
@@ -393,10 +391,7 @@ pub(crate) fn validate_bundle(
         regex::escape(version)
     ))?
     .is_match(&html);
-    ensure!(
-        marker && candidate.join("ops/run.sh").is_file(),
-        "bundle is missing matching Web identity or its service launcher"
-    );
+    ensure!(marker, "bundle is missing matching Web identity");
     Ok(info)
 }
 struct Unlocked<'a> {
@@ -531,15 +526,31 @@ pub fn prepare_bundle(
     commit: &str,
     password: &str,
 ) -> Result<Value> {
-    let _lock = crate::release::lock_release(home)?;
-    prepare_with(
+    let lock = crate::release::lock_release(home)?;
+    prepare_bundle_locked(
         home,
         candidate,
         version,
         commit,
         password,
+        &lock,
         &Tools::default(),
     )
+}
+
+/// Sign and verify `candidate` while reusing a `ReleaseLock` already held by the caller,
+/// avoiding opening/closing a second descriptor on `releases/.release.lock` (which on POSIX
+/// would release all fcntl locks held by this process on that inode).
+pub(crate) fn prepare_bundle_locked(
+    home: &Path,
+    candidate: &Path,
+    version: &str,
+    commit: &str,
+    password: &str,
+    _lock: &crate::release::ReleaseLock,
+    tools: &Tools,
+) -> Result<Value> {
+    prepare_with(home, candidate, version, commit, password, tools)
 }
 fn prepare_with(
     home: &Path,
@@ -677,9 +688,6 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
     )?;
     let generic = candidate.join("bin/steve-keyhelper");
     owned_file(&generic)?;
-    for name in ["sign-setup.sh", "release-lib.sh"] {
-        owned_file(&candidate.join("ops").join(name))?;
-    }
     private_dir(&signing)?;
     let started = signing.join("bundle-setup-started.json");
     let keychain = signing.join("steve-signing.keychain-db");
@@ -698,33 +706,34 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
         );
         exclusive_json(&started, &started_value)?;
     }
-    let mut command = Command::new(&tools.shell);
-    command
-        .arg(candidate.join("ops/sign-setup.sh"))
-        .env_clear()
-        .env("STEVE_HOME", home);
-    for key in ["HOME", "PATH", "USER", "TMPDIR"] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
-    /* what the script says is kept off the terminal and shown only when it fails */
-    let output = output(&mut command, SIGN_SETUP_TIMEOUT)?;
-    if !output.status.success() {
-        let said = String::from_utf8_lossy(&output.stderr);
-        let last = said
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("");
-        bail!(
-            "first-install signing identity setup failed: {}",
-            last.trim()
+    if fs::symlink_metadata(&staging).is_err() {
+        ensure!(
+            fs::symlink_metadata(&keychain).is_err(),
+            "the signing keychain has no setup password"
         );
+        let generated = Zeroizing::new(hex::encode(random_bytes::<32>()?.as_slice()));
+        write_private_new(&staging, generated.as_bytes())?;
     }
-    owned_file(&keychain)?;
     owned_file(&staging)?;
     let password = Zeroizing::new(fs::read_to_string(&staging)?.trim().to_owned());
+    check_security_token(&password, "signing password")?;
+    let keychain_ready = if keychain.is_file() {
+        owned_file(&keychain)?;
+        let _lock = unlock(&keychain, &password, tools, SECURITY_TIMEOUT)?;
+        find_codesigning_identities(&keychain, tools)?
+            .to_ascii_lowercase()
+            .contains(&HUB_CERTIFICATE_NAME.to_ascii_lowercase())
+    } else {
+        false
+    };
+    if !keychain_ready {
+        let work_dir = signing.join(format!(".init-{}", uuid::Uuid::new_v4()));
+        private_dir(&work_dir)?;
+        let _work_guard = TempDirGuard(work_dir.clone());
+        let _sha1 =
+            create_signing_keychain(&work_dir, HUB_CERTIFICATE_NAME, &keychain, &password, tools)?;
+    }
+    owned_file(&keychain)?;
     private_dir(helper.parent().unwrap())?;
     let temporary = helper
         .parent()
@@ -808,21 +817,168 @@ fn strict_private_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn write_private_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn find_codesigning_identities(keychain: &Path, tools: &Tools) -> Result<String> {
+    let listed = successful(
+        Command::new(&tools.security)
+            .args(["find-identity", "-p", "codesigning"])
+            .arg(keychain)
+            .stdin(Stdio::null()),
+        SECURITY_TIMEOUT,
+    )?;
+    Ok(String::from_utf8_lossy(&listed.stdout).into_owned())
+}
+
+/// Generate a self-signed code-signing certificate and import it into a dedicated keychain without
+/// exposing passwords on argv or invoking any shell script. Returns the leaf certificate SHA-1.
+fn create_signing_keychain(
+    work_dir: &Path,
+    cert_name: &str,
+    keychain_path: &Path,
+    password: &str,
+    tools: &Tools,
+) -> Result<String> {
+    check_security_token(password, "signing password")?;
+    let keychain_text = check_security_path(keychain_path, "signing keychain path")?;
+    let codesign_text = check_security_path(&tools.codesign, "codesign path")?;
+    let cert_cnf = work_dir.join("cert.cnf");
+    let key_pem = work_dir.join("key.pem");
+    let cert_pem = work_dir.join("cert.pem");
+    let id_p12 = work_dir.join("id.p12");
+    let p12_text = check_security_path(&id_p12, "temporary signing bundle path")?;
+    let cnf = format!(
+        "[req]\ndistinguished_name=dn\nx509_extensions=v3\nprompt=no\n[dn]\nCN={cert_name}\n[v3]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n"
+    );
+    write_private_new(&cert_cnf, cnf.as_bytes())?;
+
+    successful(
+        Command::new(&tools.openssl)
+            .args([
+                "req", "-x509", "-newkey", "rsa:3072", "-nodes", "-days", "36500",
+            ])
+            .arg("-keyout")
+            .arg(&key_pem)
+            .arg("-out")
+            .arg(&cert_pem)
+            .arg("-config")
+            .arg(&cert_cnf)
+            .stdin(Stdio::null()),
+        OPENSSL_GENERATE_TIMEOUT,
+    )
+    .with_context(|| format!("generate local signing certificate for {cert_name}"))?;
+
+    let fingerprint = successful(
+        Command::new(&tools.openssl)
+            .args(["x509", "-noout", "-fingerprint", "-sha1", "-in"])
+            .arg(&cert_pem)
+            .stdin(Stdio::null()),
+        OPENSSL_FINGERPRINT_TIMEOUT,
+    )
+    .with_context(|| format!("read local signing certificate fingerprint for {cert_name}"))?;
+    let certificate_sha1 = parse_openssl_sha1(&fingerprint.stdout)?;
+
+    let p12_pass = Zeroizing::new(hex::encode(random_bytes::<16>()?.as_slice()));
+    check_security_token(&p12_pass, "temporary export password")?;
+
+    let export_legacy = output(
+        Command::new(&tools.openssl)
+            .args(["pkcs12", "-export", "-legacy", "-passout", "env:P12"])
+            .arg("-inkey")
+            .arg(&key_pem)
+            .arg("-in")
+            .arg(&cert_pem)
+            .arg("-out")
+            .arg(&id_p12)
+            .env("P12", p12_pass.as_str())
+            .stdin(Stdio::null()),
+        OPENSSL_EXPORT_TIMEOUT,
+    )?;
+    if !export_legacy.status.success() {
+        successful(
+            Command::new(&tools.openssl)
+                .args(["pkcs12", "-export", "-passout", "env:P12"])
+                .arg("-inkey")
+                .arg(&key_pem)
+                .arg("-in")
+                .arg(&cert_pem)
+                .arg("-out")
+                .arg(&id_p12)
+                .env("P12", p12_pass.as_str())
+                .stdin(Stdio::null()),
+            OPENSSL_EXPORT_TIMEOUT,
+        )
+        .with_context(|| format!("export local signing identity for {cert_name}"))?;
+    }
+
+    if !keychain_path.is_file() {
+        let create_cmd = Zeroizing::new(format!(
+            "create-keychain -p {password} \"{keychain_text}\"\n"
+        ));
+        run_security_stdin(
+            &tools.security,
+            &create_cmd,
+            SECURITY_TIMEOUT,
+            "signing keychain creation timed out",
+            "create signing keychain",
+        )?;
+    }
+    {
+        let _lock = unlock(keychain_path, password, tools, SECURITY_TIMEOUT)?;
+        successful(
+            Command::new(&tools.security)
+                .args(["set-keychain-settings", "-l", "-u", "-t", "300"])
+                .arg(keychain_path)
+                .stdin(Stdio::null()),
+            SECURITY_TIMEOUT,
+        )?;
+        let import_cmd = Zeroizing::new(format!(
+            "import \"{p12_text}\" -k \"{keychain_text}\" -P {} -T \"{codesign_text}\"\n",
+            p12_pass.as_str()
+        ));
+        run_security_stdin(
+            &tools.security,
+            &import_cmd,
+            SECURITY_TIMEOUT,
+            "signing identity import timed out",
+            "import local signing identity",
+        )?;
+        let partition_cmd = Zeroizing::new(format!(
+            "set-key-partition-list -S apple-tool:,apple: -s -k {password} \"{keychain_text}\"\n"
+        ));
+        run_security_stdin(
+            &tools.security,
+            &partition_cmd,
+            SECURITY_TIMEOUT,
+            "signing keychain partition update timed out",
+            "configure local signing keychain access",
+        )?;
+        let found = find_codesigning_identities(keychain_path, tools)?.to_ascii_lowercase();
+        ensure!(
+            found.contains(&certificate_sha1) || found.contains(&cert_name.to_ascii_lowercase()),
+            "local signing identity did not verify in keychain"
+        );
+    }
+    Ok(certificate_sha1)
+}
+
 fn store_node_signing_password(home: &Path, raw: &[u8; 32]) -> Result<()> {
     private_dir(&home.join("secrets"))?;
     let store = home.join(NODE_KEYSTORE_DIR);
     private_dir(&store)?;
     let path = store.join(NODE_SIGNING_PASS_ENTRY);
     let encoded = Zeroizing::new(data_encoding::BASE64.encode(raw));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)
-        .context("store Node signing keychain password")?;
-    file.write_all(encoded.as_bytes())?;
-    file.sync_all()?;
+    write_private_new(&path, encoded.as_bytes()).context("store Node signing keychain password")?;
     File::open(&store)?.sync_all()?;
     let readback = load_node_signing_password(home)?;
     let expected = Zeroizing::new(hex::encode(raw));
@@ -960,8 +1116,8 @@ pub(crate) fn ensure_node_identity(
         home.display()
     );
 
-    let keychain_text = check_security_path(&keychain_path, "signing keychain path")?;
-    let codesign_text = check_security_path(&tools.codesign, "codesign path")?;
+    let _ = check_security_path(&keychain_path, "signing keychain path")?;
+    let _ = check_security_path(&tools.codesign, "codesign path")?;
     let signing_dir = home.join("signing");
     private_dir(&signing_dir)?;
     let work_dir = signing_dir.join(format!(".init-{}", uuid::Uuid::new_v4()));
@@ -974,141 +1130,15 @@ pub(crate) fn ensure_node_identity(
         armed: true,
     };
 
-    let cert_cnf = work_dir.join("cert.cnf");
-    let key_pem = work_dir.join("key.pem");
-    let cert_pem = work_dir.join("cert.pem");
-    let id_p12 = work_dir.join("id.p12");
-    let p12_text = check_security_path(&id_p12, "temporary signing bundle path")?;
-    {
-        let mut cnf = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&cert_cnf)?;
-        write!(
-            cnf,
-            "[req]\ndistinguished_name=dn\nx509_extensions=v3\nprompt=no\n[dn]\nCN={NODE_CERTIFICATE_NAME}\n[v3]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n"
-        )?;
-    }
-
-    successful(
-        Command::new(&tools.openssl)
-            .args([
-                "req", "-x509", "-newkey", "rsa:3072", "-nodes", "-days", "36500",
-            ])
-            .arg("-keyout")
-            .arg(&key_pem)
-            .arg("-out")
-            .arg(&cert_pem)
-            .arg("-config")
-            .arg(&cert_cnf)
-            .stdin(Stdio::null()),
-        OPENSSL_GENERATE_TIMEOUT,
-    )
-    .context("generate local Node signing certificate")?;
-
-    let fingerprint = successful(
-        Command::new(&tools.openssl)
-            .args(["x509", "-noout", "-fingerprint", "-sha1", "-in"])
-            .arg(&cert_pem)
-            .stdin(Stdio::null()),
-        OPENSSL_FINGERPRINT_TIMEOUT,
-    )
-    .context("read local Node signing certificate fingerprint")?;
-    let certificate_sha1 = parse_openssl_sha1(&fingerprint.stdout)?;
-
     let raw_password = random_bytes::<32>()?;
     let password = Zeroizing::new(hex::encode(raw_password.as_slice()));
-    let p12_pass = Zeroizing::new(hex::encode(random_bytes::<16>()?.as_slice()));
-    check_security_token(&password, "signing password")?;
-    check_security_token(&p12_pass, "temporary export password")?;
-
-    let export_legacy = output(
-        Command::new(&tools.openssl)
-            .args(["pkcs12", "-export", "-legacy", "-passout", "env:P12"])
-            .arg("-inkey")
-            .arg(&key_pem)
-            .arg("-in")
-            .arg(&cert_pem)
-            .arg("-out")
-            .arg(&id_p12)
-            .env("P12", p12_pass.as_str())
-            .stdin(Stdio::null()),
-        OPENSSL_EXPORT_TIMEOUT,
+    let certificate_sha1 = create_signing_keychain(
+        &work_dir,
+        NODE_CERTIFICATE_NAME,
+        &keychain_path,
+        &password,
+        tools,
     )?;
-    if !export_legacy.status.success() {
-        successful(
-            Command::new(&tools.openssl)
-                .args(["pkcs12", "-export", "-passout", "env:P12"])
-                .arg("-inkey")
-                .arg(&key_pem)
-                .arg("-in")
-                .arg(&cert_pem)
-                .arg("-out")
-                .arg(&id_p12)
-                .env("P12", p12_pass.as_str())
-                .stdin(Stdio::null()),
-            OPENSSL_EXPORT_TIMEOUT,
-        )
-        .context("export local Node signing identity")?;
-    }
-
-    let create_cmd = Zeroizing::new(format!(
-        "create-keychain -p {} \"{keychain_text}\"\n",
-        password.as_str()
-    ));
-    run_security_stdin(
-        &tools.security,
-        &create_cmd,
-        SECURITY_TIMEOUT,
-        "Node signing keychain creation timed out",
-        "create Node signing keychain",
-    )?;
-    {
-        let _lock = unlock(&keychain_path, &password, tools, SECURITY_TIMEOUT)?;
-        successful(
-            Command::new(&tools.security)
-                .args(["set-keychain-settings", "-l", "-u", "-t", "300"])
-                .arg(&keychain_path)
-                .stdin(Stdio::null()),
-            SECURITY_TIMEOUT,
-        )?;
-        let import_cmd = Zeroizing::new(format!(
-            "import \"{p12_text}\" -k \"{keychain_text}\" -P {} -T \"{codesign_text}\"\n",
-            p12_pass.as_str()
-        ));
-        run_security_stdin(
-            &tools.security,
-            &import_cmd,
-            SECURITY_TIMEOUT,
-            "Node signing identity import timed out",
-            "import local Node signing identity",
-        )?;
-        let partition_cmd = Zeroizing::new(format!(
-            "set-key-partition-list -S apple-tool:,apple: -s -k {} \"{keychain_text}\"\n",
-            password.as_str()
-        ));
-        run_security_stdin(
-            &tools.security,
-            &partition_cmd,
-            SECURITY_TIMEOUT,
-            "Node signing keychain partition update timed out",
-            "configure local Node signing keychain access",
-        )?;
-        let listed = successful(
-            Command::new(&tools.security)
-                .args(["find-identity", "-p", "codesigning"])
-                .arg(&keychain_path)
-                .stdin(Stdio::null()),
-            SECURITY_TIMEOUT,
-        )?;
-        let found = String::from_utf8_lossy(&listed.stdout).to_ascii_lowercase();
-        ensure!(
-            found.contains(&certificate_sha1)
-                || found.contains(&NODE_CERTIFICATE_NAME.to_ascii_lowercase()),
-            "local Node signing identity did not verify in keychain"
-        );
-    }
 
     owned_file(&keychain_path)?;
     store_node_signing_password(home, &raw_password)?;
@@ -1285,7 +1315,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
         let candidate = home.join("releases/1.2.3-test");
-        for name in ["bin", "ops", "web/dist"] {
+        for name in ["bin", "web/dist"] {
             fs::create_dir_all(candidate.join(name)).unwrap();
         }
         let candidate = fs::canonicalize(candidate).unwrap();
@@ -1307,28 +1337,77 @@ pub(crate) mod tests {
         .unwrap();
         executable(
             &candidate.join("bin/steve-hub"),
-            "#!/bin/sh\nif [ \"$2\" = provision-signing ]; then\n  test \"$(cat)\" = test-password\n  exit $?\nfi\nprintf '%s\\n' '{\"version\":\"1.2.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}'\n",
+            "#!/bin/sh\nif [ \"$2\" = provision-signing ]; then\n  pass=$(cat)\n  [ \"${#pass}\" -eq 64 ]\n  exit $?\nfi\nprintf '%s\\n' '{\"version\":\"1.2.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}'\n",
         );
         executable(
             &candidate.join("bin/steve-keyhelper"),
             "#!/bin/sh\nexit 0\n",
-        );
-        executable(&candidate.join("ops/run.sh"), "#!/bin/sh\nexit 0\n");
-        executable(&candidate.join("ops/release-lib.sh"), "# fixture\n");
-        executable(
-            &candidate.join("ops/sign-setup.sh"),
-            "#!/bin/sh\nset -eu\numask 077\nprintf keychain > \"$STEVE_HOME/signing/steve-signing.keychain-db\"\nprintf test-password > \"$STEVE_HOME/signing/.setup-password\"\n",
         );
         let codesign = home.join("codesign");
         executable(
             &codesign,
             "#!/bin/sh\nif [ \"$1\" = '-dv' ]; then\ncase \"$2\" in *keyhelper*) printf 'Identifier=io.github.infranite.steve.keyhelper\\n' >&2;; *) printf 'Identifier=io.github.infranite.steve.hub\\n' >&2;; esac\nfi\nexit 0\n",
         );
+        let openssl = home.join("openssl");
+        executable(
+            &openssl,
+            r#"#!/bin/sh
+set -eu
+case "$1" in
+  req)
+    keyout=''; out=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -keyout) keyout="$2"; shift 2 ;;
+        -out) out="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'PRIVATE KEY\n' > "$keyout"
+    printf 'CERT\n' > "$out"
+    ;;
+  x509)
+    printf 'SHA1 Fingerprint=01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67\n'
+    ;;
+  pkcs12)
+    [ -n "${P12:-}" ] || exit 11
+    out=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -out) out="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'P12\n' > "$out"
+    ;;
+  *) exit 99 ;;
+esac
+"#,
+        );
         let security = home.join("security");
         executable(
             &security,
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\nif [ \"$1\" = '-i' ]; then cat >/dev/null; fi\nexit 0\n",
+                r#"#!/bin/sh
+set -eu
+printf '%s\n' "$1" >> '{}'
+if [ "$1" = '-i' ]; then
+  line=$(cat)
+  cmd=$(printf '%s' "$line" | awk '{{print $1}}')
+  if [ "$cmd" = create-keychain ]; then
+    kc=$(printf '%s' "$line" | sed -n 's/^create-keychain -p [^ ]* "\(.*\)"$/\1/p')
+    umask 077
+    printf 'keychain\n' > "$kc"
+  fi
+  exit 0
+fi
+if [ "$1" = find-identity ]; then
+  printf '  1) 0123456789ABCDEF0123456789ABCDEF01234567 "Steve Hub"\n     1 identities found\n'
+fi
+exit 0
+"#,
                 home.join("security.log").display()
             ),
         );
@@ -1338,8 +1417,7 @@ pub(crate) mod tests {
             Tools {
                 codesign,
                 security,
-                openssl: "/usr/bin/false".into(),
-                shell: "/bin/sh".into(),
+                openssl,
             },
         )
     }
@@ -1697,7 +1775,6 @@ esac
                 codesign,
                 security,
                 openssl,
-                shell: "/bin/sh".into(),
             },
         )
     }
@@ -1959,14 +2036,40 @@ esac
     }
 
     #[test]
+    fn review593_r3_3_foreground_child_runs_in_isolated_process_group() {
+        let parent_pgid = unsafe { libc::getpgrp() };
+        let mut cmd = Command::new("python3");
+        cmd.args(["-c", "import os; print(os.getpid(), os.getpgrp())"])
+            .stdin(Stdio::null());
+        let out = output(&mut cmd, Duration::from_secs(10)).unwrap();
+        assert!(out.status.success());
+        let text = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<i32> = text
+            .split_whitespace()
+            .map(|s| s.parse::<i32>().unwrap())
+            .collect();
+        assert_eq!(parts.len(), 2, "unexpected output: {text}");
+        let (child_pid, child_pgid) = (parts[0], parts[1]);
+        assert_eq!(
+            child_pid, child_pgid,
+            "foreground maintenance child must be its own process group leader"
+        );
+        assert_ne!(
+            child_pgid, parent_pgid,
+            "foreground maintenance child must not share the terminal's foreground process group"
+        );
+    }
+
+    #[test]
     fn hub_upgrade_from_bundles_v1_to_v2_preserves_tcc_identifier_requirement_and_stable_path() {
         let dir = tempfile::tempdir().unwrap();
         let home = fs::canonicalize(dir.path()).unwrap();
         let cert_sha1 = "11223344556677889900aabbccddeeff00112233";
+        let captured_pass = home.join("captured-setup-password");
 
         let make_hub_bundle = |dir_name: &str, version: &str, commit: &str| -> PathBuf {
             let candidate = home.join("releases").join(dir_name);
-            for sub in ["bin", "ops", "web/dist"] {
+            for sub in ["bin", "web/dist"] {
                 fs::create_dir_all(candidate.join(sub)).unwrap();
             }
             let manifest = json!({
@@ -1995,18 +2098,13 @@ esac
             executable(
                 &candidate.join("bin/steve-hub"),
                 &format!(
-                    "#!/bin/sh\nif [ \"$2\" = provision-signing ]; then\n  test \"$(cat)\" = test-password\n  exit $?\nfi\nprintf '%s\\n' '{{\"version\":\"{version}\",\"commit\":\"{commit}\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}}'\n"
+                    "#!/bin/sh\nif [ \"$2\" = provision-signing ]; then\n  cat > '{}'\n  exit $?\nfi\nprintf '%s\\n' '{{\"version\":\"{version}\",\"commit\":\"{commit}\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}}'\n",
+                    captured_pass.display()
                 ),
             );
             executable(
                 &candidate.join("bin/steve-keyhelper"),
                 "#!/bin/sh\nexit 0\n",
-            );
-            executable(&candidate.join("ops/run.sh"), "#!/bin/sh\nexit 0\n");
-            executable(&candidate.join("ops/release-lib.sh"), "# fixture\n");
-            executable(
-                &candidate.join("ops/sign-setup.sh"),
-                "#!/bin/sh\nset -eu\numask 077\nprintf keychain > \"$STEVE_HOME/signing/steve-signing.keychain-db\"\nprintf test-password > \"$STEVE_HOME/signing/.setup-password\"\n",
             );
             fs::canonicalize(candidate).unwrap()
         };
@@ -2057,20 +2155,80 @@ esac
 "#
             ),
         );
+        let openssl = home.join("tcc-openssl");
+        executable(
+            &openssl,
+            r#"#!/bin/sh
+set -eu
+case "$1" in
+  req)
+    keyout=''; out=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -keyout) keyout="$2"; shift 2 ;;
+        -out) out="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'PRIVATE KEY\n' > "$keyout"
+    printf 'CERT\n' > "$out"
+    ;;
+  x509)
+    printf 'SHA1 Fingerprint=11:22:33:44:55:66:77:88:99:00:AA:BB:CC:DD:EE:FF:00:11:22:33\n'
+    ;;
+  pkcs12)
+    out=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -out) out="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'P12\n' > "$out"
+    ;;
+  *) exit 99 ;;
+esac
+"#,
+        );
         let security = home.join("tcc-security");
         executable(
             &security,
-            "#!/bin/sh\nif [ \"$1\" = '-i' ]; then cat >/dev/null; fi\nexit 0\n",
+            &format!(
+                r#"#!/bin/sh
+set -eu
+if [ "$1" = '-i' ]; then
+  line=$(cat)
+  cmd=$(printf '%s' "$line" | awk '{{print $1}}')
+  if [ "$cmd" = create-keychain ]; then
+    kc=$(printf '%s' "$line" | sed -n 's/^create-keychain -p [^ ]* "\(.*\)"$/\1/p')
+    umask 077
+    printf 'keychain\n' > "$kc"
+  fi
+  exit 0
+fi
+if [ "$1" = find-identity ]; then
+  printf '  1) {cert_sha1_upper} "Steve Hub"\n     1 identities found\n'
+fi
+exit 0
+"#,
+                cert_sha1_upper = cert_sha1.to_ascii_uppercase()
+            ),
         );
         let tools = Tools {
             codesign,
             security,
-            openssl: "/usr/bin/false".into(),
-            shell: "/bin/sh".into(),
+            openssl,
         };
 
         // 1. Setup signs bundles/v1 and links <home>/current -> v1.
         setup_with(&home, &v1, "io.github.infranite.steve.hub", &tools).unwrap();
+        let password = fs::read_to_string(&captured_pass)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(!password.is_empty());
         std::os::unix::fs::symlink(&v1, home.join("current")).unwrap();
         let setup_tcc_path = crate::service::file_access::tcc_executable_path("hub", &home);
         assert_eq!(setup_tcc_path, home.join("current/bin/steve-hub"));
@@ -2080,7 +2238,7 @@ esac
         );
 
         // 2. Upgrade prepares bundles/v2 against the existing identity and checks TCC continuity.
-        prepare_with(&home, &v2, "1.1.0", commit_v2, "test-password", &tools).unwrap();
+        prepare_with(&home, &v2, "1.1.0", commit_v2, &password, &tools).unwrap();
         let continuity_req = verify_tcc_signing_continuity(
             &v1.join("bin/steve-hub"),
             &v2.join("bin/steve-hub"),

@@ -62,22 +62,34 @@ pub const OWNER_LIVE_MS: i64 = 180_000;
 /// separate questions a minute and a half apart were answered as one, from 7.5 min an unrelated later
 /// message took over one that needed you. 1 min sits inside.
 pub const BURST_GAP_MS: i64 = 60_000;
+/// Maximum total time span of a single burst from its first message to its last (3 min), so a slow
+/// trickle of messages separated by < [`BURST_GAP_MS`] cannot coalesce indefinitely (#268).
+pub const BURST_MAX_SPAN_MS: i64 = 180_000;
 /// At most this many messages make one turn (the newest).
 pub const BURST_MAX: usize = 10;
+/// Live debounce settle window for rapid multi-message bursts from the same sender in a space
+/// before invoking the composer (#268).
+pub const BURST_SETTLE_MS: u64 = 2_500;
+/// Maximum number of topic-split replies produced for a single multi-topic burst (#268).
+pub const MAX_TOPIC_SPLITS: usize = 3;
 /// Lines read around a message to decide (a busy group's minutes).
 const AROUND_MAX: usize = 400;
 
 /// `result.superseded` of a card closed because you answered yourself.
 pub const BY_YOU: &str = "你已亲自回复";
+/// `result.superseded` of a card closed because you reacted with an emoji (#277).
+pub const BY_REACTED: &str = "你已用表情回应";
 /// `result.superseded` of a card closed because the sender went on and the turn was answered as one.
 pub const BY_LATER: &str = "对方接着发了消息，已合在一起处理";
 /// `result.superseded` of a card closed because the space is set not to reply for you any more.
 pub const BY_SETTING: &str = "这里已设为不替你回复";
 /// What a message you were there for says on its event.
 pub const LABEL_REPLIED: &str = "你已亲自回复，不替你起草";
+pub const LABEL_REACTED: &str = "你已用表情回应，不替你起草";
 pub const LABEL_LIVE: &str = "你正在这里聊，不替你起草";
 /// The reason codes (logs, the eval, audit).
 pub const REASON_REPLIED: &str = "owner_replied";
+pub const REASON_REACTED: &str = "owner_reacted";
 pub const REASON_LIVE: &str = "owner_live";
 pub const REASON_MERGED: &str = "merged";
 pub const REASON_SETTING: &str = "reply_as_you";
@@ -113,6 +125,13 @@ pub struct Said {
 pub enum Engaged {
     /// You said something about it after it: your latest such message.
     Replied { message_id: String, at: i64 },
+    /// You reacted with an emoji to it (or, in a DM, to the end of its unanswered burst): never a
+    /// live signal for later messages (#277).
+    Reacted {
+        message_id: String,
+        at: i64,
+        emoji: String,
+    },
     /// You said something shortly before it and it goes on with that: your latest such message.
     Live { message_id: String, at: i64 },
 }
@@ -121,6 +140,7 @@ impl Engaged {
     pub fn reason(&self) -> &'static str {
         match self {
             Self::Replied { .. } => REASON_REPLIED,
+            Self::Reacted { .. } => REASON_REACTED,
             Self::Live { .. } => REASON_LIVE,
         }
     }
@@ -128,14 +148,15 @@ impl Engaged {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Replied { .. } => LABEL_REPLIED,
+            Self::Reacted { .. } => LABEL_REACTED,
             Self::Live { .. } => LABEL_LIVE,
         }
     }
 
-    /// When you last spoke.
+    /// When you last spoke or reacted.
     pub fn at(&self) -> i64 {
         match self {
-            Self::Replied { at, .. } | Self::Live { at, .. } => *at,
+            Self::Replied { at, .. } | Self::Reacted { at, .. } | Self::Live { at, .. } => *at,
         }
     }
 }
@@ -173,6 +194,9 @@ impl Stop {
     /// `result.superseded` of the card it closes.
     pub fn why(&self) -> &'static str {
         match self {
+            Self::You {
+                engaged: Engaged::Reacted { .. },
+            } => BY_REACTED,
             Self::You { .. } => BY_YOU,
             Self::Merged { .. } => BY_LATER,
             Self::Setting { .. } => BY_SETTING,
@@ -293,23 +317,51 @@ pub fn engaged(
 }
 
 /// The ids of the turn `target` ends, oldest first: it and the messages right before it from the same
-/// sender, while nobody else spoke between, each follows the last within `gap_ms` and none was
-/// answered in your name already (at most [`BURST_MAX`]). `before`: the space's messages before it,
-/// any order.
+/// sender, while nobody else spoke between, each follows the last within `gap_ms`, total span is
+/// within [`BURST_MAX_SPAN_MS`], explicit reply targets or multi-message threads do not diverge,
+/// and none was answered in your name already (at most [`BURST_MAX`]). `before`: the space's
+/// messages before it, any order.
 pub fn burst(target: &Said, before: &[Said], gap_ms: i64) -> Vec<String> {
     let mut earlier: Vec<&Said> = before
         .iter()
         .filter(|s| s.id != target.id && s.at <= target.at)
         .collect();
     earlier.sort_by_key(|s| std::cmp::Reverse(s.at));
+    // A provider thread key splits bursts only when it actually groups multiple messages (not
+    // per-message synthetic thread keys that platforms assign to unthreaded chat lines).
+    let is_real_thread = |key: Option<&str>| -> bool {
+        let Some(k) = key.filter(|k| !k.is_empty()) else {
+            return false;
+        };
+        let mut count = usize::from(target.thread_key.as_deref() == Some(k));
+        for s in before {
+            if s.id != target.id && s.thread_key.as_deref() == Some(k) {
+                count += 1;
+                if count >= 2 {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    let target_in_real_thread = is_real_thread(target.thread_key.as_deref());
     let mut out = vec![target.id.clone()];
     let mut next = target.at;
     for s in earlier {
+        let distinct_reply = target.reply_to.is_some()
+            && s.reply_to.is_some()
+            && target.reply_to != s.reply_to
+            && target.reply_to != s.external_id;
+        let distinct_thread = target.thread_key != s.thread_key
+            && (target_in_real_thread || is_real_thread(s.thread_key.as_deref()));
         if out.len() >= BURST_MAX
             || s.owner
             || s.answered
             || s.sender != target.sender
             || next - s.at > gap_ms
+            || target.at - s.at > BURST_MAX_SPAN_MS
+            || distinct_reply
+            || distinct_thread
         {
             break;
         }
@@ -394,7 +446,10 @@ pub fn owner_engaged(
     // newest time stored (a provider clock ahead of the Hub's does not hide your message)
     let around = lines(c, ws, &space, t.at - OWNER_LIVE_MS, i64::MAX, &my)?;
     let now = around.iter().map(|s| s.at).fold(now.max(t.at), i64::max);
-    Ok(engaged(dm, &t, &around, now, OWNER_LIVE_MS))
+    if let Some(e) = engaged(dm, &t, &around, now, OWNER_LIVE_MS) {
+        return Ok(Some(e));
+    }
+    crate::incoming_reactions::owner_reacted(c, ws, target)
 }
 
 /// [`owner_engaged`] over the whole chat of inbound message `target`: the spaces every connection of
@@ -421,7 +476,10 @@ pub fn owner_engaged_chat(
         mine.extend(my);
     }
     t.mentions_owner |= t.mentions.iter().any(|a| mine.contains(a));
-    Ok(engaged(dm, &t, &around, now, OWNER_LIVE_MS))
+    if let Some(e) = engaged(dm, &t, &around, now, OWNER_LIVE_MS) {
+        return Ok(Some(e));
+    }
+    crate::incoming_reactions::owner_reacted_chat(c, ws, target)
 }
 
 /// The later message whose turn took inbound message `id` ([`take_turn`]), if one did.
@@ -578,12 +636,25 @@ pub fn answered_message(c: &mut impl Read, ws: &str, out: &str) -> ChannelResult
     else {
         return Ok(None);
     };
-    let (Some(external), Some(sender)) = (row.reply_to, row.sender_account_id) else {
+    let Some(sender) = row.sender_account_id else {
         return Ok(None);
     };
     if !repo::accounts(c, ws, &row.space_id)?.contains(&sender) {
         return Ok(None);
     }
+    if let Some(src_id) =
+        steve_store::channel_message_repo::incoming_reactions::reply_source_of(c, out)?
+    {
+        return Ok(repo::another_senders_message_by_id(
+            c,
+            ws,
+            &row.space_id,
+            &src_id,
+        )?);
+    }
+    let Some(external) = row.reply_to else {
+        return Ok(None);
+    };
     Ok(repo::another_senders_message(
         c,
         ws,

@@ -275,6 +275,7 @@ fn context_msg(l: &Line) -> crate::context::Msg {
         thread_key: l.thread_key.clone(),
         external_id: None,
         reply_to: None,
+        ..Default::default()
     }
 }
 
@@ -339,6 +340,7 @@ pub fn layers(case: &Case, s: &Setting, history: usize, voice: Voice) -> Layers 
             sender: sender.clone(),
             why: Why::of(&facts, false),
             at: t.at,
+            mentions_others: Vec::new(),
         },
         Mode::Own,
         &clock,

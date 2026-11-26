@@ -34,31 +34,107 @@ impl tracing::Subscriber for Warns {
 
 #[test]
 fn compiled_migrations_match_the_release_lock() {
-    // The compatibility test checks disk files against LOCK, including helper
-    // files such as 027_items.sql. This checks what the release actually compiles.
-    let locked: Vec<_> = include_str!("../migrations/LOCK")
+    // Only `027_items.sql` is an allowlisted helper SQL file; every other LOCK entry must be a
+    // strictly contiguous numbered migration (`001.sql`, `002.sql`, ..., `999.sql`, `1000.sql`).
+    const ALLOWED_HELPER: &str = "027_items.sql";
+    let entries: Vec<_> = include_str!("../migrations/LOCK")
         .lines()
         .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
         .map(|line| line.split_once(' ').expect("`<file> <sha256>`"))
-        .filter(|(file, _)| {
-            file.len() == "000.sql".len()
-                && file.ends_with(".sql")
-                && file.as_bytes()[..3].iter().all(u8::is_ascii_digit)
-        })
         .collect();
+    let mut locked = Vec::new();
+    let mut saw_helper = false;
+    for (file, digest) in entries {
+        if file == ALLOWED_HELPER {
+            assert!(!saw_helper, "duplicate {ALLOWED_HELPER} entry in LOCK");
+            saw_helper = true;
+            let actual: String =
+                Sha256::digest(include_str!("../migrations/027_items.sql").as_bytes())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+            assert_eq!(
+                actual, digest,
+                "compiled {ALLOWED_HELPER} differs from LOCK"
+            );
+            continue;
+        }
+        let stem = file
+            .strip_suffix(".sql")
+            .unwrap_or_else(|| panic!("unexpected migration filename in LOCK: {file}"));
+        assert!(
+            stem.len() >= 3 && stem.bytes().all(|b| b.is_ascii_digit()),
+            "unexpected non-numeric or suffixed migration in LOCK: {file}"
+        );
+        locked.push((file, digest));
+    }
+    assert!(saw_helper, "missing allowlisted {ALLOWED_HELPER} in LOCK");
     assert_eq!(
         db::MIGRATIONS.len(),
         locked.len(),
         "compiled migration count"
     );
     for (index, ((file, expected), sql)) in locked.iter().zip(db::MIGRATIONS).enumerate() {
-        assert_eq!(*file, format!("{:03}.sql", index + 1), "migration order");
+        assert_eq!(
+            *file,
+            format!("{:03}.sql", index + 1),
+            "migrations in LOCK must be strictly contiguous without gaps"
+        );
         let actual: String = Sha256::digest(sql.as_bytes())
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
         assert_eq!(actual, *expected, "compiled migration differs from {file}");
     }
+}
+
+#[test]
+fn opening_an_up_to_date_db_executes_zero_write_transactions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steve.sqlite3");
+    let first = Store::open(&path, NoPublisher).unwrap();
+    drop(first);
+
+    // Observer connection tracks PRAGMA data_version (increments on every write transaction
+    // committed by another connection).
+    let observer = Connection::open(&path).unwrap();
+    let version_before: i64 = observer
+        .query_row("PRAGMA data_version", [], |r| r.get(0))
+        .unwrap();
+
+    // Hold SQLite's write lock via BEGIN IMMEDIATE on a separate connection. Any write transaction
+    // attempted during Store::open or db::migrate would block until busy_timeout and fail.
+    let blocker = Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE;").unwrap();
+
+    let ro =
+        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    db::migrate(&ro).expect("db::migrate must not write on an up-to-date database");
+    drop(ro);
+
+    let completed = Arc::new(AtomicUsize::new(0));
+    let seen = completed.clone();
+    let reopened = Store::open_with_migration_progress(
+        &path,
+        NoPublisher,
+        Arc::new(move |snap| {
+            if snap.complete && snap.migration == db::SCHEMA_VERSION as u32 {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+        }),
+    )
+    .expect("Store::open must not begin a write transaction on an up-to-date database");
+    assert_eq!(completed.load(Ordering::SeqCst), 1);
+    drop(reopened);
+
+    blocker.execute_batch("ROLLBACK;").unwrap();
+    let version_after: i64 = observer
+        .query_row("PRAGMA data_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        version_after, version_before,
+        "opening an up-to-date database must execute 0 write transactions"
+    );
 }
 
 #[test]

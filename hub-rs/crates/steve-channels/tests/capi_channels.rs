@@ -25,11 +25,11 @@ use steve_channels::lifecycle::ConnectionRuntime;
 use steve_channels::{Channels, SpaceEvent, channels_api, space_decisions};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
+use steve_modules::Caller;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::testkit::{ME, OTHER, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
-use steve_modules::{Caller, decisions};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
@@ -533,72 +533,54 @@ fn joined(ext: &str, name: &str) -> SpaceEvent {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn new_group_decision_open_mute_undo_and_expiry() {
+async fn new_group_defaults_to_silent_record_with_one_click_rule_change() {
     let h = setup().await;
     let con = s(&h.connect_bot(None).await["connection_id"]);
-    let me = caller(WS, ME);
 
-    // mute
+    // New bot group: default silent record (muted=true, configured=false), no inbox ask card.
     let c =
         h.ch.on_space_event(WS, &con, joined(ids::GROUP_CHAT, "平台值班群"))
             .await
             .expect("ev")
             .expect("change");
-    let d = c.decision_id.expect("新群 decision");
-    let r = decisions::dispatch(h.ch.modules(), &me, &d, "mute", "")
-        .expect("ours")
-        .expect("resolved");
-    assert_eq!(r.result["choice"], "mute");
-    assert_eq!(r.result["space_id"], c.space_id);
+    assert!(
+        c.decision_id.is_none(),
+        "new groups must not open a 4-choice ask card in Inbox"
+    );
+    assert_eq!(
+        inspect::decisions::count_decisions_by_space(h.env.store()).unwrap(),
+        0
+    );
     let (_, sp) = h
         .call("GET", &format!("/spaces/{}", c.space_id), None)
         .await;
     assert_eq!(sp["muted"], true);
+    assert_eq!(sp["configured"], false);
+    assert_eq!(sp["role"], "record");
+
+    // One-click rule change on the space page switches to default rules and marks configured.
+    let (st, sp) = h
+        .call(
+            "PATCH",
+            &format!("/spaces/{}", c.space_id),
+            Some(json!({"muted": false})),
+        )
+        .await;
+    assert_eq!(st, 200, "{sp}");
+    assert_eq!(sp["muted"], false);
     assert_eq!(sp["configured"], true);
     assert_eq!(
         inspect::people::count_revisions_by_object(h.env.store(), &c.space_id).unwrap(),
         1
     );
-    // undo: back as it was
-    h.env
-        .store()
-        .write(|w| {
-            let d = steve_store::DecisionRows(w).get(&d)?.expect("decision");
-            h.ch.modules().registry.before_undo(w, &d)
-        })
-        .expect("undo");
-    let (_, sp) = h
-        .call("GET", &format!("/spaces/{}", c.space_id), None)
-        .await;
-    assert_eq!(sp["muted"], false);
-    assert_eq!(sp["configured"], false);
 
-    // open
-    let c2 =
-        h.ch.on_space_event(WS, &con, joined(ids::TOPIC_CHAT, "需求讨论"))
-            .await
-            .expect("ev")
-            .expect("change");
-    let d2 = c2.decision_id.expect("新群 decision");
-    let r = decisions::dispatch(h.ch.modules(), &me, &d2, "open", "")
-        .expect("ours")
-        .expect("resolved");
-    assert_eq!(r.result["space_id"], c2.space_id);
-    let (_, sp) = h
-        .call("GET", &format!("/spaces/{}", c2.space_id), None)
-        .await;
-    assert_eq!(sp["muted"], false);
-    assert_eq!(sp["configured"], true);
-    let replay = decisions::dispatch(h.ch.modules(), &me, &d2, "open", "").expect("ours");
-    assert_eq!(replay.unwrap(), r);
-
-    // the bot is removed / the group disbanded: an open card expires
+    // Leaving or disbanding updates space status cleanly without leaving orphan cards.
     let c3 =
         h.ch.on_space_event(WS, &con, joined(ids::EXTERNAL_CHAT, "客户对接群"))
             .await
             .expect("ev")
             .expect("change");
-    let d3 = c3.decision_id.expect("新群 decision");
+    assert!(c3.decision_id.is_none());
     h.ch.on_space_event(
         WS,
         &con,
@@ -609,14 +591,17 @@ async fn new_group_decision_open_mute_undo_and_expiry() {
     )
     .await
     .expect("left");
-    let st: String = inspect::decisions::status(h.env.store(), &d3).expect("status");
-    assert_eq!(st, "expired");
+    let (_, sp3) = h
+        .call("GET", &format!("/spaces/{}", c3.space_id), None)
+        .await;
+    assert_eq!(sp3["status"], "left");
+
     let c4 =
         h.ch.on_space_event(WS, &con, joined("oc_another", "另一个群"))
             .await
             .expect("ev")
             .expect("change");
-    let d4 = c4.decision_id.expect("新群 decision");
+    assert!(c4.decision_id.is_none());
     h.ch.on_space_event(
         WS,
         &con,
@@ -627,10 +612,10 @@ async fn new_group_decision_open_mute_undo_and_expiry() {
     )
     .await
     .expect("disbanded");
-    assert_eq!(
-        inspect::decisions::count_decisions_by_id_and_expired(h.env.store(), &d4).unwrap(),
-        1
-    );
+    let (_, sp4) = h
+        .call("GET", &format!("/spaces/{}", c4.space_id), None)
+        .await;
+    assert_eq!(sp4["status"], "archived");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1126,80 +1111,49 @@ async fn one_space_per_chat_with_one_voice() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn new_group_decision_quiet_block_and_the_suggestion() {
+async fn new_group_alert_suggestion_quiet_and_block() {
     let h = setup().await;
     let con = s(&h.connect_bot(None).await["connection_id"]);
-    let me = caller(WS, ME);
     let c =
         h.ch.on_space_event(WS, &con, joined(ids::GROUP_CHAT, "线上告警通知"))
             .await
             .expect("ev")
             .expect("change");
-    let d = c.decision_id.expect("新群 decision");
+    assert!(c.decision_id.is_none());
     let path = format!("/spaces/{}", c.space_id);
     // the fake names the chat itself; an alert group's name
     seed::spaces::set_space_name_for_new_group_decision_quiet_block_and(h.env.store(), &c.space_id)
         .unwrap();
     let (_, sp) = h.call("GET", &path, None).await;
+    assert_eq!(sp["muted"], true);
+    assert_eq!(sp["configured"], false);
     assert!(
         sp["suggest_quiet"].as_str().unwrap_or("").contains("告警"),
         "{sp}"
     );
-    assert_eq!(
-        inspect::decisions::count_decisions_by_id(h.env.store(), &d).unwrap(),
-        1
-    );
-    let r = decisions::dispatch(h.ch.modules(), &me, &d, "quiet", "")
-        .expect("ours")
-        .expect("resolved");
-    assert_eq!(r.result["choice"], "quiet");
-    let (_, sp) = h.call("GET", &path, None).await;
+    let (st, sp) = h
+        .call("PATCH", &path, Some(json!({"attention": "quiet"})))
+        .await;
+    assert_eq!(st, 200, "{sp}");
     assert_eq!(sp["attention"], "quiet");
-    assert_eq!(sp["muted"], false, "不提醒 is not 静默");
     assert_eq!(sp["configured"], true);
     assert_eq!(sp["suggest_quiet"], Value::Null, "only for a new space");
-    h.env
-        .store()
-        .write(|w| {
-            let d = steve_store::DecisionRows(w).get(&d)?.expect("decision");
-            h.ch.modules().registry.before_undo(w, &d)
-        })
-        .expect("undo");
-    let (_, sp) = h.call("GET", &path, None).await;
-    assert_eq!(sp["attention"], "realtime");
-    assert_eq!(sp["configured"], false);
 
-    // 屏蔽 from the card; and setting a level on the page expires an open card
+    // 屏蔽 via one-click PATCH on a new topic group
     let c2 =
         h.ch.on_space_event(WS, &con, joined(ids::TOPIC_CHAT, "需求讨论"))
             .await
             .expect("ev")
             .expect("change");
-    let d2 = c2.decision_id.expect("新群 decision");
-    decisions::dispatch(h.ch.modules(), &me, &d2, "block", "")
-        .expect("ours")
-        .expect("resolved");
-    let (_, sp) = h
-        .call("GET", &format!("/spaces/{}", c2.space_id), None)
-        .await;
-    assert_eq!(sp["attention"], "blocked");
-    assert_eq!(sp["kind"], "topic_group");
-    let c3 =
-        h.ch.on_space_event(WS, &con, joined(ids::EXTERNAL_CHAT, "客户对接群"))
-            .await
-            .expect("ev")
-            .expect("change");
-    let d3 = c3.decision_id.expect("新群 decision");
-    let (st, _) = h
+    assert!(c2.decision_id.is_none());
+    let (st, sp) = h
         .call(
             "PATCH",
-            &format!("/spaces/{}", c3.space_id),
-            Some(json!({"attention": "quiet"})),
+            &format!("/spaces/{}", c2.space_id),
+            Some(json!({"attention": "blocked"})),
         )
         .await;
-    assert_eq!(st, 200);
-    assert_eq!(
-        inspect::decisions::count_decisions_by_id_and_expired_count(h.env.store(), &d3).unwrap(),
-        1
-    );
+    assert_eq!(st, 200, "{sp}");
+    assert_eq!(sp["attention"], "blocked");
+    assert_eq!(sp["kind"], "topic_group");
 }

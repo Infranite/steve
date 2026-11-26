@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""External backup entry points with a fake Hub and disposable homes, without services or network."""
+"""External backup entry point (`ops/dev.py snapshot`) with a fake Hub and disposable homes."""
 import importlib.util
 from contextlib import closing
 import json
 import os
 from pathlib import Path
-import plistlib
 import sqlite3
 import subprocess
 import sys
@@ -65,18 +64,6 @@ print(json.dumps(dict(snapshot_id="a"*64,purpose=args[3],
         call = json.loads((self.home / "called.json").read_text())
         self.assertEqual(call, dict(args=["--admin", "backup", "--reason", reason] + (["--offline"] if offline else []), home=str(self.home)))
 
-    def test_local_release_uses_candidate_receipt_and_rejects_failed_or_incomplete_backup(self):
-        m = load("local-release")
-        self.assertEqual(m.hub_backup(self.candidate), "a" * 64)
-        self.assert_call("pre-upgrade", offline=True)
-        (self.home / "fail").touch()
-        with self.assertRaisesRegex(m.Refused, "fixture refuses"):
-            m.hub_backup(self.candidate)
-        (self.home / "fail").unlink()
-        (self.home / "incomplete").touch()
-        with self.assertRaisesRegex(m.Refused, "incomplete"):
-            m.hub_backup(self.candidate)
-
     def test_dev_snapshot_changes_only_the_copy_and_failure_preserves_it(self):
         m = load("dev")
         m.DEV = self.root / "development"
@@ -95,41 +82,6 @@ print(json.dumps(dict(snapshot_id="a"*64,purpose=args[3],
         with self.assertRaises(subprocess.CalledProcessError):
             m.snapshot(self.home)
         self.assertEqual(dst.read_bytes(), saved)
-
-    def test_source_release_helper_checks_command_status_and_receipt(self):
-        source = (OPS / "release.sh").read_text()
-        helper = source[source.index("hub_backup() {"):source.index("\nschema() {")]
-        def invoke():
-            return subprocess.run(["/bin/zsh", "-fc", helper + '\nhub_backup "$1"', "zsh", str(self.binary)],
-                                  env={**os.environ, "HOME_DIR": str(self.home)},
-                                  text=True, capture_output=True, timeout=10)
-        result = invoke()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "a" * 64)
-        self.assert_call("pre-upgrade")
-        (self.home / "fail").touch()
-        self.assertNotEqual(invoke().returncode, 0)
-        (self.home / "fail").unlink()
-        (self.home / "incomplete").touch()
-        self.assertNotEqual(invoke().returncode, 0)
-
-    def test_source_install_registers_only_hub_and_no_backup_job(self):
-        (self.home / "steve.env").touch()
-        tools = self.root / "tools"
-        tools.mkdir()
-        stub = tools / "launchctl"
-        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/launchctl-calls"\n')
-        stub.chmod(0o700)
-        env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "STEVE_LABEL": "fixture.hub"}
-        subprocess.run(["/bin/zsh", str(OPS / "install.sh")], env=env, check=True, capture_output=True, timeout=10)
-        agents = self.root / "Library/LaunchAgents"
-        self.assertEqual([p.name for p in agents.iterdir()], ["fixture.hub.plist"])
-        with (agents / "fixture.hub.plist").open('rb') as f:
-            job = plistlib.load(f)
-        self.assertEqual(job["ProgramArguments"], ["/bin/zsh", f"{self.home}/current/ops/run.sh"])
-        self.assertEqual((self.root / "launchctl-calls").read_text().splitlines(),
-                         [f"bootout gui/{os.getuid()}/fixture.hub",
-                          f"bootstrap gui/{os.getuid()} {agents}/fixture.hub.plist"])
 
 
 if __name__ == "__main__":

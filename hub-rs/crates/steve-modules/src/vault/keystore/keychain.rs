@@ -108,6 +108,27 @@ impl KeychainStore {
         .map_err(map)?;
         f(&kc)
     }
+
+    /// Interactive generic-password lookup for an explicit terminal command (e.g. one-shot macOS
+    /// upgrade run from an unsigned release tarball where `steve-keyhelper` refuses the parent).
+    /// Unlike [`KeyStore::get`], user interaction stays enabled so macOS can prompt the operator.
+    pub fn get_interactive(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<Kek>, KeyStoreError> {
+        let _serial = INTERACTION.lock().unwrap_or_else(|e| e.into_inner());
+        let kc = match &self.file {
+            Some(p) => SecKeychain::open(p),
+            None => SecKeychain::default(),
+        }
+        .map_err(map)?;
+        match kc.find_generic_password(service, account) {
+            Ok((pw, _item)) => decode(pw.as_ref()).map(Some),
+            Err(e) if e.code() == ERR_ITEM_NOT_FOUND => Ok(None),
+            Err(e) => Err(classify(&kc, e)),
+        }
+    }
 }
 
 impl KeyStore for KeychainStore {

@@ -1,14 +1,15 @@
-//! The “新群” decision: `{kind:"ask", subject_type:"space",
-//! options:["open","mute","quiet","block"]}`, opened when a bot
-//! account finds itself in a new group.
+//! Space rule-suggestion decisions (`subject_type = "space"`, `kind = "propose"`):
+//! opened when similar messages in a space are ignored repeatedly
+//! ([`crate::rule_suggestions`]).
 //!
-//! - `open` (去设置): the space counts as seen (`configured=1`); the result carries `space_id` so the
-//!   card goes to `#/channels/space/<id>`.
-//! - `mute` (静默 = Steve's role 只记录): `muted=1`; `quiet` (不提醒), `block` (屏蔽): that attention
-//!   (migration 019). Each with `configured=1`, a revision and audit like `PATCH /spaces/:id`.
-//! - Undo puts `muted`, the attention and `configured` back as they were.
-//! - The bot leaving the group (`bot.deleted`, `chat.disbanded`) expires an open one
-//!   ([`expire_for_space`]): there is nothing left to set up.
+//! - `record_only` (以后只记录): switches the space to record-only (`muted = true`, and
+//!   `reply_as_you = record` when your own account speaks there), sets `configured = true`,
+//!   supersedes remaining open drafts, and records revision + audit.
+//! - `keep` (保持现状): leaves the space settings unchanged and records the decision timestamp so
+//!   the suggestion does not immediately re-trigger.
+//! - Undo puts `muted`, `reply_as_you`, and `configured` back as they were (when unchanged since).
+//! - Leaving/disbanding the group or manually switching the space to quiet/blocked/muted expires
+//!   any open suggestion ([`expire_for_space`]).
 //!
 //! Register with `steve_channels::space_decisions::register(&mut registry)`.
 
@@ -18,43 +19,40 @@ use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::{Decision, W};
 
 use crate::ChannelResult;
-use crate::spaces::{self, Attention, SUBJECT_SPACE};
+use crate::spaces::{self, Mode, ReplyAsYou, SUBJECT_SPACE};
 
 /// The handler of `subject_type = "space"`.
-pub struct NewSpaceDecision;
+pub struct SpaceRuleSuggestionDecision;
 
-/// Registers [`NewSpaceDecision`] for `space`.
+/// Registers [`SpaceRuleSuggestionDecision`] for `space`.
 pub fn register(reg: &mut Registry) {
-    reg.decision(SUBJECT_SPACE, Box::new(NewSpaceDecision));
+    reg.decision(SUBJECT_SPACE, Box::new(SpaceRuleSuggestionDecision));
 }
 
-/// What the answer sets.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Flags {
     muted: bool,
-    attention: Attention,
+    reply_as_you: ReplyAsYou,
     configured: bool,
 }
 
 fn flags_of(s: &spaces::SpaceSettings) -> Flags {
     Flags {
         muted: s.muted,
-        attention: s.attention,
+        reply_as_you: s.reply_as_you,
         configured: s.configured,
     }
 }
 
-/// Writes `muted`, the attention and `configured` with a revision and audit; returns whether
-/// anything changed.
 fn set_flags(
-    w: &mut steve_store::W<'_>,
+    w: &mut W<'_>,
     ws: &str,
     actor: &str,
     space: &str,
     to: Flags,
     why: &Value,
 ) -> ApiResult<bool> {
-    let before = crate::spaces::settings(w, space)?;
+    let before = spaces::settings(w, space)?;
     let was = flags_of(&before);
     if was == to {
         return Ok(false);
@@ -63,22 +61,35 @@ fn set_flags(
     let revision = before.revision + 1;
     use steve_store::channel_spaces::preferences::{self, Preference};
     preferences::set_flags(w, space, to.muted, to.configured, revision, now)?;
-    if was.attention != to.attention {
+    if was.reply_as_you != to.reply_as_you {
         preferences::set(
             w,
             ws,
             space,
-            Preference::Attention(to.attention.code()),
+            Preference::ReplyAsYou(to.reply_as_you.code()),
             now,
         )?;
+        if was.reply_as_you == ReplyAsYou::Draft
+            && to.reply_as_you != ReplyAsYou::Draft
+            && spaces::speaks_as_you(w, ws, space, None)?
+        {
+            crate::presence::supersede(
+                w,
+                ws,
+                space,
+                crate::presence::Answering::All,
+                crate::presence::BY_SETTING,
+                to.reply_as_you.code(),
+            )?;
+        }
     }
 
     let mut fields = Vec::new();
     if was.muted != to.muted {
         fields.push("muted");
     }
-    if was.attention != to.attention {
-        fields.push("attention");
+    if was.reply_as_you != to.reply_as_you {
+        fields.push("reply_as_you");
     }
     if !fields.is_empty() {
         steve_store::audit_repo::revise(
@@ -87,8 +98,8 @@ fn set_flags(
             "space",
             space,
             revision,
-            &json!({"muted": was.muted, "attention": was.attention.code()}),
-            &json!({"muted": to.muted, "attention": to.attention.code()}),
+            &json!({"muted": was.muted, "reply_as_you": was.reply_as_you.code()}),
+            &json!({"muted": to.muted, "reply_as_you": to.reply_as_you.code()}),
             actor,
         )?;
     }
@@ -101,64 +112,82 @@ fn set_flags(
     Ok(true)
 }
 
-/// What `choice` makes of the flags the space had.
-fn answered(choice: &str, was: Flags) -> Option<Flags> {
-    let mut to = was;
-    to.configured = true;
-    match choice {
-        "open" => {}
-        "mute" => to.muted = true,
-        "quiet" => to.attention = Attention::Quiet,
-        "block" => to.attention = Attention::Blocked,
-        _ => return None,
-    }
-    Some(to)
-}
-
-impl DecisionHandler for NewSpaceDecision {
+impl DecisionHandler for SpaceRuleSuggestionDecision {
     fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let Some(s) = steve_store::channel_spaces::rows::get_in_workspace(w, cx.ws, &d.subject_id)?
         else {
-            // the space went away meanwhile: nothing to do
             return Ok(json!({"choice": cx.choice, "gone": true}).into());
         };
-        let before = crate::spaces::settings(w, &s.id)?;
+        let before = spaces::settings(w, &s.id)?;
         let was = flags_of(&before);
-        let to = answered(cx.choice, was).ok_or_else(|| ApiError::invalid("choice"))?;
-        set_flags(w, cx.ws, cx.actor, &s.id, to, &json!({"decision": d.id}))?;
-        Ok(json!({
-            "choice": cx.choice,
-            "space_id": s.id,
-            "was": {"muted": was.muted, "attention": was.attention.code(), "configured": was.configured},
-        }).into())
+        let voice_mode = (!s.connection_id.is_empty())
+            .then(|| crate::bindings::connection_account(w, cx.ws, &s.connection_id).ok())
+            .flatten()
+            .map(|(_, m)| m);
+        let resolved_at = steve_store::now().max(
+            d.result
+                .get("suggested_at")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+        );
+        match cx.choice {
+            "record_only" => {
+                let to = Flags {
+                    muted: true,
+                    reply_as_you: if voice_mode == Some(Mode::Own) {
+                        ReplyAsYou::Record
+                    } else {
+                        was.reply_as_you
+                    },
+                    configured: true,
+                };
+                set_flags(w, cx.ws, cx.actor, &s.id, to, &json!({"decision": d.id}))?;
+                Ok(json!({
+                    "choice": cx.choice,
+                    "space_id": s.id,
+                    "resolved_at": resolved_at,
+                    "was": {
+                        "muted": was.muted,
+                        "reply_as_you": was.reply_as_you.code(),
+                        "configured": was.configured,
+                    },
+                })
+                .into())
+            }
+            "keep" => Ok(json!({
+                "choice": cx.choice,
+                "space_id": s.id,
+                "resolved_at": resolved_at,
+            })
+            .into()),
+            _ => Err(ApiError::invalid("choice")),
+        }
     }
 
-    /// Back to the flags the space had before the answer (only when nobody changed them since).
     fn before_undo(&self, w: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if d.result["choice"].as_str() != Some("record_only") {
+            return Ok(());
+        }
         let Some(s) =
             steve_store::channel_spaces::rows::get_in_workspace(w, &d.workspace_id, &d.subject_id)?
         else {
             return Ok(());
         };
         let prior = &d.result["was"];
-        let (Some(muted), Some(configured), Some(attention)) = (
+        let (Some(muted), Some(configured), Some(reply_as_you)) = (
             prior["muted"].as_bool(),
             prior["configured"].as_bool(),
-            prior["attention"].as_str().and_then(Attention::parse),
+            prior["reply_as_you"].as_str().and_then(ReplyAsYou::parse),
         ) else {
             return Ok(());
         };
         let was = Flags {
             muted,
-            attention,
+            reply_as_you,
             configured,
         };
-        let Some(to) = answered(d.result["choice"].as_str().unwrap_or(""), was) else {
-            return Ok(());
-        };
-        let now = flags_of(&crate::spaces::settings(w, &s.id)?);
-        if (now.muted, now.attention) != (to.muted, to.attention) {
-            // changed on the space page after the answer: keep what the user set there
+        let now = flags_of(&spaces::settings(w, &s.id)?);
+        if !now.muted {
             return Ok(());
         }
         set_flags(
@@ -173,14 +202,9 @@ impl DecisionHandler for NewSpaceDecision {
     }
 }
 
-/// Expires the open “新群” decision of a space (the bot left or the group was disbanded). Returns
-/// whether one was open.
-pub fn expire_for_space(
-    w: &mut steve_store::W<'_>,
-    ws: &str,
-    space: &str,
-    reason: &str,
-) -> ChannelResult<bool> {
+/// Expires any open rule-suggestion decision on `space` (e.g. bot left, group disbanded, or space
+/// switched to record-only / quiet / blocked). Returns whether one was open.
+pub fn expire_for_space(w: &mut W<'_>, ws: &str, space: &str, reason: &str) -> ChannelResult<bool> {
     let Some(d) = steve_store::decision_repo::open_for(w, ws, SUBJECT_SPACE, space)? else {
         return Ok(false);
     };

@@ -67,7 +67,7 @@ install! { install(reg, cx) [conns, declared, digest, gh, item_events, late, mai
             .outbound(outbox.clone())
             .composer(
                 steve_channels::compose::Composer::new()
-                    .media(Arc::new(steve_channels::media_agent::FeishuMediaSource)),
+                    .media(Arc::new(steve_channels::media_agent::ChannelMediaSource)),
             ),
     );
     let setup = setup

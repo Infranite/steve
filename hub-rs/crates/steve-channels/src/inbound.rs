@@ -197,7 +197,6 @@ pub(crate) struct ConnFacts {
     pub adapter: String,
     pub account_id: String,
     pub created_by: String,
-    pub account_name: String,
     /// The user whose “我” owns the account (a personal, `mode=self` connection).
     pub owner_user: Option<String>,
     /// When the connection was last turned on (`connections.enabled_at`, else `created`).
@@ -216,11 +215,6 @@ fn conn_facts(r: &mut impl Read, ws: &str, conn: &str) -> ChannelResult<ConnFact
         .get(&connection.account_id)?
         .ok_or_else(|| ApiError::not_found("连接"))?;
     let owner_user = steve_store::parties::user_id(r, &account.party_id)?;
-    let account_name = if account.display_name.is_empty() {
-        account.handle_display
-    } else {
-        account.display_name
-    };
     let late_ms = spaces::channel_settings(r, ws, conn)?
         .and_then(|settings| settings.late_ms)
         .filter(|late| LATE_MS.contains(late))
@@ -229,7 +223,6 @@ fn conn_facts(r: &mut impl Read, ws: &str, conn: &str) -> ChannelResult<ConnFact
         adapter: connection.adapter,
         account_id: connection.account_id,
         created_by: connection.created_by,
-        account_name,
         owner_user,
         enabled_at: connection.enabled_at,
         late_ms,
@@ -814,9 +807,13 @@ impl Channels {
         };
         let first = input.find_existing_message(self, w, space, &identity, &key)?;
         if let Some(written) = input.duplicate_message(w, &prepared, &identity, &trigger, first)? {
+            if !written.inbound.message_id.is_empty() {
+                crate::incoming_reactions::attach(w, ws, conn, &written.inbound.message_id)?;
+            }
             return Ok(written);
         }
         let message_id = input.insert_message(w, space, &identity, &key, mentions, &trigger)?;
+        crate::incoming_reactions::attach(w, ws, conn, &message_id)?;
         let type_key = input.message_type(w, space)?;
         let set = crate::spaces::settings(w, &space.id)?;
         let (sender_is_ours, from_owner, own) = input.settle_authorship(w, &identity)?;
@@ -925,6 +922,7 @@ impl InboundWrite<'_> {
                 name: &info.name,
                 member_count: info.member_count,
                 has_external: info.has_external,
+                muted: spaces::default_new_space_muted(mode, info.kind),
                 now,
                 platform: facts.platform.as_deref(),
             },
@@ -934,7 +932,7 @@ impl InboundWrite<'_> {
         } else {
             space.name.clone()
         };
-        let mut decision_id = None;
+        let decision_id = None;
         // a group seen before without its member count: now that it is known, record it and its members
         let filled = !created && space.member_count == 0 && info.member_count > 0;
         if filled {
@@ -978,20 +976,9 @@ impl InboundWrite<'_> {
                 }
             }
         }
-        // “新群” is asked on the group's first live message: history opens no card (a group first
-        // seen through old messages asks when someone writes there now)
-        if mode == Mode::Bot
-            && info.kind.is_group()
-            && history.is_none()
-            && (created || ingress::only_history(w, &space.id)?)
-        {
-            decision_id = Some(spaces::open_new_space_decision(
-                w,
-                ws,
-                &space,
-                &facts.account_name,
-            )?);
-        }
+        // New bot groups default to silent record (`muted = true`, `configured = false`) instead of
+        // opening a 4-choice ask decision in Inbox (#213).
+        let _ = (history, mode);
 
         Ok(PreparedSpace {
             space,
@@ -2126,6 +2113,7 @@ impl Channels {
             rule: None,
             muted: set.muted,
             trigger: None,
+            burst_message_ids: Vec::new(),
         };
 
         Ok(ResponseContext {

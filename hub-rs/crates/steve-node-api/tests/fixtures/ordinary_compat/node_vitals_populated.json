@@ -1,0 +1,32 @@
+{
+  "at": 1764200000000,
+  "roots": [
+    {
+      "root": "root_code",
+      "free": 1000000,
+      "total": 2000000
+    }
+  ],
+  "session_vitals": [
+    {
+      "session_id": "s_compat_1",
+      "cpu_seconds": 1.25,
+      "resident_bytes": 65536,
+      "disk_written_bytes": 4096
+    }
+  ],
+  "meters": {
+    "journal_bytes": 1024,
+    "journal_file_bytes": 4096,
+    "journal_commits": 3,
+    "event_backlog": 0,
+    "event_backlog_bytes": 0,
+    "adapters": 1,
+    "adapter_cpu_seconds": 0.5,
+    "adapter_resident_bytes": 32768,
+    "process": {
+      "cpu_seconds": 0.1,
+      "resident_bytes": 16384
+    }
+  }
+}

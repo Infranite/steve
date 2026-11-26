@@ -101,7 +101,10 @@ fn line_columns() -> String {
        coalesce(m.sender_party_id, m.sender_account_id, ''), m.thread_key, m.external_id, m.reply_to, m.mentions,
        m.sender_account_id, coalesce(m.text, ''),
        EXISTS (SELECT 1 FROM chan_messages o WHERE o.space_id = m.space_id AND o.direction = 'out'
-                  AND o.reply_to = m.external_id AND o.status IN ('{}', '{}', '{}', '{}')
+                  AND (o.reply_to = m.external_id
+                       OR EXISTS (SELECT 1 FROM chan_reply_sources rs
+                                   WHERE rs.out_message_id = o.id AND rs.source_message_id = m.id))
+                  AND o.status IN ('{}', '{}', '{}', '{}')
                   AND o.on_behalf = 'none' AND o.persona_id IS NULL
                   AND o.sender_account_id IN (SELECT id FROM my_accounts))",
         ANSWERED[0], ANSWERED[1], ANSWERED[2], ANSWERED[3])
@@ -208,7 +211,9 @@ pub fn supersession(
     let drafts = format!(
         "SELECT o.id, o.status, src.id FROM chan_messages o
            JOIN chan_messages src ON src.space_id = o.space_id AND src.direction = 'in'
-                AND src.external_id = o.reply_to
+                AND (src.external_id = o.reply_to
+                     OR EXISTS (SELECT 1 FROM chan_reply_sources rs
+                                 WHERE rs.out_message_id = o.id AND rs.source_message_id = src.id))
            JOIN chan_messages m ON m.id = src.id
           WHERE o.space_id = ?2 AND o.direction = 'out' AND o.status IN ('draft', 'failed')
             AND o.on_behalf = 'none' AND o.persona_id IS NULL
@@ -250,6 +255,26 @@ pub fn another_senders_message(
           WHERE m.space_id = ?2 AND m.direction = 'in' AND m.external_id = ?3"
     );
     let src = owner_view(r, ws, space, &sql, [external.into()], |row| {
+        Ok((row.get::<String>(0)?, row.get::<bool>(1)?))
+    })?;
+    Ok(src
+        .into_iter()
+        .next()
+        .filter(|(_, mine)| !mine)
+        .map(|(id, _)| id))
+}
+
+pub fn another_senders_message_by_id(
+    r: &mut impl Read,
+    ws: &str,
+    space: &str,
+    id: &str,
+) -> Result<Option<String>> {
+    let sql = format!(
+        "SELECT m.id, {IS_MINE} FROM chan_messages m
+          WHERE m.space_id = ?2 AND m.direction = 'in' AND m.id = ?3"
+    );
+    let src = owner_view(r, ws, space, &sql, [id.into()], |row| {
         Ok((row.get::<String>(0)?, row.get::<bool>(1)?))
     })?;
     Ok(src

@@ -42,6 +42,8 @@ impl std::error::Error for HandoffError {}
 pub enum CoreError {
     #[error("{0}")]
     Msg(String),
+    #[error("release.maintainer_workflow_required")]
+    MaintainerWorkflowRequired,
     #[error("{0}")]
     Handoff(HandoffError),
     #[error("{0}")]

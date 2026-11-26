@@ -10,6 +10,7 @@ use super::auth::{APP_ADAPTER, USER_ADAPTER, USER_SYSTEM};
 
 /// The bot: its long connection, its own features, made from the credential form.
 pub fn app_decl(app: &FeishuApp) -> ChannelDecl {
+    super::register_platform();
     ChannelDecl::new(APP_ADAPTER)
         .handle_system(USER_SYSTEM)
         .mode(Mode::Bot)
@@ -23,6 +24,7 @@ pub fn app_decl(app: &FeishuApp) -> ChannelDecl {
 /// You: read by polling while `msg.receive` is on; sends, replies in threads, reacts and recalls
 /// as you; authorized by OAuth or a device code.
 pub fn user_decl() -> ChannelDecl {
+    super::register_platform();
     ChannelDecl::new(USER_ADAPTER)
         .handle_system(USER_SYSTEM)
         .mode(Mode::Own)

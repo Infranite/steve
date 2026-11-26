@@ -622,6 +622,11 @@ pub(super) fn describe() {
         Count,
         "Owner updates to per-Node or per-harness automatic upgrade policy."
     );
+    describe_counter!(
+        "steve_update_check_total",
+        Count,
+        "GitHub release update checks finished. Label: result (available, up_to_date, ahead, unknown_current, no_release, unsupported_platform, unavailable, error)."
+    );
     // Node meters, from each Node's vitals (nodes::vitals); totals count from the Node's start
     describe_gauge!(
         "steve_node_sample_timestamp_seconds",
@@ -1122,6 +1127,77 @@ pub(super) fn describe() {
         "steve_security_refusals_total",
         Count,
         "Actions refused at a security or tenant boundary. Labels: boundary, reason."
+    );
+    // Channel reply pipeline (#258, #268, #275, #277, #278)
+    describe_counter!(
+        "steve_channel_incoming_reactions_total",
+        Count,
+        "Incoming channel reaction events processed. Labels: change (created, removed), origin (manual, automated, unknown), matched (yes, pending), superseded (yes, no)."
+    );
+    describe_histogram!(
+        "steve_channel_context_assembly_seconds",
+        Seconds,
+        "Time spent assembling deterministic conversation context for a channel reply."
+    );
+    describe_counter!(
+        "steve_channel_group_gate_total",
+        Count,
+        "Group chat addressee gate decisions before invoking the composer. Labels: result (addressed_to_others, pass)."
+    );
+    describe_histogram!(
+        "steve_channel_burst_messages",
+        Count,
+        "Number of inbound messages grouped into one reply burst."
+    );
+    describe_counter!(
+        "steve_channel_burst_coalesced_total",
+        Count,
+        "Inbound messages coalesced into a later message within the burst settle window."
+    );
+    describe_counter!(
+        "steve_channel_reply_splits_total",
+        Count,
+        "Burst reply deliveries split vs single. Labels: split (single, multi)."
+    );
+    describe_counter!(
+        "steve_channel_cross_context_hits_total",
+        Count,
+        "Cross-context entries assembled for owner-voice replies. Labels: source (me_mem, other_chat, main_thread, item)."
+    );
+    describe_histogram!(
+        "steve_channel_cross_context_seconds",
+        Seconds,
+        "Time spent assembling owner-voice cross-context."
+    );
+    describe_counter!(
+        "steve_channel_media_prepare_total",
+        Count,
+        "Channel media preparation outcomes. Labels: outcome (ok, cached, unsupported, failed, timeout)."
+    );
+    describe_histogram!(
+        "steve_channel_media_prepare_seconds",
+        Seconds,
+        "Time spent fetching and extracting media attachments for a channel reply."
+    );
+    describe_counter!(
+        "steve_gateway_multimodal_reroute_total",
+        Count,
+        "Image-bearing gateway calls rerouted to a multimodal-capable harness. Labels: from, to."
+    );
+    describe_counter!(
+        "steve_channel_draft_escalated_total",
+        Count,
+        "Unhandled @-mention or DM drafts escalated to Inbox after working-hour timeout. Labels: kind (dm, mention)."
+    );
+    describe_counter!(
+        "steve_channel_ignore_rule_suggestion_total",
+        Count,
+        "Record-only rule suggestions opened after repeated ignores of similar messages. Labels: category (dm, bot, mention, group)."
+    );
+    describe_counter!(
+        "steve_channel_new_group_silent_total",
+        Count,
+        "Newly discovered bot groups initialized in default silent-record mode instead of opening an inbox ask card."
     );
     describe_counter!(
         "steve_window_cache_requests_total",
