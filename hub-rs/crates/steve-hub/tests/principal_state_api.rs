@@ -95,6 +95,7 @@ async fn start() -> Env {
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let local_node = local_node::attach(&w, &cfg, &vars).await;
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_node(w.node.clone())
         .with_history(w.history.clone())
         .with_nodes(w.nodes.clone())
         .with_workspaces(Some(w.workspaces.clone()))
