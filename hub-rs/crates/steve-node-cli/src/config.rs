@@ -209,8 +209,14 @@ impl Home {
             codex_home,
             user_home,
             version: option_env!("STEVE_BUILD_VERSION")
-                .unwrap_or(env!("CARGO_PKG_VERSION"))
-                .into(),
+                .zip(option_env!("STEVE_BUILD_COMMIT"))
+                .map(|(version, _)| version.to_owned())
+                .or_else(|| {
+                    var("STEVE_VERSION")
+                        .and_then(|p| p.into_os_string().into_string().ok())
+                        .filter(|v| !v.is_empty())
+                })
+                .unwrap_or_else(|| "dev".into()),
         })
     }
 

@@ -40,6 +40,11 @@ const PID: &str = "service.pid";
 /// Maximum consecutive restarts before assuming the newly spawned binary still fails to match
 /// the Hub and refusing to enter a kill loop.
 const MAX_CONSECUTIVE_RESTARTS: u32 = 3;
+/// Period between local service supervision checks.
+const SUPERVISE_INTERVAL: Duration = Duration::from_secs(10);
+/// Grace window for an already-running local Node from a prior Hub boot to reconnect before
+/// supervision inspects or restarts it.
+const PRIOR_LINK_GRACE: Duration = Duration::from_secs(3);
 
 /// The Hub's side of its service Node: what routing and workspaces use.
 pub(crate) struct ServiceHost {
@@ -370,12 +375,18 @@ fn keep_running_task(
     version: String,
 ) -> steve_runtime::Task {
     let state = Arc::new(Mutex::new(SuperviseState::default()));
-    // a moment for a Node still running from before this Hub to link again
+    // Wait briefly only when a local Node from a prior Hub boot is already alive and reconnecting;
+    // on a cold start with no running local Node, spawn immediately so APIs do not observe 503.
+    let first_run = if read_service(&home).0.is_some_and(pid_alive) {
+        steve_runtime::FirstRun::After(PRIOR_LINK_GRACE)
+    } else {
+        steve_runtime::FirstRun::Immediate
+    };
     steve_runtime::every_after(
         "node.service.supervise",
         Arc::new(steve_runtime::SystemClock),
-        Duration::from_secs(10),
-        steve_runtime::FirstRun::After(Duration::from_secs(3)),
+        SUPERVISE_INTERVAL,
+        first_run,
         move || {
             let (home, svc, runtime, version, state) = (
                 home.clone(),

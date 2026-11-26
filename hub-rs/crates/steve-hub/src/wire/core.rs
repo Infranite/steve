@@ -1065,11 +1065,14 @@ impl CoreDomain {
             .read(|r| steve_store::mail::unknown_draft_count(r))
             .map_err(|e| BackendError::msg(e.to_string()))?;
         let sealed = quiet && self.core.node_working() == 0 && store.maintenance_seal();
-        let mut blockers = self
-            .routed
-            .node
-            .as_ref()
-            .map_or_else(Vec::new, |n| n.working_details());
+        let mut blockers = if node > 0 {
+            self.routed
+                .node
+                .as_ref()
+                .map_or_else(Vec::new, |n| n.working_details())
+        } else {
+            Vec::new()
+        };
         for (kind, count) in &running {
             if *count > 0 {
                 blockers.push(json!({"kind":"activity","state":kind,"count":count,"reason":"waiting_for_activity"}));
