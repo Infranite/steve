@@ -9,6 +9,7 @@
 //   @read <path>         an ACP read of <path> (locations and rawInput.file_path), then done
 //   @asking <kind> <path…> a pending tool call of <kind> on <path…> (an `execute`: the command)
 //                        that never completes
+//   @perm <kind> <path…> sends session/request_permission for <kind> on <path…>
 //   @running <kind> <path…> a tool call that reports in_progress and never completes
 //   @sleep <ms>          waits
 //   @touch <path>        creates the file
@@ -76,6 +77,31 @@ async function run(id, prompt) {
     else if (cmd === "say") say(rest.replaceAll("\\n", "\n"))
     else if (cmd === "read") tool("read", a[0], true)
     else if (cmd === "asking") tool(a[0], a.slice(1).join(" "), false)
+    else if (cmd === "perm") {
+      const pid = `p${++calls}`
+      const kind = a[0]
+      const arg = a.slice(1).join(" ")
+      send({
+        jsonrpc: "2.0",
+        id: pid,
+        method: "session/request_permission",
+        params: {
+          sessionId: sid,
+          toolCall: {
+            toolCallId: pid,
+            kind,
+            title: `${kind} ${arg}`,
+            status: "pending",
+            locations: kind === "execute" ? [] : [{ path: arg }],
+            rawInput: kind === "execute" ? { command: arg } : { file_path: arg },
+          },
+          options: [
+            { optionId: "yes", kind: "allow_once" },
+            { optionId: "no", kind: "reject_once" },
+          ],
+        },
+      })
+    }
     else if (cmd === "running") tool(a[0], a.slice(1).join(" "), false, "in_progress")
     else if (cmd === "sleep") await sleep(Number(a[0]))
     else if (cmd === "touch") writeFileSync(a[0], "")

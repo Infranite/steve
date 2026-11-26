@@ -421,6 +421,25 @@ async fn same_name_and_signature_org_gives_a_proposal() {
     assert_eq!(d.status, steve_types::DecisionStatus::Open);
     assert!(d.item_id.is_none());
 
+    // Low-risk merge proposals fold out of the "待我决定" Decide tier (zero Decide cards).
+    let open_views = t
+        .store()
+        .read(|r| steve_store::views::Views::decision_views(r).open())
+        .unwrap();
+    let view = open_views
+        .iter()
+        .find(|v| v.id.as_str() == dec)
+        .expect("decision view");
+    assert_eq!(view.tier, steve_types::DecisionTier::Folded);
+    assert_eq!(view.folded, Some(steve_types::FoldReason::LowPriority));
+    assert_eq!(
+        open_views
+            .iter()
+            .filter(|v| v.tier == steve_types::DecisionTier::Decide)
+            .count(),
+        0
+    );
+
     // the new contact is unconfirmed; the account is not verified yet
     let p = party(&t, &got.party_id).contact_kind.unwrap();
     assert_eq!(p, "unconfirmed");

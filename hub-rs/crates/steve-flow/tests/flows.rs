@@ -936,16 +936,24 @@ async fn notify_to_item_wait_delay_and_sub_flows() {
         event_outcome(&e, &evt).0 == "need"
     })
     .await;
-    let dec = open_decision(&e, "signal").expect("notify decision");
-    assert_eq!(decision(&e, &dec).question, "记得看：合同终稿");
-    // 转成事项
-    answer(&e, &dec, "to_item").await;
-    assert_eq!(event_outcome(&e, &evt).0, "item");
-    assert_eq!(req_item(&e, &evt), "ST-1");
-    assert_eq!(
-        e.core.created()[0].goal,
-        steve_modules::outbound::quote_untrusted("合同终稿\n\n附件是终稿")
-    );
+    // Flow notify writes to the passive notification Feed and opens zero decision cards.
+    assert!(open_decision(&e, "signal").is_none());
+    let feed = e
+        .flow
+        .store()
+        .read(|r| steve_store::FeedReads(r).report_result(WS, &run, "n"))
+        .unwrap()
+        .expect("notify reminder feed entry");
+    let feed_id = feed["feed_entry_id"].as_str().expect("feed_entry_id");
+    let entry = e
+        .flow
+        .store()
+        .read(|r| steve_store::feed::detail(r, WS, ME, feed_id))
+        .unwrap();
+    assert_eq!(entry.kind, "report");
+    assert_eq!(entry.source.r#type, "flow");
+    assert_eq!(entry.title, "记得看：合同终稿");
+    assert_eq!(entry.body.unwrap().markdown, "记得看：合同终稿");
 }
 
 #[tokio::test]

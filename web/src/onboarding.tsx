@@ -3,7 +3,7 @@
  * task (anyone else). Built on affectUI's Stepper Form; every row comes from the store, nothing is made up. */
 import { StepperForm, StepperSuccess, type Step, type StepperLabels } from "@/components/affect/stepper-form-clean"
 import { Button } from "@/components/ui/button"
-import { emit, finishOnboarding, meet, skipOnboarding, st, toast, useShellSelector, useShellStore, useRuntimes } from "@/store"
+import { emit, finishOnboarding, meet, skipOnboarding, st, toast, useRuntimesQuery, useShellSelector, useShellStore } from "@/store"
 import { go } from "@/ui"
 import { homeTilde } from "@/lib/path"
 import { useT } from "@/i18n"
@@ -44,12 +44,32 @@ export function Onboarding() {
   useShellStore()
   useShellSelector(() => st.onboard)
   const t = useT()
-  const [modelChosen, setModelChosen] = useState(false)
-  useEffect(() => setModelChosen(false), [st.workspace?.id])
-  const rts = useRuntimes(st.onboard >= 0)
+  const [modelReady, setModelReady] = useState<boolean | null>(null)
+  useEffect(() => setModelReady(null), [st.workspace?.id])
+  const rtsQuery = useRuntimesQuery(st.onboard >= 0)
+  const rts = rtsQuery.data ?? []
   if (st.onboard < 0) return null
   const k = (s: K, o?: Record<string, unknown>) => String(t(`pages:chat.onboard.${s}`, o as never))
   const ok = rts.filter((r) => r.ok).map((r) => r.name)
+  const runtimesKnown = rtsQuery.data !== undefined
+  const noHarness = runtimesKnown && ok.length === 0
+  if (noHarness) {
+    return (
+      <div className="flex max-w-[560px] flex-col gap-4 rounded-2xl border border-border bg-card p-6 shadow-[var(--lift)] anim-in" data-onboard-card data-onboard={st.onboard} data-onboard-no-harness>
+        <div className="flex flex-col gap-1.5">
+          <h2 className="type-headline text-foreground">{t("pages:models.setup.noHarnessTitle")}</h2>
+          <p className="type-callout text-muted-foreground">{k("noRuntime")}</p>
+        </div>
+        {rts.length > 0 && <List>{rts.map((r) => <Row key={r.id} ok={r.ok} name={r.name} data={{ "data-onboard-runtime": r.id }}
+          sub={r.setup?.reason || r.setup?.error || r.error || r.setup?.help || r.install_hint || k("unavailable")} />)}</List>}
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <Out to="#/devices" id="devices">{k("devices")}</Out>
+          <Button type="button" size="sm" variant="ghost" className="text-muted-foreground" onClick={skipOnboarding} data-onboard-skip>{k("skip")}</Button>
+        </div>
+      </div>
+    )
+  }
+  const hasReady = modelReady ?? ok.length > 0
   const ws = st.workspace, projects = st.projects.filter((p) => !p.archived && (!ws || p.workspace_id === ws.id))
   const shown = projects.slice(0, 4)
 
@@ -58,9 +78,9 @@ export function Onboarding() {
       render: () => null,
     },
     { id: "runtime", title: k("runtime"), heading: k("runtimeHead"), description: ok.length ? k("runtimes", { first: ok[0] }) : k("noRuntime"),
-      validate: () => st.owner && !modelChosen ? { model: t("pages:models.setup.required") } : null,
+      validate: () => st.owner && !hasReady ? { model: t("pages:models.setup.noHarness") } : null,
       render: ({ errors }) => <div className="flex flex-col gap-3">
-        {st.owner && <SteveModelForm key={st.workspace?.id} first onSaved={() => setModelChosen(true)} onDirty={() => setModelChosen(false)} />}
+        {st.owner && <SteveModelForm key={st.workspace?.id} first onReady={setModelReady} />}
         {errors.model && <p role="alert" className="type-callout text-destructive" data-onboard-model-required>{errors.model}</p>}
         {rts.length > 0 && <List>{rts.map((r) => <Row key={r.id} ok={r.ok} name={r.name} data={{ "data-onboard-runtime": r.id }}
           sub={r.ok ? (r.models.length ? k("models", { count: r.models.length }) : r.note) : (r.setup?.reason || r.setup?.error || r.error || r.setup?.help || r.install_hint || k("unavailable"))} />)}</List>}
@@ -99,7 +119,7 @@ export function Onboarding() {
         submitLabel={st.owner ? k("meetGo") : k("finish")}
         submittingLabel={st.owner ? k("meetGo") : k("finish")}
         aside={<Button type="button" size="sm" variant="ghost" className="text-muted-foreground" onClick={skipOnboarding} data-onboard-skip>{last && st.owner ? k("later") : k("skip")}</Button>}
-        onComplete={async () => { if (st.owner && !modelChosen) throw new Error(t("pages:models.setup.required")); if (st.owner) await meet(); else { finishOnboarding(); toast(k("done")) } }}
+        onComplete={async () => { if (st.owner && !hasReady) throw new Error(t("pages:models.setup.noHarness")); if (st.owner) await meet(); else { finishOnboarding(); toast(k("done")) } }}
         success={() => <StepperSuccess title={k("done")} />}
       />
     </div>

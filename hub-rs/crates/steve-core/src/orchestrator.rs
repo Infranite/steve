@@ -5479,26 +5479,6 @@ impl Tx<'_> {
                 return Ok(());
             }
         };
-        /* past the handoff threshold, when the workspace set one, the next message starts a fresh session
-         * with a handoff summary. By default none: the harness compacts its own context, and Steve does
-         * not replace a working session (decided by the user on 2026-11-09). */
-        let item = self.item(item_id)?;
-        let ws = &item.workspace_id;
-        let limit: f64 = self
-            .db()
-            .setting(ws, "handoff", "0")?
-            .parse::<f64>()
-            .ok()
-            .filter(|l| *l > 0.0)
-            .unwrap_or(f64::NAN);
-        if let (Some(used), Some(size)) = (s.used.filter(|u| *u != 0), s.size.filter(|z| *z != 0)) {
-            let ratio = used as f64 / size as f64 * 100.0;
-            if ratio >= limit && !self.busy(&s.id) {
-                let pct = ratio.round() as i64;
-                self.handoff_on_supplement(&item, &s, pct, text, files)?;
-                return Ok(());
-            }
-        }
         if mode == SupplementMode::Steer && self.busy(&s.id) {
             self.stop_now(&s.id);
         }

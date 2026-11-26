@@ -13,10 +13,16 @@ const pad = (n) => String(n).padStart(2, "0")
 const local = (ms) => { const d = new Date(ms + 8 * 3_600_000); return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}` }
 
 const ws = { id: "ws_1", name: "Sample space", description: "", item_prefix: "ST", sort: 0, created: 0, role: "owner" }
-const shell = { version: "fixture", web_version: "fixture", owner: true, workspace: ws, workspaces: [ws], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, settings: { theme: "light" }, devices: [], runtimes: [], notifications: [], notifySeen: 0 }
+const steveBot = { id: "steve", name: "Steve", role: "Assistant", main: true, harness: "codex", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "ask", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["ws_1"] }
+const shell = { version: "fixture", web_version: "fixture", owner: true, workspace: ws, workspaces: [ws], bots: [steveBot], allBots: [{ id: "steve", name: "Steve", workspaces: ["ws_1"] }], projects: [], tags: [], tagUses: {}, settings: { theme: "light", onboard: "done" }, devices: [], runtimes: [], notifications: [], notifySeen: 0 }
 const decisions = [
   { id: "dec_1", ws: "ws_1", kind: "approve", subject_type: "item", subject_id: "ST-1", item_id: "ST-1", session_id: null, question: { kind: "raw", text: "Approve deploy?" }, draft: "", options: [], status: "open", result: null, requested_by: "steve", created: NOW - 60_000, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null, revision: 1 },
   { id: "dec_2", ws: "ws_1", kind: "ask", subject_type: "item", subject_id: "ST-2", item_id: "ST-2", session_id: null, question: { kind: "raw", text: "Which target?" }, draft: "", options: [], status: "open", result: null, requested_by: "steve", created: NOW - 120_000, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null, revision: 1 },
+  { id: "dec_3", ws: "ws_1", kind: "confirm", subject_type: "party_merge", subject_id: "mp_1", item_id: null, session_id: null, question: { kind: "raw", text: "Low-priority folded card" }, draft: "", options: [], status: "open", result: null, requested_by: "steve", created: NOW - 180_000, resolved: null, undo_until: null, space_id: null, tier: "folded", folded: "low_priority", revision: 1 },
+]
+const chatItems = [
+  { id: "ST-1", ws: "ws_1", no: 1, title: "Deploy check", state: { kind: "active" }, waits: [], op_blockers: [], snooze: null, bot_id: "steve", source: "chat", created: NOW - 60_000, updated: NOW - 60_000, goals: 1, archived: false, project_id: null, priority: "中", due: null, starred: false, tags: [], accept_mode: "manual", design_gate: false, progress: "运行中", plan_done: 0, plan_total: 1, parent: null, sessions: [], queued: 0 },
+  { id: "ST-2", ws: "ws_1", no: 2, title: "Waiting task", state: { kind: "active" }, waits: ["dec_2"], op_blockers: [], snooze: null, bot_id: "steve", source: "chat", created: NOW - 120_000, updated: NOW - 120_000, goals: 1, archived: false, project_id: null, priority: "中", due: null, starred: false, tags: [], accept_mode: "manual", design_gate: false, progress: "", plan_done: 0, plan_total: 0, parent: null, sessions: [], queued: 0 },
 ]
 const todos = [
   { id: "td_1", text: "Reply to Morgan", state: "open", item_id: null, matter: null, due: null, due_quote: null, due_kind: null, due_date: "2026-11-16", source: "you", writer: "owner", created: 0, updated: 0, closed: null, kind: "todo", parent: null, target_date: null, remind_at: null, snooze_until: null, block_event: null, pri: 0, star: false, recur: null, progress: null, sources: [], people: [] },
@@ -56,7 +62,7 @@ async function open({ lang = "zh-CN", width = 1440, height = 900, hash = "/#/inb
     const json = (v, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(v) }).catch(() => {})
     if (path === "/auth/hello") return json({ name: "steve", api: 2, version: "fixture", login: { token: true, oidc: false } })
     if (path === "/api/shell") return json(shell)
-    if (path === "/api/snapshot") return json({ epoch: "ep1", rev: 1, cursor: "1", views: { decision: decisions, item: [], session: [], message: { views: [], next: null, rev: 1 } } })
+    if (path === "/api/snapshot") return json({ epoch: "ep1", rev: 1, cursor: "1", views: { decision: decisions, item: hash === "/#/" ? chatItems : [], session: [], message: { views: [], next: null, rev: 1 } } })
     if (path === "/api/stream" || path === "/api/events") return route.fulfill({ status: 200, contentType: "text/event-stream", body: ": ok\n\n" }).catch(() => {})
     if (path === "/api/me") return json({ user: { id: "owner", name: "Owner", email: null, role: "owner" }, version: "fixture", web_version: "fixture" })
     if (path === "/api/people/me/avatar") return route.fulfill({ status: 404, body: "" }).catch(() => {})
@@ -68,6 +74,10 @@ async function open({ lang = "zh-CN", width = 1440, height = 900, hash = "/#/inb
     if (path === "/api/calendar/events") return json({ range: { from: "2026-11-18 00:00", to: "2026-11-18 24:00", tz: TZ, from_ms: 0, to_ms: 0 }, events: calEvents, calendars: [] })
     if (path === "/api/approval-policy") return json({ policy: { mode: "ask_owner", revision: 1 }, editable: true })
     if (path === "/api/github/repos") return json([])
+    if (path === "/api/summary") return json({ ws: ws.id, workspace_name: ws.name, thinking: false, hold: null })
+    if (path === "/api/notifications") return json([])
+    if (path === "/api/conversations/channels") return json({ channels: [] })
+    if (path === "/api/conversations") return json({ conversations: [], has_more: false, next_offset: null, total: 0 })
     if (path === "/api/system/web-perf" && req.method() === "POST") {
       const body = req.postDataJSON()
       for (const [k, n] of Object.entries(body?.nav_opens ?? {})) navCounts.set(k, (navCounts.get(k) ?? 0) + Number(n))
@@ -221,6 +231,25 @@ try {
       { id: "more", items: ["stats", "accounts", "vault", "settings"] },
     ])
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile More page fits without horizontal overflow")
+    await page.close()
+  }
+
+  // Main chat first screen: waiting count unified from 4 entries to 1 (sidebar inbox badge matching Decide tier)
+  {
+    const { page } = await open({ lang: "zh-CN", width: 1440, height: 900, hash: "/#/" })
+    await page.locator("[data-sidebar-nav]").waitFor()
+    await page.locator('[data-composer="chat"]').waitFor()
+    const decideExpected = decisions.filter((d) => d.tier === "decide").length
+    assert.equal((await page.locator("[data-inbox-badge]").innerText()).trim(), String(decideExpected), "sidebar inbox badge matches Decide tier with zero error")
+    const runningText = (await page.locator("[data-sidebar-running] .ui-rnc__trigger").innerText()).replace(/\s+/g, " ").trim()
+    assert.ok(!runningText.includes("等你"), `running pill trigger must not repeat waiting count: ${runningText}`)
+    assert.equal(await page.locator("[data-rail-count]").count(), 0, "right rail toggle shows no waiting badge")
+    assert.equal(await page.locator("[data-rail-waiting]").count(), 0, "right rail toggle shows no waiting dot")
+    if ((await page.locator('[data-rail="aside"]').count()) === 0) await page.locator("[data-rail-toggle]").click()
+    await page.locator('[data-rail="aside"]').waitFor()
+    assert.equal(await page.locator("[data-rail-wait]").count(), 0, "right rail body shows no duplicated waiting section")
+    assert.equal(await page.locator("[data-pending-strip] button", { hasText: "展开" }).count(), 0, "no multi-count folded waiting bar above composer")
+    assert.ok((await page.locator("[data-pending-strip] [data-decision-id]").count()) <= 1, "at most 1 directly-blocking card above composer")
     await page.close()
   }
 

@@ -11,10 +11,8 @@ pub struct Decision {
     pub kind: String,
     /// the rule that changed the kind: "1".."6"; `None` when the model's kind stands
     pub guard: Option<&'static str>,
-    /// work to offer after research or an answer (rule 4 keeps the model's item here)
+    /// work to offer after research or an answer (inline answer + clickable offer action)
     pub offer: Option<Offer>,
-    /// a suggestion card about an existing item (rule 5: “……建议追加到 ST-n，追加还是单独建项？”)
-    pub for_item: Option<String>,
 }
 
 /// A guest conversation (an IM space): what the turn may become there. Configuration,
@@ -41,17 +39,14 @@ pub fn for_guest(d: Decision, r: &Route, research: bool, items: bool) -> Decisio
         // the router's clarifying question (and its options) is Steve asking the chat: the host's
         // composer answers in its own words instead (it may still ask, as a sentence)
         "ask" => ("answer", d.offer.clone()),
-        // “追加到 ST-n？” would name an item to the chat
-        "suggest" if d.for_item.is_some() => ("answer", None),
         "research" if !research => ("answer", d.offer.clone()),
-        "item" | "suggest" if !items => (inline, offer()),
+        "item" if !items => (inline, offer()),
         _ => return d,
     };
     Decision {
         kind: kind.into(),
         guard: Some("guest"),
         offer,
-        for_item: None,
     }
 }
 
@@ -66,31 +61,6 @@ pub fn for_owner(d: Decision, owner: bool) -> Decision {
         kind: "research".into(),
         guard: Some("owner"),
         ..d
-    }
-}
-
-/// Your own conversation: work that is not clearly an item is answered in place with a plan, and
-/// offered as an item — Steve no longer asks “在这里出方案，还是建成事项？” first. Decided by the user
-/// on 2026-11-04 (ST-33, `guard = "plan"`). “追加到 ST-n，还是单独建项？” still asks: it is about which item.
-pub fn for_main(d: Decision, r: &Route) -> Decision {
-    if d.kind != "suggest" || d.for_item.is_some() {
-        return d;
-    }
-    let offer = d.offer.clone().or_else(|| {
-        (!r.title.trim().is_empty()).then(|| Offer {
-            title: r.title.clone(),
-            goal: if r.goal.trim().is_empty() {
-                r.title.clone()
-            } else {
-                r.goal.clone()
-            },
-        })
-    });
-    Decision {
-        kind: "research".into(),
-        guard: Some("plan"),
-        offer,
-        for_item: None,
     }
 }
 
@@ -265,11 +235,19 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
         kind: kind.into(),
         guard: guard.filter(|_| kind != model),
         offer: r.offer.clone(),
-        for_item: None,
     };
     let work = || Offer {
         title: r.title.clone(),
-        goal: r.goal.clone(),
+        goal: if r.goal.trim().is_empty() {
+            r.title.clone()
+        } else {
+            r.goal.clone()
+        },
+    };
+    let work_offer = || {
+        r.offer
+            .clone()
+            .or_else(|| (!r.title.trim().is_empty()).then(work))
     };
     /* 6: no usable answer from the router — answer here, never an item */
     if r.fallback {
@@ -283,19 +261,17 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
         return d("item", Some("1"));
     }
     /* 2: the user asked for an item in so many words */
-    if explicit_item(text)
-        && matches!(
-            model,
-            "item" | "answer" | "research" | "suggest" | "supplement"
-        )
-    {
+    if explicit_item(text) && matches!(model, "item" | "answer" | "research" | "supplement") {
         return d("item", Some("2"));
     }
     if model == "item" {
-        /* 3: an item needs a work signal and confidence; otherwise ask with a card */
+        /* 3: an item needs a work signal and confidence; otherwise answer inline with an offer */
         let worky = r.signals.iter().any(|s| WORK.contains(&s.as_str()));
         if !worky || r.confidence < 0.75 {
-            return d("suggest", Some("3"));
+            return Decision {
+                offer: work_offer(),
+                ..d("research", Some("3"))
+            };
         }
         /* 4: a pure question is answered here; the item the model saw becomes the offer */
         if pure_question(text) {
@@ -305,11 +281,11 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
             };
         }
     }
-    /* 5: an unsure supplement asks once. Naming an item supplies context, not consent to append. */
+    /* 5: an unsure supplement stays inline with a clickable offer rather than popping a 2-choice card */
     if model == "supplement" && r.confidence < 0.8 {
         return Decision {
-            for_item: r.item.clone(),
-            ..d("suggest", Some("5"))
+            offer: work_offer(),
+            ..d("research", Some("5"))
         };
     }
     d(model, None)
@@ -400,41 +376,6 @@ mod tests {
     }
 
     #[test]
-    fn your_conversation_plans_instead_of_asking() {
-        for (kind, conf, signals) in [("suggest", 0.9, vec![]), ("item", 0.6, vec!["change"])] {
-            let r = route(kind, conf, &signals);
-            let d = for_main(
-                decide(
-                    &r,
-                    "事项页面信息太散了，你看看怎么设计",
-                    DecideCtx::default(),
-                ),
-                &r,
-            );
-            assert_eq!(
-                (d.kind.as_str(), d.guard),
-                ("research", Some("plan")),
-                "{kind}"
-            );
-            let o = d.offer.expect("the work is offered");
-            assert_eq!((o.title.as_str(), o.goal.as_str()), ("标题", "目标"));
-        }
-        /* which item it is for still asks */
-        let r = route("supplement", 0.5, &[]);
-        let d = for_main(decide(&r, "再加一个按钮", DecideCtx::default()), &r);
-        assert_eq!(
-            (d.kind.as_str(), d.for_item.as_deref()),
-            ("suggest", Some("ST-3"))
-        );
-        /* the rest is left alone */
-        let r = route("item", 0.9, &["change"]);
-        assert_eq!(
-            for_main(decide(&r, "把按钮改成蓝色", DecideCtx::default()), &r).kind,
-            "item"
-        );
-    }
-
-    #[test]
     fn rule_1_a_named_bot_makes_an_item() {
         let at = DecideCtx { named_bot: true };
         let d = decide(&route("answer", 0.9, &[]), "@研究 查下价格", at);
@@ -494,13 +435,31 @@ mod tests {
 
     #[test]
     fn rule_3_an_item_needs_a_work_signal_and_confidence() {
-        assert_eq!(
-            go("item", 0.9, &["vague"], "事项页面信息太散了"),
-            ("suggest".into(), Some("3"))
+        let d1 = decide(
+            &route("item", 0.9, &["vague"]),
+            "事项页面信息太散了",
+            DecideCtx::default(),
         );
+        assert_eq!((d1.kind.as_str(), d1.guard), ("research", Some("3")));
         assert_eq!(
-            go("item", 0.6, &["change"], "事项页面信息太散了"),
-            ("suggest".into(), Some("3"))
+            d1.offer,
+            Some(Offer {
+                title: "标题".into(),
+                goal: "目标".into()
+            })
+        );
+        let d2 = decide(
+            &route("item", 0.6, &["change"]),
+            "事项页面信息太散了",
+            DecideCtx::default(),
+        );
+        assert_eq!((d2.kind.as_str(), d2.guard), ("research", Some("3")));
+        assert_eq!(
+            d2.offer,
+            Some(Offer {
+                title: "标题".into(),
+                goal: "目标".into()
+            })
         );
         assert_eq!(
             go("item", 0.8, &["change"], "把菜单里的视觉规范页面删掉"),
@@ -558,14 +517,20 @@ mod tests {
     }
 
     #[test]
-    fn rule_5_an_unsure_supplement_asks() {
+    fn rule_5_an_unsure_supplement_answers_inline_with_an_offer() {
         let d = decide(
             &route("supplement", 0.6, &[]),
             "先别改列表页",
             DecideCtx::default(),
         );
-        assert_eq!((d.kind.as_str(), d.guard), ("suggest", Some("5")));
-        assert_eq!(d.for_item.as_deref(), Some("ST-3"));
+        assert_eq!((d.kind.as_str(), d.guard), ("research", Some("5")));
+        assert_eq!(
+            d.offer,
+            Some(Offer {
+                title: "标题".into(),
+                goal: "目标".into()
+            })
+        );
         assert_eq!(
             go("supplement", 0.85, &[], "先别改列表页"),
             ("supplement".into(), None)
@@ -578,13 +543,12 @@ mod tests {
         ] {
             assert_eq!(
                 go("supplement", 0.5, &[], t),
-                ("suggest".into(), Some("5")),
+                ("research".into(), Some("5")),
                 "{t}"
             );
         }
-        /* another item, or one whose id only starts the same, still asks */
         for t in ["追加到 ST-30", "追加到 ST-4", "TEST-3 那边也改"] {
-            assert_eq!(go("supplement", 0.5, &[], t).0, "suggest", "{t}");
+            assert_eq!(go("supplement", 0.5, &[], t).0, "research", "{t}");
         }
     }
 
@@ -606,9 +570,7 @@ mod tests {
 
     #[test]
     fn other_kinds_pass_through() {
-        for k in [
-            "answer", "research", "suggest", "ask", "status", "config", "reroute",
-        ] {
+        for k in ["answer", "research", "ask", "status", "config", "reroute"] {
             assert_eq!(go(k, 0.5, &[], "随便说说"), (k.into(), None));
         }
     }
