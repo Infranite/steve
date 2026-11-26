@@ -84,11 +84,6 @@ export default {
     take: "做成事项：{{title}}",
     dismiss: "不用",
   },
-  suggest: {
-    choseHere: "你选了在这里回答",
-    choseItem: "你选了建成事项",
-    expired: "过了 24 小时，仍可点",
-  },
   ask: {
     canReply: "可以回复：{{options}}",
   },

@@ -1,6 +1,6 @@
-//! Deterministic working-memory handoff for quota exhaustion, sustained provider errors, workspace
-//! `handoff` supplement threshold transitions, and manual owner handoffs (same Bot switching
-//! execution surface for this item only, or explicit Bot switch).
+//! Deterministic working-memory handoff for quota exhaustion, sustained provider errors, and
+//! manual owner handoffs (same Bot switching execution surface for this item only, or explicit Bot
+//! switch).
 //!
 //! Design invariants (HANDOFF.md):
 //! - Handoff reason is a strong-typed enum determined deterministically (never by a model).
@@ -666,46 +666,6 @@ impl Tx<'_> {
             )
             .increment(1);
         }
-    }
-
-    /// Perform workspace-threshold (`handoff` setting) session rollover when the user supplements
-    /// an idle session that has reached the configured context percentage.
-    pub(crate) fn handoff_on_supplement(
-        &mut self,
-        item: &Item,
-        session: &Session,
-        pct: i64,
-        text: &str,
-        files: &[FileRef],
-    ) -> Result<()> {
-        let last = self.last_agent_text(&session.id)?;
-        let working_memory = self.build_working_memory(item, session, true)?;
-        let head = format!(
-            "交接：上一个会话的上下文用到了 {pct}%。它的最后进展：{}",
-            js_head(&last, LAST_PROGRESS_CHARS)
-        );
-        let mut opening = if working_memory.is_empty() {
-            head
-        } else {
-            format!("{working_memory}\n\n{head}")
-        };
-        opening.push_str(&format!("\n\n补充信息：{text}"));
-
-        self.db().event_add(
-            &session.id,
-            "system",
-            json!({"text": format!("上下文已用 {pct}%，带交接摘要转到新会话")}),
-        )?;
-        self.hand_off(&item.id, &session.id)?;
-        self.db().timeline_add(
-            &item.id,
-            "steve",
-            "sys",
-            &format!("上下文已用 {pct}%：开新会话"),
-            None,
-        )?;
-        self.start_session_files(&item.id, Some(&opening), None, files)?;
-        Ok(())
     }
 
     /// Manual owner handoff from the item page (`OwnerRequest`).

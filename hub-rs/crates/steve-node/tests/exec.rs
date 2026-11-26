@@ -618,7 +618,7 @@ async fn child_exec_process() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_node_that_dies_while_a_command_runs_never_runs_it_again() {
     let t = T::new();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_exec_process", "--nocapture"])
         .env("STEVE_EXEC_CHILD_ROOT", &t.root)
         .stdout(std::process::Stdio::null())
@@ -635,8 +635,7 @@ async fn a_node_that_dies_while_a_command_runs_never_runs_it_again() {
         },
     )
     .await;
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.simulate_crash().unwrap();
     let runs = || std::fs::read_to_string(t.root.join("runs")).unwrap();
     assert_eq!(runs(), "ran\n");
 

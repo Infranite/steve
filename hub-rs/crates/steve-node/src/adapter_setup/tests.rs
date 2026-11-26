@@ -579,14 +579,11 @@ async fn thinking_levels_cannot_widen_permission_modes() {
 
 #[tokio::test]
 async fn a_recorded_orphan_installer_blocks_new_installs_and_execution() {
-    use std::os::unix::process::CommandExt;
     let t = Fixture::new();
     let n = t.node();
-    let mut child = std::process::Command::new("/bin/sleep")
-        .arg("30")
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let mut cmd = std::process::Command::new("/bin/sleep");
+    cmd.arg("30");
+    let mut child = steve_runtime::testkit::ProcessGuard::spawn_direct(&mut cmd).unwrap();
     let pid = i64::from(child.id());
     let started = crate::procs::start_time(pid);
     n.0.j

@@ -1104,6 +1104,30 @@ async fn release_finishes_once_the_harness_is_gone() {
     assert!(ok(&finished(&n, "op_rel").await));
     let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
     assert_eq!(v.phase, SessionPhase::Released);
+    // `stop_process` must stop a live harness through `procs::stop` (SIGTERM first), not let
+    // `Live::drop` pre-empt it with SIGKILL before leader identity is verified.
+    t.wait_for("adapter exit diagnostic", |t| {
+        t.sink.events().into_iter().any(|e| {
+            matches!(
+                e.body,
+                EventBody::Diagnostic { ref code, .. } if code == "adapter_exited"
+            )
+        })
+    })
+    .await;
+    let signal = t.sink.events().into_iter().find_map(|e| match e.body {
+        EventBody::Diagnostic {
+            code,
+            details: Some(details),
+            ..
+        } if code == "adapter_exited" => details.signal,
+        _ => None,
+    });
+    assert_eq!(
+        signal,
+        Some(libc::SIGTERM),
+        "live release must escalate via procs::stop (SIGTERM) instead of Live::drop SIGKILL"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1254,7 +1278,7 @@ async fn child_node_process() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_killed_node_leaves_its_attempt_unknown_until_abandoned() {
     let t = T::new(&[]);
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_node_process", "--nocapture"])
         .env("STEVE_NODE_CHILD_ROOT", &t.root)
         .stdout(std::process::Stdio::null())
@@ -1269,8 +1293,7 @@ async fn a_killed_node_leaves_its_attempt_unknown_until_abandoned() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.simulate_crash().unwrap();
     // the adapter's group (its own process group) outlived the Node
     let n = t.node();
     assert!(n.incarnation() >= 2);

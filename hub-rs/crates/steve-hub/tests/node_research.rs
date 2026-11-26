@@ -547,7 +547,7 @@ async fn a_run_on_the_node_answers_falls_back_and_continues() {
     assert_eq!(out.text, "接着说。");
 }
 
-/// A call that is no read ends the run as a violation, audited.
+/// A permission request in a read-only one-shot run is refused and audited as a violation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_violation_ends_and_is_audited() {
     let w = World::new();
@@ -559,7 +559,7 @@ async fn a_violation_ends_and_is_audited() {
                 &w,
                 "tr_v",
                 "default",
-                "跑一下\n@asking execute touch x\n@sleep 5000",
+                "跑一下\n@perm execute touch x\n@sleep 5000",
             ),
             &Seen::default(),
         )
@@ -567,7 +567,7 @@ async fn a_violation_ends_and_is_audited() {
     assert_eq!(out.end, RunEnd::Violated, "{out:?}");
     let audit =
         node_checks::audit_action_target_detail_thread_research_violation(&node.store).unwrap();
-    assert!(audit.contains("execute"), "{audit}");
+    assert!(audit.contains("permission_refused"), "{audit}");
 }
 
 /// What ends a read-only run is what the owner's own run is for: with `full` the job is sent with

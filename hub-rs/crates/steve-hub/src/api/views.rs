@@ -13,7 +13,7 @@ use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use steve_store::Views;
 use steve_store::views::{DecisionPage, Page, SettledCursor};
-use steve_types::{ById, PageOf, View, ViewKind};
+use steve_types::{ById, PageOf, SessionLiveVitals, SessionView, View, ViewKind};
 
 use super::{AppState, Ctx};
 use crate::error::ApiError;
@@ -24,6 +24,70 @@ type ApiResult = Result<Response, ApiError>;
 const IDS_MAX: usize = 500;
 const PAGE_MAX: u32 = 500;
 const PAGE_DEFAULT: u32 = 100;
+/// Freshness window for attaching live OS process-group vitals to active sessions.
+const SESSION_VITALS_FRESH_MS: i64 = 5 * 60 * 1000;
+
+/// Enriches session views at read time with cumulative tokens/USD cost (one batched read query)
+/// and live in-memory CPU/memory/disk-written snapshots for active sessions.
+async fn enrich_sessions(
+    st: &AppState,
+    ws: &str,
+    sessions: &mut [SessionView],
+) -> Result<(), ApiError> {
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = sessions.iter().map(|s| s.id.to_string()).collect();
+    let summaries = if let Some(s) = st.modules.as_ref().map(|m| m.store.clone()) {
+        let ws = ws.to_string();
+        super::blocking(move || {
+            s.read(|r| steve_stats::views::session_summaries(r, &ws, &ids))
+                .map_err(|e| ApiError::internal(e.to_string()))
+        })
+        .await?
+    } else {
+        std::collections::HashMap::new()
+    };
+    let since = steve_store::now().saturating_sub(SESSION_VITALS_FRESH_MS);
+    let live_vitals = crate::metrics::latest_session_vitals(since);
+    for s in sessions.iter_mut() {
+        if let Some((tokens, cost_usd)) = summaries.get(s.id.as_str()) {
+            s.tokens = Some(*tokens);
+            s.cost_usd = cost_usd.and_then(serde_json::Number::from_f64);
+        }
+        if s.status != "ended"
+            && let Some(v) = live_vitals.get(s.id.as_str())
+        {
+            s.vitals =
+                serde_json::Number::from_f64(v.cpu_seconds).map(|cpu_seconds| SessionLiveVitals {
+                    cpu_seconds,
+                    resident_bytes: v.resident_bytes,
+                    disk_written_bytes: v.disk_written_bytes,
+                });
+        }
+    }
+    Ok(())
+}
+
+async fn enrich_views(st: &AppState, ws: &str, views: &mut [View]) -> Result<(), ApiError> {
+    let mut sessions: Vec<(usize, SessionView)> = views
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| match v {
+            View::Session(s) => Some((i, s.clone())),
+            _ => None,
+        })
+        .collect();
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let mut list: Vec<SessionView> = sessions.iter().map(|(_, s)| s.clone()).collect();
+    enrich_sessions(st, ws, &mut list).await?;
+    for ((idx, _), enriched) in sessions.drain(..).zip(list) {
+        views[idx] = View::Session(enriched);
+    }
+    Ok(())
+}
 
 pub(crate) fn routes() -> axum::Router<AppState> {
     axum::Router::new()
@@ -98,7 +162,11 @@ async fn snapshot(
     {
         return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
     }
-    let body = json(&snap.into_snapshot(st.bus.epoch(), &kinds))?;
+    let mut out = snap.into_snapshot(st.bus.epoch(), &kinds);
+    if let Some(sessions) = out.views.session.as_mut() {
+        enrich_sessions(&st, &c.ws, sessions).await?;
+    }
+    let body = json(&out)?;
     let mut r = json_body(body);
     r.headers_mut().insert(
         header::ETAG,
@@ -135,19 +203,18 @@ async fn by_id(
     {
         let items = parse_ids(&items)?;
         let (store, rev) = (store(&st)?, st.bus.rev());
-        let views = super::blocking(move || {
+        let ws = c.ws.clone();
+        let mut sessions = super::blocking(move || {
             store
-                .read(|r| r.session_views().of_items(&c.ws, &items))
+                .read(|r| r.session_views().of_items(&ws, &items))
                 .map_err(|e| ApiError::internal(e.to_string()))
         })
         .await?;
-        let views = views
-            .into_iter()
-            .map(|mut s| {
-                routes.apply(&mut s);
-                View::Session(s)
-            })
-            .collect();
+        for s in &mut sessions {
+            routes.apply(s);
+        }
+        enrich_sessions(&st, &c.ws, &mut sessions).await?;
+        let views = sessions.into_iter().map(View::Session).collect();
         return Ok(json_body(json(&ById {
             rev,
             views,
@@ -158,11 +225,14 @@ async fn by_id(
     let (store, rev) = (store(&st)?, st.bus.rev());
     let ws = c.ws.clone();
     let asked = ids.clone();
-    let views = super::blocking(move || {
+    let mut views = super::blocking(move || {
         crate::projection::read_by_id(&store, &routes, k, &ws, &asked)
             .map_err(|e| ApiError::internal(e.to_string()))
     })
     .await?;
+    if k == ViewKind::Session {
+        enrich_views(&st, &c.ws, &mut views).await?;
+    }
     let found: std::collections::HashSet<String> =
         views.iter().map(|v| v.id().to_owned()).collect();
     let missing = ids.into_iter().filter(|id| !found.contains(id)).collect();
@@ -257,6 +327,9 @@ async fn page(
     .await?;
     for v in &mut views {
         routes.apply_to(v);
+    }
+    if kind == ViewKind::Session {
+        enrich_views(&st, &c.ws, &mut views).await?;
     }
     Ok(json_body(json(&PageOf { rev, views, next })?))
 }

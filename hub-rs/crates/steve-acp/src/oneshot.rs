@@ -1,8 +1,10 @@
 //! One-shot ACP calls (harness parity S2): a single prompt on a fresh (or loaded) session of any
 //! adapter, for think jobs, research and Steve's own model calls. Every adapter goes the same way:
 //! `initialize`, `session/new|load` in a read-only mode the adapter offers, the model and effort as
-//! ACP config options, `session/prompt`, its chunks streamed as Steve's events, permission requests
-//! answered by the caller's tool policy, and the usage it reported.
+//! ACP config options, `session/prompt`, its chunks streamed as Steve's events, and the usage it
+//! reported. One-shot calls rely on the OS read-only sandbox, `PermissionMode::Plan`, and
+//! `tools_off`; any `session/request_permission` is unconditionally rejected so interactive
+//! session approvals remain on the single Hub `PermissionResolver` port.
 //!
 //! The caller owns the process (its journal, its sandbox through [`Request::wrap`]) and the job's
 //! deadline and cancellation policy. Use [`run_cancellable`] and await its result to settle usage
@@ -15,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::AcpConfig;
-use crate::normalize::{Fact, Normalizer, ToolFact};
+use crate::normalize::{Fact, Normalizer};
 use crate::permission;
 use crate::rpc::{Conn, Incoming, RpcError, Spawn};
 use crate::session::{self, OpenConfig, Reports};
@@ -24,7 +26,7 @@ use serde_json::{Value, json};
 
 use steve_node_api::{
     Epoch, EventBody, GatewayPhase, PermissionDecision, PermissionMode, Role, TimeoutPhase,
-    ToolCategory, ToolOrigin, ToolPhase, UsageReport,
+    ToolCategory, UsageReport,
 };
 use tokio::sync::mpsc;
 
@@ -153,8 +155,6 @@ pub struct Request<'a> {
     pub max_output_bytes: u64,
     /// Activity without exposing private thought text to the caller's draft.
     pub on_activity: Option<&'a (dyn Fn() + Send + Sync)>,
-    /// Complete, merged facts; unknown tools and incomplete inputs must fail closed.
-    pub allow_tool: &'a (dyn Fn(&ToolFact) -> bool + Send + Sync),
 }
 
 pub struct Outcome {
@@ -170,7 +170,7 @@ struct Owned(Arc<Conn>, bool);
 impl Drop for Owned {
     fn drop(&mut self) {
         if !self.1 {
-            self.0.kill();
+            self.0.signal(libc::SIGKILL);
         }
     }
 }
@@ -236,26 +236,19 @@ fn failed(e: impl std::fmt::Display) -> OneShotError {
     OneShotError::Failed(e.to_string())
 }
 
-/// ACP sends a pending tool before its arguments finish streaming. There is nothing to
-/// authorize yet when its required target/command is missing. Inspect every refinement as
-/// soon as that field arrives; requests for permission and non-pending facts never defer.
-fn awaiting_input(fact: &ToolFact) -> bool {
-    fact.phase == ToolPhase::Pending
-        && fact.origin == ToolOrigin::Harness
-        && fact.url.is_none()
-        && match fact.category {
-            ToolCategory::Read => fact.paths.is_empty() && fact.command.is_none(),
-            ToolCategory::Search => {
-                fact.paths.is_empty()
-                    && fact.command.is_none()
-                    && fact.query.is_none()
-                    && ["glob", "include", "file_pattern", "files"]
-                        .iter()
-                        .all(|k| fact.raw["rawInput"].get(*k).is_none())
-            }
-            ToolCategory::Exec => fact.command.is_none(),
-            _ => false,
-        }
+fn tool_category_label(category: ToolCategory) -> &'static str {
+    match category {
+        ToolCategory::Read => "read",
+        ToolCategory::Edit => "edit",
+        ToolCategory::Delete => "delete",
+        ToolCategory::Move => "move",
+        ToolCategory::Search => "search",
+        ToolCategory::Exec => "exec",
+        ToolCategory::Think => "think",
+        ToolCategory::Fetch => "fetch",
+        ToolCategory::Steve => "steve",
+        ToolCategory::Other => "other",
+    }
 }
 
 /// Monotonic evidence; a meaningful reply also proves submission if stdout reached us
@@ -340,13 +333,6 @@ fn incoming(
                 if facts.iter().any(is_response) {
                     progress.advance(GatewayPhase::Responding, on_event);
                 }
-                if let Some(id) = update.get("toolCallId").and_then(Value::as_str)
-                    && norm
-                        .fact(id)
-                        .is_some_and(|f| !awaiting_input(f) && !(req.allow_tool)(f))
-                {
-                    return Err(OneShotError::ToolRefused);
-                }
                 out.events(facts, on_event);
             }
         }
@@ -359,17 +345,26 @@ fn incoming(
             }
             progress.advance(GatewayPhase::Responding, on_event);
             let asked = permission::asked(norm, &id, &params);
-            let allowed = (req.allow_tool)(&asked.fact);
-            let decision = if allowed {
-                PermissionDecision::AllowOnce
-            } else {
-                PermissionDecision::Reject
-            };
-            conn.respond(id, permission::answer(&asked, Some(decision)));
-            if !allowed {
-                return Err(OneShotError::ToolRefused);
-            }
-            out.events(asked.updates, on_event);
+            let category = tool_category_label(asked.fact.category);
+            metrics::counter!(
+                "steve_permission_refused_total",
+                "surface" => "oneshot",
+                "harness" => req.harness.to_string(),
+                "category" => category,
+            )
+            .increment(1);
+            tracing::warn!(
+                harness = req.harness,
+                prefix = req.prefix,
+                tool = %asked.fact.name,
+                category,
+                "oneshot refused session/request_permission"
+            );
+            conn.respond(
+                id,
+                permission::answer(&asked, Some(PermissionDecision::Reject)),
+            );
+            return Err(OneShotError::ToolRefused);
         }
         // initialize advertises no client-side filesystem or terminal access.
         Incoming::Request { id, .. } => {
@@ -871,11 +866,7 @@ for line in sys.stdin:
         }
     }
 
-    fn request<'a>(
-        cfg: &'a AcpConfig,
-        root: &'a Path,
-        allow: &'a (dyn Fn(&ToolFact) -> bool + Send + Sync),
-    ) -> Request<'a> {
+    fn request<'a>(cfg: &'a AcpConfig, root: &'a Path) -> Request<'a> {
         Request {
             cfg,
             harness: "neutral-test",
@@ -894,7 +885,6 @@ for line in sys.stdin:
             on_session: None,
             max_output_bytes: 16 << 20,
             on_activity: None,
-            allow_tool: allow,
         }
     }
 
@@ -912,7 +902,7 @@ for line in sys.stdin:
                 seen.lock().unwrap().push((text, Instant::now()));
             }
         };
-        let out = run(request(&cfg, temp.path(), &|_| false), &|_| true, &event)
+        let out = run(request(&cfg, temp.path()), &|_| true, &event)
             .await
             .unwrap();
         assert_eq!(out.text, "第一段，第二段");
@@ -937,7 +927,7 @@ for line in sys.stdin:
         let peer = cfg.adapters["neutral-test"].clone();
         cfg.adapters.insert("claude-code".into(), peer);
         for resume in [None, Some("acp-session")] {
-            let mut req = request(&cfg, temp.path(), &|_| false);
+            let mut req = request(&cfg, temp.path());
             req.harness = "claude-code";
             req.resume = resume;
             let out = run(req, &|_| true, &|_| {}).await.unwrap();
@@ -947,15 +937,25 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn a_tool_without_permission_is_refused_before_the_answer() {
+    async fn a_permission_request_is_always_refused_without_self_approving() {
         let temp = tempfile::tempdir().unwrap();
+        let answer_path = temp.path().join("permission-answer.json");
         let cfg = adapter(
             temp.path(),
-            "        update({'sessionUpdate':'tool_call','toolCallId':'t','kind':'edit','title':'write','rawInput':{'path':'file'}})\n        time.sleep(1)\n        chunk('must not appear')",
+            &format!(
+                r#"        send({{'jsonrpc':'2.0','id':'permission','method':'session/request_permission','params':{{'sessionId':'acp-session','toolCall':{{'toolCallId':'read','kind':'read','status':'pending','rawInput':{{'file_path':'allowed.txt'}}}},'options':[{{'optionId':'yes','kind':'allow_once'}},{{'optionId':'no','kind':'reject_once'}}]}}}})
+        reply_line = sys.stdin.readline()
+        if reply_line:
+            with open({answer_path:?}, 'w') as f:
+                f.write(reply_line)
+        time.sleep(0.2)
+        chunk('must not appear')"#,
+                answer_path = answer_path.to_str().unwrap(),
+            ),
             true,
         );
         let seen = Mutex::new(vec![]);
-        let out = run(request(&cfg, temp.path(), &|_| false), &|_| true, &|ev| {
+        let out = run(request(&cfg, temp.path()), &|_| true, &|ev| {
             seen.lock().unwrap().push(ev)
         })
         .await;
@@ -967,79 +967,9 @@ for line in sys.stdin:
                 .iter()
                 .any(|e| matches!(e, EventBody::TextDelta { .. }))
         );
-    }
-
-    #[tokio::test]
-    async fn a_read_waits_for_streamed_arguments_then_checks_the_complete_pending_input() {
-        let temp = tempfile::tempdir().unwrap();
-        // Shapes from the bundled adapter: toolCall(inputComplete:false),
-        // partialRefinement(offset), refinement(file_path), then its result.
-        let cfg = adapter(
-            temp.path(),
-            r#"        update({'sessionUpdate':'tool_call','toolCallId':'read','name':'Read','kind':'read','status':'pending','rawInput':{},'locations':[]})
-        update({'sessionUpdate':'tool_call_update','toolCallId':'read','rawInput':{'offset':1},'locations':[]})
-        update({'sessionUpdate':'tool_call_update','toolCallId':'read','rawInput':{'file_path':'allowed.txt'},'locations':[{'path':'allowed.txt'}]})
-        update({'sessionUpdate':'tool_call_update','toolCallId':'read','status':'completed'})
-        chunk('read answer')"#,
-            true,
-        );
-        let checked = Mutex::new(vec![]);
-        let allow = |fact: &ToolFact| {
-            checked.lock().unwrap().push(fact.phase);
-            fact.category == ToolCategory::Read && fact.paths == ["allowed.txt"]
-        };
-        let out = run(request(&cfg, temp.path(), &allow), &|_| true, &|_| {})
-            .await
-            .unwrap();
-        assert_eq!(out.text, "read answer");
-        assert_eq!(
-            *checked.lock().unwrap(),
-            [ToolPhase::Pending, ToolPhase::Succeeded],
-            "check the complete input before execution, not merely the final result"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_pending_read_is_refused_as_soon_as_its_forbidden_path_arrives() {
-        let temp = tempfile::tempdir().unwrap();
-        let cfg = adapter(
-            temp.path(),
-            r#"        update({'sessionUpdate':'tool_call','toolCallId':'read','kind':'read','status':'pending','rawInput':{}})
-        update({'sessionUpdate':'tool_call_update','toolCallId':'read','rawInput':{'file_path':'outside.txt'}})
-        time.sleep(0.2)
-        chunk('must not appear')"#,
-            true,
-        );
-        let checked = Mutex::new(vec![]);
-        let allow = |fact: &ToolFact| {
-            checked.lock().unwrap().push(fact.paths.clone());
-            fact.paths == ["allowed.txt"]
-        };
-        let out = run(request(&cfg, temp.path(), &allow), &|_| true, &|_| {}).await;
-        assert!(matches!(out, Err(OneShotError::ToolRefused)));
-        assert_eq!(*checked.lock().unwrap(), [vec!["outside.txt".to_string()]]);
-    }
-
-    #[tokio::test]
-    async fn missing_arguments_never_authorize_a_running_tool_or_a_permission_request() {
-        for body in [
-            r#"        update({'sessionUpdate':'tool_call','toolCallId':'read','kind':'read','status':'in_progress','rawInput':{}})
-        time.sleep(0.2)
-        chunk('must not appear')"#,
-            r#"        send({'jsonrpc':'2.0','id':'permission','method':'session/request_permission','params':{'sessionId':'acp-session','toolCall':{'toolCallId':'read','kind':'read','status':'pending','rawInput':{}},'options':[{'optionId':'yes','kind':'allow_once'},{'optionId':'no','kind':'reject_once'}]}})
-        time.sleep(0.2)
-        chunk('must not appear')"#,
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let cfg = adapter(temp.path(), body, true);
-            let checked = AtomicU64::new(0);
-            let allow = |_: &ToolFact| {
-                checked.fetch_add(1, Ordering::Relaxed);
-                false
-            };
-            let out = run(request(&cfg, temp.path(), &allow), &|_| true, &|_| {}).await;
-            assert!(matches!(out, Err(OneShotError::ToolRefused)));
-            assert_eq!(checked.load(Ordering::Relaxed), 1);
+        if let Ok(raw) = std::fs::read_to_string(&answer_path) {
+            let msg: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(msg["result"]["outcome"]["optionId"], "no");
         }
     }
 
@@ -1047,7 +977,7 @@ for line in sys.stdin:
     async fn an_adapter_cannot_inherit_a_permissive_mode() {
         let temp = tempfile::tempdir().unwrap();
         let cfg = adapter(temp.path(), "        chunk('must not appear')", false);
-        let out = run(request(&cfg, temp.path(), &|_| false), &|_| true, &|_| {}).await;
+        let out = run(request(&cfg, temp.path()), &|_| true, &|_| {}).await;
         assert!(
             matches!(out, Err(OneShotError::Failed(e)) if e.contains("unsupported: permission mode plan"))
         );
@@ -1057,7 +987,7 @@ for line in sys.stdin:
     async fn a_resumed_session_does_not_replay_history_as_a_new_draft() {
         let temp = tempfile::tempdir().unwrap();
         let cfg = adapter(temp.path(), "        chunk('new answer')", true);
-        let mut req = request(&cfg, temp.path(), &|_| false);
+        let mut req = request(&cfg, temp.path());
         req.resume = Some("acp-session");
         let seen = Mutex::new(vec![]);
         let out = run(req, &|_| true, &|event| {
@@ -1080,15 +1010,11 @@ for line in sys.stdin:
             true,
         );
         let chunks = AtomicU64::new(0);
-        let out = run(
-            request(&cfg, temp.path(), &|_| false),
-            &|_| true,
-            &|event| {
-                if matches!(event, EventBody::TextDelta { .. }) {
-                    chunks.fetch_add(1, Ordering::Relaxed);
-                }
-            },
-        )
+        let out = run(request(&cfg, temp.path()), &|_| true, &|event| {
+            if matches!(event, EventBody::TextDelta { .. }) {
+                chunks.fetch_add(1, Ordering::Relaxed);
+            }
+        })
         .await
         .unwrap();
         assert_eq!(chunks.load(Ordering::Relaxed), 4000);
@@ -1107,7 +1033,7 @@ for line in sys.stdin:
         let on_activity = || {
             activity.fetch_add(1, Ordering::Relaxed);
         };
-        let mut req = request(&cfg, temp.path(), &|_| false);
+        let mut req = request(&cfg, temp.path());
         req.on_activity = Some(&on_activity);
         let out = run(req, &|_| true, &|_| {}).await.unwrap();
         assert_eq!(out.text, "answer");
@@ -1122,7 +1048,7 @@ for line in sys.stdin:
             "        for _ in range(4000): chunk('x')",
             true,
         );
-        let mut req = request(&cfg, temp.path(), &|_| false);
+        let mut req = request(&cfg, temp.path());
         req.max_output_bytes = 4096;
         let out = run(req, &|_| true, &|_| {}).await;
         assert!(matches!(out, Err(OneShotError::OutputLimit)));
@@ -1142,7 +1068,7 @@ for line in sys.stdin:
                 ),
                 true,
             );
-            let out = run(request(&cfg, temp.path(), &|_| false), &|_| true, &|_| {}).await;
+            let out = run(request(&cfg, temp.path()), &|_| true, &|_| {}).await;
             match out {
                 Err(OneShotError::Harness {
                     text,
@@ -1166,7 +1092,7 @@ for line in sys.stdin:
             mime: "image/png".into(),
             bytes: vec![1, 2, 3],
         };
-        let mut req = request(&cfg, temp.path(), &|_| false);
+        let mut req = request(&cfg, temp.path());
         req.prompt.push(image.block());
         let out = run(req, &|_| true, &|_| {}).await;
         assert!(matches!(out, Err(OneShotError::Unsupported("images"))));
@@ -1180,7 +1106,7 @@ for line in sys.stdin:
             "        chunk('cut')\n        send({'jsonrpc':'2.0','id':msg['id'],'result':{'stopReason':'max_tokens'}})\n        continue",
             true,
         );
-        let out = run(request(&cfg, temp.path(), &|_| false), &|_| true, &|_| {})
+        let out = run(request(&cfg, temp.path()), &|_| true, &|_| {})
             .await
             .unwrap();
         assert_eq!(out.stop_reason, "max_tokens");
@@ -1197,7 +1123,7 @@ for line in sys.stdin:
         );
         let root = temp.path();
         let said = async |tools_off| {
-            let mut req = request(&cfg, root, &|_| false);
+            let mut req = request(&cfg, root);
             req.head = Some("rules");
             req.tools_off = tools_off;
             let out = run(req, &|_| true, &|_| {}).await.unwrap();
@@ -1324,7 +1250,7 @@ for line in sys.stdin:
     async fn a_keepalive_never_starts_execution_but_model_content_does() {
         let temp = tempfile::tempdir().unwrap();
         let cfg = adapter(temp.path(), "", true);
-        let req = request(&cfg, temp.path(), &|_| false);
+        let req = request(&cfg, temp.path());
         let conn = Conn::spawn_registered(
             Spawn {
                 program: "/bin/cat".into(),
@@ -1415,7 +1341,7 @@ for line in sys.stdin:
     async fn usage_preceding_a_prompt_error_is_kept_even_when_response_wins_the_poll() {
         let temp = tempfile::tempdir().unwrap();
         let cfg = adapter(temp.path(), "", true);
-        let req = request(&cfg, temp.path(), &|_| false);
+        let req = request(&cfg, temp.path());
         let conn = Conn::spawn_registered(
             Spawn {
                 program: "/bin/cat".into(),
@@ -1569,7 +1495,7 @@ for line in sys.stdin:
             true,
         );
         let usage = Mutex::new(vec![]);
-        let err = run(request(&cfg, temp.path(), &|_| false), &|_| true, &|ev| {
+        let err = run(request(&cfg, temp.path()), &|_| true, &|ev| {
             if let EventBody::Usage { report } = ev {
                 usage.lock().unwrap().push(report);
             }
@@ -1594,7 +1520,7 @@ for line in sys.stdin:
             *pid.lock().unwrap() = Some(p);
             true
         };
-        let pending = run(request(&cfg, temp.path(), &|_| false), &spawned, &|_| {});
+        let pending = run(request(&cfg, temp.path()), &spawned, &|_| {});
         assert!(
             tokio::time::timeout(Duration::from_millis(150), pending)
                 .await
@@ -1619,10 +1545,9 @@ for line in sys.stdin:
             spawn_count.fetch_add(1, Ordering::SeqCst);
             true
         };
-        let allow = |_: &ToolFact| -> bool { panic!("stopped work must not authorize tools") };
         let event = |_: EventBody| {};
         let result = run_cancellable(
-            request(&cfg, temp.path(), &allow),
+            request(&cfg, temp.path()),
             &spawned,
             &event,
             std::future::ready(()),
@@ -1633,7 +1558,7 @@ for line in sys.stdin:
 
         let stop = tokio::sync::Notify::new();
         let session = |_: &str| stop.notify_one();
-        let mut req = request(&cfg, temp.path(), &allow);
+        let mut req = request(&cfg, temp.path());
         req.on_session = Some(&session);
         let text = Mutex::new(String::new());
         let on = |body: EventBody| {
@@ -1647,40 +1572,6 @@ for line in sys.stdin:
         assert!(
             text.lock().unwrap().is_empty(),
             "cancellation during open must prevent session/prompt"
-        );
-    }
-
-    #[tokio::test]
-    async fn cancellation_is_checked_before_each_queued_permission() {
-        let temp = tempfile::tempdir().unwrap();
-        let cfg = adapter(
-            temp.path(),
-            r#"        for n in range(100):
-            send({"jsonrpc":"2.0","id":n+1000,"method":"session/request_permission","params":{
-                "toolCall":{"toolCallId":str(n),"kind":"read","status":"pending","rawInput":{"file_path":"file.txt"}},
-                "options":[{"optionId":"yes","kind":"allow_once","name":"Allow"}]}})
-        time.sleep(60)"#,
-            true,
-        );
-        let stop = tokio::sync::Notify::new();
-        let permissions = AtomicU64::new(0);
-        let allow = |_: &ToolFact| {
-            permissions.fetch_add(1, Ordering::SeqCst);
-            stop.notify_one();
-            true
-        };
-        let result = run_cancellable(
-            request(&cfg, temp.path(), &allow),
-            &|_| true,
-            &|_| {},
-            stop.notified(),
-        )
-        .await;
-        assert!(matches!(result, Err(OneShotError::Failed(_))));
-        assert_eq!(
-            permissions.load(Ordering::SeqCst),
-            1,
-            "only the permission preceding the stop can run"
         );
     }
 
@@ -1714,8 +1605,7 @@ for line in sys.stdin:
                 final_seen.store(true, Ordering::SeqCst);
             }
         };
-        let allow = |_: &ToolFact| true;
-        let mut req = request(&cfg, temp.path(), &allow);
+        let mut req = request(&cfg, temp.path());
         req.max_output_bytes = 4000;
         assert!(matches!(
             run(req, &spawned, &event).await,
@@ -1746,9 +1636,6 @@ for line in sys.stdin:
         let deltas = Mutex::new(Vec::<(String, String)>::new());
         let completed = Mutex::new(Vec::<String>::new());
         let costs = Mutex::new(Vec::<String>::new());
-        let allow = |_: &ToolFact| -> bool {
-            panic!("unchecked tool queued after cancellation must not invoke allow_tool")
-        };
         let event = |ev: EventBody| match ev {
             EventBody::MessageStarted { message, .. } => {
                 started.lock().unwrap().push(message);
@@ -1774,7 +1661,7 @@ for line in sys.stdin:
             _ => {}
         };
         let result = run_cancellable(
-            request(&cfg, temp.path(), &allow),
+            request(&cfg, temp.path()),
             &|_| true,
             &event,
             stop.notified(),

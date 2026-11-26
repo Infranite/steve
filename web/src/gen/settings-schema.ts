@@ -12,7 +12,6 @@ export const WORKSPACE_SETTINGS_SCHEMA = {
     { key: "depsAfter", values: ["自动开始","提醒我开始"], def: "自动开始", live: true },
     { key: "quotaAutoHandoff", values: ["on","off"], def: "on", live: true },
     { key: "quotaWaitMinutes", values: ["0","5","10","15","30"], def: "10", live: true },
-    { key: "handoff", values: ["0","70","80","90"], def: "0", live: true },
     { key: "archDays", values: ["7","30","90","0"], def: "30", live: true },
   ],
   "notify": [
@@ -39,7 +38,6 @@ export const WORKSPACE_SETTING_DEFAULTS = {
   "depsAfter": "自动开始",
   "quotaAutoHandoff": "on",
   "quotaWaitMinutes": "10",
-  "handoff": "0",
   "archDays": "30",
   "quiet": "23:00 – 08:00",
   "fontSize": "标准",
@@ -59,7 +57,6 @@ export const WORKSPACE_SETTING_VALUES = {
   "depsAfter": ["自动开始","提醒我开始"],
   "quotaAutoHandoff": ["on","off"],
   "quotaWaitMinutes": ["0","5","10","15","30"],
-  "handoff": ["0","70","80","90"],
   "archDays": ["7","30","90","0"],
   "quiet": ["23:00 – 08:00","22:00 – 09:00","关闭"],
   "fontSize": ["标准","大"],

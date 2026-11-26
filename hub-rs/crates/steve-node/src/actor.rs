@@ -329,11 +329,23 @@ struct Live {
     cumulative_prompt_tokens: Option<(u64, u64, u64, u64, u64)>,
     cumulative_context_cost: f64,
     pending_system_context: Option<String>,
+    /// Last-resort group cleanup if the actor is dropped without going through `stop_process`.
+    /// Disarmed once verified shutdown takes over so `Drop` never races `procs::stop`.
+    kill_on_drop: bool,
+}
+
+impl Live {
+    fn disarm(&mut self) {
+        self.kill_on_drop = false;
+    }
 }
 
 impl Drop for Live {
     fn drop(&mut self) {
         self.retire.send_replace(true);
+        if self.kill_on_drop && !self.conn.has_exited() {
+            self.conn.signal(libc::SIGKILL);
+        }
     }
 }
 
@@ -352,6 +364,7 @@ impl From<LiveNew> for Live {
             cumulative_prompt_tokens: l.cumulative_prompt_tokens,
             cumulative_context_cost: 0.0,
             pending_system_context: l.pending_system_context,
+            kill_on_drop: true,
         }
     }
 }
@@ -770,10 +783,17 @@ impl Actor {
     async fn stop_process(&mut self) -> Stopped {
         self.gate.0.store(0, Ordering::SeqCst);
         crate::revoke_tools(&self.inner, &self.session);
-        let live = self.live.take();
+        // Keep `live` alive across `procs::stop` so `Live::drop` cannot send SIGKILL before
+        // `procs::stop` verifies leader identity and escalates TERM -> KILL. On macOS a freshly
+        // SIGKILLed group transiently reports EPERM/leaderless, causing `procs::stop` to return
+        // `Uncertain`. If this future is cancelled mid-await, dropping `live` still reaps the group.
+        let mut live = self.live.take();
         let conn = live.as_ref().map(|l| l.conn.clone());
-        let (pgid, started) = match live {
-            Some(l) => (l.pgid, l.started),
+        let (pgid, started) = match live.as_ref() {
+            Some(l) => {
+                l.retire.send_replace(true);
+                (l.pgid, l.started)
+            }
             None => match self.inner.j.read(|t| t.proc_of(&self.session)) {
                 Ok(Some(p)) => (p.pgid, p.started),
                 Ok(None) => {
@@ -790,6 +810,9 @@ impl Actor {
             },
         };
         let s = procs::stop(pgid, started).await;
+        if let Some(l) = live.as_mut() {
+            l.disarm();
+        }
         if s.gone()
             && let Some(conn) = conn
             && tokio::time::timeout(Duration::from_secs(1), conn.wait_exit())
@@ -888,7 +911,9 @@ impl Actor {
         {
             return;
         }
-        let l = self.live.take().expect("checked");
+        let mut l = self.live.take().expect("checked");
+        l.retire.send_replace(true);
+        l.disarm();
         // the leader is gone; its group may not be (then it stays recorded, and nothing new starts
         // in this session until it is gone)
         if procs::stop(l.pgid, l.started).await.gone() {

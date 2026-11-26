@@ -732,8 +732,16 @@ fn record(
         free_text: None,
         context: Value::Null,
     };
+    let is_auto = origin.origin == "steve";
     let p = changes::store_plan(m, who, "contact", &prepared, plan, origin)?;
     changes::apply(m, who, &p.id)?;
+    if is_auto {
+        let notice = format!(
+            "已记录「{}」的负责人变更；24 小时内可在变更记录撤销（{}）",
+            o.name, p.id
+        );
+        let _ = steve_store::notify::notify(&m.store, &who.ws, "steward", "info", &notice, None);
+    }
     Ok(Some(p.id))
 }
 
@@ -1201,20 +1209,25 @@ pub fn new_bot_party(
 
 // ---------------------------------------------------------------- proposals from chat
 
+/// Confidence threshold at or above which steward attribution applies directly with a 24h undo token.
+pub const AUTO_APPLY_CONFIDENCE: f64 = 0.85;
+
 /// What [`propose`] did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Proposed {
-    /// A proposed row and its decision.
+    /// A passive proposal recorded on the object/person detail (no blocking decision opened),
+    /// or a 24h undo changeset id when applied directly at high confidence.
     Opened(String),
     /// That person is already a confirmed steward in that role.
     Already,
-    /// Already proposed, waiting for the user.
+    /// Already proposed on the object/person detail.
     Pending(String),
 }
 
-/// A proposed steward (`source = chat`) plus a `confirm` decision the user answers with one click.
+/// Applies a deterministic high-confidence steward assignment directly inside `tx`, recording a
+/// 24h undoable `steward.set` changeset and a passive change-record notification (zero decisions).
 #[allow(clippy::too_many_arguments)]
-pub fn propose(
+pub fn apply_with_undo(
     tx: &mut W<'_>,
     ws: &str,
     o: &ObjectInfo,
@@ -1230,41 +1243,103 @@ pub fn propose(
         person_id: person.id.clone(),
         role: role.into(),
     };
-    if let Some(s) = get(tx, ws, &k)? {
-        return Ok(match (s.status.as_str(), s.decision_id) {
-            ("proposed", Some(d)) => Proposed::Pending(d),
-            _ => Proposed::Already,
-        });
+    let prior = get(tx, ws, &k)?;
+    if prior.as_ref().is_some_and(|s| s.status == "confirmed") {
+        return Ok(Proposed::Already);
     }
+    let mut s = Steward::new(ws, &k.object_type, &k.object_id, &k.person_id, role, "chat");
+    s.status = "confirmed".into();
+    s.confidence = 1.0;
+    s.source_ref = source_ref.map(str::to_string);
+    if let Some(b) = &prior {
+        s.created = b.created;
+    }
+    put(tx, &s)?;
+    let op = set_op(o, &person.id, role, "chat");
+    let before = vec![json!({
+        "op": op,
+        "before": prior.map(serde_json::to_value).transpose()?.unwrap_or(Value::Null),
+    })];
+    let cs = steve_store::base::changesets::ChangeSets(tx).create(
+        ws,
+        &steve_store::base::changesets::NewChangeset {
+            target_type: "contact".into(),
+            target_id: Some(person.id.clone()),
+            target_revision: None,
+            title: steve_i18n::stored(|| {
+                steve_i18n::t!(
+                    "modules.stewards.line",
+                    name = o.name,
+                    role = role_shown(role)
+                )
+            }),
+            href: format!("#/contacts/{}", person.id),
+            changes: vec![Change::new(
+                steve_i18n::stored(|| {
+                    steve_i18n::t!(
+                        "modules.stewards.line",
+                        name = o.name,
+                        role = role_shown(role)
+                    )
+                }),
+                String::new(),
+                person.name.clone(),
+            )],
+            ops: vec![op],
+            origin: "steve".into(),
+            request: String::new(),
+            basis: basis.trim().chars().take(500).collect(),
+            created_by: requested_by.into(),
+        },
+    )?;
+    steve_store::base::changesets::ChangeSets(tx).mark_applied(&cs, &before)?;
+    let notice = format!(
+        "已将「{}」的{}设为 {}；24 小时内可在变更记录撤销（{}）",
+        o.name,
+        role_label(role),
+        person.name,
+        cs.id
+    );
+    steve_store::notify::notify_in(tx, ws, "steward", "info", &notice, None)?;
+    Ok(Proposed::Opened(cs.id))
+}
+
+/// Records a low-confidence steward suggestion silently on the object/person detail (`status = proposed`,
+/// `decision_id = None`), never popping a confirmation decision card into "待我决定".
+#[allow(clippy::too_many_arguments)]
+pub fn propose(
+    tx: &mut W<'_>,
+    ws: &str,
+    o: &ObjectInfo,
+    person: &Party,
+    role: &str,
+    _basis: &str,
+    _requested_by: &str,
+    source_ref: Option<&str>,
+) -> ApiResult<Proposed> {
+    let k = Key {
+        object_type: o.object_type.clone(),
+        object_id: o.object_id.clone(),
+        person_id: person.id.clone(),
+        role: role.into(),
+    };
     let subject = format!(
         "{}:{}:{}:{}",
         k.object_type, k.object_id, k.person_id, k.role
     );
-    let mut d = decisions::confirm(
-        ws,
-        SUBJECT,
-        &subject,
-        &format!("「{}」的{}是 {}？", o.name, role_label(role), person.name),
-        requested_by,
-    );
-    let basis = basis.trim();
-    if !basis.is_empty() {
-        d.draft = Some(basis.chars().take(500).collect());
+    if let Some(s) = get(tx, ws, &k)? {
+        return Ok(match s.status.as_str() {
+            "proposed" => Proposed::Pending(s.decision_id.unwrap_or(subject)),
+            _ => Proposed::Already,
+        });
     }
-    d.source = Some(match source_ref {
-        Some(reference) => steve_store::DecisionSource::Revision {
-            revision: format!("steward:{reference}"),
-        },
-        None => steve_store::DecisionSource::Record,
-    });
-    let d = DecisionRows(tx).open(&d)?;
     let mut s = Steward::new(ws, &k.object_type, &k.object_id, &k.person_id, role, "chat");
     s.status = "proposed".into();
     s.confidence = CHAT_CONFIDENCE;
     s.source_ref = source_ref.map(str::to_string);
-    s.decision_id = Some(d.id.clone());
+    s.decision_id = None;
     put(tx, &s)?;
-    Ok(Proposed::Opened(d.id))
+    Ok(Proposed::Opened(subject))
 }
 
 /// `confirm` on a proposed steward: `yes` → confirmed; `no` → deleted. Undo makes it proposed again.

@@ -47,10 +47,10 @@ impl Stats<'_> {
         }
         self.0.write(|tx| {
             let owner = tx.conn.query_row(
-                "SELECT workspace_id, session_id, item_id, bot_id, project_id, harness, started FROM agent_turns WHERE id=?",
-                [turn], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,Option<String>>(2)?, r.get::<_,Option<String>>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,String>(5)?, r.get::<_,i64>(6)?))
+                "SELECT workspace_id, session_id, item_id, bot_id, project_id, harness, started, node_id FROM agent_turns WHERE id=?",
+                [turn], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,Option<String>>(2)?, r.get::<_,Option<String>>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,String>(5)?, r.get::<_,i64>(6)?, r.get::<_,String>(7)?))
             ).optional()?;
-            let Some((ws,session,item,bot,project,harness,started)) = owner else { return Ok(false); };
+            let Some((ws,session,item,bot,project,harness,started,node_id)) = owner else { return Ok(false); };
             if tx.conn.execute("INSERT OR IGNORE INTO usage_reports(turn_id,report_id,payload) VALUES(?,?,?)", params![turn,report.report_id,serde_json::to_string(report)?])? == 0 {
                 return Ok(false);
             }
@@ -82,6 +82,7 @@ impl Stats<'_> {
                 let id = usage_in(tx.conn, &NewUsage {
                     workspace_id:ws.clone(), ts:started, day:day.into(), source:"agent".into(), purpose:"turn".into(), harness:harness.clone(),
                     turn_id:Some(turn.into()), session_id:Some(session.clone()), item_id:item.clone(), bot_id:bot.clone(), project_id:project.clone(),
+                    node_id:(!node_id.is_empty()).then(|| node_id.clone()),
                     usage:ModelUsage {
                         model:r.model.clone().unwrap_or_default(),
                         tokens:Tokens {input:n(r.tokens.input), output:n(r.tokens.output), cache_read:n(r.tokens.cache_read), cache_write:n(r.tokens.cache_write), reasoning:n(r.tokens.reasoning)},

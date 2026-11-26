@@ -207,15 +207,12 @@ try {
   await stale.close()
 
   const composer = await open("composer", { delayedContext: true })
-  await composer.page.getByRole("button", { name: "展开", exact: true }).click()
+  // ComposerDecisions renders at most 1 directly blocking card with no folded multi-count yellow bar
+  eq(await composer.page.getByRole("button", { name: "展开", exact: true }).count(), 0, "no folded multi-count bar above composer")
+  eq(await composer.page.locator("[data-step='next']").count(), 0, "at most 1 blocking decision card above composer")
   await composer.page.locator("[data-out-reply-to]").waitFor()
-  await composer.page.locator("[data-step='next']").click()
-  await composer.page.locator("[data-out-context-state='loading']").waitFor()
-  eq(await composer.page.locator("[data-out-context]").count(), 0, "previous chat is hidden before next context arrives")
-  await composer.releaseContext()
-  await composer.page.locator("[data-out-context]").getByText("另一个聊天", { exact: true }).waitFor()
-  ok((await composer.page.locator("[data-out-context]").textContent()).includes("以你本人"), "next card shows its own sending identity")
-  await composer.shot("composer-next-context")
+  await composer.page.locator("[data-out-context]").getByText("产品讨论群", { exact: true }).waitFor()
+  await composer.shot("composer-blocking-card")
   await composer.close()
 
   for (const kind of ["plain", "tool", "failed"]) {

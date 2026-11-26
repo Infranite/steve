@@ -171,10 +171,15 @@ async fn start() -> Env {
 #[tokio::test(flavor = "multi_thread")]
 async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     let e = start().await;
-    // all three consumers were registered while wiring, from the beginning of the topic
+    // all three consumers were registered while wiring, from the beginning of their topics
+    // (`flow.item_events` and `channels.notifications` on `work.item.done`, `work.tidy` on `work.item.lifecycle`)
     assert_eq!(
         outbox_checks::outbox_consumers_count_work_item_done_with_since_seq(&e.db).unwrap(),
-        3
+        2
+    );
+    assert_eq!(
+        outbox_checks::outbox_consumers_count_work_item_lifecycle_with_since_seq(&e.db).unwrap(),
+        1
     );
     // An explicit personal log policy exercises real completion -> wired dispatcher -> inbox.
     let (s,v)=e.call("PUT","/api/me/notification-policy",Some(json!({

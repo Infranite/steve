@@ -1,12 +1,13 @@
 //! Personal read metadata and live projections, not another notification/event queue.
 //! Page capabilities pin the full projection digest: a changing source explicitly invalidates a
 //! traversal. Clients consume every page before replacing their baseline, and restart on conflict.
-use crate::{Result, StoreError, W, feed, sha, uid};
+use crate::repo::window_cache::AttentionWindow;
+pub use crate::repo::window_cache::{ATTENTION_WINDOW_CACHE_MAX, ATTENTION_WINDOW_TTL_SECS};
+use crate::{Result, StoreError, W, feed, sha};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 pub const KINDS: [&str; 4] = ["replies", "pending", "feed", "channels"];
-const TTL: i64 = 86_400_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
@@ -132,10 +133,11 @@ pub(crate) fn pending_on(c: &Connection, ws: &str, user: &str, now: i64) -> Resu
 
 /// Indexed unread metadata maintained by Feed/read/membership triggers. No content is copied.
 /// Scope revision/count are O(1); each keyset page loads at most limit candidates, irrespective
-/// of historical/read row count. The surrounding writer transaction performs bounded work only.
+/// of historical/read row count. Runs purely on a read snapshot; snapshot/cursor tokens live in
+/// the Store's bounded in-process LRU cache and never touch the SQLite writer connection.
 #[allow(clippy::too_many_arguments)]
 pub fn feed_page(
-    tx: &mut W<'_>,
+    r: &mut impl crate::Read,
     ws: &str,
     user: &str,
     cursor: Option<&str>,
@@ -143,16 +145,18 @@ pub fn feed_page(
     limit: usize,
     now: i64,
 ) -> Result<Category> {
-    feed::member_on(tx.conn, ws, user)?;
+    let conn = r.connection();
+    feed::member_on(conn, ws, user)?;
     if !(1..=100).contains(&limit) || (cursor.is_some() && if_snapshot.is_some()) {
         return Err(StoreError::Conflict("Invalid Feed attention page".into()));
     }
-    let (revision, count): (String, i64) = tx.conn.query_row(
+    let (revision, count): (String, i64) = conn.query_row(
         "SELECT revision,unread_count FROM attention_feed_scopes WHERE workspace_id=? AND user_id=?",
-        params![ws,user], |r| Ok((r.get(0)?,r.get(1)?)),
+        params![ws, user],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let before = if let Some(token) = cursor {
-        let w = resolve(tx.conn, ws, user, "feed", token, now)?;
+        let w = resolve(r, ws, user, "feed", token, now)?;
         if w.position <= 0 || w.revision != revision {
             return Err(StoreError::Conflict(
                 "Attention snapshot changed; restart this category".into(),
@@ -163,7 +167,7 @@ pub fn feed_page(
         None
     };
     let unchanged = if let Some(token) = if_snapshot {
-        let w = resolve(tx.conn, ws, user, "feed", token, now)?;
+        let w = resolve(r, ws, user, "feed", token, now)?;
         if w.position != 0 {
             return Err(StoreError::Conflict("Expected completed snapshot".into()));
         }
@@ -179,31 +183,36 @@ pub fn feed_page(
         } else {
             ""
         };
-        let sql=format!("SELECT e.id,e.seq,e.published_at,e.source_id,CASE WHEN e.source_type='notification' THEN json_extract(e.source_key,'$[1]') END
+        let sql = format!(
+            "SELECT e.id,e.seq,e.published_at,e.source_id,CASE WHEN e.source_type='notification' THEN json_extract(e.source_key,'$[1]') END
             FROM attention_feed_unread u JOIN feed_entries e ON e.id=u.entry_id
-            WHERE u.workspace_id=?1 AND u.user_id=?2{bound} ORDER BY u.seq DESC LIMIT ?4");
-        let mut st = tx.conn.prepare_cached(&sql)?;
+            WHERE u.workspace_id=?1 AND u.user_id=?2{bound} ORDER BY u.seq DESC LIMIT ?4"
+        );
+        let mut st = conn.prepare_cached(&sql)?;
         entries = st
-            .query_map(params![ws, user, before, limit as i64], |r| {
-                let id: String = r.get(0)?;
-                let mut e = Entry::new(id.clone(), r.get(2)?, "feed", id);
-                e.order = Some(r.get(1)?);
-                e.source_id = r.get(3)?;
-                e.group_key = r.get(4)?;
+            .query_map(params![ws, user, before, limit as i64], |row| {
+                let id: String = row.get(0)?;
+                let mut e = Entry::new(id.clone(), row.get(2)?, "feed", id);
+                e.order = Some(row.get(1)?);
+                e.source_id = row.get(3)?;
+                e.group_key = row.get(4)?;
                 Ok(e)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
     }
     // Probe the indexed next key, not count/offset over earlier pages.
     let more = if let Some(last) = entries.last() {
-        tx.conn.query_row("SELECT EXISTS(SELECT 1 FROM attention_feed_unread WHERE workspace_id=? AND user_id=? AND seq<?)",
-            params![ws,user,last.order],|r|r.get::<_,bool>(0))?
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attention_feed_unread WHERE workspace_id=? AND user_id=? AND seq<?)",
+            params![ws, user, last.order],
+            |row| row.get::<_, bool>(0),
+        )?
     } else {
         false
     };
     let next_cursor = if more {
         Some(window(
-            tx,
+            r,
             ws,
             user,
             "feed",
@@ -218,7 +227,7 @@ pub fn feed_page(
     let snapshot = if more {
         None
     } else {
-        Some(window(tx, ws, user, "feed", &revision, 0, 0, now)?)
+        Some(window(r, ws, user, "feed", &revision, 0, 0, now)?)
     };
     Ok(Category {
         kind: "feed".into(),
@@ -239,35 +248,30 @@ struct Window {
     position: i64,
 }
 fn resolve(
-    c: &Connection,
+    r: &impl crate::Read,
     ws: &str,
     user: &str,
     kind: &str,
     token: &str,
     now: i64,
 ) -> Result<Window> {
-    c.query_row(
-        "SELECT revision,upper_seq,position FROM attention_windows
-        WHERE token=? AND workspace_id=? AND user_id=? AND kind=? AND expires>?",
-        params![token, ws, user, kind, now],
-        |r| {
-            Ok(Window {
-                revision: r.get(0)?,
-                upper: r.get(1)?,
-                position: r.get(2)?,
-            })
-        },
-    )
-    .optional()?
-    .ok_or_else(|| {
-        StoreError::Conflict(
+    let caches = r
+        .window_caches()
+        .ok_or_else(|| StoreError::Storage("attention window cache unavailable".into()))?;
+    match caches.attention.resolve(token, now) {
+        Some((w, _version)) if w.ws == ws && w.user == user && w.kind == kind => Ok(Window {
+            revision: w.revision,
+            upper: w.upper,
+            position: w.position,
+        }),
+        _ => Err(StoreError::Conflict(
             "Invalid or expired attention capability for this scope/category".into(),
-        )
-    })
+        )),
+    }
 }
 #[allow(clippy::too_many_arguments)]
 fn window(
-    tx: &mut W<'_>,
+    r: &impl crate::Read,
     ws: &str,
     user: &str,
     kind: &str,
@@ -276,17 +280,25 @@ fn window(
     position: i64,
     now: i64,
 ) -> Result<String> {
-    if let Some(t) = tx.conn.query_row("SELECT token FROM attention_windows WHERE workspace_id=? AND user_id=? AND kind=? AND revision=? AND upper_seq=? AND position=? AND expires>? LIMIT 1",params![ws,user,kind,revision,upper,position,now+3_600_000], |r| r.get::<_,String>(0)).optional()? { return Ok(t); }
-    let token = format!("{}{}", uid("aw"), uid(""));
-    tx.conn.execute(
-        "INSERT INTO attention_windows VALUES(?,?,?,?,?,?,?,?)",
-        params![token, ws, user, kind, revision, upper, position, now + TTL],
-    )?;
-    Ok(token)
+    let caches = r
+        .window_caches()
+        .ok_or_else(|| StoreError::Storage("attention window cache unavailable".into()))?;
+    Ok(caches.attention.issue(
+        "aw",
+        AttentionWindow {
+            ws: ws.to_owned(),
+            user: user.to_owned(),
+            kind: kind.to_owned(),
+            revision: revision.to_owned(),
+            upper,
+            position,
+        },
+        now,
+    ))
 }
 #[allow(clippy::too_many_arguments)]
 pub fn page(
-    tx: &mut W<'_>,
+    r: &mut impl crate::Read,
     ws: &str,
     user: &str,
     kind: &str,
@@ -297,7 +309,7 @@ pub fn page(
     limit: usize,
     now: i64,
 ) -> Result<Category> {
-    feed::member_on(tx.conn, ws, user)?;
+    feed::member_on(r.connection(), ws, user)?;
     if !KINDS.contains(&kind)
         || !(1..=100).contains(&limit)
         || (cursor.is_some() && if_snapshot.is_some())
@@ -308,7 +320,7 @@ pub fn page(
     }
     let revision = sha(&serde_json::to_string(&(ws, user, kind, upper, &entries))?);
     let position = if let Some(token) = cursor {
-        let w = resolve(tx.conn, ws, user, kind, token, now)?;
+        let w = resolve(r, ws, user, kind, token, now)?;
         if w.position == 0 || w.revision != revision || w.upper != upper {
             return Err(StoreError::Conflict(
                 "Attention snapshot changed; restart this category".into(),
@@ -320,7 +332,7 @@ pub fn page(
         0
     };
     let unchanged = if let Some(token) = if_snapshot {
-        let w = resolve(tx.conn, ws, user, kind, token, now)?;
+        let w = resolve(r, ws, user, kind, token, now)?;
         if w.position != 0 {
             return Err(StoreError::Conflict(
                 "Expected an attention snapshot, not page cursor".into(),
@@ -338,13 +350,13 @@ pub fn page(
         ));
     }
     let snapshot = if unchanged || end == count {
-        Some(window(tx, ws, user, kind, &revision, upper, 0, now)?)
+        Some(window(r, ws, user, kind, &revision, upper, 0, now)?)
     } else {
         None
     };
     let next_cursor = if !unchanged && end < count {
         Some(window(
-            tx, ws, user, kind, &revision, upper, end as i64, now,
+            r, ws, user, kind, &revision, upper, end as i64, now,
         )?)
     } else {
         None
@@ -382,7 +394,7 @@ pub fn read_replies(
     now: i64,
 ) -> Result<bool> {
     feed::member_on(tx.conn, ws, user)?;
-    let w = resolve(tx.conn, ws, user, "replies", snapshot, now)?;
+    let w = resolve(tx, ws, user, "replies", snapshot, now)?;
     if w.position != 0 {
         return Err(StoreError::Conflict("Expected replies snapshot".into()));
     }

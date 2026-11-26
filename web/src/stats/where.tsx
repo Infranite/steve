@@ -20,9 +20,17 @@ import { fmtEst, fmtMs, fmtN, fmtUsage, fmtUsd } from "@/stats/format"
 import { harnessName } from "@/model-picker"
 import { t, useT } from "@/i18n"
 
-export type WhereTab = "item" | "bot" | "model" | "harness" | "purpose"
+export type WhereTab = "item" | "bot" | "model" | "harness" | "node" | "session" | "purpose"
 type Measure = "cost" | "time"
-const TABS = (): [WhereTab, string][] => [["item", t("stats:v2.where.tab.item")], ["bot", "Bot"], ["model", t("stats:v2.where.tab.model")], ["harness", "Harness"], ["purpose", t("stats:v2.where.tab.purpose")]]
+const TABS = (): [WhereTab, string][] => [
+  ["item", t("stats:v2.where.tab.item")],
+  ["bot", "Bot"],
+  ["model", t("stats:v2.where.tab.model")],
+  ["harness", "Harness"],
+  ["node", t("stats:v2.where.tab.node")],
+  ["session", t("stats:v2.where.tab.session")],
+  ["purpose", t("stats:v2.where.tab.purpose")],
+]
 
 /** the rows of the split, as the parts helper wants them: `est` (cost) and `total` (here: the measure when it isn't cost) */
 type Part = { key: string; label: string; est: number; total: number }

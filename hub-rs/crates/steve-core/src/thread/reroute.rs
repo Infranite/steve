@@ -80,17 +80,6 @@ impl Core {
                     Some(r) if r.meta["offer"]["state"] == "open" => {
                         self.offer(ws, &r.id, true, by)
                     }
-                    Some(r) if r.meta.get("suggest").is_some_and(Value::is_object) => {
-                        let choice = if r.meta["suggest"]["choices"]
-                            .as_array()
-                            .is_some_and(|cs| cs.iter().any(|c| c["id"] == "item"))
-                        {
-                            "item"
-                        } else {
-                            "new"
-                        };
-                        self.suggest(ws, &r.id, choice, by)
-                    }
                     Some(r) if r.item_id.is_some() => {
                         let item = self
                             .store()
