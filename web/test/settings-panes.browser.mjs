@@ -98,6 +98,16 @@ try {
     if (shots) await page.screenshot({ path: `${shots}/settings-general-390.png`, fullPage: true })
     await page.close()
   }
+
+  /* 事项与通知: no legacy handoff threshold row, and no untranslated English Choose… placeholder in zh-CN */
+  {
+    const { page } = await open("items")
+    assert.equal(await page.locator('[data-select="handoff"]').count(), 0, "legacy handoff threshold select is removed")
+    const text = await page.locator('[data-settings-pane="items"]').innerText()
+    assert.ok(!text.includes("交接阈值"), "no legacy 交接阈值 row in settings")
+    assert.ok(!/Choose\s*(\.\.\.|…)/i.test(text), `no English Choose placeholder in zh-CN: ${text}`)
+    await page.close()
+  }
   assert.deepEqual(errors, [])
   console.log("settings panes browser: ok")
 } finally {

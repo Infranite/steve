@@ -990,17 +990,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_hub_that_dies_mid_use_never_runs_it_again() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "wire::node_secrets::tests::child_vault_use_crash",
-                "--nocapture",
-            ])
-            .env("STEVE_VAULT_USE_CHILD_ROOT", tmp.path())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child =
+            steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "wire::node_secrets::tests::child_vault_use_crash",
+                    "--nocapture",
+                ])
+                .env("STEVE_VAULT_USE_CHILD_ROOT", tmp.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
         let t0 = Instant::now();
         while !tmp.path().join("ready").exists() {
             assert!(
@@ -1009,8 +1010,14 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child.simulate_crash().unwrap();
+        let _cmd_guard = steve_runtime::testkit::GroupGuard::for_pid(
+            std::fs::read_to_string(tmp.path().join("pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        );
 
         let t = hub_at(tmp.path()).await;
         let op = op_of("su_lost");

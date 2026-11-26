@@ -393,7 +393,7 @@ fn interrupted_journal_pointer_is_repaired_without_stealing_another_operation() 
 #[test]
 #[allow(clippy::zombie_processes)] // The nested fixture intentionally dies with its child via process-group SIGKILL.
 fn managed_orphan_exit_kills_group_descendants() {
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::os::unix::process::ExitStatusExt;
     const FIXTURE: &str = "STEVE_TEST_ORPHAN_DESCENDANT_FILE";
     if let Ok(path) = std::env::var(FIXTURE) {
         eprintln!(
@@ -412,18 +412,16 @@ fn managed_orphan_exit_kills_group_descendants() {
     }
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("pid");
-    let process = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "upgrades::tests::managed_orphan_exit_kills_group_descendants",
-            "--nocapture",
-        ])
-        .env(FIXTURE, &pid_file)
-        .process_group(0)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args([
+        "--exact",
+        "upgrades::tests::managed_orphan_exit_kills_group_descendants",
+        "--nocapture",
+    ])
+    .env(FIXTURE, &pid_file)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    let process = steve_runtime::testkit::ProcessGuard::spawn_direct(&mut cmd).unwrap();
     let child_pid = process.id();
     let output = process.wait_with_output().unwrap();
     // macOS can report the explicit fallback exit before delivering SIGKILL to the fixture itself.
@@ -714,7 +712,7 @@ fn a_release_script_or_local_release_running_refuses_a_local_upgrade() {
     fs::create_dir_all(lock.parent().unwrap()).unwrap();
     fs::write(&lock, "").unwrap();
     // another process holds the fcntl lock, the way ops/release.sh and local-release.py do
-    let Ok(mut holder) = std::process::Command::new("python3")
+    let Ok(mut holder) = steve_runtime::testkit::process::Command::new("python3")
         .args([
             "-c",
             "import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.lockf(f,fcntl.LOCK_EX); print('held',flush=True); time.sleep(30)",

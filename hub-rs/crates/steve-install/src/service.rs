@@ -4456,13 +4456,6 @@ esac
         // -> discovered via lock file PID + native OS binary path lookup.
         {
             use std::io::{BufRead, BufReader};
-            struct ChildGuard(std::process::Child);
-            impl Drop for ChildGuard {
-                fn drop(&mut self) {
-                    let _ = self.0.kill();
-                    let _ = self.0.wait();
-                }
-            }
             let f = Fixture::new();
             let (mut s, _manager) = f.service(System::Darwin, "node");
             s.node_exit_wait = Duration::ZERO;
@@ -4470,7 +4463,7 @@ esac
             let lock_path = f.home.join("node/local/node.lock");
             fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
             fs::write(&lock_path, b"").unwrap();
-            let mut child = Command::new("python3")
+            let mut child = steve_runtime::testkit::process::Command::new("python3")
                 .args([
                     "-c",
                     "import fcntl, os, sys, time; \
@@ -4491,7 +4484,6 @@ esac
                 .read_line(&mut ready)
                 .unwrap();
             assert_eq!(ready.trim(), "locked");
-            let _guard = ChildGuard(child);
 
             let err = s.dispatch("enable-boot", None, 0).unwrap_err().to_string();
             assert!(

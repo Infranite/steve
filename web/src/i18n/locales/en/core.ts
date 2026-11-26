@@ -130,8 +130,6 @@ export default {
     withdrawnToComposer: "Withdrawn and put back in the composer",
     queuedEdited: "Queued message updated",
     madeItem: "Made {{id}}",
-    appendedTo: "Added to {{id}}",
-    createdItem: "Created {{id}}",
     sentTo: "Sent to {{id}}",
     answerHere: "Answering here instead",
     changed: "Changed",

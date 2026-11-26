@@ -187,7 +187,7 @@ async fn corrections_stack_and_scope_one_uses_the_thread() {
     // the newest exception is checked first: the group's ignore wins over the thread's remind
     let m2 = ingest(&e, mail("m2", Some("acme"), Some("th1"), "Acme：回复")).await;
     settled(&e, &m2, "ignored").await;
-    // the thread alone, in another group → reminded
+    // the thread alone, in another group → reminded passively in Feed (zero decisions opened)
     let m3 = ingest(&e, mail("m3", Some("beta"), Some("th1"), "转发：周报")).await;
     settled(&e, &m3, "need").await;
     let open = fixtures::decisions_for(e.env.store(), "signal", &m3)
@@ -195,7 +195,19 @@ async fn corrections_stack_and_scope_one_uses_the_thread() {
         .iter()
         .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .count();
-    assert_eq!(open, 1);
+    assert_eq!(open, 0);
+    let entries = e
+        .env
+        .store()
+        .write(|w| steve_store::feed::list(w, WS, ME, &Default::default(), None, 10, 0))
+        .unwrap()
+        .entries;
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.title.contains("转发：周报")),
+        "expected passive Feed reminder for m3, got {entries:?}"
+    );
 }
 
 #[tokio::test]

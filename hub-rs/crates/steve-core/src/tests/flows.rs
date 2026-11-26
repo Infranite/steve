@@ -869,9 +869,9 @@ fn detached_decisions_go_straight_to_their_session() {
 }
 
 #[test]
-fn supplement_modes_and_the_handoff_threshold() {
+fn supplement_modes_keep_session_even_at_high_context_usage() {
     let k = Kit::new();
-    /* a workspace that set a threshold (by default there is none) */
+    /* a leftover legacy setting row in SQLite is ignored; harnesses compact their own context */
     k.db()
         .settings_set(
             crate::repo::WS,
@@ -900,7 +900,7 @@ fn supplement_modes_and_the_handoff_threshold() {
         i.id
     )));
     k.rt.end_turn(&k.core, &s2.id, "cancelled", None);
-    /* over the threshold: a handoff session */
+    /* high context usage keeps the active session rather than forcing a percentage rollover */
     k.db()
         .session_patch(&s2.id, patch![used: 85, size: 100])
         .unwrap();
@@ -908,36 +908,13 @@ fn supplement_modes_and_the_handoff_threshold() {
     k.core
         .supplement(&i.id, "继续", SupplementMode::Auto, &[], "me")
         .unwrap();
-    assert_eq!(k.db().session(&s2.id).unwrap().unwrap().status, "ended");
-    let s3 = last_session(&k, &i.id);
-    assert_eq!(s3.no, 3);
-    assert!(k.rt.prompts_of(&s3.id)[0].ends_with(
-        "交接：上一个会话的上下文用到了 85%。它的最后进展：进展到一半\n\n补充信息：继续"
-    ));
-    assert!(
-        k.timeline_texts(&i.id)
-            .contains(&"上下文已用 85%：开新会话".to_string())
-    );
-    /* a higher setting keeps the session */
-    k.rt.end_turn(&k.core, &s3.id, "cancelled", None);
-    k.db()
-        .settings_set(
-            WS,
-            &json!({"handoff": "90"}).as_object().unwrap().clone(),
-            "me",
-        )
-        .unwrap();
-    k.db()
-        .session_patch(&s3.id, patch![used: 85, size: 100])
-        .unwrap();
-    k.core
-        .supplement(&i.id, "再来", SupplementMode::Auto, &[], "me")
-        .unwrap();
-    assert_eq!(k.rt.prompts_of(&s3.id).last().unwrap(), "补充信息：再来");
+    assert_ne!(k.db().session(&s2.id).unwrap().unwrap().status, "ended");
+    assert_eq!(last_session(&k, &i.id).id, s2.id);
+    assert_eq!(k.rt.prompts_of(&s2.id).last().unwrap(), "补充信息：继续");
     /* a supplement supersedes stale questions */
-    k.rt.end_turn(&k.core, &s3.id, "cancelled", None);
-    let s3row = k.db().session(&s3.id).unwrap().unwrap();
-    k.core.tool_ask(&s3row, "q", &[]).unwrap();
+    k.rt.end_turn(&k.core, &s2.id, "cancelled", None);
+    let s2row = k.db().session(&s2.id).unwrap().unwrap();
+    k.core.tool_ask(&s2row, "q", &[]).unwrap();
     k.core
         .supplement(&i.id, "直接说", SupplementMode::Auto, &[], "me")
         .unwrap();
@@ -1216,21 +1193,12 @@ fn a_handoff_names_the_release_its_successor_waits_for() {
         s.id.clone(),
         crate::Released::Pending("op_release_1".into()),
     );
-    k.db()
-        .settings_set(
-            crate::repo::WS,
-            &serde_json::json!({"handoff": "80"})
-                .as_object()
-                .unwrap()
-                .clone(),
+    k.core
+        .handoff_item(
+            &i.id,
+            crate::context_handoff::HandoffTarget::default(),
             "me",
         )
-        .unwrap();
-    k.db()
-        .session_patch(&s.id, patch![used: 85, size: 100])
-        .unwrap();
-    k.core
-        .supplement(&i.id, "继续", SupplementMode::Auto, &[], "me")
         .unwrap();
     let s2 = last_session(&k, &i.id);
     assert_ne!(s2.id, s.id);
@@ -1238,13 +1206,14 @@ fn a_handoff_names_the_release_its_successor_waits_for() {
         k.rt.st().created.last().unwrap(),
         &(s2.id.clone(), Some("op_release_1".to_string()))
     );
-    /* the rollover past the handoff threshold, its old session gone at once: nothing to wait for */
+    /* a subsequent manual handoff whose old session is released immediately waits for nothing */
     k.rt.end_turn(&k.core, &s2.id, "cancelled", None);
-    k.db()
-        .session_patch(&s2.id, patch![used: 85, size: 100])
-        .unwrap();
     k.core
-        .supplement(&i.id, "继续", SupplementMode::Auto, &[], "me")
+        .handoff_item(
+            &i.id,
+            crate::context_handoff::HandoffTarget::default(),
+            "me",
+        )
         .unwrap();
     let s3 = last_session(&k, &i.id);
     assert_eq!(s3.no, 3);

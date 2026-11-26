@@ -1254,7 +1254,7 @@ async fn child_node_process() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_killed_node_leaves_its_attempt_unknown_until_abandoned() {
     let t = T::new(&[]);
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_node_process", "--nocapture"])
         .env("STEVE_NODE_CHILD_ROOT", &t.root)
         .stdout(std::process::Stdio::null())
@@ -1269,8 +1269,7 @@ async fn a_killed_node_leaves_its_attempt_unknown_until_abandoned() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.simulate_crash().unwrap();
     // the adapter's group (its own process group) outlived the Node
     let n = t.node();
     assert!(n.incarnation() >= 2);

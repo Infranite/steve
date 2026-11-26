@@ -288,12 +288,6 @@ fn succeeds(dir: &Path, args: &[&str]) -> bool {
     git_read(dir, args).is_ok()
 }
 
-/// Whether a git command that changes the repository succeeds (through [`git`]: never killed, so it
-/// cannot leave half-done work behind).
-fn succeeds_write(dir: &Path, args: &[&str]) -> bool {
-    git(dir, args).is_ok()
-}
-
 pub fn is_git(dir: &Path) -> bool {
     succeeds(dir, &["rev-parse", "--is-inside-work-tree"])
 }
@@ -412,18 +406,37 @@ pub fn landed(repo: &Path, branch: &str, base: &str) -> bool {
     v
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeTidy {
     Removed,
-    Dirty,
-    Unmerged,
+    Dirty(String),
+    Failed(String),
     Absent,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchTidy {
     Deleted,
-    Kept,
+    KeptUnmerged { short_sha: Option<String> },
+    KeptDueToWorktree,
+    DeleteFailed(String),
     Absent,
+}
+
+/// The repository's base branch for merge checks: `main`, then `master`, else `HEAD`.
+pub fn default_base(repo: &Path) -> &'static str {
+    if succeeds(
+        repo,
+        &["rev-parse", "--verify", "--quiet", "refs/heads/main"],
+    ) {
+        "main"
+    } else if succeeds(
+        repo,
+        &["rev-parse", "--verify", "--quiet", "refs/heads/master"],
+    ) {
+        "master"
+    } else {
+        "HEAD"
+    }
 }
 
 /// What a tidy decides on about an item's branch (git reads only).
@@ -463,49 +476,60 @@ pub fn branch_facts(repo: &Path, branch: &str, base: &str) -> BranchFacts {
     }
 }
 
-/// After an item is done or dropped: remove its worktree when it is clean (and, if `only_merged`, when the
-/// branch's work is in `base`), and delete the branch when it is fully merged into `base`. Unmerged work is
-/// never deleted.
-///
-/// "In `base`" also counts a branch that landed rebased or squashed (a PR merged by rebase gives its commits
-/// new ids, so `merge-base --is-ancestor` alone kept such worktrees forever); its branch stays, since
-/// `branch -d` only deletes what is an ancestor of `base`, and the worktree can be made again from it.
+/// After an item is closed (completed, cancelled, or failed): remove its clean worktree, delete its
+/// branch when fully merged into `base`, and preserve any unmerged branch with its tip revision.
+/// Dirty worktrees and git errors are returned explicitly so callers log, meter and display them.
 pub fn tidy_worktree(
     repo: &Path,
     worktree: &Path,
-    branch: &str,
-    only_merged: bool,
+    branch: Option<&str>,
     base: &str,
 ) -> (WorktreeTidy, BranchTidy) {
-    let BranchFacts {
-        exists,
-        merged,
-        landed,
-    } = branch_facts(repo, branch, base);
+    let facts = branch.map(|b| branch_facts(repo, b, base));
     let mut wt = WorktreeTidy::Absent;
     if worktree.exists() {
         /* `git worktree remove` without --force refuses modified or untracked files */
-        wt = if only_merged && !landed {
-            WorktreeTidy::Unmerged
-        } else if succeeds_write(repo, &["worktree", "remove", &worktree.to_string_lossy()]) {
-            WorktreeTidy::Removed
-        } else {
-            WorktreeTidy::Dirty
+        wt = match git(repo, &["worktree", "remove", &worktree.to_string_lossy()]) {
+            Ok(_) => WorktreeTidy::Removed,
+            Err(err) => {
+                let dirty =
+                    git_read(worktree, &["status", "--porcelain"]).is_ok_and(|out| !out.is_empty());
+                if dirty {
+                    WorktreeTidy::Dirty(err)
+                } else {
+                    WorktreeTidy::Failed(err)
+                }
+            }
         };
     }
-    let mut br = if exists {
-        BranchTidy::Kept
-    } else {
-        BranchTidy::Absent
+    let br = match (branch, facts) {
+        (
+            Some(branch),
+            Some(BranchFacts {
+                exists: true,
+                merged,
+                ..
+            }),
+        ) => {
+            if matches!(wt, WorktreeTidy::Dirty(_) | WorktreeTidy::Failed(_)) {
+                BranchTidy::KeptDueToWorktree
+            } else if merged {
+                /* -d checks again that the branch is merged */
+                match git(repo, &["branch", "-d", branch]) {
+                    Ok(_) => BranchTidy::Deleted,
+                    Err(err) => BranchTidy::DeleteFailed(err),
+                }
+            } else {
+                let short_sha = git_read(
+                    repo,
+                    &["rev-parse", "--short", &format!("refs/heads/{branch}")],
+                )
+                .ok();
+                BranchTidy::KeptUnmerged { short_sha }
+            }
+        }
+        _ => BranchTidy::Absent,
     };
-    /* -d checks again that the branch is merged */
-    if exists
-        && merged
-        && !matches!(wt, WorktreeTidy::Dirty | WorktreeTidy::Unmerged)
-        && succeeds_write(repo, &["branch", "-d", branch])
-    {
-        br = BranchTidy::Deleted;
-    }
     (wt, br)
 }
 
@@ -636,37 +660,40 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn tidy_removes_merged_work_and_keeps_unmerged_or_dirty() {
+    fn tidy_removes_clean_worktrees_deletes_merged_branches_and_keeps_unmerged_or_dirty() {
         let t = tempfile::tempdir().unwrap();
         let r = repo(t.path());
         let wts = t.path().join("wt");
         let (m, mwt) = branch_with(&r, &wts, "T-1", "m.txt", "m\n");
         g(&r, &["merge", "-q", "--ff-only", &m]);
         assert_eq!(
-            tidy_worktree(&r, &mwt, &m, true, "main"),
+            tidy_worktree(&r, &mwt, Some(&m), "main"),
             (WorktreeTidy::Removed, BranchTidy::Deleted)
         );
         assert!(!mwt.exists());
+        assert!(g(&r, &["branch", "--list", &m]).is_empty());
 
         let (o, owt) = branch_with(&r, &wts, "T-2", "o.txt", "o\n");
+        let expected_sha = g(&r, &["rev-parse", "--short", &format!("refs/heads/{o}")]);
         assert_eq!(
-            tidy_worktree(&r, &owt, &o, true, "main"),
-            (WorktreeTidy::Unmerged, BranchTidy::Kept)
+            tidy_worktree(&r, &owt, Some(&o), "main"),
+            (
+                WorktreeTidy::Removed,
+                BranchTidy::KeptUnmerged {
+                    short_sha: Some(expected_sha)
+                }
+            )
         );
-        assert!(owt.exists());
-        assert_eq!(
-            tidy_worktree(&r, &owt, &o, false, "main"),
-            (WorktreeTidy::Removed, BranchTidy::Kept)
-        );
+        assert!(!owt.exists());
         g(&r, &["rev-parse", "--verify", &o]);
 
         let (d, dwt) = branch_with(&r, &wts, "T-3", "d.txt", "d\n");
         fs::write(dwt.join("untracked.txt"), "x").unwrap();
-        assert_eq!(
-            tidy_worktree(&r, &dwt, &d, false, "main"),
-            (WorktreeTidy::Dirty, BranchTidy::Kept)
-        );
+        let (wt, br) = tidy_worktree(&r, &dwt, Some(&d), "main");
+        assert!(matches!(wt, WorktreeTidy::Dirty(_)), "{wt:?}");
+        assert_eq!(br, BranchTidy::KeptDueToWorktree);
         assert!(dwt.join("untracked.txt").exists());
+        g(&r, &["rev-parse", "--verify", &d]);
     }
 
     #[test]

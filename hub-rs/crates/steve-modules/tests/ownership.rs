@@ -428,3 +428,89 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
     .unwrap_err();
     assert!(e.contains("Invalid option"), "{e}");
 }
+
+#[tokio::test]
+async fn low_confidence_steward_proposal_is_silent_and_high_confidence_applies_with_24h_undo() {
+    let t = env();
+    let r = app(&t);
+    let (_, zhang) = setup(&r).await;
+
+    let bot_info = t
+        .store()
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(contacts::stewards::object_info(c, WS, "bot", "steve").expect("obj"))
+        })
+        .expect("read")
+        .expect("bot");
+    let zhang_party = t
+        .store()
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(steve_store::Contacts::new(c).party(&zhang).expect("party"))
+        })
+        .expect("read")
+        .expect("zhang");
+
+    // Low-confidence propose: silently records status=proposed, decision_id=None, 0 decisions opened.
+    let prop = t
+        .store()
+        .write(|tx| {
+            contacts::stewards::propose(
+                tx,
+                WS,
+                &bot_info,
+                &zhang_party,
+                "maintainer",
+                "可能是张三维护",
+                "steve",
+                None,
+            )
+        })
+        .expect("propose");
+    assert!(matches!(prop, contacts::stewards::Proposed::Opened(_)));
+    assert_eq!(
+        fixture::open_steward_decisions(t.store()).expect("decisions"),
+        0,
+        "low-confidence steward proposal must open 0 decisions"
+    );
+    assert!(rows(&t).contains(&format!("bot steve {zhang} maintainer chat proposed")));
+
+    // High-confidence apply_with_undo: confirms directly, 0 decisions opened, 24h undoable changeset.
+    let applied = t
+        .store()
+        .write(|tx| {
+            contacts::stewards::apply_with_undo(
+                tx,
+                WS,
+                &bot_info,
+                &zhang_party,
+                "maintainer",
+                "群里确认由张三维护",
+                "steve",
+                None,
+            )
+        })
+        .expect("apply_with_undo");
+    let cs_id = match applied {
+        contacts::stewards::Proposed::Opened(id) => id,
+        other => panic!("expected changeset id, got {other:?}"),
+    };
+    assert_eq!(
+        fixture::open_steward_decisions(t.store()).expect("decisions"),
+        0,
+        "high-confidence steward assignment must open 0 decisions"
+    );
+    assert!(rows(&t).contains(&format!("bot steve {zhang} maintainer chat confirmed")));
+    let cs = fixture::changeset_status_and_changes(t.store(), &cs_id).expect("changeset");
+    assert_eq!(cs.0, "applied");
+    let notices = steve_store::notify::list_recent(t.store(), WS, 20).expect("notices");
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.kind == "steward" && n.text.contains(&cs_id)),
+        "expected passive steward notification referencing {cs_id}, got {notices:?}"
+    );
+
+    // 24h undo restores the previous proposed row cleanly.
+    records::undo(&t.modules, &me(), &cs_id).expect("undo");
+    assert!(rows(&t).contains(&format!("bot steve {zhang} maintainer chat proposed")));
+}

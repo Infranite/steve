@@ -4,6 +4,7 @@
 /**
  * The tiers of 待处理, decided by the Hub in a fixed order of rules: an approved send that failed
  * and a starred contact's message always ask you; a conversation you answered yourself folds; a
- * reply drafted for you is a draft; everything else asks you.
+ * reply drafted for you is a draft; only whitelisted high-stakes / irreversible kinds ask you;
+ * everything else folds into passive review.
  */
 export type DecisionTier = "decide" | "draft" | "folded";

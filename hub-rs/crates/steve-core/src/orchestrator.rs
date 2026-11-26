@@ -3530,85 +3530,289 @@ impl Tx<'_> {
     }
 
     /* ── finishing and prerequisites ── */
-    /// A finished or dropped item gives back its worktree (only when clean; for a finished item only once its
-    /// branch is merged) and its branch once it is merged into main; unmerged work stays.
+    /// A closed item (completed, cancelled, or failed) gives back its clean worktree and deletes
+    /// its branch when merged; unmerged branches are preserved and noted on the item.
     pub(crate) fn tidy_branch(&mut self, item_id: &str) -> Result<()> {
         self.tidy_branch_now(item_id).map(|_| ())
     }
 
-    /// [`Self::tidy_branch`], telling whether it could decide: `false` while a session of the item is
-    /// still busy (nothing was touched; ask again later). `true` also when there is nothing to tidy, or
-    /// the worktree is kept on purpose (dirty, unmerged).
+    /// [`Self::tidy_branch`], telling whether it could decide: `false` while a session of the item
+    /// is still busy or releasing (ask again later). `true` once tidied, dispatched to its Node,
+    /// nothing to tidy, or a terminal failure (dirty worktree, git error) has been recorded on the
+    /// item.
     pub(crate) fn tidy_branch_now(&mut self, item_id: &str) -> Result<bool> {
+        Ok(self.tidy_branch_outcome(item_id)? != crate::worktrees::TidyOutcome::Busy)
+    }
+
+    pub(crate) fn tidy_branch_outcome(
+        &mut self,
+        item_id: &str,
+    ) -> Result<crate::worktrees::TidyOutcome> {
+        use crate::worktrees::TidyOutcome;
+
+        let started = std::time::Instant::now();
         let Some(i) = self.db().item(item_id)? else {
-            return Ok(true);
+            return Ok(TidyOutcome::Noop);
         };
-        let Some(p) = self.db().project(i.project_id.as_deref())? else {
-            return Ok(true);
-        };
-        let (Some(branch), Some(cwd)) = (
-            i.branch.as_deref().filter(|b| !b.is_empty()),
-            i.cwd.as_deref().filter(|c| !c.is_empty()),
-        ) else {
-            return Ok(true);
-        };
-        let prefix = format!("{}/", self.cfg().worktrees.to_string_lossy());
-        if !i.is_closed() || !cwd.starts_with(&prefix) || !git::is_git(Path::new(&p.path)) {
-            return Ok(true);
+        if !i.is_closed() {
+            return Ok(TidyOutcome::Noop);
         }
+        let Some(cwd) = self.item_worktree_dir(&i) else {
+            return Ok(TidyOutcome::Noop);
+        };
         /* only once no harness can be in the worktree any more: a release on its way (a Node's) is
          * asked about again later */
         let ss = self.db().sessions_of_item(item_id)?;
         if ss.iter().any(|s| self.busy(&s.id)) {
-            return Ok(false);
+            return Ok(TidyOutcome::Busy);
         }
         let mut gone = true;
         for s in &ss {
             gone &= self.rt().release(&s.id)? == Released::Gone;
         }
         if !gone {
-            return Ok(false);
+            return Ok(TidyOutcome::Busy);
         }
+
+        let cwd_path = Path::new(&cwd);
+        let cwd_exists = cwd_path.exists();
+        let Some(p) = self.db().project(i.project_id.as_deref())? else {
+            if cwd_exists {
+                let err = "project not found";
+                tracing::warn!(item = item_id, cwd = %cwd, error = err, "worktree cleanup failed");
+                metrics::counter!(
+                    "steve_worktree_cleanup_total",
+                    "backend" => "core",
+                    "outcome" => "failed",
+                    "branch" => "kept"
+                )
+                .increment(1);
+                let note = steve_i18n::stored(|| {
+                    steve_i18n::t!(
+                        "core.worktree.cleanup_failed",
+                        cwd = cwd.as_str(),
+                        error = err
+                    )
+                });
+                self.note_cleanup_once(item_id, &note)?;
+                return Ok(TidyOutcome::Failed);
+            }
+            return Ok(TidyOutcome::Noop);
+        };
+        let repo = Path::new(&p.path);
+        if !git::is_git(repo) {
+            if cwd_exists {
+                let err = format!("project repository is unavailable: {}", p.path);
+                tracing::warn!(item = item_id, cwd = %cwd, repo = %p.path, error = %err, "worktree cleanup failed");
+                metrics::counter!(
+                    "steve_worktree_cleanup_total",
+                    "backend" => "core",
+                    "outcome" => "failed",
+                    "branch" => "kept"
+                )
+                .increment(1);
+                let note = steve_i18n::stored(|| {
+                    steve_i18n::t!(
+                        "core.worktree.cleanup_failed",
+                        cwd = cwd.as_str(),
+                        error = err.as_str()
+                    )
+                });
+                self.note_cleanup_once(item_id, &note)?;
+                return Ok(TidyOutcome::Failed);
+            }
+            return Ok(TidyOutcome::Noop);
+        }
+
+        let branch = i
+            .branch
+            .as_deref()
+            .filter(|b| !b.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                cwd_exists
+                    .then(|| {
+                        git::git_read(cwd_path, &["symbolic-ref", "--short", "HEAD"])
+                            .ok()
+                            .filter(|b| b.starts_with("steve/"))
+                    })
+                    .flatten()
+            });
+
         /* the caches go to the trash first (a rename): removing the worktree under the lock is then quick,
          * and they are deleted outside it */
-        let shed = self.shed_closed_caches(item_id, Path::new(cwd));
-        if !shed.is_empty() {
-            self.c.purge_soon();
+        if cwd_exists {
+            let shed = self.shed_closed_caches(item_id, cwd_path);
+            if !shed.is_empty() {
+                self.c.purge_soon();
+            }
         }
+
         /* a worktree its backend made is given back by it (off the lock); what it did is told later */
-        if self.tidy_by_backend(&i, &p, branch, cwd)? {
-            return Ok(true);
+        if self.tidy_by_backend(&i, &p, branch.as_deref(), &cwd)? {
+            metrics::histogram!("steve_worktree_cleanup_duration_seconds", "backend" => "node")
+                .record(started.elapsed().as_secs_f64());
+            return Ok(TidyOutcome::Dispatched);
         }
-        /* an archived item gives back a clean worktree even when its branch is not in main: the branch
-         * stays, and the worktree can be made again from it */
-        let (wt, br) = git::tidy_worktree(
-            Path::new(&p.path),
-            Path::new(cwd),
-            branch,
-            i.is_completed() && !i.archived,
-            "main",
-        );
-        let mut said = vec![];
-        if wt == git::WorktreeTidy::Removed {
-            let head = git::git(
-                Path::new(&p.path),
-                &["rev-parse", "--short", &format!("refs/heads/{branch}")],
-            );
-            said.push(match (br, head) {
-                (git::BranchTidy::Kept, Ok(h)) => {
-                    format!("删除了工作区 {cwd}（分支 {branch} 保留在 {h}，继续时从分支重建）")
-                }
-                _ => format!("删除了工作区 {cwd}"),
-            });
+
+        let base = git::default_base(repo);
+        let (wt, br) = git::tidy_worktree(repo, cwd_path, branch.as_deref(), base);
+        let elapsed = started.elapsed().as_secs_f64();
+        let branch_name = branch.as_deref().unwrap_or("");
+
+        let (outcome_label, branch_label, note, tidy_outcome) = match (&wt, &br) {
+            (git::WorktreeTidy::Removed, git::BranchTidy::Deleted) => {
+                tracing::info!(
+                    item = item_id,
+                    cwd = %cwd,
+                    branch = branch_name,
+                    elapsed_ms = (elapsed * 1000.0) as u64,
+                    "removed worktree and deleted merged branch"
+                );
+                let note = steve_i18n::stored(|| {
+                    steve_i18n::t!(
+                        "core.worktree.removed_merged",
+                        cwd = cwd.as_str(),
+                        branch = branch_name
+                    )
+                });
+                ("removed", "deleted", Some(note), TidyOutcome::Cleaned)
+            }
+            (git::WorktreeTidy::Removed, git::BranchTidy::KeptUnmerged { short_sha }) => {
+                tracing::info!(
+                    item = item_id,
+                    cwd = %cwd,
+                    branch = branch_name,
+                    head = ?short_sha,
+                    elapsed_ms = (elapsed * 1000.0) as u64,
+                    "removed worktree and preserved unmerged branch"
+                );
+                let note = steve_i18n::stored(|| match short_sha.as_deref() {
+                    Some(head) => steve_i18n::t!(
+                        "core.worktree.removed_unmerged",
+                        cwd = cwd.as_str(),
+                        branch = branch_name,
+                        head = head
+                    ),
+                    None => steve_i18n::t!(
+                        "core.worktree.removed_unmerged_no_sha",
+                        cwd = cwd.as_str(),
+                        branch = branch_name
+                    ),
+                });
+                ("removed", "preserved", Some(note), TidyOutcome::Cleaned)
+            }
+            (git::WorktreeTidy::Removed, git::BranchTidy::DeleteFailed(err)) => {
+                tracing::warn!(
+                    item = item_id,
+                    cwd = %cwd,
+                    branch = branch_name,
+                    error = %err,
+                    "removed worktree but failed to delete merged branch"
+                );
+                let note = steve_i18n::stored(|| {
+                    steve_i18n::t!(
+                        "core.worktree.removed_branch_failed",
+                        cwd = cwd.as_str(),
+                        branch = branch_name,
+                        error = err.as_str()
+                    )
+                });
+                ("partial", "delete_failed", Some(note), TidyOutcome::Failed)
+            }
+            (git::WorktreeTidy::Removed, _) => {
+                tracing::info!(
+                    item = item_id,
+                    cwd = %cwd,
+                    elapsed_ms = (elapsed * 1000.0) as u64,
+                    "removed worktree"
+                );
+                let note = steve_i18n::stored(|| {
+                    steve_i18n::t!("core.worktree.removed_only", cwd = cwd.as_str())
+                });
+                ("removed", "none", Some(note), TidyOutcome::Cleaned)
+            }
+            (git::WorktreeTidy::Dirty(err), _) => {
+                tracing::warn!(
+                    item = item_id,
+                    cwd = %cwd,
+                    branch = ?branch,
+                    error = %err,
+                    "worktree cleanup failed: dirty worktree"
+                );
+                let note = steve_i18n::stored(|| {
+                    steve_i18n::t!(
+                        "core.worktree.cleanup_failed",
+                        cwd = cwd.as_str(),
+                        error = err.as_str()
+                    )
+                });
+                ("dirty", "kept", Some(note), TidyOutcome::Failed)
+            }
+            (git::WorktreeTidy::Failed(err), _) => {
+                tracing::warn!(
+                    item = item_id,
+                    cwd = %cwd,
+                    branch = ?branch,
+                    error = %err,
+                    "worktree cleanup failed"
+                );
+                let note = steve_i18n::stored(|| {
+                    steve_i18n::t!(
+                        "core.worktree.cleanup_failed",
+                        cwd = cwd.as_str(),
+                        error = err.as_str()
+                    )
+                });
+                ("failed", "kept", Some(note), TidyOutcome::Failed)
+            }
+            (git::WorktreeTidy::Absent, git::BranchTidy::Deleted) => {
+                tracing::info!(
+                    item = item_id,
+                    branch = branch_name,
+                    "deleted merged branch for already-absent worktree"
+                );
+                let note = steve_i18n::stored(|| {
+                    steve_i18n::t!("core.worktree.branch_deleted", branch = branch_name)
+                });
+                ("removed", "deleted", Some(note), TidyOutcome::Cleaned)
+            }
+            (git::WorktreeTidy::Absent, git::BranchTidy::DeleteFailed(err)) => {
+                tracing::warn!(
+                    item = item_id,
+                    branch = branch_name,
+                    error = %err,
+                    "failed to delete merged branch for already-absent worktree"
+                );
+                let note = steve_i18n::stored(|| {
+                    steve_i18n::t!(
+                        "core.worktree.branch_delete_failed",
+                        branch = branch_name,
+                        error = err.as_str()
+                    )
+                });
+                ("failed", "delete_failed", Some(note), TidyOutcome::Failed)
+            }
+            (git::WorktreeTidy::Absent, git::BranchTidy::KeptUnmerged { .. })
+            | (git::WorktreeTidy::Absent, git::BranchTidy::KeptDueToWorktree)
+            | (git::WorktreeTidy::Absent, git::BranchTidy::Absent) => {
+                return Ok(TidyOutcome::Noop);
+            }
+        };
+
+        metrics::histogram!("steve_worktree_cleanup_duration_seconds", "backend" => "core")
+            .record(elapsed);
+        metrics::counter!(
+            "steve_worktree_cleanup_total",
+            "backend" => "core",
+            "outcome" => outcome_label,
+            "branch" => branch_label
+        )
+        .increment(1);
+        if let Some(note) = note {
+            self.note_cleanup_once(item_id, &note)?;
         }
-        if br == git::BranchTidy::Deleted {
-            said.push(format!("删除了已合并的分支 {branch}"));
-        }
-        if !said.is_empty() {
-            self.db()
-                .timeline_add(item_id, "steve", "sys", &said.join("；"), None)?;
-        }
-        Ok(true)
+        Ok(tidy_outcome)
     }
 
     /// A removed worktree comes back (from the kept branch, or fresh from main) when the item continues.
@@ -5275,26 +5479,6 @@ impl Tx<'_> {
                 return Ok(());
             }
         };
-        /* past the handoff threshold, when the workspace set one, the next message starts a fresh session
-         * with a handoff summary. By default none: the harness compacts its own context, and Steve does
-         * not replace a working session (decided by the user on 2026-11-09). */
-        let item = self.item(item_id)?;
-        let ws = &item.workspace_id;
-        let limit: f64 = self
-            .db()
-            .setting(ws, "handoff", "0")?
-            .parse::<f64>()
-            .ok()
-            .filter(|l| *l > 0.0)
-            .unwrap_or(f64::NAN);
-        if let (Some(used), Some(size)) = (s.used.filter(|u| *u != 0), s.size.filter(|z| *z != 0)) {
-            let ratio = used as f64 / size as f64 * 100.0;
-            if ratio >= limit && !self.busy(&s.id) {
-                let pct = ratio.round() as i64;
-                self.handoff_on_supplement(&item, &s, pct, text, files)?;
-                return Ok(());
-            }
-        }
         if mode == SupplementMode::Steer && self.busy(&s.id) {
             self.stop_now(&s.id);
         }

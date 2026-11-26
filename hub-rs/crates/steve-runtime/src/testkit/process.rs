@@ -4,7 +4,8 @@
 //! reparented after their group leader exits, double-fork daemons and post-snapshot spawns require
 //! separate fixture ownership. This is not a process-container or subreaper contract.
 use std::ffi::OsStr;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::net::Shutdown;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -12,9 +13,17 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 const FD_ENV: &str = "_STEVE_TEST_LIFELINE_FD";
 const PARENT_ENV: &str = "_STEVE_TEST_PARENT_PID";
+const SIGKILL: i32 = 9;
+const SIGTERM: i32 = 15;
+/// Maximum wait for the watchdog subshell to finish killing descendant groups before falling back
+/// to direct process-group SIGKILL.
+const WATCHDOG_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+/// Bounded wait to reap an async child after SIGKILL in `AsyncProcessGuard::drop`.
+const ASYNC_DROP_REAP_TIMEOUT: Duration = Duration::from_millis(500);
 static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 // length(array) needs mawk >= 1.3.4 (or the system BSD/GNU awk).
 const GROUPS: &str = r#"
@@ -62,11 +71,11 @@ unset _STEVE_TEST_LIFELINE_FD _STEVE_TEST_PARENT_PID
     # on EOF/timeout inspect the original direct child's parent, not a cached PID's existence.
     while ! IFS= read -r -t 1 -u "$life"; do
         kill -0 "$owner" 2>/dev/null || break
-        current=$(/bin/ps -p "$owner" -o ppid= | /usr/bin/awk '{$1=$1; print}')
+        current=$(/bin/ps -p "$owner" -o ppid= 2>/dev/null | /usr/bin/awk '{$1=$1; print}')
         # A transient fork/ps failure is not evidence that parentage changed.
         [ -z "$current" ] || [ "$current" = "$parent" ] || break
     done
-    groups=$(/bin/ps -A -o pid=,ppid=,pgid= | /usr/bin/awk -v root="$owner" "$selector")
+    groups=$(/bin/ps -A -o pid=,ppid=,pgid= 2>/dev/null | /usr/bin/awk -v root="$owner" "$selector")
     eval "$teardown"
 ) </dev/null >/dev/null 2>&1 &
 eval "exec $life<&-"
@@ -76,19 +85,57 @@ exec "$@"
 unsafe extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     fn kill(pid: i32, signal: i32) -> i32;
+    fn getpgid(pid: i32) -> i32;
 }
 
 #[derive(Debug)]
-struct LifeWriter(UnixStream);
+struct LifeWriter {
+    stream: UnixStream,
+    fired: bool,
+}
+impl LifeWriter {
+    fn new(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            fired: false,
+        }
+    }
+    /// Wake the watchdog and wait (bounded by [`WATCHDOG_TEARDOWN_TIMEOUT`]) for it to finish
+    /// killing descendant groups and `-$owner` (signalled by EOF when the watchdog exits).
+    fn teardown(mut self) -> bool {
+        self.fired = true;
+        let _ = self.stream.write_all(b"\n");
+        let _ = self.stream.shutdown(Shutdown::Write);
+        let _ = self
+            .stream
+            .set_read_timeout(Some(WATCHDOG_TEARDOWN_TIMEOUT));
+        let mut buf = [0u8; 16];
+        loop {
+            match self.stream.read(&mut buf) {
+                Ok(0) => return true,
+                Ok(_) => continue,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => return false,
+            }
+        }
+    }
+    /// Disarm without triggering descendant teardown (used only for intentional crash simulation).
+    fn disarm(mut self) {
+        self.fired = true;
+    }
+}
 impl AsRawFd for LifeWriter {
     fn as_raw_fd(&self) -> i32 {
-        self.0.as_raw_fd()
+        self.stream.as_raw_fd()
     }
 }
 impl Drop for LifeWriter {
     fn drop(&mut self) {
-        // Release the same channel even if an uncontrolled spawn inherited another writer.
-        let _ = self.0.write_all(b"\n");
+        if !self.fired {
+            // Release the same channel even if an uncontrolled spawn inherited another writer.
+            let _ = self.stream.write_all(b"\n");
+            let _ = self.stream.shutdown(Shutdown::Write);
+        }
     }
 }
 struct Lifeline {
@@ -130,7 +177,7 @@ impl Lifeline {
         }
         Ok(Self {
             _read: unsafe { OwnedFd::from_raw_fd(fd) },
-            write: LifeWriter(write),
+            write: LifeWriter::new(write),
         })
     }
 }
@@ -242,11 +289,11 @@ impl Command {
     fn note_stdio(&mut self, index: usize) {
         self.stdio[index] = true;
     }
-    pub fn spawn(&mut self) -> io::Result<Child> {
+    pub fn spawn(&mut self) -> io::Result<ProcessGuard> {
         let prepared = self.prepare()?;
         let child = self.inner.spawn()?;
         let life = prepared.release();
-        Ok(Child {
+        Ok(ProcessGuard {
             pid: child.id(),
             inner: Some(child),
             life: Some(life),
@@ -280,26 +327,92 @@ impl Command {
     }
 }
 
-/// Owns both the ordinary wait/reap path and the parent-death lifeline.
+/// Guard for a test child process in its own process group.
+///
+/// Kills the entire process group (and reachable descendant groups via the lifeline watchdog)
+/// on explicit [`kill`](Self::kill), normal exit, and [`Drop`] (including unwind on panic), and
+/// reaps the direct child so no zombies or orphan descendants leak.
 #[derive(Debug)]
-pub struct Child {
+pub struct ProcessGuard {
     inner: Option<std::process::Child>,
     pid: u32,
     life: Option<LifeWriter>,
 }
-impl Child {
+impl ProcessGuard {
+    /// Spawn a `std::process::Command` directly in its own process group (`process_group(0)`)
+    /// without injecting a watchdog subshell into the group.
+    ///
+    /// Prefer [`Command::spawn`] by default so descendant process groups are also covered on test
+    /// SIGKILL; use `spawn_direct` only when the test itself inspects the child's exact process
+    /// group membership (e.g. `procs::started_by` or self-killing orphan tests).
+    pub fn spawn_direct(command: &mut std::process::Command) -> io::Result<Self> {
+        command.process_group(0);
+        let child = command.spawn()?;
+        Ok(Self {
+            pid: child.id(),
+            inner: Some(child),
+            life: None,
+        })
+    }
     fn finish(&mut self) {
-        self.life.take();
+        if let Some(life) = self.life.take() {
+            life.teardown();
+        }
+    }
+    fn still_unreaped(&mut self) -> bool {
+        self.inner
+            .as_mut()
+            .is_some_and(|c| matches!(c.try_wait(), Ok(None)))
     }
     pub fn id(&self) -> u32 {
         self.pid
     }
+    /// Kill the child's entire process group and reachable descendant groups via the watchdog,
+    /// falling back to direct process-group SIGKILL if still running.
     pub fn kill(&mut self) -> io::Result<()> {
-        if self.life.is_some() {
-            kill_group(self.pid);
-            self.life.take();
+        if let Some(life) = self.life.take() {
+            life.teardown();
         }
-        self.inner.as_mut().unwrap().kill()
+        if self.still_unreaped() {
+            kill_group(self.pid);
+            let _ = self.inner.as_mut().unwrap().kill();
+        }
+        Ok(())
+    }
+    /// Simulate an abrupt crash of ONLY this child's process group (killing the watchdog with it)
+    /// so detached descendant process groups intentionally survive for crash-recovery tests, then
+    /// reap the direct child.
+    pub fn simulate_crash(&mut self) -> io::Result<()> {
+        if self.still_unreaped() {
+            kill_group(self.pid);
+            let _ = self.inner.as_mut().unwrap().wait();
+        }
+        if let Some(life) = self.life.take() {
+            life.disarm();
+        }
+        Ok(())
+    }
+    /// Ask the process to exit gracefully with `SIGTERM`, waiting up to `grace` before forcing
+    /// full process-group and descendant teardown with `SIGKILL` and reaping.
+    pub fn terminate(&mut self, grace: Duration) {
+        if !self.still_unreaped() {
+            self.finish();
+            return;
+        }
+        // SAFETY: unreaped child pins its PID.
+        unsafe { kill(self.pid as i32, SIGTERM) };
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline {
+            if !self.still_unreaped() {
+                self.finish();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = self.kill();
+        if let Some(child) = &mut self.inner {
+            let _ = child.wait();
+        }
     }
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
         let result = self.inner.as_mut().unwrap().wait();
@@ -321,23 +434,77 @@ impl Child {
         result
     }
 }
-impl Deref for Child {
+impl Deref for ProcessGuard {
     type Target = std::process::Child;
     fn deref(&self) -> &Self::Target {
         self.inner.as_ref().unwrap()
     }
 }
-impl DerefMut for Child {
+impl DerefMut for ProcessGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.inner.as_mut().unwrap()
     }
 }
-impl Drop for Child {
+impl Drop for ProcessGuard {
     fn drop(&mut self) {
         self.finish();
+        if self.still_unreaped() {
+            kill_group(self.pid);
+        }
         if let Some(child) = &mut self.inner {
             let _ = child.wait();
         }
+    }
+}
+
+/// RAII guard for a detached process group (e.g. an orphaned fixture group in a crash-recovery
+/// test). Sends `SIGKILL` to `-pgid` on [`Drop`] (including unwind on panic) unless disarmed.
+#[derive(Debug)]
+pub struct GroupGuard(Option<i32>);
+
+impl GroupGuard {
+    /// Guard process group `pgid` (must be `> 1`, never the test's own group).
+    pub fn new(pgid: i32) -> Self {
+        let own = unsafe { getpgid(0) };
+        if pgid > 1 && pgid != own {
+            Self(Some(pgid))
+        } else {
+            Self(None)
+        }
+    }
+    /// Resolve and guard the process group currently owning `pid`.
+    pub fn for_pid(pid: i32) -> Self {
+        if pid <= 1 {
+            return Self(None);
+        }
+        let pgid = unsafe { getpgid(pid) };
+        if pgid > 1 {
+            Self::new(pgid)
+        } else {
+            Self::new(pid)
+        }
+    }
+    /// Kill a single known process group immediately (must be `> 1` and not the test's own group).
+    pub fn kill_pgid(pgid: i32) {
+        let own = unsafe { getpgid(0) };
+        if pgid > 1 && pgid != own {
+            // SAFETY: caller proved ownership of `pgid`; never signals the test's own group.
+            unsafe { kill(-pgid, SIGKILL) };
+        }
+    }
+    pub fn disarm(&mut self) {
+        self.0 = None;
+    }
+    pub fn kill_now(&mut self) {
+        if let Some(pgid) = self.0.take() {
+            Self::kill_pgid(pgid);
+        }
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        self.kill_now();
     }
 }
 
@@ -358,12 +525,12 @@ impl AsyncCommand {
         self.inner.kill_on_drop(false);
         self
     }
-    pub fn spawn(&mut self) -> io::Result<AsyncChild> {
+    pub fn spawn(&mut self) -> io::Result<AsyncProcessGuard> {
         let prepared = self.prepare()?;
         self.inner.kill_on_drop(false);
         let child = self.inner.spawn()?;
         let life = prepared.release();
-        Ok(AsyncChild {
+        Ok(AsyncProcessGuard {
             pid: child.id().expect("spawned child PID"),
             inner: Some(child),
             life: Some(life),
@@ -385,14 +552,21 @@ impl AsyncCommand {
     }
 }
 #[derive(Debug)]
-pub struct AsyncChild {
+pub struct AsyncProcessGuard {
     inner: Option<tokio::process::Child>,
     pid: u32,
     life: Option<LifeWriter>,
 }
-impl AsyncChild {
+impl AsyncProcessGuard {
     fn finish(&mut self) {
-        self.life.take();
+        if let Some(life) = self.life.take() {
+            life.teardown();
+        }
+    }
+    fn still_unreaped(&mut self) -> bool {
+        self.inner
+            .as_mut()
+            .is_some_and(|c| c.id().is_some() && matches!(c.try_wait(), Ok(None)))
     }
     pub fn id(&self) -> Option<u32> {
         self.inner.as_ref().unwrap().id()
@@ -412,11 +586,14 @@ impl AsyncChild {
         result
     }
     pub fn start_kill(&mut self) -> io::Result<()> {
-        if self.life.is_some() {
-            kill_group(self.pid);
-            self.life.take();
+        if let Some(life) = self.life.take() {
+            life.teardown();
         }
-        self.inner.as_mut().unwrap().start_kill()
+        if self.still_unreaped() {
+            kill_group(self.pid);
+            let _ = self.inner.as_mut().unwrap().start_kill();
+        }
+        Ok(())
     }
     pub async fn kill(&mut self) -> io::Result<()> {
         self.start_kill()?;
@@ -429,20 +606,35 @@ impl AsyncChild {
         result
     }
 }
-impl Deref for AsyncChild {
+impl Deref for AsyncProcessGuard {
     type Target = tokio::process::Child;
     fn deref(&self) -> &Self::Target {
         self.inner.as_ref().unwrap()
     }
 }
-impl DerefMut for AsyncChild {
+impl DerefMut for AsyncProcessGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.inner.as_mut().unwrap()
     }
 }
-impl Drop for AsyncChild {
+impl Drop for AsyncProcessGuard {
     fn drop(&mut self) {
         self.finish();
+        if self.still_unreaped() {
+            kill_group(self.pid);
+            let _ = self.inner.as_mut().unwrap().start_kill();
+        }
+        if let Some(child) = &mut self.inner
+            && child.id().is_some()
+        {
+            let deadline = Instant::now() + ASYNC_DROP_REAP_TIMEOUT;
+            while Instant::now() < deadline {
+                if !matches!(child.try_wait(), Ok(None)) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
 }
 
@@ -811,6 +1003,84 @@ owner=$$"#,
         })
         .await;
         fs::remove_file(fixture.0.join("ready")).unwrap();
+    }
+
+    #[test]
+    fn panic_reaps_child_and_its_process_group() {
+        let fixture = Fixture::new();
+        let ready = fixture.0.join("ready");
+        let observed = std::sync::Mutex::new(Vec::new());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let guard = target(&ready).spawn().unwrap();
+            crate::testkit::eventually_blocking("panic fixture ready", || {
+                fixture.pids("ready").len() == 2
+            });
+            let pids = fixture.pids("ready");
+            assert_eq!(pids[0], guard.id() as i32);
+            assert_eq!(pids[0], unsafe { get_group(pids[0]) });
+            *observed.lock().unwrap() = pids;
+            let _keep_until_unwind = guard;
+            panic!("intentional test panic");
+        }));
+        assert!(
+            outcome.is_err(),
+            "closure must panic to exercise unwind Drop"
+        );
+        let pids = observed.into_inner().unwrap();
+        assert_eq!(pids.len(), 2);
+        crate::testkit::eventually_blocking(
+            "panic unwind reaped child, grandchild, and process group",
+            || pids.iter().all(|p| gone(*p)) && gone(-pids[0]),
+        );
+        fs::remove_file(ready).unwrap();
+    }
+
+    #[tokio::test]
+    async fn panic_in_async_task_reaps_async_process_guard_and_group() {
+        let fixture = Fixture::new();
+        let ready = fixture.0.join("ready");
+        let pids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pids_in = pids.clone();
+        let ready_in = ready.clone();
+        let handle = tokio::spawn(async move {
+            let mut cmd = AsyncCommand::new("/bin/sh");
+            cmd.args([
+                "-c",
+                "/bin/sleep 600 & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > \"$1\"; wait",
+                "fixture",
+            ])
+            .arg(&ready_in)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+            let guard = cmd.spawn().unwrap();
+            eventually_sync("async panic fixture ready", || {
+                fs::read_to_string(&ready_in)
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .count()
+                    == 2
+            })
+            .await;
+            let recorded: Vec<i32> = fs::read_to_string(&ready_in)
+                .unwrap()
+                .split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            assert_eq!(recorded[0], guard.id().unwrap() as i32);
+            *pids_in.lock().unwrap() = recorded;
+            let _keep_until_unwind = guard;
+            panic!("intentional async test panic");
+        });
+        assert!(handle.await.unwrap_err().is_panic());
+        let recorded = pids.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 2);
+        eventually_sync(
+            "async panic unwind reaped child, grandchild, and process group",
+            || recorded.iter().all(|p| gone(*p)) && gone(-recorded[0]),
+        )
+        .await;
+        fs::remove_file(ready).unwrap();
     }
 
     #[test]

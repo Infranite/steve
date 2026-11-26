@@ -322,7 +322,7 @@
    ],
    "expect": [
     "research",
-    "suggest",
+    "research",
     "answer"
    ],
    "question": true,
@@ -396,7 +396,7 @@
    ],
    "expect": [
     "research",
-    "suggest"
+    "research"
    ],
    "question": true,
    "source": "prod"
@@ -547,7 +547,7 @@
    ],
    "expect": [
     "research",
-    "suggest"
+    "research"
    ],
    "question": true,
    "source": "prod"
@@ -586,7 +586,7 @@
    ],
    "expect": [
     "item",
-    "suggest"
+    "research"
    ],
    "question": false,
    "source": "prod"
@@ -776,7 +776,7 @@
    ],
    "expect": [
     "item",
-    "suggest",
+    "research",
     "ask"
    ],
    "question": false,
@@ -815,7 +815,7 @@
     }
    ],
    "expect": [
-    "suggest",
+    "research",
     "research"
    ],
    "question": false,
@@ -975,7 +975,7 @@
    "files": [],
    "history": [],
    "expect": [
-    "suggest",
+    "research",
     "research"
    ],
    "question": false,
@@ -988,7 +988,7 @@
    "history": [],
    "expect": [
     "ask",
-    "suggest"
+    "research"
    ],
    "question": false,
    "source": "synthetic"

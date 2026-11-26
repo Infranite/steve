@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use steve_runtime::testkit::eventually_blocking;
-use steve_runtime::testkit::process::{Child, Command};
+use steve_runtime::testkit::process::{Command, ProcessGuard};
 
 struct Pty {
     master: File,
@@ -96,7 +96,7 @@ impl Pty {
         }
     }
 
-    fn wait_prompt(&mut self, child: &mut Child, prompt: &str) {
+    fn wait_prompt(&mut self, child: &mut ProcessGuard, prompt: &str) {
         // The wizard verifies and privately copies the real CLI before its first prompt.
         let deadline = Instant::now() + Duration::from_secs(60);
         eventually_blocking(format!("CLI prompt {prompt}"), || {
@@ -117,7 +117,7 @@ impl Pty {
         });
     }
 
-    fn wait_exit(&mut self, child: &mut Child) -> ExitStatus {
+    fn wait_exit(&mut self, child: &mut ProcessGuard) -> ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut exited = None;
         eventually_blocking("cancelled CLI exits", || {
@@ -131,17 +131,6 @@ impl Pty {
             false
         });
         exited.unwrap()
-    }
-}
-
-struct Process(Child);
-impl Drop for Process {
-    fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            // SAFETY: process_group(0) gives this fixture a group named by its child PID.
-            unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
-            let _ = self.0.wait();
-        }
     }
 }
 
@@ -303,14 +292,14 @@ fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
         .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
         .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
         .process_group(0);
-    let mut process = Process(command.spawn().unwrap());
+    let mut process = command.spawn().unwrap();
     // without TERM the wizard types its questions. An address nothing can listen on is asked
     // again; then the person gives up (end of input)
-    pty.wait_prompt(&mut process.0, "监听地址 [0.0.0.0:8440]: ");
+    pty.wait_prompt(&mut process, "监听地址 [0.0.0.0:8440]: ");
     pty.master.write_all(b"localhost:8440\n").unwrap();
-    pty.wait_prompt(&mut process.0, "监听地址 [0.0.0.0:8440]: ");
+    pty.wait_prompt(&mut process, "监听地址 [0.0.0.0:8440]: ");
     pty.master.write_all(&[4]).unwrap();
-    let status = pty.wait_exit(&mut process.0);
+    let status = pty.wait_exit(&mut process);
     assert_eq!(
         status.code(),
         Some(1),
@@ -396,18 +385,18 @@ fn actual_setup_cancelled_at_a_widget_exits_as_interrupted_and_restores_the_term
         .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
         .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
         .process_group(0);
-    let mut process = Process(command.spawn().unwrap());
+    let mut process = command.spawn().unwrap();
     // the first question is a list; one step down redraws it, then Ctrl-C, which the widget reads
     // as a key (no signal is sent while it has the terminal)
-    pty.wait_prompt(&mut process.0, "↑↓ 选择 · 回车确认");
+    pty.wait_prompt(&mut process, "↑↓ 选择 · 回车确认");
     assert_eq!(
         pty.attributes().c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG),
         0
     );
     pty.master.write_all(b"\x1b[B").unwrap();
-    pty.wait_prompt(&mut process.0, "↑↓ 选择 · 回车确认");
+    pty.wait_prompt(&mut process, "↑↓ 选择 · 回车确认");
     pty.master.write_all(&[3]).unwrap();
-    let status = pty.wait_exit(&mut process.0);
+    let status = pty.wait_exit(&mut process);
     assert_eq!(
         status.code(),
         Some(130),
@@ -461,16 +450,14 @@ fn actual_setup_cancelled_at_a_widget_exits_as_interrupted_and_restores_the_term
 
 fn terminal_output(command: &mut Command) -> (ExitStatus, String) {
     let mut pty = Pty::open().unwrap();
-    let mut process = Process(
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap(),
-    );
-    let status = pty.wait_exit(&mut process.0);
+    let mut process = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let status = pty.wait_exit(&mut process);
     (
         status,
         String::from_utf8(pty.output).unwrap().replace("\r\n", "\n"),
@@ -1282,23 +1269,21 @@ fn actual_reconfigure_preserves_installation_and_supports_noop_and_eof() {
     let before = installation_tree(&account);
     let start = || {
         let pty = Pty::open().unwrap();
-        let process = Process(
-            Command::new(env!("CARGO_BIN_EXE_steve"))
-                .args(["setup", "hub", "--reconfigure", "--home"])
-                .arg(&home)
-                .env_clear()
-                .env("STEVE_LANG", "zh-CN")
-                .env("HOME", &account)
-                .env("PATH", &deny_bin)
-                .env("TMPDIR", &root)
-                .current_dir(&root)
-                .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
-                .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
-                .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
-                .process_group(0)
-                .spawn()
-                .unwrap(),
-        );
+        let process = Command::new(env!("CARGO_BIN_EXE_steve"))
+            .args(["setup", "hub", "--reconfigure", "--home"])
+            .arg(&home)
+            .env_clear()
+            .env("STEVE_LANG", "zh-CN")
+            .env("HOME", &account)
+            .env("PATH", &deny_bin)
+            .env("TMPDIR", &root)
+            .current_dir(&root)
+            .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+            .process_group(0)
+            .spawn()
+            .unwrap();
         (pty, process)
     };
     let (mut pty, mut process) = start();
@@ -1318,10 +1303,10 @@ fn actual_reconfigure_preserves_installation_and_supports_noop_and_eof() {
         ("OIDC client ID [original-client]: ", "updated-client\n"),
         ("确认保存并备份现有配置？[y/N] [N]: ", "y\n"),
     ] {
-        pty.wait_prompt(&mut process.0, prompt);
+        pty.wait_prompt(&mut process, prompt);
         pty.master.write_all(answer.as_bytes()).unwrap();
     }
-    let status = pty.wait_exit(&mut process.0);
+    let status = pty.wait_exit(&mut process);
     let output = String::from_utf8_lossy(&pty.output);
     assert!(status.success(), "{output}");
     assert!(
@@ -1406,10 +1391,10 @@ fn actual_reconfigure_preserves_installation_and_supports_noop_and_eof() {
     ];
     let (mut pty, mut process) = start();
     for prompt in prompts {
-        pty.wait_prompt(&mut process.0, prompt);
+        pty.wait_prompt(&mut process, prompt);
         pty.master.write_all(b"\n").unwrap();
     }
-    let status = pty.wait_exit(&mut process.0);
+    let status = pty.wait_exit(&mut process);
     let output = String::from_utf8_lossy(&pty.output);
     assert!(status.success(), "{output}");
     assert!(output.contains("配置与收据已经一致，无需修改"), "{output}");
@@ -1420,12 +1405,12 @@ fn actual_reconfigure_preserves_installation_and_supports_noop_and_eof() {
         "no-op must not create another transaction or rewrite any file"
     );
     let (mut pty, mut process) = start();
-    pty.wait_prompt(&mut process.0, prompts[0]);
+    pty.wait_prompt(&mut process, prompts[0]);
     pty.master.write_all(b"127.0.0.1:9999\n").unwrap();
-    pty.wait_prompt(&mut process.0, prompts[1]);
+    pty.wait_prompt(&mut process, prompts[1]);
     let eof = pty.attributes().c_cc[libc::VEOF];
     pty.master.write_all(&[eof]).unwrap();
-    let status = pty.wait_exit(&mut process.0);
+    let status = pty.wait_exit(&mut process);
     let output = String::from_utf8_lossy(&pty.output);
     assert_eq!(status.code(), Some(1), "{output}");
     assert!(

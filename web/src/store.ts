@@ -17,7 +17,7 @@ import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
 import { decisionText } from "./i18n/decision"
-import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RQueued, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
@@ -68,9 +68,9 @@ export type Draft = { mid: string; thought: string; text: string; /** when the r
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
   /** Steve's welcome that opened the first meeting */
   meet?: boolean
-  /* thread routing (§3.4, §5.2): the offer under an answer, a suggestion card, ask options, a user message waiting in the
+  /* thread routing (§3.4, §5.2): the offer under an answer, ask options, a user message waiting in the
    * queue, the message this one answers or quotes, flow-back from an item, a research cut off by a restart */
-  offer?: Offer; suggest?: Suggest; ask?: { options: string[] }; queued?: { run?: string | null }; replyTo?: string; origin?: string; answer?: string
+  offer?: Offer; ask?: { options: string[] }; queued?: { run?: string | null }; replyTo?: string; origin?: string; answer?: string
   /* said while Steve was on a turn: waits in the queue above the composer (editable, withdrawable) until the turn ends;
    * `stopped`: a reply the user stopped */
   held?: boolean; stopped?: boolean
@@ -86,8 +86,6 @@ export type ItemCardState = { item: string; state: string; at?: number; text?: s
   /** a Release build that failed after the item was done */
   build?: { text: string; at?: number } }
 export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
-export type { SuggestChoice }
-export type Suggest = { question: string; choices: { id: SuggestChoice; label: string; item?: string; title?: string; recommended?: boolean }[]; state: "open" | "expired" | "chosen"; chosen?: string; item?: string }
 /** a key moment of an item made from the conversation, posted back to it (§5.2) */
 export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fail"; item: string; text?: string; decision?: string; full?: boolean; ref?: string }
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
@@ -599,7 +597,7 @@ export function msgOf(m: ConversationMessage): Msg {
   const cfgs = ps.map((p) => proposalOf(p, x.cfg_state?.[p.id] ?? (x.applied ? "applied" : x.dropped ? "dropped" : "draft")))
   return { id: m.id, k: m.author, t: m.text, item: m.item_id ?? undefined, chat: x.chat, files: x.files, created: m.created, steps: stepsOf(x.steps), notice: x.notice, cites: x.cites, cfgs: cfgs.length ? cfgs : undefined,
     held: !!x.held || undefined, stopped: !!x.stopped || undefined, meet: x.onboard === true || undefined,
-    offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
+    offer: x.offer ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
     card: x.card?.item ? x.card : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
     a2ui: x.a2ui && typeof x.a2ui === "object" ? x.a2ui : undefined, a2uiAction: x.a2ui_action?.name ? x.a2ui_action : undefined }
@@ -1147,12 +1145,6 @@ export async function a2uiSubmit(msg: string, a: A2uiSubmit): Promise<{ already:
   const r = await api.a2ui(msg, a)
   await refresh().catch(fail)
   return { already: r.already }
-}
-export async function chooseSuggest(m: Msg, choice: SuggestChoice) {
-  if (!m.id) return
-  const append = !!m.suggest?.choices.find((c) => c.id === choice)?.item
-  const r = await call(api.suggest(m.id, choice))
-  if (r?.item) toast(t(append ? "core:toast.appendedTo" : "core:toast.createdItem", { id: r.item.id }))
 }
 export async function reroute(m: Msg, to: string) {
   if (!m.id) return

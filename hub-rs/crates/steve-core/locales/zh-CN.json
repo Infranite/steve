@@ -140,7 +140,6 @@
   "core.draft.value.forever": "永久",
   "core.draft.value.no_report": "不汇报",
   "core.draft.value.no_archive": "不自动归档",
-  "core.draft.value.no_handoff": "不换会话",
   "core.draft.value.no_wait": "不等待",
   "core.draft.value.load": "\u52a0\u8f7d",
   "core.draft.value.no_load": "不加载",
@@ -185,7 +184,6 @@
   "core.draft.setting.depsAfter": "前置完成后",
   "core.draft.setting.quotaAutoHandoff": "额度不足自动交接",
   "core.draft.setting.quotaWaitMinutes": "额度恢复等待阈值",
-  "core.draft.setting.handoff": "交接阈值",
   "core.draft.setting.archDays": "完成后自动归档",
   "core.draft.setting.quiet": "免打扰",
   "core.draft.setting.fontSize": "字号",
@@ -313,5 +311,15 @@
   "core.sweep.follow_up": "停了，Steve 会跟进",
   "core.sweep.stall_question": "回合很久没有新输出：问一次进展",
   "core.sweep.long_wait": "这项等待已查看很多次",
-  "core.sweep.silent": "在等，很久没有任何记录"
+  "core.sweep.silent": "在等，很久没有任何记录",
+  "core.worktree.removed_merged": "删除了工作区 %{cwd}；删除了已合并的分支 %{branch}",
+  "core.worktree.removed_unmerged": "删除了工作区 %{cwd}；未合并分支 %{branch} 已保留（%{head}），继续时从该分支重建",
+  "core.worktree.removed_unmerged_no_sha": "删除了工作区 %{cwd}；未合并分支 %{branch} 已保留，继续时从该分支重建",
+  "core.worktree.removed_only": "删除了工作区 %{cwd}",
+  "core.worktree.removed_branch_failed": "删除了工作区 %{cwd}；清理已合并分支 %{branch} 失败：%{error}",
+  "core.worktree.cleanup_failed": "工作区清理失败（%{cwd}）：%{error}",
+  "core.worktree.cleanup_in_use": "工作区清理暂缓（%{cwd}）：仍有进程占用该目录",
+  "core.worktree.branch_deleted": "删除了已合并的分支 %{branch}",
+  "core.worktree.branch_delete_failed": "清理已合并分支 %{branch} 失败：%{error}",
+  "core.worktree.branch_preserved": "未合并分支 %{branch} 已保留（%{head}）"
 }
