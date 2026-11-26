@@ -1158,6 +1158,7 @@ pub(super) fn describe() {
         "steve_channel_new_group_silent_total",
         Count,
         "Newly discovered bot groups initialized in default silent-record mode instead of opening an inbox ask card."
+    );
     describe_counter!(
         "steve_window_cache_requests_total",
         Count,
