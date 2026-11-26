@@ -29,6 +29,47 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
             "antigravity" => json!({"kind": "meta_append", "namespace": "antigravity"}),
             _ => Value::Null,
         };
+        if id == "claude-code" {
+            entry["properties"]["state"]["login"]["entries"] = json!([
+                "apiKeyHelper",
+                "awsAuthRefresh",
+                "awsCredentialExport",
+                "forceLoginMethod",
+                "forceLoginOrgUUID",
+                "env.ANTHROPIC_*",
+                "env.CLAUDE_CODE_USE_*",
+                "env.CLAUDE_CODE_AUTO_MODE_*",
+                "env.CLAUDE_CODE_BG_CLASSIFIER_MODEL",
+                "env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+                "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "env.CLAUDE_CODE_DISABLE_FEATURE_FLAGS",
+                "env.DISABLE_GROWTHBOOK",
+                "env.DISABLE_TELEMETRY",
+                "env.DO_NOT_TRACK",
+                "env.CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF",
+                "env.HTTP_PROXY",
+                "env.HTTPS_PROXY",
+                "env.ALL_PROXY",
+                "env.NO_PROXY",
+                "env.http_proxy",
+                "env.https_proxy",
+                "env.all_proxy",
+                "env.no_proxy",
+                "env.CLAUDE_CODE_HTTP_PROXY",
+                "env.CLAUDE_CODE_HTTPS_PROXY",
+                "env.CLAUDE_CODE_PROXY_*",
+                "env.SSL_CERT_FILE",
+                "env.SSL_CERT_DIR",
+                "env.NODE_EXTRA_CA_CERTS",
+                "env.CLAUDE_CODE_CERT_STORE",
+                "env.CLAUDE_CODE_CLIENT_CERT",
+                "env.CLAUDE_CODE_CLIENT_KEY",
+                "env.CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+                "env.AWS_*",
+                "env.CLOUD_ML_REGION",
+                "env.VERTEX_REGION_*"
+            ]);
+        }
         entry["env"]
             .as_array_mut()
             .unwrap()
