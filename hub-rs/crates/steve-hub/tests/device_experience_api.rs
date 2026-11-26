@@ -95,6 +95,8 @@ async fn start(local: bool) -> Env {
     let local_node = local_node::attach(&w, &cfg, &vars).await;
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_node(w.node.clone())
+        .with_nodes(w.nodes.clone())
+        .with_workspaces(Some(w.workspaces.clone()))
         .with_modules(w.modules)
         .with_oidc(w.oidc.clone());
     steve_hub::app::boot(&st).await.expect("boot");

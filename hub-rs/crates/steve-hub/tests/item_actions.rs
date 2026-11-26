@@ -155,7 +155,10 @@ async fn start() -> Env {
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let local_node = local_node::attach(&w, &cfg, &vars).await;
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_nodes(w.nodes.clone())
+        .with_workspaces(Some(w.workspaces.clone()))
+        .with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
@@ -1058,7 +1061,7 @@ async fn bulk_actions_use_typed_item_state() {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NO_RESUME", "1".into()),
+        ("STEVE_LOCAL_NODE_PORT", "0".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
@@ -1079,8 +1082,13 @@ async fn bulk_actions_use_typed_item_state() {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
+    let _local_node = local_node::attach(&w, &cfg, &vars).await;
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_nodes(w.nodes.clone())
+        .with_workspaces(Some(w.workspaces.clone()))
+        .with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes);
 
     let peer = SocketAddr::from(([127, 0, 0, 1], 18701));

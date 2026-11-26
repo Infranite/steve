@@ -91,6 +91,15 @@ impl Home {
             })
             .executable
     }
+    fn service_node_executable(&self) -> &std::path::Path {
+        &self
+            .service
+            .get_or_init(|| {
+                ServiceNodeGuard::new(self.dir.path(), self.steve())
+                    .expect("fixture service executable")
+            })
+            .node_executable
+    }
     fn base(&self) -> String {
         format!(
             "http://{}",
@@ -757,6 +766,9 @@ async fn a_node_session_end_to_end() {
     )
     .await;
     hub.kill();
+    if let Some(svc) = h.service.get() {
+        svc.kill_running();
+    }
     let mut hub = spawn(&h, true, &[]);
     serving(&h).await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
@@ -1005,9 +1017,13 @@ async fn drained(h: &Home, token: &str, secs: u64) -> Option<Value> {
     observed.into_inner().unwrap()
 }
 
-/// The upgrade drain waits for Node work (L3, D1): a running turn, and a turn waiting for a
-/// permission answer until it is answered; it seals once they are over, and lifting it still sends
-/// what was queued meanwhile.
+/// The upgrade drain with the out-of-process colocated service Node:
+/// - Hub drain seals (`ready: true`, `node: 0`, no `node_turn` blocker) even while a turn runs or
+///   waits for a permission card on the independent `steve-node`, because the Node process outlives
+///   Hub restarts;
+/// - while maintenance is active, new prompts are held in `queued` and never dispatched;
+/// - answering an in-flight permission card still lets the active turn finish, and lifting the
+///   drain dispatches the held prompt.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_upgrade_drain_waits_for_node_turns() {
     let h = Home::new();
@@ -1028,46 +1044,43 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     })
     .await;
 
-    // ── a running turn holds the drain
+    // ── an active turn on the independent service Node does not block Hub drain sealing
     c.say(&sid, "排空验收-运行 @sleep 600000").await;
     eventually_sync(
         "The fake adapter records the target prompt exactly once.",
         || h.got("排空验收-运行") == 1,
     )
     .await;
-    let d = drain(&h, "POST", &token).await;
+    let d = drained(&h, &token, 30).await.unwrap_or_else(|| {
+        panic!(
+            "service-node Hub seals without waiting for out-of-process Node turns; log:\n{}",
+            hub_log(&h)
+        )
+    });
     assert_eq!(d["maintenance"], true, "{d}");
-    assert_eq!(d["ready"], false, "not sealed under a running turn: {d}");
-    assert_eq!(d["node"], 1, "{d}");
+    assert_eq!(d["ready"], true, "{d}");
+    assert_eq!(d["node"], 0, "{d}");
     assert!(
-        d["blockers"]
+        !d["blockers"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|b| b["kind"] == "node_turn"
-                && b["session_id"] == sid
-                && b["item_id"].is_string()
-                && b["attempt_id"].is_string()),
-        "the upgrade identifies the actual waiting item: {d}"
+            .any(|b| b["kind"] == "node_turn"),
+        "out-of-process service Node turns must not be reported as Hub drain blockers: {d}"
     );
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let d = drain(&h, "POST", &token).await;
-    assert_eq!((&d["ready"], &d["node"]), (&json!(false), &json!(1)), "{d}");
     let (st, v) = c
         .call("POST", &format!("/api/sessions/{sid}/cancel"), None)
         .await;
     assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
-    let d = drained(&h, &token, 30).await;
-    assert!(
-        d.is_some(),
-        "sealed once the turn is over; log:\n{}",
-        hub_log(&h)
-    );
-    assert_eq!(d.expect("drain")["node"], 0);
+    eventually_sync("The cancelled turn finishes cleanly.", || {
+        steve_v1(&h, &sid, "cancelled") > 0
+    })
+    .await;
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
 
-    // ── a turn waiting for a permission answer holds it too, until it is answered
+    // ── while drained, a queued prompt is held until the drain is lifted, even after an in-flight
+    //    permission card is answered and its turn finishes
     c.say(&sid, "@perm Bash").await;
     let mut card = None;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
@@ -1082,11 +1095,16 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     })
     .await;
     let card = card.expect("card");
-    let d = drain(&h, "POST", &token).await;
+    let d = drained(&h, &token, 30).await.unwrap_or_else(|| {
+        panic!(
+            "service-node Hub seals while permission card is open; log:\n{}",
+            hub_log(&h)
+        )
+    });
     assert_eq!(
-        (&d["ready"], &d["node"]),
-        (&json!(false), &json!(1)),
-        "a permission wait holds the drain: {d}"
+        (&d["maintenance"], &d["ready"], &d["node"]),
+        (&json!(true), &json!(true), &json!(0)),
+        "{d}"
     );
     let r = c.say(&sid, "排空验收-排队 @say drained-done").await;
     assert_eq!(r["result"], "queued", "{r}");
@@ -1105,11 +1123,7 @@ async fn the_upgrade_drain_waits_for_node_turns() {
         )
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "perm:selected:") > 0).await;
-    assert!(
-        drained(&h, &token, 30).await.is_some(),
-        "sealed once the answered turn is over; log:\n{}",
-        hub_log(&h)
-    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(h.got("排空验收-排队"), 0, "not sent while drained");
 
     // ── lifting the drain sends what waited
@@ -1247,7 +1261,7 @@ async fn the_node_is_the_default() {
         .expect("stop the fixture's Node");
 
     // A diagnostic Hub ignores the copied session Node configuration.
-    let hub = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
+    let hub = spawn_mode(&h, Some("service"), &[("STEVE_NO_RESUME", "1")]);
     serving(&h).await;
     let c = Client::login(&h).await;
     let (status, health) = c.call("GET", "/healthz", None).await;
@@ -1312,23 +1326,11 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
-/// N0e-E11a: with the local Node on, a new item of a git project gets its worktree from the Node
-/// (made off the core's lock, where Steve keeps worktrees, on `steve/<id>`) and its agent works
-/// there; dropped, its clean worktree (and merged branch) is given back by the Node and the
-/// timeline says so.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_git_items_worktree_is_made_and_given_back_by_the_node() {
-    git_worktree_case("local").await;
-}
-
-/// B1: the same with the Hub's own Node in a process of its own: its roots come through the
-/// roots file, and the worktree is made, used and given back by that process.
+/// B1: with the Hub's own Node in a process of its own, its roots come through the roots file,
+/// and a git item's worktree is made, used, and given back by that process (and its merged branch
+/// deleted, with the timeline recording it).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_git_items_worktree_on_the_service_node() {
-    git_worktree_case("service").await;
-}
-
-async fn git_worktree_case(mode: &str) {
     let h = Home::new();
     let repo = h.dir.path().join("repo");
     std::fs::create_dir_all(&repo).expect("repo");
@@ -1339,7 +1341,7 @@ async fn git_worktree_case(mode: &str) {
     std::fs::write(repo.join("a.txt"), "a\n").expect("file");
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "a"]);
-    let _hub = spawn_mode(&h, Some(mode), &[]);
+    let _hub = spawn_mode(&h, Some("service"), &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
     wait_node_health(&h, |n| n["reconciled"] == true).await;
@@ -1893,6 +1895,23 @@ impl ServiceNodeGuard {
             .filter(|pid| *pid > 1)
     }
 
+    /// Abruptly kills the running detached local Node (simulating a host/node crash) without
+    /// deleting the fixture executables, so a subsequent Hub launch starts a fresh local Node.
+    fn kill_running(&self) {
+        if let Some(pid) = self.lock_holder_pid() {
+            GroupGuard::kill_pgid(pid);
+        }
+        if let Ok(lock) = File::open(&self.node_lock) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if lock.try_lock().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
     fn stop(&self) -> std::io::Result<()> {
         for p in [&self.executable, &self.node_executable] {
             match std::fs::remove_file(p) {
@@ -2007,7 +2026,7 @@ async fn local_service_exits_when_its_home_or_executable_disappears() {
         let (mut hub, lock) = linked_service(&h).await;
         hub.kill_hub_group();
         assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
-        let executable = h.service_executable();
+        let executable = h.service_node_executable();
         if remove_home {
             std::fs::rename(h.steve(), h.dir.path().join("retired-home")).unwrap();
             assert!(executable.exists());

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
-use steve_runtime::testkit::process::ProcessGuard;
+use steve_runtime::testkit::process::{GroupGuard, ProcessGuard};
 use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
@@ -29,8 +29,23 @@ struct Hub {
     _child: ProcessGuard,
     base: String,
     steve: PathBuf,
+    diagnostic: bool,
     /// Its port, held by the test (#429).
     _socket: handed::Socket,
+}
+
+impl Drop for Hub {
+    fn drop(&mut self) {
+        if let Ok(text) = std::fs::read_to_string(self.steve.join("data/node/service.pid"))
+            && let Some(pid) = text
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse::<i32>().ok())
+                .filter(|p| *p > 1)
+        {
+            GroupGuard::kill_pgid(pid);
+        }
+    }
 }
 
 fn spawn(home: &Path, name: &str, diagnostic: bool) -> Hub {
@@ -84,6 +99,7 @@ fn spawn(home: &Path, name: &str, diagnostic: bool) -> Hub {
         _child: c.spawn().expect("spawn hub"),
         base,
         steve,
+        diagnostic,
         _socket: socket,
     }
 }
@@ -114,9 +130,11 @@ impl Client {
                     .send()
                     .await;
                 if let Ok(r) = up
-                    && r.json::<Value>()
-                        .await
-                        .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
+                    && r.json::<Value>().await.is_ok_and(|v| {
+                        v["ok"] == true
+                            && v["maintenance"] != true
+                            && (h.diagnostic || v["node"]["reconciled"] == true)
+                    })
                 {
                     return true;
                 }
