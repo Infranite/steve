@@ -39,6 +39,10 @@ export function macosOneShotUpgradeCommand(home: string, version?: string | null
 export const macosRollbackCommand = (home: string) =>
   `${sh(home)}/current/bin/steve-hub --local-release rollback-macos --home ${sh(home)}`
 
+/** Confirmation command archiving rollback metadata after verifying the upgraded Hub is stable. */
+export const macosConfirmCommand = (home: string) =>
+  `${sh(home)}/current/bin/steve-hub --local-release confirm-macos --home ${sh(home)}`
+
 /** Commands for an installation Steve does not switch itself, with this machine's paths filled in. */
 export function upgradeGuide(install: Install, version: string, repository?: string): Guide {
   const v = version.replace(/^v/, ""), tag = v ? `v${v}` : ""
@@ -61,7 +65,10 @@ export function upgradeGuide(install: Install, version: string, repository?: str
       backup: t("pages:guide.legacyMacos.backup", { home }),
       recovery: [
         t("pages:guide.legacyMacos.autoRollback"),
-        t("pages:guide.legacyMacos.manualRollback", { command: macosRollbackCommand(rawHome) }),
+        t("pages:guide.legacyMacos.manualRollback", {
+          command: macosRollbackCommand(rawHome),
+          confirm: macosConfirmCommand(rawHome),
+        }),
       ],
     }
     case "local_release": return {

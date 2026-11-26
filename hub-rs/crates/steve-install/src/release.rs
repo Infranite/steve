@@ -1160,6 +1160,13 @@ impl MacosUpgradeStage {
             Self::Probed | Self::Switched | Self::Started | Self::CommittedFailed
         )
     }
+
+    fn crossed_commit_boundary(self) -> bool {
+        matches!(
+            self,
+            Self::Started | Self::CommittedFailed | Self::Succeeded
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1177,6 +1184,10 @@ struct MacosUpgradeJournal {
     stage: MacosUpgradeStage,
     #[serde(default)]
     probe_pid: Option<u32>,
+    #[serde(default)]
+    probe_exe: Option<PathBuf>,
+    #[serde(default)]
+    probe_start_us: Option<u64>,
     #[serde(default)]
     finished_at_ms: Option<u64>,
     #[serde(default)]
@@ -1227,15 +1238,104 @@ fn db_file_stamp(db: &Path) -> Option<(u64, u64)> {
     Some((mtime_ms, size))
 }
 
-fn reap_orphan_probe(pid: u32) {
+fn process_executable_path(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let len = unsafe {
+            libc::proc_pidpath(
+                pid as libc::c_int,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+            )
+        };
+        if len <= 0 {
+            return None;
+        }
+        let path = std::str::from_utf8(&buf[..len as usize]).ok()?;
+        let p = PathBuf::from(path);
+        Some(canonical(&p).unwrap_or(p))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        canonical(&PathBuf::from(format!("/proc/{pid}/exe"))).ok()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn process_start_time_us(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let expected_size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let ret = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                expected_size,
+            )
+        };
+        if ret != expected_size {
+            return None;
+        }
+        Some(
+            info.pbi_start_tvsec
+                .saturating_mul(1_000_000)
+                .saturating_add(info.pbi_start_tvusec),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn reap_orphan_probe(
+    pid: u32,
+    expected_exe: Option<&Path>,
+    expected_start_us: Option<u64>,
+    candidate_hub: &Path,
+) {
     if pid <= 1 || pid == std::process::id() {
         return;
     }
     let pid_t = pid as libc::pid_t;
     // Probe children are spawned as their own process group leader (.process_group(0)).
-    // Checking getpgid(pid) == pid avoids signaling an unrelated reused PID in another group.
+    // Verify BOTH process group leadership AND executable path / kernel start timestamp before
+    // sending any signal so PID reuse after a reboot can never kill an unrelated process.
     let pgid = unsafe { libc::getpgid(pid_t) };
     if pgid != pid_t {
+        return;
+    }
+    let actual_exe = process_executable_path(pid);
+    let actual_start_us = process_start_time_us(pid);
+    let candidate_canon = canonical(candidate_hub).unwrap_or_else(|_| candidate_hub.to_path_buf());
+    let expected_exe_canon = expected_exe.map(|p| canonical(p).unwrap_or_else(|_| p.to_path_buf()));
+
+    if let Some(exp_start) = expected_start_us
+        && actual_start_us != Some(exp_start)
+    {
+        return;
+    }
+    let exe_matches = actual_exe.as_ref().is_some_and(|actual| {
+        actual == &candidate_canon || expected_exe_canon.as_ref().is_some_and(|exp| actual == exp)
+    });
+    let start_matches = expected_start_us.is_some() && actual_start_us == expected_start_us;
+    if !exe_matches && !start_matches {
+        return;
+    }
+    if let Some(exp_exe) = &expected_exe_canon
+        && let Some(actual) = &actual_exe
+        && actual != exp_exe
+        && actual != &candidate_canon
+    {
         return;
     }
     unsafe {
@@ -1411,7 +1511,12 @@ where
     if let Some(prev) = preserve_previous
         && let Some(pid) = prev.probe_pid
     {
-        reap_orphan_probe(pid);
+        reap_orphan_probe(
+            pid,
+            prev.probe_exe.as_deref(),
+            prev.probe_start_us,
+            &prev.candidate.join("bin/steve-hub"),
+        );
     }
 
     let initial_health = runtime.health();
@@ -1520,6 +1625,8 @@ where
         was_running,
         stage: MacosUpgradeStage::Planned,
         probe_pid: None,
+        probe_exe: None,
+        probe_start_us: None,
         finished_at_ms: None,
         db_mtime_after_upgrade_ms: None,
         db_size_after_upgrade: None,
@@ -1627,6 +1734,10 @@ where
         changed.probed = db.is_file();
         runtime.probe_with_env_tracked(&staged, version, &effective_env, &mut |pid| {
             journal.probe_pid = pid;
+            journal.probe_exe = pid.and_then(|p| {
+                process_executable_path(p).or_else(|| Some(staged.join("bin/steve-hub")))
+            });
+            journal.probe_start_us = pid.and_then(process_start_time_us);
             save_macos_journal(home, &mut journal)
         })?;
         journal.stage = MacosUpgradeStage::Probed;
@@ -1656,9 +1767,16 @@ where
 
         runtime.check_interrupted()?;
         // Commit boundary: once launchd starts the new Hub, business traffic may run.
+        // Record commit timestamp and pre-start DB stamp so rollback from Started/CommittedFailed
+        // protects any post-commit writes with --confirm-data-loss.
         phase = "start";
         changed.started = true;
         journal.stage = MacosUpgradeStage::Started;
+        journal.finished_at_ms = Some(now());
+        if let Some((mtime_ms, size)) = db_file_stamp(&db) {
+            journal.db_mtime_after_upgrade_ms = Some(mtime_ms);
+            journal.db_size_after_upgrade = Some(size);
+        }
         save_macos_journal(home, &mut journal)?;
         runtime.service_at("start", &label, &plist_path)?;
         phase = "health";
@@ -1680,6 +1798,8 @@ where
         Ok(health) => {
             journal.stage = MacosUpgradeStage::Succeeded;
             journal.probe_pid = None;
+            journal.probe_exe = None;
+            journal.probe_start_us = None;
             journal.finished_at_ms = Some(now());
             if let Some((mtime_ms, size)) = db_file_stamp(&db) {
                 journal.db_mtime_after_upgrade_ms = Some(mtime_ms);
@@ -1700,6 +1820,15 @@ where
         Err(error) if changed.started => {
             journal.stage = MacosUpgradeStage::CommittedFailed;
             journal.probe_pid = None;
+            journal.probe_exe = None;
+            journal.probe_start_us = None;
+            journal.finished_at_ms = Some(now());
+            if journal.db_mtime_after_upgrade_ms.is_none()
+                && let Some((mtime_ms, size)) = db_file_stamp(&db)
+            {
+                journal.db_mtime_after_upgrade_ms = Some(mtime_ms);
+                journal.db_size_after_upgrade = Some(size);
+            }
             let _ = save_macos_journal(home, &mut journal);
             let message = format!(
                 "Upgrade committed; new database retained and automatic rollback refused: {error:#}. Verified backup: {}",
@@ -1935,8 +2064,9 @@ fn rollback_macos_with(
             );
             // Verify the snapshot actually exists in the backup repository BEFORE stopping service.
             verify_snapshot_exists(runtime, &helper_release, snapshot, &effective_env)?;
-            // Guard against silently overwriting post-upgrade production data with an older snapshot.
-            if journal.stage == MacosUpgradeStage::Succeeded && !confirm_data_loss {
+            // Guard against silently overwriting post-commit database state (Started,
+            // CommittedFailed, or stale/modified Succeeded) with an older pre-upgrade snapshot.
+            if journal.stage.crossed_commit_boundary() && !confirm_data_loss {
                 let elapsed_ms = journal
                     .finished_at_ms
                     .map(|fin| now().saturating_sub(fin))
@@ -1952,9 +2082,14 @@ fn rollback_macos_with(
                     }
                     _ => false,
                 };
+                let post_commit_uncertain = matches!(
+                    journal.stage,
+                    MacosUpgradeStage::Started | MacosUpgradeStage::CommittedFailed
+                );
                 ensure!(
-                    !stale && !db_modified,
-                    "refusing to silently overwrite post-upgrade database with pre-upgrade snapshot {} (started {}, elapsed {}s, db_modified={}); re-run with --confirm-data-loss if you intentionally want to discard post-upgrade data",
+                    !post_commit_uncertain && !stale && !db_modified,
+                    "refusing to silently overwrite post-commit database (stage {:?}) with pre-upgrade snapshot {} (started {}, elapsed {}s, db_modified={}); re-run with --confirm-data-loss if you intentionally want to discard post-commit data",
+                    journal.stage,
                     snapshot.as_str(),
                     journal.started,
                     elapsed_ms / 1000,
@@ -1981,7 +2116,12 @@ fn rollback_macos_with(
         };
 
     if let Some(pid) = journal.probe_pid {
-        reap_orphan_probe(pid);
+        reap_orphan_probe(
+            pid,
+            journal.probe_exe.as_deref(),
+            journal.probe_start_us,
+            &journal.candidate.join("bin/steve-hub"),
+        );
     }
 
     // Mandatory drain when /healthz answers; on drain failure, lift maintenance and abort WITHOUT bootout.
@@ -3523,6 +3663,8 @@ exit 0
             was_running: true,
             stage: MacosUpgradeStage::Stopped,
             probe_pid: None,
+            probe_exe: None,
+            probe_start_us: None,
             finished_at_ms: None,
             db_mtime_after_upgrade_ms: None,
             db_size_after_upgrade: None,
@@ -3554,8 +3696,8 @@ exit 0
             macos_012_fixture(false);
         let home = dir.path();
         // Spawn an orphan process-group-leader child simulating a probe Hub left behind after SIGKILL.
-        let mut orphan = Command::new("/bin/sh")
-            .args(["-c", "sleep 30"])
+        let mut orphan = Command::new("/bin/sleep")
+            .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -3563,6 +3705,8 @@ exit 0
             .spawn()
             .unwrap();
         let orphan_pid = orphan.id();
+        let orphan_exe = process_executable_path(orphan_pid);
+        let orphan_start_us = process_start_time_us(orphan_pid);
         let old_hub = fs::canonicalize(home.join("releases/0.12.0")).unwrap();
         let old_manifest = json_file(&old_hub.join("release.json")).unwrap();
         let staged = crate::service::stage_release_bundle(
@@ -3585,6 +3729,8 @@ exit 0
             "was_running": true,
             "stage": "backed_up",
             "probe_pid": orphan_pid,
+            "probe_exe": orphan_exe,
+            "probe_start_us": orphan_start_us,
             "started": stamp(),
             "updated": stamp(),
         });
@@ -3651,6 +3797,8 @@ exit 0
             was_running: true,
             stage: MacosUpgradeStage::BackedUp,
             probe_pid: None,
+            probe_exe: None,
+            probe_start_us: None,
             finished_at_ms: None,
             db_mtime_after_upgrade_ms: None,
             db_size_after_upgrade: None,
@@ -3829,6 +3977,8 @@ exit 0
             was_running: true,
             stage: MacosUpgradeStage::Stopped,
             probe_pid: None,
+            probe_exe: None,
+            probe_start_us: None,
             finished_at_ms: None,
             db_mtime_after_upgrade_ms: None,
             db_size_after_upgrade: None,
@@ -3904,6 +4054,133 @@ exit 0
         assert_eq!(
             json_file(&home.join("current/release.json")).unwrap()["version"],
             "0.12.0"
+        );
+    }
+
+    #[test]
+    fn review593_r3_1_started_and_committed_failed_require_confirm_data_loss() {
+        // Part A: CommittedFailed records finished_at_ms + DB stamp and refuses rollback without --confirm-data-loss.
+        let (dir_cf, _ext_cf, cand_cf, _plist_cf, _orig_cf, rt_cf, _svc_cf) =
+            macos_012_fixture(false);
+        let home_cf = dir_cf.path();
+        fs::write(home_cf.join("fail-health-version"), "1.2.3").unwrap();
+        let res_cf =
+            run_upgrade_macos(&rt_cf, &cand_cf, None, Duration::from_secs(2), None).unwrap();
+        assert_eq!(res_cf.exit_code, 3, "{}", res_cf.receipt);
+        let j_cf = load_macos_journal(home_cf).unwrap();
+        assert_eq!(j_cf.stage, MacosUpgradeStage::CommittedFailed);
+        assert!(
+            j_cf.finished_at_ms.is_some()
+                && j_cf.db_mtime_after_upgrade_ms.is_some()
+                && j_cf.db_size_after_upgrade.is_some(),
+            "CommittedFailed journal must record finished_at_ms and DB stamp: {j_cf:?}"
+        );
+        let _ = fs::remove_file(home_cf.join("launchctl-log"));
+        let refused_cf = rollback_macos_with(&rt_cf, None, Duration::from_secs(2), false);
+        assert!(
+            refused_cf
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("--confirm-data-loss")),
+            "CommittedFailed rollback must require --confirm-data-loss: {refused_cf:?}"
+        );
+        assert!(
+            !fs::read_to_string(home_cf.join("launchctl-log"))
+                .unwrap_or_default()
+                .contains("bootout"),
+            "unconfirmed CommittedFailed rollback must refuse BEFORE bootout"
+        );
+        let ok_cf = rollback_macos_with(&rt_cf, None, Duration::from_secs(2), true).unwrap();
+        assert_eq!(ok_cf.exit_code, 0, "{}", ok_cf.receipt);
+
+        // Part B: Started stage (crash after launchctl bootstrap) also requires --confirm-data-loss.
+        let (dir_st, _ext_st, cand_st, _plist_st, _orig_st, rt_st, _svc_st) =
+            macos_012_fixture(false);
+        let home_st = dir_st.path();
+        let up_st =
+            run_upgrade_macos(&rt_st, &cand_st, None, Duration::from_secs(2), None).unwrap();
+        assert_eq!(up_st.exit_code, 0, "{}", up_st.receipt);
+        let mut j_st = load_macos_journal(home_st).unwrap();
+        j_st.stage = MacosUpgradeStage::Started;
+        save_macos_journal(home_st, &mut j_st).unwrap();
+        let _ = fs::remove_file(home_st.join("launchctl-log"));
+        let refused_st = rollback_macos_with(&rt_st, None, Duration::from_secs(2), false);
+        assert!(
+            refused_st
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("--confirm-data-loss")),
+            "Started rollback must require --confirm-data-loss: {refused_st:?}"
+        );
+        assert!(
+            !fs::read_to_string(home_st.join("launchctl-log"))
+                .unwrap_or_default()
+                .contains("bootout"),
+            "unconfirmed Started rollback must refuse BEFORE bootout"
+        );
+        let ok_st = rollback_macos_with(&rt_st, None, Duration::from_secs(2), true).unwrap();
+        assert_eq!(ok_st.exit_code, 0, "{}", ok_st.receipt);
+    }
+
+    #[test]
+    fn review593_r3_2_orphan_reap_verifies_executable_or_start_time_and_spares_unrelated_pid() {
+        let (dir, _ext_dir, ext_candidate, plist_path, _orig_p, runtime, _svc) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Spawn an UNRELATED process-group leader (simulating PID reuse after reboot).
+        let mut unrelated = Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let unrelated_pid = unrelated.id();
+        let old_hub = fs::canonicalize(home.join("releases/0.12.0")).unwrap();
+        let old_manifest = json_file(&old_hub.join("release.json")).unwrap();
+        let staged = crate::service::stage_release_bundle(
+            home,
+            &ext_candidate,
+            "1.2.3",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        // Direct check: reaping without matching exe or start time must spare the unrelated PID.
+        reap_orphan_probe(unrelated_pid, None, None, &staged.join("bin/steve-hub"));
+        assert!(
+            unrelated.try_wait().unwrap().is_none(),
+            "reap_orphan_probe must not signal an unrelated process when executable path does not match candidate hub"
+        );
+        // Journal records PID with mismatched start time (e.g. from before a reboot) and candidate hub exe.
+        let meta = json!({
+            "version": "1.2.3",
+            "candidate": staged,
+            "previous_hub": old_hub,
+            "previous_web": old_hub.join("web/dist"),
+            "previous_manifest": old_manifest,
+            "label": "io.github.infranite.steve.hub",
+            "plist_path": plist_path,
+            "plist_backup_path": crate::service::previous_service_definition_path(&plist_path),
+            "backup_snapshot": Value::Null,
+            "was_running": true,
+            "stage": "backed_up",
+            "probe_pid": unrelated_pid,
+            "probe_start_us": 1_u64,
+            "started": stamp(),
+            "updated": stamp(),
+        });
+        atomic_json(&macos_journal_path(home), &meta).unwrap();
+        crate::service::backup_service_definition(&plist_path, false).unwrap();
+
+        let outcome =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
+        let still_alive = unrelated.try_wait().unwrap().is_none();
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        assert!(
+            still_alive,
+            "orphan probe reaper must NOT kill an unrelated process whose exe/start time does not match"
         );
     }
     #[test]

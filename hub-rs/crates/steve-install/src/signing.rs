@@ -176,6 +176,9 @@ pub(crate) fn atomic_json(path: &Path, value: &Value) -> Result<()> {
 }
 
 pub(crate) fn output(command: &mut Command, timeout: Duration) -> Result<Output> {
+    // Isolate foreground maintenance children (launchctl, --admin backup/restore, codesign,
+    // security) in their own process group so terminal Ctrl-C/SIGHUP cannot tear them down mid-op.
+    std::os::unix::process::CommandExt::process_group(command, 0);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
@@ -196,6 +199,9 @@ pub(crate) fn output(command: &mut Command, timeout: Duration) -> Result<Output>
             break status;
         }
         if Instant::now() >= deadline {
+            unsafe {
+                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = child.wait();
             bail!("native maintenance command timed out");
@@ -424,6 +430,7 @@ fn run_security_stdin(
     use std::os::fd::AsRawFd;
 
     let mut command = Command::new(security);
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     command
         .arg("-i")
         .stdin(Stdio::piped())
@@ -2043,5 +2050,30 @@ esac
         assert_eq!(req1, req2);
         verify_node_binary(&v1, &req1, &tools).unwrap();
         verify_node_binary(&v2, &req1, &tools).unwrap();
+    }
+
+    #[test]
+    fn review593_r3_3_foreground_child_runs_in_isolated_process_group() {
+        let parent_pgid = unsafe { libc::getpgrp() };
+        let mut cmd = Command::new("python3");
+        cmd.args(["-c", "import os; print(os.getpid(), os.getpgrp())"])
+            .stdin(Stdio::null());
+        let out = output(&mut cmd, Duration::from_secs(10)).unwrap();
+        assert!(out.status.success());
+        let text = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<i32> = text
+            .split_whitespace()
+            .map(|s| s.parse::<i32>().unwrap())
+            .collect();
+        assert_eq!(parts.len(), 2, "unexpected output: {text}");
+        let (child_pid, child_pgid) = (parts[0], parts[1]);
+        assert_eq!(
+            child_pid, child_pgid,
+            "foreground maintenance child must be its own process group leader"
+        );
+        assert_ne!(
+            child_pgid, parent_pgid,
+            "foreground maintenance child must not share the terminal's foreground process group"
+        );
     }
 }

@@ -1,14 +1,23 @@
 //! Explicit terminal maintenance. No password is fetched on behalf of a caller.
 use super::*;
 
+fn write_line_ignoring_io_error(mut out: impl std::io::Write, line: &str) {
+    // Closing the terminal (SIGHUP) leaves stdout/stderr closed; ignore EPIPE/EIO instead of
+    // panicking after cleanup has already completed.
+    let _ = writeln!(out, "{line}");
+}
+
 pub fn main(args: &[String]) -> i32 {
     match dispatch(args) {
         Ok((code, value)) => {
-            println!("{value}");
+            write_line_ignoring_io_error(std::io::stdout().lock(), &value.to_string());
             code
         }
         Err(error) => {
-            eprintln!("{}", json!({"error":format!("{error:#}")}));
+            write_line_ignoring_io_error(
+                std::io::stderr().lock(),
+                &json!({"error":format!("{error:#}")}).to_string(),
+            );
             1
         }
     }
@@ -407,5 +416,25 @@ mod tests {
             assert_eq!(*order.borrow(), vec!["notice", "keychain"]);
             assert_eq!(got.as_deref().map(String::as_str), Some(pass.as_str()));
         }
+    }
+
+    #[test]
+    fn review593_r3_3_output_write_ignores_broken_pipe() {
+        struct ClosedTerminal;
+        impl std::io::Write for ClosedTerminal {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed after SIGHUP",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed after SIGHUP",
+                ))
+            }
+        }
+        write_line_ignoring_io_error(ClosedTerminal, r#"{"ok":false,"rolled_back":true}"#);
     }
 }

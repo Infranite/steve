@@ -302,7 +302,7 @@ export default {
       upgradeNote: "由新发行包里的 steve-hub 二进制读取 steve.env、校验新包（零脚本）、排空活跃任务、离线备份与维护探测、切换 current、改写 LaunchAgent plist（保留 PATH/NO_COLOR/WorkingDirectory）、校验 harness 后启动服务；已签名安装会自动弹窗读取钥匙串，无桌面终端可配合 --keychain-pass-stdin。",
       backup: "切换前会自动在 {{home}}/backups/restic 保存离线数据库快照，并在动手前于原 plist 同目录写入回滚日志与 0.12.0 原始 plist 副本（.plist.previous）。",
       autoRollback: "提交前任一步失败（校验、排空、备份、维护探测、切换或 plist 改写），都会自动解除维护锁并恢复 0.12.0 版本、原始 plist 与数据库快照；启动新服务后失败则保留新数据库（退出码 3）供人工核查。",
-      manualRollback: "升级后如需手动回滚到 0.12.0：{{command}}",
+      manualRollback: "升级后如需手动回滚到 0.12.0：{{command}}；确认新版本稳定运行后，请执行 {{confirm}} 归档并清理回滚元数据。",
     },
     local: {
       label: "本机签名安装",

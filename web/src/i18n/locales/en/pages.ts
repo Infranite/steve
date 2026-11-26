@@ -303,7 +303,7 @@ export default {
       upgradeNote: "Reads steve.env, validates the script-free package, drains active work, backs up SQLite, runs the maintenance probe, switches current, rewrites the LaunchAgent plist (preserving PATH, NO_COLOR, and WorkingDirectory), verifies harnesses, and restarts launchd. Signed installs prompt macOS Keychain interactively (or use --keychain-pass-stdin in headless SSH).",
       backup: "Before touching the running service, the updater writes a durable rollback journal and saves the original v0.12.0 plist (.plist.previous), then captures an offline database snapshot under {{home}}/backups/restic.",
       autoRollback: "Any pre-commit failure (validation, drain, backup, maintenance probe, switch, or plist rewrite) lifts maintenance and automatically restores v0.12.0, the original plist, and the database snapshot. Post-start failures retain the migrated database (exit code 3) for inspection.",
-      manualRollback: "To roll back manually after upgrading: {{command}}",
+      manualRollback: "To roll back manually after upgrading: {{command}}. Once the new release is verified stable, run {{confirm}} to archive and clear rollback metadata.",
     },
     local: {
       label: "Locally signed install",

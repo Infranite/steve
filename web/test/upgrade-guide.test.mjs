@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { checkStale, committedFailure, downloadPercent, enableOneClick, installLabel, macosOneShotUpgradeCommand, macosRollbackCommand, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
+import { checkStale, committedFailure, downloadPercent, enableOneClick, installLabel, macosConfirmCommand, macosOneShotUpgradeCommand, macosRollbackCommand, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade } from "../src/upgrade-guide.ts"
 
 const home = "/Users/example/.steve", repo = "/Users/example/Agents/steve"
 
@@ -106,6 +106,7 @@ test("legacy macOS launchd service provides the Rust one-shot upgrade command an
   assert.match(gWithVer.steps[0].command, /releases\/download\/v0\.13\.0\/steve-0\.13\.0-aarch64-apple-darwin\.tar\.gz/)
   assert.equal(gWithVer.steps.length, 2)
   assert.ok(gWithVer.recovery.join("\n").includes(macosRollbackCommand(home)))
+  assert.ok(gWithVer.recovery.join("\n").includes(macosConfirmCommand(home)))
   const gUnchecked = upgradeGuide({ kind: "legacy_macos_service", home, legacy_service: "run_managed_sh" }, "")
   assert.match(gUnchecked.steps[0].command, /brew upgrade steve && "\$\(brew --prefix steve\)\/libexec\/bin\/steve-hub" --local-release upgrade-macos --home \/Users\/example\/\.steve/)
   assert.equal(gUnchecked.steps.length, 1)

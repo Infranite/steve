@@ -1110,15 +1110,16 @@ SVC=$(plutil -extract vault_service raw ~/.steve/signing/identity.json) && \
   /tmp/steve-upgrade/bin/steve-hub --local-release upgrade-macos --home ~/.steve --keychain-pass-stdin
 ```
 
-To roll back manually to v0.12.0 afterward (preflights metadata, `current` alignment, and repository snapshot existence before stopping; unconditionally unloads launchd even if `/healthz` is unreachable; restores `current`, the exact original `.plist.previous`, and the database snapshot if required; cleans up rollback metadata and writes a receipt). If the upgraded Hub has been running past the immediate verification window or has written new data to SQLite, rolling back a database snapshot requires explicit `--confirm-data-loss`:
+To roll back manually to v0.12.0 afterward (preflights metadata, `current` alignment, and repository snapshot existence before stopping; unconditionally unloads launchd even if `/healthz` is unreachable; restores `current`, the exact original `.plist.previous`, and the database snapshot if required; cleans up rollback metadata and writes a receipt). If the upgrade crossed the commit boundary (`Started`/`CommittedFailed`) or has been running past the immediate verification window / written new data to SQLite, rolling back a database snapshot requires explicit `--confirm-data-loss`. **After verifying the upgraded Hub is stable, always run `confirm-macos`** to archive and clear the rollback metadata and `.plist.previous`:
 
 ```sh
-~/.steve/current/bin/steve-hub --local-release rollback-macos --home ~/.steve
-# If post-upgrade data would be overwritten by the pre-upgrade snapshot:
-~/.steve/current/bin/steve-hub --local-release rollback-macos --home ~/.steve --confirm-data-loss
-
-# Once satisfied with the new release, archive and clear rollback metadata:
+# Once the upgraded Hub is verified stable (recommended):
 ~/.steve/current/bin/steve-hub --local-release confirm-macos --home ~/.steve
+
+# Or to roll back manually to v0.12.0 instead:
+~/.steve/current/bin/steve-hub --local-release rollback-macos --home ~/.steve
+# If post-commit/post-upgrade data would be overwritten by the pre-upgrade snapshot:
+~/.steve/current/bin/steve-hub --local-release rollback-macos --home ~/.steve --confirm-data-loss
 ```
 
 In this release and later, if **Settings → About** detects a legacy macOS LaunchAgent plist, it disables one-click upgrade and displays the copyable command for that installation (note: v0.12.0 itself does not have this detector, so v0.12.0 macOS users must run the terminal command above). Once migrated, future upgrades (including post-commit LaunchAgent plist migration for legacy managed installs) return to one-click in **Settings → About**.

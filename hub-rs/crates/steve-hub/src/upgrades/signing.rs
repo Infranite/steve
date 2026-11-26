@@ -43,7 +43,10 @@ pub(super) fn resolve_maintenance_password(
         vars,
         stdin_password,
         std::io::stdin().is_terminal(),
-        |notice| eprintln!("{notice}"),
+        |notice| {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "{notice}");
+        },
         || {
             #[cfg(target_os = "macos")]
             {
