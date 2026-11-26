@@ -355,9 +355,10 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
     match wait_health(cfg, u, child, &op.version, None).await {
         Ok(()) => {
             release_maintenance(cfg, u).await?;
-            #[cfg(target_os = "linux")]
-            if let Err(error) = steve_install::service::sync_hub_systemd_unit(&cfg.home, &target) {
-                tracing::warn!("sync systemd hub unit after managed upgrade: {error:#}");
+            if let Err(error) =
+                steve_install::service::sync_hub_service_definition(&cfg.home, &target)
+            {
+                tracing::warn!("sync hub service definition after managed upgrade: {error:#}");
             }
             u.phase(op, "succeeded", None)?;
         }

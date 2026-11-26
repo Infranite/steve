@@ -166,16 +166,20 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
                         .to_path_buf()
                 }
             };
-            let password = if password_stdin {
+            let stdin_password = if password_stdin {
                 let mut raw = zeroize::Zeroizing::new(String::new());
                 std::io::stdin().read_line(&mut raw)?;
                 Some(zeroize::Zeroizing::new(raw.trim().to_owned()))
-            } else if home.join("signing/identity.json").is_file() {
-                let store = super::signing::installed_helper(&home);
-                super::signing::password(store.as_deref()).ok().flatten()
             } else {
                 None
             };
+            let caller_env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+            let merged_env = steve_install::release::read_home_env(&home, &caller_env)?;
+            let password = super::signing::resolve_maintenance_password(
+                &home,
+                &|k| merged_env.get(k).cloned(),
+                stdin_password,
+            )?;
             let result = steve_install::release::upgrade_macos(
                 &home,
                 &bundle,
@@ -207,6 +211,9 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use steve_modules::vault::keystore::{DirKeyStore, KeyStoreError, signing as ks_signing};
+
     #[test]
     fn invalid_maintenance_never_reaches_an_installation() {
         for input in [
@@ -217,5 +224,96 @@ mod tests {
             assert!(dispatch(&input.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
         }
         assert_eq!(dispatch(&[]).unwrap().0, 0);
+    }
+
+    #[test]
+    fn review593_3_unsigned_binary_falls_back_to_interactive_keychain_and_reads_steve_env() {
+        // Case A: STEVE_VAULT_KEYSTORE=dir + STEVE_VAULT_KEY_DIR defined ONLY in steve.env
+        // (absent from process env) must be loaded and used to retrieve the signing password.
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("hub-home");
+        let keys_dir = root.path().join("vault-keys");
+        fs::create_dir_all(home.join("signing")).unwrap();
+        fs::write(
+            home.join("signing/identity.json"),
+            r#"{"label":"test.hub","hub_identifier":"h","keyhelper_identifier":"k","vault_service":"test.vault"}"#,
+        )
+        .unwrap();
+        let store = DirKeyStore::open(&keys_dir, &home).unwrap();
+        let expected_pass = "0123456789abcdef".repeat(4);
+        ks_signing::set(&store, &expected_pass).unwrap();
+        fs::write(
+            home.join("steve.env"),
+            format!(
+                "STEVE_VAULT_KEYSTORE=dir\nSTEVE_VAULT_KEY_DIR={}\n",
+                keys_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let caller_env = BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]);
+        let merged = steve_install::release::read_home_env(&home, &caller_env).unwrap();
+        let got_dir = super::signing::resolve_maintenance_password_with(
+            &home,
+            &|k| merged.get(k).cloned(),
+            None,
+            || panic!("dir keystore from steve.env must not invoke steve-keyhelper"),
+            || panic!("dir keystore from steve.env must not prompt login keychain"),
+        )
+        .unwrap();
+        assert_eq!(
+            got_dir.as_deref().map(String::as_str),
+            Some(expected_pass.as_str())
+        );
+
+        // Case B: Signed macOS Keychain installation run from unsigned /tmp binary:
+        // steve-keyhelper refuses with Denied -> automatically falls back to interactive Keychain.
+        let kc_home = root.path().join("kc-home");
+        fs::create_dir_all(kc_home.join("signing")).unwrap();
+        fs::write(
+            kc_home.join("signing/identity.json"),
+            r#"{"label":"test.hub","hub_identifier":"h","keyhelper_identifier":"k","vault_service":"test.vault"}"#,
+        )
+        .unwrap();
+        let mut interactive_called = false;
+        let got_kc = super::signing::resolve_maintenance_password_with(
+            &kc_home,
+            &|_| None,
+            None,
+            || Err(KeyStoreError::Denied),
+            || {
+                interactive_called = true;
+                Ok(Some(zeroize::Zeroizing::new(expected_pass.clone())))
+            },
+        )
+        .unwrap();
+        assert!(
+            interactive_called,
+            "must fall back to interactive keychain on helper denial"
+        );
+        assert_eq!(
+            got_kc.as_deref().map(String::as_str),
+            Some(expected_pass.as_str())
+        );
+
+        // Case C: --keychain-pass-stdin accepts both raw 64-hex and the 32-byte base64 Keychain
+        // item printed by `security find-generic-password -a steve/signing/keychain-pass -w`.
+        use base64::Engine as _;
+        let raw_bytes = hex::decode(&expected_pass).unwrap();
+        let keychain_b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+        for stdin_val in [expected_pass.clone(), keychain_b64] {
+            let got_stdin = super::signing::resolve_maintenance_password_with(
+                &kc_home,
+                &|_| None,
+                Some(zeroize::Zeroizing::new(stdin_val)),
+                || panic!("stdin password must bypass helper"),
+                || panic!("stdin password must bypass interactive keychain"),
+            )
+            .unwrap();
+            assert_eq!(
+                got_stdin.as_deref().map(String::as_str),
+                Some(expected_pass.as_str())
+            );
+        }
     }
 }

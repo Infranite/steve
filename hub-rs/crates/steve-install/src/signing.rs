@@ -544,15 +544,31 @@ pub fn prepare_bundle(
     commit: &str,
     password: &str,
 ) -> Result<Value> {
-    let _lock = crate::release::lock_release(home)?;
-    prepare_with(
+    let lock = crate::release::lock_release(home)?;
+    prepare_bundle_locked(
         home,
         candidate,
         version,
         commit,
         password,
+        &lock,
         &Tools::default(),
     )
+}
+
+/// Sign and verify `candidate` while reusing a `ReleaseLock` already held by the caller,
+/// avoiding opening/closing a second descriptor on `releases/.release.lock` (which on POSIX
+/// would release all fcntl locks held by this process on that inode).
+pub(crate) fn prepare_bundle_locked(
+    home: &Path,
+    candidate: &Path,
+    version: &str,
+    commit: &str,
+    password: &str,
+    _lock: &crate::release::ReleaseLock,
+    tools: &Tools,
+) -> Result<Value> {
+    prepare_with(home, candidate, version, commit, password, tools)
 }
 fn prepare_with(
     home: &Path,

@@ -6,6 +6,7 @@ use crate::signing::{
 use anyhow::{Context, Result, ensure};
 use reqwest::Method;
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -15,6 +16,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steve_store::db::inspect_schema;
 use steve_types::backup::{BackupPurpose, BackupReceipt, SnapshotId};
@@ -24,9 +27,14 @@ pub struct DeployOutcome {
     pub receipt: Value,
 }
 
+/// Exclusive POSIX record lock guard for `releases/.release.lock`.
+/// Keep a single descriptor open across the entire release operation; never open and close a
+/// second descriptor to the same inode in this process, as POSIX releases all fcntl locks on close.
+pub(crate) struct ReleaseLock(#[allow(dead_code)] File);
+
 /// POSIX record lock, interoperable with the historical Python lockf and zsh zsystem flock.
 /// Keep this descriptor open for the complete operation; do not substitute BSD flock.
-pub(crate) fn lock_release(home: &Path) -> Result<File> {
+pub(crate) fn lock_release(home: &Path) -> Result<ReleaseLock> {
     let directory = home.join("releases");
     private_dir(&directory)?;
     let path = directory.join(".release.lock");
@@ -47,7 +55,48 @@ pub(crate) fn lock_release(home: &Path) -> Result<File> {
         "another release operation holds releases/.release.lock: {}",
         std::io::Error::last_os_error()
     );
-    Ok(file)
+    Ok(ReleaseLock(file))
+}
+
+static SIGNAL_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_interrupt(_sig: libc::c_int) {
+    SIGNAL_INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+struct SignalGuard {
+    prev_int: libc::sigaction,
+    prev_term: libc::sigaction,
+}
+
+impl SignalGuard {
+    fn install() -> Self {
+        SIGNAL_INTERRUPTED.store(false, Ordering::SeqCst);
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = handle_interrupt as *const () as usize;
+        action.sa_flags = 0;
+        let mut prev_int: libc::sigaction = unsafe { std::mem::zeroed() };
+        let mut prev_term: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGINT, &action, &mut prev_int);
+            libc::sigaction(libc::SIGTERM, &action, &mut prev_term);
+        }
+        Self {
+            prev_int,
+            prev_term,
+        }
+    }
+}
+
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::sigaction(libc::SIGINT, &self.prev_int, std::ptr::null_mut());
+            libc::sigaction(libc::SIGTERM, &self.prev_term, std::ptr::null_mut());
+        }
+        SIGNAL_INTERRUPTED.store(false, Ordering::SeqCst);
+    }
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -171,22 +220,45 @@ fn read_text(path: &Path) -> std::io::Result<String> {
     fs::read_to_string(path)
 }
 
-fn environment(home: &Path) -> Result<BTreeMap<String, String>> {
-    let mut values = BTreeMap::new();
-    for key in ["HOME", "PATH", "USER", "TMPDIR"] {
-        if let Ok(value) = std::env::var(key) {
-            values.insert(key.into(), value);
-        }
-    }
+fn remove_file_best_effort(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    fs::canonicalize(path)
+}
+
+/// Read `<home>/steve.env` merged with `existing`: caller-supplied variables win except `PATH`,
+/// where an explicit `PATH` in `steve.env` overrides launchd's minimal inherited `PATH`.
+pub fn read_home_env(
+    home: &Path,
+    existing: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut values = existing.clone();
     values.insert("STEVE_HOME".into(), home.to_string_lossy().into());
     let path = home.join("steve.env");
     if path.exists() {
         owned_file(&path)?;
         let raw = read_text(&path)?;
         let parsed = crate::env_file::parse_runtime_env(raw.as_bytes(), &values)?;
-        values.extend(parsed);
+        for (key, value) in parsed {
+            if key == "PATH" || !existing.contains_key(&key) {
+                values.insert(key, value);
+            }
+        }
     }
     values.insert("STEVE_HOME".into(), home.to_string_lossy().into());
+    Ok(values)
+}
+
+fn environment(home: &Path) -> Result<BTreeMap<String, String>> {
+    let mut base = BTreeMap::new();
+    for key in ["HOME", "PATH", "USER", "TMPDIR"] {
+        if let Ok(value) = std::env::var(key) {
+            base.insert(key.into(), value);
+        }
+    }
+    let mut values = read_home_env(home, &base)?;
     values
         .entry("STEVE_KEYHELPER".into())
         .or_insert_with(|| home.join("bin/steve-keyhelper").to_string_lossy().into());
@@ -233,6 +305,7 @@ struct Runtime {
     launchctl: PathBuf,
     service_home: PathBuf,
     health_timeout: Duration,
+    interrupt: Arc<AtomicBool>,
     #[cfg(test)]
     simulated_service: bool,
 }
@@ -271,9 +344,17 @@ impl Runtime {
             launchctl: "/bin/launchctl".into(),
             service_home,
             health_timeout: Duration::from_secs(60),
+            interrupt: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             simulated_service: false,
         })
+    }
+    fn check_interrupted(&self) -> Result<()> {
+        ensure!(
+            !SIGNAL_INTERRUPTED.load(Ordering::SeqCst) && !self.interrupt.load(Ordering::SeqCst),
+            "upgrade interrupted by signal (SIGINT/SIGTERM)"
+        );
+        Ok(())
     }
     fn control(&self, method: Method) -> Result<Value> {
         let path = self.home.join("updates/control-token.json");
@@ -354,48 +435,109 @@ impl Runtime {
             .join(format!("{label}.plist"));
         self.service_at(action, label, &plist)
     }
-    fn service_at(&self, action: &str, label: &str, plist: &Path) -> Result<()> {
-        let domain = format!("gui/{}", unsafe { libc::getuid() });
-        let mut command = Command::new(&self.launchctl);
-        if action == "stop" {
-            command.args(["bootout", &format!("{domain}/{label}")]);
-        } else {
-            command.args(["bootstrap", &domain]).arg(plist);
+    fn wait_port_stopped(&self) -> Result<()> {
+        #[cfg(test)]
+        if self.simulated_service {
+            return Ok(());
         }
-        successful(command.stdin(Stdio::null()), Duration::from_secs(30))?;
-        if action == "stop" {
-            #[cfg(test)]
-            if self.simulated_service {
-                return Ok(());
-            }
-            let deadline = Instant::now() + self.health_timeout.min(Duration::from_secs(15));
-            let addresses: Vec<_> = self.address.to_socket_addrs()?.collect();
-            ensure!(!addresses.is_empty(), "local Hub address did not resolve");
-            while addresses.iter().any(|address| {
-                TcpStream::connect_timeout(address, Duration::from_millis(100)).is_ok()
-            }) {
-                ensure!(
-                    Instant::now() < deadline,
-                    "old Hub still listens after bootout"
-                );
-                std::thread::sleep(Duration::from_millis(100));
-            }
+        let deadline = Instant::now() + self.health_timeout.min(Duration::from_secs(15));
+        let addresses: Vec<_> = self.address.to_socket_addrs()?.collect();
+        ensure!(!addresses.is_empty(), "local Hub address did not resolve");
+        while addresses
+            .iter()
+            .any(|address| TcpStream::connect_timeout(address, Duration::from_millis(100)).is_ok())
+        {
+            ensure!(
+                Instant::now() < deadline,
+                "old Hub still listens after bootout"
+            );
+            std::thread::sleep(Duration::from_millis(100));
         }
         Ok(())
     }
+    fn run_launchctl(
+        &self,
+        args: &[&str],
+        plist: Option<&Path>,
+        allow_unloaded: bool,
+    ) -> Result<()> {
+        let mut command = Command::new(&self.launchctl);
+        command.args(args);
+        if let Some(p) = plist {
+            command.arg(p);
+        }
+        command.stdin(Stdio::null());
+        if allow_unloaded {
+            let out = signing::output(&mut command, Duration::from_secs(30))?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let unloaded = stderr.contains("Could not find service")
+                    || stderr.contains("No such process")
+                    || stderr.contains("Input/output error")
+                    || out.status.code() == Some(3);
+                ensure!(unloaded, "launchctl {:?} failed: {}", args, stderr.trim());
+            }
+            Ok(())
+        } else {
+            successful(&mut command, Duration::from_secs(30))?;
+            Ok(())
+        }
+    }
+    fn service_at(&self, action: &str, label: &str, plist: &Path) -> Result<()> {
+        let domain = format!("gui/{}", unsafe { libc::getuid() });
+        if action == "stop" {
+            let target = format!("{domain}/{label}");
+            self.run_launchctl(&["bootout", &target], None, false)?;
+            self.wait_port_stopped()
+        } else {
+            self.run_launchctl(&["bootstrap", &domain], Some(plist), false)
+        }
+    }
+    /// Unconditionally unload `label` from launchd (used by rollback even when `/healthz` is dead
+    /// or the Hub is crash-looping), tolerating an already-unloaded service while still ensuring
+    /// the local listening port is closed.
+    fn bootout_unconditional(&self, label: &str) -> Result<()> {
+        let domain = format!("gui/{}", unsafe { libc::getuid() });
+        let target = format!("{domain}/{label}");
+        self.run_launchctl(&["bootout", &target], None, true)?;
+        self.wait_port_stopped()
+    }
     fn hub_command(&self, candidate: &Path) -> Command {
+        self.hub_command_with_env(candidate, &self.env, None)
+    }
+    fn hub_command_with_env(
+        &self,
+        candidate: &Path,
+        env: &BTreeMap<String, String>,
+        working_dir: Option<&Path>,
+    ) -> Command {
         let mut command = Command::new(candidate.join("bin/steve-hub"));
         command
             .env_clear()
-            .envs(&self.env)
+            .envs(env)
             .env("STEVE_WEB_DIR", candidate.join("web/dist"));
+        if let Some(dir) = working_dir
+            && dir.is_dir()
+        {
+            command.current_dir(dir);
+        }
         command
     }
     fn check_config(&self, candidate: &Path, info: &Value) -> Result<()> {
+        self.check_config_with_env(candidate, info, &self.env, None, false)
+    }
+    fn check_config_with_env(
+        &self,
+        candidate: &Path,
+        info: &Value,
+        env: &BTreeMap<String, String>,
+        working_dir: Option<&Path>,
+        enforce_harnesses: bool,
+    ) -> Result<()> {
         if info["check_config"] != true {
             return Ok(());
         }
-        let mut command = self.hub_command(candidate);
+        let mut command = self.hub_command_with_env(candidate, env, working_dir);
         command.arg("--check-config").stdin(Stdio::null());
         let output = signing::output(&mut command, Duration::from_secs(120))?;
         let report: Value = serde_json::from_slice(&output.stdout)
@@ -404,9 +546,35 @@ impl Runtime {
             output.status.success() && report["ok"] == true,
             "candidate configuration check failed; current Hub has not been drained or stopped"
         );
+        if enforce_harnesses
+            && let Some(harnesses) = report.get("harnesses").and_then(Value::as_object)
+        {
+            let missing_node = harnesses
+                .get("missing_node")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let missing_adapters: Vec<&str> = harnesses
+                .get("missing_adapters")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            ensure!(
+                !missing_node && missing_adapters.is_empty(),
+                "candidate service environment cannot resolve configured harnesses/Node (missing_node={missing_node}, missing_adapters={missing_adapters:?}, PATH={})",
+                env.get("PATH").map(String::as_str).unwrap_or("")
+            );
+        }
         Ok(())
     }
     fn probe(&self, candidate: &Path, version: &str) -> Result<Value> {
+        self.probe_with_env(candidate, version, &self.env)
+    }
+    fn probe_with_env(
+        &self,
+        candidate: &Path,
+        version: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<Value> {
         let id = uuid::Uuid::new_v4();
         let operations = self.home.join("updates/operations");
         private_dir(&operations)?;
@@ -423,7 +591,8 @@ impl Runtime {
             .write(true)
             .mode(0o600)
             .open(log_dir.join(format!("probe-{version}-{id}.log")))?;
-        let mut command = self.hub_command(candidate);
+        let mut command =
+            self.hub_command_with_env(candidate, env, Some(&self.home.join("current")));
         command
             .env("STEVE_PORT", port.to_string())
             .env("STEVE_HOST", "127.0.0.1")
@@ -442,6 +611,7 @@ impl Runtime {
             let mut budget =
                 crate::migration::Budget::new(&id.to_string(), process.0.id(), self.health_timeout);
             loop {
+                self.check_interrupted()?;
                 ensure!(
                     process.0.try_wait()?.is_none(),
                     "candidate exited during its maintenance probe"
@@ -475,7 +645,7 @@ impl Runtime {
                 std::thread::sleep(Duration::from_millis(200));
             }
         })();
-        let _ = fs::remove_file(operation);
+        remove_file_best_effort(&operation);
         result
     }
 }
@@ -498,7 +668,15 @@ impl Drop for ProbeProcess {
 }
 /// Take the pre-upgrade snapshot with the verified candidate, after stopping the running Hub.
 fn backup(runtime: &Runtime, candidate: &Path) -> Result<SnapshotId> {
-    let mut command = runtime.hub_command(candidate);
+    backup_with_env(runtime, candidate, &runtime.env)
+}
+
+fn backup_with_env(
+    runtime: &Runtime,
+    candidate: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<SnapshotId> {
+    let mut command = runtime.hub_command_with_env(candidate, env, None);
     command
         .args(["--admin", "backup", "--reason", "pre-upgrade", "--offline"])
         .stdin(Stdio::null());
@@ -528,7 +706,7 @@ fn link(path: &Path, target: &Path) -> Result<()> {
     let temporary = path.with_file_name(format!(".deploy-{}", uuid::Uuid::new_v4()));
     std::os::unix::fs::symlink(target, &temporary)?;
     if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(temporary);
+        remove_file_best_effort(&temporary);
         return Err(error.into());
     }
     File::open(path.parent().unwrap())?.sync_all()?;
@@ -553,6 +731,36 @@ fn restore(
     saved: Option<&SnapshotId>,
     candidate: &Path,
     ident: &Value,
+) -> (bool, Vec<String>) {
+    let label = ident["label"].as_str().unwrap_or("");
+    let plist = runtime
+        .service_home
+        .join("Library/LaunchAgents")
+        .join(format!("{label}.plist"));
+    restore_at(
+        runtime,
+        changed,
+        old_hub,
+        old_web,
+        old_manifest,
+        saved,
+        candidate,
+        label,
+        &plist,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_at(
+    runtime: &Runtime,
+    changed: &Changed,
+    old_hub: &Path,
+    old_web: &Path,
+    old_manifest: &Value,
+    saved: Option<&SnapshotId>,
+    candidate: &Path,
+    label: &str,
+    plist: &Path,
 ) -> (bool, Vec<String>) {
     let mut steps = Vec::new();
     let mut ok = true;
@@ -586,21 +794,7 @@ fn restore(
             "database backup restored; probed files retained separately",
             (|| -> Result<()> {
                 let saved = saved.context("verified backup missing")?;
-                let mut command = runtime.hub_command(candidate);
-                command
-                    .args(["--admin", "restore", saved.as_str(), "--database-only"])
-                    .stdin(Stdio::null());
-                let output = signing::output(&mut command, Duration::from_secs(3600))?;
-                ensure!(
-                    output.status.success(),
-                    "candidate restore failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                ensure!(
-                    String::from_utf8_lossy(&output.stdout).trim() == saved.as_str(),
-                    "candidate returned the wrong restored snapshot"
-                );
-                Ok(())
+                restore_snapshot(runtime, candidate, saved)
             })(),
         );
     }
@@ -609,7 +803,7 @@ fn restore(
         return (false, steps);
     }
     if changed.stopped && runtime.health().is_none() {
-        match runtime.service("start", ident) {
+        match runtime.service_at("start", label, plist) {
             Ok(()) => steps.push("old service started".into()),
             Err(error) => {
                 ok = false;
@@ -617,22 +811,29 @@ fn restore(
             }
         }
     }
-    if runtime
-        .wait_health(|h| {
-            h["version"] == old_manifest["version"]
-                && (h["build_commit"].is_null() || h["build_commit"] == old_manifest["commit"])
-        })
-        .is_err()
-    {
-        steps.push("old Hub did not answer as its original identity".into());
-        return (false, steps);
-    }
-    if changed.drain {
-        match runtime.lift() {
-            Ok(()) => steps.push("drain lifted".into()),
-            Err(error) => {
-                ok = false;
-                steps.push(format!("drain lift failed: {error:#}"));
+    if changed.stopped || changed.drain {
+        if runtime
+            .wait_health(|h| {
+                h["version"] == old_manifest["version"]
+                    && (h["build_commit"].is_null() || h["build_commit"] == old_manifest["commit"])
+            })
+            .is_err()
+        {
+            steps.push("old Hub did not answer as its original identity".into());
+            if changed.drain && !changed.stopped {
+                let _ = runtime.lift();
+            }
+            return (false, steps);
+        }
+        // Always lift maintenance whenever drain was initiated, even when the Hub was never stopped
+        // (e.g. drain timed out, control GET failed, or the operator sent SIGINT during drain).
+        if changed.drain {
+            match runtime.lift() {
+                Ok(()) => steps.push("drain lifted".into()),
+                Err(error) => {
+                    ok = false;
+                    steps.push(format!("drain lift failed: {error:#}"));
+                }
             }
         }
     }
@@ -897,12 +1098,85 @@ fn restore_snapshot(runtime: &Runtime, helper_release: &Path, saved: &SnapshotId
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MacosUpgradeStage {
+    Planned,
+    Draining,
+    Stopped,
+    BackedUp,
+    Probed,
+    Switched,
+    Started,
+    Succeeded,
+    RolledBack,
+    CommittedFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MacosUpgradeJournal {
+    version: String,
+    candidate: PathBuf,
+    previous_hub: PathBuf,
+    previous_web: PathBuf,
+    previous_manifest: Value,
+    label: String,
+    plist_path: PathBuf,
+    plist_backup_path: PathBuf,
+    backup_snapshot: Option<SnapshotId>,
+    was_running: bool,
+    stage: MacosUpgradeStage,
+    started: String,
+    updated: String,
+}
+
+fn macos_journal_path(home: &Path) -> PathBuf {
+    home.join("releases/.macos-rollback.json")
+}
+
+fn load_macos_journal(home: &Path) -> Result<MacosUpgradeJournal> {
+    let value = json_file(&macos_journal_path(home))
+        .context("no recorded macOS upgrade rollback metadata (releases/.macos-rollback.json)")?;
+    serde_json::from_value(value)
+        .context("corrupt macOS upgrade rollback metadata (releases/.macos-rollback.json)")
+}
+
+fn save_macos_journal(home: &Path, journal: &mut MacosUpgradeJournal) -> Result<()> {
+    journal.updated = stamp();
+    atomic_json(&macos_journal_path(home), &serde_json::to_value(&*journal)?)
+}
+
+fn effective_service_env(
+    runtime: &Runtime,
+    plist_path: &Path,
+) -> Result<(BTreeMap<String, String>, Option<PathBuf>)> {
+    let (plist_env, plist_wd) =
+        crate::service::read_hub_launchd_plist_env(plist_path).unwrap_or_default();
+    let mut base = runtime.env.clone();
+    for (k, v) in &plist_env {
+        base.insert(k.clone(), v.clone());
+    }
+    let resolved_path = crate::service::resolve_hub_launchd_path(
+        &runtime.home,
+        plist_env
+            .get("PATH")
+            .or_else(|| runtime.env.get("PATH"))
+            .map(String::as_str),
+    );
+    base.insert("PATH".into(), resolved_path);
+    base.entry("NO_COLOR".into()).or_insert_with(|| "1".into());
+    let env = read_home_env(&runtime.home, &base)?;
+    Ok((env, plist_wd))
+}
+
 /// One-shot macOS migration/upgrade driven purely by the Rust binary inside the new release
-/// package: validates the script-free bundle, stages it into `<home>/releases/`, drains/stops the
-/// prior Hub, backs up SQLite, switches `current` + `web/current`, rewrites the legacy LaunchAgent
-/// plist to invoke `steve-hub` directly, starts launchd, and probes `/healthz`. Any failure during
-/// switch, plist rewrite, service start, or health probe automatically rolls back to the prior
-/// (e.g. v0.12.0) release and plist.
+/// package: records a durable rollback journal and `.plist.previous` before touching the running
+/// service, validates and signs the script-free bundle while holding one continuous POSIX release
+/// lock, drains and stops the prior Hub, backs up SQLite, runs the bounded maintenance probe
+/// (vault read + migration progress budget), switches `current` + `web/current`, rewrites the
+/// legacy LaunchAgent plist with `PATH`/`NO_COLOR`/`WorkingDirectory`, verifies configured
+/// harnesses/Node, starts launchd, and checks `/healthz`. Pre-commit failures automatically roll
+/// back and lift maintenance; post-commit failures follow `committed_startup_failed` (exit 3).
 pub fn upgrade_macos(
     home: &Path,
     candidate: &Path,
@@ -921,7 +1195,8 @@ pub fn upgrade_macos(
         signing_password.map(str::to_owned),
     );
     std::thread::spawn(move || {
-        let _lock = lock_release(&home)?;
+        let _signals = SignalGuard::install();
+        let lock = lock_release(&home)?;
         let runtime = Runtime::new(&home)?;
         upgrade_macos_with(
             &runtime,
@@ -929,6 +1204,7 @@ pub fn upgrade_macos(
             label_override.as_deref(),
             drain_timeout,
             signing_password.as_deref(),
+            &lock,
         )
     })
     .join()
@@ -941,8 +1217,10 @@ fn upgrade_macos_with(
     label_override: Option<&str>,
     drain_timeout: Duration,
     signing_password: Option<&str>,
+    lock: &ReleaseLock,
 ) -> Result<DeployOutcome> {
     let home = &runtime.home;
+    runtime.check_interrupted()?;
     validate_script_free_bundle(candidate)?;
     let manifest = json_file(&candidate.join("release.json"))?;
     ensure!(
@@ -955,11 +1233,6 @@ fn upgrade_macos_with(
     let commit = manifest["commit"]
         .as_str()
         .context("candidate commit missing")?;
-    let old_hub = fs::canonicalize(home.join("current"))
-        .context("current release symlink is missing; cannot establish rollback target")?;
-    let old_manifest = json_file(&old_hub.join("release.json"))?;
-    let old_web = fs::canonicalize(home.join("web/current"))
-        .or_else(|_| fs::canonicalize(old_hub.join("web/dist")))?;
     let (label, plist_path) =
         crate::service::hub_launchd_plist_path(&runtime.service_home, home, label_override)?;
     ensure!(
@@ -967,13 +1240,67 @@ fn upgrade_macos_with(
         "LaunchAgent plist not found at {}",
         plist_path.display()
     );
-    let db = home.join("data/steve.sqlite3");
-    check_schema(&db, candidate)?;
 
-    let staged = crate::service::stage_release_bundle(home, candidate, version, commit)?;
+    let actual_current = canonical(&home.join("current"))
+        .context("current release symlink is missing; cannot establish rollback target")?;
+    let existing_journal = load_macos_journal(home).ok();
+    let preserve_previous = existing_journal.as_ref().filter(|j| {
+        let incomplete = !matches!(
+            j.stage,
+            MacosUpgradeStage::Succeeded | MacosUpgradeStage::RolledBack
+        );
+        let current_is_not_previous = canonical(&j.previous_hub)
+            .ok()
+            .is_some_and(|prev| prev != actual_current);
+        let current_is_candidate_retry = j.stage == MacosUpgradeStage::RolledBack
+            && current_is_not_previous
+            && j.version == version;
+        incomplete || current_is_candidate_retry
+    });
+
+    let (old_hub, old_web, old_manifest, was_running, resumed_backup, preserve_plist_backup) =
+        if let Some(prev) = preserve_previous {
+            (
+                prev.previous_hub.clone(),
+                prev.previous_web.clone(),
+                prev.previous_manifest.clone(),
+                prev.was_running || runtime.health().is_some(),
+                prev.backup_snapshot.clone(),
+                true,
+            )
+        } else {
+            let old_manifest = json_file(&actual_current.join("release.json"))?;
+            let old_web = canonical(&home.join("web/current"))
+                .or_else(|_| canonical(&actual_current.join("web/dist")))?;
+            (
+                actual_current.clone(),
+                old_web,
+                old_manifest,
+                runtime.health().is_some(),
+                None,
+                false,
+            )
+        };
+
+    let staged = if let Some(prev) = preserve_previous
+        && prev.version == version
+        && prev.candidate.join("release.json").is_file()
+        && canonical(&prev.candidate)
+            .ok()
+            .is_some_and(|p| p != actual_current)
+        && json_file(&prev.candidate.join("release.json"))
+            .ok()
+            .is_some_and(|m| m["version"] == version && m["commit"] == commit)
+    {
+        prev.candidate.clone()
+    } else {
+        crate::service::stage_release_bundle(home, candidate, version, commit)?
+    };
     ensure!(old_hub != staged, "candidate is already current");
+
+    let db = home.join("data/steve.sqlite3");
+    check_schema(&db, &staged)?;
     let info = signing::validate_bundle(home, &staged, version, commit)?;
-    runtime.check_config(&staged, &info)?;
 
     if home.join("signing/identity.json").is_file() {
         let ident = signing::identity(home, &runtime.tools)?;
@@ -983,17 +1310,51 @@ fn upgrade_macos_with(
         if signing::verify_signature(&staged.join("bin/steve-hub"), hub_id, &runtime.tools).is_err()
         {
             let password = signing_password.context(
-                "signed macOS installation requires the signing keychain password (pass --keychain-pass-stdin or unlock steve-keyhelper)",
+                "signed macOS installation requires the signing keychain password (unlock the login Keychain or pass --keychain-pass-stdin)",
             )?;
-            signing::prepare_bundle(home, &staged, version, commit, password)?;
+            signing::prepare_bundle_locked(
+                home,
+                &staged,
+                version,
+                commit,
+                password,
+                lock,
+                &runtime.tools,
+            )?;
             signing::verify_signature(&staged.join("bin/steve-hub"), hub_id, &runtime.tools)?;
         }
     }
 
+    let (effective_env, pre_wd) = effective_service_env(runtime, &plist_path)?;
+    let check_wd = pre_wd.or_else(|| Some(home.join("current")));
+    runtime.check_config_with_env(&staged, &info, &effective_env, check_wd.as_deref(), true)?;
+
+    // Step 0: persist durable rollback journal and original plist backup BEFORE any mutation.
     let stamp = stamp();
     let logs = home.join("logs/release");
     private_dir(&logs)?;
     let result_path = logs.join(format!("macos-upgrade-{version}-{stamp}.json"));
+    let plist_backup_snapshot =
+        crate::service::backup_service_definition(&plist_path, preserve_plist_backup)?;
+    let mut journal = MacosUpgradeJournal {
+        version: version.to_owned(),
+        candidate: staged.clone(),
+        previous_hub: old_hub.clone(),
+        previous_web: old_web.clone(),
+        previous_manifest: old_manifest.clone(),
+        label: label.clone(),
+        plist_path: plist_path.clone(),
+        plist_backup_path: crate::service::previous_service_definition_path(&plist_path),
+        backup_snapshot: resumed_backup.clone(),
+        was_running,
+        stage: MacosUpgradeStage::Planned,
+        started: preserve_previous
+            .map(|j| j.started.clone())
+            .unwrap_or_else(|| stamp.clone()),
+        updated: stamp.clone(),
+    };
+    save_macos_journal(home, &mut journal)?;
+
     let mut receipt = json!({
         "version": version,
         "release": staged,
@@ -1005,93 +1366,125 @@ fn upgrade_macos_with(
         "started": stamp,
     });
 
-    let mut drained = false;
-    let mut stopped = false;
-    let mut hub_link = false;
-    let mut web_link = false;
-    let mut plist_backup: Option<crate::service::ServiceDefinitionBackup> = None;
-    let mut started_new = false;
-    let mut saved: Option<SnapshotId> = None;
+    let mut changed = Changed::default();
+    if preserve_previous.is_some() {
+        if actual_current != old_hub {
+            changed.hub_link = true;
+            changed.web_link = true;
+        }
+        changed.service_definition = plist_backup_snapshot.clone();
+    }
+    let mut plist_rewritten = false;
+    let mut saved = resumed_backup;
     let mut phase = "drain";
 
     let transaction = (|| -> Result<Value> {
-        let was_running = runtime.health().is_some();
-        if was_running {
-            if home.join("updates/control-token.json").is_file()
-                && runtime.control(Method::POST).is_ok()
-            {
-                drained = true;
-                let until = Instant::now() + drain_timeout;
-                loop {
-                    let state = runtime.control(Method::GET)?;
-                    if state["ready"] == true {
-                        break;
-                    }
-                    ensure!(
-                        Instant::now() < until,
-                        "Hub did not drain before its deadline"
-                    );
-                    std::thread::sleep(Duration::from_millis(200));
+        runtime.check_interrupted()?;
+        if runtime.health().is_some() {
+            journal.stage = MacosUpgradeStage::Draining;
+            save_macos_journal(home, &mut journal)?;
+            // Mark drain active BEFORE POST so any partial drain or failure lifts maintenance.
+            changed.drain = true;
+            runtime.control(Method::POST)?;
+            let until = Instant::now() + drain_timeout;
+            loop {
+                runtime.check_interrupted()?;
+                let state = runtime.control(Method::GET)?;
+                if state["ready"] == true {
+                    break;
                 }
+                ensure!(
+                    Instant::now() < until,
+                    "Hub did not drain before its deadline"
+                );
+                std::thread::sleep(Duration::from_millis(200));
             }
             phase = "stop";
-            stopped = true;
+            changed.stopped = true;
             runtime.service_at("stop", &label, &plist_path)?;
+            journal.stage = MacosUpgradeStage::Stopped;
+            save_macos_journal(home, &mut journal)?;
+        } else if was_running {
+            changed.stopped = true;
         }
+
+        runtime.check_interrupted()?;
         if db.is_file() {
             phase = "backup";
-            let snapshot = backup(runtime, &staged)?;
-            receipt["backup_snapshot"] = json!(snapshot);
-            atomic_json(&result_path, &receipt)?;
-            saved = Some(snapshot);
+            // Reuse a recorded pre-upgrade backup only if a prior crashed attempt already migrated
+            // the DB past the old release's schema, so the clean 0.12.0 backup is never overwritten.
+            let reuse_saved = saved.is_some() && check_schema(&db, &old_hub).is_err();
+            if !reuse_saved {
+                let snapshot = backup_with_env(runtime, &staged, &effective_env)?;
+                receipt["backup_snapshot"] = json!(snapshot);
+                atomic_json(&result_path, &receipt)?;
+                saved = Some(snapshot.clone());
+                journal.backup_snapshot = Some(snapshot);
+                journal.stage = MacosUpgradeStage::BackedUp;
+                save_macos_journal(home, &mut journal)?;
+            } else if let Some(snapshot) = &saved {
+                receipt["backup_snapshot"] = json!(snapshot);
+                atomic_json(&result_path, &receipt)?;
+            }
         }
+
+        runtime.check_interrupted()?;
+        phase = "probe";
+        changed.probed = db.is_file();
+        runtime.probe_with_env(&staged, version, &effective_env)?;
+        journal.stage = MacosUpgradeStage::Probed;
+        save_macos_journal(home, &mut journal)?;
+
+        runtime.check_interrupted()?;
         phase = "switch";
-        hub_link = true;
+        changed.hub_link = true;
         link(&home.join("current"), &staged)?;
-        web_link = true;
+        changed.web_link = true;
         link(&home.join("web/current"), &staged.join("web/dist"))?;
         phase = "plist";
-        plist_backup = crate::service::sync_hub_launchd_plist(&plist_path, home, &staged)?;
-        let rollback_meta = json!({
-            "version": version,
-            "candidate": staged,
-            "previous_hub": old_hub,
-            "previous_web": old_web,
-            "previous_manifest": old_manifest,
-            "label": label,
-            "plist_path": plist_path,
-            "plist_backup_path": crate::service::previous_service_definition_path(&plist_path),
-            "backup_snapshot": saved,
-            "started": stamp,
-        });
-        atomic_json(&home.join("releases/.macos-rollback.json"), &rollback_meta)?;
+        let rewritten_backup = crate::service::sync_hub_launchd_plist_preserving_backup(
+            &plist_path,
+            home,
+            &staged,
+            true,
+        )?;
+        plist_rewritten = rewritten_backup.is_some();
+        changed.service_definition = rewritten_backup.or(plist_backup_snapshot.clone());
+        journal.stage = MacosUpgradeStage::Switched;
+        save_macos_journal(home, &mut journal)?;
+
+        // Re-verify candidate config and harnesses against the rewritten plist before committing.
+        let (post_env, post_wd) = effective_service_env(runtime, &plist_path)?;
+        runtime.check_config_with_env(&staged, &info, &post_env, post_wd.as_deref(), true)?;
+
+        runtime.check_interrupted()?;
+        // Commit boundary: once launchd starts the new Hub, business traffic may run.
         phase = "start";
-        started_new = true;
+        changed.started = true;
+        journal.stage = MacosUpgradeStage::Started;
+        save_macos_journal(home, &mut journal)?;
         runtime.service_at("start", &label, &plist_path)?;
         phase = "health";
-        let health = runtime.wait_health(|h| {
-            h["version"] == version
-                && (h["build_commit"].is_null() || h["build_commit"] == commit)
-                && (h["web_version"].is_null() || h["web_version"] == version)
-                && h["recovery"]["state"] != "failed"
+        runtime.wait_health(|h| {
+            h["version"] == version && (h["build_commit"].is_null() || h["build_commit"] == commit)
         })?;
-        if health["drain"] == true {
+        if changed.drain || runtime.health().is_some_and(|h| h["drain"] == true) {
             runtime.lift()?;
-            runtime.wait_health(|h| {
-                h["version"] == version
-                    && (h["web_version"].is_null() || h["web_version"] == version)
-                    && h["drain"] != true
-                    && h["recovery"]["state"] != "failed"
-            })
-        } else {
-            Ok(health)
         }
+        runtime.wait_health(|h| {
+            h["version"] == version
+                && (h["web_version"].is_null() || h["web_version"] == version)
+                && h["drain"] != true
+                && h["recovery"]["state"] != "failed"
+        })
     })();
 
     let exit_code = match transaction {
         Ok(health) => {
+            journal.stage = MacosUpgradeStage::Succeeded;
+            save_macos_journal(home, &mut journal)?;
             receipt["ok"] = true.into();
-            receipt["plist_rewritten"] = plist_backup.is_some().into();
+            receipt["plist_rewritten"] = plist_rewritten.into();
             receipt["health"] = health;
             receipt["db_after"] = json!(inspect_schema(&db)?);
             receipt["finished"] = self::stamp().into();
@@ -1101,99 +1494,47 @@ fn upgrade_macos_with(
             }
             0
         }
+        Err(error) if changed.started => {
+            journal.stage = MacosUpgradeStage::CommittedFailed;
+            let _ = save_macos_journal(home, &mut journal);
+            let message = format!(
+                "Upgrade committed; new database retained and automatic rollback refused: {error:#}. Verified backup: {}",
+                saved.as_ref().map_or("none", SnapshotId::as_str)
+            );
+            receipt["ok"] = false.into();
+            receipt["degraded"] = true.into();
+            receipt["phase"] = phase.into();
+            receipt["error"] = message.into();
+            receipt["db_after"] = inspect_schema(&db).map_or(Value::Null, |state| json!(state));
+            receipt["error_code"] = "committed_startup_failed".into();
+            receipt["finished"] = self::stamp().into();
+            3
+        }
         Err(error) => {
-            let mut steps = Vec::new();
-            let mut ok = true;
-            fn record_step(ok: &mut bool, steps: &mut Vec<String>, name: &str, result: Result<()>) {
-                match result {
-                    Ok(()) => steps.push(name.to_owned()),
-                    Err(err) => {
-                        *ok = false;
-                        steps.push(format!("{name} failed: {err:#}"));
-                    }
-                }
-            }
-            if started_new {
-                let _ = runtime.service_at("stop", &label, &plist_path);
-                steps.push("failed candidate stopped".into());
-            }
-            if let Some(backup_def) = &plist_backup {
-                record_step(
-                    &mut ok,
-                    &mut steps,
-                    "LaunchAgent plist restored",
-                    crate::service::restore_service_definition(backup_def),
-                );
-            }
-            if web_link {
-                record_step(
-                    &mut ok,
-                    &mut steps,
-                    "web/current restored",
-                    link(&home.join("web/current"), &old_web),
-                );
-            }
-            if hub_link {
-                record_step(
-                    &mut ok,
-                    &mut steps,
-                    "current restored",
-                    link(&home.join("current"), &old_hub),
-                );
-            }
-            if let Some(snapshot) = saved.as_ref()
-                && started_new
-            {
-                record_step(
-                    &mut ok,
-                    &mut steps,
-                    "database backup restored",
-                    restore_snapshot(runtime, &staged, snapshot),
-                );
-            }
-            if stopped {
-                if ok {
-                    record_step(
-                        &mut ok,
-                        &mut steps,
-                        "previous service started",
-                        runtime.service_at("start", &label, &plist_path),
-                    );
-                    if ok {
-                        match runtime.wait_health(|h| {
-                            h["version"] == old_manifest["version"]
-                                && (h["build_commit"].is_null()
-                                    || h["build_commit"] == old_manifest["commit"])
-                        }) {
-                            Ok(old_health) => {
-                                steps.push("previous Hub healthy".into());
-                                if drained || old_health["drain"] == true {
-                                    record_step(
-                                        &mut ok,
-                                        &mut steps,
-                                        "drain lifted",
-                                        runtime.lift(),
-                                    );
-                                }
-                            }
-                            Err(err) => {
-                                ok = false;
-                                steps.push(format!("previous Hub health check failed: {err:#}"));
-                            }
-                        }
-                    }
-                } else {
-                    steps.push("previous service not started: recovery needs inspection".into());
-                }
+            let (recovered, steps) = restore_at(
+                runtime,
+                &changed,
+                &old_hub,
+                &old_web,
+                &old_manifest,
+                saved.as_ref(),
+                &staged,
+                &label,
+                &plist_path,
+            );
+            if recovered {
+                journal.stage = MacosUpgradeStage::RolledBack;
+                let _ = save_macos_journal(home, &mut journal);
             }
             let message = format!("{phase} failed: {error:#}; recovery: {}", steps.join("; "));
             receipt["ok"] = false.into();
             receipt["phase"] = phase.into();
             receipt["error"] = message.into();
-            receipt["rolled_back"] = ok.into();
+            receipt["rolled_back"] = recovered.into();
+            receipt["recovered"] = recovered.into();
             receipt["recovery"] = json!(steps);
             receipt["finished"] = self::stamp().into();
-            if ok { 1 } else { 2 }
+            if recovered { 1 } else { 2 }
         }
     };
     if let Err(error) = atomic_json(&result_path, &receipt) {
@@ -1202,9 +1543,12 @@ fn upgrade_macos_with(
     Ok(DeployOutcome { exit_code, receipt })
 }
 
-/// Manual rollback for a macOS one-shot upgrade: restores `current`, `web/current`, the original
-/// LaunchAgent plist (`.plist.previous`), and (when DB schema requires it) the pre-upgrade database
-/// backup, then restarts the previous (e.g. v0.12.0) Hub and verifies `/healthz`.
+/// Manual rollback for a macOS one-shot upgrade: preflights metadata, `current` alignment, plist
+/// availability, and database schema/backup before touching the running service; drains if alive
+/// (lifting maintenance on failure without calling `bootout`); unconditionally unloads launchd even
+/// when `/healthz` is dead or crash-looping; restores `current`, `web/current`, the exact original
+/// `.plist.previous`, and the database snapshot when needed; verifies the previous Hub's `/healthz`;
+/// cleans up rollback metadata; and always writes a receipt.
 pub fn rollback_macos(
     home: &Path,
     label_override: Option<&str>,
@@ -1216,6 +1560,7 @@ pub fn rollback_macos(
     );
     let (home, label_override) = (home.to_owned(), label_override.map(str::to_owned));
     std::thread::spawn(move || {
+        let _signals = SignalGuard::install();
         let _lock = lock_release(&home)?;
         let runtime = Runtime::new(&home)?;
         rollback_macos_with(&runtime, label_override.as_deref(), drain_timeout)
@@ -1230,60 +1575,139 @@ fn rollback_macos_with(
     drain_timeout: Duration,
 ) -> Result<DeployOutcome> {
     let home = &runtime.home;
-    let meta = json_file(&home.join("releases/.macos-rollback.json"))
-        .context("no recorded macOS upgrade rollback metadata (releases/.macos-rollback.json)")?;
-    let previous_hub = PathBuf::from(
-        meta["previous_hub"]
-            .as_str()
-            .context("rollback metadata missing previous_hub")?,
-    );
-    let previous_web = meta["previous_web"]
-        .as_str()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| previous_hub.join("web/dist"));
-    let previous_manifest = json_file(&previous_hub.join("release.json"))
-        .context("previous release manifest missing; cannot roll back")?;
-    ensure!(
-        previous_hub.join("bin/steve-hub").is_file(),
-        "previous release has no bin/steve-hub"
-    );
-    let (resolved_label, resolved_plist) =
-        crate::service::hub_launchd_plist_path(&runtime.service_home, home, label_override)?;
-    let label = label_override
-        .map(str::to_owned)
-        .or_else(|| meta["label"].as_str().map(str::to_owned))
-        .unwrap_or(resolved_label);
-    let plist_path = if label_override.is_some() {
-        resolved_plist
-    } else {
-        meta["plist_path"]
-            .as_str()
-            .map(PathBuf::from)
-            .unwrap_or(resolved_plist)
-    };
-    let helper_release = meta["candidate"]
-        .as_str()
-        .map(PathBuf::from)
-        .filter(|p| p.join("bin/steve-hub").is_file())
-        .or_else(|| fs::canonicalize(home.join("current")).ok())
-        .unwrap_or_else(|| previous_hub.clone());
-    let saved_snapshot = meta["backup_snapshot"]
-        .as_str()
-        .and_then(|s| SnapshotId::try_from(s.to_owned()).ok());
-
     let stamp = stamp();
     let logs = home.join("logs/release");
     private_dir(&logs)?;
     let result_path = logs.join(format!("macos-rollback-{stamp}.json"));
+    let write_failure_receipt = |phase: &str, error: &anyhow::Error| {
+        let receipt = json!({
+            "ok": false,
+            "phase": phase,
+            "error": format!("{error:#}"),
+            "started": stamp,
+            "finished": self::stamp(),
+        });
+        let _ = atomic_json(&result_path, &receipt);
+    };
 
+    // Preflight: validate EVERYTHING before draining or stopping the service.
+    let preflight = (|| -> Result<_> {
+        runtime.check_interrupted()?;
+        let journal = load_macos_journal(home)?;
+        ensure!(
+            journal.previous_hub.join("bin/steve-hub").is_file(),
+            "previous release has no bin/steve-hub"
+        );
+        let previous_manifest = json_file(&journal.previous_hub.join("release.json"))
+            .context("previous release manifest missing; cannot roll back")?;
+        ensure!(
+            journal.previous_web.is_dir(),
+            "previous web directory missing: {}",
+            journal.previous_web.display()
+        );
+        let actual_current = canonical(&home.join("current"))
+            .context("current release symlink missing; cannot verify rollback target")?;
+        let expected_candidate =
+            canonical(&journal.candidate).unwrap_or_else(|_| journal.candidate.clone());
+        let expected_previous =
+            canonical(&journal.previous_hub).unwrap_or_else(|_| journal.previous_hub.clone());
+        match journal.stage {
+            MacosUpgradeStage::RolledBack if actual_current == expected_previous => {
+                anyhow::bail!(
+                    "installation is already rolled back to previous release {}",
+                    expected_previous.display()
+                );
+            }
+            MacosUpgradeStage::Succeeded
+            | MacosUpgradeStage::Started
+            | MacosUpgradeStage::CommittedFailed => {
+                ensure!(
+                    actual_current == expected_candidate,
+                    "current release ({}) does not match recorded upgrade candidate ({}); refusing rollback",
+                    actual_current.display(),
+                    expected_candidate.display()
+                );
+            }
+            _ => {
+                ensure!(
+                    actual_current == expected_candidate || actual_current == expected_previous,
+                    "current release ({}) matches neither candidate ({}) nor previous ({}); refusing rollback",
+                    actual_current.display(),
+                    expected_candidate.display(),
+                    expected_previous.display()
+                );
+            }
+        }
+        let (resolved_label, resolved_plist) =
+            crate::service::hub_launchd_plist_path(&runtime.service_home, home, label_override)?;
+        let label = label_override.map(str::to_owned).unwrap_or_else(|| {
+            if journal.label.is_empty() {
+                resolved_label
+            } else {
+                journal.label.clone()
+            }
+        });
+        let plist_path = if label_override.is_some() {
+            resolved_plist
+        } else {
+            journal.plist_path.clone()
+        };
+        let plist_backup_path = crate::service::previous_service_definition_path(&plist_path);
+        ensure!(
+            (crate::common::exists(&plist_backup_path) && plist_backup_path.is_file())
+                || (crate::common::exists(&plist_path) && plist_path.is_file()),
+            "neither LaunchAgent plist nor its .previous backup exists at {}",
+            plist_path.display()
+        );
+
+        let db = home.join("data/steve.sqlite3");
+        let needs_db_restore = db.is_file()
+            && (check_schema(&db, &journal.previous_hub).is_err()
+                || journal.stage == MacosUpgradeStage::Probed);
+        let helper_release = if journal.candidate.join("bin/steve-hub").is_file() {
+            journal.candidate.clone()
+        } else if actual_current.join("bin/steve-hub").is_file() {
+            actual_current.clone()
+        } else {
+            journal.previous_hub.clone()
+        };
+        if needs_db_restore {
+            ensure!(
+                journal.backup_snapshot.is_some(),
+                "database schema is newer than previous release and no backup snapshot is recorded"
+            );
+            ensure!(
+                helper_release.join("bin/steve-hub").is_file(),
+                "cannot restore database backup: helper release bin/steve-hub is missing"
+            );
+        }
+        Ok((
+            journal,
+            previous_manifest,
+            label,
+            plist_path,
+            needs_db_restore,
+            helper_release,
+        ))
+    })();
+    let (journal, previous_manifest, label, plist_path, needs_db_restore, helper_release) =
+        match preflight {
+            Ok(values) => values,
+            Err(error) => {
+                write_failure_receipt("preflight", &error);
+                return Err(error);
+            }
+        };
+
+    // Mandatory drain when /healthz answers; on drain failure, lift maintenance and abort WITHOUT bootout.
     let mut drained = false;
     if runtime.health().is_some() {
-        if home.join("updates/control-token.json").is_file()
-            && runtime.control(Method::POST).is_ok()
-        {
-            drained = true;
+        drained = true;
+        let drain_result = (|| -> Result<()> {
+            runtime.control(Method::POST)?;
             let until = Instant::now() + drain_timeout;
             loop {
+                runtime.check_interrupted()?;
                 let state = runtime.control(Method::GET)?;
                 if state["ready"] == true {
                     break;
@@ -1294,48 +1718,85 @@ fn rollback_macos_with(
                 );
                 std::thread::sleep(Duration::from_millis(200));
             }
+            Ok(())
+        })();
+        if let Err(error) = drain_result {
+            let lifted = runtime.lift().is_ok();
+            let receipt = json!({
+                "ok": false,
+                "phase": "drain",
+                "error": format!("{error:#}"),
+                "drain_lifted": lifted,
+                "started": stamp,
+                "finished": self::stamp(),
+            });
+            let _ = atomic_json(&result_path, &receipt);
+            return Ok(DeployOutcome {
+                exit_code: if lifted { 1 } else { 2 },
+                receipt,
+            });
         }
-        runtime.service_at("stop", &label, &plist_path)?;
     }
 
-    let restored_from_backup = crate::service::restore_service_definition_from_backup(&plist_path)?;
-    if !restored_from_backup {
-        crate::service::sync_hub_launchd_plist(&plist_path, home, &previous_hub)?;
-    }
-    link(&home.join("web/current"), &previous_web)?;
-    link(&home.join("current"), &previous_hub)?;
+    // Unconditionally bootout even when /healthz is dead or crash-looping, then restore everything.
+    let apply_result = (|| -> Result<(bool, bool, Value)> {
+        runtime.bootout_unconditional(&label)?;
 
-    let db = home.join("data/steve.sqlite3");
-    let mut restored_db = false;
-    if db.is_file() && check_schema(&db, &previous_hub).is_err() {
-        let snapshot = saved_snapshot.as_ref().context(
-            "database schema is newer than previous release and no backup snapshot is recorded",
-        )?;
-        restore_snapshot(runtime, &helper_release, snapshot)?;
-        restored_db = true;
-    }
+        let restored_from_backup =
+            crate::service::restore_service_definition_from_backup(&plist_path)?;
+        if !restored_from_backup {
+            crate::service::sync_hub_launchd_plist(&plist_path, home, &journal.previous_hub)?;
+        }
+        link(&home.join("web/current"), &journal.previous_web)?;
+        link(&home.join("current"), &journal.previous_hub)?;
 
-    runtime.service_at("start", &label, &plist_path)?;
-    let health = runtime.wait_health(|h| {
-        h["version"] == previous_manifest["version"]
-            && (h["build_commit"].is_null() || h["build_commit"] == previous_manifest["commit"])
-    })?;
-    let health = if drained || health["drain"] == true {
-        runtime.lift()?;
-        runtime
-            .wait_health(|h| h["version"] == previous_manifest["version"] && h["drain"] != true)?
-    } else {
-        health
+        let mut restored_db = false;
+        if needs_db_restore {
+            let snapshot = journal
+                .backup_snapshot
+                .as_ref()
+                .context("verified pre-upgrade backup snapshot missing")?;
+            restore_snapshot(runtime, &helper_release, snapshot)?;
+            restored_db = true;
+        }
+
+        runtime.service_at("start", &label, &plist_path)?;
+        let health = runtime.wait_health(|h| {
+            h["version"] == previous_manifest["version"]
+                && (h["build_commit"].is_null() || h["build_commit"] == previous_manifest["commit"])
+        })?;
+        let health = if drained || health["drain"] == true {
+            runtime.lift()?;
+            runtime.wait_health(|h| {
+                h["version"] == previous_manifest["version"] && h["drain"] != true
+            })?
+        } else {
+            health
+        };
+        Ok((restored_from_backup, restored_db, health))
+    })();
+
+    let (restored_from_backup, restored_db, health) = match apply_result {
+        Ok(values) => values,
+        Err(error) => {
+            write_failure_receipt("rollback", &error);
+            return Err(error);
+        }
     };
+
+    // Clean up rollback metadata and `.plist.previous` once rollback succeeds so repeats refuse safely.
+    remove_file_best_effort(&macos_journal_path(home));
+    let _ = crate::service::remove_service_definition_backup(&plist_path);
 
     let receipt = json!({
         "ok": true,
-        "rolled_back_to": previous_hub,
+        "rolled_back_to": journal.previous_hub,
         "version": previous_manifest["version"],
         "plist": plist_path,
         "plist_restored_from_backup": restored_from_backup,
         "database_restored": restored_db,
         "health": health,
+        "started": stamp,
         "finished": self::stamp(),
     });
     atomic_json(&result_path, &receipt)?;
@@ -1643,13 +2104,33 @@ mod tests {
                     continue;
                 }
                 if line.contains("/internal/upgrade/drain") {
+                    if let Ok(mut f) = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(home.join("drain-log"))
+                    {
+                        let _ = writeln!(f, "{line}");
+                    }
                     if line.starts_with("POST ") {
+                        if home.join("drain-fail-post").exists() {
+                            response(
+                                stream,
+                                500,
+                                json!({"error": "simulated drain post failure"}),
+                            );
+                            continue;
+                        }
                         maintenance = true;
                     }
                     if line.starts_with("DELETE ") {
                         maintenance = false;
                     }
-                    response(stream, 200, json!({"ready":true,"maintenance":maintenance}));
+                    let ready = !home.join("drain-never-ready").exists();
+                    response(
+                        stream,
+                        200,
+                        json!({"ready": ready, "maintenance": maintenance}),
+                    );
                 } else {
                     let manifest = json_file(&home.join("current/release.json")).unwrap();
                     if fs::read_to_string(home.join("fail-health-version"))
@@ -1757,6 +2238,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             launchctl: manager,
             service_home: home.to_owned(),
             health_timeout: Duration::from_secs(3),
+            interrupt: Arc::new(AtomicBool::new(false)),
             simulated_service: true,
         };
         let id = uuid::Uuid::new_v4().to_string();
@@ -2099,7 +2581,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
                 r#"#!/bin/sh
 case "${{1:-}}" in
     --build-info) printf '%s\n' '{{"version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target":"aarch64-apple-darwin","schema":54,"check_config":true}}'; exit 0;;
-    --check-config) printf '%s\n' '{{"ok":true}}'; exit 0;;
+    --check-config) printf '%s\n' '{{"ok":true,"harnesses":{{"missing_adapters":[],"missing_node":false,"resolved_adapters":[]}}}}'; exit 0;;
     --admin)
         case "$2" in
             backup) [ "$3 $4 $5" = "--reason pre-upgrade --offline" ] || exit 9
@@ -2112,7 +2594,8 @@ case "${{1:-}}" in
         esac
         exit 0;;
 esac
-exit 0
+export STEVE_NATIVE_TEST_FIXTURE=1
+exec {quoted} --exact release::tests::fixture_process --nocapture
 "#,
                 snapshot = "a".repeat(64),
             ),
@@ -2123,7 +2606,7 @@ exit 0
         executable(
             &manager,
             &format!(
-                "#!/bin/sh\ncase \"$1\" in bootout) printf stop > {quoted_home}/service-state;; bootstrap) printf start > {quoted_home}/service-state;; *) exit 4;; esac\n"
+                "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> {quoted_home}/launchctl-log\ncase \"$1\" in bootout) printf stop > {quoted_home}/service-state;; bootstrap) printf start > {quoted_home}/service-state;; *) exit 4;; esac\n"
             ),
         );
         fs::write(home.join("service-state"), "start").unwrap();
@@ -2144,6 +2627,7 @@ exit 0
             launchctl: manager,
             service_home: home.to_owned(),
             health_timeout: Duration::from_secs(2),
+            interrupt: Arc::new(AtomicBool::new(false)),
             simulated_service: true,
         };
         (
@@ -2154,6 +2638,24 @@ exit 0
             original_plist,
             runtime,
             service,
+        )
+    }
+
+    fn run_upgrade_macos(
+        runtime: &Runtime,
+        candidate: &Path,
+        label_override: Option<&str>,
+        drain_timeout: Duration,
+        signing_password: Option<&str>,
+    ) -> Result<DeployOutcome> {
+        let lock = lock_release(&runtime.home)?;
+        upgrade_macos_with(
+            runtime,
+            candidate,
+            label_override,
+            drain_timeout,
+            signing_password,
+            &lock,
         )
     }
 
@@ -2176,13 +2678,13 @@ exit 0
             fs::create_dir_all(bad_script.parent().unwrap()).unwrap();
             fs::write(&bad_script, "#!/bin/sh\n").unwrap();
             assert!(
-                upgrade_macos_with(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
                     .is_err()
             );
             fs::remove_dir_all(ext_candidate.join("ops")).unwrap();
 
             let outcome =
-                upgrade_macos_with(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
                     .unwrap();
             assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
             let current = fs::canonicalize(home.join("current")).unwrap();
@@ -2205,6 +2707,16 @@ exit 0
             };
             assert_eq!(rewritten["ProgramArguments"], expected_args);
             assert_eq!(
+                rewritten["WorkingDirectory"],
+                json!(format!("{}/current", home.display()))
+            );
+            assert_eq!(rewritten["EnvironmentVariables"]["NO_COLOR"], json!("1"));
+            assert!(
+                rewritten["EnvironmentVariables"]["PATH"]
+                    .as_str()
+                    .is_some_and(|p| p.contains("/opt/homebrew/bin"))
+            );
+            assert_eq!(
                 crate::service::detect_legacy_hub_launchd_plist(&plist_path, home),
                 None
             );
@@ -2225,18 +2737,20 @@ exit 0
 
     #[test]
     fn macos_upgrade_from_012_auto_rolls_back_on_health_probe_failure() {
-        let (dir, _ext_dir, ext_candidate, plist_path, original_plist, runtime, _service) =
+        let (dir, _ext_dir, ext_candidate, plist_path, original_plist, mut runtime, _service) =
             macos_012_fixture(false);
         let home = dir.path();
-        // Simulate new version 1.2.3 failing /healthz after launchd start.
-        fs::write(home.join("fail-health-version"), "1.2.3").unwrap();
+        // Simulate pre-commit maintenance probe failure after migrating DB -> auto rollback to 0.12.0.
+        runtime
+            .env
+            .insert("STEVE_NATIVE_TEST_PROBE_FAIL".into(), "1".into());
 
         let outcome =
-            upgrade_macos_with(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
                 .unwrap();
         assert_eq!(outcome.exit_code, 1, "{}", outcome.receipt);
         assert_eq!(outcome.receipt["rolled_back"], true);
-        assert_eq!(outcome.receipt["phase"], "health");
+        assert_eq!(outcome.receipt["phase"], "probe");
         assert_eq!(
             json_file(&home.join("current/release.json")).unwrap()["version"],
             "0.12.0"
@@ -2265,7 +2779,7 @@ exit 0
             macos_012_fixture(false);
         let home = dir.path();
         let upgraded =
-            upgrade_macos_with(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
                 .unwrap();
         assert_eq!(upgraded.exit_code, 0, "{}", upgraded.receipt);
         assert_eq!(
@@ -2274,8 +2788,13 @@ exit 0
         );
         assert_ne!(fs::read(&plist_path).unwrap(), original_plist);
 
-        // Simulate DB schema bumped after upgrade so manual rollback also proves DB restoration.
-        set_schema(&home.join("data/steve.sqlite3"), 54, Some(54)).unwrap();
+        // Maintenance probe already migrated DB to schema 54 -> manual rollback must restore schema 53.
+        assert_eq!(
+            inspect_schema(&home.join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
+            54
+        );
 
         let rolled_back = rollback_macos_with(&runtime, None, Duration::from_secs(2)).unwrap();
         assert_eq!(rolled_back.exit_code, 0, "{}", rolled_back.receipt);
@@ -2300,6 +2819,372 @@ exit 0
         assert_eq!(
             fs::read_to_string(home.join("service-state")).unwrap(),
             "start"
+        );
+    }
+
+    #[test]
+    fn review593_1_drain_failure_lifts_maintenance_on_upgrade_and_rollback() {
+        let (dir, _ext_dir, ext_candidate, _plist_path, _original_plist, runtime, _service) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        private_dir(&home.join("updates")).unwrap();
+        signing::exclusive_json(&home.join("updates/control-token.json"), &json!("tok")).unwrap();
+        // Part A: upgrade drain timeout must lift maintenance instead of leaving 0.12.0 stuck in 503.
+        fs::write(home.join("drain-never-ready"), "1").unwrap();
+        let outcome = run_upgrade_macos(
+            &runtime,
+            &ext_candidate,
+            None,
+            Duration::from_millis(250),
+            None,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, 1, "{}", outcome.receipt);
+        let health = runtime.health().expect("0.12.0 must still answer /healthz");
+        assert_eq!(
+            health["drain"], false,
+            "drain timeout must lift maintenance instead of leaving 0.12.0 stuck in 503: {health}"
+        );
+
+        // Part B: rollback drain timeout must ALSO lift maintenance without calling bootout.
+        fs::remove_file(home.join("drain-never-ready")).unwrap();
+        let upgraded =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(upgraded.exit_code, 0, "{}", upgraded.receipt);
+        let _ = fs::remove_file(home.join("launchctl-log"));
+        fs::write(home.join("drain-never-ready"), "1").unwrap();
+        let rb = rollback_macos_with(&runtime, None, Duration::from_millis(250)).unwrap();
+        assert_eq!(rb.exit_code, 1, "{}", rb.receipt);
+        assert_eq!(rb.receipt["drain_lifted"], true);
+        let rb_health = runtime.health().expect("1.2.3 must still answer /healthz");
+        assert_eq!(
+            rb_health["drain"], false,
+            "rollback drain timeout must lift maintenance: {rb_health}"
+        );
+        assert!(
+            !fs::read_to_string(home.join("launchctl-log"))
+                .unwrap_or_default()
+                .contains("bootout"),
+            "rollback drain timeout must NOT bootout running Hub"
+        );
+    }
+
+    #[test]
+    fn review593_2_missing_token_creates_token_and_drain_error_aborts_without_bootout() {
+        let (dir, _ext_dir, ext_candidate, _plist_path, _original_plist, runtime, _service) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Missing control-token.json must NOT skip drain; drain POST failure must abort before bootout.
+        assert!(!home.join("updates/control-token.json").exists());
+        fs::write(home.join("drain-fail-post"), "1").unwrap();
+        let outcome =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_ne!(outcome.exit_code, 0, "drain failure must abort upgrade");
+        assert!(
+            home.join("updates/control-token.json").is_file(),
+            "upgrade_macos must create missing control-token.json via Runtime::control"
+        );
+        let launchctl_log = fs::read_to_string(home.join("launchctl-log")).unwrap_or_default();
+        assert!(
+            !launchctl_log.contains("bootout"),
+            "drain failure must NOT bootout running Hub: {launchctl_log}"
+        );
+    }
+
+    #[test]
+    fn review593_4_upgrade_rejects_broken_harness_path() {
+        let (dir, _ext_dir, ext_candidate, _plist_path, _original_plist, runtime, _service) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Candidate --check-config reports a missing configured adapter/node on the effective PATH.
+        let stub = ext_candidate.join("bin/steve-hub");
+        let original_stub = fs::read_to_string(&stub).unwrap();
+        let broken_stub = original_stub.replace(
+            r#"--check-config) printf '%s\n' '{"ok":true,"harnesses":{"missing_adapters":[],"missing_node":false,"resolved_adapters":[]}}'; exit 0;;"#,
+            r#"--check-config) printf '%s\n' '{"ok":true,"warnings":["missing adapter"],"harnesses":{"missing_adapters":["claude"],"missing_node":true,"resolved_adapters":[]}}'; exit 0;;"#,
+        );
+        assert_ne!(original_stub, broken_stub);
+        executable(&stub, &broken_stub);
+        let res = run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None);
+        let failed = match &res {
+            Err(_) => true,
+            Ok(o) => o.exit_code != 0,
+        };
+        assert!(
+            failed,
+            "upgrade must refuse/fail when configured harness or node is unreachable in effective PATH: {:?}",
+            res.map(|o| (o.exit_code, o.receipt))
+        );
+        assert_eq!(
+            json_file(&home.join("current/release.json")).unwrap()["version"],
+            "0.12.0"
+        );
+    }
+
+    #[test]
+    fn review593_5_signing_preserves_release_lock_for_entire_upgrade() {
+        let (dir, _ext_dir, ext_candidate, _plist_path, _original_plist, mut runtime, _service) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Make codesign fail ONLY for the newly staged unsigned 1.2.3 steve-hub until
+        // codesign --force --sign runs, while installed 0.12.0 current/bin/steve-hub and
+        // bin/steve-keyhelper stay verified as on a real signed macOS installation.
+        let flag = home.join("signed-once");
+        let codesign = home.join("codesign");
+        executable(
+            &codesign,
+            &format!(
+                r#"#!/bin/sh
+case "$1" in
+    --force) touch '{flag}'; exit 0;;
+    --verify)
+        case "$3" in
+            *1.2.3*/bin/steve-hub) [ -f '{flag}' ] || exit 1; exit 0;;
+            *) exit 0;;
+        esac;;
+    -dv)
+        case "$2" in
+            *steve-keyhelper) printf 'Identifier=io.github.infranite.steve.keyhelper\n' >&2; exit 0;;
+            *1.2.3*/bin/steve-hub) [ -f '{flag}' ] || exit 1; printf 'Identifier=io.github.infranite.steve.hub\n' >&2; exit 0;;
+            *) printf 'Identifier=io.github.infranite.steve.hub\n' >&2; exit 0;;
+        esac;;
+esac
+exit 0
+"#,
+                flag = flag.display()
+            ),
+        );
+        runtime.tools.codesign = codesign;
+        fs::create_dir_all(home.join("bin")).unwrap();
+        executable(&home.join("bin/steve-keyhelper"), "#!/bin/sh\nexit 0\n");
+        fs::write(home.join("signing/steve-signing.keychain-db"), "kc").unwrap();
+
+        // Hold release lock in parent (as upgrade_macos does) and verify lock survives signing!
+        let lock = lock_release(home).unwrap();
+        let pass = "0123456789abcdef".repeat(4);
+        let outcome = upgrade_macos_with(
+            &runtime,
+            &ext_candidate,
+            None,
+            Duration::from_secs(2),
+            Some(&pass),
+            &lock,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
+
+        // Spawn a separate process attempting non-blocking F_SETLK on releases/.release.lock:
+        // if prepare_bundle opened & closed a second fd, POSIX dropped our lock and python succeeds!
+        let lock_path = home.join("releases/.release.lock");
+        let probe = Command::new("python3")
+            .args([
+                "-c",
+                "import fcntl, sys; f = open(sys.argv[1], 'r+'); fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+            ])
+            .arg(&lock_path)
+            .status()
+            .unwrap();
+        assert!(
+            !probe.success(),
+            "parent's POSIX release lock must still be held after signing inside upgrade_macos"
+        );
+    }
+
+    #[test]
+    fn review593_6_interrupt_mid_upgrade_recovers_and_rerun_preserves_012_target() {
+        let (dir, _ext_dir, ext_candidate, plist_path, original_plist, mut runtime, _service) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Part A: SIGINT/SIGTERM during upgrade must abort cleanly without leaving Hub stuck in drain.
+        runtime.interrupt.store(true, Ordering::SeqCst);
+        let sig_err =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None);
+        assert!(
+            sig_err.is_err(),
+            "pending SIGINT/SIGTERM must abort before mutating installation"
+        );
+        runtime.interrupt.store(false, Ordering::SeqCst);
+
+        // Part B: crash right after stop/backup (before switch): backup fails -> journal + .plist.previous persist.
+        runtime
+            .env
+            .insert("STEVE_NATIVE_TEST_BACKUP_FAIL".into(), "1".into());
+        let failed =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_ne!(failed.exit_code, 0);
+        assert!(
+            home.join("releases/.macos-rollback.json").is_file(),
+            "durable upgrade journal must be written before backup/switch"
+        );
+        assert_eq!(
+            fs::read(crate::service::previous_service_definition_path(
+                &plist_path
+            ))
+            .unwrap(),
+            original_plist,
+            ".plist.previous must be captured at Step 0 before any mutation"
+        );
+        // Simulate a mid-switch crash where current points to 1.2.3 before finish:
+        // re-running upgrade_macos must preserve 0.12.0 as previous_hub, never overwrite it with 1.2.3!
+        runtime.env.remove("STEVE_NATIVE_TEST_BACKUP_FAIL");
+        let staged = fs::read_dir(home.join("releases"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("1.2.3-"))
+            })
+            .expect("staged 1.2.3 dir");
+        link(&home.join("current"), &staged).unwrap();
+        let resumed =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(resumed.exit_code, 0, "{}", resumed.receipt);
+        let meta = json_file(&home.join("releases/.macos-rollback.json")).unwrap();
+        assert_eq!(
+            meta["previous_hub"],
+            json!(fs::canonicalize(home.join("releases/0.12.0")).unwrap()),
+            "re-running after mid-switch crash must keep 0.12.0 as rollback target"
+        );
+        // And manual rollback from that resumed upgrade must restore 0.12.0 & original plist.
+        let rb = rollback_macos_with(&runtime, None, Duration::from_secs(2)).unwrap();
+        assert_eq!(rb.exit_code, 0, "{}", rb.receipt);
+        assert_eq!(fs::read(&plist_path).unwrap(), original_plist);
+    }
+
+    #[test]
+    fn review593_7_rollback_preflights_unconditionally_bootouts_and_cleans_metadata() {
+        let (dir, _ext_dir, ext_candidate, plist_path, original_plist, runtime, _service) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        let upgraded =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(upgraded.exit_code, 0, "{}", upgraded.receipt);
+
+        let count_rollback_receipts = || -> usize {
+            fs::read_dir(home.join("logs/release"))
+                .unwrap()
+                .flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("macos-rollback-")
+                })
+                .count()
+        };
+
+        // 1) Preflight check: incompatible schema with missing backup snapshot must fail BEFORE bootout
+        //    and leave the running Hub untouched + write a failure receipt.
+        let meta_path = home.join("releases/.macos-rollback.json");
+        let mut meta = json_file(&meta_path).unwrap();
+        let saved_snap = meta["backup_snapshot"].clone();
+        meta["backup_snapshot"] = Value::Null;
+        atomic_json(&meta_path, &meta).unwrap();
+        set_schema(&home.join("data/steve.sqlite3"), 54, Some(54)).unwrap();
+        let _ = fs::remove_file(home.join("launchctl-log"));
+        let before_receipts = count_rollback_receipts();
+        let err = rollback_macos_with(&runtime, None, Duration::from_secs(2));
+        assert!(err.is_err());
+        assert!(
+            count_rollback_receipts() > before_receipts,
+            "failed rollback preflight must still write a receipt"
+        );
+        assert!(
+            !fs::read_to_string(home.join("launchctl-log"))
+                .unwrap_or_default()
+                .contains("bootout"),
+            "missing backup snapshot preflight must fail BEFORE bootout"
+        );
+        meta["backup_snapshot"] = saved_snap;
+        atomic_json(&meta_path, &meta).unwrap();
+
+        // 2) Preflight check: current pointing to an unrelated third release must refuse BEFORE bootout.
+        let third = home.join("releases/1.2.9-other");
+        fs::create_dir_all(&third).unwrap();
+        let real_candidate = fs::canonicalize(home.join("current")).unwrap();
+        link(&home.join("current"), &third).unwrap();
+        let _ = fs::remove_file(home.join("launchctl-log"));
+        assert!(rollback_macos_with(&runtime, None, Duration::from_secs(2)).is_err());
+        assert!(
+            !fs::read_to_string(home.join("launchctl-log"))
+                .unwrap_or_default()
+                .contains("bootout"),
+            "current mismatch preflight must fail BEFORE bootout"
+        );
+        link(&home.join("current"), &real_candidate).unwrap();
+
+        // 3) Hung / crash-looping new Hub (/healthz unreachable) MUST still be unconditionally bootout'd!
+        fs::write(home.join("fail-health-version"), "1.2.3").unwrap();
+        let _ = fs::remove_file(home.join("launchctl-log"));
+        let rb = rollback_macos_with(&runtime, None, Duration::from_secs(2)).unwrap();
+        assert_eq!(rb.exit_code, 0, "{}", rb.receipt);
+        let llog = fs::read_to_string(home.join("launchctl-log")).unwrap_or_default();
+        assert!(
+            llog.contains("bootout"),
+            "rollback must unconditionally bootout even when /healthz is dead: {llog}"
+        );
+        assert_eq!(fs::read(&plist_path).unwrap(), original_plist);
+        // 4) Metadata AND .plist.previous cleaned after rollback so a second rollback refuses safely.
+        assert!(
+            !meta_path.exists(),
+            "rollback metadata must be removed once rollback completes"
+        );
+        assert!(
+            !crate::service::previous_service_definition_path(&plist_path).exists(),
+            ".plist.previous must be removed once rollback completes"
+        );
+        assert!(
+            rollback_macos_with(&runtime, None, Duration::from_secs(2)).is_err(),
+            "repeating rollback_macos after completion must refuse cleanly"
+        );
+    }
+
+    #[test]
+    fn review593_8_upgrade_runs_maintenance_probe_and_refuses_db_rollback_after_commit() {
+        // Part A: pre-commit maintenance probe failure must abort and restore DB before switching.
+        let (dir_p, _ext_p, cand_p, plist_p, orig_p, mut rt_p, _svc_p) = macos_012_fixture(false);
+        rt_p.env
+            .insert("STEVE_NATIVE_TEST_PROBE_FAIL".into(), "1".into());
+        let res_p = run_upgrade_macos(&rt_p, &cand_p, None, Duration::from_secs(2), None).unwrap();
+        assert_eq!(
+            res_p.exit_code, 1,
+            "maintenance probe failure must fail & auto-rollback before switch: {}",
+            res_p.receipt
+        );
+        assert_eq!(
+            json_file(&dir_p.path().join("current/release.json")).unwrap()["version"],
+            "0.12.0"
+        );
+        assert_eq!(fs::read(&plist_p).unwrap(), orig_p);
+        assert_eq!(
+            inspect_schema(&dir_p.path().join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
+            53
+        );
+
+        // Part B: post-commit startup failure (after launchd bootstrap) must follow deploy's
+        // committed_startup_failed policy (exit 3, keep new DB, NO automatic DB rollback).
+        let (dir_c, _ext_c, cand_c, _plist_c, _orig_c, rt_c, _svc_c) = macos_012_fixture(false);
+        fs::write(dir_c.path().join("fail-health-version"), "1.2.3").unwrap();
+        let res_c = run_upgrade_macos(&rt_c, &cand_c, None, Duration::from_secs(2), None).unwrap();
+        assert_eq!(
+            res_c.exit_code, 3,
+            "post-start failure must return exit 3 (committed_startup_failed) without rolling back DB: {}",
+            res_c.receipt
+        );
+        assert_eq!(res_c.receipt["error_code"], "committed_startup_failed");
+        assert_eq!(
+            inspect_schema(&dir_c.path().join("data/steve.sqlite3"))
+                .unwrap()
+                .schema,
+            54,
+            "post-commit failure must retain migrated DB"
         );
     }
     #[test]

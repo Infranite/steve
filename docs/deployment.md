@@ -1090,7 +1090,7 @@ Candidate maintenance probes allow **60 seconds without migration progress**, wi
 **Upgrading from v0.12.0 or an older runner:** older releases launched the Hub through legacy shell wrapper scripts under `current/ops/`.
 
 - **Linux:** no manual steps are required. Upgrade from **Settings → About** as usual; once the new Hub commits, it automatically rewrites the systemd user unit to launch `steve-hub --supervise` directly and runs `systemctl --user daemon-reload`.
-- **macOS:** perform a one-time upgrade using only the Rust binary inside the new release package (zero scripts). It validates the script-free bundle, stages it into `$STEVE_HOME/releases/`, switches `current` and `web/current`, rewrites the LaunchAgent plist to launch `steve-hub` directly (saving `.plist.previous`), starts launchd, and probes `/healthz`—automatically rolling back to v0.12.0 if any step fails:
+- **macOS (v0.12.0 and earlier):** v0.12.0's own **Settings → About** page predates the legacy-plist detector and will not display this prompt—run the one-time Rust upgrade command below in Terminal directly from the new release package (zero scripts). It reads `<STEVE_HOME>/steve.env`, writes a durable rollback journal (`releases/.macos-rollback.json`) and `.plist.previous` before touching the running Hub, validates the script-free bundle, drains active turns, takes an offline SQLite backup, runs the same maintenance probe (vault check + 60s idle / 15-minute migration budget) as in-app upgrades, switches `current` and `web/current`, rewrites the LaunchAgent plist with direct `steve-hub` invocation (`PATH`, `NO_COLOR=1`, and `WorkingDirectory`), verifies configured harnesses and `node`, and starts launchd. Pre-commit failures automatically roll back to v0.12.0 (lifting maintenance drain); failures after the new Hub has started follow `committed_startup_failed` (exit code 3, retaining the new database):
 
 ```sh
 # Homebrew installations:
@@ -1102,13 +1102,20 @@ rm -rf /tmp/steve-upgrade && mkdir -p /tmp/steve-upgrade && \
   /tmp/steve-upgrade/bin/steve-hub --local-release upgrade-macos --home ~/.steve
 ```
 
-To roll back manually to v0.12.0 afterward (restoring `current`, the exact original `.plist.previous`, and the database snapshot if schema changed):
+On signed macOS installations using the login Keychain, an unpacked `/tmp/steve-upgrade/bin/steve-hub` binary is not yet signed with your local Hub certificate, so `steve-keyhelper` refuses it by design. `upgrade-macos` automatically falls back to an interactive macOS Keychain prompt for `steve/signing/keychain-pass`. In headless/SSH sessions where a GUI Keychain dialog cannot appear, pipe the Keychain entry explicitly with `--keychain-pass-stdin` (accepts either the base64 Keychain item value or the raw 64-hex signing keychain password):
+
+```sh
+security find-generic-password -s io.github.infranite.steve.vault -a steve/signing/keychain-pass -w | \
+  /tmp/steve-upgrade/bin/steve-hub --local-release upgrade-macos --home ~/.steve --keychain-pass-stdin
+```
+
+To roll back manually to v0.12.0 afterward (preflights before stopping, unconditionally unloads launchd even if `/healthz` is unreachable, restores `current`, the exact original `.plist.previous`, and the database snapshot if schema changed, then cleans up rollback metadata and writes a receipt):
 
 ```sh
 ~/.steve/current/bin/steve-hub --local-release rollback-macos --home ~/.steve
 ```
 
-When Settings → About detects a legacy macOS LaunchAgent plist, it disables one-click upgrade and displays the exact copyable command for that installation. Once migrated, future upgrades return to one-click in Settings → About.
+In this release and later, if **Settings → About** detects a legacy macOS LaunchAgent plist, it disables one-click upgrade and displays the copyable command for that installation (note: v0.12.0 itself does not have this detector, so v0.12.0 macOS users must run the terminal command above). Once migrated, future upgrades (including post-commit LaunchAgent plist migration for legacy managed installs) return to one-click in **Settings → About**.
 
 It must be run by the installation owner with no other upgrade in progress. Merely changing `current` to bootstrap a candidate with pending migrations skips that upgrade gate; ordinary startup and rollback health checks retain their 60-second window. Do not edit released migration SQL or add indexes manually. Retain the probe log, migration progress file and deployment receipt when a bounded probe fails; progress reporting does not declare the candidate healthy or permit business operations during migration.
 

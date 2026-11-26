@@ -492,19 +492,20 @@ fn read_env_file_vars(
         })?;
     Ok(parsed
         .into_iter()
-        .filter(|(k, _)| !existing.contains_key(k))
+        .filter(|(k, _)| k == "PATH" || !existing.contains_key(k))
         .collect())
 }
 
 /// Loads `<STEVE_HOME>/steve.env` into the process environment at startup without overriding
-/// variables already supplied by the caller or service manager.
+/// variables already supplied by the caller or service manager — except `PATH`, where launchd
+/// always supplies a minimal default and an explicit `PATH` in `steve.env` must take effect.
 ///
 /// Must be called once in `main()` before spawning worker threads or building the Tokio runtime.
 pub fn load_env_file() -> Result<(), ConfigError> {
     let existing: BTreeMap<String, String> = std::env::vars().collect();
     let to_set = read_env_file_vars(&existing)?;
     for (key, value) in to_set {
-        if std::env::var_os(&key).is_none() {
+        if key == "PATH" || std::env::var_os(&key).is_none() {
             // SAFETY: invoked at process startup in main() while single-threaded, before the
             // Tokio runtime or any background threads exist.
             unsafe {
@@ -1415,5 +1416,33 @@ mod tests {
         std::fs::write(web_current.join("index.html"), "<!doctype html>").unwrap();
         let c = cfg(&[("STEVE_HOME", dir.path().to_str().unwrap())]);
         assert_eq!(c.web_dir, resolve(&web_current));
+    }
+
+    #[test]
+    fn review593_4_steve_env_path_overrides_minimal_launchd_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("hub");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("steve.env"),
+            "PATH=/opt/homebrew/bin:/custom/tools:$PATH\nSTEVE_PORT=9123\n",
+        )
+        .unwrap();
+        // Simulate launchd passing a minimal PATH while steve.env declares Homebrew + custom tools.
+        let existing = BTreeMap::from([
+            ("STEVE_HOME".into(), home.display().to_string()),
+            ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+            ("STEVE_PORT".into(), "18888".into()),
+        ]);
+        let loaded = read_env_file_vars(&existing).unwrap();
+        assert_eq!(
+            loaded.get("PATH").map(String::as_str),
+            Some("/opt/homebrew/bin:/custom/tools:/usr/bin:/bin:/usr/sbin:/sbin"),
+            "PATH in steve.env must override launchd's minimal inherited PATH"
+        );
+        assert!(
+            !loaded.contains_key("STEVE_PORT"),
+            "non-PATH explicit caller overrides must still win over steve.env"
+        );
     }
 }

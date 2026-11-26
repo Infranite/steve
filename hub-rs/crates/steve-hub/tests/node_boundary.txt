@@ -75,7 +75,7 @@ Fs	steve-hub/src/wire/local_service.rs	9
 Fs	steve-hub/src/wire/node_files.rs	1
 Fs	steve-install/src/common.rs	7
 Fs	steve-install/src/publish.rs	7
-Fs	steve-install/src/release.rs	10
+Fs	steve-install/src/release.rs	9
 Fs	steve-install/src/service.rs	35
 Fs	steve-install/src/service/boot.rs	7
 Fs	steve-install/src/setup.rs	13

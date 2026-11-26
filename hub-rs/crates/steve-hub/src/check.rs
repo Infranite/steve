@@ -14,6 +14,14 @@ use serde::Serialize;
 
 use crate::config::Config;
 
+/// Typed harness and Node.js availability summary for `--check-config` and upgrade preflight.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct HarnessCheck {
+    pub missing_adapters: Vec<String>,
+    pub missing_node: bool,
+    pub resolved_adapters: Vec<String>,
+}
+
 /// What `--check-config` prints (one JSON line); `ok` is false when any error was found.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Report {
@@ -24,6 +32,8 @@ pub struct Report {
     pub listen: Vec<String>,
     /// Non-blocking setup or migration work, and unavailable optional confinement.
     pub warnings: Vec<String>,
+    /// Typed adapter/Node.js availability under the caller's `PATH`.
+    pub harnesses: HarnessCheck,
 }
 
 /// Every environment check of a real start, on `get` (the process environment in production).
@@ -38,6 +48,7 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
                 errors: vec![e.to_string()],
                 listen: Vec::new(),
                 warnings: Vec::new(),
+                harnesses: HarnessCheck::default(),
             };
         }
     };
@@ -60,12 +71,15 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
         }
     }
     let mut warnings = Vec::new();
+    let mut harnesses = HarnessCheck::default();
     match crate::wire::node_mode(&vars, cfg.diagnostic()) {
         Err(e) => errors.push(e.to_string()),
         Ok(None) => {}
         // the local Node's runs in the OS sandbox (never a reason not to start)
         Ok(_) => {
-            warnings.extend(local_node_warnings(&cfg, &vars));
+            let (node_warnings, checked) = local_node_checks(&cfg, &vars);
+            warnings.extend(node_warnings);
+            harnesses = checked;
             if let Err(why) = steve_confine::confinement(
                 &cfg.home,
                 &cfg.data_dir.join("node"),
@@ -101,13 +115,19 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
         errors,
         listen: cfg.listen.urls().split(", ").map(str::to_string).collect(),
         warnings,
+        harnesses,
     }
 }
 
 /// Setup guidance shared by preflight and a normal boot. No harness is spawned and no login
 /// contents are inspected: the operator, not Steve, authenticates each principal's harness.
 pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec<String> {
+    local_node_checks(cfg, vars).0
+}
+
+fn local_node_checks(cfg: &Config, vars: &crate::wire::Vars) -> (Vec<String>, HarnessCheck) {
     let mut warnings = Vec::new();
+    let mut harnesses = HarnessCheck::default();
     let path = vars("PATH").unwrap_or_default();
     let available = |program: &str, executable: bool| {
         use std::os::unix::fs::PermissionsExt;
@@ -146,23 +166,29 @@ pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec
             {
                 continue;
             }
+            harnesses.missing_adapters.push(harness.clone());
             warnings.push(steve_i18n::t!(
                 "hub.check.adapter_missing",
                 harness = harness,
                 adapter = adapter
             ));
         } else if js && !available(&cfg.node, true) {
+            harnesses.missing_node = true;
             warnings.push(steve_i18n::t!(
                 "hub.check.node_missing",
                 node = cfg.node,
                 harness = harness
             ));
+        } else {
+            harnesses.resolved_adapters.push(harness.clone());
         }
     }
+    harnesses.missing_adapters.sort();
+    harnesses.resolved_adapters.sort();
     if crate::wire::principal_state(vars) {
         warnings.push(steve_i18n::t!("hub.check.principal_state"));
     }
-    warnings
+    (warnings, harnesses)
 }
 
 /// A start makes `d` (`create_dir_all`): it is a directory already, or its nearest existing
