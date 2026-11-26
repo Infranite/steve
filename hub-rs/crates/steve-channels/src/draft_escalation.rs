@@ -109,38 +109,40 @@ fn already_escalated(result_json: Option<&str>) -> bool {
         == Some(true)
 }
 
-/// Scans open @-mention and DM drafts and escalates any that have remained unhandled for at least
-/// [`DRAFT_ESCALATE_WORK_HOURS`] working hours. Returns how many drafts were escalated.
+/// Scans open @-mention and DM drafts using the module's injected clock and each workspace
+/// owner's configured timezone ([`Zone::for_owner`]), escalating any draft that has remained
+/// unhandled for at least [`DRAFT_ESCALATE_WORK_HOURS`] working hours. Returns how many drafts
+/// were escalated.
 pub fn escalate_due(ch: &Channels) -> ChannelResult<usize> {
     escalate_due_in(ch.store(), ch.now())
 }
 
-/// Store-level escalation pass at timestamp `now` (used by [`escalate_due`] and deterministic
-/// unit tests).
+/// Store-level escalation pass at injected timestamp `now` (used by [`escalate_due`] and
+/// deterministic unit tests). Working hours are evaluated in each workspace owner's timezone via
+/// [`Zone::for_owner`].
 pub fn escalate_due_in(store: &Store, now: i64) -> ChannelResult<usize> {
-    let (candidates, zones) = store.read(|r| -> ChannelResult<_> {
+    let candidates = store.read(|r| -> ChannelResult<_> {
         let rows = message_repo::open_addressed_drafts(r)?;
         let mut zones: HashMap<String, Tz> = HashMap::new();
-        for row in &rows {
-            if !zones.contains_key(&row.ws) {
-                let tz = Zone::for_owner(r, &row.ws)
-                    .map(|z| z.tz)
-                    .unwrap_or_else(|_| steve_modules::zone::default_tz());
-                zones.insert(row.ws.clone(), tz);
-            }
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let tz = match zones.get(&row.ws) {
+                Some(&tz) => tz,
+                None => {
+                    let tz = Zone::for_owner(r, &row.ws)?.tz;
+                    zones.insert(row.ws.clone(), tz);
+                    tz
+                }
+            };
+            out.push((row, tz));
         }
-        Ok((rows, zones))
+        Ok(out)
     })?;
     let due: Vec<_> = candidates
         .into_iter()
-        .filter(|c| !already_escalated(c.result_json.as_deref()))
-        .filter(|c| {
-            let tz = zones
-                .get(&c.ws)
-                .copied()
-                .unwrap_or_else(steve_modules::zone::default_tz);
-            is_escalation_due(c.created, now, tz)
-        })
+        .filter(|(c, _)| !already_escalated(c.result_json.as_deref()))
+        .filter(|(c, tz)| is_escalation_due(c.created, now, *tz))
+        .map(|(c, _)| c)
         .collect();
     if due.is_empty() {
         return Ok(0);
@@ -293,91 +295,119 @@ mod tests {
         ));
     }
 
+    struct EscalationHarness {
+        env: TestEnv,
+        _keys: tempfile::TempDir,
+        ch: Channels,
+        me: String,
+    }
+
+    impl EscalationHarness {
+        fn new(start: i64, ws_tz: &str, owner_tz: Option<&str>) -> Self {
+            let core = Arc::new(FakeCore::default());
+            let flow_setup = FlowSetup::new(core);
+            let link = OutLink::new();
+            let reg_link = link.clone();
+            let env = TestEnv::new(|r| {
+                flow_setup.register(r);
+                connections::register(r);
+                r.decision(SUBJECT_MESSAGE, reg_link.handler());
+            });
+            env.clock.set(start);
+            link.bind_clock(env.clock.clone());
+            env.store()
+                .settings()
+                .set(WS, json!({"tz": ws_tz}).as_object().unwrap(), ME)
+                .unwrap();
+            if let Some(tz) = owner_tz {
+                steve_store::testkit::modules::notification_timezone(env.store(), WS, ME, tz)
+                    .unwrap();
+            }
+            let keys = tempfile::tempdir().unwrap();
+            let vault = Vault::new(
+                env.store().clone(),
+                Arc::new(FileKeyStore::open(keys.path()).unwrap()),
+            );
+            let fake = Arc::new(FakeChannel::new());
+            let conns = Connections::builder(
+                env.modules.clone(),
+                vault,
+                ConnectionsConfig::new(Vec::new(), true, |_| None),
+            )
+            .provider(fake.clone())
+            .build();
+            let outbox = Arc::new(Outbox::new(link));
+            let replies = Arc::new(Replies::new().outbound(outbox));
+            let flow = flow_setup
+                .connections(conns.clone())
+                .build(env.modules.clone(), Arc::new(LinearExecutor));
+            let ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
+                .adapter(fake.clone())
+                .responder(replies)
+                .flow(flow)
+                .build();
+            let (me, _) =
+                FakeChannel::seed_connection(env.store(), &caller(WS, ME), Some("upx")).unwrap();
+            fake.space("D_LI", "", SpaceKind::Dm, false, &[("ulilei", "李雷")]);
+            fake.space(
+                "G_DEV",
+                "开发群",
+                SpaceKind::Group,
+                false,
+                &[("ulilei", "李雷")],
+            );
+            fake.space(
+                "G_DIRECT",
+                "公告群",
+                SpaceKind::Group,
+                false,
+                &[("ulilei", "李雷")],
+            );
+            env.store()
+                .write(|w| {
+                    spaces::set_account_rules(
+                        w,
+                        &Viewer::bare(WS, ME),
+                        &me,
+                        &json!([{"when": {"kind": "mention_or_dm"}, "act": "draft"}]),
+                        start,
+                    )
+                })
+                .unwrap();
+            env.gateway.script(
+                crate::compose::H_SAFETY,
+                r#"{"text": "收到，稍后看。", "needs_approval": false, "why": "回复"}"#,
+            );
+            Self {
+                env,
+                _keys: keys,
+                ch,
+                me,
+            }
+        }
+
+        fn tier_of(&self, id: &str) -> (DecisionTier, Option<FoldReason>) {
+            let v = self
+                .env
+                .store()
+                .read(|r| r.decision_views().of(WS, &[id.to_owned()]))
+                .unwrap()
+                .pop()
+                .unwrap();
+            (v.tier, v.folded)
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn unhandled_dm_and_mention_drafts_escalate_after_four_working_hours_only() {
         let tz = chrono_tz::Asia::Shanghai;
-        // 2027-01-07 is a Thursday (strictly ahead of wall-clock FakeClock start).
-        let start = local_ms(tz, 2027, 1, 7, 16, 0); // Thu 16:00
-        let core = Arc::new(FakeCore::default());
-        let flow_setup = FlowSetup::new(core.clone());
-        let link = OutLink::new();
-        let reg_link = link.clone();
-        let env = TestEnv::new(|r| {
-            flow_setup.register(r);
-            connections::register(r);
-            r.decision(SUBJECT_MESSAGE, reg_link.handler());
-        });
-        env.clock.advance_to(start);
-        link.bind_clock(env.clock.clone());
-        env.store()
-            .settings()
-            .set(
-                WS,
-                serde_json::json!({"tz": "Asia/Shanghai"})
-                    .as_object()
-                    .unwrap(),
-                ME,
-            )
-            .unwrap();
-        let keys = tempfile::tempdir().unwrap();
-        let vault = Vault::new(
-            env.store().clone(),
-            Arc::new(FileKeyStore::open(keys.path()).unwrap()),
-        );
-        let fake = Arc::new(FakeChannel::new());
-        let conns = Connections::builder(
-            env.modules.clone(),
-            vault,
-            ConnectionsConfig::new(Vec::new(), true, |_| None),
-        )
-        .provider(fake.clone())
-        .build();
-        let outbox = Arc::new(Outbox::new(link));
-        let replies = Arc::new(Replies::new().outbound(outbox.clone()));
-        let flow = flow_setup
-            .connections(conns.clone())
-            .build(env.modules.clone(), Arc::new(LinearExecutor));
-        let ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
-            .adapter(fake.clone())
-            .responder(replies)
-            .flow(flow)
-            .build();
-        let (me, _) =
-            FakeChannel::seed_connection(env.store(), &caller(WS, ME), Some("upx")).unwrap();
-        fake.space("D_LI", "", SpaceKind::Dm, false, &[("ulilei", "李雷")]);
-        fake.space(
-            "G_DEV",
-            "开发群",
-            SpaceKind::Group,
-            false,
-            &[("ulilei", "李雷")],
-        );
-        fake.space(
-            "G_DIRECT",
-            "公告群",
-            SpaceKind::Group,
-            false,
-            &[("ulilei", "李雷")],
-        );
-        env.store()
-            .write(|w| {
-                spaces::set_account_rules(
-                    w,
-                    &Viewer::bare(WS, ME),
-                    &me,
-                    &json!([{"when": {"kind": "mention_or_dm"}, "act": "draft"}]),
-                    start,
-                )
-            })
-            .unwrap();
-        env.gateway.script(
-            crate::compose::H_SAFETY,
-            r#"{"text": "收到，稍后看。", "needs_approval": false, "why": "回复"}"#,
-        );
+        // Fixed Thursday timestamp independent of wall clock or host timezone.
+        let start = local_ms(tz, 2026, 1, 15, 16, 0); // Thu 16:00 Asia/Shanghai
+        let h = EscalationHarness::new(start, "Asia/Shanghai", None);
 
         let mut dm = FakeChannel::message("D_LI", "m_dm", "ulilei", "在吗？");
         dm.created = start;
-        let dm_res = ch.on_message(WS, &me, dm).await.unwrap();
+        let dm_res = h.ch.on_message(WS, &h.me, dm).await.unwrap();
         let dm_dec = dm_res.response.unwrap().decision_id.unwrap();
 
         let mut mention: InboundMessage =
@@ -388,19 +418,20 @@ mod tests {
             name: "你".into(),
             is_connection: true,
         });
-        let at_res = ch.on_message(WS, &me, mention).await.unwrap();
+        let at_res = h.ch.on_message(WS, &h.me, mention).await.unwrap();
         let at_dec = at_res.response.unwrap().decision_id.unwrap();
 
         // A direct outbound draft in a separate group without an @-mention source must NOT escalate.
         let mut plain_in = FakeChannel::message("G_DIRECT", "m_plain", "ulilei", "同步进度");
         plain_in.created = start;
-        let plain_res = ch.on_message(WS, &me, plain_in).await.unwrap();
-        let non_mention_dec = env
+        let plain_res = h.ch.on_message(WS, &h.me, plain_in).await.unwrap();
+        let non_mention_dec = h
+            .env
             .store()
             .write(|w| {
                 let target = crate::deliver::OutTarget {
                     ws: WS.into(),
-                    connection_id: me.clone(),
+                    connection_id: h.me.clone(),
                     mode: spaces::Mode::Own,
                     space_id: plain_res.space_id.clone(),
                     space_name: "公告群".into(),
@@ -415,50 +446,76 @@ mod tests {
             .unwrap()
             .1;
 
-        let tier_of = |id: &str| {
-            let v = env
-                .store()
-                .read(|r| r.decision_views().of(WS, &[id.to_owned()]))
-                .unwrap()
-                .pop()
-                .unwrap();
-            (v.tier, v.folded)
-        };
-        assert_eq!(tier_of(&dm_dec), (DecisionTier::Draft, None));
-        assert_eq!(tier_of(&at_dec), (DecisionTier::Draft, None));
-        assert_eq!(tier_of(&non_mention_dec), (DecisionTier::Draft, None));
+        assert_eq!(h.tier_of(&dm_dec), (DecisionTier::Draft, None));
+        assert_eq!(h.tier_of(&at_dec), (DecisionTier::Draft, None));
+        assert_eq!(h.tier_of(&non_mention_dec), (DecisionTier::Draft, None));
 
         // Overnight Fri 10:59 (3h59m working): still quiet Draft, nothing escalated.
-        env.clock.advance_to(local_ms(tz, 2027, 1, 8, 10, 59));
-        assert_eq!(escalate_due(&ch).unwrap(), 0);
-        assert_eq!(tier_of(&dm_dec), (DecisionTier::Draft, None));
-        assert_eq!(tier_of(&at_dec), (DecisionTier::Draft, None));
+        h.env.clock.advance_to(local_ms(tz, 2026, 1, 16, 10, 59));
+        assert_eq!(escalate_due(&h.ch).unwrap(), 0);
+        assert_eq!(h.tier_of(&dm_dec), (DecisionTier::Draft, None));
+        assert_eq!(h.tier_of(&at_dec), (DecisionTier::Draft, None));
 
         // Fri 11:00 (4h00m working): both unhandled DM and @-mention drafts escalate to Decide,
         // while the non-addressed group draft stays quiet.
-        env.clock.advance_to(local_ms(tz, 2027, 1, 8, 11, 0));
-        assert_eq!(escalate_due(&ch).unwrap(), 2);
-        assert_eq!(tier_of(&dm_dec), (DecisionTier::Decide, None));
-        assert_eq!(tier_of(&at_dec), (DecisionTier::Decide, None));
-        assert_eq!(tier_of(&non_mention_dec), (DecisionTier::Draft, None));
+        h.env.clock.advance_to(local_ms(tz, 2026, 1, 16, 11, 0));
+        assert_eq!(escalate_due(&h.ch).unwrap(), 2);
+        assert_eq!(h.tier_of(&dm_dec), (DecisionTier::Decide, None));
+        assert_eq!(h.tier_of(&at_dec), (DecisionTier::Decide, None));
+        assert_eq!(h.tier_of(&non_mention_dec), (DecisionTier::Draft, None));
         // Second sweep is idempotent.
-        assert_eq!(escalate_due(&ch).unwrap(), 0);
+        assert_eq!(escalate_due(&h.ch).unwrap(), 0);
 
         // Once the owner replies in the DM, even an escalated draft folds as Replied.
         let mut own_reply = FakeChannel::message("D_LI", "m_owner", "upx", "我直接回复了");
         own_reply.mine = true;
-        own_reply.created = local_ms(tz, 2027, 1, 8, 11, 5);
-        ch.on_message(WS, &me, own_reply).await.unwrap();
-        let dm_after = env
-            .store()
-            .read(|r| r.decision_views().of(WS, &[dm_dec.clone()]))
-            .unwrap()
-            .pop()
-            .unwrap();
-        assert_eq!(dm_after.tier, DecisionTier::Folded);
+        own_reply.created = local_ms(tz, 2026, 1, 16, 11, 5);
+        h.ch.on_message(WS, &h.me, own_reply).await.unwrap();
+        let (tier, folded) = h.tier_of(&dm_dec);
+        assert_eq!(tier, DecisionTier::Folded);
         assert!(matches!(
-            dm_after.folded,
+            folded,
             Some(FoldReason::Replied | FoldReason::Expired)
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn escalation_uses_owner_timezone_over_workspace_and_host_clock() {
+        let shanghai = chrono_tz::Asia::Shanghai;
+        let new_york = chrono_tz::America::New_York;
+        // Thu 2026-01-15 11:00 Asia/Shanghai == Wed 2026-01-14 22:00 America/New_York (03:00 UTC).
+        let start = local_ms(shanghai, 2026, 1, 15, 11, 0);
+        // Workspace tz is Asia/Shanghai, while owner's personal notification tz is America/New_York.
+        let h = EscalationHarness::new(start, "Asia/Shanghai", Some("America/New_York"));
+
+        let mut dm = FakeChannel::message("D_LI", "m_tz", "ulilei", "在吗？");
+        dm.created = start;
+        let dm_dec =
+            h.ch.on_message(WS, &h.me, dm)
+                .await
+                .unwrap()
+                .response
+                .unwrap()
+                .decision_id
+                .unwrap();
+
+        // Thu 15:00 Asia/Shanghai (4h working in Shanghai) == Thu 02:00 America/New_York (0h working).
+        h.env
+            .clock
+            .advance_to(local_ms(shanghai, 2026, 1, 15, 15, 0));
+        assert_eq!(escalate_due(&h.ch).unwrap(), 0);
+
+        // Thu 12:59 America/New_York (3h59m working in NY): still quiet.
+        h.env
+            .clock
+            .advance_to(local_ms(new_york, 2026, 1, 15, 12, 59));
+        assert_eq!(escalate_due(&h.ch).unwrap(), 0);
+
+        // Thu 13:00 America/New_York (4h00m working in NY): escalates to Decide.
+        h.env
+            .clock
+            .advance_to(local_ms(new_york, 2026, 1, 15, 13, 0));
+        assert_eq!(escalate_due(&h.ch).unwrap(), 1);
+        assert_eq!(h.tier_of(&dm_dec), (DecisionTier::Decide, None));
     }
 }

@@ -1272,12 +1272,12 @@ async fn w34_thread_replay_channels() {
             && !fresh_set.configured
             && fresh.response.as_ref().is_some_and(|r| r.muted);
 
-        // 4 working-hour escalation on unhandled DM draft (Thu 2027-01-07 16:00 -> Fri 11:00 = 4h)
+        // 4 working-hour escalation on unhandled DM draft (Thu 2026-01-15 16:00 -> Fri 11:00 = 4h)
         let tz = chrono_tz::Asia::Shanghai;
         let zone = steve_modules::zone::Zone::new(tz);
         let thu_16 = zone
             .instant(
-                chrono::NaiveDate::from_ymd_opt(2027, 1, 7)
+                chrono::NaiveDate::from_ymd_opt(2026, 1, 15)
                     .unwrap()
                     .and_hms_opt(16, 0, 0)
                     .unwrap(),
@@ -1285,13 +1285,13 @@ async fn w34_thread_replay_channels() {
             .unwrap();
         let fri_11 = zone
             .instant(
-                chrono::NaiveDate::from_ymd_opt(2027, 1, 8)
+                chrono::NaiveDate::from_ymd_opt(2026, 1, 16)
                     .unwrap()
                     .and_hms_opt(11, 0, 0)
                     .unwrap(),
             )
             .unwrap();
-        h.env.clock.advance_to(thu_16);
+        h.env.clock.set(thu_16);
         h.env
             .store()
             .settings()

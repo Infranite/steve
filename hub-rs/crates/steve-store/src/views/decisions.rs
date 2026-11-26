@@ -107,8 +107,12 @@ fn tier(
         (DecisionTier::Folded, Some(FoldReason::Replied))
     } else if draft && unsendable {
         (DecisionTier::Folded, Some(FoldReason::Unsendable))
-    } else if draft && d.status == DecisionStatus::Open && !escalated {
-        (DecisionTier::Draft, None)
+    } else if draft && d.status == DecisionStatus::Open {
+        if escalated {
+            (DecisionTier::Decide, None)
+        } else {
+            (DecisionTier::Draft, None)
+        }
     } else if is_decide_kind(d) {
         (DecisionTier::Decide, None)
     } else {
@@ -527,5 +531,33 @@ mod tests {
                 "{kind}/{subject} should fold as LowPriority"
             );
         }
+    }
+
+    #[test]
+    fn escalated_chat_draft_surfaces_as_decide_until_folded() {
+        let open_draft = sample("approve", ABOUT_CHAT_MESSAGE);
+        assert_eq!(
+            tier(&open_draft, false, false, false, false, false),
+            (DecisionTier::Draft, None),
+        );
+        assert_eq!(
+            tier(&open_draft, false, false, false, false, true),
+            (DecisionTier::Decide, None),
+        );
+        // Replying, becoming unsendable, or expiring still folds an escalated draft.
+        assert_eq!(
+            tier(&open_draft, false, true, false, false, true),
+            (DecisionTier::Folded, Some(FoldReason::Replied)),
+        );
+        assert_eq!(
+            tier(&open_draft, false, false, true, false, true),
+            (DecisionTier::Folded, Some(FoldReason::Unsendable)),
+        );
+        let mut expired = open_draft;
+        expired.status = DecisionStatus::Expired;
+        assert_eq!(
+            tier(&expired, false, false, false, false, true),
+            (DecisionTier::Folded, Some(FoldReason::Expired)),
+        );
     }
 }
