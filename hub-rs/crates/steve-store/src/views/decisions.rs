@@ -505,7 +505,7 @@ mod tests {
         ] {
             let view = sample(kind, subject);
             assert_eq!(
-                tier(&view, false, false, false, false),
+                tier(&view, false, false, false, false, false),
                 (DecisionTier::Decide, None),
                 "{kind}/{subject} should be Decide"
             );
@@ -522,7 +522,7 @@ mod tests {
         ] {
             let view = sample(kind, subject);
             assert_eq!(
-                tier(&view, false, false, false, false),
+                tier(&view, false, false, false, false, false),
                 (DecisionTier::Folded, Some(FoldReason::LowPriority)),
                 "{kind}/{subject} should fold as LowPriority"
             );
