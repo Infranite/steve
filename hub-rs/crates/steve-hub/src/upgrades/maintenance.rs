@@ -296,18 +296,20 @@ mod tests {
         .unwrap();
         let mut interactive_called = false;
         let mut prompt_notice = String::new();
-        let got_kc = super::signing::resolve_maintenance_password_with(
-            &kc_home,
-            &|_| None,
-            None,
-            true,
-            |notice| prompt_notice = notice.to_owned(),
-            || Err(KeyStoreError::Denied),
-            || {
-                interactive_called = true;
-                Ok(Some(zeroize::Zeroizing::new(expected_pass.clone())))
-            },
-        )
+        let got_kc = steve_i18n::with(steve_i18n::EN, || {
+            super::signing::resolve_maintenance_password_with(
+                &kc_home,
+                &|_| None,
+                None,
+                true,
+                |notice| prompt_notice = notice.to_owned(),
+                || Err(KeyStoreError::Denied),
+                || {
+                    interactive_called = true;
+                    Ok(Some(zeroize::Zeroizing::new(expected_pass.clone())))
+                },
+            )
+        })
         .unwrap();
         assert!(
             interactive_called,
@@ -374,32 +376,36 @@ mod tests {
             "expected TTY refusal pointing to --keychain-pass-stdin, got: {non_tty:?}"
         );
 
-        // TTY stdin emits the Allow-only / no-Always-Allow warning BEFORE invoking Keychain.
-        let order = std::cell::RefCell::new(Vec::new());
+        // TTY stdin emits the localized Allow-only / no-Always-Allow warning BEFORE invoking Keychain.
         let pass = "0123456789abcdef".repeat(4);
-        let got = super::signing::resolve_maintenance_password_with(
-            &home,
-            &|_| None,
-            None,
-            true,
-            |notice| {
-                assert!(
-                    notice.contains("允许")
-                        && notice.contains("始终允许")
-                        && notice.contains("Allow")
-                        && notice.contains("Always Allow"),
-                    "notice must warn Allow-only in both English and Chinese: {notice}"
-                );
-                order.borrow_mut().push("notice");
-            },
-            || Err(KeyStoreError::Denied),
-            || {
-                order.borrow_mut().push("keychain");
-                Ok(Some(zeroize::Zeroizing::new(pass.clone())))
-            },
-        )
-        .unwrap();
-        assert_eq!(*order.borrow(), vec!["notice", "keychain"]);
-        assert_eq!(got.as_deref().map(String::as_str), Some(pass.as_str()));
+        for (locale, allow_word, always_word) in [
+            (steve_i18n::EN, "Allow", "Always Allow"),
+            (steve_i18n::ZH_CN, "允许", "始终允许"),
+        ] {
+            let order = std::cell::RefCell::new(Vec::new());
+            let got = steve_i18n::with(locale, || {
+                super::signing::resolve_maintenance_password_with(
+                    &home,
+                    &|_| None,
+                    None,
+                    true,
+                    |notice| {
+                        assert!(
+                            notice.contains(allow_word) && notice.contains(always_word),
+                            "notice for {locale} must warn Allow-only: {notice}"
+                        );
+                        order.borrow_mut().push("notice");
+                    },
+                    || Err(KeyStoreError::Denied),
+                    || {
+                        order.borrow_mut().push("keychain");
+                        Ok(Some(zeroize::Zeroizing::new(pass.clone())))
+                    },
+                )
+            })
+            .unwrap();
+            assert_eq!(*order.borrow(), vec!["notice", "keychain"]);
+            assert_eq!(got.as_deref().map(String::as_str), Some(pass.as_str()));
+        }
     }
 }

@@ -7,11 +7,6 @@ use anyhow::{Context, Result, bail, ensure};
 use steve_modules::vault::keystore::{KeyStore, KeyStoreError, signing};
 use zeroize::Zeroizing;
 
-/// Operator warning printed before triggering an interactive macOS Keychain dialog for an unsigned
-/// temporary release binary. Clicking "Always Allow" would grant that temporary binary permanent
-/// Keychain ACL access.
-pub(super) const INTERACTIVE_KEYCHAIN_NOTICE: &str = "macOS Keychain will prompt to allow this temporary unsigned steve-hub binary to read steve/signing/keychain-pass. Click \"Allow\" (允许) ONLY — do NOT click \"Always Allow\" (始终允许).";
-
 pub(super) fn provision(home: &Path, password: &str) -> Result<()> {
     let store = installed_helper(home).context("signing key store unavailable")?;
     if let Some(existing) = signing::get(store.as_ref())? {
@@ -121,7 +116,8 @@ pub(super) fn resolve_maintenance_password_with(
         is_tty,
         "interactive macOS Keychain access requires a terminal (stdin is not a TTY); run in Terminal or pipe the signing password with --keychain-pass-stdin"
     );
-    on_interactive_prompt(INTERACTIVE_KEYCHAIN_NOTICE);
+    let notice = steve_i18n::t!("hub.upgrade.interactive_keychain_notice");
+    on_interactive_prompt(&notice);
     match interactive_lookup() {
         Ok(Some(pass)) => Ok(Some(pass)),
         Ok(None) => Ok(None),

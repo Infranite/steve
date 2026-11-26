@@ -147,6 +147,7 @@
   "hub.upgrade.local.rolled_back": "部署失败，已恢复到升级前的版本和数据库。详情见日志 %{log}",
   "hub.upgrade.local.committed_failed": "升级已提交，但新版本没有正常起来；没有回滚，新版本保留。详情见日志 %{log}",
   "hub.upgrade.local.not_recovered": "部署失败，旧版本没有恢复，需要手动处理。详情见日志 %{log}",
+  "hub.upgrade.interactive_keychain_notice": "macOS 钥匙串将弹窗请求允许这个临时未签名的 steve-hub 二进制读取 steve/signing/keychain-pass。请只点「允许」，不要点「始终允许」。",
   "hub.runtime.no_adapter": "缺少 ACP 适配器 %{adapter}",
   "hub.runtime.install_cmd": "缺少 CLI 或 ACP 适配器（安装命令：%{cmd}）",
   "hub.runtime.via_acp": "通过 ACP 适配器运行",

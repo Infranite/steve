@@ -147,6 +147,7 @@
   "hub.upgrade.local.rolled_back": "The deploy failed and the previous version and database were restored. See the log %{log}",
   "hub.upgrade.local.committed_failed": "Upgrade committed, but the new version didn't come up properly; it stays in place and was not rolled back. See the log %{log}",
   "hub.upgrade.local.not_recovered": "The deploy failed and the previous version didn't come back; it needs fixing by hand. See the log %{log}",
+  "hub.upgrade.interactive_keychain_notice": "macOS Keychain will prompt to allow this temporary unsigned steve-hub binary to read steve/signing/keychain-pass. Click \"Allow\" ONLY — do NOT click \"Always Allow\".",
   "hub.runtime.no_adapter": "Missing ACP adapter %{adapter}",
   "hub.runtime.install_cmd": "Missing CLI or ACP adapter (install: %{cmd})",
   "hub.runtime.via_acp": "Runs through the ACP adapter",
