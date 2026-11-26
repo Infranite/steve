@@ -6194,6 +6194,148 @@ async fn antigravity_isolated_state_merges_permissions_and_runs_unwrapped() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn antigravity_open_session_rebuilds_tampered_settings_and_fails_closed() {
+    use serde_json::{Value, json};
+
+    let t = T::new(&[]);
+    let steve_dir = t.root.join("steve");
+    std::fs::create_dir_all(steve_dir.join("signing")).unwrap();
+    std::fs::write(steve_dir.join("steve.env"), "CANARY=secret\n").unwrap();
+
+    let ambient_cli = t.root.join(".gemini/antigravity-cli");
+    let ambient_cfg = t.root.join(".gemini/config");
+    std::fs::create_dir_all(&ambient_cli).unwrap();
+    std::fs::create_dir_all(&ambient_cfg).unwrap();
+    std::fs::write(
+        ambient_cli.join("settings.json"),
+        serde_json::to_vec_pretty(&json!({
+            "theme": "dark",
+            "permissions": { "ask": ["mcp(steve/steve_deliver)"] }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        ambient_cfg.join("config.json"),
+        serde_json::to_vec_pretty(&json!({
+            "plugins": { "swarm": { "enabled": true } }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut cfg = t.config();
+    cfg.acp
+        .adapters
+        .insert("antigravity".to_string(), t.adapter.clone());
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+
+    n.prepare_workspace(now_cmd("op_prep_tamper", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep_tamper").await));
+
+    let state_dir = "default/owner/dev/antigravity";
+    let isolated_root = t.home.join("state").join(state_dir).join("harness");
+    let isolated_settings = isolated_root.join("antigravity-cli/settings.json");
+    let isolated_cfg = isolated_root.join("config/config.json");
+
+    let open = |session: &str| {
+        let mut b = open_body(session);
+        b.choice.harness = "antigravity".into();
+        b.choice.model = None;
+        b.state = Some(HarnessState {
+            dir: state_dir.into(),
+            import_owner: true,
+            owner_context: true,
+        });
+        b
+    };
+
+    // Initial open establishes isolated state.
+    n.open_session(now_cmd("op_open_init", open("s_agy_tamper_1")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_open_init").await));
+
+    // Simulate a prior session replacing settings.json with a symlink and corrupting config.json.
+    let outside = t.root.join("outside.json");
+    std::fs::write(&outside, r#"{"outside":true}"#).unwrap();
+    std::fs::remove_file(&isolated_settings).unwrap();
+    std::os::unix::fs::symlink(&outside, &isolated_settings).unwrap();
+    std::fs::write(&isolated_cfg, "{corrupted").unwrap();
+
+    n.open_session(now_cmd("op_open_rebuilt", open("s_agy_tamper_2")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_open_rebuilt").await));
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        r#"{"outside":true}"#
+    );
+    assert!(
+        std::fs::symlink_metadata(&isolated_settings)
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+    let rebuilt_settings: Value =
+        serde_json::from_slice(&std::fs::read(&isolated_settings).unwrap()).unwrap();
+    assert_eq!(rebuilt_settings["theme"], "dark");
+    assert_eq!(
+        rebuilt_settings["permissions"]["allow"],
+        json!(["mcp(steve/*)"])
+    );
+    let rebuilt_cfg: Value =
+        serde_json::from_slice(&std::fs::read(&isolated_cfg).unwrap()).unwrap();
+    assert_eq!(rebuilt_cfg["plugins"]["swarm"]["enabled"], json!(true));
+    assert_eq!(
+        rebuilt_cfg["userSettings"]["globalPermissionGrants"]["ask"],
+        json!(["mcp(steve/steve_deliver)"])
+    );
+    assert!(
+        rebuilt_cfg["userSettings"]["globalPermissionGrants"]["deny"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(format!(
+                "read_file({}/signing)",
+                steve_dir.display()
+            )))
+    );
+
+    // Unrecoverable conflict (directory at config.json) must fail open_session closed without spawning.
+    let spawns_before = t.sent("initialize");
+    std::fs::remove_file(&isolated_cfg).unwrap();
+    std::fs::create_dir(&isolated_cfg).unwrap();
+    n.open_session(now_cmd("op_open_fail_closed", open("s_agy_tamper_3")))
+        .await
+        .unwrap();
+    let failed = finished(&n, "op_open_fail_closed").await;
+    match failed {
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            error: Some(err),
+            ..
+        } => {
+            assert!(
+                err.safe_detail.contains("config.json") && err.safe_detail.contains("directory"),
+                "expected config.json directory failure, got: {err:?}"
+            );
+        }
+        other => panic!("expected fail-closed open_session, got: {other:?}"),
+    }
+    assert_eq!(
+        t.sent("initialize"),
+        spawns_before,
+        "adapter must not spawn when settings reconciliation fails"
+    );
+
+    n.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "runs real agy acp binary outside sandbox"]
 async fn real_antigravity_yolo_allows_steve_mcp_and_blocks_protected_and_high_risk() {

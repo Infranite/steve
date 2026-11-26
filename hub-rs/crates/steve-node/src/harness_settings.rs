@@ -42,34 +42,40 @@ fn record_metric(kind: StateSettings, file: &'static str, outcome: &'static str)
 enum ExistingFile {
     Absent,
     Regular(Vec<u8>),
-    Skipped(String),
+    /// Symlink, non-regular file (FIFO/socket), or file exceeding `MAX_SETTINGS`.
+    Irregular(String),
+}
+
+fn read_bounded_regular(f: fs::File) -> Result<Vec<u8>, std::io::Error> {
+    let meta = f.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    if meta.len() > MAX_SETTINGS {
+        return Err(std::io::Error::other("exceeds size limit"));
+    }
+    let mut buf = Vec::with_capacity(meta.len() as usize);
+    f.take(MAX_SETTINGS + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_SETTINGS {
+        return Err(std::io::Error::other("exceeds size limit"));
+    }
+    Ok(buf)
 }
 
 fn read_regular_file_bytes(path: &Path) -> Result<Vec<u8>, std::io::Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        let mut f = OpenOptions::new()
+        let f = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
-        let meta = f.metadata()?;
-        if !meta.is_file() {
-            return Err(std::io::Error::other("not a regular file"));
-        }
-        if meta.len() > MAX_SETTINGS {
-            return Err(std::io::Error::other("exceeds size limit"));
-        }
-        let mut buf = Vec::with_capacity(meta.len() as usize);
-        f.read_to_end(&mut buf)?;
-        if buf.len() as u64 > MAX_SETTINGS {
-            return Err(std::io::Error::other("exceeds size limit"));
-        }
-        Ok(buf)
+        read_bounded_regular(f)
     }
     #[cfg(not(unix))]
     {
-        fs::read(path)
+        let f = OpenOptions::new().read(true).open(path)?;
+        read_bounded_regular(f)
     }
 }
 
@@ -77,22 +83,20 @@ fn read_existing_file(path: &Path) -> Result<ExistingFile, String> {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ExistingFile::Absent),
         Err(e) => Err(format!("{}: {e}", path.display())),
+        Ok(m) if m.file_type().is_symlink() => Ok(ExistingFile::Irregular("symlink".into())),
         Ok(m) if m.is_dir() => Err(format!("{} is a directory", path.display())),
-        Ok(m) if !m.is_file() || m.len() > MAX_SETTINGS => Ok(ExistingFile::Skipped(
-            "not a regular file of its own here".into(),
-        )),
+        Ok(m) if !m.is_file() => Ok(ExistingFile::Irregular("not a regular file".into())),
+        Ok(m) if m.len() > MAX_SETTINGS => Ok(ExistingFile::Irregular("exceeds size limit".into())),
         Ok(_) => match read_regular_file_bytes(path) {
             Ok(bytes) => Ok(ExistingFile::Regular(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ExistingFile::Absent),
             Err(e) => {
                 #[cfg(unix)]
                 if e.raw_os_error() == Some(libc::ELOOP) {
-                    return Ok(ExistingFile::Skipped(
-                        "not a regular file of its own here".into(),
-                    ));
+                    return Ok(ExistingFile::Irregular("symlink".into()));
                 }
                 if e.kind() == std::io::ErrorKind::Other {
-                    return Ok(ExistingFile::Skipped(e.to_string()));
+                    return Ok(ExistingFile::Irregular(e.to_string()));
                 }
                 Err(format!("{}: {e}", path.display()))
             }
@@ -100,40 +104,65 @@ fn read_existing_file(path: &Path) -> Result<ExistingFile, String> {
     }
 }
 
-fn read_owner_config_json(owner_config_dir: &Path, notes: &mut Vec<String>) -> Map<String, Value> {
-    match fs::symlink_metadata(owner_config_dir) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Map::new(),
-        Err(e) => {
-            notes.push(format!("{CONFIG_FILE}: owner config not readable ({e})"));
-            return Map::new();
+fn read_owner_json(
+    owner_state_root: &Path,
+    sub_dir: Option<&Path>,
+    file_name: &str,
+    notes: &mut Vec<String>,
+) -> Map<String, Value> {
+    let mut cur = owner_state_root.to_path_buf();
+    let check_dir = |dir: &Path, notes: &mut Vec<String>| -> bool {
+        match fs::symlink_metadata(dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                notes.push(format!("{file_name}: owner directory not readable ({e})"));
+                false
+            }
+            Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+                notes.push(format!(
+                    "{file_name}: owner directory is not a regular directory, not imported"
+                ));
+                false
+            }
+            Ok(_) => true,
         }
-        Ok(m) if !m.is_dir() => {
-            notes.push(format!(
-                "{CONFIG_FILE}: owner config directory is not a regular directory, not imported"
-            ));
-            return Map::new();
+    };
+    if !check_dir(&cur, notes) {
+        return Map::new();
+    }
+    if let Some(rel) = sub_dir {
+        for comp in rel.components() {
+            match comp {
+                std::path::Component::Normal(seg) => {
+                    cur.push(seg);
+                    if !check_dir(&cur, notes) {
+                        return Map::new();
+                    }
+                }
+                std::path::Component::CurDir => {}
+                _ => return Map::new(),
+            }
         }
-        Ok(_) => {}
     }
 
-    let src = owner_config_dir.join(CONFIG_FILE);
+    let src = cur.join(file_name);
     match read_existing_file(&src) {
         Ok(ExistingFile::Absent) => Map::new(),
-        Ok(ExistingFile::Skipped(why)) => {
-            notes.push(format!("{CONFIG_FILE}: owner file skipped ({why})"));
+        Ok(ExistingFile::Irregular(why)) => {
+            notes.push(format!("{file_name}: owner file skipped ({why})"));
             Map::new()
         }
         Ok(ExistingFile::Regular(raw)) => match parse_json_object(&raw) {
             Ok(obj) => obj,
             Err(why) => {
                 notes.push(format!(
-                    "{CONFIG_FILE}: owner file not readable here ({why}), not imported"
+                    "{file_name}: owner file not readable here ({why}), not imported"
                 ));
                 Map::new()
             }
         },
         Err(why) => {
-            notes.push(format!("{CONFIG_FILE}: owner file skipped ({why})"));
+            notes.push(format!("{file_name}: owner file skipped ({why})"));
             Map::new()
         }
     }
@@ -142,7 +171,9 @@ fn read_owner_config_json(owner_config_dir: &Path, notes: &mut Vec<String>) -> M
 /// Applies harness-declared [`StateSettings`] inside `state_root` / `target` (the session's
 /// isolated harness root and settings directory). `owner_state_root` is the owner's ambient state
 /// root (matching `state_root`, e.g. `~/.gemini`) when `import_owner` is enabled. Returns
-/// informational notes when an existing file cannot be safely updated and is left alone.
+/// informational notes when an irregular or malformed isolated file was rebuilt and replaced, or
+/// when an unreadable owner file was skipped during import; returns `Err` (fail-closed) whenever
+/// either isolated settings file cannot be ensured or written.
 pub(crate) fn apply(
     state_root: &Path,
     target: &Path,
@@ -164,6 +195,116 @@ pub(crate) fn apply(
     }
 }
 
+fn rebuild_and_publish<F, M>(
+    kind: StateSettings,
+    file_label: &'static str,
+    dst: &Path,
+    outcome: &'static str,
+    load_owner: &F,
+    merge: &M,
+    notes: &mut Vec<String>,
+) -> Result<Map<String, Value>, String>
+where
+    F: Fn(&mut Vec<String>) -> Map<String, Value>,
+    M: Fn(&mut Map<String, Value>) -> Result<bool, String>,
+{
+    let mut doc = load_owner(notes);
+    if let Err(owner_why) = merge(&mut doc) {
+        notes.push(format!(
+            "{file_label}: owner file has incompatible shape ({owner_why}), not imported"
+        ));
+        doc = Map::new();
+        merge(&mut doc).map_err(|e| {
+            record_metric(kind, file_label, "error");
+            format!("{}: {e}", dst.display())
+        })?;
+    }
+    write_json_file(kind, file_label, dst, &doc, outcome)?;
+    Ok(doc)
+}
+
+fn write_json_file(
+    kind: StateSettings,
+    file_label: &'static str,
+    dst: &Path,
+    doc: &Map<String, Value>,
+    outcome: &'static str,
+) -> Result<(), String> {
+    let bytes = serialize_json_pretty(doc).map_err(|e| {
+        record_metric(kind, file_label, "error");
+        format!("{}: {e}", dst.display())
+    })?;
+    if let Err(e) = publish_private(dst, &bytes) {
+        record_metric(kind, file_label, "error");
+        return Err(e);
+    }
+    record_metric(kind, file_label, outcome);
+    Ok(())
+}
+
+fn sync_antigravity_file<F, M>(
+    kind: StateSettings,
+    file_label: &'static str,
+    dst: &Path,
+    load_owner: F,
+    merge: M,
+    notes: &mut Vec<String>,
+) -> Result<Map<String, Value>, String>
+where
+    F: Fn(&mut Vec<String>) -> Map<String, Value>,
+    M: Fn(&mut Map<String, Value>) -> Result<bool, String>,
+{
+    let existing = match read_existing_file(dst) {
+        Ok(state) => state,
+        Err(e) => {
+            record_metric(kind, file_label, "error");
+            return Err(e);
+        }
+    };
+
+    let replace_reason = match existing {
+        ExistingFile::Absent => {
+            return rebuild_and_publish(
+                kind,
+                file_label,
+                dst,
+                "updated",
+                &load_owner,
+                &merge,
+                notes,
+            );
+        }
+        ExistingFile::Irregular(why) => why,
+        ExistingFile::Regular(raw) => match parse_json_object(&raw) {
+            Err(why) => why,
+            Ok(mut doc) => match merge(&mut doc) {
+                Ok(false) => {
+                    record_metric(kind, file_label, "unchanged");
+                    return Ok(doc);
+                }
+                Ok(true) => {
+                    write_json_file(kind, file_label, dst, &doc, "updated")?;
+                    return Ok(doc);
+                }
+                Err(why) => why,
+            },
+        },
+    };
+
+    notes.push(format!(
+        "{file_label}: rebuilt and replaced ({replace_reason})"
+    ));
+    rebuild_and_publish(
+        kind,
+        file_label,
+        dst,
+        "replaced",
+        &load_owner,
+        &merge,
+        notes,
+    )
+}
+
 fn apply_antigravity(
     state_root: &Path,
     target: &Path,
@@ -177,123 +318,57 @@ fn apply_antigravity(
     collect_prefix_matches(steve_home, node_home, &mut steve_deny);
 
     let mut notes = Vec::new();
-    let mut carried = PermissionRules::default();
 
     // Part A: <target>/settings.json -> permissions.{allow, ask, deny} (CLI/TUI/print mode and
     // carried over into config/config.json for ACP).
-    let dst = target.join(SETTINGS_FILE);
-    let settings_state = match read_existing_file(&dst) {
-        Err(e) => {
-            record_metric(kind, SETTINGS_FILE, "error");
-            return Err(e);
-        }
-        Ok(ExistingFile::Absent) => Some((Map::new(), false)),
-        Ok(ExistingFile::Skipped(why)) => {
-            record_metric(kind, SETTINGS_FILE, "skipped");
-            notes.push(format!("{SETTINGS_FILE}: {why}, left alone"));
-            None
-        }
-        Ok(ExistingFile::Regular(raw)) => match parse_json_object(&raw) {
-            Ok(obj) => Some((obj, true)),
-            Err(why) => {
-                record_metric(kind, SETTINGS_FILE, "skipped");
-                notes.push(format!(
-                    "{SETTINGS_FILE}: not readable here ({why}), left alone"
-                ));
-                None
-            }
-        },
-    };
-
-    if let Some((mut doc, existed)) = settings_state {
-        carried = extract_permission_lists(&doc);
-        match merge_top_permissions(&mut doc, &steve_allow, &steve_deny) {
-            Err(why) => {
-                record_metric(kind, SETTINGS_FILE, "skipped");
-                notes.push(format!("{SETTINGS_FILE}: {why}, left alone"));
-            }
-            Ok(changed) => {
-                if !changed && existed {
-                    record_metric(kind, SETTINGS_FILE, "unchanged");
-                } else {
-                    let bytes = serialize_json_pretty(&doc).inspect_err(|_| {
-                        record_metric(kind, SETTINGS_FILE, "error");
-                    })?;
-                    if let Err(e) = publish_private(&dst, &bytes) {
-                        record_metric(kind, SETTINGS_FILE, "error");
-                        return Err(e);
-                    }
-                    record_metric(kind, SETTINGS_FILE, "updated");
-                }
-            }
-        }
+    if let Err(e) = crate::attachments::private_dir(target) {
+        record_metric(kind, SETTINGS_FILE, "error");
+        return Err(e);
     }
+    let owner_settings_rel = target.strip_prefix(state_root).ok();
+    let dst = target.join(SETTINGS_FILE);
+    let settings_doc = sync_antigravity_file(
+        kind,
+        SETTINGS_FILE,
+        &dst,
+        |notes| match (owner_state_root, owner_settings_rel) {
+            (Some(owner_root), Some(rel)) => {
+                read_owner_json(owner_root, Some(rel), SETTINGS_FILE, notes)
+            }
+            _ => Map::new(),
+        },
+        |doc| merge_top_permissions(doc, &steve_allow, &steve_deny),
+        &mut notes,
+    )?;
+    let carried = extract_permission_lists(&settings_doc);
 
     // Part B: <state_root>/config/config.json -> userSettings.globalPermissionGrants.{allow, ask, deny}
     // (enforced by `agy acp`).
     let config_dir = state_root.join(CONFIG_DIR);
     if let Err(e) = crate::attachments::private_dir(&config_dir) {
         record_metric(kind, CONFIG_FILE, "error");
-        return Err(format!("{}: {e}", config_dir.display()));
+        return Err(e);
     }
-    let owner_config_dir = owner_state_root.map(|root| root.join(CONFIG_DIR));
     let config_dst = config_dir.join(CONFIG_FILE);
-    let (mut cfg_doc, cfg_existed) = match read_existing_file(&config_dst) {
-        Err(e) => {
-            record_metric(kind, CONFIG_FILE, "error");
-            return Err(e);
-        }
-        Ok(ExistingFile::Absent) => {
-            let initial = owner_config_dir
-                .as_deref()
-                .map(|src_dir| read_owner_config_json(src_dir, &mut notes))
-                .unwrap_or_default();
-            (initial, false)
-        }
-        Ok(ExistingFile::Skipped(why)) => {
-            record_metric(kind, CONFIG_FILE, "skipped");
-            notes.push(format!("{CONFIG_FILE}: {why}, left alone"));
-            return Ok(notes);
-        }
-        Ok(ExistingFile::Regular(raw)) => match parse_json_object(&raw) {
-            Ok(obj) => (obj, true),
-            Err(why) => {
-                record_metric(kind, CONFIG_FILE, "skipped");
-                notes.push(format!(
-                    "{CONFIG_FILE}: not readable here ({why}), left alone"
-                ));
-                return Ok(notes);
-            }
-        },
-    };
-
     let mut cfg_allow = carried.allow;
     cfg_allow.extend(steve_allow);
     let cfg_ask = carried.ask;
     let mut cfg_deny = carried.deny;
     cfg_deny.extend(steve_deny);
 
-    match merge_global_permission_grants(&mut cfg_doc, &cfg_allow, &cfg_ask, &cfg_deny) {
-        Err(why) => {
-            record_metric(kind, CONFIG_FILE, "skipped");
-            notes.push(format!("{CONFIG_FILE}: {why}, left alone"));
-            return Ok(notes);
-        }
-        Ok(changed) => {
-            if !changed && cfg_existed {
-                record_metric(kind, CONFIG_FILE, "unchanged");
-                return Ok(notes);
+    sync_antigravity_file(
+        kind,
+        CONFIG_FILE,
+        &config_dst,
+        |notes| match owner_state_root {
+            Some(owner_root) => {
+                read_owner_json(owner_root, Some(Path::new(CONFIG_DIR)), CONFIG_FILE, notes)
             }
-            let bytes = serialize_json_pretty(&cfg_doc).inspect_err(|_| {
-                record_metric(kind, CONFIG_FILE, "error");
-            })?;
-            if let Err(e) = publish_private(&config_dst, &bytes) {
-                record_metric(kind, CONFIG_FILE, "error");
-                return Err(e);
-            }
-            record_metric(kind, CONFIG_FILE, "updated");
-        }
-    }
+            None => Map::new(),
+        },
+        |doc| merge_global_permission_grants(doc, &cfg_allow, &cfg_ask, &cfg_deny),
+        &mut notes,
+    )?;
 
     Ok(notes)
 }
@@ -377,16 +452,20 @@ fn merge_permission_object(
         ("ask", ask, false),
         ("deny", deny, true),
     ] {
-        if rules.is_empty() && !always_create {
+        let existing_non_null = perms.get(key).is_some_and(|v| !v.is_null());
+        if rules.is_empty() && !always_create && !existing_non_null {
             continue;
         }
-        if !perms.contains_key(key) || perms.get(key).is_some_and(Value::is_null) {
+        if !existing_non_null {
             perms.insert(key.to_string(), Value::Array(Vec::new()));
             changed = true;
         }
         let Some(arr) = perms.get_mut(key).and_then(Value::as_array_mut) else {
             return Err(format!("{prefix}.{key} is not an array"));
         };
+        if arr.iter().any(|v| !v.is_string()) {
+            return Err(format!("{prefix}.{key} contains a non-string entry"));
+        }
         for rule in rules {
             if !arr.iter().any(|v| v.as_str() == Some(rule.as_str())) {
                 arr.push(Value::String(rule.clone()));
@@ -700,19 +779,152 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct CounterRecorder {
+        records: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>>,
+    }
+
+    #[cfg(unix)]
+    struct VecCounter {
+        name: String,
+        labels: Vec<(String, String)>,
+        records: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>>,
+    }
+
+    #[cfg(unix)]
+    impl metrics::CounterFn for VecCounter {
+        fn increment(&self, value: u64) {
+            let mut guard = self.records.lock().unwrap();
+            for _ in 0..value {
+                guard.push((self.name.clone(), self.labels.clone()));
+            }
+        }
+        fn absolute(&self, _value: u64) {}
+    }
+
+    #[cfg(unix)]
+    impl metrics::Recorder for CounterRecorder {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            let labels = key
+                .labels()
+                .map(|l| (l.key().to_owned(), l.value().to_owned()))
+                .collect();
+            metrics::Counter::from_arc(std::sync::Arc::new(VecCounter {
+                name: key.name().to_owned(),
+                labels,
+                records: self.records.clone(),
+            }))
+        }
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    #[cfg(unix)]
+    fn record_outcomes<R>(f: impl FnOnce() -> R) -> (R, Vec<(String, String)>) {
+        let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = CounterRecorder {
+            records: records.clone(),
+        };
+        let out = metrics::with_local_recorder(&recorder, f);
+        let pairs = records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "steve_node_harness_settings_total")
+            .map(|(_, labels)| {
+                let file = labels
+                    .iter()
+                    .find(|(k, _)| k == "file")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                let outcome = labels
+                    .iter()
+                    .find(|(k, _)| k == "outcome")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                (file, outcome)
+            })
+            .collect();
+        (out, pairs)
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn leaves_symlinks_untouched_without_following() {
+    fn replaces_symlinks_atomically_without_following_and_skips_linked_owner_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let dir = tempfile::tempdir().unwrap();
         let state_root = dir.path().join("state");
         let target = state_root.join("antigravity-cli");
         let cfg_dir = state_root.join(CONFIG_DIR);
         let owner_state_root = dir.path().join("owner/.gemini");
+        let owner_cli_dir = owner_state_root.join("antigravity-cli");
         let owner_config_dir = owner_state_root.join(CONFIG_DIR);
         let steve_home = dir.path().join("steve");
         let node_home = steve_home.join("data/node");
         fs::create_dir_all(&target).unwrap();
         fs::create_dir_all(&cfg_dir).unwrap();
+        fs::create_dir_all(&owner_cli_dir).unwrap();
         fs::create_dir_all(&owner_config_dir).unwrap();
+
+        fs::write(
+            owner_cli_dir.join(SETTINGS_FILE),
+            serde_json::to_vec_pretty(&json!({
+                "theme": "dark",
+                "permissions": {
+                    "allow": ["command(git status)"],
+                    "ask": ["mcp(steve/steve_deliver)"],
+                    "deny": ["command(sudo)"]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            owner_config_dir.join(CONFIG_FILE),
+            serde_json::to_vec_pretty(&json!({
+                "plugins": { "swarm": { "enabled": true } },
+                "userSettings": {
+                    "globalPermissionGrants": {
+                        "allow": ["read_url(example.com)"]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         let outside = dir.path().join("outside.json");
         fs::write(&outside, r#"{"outside":true}"#).unwrap();
@@ -722,45 +934,151 @@ mod tests {
         let cfg_link = cfg_dir.join(CONFIG_FILE);
         std::os::unix::fs::symlink(&outside, &cfg_link).unwrap();
 
-        let notes = apply(
-            &state_root,
-            &target,
-            StateSettings::AntigravitySettings,
-            &steve_home,
-            &node_home,
-            Some(&owner_state_root),
-        )
-        .unwrap();
+        let (res, outcomes) = record_outcomes(|| {
+            apply(
+                &state_root,
+                &target,
+                StateSettings::AntigravitySettings,
+                &steve_home,
+                &node_home,
+                Some(&owner_state_root),
+            )
+        });
+        let notes = res.unwrap();
         assert_eq!(notes.len(), 2, "{notes:?}");
+        assert_eq!(
+            outcomes,
+            vec![
+                (SETTINGS_FILE.to_string(), "replaced".to_string()),
+                (CONFIG_FILE.to_string(), "replaced".to_string()),
+            ]
+        );
+        // Symlink targets are untouched; isolated paths are now 0600 regular files with owner + Steve rules.
+        assert_eq!(fs::read_to_string(&outside).unwrap(), r#"{"outside":true}"#);
+        for path in [&settings_link, &cfg_link] {
+            let meta = fs::symlink_metadata(path).unwrap();
+            assert!(!meta.file_type().is_symlink(), "{}", path.display());
+            assert!(meta.file_type().is_file(), "{}", path.display());
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "{}",
+                path.display()
+            );
+        }
+        let settings_val: Value =
+            serde_json::from_slice(&fs::read(&settings_link).unwrap()).unwrap();
+        assert_eq!(settings_val["theme"], "dark");
+        assert!(settings_val.get("outside").is_none());
+        assert_eq!(
+            settings_val["permissions"]["allow"],
+            json!(["command(git status)", "mcp(steve/*)"])
+        );
+        assert_eq!(
+            settings_val["permissions"]["ask"],
+            json!(["mcp(steve/steve_deliver)"])
+        );
+        let settings_deny = settings_val["permissions"]["deny"].as_array().unwrap();
+        assert_eq!(settings_deny[0], "command(sudo)");
+        assert!(settings_deny.contains(&json!(format!(
+            "read_file({}/signing)",
+            steve_home.display()
+        ))));
+
+        let cfg_val: Value = serde_json::from_slice(&fs::read(&cfg_link).unwrap()).unwrap();
+        assert_eq!(cfg_val["plugins"]["swarm"]["enabled"], json!(true));
+        assert!(cfg_val.get("outside").is_none());
+        let grants = &cfg_val["userSettings"]["globalPermissionGrants"];
+        assert_eq!(
+            grants["allow"],
+            json!([
+                "read_url(example.com)",
+                "command(git status)",
+                "mcp(steve/*)"
+            ])
+        );
+        assert_eq!(grants["ask"], json!(["mcp(steve/steve_deliver)"]));
+        let grants_deny = grants["deny"].as_array().unwrap();
+        assert!(grants_deny.contains(&json!("command(sudo)")));
+        assert!(grants_deny.contains(&json!(format!(
+            "read_file({}/steve.env)",
+            steve_home.display()
+        ))));
+
+        // Dangling symlink & symlink-to-directory in isolated state are also replaced without following.
+        let outside_dir = dir.path().join("outside-dir");
+        fs::create_dir_all(&outside_dir).unwrap();
+        let dangling_target = dir.path().join("never-created.json");
+        fs::remove_file(&settings_link).unwrap();
+        fs::remove_file(&cfg_link).unwrap();
+        std::os::unix::fs::symlink(&dangling_target, &settings_link).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, &cfg_link).unwrap();
+        let (res_special, outcomes_special) = record_outcomes(|| {
+            apply(
+                &state_root,
+                &target,
+                StateSettings::AntigravitySettings,
+                &steve_home,
+                &node_home,
+                None,
+            )
+        });
+        assert_eq!(res_special.unwrap().len(), 2);
+        assert_eq!(
+            outcomes_special,
+            vec![
+                (SETTINGS_FILE.to_string(), "replaced".to_string()),
+                (CONFIG_FILE.to_string(), "replaced".to_string()),
+            ]
+        );
+        assert!(!dangling_target.exists());
+        assert!(outside_dir.is_dir());
         assert!(
             fs::symlink_metadata(&settings_link)
                 .unwrap()
                 .file_type()
-                .is_symlink()
+                .is_file()
         );
         assert!(
             fs::symlink_metadata(&cfg_link)
                 .unwrap()
                 .file_type()
-                .is_symlink()
+                .is_file()
         );
-        assert_eq!(fs::read_to_string(&outside).unwrap(), r#"{"outside":true}"#);
 
-        // Also refuse symlinked owner config.json and symlinked owner config directory.
+        // Also refuse symlinked owner files and symlinked owner directories without following them.
+        let owner_linked_files = dir.path().join("owner-linked-files/.gemini");
+        fs::create_dir_all(owner_linked_files.join("antigravity-cli")).unwrap();
+        fs::create_dir_all(owner_linked_files.join(CONFIG_DIR)).unwrap();
+        std::os::unix::fs::symlink(
+            &outside,
+            owner_linked_files
+                .join("antigravity-cli")
+                .join(SETTINGS_FILE),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            &outside,
+            owner_linked_files.join(CONFIG_DIR).join(CONFIG_FILE),
+        )
+        .unwrap();
         let state_root2 = dir.path().join("state2");
         let target2 = state_root2.join("antigravity-cli");
         fs::create_dir_all(&target2).unwrap();
-        std::os::unix::fs::symlink(&outside, owner_config_dir.join(CONFIG_FILE)).unwrap();
         let notes_owner = apply(
             &state_root2,
             &target2,
             StateSettings::AntigravitySettings,
             &steve_home,
             &node_home,
-            Some(&owner_state_root),
+            Some(&owner_linked_files),
         )
         .unwrap();
-        assert_eq!(notes_owner.len(), 1, "{notes_owner:?}");
+        assert_eq!(notes_owner.len(), 2, "{notes_owner:?}");
+        let s2: Value =
+            serde_json::from_slice(&fs::read(target2.join(SETTINGS_FILE)).unwrap()).unwrap();
+        assert!(s2.get("outside").is_none());
+        assert_eq!(s2["permissions"]["allow"], json!(["mcp(steve/*)"]));
         let cfg2: Value = serde_json::from_slice(
             &fs::read(state_root2.join(CONFIG_DIR).join(CONFIG_FILE)).unwrap(),
         )
@@ -792,53 +1110,81 @@ mod tests {
     }
 
     #[test]
-    fn leaves_malformed_or_bad_shape_files_untouched_without_blocking_config_json() {
+    fn replaces_malformed_oversized_or_bad_shape_files_with_steve_rules() {
         let dir = tempfile::tempdir().unwrap();
         let state_root = dir.path().join("state");
         let target = state_root.join("antigravity-cli");
+        let owner_state_root = dir.path().join("owner/.gemini");
+        let owner_cli_dir = owner_state_root.join("antigravity-cli");
+        let owner_config_dir = owner_state_root.join(CONFIG_DIR);
         let steve_home = dir.path().join("steve");
         let node_home = steve_home.join("data/node");
         fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&owner_cli_dir).unwrap();
+        fs::create_dir_all(&owner_config_dir).unwrap();
+        fs::write(
+            owner_cli_dir.join(SETTINGS_FILE),
+            serde_json::to_vec_pretty(&json!({
+                "theme": "ocean",
+                "permissions": { "deny": ["command(sudo)"] }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            owner_config_dir.join(CONFIG_FILE),
+            serde_json::to_vec_pretty(&json!({
+                "plugins": { "swarm": { "enabled": true } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
         let settings_path = target.join(SETTINGS_FILE);
-
-        // Malformed settings.json is left untouched, while config/config.json is still populated.
-        fs::write(&settings_path, "{not json").unwrap();
-        let notes = apply(
-            &state_root,
-            &target,
-            StateSettings::AntigravitySettings,
-            &steve_home,
-            &node_home,
-            None,
-        )
-        .unwrap();
-        assert_eq!(notes.len(), 1, "{notes:?}");
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), "{not json");
         let cfg_path = state_root.join(CONFIG_DIR).join(CONFIG_FILE);
-        let cfg_val: Value = serde_json::from_slice(&fs::read(&cfg_path).unwrap()).unwrap();
-        assert_eq!(
-            cfg_val["userSettings"]["globalPermissionGrants"]["allow"],
-            json!(["mcp(steve/*)"])
-        );
+        let expected_deny = json!(format!("read_file({}/signing)", steve_home.display()));
 
-        // Non-array permissions.allow in settings.json leaves settings.json untouched.
-        let bad_shape = r#"{"permissions":{"allow":"not-an-array"}}"#;
-        fs::write(&settings_path, bad_shape).unwrap();
-        let notes = apply(
-            &state_root,
-            &target,
-            StateSettings::AntigravitySettings,
-            &steve_home,
-            &node_home,
-            None,
-        )
-        .unwrap();
-        assert_eq!(notes.len(), 1, "{notes:?}");
-        assert_eq!(fs::read_to_string(&settings_path).unwrap(), bad_shape);
+        // Malformed JSON, non-object JSON, oversized file, and bad permission shapes in settings.json.
+        let oversized = vec![b' '; (MAX_SETTINGS as usize) + 1];
+        for bad_settings in [
+            b"{not json".as_slice(),
+            b"[]".as_slice(),
+            oversized.as_slice(),
+            br#"{"permissions":{"allow":"not-an-array"}}"#.as_slice(),
+            br#"{"permissions":{"ask":"not-an-array"}}"#.as_slice(),
+            br#"{"permissions":{"deny":[123]}}"#.as_slice(),
+        ] {
+            fs::write(&settings_path, bad_settings).unwrap();
+            let notes = apply(
+                &state_root,
+                &target,
+                StateSettings::AntigravitySettings,
+                &steve_home,
+                &node_home,
+                Some(&owner_state_root),
+            )
+            .unwrap();
+            assert!(
+                notes
+                    .iter()
+                    .any(|n| n.starts_with("settings.json: rebuilt")),
+                "{notes:?}"
+            );
+            let val: Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+            assert_eq!(val["theme"], "ocean");
+            assert_eq!(val["permissions"]["allow"], json!(["mcp(steve/*)"]));
+            let deny = val["permissions"]["deny"].as_array().unwrap();
+            assert!(deny.contains(&json!("command(sudo)")));
+            assert!(deny.contains(&expected_deny));
+        }
 
-        // Non-object userSettings or malformed config.json leaves config.json untouched.
-        fs::write(&settings_path, "{}").unwrap();
-        for bad_cfg in [r#"{"userSettings":"bad"}"#, "{not json"] {
+        // Malformed JSON, oversized file, and bad shapes in config.json are rebuilt from owner + Steve rules.
+        for bad_cfg in [
+            b"{not json".as_slice(),
+            oversized.as_slice(),
+            br#"{"userSettings":"bad"}"#.as_slice(),
+            br#"{"userSettings":{"globalPermissionGrants":{"deny":[42]}}}"#.as_slice(),
+        ] {
             fs::write(&cfg_path, bad_cfg).unwrap();
             let notes = apply(
                 &state_root,
@@ -846,11 +1192,154 @@ mod tests {
                 StateSettings::AntigravitySettings,
                 &steve_home,
                 &node_home,
-                None,
+                Some(&owner_state_root),
             )
             .unwrap();
-            assert_eq!(notes.len(), 1, "{notes:?}");
-            assert_eq!(fs::read_to_string(&cfg_path).unwrap(), bad_cfg);
+            assert!(
+                notes.iter().any(|n| n.starts_with("config.json: rebuilt")),
+                "{notes:?}"
+            );
+            let cfg_val: Value = serde_json::from_slice(&fs::read(&cfg_path).unwrap()).unwrap();
+            assert_eq!(cfg_val["plugins"]["swarm"]["enabled"], json!(true));
+            let grants = &cfg_val["userSettings"]["globalPermissionGrants"];
+            assert_eq!(grants["allow"], json!(["mcp(steve/*)"]));
+            let deny = grants["deny"].as_array().unwrap();
+            assert!(deny.contains(&json!("command(sudo)")));
+            assert!(deny.contains(&expected_deny));
+        }
+
+        // Bad-shape owner config.json is skipped without failing rebuild; Steve rules still land.
+        fs::write(
+            owner_config_dir.join(CONFIG_FILE),
+            r#"{"userSettings":"bad"}"#,
+        )
+        .unwrap();
+        fs::write(&cfg_path, "{broken").unwrap();
+        let notes = apply(
+            &state_root,
+            &target,
+            StateSettings::AntigravitySettings,
+            &steve_home,
+            &node_home,
+            Some(&owner_state_root),
+        )
+        .unwrap();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let cfg_val: Value = serde_json::from_slice(&fs::read(&cfg_path).unwrap()).unwrap();
+        assert_eq!(
+            cfg_val["userSettings"]["globalPermissionGrants"]["allow"],
+            json!(["mcp(steve/*)"])
+        );
+        assert!(
+            cfg_val["userSettings"]["globalPermissionGrants"]["deny"]
+                .as_array()
+                .unwrap()
+                .contains(&expected_deny)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fails_closed_when_isolated_path_is_directory_or_unwritable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let steve_home = dir.path().join("steve");
+        let node_home = steve_home.join("data/node");
+
+        // Directory at settings.json fails closed and names settings.json.
+        let s1 = dir.path().join("s1");
+        let t1 = s1.join("antigravity-cli");
+        fs::create_dir_all(t1.join(SETTINGS_FILE)).unwrap();
+        let (err1, outcomes1) = record_outcomes(|| {
+            apply(
+                &s1,
+                &t1,
+                StateSettings::AntigravitySettings,
+                &steve_home,
+                &node_home,
+                None,
+            )
+        });
+        let msg1 = err1.unwrap_err();
+        assert!(
+            msg1.contains(SETTINGS_FILE) && msg1.contains("directory"),
+            "{msg1}"
+        );
+        assert_eq!(
+            outcomes1,
+            vec![(SETTINGS_FILE.to_string(), "error".to_string())]
+        );
+
+        // Directory at config/config.json fails closed and names config.json.
+        let s2 = dir.path().join("s2");
+        let t2 = s2.join("antigravity-cli");
+        fs::create_dir_all(&t2).unwrap();
+        fs::create_dir_all(s2.join(CONFIG_DIR).join(CONFIG_FILE)).unwrap();
+        let (err2, outcomes2) = record_outcomes(|| {
+            apply(
+                &s2,
+                &t2,
+                StateSettings::AntigravitySettings,
+                &steve_home,
+                &node_home,
+                None,
+            )
+        });
+        let msg2 = err2.unwrap_err();
+        assert!(
+            msg2.contains(CONFIG_FILE) && msg2.contains("directory"),
+            "{msg2}"
+        );
+        assert_eq!(
+            outcomes2,
+            vec![
+                (SETTINGS_FILE.to_string(), "updated".to_string()),
+                (CONFIG_FILE.to_string(), "error".to_string()),
+            ]
+        );
+
+        // Symlinked config directory fails closed without following it.
+        let s3 = dir.path().join("s3");
+        let t3 = s3.join("antigravity-cli");
+        let outside_dir = dir.path().join("outside-cfg");
+        fs::create_dir_all(&t3).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, s3.join(CONFIG_DIR)).unwrap();
+        let err3 = apply(
+            &s3,
+            &t3,
+            StateSettings::AntigravitySettings,
+            &steve_home,
+            &node_home,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err3.contains(CONFIG_DIR) && err3.contains("not a directory"),
+            "{err3}"
+        );
+        assert!(!outside_dir.join(CONFIG_FILE).exists());
+
+        // Read-only config directory prevents atomic publish and fails closed (skip if root).
+        if unsafe { libc::geteuid() } != 0 {
+            let s4 = dir.path().join("s4");
+            let t4 = s4.join("antigravity-cli");
+            let cfg4 = s4.join(CONFIG_DIR);
+            fs::create_dir_all(&t4).unwrap();
+            fs::create_dir_all(&cfg4).unwrap();
+            fs::set_permissions(&cfg4, fs::Permissions::from_mode(0o500)).unwrap();
+            let err4 = apply(
+                &s4,
+                &t4,
+                StateSettings::AntigravitySettings,
+                &steve_home,
+                &node_home,
+                None,
+            )
+            .unwrap_err();
+            fs::set_permissions(&cfg4, fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(err4.contains(CONFIG_FILE), "{err4}");
         }
     }
 
