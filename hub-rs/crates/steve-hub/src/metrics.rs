@@ -2156,4 +2156,25 @@ mod tests {
             "removed node label must disappear from rendered metrics:\n{after}"
         );
     }
+
+    #[test]
+    fn update_check_metric_is_described_and_recorded() {
+        let recorder = recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            catalog::describe();
+            metrics::counter!("steve_update_check_total", "result" => "available").increment(1);
+            metrics::counter!("steve_update_check_total", "result" => "unavailable").increment(2);
+            metrics::counter!("steve_update_check_total", "result" => "error").increment(1);
+        });
+        let text = handle.render();
+        for line in [
+            "# HELP steve_update_check_total ",
+            "steve_update_check_total{result=\"available\"} 1",
+            "steve_update_check_total{result=\"unavailable\"} 2",
+            "steve_update_check_total{result=\"error\"} 1",
+        ] {
+            assert!(text.contains(line), "missing `{line}` in:\n{text}");
+        }
+    }
 }

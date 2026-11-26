@@ -627,6 +627,11 @@ pub(super) fn describe() {
         Count,
         "Owner updates to per-Node or per-harness automatic upgrade policy."
     );
+    describe_counter!(
+        "steve_update_check_total",
+        Count,
+        "GitHub release update checks finished. Label: result (available, up_to_date, ahead, unknown_current, no_release, unsupported_platform, unavailable, error)."
+    );
     // Node meters, from each Node's vitals (nodes::vitals); totals count from the Node's start
     describe_gauge!(
         "steve_node_sample_timestamp_seconds",

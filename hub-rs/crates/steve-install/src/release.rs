@@ -75,9 +75,13 @@ fn stamp() -> String {
     )
 }
 struct Journal {
+    id: Option<String>,
     path: Option<PathBuf>,
 }
 impl Journal {
+    fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
     fn new(home: &Path, operation: Option<&str>) -> Result<Self> {
         let path = operation
             .map(|id| -> Result<PathBuf> {
@@ -100,7 +104,10 @@ impl Journal {
                 Ok(path)
             })
             .transpose()?;
-        Ok(Self { path })
+        Ok(Self {
+            id: operation.map(str::to_owned),
+            path,
+        })
     }
     fn update(
         &self,
@@ -693,17 +700,36 @@ fn deploy_with(
     check_schema(&db, candidate)?;
     runtime.check_config(candidate, &info)?;
     let stamp = stamp();
-    let mut receipt = json!({"version":version,"release":candidate,"previous":old_hub,"previous_web":old_web,"db_before":inspect_schema(&db)?,"started":stamp});
+    let started_at = now();
+    let old_manifest = json_file(&old_hub.join("release.json"))?;
+    let old_version = old_manifest["version"].as_str().map(str::to_owned);
+    let mut receipt = json!({
+        "version": version,
+        "release": candidate,
+        "previous": old_hub,
+        "previous_version": old_version,
+        "previous_web": old_web,
+        "db_before": inspect_schema(&db)?,
+        "started": stamp,
+        "started_at": started_at,
+    });
+    if let Some(op_id) = journal.id() {
+        receipt["operation_id"] = json!(op_id);
+    }
     let logs = home.join("logs/release");
     private_dir(&logs)?;
     let result_path = logs.join(format!("local-{version}-{stamp}.json"));
     let helper_hash = hash(&home.join("bin/steve-keyhelper"))?;
-    let old_manifest = json_file(&old_hub.join("release.json"))?;
     let mut changed = Changed::default();
     let mut phase = "drain";
     let mut saved = None;
     let transaction = (|| -> Result<Value> {
-        journal.update("draining", None, None, json!({"target":candidate}))?;
+        journal.update(
+            "draining",
+            None,
+            None,
+            json!({"target": candidate, "previous": old_hub, "previous_version": old_version}),
+        )?;
         changed.drain = true;
         runtime.control(Method::POST)?;
         let until = Instant::now() + drain_timeout;
@@ -766,6 +792,7 @@ fn deploy_with(
             receipt["health"] = health;
             receipt["db_after"] = json!(inspect_schema(&db)?);
             receipt["finished"] = self::stamp().into();
+            receipt["finished_at"] = now().into();
             if hash(&home.join("bin/steve-keyhelper"))? != helper_hash {
                 receipt["warning"] = "installed keyhelper changed during deployment".into();
             }
@@ -787,6 +814,8 @@ fn deploy_with(
             receipt["phase"] = phase.into();
             receipt["error"] = message.clone().into();
             receipt["db_after"] = inspect_schema(&db).map_or(Value::Null, |state| json!(state));
+            receipt["finished"] = self::stamp().into();
+            receipt["finished_at"] = now().into();
             journal.update("failed", Some(&message), None, json!({}))?;
             3
         }
@@ -807,6 +836,8 @@ fn deploy_with(
             receipt["error"] = message.clone().into();
             receipt["recovered"] = recovered.into();
             receipt["recovery"] = json!(steps);
+            receipt["finished"] = self::stamp().into();
+            receipt["finished_at"] = now().into();
             journal.update(
                 if recovered && changed.stopped {
                     "rolled_back"
@@ -1274,6 +1305,14 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         let outcome = deploy_with(&runtime, &candidate, &journal, Duration::from_secs(2)).unwrap();
         assert_eq!(outcome.exit_code, 1, "{}", outcome.receipt);
         assert_eq!(outcome.receipt["phase"], "backup");
+        assert_eq!(outcome.receipt["previous_version"], "1.2.2");
+        assert!(outcome.receipt["started_at"].as_u64().is_some());
+        assert!(outcome.receipt["finished_at"].as_u64().is_some());
+        assert_eq!(outcome.receipt["operation_id"].as_str(), journal.id());
+        let saved_journal = json_file(journal.path.as_ref().unwrap()).unwrap();
+        assert_eq!(saved_journal["phase"], "rolled_back");
+        assert_eq!(saved_journal["previous_version"], "1.2.2");
+        assert!(saved_journal["previous"].as_str().is_some());
         assert_eq!(
             inspect_schema(&dir.path().join("data/steve.sqlite3"))
                 .unwrap()
