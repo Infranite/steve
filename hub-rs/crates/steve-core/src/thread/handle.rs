@@ -65,6 +65,7 @@ pub(super) struct RouteInfo {
     pub fallback: bool,
     pub ms: i64,
     pub project: Option<String>,
+    pub tags: Vec<String>,
     pub offer: Option<Offer>,
     pub step_json: Option<Value>,
 }
@@ -81,6 +82,7 @@ impl Default for RouteInfo {
             fallback: false,
             ms: 0,
             project: None,
+            tags: vec![],
             offer: None,
             step_json: None,
         }
@@ -382,11 +384,23 @@ impl Core {
                 .route_json
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok());
+            let tags = route_json
+                .as_ref()
+                .and_then(|v| v.get("tags"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
             let info = RouteInfo {
                 kind: forced.into(),
                 model_kind: forced.into(),
                 guard: Some("forced".into()),
                 project: task.project_id.clone(),
+                tags,
                 step_json: route_json,
                 ..Default::default()
             };
@@ -569,7 +583,7 @@ impl Core {
         if confirms(text)
             && let Some(offer_msg) = self.open_offer_before(ws, mid)?
         {
-            let h = self.offer_as(ws, &offer_msg.id, true, conv.start, user)?;
+            let h = self.offer_as(ws, &offer_msg.id, true, conv.start, None, user)?;
             let (outcome, dispatch) = match h.dispatch_ref_id.as_deref() {
                 Some(id) => ("handed_off", ReceiptDispatch::Dispatched(id)),
                 None => ("answered", ReceiptDispatch::NoDispatch),
@@ -801,6 +815,7 @@ impl Core {
             fallback: r.fallback,
             ms,
             project: r.project.clone(),
+            tags: r.tag_ids.clone(),
             offer: d.offer.clone(),
             step_json: Some(step),
         };

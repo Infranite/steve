@@ -1082,6 +1082,7 @@ impl Tx<'_> {
                 effort: effort_filter,
                 team: team.as_ref(),
                 project: &project_req,
+                title: &item.title,
                 goal: &goal_text,
                 tags: &tags_for_selection,
                 required_specialties: &[],

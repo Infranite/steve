@@ -281,6 +281,9 @@ impl Core {
     pub(crate) fn gw(&self) -> &dyn ModelGateway {
         &*self.0.gateway
     }
+    pub(crate) fn rt(&self) -> &dyn AgentRuntime {
+        &*self.0.runtime
+    }
 
     /// Enter the critical section.
     #[track_caller]

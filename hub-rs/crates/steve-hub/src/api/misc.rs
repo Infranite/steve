@@ -54,6 +54,8 @@ struct RerouteBody {
 #[derive(serde::Deserialize)]
 struct OfferBody {
     take: bool,
+    #[serde(default)]
+    bot: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -725,7 +727,10 @@ pub async fn thread_reroute(
     thread_result(st.domain.reroute(&c.ws, &id, &to, &c.me).await?)
 }
 
-/// `POST /api/thread/:id/offer {take: bool}`.
+/// Maximum length of an explicit Bot identifier accepted by `POST /api/thread/:id/offer`.
+const MAX_OFFER_BOT_ID_LEN: usize = 128;
+
+/// `POST /api/thread/:id/offer {take: bool, bot?: string}`.
 pub async fn thread_offer(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -733,7 +738,21 @@ pub async fn thread_offer(
     b: Bytes,
 ) -> ApiResult {
     let req: OfferBody = json_body(&b)?;
-    thread_result(st.domain.offer(&c.ws, &id, req.take, &c.me).await?)
+    let bot = req.bot.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if bot.is_some_and(|b| !check_len(b, 1, MAX_OFFER_BOT_ID_LEN)) {
+        return Err(ApiError::Invalid(vec!["bot".into()]));
+    }
+    thread_result(
+        st.domain
+            .offer(
+                &c.ws,
+                &id,
+                req.take,
+                req.take.then_some(bot).flatten(),
+                &c.me,
+            )
+            .await?,
+    )
 }
 
 /// `POST /api/thread/:id/a2ui` (ST-46): a button of an A2UI interface in Steve's reply. Answers the record

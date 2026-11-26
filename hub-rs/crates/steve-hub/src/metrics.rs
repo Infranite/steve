@@ -2177,4 +2177,32 @@ mod tests {
             assert!(text.contains(line), "missing `{line}` in:\n{text}");
         }
     }
+
+    #[test]
+    fn placement_and_offer_metrics_are_described_and_recorded() {
+        let recorder = recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            catalog::describe();
+            metrics::counter!("steve_bot_selection_total", "reason" => "stable_order").increment(1);
+            metrics::counter!("steve_offer_preview_total", "result" => "placed").increment(1);
+            metrics::counter!(
+                "steve_offer_action_total",
+                "action" => "take",
+                "bot_override" => "explicit"
+            )
+            .increment(1);
+        });
+        let text = handle.render();
+        for line in [
+            "# HELP steve_bot_selection_total ",
+            "# HELP steve_offer_preview_total ",
+            "# HELP steve_offer_action_total ",
+            "steve_bot_selection_total{reason=\"stable_order\"} 1",
+            "steve_offer_preview_total{result=\"placed\"} 1",
+            "steve_offer_action_total{action=\"take\",bot_override=\"explicit\"} 1",
+        ] {
+            assert!(text.contains(line), "missing `{line}` in:\n{text}");
+        }
+    }
 }

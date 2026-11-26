@@ -1740,15 +1740,30 @@ impl CoreDomain {
         ws: &str,
         message: &str,
         take: bool,
+        bot: Option<&str>,
         by: &str,
-    ) -> BResult<(Obj, bool)> {
-        let (c, ws, m, by) = (
+    ) -> Result<(Obj, bool), crate::error::ApiError> {
+        let (c, ws, m, bot, by) = (
             self.core.clone(),
             ws.to_string(),
             message.to_string(),
+            bot.map(str::to_owned),
             by.to_string(),
         );
-        handled(blocking(move || c.offer(&ws, &m, take, Some(&by))).await?)
+        let result =
+            tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+                c.offer(&ws, &m, take, bot.as_deref(), Some(&by))
+                    .map_err(|error| match error {
+                        CoreError::Placement(blocked) => crate::error::ApiError::Placement {
+                            blocked,
+                            proposal: None,
+                        },
+                        other => cerr(other).into(),
+                    })
+            })))
+            .await
+            .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
+        Ok(handled(result?)?)
     }
     pub async fn a2ui_action(
         &self,
