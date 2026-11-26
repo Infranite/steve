@@ -7,10 +7,14 @@ import assert from "node:assert/strict"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
+/* Fixed midday UTC timestamp paired with timezoneId: "UTC" + page.clock.setFixedTime(NOW)
+ * so fixture timestamps (T = Date.now() - 1h) stay on the same calendar day regardless of wall clock. */
+const NOW = Date.UTC(2026, 10, 18, 14, 0)
 const errors = []
 const shot = async (page, name) => { if (process.env.STEVE_TEST_SHOTS) await page.screenshot({ path: `${process.env.STEVE_TEST_SHOTS}/session-panel-${name}.png`, fullPage: true }) }
 async function open(width, q) {
-  const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 1000 } })
+  const page = await browser.newPage({ locale: "zh-CN", timezoneId: "UTC", viewport: { width, height: 1000 } })
+  await page.clock.setFixedTime(NOW)
   page.on("pageerror", (e) => errors.push(e.message))
   await page.route("**/*", (route) => { const u = new URL(route.request().url()); return u.origin !== base || u.pathname.startsWith("/api/") ? route.abort("blockedbyclient") : route.continue() })
   await page.goto(`${base}/test/fixtures/session-panel.html${q}`)

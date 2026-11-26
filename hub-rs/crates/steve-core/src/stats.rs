@@ -83,6 +83,7 @@ impl CallAccount {
                 bot,
                 project,
                 purpose: tag.purpose.into(),
+                node_id: Some("local".into()),
                 started: ts,
                 day: steve_stats::day(ts, steve_stats::tz(tz.as_deref())),
             })?;

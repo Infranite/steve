@@ -84,6 +84,17 @@ impl<C: Read> BotReads<'_, C> {
     }
 }
 
+pub struct NodeReads<'a, C>(pub &'a mut C);
+
+impl<C: Read> NodeReads<'_, C> {
+    pub fn names(&mut self) -> Result<Vec<(String, String)>> {
+        self.0.all(
+            Query::select().columns(["node_id", "name"]).from("nodes"),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+}
+
 impl<C: Read> ItemHistory<'_, C> {
     pub fn project_names(&mut self, ws: &str) -> Result<Vec<(String, String)>> {
         self.0.all(
@@ -500,6 +511,53 @@ impl<C: Read> UsageReads<'_, C> {
             ))
         })
     }
+
+    /// Batched per-session `(model, day)` usage sums for session list enrichment.
+    pub fn for_sessions(&mut self, ws: &str, ids: &[String]) -> Result<Vec<(String, TokenGroup)>> {
+        const SESSION_BATCH_MAX: usize = 200;
+        let mut out = Vec::new();
+        for chunk in ids.chunks(SESSION_BATCH_MAX) {
+            let mut q = Query::select();
+            q.columns(["session_id", "model", "day"])
+                .from("usage_records")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("session_id").is_in(chunk.iter().map(String::as_str)));
+            for field in ["input", "output", "cache_read", "cache_write"] {
+                q.expr(Func::sum(Expr::col(field)));
+            }
+            let hit_base = Expr::col("input")
+                .add(Expr::col("cache_read"))
+                .add(Func::coalesce([
+                    Expr::col("cache_write"),
+                    Expr::Constant(0_i64.into()),
+                ]));
+            q.expr(Func::sum(hit_base))
+                .expr(Func::sum(Expr::col("cost_reported")))
+                .group_by_col("session_id")
+                .group_by_col("model")
+                .group_by_col("day");
+            let rows = self.0.all(&q, |r| {
+                Ok((
+                    r.get::<Option<String>>(0)?.unwrap_or_default(),
+                    (
+                        r.get(1)?,
+                        r.get(2)?,
+                        Tokens {
+                            input: r.get(3)?,
+                            output: r.get(4)?,
+                            cache_read: r.get(5)?,
+                            cache_write: r.get(6)?,
+                            reasoning: None,
+                        },
+                        r.get::<Option<i64>>(7)?.unwrap_or_default(),
+                        r.get::<Option<f64>>(8)?.unwrap_or_default(),
+                    ),
+                ))
+            })?;
+            out.extend(rows);
+        }
+        Ok(out)
+    }
 }
 
 impl<C: Read> SessionReads<'_, C> {
@@ -510,6 +568,16 @@ impl<C: Read> SessionReads<'_, C> {
                 .from("sessions")
                 .and_where(Expr::col("id").eq(id)),
             |r| r.get(0),
+        )
+    }
+
+    pub fn titles(&mut self, ws: &str) -> Result<Vec<(String, String)>> {
+        self.0.all(
+            Query::select()
+                .columns(["id", "title"])
+                .from("sessions")
+                .and_where(Expr::col("workspace_id").eq(ws)),
+            |r| Ok((r.get(0)?, r.get::<Option<String>>(1)?.unwrap_or_default())),
         )
     }
 }

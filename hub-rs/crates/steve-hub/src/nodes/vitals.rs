@@ -198,7 +198,8 @@ pub async fn get(
                     minute,
                     now,
                 )?;
-                Ok::<_, steve_store::StoreError>((ids, now, tokens))
+                let costs = steve_stats::metrics::node_costs(r, &caller.ws, &today)?;
+                Ok::<_, steve_store::StoreError>((ids, now, tokens, costs))
             })
             .map_err(|e| {
                 tracing::error!("vitals: {e}");
@@ -207,8 +208,8 @@ pub async fn get(
     })
     .await;
     match result {
-        Ok((ids, now, tokens)) => axum::Json(VitalsResponse {
-            nodes: metrics::node_days(ids, now, tokens),
+        Ok((ids, now, tokens, costs)) => axum::Json(VitalsResponse {
+            nodes: metrics::node_days(ids, now, tokens, costs),
         })
         .into_response(),
         Err(e) => e.into_response(),

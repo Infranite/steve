@@ -36,6 +36,7 @@ pub enum Attribution {
 
 pub struct Meter {
     pub key: DailyKey,
+    pub session: Option<String>,
     pub at: i64,
     pub tokens: Tokens,
     pub cost: Option<f64>,
@@ -51,6 +52,8 @@ pub struct MissingTurn {
     pub model: String,
     pub bot: String,
     pub project: String,
+    pub node: String,
+    pub session: String,
     pub pending: bool,
 }
 
@@ -113,6 +116,8 @@ impl<C: Read> CoverageRows<'_, C> {
                 "model",
                 "bot_id",
                 "project_id",
+                "node_id",
+                "session_id",
                 "input",
                 "output",
                 "cache_read",
@@ -139,6 +144,7 @@ impl<C: Read> CoverageRows<'_, C> {
                 optional_filter(&mut q, u("project_id"), f.project);
                 optional_filter(&mut q, u("bot_id"), f.bot);
                 optional_filter(&mut q, u("source"), f.source);
+                optional_filter(&mut q, u("node_id"), f.node);
                 if let Some(model) = f.model {
                     let unspent_match = Query::select()
                         .column(("e", "value"))
@@ -171,23 +177,25 @@ impl<C: Read> CoverageRows<'_, C> {
                     r.get(4)?,
                     r.get::<Option<String>>(5)?.unwrap_or_default(),
                     r.get::<Option<String>>(6)?.unwrap_or_default(),
+                    r.get::<Option<String>>(7)?.unwrap_or_default(),
                 ),
+                session: r.get(8)?,
                 tokens: Tokens {
-                    input: r.get(7)?,
-                    output: r.get(8)?,
-                    cache_read: r.get(9)?,
-                    cache_write: r.get(10)?,
+                    input: r.get(9)?,
+                    output: r.get(10)?,
+                    cache_read: r.get(11)?,
+                    cache_write: r.get(12)?,
                     reasoning: None,
                 },
-                cost: r.get(11)?,
-                pending: r.get(12)?,
-                at: r.get(13)?,
-                attribution: match r.get::<i64>(14)? {
+                cost: r.get(13)?,
+                pending: r.get(14)?,
+                at: r.get(15)?,
+                attribution: match r.get::<i64>(16)? {
                     0 => Attribution::CostOnly,
                     _ => Attribution::Meter,
                 },
                 unspent: r
-                    .get::<Option<Json<Vec<Unspent>>>>(15)?
+                    .get::<Option<Json<Vec<Unspent>>>>(17)?
                     .map(|j| j.0)
                     .unwrap_or_default(),
             })
@@ -211,7 +219,12 @@ impl<C: Read> CoverageRows<'_, C> {
         let mut q = Query::select();
         q.columns([("t", "workspace_id"), ("t", "started"), ("t", "harness")])
             .expr(model.clone())
-            .columns([("t", "bot_id"), ("t", "project_id")])
+            .columns([
+                ("t", "bot_id"),
+                ("t", "project_id"),
+                ("t", "node_id"),
+                ("t", "session_id"),
+            ])
             .expr(t("ended").is_null())
             .from_as("agent_turns", "t")
             .join_as(
@@ -237,6 +250,7 @@ impl<C: Read> CoverageRows<'_, C> {
                     .and_where(t("started").lt(*hi));
                 optional_filter(&mut q, t("project_id"), f.project);
                 optional_filter(&mut q, t("bot_id"), f.bot);
+                optional_filter(&mut q, t("node_id"), f.node);
                 optional_filter(&mut q, model, f.model);
             }
             CoverageScope::Report { .. } => return Ok(Vec::new()),
@@ -253,7 +267,9 @@ impl<C: Read> CoverageRows<'_, C> {
                 model: r.get(3)?,
                 bot: r.get::<Option<String>>(4)?.unwrap_or_default(),
                 project: r.get::<Option<String>>(5)?.unwrap_or_default(),
-                pending: r.get(6)?,
+                node: r.get::<Option<String>>(6)?.unwrap_or_default(),
+                session: r.get(7)?,
+                pending: r.get(8)?,
             })
         })
     }

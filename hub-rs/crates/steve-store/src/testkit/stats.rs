@@ -914,3 +914,37 @@ pub fn gateway_recovered(s: &Store) -> Result<(i64, i64, String, i64)> {
         [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
     )?))
 }
+
+/// Registers an active Node fixture row with a valid 32-byte public key.
+pub fn seed_active_node(
+    s: &crate::Store,
+    node_id: &str,
+    owner: &str,
+    name: &str,
+) -> crate::Result<()> {
+    s.write_locked(|c| {
+        c.execute(
+            "INSERT OR IGNORE INTO nodes(node_id, owner, name, pubkey, fingerprint, state, created)
+             VALUES (?1, ?2, ?3, zeroblob(32), ?4, 'active', 1)",
+            rusqlite::params![node_id, owner, name, format!("fp_{node_id}")],
+        )?;
+        Ok(())
+    })
+}
+
+/// Binds an existing session to a Node in `runtime_sessions` for stats and API tests.
+pub fn bind_session_node(
+    s: &crate::Store,
+    session_id: &str,
+    node_id: &str,
+    phase: &str,
+) -> crate::Result<()> {
+    s.write_locked(|c| {
+        c.execute(
+            "INSERT OR REPLACE INTO runtime_sessions(session_id, node_id, workspace_ref, node_session_id, config_revision, phase, updated)
+             VALUES (?1, ?2, 'ws', ?1, '1', ?3, 1)",
+            rusqlite::params![session_id, node_id, phase],
+        )?;
+        Ok(())
+    })
+}

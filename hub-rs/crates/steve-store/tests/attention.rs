@@ -174,11 +174,15 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     for (user, token, time) in [
         ("other", snapshot.as_str(), 101),
         ("u", "forged", 101),
-        ("u", snapshot.as_str(), 86_400_101),
+        (
+            "u",
+            snapshot.as_str(),
+            100 + (attention::ATTENTION_WINDOW_TTL_SECS as i64) * 1_000,
+        ),
     ] {
         assert!(
             t.store
-                .write(|tx| attention::feed_page(tx, WS, user, None, Some(token), 100, time))
+                .read(|r| attention::feed_page(r, WS, user, None, Some(token), 100, time))
                 .is_err()
         );
     }
