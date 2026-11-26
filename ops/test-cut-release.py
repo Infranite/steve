@@ -331,21 +331,21 @@ Ran cargo nextest.
     # lint_pr rejects Checks: paragraphs and signature lines inside ## Release note, and accepts them after ## Checks.
     m.lint_pr(
         "feat(web): split Node page",
-        "## Release note\n\nReorganized the Node page.\n\n## Checks\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+        "Closes #10\n\n## Release note\n\nReorganized the Node page.\n\n## Checks\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
     )
     m.lint_pr(
         "feat(web): split Node page",
-        "## Release note\n\nReorganized the Node page.\n\n### Checks\n\nLocal checks: npm run check\n\nCo-Authored-By: Gemini <noreply@google.com>\n",
+        "Fixes #11\n\n## Release note\n\nReorganized the Node page.\n\n### Checks\n\nLocal checks: npm run check\n\nCo-Authored-By: Gemini <noreply@google.com>\n",
     )
     # Without ## Release note, Checks: and signature lines in PR body are allowed.
     m.lint_pr(
         "refactor(core): tidy helper",
-        "## Summary\n\nInternal cleanup.\n\nChecks: cargo test\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+        "Resolves #12\n\n## Summary\n\nInternal cleanup.\n\nChecks: cargo test\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
     )
     # Checks: / signature inside fenced code blocks or HTML comments within ## Release note are allowed.
     m.lint_pr(
         "docs(release): document example",
-        "## Release note\n\n<!-- Checks: comment ignored -->\n```\nChecks: example\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n```\n",
+        "closes #13\n\n## Release note\n\n<!-- Checks: comment ignored -->\n```\nChecks: example\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n```\n",
     )
     # Checks: variants inside ## Release note (no separating heading) are refused with ## Checks guidance.
     for bad_checks in (
@@ -355,7 +355,7 @@ Ran cargo nextest.
         "**Checks:** npm run check",
     ):
         try:
-            m.lint_pr("feat(web): split Node page", f"## Release note\n\nUser summary.\n\n{bad_checks}\n")
+            m.lint_pr("feat(web): split Node page", f"Closes #14\n\n## Release note\n\nUser summary.\n\n{bad_checks}\n")
             raise AssertionError(f"checks paragraph passed lint: {bad_checks}")
         except m.Refused as e:
             assert "## Checks" in str(e) and "checks paragraph" in str(e), e
@@ -367,7 +367,7 @@ Ran cargo nextest.
         "Signed-off-by: Maintainer <m@example.com>",
     ):
         try:
-            m.lint_pr("feat(web): split Node page", f"## Release note\n\nUser summary.\n\n{bad_sig}\n")
+            m.lint_pr("feat(web): split Node page", f"Closes #15\n\n## Release note\n\nUser summary.\n\n{bad_sig}\n")
             raise AssertionError(f"signature line passed lint: {bad_sig}")
         except m.Refused as e:
             assert "## Checks" in str(e) and "signature/attribution line" in str(e), e
@@ -375,12 +375,27 @@ Ran cargo nextest.
     try:
         m.lint_pr(
             "feat(web): split Node page",
-            "## Release note\n\nUser summary.\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+            "Closes #16\n\n## Release note\n\nUser summary.\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
         )
         raise AssertionError("combined Checks: + signature passed lint")
     except m.Refused as e:
         assert "checks paragraph" in str(e) and "signature/attribution line" in str(e) and "## Checks" in str(e), e
-    ok("lint rejects Checks: paragraphs and signature lines inside ## Release note with ## Checks guidance")
+    # Ordinary PRs without Closes/Fixes/Resolves #N outside code blocks are refused; chore(release): is exempt.
+    for missing_issue_body in (
+        "",
+        "## Release note\n\nNo issue link here.\n",
+        "```\nCloses #99\n```\n",
+        "<!-- Fixes #99 -->\n",
+        "Related to #99\n",
+        "Closes #0\n",
+    ):
+        try:
+            m.lint_pr("fix(hub): patch bug", missing_issue_body)
+            raise AssertionError(f"PR without issue link passed lint: {missing_issue_body!r}")
+        except m.Refused as e:
+            assert "Closes #N" in str(e), e
+    m.lint_pr("chore(release): v0.12.0", "")
+    ok("lint rejects Checks:/signatures inside ## Release note and enforces PR issue links (exempting chore(release))")
 
     # Version computation: pre-1.0 vs post-1.0, PATCH/MINOR/MAJOR, triggers.
     def mk(ct, *, breaking=False, upgrades=(), pr=None, title=None):
@@ -442,20 +457,20 @@ Ran cargo nextest.
     upgrade_commit = m.PrCommit(sha="a1b2c3d4" + "0" * 32, message="feat(store): migrate schema\n\nUpgrade: draft commit upgrade notice.\n")
     fenced_commit = m.PrCommit(sha="b2c3d4e5" + "0" * 32, message="docs: document trailer\n\n```\nUpgrade: example inside fence\n```\n")
     try:
-        m.lint_pr("feat(store): migrate schema", "## Release note\n\nSchema migrated.\n", commits=[upgrade_commit])
+        m.lint_pr("feat(store): migrate schema", "Closes #20\n\n## Release note\n\nSchema migrated.\n", commits=[upgrade_commit])
         raise AssertionError("missing PR-description Upgrade: passed lint")
     except m.Refused as e:
         assert "a1b2c3d" in str(e) and "PR description" in str(e), e
     # Writing the final Upgrade: into the PR description satisfies lint.
     m.lint_pr(
         "feat(store): migrate schema",
-        "## Release note\n\nSchema migrated.\n\nUpgrade: final operator upgrade notice.\n",
+        "Closes #20\n\n## Release note\n\nSchema migrated.\n\nUpgrade: final operator upgrade notice.\n",
         commits=[upgrade_commit],
     )
     # Upgrade: only inside a fenced code block in a commit does not trigger the rule.
-    m.lint_pr("docs: document trailer", "## Summary\n\nDocs.\n", commits=[fenced_commit])
+    m.lint_pr("docs: document trailer", "Closes #21\n\n## Summary\n\nDocs.\n", commits=[fenced_commit])
     # chore(integration) carrier PR is exempt because carried sub-PRs own their PR descriptions.
-    m.lint_pr("chore(integration): land batch 0.12", "Batch PR.", commits=[upgrade_commit])
+    m.lint_pr("chore(integration): land batch 0.12", "Closes #22\n\nBatch PR.", commits=[upgrade_commit])
     ok("lint rejects PRs with commit Upgrade: trailers missing from the PR description (exempting chore(integration))")
 
     # Cross-entry deduplication in ## Before upgrading (identical text across entries, breaking fallback guard).
@@ -491,16 +506,28 @@ Ran cargo nextest.
         m.lint_github_event(
             str(ev),
             env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
-            refresh=lambda repo, num, tok, base: ("fix(ci): edited title", "Upgrade: restart Hub"),
+            refresh=lambda repo, num, tok, base: ("fix(ci): edited title", "Closes #30\n\nUpgrade: restart Hub"),
             fetch_files=lambda repo, num, tok, base: [{"filename": "ops/cut-release.py", "status": "modified"}],
             fetch_commits=no_commits,
         )
+        # Missing issue link in a real PR event is refused.
+        try:
+            m.lint_github_event(
+                str(ev),
+                env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+                refresh=lambda repo, num, tok, base: ("fix(ci): missing issue link", "No issue link."),
+                fetch_files=lambda repo, num, tok, base: [{"filename": "ops/cut-release.py", "status": "modified"}],
+                fetch_commits=no_commits,
+            )
+            raise AssertionError("PR event without issue link passed lint_github_event")
+        except m.Refused as e:
+            assert "Closes #N" in str(e), e
         # Commit carries Upgrade: while PR description omits it -> refused in lint --github-event.
         try:
             m.lint_github_event(
                 str(ev),
                 env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
-                refresh=lambda repo, num, tok, base: ("feat(store): add migration", "## Release note\n\nMigrated.\n"),
+                refresh=lambda repo, num, tok, base: ("feat(store): add migration", "Closes #31\n\n## Release note\n\nMigrated.\n"),
                 fetch_files=lambda repo, num, tok, base: [{"filename": "hub-rs/src/lib.rs", "status": "modified"}],
                 fetch_commits=lambda repo, num, tok, base: [
                     m.PrCommit(sha="deadbeef" + "0" * 32, message="feat(store): add migration\n\nUpgrade: draft commit note.\n")
@@ -514,7 +541,7 @@ Ran cargo nextest.
             m.lint_github_event(
                 str(ev),
                 env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
-                refresh=lambda repo, num, tok, base: ("fix(ci): ok title", ""),
+                refresh=lambda repo, num, tok, base: ("fix(ci): ok title", "Closes #32"),
                 fetch_files=lambda repo, num, tok, base: [{"filename": "ops/cut-release.py", "status": "modified"}],
                 fetch_commits=lambda repo, num, tok, base: (_ for _ in ()).throw(OSError("timeout")),
             )
@@ -528,7 +555,7 @@ Ran cargo nextest.
                 env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
                 refresh=lambda repo, num, tok, base: (
                     "feat(web): regroup sidebar",
-                    "## Release note\n\nRegrouped sidebar.\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+                    "Closes #33\n\n## Release note\n\nRegrouped sidebar.\n\nChecks: npm run check\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
                 ),
                 fetch_files=lambda repo, num, tok, base: [{"filename": "web/src/nav.tsx", "status": "modified"}],
                 fetch_commits=no_commits,
@@ -536,28 +563,30 @@ Ran cargo nextest.
             raise AssertionError("dirty ## Release note passed lint_github_event")
         except m.Refused as e:
             assert "## Checks" in str(e) and "checks paragraph" in str(e) and "signature/attribution line" in str(e), e
-        # Ordinary PR adding or modifying any file under docs/releases/ is refused.
+        # Ordinary PR adding, modifying, or deleting any file under docs/releases/ is refused.
         for bad_files in (
             [{"filename": "docs/releases/0.11.0.md", "status": "added"}],
             [{"filename": "docs/releases/draft.md", "status": "added"}],
             [{"filename": "docs/releases/0.10.1.md", "status": "modified"}],
+            [{"filename": "docs/releases/0.10.1.md", "status": "removed"}],
         ):
             try:
                 m.lint_github_event(
                     str(ev),
                     env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
-                    refresh=lambda repo, num, tok, base: ("docs: edit release notes", ""),
+                    refresh=lambda repo, num, tok, base: ("docs: edit release notes", "Closes #34"),
                     fetch_files=lambda repo, num, tok, base, bf=bad_files: bf,
                     fetch_commits=no_commits,
                 )
                 raise AssertionError(f"docs/releases change passed: {bad_files}")
             except m.Refused as e:
                 assert "docs/releases/" in str(e), e
-        # chore(release) PR adding extra files or modifying existing notes is refused.
+        # chore(release) PR adding extra files, modifying, or deleting existing notes is refused.
         for bad_rel in (
             [{"filename": "docs/releases/0.11.0.md", "status": "added"}, {"filename": "README.md", "status": "modified"}],
             [{"filename": "docs/releases/0.11.0.md", "status": "modified"}],
             [{"filename": "docs/releases/0.12.0.md", "status": "added"}],
+            [{"filename": "docs/releases/0.10.1.md", "status": "removed"}],
         ):
             try:
                 m.lint_github_event(
@@ -570,7 +599,7 @@ Ran cargo nextest.
                 raise AssertionError(f"bad release PR passed: {bad_rel}")
             except m.Refused as e:
                 assert "docs/releases/" in str(e), e
-        # Genuine chore(release): v0.11.0 PR adding only docs/releases/0.11.0.md passes.
+        # Genuine chore(release): v0.11.0 PR adding only docs/releases/0.11.0.md passes without an issue link.
         m.lint_github_event(
             str(ev),
             env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
@@ -578,17 +607,21 @@ Ran cargo nextest.
             fetch_files=lambda repo, num, tok, base: [{"filename": "docs/releases/0.11.0.md", "status": "added"}],
             fetch_commits=no_commits,
         )
-        # Deleting files under docs/releases/ (cleanup PR) passes.
-        m.lint_github_event(
-            str(ev),
-            env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
-            refresh=lambda repo, num, tok, base: ("chore(release): remove old notes", ""),
-            fetch_files=lambda repo, num, tok, base: [
-                {"filename": "docs/releases/old/note.md", "status": "removed"},
-                {"filename": "ops/cut-release.py", "status": "modified"},
-            ],
-            fetch_commits=no_commits,
-        )
+        # Deleting files under docs/releases/ is always refused (even under chore(release):).
+        try:
+            m.lint_github_event(
+                str(ev),
+                env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "acme/app"},
+                refresh=lambda repo, num, tok, base: ("chore(release): remove old notes", ""),
+                fetch_files=lambda repo, num, tok, base: [
+                    {"filename": "docs/releases/old/note.md", "status": "removed"},
+                    {"filename": "ops/cut-release.py", "status": "modified"},
+                ],
+                fetch_commits=no_commits,
+            )
+            raise AssertionError("deleting docs/releases/ passed lint_github_event")
+        except m.Refused as e:
+            assert "docs/releases/" in str(e), e
         ev_non_pr = Path(tmp, "push.json")
         ev_non_pr.write_text(json.dumps({"before": "a" * 40}))
         m.lint_github_event(str(ev_non_pr), env={})
@@ -794,12 +827,18 @@ def integration_checks():
         assert cut(a, "lint").returncode == 0
         # Local PR check with --base refuses when branch commits carry Upgrade: but PR body omits it.
         no_up_body = Path(tmp, "no-up-body.md")
-        no_up_body.write_text("## Release note\n\nAdded filter.\n", encoding="utf-8")
+        no_up_body.write_text("Closes #40\n\n## Release note\n\nAdded filter.\n", encoding="utf-8")
         r = cut(a, "lint", "--pr-title", "feat(web): add filter", "--pr-body", str(no_up_body), "--base", "origin/main")
         assert r.returncode == 1 and "PR description" in r.stderr, r
         with_up_body = Path(tmp, "with-up-body.md")
-        with_up_body.write_text("## Release note\n\nAdded filter.\n\nUpgrade: reload open tabs after upgrading.\n", encoding="utf-8")
+        with_up_body.write_text("Closes #40\n\n## Release note\n\nAdded filter.\n\nUpgrade: reload open tabs after upgrading.\n", encoding="utf-8")
         assert cut(a, "lint", "--pr-title", "feat(web): add filter", "--pr-body", str(with_up_body), "--base", "origin/main").returncode == 0
+        # Deleting an existing release note on a branch -> refused.
+        git(a, "rm", "-q", "docs/releases/0.3.0.md")
+        git(a, "commit", "-q", "-m", "chore: delete old release notes")
+        r = cut(a, "lint")
+        assert r.returncode == 1 and "docs/releases/0.3.0.md" in r.stderr, r
+        git(a, "reset", "-q", "--hard", "HEAD~1")
         # Adding any file under docs/releases/ on a regular branch -> refused.
         commit(a, {"docs/releases/draft.md": "- Draft.\n"}, "docs: add draft note")
         r = cut(a, "lint")
@@ -822,11 +861,11 @@ def integration_checks():
         assert cut(a, "lint", "--pr-title", "fix(hub): handle EOF").returncode == 0
         assert cut(a, "lint", "--pr-title", "Handle EOF").returncode == 1
         bad_body = Path(tmp, "bad-pr-body.md")
-        bad_body.write_text("## Release note\n\nFixed EOF.\n\nChecks: cargo test\n", encoding="utf-8")
+        bad_body.write_text("Closes #41\n\n## Release note\n\nFixed EOF.\n\nChecks: cargo test\n", encoding="utf-8")
         r = cut(a, "lint", "--pr-title", "fix(hub): handle EOF", "--pr-body", str(bad_body))
         assert r.returncode == 1 and "## Checks" in r.stderr, r
         good_body = Path(tmp, "good-pr-body.md")
-        good_body.write_text("## Release note\n\nFixed EOF.\n\n## Checks\n\nChecks: cargo test\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n", encoding="utf-8")
+        good_body.write_text("Closes #41\n\n## Release note\n\nFixed EOF.\n\n## Checks\n\nChecks: cargo test\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n", encoding="utf-8")
         assert cut(a, "lint", "--pr-title", "fix(hub): handle EOF", "--pr-body", str(good_body)).returncode == 0
         # --range check on main skips release PR merges and validates commits.
         assert cut(a, "lint", "--range", "v0.3.0..origin/main").returncode == 0

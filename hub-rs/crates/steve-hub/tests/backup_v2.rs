@@ -89,10 +89,10 @@ fn one_engine_and_repository_for_all_purposes_with_private_verified_restore() {
         "signing/keychain-pass",
         "signing/other",
         "secrets/token",
-        "steve.env",
     ] {
         fs::write(h.join(path), path).unwrap();
     }
+    fs::write(h.join("steve.env"), "STEVE_UPDATE_CHECK=0\n").unwrap();
     symlink(h.join("backups"), h.join("workspaces/item/backups-link")).unwrap();
 
     let first = copy(h, BackupPurpose::Daily);

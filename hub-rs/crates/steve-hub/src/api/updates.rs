@@ -36,7 +36,7 @@ pub async fn status(
         v.install = crate::upgrades::InstallView::owner(install);
     } else {
         // paths on this machine are the instance manager's
-        v.install = crate::upgrades::InstallView::redacted(install.kind);
+        v.install = crate::upgrades::InstallView::redacted(install.kind, install.legacy_service);
         v.backup = None;
         v.capability.reason = steve_i18n::t!("hub.upgrade.owner_only_reason");
         if let Some(op) = v.operation.as_mut() {

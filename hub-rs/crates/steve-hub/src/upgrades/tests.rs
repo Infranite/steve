@@ -101,6 +101,55 @@ fn an_unmanaged_install_names_its_kind_and_why_it_is_not_upgraded_here() {
     assert_eq!(refused.to_string(), reason);
 }
 
+#[test]
+fn legacy_macos_service_disables_one_click_and_returns_typed_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs/release");
+    fs::create_dir_all(&logs).unwrap();
+    atomic(
+        &logs.join("macos-upgrade-0.13.0-20261126-220000.json"),
+        &json!({
+            "version": "0.13.0",
+            "release": "/Users/example/.steve/releases/0.13.0-aaaaaaaa",
+            "previous": "/Users/example/.steve/releases/0.12.0",
+            "previous_version": "0.12.0",
+            "started": "20261126-220000",
+            "started_at": 1_764_165_600_000_u64,
+            "finished": "20261126-220030",
+            "finished_at": 1_764_165_630_000_u64,
+            "ok": false,
+            "recovered": true,
+            "error": "probe failed: database busy",
+        }),
+    )
+    .unwrap();
+    let u = Updates {
+        current_hub: "0.12.0".into(),
+        current_web: "0.12.0".into(),
+        kind: Some(install::InstallKind::LegacyMacosService),
+        ..test_updates(dir.path())
+    };
+    let reason = u.execution_reason().expect("one-click must be disabled");
+    let status = u.status().unwrap();
+    assert_eq!(
+        status.install.kind,
+        install::InstallKind::LegacyMacosService
+    );
+    assert_eq!(
+        status.capability.reason_code,
+        Some(CapabilityReasonCode::LegacyMacosService)
+    );
+    assert_eq!(status.capability.reason, reason);
+    let op = status
+        .operation
+        .expect("legacy macOS service must still surface latest upgrade receipt");
+    assert_eq!(op.phase, "rolled_back");
+    assert_eq!(op.version, "0.13.0");
+    assert_eq!(op.previous_version.as_deref(), Some("0.12.0"));
+    assert_eq!(op.source, OperationSource::TerminalDeploy);
+    assert!(u.request("0.13.0", "legacy-macos", "owner", true).is_err());
+}
+
 #[tokio::test]
 async fn github_checks_validate_assets_and_bind_cache_to_repository_and_both_versions() {
     use axum::response::IntoResponse;
@@ -502,7 +551,7 @@ fn local(home: &Path, repo: &Path, api_base: String) -> (Updates, Arc<Mutex<Vec<
         api_base: api_base.clone(),
         web_base: api_base,
         repo: repo.into(),
-        kind: Some("local_release"),
+        kind: Some(install::InstallKind::LocalRelease),
         launch: runner::Launch::Fake(started.clone()),
         check_timeout: Duration::from_secs(2),
         check_backoff: fast_check_backoff(),
@@ -1073,6 +1122,7 @@ fn status_prefers_latest_terminal_deploy_and_enriches_restored_version() {
         approved_by: Some("owner".into()),
         approved_at: Some(failed_at),
         error: Some("backup failed: restic unavailable".into()),
+        error_code: None,
         previous: None,
         previous_version: None,
         target: Some("/tmp/releases/0.12.0".into()),
@@ -1166,6 +1216,7 @@ fn status_hides_stale_failure_when_running_version_already_matches_target() {
         approved_by: Some("owner".into()),
         approved_at: Some(1_000),
         error: Some("backup failed".into()),
+        error_code: None,
         previous: Some("/Users/example/.steve/releases/0.11.0-local-aaaaaaa".into()),
         previous_version: Some("0.11.0".into()),
         target: Some("/Users/example/.steve/releases/0.12.0".into()),
