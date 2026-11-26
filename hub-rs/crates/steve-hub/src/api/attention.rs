@@ -51,28 +51,68 @@ async fn list(
         ));
     }
     m.blocking(move |m| {
-        m.store.write(|tx| -> ApiResult<_> {
-            steve_store::feed::member(tx,&who.ws,&who.me).map_err(error)?;
-            let viewer=steve_store::base::Viewer::bare(&who.ws,&who.me);
-            let now=m.clock.now();
-            let mut categories=vec![];
+        m.store.read(|r| -> ApiResult<_> {
+            steve_store::feed::member(r, &who.ws, &who.me).map_err(error)?;
+            let viewer = steve_store::base::Viewer::bare(&who.ws, &who.me);
+            let now = m.clock.now();
+            let mut categories = vec![];
             for kind in attention::KINDS {
-                if q.kind.as_deref().is_some_and(|k|k!=kind) { continue; }
-                if kind=="feed" {
-                    categories.push(attention::feed_page(tx,&who.ws,&who.me,q.cursor.as_deref(),q.if_snapshot.as_deref(),limit,now).map_err(error)?);
+                if q.kind.as_deref().is_some_and(|k| k != kind) {
                     continue;
                 }
-                let (entries,upper)=match kind {
-                    "replies"=>attention::replies(tx,&who.ws,&who.me).map_err(error)?,
-                    "pending"=>(attention::pending(tx,&who.ws,&who.me,now).map_err(error)?,0),
-                    _=>(steve_channels::conversations::attention(tx,&who.ws,&viewer,now)?,0),
+                if kind == "feed" {
+                    categories.push(
+                        attention::feed_page(
+                            r,
+                            &who.ws,
+                            &who.me,
+                            q.cursor.as_deref(),
+                            q.if_snapshot.as_deref(),
+                            limit,
+                            now,
+                        )
+                        .map_err(error)?,
+                    );
+                    continue;
+                }
+                let (entries, upper) = match kind {
+                    "replies" => attention::replies(r, &who.ws, &who.me).map_err(error)?,
+                    "pending" => (
+                        attention::pending(r, &who.ws, &who.me, now).map_err(error)?,
+                        0,
+                    ),
+                    _ => (
+                        steve_channels::conversations::attention(r, &who.ws, &viewer, now)?,
+                        0,
+                    ),
                 };
-                categories.push(attention::page(tx,&who.ws,&who.me,kind,entries,upper,q.cursor.as_deref(),q.if_snapshot.as_deref(),limit,now).map_err(error)?);
+                categories.push(
+                    attention::page(
+                        r,
+                        &who.ws,
+                        &who.me,
+                        kind,
+                        entries,
+                        upper,
+                        q.cursor.as_deref(),
+                        q.if_snapshot.as_deref(),
+                        limit,
+                        now,
+                    )
+                    .map_err(error)?,
+                );
             }
-            Ok(Json(json!({"v":1,"epoch":attention::epoch(tx).map_err(error)?,"user_id":who.me,"workspace_id":who.ws,
-                "history_policy":"since_attention_v1","categories":categories})))
+            Ok(Json(json!({
+                "v": 1,
+                "epoch": attention::epoch(r).map_err(error)?,
+                "user_id": who.me,
+                "workspace_id": who.ws,
+                "history_policy": "since_attention_v1",
+                "categories": categories
+            })))
         })
-    }).await
+    })
+    .await
 }
 async fn reply(
     State(m): State<Modules>,

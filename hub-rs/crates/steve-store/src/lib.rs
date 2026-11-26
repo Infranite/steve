@@ -277,6 +277,8 @@ struct Inner {
     outbox_wake: Arc<tokio::sync::Notify>,
     commit_wakes: Arc<Mutex<CommitWakes>>,
     diagnostics: std::sync::OnceLock<diagnostics::Recorder>,
+    windows: repo::window_cache::WindowCaches,
+    write_txs: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -377,6 +379,8 @@ impl Store {
                 outbox_wake: Arc::new(tokio::sync::Notify::new()),
                 commit_wakes: Arc::default(),
                 diagnostics: std::sync::OnceLock::new(),
+                windows: repo::window_cache::WindowCaches::new(),
+                write_txs: std::sync::atomic::AtomicU64::new(0),
             }),
         };
         if !admin
@@ -543,11 +547,26 @@ impl Store {
         self.emit_event(e.into())
     }
 
+    /// Number of outermost SQLite writer lock acquisitions performed on this `Store`.
+    pub fn write_tx_count(&self) -> u64 {
+        self.inner
+            .write_txs
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Monotonic version of the in-process attention window cache.
+    pub fn attention_window_version(&self) -> u64 {
+        self.inner.windows.attention.version()
+    }
+
     #[track_caller]
     pub(crate) fn lock(&self) -> WriteGuard<'_> {
         let timing = LockTiming::start("store", std::panic::Location::caller());
         // A panic mid-write leaves SQLite consistent (the transaction rolls back), so poisoning is ignored.
         let conn = self.inner.writer.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner
+            .write_txs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         instrumentation::store_acquired();
         self.sync_commit_hooks(&conn);
         WriteGuard {

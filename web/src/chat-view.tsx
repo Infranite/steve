@@ -36,7 +36,7 @@ import { readPos, savePos, type ReadPos } from "@/thread/topics"
 import { useReplyReading } from "@/thread/use-reply-reading"
 import { ChannelSwitcher, ChanOutNote, ConversationDraft, ConvBadgeChip, ConvSwitcher, HandlingLine, ImMsgActions, ImReadOnly, OlderRecords, RecordRow, SenderLine, useChannels, useConversation } from "@/thread/conversations"
 import { weave, type Entry } from "@/thread/channel-record"
-import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, QuoteHead, Rerun, SuggestCard, threadDecisions, Updates } from "@/thread/parts"
+import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, QuoteHead, Rerun, threadDecisions, Updates } from "@/thread/parts"
 import { Composer, type ComposerHandle } from "@/composer"
 import { go, ItemRef, openSheet } from "@/ui"
 import { cn } from "cn"
@@ -63,8 +63,7 @@ function Hero() {
   useEffect(() => {
     let timer: any
     const off = onCue((c) => { clearTimeout(timer); setLabel(cueLabel(c)); if (c !== "think" && c !== "input") timer = setTimeout(() => setLabel(null), 2600) })
-    const w = decideCards().length ? setTimeout(() => cue("wary"), 700) : undefined
-    return () => { off(); clearTimeout(timer); clearTimeout(w) }
+    return () => { off(); clearTimeout(timer) }
   }, [])
   const activity = useChatLive((s) => s.live ? "research" : s.draft?.text ? "reply" : s.thinking ? s.phase || "answer" : "")
   const doing = activity === "reply" ? t("pages:chat.doing.reply") : activity ? doingLabel(activity) : ""
@@ -105,7 +104,7 @@ const TOUCH_LAST = "[@media(hover:none)]:opacity-100"
 function MsgActions({ m, last }: { m: Msg; last: boolean }) {
   const fromChat = !!m.item && (m.steps?.route?.kind === "item" || !!m.updates?.length) && !m.update
   const promoting = useShellSelector(() => isPromoting(m))
-  const canItem = !m.item && (!!m.chat || !!m.suggest || m.steps?.route?.kind === "research" || m.steps?.route?.kind === "answer")
+  const canItem = !m.item && (!!m.chat || m.steps?.route?.kind === "research" || m.steps?.route?.kind === "answer")
   const t = useT()
   const more: MessageMoreAction[] = [
     ...(m.id ? [{ key: "quote", label: m.item ? t("pages:chat.quoteTo", { item: m.item }) : t("pages:chat.quote"), icon: <MessageSquareReplyIcon strokeWidth={1.75} />, onClick: () => quoteMsg(m.id!), attrs: { "data-quote-reply": "" } }] : []),
@@ -509,7 +508,7 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
         : unread && <Button className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full shadow-lg anim-in" size="sm" onClick={bottom} data-new-messages>{fresh ? t("pages:chat.newCount", { count: fresh }) : t("pages:chat.newMessages")}<ArrowDownIcon /></Button>}</div>
       <div className="mx-auto w-full max-w-[800px] shrink-0 px-4 pb-[76px] pt-3 sm:px-8 md:pb-5" data-chat-input>
         {conv ? im && <ImReadOnly b={im.badge} /> : <>
-        <ComposerDecisions skip={inThread} />
+        <ComposerDecisions skip={inThread} focus={focusItem()} threadItems={threadCardItems()} />
         <ComposerBars />
         <div className="flex min-w-0 justify-start px-1" data-chat-model><SteveModelControl /></div>
         <ChatComposer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} queue={<ChatQueue composer={composer} />} placeholder={focusItem() ? t("pages:chat.placeholderFocus", { item: focusItem() }) : chatBusy() ? t("pages:chat.placeholderBusy", { name: S?.n ?? "Steve" }) : t("pages:chat.placeholder", { name: S?.n ?? "Steve" })} testId="chat" onSend={(t, files, refs, mentions, clientId) => { bottom(); return chatSend(t, files, refs, mentions, clientId) }} onStop={stopReply}
@@ -622,7 +621,7 @@ const MessageRow = memo(function MessageRow({ id, channel, previous, day, last, 
         {m.item && !m.update && !m.card && (m.wasCard || threadCardItems().has(m.item)
           ? <CardLink id={m.item} from={id} /> : <ItemRef id={m.item} />)}
         {m.card ? <ItemCard c={m.card} /> : <Updates m={m} />}
-        <OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={conv} /><Rerun m={m} conv={conv} />
+        <OfferLine m={m} /><AskChips m={m} conv={conv} /><Rerun m={m} conv={conv} />
       </SteveSays>
       {m.meet && meeting() && id === st.settings.onboardFrom && <Button size="sm" variant="ghost"
         className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}

@@ -85,7 +85,7 @@ export function Select({
   ...data
 }: SelectProps) {
   const t = useT();
-  const placeholder = placeholderProp ?? t("common:action.choose");
+  const placeholder = placeholderProp ?? t("common:picker.choose");
   const autoId = useId();
   const triggerId = id ?? `${autoId}-trigger`;
   const listId = `${autoId}-list`;

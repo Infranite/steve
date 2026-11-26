@@ -17,7 +17,6 @@ export default {
     remove: "Remove",
     search: "Search",
     refresh: "Refresh",
-    choose: "Choose…",
   },
   a11y: {
     code: "{{name}}, code",
@@ -100,6 +99,7 @@ export default {
     copy: "Copy",
     copied: "Copied",
     optional: "Optional",
+    choose: "Choose…",
   },
   actor: {
     kind: { person: "Person", bot: "Bot", system: "System", org: "Organization", team: "Team" },

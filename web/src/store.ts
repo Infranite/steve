@@ -17,12 +17,12 @@ import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
 import { decisionText } from "./i18n/decision"
-import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RQueued, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, ReasoningEffort, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onEntityView, onViewKinds, messageView, messageViews, openDecisions, resetViews, settle, settled, subscribeItemScope, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork, useItemView, useSessionView, useViewGroup } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
@@ -30,7 +30,11 @@ import { itemDisplayStatusOf, itemState } from "./item-state"
 /* ───────── view types (from the prototype) ───────── */
 export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: ReasoningEffort | null; effortMapping?: EffortMapping | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; node?: string; queued: number; busy: boolean; /** its next turn waits for room on its device */ room?: SessionWaiting | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
-  starting?: boolean; since?: number; placement?: PlacementExplanation }
+  starting?: boolean; since?: number; placement?: PlacementExplanation
+  /** cumulative tokens & estimated USD cost (read-time enriched) */
+  tokens?: number; costUsd?: number
+  /** latest live CPU, memory, and disk-write snapshot for an active session */
+  vitals?: SessionLiveVitals }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
   recovery?: SendRecoveryInfo
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
@@ -68,9 +72,9 @@ export type Draft = { mid: string; thought: string; text: string; /** when the r
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
   /** Steve's welcome that opened the first meeting */
   meet?: boolean
-  /* thread routing (§3.4, §5.2): the offer under an answer, a suggestion card, ask options, a user message waiting in the
+  /* thread routing (§3.4, §5.2): the offer under an answer, ask options, a user message waiting in the
    * queue, the message this one answers or quotes, flow-back from an item, a research cut off by a restart */
-  offer?: Offer; suggest?: Suggest; ask?: { options: string[] }; queued?: { run?: string | null }; replyTo?: string; origin?: string; answer?: string
+  offer?: Offer; ask?: { options: string[] }; queued?: { run?: string | null }; replyTo?: string; origin?: string; answer?: string
   /* said while Steve was on a turn: waits in the queue above the composer (editable, withdrawable) until the turn ends;
    * `stopped`: a reply the user stopped */
   held?: boolean; stopped?: boolean
@@ -86,8 +90,6 @@ export type ItemCardState = { item: string; state: string; at?: number; text?: s
   /** a Release build that failed after the item was done */
   build?: { text: string; at?: number } }
 export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
-export type { SuggestChoice }
-export type Suggest = { question: string; choices: { id: SuggestChoice; label: string; item?: string; title?: string; recommended?: boolean }[]; state: "open" | "expired" | "chosen"; chosen?: string; item?: string }
 /** a key moment of an item made from the conversation, posted back to it (§5.2) */
 export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fail"; item: string; text?: string; decision?: string; full?: boolean; ref?: string }
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
@@ -316,6 +318,7 @@ export function sessOf(s: SessionView): Sess {
     get queue() { return qc.getQueryData<RQueued[]>(queueKey(s.id)) ?? emptyQueue },
     ro: s.readonly, device: s.device_id ?? "", node: s.node_id, queued: s.queued ?? 0,
     busy: s.busy ?? false, room: running ? s.waiting ?? null : null, starting: s.status === "starting", since: s.created,
+    tokens: s.tokens, costUsd: s.cost_usd, vitals: s.vitals,
   }
   sessionModels.set(s, model)
   return model
@@ -599,7 +602,7 @@ export function msgOf(m: ConversationMessage): Msg {
   const cfgs = ps.map((p) => proposalOf(p, x.cfg_state?.[p.id] ?? (x.applied ? "applied" : x.dropped ? "dropped" : "draft")))
   return { id: m.id, k: m.author, t: m.text, item: m.item_id ?? undefined, chat: x.chat, files: x.files, created: m.created, steps: stepsOf(x.steps), notice: x.notice, cites: x.cites, cfgs: cfgs.length ? cfgs : undefined,
     held: !!x.held || undefined, stopped: !!x.stopped || undefined, meet: x.onboard === true || undefined,
-    offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
+    offer: x.offer ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,
     card: x.card?.item ? x.card : undefined, cardOnly: !!x.card_only, wasCard: !!x.was_card,
     a2ui: x.a2ui && typeof x.a2ui === "object" ? x.a2ui : undefined, a2uiAction: x.a2ui_action?.name ? x.a2ui_action : undefined }
@@ -1154,12 +1157,6 @@ export async function a2uiSubmit(msg: string, a: A2uiSubmit): Promise<{ already:
   const r = await api.a2ui(msg, a)
   await refresh().catch(fail)
   return { already: r.already }
-}
-export async function chooseSuggest(m: Msg, choice: SuggestChoice) {
-  if (!m.id) return
-  const append = !!m.suggest?.choices.find((c) => c.id === choice)?.item
-  const r = await call(api.suggest(m.id, choice))
-  if (r?.item) toast(t(append ? "core:toast.appendedTo" : "core:toast.createdItem", { id: r.item.id }))
 }
 export async function reroute(m: Msg, to: string) {
   if (!m.id) return

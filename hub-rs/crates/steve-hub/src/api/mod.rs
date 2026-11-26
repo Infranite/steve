@@ -63,6 +63,8 @@ pub struct Inner {
     pub runtimes: Runtimes,
     /// Device observations stay separate from the merged model/dispatch catalogue.
     pub node_harnesses: node_harnesses::Inventory,
+    /// In-process cache of the most recent Node harness update reports (keeps GET read-only).
+    pub harness_reports: harness_updates::ReportCache,
     /// The models each harness offers (`/system/models`).
     pub catalog: crate::catalog::Catalog,
     /// `client_id` of recent sends (`POST /thread`, `POST /items`), so a retry does not send twice.
@@ -118,6 +120,7 @@ impl AppState {
             bus,
             runtimes,
             node_harnesses,
+            harness_reports: Default::default(),
             caches,
             origins,
             dedupe: Default::default(),

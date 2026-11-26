@@ -14,7 +14,7 @@ export function SetSelect({ value, options, onChange, testId, label, placeholder
   const os = options.map((o) => (Array.isArray(o) ? { value: o[0], label: o[1] } : { value: o.v, label: o.l, icon: o.icon, disabled: o.disabled, description: o.description }))
   return (
     <div data-set-select={wide ? undefined : ""} className={cn("min-w-0", wide ? "w-full" : "w-40 max-w-full", className)}>
-      <Select size={wide ? "md" : "sm"} value={value} options={os} placeholder={placeholder ?? t("common:action.choose")} onChange={(v) => onChange(v)} aria-label={label} disabled={disabled} data-select={testId} />
+      <Select size={wide ? "md" : "sm"} value={value} options={os} placeholder={placeholder ?? t("common:picker.choose")} onChange={(v) => onChange(v)} aria-label={label} disabled={disabled} data-select={testId} />
     </div>
   )
 }

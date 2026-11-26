@@ -18,7 +18,6 @@ export default {
     remove: "移除",
     search: "搜索",
     refresh: "刷新",
-    choose: "请选择…",
   },
   a11y: {
     code: "{{name}} 代码",
@@ -98,6 +97,7 @@ export default {
     copy: "复制",
     copied: "已复制",
     optional: "可选",
+    choose: "请选择…",
   },
   actor: {
     kind: { person: "人", bot: "Bot", system: "系统", org: "组织", team: "团队" },

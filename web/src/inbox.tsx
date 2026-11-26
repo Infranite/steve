@@ -67,7 +67,7 @@ export function InboxView() {
   const currentType = typeKeys.includes(ibType) ? ibType : "all"
   const xs = p.filter((c) => currentType === "all" || c.w.type === currentType)
   return (
-    <Page title={t("views:inbox.title")} sub={p.length + mems ? t("views:inbox.sub", { count: p.length + mems }) : t("views:inbox.subNone")} max={640} scrollRef={scroll}
+    <Page title={t("views:inbox.title")} sub={p.length ? t("views:inbox.sub", { count: p.length }) : t("views:inbox.subNone")} max={640} scrollRef={scroll}
       toolbar={<><Segmented value={ibTab} onChange={(v) => { ibTab = v; r() }} options={[["pending", t("views:inbox.tabPending")], ["done", t("views:inbox.tabDone")]] as const} /></>}>
       {ibTab === "pending" && <>
         {p.length > 0 && <Chips className="mb-6" value={typeLabel(currentType)} onChange={(v) => { ibType = typeKeys.find((k) => typeLabel(k) === v) ?? "all"; r() }} options={typeKeys.map(typeLabel)} />}

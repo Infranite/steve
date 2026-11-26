@@ -148,6 +148,8 @@ struct State {
     build: Option<BuildIdentity>,
     /// Upgrades this Node was asked for, by operation ([`FakeNode::set_upgrade_outcome`]).
     upgrades: BTreeMap<OperationId, NodeUpgradeState>,
+    /// Optional custom vitals snapshot returned by [`Discovery::vitals`].
+    vitals_override: Option<NodeVitals>,
     /// What a switch ends in: `succeeded` (the build becomes the staged one) or a failure phase.
     upgrade_outcome: Option<(String, Option<String>)>,
     /// Upgrades staged, with what was asked.
@@ -291,6 +293,11 @@ impl FakeNode {
     /// The build the minimal upgrade probe reports.
     pub fn set_build(&self, build: Option<BuildIdentity>) {
         self.st().build = build;
+    }
+
+    /// Override the snapshot returned by [`Discovery::vitals`] for fidelity tests.
+    pub fn set_vitals(&self, vitals: NodeVitals) {
+        self.st().vitals_override = Some(vitals);
     }
 
     /// How the next upgrade switches end: `succeeded`, or a failure phase (`rolled_back`) with its
@@ -2211,6 +2218,9 @@ impl Discovery for FakeNode {
     /// Fixed figures: 8 CPUs at load 2, 16 GiB of which 4 GiB free, nothing under roots; a journal
     /// of 4 KiB after 7 commits with 2 events not acknowledged, and 1 MiB written by the process.
     async fn vitals(&self) -> ApiResult<NodeVitals> {
+        if let Some(v) = self.st().vitals_override.clone() {
+            return Ok(v);
+        }
         Ok(NodeVitals {
             at: Timestamp(1),
             cpus: Some(8),
@@ -2219,6 +2229,8 @@ impl Discovery for FakeNode {
             mem_available: Some(4 << 30),
             roots: vec![],
             sessions: 0,
+            adapter_disk_written_bytes: 0,
+            session_vitals: vec![],
             meters: Some(NodeMeters {
                 journal_bytes: 4096,
                 journal_commits: 7,

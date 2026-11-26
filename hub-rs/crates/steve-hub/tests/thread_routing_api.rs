@@ -250,13 +250,14 @@ async fn a_finished_item_never_swallows_a_main_conversation_request() {
     let thread = e.settle(before + 2).await;
     let card = thread.last().unwrap();
     assert_eq!(card["meta"]["steps"]["route"]["guard"], "closed");
-    assert_eq!(card["meta"]["suggest"]["choices"][0]["id"], "new");
+    assert!(card["meta"].get("suggest").is_none(), "{card}");
+    assert_eq!(card["meta"]["offer"]["state"], "open");
     assert!(card["meta"].get("error").is_none(), "{card}");
     let (s, v) = e
         .call(
             "POST",
-            &format!("/api/thread/{}/suggest", card["id"].as_str().unwrap()),
-            Some(json!({"choice":"new"})),
+            &format!("/api/thread/{}/offer", card["id"].as_str().unwrap()),
+            Some(json!({"take": true})),
         )
         .await;
     assert_eq!(s, 200, "{v}");
@@ -352,24 +353,6 @@ async fn thread_routing_api() {
     let (s, v) = e.call("POST", &path, Some(json!({"take": true}))).await;
     assert_eq!((s, v["error"].as_str()), (409, Some("已经处理过了")));
     assert_eq!(v["item"]["id"], json!(made));
-
-    /* not a card */
-    let (s, v) = e
-        .call(
-            "POST",
-            &format!("/api/thread/{}/suggest", ans["id"].as_str().unwrap()),
-            Some(json!({"choice": "here"})),
-        )
-        .await;
-    assert_eq!((s, v["error"].as_str()), (400, Some("这条消息不是建议卡")));
-    let (s, _) = e
-        .call(
-            "POST",
-            &format!("/api/thread/{}/suggest", ans["id"].as_str().unwrap()),
-            Some(json!({"choice": "x"})),
-        )
-        .await;
-    assert_eq!(s, 400);
 
     /* runs and follow */
     let (s, v) = e.call("POST", "/api/thread/runs/tr_nope/stop", None).await;

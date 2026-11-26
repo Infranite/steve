@@ -561,8 +561,8 @@ function Pane({ id }: { id: string }) {
     return <div className="flex flex-col gap-8">
       <Section label={t("manage:general.assistant")}><Panel><Row icon={<ActorAvatar actorId="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>
       <Panel>
-        <Row title={t("manage:general.home")} sub={t("manage:general.homeSub")}><Sel label={t("manage:general.home")} testId="home" v={c.home} o={homeOpts} on={(v) => setSetting({ home: v })} /></Row>
-        <Row title={t("manage:general.away")} sub={t("manage:general.awaySub")}><Sel label={t("manage:general.away")} testId="away" v={c.awayH} o={awayOpts} on={(v) => setSetting({ awayH: v })} /></Row>
+        <Row title={t("manage:general.home")} sub={t("manage:general.homeSub")}><Sel label={t("manage:general.home")} testId="home" v={c.home ?? WORKSPACE_SETTING_DEFAULTS.home} o={homeOpts} on={(v) => setSetting({ home: v })} /></Row>
+        <Row title={t("manage:general.away")} sub={t("manage:general.awaySub")}><Sel label={t("manage:general.away")} testId="away" v={c.awayH ?? WORKSPACE_SETTING_DEFAULTS.awayH} o={awayOpts} on={(v) => setSetting({ awayH: v })} /></Row>
       </Panel>
       <Panel>
         <Row title={t("manage:general.onboard")} sub={t("manage:general.onboardSub")}><Button size="sm" variant="outline" onClick={() => { localStorage.removeItem("steve-onboarded"); st.onboard = 0; emit(); go("#/") }} data-restart-onboard>{t("manage:general.restart")}</Button></Row>
@@ -590,23 +590,18 @@ function Pane({ id }: { id: string }) {
       v,
       v === "0" ? t("manage:items.quotaWaitMinutesOff") : t("manage:items.quotaWaitMinutesMin", { minutes: Number(v) }),
     ])
-    const handoffOpts: [string, string][] = WORKSPACE_SETTING_VALUES.handoff.map((v) => [
-      v,
-      v === "0" ? t("manage:items.handoffOff") : `${v}%`,
-    ])
     return <div className="flex flex-col gap-8">
       {/* the pane's title already says 事项: the first group goes without a label; the number prefix lives in 工作空间 */}
       <Panel>
         <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.noExecutor")} sub={t("manage:items.noExecutorSub")}><SetSelect testId="settings-no-executor" label={t("manage:items.noExecutor")} value={c.noExecutor === "steve" ? "steve" : WORKSPACE_SETTING_DEFAULTS.noExecutor} disabled={!st.owner} options={noExecOpts} onChange={(v) => setSetting({ noExecutor: v })} /></Row>
         <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : WORKSPACE_SETTING_DEFAULTS.accDefault} onChange={(v) => setSetting({ accDefault: v })} options={accOpts} /></Row>
-        <Row title={t("manage:items.depsAfter")} sub={t("manage:items.depsAfterSub")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={depsOpts} on={(v) => setSetting({ depsAfter: v })} /></Row>
-        <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={archOpts} on={(v) => setSetting({ archDays: v })} /></Row>
+        <Row title={t("manage:items.depsAfter")} sub={t("manage:items.depsAfterSub")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter ?? WORKSPACE_SETTING_DEFAULTS.depsAfter} o={depsOpts} on={(v) => setSetting({ depsAfter: v })} /></Row>
+        <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays ?? WORKSPACE_SETTING_DEFAULTS.archDays} o={archOpts} on={(v) => setSetting({ archDays: v })} /></Row>
         {/* the personal agent config default is the Hub's (a Node serves every workspace): set on Devices · Hub */}
         <Row title={t("manage:items.ownerContext")} sub={t("manage:items.ownerContextSub")}><Button size="sm" variant="outline" onClick={() => go("#/devices/hub")} data-owner-context-link>{t("manage:items.ownerContextOpen")}</Button></Row></Panel>
       <Section label={t("manage:items.sessions")}><Panel>
         <Row title={t("manage:items.quotaAutoHandoff")} sub={t("manage:items.quotaAutoHandoffSub")}><Sel label={t("manage:items.quotaAutoHandoff")} testId="quota-auto-handoff" v={c.quotaAutoHandoff ?? WORKSPACE_SETTING_DEFAULTS.quotaAutoHandoff} o={quotaAutoOpts} on={(v) => setSetting({ quotaAutoHandoff: v })} /></Row>
-        <Row title={t("manage:items.quotaWaitMinutes")} sub={t("manage:items.quotaWaitMinutesSub")}><Sel label={t("manage:items.quotaWaitMinutes")} testId="quota-wait-minutes" v={c.quotaWaitMinutes ?? WORKSPACE_SETTING_DEFAULTS.quotaWaitMinutes} o={quotaWaitOpts} on={(v) => setSetting({ quotaWaitMinutes: v })} /></Row>
-        <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? WORKSPACE_SETTING_DEFAULTS.handoff} o={handoffOpts} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
+        <Row title={t("manage:items.quotaWaitMinutes")} sub={t("manage:items.quotaWaitMinutesSub")}><Sel label={t("manage:items.quotaWaitMinutes")} testId="quota-wait-minutes" v={c.quotaWaitMinutes ?? WORKSPACE_SETTING_DEFAULTS.quotaWaitMinutes} o={quotaWaitOpts} on={(v) => setSetting({ quotaWaitMinutes: v })} /></Row></Panel></Section>
     </div>
   }
   if (id === "notify") return st.workspace ? <NotificationSettingsPane key={`${currentHub()}:${st.workspace.id}`} workspace={st.workspace.id} /> : null

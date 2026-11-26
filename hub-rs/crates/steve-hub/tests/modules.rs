@@ -3,7 +3,7 @@
 //! binary on a temp STEVE_HOME, with a file keystore and an optional offline model-job Node.
 
 use std::time::Duration;
-use steve_runtime::testkit::process::Child;
+use steve_runtime::testkit::process::ProcessGuard;
 use steve_store::testkit::hub::api as fixtures;
 
 use futures::StreamExt;
@@ -15,18 +15,11 @@ use serde_json::{Value, json};
 mod handed;
 
 struct Hub {
-    child: Child,
+    _child: ProcessGuard,
     base: String,
     home: tempfile::TempDir,
     /// Its port, held by the test (#429).
     _socket: handed::Socket,
-}
-
-impl Drop for Hub {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 async fn start() -> Hub {
@@ -62,7 +55,7 @@ async fn start_in(home: tempfile::TempDir, web_dir: &std::path::Path, model: boo
             .is_ok_and(|r| r.status().is_success())
         {
             return Hub {
-                child,
+                _child: child,
                 base,
                 home,
                 _socket: socket,
@@ -92,7 +85,7 @@ fn spawn_hub(
     out: &std::path::Path,
     log: &std::path::Path,
     model: bool,
-) -> Child {
+) -> ProcessGuard {
     let fake = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/contract/fake-claude.mjs"
