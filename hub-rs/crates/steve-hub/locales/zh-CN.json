@@ -271,6 +271,7 @@
   "hub.onboard.owner_only": "仅实例管理员可以开始或跳过初次见面",
   "hub.check.adapter_missing": "ACP 适配器 %{harness} 不在 %{adapter}；启动 %{harness} 任务前，先安装它的 ACP 适配器，并把它的注册项配成绝对路径（docs/deployment.md#harness-setup）",
   "hub.check.node_missing": "STEVE_NODE：Node.js 可执行文件不在 %{node}；启动 %{harness} 任务前，先安装 Node.js，或把它设成绝对路径",
+  "hub.check.tailcat_missing": "STEVE_TAILCAT：tailcat 可执行文件不在 %{tailcat}；请确保 tailcat 在 PATH 中，或把 STEVE_TAILCAT 设成绝对路径",
   "hub.check.principal_state": "STEVE_PRINCIPAL_STATE=on（默认）：新会话用各自独立的 harness 目录，已有会话沿用记录下来的状态。每个主体的会话都用 harness 在所在 Node 上自己的登录（不会复制），所以请在 Node 上让各 harness 自己登录；Steve 从不配置模型提供方或密钥。见 docs/deployment.md#harness-setup。STEVE_PRINCIPAL_STATE=off 只让新会话回到共用状态。",
   "hub.check.unconfined": "STEVE_CONFINE：运行不会放进沙箱：%{why}",
   "hub.audit.owner_only": "仅实例管理员可以查看操作记录",

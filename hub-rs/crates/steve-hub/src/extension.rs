@@ -1232,7 +1232,36 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     cfg.listen
         .adopt(crate::config::Handed::take()?)
         .context("the sockets the Hub was started with")?;
+    const PROBE_PARENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+    let probe_parent_pid: Option<i32> = match std::env::var("STEVE_PROBE_PARENT_PID") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let expected: i32 = raw
+                .trim()
+                .parse()
+                .context("invalid STEVE_PROBE_PARENT_PID")?;
+            anyhow::ensure!(
+                expected > 1 && unsafe { libc::getppid() } == expected,
+                "maintenance probe lost its parent before boot"
+            );
+            Some(expected)
+        }
+        _ => None,
+    };
     let _instance_lock = crate::upgrades::instance_lock(&cfg)?;
+    if let Some(expected) = probe_parent_pid {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(PROBE_PARENT_POLL_INTERVAL).await;
+                if unsafe { libc::getppid() } != expected {
+                    tracing::warn!(
+                        expected_parent = expected,
+                        "maintenance probe parent exited; terminating probe to release instance lock"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
     let ready = crate::admin::ReadyFile::new(&cfg.home)?;
     // Bind before wiring cookies, origins and the local Node.
     let listeners = cfg.listen.bind().await?;

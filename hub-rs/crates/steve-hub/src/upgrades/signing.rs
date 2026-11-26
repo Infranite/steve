@@ -1,10 +1,16 @@
 //! The local release runner reads its signing password from the installation's key store.
+use std::io::IsTerminal as _;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
 use steve_modules::vault::keystore::{KeyStore, KeyStoreError, signing};
 use zeroize::Zeroizing;
+
+/// Operator warning printed before triggering an interactive macOS Keychain dialog for an unsigned
+/// temporary release binary. Clicking "Always Allow" would grant that temporary binary permanent
+/// Keychain ACL access.
+pub(super) const INTERACTIVE_KEYCHAIN_NOTICE: &str = "macOS Keychain will prompt to allow this temporary unsigned steve-hub binary to read steve/signing/keychain-pass. Click \"Allow\" (允许) ONLY — do NOT click \"Always Allow\" (始终允许).";
 
 pub(super) fn provision(home: &Path, password: &str) -> Result<()> {
     let store = installed_helper(home).context("signing key store unavailable")?;
@@ -41,6 +47,8 @@ pub(super) fn resolve_maintenance_password(
         home,
         vars,
         stdin_password,
+        std::io::stdin().is_terminal(),
+        |notice| eprintln!("{notice}"),
         || {
             #[cfg(target_os = "macos")]
             {
@@ -83,6 +91,8 @@ pub(super) fn resolve_maintenance_password_with(
     home: &Path,
     vars: &impl Fn(&str) -> Option<String>,
     stdin_password: Option<Zeroizing<String>>,
+    is_tty: bool,
+    on_interactive_prompt: impl FnOnce(&str),
     helper_lookup: impl FnOnce() -> Result<Option<Zeroizing<String>>, KeyStoreError>,
     interactive_lookup: impl FnOnce() -> Result<Option<Zeroizing<String>>, KeyStoreError>,
 ) -> Result<Option<Zeroizing<String>>> {
@@ -107,6 +117,11 @@ pub(super) fn resolve_maintenance_password_with(
     if let Ok(Some(pass)) = helper_lookup() {
         return Ok(Some(pass));
     }
+    ensure!(
+        is_tty,
+        "interactive macOS Keychain access requires a terminal (stdin is not a TTY); run in Terminal or pipe the signing password with --keychain-pass-stdin"
+    );
+    on_interactive_prompt(INTERACTIVE_KEYCHAIN_NOTICE);
     match interactive_lookup() {
         Ok(Some(pass)) => Ok(Some(pass)),
         Ok(None) => Ok(None),

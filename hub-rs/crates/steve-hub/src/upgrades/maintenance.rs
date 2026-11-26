@@ -19,7 +19,7 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
     if command == "--help" {
         return Ok((
             0,
-            json!({"usage":"--local-release setup-keychain|prepare-bundle|deploy <bundle> --home PATH; upgrade-macos [<bundle>] [--home PATH] [--label LABEL] [--timeout SECS] [--keychain-pass-stdin]; rollback-macos [--home PATH] [--label LABEL] [--timeout SECS]; prune --home PATH [--keep PATH] [--dry-run]"}),
+            json!({"usage":"--local-release setup-keychain|prepare-bundle|deploy <bundle> --home PATH; upgrade-macos [<bundle>] [--home PATH] [--label LABEL] [--timeout SECS] [--keychain-pass-stdin]; rollback-macos [--home PATH] [--label LABEL] [--timeout SECS] [--confirm-data-loss]; confirm-macos [--home PATH]; prune --home PATH [--keep PATH] [--dry-run]"}),
         ));
     }
     if command == "schema-state" && args.len() == 2 {
@@ -44,6 +44,7 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
         "deploy",
         "upgrade-macos",
         "rollback-macos",
+        "confirm-macos",
         "prune",
     ]
     .contains(&command)
@@ -72,7 +73,7 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
     let mut label: Option<String> = None;
     let (mut version, mut commit, mut operation) = (None, None, None);
     let mut timeout = 600_u64;
-    let (mut password_stdin, mut dry) = (false, false);
+    let (mut password_stdin, mut dry, mut confirm_data_loss) = (false, false, false);
     let mut keep = vec![];
     while index < args.len() {
         let name = args[index].as_str();
@@ -80,6 +81,10 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
         if name == "--keychain-pass-stdin" && matches!(command, "prepare-bundle" | "upgrade-macos")
         {
             password_stdin = true;
+            continue;
+        }
+        if name == "--confirm-data-loss" && command == "rollback-macos" {
+            confirm_data_loss = true;
             continue;
         }
         if name == "--dry-run" && command == "prune" {
@@ -169,23 +174,33 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
             let stdin_password = if password_stdin {
                 let mut raw = zeroize::Zeroizing::new(String::new());
                 std::io::stdin().read_line(&mut raw)?;
-                Some(zeroize::Zeroizing::new(raw.trim().to_owned()))
+                let normalized =
+                    steve_modules::vault::keystore::signing::normalize_stdin_password(&raw);
+                anyhow::ensure!(
+                    !normalized.is_empty(),
+                    "--keychain-pass-stdin received an empty password"
+                );
+                Some(normalized)
             } else {
                 None
             };
             let caller_env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
             let merged_env = steve_install::release::read_home_env(&home, &caller_env)?;
-            let password = super::signing::resolve_maintenance_password(
-                &home,
-                &|k| merged_env.get(k).cloned(),
-                stdin_password,
-            )?;
+            let home_for_pw = home.clone();
+            // Resolve lazily inside upgrade_macos so resuming an already-signed staged bundle
+            // (or refusing a duplicate upgrade) never triggers an unnecessary Keychain prompt.
             let result = steve_install::release::upgrade_macos(
                 &home,
                 &bundle,
                 label.as_deref(),
                 Duration::from_secs(timeout),
-                password.as_deref().map(String::as_str),
+                move || {
+                    super::signing::resolve_maintenance_password(
+                        &home_for_pw,
+                        &|k| merged_env.get(k).cloned(),
+                        stdin_password,
+                    )
+                },
             )?;
             Ok((result.exit_code, result.receipt))
         }
@@ -197,9 +212,11 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
                 &home,
                 label.as_deref(),
                 Duration::from_secs(timeout),
+                confirm_data_loss,
             )?;
             Ok((result.exit_code, result.receipt))
         }
+        "confirm-macos" => Ok((0, steve_install::release::confirm_macos(&home)?)),
         "prune" => Ok((
             0,
             json!({"removed":steve_install::release::prune(&home, &keep, dry)?, "dry_run":dry}),
@@ -257,6 +274,8 @@ mod tests {
             &home,
             &|k| merged.get(k).cloned(),
             None,
+            true,
+            |_| panic!("dir keystore must not print interactive keychain prompt notice"),
             || panic!("dir keystore from steve.env must not invoke steve-keyhelper"),
             || panic!("dir keystore from steve.env must not prompt login keychain"),
         )
@@ -266,8 +285,8 @@ mod tests {
             Some(expected_pass.as_str())
         );
 
-        // Case B: Signed macOS Keychain installation run from unsigned /tmp binary:
-        // steve-keyhelper refuses with Denied -> automatically falls back to interactive Keychain.
+        // Case B: Signed macOS Keychain installation run from unsigned /tmp binary in a TTY:
+        // steve-keyhelper refuses with Denied -> prints Allow-only notice and falls back to interactive Keychain.
         let kc_home = root.path().join("kc-home");
         fs::create_dir_all(kc_home.join("signing")).unwrap();
         fs::write(
@@ -276,10 +295,13 @@ mod tests {
         )
         .unwrap();
         let mut interactive_called = false;
+        let mut prompt_notice = String::new();
         let got_kc = super::signing::resolve_maintenance_password_with(
             &kc_home,
             &|_| None,
             None,
+            true,
+            |notice| prompt_notice = notice.to_owned(),
             || Err(KeyStoreError::Denied),
             || {
                 interactive_called = true;
@@ -290,6 +312,10 @@ mod tests {
         assert!(
             interactive_called,
             "must fall back to interactive keychain on helper denial"
+        );
+        assert!(
+            prompt_notice.contains("Allow") && prompt_notice.contains("Always Allow"),
+            "interactive fallback must warn operator to click Allow only: {prompt_notice}"
         );
         assert_eq!(
             got_kc.as_deref().map(String::as_str),
@@ -306,6 +332,8 @@ mod tests {
                 &kc_home,
                 &|_| None,
                 Some(zeroize::Zeroizing::new(stdin_val)),
+                false,
+                |_| panic!("stdin password must not print interactive notice"),
                 || panic!("stdin password must bypass helper"),
                 || panic!("stdin password must bypass interactive keychain"),
             )
@@ -315,5 +343,63 @@ mod tests {
                 Some(expected_pass.as_str())
             );
         }
+    }
+
+    #[test]
+    fn review593_re_keychain_requires_tty_warns_allow_only() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("kc-home");
+        fs::create_dir_all(home.join("signing")).unwrap();
+        fs::write(
+            home.join("signing/identity.json"),
+            r#"{"label":"test.hub","hub_identifier":"h","keyhelper_identifier":"k","vault_service":"custom.vault"}"#,
+        )
+        .unwrap();
+
+        // Non-TTY stdin must REFUSE interactive Keychain fallback and never invoke it.
+        let non_tty = super::signing::resolve_maintenance_password_with(
+            &home,
+            &|_| None,
+            None,
+            false,
+            |_| panic!("non-TTY must refuse before emitting interactive prompt notice"),
+            || Err(KeyStoreError::Denied),
+            || panic!("non-TTY must refuse before calling interactive Keychain"),
+        );
+        assert!(
+            non_tty
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("TTY")
+                    && e.to_string().contains("--keychain-pass-stdin")),
+            "expected TTY refusal pointing to --keychain-pass-stdin, got: {non_tty:?}"
+        );
+
+        // TTY stdin emits the Allow-only / no-Always-Allow warning BEFORE invoking Keychain.
+        let order = std::cell::RefCell::new(Vec::new());
+        let pass = "0123456789abcdef".repeat(4);
+        let got = super::signing::resolve_maintenance_password_with(
+            &home,
+            &|_| None,
+            None,
+            true,
+            |notice| {
+                assert!(
+                    notice.contains("允许")
+                        && notice.contains("始终允许")
+                        && notice.contains("Allow")
+                        && notice.contains("Always Allow"),
+                    "notice must warn Allow-only in both English and Chinese: {notice}"
+                );
+                order.borrow_mut().push("notice");
+            },
+            || Err(KeyStoreError::Denied),
+            || {
+                order.borrow_mut().push("keychain");
+                Ok(Some(zeroize::Zeroizing::new(pass.clone())))
+            },
+        )
+        .unwrap();
+        assert_eq!(*order.borrow(), vec!["notice", "keychain"]);
+        assert_eq!(got.as_deref().map(String::as_str), Some(pass.as_str()));
     }
 }

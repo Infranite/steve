@@ -1102,17 +1102,23 @@ rm -rf /tmp/steve-upgrade && mkdir -p /tmp/steve-upgrade && \
   /tmp/steve-upgrade/bin/steve-hub --local-release upgrade-macos --home ~/.steve
 ```
 
-On signed macOS installations using the login Keychain, an unpacked `/tmp/steve-upgrade/bin/steve-hub` binary is not yet signed with your local Hub certificate, so `steve-keyhelper` refuses it by design. `upgrade-macos` automatically falls back to an interactive macOS Keychain prompt for `steve/signing/keychain-pass`. In headless/SSH sessions where a GUI Keychain dialog cannot appear, pipe the Keychain entry explicitly with `--keychain-pass-stdin` (accepts either the base64 Keychain item value or the raw 64-hex signing keychain password):
+On signed macOS installations using the login Keychain, an unpacked `/tmp/steve-upgrade/bin/steve-hub` binary is not yet signed with your local Hub certificate, so `steve-keyhelper` refuses it by design. When run in an interactive Terminal (TTY), `upgrade-macos` falls back to a macOS Keychain prompt for `steve/signing/keychain-pass`—**click "Allow" ONLY (never "Always Allow")** so the temporary `/tmp` binary is not granted permanent Keychain ACL access (resuming an already-signed staged release does not prompt again). In non-interactive or headless/SSH sessions (no TTY), interactive fallback is refused; read `vault_service` from `signing/identity.json` and pipe the Keychain entry explicitly with `--keychain-pass-stdin` (accepts either the base64 Keychain item value or the raw 64-hex signing keychain password):
 
 ```sh
-security find-generic-password -s io.github.infranite.steve.vault -a steve/signing/keychain-pass -w | \
+SVC=$(plutil -extract vault_service raw ~/.steve/signing/identity.json) && \
+  security find-generic-password -s "$SVC" -a steve/signing/keychain-pass -w | \
   /tmp/steve-upgrade/bin/steve-hub --local-release upgrade-macos --home ~/.steve --keychain-pass-stdin
 ```
 
-To roll back manually to v0.12.0 afterward (preflights before stopping, unconditionally unloads launchd even if `/healthz` is unreachable, restores `current`, the exact original `.plist.previous`, and the database snapshot if schema changed, then cleans up rollback metadata and writes a receipt):
+To roll back manually to v0.12.0 afterward (preflights metadata, `current` alignment, and repository snapshot existence before stopping; unconditionally unloads launchd even if `/healthz` is unreachable; restores `current`, the exact original `.plist.previous`, and the database snapshot if required; cleans up rollback metadata and writes a receipt). If the upgraded Hub has been running past the immediate verification window or has written new data to SQLite, rolling back a database snapshot requires explicit `--confirm-data-loss`:
 
 ```sh
 ~/.steve/current/bin/steve-hub --local-release rollback-macos --home ~/.steve
+# If post-upgrade data would be overwritten by the pre-upgrade snapshot:
+~/.steve/current/bin/steve-hub --local-release rollback-macos --home ~/.steve --confirm-data-loss
+
+# Once satisfied with the new release, archive and clear rollback metadata:
+~/.steve/current/bin/steve-hub --local-release confirm-macos --home ~/.steve
 ```
 
 In this release and later, if **Settings → About** detects a legacy macOS LaunchAgent plist, it disables one-click upgrade and displays the copyable command for that installation (note: v0.12.0 itself does not have this detector, so v0.12.0 macOS users must run the terminal command above). Once migrated, future upgrades (including post-commit LaunchAgent plist migration for legacy managed installs) return to one-click in **Settings → About**.

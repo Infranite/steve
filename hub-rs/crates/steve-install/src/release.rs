@@ -22,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steve_store::db::inspect_schema;
 use steve_types::backup::{BackupPurpose, BackupReceipt, SnapshotId};
 
+#[derive(Debug)]
 pub struct DeployOutcome {
     pub exit_code: i32,
     pub receipt: Value,
@@ -67,6 +68,7 @@ extern "C" fn handle_interrupt(_sig: libc::c_int) {
 struct SignalGuard {
     prev_int: libc::sigaction,
     prev_term: libc::sigaction,
+    prev_hup: libc::sigaction,
 }
 
 impl SignalGuard {
@@ -77,14 +79,17 @@ impl SignalGuard {
         action.sa_flags = 0;
         let mut prev_int: libc::sigaction = unsafe { std::mem::zeroed() };
         let mut prev_term: libc::sigaction = unsafe { std::mem::zeroed() };
+        let mut prev_hup: libc::sigaction = unsafe { std::mem::zeroed() };
         unsafe {
             libc::sigemptyset(&mut action.sa_mask);
             libc::sigaction(libc::SIGINT, &action, &mut prev_int);
             libc::sigaction(libc::SIGTERM, &action, &mut prev_term);
+            libc::sigaction(libc::SIGHUP, &action, &mut prev_hup);
         }
         Self {
             prev_int,
             prev_term,
+            prev_hup,
         }
     }
 }
@@ -94,6 +99,7 @@ impl Drop for SignalGuard {
         unsafe {
             libc::sigaction(libc::SIGINT, &self.prev_int, std::ptr::null_mut());
             libc::sigaction(libc::SIGTERM, &self.prev_term, std::ptr::null_mut());
+            libc::sigaction(libc::SIGHUP, &self.prev_hup, std::ptr::null_mut());
         }
         SIGNAL_INTERRUPTED.store(false, Ordering::SeqCst);
     }
@@ -306,6 +312,7 @@ struct Runtime {
     service_home: PathBuf,
     health_timeout: Duration,
     interrupt: Arc<AtomicBool>,
+    watch_global_signal: bool,
     #[cfg(test)]
     simulated_service: bool,
 }
@@ -345,14 +352,16 @@ impl Runtime {
             service_home,
             health_timeout: Duration::from_secs(60),
             interrupt: Arc::new(AtomicBool::new(false)),
+            watch_global_signal: true,
             #[cfg(test)]
             simulated_service: false,
         })
     }
     fn check_interrupted(&self) -> Result<()> {
+        let signaled = self.watch_global_signal && SIGNAL_INTERRUPTED.load(Ordering::SeqCst);
         ensure!(
-            !SIGNAL_INTERRUPTED.load(Ordering::SeqCst) && !self.interrupt.load(Ordering::SeqCst),
-            "upgrade interrupted by signal (SIGINT/SIGTERM)"
+            !signaled && !self.interrupt.load(Ordering::SeqCst),
+            "upgrade interrupted by signal (SIGINT/SIGTERM/SIGHUP)"
         );
         Ok(())
     }
@@ -553,27 +562,32 @@ impl Runtime {
                 .get("missing_node")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let missing_tailcat = harnesses
+                .get("missing_tailcat")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let missing_adapters: Vec<&str> = harnesses
                 .get("missing_adapters")
                 .and_then(Value::as_array)
                 .map(|items| items.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
             ensure!(
-                !missing_node && missing_adapters.is_empty(),
-                "candidate service environment cannot resolve configured harnesses/Node (missing_node={missing_node}, missing_adapters={missing_adapters:?}, PATH={})",
+                !missing_node && !missing_tailcat && missing_adapters.is_empty(),
+                "candidate service environment cannot resolve configured harnesses/Node/tailcat (missing_node={missing_node}, missing_tailcat={missing_tailcat}, missing_adapters={missing_adapters:?}, PATH={})",
                 env.get("PATH").map(String::as_str).unwrap_or("")
             );
         }
         Ok(())
     }
     fn probe(&self, candidate: &Path, version: &str) -> Result<Value> {
-        self.probe_with_env(candidate, version, &self.env)
+        self.probe_with_env_tracked(candidate, version, &self.env, &mut |_| Ok(()))
     }
-    fn probe_with_env(
+    fn probe_with_env_tracked(
         &self,
         candidate: &Path,
         version: &str,
         env: &BTreeMap<String, String>,
+        on_probe_pid: &mut dyn FnMut(Option<u32>) -> Result<()>,
     ) -> Result<Value> {
         let id = uuid::Uuid::new_v4();
         let operations = self.home.join("updates/operations");
@@ -597,6 +611,7 @@ impl Runtime {
             .env("STEVE_PORT", port.to_string())
             .env("STEVE_HOST", "127.0.0.1")
             .env("STEVE_UPGRADE_ID", id.to_string())
+            .env("STEVE_PROBE_PARENT_PID", std::process::id().to_string())
             .env("STEVE_NO_RESUME", "1")
             .env("STEVE_REPO", self.home.join("probe-unused-repo"))
             .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
@@ -608,8 +623,10 @@ impl Runtime {
             .process_group(0);
         let result = (|| -> Result<Value> {
             let mut process = ProbeProcess(command.spawn()?);
+            let pid = process.0.id();
+            on_probe_pid(Some(pid))?;
             let mut budget =
-                crate::migration::Budget::new(&id.to_string(), process.0.id(), self.health_timeout);
+                crate::migration::Budget::new(&id.to_string(), pid, self.health_timeout);
             loop {
                 self.check_interrupted()?;
                 ensure!(
@@ -645,6 +662,7 @@ impl Runtime {
                 std::thread::sleep(Duration::from_millis(200));
             }
         })();
+        let _ = on_probe_pid(None);
         remove_file_best_effort(&operation);
         result
     }
@@ -1098,6 +1116,15 @@ fn restore_snapshot(runtime: &Runtime, helper_release: &Path, saved: &SnapshotId
     Ok(())
 }
 
+/// Immediate verification window after a completed macOS upgrade. Once more time than this has
+/// elapsed (or once the database has been written post-upgrade), rolling back to a pre-upgrade DB
+/// snapshot would silently discard post-upgrade work and therefore requires `--confirm-data-loss`.
+const MACOS_ROLLBACK_SILENT_DB_WINDOW_MS: u64 = 30 * 60 * 1000;
+
+/// Grace period before SIGKILL when reaping an orphaned probe process group recorded by a crashed
+/// prior upgrade run.
+const ORPHAN_PROBE_TERM_GRACE: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MacosUpgradeStage {
@@ -1113,6 +1140,28 @@ enum MacosUpgradeStage {
     CommittedFailed,
 }
 
+impl MacosUpgradeStage {
+    fn initiated_drain(self) -> bool {
+        matches!(
+            self,
+            Self::Draining
+                | Self::Stopped
+                | Self::BackedUp
+                | Self::Probed
+                | Self::Switched
+                | Self::Started
+                | Self::CommittedFailed
+        )
+    }
+
+    fn touched_database(self) -> bool {
+        matches!(
+            self,
+            Self::Probed | Self::Switched | Self::Started | Self::CommittedFailed
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MacosUpgradeJournal {
     version: String,
@@ -1126,6 +1175,14 @@ struct MacosUpgradeJournal {
     backup_snapshot: Option<SnapshotId>,
     was_running: bool,
     stage: MacosUpgradeStage,
+    #[serde(default)]
+    probe_pid: Option<u32>,
+    #[serde(default)]
+    finished_at_ms: Option<u64>,
+    #[serde(default)]
+    db_mtime_after_upgrade_ms: Option<u64>,
+    #[serde(default)]
+    db_size_after_upgrade: Option<u64>,
     started: String,
     updated: String,
 }
@@ -1144,6 +1201,90 @@ fn load_macos_journal(home: &Path) -> Result<MacosUpgradeJournal> {
 fn save_macos_journal(home: &Path, journal: &mut MacosUpgradeJournal) -> Result<()> {
     journal.updated = stamp();
     atomic_json(&macos_journal_path(home), &serde_json::to_value(&*journal)?)
+}
+
+fn db_file_stamp(db: &Path) -> Option<(u64, u64)> {
+    let meta = db.metadata().ok()?;
+    let mut mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_millis() as u64);
+    let mut size = meta.len();
+    let mut wal = db.as_os_str().to_os_string();
+    wal.push("-wal");
+    if let Ok(wal_meta) = Path::new(&wal).metadata() {
+        size = size.saturating_add(wal_meta.len());
+        if let Some(wal_ms) = wal_meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+        {
+            mtime_ms = mtime_ms.max(wal_ms);
+        }
+    }
+    Some((mtime_ms, size))
+}
+
+fn reap_orphan_probe(pid: u32) {
+    if pid <= 1 || pid == std::process::id() {
+        return;
+    }
+    let pid_t = pid as libc::pid_t;
+    // Probe children are spawned as their own process group leader (.process_group(0)).
+    // Checking getpgid(pid) == pid avoids signaling an unrelated reused PID in another group.
+    let pgid = unsafe { libc::getpgid(pid_t) };
+    if pgid != pid_t {
+        return;
+    }
+    unsafe {
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + ORPHAN_PROBE_TERM_GRACE;
+    while Instant::now() < deadline {
+        let alive = unsafe { libc::kill(pid_t, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if !alive {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+}
+
+fn verify_snapshot_exists(
+    runtime: &Runtime,
+    helper_release: &Path,
+    saved: &SnapshotId,
+    env: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut command = runtime.hub_command_with_env(helper_release, env, None);
+    command
+        .args(["--admin", "backup-list"])
+        .stdin(Stdio::null());
+    let output = signing::output(&mut command, Duration::from_secs(30))?;
+    ensure!(
+        output.status.success(),
+        "cannot verify backup snapshot {} in repository: {}",
+        saved.as_str(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let entries: Value =
+        serde_json::from_slice(&output.stdout).context("backup-list returned invalid JSON")?;
+    let found = entries.as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["snapshot_id"].as_str() == Some(saved.as_str()))
+    });
+    ensure!(
+        found,
+        "recorded backup snapshot {} does not exist in backup repository",
+        saved.as_str()
+    );
+    Ok(())
 }
 
 fn effective_service_env(
@@ -1171,28 +1312,32 @@ fn effective_service_env(
 
 /// One-shot macOS migration/upgrade driven purely by the Rust binary inside the new release
 /// package: records a durable rollback journal and `.plist.previous` before touching the running
-/// service, validates and signs the script-free bundle while holding one continuous POSIX release
-/// lock, drains and stops the prior Hub, backs up SQLite, runs the bounded maintenance probe
-/// (vault read + migration progress budget), switches `current` + `web/current`, rewrites the
-/// legacy LaunchAgent plist with `PATH`/`NO_COLOR`/`WorkingDirectory`, verifies configured
-/// harnesses/Node, starts launchd, and checks `/healthz`. Pre-commit failures automatically roll
-/// back and lift maintenance; post-commit failures follow `committed_startup_failed` (exit 3).
-pub fn upgrade_macos(
+/// service, validates and signs the script-free bundle (fetching the signing password lazily only
+/// when the staged binary is not already signed) while holding one continuous POSIX release lock,
+/// drains and stops the prior Hub, backs up SQLite (reusing an existing clean pre-upgrade snapshot
+/// on crash resume), runs the bounded maintenance probe (vault read + migration budget + parent
+/// watchdog), switches `current` + `web/current`, rewrites the legacy LaunchAgent plist with
+/// `PATH`/`NO_COLOR`/`WorkingDirectory`, verifies configured harnesses/Node/tailcat, starts
+/// launchd, and checks `/healthz`. Pre-commit failures automatically roll back and lift
+/// maintenance; post-commit failures follow `committed_startup_failed` (exit 3).
+pub fn upgrade_macos<F>(
     home: &Path,
     candidate: &Path,
     label_override: Option<&str>,
     drain_timeout: Duration,
-    signing_password: Option<&str>,
-) -> Result<DeployOutcome> {
+    signing_password: F,
+) -> Result<DeployOutcome>
+where
+    F: FnOnce() -> Result<Option<zeroize::Zeroizing<String>>> + Send + 'static,
+{
     ensure!(
         cfg!(target_os = "macos"),
         "macOS one-shot service upgrade requires macOS"
     );
-    let (home, candidate, label_override, signing_password) = (
+    let (home, candidate, label_override) = (
         home.to_owned(),
         candidate.to_owned(),
         label_override.map(str::to_owned),
-        signing_password.map(str::to_owned),
     );
     std::thread::spawn(move || {
         let _signals = SignalGuard::install();
@@ -1203,7 +1348,7 @@ pub fn upgrade_macos(
             &candidate,
             label_override.as_deref(),
             drain_timeout,
-            signing_password.as_deref(),
+            signing_password,
             &lock,
         )
     })
@@ -1211,14 +1356,17 @@ pub fn upgrade_macos(
     .map_err(|_| anyhow::anyhow!("macOS upgrade worker stopped"))?
 }
 
-fn upgrade_macos_with(
+fn upgrade_macos_with<F>(
     runtime: &Runtime,
     candidate: &Path,
     label_override: Option<&str>,
     drain_timeout: Duration,
-    signing_password: Option<&str>,
+    signing_password: F,
     lock: &ReleaseLock,
-) -> Result<DeployOutcome> {
+) -> Result<DeployOutcome>
+where
+    F: FnOnce() -> Result<Option<zeroize::Zeroizing<String>>>,
+{
     let home = &runtime.home;
     runtime.check_interrupted()?;
     validate_script_free_bundle(candidate)?;
@@ -1258,13 +1406,22 @@ fn upgrade_macos_with(
         incomplete || current_is_candidate_retry
     });
 
+    // Reap any orphaned probe process recorded by a previously hard-killed upgrade before acquiring
+    // SQLite/instance locks or checking health.
+    if let Some(prev) = preserve_previous
+        && let Some(pid) = prev.probe_pid
+    {
+        reap_orphan_probe(pid);
+    }
+
+    let initial_health = runtime.health();
     let (old_hub, old_web, old_manifest, was_running, resumed_backup, preserve_plist_backup) =
         if let Some(prev) = preserve_previous {
             (
                 prev.previous_hub.clone(),
                 prev.previous_web.clone(),
                 prev.previous_manifest.clone(),
-                prev.was_running || runtime.health().is_some(),
+                prev.was_running || initial_health.is_some(),
                 prev.backup_snapshot.clone(),
                 true,
             )
@@ -1276,11 +1433,23 @@ fn upgrade_macos_with(
                 actual_current.clone(),
                 old_web,
                 old_manifest,
-                runtime.health().is_some(),
+                initial_health.is_some(),
                 None,
                 false,
             )
         };
+
+    // Refuse re-running upgrade-macos with the exact version/commit already running on a migrated
+    // plist so a duplicate invocation never overwrites .macos-rollback.json or .plist.previous.
+    if preserve_previous.is_none()
+        && old_manifest["version"] == version
+        && old_manifest["commit"] == commit
+        && crate::service::detect_legacy_hub_launchd_plist(&plist_path, home).is_none()
+    {
+        anyhow::bail!(
+            "current installation is already running version {version} ({commit}); refusing duplicate upgrade to preserve rollback metadata"
+        );
+    }
 
     let staged = if let Some(prev) = preserve_previous
         && prev.version == version
@@ -1309,15 +1478,15 @@ fn upgrade_macos_with(
             .context("signing hub_identifier missing")?;
         if signing::verify_signature(&staged.join("bin/steve-hub"), hub_id, &runtime.tools).is_err()
         {
-            let password = signing_password.context(
-                "signed macOS installation requires the signing keychain password (unlock the login Keychain or pass --keychain-pass-stdin)",
+            let password = signing_password()?.context(
+                "signed macOS installation requires the signing keychain password (unlock the login Keychain in Terminal or pass --keychain-pass-stdin)",
             )?;
             signing::prepare_bundle_locked(
                 home,
                 &staged,
                 version,
                 commit,
-                password,
+                password.as_str(),
                 lock,
                 &runtime.tools,
             )?;
@@ -1336,6 +1505,8 @@ fn upgrade_macos_with(
     let result_path = logs.join(format!("macos-upgrade-{version}-{stamp}.json"));
     let plist_backup_snapshot =
         crate::service::backup_service_definition(&plist_path, preserve_plist_backup)?;
+    let resumed_drain = preserve_previous.is_some_and(|j| j.stage.initiated_drain())
+        || initial_health.as_ref().is_some_and(|h| h["drain"] == true);
     let mut journal = MacosUpgradeJournal {
         version: version.to_owned(),
         candidate: staged.clone(),
@@ -1348,6 +1519,10 @@ fn upgrade_macos_with(
         backup_snapshot: resumed_backup.clone(),
         was_running,
         stage: MacosUpgradeStage::Planned,
+        probe_pid: None,
+        finished_at_ms: None,
+        db_mtime_after_upgrade_ms: None,
+        db_size_after_upgrade: None,
         started: preserve_previous
             .map(|j| j.started.clone())
             .unwrap_or_else(|| stamp.clone()),
@@ -1366,7 +1541,10 @@ fn upgrade_macos_with(
         "started": stamp,
     });
 
-    let mut changed = Changed::default();
+    let mut changed = Changed {
+        drain: resumed_drain,
+        ..Changed::default()
+    };
     if preserve_previous.is_some() {
         if actual_current != old_hub {
             changed.hub_link = true;
@@ -1411,10 +1589,24 @@ fn upgrade_macos_with(
         runtime.check_interrupted()?;
         if db.is_file() {
             phase = "backup";
-            // Reuse a recorded pre-upgrade backup only if a prior crashed attempt already migrated
-            // the DB past the old release's schema, so the clean 0.12.0 backup is never overwritten.
-            let reuse_saved = saved.is_some() && check_schema(&db, &old_hub).is_err();
-            if !reuse_saved {
+            // Always reuse an existing clean pre-upgrade backup recorded in the journal once we
+            // confirm it exists in the repository; never overwrite a clean pre-upgrade snapshot on resume.
+            let reusable = match saved.as_ref() {
+                Some(snapshot) => {
+                    if verify_snapshot_exists(runtime, &staged, snapshot, &effective_env).is_ok() {
+                        true
+                    } else {
+                        ensure!(
+                            check_schema(&db, &old_hub).is_ok(),
+                            "recorded pre-upgrade backup {} is missing from repository and database was already migrated",
+                            snapshot.as_str()
+                        );
+                        false
+                    }
+                }
+                None => false,
+            };
+            if !reusable {
                 let snapshot = backup_with_env(runtime, &staged, &effective_env)?;
                 receipt["backup_snapshot"] = json!(snapshot);
                 atomic_json(&result_path, &receipt)?;
@@ -1425,13 +1617,18 @@ fn upgrade_macos_with(
             } else if let Some(snapshot) = &saved {
                 receipt["backup_snapshot"] = json!(snapshot);
                 atomic_json(&result_path, &receipt)?;
+                journal.stage = MacosUpgradeStage::BackedUp;
+                save_macos_journal(home, &mut journal)?;
             }
         }
 
         runtime.check_interrupted()?;
         phase = "probe";
         changed.probed = db.is_file();
-        runtime.probe_with_env(&staged, version, &effective_env)?;
+        runtime.probe_with_env_tracked(&staged, version, &effective_env, &mut |pid| {
+            journal.probe_pid = pid;
+            save_macos_journal(home, &mut journal)
+        })?;
         journal.stage = MacosUpgradeStage::Probed;
         save_macos_journal(home, &mut journal)?;
 
@@ -1453,7 +1650,7 @@ fn upgrade_macos_with(
         journal.stage = MacosUpgradeStage::Switched;
         save_macos_journal(home, &mut journal)?;
 
-        // Re-verify candidate config and harnesses against the rewritten plist before committing.
+        // Re-verify candidate config, harnesses, Node, and tailcat against the rewritten plist before committing.
         let (post_env, post_wd) = effective_service_env(runtime, &plist_path)?;
         runtime.check_config_with_env(&staged, &info, &post_env, post_wd.as_deref(), true)?;
 
@@ -1482,6 +1679,12 @@ fn upgrade_macos_with(
     let exit_code = match transaction {
         Ok(health) => {
             journal.stage = MacosUpgradeStage::Succeeded;
+            journal.probe_pid = None;
+            journal.finished_at_ms = Some(now());
+            if let Some((mtime_ms, size)) = db_file_stamp(&db) {
+                journal.db_mtime_after_upgrade_ms = Some(mtime_ms);
+                journal.db_size_after_upgrade = Some(size);
+            }
             save_macos_journal(home, &mut journal)?;
             receipt["ok"] = true.into();
             receipt["plist_rewritten"] = plist_rewritten.into();
@@ -1496,6 +1699,7 @@ fn upgrade_macos_with(
         }
         Err(error) if changed.started => {
             journal.stage = MacosUpgradeStage::CommittedFailed;
+            journal.probe_pid = None;
             let _ = save_macos_journal(home, &mut journal);
             let message = format!(
                 "Upgrade committed; new database retained and automatic rollback refused: {error:#}. Verified backup: {}",
@@ -1522,10 +1726,11 @@ fn upgrade_macos_with(
                 &label,
                 &plist_path,
             );
+            journal.probe_pid = None;
             if recovered {
                 journal.stage = MacosUpgradeStage::RolledBack;
-                let _ = save_macos_journal(home, &mut journal);
             }
+            let _ = save_macos_journal(home, &mut journal);
             let message = format!("{phase} failed: {error:#}; recovery: {}", steps.join("; "));
             receipt["ok"] = false.into();
             receipt["phase"] = phase.into();
@@ -1543,16 +1748,56 @@ fn upgrade_macos_with(
     Ok(DeployOutcome { exit_code, receipt })
 }
 
+/// Explicit confirmation point after a macOS upgrade has stabilized: archives
+/// `releases/.macos-rollback.json` under `logs/release/` and removes `.macos-rollback.json` and
+/// `.plist.previous` so stale rollback metadata cannot later overwrite weeks of production data.
+pub fn confirm_macos(home: &Path) -> Result<Value> {
+    let _lock = lock_release(home)?;
+    confirm_macos_with(home)
+}
+
+fn confirm_macos_with(home: &Path) -> Result<Value> {
+    let journal = load_macos_journal(home)?;
+    ensure!(
+        journal.stage == MacosUpgradeStage::Succeeded,
+        "cannot confirm macOS upgrade in stage {:?}; only a succeeded upgrade can be confirmed",
+        journal.stage
+    );
+    let stamp = stamp();
+    let logs = home.join("logs/release");
+    private_dir(&logs)?;
+    let archive_path = logs.join(format!(
+        "macos-upgrade-confirmed-{}-{stamp}.json",
+        journal.version
+    ));
+    let archived = json!({
+        "confirmed_at": stamp,
+        "journal": journal,
+    });
+    atomic_json(&archive_path, &archived)?;
+    remove_file_best_effort(&macos_journal_path(home));
+    let _ = crate::service::remove_service_definition_backup(&journal.plist_path);
+    Ok(json!({
+        "ok": true,
+        "confirmed_version": journal.version,
+        "previous_hub": journal.previous_hub,
+        "archived_journal": archive_path,
+        "confirmed_at": stamp,
+    }))
+}
+
 /// Manual rollback for a macOS one-shot upgrade: preflights metadata, `current` alignment, plist
-/// availability, and database schema/backup before touching the running service; drains if alive
-/// (lifting maintenance on failure without calling `bootout`); unconditionally unloads launchd even
-/// when `/healthz` is dead or crash-looping; restores `current`, `web/current`, the exact original
-/// `.plist.previous`, and the database snapshot when needed; verifies the previous Hub's `/healthz`;
-/// cleans up rollback metadata; and always writes a receipt.
+/// availability, actual backup repository snapshot presence, and post-upgrade DB overwrite
+/// confirmation before touching the running service; drains if alive (lifting maintenance on
+/// failure without calling `bootout`); unconditionally unloads launchd even when `/healthz` is
+/// dead or crash-looping; restores `current`, `web/current`, the exact original `.plist.previous`,
+/// and the database snapshot when needed; verifies the previous Hub's `/healthz`; cleans up
+/// rollback metadata; and always writes a receipt.
 pub fn rollback_macos(
     home: &Path,
     label_override: Option<&str>,
     drain_timeout: Duration,
+    confirm_data_loss: bool,
 ) -> Result<DeployOutcome> {
     ensure!(
         cfg!(target_os = "macos"),
@@ -1563,7 +1808,12 @@ pub fn rollback_macos(
         let _signals = SignalGuard::install();
         let _lock = lock_release(&home)?;
         let runtime = Runtime::new(&home)?;
-        rollback_macos_with(&runtime, label_override.as_deref(), drain_timeout)
+        rollback_macos_with(
+            &runtime,
+            label_override.as_deref(),
+            drain_timeout,
+            confirm_data_loss,
+        )
     })
     .join()
     .map_err(|_| anyhow::anyhow!("macOS rollback worker stopped"))?
@@ -1573,6 +1823,7 @@ fn rollback_macos_with(
     runtime: &Runtime,
     label_override: Option<&str>,
     drain_timeout: Duration,
+    confirm_data_loss: bool,
 ) -> Result<DeployOutcome> {
     let home = &runtime.home;
     let stamp = stamp();
@@ -1661,9 +1912,11 @@ fn rollback_macos_with(
         );
 
         let db = home.join("data/steve.sqlite3");
+        // Treat Probed, Switched, Started, and CommittedFailed consistently: once probe ran,
+        // the DB may have been modified and must be restored from the pre-upgrade snapshot.
         let needs_db_restore = db.is_file()
             && (check_schema(&db, &journal.previous_hub).is_err()
-                || journal.stage == MacosUpgradeStage::Probed);
+                || journal.stage.touched_database());
         let helper_release = if journal.candidate.join("bin/steve-hub").is_file() {
             journal.candidate.clone()
         } else if actual_current.join("bin/steve-hub").is_file() {
@@ -1671,15 +1924,43 @@ fn rollback_macos_with(
         } else {
             journal.previous_hub.clone()
         };
+        let (effective_env, _) = effective_service_env(runtime, &plist_path)?;
         if needs_db_restore {
-            ensure!(
-                journal.backup_snapshot.is_some(),
-                "database schema is newer than previous release and no backup snapshot is recorded"
-            );
+            let snapshot = journal.backup_snapshot.as_ref().context(
+                "database requires restore for rollback and no backup snapshot is recorded",
+            )?;
             ensure!(
                 helper_release.join("bin/steve-hub").is_file(),
                 "cannot restore database backup: helper release bin/steve-hub is missing"
             );
+            // Verify the snapshot actually exists in the backup repository BEFORE stopping service.
+            verify_snapshot_exists(runtime, &helper_release, snapshot, &effective_env)?;
+            // Guard against silently overwriting post-upgrade production data with an older snapshot.
+            if journal.stage == MacosUpgradeStage::Succeeded && !confirm_data_loss {
+                let elapsed_ms = journal
+                    .finished_at_ms
+                    .map(|fin| now().saturating_sub(fin))
+                    .unwrap_or(0);
+                let stale = elapsed_ms > MACOS_ROLLBACK_SILENT_DB_WINDOW_MS;
+                let db_modified = match (
+                    db_file_stamp(&db),
+                    journal.db_mtime_after_upgrade_ms,
+                    journal.db_size_after_upgrade,
+                ) {
+                    (Some((cur_m, cur_s)), Some(rec_m), Some(rec_s)) => {
+                        cur_m != rec_m || cur_s != rec_s
+                    }
+                    _ => false,
+                };
+                ensure!(
+                    !stale && !db_modified,
+                    "refusing to silently overwrite post-upgrade database with pre-upgrade snapshot {} (started {}, elapsed {}s, db_modified={}); re-run with --confirm-data-loss if you intentionally want to discard post-upgrade data",
+                    snapshot.as_str(),
+                    journal.started,
+                    elapsed_ms / 1000,
+                    db_modified
+                );
+            }
         }
         Ok((
             journal,
@@ -1699,8 +1980,12 @@ fn rollback_macos_with(
             }
         };
 
+    if let Some(pid) = journal.probe_pid {
+        reap_orphan_probe(pid);
+    }
+
     // Mandatory drain when /healthz answers; on drain failure, lift maintenance and abort WITHOUT bootout.
-    let mut drained = false;
+    let mut drained = journal.stage.initiated_drain();
     if runtime.health().is_some() {
         drained = true;
         let drain_result = (|| -> Result<()> {
@@ -2195,6 +2480,12 @@ case "${{1:-}}" in
             backup) [ "$3 $4 $5" = "--reason pre-upgrade --offline" ] || exit 9
                 STEVE_NATIVE_TEST_BACKUP=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
                 cat "$STEVE_HOME/fixture-manifest.json";;
+            backup-list)
+                if [ -f "$STEVE_HOME/fixture-manifest.json" ]; then
+                    printf '[%s]\n' "$(cat "$STEVE_HOME/fixture-manifest.json")"
+                else
+                    printf '[]\n'
+                fi;;
             restore) [ "$3 $4" = "{snapshot} --database-only" ] || exit 9
                 STEVE_NATIVE_TEST_RESTORE=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
                 printf '%s\n' "$3";;
@@ -2239,6 +2530,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             service_home: home.to_owned(),
             health_timeout: Duration::from_secs(3),
             interrupt: Arc::new(AtomicBool::new(false)),
+            watch_global_signal: false,
             simulated_service: true,
         };
         let id = uuid::Uuid::new_v4().to_string();
@@ -2587,6 +2879,12 @@ case "${{1:-}}" in
             backup) [ "$3 $4 $5" = "--reason pre-upgrade --offline" ] || exit 9
                 STEVE_NATIVE_TEST_BACKUP=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
                 cat "$STEVE_HOME/fixture-manifest.json";;
+            backup-list)
+                if [ -f "$STEVE_HOME/fixture-manifest.json" ]; then
+                    printf '[%s]\n' "$(cat "$STEVE_HOME/fixture-manifest.json")"
+                else
+                    printf '[]\n'
+                fi;;
             restore) [ "$3 $4" = "{snapshot} --database-only" ] || exit 9
                 STEVE_NATIVE_TEST_RESTORE=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
                 printf '%s\n' "$3";;
@@ -2628,6 +2926,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             service_home: home.to_owned(),
             health_timeout: Duration::from_secs(2),
             interrupt: Arc::new(AtomicBool::new(false)),
+            watch_global_signal: false,
             simulated_service: true,
         };
         (
@@ -2649,12 +2948,13 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         signing_password: Option<&str>,
     ) -> Result<DeployOutcome> {
         let lock = lock_release(&runtime.home)?;
+        let pw = signing_password.map(|s| zeroize::Zeroizing::new(s.to_owned()));
         upgrade_macos_with(
             runtime,
             candidate,
             label_override,
             drain_timeout,
-            signing_password,
+            move || Ok(pw),
             &lock,
         )
     }
@@ -2796,7 +3096,8 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             54
         );
 
-        let rolled_back = rollback_macos_with(&runtime, None, Duration::from_secs(2)).unwrap();
+        let rolled_back =
+            rollback_macos_with(&runtime, None, Duration::from_secs(2), false).unwrap();
         assert_eq!(rolled_back.exit_code, 0, "{}", rolled_back.receipt);
         assert_eq!(rolled_back.receipt["ok"], true);
         assert_eq!(rolled_back.receipt["version"], "0.12.0");
@@ -2854,7 +3155,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         assert_eq!(upgraded.exit_code, 0, "{}", upgraded.receipt);
         let _ = fs::remove_file(home.join("launchctl-log"));
         fs::write(home.join("drain-never-ready"), "1").unwrap();
-        let rb = rollback_macos_with(&runtime, None, Duration::from_millis(250)).unwrap();
+        let rb = rollback_macos_with(&runtime, None, Duration::from_millis(250), false).unwrap();
         assert_eq!(rb.exit_code, 1, "{}", rb.receipt);
         assert_eq!(rb.receipt["drain_lifted"], true);
         let rb_health = runtime.health().expect("1.2.3 must still answer /healthz");
@@ -2969,7 +3270,7 @@ exit 0
             &ext_candidate,
             None,
             Duration::from_secs(2),
-            Some(&pass),
+            || Ok(Some(zeroize::Zeroizing::new(pass.clone()))),
             &lock,
         )
         .unwrap();
@@ -3051,7 +3352,7 @@ exit 0
             "re-running after mid-switch crash must keep 0.12.0 as rollback target"
         );
         // And manual rollback from that resumed upgrade must restore 0.12.0 & original plist.
-        let rb = rollback_macos_with(&runtime, None, Duration::from_secs(2)).unwrap();
+        let rb = rollback_macos_with(&runtime, None, Duration::from_secs(2), false).unwrap();
         assert_eq!(rb.exit_code, 0, "{}", rb.receipt);
         assert_eq!(fs::read(&plist_path).unwrap(), original_plist);
     }
@@ -3085,10 +3386,9 @@ exit 0
         let saved_snap = meta["backup_snapshot"].clone();
         meta["backup_snapshot"] = Value::Null;
         atomic_json(&meta_path, &meta).unwrap();
-        set_schema(&home.join("data/steve.sqlite3"), 54, Some(54)).unwrap();
         let _ = fs::remove_file(home.join("launchctl-log"));
         let before_receipts = count_rollback_receipts();
-        let err = rollback_macos_with(&runtime, None, Duration::from_secs(2));
+        let err = rollback_macos_with(&runtime, None, Duration::from_secs(2), false);
         assert!(err.is_err());
         assert!(
             count_rollback_receipts() > before_receipts,
@@ -3109,7 +3409,7 @@ exit 0
         let real_candidate = fs::canonicalize(home.join("current")).unwrap();
         link(&home.join("current"), &third).unwrap();
         let _ = fs::remove_file(home.join("launchctl-log"));
-        assert!(rollback_macos_with(&runtime, None, Duration::from_secs(2)).is_err());
+        assert!(rollback_macos_with(&runtime, None, Duration::from_secs(2), false).is_err());
         assert!(
             !fs::read_to_string(home.join("launchctl-log"))
                 .unwrap_or_default()
@@ -3121,7 +3421,7 @@ exit 0
         // 3) Hung / crash-looping new Hub (/healthz unreachable) MUST still be unconditionally bootout'd!
         fs::write(home.join("fail-health-version"), "1.2.3").unwrap();
         let _ = fs::remove_file(home.join("launchctl-log"));
-        let rb = rollback_macos_with(&runtime, None, Duration::from_secs(2)).unwrap();
+        let rb = rollback_macos_with(&runtime, None, Duration::from_secs(2), false).unwrap();
         assert_eq!(rb.exit_code, 0, "{}", rb.receipt);
         let llog = fs::read_to_string(home.join("launchctl-log")).unwrap_or_default();
         assert!(
@@ -3139,7 +3439,7 @@ exit 0
             ".plist.previous must be removed once rollback completes"
         );
         assert!(
-            rollback_macos_with(&runtime, None, Duration::from_secs(2)).is_err(),
+            rollback_macos_with(&runtime, None, Duration::from_secs(2), false).is_err(),
             "repeating rollback_macos after completion must refuse cleanly"
         );
     }
@@ -3185,6 +3485,425 @@ exit 0
                 .schema,
             54,
             "post-commit failure must retain migrated DB"
+        );
+    }
+
+    #[test]
+    fn review593_re_a_hard_kill_during_drain_rerun_lifts_stranded_maintenance() {
+        let (dir, _ext_dir, ext_candidate, plist_path, _orig_p, mut runtime, _svc) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Simulate run 1: drained 0.12.0 (maintenance=true), stopped service (bootout),
+        // wrote stage=stopped to journal, then got SIGKILL'd!
+        runtime.control(Method::POST).unwrap();
+        assert_eq!(runtime.health().unwrap()["drain"], true);
+        runtime
+            .service_at("stop", "io.github.infranite.steve.hub", &plist_path)
+            .unwrap();
+        assert!(runtime.health().is_none());
+        let old_hub = fs::canonicalize(home.join("releases/0.12.0")).unwrap();
+        let old_manifest = json_file(&old_hub.join("release.json")).unwrap();
+        let staged = crate::service::stage_release_bundle(
+            home,
+            &ext_candidate,
+            "1.2.3",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let mut journal = MacosUpgradeJournal {
+            version: "1.2.3".into(),
+            candidate: staged,
+            previous_hub: old_hub.clone(),
+            previous_web: old_hub.join("web/dist"),
+            previous_manifest: old_manifest,
+            label: "io.github.infranite.steve.hub".into(),
+            plist_path: plist_path.clone(),
+            plist_backup_path: crate::service::previous_service_definition_path(&plist_path),
+            backup_snapshot: None,
+            was_running: true,
+            stage: MacosUpgradeStage::Stopped,
+            probe_pid: None,
+            finished_at_ms: None,
+            db_mtime_after_upgrade_ms: None,
+            db_size_after_upgrade: None,
+            started: stamp(),
+            updated: stamp(),
+        };
+        save_macos_journal(home, &mut journal).unwrap();
+        crate::service::backup_service_definition(&plist_path, false).unwrap();
+
+        // Run 2 hits a pre-commit backup failure and rolls back to 0.12.0:
+        // it MUST lift the stranded drain left over from the hard-killed Run 1!
+        runtime
+            .env
+            .insert("STEVE_NATIVE_TEST_BACKUP_FAIL".into(), "1".into());
+        let outcome =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(outcome.exit_code, 1, "{}", outcome.receipt);
+        let health = runtime.health().expect("0.12.0 must be back up");
+        assert_eq!(
+            health["drain"], false,
+            "resuming after hard-kill in Stopped/Draining must lift stranded maintenance: {health}"
+        );
+    }
+
+    #[test]
+    fn review593_re_b_orphan_probe_pid_reaped_on_recovery() {
+        let (dir, _ext_dir, ext_candidate, plist_path, _orig_p, runtime, _svc) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Spawn an orphan process-group-leader child simulating a probe Hub left behind after SIGKILL.
+        let mut orphan = Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let orphan_pid = orphan.id();
+        let old_hub = fs::canonicalize(home.join("releases/0.12.0")).unwrap();
+        let old_manifest = json_file(&old_hub.join("release.json")).unwrap();
+        let staged = crate::service::stage_release_bundle(
+            home,
+            &ext_candidate,
+            "1.2.3",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let meta = json!({
+            "version": "1.2.3",
+            "candidate": staged,
+            "previous_hub": old_hub,
+            "previous_web": old_hub.join("web/dist"),
+            "previous_manifest": old_manifest,
+            "label": "io.github.infranite.steve.hub",
+            "plist_path": plist_path,
+            "plist_backup_path": crate::service::previous_service_definition_path(&plist_path),
+            "backup_snapshot": Value::Null,
+            "was_running": true,
+            "stage": "backed_up",
+            "probe_pid": orphan_pid,
+            "started": stamp(),
+            "updated": stamp(),
+        });
+        atomic_json(&macos_journal_path(home), &meta).unwrap();
+        crate::service::backup_service_definition(&plist_path, false).unwrap();
+
+        let outcome =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
+        let exited = orphan.try_wait().unwrap().is_some();
+        if !exited {
+            let _ = orphan.kill();
+            let _ = orphan.wait();
+        }
+        assert!(
+            exited,
+            "orphan probe process (pid {orphan_pid}) recorded in journal must be terminated on recovery"
+        );
+    }
+
+    #[test]
+    fn review593_re_c_resume_reuses_recorded_pre_upgrade_snapshot() {
+        let (dir, _ext_dir, ext_candidate, plist_path, _orig_p, mut runtime, _svc) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Seed existing clean backup snapshot in fixture repo + BackedUp journal (DB still schema 53).
+        let clean_snap = "a".repeat(64);
+        fs::copy(
+            home.join("data/steve.sqlite3"),
+            home.join("fixture-backup.sqlite3"),
+        )
+        .unwrap();
+        atomic_json(
+            &home.join("fixture-manifest.json"),
+            &json!({
+                "purpose": "pre-upgrade",
+                "snapshot_id": clean_snap,
+                "created_ms": 1,
+                "written_bytes": 1,
+                "database": {"bytes": 1, "sha256": "b".repeat(64)}
+            }),
+        )
+        .unwrap();
+        let old_hub = fs::canonicalize(home.join("releases/0.12.0")).unwrap();
+        let old_manifest = json_file(&old_hub.join("release.json")).unwrap();
+        let staged = crate::service::stage_release_bundle(
+            home,
+            &ext_candidate,
+            "1.2.3",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let mut journal = MacosUpgradeJournal {
+            version: "1.2.3".into(),
+            candidate: staged,
+            previous_hub: old_hub.clone(),
+            previous_web: old_hub.join("web/dist"),
+            previous_manifest: old_manifest,
+            label: "io.github.infranite.steve.hub".into(),
+            plist_path: plist_path.clone(),
+            plist_backup_path: crate::service::previous_service_definition_path(&plist_path),
+            backup_snapshot: Some(SnapshotId::try_from(clean_snap.clone()).unwrap()),
+            was_running: true,
+            stage: MacosUpgradeStage::BackedUp,
+            probe_pid: None,
+            finished_at_ms: None,
+            db_mtime_after_upgrade_ms: None,
+            db_size_after_upgrade: None,
+            started: stamp(),
+            updated: stamp(),
+        };
+        save_macos_journal(home, &mut journal).unwrap();
+        crate::service::backup_service_definition(&plist_path, false).unwrap();
+
+        // Fail if --admin backup is invoked again: resume MUST reuse the recorded clean snapshot!
+        runtime
+            .env
+            .insert("STEVE_NATIVE_TEST_BACKUP_FAIL".into(), "1".into());
+        let outcome =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(
+            outcome.exit_code, 0,
+            "resuming with an already-recorded pre-upgrade snapshot must reuse it without re-running backup: {}",
+            outcome.receipt
+        );
+        assert_eq!(outcome.receipt["backup_snapshot"], json!(clean_snap));
+    }
+
+    #[test]
+    fn review593_re_d_duplicate_upgrade_refused_and_preserves_012_metadata() {
+        let (dir, _ext_dir, ext_candidate, plist_path, original_plist, runtime, _svc) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        let first = run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+            .unwrap();
+        assert_eq!(first.exit_code, 0, "{}", first.receipt);
+        let old_012 = fs::canonicalize(home.join("releases/0.12.0")).unwrap();
+        assert_eq!(
+            json_file(&macos_journal_path(home)).unwrap()["previous_hub"],
+            json!(old_012)
+        );
+
+        // Re-running upgrade-macos with the exact same bundle after success MUST refuse
+        // and preserve 0.12.0 as previous_hub and original .plist.previous!
+        let second =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None);
+        assert!(
+            second.is_err(),
+            "re-running upgrade-macos with the already-active version/commit must refuse instead of overwriting rollback metadata"
+        );
+        assert_eq!(
+            json_file(&macos_journal_path(home)).unwrap()["previous_hub"],
+            json!(old_012),
+            "duplicate upgrade attempt must not overwrite 0.12.0 rollback target"
+        );
+        assert_eq!(
+            fs::read(crate::service::previous_service_definition_path(
+                &plist_path
+            ))
+            .unwrap(),
+            original_plist
+        );
+    }
+
+    #[test]
+    fn review593_re_7_snapshot_repo_preflight_and_switched_db_parity() {
+        let (dir, _ext_dir, ext_candidate, plist_path, _orig_p, runtime, _svc) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        let upgraded =
+            run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None)
+                .unwrap();
+        assert_eq!(upgraded.exit_code, 0, "{}", upgraded.receipt);
+
+        // Gap 7a: snapshot ID is in journal, but deleted from the backup repository -> preflight MUST refuse before bootout.
+        let manifest_backup = fs::read(home.join("fixture-manifest.json")).unwrap();
+        fs::remove_file(home.join("fixture-manifest.json")).unwrap();
+        let _ = fs::remove_file(home.join("launchctl-log"));
+        assert!(
+            rollback_macos_with(&runtime, None, Duration::from_secs(2), false).is_err(),
+            "rollback preflight must verify snapshot exists in backup repository before bootout"
+        );
+        assert!(
+            !fs::read_to_string(home.join("launchctl-log"))
+                .unwrap_or_default()
+                .contains("bootout"),
+            "missing repository snapshot must fail BEFORE bootout"
+        );
+        fs::write(home.join("fixture-manifest.json"), manifest_backup).unwrap();
+
+        // Gap 7b-1: weeks later (stale finished_at_ms) or post-upgrade DB writes MUST refuse silent DB overwrite
+        // without --confirm-data-loss (before bootout), and succeed only when --confirm-data-loss is explicitly passed.
+        let mut stale_journal = load_macos_journal(home).unwrap();
+        stale_journal.finished_at_ms = Some(now().saturating_sub(14 * 24 * 3600 * 1000));
+        save_macos_journal(home, &mut stale_journal).unwrap();
+        let _ = fs::remove_file(home.join("launchctl-log"));
+        let refused = rollback_macos_with(&runtime, None, Duration::from_secs(2), false);
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("--confirm-data-loss")),
+            "stale rollback must require explicit --confirm-data-loss: {refused:?}"
+        );
+        assert!(
+            !fs::read_to_string(home.join("launchctl-log"))
+                .unwrap_or_default()
+                .contains("bootout"),
+            "unconfirmed stale rollback must fail BEFORE bootout"
+        );
+
+        // Gap 7b-2: explicit confirm-macos archives the journal and cleans .macos-rollback.json + .plist.previous.
+        let confirmed = confirm_macos_with(home).unwrap();
+        assert_eq!(confirmed["ok"], true);
+        let archive_path = PathBuf::from(confirmed["archived_journal"].as_str().unwrap());
+        assert!(archive_path.is_file(), "confirmed journal must be archived");
+        assert!(!macos_journal_path(home).exists());
+        assert!(!crate::service::previous_service_definition_path(&plist_path).exists());
+
+        // Gap 7c: crash at stage=Switched with same schema (53) must STILL restore DB snapshot just like Probed.
+        let (dir_sw, _ext_sw, cand_sw, plist_sw, _orig_sw, rt_sw, _svc_sw) =
+            macos_012_fixture(false);
+        let home_sw = dir_sw.path();
+        let up_sw =
+            run_upgrade_macos(&rt_sw, &cand_sw, None, Duration::from_secs(2), None).unwrap();
+        assert_eq!(up_sw.exit_code, 0, "{}", up_sw.receipt);
+        set_schema(&home_sw.join("data/steve.sqlite3"), 53, Some(53)).unwrap();
+        let mut journal = load_macos_journal(home_sw).unwrap();
+        journal.stage = MacosUpgradeStage::Switched;
+        save_macos_journal(home_sw, &mut journal).unwrap();
+        let rb = rollback_macos_with(&rt_sw, None, Duration::from_secs(2), false).unwrap();
+        assert_eq!(rb.exit_code, 0, "{}", rb.receipt);
+        assert_eq!(
+            rb.receipt["database_restored"], true,
+            "Switched stage must restore DB snapshot consistently with Probed stage: {}",
+            rb.receipt
+        );
+        assert!(!crate::service::previous_service_definition_path(&plist_sw).exists());
+
+        // Also confirm --confirm-data-loss succeeds on an intentionally confirmed stale rollback.
+        let (dir_cf, _ext_cf, cand_cf, _plist_cf, _orig_cf, rt_cf, _svc_cf) =
+            macos_012_fixture(false);
+        let home_cf = dir_cf.path();
+        let up_cf =
+            run_upgrade_macos(&rt_cf, &cand_cf, None, Duration::from_secs(2), None).unwrap();
+        assert_eq!(up_cf.exit_code, 0, "{}", up_cf.receipt);
+        let mut stale_cf = load_macos_journal(home_cf).unwrap();
+        stale_cf.finished_at_ms = Some(now().saturating_sub(14 * 24 * 3600 * 1000));
+        save_macos_journal(home_cf, &mut stale_cf).unwrap();
+        let rb_cf = rollback_macos_with(&rt_cf, None, Duration::from_secs(2), true).unwrap();
+        assert_eq!(rb_cf.exit_code, 0, "{}", rb_cf.receipt);
+        assert_eq!(rb_cf.receipt["database_restored"], true);
+    }
+
+    #[test]
+    fn review593_re_resume_already_signed_skips_password_prompt() {
+        let (dir, _ext_dir, ext_candidate, plist_path, _orig_p, runtime, _svc) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Stage and leave an interrupted journal where the staged binary is ALREADY validly signed
+        // (default fixture tools.codesign verifies it). Resuming MUST NOT invoke the password callback!
+        let old_hub = fs::canonicalize(home.join("releases/0.12.0")).unwrap();
+        let old_manifest = json_file(&old_hub.join("release.json")).unwrap();
+        let staged = crate::service::stage_release_bundle(
+            home,
+            &ext_candidate,
+            "1.2.3",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let mut journal = MacosUpgradeJournal {
+            version: "1.2.3".into(),
+            candidate: staged,
+            previous_hub: old_hub.clone(),
+            previous_web: old_hub.join("web/dist"),
+            previous_manifest: old_manifest,
+            label: "io.github.infranite.steve.hub".into(),
+            plist_path: plist_path.clone(),
+            plist_backup_path: crate::service::previous_service_definition_path(&plist_path),
+            backup_snapshot: None,
+            was_running: true,
+            stage: MacosUpgradeStage::Stopped,
+            probe_pid: None,
+            finished_at_ms: None,
+            db_mtime_after_upgrade_ms: None,
+            db_size_after_upgrade: None,
+            started: stamp(),
+            updated: stamp(),
+        };
+        save_macos_journal(home, &mut journal).unwrap();
+        crate::service::backup_service_definition(&plist_path, false).unwrap();
+
+        let lock = lock_release(home).unwrap();
+        let outcome = upgrade_macos_with(
+            &runtime,
+            &ext_candidate,
+            None,
+            Duration::from_secs(2),
+            || -> Result<Option<zeroize::Zeroizing<String>>> {
+                panic!(
+                    "resuming an already-signed staged bundle must not prompt for Keychain password"
+                );
+            },
+            &lock,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
+    }
+
+    #[test]
+    fn review593_re_sighup_sets_interrupt_and_aborts_cleanly() {
+        let (_dir, _ext_dir, _ext_candidate, _plist_path, _orig_p, mut runtime, _svc) =
+            macos_012_fixture(false);
+        runtime.watch_global_signal = true;
+        let _guard = SignalGuard::install();
+        let mut current_hup: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut current_hup);
+        }
+        assert_eq!(
+            current_hup.sa_sigaction, handle_interrupt as *const () as usize,
+            "SignalGuard must register handle_interrupt for SIGHUP (terminal close)"
+        );
+        unsafe {
+            libc::raise(libc::SIGHUP);
+        }
+        assert!(
+            runtime.check_interrupted().is_err(),
+            "receiving SIGHUP must mark upgrade interrupted cleanly"
+        );
+    }
+
+    #[test]
+    fn review593_re_4_upgrade_rejects_missing_tailcat() {
+        let (dir, _ext_dir, ext_candidate, _plist_path, _orig_p, runtime, _svc) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        let stub = ext_candidate.join("bin/steve-hub");
+        let original_stub = fs::read_to_string(&stub).unwrap();
+        let broken_stub = original_stub.replace(
+            r#"--check-config) printf '%s\n' '{"ok":true,"harnesses":{"missing_adapters":[],"missing_node":false,"resolved_adapters":[]}}'; exit 0;;"#,
+            r#"--check-config) printf '%s\n' '{"ok":true,"warnings":["tailcat missing"],"harnesses":{"missing_adapters":[],"missing_node":false,"missing_tailcat":true,"resolved_adapters":[]}}'; exit 0;;"#,
+        );
+        assert_ne!(original_stub, broken_stub);
+        executable(&stub, &broken_stub);
+        let res = run_upgrade_macos(&runtime, &ext_candidate, None, Duration::from_secs(2), None);
+        let failed = match &res {
+            Err(_) => true,
+            Ok(o) => o.exit_code != 0,
+        };
+        assert!(
+            failed,
+            "upgrade must refuse when tailcat is configured but missing from service PATH: {:?}",
+            res.map(|o| (o.exit_code, o.receipt))
+        );
+        assert_eq!(
+            json_file(&home.join("current/release.json")).unwrap()["version"],
+            "0.12.0"
         );
     }
     #[test]

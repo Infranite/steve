@@ -14,11 +14,12 @@ use serde::Serialize;
 
 use crate::config::Config;
 
-/// Typed harness and Node.js availability summary for `--check-config` and upgrade preflight.
+/// Typed harness, Node.js, and tailcat availability summary for `--check-config` and upgrade preflight.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct HarnessCheck {
     pub missing_adapters: Vec<String>,
     pub missing_node: bool,
+    pub missing_tailcat: bool,
     pub resolved_adapters: Vec<String>,
 }
 
@@ -89,6 +90,7 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
             }
         }
     }
+    check_tailcat(&cfg, &vars, &mut warnings, &mut harnesses);
     if let Err(e) = crate::nodes::Ingress::from_vars(|k| vars(k)) {
         errors.push(e);
     }
@@ -125,23 +127,47 @@ pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec
     local_node_checks(cfg, vars).0
 }
 
+fn program_available(program: &str, executable: bool, path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let usable = |p: &std::path::Path| {
+        p.metadata()
+            .is_ok_and(|m| m.is_file() && (!executable || m.permissions().mode() & 0o111 != 0))
+    };
+    let p = std::path::Path::new(program);
+    if p.components().count() > 1 {
+        usable(p)
+    } else {
+        std::env::split_paths(path).any(|d| usable(&d.join(p)))
+    }
+}
+
+fn check_tailcat(
+    cfg: &Config,
+    vars: &crate::wire::Vars,
+    warnings: &mut Vec<String>,
+    harnesses: &mut HarnessCheck,
+) {
+    let explicit = vars("STEVE_TAILCAT").filter(|v| !v.trim().is_empty());
+    let configured = explicit.is_some() || cfg.home.join("tailcat/hub.private.json").is_file();
+    if !configured {
+        return;
+    }
+    let program = explicit.as_deref().unwrap_or("tailcat");
+    let path = vars("PATH").unwrap_or_default();
+    if !program_available(program, true, &path) {
+        harnesses.missing_tailcat = true;
+        warnings.push(steve_i18n::t!(
+            "hub.check.tailcat_missing",
+            tailcat = program
+        ));
+    }
+}
+
 fn local_node_checks(cfg: &Config, vars: &crate::wire::Vars) -> (Vec<String>, HarnessCheck) {
     let mut warnings = Vec::new();
     let mut harnesses = HarnessCheck::default();
     let path = vars("PATH").unwrap_or_default();
-    let available = |program: &str, executable: bool| {
-        use std::os::unix::fs::PermissionsExt;
-        let usable = |p: &std::path::Path| {
-            p.metadata()
-                .is_ok_and(|m| m.is_file() && (!executable || m.permissions().mode() & 0o111 != 0))
-        };
-        let p = std::path::Path::new(program);
-        if p.components().count() > 1 {
-            usable(p)
-        } else {
-            std::env::split_paths(&path).any(|d| usable(&d.join(p)))
-        }
-    };
+    let available = |program: &str, executable: bool| program_available(program, executable, &path);
     let path_only_bins: std::collections::HashMap<&str, (&str, &str)> =
         steve_harness_spec::builtin_bins()
             .zip(steve_harness_spec::builtin_command_vars())
@@ -480,6 +506,32 @@ mod tests {
         assert!(
             r.errors.iter().any(|e| e.contains("STEVE_VAULT_KEY_DIR")),
             "{r:?}"
+        );
+    }
+
+    #[test]
+    fn review593_re_4_check_config_detects_missing_tailcat() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().to_string_lossy().into_owned();
+        std::fs::create_dir_all(tmp.path().join("tailcat")).expect("tailcat dir");
+        std::fs::write(tmp.path().join("tailcat/hub.private.json"), "{}").expect("key");
+        let r = run(&[("STEVE_HOME", home.as_str()), ("PATH", "/nonexistent")]);
+        assert!(
+            r.harnesses.missing_tailcat && r.warnings.iter().any(|w| w.contains("tailcat")),
+            "check_config must detect missing tailcat when <home>/tailcat/hub.private.json exists: {r:?}"
+        );
+        // Once tailcat is present and executable on PATH, missing_tailcat clears.
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let tc = bin_dir.join("tailcat");
+        std::fs::write(&tc, "#!/bin/sh\nexit 0\n").expect("tailcat stub");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tc, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = bin_dir.to_string_lossy().into_owned();
+        let ok = run(&[("STEVE_HOME", home.as_str()), ("PATH", path.as_str())]);
+        assert!(
+            !ok.harnesses.missing_tailcat,
+            "executable tailcat on PATH must clear missing_tailcat: {ok:?}"
         );
     }
 }
