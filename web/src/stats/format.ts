@@ -17,6 +17,16 @@ export const fmtUsage = (u: Pick<Usage, "total" | "coverage"> & Partial<Pick<Usa
   coverageValue(u, field, fmtN, { not_reported: t("stats:coverage.not_reported"), unavailable: t("stats:coverage.unavailable"), partial: t("stats:coverage.partial") })
 
 export const fmtUsd = (n: number | null | undefined) => (n == null || !isFinite(n) ? "—" : n === 0 ? "$0" : n < 0.01 ? "<$0.01" : "$" + (n >= 1000 ? Math.round(n).toLocaleString("en-US") : n.toFixed(2)))
+const KIB = 1024, MIB = KIB * 1024, GIB = MIB * 1024, TIB = GIB * 1024
+/** Human-readable binary byte count shared across stats, Node vitals, and session rows. */
+export const fmtBytes = (bytes: number | null | undefined) => {
+  if (bytes == null || !isFinite(bytes) || bytes < 0) return "—"
+  if (bytes >= TIB) return (bytes / TIB).toFixed(1).replace(/\.0$/, "") + " TB"
+  if (bytes >= GIB) return (bytes / GIB).toFixed(1).replace(/\.0$/, "") + " GB"
+  if (bytes >= MIB) return (bytes / MIB).toFixed(1).replace(/\.0$/, "") + " MB"
+  if (bytes >= KIB) return (bytes / KIB).toFixed(1).replace(/\.0$/, "") + " KB"
+  return `${Math.round(bytes)} B`
+}
 /** An estimate that leaves `unpriced` tokens out: “≥$1.20 · 7.4M 未定价”, “— · 7.4M 未定价” when what is priced
  * rounds to nothing (not “<$0.01” for millions of tokens); plain [`fmtUsd`] when every token is priced. */
 export const fmtEst = (est: number, unpriced = 0) =>

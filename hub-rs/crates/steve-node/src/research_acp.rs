@@ -1,5 +1,5 @@
-//! Research's ACP policy and budgets. The transport is shared with think jobs; only this module
-//! decides which reported reads belong to the research scope.
+//! Research's ACP policy and budgets. Read-only enforcement relies on the OS sandbox,
+//! `PermissionMode::Plan`, and unconditional permission refusal in one-shot ACP calls.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,6 @@ use tokio::time::Instant as IdleInstant;
 
 use serde_json::{Value, json};
 use steve_acp::StateDirRuntime;
-use steve_acp::normalize::{CommandFact, ToolFact};
 
 use super::*;
 use crate::acp_job;
@@ -62,101 +61,6 @@ pub(super) fn sandbox_mode(
     }
 }
 
-/// Tools that load nothing but deferred tool schemas (Claude Code's `ToolSearch`).
-const INERT_TOOLS: [&str; 1] = ["ToolSearch"];
-
-/// The ACP kind describes what a tool does, independent of its adapter's spelling. Steve's MCP
-/// tools still have an explicit allowlist because the server exposes actions as well as reads.
-pub(crate) fn guard(
-    fact: &ToolFact,
-    scope: &r::Scope,
-    steve_tools: bool,
-    sandboxed_shell: bool,
-) -> Result<(), r::Violation> {
-    let tool = if fact.name.is_empty() {
-        fact.title.clone()
-    } else {
-        fact.name.clone()
-    };
-    if fact.origin == ToolOrigin::Steve {
-        let name = fact.name.strip_prefix("mcp__steve__").unwrap_or(&fact.name);
-        return if steve_tools && r::guard::MCP_TOOLS.contains(&name) {
-            Ok(())
-        } else {
-            Err(r::Violation::Tool { tool })
-        };
-    }
-    if fact.origin == ToolOrigin::External {
-        return Err(r::Violation::Tool { tool });
-    }
-    // a harness's own bookkeeping that touches nothing (loading deferred tool schemas)
-    if INERT_TOOLS.contains(&fact.name.as_str()) {
-        return Ok(());
-    }
-    let mut scope = scope.clone();
-    if let Some(cwd) = &fact.cwd {
-        r::guard::check_path(&tool, cwd, &scope)?;
-        scope.cwd = r::guard::resolve(&scope.cwd.join(cwd));
-    }
-    // ACP adapters may describe a shell command by its purpose (Read/Search), while
-    // retaining the full command input. It needs exactly the same sandbox and path
-    // checks as Exec; its display title never grants a capability.
-    let command_backed = fact.category == ToolCategory::Exec
-        || (matches!(fact.category, ToolCategory::Read | ToolCategory::Search)
-            && fact.command.is_some());
-    if fact.origin == ToolOrigin::Harness && command_backed && sandboxed_shell {
-        for path in &fact.paths {
-            r::guard::check_path(&tool, path, &scope)?;
-        }
-        return match &fact.command {
-            Some(CommandFact::Shell(command)) => r::guard::check_shell(command, &scope),
-            Some(CommandFact::Argv(argv)) if !argv.is_empty() => {
-                let program = Path::new(&argv[0]);
-                if argv[0].contains('/')
-                    && !program.starts_with("/usr/bin")
-                    && !program.starts_with("/bin")
-                {
-                    r::guard::check_path(&tool, &argv[0], &scope)?;
-                }
-                // Preserve argument boundaries; this is inspection, never an argv-to-shell
-                // conversion. Shell `-c` payloads get the same path guard as shell commands.
-                for arg in argv.iter().skip(1) {
-                    if !arg.starts_with('-')
-                        && (arg.starts_with('/') || arg.starts_with("./") || arg.starts_with("../"))
-                        && !arg.contains(char::is_whitespace)
-                    {
-                        r::guard::check_path(&tool, arg, &scope)?;
-                    }
-                    r::guard::check_shell(arg, &scope)?;
-                }
-                Ok(())
-            }
-            _ => Err(r::Violation::BadInput { tool }),
-        };
-    }
-    if !matches!(
-        fact.category,
-        ToolCategory::Read | ToolCategory::Search | ToolCategory::Think
-    ) || fact.command.is_some()
-        || fact.url.is_some()
-    {
-        return Err(r::Violation::Tool { tool });
-    }
-    if fact.category == ToolCategory::Read && fact.paths.is_empty() {
-        return Err(r::Violation::BadInput { tool });
-    }
-    for path in &fact.paths {
-        r::guard::check_path(&tool, path, &scope)?;
-    }
-    if fact.category == ToolCategory::Search {
-        // what the search reaches, even when an adapter supplies no locations
-        if let Some(input) = fact.raw.get("rawInput") {
-            r::guard::check_search(&tool, input, &scope)?;
-        }
-    }
-    Ok(())
-}
-
 #[derive(Default)]
 struct State {
     message: Option<String>,
@@ -172,66 +76,6 @@ struct State {
 }
 
 impl State {
-    fn tool(
-        &mut self,
-        fact: &ToolFact,
-        scope: &r::Scope,
-        budget: r::Budget,
-        tools: bool,
-        sandboxed_shell: bool,
-        full: bool,
-    ) -> bool {
-        if self.stop.is_some() {
-            return false;
-        }
-        // a run with the user's full access answers to no read-only rule
-        if !full && let Err(v) = guard(fact, scope, tools, sandboxed_shell) {
-            self.stop = Some(r::RunStatus::Violated(v));
-            return false;
-        }
-        self.calls.insert(fact.raw_id.clone());
-        if budget
-            .max_tools
-            .is_some_and(|max| self.calls.len() > max as usize)
-        {
-            self.stop = Some(r::RunStatus::Budget(r::BudgetHit::Tools));
-            return false;
-        }
-        if fact.phase == ToolPhase::Succeeded {
-            let paths = if fact.category == ToolCategory::Read {
-                fact.paths.clone()
-            } else if fact.category == ToolCategory::Exec {
-                match &fact.command {
-                    Some(CommandFact::Shell(command)) => {
-                        r::guard::shell_read(command).into_iter().collect()
-                    }
-                    Some(CommandFact::Argv(argv)) => argv
-                        .first()
-                        .filter(|program| {
-                            matches!(
-                                Path::new(program).file_name().and_then(|s| s.to_str()),
-                                Some("cat" | "sed" | "head" | "tail" | "nl" | "less" | "bat")
-                            )
-                        })
-                        .and_then(|_| argv.last().filter(|last| !last.starts_with('-')))
-                        .cloned()
-                        .into_iter()
-                        .collect(),
-                    None => vec![],
-                }
-            } else {
-                vec![]
-            };
-            for path in paths {
-                let path = steve_acp::normalize::shown(&path, &scope.cwd);
-                if !self.files.contains(&path) {
-                    self.files.push(path);
-                }
-            }
-        }
-        true
-    }
-
     fn event(&mut self, event: &EventBody, budget: r::Budget) {
         match event {
             EventBody::MessageStarted {
@@ -259,6 +103,27 @@ impl State {
                 if offset <= self.text.len() && self.text.is_char_boundary(offset) {
                     self.text.truncate(offset);
                     self.text.push_str(text);
+                }
+            }
+            EventBody::ToolChanged { tool } => {
+                if self.stop.is_some() {
+                    return;
+                }
+                self.calls.insert(tool.id.as_str().to_string());
+                if budget
+                    .max_tools
+                    .is_some_and(|max| self.calls.len() > max as usize)
+                {
+                    self.stop = Some(r::RunStatus::Budget(r::BudgetHit::Tools));
+                    return;
+                }
+                if tool.phase == ToolPhase::Succeeded
+                    && tool.category == ToolCategory::Read
+                    && let Some(target) = &tool.target
+                    && !target.is_empty()
+                    && !self.files.contains(target)
+                {
+                    self.files.push(target.clone());
                 }
             }
             _ => {}
@@ -406,7 +271,6 @@ impl LocalNode {
                 budget,
                 state: &state,
                 cwd: &prepared.cwd,
-                scope: &prepared.scope,
                 prompt: prepared.prompt,
                 wrap: &wrap,
             }
@@ -568,7 +432,6 @@ struct ResearchCall<'a> {
     budget: r::Budget,
     state: &'a Mutex<State>,
     cwd: &'a Path,
-    scope: &'a r::Scope,
     prompt: Vec<Value>,
     wrap: steve_acp::oneshot::Wrap<'a>,
 }
@@ -590,25 +453,9 @@ impl ResearchCall<'_> {
             budget,
             state,
             cwd,
-            scope,
             prompt,
             wrap,
         } = self;
-        let full = spec.run.policy.permissions == PermissionMode::FullAccess;
-        let allow = |fact: &ToolFact| {
-            state.lock().unwrap().tool(
-                fact,
-                scope,
-                budget,
-                req.mcp.is_some(),
-                node.0
-                    .cfg
-                    .acp
-                    .adapter_properties(&req.harness)
-                    .self_read_only,
-                full,
-            )
-        };
         let event = |event: EventBody| {
             let _ = tx.send(event);
         };
@@ -639,7 +486,6 @@ impl ResearchCall<'_> {
                 wrap: Some(wrap),
                 timeout: budget.hard.unwrap_or(Duration::from_secs(86400)),
                 prefix: exec.attempt().as_str(),
-                allow_tool: &allow,
                 on_session: Some(&session),
                 on_activity: Some(&activity),
                 max_output_bytes: spec.run.limits.max_output_bytes,
@@ -696,6 +542,11 @@ fn apply_outcome(
             Some(Err(acp_job::OneShotError::OutputLimit)) => {
                 *why = Some(Stop::Output);
                 r::RunStatus::Stopped
+            }
+            Some(Err(acp_job::OneShotError::ToolRefused)) => {
+                r::RunStatus::Violated(r::Violation::Tool {
+                    tool: "permission_refused".into(),
+                })
             }
             Some(Err(e)) => r::RunStatus::Failed(e.to_string()),
             None => r::RunStatus::Stopped,
@@ -788,142 +639,71 @@ impl ResearchOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use steve_acp::normalize::Normalizer;
 
-    fn fact(update: Value) -> ToolFact {
-        let mut normalizer = Normalizer::new("/", "test", Epoch::new("test").unwrap());
-        normalizer.update(&update);
-        normalizer.fact("t1").unwrap().clone()
-    }
-
-    #[test]
-    fn generic_acp_reads_keep_scope_secrets_and_actions_separate() {
-        let dir = tempfile::tempdir().unwrap();
-        let scope = r::Scope::new(dir.path(), &[], &dir.path().join("home"));
-        let read = |path: &str| {
-            fact(json!({
-                "sessionUpdate": "tool_call", "toolCallId": "t1", "name": "any_reader",
-                "kind": "read", "status": "in_progress", "locations": [{"path": path}],
-            }))
-        };
-        assert!(guard(&read("src/lib.rs"), &scope, false, false).is_ok());
-        assert!(matches!(
-            guard(&read(".env.local"), &scope, false, false),
-            Err(r::Violation::Sensitive { .. })
-        ));
-        assert!(matches!(
-            guard(&read("/etc/hosts"), &scope, false, false),
-            Err(r::Violation::OutOfScope { .. })
-        ));
-        let shell = fact(json!({
-            "sessionUpdate": "tool_call", "toolCallId": "t1", "name": "any_shell",
-            "kind": "execute", "rawInput": {"command": "cat src/lib.rs"}
-        }));
-        assert!(matches!(
-            guard(&shell, &scope, false, false),
-            Err(r::Violation::Tool { .. })
-        ));
-        assert!(guard(&shell, &scope, false, true).is_ok());
-        let secret_shell = fact(json!({
-            "sessionUpdate": "tool_call", "toolCallId": "t1", "name": "any_shell",
-            "kind": "execute", "rawInput": {"command": ["/bin/sh", "-lc", "cat ~/.ssh/id_rsa"]}
-        }));
-        assert!(matches!(
-            guard(&secret_shell, &scope, false, true),
-            Err(r::Violation::Sensitive { .. })
-        ));
-        let secret_program = fact(json!({
-            "sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute",
-            "rawInput": {"command": [scope.home.join(".ssh/run").display().to_string()]}
-        }));
-        assert!(matches!(
-            guard(&secret_program, &scope, false, true),
-            Err(r::Violation::Sensitive { .. })
-        ));
-        let mcp = |name: &str| {
-            fact(json!({
-                "sessionUpdate": "tool_call", "toolCallId": "t1", "name": name, "kind": "other"
-            }))
-        };
-        assert!(
-            guard(
-                &mcp("mcp__steve__steve_knowledge_search"),
-                &scope,
-                true,
-                false
-            )
-            .is_ok()
-        );
-        assert!(
-            guard(
-                &mcp("mcp__steve__steve_knowledge_search"),
-                &scope,
-                false,
-                false
-            )
-            .is_err()
-        );
-        assert!(guard(&mcp("mcp__steve__steve_deliver"), &scope, true, false).is_err());
-    }
-
-    #[test]
-    fn a_full_access_run_answers_to_no_read_only_rule_but_keeps_its_budget() {
-        let dir = tempfile::tempdir().unwrap();
-        let scope = r::Scope::new(dir.path(), &[], &dir.path().join("home"));
-        let call = |id: &str, update: Value| {
-            let mut update = update;
-            update["toolCallId"] = json!(id);
-            let mut normalizer = Normalizer::new("/", "test", Epoch::new("test").unwrap());
-            normalizer.update(&update);
-            normalizer.fact(id).unwrap().clone()
-        };
-        let outside = json!({
-            "sessionUpdate": "tool_call", "name": "any_reader", "kind": "read",
-            "status": "in_progress", "locations": [{"path": "/etc/hosts"}],
-        });
-        let write = json!({
-            "sessionUpdate": "tool_call", "name": "any_writer", "kind": "edit",
-            "status": "in_progress", "locations": [{"path": "/etc/hosts"}],
-        });
-        let shell = json!({
-            "sessionUpdate": "tool_call", "name": "any_shell", "kind": "execute",
-            "rawInput": {"command": "touch notes.md"}
-        });
-        let budget = r::Budget::default();
-        let run = |state: &mut State, id: &str, update: &Value, budget: r::Budget, full: bool| {
-            let fact = call(id, update.clone());
-            state.tool(&fact, &scope, budget, false, false, full)
-        };
-
-        // read-only: the first call out of scope ends the run, and nothing after it counts
-        let mut limited = State::default();
-        assert!(!run(&mut limited, "a", &outside, budget, false));
-        assert!(matches!(
-            limited.stop,
-            Some(r::RunStatus::Violated(r::Violation::OutOfScope { .. }))
-        ));
-        assert!(!run(&mut limited, "b", &shell, budget, false));
-        assert!(limited.calls.is_empty());
-
-        // full access: the same calls go through
-        let mut full = State::default();
-        for (id, update) in [("a", &outside), ("b", &write), ("c", &shell)] {
-            assert!(run(&mut full, id, update, budget, true));
+    fn tool_event(
+        id: &str,
+        category: ToolCategory,
+        phase: ToolPhase,
+        target: Option<&str>,
+    ) -> EventBody {
+        EventBody::ToolChanged {
+            tool: ToolView {
+                id: CallId::new(id).unwrap(),
+                parent: None,
+                origin: ToolOrigin::Harness,
+                name: "tool".into(),
+                category,
+                title: "tool".into(),
+                description: None,
+                target: target.map(str::to_string),
+                phase,
+                action: None,
+                evidence: None,
+                result: vec![],
+                error: None,
+                duration_ms: None,
+            },
         }
-        assert!(full.stop.is_none());
-        assert_eq!(full.calls.len(), 3);
+    }
 
-        // and a limit the owner set on tool calls still ends it
+    #[test]
+    fn tool_budget_and_read_file_tracking_run_on_tool_events() {
         let two = r::Budget {
             max_tools: Some(2),
-            ..budget
+            ..r::Budget::default()
         };
-        let mut capped = State::default();
-        assert!(run(&mut capped, "a", &outside, two, true));
-        assert!(run(&mut capped, "b", &write, two, true));
-        assert!(!run(&mut capped, "c", &shell, two, true));
+        let mut state = State::default();
+        state.event(
+            &tool_event(
+                "a",
+                ToolCategory::Read,
+                ToolPhase::Succeeded,
+                Some("src/lib.rs"),
+            ),
+            two,
+        );
+        state.event(
+            &tool_event(
+                "b",
+                ToolCategory::Search,
+                ToolPhase::Succeeded,
+                Some("fn add"),
+            ),
+            two,
+        );
+        assert!(state.stop.is_none());
+        assert_eq!(state.files, vec!["src/lib.rs"]);
+        state.event(
+            &tool_event(
+                "c",
+                ToolCategory::Read,
+                ToolPhase::Pending,
+                Some("src/main.rs"),
+            ),
+            two,
+        );
         assert!(matches!(
-            capped.stop,
+            state.stop,
             Some(r::RunStatus::Budget(r::BudgetHit::Tools))
         ));
     }

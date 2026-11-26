@@ -42,17 +42,16 @@ try {
     assert.deepEqual(await rts.evaluateAll((els) => els.map((e) => e.getAttribute("data-onboard-runtime"))), ["claude-code", "codex", "gemini"])
     assert.match(await rts.nth(0).innerText(), /3 个模型/)
     assert.match(await rts.nth(2).innerText(), /没有找到 gemini 命令/)
-    assert.match(await card(page).locator('[data-pane="current"]').innerText(), /请选择你想用的模型/)
+    assert.match(await card(page).locator('[data-pane="current"]').innerText(), /已检出就绪环境/)
+    assert.equal(await card(page).locator('[data-pane="current"] [required], [data-pane="current"] [aria-required="true"]').count(), 0, "zero required form fields when a ready harness is detected")
+    assert.equal(await card(page).locator('[data-pane="current"] [data-role-preview]').count(), 0, "no 7-purpose explanation during onboarding")
+    assert.equal(await card(page).locator('[data-pane="current"] [data-lightweight-config]').count(), 0, "purpose overrides stay in Settings -> Models")
+    assert.equal(await card(page).locator("button[type=submit]").isDisabled(), false, "default button is directly clickable when a ready harness exists")
+    await card(page).locator('[data-pane="current"] [data-select="steve-harness"]').waitFor()
+    assert.match(await card(page).locator('[data-pane="current"] [data-select="steve-harness"]').innerText(), /Claude Code/)
     if (shots) await page.screenshot({ path: `${shots}/onboarding-runtime-${tag}.png` })
 
-    assert.equal(await card(page).locator("button[type=submit]").isDisabled(), true)
-    assert.equal(await step(page), "1", "a model must be explicitly chosen before the first meeting")
-    await card(page).locator('[data-pane="current"] [data-select="steve-harness"]').click()
-    await page.getByRole("option", { name: "Codex", exact: true }).click()
-    await card(page).locator('[data-pane="current"] .ui-mdpc__trigger').click()
-    await page.getByRole("option", { name: /Fixture model/ }).click()
-    await card(page).locator('[data-pane="current"] [data-steve-model-save]').click()
-    await card(page).locator('[data-pane="current"] [data-steve-model-saved]').waitFor()
+    /* zero-friction default path: proceed directly without touching the model form */
     await next(page)
     await page.waitForFunction(() => document.querySelector("[data-onboard-card]")?.getAttribute("data-onboard") === "2")
     const pane = card(page).locator('[data-pane="current"]')
@@ -78,12 +77,29 @@ try {
     assert.equal(await heading(page), "互相认识一下")
     assert.equal(await skip.innerText(), "以后再说")
     if (shots) await page.screenshot({ path: `${shots}/onboarding-meet-${tag}.png` })
-    assert.deepEqual(await calls(page), ["model:codex"], "explicit model selection is saved before starting the meeting")
+    assert.deepEqual(await calls(page), [], "no mandatory model save before starting the meeting")
     await next(page)
     await card(page).waitFor({ state: "detached" })
-    assert.deepEqual(await calls(page), ["model:codex", "start"])
+    assert.deepEqual(await calls(page), ["start"])
     assert.equal(await page.locator("main").getAttribute("data-meeting"), "")
     assert.equal(await page.evaluate(() => localStorage.getItem("steve-onboarded")), "1")
+    await page.close()
+  }
+
+  /* optional override during onboarding: switching harness and saving still works */
+  {
+    const page = await open(1440, "light")
+    await next(page)
+    await page.waitForFunction(() => document.querySelector("[data-onboard-card]")?.getAttribute("data-onboard") === "1")
+    await card(page).locator('[data-pane="current"] [data-select="steve-harness"]').click()
+    await page.getByRole("option", { name: "Codex", exact: true }).click()
+    await card(page).locator('[data-pane="current"] .ui-mdpc__trigger').click()
+    await page.getByRole("option", { name: /Fixture model/ }).click()
+    await card(page).locator('[data-pane="current"] [data-steve-model-save]').click()
+    await card(page).locator('[data-pane="current"] [data-steve-model-saved]').waitFor()
+    await next(page); await next(page); await next(page)
+    await card(page).waitFor({ state: "detached" })
+    assert.deepEqual(await calls(page), ["model:codex", "start"])
     await page.close()
   }
 
@@ -116,16 +132,14 @@ try {
     assert.deepEqual(await calls(page), [])
     await page.close()
   }
-  /* a machine without runtimes or projects: the text says so and no empty list is drawn */
+  /* a machine without any usable harness: single guidance card directly, no empty model dropdowns */
   {
     const page = await open(390, "dark", "?bare")
-    await next(page)
-    await page.waitForFunction(() => document.querySelector("[data-onboard-card]")?.getAttribute("data-onboard") === "1")
-    assert.match(await card(page).locator('[data-pane="current"]').innerText(), /还没有找到可用的 harness/)
-    assert.equal(await card(page).locator('[data-pane="current"] ul').count(), 0)
-    assert.equal(await card(page).locator("button[type=submit]").isDisabled(), true)
-    assert.equal(await step(page), "1")
-    assert.equal(await card(page).locator('[data-pane="current"] [data-steve-model-save]').isDisabled(), true)
+    await page.locator("[data-onboard-no-harness]").waitFor()
+    assert.equal(await card(page).locator("h2").innerText(), "安装或登录一个 Harness")
+    assert.match(await card(page).innerText(), /还没有找到可用的 harness/)
+    assert.equal(await card(page).locator("ul").count(), 0)
+    assert.equal(await card(page).locator("[data-select], .ui-mdpc__trigger, [data-steve-model-save]").count(), 0, "no empty model dropdowns when no harness is usable")
     if (shots) await page.screenshot({ path: `${shots}/onboarding-bare-390-dark.png` })
     await page.close()
   }

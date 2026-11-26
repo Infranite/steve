@@ -5,7 +5,6 @@ use super::decide::{self, DecideCtx};
 use super::handoff;
 use super::offer::{ThreadItem, confirms};
 use super::research::SYSTEM;
-use super::suggest;
 use super::{AT, Conv, SayTo, Steps, Stop, lock, route_step};
 use crate::Core;
 use crate::error::Result;
@@ -512,10 +511,6 @@ impl Core {
             }
         }
 
-        if let Err(e) = self.expire_suggestions(ws, space) {
-            tracing::warn!("expire suggestion cards in {ws}: {e}");
-        }
-
         // 3. Explicit `@Bot` mention (Rule 1) -> 0 router calls!
         let named = if !guest || conv.items {
             self.named_bot(ws, text)?
@@ -542,7 +537,6 @@ impl Core {
                 kind: "item".into(),
                 guard: Some("1"),
                 offer: None,
-                for_item: None,
             };
             let step = route_step(&r, Some(&d), 0);
             lock(steps).route = Some(step.clone());
@@ -644,7 +638,6 @@ impl Core {
                 kind: "item".into(),
                 guard: Some("2"),
                 offer: None,
-                for_item: None,
             };
             let step = route_step(&r, Some(&d), 0);
             lock(steps).route = Some(step.clone());
@@ -767,28 +760,38 @@ impl Core {
         let mut d = decide::decide(&r, text, DecideCtx { named_bot: false });
         if guest {
             d = decide::for_guest(d, &r, conv.research, conv.items);
-        } else {
-            d = decide::for_main(d, &r);
         }
         // Obvious greetings stay a single lightweight answer; owner-only chat questions use research.
         if det_guard != Some("obvious") {
             d = decide::for_owner(d, conv.owner_only && conv.research);
         }
         if !guest
-            && (d.kind == "supplement" || d.for_item.is_some())
+            && d.kind == "supplement"
             && let Some(id) = r.item.as_deref()
             && db.item(id)?.is_some_and(|i| i.is_closed())
         {
-            d.kind = "suggest".into();
+            d.kind = "answer".into();
             d.guard = Some("closed");
-            d.for_item = Some(id.into());
+            if d.offer.is_none() {
+                let title = if r.title.trim().is_empty() {
+                    js_head(text, 24).to_string()
+                } else {
+                    r.title.clone()
+                };
+                let goal = if r.goal.trim().is_empty() {
+                    text.to_string()
+                } else {
+                    r.goal.clone()
+                };
+                d.offer = Some(crate::gateway::Offer { title, goal });
+            }
         }
         if let Some(g) = det_guard {
             d.guard = Some(g);
         }
         let step = route_step(&r, Some(&d), ms);
         lock(steps).route = Some(step.clone());
-        let info = RouteInfo {
+        let mut info = RouteInfo {
             kind: d.kind.clone(),
             model_kind: r.kind.clone(),
             guard: d.guard.map(String::from),
@@ -811,34 +814,6 @@ impl Core {
                 let request = with_earlier(text, &history);
                 self.execute_config(task, lease, &request, user, &info, steps, t0)
                     .await
-            }
-            "suggest" => {
-                let item = match &d.for_item {
-                    Some(i) => db.item(i)?,
-                    None => None,
-                };
-                let (q, card) = suggest::card(&r, &d, item.as_ref());
-                let meta = json!({
-                    "origin": mid,
-                    "suggest": card,
-                    "steps": lock(steps).json(now() - t0),
-                });
-                self.commit_simple(
-                    task,
-                    lease,
-                    false,
-                    "answered",
-                    Some(&q),
-                    None,
-                    meta,
-                    &info,
-                    None,
-                    None,
-                    ReceiptDispatch::NoDispatch,
-                    None,
-                    None,
-                )?;
-                Ok(())
             }
             "ask" => {
                 let q = if r.reply.trim().is_empty() {
@@ -900,29 +875,29 @@ impl Core {
                         None,
                     )?;
                 } else {
-                    d.for_item = Some(id.clone());
-                    let item = db.item(&id)?;
-                    let (q, card) = suggest::card(&r, &d, item.as_ref());
-                    let meta = json!({
-                        "origin": mid,
-                        "suggest": card,
-                        "steps": lock(steps).json(now() - t0),
-                    });
-                    self.commit_simple(
-                        task,
-                        lease,
-                        false,
-                        "answered",
-                        Some(&q),
-                        None,
-                        meta,
-                        &info,
-                        None,
-                        None,
-                        ReceiptDispatch::NoDispatch,
-                        None,
-                        None,
-                    )?;
+                    // Item closed or unavailable: answer inline with a clickable offer instead of a 2-choice card.
+                    info.kind = "answer".into();
+                    info.guard = Some("closed".into());
+                    if let Some(step) = info.step_json.as_mut().and_then(Value::as_object_mut) {
+                        step.insert("kind".into(), json!("answer"));
+                        step.insert("guard".into(), json!("closed"));
+                    }
+                    if info.offer.is_none() {
+                        let title = if r.title.trim().is_empty() {
+                            js_head(text, 24).to_string()
+                        } else {
+                            r.title.clone()
+                        };
+                        let goal = if r.goal.trim().is_empty() {
+                            text.to_string()
+                        } else {
+                            r.goal.clone()
+                        };
+                        info.offer = Some(crate::gateway::Offer { title, goal });
+                    }
+                    return self
+                        .execute_inline(task, lease, stop, conv, text, &files, info, t0)
+                        .await;
                 }
                 Ok(())
             }

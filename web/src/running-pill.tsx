@@ -3,8 +3,8 @@ import { deepEqual } from "@/data/table"
 import type { DecisionView, ItemView, SessionView } from "@/gen"
 import { actOnItem, getItems, itemDisplayState, st, useShellSelector, type Item } from "@/store"
 /* The running-status pill, on affectUI's Running Now, with Steve's own data: every open item's one state (item-state.ts
- * via itemDisplayState) sorted as the items page sorts it (item-lanes.ts), so the pill's "N 进行中 · M 等你" is the
- * page's. ui.tsx shows it in the sidebar and a phone's page header, so this imports nothing from ui.tsx. */
+ * via itemDisplayState) sorted as the items page sorts it (item-lanes.ts). The trigger shows only running / paused /
+ * idle counts so the sidebar Inbox badge stays the sole waiting-on-you counter; clicking opens the full popover. */
 import { RunningNow, type RunningTask } from "@/components/affect/running-now"
 import { resumable, RUN_ORDER, runStateOf, type RunState } from "@/item-lanes"
 import { permissionQuestion } from "@/permission-question"
@@ -83,7 +83,7 @@ export function RunningNowPill({ className, align = "start", quiet = false }: { 
   const leave = (h: string) => { setOpen(false); location.hash = h }
   if (quiet && !tasks.length) return null
   return (
-    <RunningNow className={className} tasks={tasks} align={align} open={open} onOpenChange={setOpen}
+    <RunningNow className={className} tasks={tasks} align={align} hideWaitingTrigger open={open} onOpenChange={setOpen}
       onPause={(id) => actOnItem(id, "pause")} onResume={(id) => actOnItem(id, "resume")} onOpen={(id) => leave("#/items/" + id)} onOpenAll={() => leave("#/items")}
       labels={{ title: t("views:runningNow.title"), running: t("views:runningNow.running"), needsYou: t("views:runningNow.needsYou"), needsYouBadge: t("views:runningNow.needsYouBadge"),
         paused: t("views:runningNow.paused"), pausedCount: t("views:runningNow.pausedCount"), done: t("views:runningNow.done"), pause: t("views:runningNow.pause"), resume: t("views:runningNow.resume"),

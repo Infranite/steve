@@ -649,11 +649,13 @@ fn new_contact(
 }
 
 /// A contact seen for the first time that looks like you, `me` (a user's “我”): opens a merge
-/// proposal of `party` into `me` (the `party_merge` decision), never merges by itself. It looks
-/// like you when one of `handles` is an email that is an alias of `me` or the user's own email, or
-/// when its `name` is your name or one of your aliases and one of its emails is in a domain one of
-/// your email accounts uses. Only an unconfirmed, active contact is proposed; a pair rejected
-/// before is not proposed again. Returns the proposal id.
+/// proposal of `party` into `me` (the `party_merge` decision, which folds out of `DecisionTier::Decide`
+/// as low priority), never merges by itself. Merging an unconfirmed inbound contact into “我” without
+/// a proven OAuth self-claim (`claim_self`) would escalate an external handle into owner identity.
+/// It looks like you when one of `handles` is an email that is an alias of `me` or the user's own
+/// email, or when its `name` is your name or one of your aliases and one of its emails is in a
+/// domain one of your email accounts uses. Only an unconfirmed, active contact is proposed; a pair
+/// rejected before is not proposed again. Returns the proposal id.
 pub fn propose_if_me(
     w: &mut W<'_>,
     ws: &str,
@@ -732,8 +734,10 @@ pub fn propose_if_me(
     }
 }
 
-/// Writes the merge proposal and opens its decision; the `party_merge` handler (P4)
-/// acts on the answer. A pair rejected before is not proposed again.
+/// Writes the merge proposal and opens its `party_merge` decision; the `party_merge` handler (P4)
+/// acts on `merge` / `not_same` (and undo). `party_merge` falls outside the `DecisionTier::Decide`
+/// whitelist, so it folds into passive review with zero blocking cards in "待我决定". A pair
+/// rejected before is not proposed again.
 fn propose(
     w: &mut W<'_>,
     ws: &str,

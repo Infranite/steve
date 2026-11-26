@@ -89,11 +89,6 @@ export default {
     take: "Make it an item: {{title}}",
     dismiss: "No thanks",
   },
-  suggest: {
-    choseHere: "You chose to answer here",
-    choseItem: "You chose to make it an item",
-    expired: "Over 24 hours old, still clickable",
-  },
   ask: {
     canReply: "They can reply: {{options}}",
   },

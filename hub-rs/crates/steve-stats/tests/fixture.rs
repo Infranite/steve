@@ -203,6 +203,7 @@ fn invariants_hold() {
                 item_id: Some("ST-1".into()),
                 bot_id: bot.map(Into::into),
                 project_id: None,
+                node_id: None,
                 usage: steve_store::ModelUsage {
                     model: model.into(),
                     tokens: t,

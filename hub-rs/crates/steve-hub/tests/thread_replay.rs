@@ -1109,69 +1109,6 @@ async fn w34_thread_replay_hub() {
         );
     }
 
-    // 15: POST /api/thread/:id/suggest item updates projections (0 diffs) & 2nd is 409
-    {
-        let e = Env::start().await;
-        let origin = e
-            .store
-            .messages()
-            .add(WS, "me", "优化列表", None, &json!({}), "steve")
-            .unwrap();
-        let card = e
-            .store
-            .messages()
-            .add(
-                WS,
-                "steve",
-                "建项吗？",
-                None,
-                &json!({
-                    "origin": origin,
-                    "suggest": {
-                        "state": "open",
-                        "choices": [{"id": "item", "label": "建项", "title": "优化列表", "goal": "优化渲染"}]
-                    }
-                }),
-                "steve",
-            )
-            .unwrap();
-        let (s1, rev1, _) = e
-            .req(
-                "POST",
-                &format!("/api/thread/{card}/suggest"),
-                Some(&e.owner_cookie),
-                WS,
-                Some(json!({"choice": "item"})),
-            )
-            .await;
-        let (s2, _, _) = e
-            .req(
-                "POST",
-                &format!("/api/thread/{card}/suggest"),
-                Some(&e.owner_cookie),
-                WS,
-                Some(json!({"choice": "item"})),
-            )
-            .await;
-        let snap_eq = e.snapshot_messages_match_store(WS).await;
-        let diffs = e.projection.reconcile().await.unwrap();
-        report.case(
-            "hub.proj.04_suggest_item_updates_projections_zero_diff",
-            &[
-                (
-                    "first_200_second_409",
-                    s1 == 200 && rev1.is_some() && s2 == 409,
-                ),
-                (
-                    "le1_dispatch_per_intent",
-                    e.store.items().list(WS, false).unwrap().len() == 1,
-                ),
-                ("s2_projection_zero_diff", diffs == 0 && snap_eq),
-            ],
-            &[],
-        );
-    }
-
     // 16: Notice post + dismiss invalidates MessageView host projection (0 diffs!)
     {
         let e = Env::start().await;
@@ -1391,7 +1328,7 @@ async fn w34_thread_replay_hub() {
         );
     }
 
-    report.finish(18);
+    report.finish(17);
 }
 
 #[tokio::test]

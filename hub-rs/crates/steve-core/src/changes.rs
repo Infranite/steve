@@ -504,7 +504,6 @@ fn setting_label_shown(key: &str) -> Option<String> {
         "depsAfter" => steve_i18n::t!("core.draft.setting.depsAfter"),
         "quotaAutoHandoff" => steve_i18n::t!("core.draft.setting.quotaAutoHandoff"),
         "quotaWaitMinutes" => steve_i18n::t!("core.draft.setting.quotaWaitMinutes"),
-        "handoff" => steve_i18n::t!("core.draft.setting.handoff"),
         "archDays" => steve_i18n::t!("core.draft.setting.archDays"),
         "quiet" => steve_i18n::t!("core.draft.setting.quiet"),
         "fontSize" => steve_i18n::t!("core.draft.setting.fontSize"),
@@ -611,7 +610,6 @@ fn choice_shown(s: String) -> String {
         "永久" => steve_i18n::t!("core.draft.value.forever"),
         "不汇报" => steve_i18n::t!("core.draft.value.no_report"),
         "不自动归档" => steve_i18n::t!("core.draft.value.no_archive"),
-        "不换会话" => steve_i18n::t!("core.draft.value.no_handoff"),
         "加载" => steve_i18n::t!("core.draft.value.load"),
         "不加载" => steve_i18n::t!("core.draft.value.no_load"),
         "1 年" => steve_i18n::t!("core.draft.value.one_year"),
@@ -980,13 +978,12 @@ pub struct Drafted {
 
 /// Settings a request in the conversation changes at once, with an undo on its card: local, and put
 /// back in one click. Retention (data is deleted) and the default acceptance still show a preview.
-const AUTO_SETTINGS: [&str; 11] = [
+const AUTO_SETTINGS: [&str; 10] = [
     "lang",
     "home",
     "awayH",
     "tz",
     "depsAfter",
-    "handoff",
     "archDays",
     "quiet",
     "fontSize",
@@ -1184,7 +1181,7 @@ const CORE_KINDS: [&str; 5] = ["bot", "project", "settings", "models", "tags"];
 /// The option lines of the core targets after the bots and projects.
 const CORE_OPTIONS: [&str; 7] = [
     "settings:general — 语言、启动页、离开期间汇报、时区",
-    "settings:items — 默认验收方式（自动验收）、事项编号前缀、前置完成后、交接阈值、完成后自动归档",
+    "settings:items — 默认验收方式（自动验收）、事项编号前缀、前置完成后、完成后自动归档",
     "settings:notify — 免打扰时段",
     "settings:look — 字号、动态效果",
     "settings:data — 会话记录、事件原文、邮件正文的保留期限",
@@ -2671,7 +2668,7 @@ mod tests {
         assert_eq!(d["archDays"], "30");
         assert_eq!(d["quotaAutoHandoff"], "on");
         assert_eq!(d["quotaWaitMinutes"], "10");
-        assert_eq!(d.len(), 17);
+        assert_eq!(d.len(), 16);
         assert_eq!(d["tz"], "system");
         assert!(ws_settings::allowed("tz", "UTC") && !ws_settings::allowed("tz", "Mars/Base"));
         assert!(
@@ -2685,8 +2682,8 @@ mod tests {
                 && !ws_settings::allowed("quotaWaitMinutes", "7")
         );
         assert!(
-            ws_settings::allowed("handoff", "70")
-                && !ws_settings::allowed("handoff", "75")
+            !ws_settings::allowed("handoff", "70")
+                && !ws_settings::allowed("handoff", "80")
                 && !ws_settings::allowed("nope", "x")
         );
         let keys: Vec<&str> = ws_settings::schema()

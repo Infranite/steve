@@ -17,7 +17,7 @@ import { chatBusy, refresh } from "@/store"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
-import { GITHUB_PR_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
+import { GITHUB_PR_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, type Msg, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
 import { ItemRef, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMessages, threadMsg, useThreadIds, useThreadMessage } from "@/thread/history"
 import { Trans } from "react-i18next"
@@ -78,7 +78,7 @@ export function researchLiveItems(l: LiveRun): TrailItem[] {
   return items
 }
 
-/* ───────── offer · suggestion card · ask ───────── */
+/* ───────── offer · ask ───────── */
 /** "要我改吗？ [做成事项：…] [不用]" under an answer */
 export function OfferLine({ m }: { m: Msg }) {
   const o = m.offer, [busy, setBusy] = useState(false), [open, setOpen] = useState(false), t = useT()
@@ -92,23 +92,6 @@ export function OfferLine({ m }: { m: Msg }) {
       <span className="type-callout text-muted-foreground">{t("thread:offer.question")}</span>
       <Button size="sm" variant="outline" className="max-w-full rounded-full" disabled={busy} onClick={() => void act(true)} data-offer-take><span className="truncate">{t("thread:offer.take", { title: o.title })}</span></Button>
       <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(false)} data-offer-dismiss>{t("thread:offer.dismiss")}</Button>
-    </div>
-  )
-}
-
-/** a suggestion card: answer here or make it an item; greyed once expired, still clickable */
-export function SuggestCard({ m }: { m: Msg }) {
-  const s = m.suggest, [busy, setBusy] = useState(false), t = useT()
-  if (!s) return null
-  const chosen = s.state === "chosen"
-  const act = async (c: SuggestChoice) => { setBusy(true); try { await chooseSuggest(m, c) } finally { setBusy(false) } }
-  return (
-    <div className={cn("mt-3 flex flex-col gap-2", s.state === "expired" && "opacity-60")} data-suggest={m.id} data-suggest-state={s.state}>
-      {chosen ? <div className="type-callout text-muted-foreground">{s.chosen === "here" ? t("thread:suggest.choseHere") : s.item ? "" : t("thread:suggest.choseItem")}</div>
-        : <div className="flex flex-wrap gap-2">{s.choices.map((c) => (
-          <Button key={c.id} size="sm" variant={(s.choices.some((x) => x.recommended) ? c.recommended : c.id === "here") ? "default" : "outline"} className="max-w-full rounded-full" disabled={busy} onClick={() => void act(c.id)} data-suggest-choice={c.id}><span className="truncate">{c.label}</span></Button>))}
-          {s.state === "expired" && <span className="self-center type-footnote text-tertiary">{t("thread:suggest.expired")}</span>}</div>}
-      {s.item && (threadMessages().some((x) => x.card?.item === s.item) ? <CardLink id={s.item} from={m.id} /> : <ItemRef id={s.item} />)}
     </div>
   )
 }
@@ -348,8 +331,8 @@ export function ItemCard({ c }: { c: ItemCardState }) {
   )
 }
 
-/* the items a Steve message links to (its own, a taken offer's, a chosen suggestion's) */
-const linksOf = (m: Msg) => [m.item, m.offer?.state === "taken" ? m.offer.item : undefined, m.suggest?.item].filter(Boolean)
+/* the items a Steve message links to (its own or a taken offer's) */
+const linksOf = (m: Msg) => [m.item, m.offer?.state === "taken" ? m.offer.item : undefined].filter(Boolean)
 /** whether a Steve message before `from`, since you last spoke, already links to `id`: the way to its card is said once per answer */
 function linkedAbove(from: string | undefined, id: string) {
   const messages = threadMessages()
