@@ -21,6 +21,7 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
             entry["properties"]["fallback_efforts"] =
                 json!(["low", "medium", "high", "xhigh", "max"]);
         } else if id == "antigravity" {
+            entry["properties"]["nested_sandbox"] = json!(false);
             entry["properties"]["fallback_efforts"] = json!(["low", "medium", "high", "xhigh"]);
         }
         // Card 1 adds declarative native `append_system_context` for empirically verified harnesses.
@@ -28,6 +29,10 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
             "claude-code" | "codex" => json!({"kind": "acp_system_prompt"}),
             "antigravity" => json!({"kind": "meta_append", "namespace": "antigravity"}),
             _ => Value::Null,
+        };
+        entry["properties"]["state_settings"] = match id.as_str() {
+            "antigravity" => json!("antigravity_settings"),
+            _ => json!("none"),
         };
         entry["env"]
             .as_array_mut()
@@ -279,5 +284,26 @@ fn verified_append_system_context_declarations_match_contract() {
         Some(AppendSystemContext::CliFlag {
             flag: "--append-system-prompt".into(),
         })
+    );
+}
+
+#[test]
+fn antigravity_declares_non_nested_sandbox_and_state_settings_with_override_support() {
+    let agy = builtin("antigravity").unwrap();
+    assert!(!agy.properties.nested_sandbox);
+    assert_eq!(
+        agy.properties.state_settings,
+        StateSettings::AntigravitySettings
+    );
+    let override_entry: AdapterEntry = serde_json::from_value(json!({
+        "command": "/fixture/adapter",
+        "name": "Own",
+        "properties": { "state_settings": "antigravity_settings" }
+    }))
+    .unwrap();
+    let (_, declared) = split_entries([("own".into(), override_entry)]);
+    assert_eq!(
+        spec("own", declared.get("own")).properties.state_settings,
+        StateSettings::AntigravitySettings
     );
 }

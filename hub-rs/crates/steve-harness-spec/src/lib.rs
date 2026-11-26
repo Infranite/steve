@@ -366,6 +366,19 @@ pub enum SessionMeta {
     ClaudeSettings,
 }
 
+/// Harness-native settings merged into a session's isolated state directory before launch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateSettings {
+    #[default]
+    None,
+    /// Antigravity CLI's `<state_target>/settings.json` (`permissions`) and
+    /// `<state_root>/config/config.json` (`userSettings.globalPermissionGrants`, read by
+    /// `agy acp`): allows `mcp(steve/*)` and denies Steve's control-plane paths while preserving
+    /// user settings and rules.
+    AntigravitySettings,
+}
+
 /// Arguments the adapter is started with beyond its declared `args`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -561,6 +574,8 @@ adapter_properties! {
     executable_env: Option<String> = None => Option<String>, "Option::is_none", optional_string;
 
     session_meta: SessionMeta = SessionMeta::None => Option<SessionMeta>, "Option::is_none", copied;
+
+    state_settings: StateSettings = StateSettings::None => Option<StateSettings>, "Option::is_none", copied;
 
     launch_extra: LaunchExtra = LaunchExtra::None => Option<LaunchExtra>, "Option::is_none", copied;
     /// Discovery asks it `initialize` and opens a scratch session (`ACP initialize probe`), at most every half

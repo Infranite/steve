@@ -1787,6 +1787,11 @@ mod tests {
         // antigravity: native PATH binary, 4 ACP modes + --dangerously-skip-permissions only for full_access
         let agy = c.adapter_spec("antigravity");
         assert_eq!(agy.name, "Antigravity CLI");
+        assert!(!agy.properties.nested_sandbox);
+        assert_eq!(
+            agy.properties.state_settings,
+            steve_harness_spec::StateSettings::AntigravitySettings
+        );
         assert_eq!(
             agy.properties.native_approval(),
             Some(steve_harness_spec::NativeApprovalFallback::AskOwner)

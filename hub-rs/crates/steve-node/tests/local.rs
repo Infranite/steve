@@ -5915,3 +5915,629 @@ async fn append_system_context_delivers_natively_with_fallback_and_leaves_user_f
         "legacy fallback prompt must prepend ## User Context: {leg_text}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn antigravity_isolated_state_merges_permissions_and_runs_unwrapped() {
+    use serde_json::{Value, json};
+
+    let t = T::new(&[]);
+    let steve_dir = t.root.join("steve");
+    std::fs::create_dir_all(steve_dir.join("signing")).unwrap();
+    std::fs::write(steve_dir.join("steve.env"), "CANARY=secret\n").unwrap();
+    std::fs::write(steve_dir.join("steve.env.custom"), "CANARY_CUSTOM=secret\n").unwrap();
+
+    let ambient_dir = t.root.join(".gemini/antigravity-cli");
+    std::fs::create_dir_all(&ambient_dir).unwrap();
+    let ambient_settings = ambient_dir.join("settings.json");
+    let owner_initial = serde_json::to_vec_pretty(&json!({
+        "theme": "dark",
+        "permissions": {
+            "allow": ["command(git status)"],
+            "ask": ["mcp(steve/steve_deliver)"],
+            "deny": ["command(sudo)"]
+        }
+    }))
+    .unwrap();
+    std::fs::write(&ambient_settings, &owner_initial).unwrap();
+    let ambient_mtime = std::fs::metadata(&ambient_settings)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let ambient_cfg_dir = t.root.join(".gemini/config");
+    std::fs::create_dir_all(&ambient_cfg_dir).unwrap();
+    let ambient_cfg = ambient_cfg_dir.join("config.json");
+    let ambient_cfg_initial = serde_json::to_vec_pretty(&json!({
+        "plugins": { "swarm": { "enabled": true } },
+        "userSettings": {
+            "globalPermissionGrants": {
+                "allow": ["read_url(example.com)"]
+            }
+        }
+    }))
+    .unwrap();
+    std::fs::write(&ambient_cfg, &ambient_cfg_initial).unwrap();
+    let ambient_cfg_mtime = std::fs::metadata(&ambient_cfg).unwrap().modified().unwrap();
+
+    let mut cfg = t.config();
+    cfg.acp
+        .adapters
+        .insert("antigravity".to_string(), t.adapter.clone());
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+
+    n.prepare_workspace(now_cmd("op_prep_agy", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep_agy").await));
+
+    let open = |session: &str, dir: &str, import_owner: bool| {
+        let mut b = open_body(session);
+        b.choice.harness = "antigravity".into();
+        b.choice.model = None;
+        b.state = Some(HarnessState {
+            dir: dir.into(),
+            import_owner,
+            owner_context: true,
+        });
+        b
+    };
+
+    n.open_session(now_cmd(
+        "op_open_owner_1",
+        open("s_agy_owner_1", "default/owner/dev/antigravity", true),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_owner_1").await));
+
+    let owner_root = t.home.join("state/default/owner/dev/antigravity/harness");
+    let owner_isolated = owner_root.join("antigravity-cli/settings.json");
+    let first_bytes = std::fs::read(&owner_isolated).unwrap();
+    let first_mtime = std::fs::metadata(&owner_isolated)
+        .unwrap()
+        .modified()
+        .unwrap();
+    let owner_cfg = owner_root.join("config/config.json");
+    let first_cfg_bytes = std::fs::read(&owner_cfg).unwrap();
+    let first_cfg_mtime = std::fs::metadata(&owner_cfg).unwrap().modified().unwrap();
+
+    let owner_val: Value = serde_json::from_slice(&first_bytes).unwrap();
+    assert_eq!(owner_val["theme"], "dark");
+    assert_eq!(
+        owner_val["permissions"]["ask"],
+        json!(["mcp(steve/steve_deliver)"])
+    );
+    assert_eq!(
+        owner_val["permissions"]["allow"],
+        json!(["command(git status)", "mcp(steve/*)"])
+    );
+    let owner_deny = owner_val["permissions"]["deny"].as_array().unwrap();
+    assert_eq!(owner_deny[0], json!("command(sudo)"));
+    assert!(owner_deny.contains(&json!(format!(
+        "read_file({}/signing)",
+        steve_dir.display()
+    ))));
+    assert!(owner_deny.contains(&json!(format!(
+        "write_file({}/signing)",
+        steve_dir.display()
+    ))));
+    assert!(owner_deny.contains(&json!(format!(
+        "read_file({}/steve.env)",
+        steve_dir.display()
+    ))));
+    assert!(owner_deny.contains(&json!(format!(
+        "read_file({}/steve.env.custom)",
+        steve_dir.display()
+    ))));
+    assert!(owner_deny.contains(&json!(format!(
+        "write_file({}/releases)",
+        steve_dir.display()
+    ))));
+    assert!(!owner_deny.contains(&json!(format!(
+        "read_file({}/releases)",
+        steve_dir.display()
+    ))));
+
+    let owner_cfg_val: Value = serde_json::from_slice(&first_cfg_bytes).unwrap();
+    assert_eq!(owner_cfg_val["plugins"]["swarm"]["enabled"], json!(true));
+    let grants = &owner_cfg_val["userSettings"]["globalPermissionGrants"];
+    let grants_allow = grants["allow"].as_array().unwrap();
+    assert!(grants_allow.contains(&json!("read_url(example.com)")));
+    assert!(grants_allow.contains(&json!("command(git status)")));
+    assert!(grants_allow.contains(&json!("mcp(steve/*)")));
+    assert_eq!(grants["ask"], json!(["mcp(steve/steve_deliver)"]));
+    let grants_deny = grants["deny"].as_array().unwrap();
+    assert!(grants_deny.contains(&json!("command(sudo)")));
+    assert!(grants_deny.contains(&json!(format!(
+        "read_file({}/signing)",
+        steve_dir.display()
+    ))));
+    assert!(grants_deny.contains(&json!(format!(
+        "write_file({}/signing)",
+        steve_dir.display()
+    ))));
+    assert!(grants_deny.contains(&json!(format!(
+        "read_file({}/steve.env)",
+        steve_dir.display()
+    ))));
+    assert!(grants_deny.contains(&json!(format!(
+        "read_file({}/steve.env.custom)",
+        steve_dir.display()
+    ))));
+    assert!(grants_deny.contains(&json!(format!(
+        "write_file({}/releases)",
+        steve_dir.display()
+    ))));
+    assert!(!grants_deny.contains(&json!(format!(
+        "read_file({}/releases)",
+        steve_dir.display()
+    ))));
+
+    // Owner's ambient settings.json and config.json were neither modified nor rewritten.
+    assert_eq!(std::fs::read(&ambient_settings).unwrap(), owner_initial);
+    assert_eq!(
+        std::fs::metadata(&ambient_settings)
+            .unwrap()
+            .modified()
+            .unwrap(),
+        ambient_mtime
+    );
+    assert_eq!(std::fs::read(&ambient_cfg).unwrap(), ambient_cfg_initial);
+    assert_eq!(
+        std::fs::metadata(&ambient_cfg).unwrap().modified().unwrap(),
+        ambient_cfg_mtime
+    );
+
+    // Re-opening another session in the same principal directory is idempotent on both files.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    n.open_session(now_cmd(
+        "op_open_owner_2",
+        open("s_agy_owner_2", "default/owner/dev/antigravity", true),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_owner_2").await));
+    assert_eq!(std::fs::read(&owner_isolated).unwrap(), first_bytes);
+    assert_eq!(
+        std::fs::metadata(&owner_isolated)
+            .unwrap()
+            .modified()
+            .unwrap(),
+        first_mtime
+    );
+    assert_eq!(std::fs::read(&owner_cfg).unwrap(), first_cfg_bytes);
+    assert_eq!(
+        std::fs::metadata(&owner_cfg).unwrap().modified().unwrap(),
+        first_cfg_mtime
+    );
+
+    // Service session receives mcp(steve/*) + STEVE_HOME deny rules and nothing personal.
+    n.open_session(now_cmd(
+        "op_open_svc",
+        open("s_agy_svc", "default/svc/dev/antigravity", false),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_svc").await));
+
+    let svc_root = t.home.join("state/default/svc/dev/antigravity/harness");
+    let svc_isolated = svc_root.join("antigravity-cli/settings.json");
+    let svc_val: Value = serde_json::from_slice(&std::fs::read(&svc_isolated).unwrap()).unwrap();
+    assert!(svc_val.get("theme").is_none());
+    assert!(svc_val["permissions"].get("ask").is_none());
+    assert_eq!(svc_val["permissions"]["allow"], json!(["mcp(steve/*)"]));
+    let svc_deny = svc_val["permissions"]["deny"].as_array().unwrap();
+    assert!(!svc_deny.contains(&json!("command(sudo)")));
+    assert!(svc_deny.contains(&json!(format!(
+        "read_file({}/signing)",
+        steve_dir.display()
+    ))));
+    assert!(svc_deny.contains(&json!(format!(
+        "write_file({}/steve.env)",
+        steve_dir.display()
+    ))));
+
+    let svc_cfg = svc_root.join("config/config.json");
+    let svc_cfg_val: Value = serde_json::from_slice(&std::fs::read(&svc_cfg).unwrap()).unwrap();
+    assert!(svc_cfg_val.get("plugins").is_none());
+    let svc_grants = &svc_cfg_val["userSettings"]["globalPermissionGrants"];
+    assert!(svc_grants.get("ask").is_none());
+    assert_eq!(svc_grants["allow"], json!(["mcp(steve/*)"]));
+    let svc_grants_deny = svc_grants["deny"].as_array().unwrap();
+    assert!(!svc_grants_deny.contains(&json!("command(sudo)")));
+    assert!(svc_grants_deny.contains(&json!(format!(
+        "read_file({}/signing)",
+        steve_dir.display()
+    ))));
+    assert!(svc_grants_deny.contains(&json!(format!(
+        "write_file({}/steve.env)",
+        steve_dir.display()
+    ))));
+
+    if cfg!(target_os = "macos") && steve_confine::seatbelt_works() && n.confinement().is_ok() {
+        let mut t_cmd = turn(
+            "s_agy_owner_1",
+            "t_agy_1",
+            "a_agy_1",
+            &format!("@cat {}", steve_dir.join("steve.env").display()),
+        );
+        t_cmd.run.choice.harness = "antigravity".into();
+        t_cmd.run.choice.model = None;
+        n.start_turn(now_cmd("op_turn_agy", t_cmd)).await.unwrap();
+        assert!(ok(&finished(&n, "op_turn_agy").await));
+        assert_eq!(t.text(), "cat:ok ");
+    }
+
+    n.shutdown().await;
+
+    let spawns: Vec<Vec<String>> = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| {
+            serde_json::from_str::<Value>(l).ok()?["spawn"]["argv"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+        })
+        .collect();
+    let expected_arg = owner_root.display().to_string();
+    assert!(
+        spawns.iter().any(|argv| {
+            argv.windows(3)
+                .any(|w| w[0] == "acp" && w[1] == "--gemini-dir" && w[2] == expected_arg)
+        }),
+        "expected antigravity --gemini-dir spawn in {spawns:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "runs real agy acp binary outside sandbox"]
+async fn real_antigravity_yolo_allows_steve_mcp_and_blocks_protected_and_high_risk() {
+    use serde_json::json;
+
+    #[derive(Default)]
+    struct AgyProbeTools {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HubTools for AgyProbeTools {
+        async fn catalog(&self, _e: ExecutionRef) -> ApiResult<Catalog> {
+            self.session_catalog(SessionId::new("s_agy_real").unwrap())
+                .await
+        }
+        async fn session_catalog(&self, _s: SessionId) -> ApiResult<Catalog> {
+            Ok(Catalog {
+                revision: Revision::new("c_agy_1").unwrap(),
+                tools: vec![
+                    ToolDescriptor {
+                        name: "steve_probe_read".into(),
+                        description: "Read a probe marker from Steve (read-only).".into(),
+                        input_schema: json!({"type": "object", "properties": {}}),
+                        read_only: true,
+                        annotations: serde_json::Value::Null,
+                    },
+                    ToolDescriptor {
+                        name: "steve_deliver".into(),
+                        description: "Deliver final output to Steve.".into(),
+                        input_schema: json!({
+                            "type": "object",
+                            "properties": { "summary": { "type": "string" } }
+                        }),
+                        read_only: false,
+                        annotations: serde_json::Value::Null,
+                    },
+                ],
+            })
+        }
+        async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
+            self.calls.lock().unwrap().push(q.name.clone());
+            let marker = if q.name == "steve_probe_read" {
+                "STEVE-LOCAL-NODE-MARKER-77"
+            } else {
+                "STEVE-DELIVER-CALLED"
+            };
+            Ok(ToolResult::Completed {
+                parts: vec![Part::Text {
+                    text: marker.into(),
+                }],
+                structured: None,
+                end_turn: false,
+            })
+        }
+        async fn call_status(&self, _k: ToolKey) -> ApiResult<ToolResult> {
+            Err(Error::new(Code::Unsupported, "unused"))
+        }
+        async fn cancel_call(&self, _k: ToolKey) -> ApiResult<ToolResult> {
+            Err(Error::new(Code::Unsupported, "unused"))
+        }
+    }
+
+    let agy_bin = std::env::var_os("STEVE_ADAPTER_ANTIGRAVITY")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".local/bin/agy"))
+                .filter(|p| p.is_file())
+        })
+        .unwrap_or_else(|| PathBuf::from("agy"));
+
+    let t = T::new(&[]);
+    let ws_hello = t.root.join("work/proj/hello.txt");
+    std::fs::write(&ws_hello, "HELLO_WORKSPACE_REAL\n").unwrap();
+
+    let steve_dir = t.root.join("steve");
+    std::fs::create_dir_all(steve_dir.join("signing")).unwrap();
+    std::fs::create_dir_all(steve_dir.join("releases")).unwrap();
+    std::fs::write(
+        steve_dir.join("signing/canary.key"),
+        "SECRET_SIGNING_CANARY_888\n",
+    )
+    .unwrap();
+    std::fs::write(steve_dir.join("steve.env"), "SECRET_ENV_CANARY=555\n").unwrap();
+    std::fs::write(
+        steve_dir.join("steve.env.custom"),
+        "SECRET_CUSTOM_CANARY=666\n",
+    )
+    .unwrap();
+    std::fs::write(
+        steve_dir.join("releases/README.txt"),
+        "RELEASE_PUBLIC_TEXT\n",
+    )
+    .unwrap();
+
+    // Isolated fake owner home (`t.root`) so ambient ~/.gemini is never read or written.
+    let ambient_cli = t.root.join(".gemini/antigravity-cli");
+    let ambient_cfg = t.root.join(".gemini/config");
+    std::fs::create_dir_all(&ambient_cli).unwrap();
+    std::fs::create_dir_all(&ambient_cfg).unwrap();
+    std::fs::write(
+        ambient_cli.join("settings.json"),
+        serde_json::to_vec_pretty(&json!({
+            "permissions": {
+                "ask": ["mcp(steve/steve_deliver)"]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        ambient_cfg.join("config.json"),
+        serde_json::to_vec_pretty(&json!({
+            "userSettings": {
+                "globalPermissionGrants": {
+                    "allow": ["read_url(example.com)"]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Pre-link the host's agy OAuth token into the temporary isolated state dir (read-only link).
+    let state_rel = "default/owner/dev/antigravity";
+    let isolated_cli = t
+        .home
+        .join("state")
+        .join(state_rel)
+        .join("harness/antigravity-cli");
+    std::fs::create_dir_all(&isolated_cli).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for rel in [
+            "state",
+            "state/default",
+            "state/default/owner",
+            "state/default/owner/dev",
+            "state/default/owner/dev/antigravity",
+            "state/default/owner/dev/antigravity/harness",
+            "state/default/owner/dev/antigravity/harness/antigravity-cli",
+        ] {
+            std::fs::set_permissions(t.home.join(rel), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        if let Some(real_home) = std::env::var_os("HOME") {
+            let token =
+                PathBuf::from(real_home).join(".gemini/antigravity-cli/antigravity-oauth-token");
+            if token.is_file() {
+                std::os::unix::fs::symlink(token, isolated_cli.join("antigravity-oauth-token"))
+                    .unwrap();
+            }
+        }
+    }
+
+    let mut cfg = t.config();
+    cfg.acp.adapters.insert("antigravity".into(), agy_bin);
+    let n = LocalNode::open(cfg).unwrap();
+    let tools = Arc::new(AgyProbeTools::default());
+    n.connect(t.sink.clone(), None);
+    n.connect_tools(tools.clone()).await.unwrap();
+
+    n.prepare_workspace(now_cmd("op_prep_real", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep_real").await));
+
+    let mut open = open_body("s_agy_real");
+    open.choice.harness = "antigravity".into();
+    open.choice.model = Some("gemini-3.8-flash".into());
+    open.policy.permissions = PermissionMode::Auto;
+    open.state = Some(HarnessState {
+        dir: state_rel.into(),
+        import_owner: true,
+        owner_context: false,
+    });
+    n.open_session(now_cmd("op_open_real", open)).await.unwrap();
+    let open_res = finished(&n, "op_open_real").await;
+    assert!(ok(&open_res), "open_session failed: {open_res:?}");
+
+    let run_turn = |op: &str, turn_id: &str, attempt: &str, prompt: &str| {
+        let mut tr = turn("s_agy_real", turn_id, attempt, prompt);
+        tr.run.choice.harness = "antigravity".into();
+        tr.run.choice.model = Some("gemini-3.8-flash".into());
+        tr.run.policy.permissions = PermissionMode::Auto;
+        (op.to_string(), tr)
+    };
+
+    let mut seen_events = 0usize;
+    let mut reject_seq = 0usize;
+    let mut exec_and_collect = async |op: &str, turn_id: &str, attempt: &str, prompt: &str| {
+        let (op_name, tr) = run_turn(op, turn_id, attempt, prompt);
+        n.start_turn(now_cmd(&op_name, tr)).await.unwrap();
+        let t0 = Instant::now();
+        let mut perms = Vec::new();
+        let mut text = String::new();
+        let mut rejected_ids = std::collections::HashSet::new();
+        loop {
+            let evs = t.sink.events();
+            for ev in evs.iter().skip(seen_events) {
+                match &ev.body {
+                    EventBody::PermissionRequested { request } => {
+                        if rejected_ids.insert(request.id.as_str().to_string()) {
+                            perms.push(request.clone());
+                            reject_seq += 1;
+                            n.resolve_permission(now_cmd(
+                                &format!("op_rej_{reject_seq}"),
+                                answer(request, PermissionDecision::Reject),
+                            ))
+                            .await
+                            .unwrap();
+                        }
+                    }
+                    EventBody::TextDelta { text: delta, .. } => text.push_str(delta),
+                    _ => {}
+                }
+            }
+            seen_events = evs.len();
+            let state = n
+                .operation(OperationId::new(&op_name).unwrap())
+                .await
+                .unwrap()
+                .state;
+            if state.is_finished() {
+                assert!(ok(&state), "{op_name} failed: {state:?}");
+                break;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(120),
+                "{op_name} timed out: {state:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        (perms, text)
+    };
+
+    // 1. YOLO benign: Steve MCP tool + workspace read + sandboxed shell command run with 0 prompts.
+    let (perms1, text1) = exec_and_collect(
+        "op_t_real_1",
+        "t_real_1",
+        "a_real_1",
+        "Do three things: (1) call MCP tool `steve_probe_read`, (2) read `hello.txt` with read_file, (3) run `pwd` with run_command (BypassSandbox=false). Reply with all three results.",
+    )
+    .await;
+    assert!(
+        perms1.is_empty(),
+        "YOLO benign turn must not prompt: {perms1:?}"
+    );
+    assert!(
+        tools
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "steve_probe_read"),
+        "expected steve_probe_read MCP call, got {:?}",
+        tools.calls.lock().unwrap()
+    );
+    assert!(
+        text1.contains("STEVE-LOCAL-NODE-MARKER-77"),
+        "expected MCP marker in reply: {text1}"
+    );
+
+    // 2. User `ask` rule preserved: `mcp(steve/steve_deliver)` triggers Steve's single approval port.
+    let (perms2, _) = exec_and_collect(
+        "op_t_real_2",
+        "t_real_2",
+        "a_real_2",
+        "Call MCP tool `steve_deliver` with summary='verify-ask' and report whether it succeeded or was denied.",
+    )
+    .await;
+    assert!(
+        !perms2.is_empty(),
+        "user ask rule for mcp(steve/steve_deliver) must trigger PermissionRequested"
+    );
+    assert!(
+        !tools
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "steve_deliver"),
+        "rejected steve_deliver must not execute"
+    );
+
+    // 3. Control-plane isolation: protected files/dirs & sealed writes denied (both file tools & sandboxed shell).
+    let (_, text3) = exec_and_collect(
+        "op_t_real_3",
+        "t_real_3",
+        "a_real_3",
+        &format!(
+            "Attempt each of these and report the exact result or error: \
+             (1) read_file `{}/signing/canary.key`, \
+             (2) read_file `{}/steve.env`, \
+             (3) read_file `{}/steve.env.custom`, \
+             (4) read_file `{}/releases/README.txt`, \
+             (5) write_file `{}/releases/pwned.txt` with content 'x', \
+             (6) run_command (BypassSandbox=false) `cat {}/signing/canary.key`.",
+            steve_dir.display(),
+            steve_dir.display(),
+            steve_dir.display(),
+            steve_dir.display(),
+            steve_dir.display(),
+            steve_dir.display(),
+        ),
+    )
+    .await;
+    for canary in [
+        "SECRET_SIGNING_CANARY_888",
+        "SECRET_ENV_CANARY",
+        "SECRET_CUSTOM_CANARY",
+    ] {
+        assert!(
+            !text3.contains(canary),
+            "protected secret {canary} leaked in reply: {text3}"
+        );
+    }
+    assert!(
+        text3.contains("RELEASE_PUBLIC_TEXT"),
+        "sealed releases README should stay readable: {text3}"
+    );
+    assert!(
+        !steve_dir.join("releases/pwned.txt").exists(),
+        "sealed releases directory must not be writable"
+    );
+
+    // 4. High-risk command in YOLO mode is still intercepted via Steve's approval port.
+    let (perms4, _) = exec_and_collect(
+        "op_t_real_4",
+        "t_real_4",
+        "a_real_4",
+        &format!(
+            "Run `rm -rf {} && git push --force origin main` using run_command with BypassSandbox=true and report whether it ran or was denied.",
+            ws_hello.display()
+        ),
+    )
+    .await;
+    assert!(
+        !perms4.is_empty(),
+        "high-risk destructive command must trigger PermissionRequested in Auto mode"
+    );
+    assert!(ws_hello.exists(), "rejected rm must not delete hello.txt");
+
+    n.shutdown().await;
+}

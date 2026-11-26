@@ -2297,11 +2297,35 @@ fn read_owner_regular_file(own: &std::path::Path, segs: &[std::ffi::OsString]) -
     }
 }
 
+/// Derives the owner's ambient state root matching the isolated `state_root` layout: strips
+/// `sd.import_into` from `sd.owner_source(user_home)` when present (for example
+/// `~/.gemini/antigravity-cli` with `import_into = "antigravity-cli"` -> `~/.gemini`), avoiding
+/// positional assumptions about `sd.extra_dirs`.
+fn owner_state_root(
+    sd: &steve_harness_spec::StateDir,
+    user_home: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let own = sd.owner_source(user_home)?;
+    if let Some(sub) = sd.import_into.as_deref().filter(|s| !s.is_empty()) {
+        let sub_path = std::path::Path::new(sub);
+        if own.ends_with(sub_path) {
+            let depth = sub_path.components().count();
+            let mut root = own.as_path();
+            for _ in 0..depth {
+                root = root.parent()?;
+            }
+            return Some(root.to_path_buf());
+        }
+    }
+    Some(own)
+}
+
 fn harness_state(
     inner: &Inner,
     s: &HarnessState,
     sd: &steve_harness_spec::StateDir,
     skills: Option<&str>,
+    state_settings: steve_harness_spec::StateSettings,
 ) -> ApiResult<std::path::PathBuf> {
     if !s.valid() {
         return Err(Error::new(
@@ -2378,6 +2402,27 @@ fn harness_state(
             Err(why) => {
                 return Err(internal(format!("harness state: sign-in: {why}")));
             }
+        }
+    }
+    let owner_root = s
+        .import_owner
+        .then(|| owner_state_root(sd, &inner.cfg.acp.user_home))
+        .flatten();
+    match crate::harness_settings::apply(
+        &dir,
+        &target,
+        state_settings,
+        &inner.cfg.acp.steve_home,
+        &inner.cfg.home,
+        owner_root.as_deref(),
+    ) {
+        Ok(left) => {
+            for why in left {
+                tracing::info!("harness state: settings: {why}");
+            }
+        }
+        Err(why) => {
+            return Err(internal(format!("harness state: settings: {why}")));
         }
     }
     // the owner's personal instructions and extensions, linked where the harness reads them, when
@@ -2507,7 +2552,7 @@ async fn open_harness(
     let state = match (&row.open.state, declared_state.as_ref()) {
         (Some(s), Some(sd)) => {
             let props = inner.cfg.acp.adapter_properties(&harness);
-            let dir = harness_state(inner, s, sd, props.skills.as_deref())?;
+            let dir = harness_state(inner, s, sd, props.skills.as_deref(), props.state_settings)?;
             let mut env =
                 sd.isolation_env_for(&dir, Some(&inner.cfg.acp.user_home), s.import_owner);
             // its credential store where the Node's harness keeps it, apart from the directory
@@ -3065,6 +3110,23 @@ mod state_import_tests {
         std::fs::write(own.join("real.json"), "{\"ok\":true}").unwrap();
         let real_segs = valid_rel_path("real.json").unwrap();
         assert!(read_owner_regular_file(&own, &real_segs).is_some());
+    }
+
+    #[test]
+    fn owner_state_root_strips_import_into_independently_of_extra_dirs() {
+        let mut sd = steve_harness_spec::builtin("antigravity")
+            .unwrap()
+            .properties
+            .state
+            .clone()
+            .unwrap();
+        let home = std::path::Path::new("/fixture/home");
+        assert_eq!(owner_state_root(&sd, home), Some(home.join(".gemini")));
+        // Reordering or clearing extra_dirs must not affect the derived owner state root.
+        sd.extra_dirs = vec![".gemini/sandbox".into(), ".gemini/config".into()];
+        assert_eq!(owner_state_root(&sd, home), Some(home.join(".gemini")));
+        sd.extra_dirs.clear();
+        assert_eq!(owner_state_root(&sd, home), Some(home.join(".gemini")));
     }
 }
 
