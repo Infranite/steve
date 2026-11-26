@@ -303,14 +303,19 @@ impl Core {
     }
 }
 
-/// Run `f` on its own thread inside the caller's tokio runtime, if there is one. A TS timer runs on the event loop;
-/// a bare thread has no runtime, and the agent runtime starts turns (and the item hooks run) with `tokio::spawn`.
+/// Run `f` off the current critical section inside the caller's tokio runtime blocking pool, if
+/// there is one (or a bare thread in synchronous unit tests with no runtime). Using the runtime's
+/// blocking pool instead of a raw thread with `Handle::enter` keeps `block_in_place` / `block_on`
+/// valid inside detached work such as `disk_low -> reclaim_workspaces` and git gathers.
 pub(crate) fn detach(f: impl FnOnce() + Send + 'static) {
-    let rt = tokio::runtime::Handle::try_current().ok();
-    std::thread::spawn(move || {
-        let _in = rt.as_ref().map(|h| h.enter());
-        f()
-    });
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) => {
+            rt.spawn_blocking(f);
+        }
+        Err(_) => {
+            std::thread::spawn(f);
+        }
+    }
 }
 
 impl Tx<'_> {

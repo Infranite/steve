@@ -62,6 +62,14 @@ pub trait NodeGit: Send + Sync {
     fn on_node(&self, item: &str) -> bool;
     /// The facts `q` asks for in the item's workspace; `offline` when its Node is not there.
     async fn facts(&self, item: &str, q: Ask) -> na::ApiResult<na::GitFacts>;
+    /// The facts `q` asks for in a project's repository on its Node (used when an item's
+    /// dedicated worktree has been tidied or when verifying commits in a shared repository).
+    async fn project_facts(&self, _project_id: &str, _q: Ask) -> na::ApiResult<na::GitFacts> {
+        Err(na::Error::new(
+            na::Code::Invalid,
+            "project git facts unavailable",
+        ))
+    }
     /// Applies `action` in the item's workspace on the facts `on`, through the Hub's ledger as
     /// `operation` for `subject`, and waits for its end.
     async fn apply(
@@ -477,15 +485,28 @@ impl Tx<'_> {
         let ask = s.asked;
         s.running = Some((ask, t, want.clone()));
         let (core, item) = (self.c.clone(), i.id.clone());
-        detach(move || {
-            let got = block_on(async {
-                tokio::time::timeout(GATHER_DEADLINE, gather(&*port, &item, want))
-                    .await
-                    .unwrap_or_else(|_| Err("timed out".into()))
-            })
-            .unwrap_or_else(|| Err("no runtime".into()));
-            core.git_arrived(&item, ask, got);
-        });
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(async move {
+                    let got = tokio::time::timeout(GATHER_DEADLINE, gather(&*port, &item, want))
+                        .await
+                        .unwrap_or_else(|_| Err("timed out".into()));
+                    let _ = tokio::task::spawn_blocking(move || core.git_arrived(&item, ask, got))
+                        .await;
+                });
+            }
+            Err(_) => {
+                detach(move || {
+                    let got = block_on(async {
+                        tokio::time::timeout(GATHER_DEADLINE, gather(&*port, &item, want))
+                            .await
+                            .unwrap_or_else(|_| Err("timed out".into()))
+                    })
+                    .unwrap_or_else(|| Err("no runtime".into()));
+                    core.git_arrived(&item, ask, got);
+                });
+            }
+        }
     }
 
     /// The facts gathered for `i` to decide on in this critical section: fresh ones (taken now,
@@ -533,15 +554,7 @@ impl Tx<'_> {
         );
         /* one rebase per approval: the ledger takes the same operation once */
         let operation = format!("rebase-{decision}");
-        detach(move || {
-            let outcome = block_on(async {
-                tokio::time::timeout(GATHER_DEADLINE, rebase(&*port, &item, &operation))
-                    .await
-                    .unwrap_or_else(|_| {
-                        crate::git::Rebase::Error("结果未知（超时），不会自动重试".into())
-                    })
-            })
-            .unwrap_or_else(|| crate::git::Rebase::Error("no runtime".into()));
+        let finish_rebase = move |outcome| {
             let mut t = core.tx();
             match t.rebased(&item, &branch, &to, outcome) {
                 Ok(true) => {
@@ -552,7 +565,39 @@ impl Tx<'_> {
                 Ok(false) => {}
                 Err(e) => tracing::error!(item, "rebase before the release: {e}"),
             }
-        });
+        };
+        let item_for_run = item_id.to_string();
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(async move {
+                    let outcome = tokio::time::timeout(
+                        GATHER_DEADLINE,
+                        rebase(&*port, &item_for_run, &operation),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        crate::git::Rebase::Error("结果未知（超时），不会自动重试".into())
+                    });
+                    let _ = tokio::task::spawn_blocking(move || finish_rebase(outcome)).await;
+                });
+            }
+            Err(_) => {
+                detach(move || {
+                    let outcome = block_on(async {
+                        tokio::time::timeout(
+                            GATHER_DEADLINE,
+                            rebase(&*port, &item_for_run, &operation),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            crate::git::Rebase::Error("结果未知（超时），不会自动重试".into())
+                        })
+                    })
+                    .unwrap_or_else(|| crate::git::Rebase::Error("no runtime".into()));
+                    finish_rebase(outcome);
+                });
+            }
+        }
     }
 }
 

@@ -1057,23 +1057,20 @@ impl TestNodeGit {
         })
     }
 
-    async fn workspace(
+    async fn workspace_for_dir(
         &self,
-        item: &str,
+        scope: &str,
+        dir: &str,
     ) -> steve_node_api::ApiResult<steve_node_api::WorkspaceRef> {
         use steve_node_api::*;
-        let cwd = self
-            .store
-            .item(item)
-            .ok()
-            .flatten()
-            .and_then(|i| i.cwd)
-            .ok_or_else(|| Error::new(Code::Invalid, "no cwd"))?;
-        let key = (item.to_string(), cwd.clone());
+        if !std::path::Path::new(dir).exists() {
+            return Err(Error::new(Code::NotFound, "workspace directory absent"));
+        }
+        let key = (scope.to_string(), dir.to_string());
         if let Some(w) = self.workspaces.lock().unwrap().get(&key) {
             return Ok(w.clone());
         }
-        let rel = std::path::Path::new(&cwd)
+        let rel = std::path::Path::new(dir)
             .strip_prefix(&self.root)
             .map_err(|_| Error::new(Code::Forbidden, "outside root"))?
             .to_string_lossy()
@@ -1086,7 +1083,7 @@ impl TestNodeGit {
             accept_before: Timestamp(now + 60_000),
             grant: GrantId::new("grant").unwrap(),
             body: Prepare {
-                resource: format!("item:{item}:{uid}"),
+                resource: format!("{scope}:{uid}"),
                 kind: PrepareKind::Existing {
                     dir: RootPath {
                         root: RootId::new("home").unwrap(),
@@ -1128,6 +1125,37 @@ impl TestNodeGit {
             .unwrap()?;
         self.workspaces.lock().unwrap().insert(key, ws.clone());
         Ok(ws)
+    }
+
+    async fn workspace(
+        &self,
+        item: &str,
+    ) -> steve_node_api::ApiResult<steve_node_api::WorkspaceRef> {
+        use steve_node_api::*;
+        let cwd = self
+            .store
+            .item(item)
+            .ok()
+            .flatten()
+            .and_then(|i| i.cwd)
+            .ok_or_else(|| Error::new(Code::Invalid, "no cwd"))?;
+        self.workspace_for_dir(&format!("item:{item}"), &cwd).await
+    }
+
+    async fn project_workspace(
+        &self,
+        project_id: &str,
+    ) -> steve_node_api::ApiResult<steve_node_api::WorkspaceRef> {
+        use steve_node_api::*;
+        let path = self
+            .store
+            .project(Some(project_id))
+            .ok()
+            .flatten()
+            .map(|p| p.path)
+            .ok_or_else(|| Error::new(Code::NotFound, "no project"))?;
+        self.workspace_for_dir(&format!("project:{project_id}"), &path)
+            .await
     }
 
     /// Computes a Node git fingerprint for any directory under `self.root`.
@@ -1212,6 +1240,30 @@ impl crate::node_git::NodeGit for TestNodeGit {
     ) -> steve_node_api::ApiResult<steve_node_api::GitFacts> {
         use steve_node_api::*;
         let w = self.workspace(item).await?;
+        let node = self.node.clone();
+        self.rt
+            .spawn(async move {
+                node.git_facts(GitQuery {
+                    workspace: w,
+                    refs: q.refs,
+                    ranges: q.ranges,
+                    fetch: q.fetch,
+                    reads: q.reads,
+                    heads_only: q.heads_only,
+                })
+                .await
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn project_facts(
+        &self,
+        project_id: &str,
+        q: crate::node_git::Ask,
+    ) -> steve_node_api::ApiResult<steve_node_api::GitFacts> {
+        use steve_node_api::*;
+        let w = self.project_workspace(project_id).await?;
         let node = self.node.clone();
         self.rt
             .spawn(async move {

@@ -722,6 +722,9 @@ impl Core {
         result: Option<&Value>,
         actor: &str,
     ) -> Result<Item> {
+        if command == "finish" {
+            self.git_before(item);
+        }
         let mut t = self.tx();
         if command == "finish" {
             let i = t.item(item)?;

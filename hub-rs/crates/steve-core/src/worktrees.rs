@@ -387,6 +387,39 @@ impl Tx<'_> {
         branch: Option<&str>,
         cwd: &str,
     ) -> Result<bool> {
+        if !self.has_backend_workspace(&i.id)? {
+            return Ok(false);
+        }
+        let keep_branch = branch.is_none_or(|b| {
+            !self
+                .c
+                .inspect_branch(&p.path, b)
+                .is_some_and(|(merged, _)| merged)
+        });
+        self.tidy_by_backend_with_branch(i, branch, cwd, keep_branch)
+    }
+
+    /// Whether the backend tracks a prepared workspace for any session of `item_id`.
+    pub(crate) fn has_backend_workspace(&self, item_id: &str) -> Result<bool> {
+        if !self.rt().makes_worktrees() {
+            return Ok(false);
+        }
+        Ok(self
+            .db()
+            .sessions_of_item(item_id)?
+            .into_iter()
+            .any(|s| self.rt().makes_workspace(&s.id)))
+    }
+
+    /// Dispatches closed-item worktree cleanup to the Node backend using a pre-inspected
+    /// `keep_branch` flag so callers can keep `inspect_branch` RPCs off the Core lock.
+    pub(crate) fn tidy_by_backend_with_branch(
+        &self,
+        i: &Item,
+        branch: Option<&str>,
+        cwd: &str,
+        keep_branch: bool,
+    ) -> Result<bool> {
         if !self.rt().makes_worktrees() {
             return Ok(false);
         }
@@ -399,12 +432,6 @@ impl Tx<'_> {
         else {
             return Ok(false);
         };
-        let keep_branch = branch.is_none_or(|b| {
-            !self
-                .c
-                .inspect_branch(&p.path, b)
-                .is_some_and(|(merged, _)| merged)
-        });
         match self.rt().tidy(&s.id, keep_branch) {
             Ok(true) => {
                 let branch_label = if keep_branch { "preserved" } else { "deleted" };

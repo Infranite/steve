@@ -485,6 +485,10 @@ struct HydrationCandidate {
     is_git_backed: bool,
     git_head: Option<String>,
     git_tree: Option<String>,
+    git_cwd: Option<String>,
+    project_id: Option<String>,
+    project_path: Option<String>,
+    project_worktree: bool,
     child_item_id: Option<String>,
     artifact_ids: Vec<String>,
 }
@@ -504,44 +508,25 @@ enum HydrationOutcome {
     },
 }
 
-async fn verify_node_git_candidate(
-    port: &dyn crate::node_git::NodeGit,
-    c: &HydrationCandidate,
-) -> HydrationOutcome {
+enum LiveFingerprintCheck {
+    Match,
+    Mismatch { head: String, tree: Option<String> },
+    Absent,
+    Unavailable(String),
+}
+
+enum RepoCommitTreeCheck {
+    Match,
+    /// Repository answered `Ok(facts)` but `rec_head^{tree} != rec_tree` (e.g. uncommitted delivery).
+    TreeDiffers(String),
+    /// Repository query returned a non-transient error (missing commit/workspace).
+    Error(String),
+    Unavailable(String),
+}
+
+fn commit_tree_ask(rec_head: &str, rec_tree: &str) -> crate::node_git::Ask {
     use steve_node_api as na;
-
-    let (Some(rec_head), Some(rec_tree)) = (c.git_head.as_deref(), c.git_tree.as_deref()) else {
-        return HydrationOutcome::Invalid {
-            call_id: c.call_id.clone(),
-            is_review: c.is_review,
-            reason_code: "missing_git_fingerprint",
-            detail: format!(
-                "remote git-backed call {} has no recorded (git_head, git_tree) fingerprint",
-                c.call_id
-            ),
-        };
-    };
-    if rec_head.is_empty() || rec_tree.is_empty() {
-        return HydrationOutcome::Invalid {
-            call_id: c.call_id.clone(),
-            is_review: c.is_review,
-            reason_code: "missing_git_fingerprint",
-            detail: format!(
-                "remote git-backed call {} has empty git fingerprint",
-                c.call_id
-            ),
-        };
-    }
-    let Some(child_id) = c.child_item_id.as_deref() else {
-        return HydrationOutcome::Invalid {
-            call_id: c.call_id.clone(),
-            is_review: c.is_review,
-            reason_code: "git_fingerprint_mismatch",
-            detail: format!("remote git-backed call {} missing child_item_id", c.call_id),
-        };
-    };
-
-    let ask = crate::node_git::Ask {
+    crate::node_git::Ask {
         heads_only: true,
         reads: vec![
             na::GitRead::Show {
@@ -556,8 +541,54 @@ async fn verify_node_git_candidate(
             },
         ],
         ..Default::default()
-    };
-    match port.facts(child_id, ask).await {
+    }
+}
+
+async fn check_live_fingerprint(
+    port: &dyn crate::node_git::NodeGit,
+    child_id: &str,
+    rec_head: &str,
+    rec_tree: &str,
+) -> LiveFingerprintCheck {
+    use steve_node_api as na;
+    match port
+        .facts(
+            child_id,
+            crate::node_git::Ask {
+                reads: vec![na::GitRead::Fingerprint],
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(fp_facts) => {
+            let live_tree = fp_facts.reads.iter().find_map(|r| match &r.answer {
+                na::GitAnswer::Fingerprint { tree, .. } => Some(tree.clone()),
+                _ => None,
+            });
+            if fp_facts.head == rec_head && live_tree.as_deref() == Some(rec_tree) {
+                LiveFingerprintCheck::Match
+            } else {
+                LiveFingerprintCheck::Mismatch {
+                    head: fp_facts.head,
+                    tree: live_tree,
+                }
+            }
+        }
+        Err(e) if e.code == na::Code::Unavailable => {
+            LiveFingerprintCheck::Unavailable(e.safe_detail)
+        }
+        Err(_) => LiveFingerprintCheck::Absent,
+    }
+}
+
+fn eval_commit_tree(
+    res: steve_node_api::ApiResult<steve_node_api::GitFacts>,
+    rec_head: &str,
+    rec_tree: &str,
+) -> RepoCommitTreeCheck {
+    use steve_node_api as na;
+    match res {
         Ok(facts) => {
             let has_commit = facts
                 .reads
@@ -571,50 +602,173 @@ async fn verify_node_git_candidate(
                 )
             });
             if has_commit && tree_matches {
+                RepoCommitTreeCheck::Match
+            } else {
+                RepoCommitTreeCheck::TreeDiffers(format!(
+                    "Node commit/tree {rec_head}:{rec_tree} did not verify"
+                ))
+            }
+        }
+        Err(e) if e.code == na::Code::Unavailable => {
+            RepoCommitTreeCheck::Unavailable(e.safe_detail)
+        }
+        Err(e) => RepoCommitTreeCheck::Error(e.safe_detail),
+    }
+}
+
+async fn verify_node_git_candidate(
+    port: &dyn crate::node_git::NodeGit,
+    c: &HydrationCandidate,
+) -> HydrationOutcome {
+    let (Some(rec_head), Some(rec_tree)) = (c.git_head.as_deref(), c.git_tree.as_deref()) else {
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "missing_git_fingerprint",
+            detail: format!(
+                "git-backed call {} has no recorded (git_head, git_tree) fingerprint",
+                c.call_id
+            ),
+        };
+    };
+    if rec_head.is_empty() || rec_tree.is_empty() {
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "missing_git_fingerprint",
+            detail: format!("git-backed call {} has empty git fingerprint", c.call_id),
+        };
+    }
+    let Some(child_id) = c.child_item_id.as_deref() else {
+        return HydrationOutcome::Invalid {
+            call_id: c.call_id.clone(),
+            is_review: c.is_review,
+            reason_code: "git_fingerprint_mismatch",
+            detail: format!("git-backed call {} missing child_item_id", c.call_id),
+        };
+    };
+
+    let cwd = c.git_cwd.as_deref().filter(|d| !d.is_empty());
+    let project_path = c.project_path.as_deref().filter(|d| !d.is_empty());
+    let is_shared_repo = !c.project_worktree
+        || match (cwd, project_path) {
+            (Some(d), Some(p)) => d == p,
+            _ => false,
+        };
+
+    if is_shared_repo {
+        // Shared repository (`worktree = false`): subsequent calls or commits legitimately advance
+        // HEAD in the repository. Verify the recorded commit & tree still exist in the repo first;
+        // fall back to the live working-tree fingerprint for uncommitted deliveries.
+        let ask = commit_tree_ask(rec_head, rec_tree);
+        let repo_res = if let Some(pid) = c.project_id.as_deref() {
+            port.project_facts(pid, ask).await
+        } else {
+            port.facts(child_id, ask).await
+        };
+        match eval_commit_tree(repo_res, rec_head, rec_tree) {
+            RepoCommitTreeCheck::Match => {
                 return HydrationOutcome::Valid {
                     call_id: c.call_id.clone(),
                 };
             }
-            // Fallback for uncommitted Node deliveries whose synthetic tree differs from HEAD^{tree}.
-            if let Ok(fp_facts) = port
-                .facts(
-                    child_id,
-                    crate::node_git::Ask {
-                        reads: vec![na::GitRead::Fingerprint],
-                        ..Default::default()
-                    },
-                )
-                .await
-                && fp_facts.head == rec_head
-                && fp_facts.reads.iter().any(|r| {
-                    matches!(&r.answer, na::GitAnswer::Fingerprint { tree, .. } if tree == rec_tree)
-                })
-            {
-                return HydrationOutcome::Valid {
+            RepoCommitTreeCheck::Unavailable(detail) => {
+                return HydrationOutcome::TransientUnavailable { detail };
+            }
+            RepoCommitTreeCheck::Error(detail) => {
+                return HydrationOutcome::Invalid {
                     call_id: c.call_id.clone(),
+                    is_review: c.is_review,
+                    reason_code: "git_fingerprint_mismatch",
+                    detail: format!("Node git verification failed for {child_id}: {detail}"),
                 };
             }
-            HydrationOutcome::Invalid {
+            RepoCommitTreeCheck::TreeDiffers(_) => {}
+        }
+        return match check_live_fingerprint(port, child_id, rec_head, rec_tree).await {
+            LiveFingerprintCheck::Match => HydrationOutcome::Valid {
+                call_id: c.call_id.clone(),
+            },
+            LiveFingerprintCheck::Unavailable(detail) => {
+                HydrationOutcome::TransientUnavailable { detail }
+            }
+            LiveFingerprintCheck::Mismatch { head, tree } => HydrationOutcome::Invalid {
                 call_id: c.call_id.clone(),
                 is_review: c.is_review,
                 reason_code: "git_fingerprint_mismatch",
                 detail: format!(
-                    "remote Node commit/tree {rec_head}:{rec_tree} did not verify for {child_id}"
+                    "shared repo {rec_head}:{rec_tree} != live {head}:{} for {child_id}",
+                    tree.as_deref().unwrap_or("<none>")
                 ),
-            }
+            },
+            LiveFingerprintCheck::Absent => HydrationOutcome::Invalid {
+                call_id: c.call_id.clone(),
+                is_review: c.is_review,
+                reason_code: "git_fingerprint_mismatch",
+                detail: format!(
+                    "shared repo commit/tree {rec_head}:{rec_tree} could not be verified for {child_id}"
+                ),
+            },
+        };
+    }
+
+    // Dedicated worktree (`worktree = true`): if the worktree still exists on its Node, its live
+    // fingerprint MUST match (catching dirty edits or resets); only when the worktree has been
+    // tidied/removed do we verify `recorded_head^{tree} == recorded_tree` in the project repo.
+    match check_live_fingerprint(port, child_id, rec_head, rec_tree).await {
+        LiveFingerprintCheck::Match => {
+            return HydrationOutcome::Valid {
+                call_id: c.call_id.clone(),
+            };
         }
-        Err(e) if e.code == na::Code::Unavailable => HydrationOutcome::TransientUnavailable {
-            detail: e.safe_detail,
-        },
-        Err(e) => HydrationOutcome::Invalid {
-            call_id: c.call_id.clone(),
-            is_review: c.is_review,
-            reason_code: "git_fingerprint_mismatch",
-            detail: format!(
-                "Node git verification failed for {child_id}: {}",
-                e.safe_detail
-            ),
-        },
+        LiveFingerprintCheck::Mismatch { head, tree } => {
+            return HydrationOutcome::Invalid {
+                call_id: c.call_id.clone(),
+                is_review: c.is_review,
+                reason_code: "git_fingerprint_mismatch",
+                detail: format!(
+                    "recorded {rec_head}:{rec_tree} != live {head}:{} for {child_id}",
+                    tree.as_deref().unwrap_or("<none>")
+                ),
+            };
+        }
+        LiveFingerprintCheck::Unavailable(detail) => {
+            return HydrationOutcome::TransientUnavailable { detail };
+        }
+        LiveFingerprintCheck::Absent => {}
+    }
+
+    if let Some(pid) = c.project_id.as_deref() {
+        let repo_res = port
+            .project_facts(pid, commit_tree_ask(rec_head, rec_tree))
+            .await;
+        return match eval_commit_tree(repo_res, rec_head, rec_tree) {
+            RepoCommitTreeCheck::Match => HydrationOutcome::Valid {
+                call_id: c.call_id.clone(),
+            },
+            RepoCommitTreeCheck::Unavailable(detail) => {
+                HydrationOutcome::TransientUnavailable { detail }
+            }
+            RepoCommitTreeCheck::TreeDiffers(detail) | RepoCommitTreeCheck::Error(detail) => {
+                HydrationOutcome::Invalid {
+                    call_id: c.call_id.clone(),
+                    is_review: c.is_review,
+                    reason_code: "git_fingerprint_mismatch",
+                    detail: format!(
+                        "tidied worktree commit/tree {rec_head}:{rec_tree} failed for {child_id}: {detail}"
+                    ),
+                }
+            }
+        };
+    }
+
+    HydrationOutcome::Invalid {
+        call_id: c.call_id.clone(),
+        is_review: c.is_review,
+        reason_code: "git_fingerprint_mismatch",
+        detail: format!(
+            "worktree absent and no project repository available to verify {rec_head}:{rec_tree} for {child_id}"
+        ),
     }
 }
 
@@ -1883,6 +2037,13 @@ impl Tx<'_> {
                 is_git_backed,
                 git_head: c.git_head.clone(),
                 git_tree: c.git_tree.clone(),
+                git_cwd: c
+                    .git_cwd
+                    .clone()
+                    .or_else(|| child_item.as_ref().and_then(|ch| ch.cwd.clone())),
+                project_id: effective_project_id.map(str::to_owned),
+                project_path: project.as_ref().map(|p| p.path.clone()),
+                project_worktree: project.as_ref().is_some_and(|p| p.worktree),
                 child_item_id,
                 artifact_ids,
             });

@@ -395,7 +395,39 @@ impl Core {
                 "本地设备节点未连接，无法执行工作区回收".into(),
             ));
         };
-        let (req, mut extra_kept) = self.tx().build_reclaim_request()?;
+        let (mut req, mut extra_kept, backend_candidates) = self.tx().build_reclaim_request()?;
+        // Dispatch Node-managed closed worktrees through the Node workspace ledger (`tidy_workspace`)
+        // while keeping branch inspection off the Core lock; anything the backend does not own falls
+        // through to `disk_reclaim`.
+        for (item, project, branch, cwd) in backend_candidates {
+            let keep_branch = branch.as_deref().is_none_or(|b| {
+                !self
+                    .inspect_branch(&project.path, b)
+                    .is_some_and(|(merged, _)| merged)
+            });
+            match self
+                .tx()
+                .tidy_by_backend_with_branch(&item, branch.as_deref(), &cwd, keep_branch)
+            {
+                Ok(true) => continue,
+                Ok(false) => {
+                    req.closed_worktrees.push(ReclaimClosedTarget {
+                        item: item.id,
+                        path: cwd,
+                        repo: project.path,
+                        branch: branch.unwrap_or_default(),
+                        keep_unmerged: false,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        item = %item.id,
+                        error = %e,
+                        "reclaim skipped closed item whose node tidy dispatch failed"
+                    );
+                }
+            }
+        }
         let resp = crate::node_git::block_on(port.disk_reclaim(req))
             .ok_or_else(|| CoreError::Msg("workspace reclaim runtime unavailable".into()))?
             .map_err(|e| {
@@ -618,11 +650,24 @@ impl Tx<'_> {
         Path::new(cwd) == self.cfg().scratch.join(item)
     }
 
-    fn build_reclaim_request(&self) -> Result<(DiskReclaimRequest, Vec<Kept>)> {
+    #[allow(clippy::type_complexity)]
+    fn build_reclaim_request(
+        &self,
+    ) -> Result<(
+        DiskReclaimRequest,
+        Vec<Kept>,
+        Vec<(
+            crate::repo::Item,
+            crate::repo::Project,
+            Option<String>,
+            String,
+        )>,
+    )> {
         let pol = self.cfg().disk;
         let at = now();
         let mut git_projects = Vec::new();
         let mut closed_worktrees = Vec::new();
+        let mut backend_candidates = Vec::new();
         let mut idle_worktrees: Vec<(i64, ReclaimCacheTarget)> = Vec::new();
         let mut ended_scratch: Vec<(i64, ReclaimCacheTarget)> = Vec::new();
         let mut extra_kept = Vec::new();
@@ -654,17 +699,25 @@ impl Tx<'_> {
                             });
                             continue;
                         }
-                        let repo = self
-                            .db()
-                            .project(i.project_id.as_deref())?
-                            .map(|p| p.path)
-                            .unwrap_or_default();
-                        let branch = i.branch.clone().unwrap_or_default();
+                        let project = self.db().project(i.project_id.as_deref())?;
+                        let branch = i.branch.clone().filter(|b| !b.is_empty());
+                        if let Some(p) = project.as_ref()
+                            && self.has_backend_workspace(&i.id)?
+                        {
+                            backend_candidates.push((
+                                i.clone(),
+                                p.clone(),
+                                branch,
+                                cwd.to_string(),
+                            ));
+                            continue;
+                        }
+                        let repo = project.map(|p| p.path).unwrap_or_default();
                         closed_worktrees.push(ReclaimClosedTarget {
                             item: i.id.clone(),
                             path: cwd.to_string(),
                             repo,
-                            branch,
+                            branch: branch.unwrap_or_default(),
                             keep_unmerged: false,
                         });
                     } else if at - i.updated >= pol.idle_ms {
@@ -702,6 +755,7 @@ impl Tx<'_> {
                 low_bytes: pol.low,
             },
             extra_kept,
+            backend_candidates,
         ))
     }
 
