@@ -14,7 +14,9 @@ const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5195"
 const shots = process.env.STEVE_AVATAR_SHOTS || process.env.STEVE_TEST_SHOTS || ""
 if (shots) await mkdir(shots, { recursive: true })
 
-const NOW = Date.now()
+/* Fixed midday UTC timestamp paired with timezoneId: "UTC" + page.clock.setFixedTime(NOW)
+ * so all fixture offsets (-120..0 min) stay on the same calendar day regardless of wall clock. */
+const NOW = Date.UTC(2026, 10, 18, 14, 0)
 const MIN = 60_000
 
 /** @type {import("../src/gen/MemberIdentity").MemberIdentity} */
@@ -195,11 +197,13 @@ const ITEM_DETAIL = {
 async function runTheme(theme) {
   const page = await browser.newPage({
     locale: "zh-CN",
+    timezoneId: "UTC",
     viewport: { width: 1280, height: 860 },
     colorScheme: theme,
     reducedMotion: "reduce",
   })
   page.setDefaultTimeout(12000)
+  await page.clock.setFixedTime(NOW)
   const errors = []
   page.on("pageerror", (e) => errors.push(e.message))
 

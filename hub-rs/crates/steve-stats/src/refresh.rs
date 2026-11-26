@@ -174,6 +174,7 @@ pub fn rebuild_in(w: &mut W<'_>, ws: &str) -> Result<usize> {
             u.model.clone(),
             u.bot.clone(),
             u.project.clone(),
+            u.node.clone(),
         );
         add_usage(cells.entry(key).or_default(), &u);
         Ok(())
@@ -192,6 +193,7 @@ pub fn rebuild_in(w: &mut W<'_>, ws: &str) -> Result<usize> {
             model,
             t.bot.clone(),
             t.project.clone(),
+            t.node.clone(),
         );
         add_turn(cells.entry(key).or_default(), &t);
         Ok(())

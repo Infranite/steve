@@ -48,6 +48,7 @@ fn gateway(s: &Store, ts: i64, model: &str, t: Tokens) {
             item_id: None,
             bot_id: None,
             project_id: None,
+            node_id: None,
             usage: ModelUsage {
                 model: model.into(),
                 tokens: t,

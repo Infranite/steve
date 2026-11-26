@@ -533,6 +533,30 @@ pub struct NodeVitalsDay {
     pub tokens: VitalsTokens,
 }
 
+/// Live process counters preserved on [`NodeVitalsLatest`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeProcessVitals {
+    pub cpu_seconds: f64,
+    pub resident_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub disk_read_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub disk_written_bytes: Option<u64>,
+}
+
+/// Live CPU, memory, and disk-write snapshot for one active session on a Node.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeSessionVitals {
+    pub session_id: SessionId,
+    pub cpu_seconds: f64,
+    pub resident_bytes: u64,
+    pub disk_written_bytes: u64,
+}
+
 /// `at` is the Hub receipt time. `sampled_at` is the Node's local sample time.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -556,6 +580,13 @@ pub struct NodeVitalsLatest {
     pub network: Option<NetworkRate>,
     pub roots: Vec<VitalsRoot>,
     pub sessions: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub process: Option<NodeProcessVitals>,
+    #[serde(default)]
+    pub adapter_disk_written_bytes: u64,
+    #[serde(default)]
+    pub session_vitals: Vec<NodeSessionVitals>,
     pub rtt_ms: Option<i64>,
 }
 
@@ -610,6 +641,10 @@ pub struct VitalsSampling {
 pub struct VitalsTokens {
     pub per_minute: i64,
     pub today: i64,
+    #[serde(default)]
+    pub total_cost_usd: f64,
+    #[serde(default)]
+    pub today_cost_usd: f64,
 }
 
 /// How a harness component binary was installed on a Node, determined from its resolved path.

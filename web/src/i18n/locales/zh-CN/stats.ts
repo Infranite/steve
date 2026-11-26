@@ -478,6 +478,14 @@ export default {
       perItemDef: "这段时间完成的事项，每件从开始到完成的估算费用的平均，包括这段时间以外花的部分。",
       perItemFoot: "中位数 {{usd}}",
     },
+    infra: {
+      diskWrites: "节点磁盘写入",
+      diskWritesSub: "进程 {{proc}} · 活跃会话 {{sessions}}",
+      diskWritesEmpty: "暂无节点磁盘写入采样",
+      topNode: "开销最高的 Node",
+      topNodeSub: "{{tokens}} tokens · 估 {{usd}}",
+      topNodeEmpty: "这段时间尚无 Node 开销记录",
+    },
     daily: {
       section: "每天的产出",
       sectionSub: "每天完成了多少事项，花了多少。点一天看那天完成和新建的事项。",
@@ -500,10 +508,12 @@ export default {
     },
     where: {
       section: "钱和时间花在哪",
-      sectionSub: "按事项、Bot、模型、harness 或用途拆开费用和 Agent 时长；下面是最贵的事项，点一件看它的费用去向。",
+      sectionSub: "按事项、Bot、模型、harness、Node、会话或用途拆开费用和 Agent 时长；下面是最贵的事项，点一件看它的费用去向。",
       tab: {
         item: "事项",
         model: "模型",
+        node: "Node",
+        session: "会话",
         purpose: "用途",
       },
       tabAria: "按什么拆分",
