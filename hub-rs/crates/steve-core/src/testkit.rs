@@ -836,8 +836,20 @@ impl crate::thread::Researcher for FakeResearch {
                     ok: true,
                     error: None,
                     ms: 3,
+                    description: String::new(),
+                    step_started_at: None,
+                    excerpt: None,
                 }),
-                Step::Running(name, kind, brief) => sink.tool_running(None, name, kind, brief),
+                Step::Running(name, kind, brief) => {
+                    sink.tool_running(&crate::thread::ToolRunningSeen {
+                        call: None,
+                        name,
+                        kind,
+                        brief,
+                        description: "",
+                        step_started_at: crate::util::now(),
+                    })
+                }
                 Step::ToolFailure(name, brief, error) => sink.tool(&crate::thread::ToolSeen {
                     call: None,
                     name: name.into(),
@@ -846,6 +858,9 @@ impl crate::thread::Researcher for FakeResearch {
                     ok: false,
                     error: Some(error.into()),
                     ms: 1,
+                    description: String::new(),
+                    step_started_at: None,
+                    excerpt: None,
                 }),
                 Step::End(reason) => {
                     end = reason;

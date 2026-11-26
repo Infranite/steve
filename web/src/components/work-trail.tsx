@@ -31,10 +31,10 @@ export type ToolStep = {
   attrs?: Record<string, string | undefined>
   /** the call as a Tool Call Card (an agent's transcript): the tool's own name, what went in and came out, its time.
    *  The line's words (verb, subject, diff) become the card's summary; `body` is not used then */
-  card?: { name: string; icon?: ReactNode; args?: unknown; result?: unknown; resultView?: ReactNode; error?: string; t0?: number; ms?: number }
+  card?: { name: string; icon?: ReactNode; args?: unknown; result?: unknown; resultView?: ReactNode; error?: string; startedAt?: number; t0?: number; ms?: number }
 }
 export type TrailItem = ToolStep
-  | { t: "think"; key: string; text: string; live: boolean; /** how long it took; while it runs, when it began */ ms?: number; t0?: number; attrs?: Record<string, string | undefined> }
+  | { t: "think"; key: string; text: string; live: boolean; /** how long it took; while it runs, when it began */ ms?: number; startedAt?: number; at?: number; t0?: number; attrs?: Record<string, string | undefined> }
   | { t: "note"; key: string; text: string }
   | { t: "block"; key: string; state: StepState; body: ReactNode; attrs?: Record<string, string | undefined> }
   | { t: "line"; key: string; state: StepState; label: ReactNode; detail?: ReactNode; body?: ReactNode; attrs?: Record<string, string | undefined> }

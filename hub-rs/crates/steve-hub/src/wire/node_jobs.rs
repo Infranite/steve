@@ -29,8 +29,18 @@ use super::*;
 pub enum News {
     /// The whole text of the model's current message, each time it grew.
     Text(String),
+    /// The whole text of the model's current reasoning/thought message, with completion flag.
+    Thought {
+        id: String,
+        text: String,
+        done: bool,
+    },
     /// A tool call's whole current view (research jobs).
     Tool(ToolView),
+    /// The agent's current plan entries (research jobs).
+    Plan(Vec<PlanEntry>),
+    /// Subagent, background task, or workflow subtask update (research jobs).
+    Subtask(SubtaskView),
     GatewayProgress(GatewayPhase),
     Usage(UsageReport),
     End(Completion),
@@ -43,9 +53,14 @@ pub(crate) use steve_core::gateway::merged_usage as normalized_usage;
 pub(super) struct Waiters(Mutex<HashMap<String, Waiter>>);
 
 struct Waiter {
-    /// The message being written and its text so far.
+    /// The assistant message being written and its text so far.
     message: Option<String>,
     text: String,
+    /// The thought/reasoning message being written and its text so far.
+    thought_message: Option<String>,
+    thought_text: String,
+    /// Every message id declared with `Role::Thought` so late/replayed deltas cannot bleed into assistant text.
+    thought_ids: std::collections::HashSet<String>,
     tx: mpsc::UnboundedSender<News>,
 }
 
@@ -57,6 +72,9 @@ impl Waiters {
             Waiter {
                 message: None,
                 text: String::new(),
+                thought_message: None,
+                thought_text: String::new(),
+                thought_ids: std::collections::HashSet::new(),
                 tx,
             },
         );
@@ -351,9 +369,19 @@ impl NodeRuntime {
                 self.jobs
                     .tell(attempt, |_| Some(News::GatewayProgress(*phase)));
             }
-            EventBody::MessageStarted { message, .. } => self.jobs.tell(attempt, |w| {
-                w.message = Some(message.clone());
-                w.text.clear();
+            EventBody::MessageStarted { message, role, .. } => self.jobs.tell(attempt, |w| {
+                match role {
+                    Role::Thought => {
+                        w.thought_ids.insert(message.clone());
+                        w.thought_message = Some(message.clone());
+                        w.thought_text.clear();
+                    }
+                    Role::Assistant => {
+                        w.message = Some(message.clone());
+                        w.text.clear();
+                    }
+                    Role::User => {}
+                }
                 None
             }),
             EventBody::TextDelta {
@@ -362,6 +390,21 @@ impl NodeRuntime {
                 text,
                 ..
             } => self.jobs.tell(attempt, |w| {
+                if w.thought_message.as_deref() == Some(message.as_str()) {
+                    let at = *utf8_offset as usize;
+                    if at <= w.thought_text.len() && w.thought_text.is_char_boundary(at) {
+                        w.thought_text.truncate(at);
+                    }
+                    w.thought_text.push_str(text);
+                    return (!text.is_empty()).then(|| News::Thought {
+                        id: message.clone(),
+                        text: w.thought_text.clone(),
+                        done: false,
+                    });
+                }
+                if w.thought_ids.contains(message) {
+                    return None;
+                }
                 if w.message.as_deref() != Some(message.as_str()) {
                     w.message = Some(message.clone());
                     w.text.clear();
@@ -374,9 +417,28 @@ impl NodeRuntime {
                 w.text.push_str(text);
                 (!text.is_empty()).then(|| News::Text(w.text.clone()))
             }),
+            EventBody::MessageCompleted { message } => self.jobs.tell(attempt, |w| {
+                if w.thought_message.as_deref() == Some(message.as_str()) {
+                    let id = message.clone();
+                    let text = w.thought_text.clone();
+                    w.thought_message = None;
+                    return (!text.is_empty()).then(|| News::Thought {
+                        id,
+                        text,
+                        done: true,
+                    });
+                }
+                None
+            }),
             EventBody::ToolChanged { tool } => {
                 self.jobs.tell(attempt, |_| Some(News::Tool(tool.clone())))
             }
+            EventBody::Plan { entries } => self
+                .jobs
+                .tell(attempt, |_| Some(News::Plan(entries.clone()))),
+            EventBody::SubtaskChanged { subtask } => self
+                .jobs
+                .tell(attempt, |_| Some(News::Subtask(subtask.clone()))),
             EventBody::Usage { report } => self
                 .jobs
                 .tell(attempt, |_| Some(News::Usage(report.clone()))),
@@ -924,7 +986,9 @@ impl OneModel for NodePrint {
                     }
                 }
                 Ok(Some(News::Usage(r))) => usage.push(r),
-                Ok(Some(News::Tool(_))) => {}
+                Ok(Some(
+                    News::Tool(_) | News::Thought { .. } | News::Plan(_) | News::Subtask(_),
+                )) => {}
                 Ok(Some(News::End(c))) => break c,
                 Ok(None) => {
                     return Tried::of(

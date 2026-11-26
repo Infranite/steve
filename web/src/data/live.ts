@@ -1,10 +1,14 @@
 import { useSyncExternalStore } from "react"
 import { qc, scopeKey } from "./sync"
+import type { ThreadResearchStage } from "@/gen"
 import type { Draft, Msg } from "@/store"
 import type { LiveRun } from "@/thread/chat-progress"
 
 type ChatLive = {
   thinking: boolean
+  thinkingStartedAt?: number
+  thinkingAt?: number
+  thinkingStage?: ThreadResearchStage
   phase: string
   draft: Draft | null
   live: LiveRun | null
@@ -13,7 +17,7 @@ type ChatLive = {
   sending: Msg[]
 }
 
-const idle: ChatLive = { thinking: false, phase: "", draft: null, live: null, drafted: "", sending: [] }
+const idle: ChatLive = { thinking: false, thinkingStartedAt: undefined, thinkingAt: undefined, thinkingStage: undefined, phase: "", draft: null, live: null, drafted: "", sending: [] }
 const key = () => ["live", scopeKey()] as const
 const listeners = new Set<() => void>()
 export const observeChatLive = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } }

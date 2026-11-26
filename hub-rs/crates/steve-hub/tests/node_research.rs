@@ -14,7 +14,9 @@ use steve_runtime::testkit::eventually_sync;
 use steve_store::testkit::hub::node_checks;
 
 use serde_json::{Value, json};
-use steve_core::thread::{ResearchRequest, ResearchSink, Researcher, ResumeFrom, RunEnd, ToolSeen};
+use steve_core::thread::{
+    ResearchRequest, ResearchSink, Researcher, ResumeFrom, RunEnd, ToolRunningSeen, ToolSeen,
+};
 use steve_hub::wire::node_files::NodeFiles;
 use steve_hub::wire::node_runtime::{NodeDomain, NodeRuntime, Sink};
 use steve_hub::wire::node_tools::{NodeTools, Service};
@@ -73,11 +75,11 @@ impl ResearchSink for Seen {
     fn tool(&self, t: &ToolSeen) {
         self.tools.lock().unwrap().push(t.clone());
     }
-    fn tool_running(&self, _call: Option<u32>, name: &str, kind: &str, brief: &str) {
+    fn tool_running(&self, t: &ToolRunningSeen<'_>) {
         self.running
             .lock()
             .unwrap()
-            .push((name.into(), kind.into(), brief.into()));
+            .push((t.name.into(), t.kind.into(), t.brief.into()));
     }
 }
 

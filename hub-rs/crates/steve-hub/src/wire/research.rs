@@ -12,9 +12,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use steve_core::thread::{ResearchOutcome, ResearchRequest, ResearchSink, RunEnd, ToolSeen};
+use steve_core::thread::{
+    ResearchOutcome, ResearchRequest, ResearchSink, RunEnd, ToolRunningSeen, ToolSeen,
+};
 use steve_node_api as api;
 use steve_research as r;
+use steve_types::{
+    Millis, ThreadPlanEntry, ThreadPlanStatus, ThreadResearchStage, ThreadSubtask,
+    ThreadSubtaskOrigin, ThreadSubtaskStatus,
+};
 
 use super::node_runtime::{News, NodeRuntime, ResearchAttempt, ResearchFile};
 
@@ -544,6 +550,7 @@ impl r::AttemptRunner for OnNode<'_> {
         // The adapter's call ID is only stable within this attempt. Publish our own
         // run-local number and keep terminal transitions for the same call, not same-name guesses.
         let mut calls = ToolCalls::new();
+        let mut subtask_started: HashMap<api::CallId, i64> = HashMap::new();
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         let mut health = tokio::time::interval(Duration::from_secs(1));
         let end = loop {
@@ -558,13 +565,36 @@ impl r::AttemptRunner for OnNode<'_> {
                         self.sink.text(&t);
                         self.text = t;
                     }
+                    Some(News::Thought { id, text, done }) => {
+                        progressed = true;
+                        self.sink.thought(&id, &text, done);
+                    }
                     Some(News::Tool(v)) => self.report_tool(v, &mut calls, &mut progressed),
+                    Some(News::Plan(entries)) => {
+                        let mapped: Vec<ThreadPlanEntry> = entries
+                            .into_iter()
+                            .map(|e| ThreadPlanEntry {
+                                content: e.content,
+                                status: map_plan_status(&e.status),
+                            })
+                            .collect();
+                        self.sink.plan(&mapped);
+                    }
+                    Some(News::Subtask(s)) => {
+                        progressed = true;
+                        let began = *subtask_started
+                            .entry(s.id.clone())
+                            .or_insert_with(steve_store::now);
+                        self.sink.subtask(&map_subtask(s, began));
+                    }
                     Some(News::Usage(u)) => {
                         if ids.insert(u.report_id.clone()) {
                             self.usage.push(u);
                         }
                     }
-                    Some(News::GatewayProgress(_)) => {},
+                    Some(News::GatewayProgress(phase)) => {
+                        self.sink.stage(map_gateway_stage(phase));
+                    }
                     Some(News::End(c)) => break Some(c),
                     None => break None,
                 },
@@ -589,11 +619,91 @@ impl r::AttemptRunner for OnNode<'_> {
     }
 }
 
-type ToolCalls = HashMap<api::CallId, (u32, std::time::Instant, Option<api::ToolPhase>, String)>;
+type ToolCalls = HashMap<
+    api::CallId,
+    (
+        u32,
+        std::time::Instant,
+        i64,
+        Option<api::ToolPhase>,
+        String,
+        String,
+    ),
+>;
+
+fn map_gateway_stage(phase: api::GatewayPhase) -> ThreadResearchStage {
+    match phase {
+        api::GatewayPhase::Submitting => ThreadResearchStage::Submitting,
+        api::GatewayPhase::Submitted => ThreadResearchStage::Submitted,
+        api::GatewayPhase::Responding => ThreadResearchStage::Responding,
+    }
+}
+
+fn map_plan_status(status: &str) -> ThreadPlanStatus {
+    match status {
+        "in_progress" => ThreadPlanStatus::InProgress,
+        "completed" => ThreadPlanStatus::Completed,
+        "failed" => ThreadPlanStatus::Failed,
+        _ => ThreadPlanStatus::Pending,
+    }
+}
+
+fn map_subtask(s: api::SubtaskView, started_at: i64) -> ThreadSubtask {
+    let origin = match s.origin {
+        api::SubtaskOrigin::Subagent => ThreadSubtaskOrigin::Subagent,
+        api::SubtaskOrigin::BackgroundTask => ThreadSubtaskOrigin::BackgroundTask,
+        api::SubtaskOrigin::NativeWorkflow => ThreadSubtaskOrigin::NativeWorkflow,
+    };
+    let status = match s.status {
+        api::SubtaskStatus::Queued => ThreadSubtaskStatus::Queued,
+        api::SubtaskStatus::Running => ThreadSubtaskStatus::Running,
+        api::SubtaskStatus::NeedsYou => ThreadSubtaskStatus::NeedsYou,
+        api::SubtaskStatus::Done => ThreadSubtaskStatus::Done,
+        api::SubtaskStatus::Failed => ThreadSubtaskStatus::Failed,
+        api::SubtaskStatus::Cancelled => ThreadSubtaskStatus::Cancelled,
+    };
+    ThreadSubtask {
+        id: s.id.as_str().to_string(),
+        origin,
+        status,
+        title: s.title,
+        actor: s.actor,
+        progress: s.progress,
+        summary: s.summary,
+        error: s.error,
+        started_at: Some(Millis(started_at)),
+        duration_ms: s.duration_ms,
+    }
+}
+
+fn result_excerpt(parts: &[api::Part]) -> Option<String> {
+    let items: Vec<String> = parts
+        .iter()
+        .filter_map(|p| match p {
+            api::Part::Text { text } => {
+                let t = text.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            }
+            api::Part::Diff {
+                path,
+                added,
+                removed,
+                ..
+            } => Some(format!("{path} (+{added}/-{removed})")),
+            api::Part::File { name, .. } if !name.trim().is_empty() => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    if items.is_empty() {
+        None
+    } else {
+        Some(items.join("\n"))
+    }
+}
 
 impl OnNode<'_> {
     fn report_tool(&mut self, v: api::ToolView, calls: &mut ToolCalls, progressed: &mut bool) {
-        if v.phase == api::ToolPhase::Pending {
+        if v.phase == api::ToolPhase::Pending || v.parent.is_some() {
             return;
         }
         *progressed = true;
@@ -602,24 +712,51 @@ impl OnNode<'_> {
             .and_then(|c| c.as_str().map(str::to_owned))
             .unwrap_or_default();
         let brief = v.target.unwrap_or_default();
-        let (call, began, last_phase, last_brief) = calls.entry(v.id).or_insert_with(|| {
-            self.calls += 1;
-            (self.calls, std::time::Instant::now(), None, String::new())
-        });
+        let description = v
+            .description
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| {
+                if !v.title.is_empty() && v.title != v.name && v.title != brief {
+                    v.title.clone()
+                } else {
+                    String::new()
+                }
+            });
+        let (call, began, began_ms, last_phase, last_brief, last_desc) =
+            calls.entry(v.id).or_insert_with(|| {
+                self.calls += 1;
+                (
+                    self.calls,
+                    std::time::Instant::now(),
+                    steve_store::now(),
+                    None,
+                    String::new(),
+                    String::new(),
+                )
+            });
         let previous = last_phase.replace(v.phase);
-        if previous == Some(v.phase) && *last_brief == brief {
+        if previous == Some(v.phase) && *last_brief == brief && *last_desc == description {
             return;
         }
         last_brief.clone_from(&brief);
+        last_desc.clone_from(&description);
         let ok = match v.phase {
             api::ToolPhase::Succeeded => true,
             api::ToolPhase::Failed => false,
             api::ToolPhase::Running => {
-                self.sink.tool_running(Some(*call), &v.name, &kind, &brief);
+                self.sink.tool_running(&ToolRunningSeen {
+                    call: Some(*call),
+                    name: &v.name,
+                    kind: &kind,
+                    brief: &brief,
+                    description: &description,
+                    step_started_at: *began_ms,
+                });
                 return;
             }
             api::ToolPhase::Pending => return,
         };
+        let excerpt = result_excerpt(&v.result);
         self.sink.tool(&ToolSeen {
             call: Some(*call),
             name: v.name,
@@ -630,6 +767,9 @@ impl OnNode<'_> {
             ms: v
                 .duration_ms
                 .unwrap_or_else(|| began.elapsed().as_millis() as u64) as i64,
+            description,
+            step_started_at: Some(*began_ms),
+            excerpt,
         });
     }
 

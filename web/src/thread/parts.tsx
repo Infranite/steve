@@ -6,6 +6,8 @@ import { lazy, Suspense, useEffect, useId, useLayoutEffect, useRef, useState, ty
 import { itemDisplayState } from "@/store"
 import { cn } from "cn"
 import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
+import type { ThreadPlanEntry, ThreadSubtask } from "@/gen"
+import { SubtaskList, type SubtaskEntry } from "@/components/subtask-list"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { type StepState, type ToolStep, type TrailItem } from "@/components/work-trail"
@@ -67,13 +69,144 @@ export function researchStep(key: string, name: string, kind: string | undefined
     chip: brief ? { label: brief, mono: true, icon: researchIcon(name, kind) } : undefined, attrs: { kind: c }, ...more }
 }
 
+export function PinnedPlan({ entries }: { entries: ThreadPlanEntry[] }) {
+  const t = useT()
+  if (!entries.length) return null
+  const done = entries.filter((e) => e.status === "completed").length
+  return (
+    <div className="flex flex-col gap-1" data-pinned-plan>
+      <div className="flex items-center justify-between gap-2 type-footnote text-muted-foreground">
+        <span className="font-medium text-foreground/85">{t("thread:progress.planTitle")}</span>
+        <span className="tabular-nums">{t("thread:progress.planCount", { done, total: entries.length })}</span>
+      </div>
+      <ul className="flex flex-col gap-1">
+        {entries.map((entry, idx) => (
+          <li key={idx} className="flex items-start gap-2 type-footnote" data-plan-status={entry.status}>
+            <span className="mt-0.5 flex size-3.5 shrink-0 items-center justify-center" aria-hidden>
+              {entry.status === "completed" ? <CheckIcon className="size-3 text-success" strokeWidth={2.25} />
+                : entry.status === "in_progress" ? <Spinner className="size-3 text-blue" />
+                : entry.status === "failed" ? <XIcon className="size-3 text-destructive" strokeWidth={2.25} />
+                : <span className="size-1.5 rounded-full bg-muted-foreground/45" />}
+            </span>
+            <span className={cn("min-w-0 wrap-anywhere", entry.status === "completed" ? "text-muted-foreground line-through decoration-muted-foreground/50" : entry.status === "in_progress" ? "font-medium text-foreground" : "text-foreground/85")}>
+              {entry.content}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** Renders main-thread research subtasks via the shared affectUI `SubtaskList` (`ParallelAttempts`). */
+export function ResearchSubtasks({ subtasks, live }: { subtasks: ThreadSubtask[]; live: boolean }) {
+  if (!subtasks.length) return null
+  const entries: SubtaskEntry[] = subtasks.map((s) => ({
+    subtask: {
+      id: s.id,
+      origin: s.origin,
+      status: s.status,
+      title: s.title,
+      actor: s.actor ?? null,
+      progress: s.progress ?? null,
+      summary: s.summary ?? null,
+      error: s.error ?? null,
+      can_cancel: false,
+      duration_ms: s.duration_ms ?? null,
+    },
+    started: s.started_at,
+    children: [],
+  }))
+  return (
+    <div data-live-subtasks>
+      <SubtaskList sessionId="" entries={entries} live={live} readOnly />
+    </div>
+  )
+}
+
+export function liveCountsSummary(l: LiveRun, t: ReturnType<typeof useT>): string | undefined {
+  const activeCount = (l.active ?? (l.now ? [l.now] : [])).length
+  const doneCount = l.tools.filter((x) => x.ok).length
+  const failedCount = l.tools.filter((x) => !x.ok).length
+  const planEntries = l.plan ?? []
+  const subtasks = l.subtasks ?? []
+  const activeSubtasks = subtasks.filter((s) => s.status === "running" || s.status === "queued").length
+  const parts = [
+    activeCount > 0 ? t("thread:progress.summary.running", { count: activeCount }) : "",
+    doneCount > 0 ? t("thread:progress.summary.done", { count: doneCount }) : "",
+    failedCount > 0 ? t("thread:progress.summary.failed", { count: failedCount }) : "",
+    planEntries.length > 0 ? t("thread:progress.summary.plan", { done: planEntries.filter((p) => p.status === "completed").length, total: planEntries.length }) : "",
+    activeSubtasks > 0 ? t("thread:progress.summary.subtasks", { count: activeSubtasks }) : "",
+  ].filter(Boolean)
+  return parts.length > 0 ? parts.join(t("thread:progress.summary.sep")) : undefined
+}
+
 /** The event stream determines every step; an empty list is still a running panel. */
 export function researchLiveItems(l: LiveRun): TrailItem[] {
   const recovered = recoveredCalls(l.tools, x => x.ok)
-  const items: TrailItem[] = l.tools.map((x,n) => researchStep(String(n), x.name, x.kind, x.brief || "", x.ok ? "done" : "fail",
-    { attrs: { kind: toolClass(x.name,x.kind), recovered: recovered.has(n) ? "" : undefined } }))
-  for (const call of l.active ?? (l.now ? [l.now] : [])) {
-    items.push(researchStep("now:" + (call.call ?? ""), call.name, call.kind, call.brief || "", "run"))
+  // Interleave thoughts and completed tools chronologically when timestamps are available.
+  const chronological: { at?: number; order: number; item: TrailItem }[] = []
+  let seq = 0
+  for (const th of l.thoughts ?? []) {
+    chronological.push({
+      at: th.startedAt,
+      order: seq++,
+      item: {
+        t: "think",
+        key: "th:" + th.id,
+        text: th.text,
+        live: !th.done,
+        startedAt: th.startedAt,
+        at: th.at,
+        ms: th.done && th.at != null ? Math.max(0, th.at - th.startedAt) : undefined,
+        attrs: { "step-thought": th.id },
+      },
+    })
+  }
+  l.tools.forEach((x, n) => {
+    chronological.push({
+      at: x.startedAt ?? x.at,
+      order: seq++,
+      item: researchStep(String(n), x.name, x.kind, x.description || x.brief || "", x.ok ? "done" : "fail", {
+        card: {
+          name: researchToolLabel(x.name, x.kind),
+          args: x.brief || undefined,
+          result: x.excerpt,
+          error: x.error,
+          ms: x.ms,
+          startedAt: x.startedAt,
+        },
+        attrs: { kind: toolClass(x.name, x.kind), recovered: recovered.has(n) ? "" : undefined },
+      }),
+    })
+  })
+  if (chronological.some((entry) => entry.at != null)) {
+    chronological.sort((a, b) => {
+      if (a.at != null && b.at != null && a.at !== b.at) return a.at - b.at
+      return a.order - b.order
+    })
+  }
+  const items: TrailItem[] = chronological.map((entry) => entry.item)
+  const active = l.active ?? (l.now ? [l.now] : [])
+  active.forEach((call, idx) => {
+    items.push(researchStep("now:" + (call.call ?? idx), call.name, call.kind, call.description || call.brief || "", "run", {
+      card: {
+        name: researchToolLabel(call.name, call.kind),
+        args: call.brief || undefined,
+        startedAt: call.startedAt,
+      },
+    }))
+  })
+  const subtasks = l.subtasks ?? []
+  if (subtasks.length > 0) {
+    const runningSubtask = subtasks.some((s) => s.status === "running" || s.status === "queued" || s.status === "needs_you")
+    items.push({
+      t: "block",
+      key: "subtasks",
+      state: runningSubtask ? "run" : "done",
+      body: <ResearchSubtasks subtasks={subtasks} live />,
+      attrs: { "live-subtasks": "" },
+    })
   }
   return items
 }

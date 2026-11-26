@@ -952,6 +952,26 @@ pub(super) fn describe() {
         Count,
         "Think prompts confirmed submitted by a Node's adapter transport."
     );
+    describe_counter!(
+        "steve_thread_progress_events_total",
+        Count,
+        "Main-thread progress events emitted to live clients. Labels: kind (stage, thought, plan, subtask, tool_running, tool_done)."
+    );
+    describe_counter!(
+        "steve_thread_progress_throttled_total",
+        Count,
+        "Main-thread progress updates suppressed by emission throttling. Labels: kind (thought)."
+    );
+    describe_counter!(
+        "steve_thread_progress_redactions_total",
+        Count,
+        "Main-thread progress fields where credential patterns were redacted before live publication or persistence."
+    );
+    describe_counter!(
+        "steve_thread_live_hydrations_total",
+        Count,
+        "GET /api/summary responses that hydrated an active main-thread live snapshot."
+    );
     describe_histogram!(
         "steve_model_call_seconds",
         Seconds,

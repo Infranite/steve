@@ -176,6 +176,11 @@ impl Normalizer {
         self.adapter.as_ref()
     }
 
+    /// Whether `session_id` belongs to a tracked child subagent session spawned by this root session.
+    pub fn is_child_session(&self, session_id: &str) -> bool {
+        self.subtasks.has_rfd_subagent(session_id)
+    }
+
     /// Current view of a tracked subtask by its Steve [`CallId`].
     pub fn subtask(&self, id: &CallId) -> Option<&SubtaskView> {
         self.subtasks.lookup_by_call_id(id)

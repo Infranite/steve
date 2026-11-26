@@ -416,7 +416,8 @@ impl Prepared {
             images: crate::inline_images::Images::default(),
             scope: image_scope,
             first_text_ms,
-            open_message: None,
+            open_messages: vec![],
+            assistant_messages: HashSet::new(),
             pending_closing: vec![],
         }
     }
@@ -489,6 +490,7 @@ impl ResearchCall<'_> {
                 on_session: Some(&session),
                 on_activity: Some(&activity),
                 max_output_bytes: spec.run.limits.max_output_bytes,
+                emit_thoughts: true,
             },
             spawned,
             &event,
@@ -558,11 +560,38 @@ struct ResearchOutput {
     images: crate::inline_images::Images,
     scope: crate::inline_images::Scope,
     first_text_ms: Option<u64>,
-    open_message: Option<String>,
+    open_messages: Vec<String>,
+    assistant_messages: HashSet<String>,
     pending_closing: Vec<(Subject, EventBody)>,
 }
 
 impl ResearchOutput {
+    fn track_message(&mut self, body: &EventBody, elapsed_ms: u64) {
+        match body {
+            EventBody::MessageStarted { message, role, .. } => {
+                if !self.open_messages.contains(message) {
+                    self.open_messages.push(message.clone());
+                }
+                if *role == Role::Assistant {
+                    self.assistant_messages.insert(message.clone());
+                }
+            }
+            EventBody::MessageCompleted { message } => {
+                self.open_messages.retain(|m| m != message);
+            }
+            EventBody::TextDelta { message, .. }
+                if self.first_text_ms.is_none() && self.assistant_messages.contains(message) =>
+            {
+                self.first_text_ms = Some(elapsed_ms);
+            }
+            _ => {}
+        }
+    }
+
+    fn take_unclosed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.open_messages)
+    }
+
     /// Account an incoming event before capturing its images and journaling its closing facts.
     async fn receive(
         &mut self,
@@ -580,14 +609,7 @@ impl ResearchOutput {
             state.output += output_bytes(&original);
             state.event(&body, budget);
         }
-        match &body {
-            EventBody::MessageStarted { message, .. } => self.open_message = Some(message.clone()),
-            EventBody::MessageCompleted { .. } => self.open_message = None,
-            EventBody::TextDelta { .. } if self.first_text_ms.is_none() => {
-                self.first_text_ms = Some(started.elapsed().as_millis() as u64);
-            }
-            _ => {}
-        }
+        self.track_message(&body, started.elapsed().as_millis() as u64);
         let closing_fact = !crate::journal::needs_budget(&body);
         let evs = self
             .images
@@ -616,22 +638,19 @@ impl ResearchOutput {
             .capture(&self.scope, exec, node.hub_files(), true)
             .await;
         *raw = self.images.rewrite(raw);
+        let open_messages = self.take_unclosed();
         let mut tail = self.pending_closing;
         tail.extend(
             captured
                 .into_iter()
                 .map(|body| (Subject::Execution(exec.clone()), body)),
         );
-        tail.extend(
-            self.open_message
-                .map(|message| {
-                    (
-                        Subject::Execution(exec.clone()),
-                        EventBody::MessageCompleted { message },
-                    )
-                })
-                .into_iter(),
-        );
+        tail.extend(open_messages.into_iter().map(|message| {
+            (
+                Subject::Execution(exec.clone()),
+                EventBody::MessageCompleted { message },
+            )
+        }));
         tail
     }
 }
@@ -743,6 +762,64 @@ mod tests {
             .unwrap_err()
             .code,
             Code::Unsupported,
+        );
+    }
+
+    #[test]
+    fn thoughts_do_not_trigger_first_text_or_turns_and_unclosed_messages_close() {
+        let mut state = State::default();
+        let budget = r::Budget {
+            max_turns: Some(5),
+            ..r::Budget::default()
+        };
+        let mut out = ResearchOutput {
+            images: crate::inline_images::Images::default(),
+            scope: crate::inline_images::Scope::new(PathBuf::from("/tmp"), vec![], vec![]),
+            first_text_ms: None,
+            open_messages: vec![],
+            assistant_messages: HashSet::new(),
+            pending_closing: vec![],
+        };
+        let thought_start = EventBody::MessageStarted {
+            message: "thought-1".into(),
+            block: "b0".into(),
+            role: Role::Thought,
+        };
+        let thought_delta = EventBody::TextDelta {
+            message: "thought-1".into(),
+            block: "b0".into(),
+            utf8_offset: 0,
+            text: "internal reasoning".into(),
+        };
+        state.event(&thought_start, budget);
+        state.event(&thought_delta, budget);
+        out.track_message(&thought_start, 5);
+        out.track_message(&thought_delta, 15);
+        assert_eq!(state.turns, 0);
+        assert!(state.raw().is_empty());
+        assert_eq!(out.first_text_ms, None);
+
+        let reply_start = EventBody::MessageStarted {
+            message: "reply-1".into(),
+            block: "b1".into(),
+            role: Role::Assistant,
+        };
+        let reply_delta = EventBody::TextDelta {
+            message: "reply-1".into(),
+            block: "b1".into(),
+            utf8_offset: 0,
+            text: "final answer".into(),
+        };
+        state.event(&reply_start, budget);
+        state.event(&reply_delta, budget);
+        out.track_message(&reply_start, 20);
+        out.track_message(&reply_delta, 42);
+        assert_eq!(state.turns, 1);
+        assert_eq!(state.raw(), "final answer");
+        assert_eq!(out.first_text_ms, Some(42));
+        assert_eq!(
+            out.take_unclosed(),
+            vec!["thought-1".to_string(), "reply-1".to_string()]
         );
     }
 }

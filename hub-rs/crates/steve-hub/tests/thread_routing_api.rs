@@ -594,13 +594,21 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
     let mut busy = false;
     for _ in 0..100 {
         let (_, st) = e.call("GET", "/api/summary", None).await;
-        if st["thinking"] == true {
+        if st["thinking"] == true && st["live"]["started_at"].is_i64() {
+            assert!(st["live"]["last_activity_at"].is_i64(), "{st}");
+            assert!(
+                st["live"]["run"].as_str().is_some_and(|s| !s.is_empty()),
+                "{st}"
+            );
             busy = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(busy, "the page knows Steve is on a turn");
+    assert!(
+        busy,
+        "the page knows Steve is on a turn and exposes its live snapshot"
+    );
     for t in ["排队一", "排队二"] {
         let (s, _) = e
             .call("POST", "/api/thread", Some(json!({"text": t})))
@@ -663,6 +671,11 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
         .call("DELETE", &format!("/api/thread/queued/{one}"), None)
         .await;
     assert_eq!(s, 409, "gone once it went");
+    let (_, idle_st) = e.call("GET", "/api/summary", None).await;
+    assert!(
+        idle_st.get("live").is_none(),
+        "live clears when settled: {idle_st}"
+    );
 }
 
 /// A research run's token sees only the four read-only tools; a session token or none gets nothing.
