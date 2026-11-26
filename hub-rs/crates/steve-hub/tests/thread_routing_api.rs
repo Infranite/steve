@@ -668,10 +668,63 @@ async fn taking_an_offer_allows_explicit_bot_override_and_validates_bot_input() 
     let item_id = taken["item"]["id"].as_str().unwrap().to_string();
     assert_eq!(taken["item"]["bot_id"], json!(bot_b_id), "{taken}");
 
-    let (s, item_view) = e.call("GET", &format!("/api/items/{item_id}"), None).await;
-    assert_eq!(s, 200, "{item_view}");
+    let (s, item_detail) = e.call("GET", &format!("/api/items/{item_id}"), None).await;
+    assert_eq!(s, 200, "{item_detail}");
+    assert_eq!(item_detail["bot_id"], json!(bot_b_id), "{item_detail}");
+
+    let (s, item_views) = e
+        .call("GET", &format!("/api/views?kind=item&ids={item_id}"), None)
+        .await;
+    assert_eq!(s, 200, "{item_views}");
+    let item_view = item_views["views"]
+        .as_array()
+        .and_then(|xs| xs.iter().find(|x| x["id"] == item_id.as_str()))
+        .expect("item view");
     assert_eq!(item_view["bot_id"], json!(bot_b_id), "{item_view}");
+    assert_eq!(
+        item_view["placement"]["bot"],
+        json!(bot_b_id),
+        "{item_view}"
+    );
     assert_eq!(item_view["placement"]["reason"], "explicit", "{item_view}");
+
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let initial = store
+        .read(|r| steve_store::bot_dispatch::initial(r, &item_id))
+        .unwrap()
+        .expect("recorded initial placement");
+    assert_eq!(initial.explanation.bot.as_str(), bot_b_id);
+    assert_eq!(
+        initial.explanation.reason,
+        steve_types::PlacementReason::Explicit
+    );
+
+    let offer_id = offer["id"].as_str().unwrap();
+    let (s, msg_views) = e
+        .call(
+            "GET",
+            &format!("/api/views?kind=message&ids={offer_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{msg_views}");
+    let offer_view = msg_views["views"]
+        .as_array()
+        .and_then(|xs| xs.iter().find(|x| x["id"] == offer_id))
+        .expect("offer message view");
+    assert_eq!(
+        offer_view["meta"]["offer"]["state"], "taken",
+        "{offer_view}"
+    );
+    assert_eq!(
+        offer_view["meta"]["offer"]["bot"],
+        json!(bot_b_id),
+        "{offer_view}"
+    );
+    assert_eq!(
+        offer_view["meta"]["offer"]["reason"], "explicit",
+        "{offer_view}"
+    );
 
     let (s, again) = e.call("POST", &path, Some(json!({"take": true}))).await;
     assert_eq!(s, 409, "{again}");
