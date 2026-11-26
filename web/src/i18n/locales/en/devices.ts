@@ -151,11 +151,8 @@ export default {
     },
     notInstalledDesc: "Not installed on this Node",
     notInstalledHint: "Install: {{cmd}}",
-    componentInstalled: "Installed", manageLocal: "Manage local runtimes",
     state: {
       ready: "Available",
-      not_installed: "Not installed",
-      unknown: "Availability unknown",
     },
     reasonBadge: {
       authentication_required: "Authentication required",
@@ -293,14 +290,16 @@ export default {
   },
   fileAccess: {
     title: "File access",
-    state: { granted: "Access confirmed", missing: "Access required", unknown: "Access unknown" },
+    state: { granted: "Access confirmed", missing: "Access required", unknown: "Access unknown", not_applicable: "Not applicable" },
     location: { desktop: "Desktop", documents: "Documents", downloads: "Downloads", volume: "Removable or network volume", protected_library: "Protected Library folders" },
+    fullDiskAccess: "Full Disk Access",
+    executable: "Authorized executable",
     noneNeeded: "No protected folders are configured.",
-    repair: "On the Node’s Mac, run this command to open Full Disk Access for the boot service.",
+    repair: "On the Node’s Mac, run this command to open Full Disk Access for the Node service.",
+    repairLocal: "On the Hub’s Mac, run this command to open Full Disk Access for the local Hub service.",
     recheck: "Recheck file access",
     recheckShort: "Recheck",
     checkFailed: "Could not check the Node’s file access.",
-    localNote: "This built-in Node runs on the Hub’s own computer and uses its local filesystem permissions directly.",
     nonMacNote: "This Node runs on {{os}} and follows its service user’s filesystem permissions; macOS Full Disk Access is not used.",
   },
   nodeTab: {

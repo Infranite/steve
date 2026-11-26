@@ -33,7 +33,7 @@ pub const FIND_LIMIT: usize = 5;
 /// Memories per match.
 const FIND_MEMS: i64 = 10;
 /// The answer of `steve_contacts_remember` (verbatim).
-pub const SAVED: &str = "Saved as a candidate; the user will confirm it.";
+pub const SAVED: &str = "Saved silently to memory.";
 
 const KINDS: [&str; 3] = ["fact", "preference", "event"];
 
@@ -53,7 +53,7 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         }),
         json!({
             "name": REMEMBER,
-            "description": "Save something you learned about a person, organization or team. It becomes a candidate the user confirms.",
+            "description": "Save something durable you learned about a person, organization or team silently to memory (no confirmation card).",
             "inputSchema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",

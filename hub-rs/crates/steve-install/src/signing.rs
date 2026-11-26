@@ -266,6 +266,33 @@ pub(crate) fn verify_signature(binary: &Path, expected: &str, tools: &Tools) -> 
     );
     Ok(())
 }
+
+/// Verify that upgrading from `old_binary` to `new_binary` preserves the exact code signing
+/// identifier and certificate-bound designated requirement so macOS TCC does not re-prompt.
+pub(crate) fn verify_tcc_signing_continuity(
+    old_binary: &Path,
+    new_binary: &Path,
+    expected_identifier: &str,
+    tools: &Tools,
+) -> Result<String> {
+    verify_signature(old_binary, expected_identifier, tools)?;
+    verify_signature(new_binary, expected_identifier, tools)?;
+    let old_req = read_node_designated_requirement(old_binary, tools)?
+        .context("previous release binary has no certificate-bound designated requirement")?;
+    let new_req = read_node_designated_requirement(new_binary, tools)?
+        .context("candidate release binary has no certificate-bound designated requirement")?;
+    ensure!(
+        old_req == new_req,
+        "upgrade changed designated requirement: {old_req} != {new_req}"
+    );
+    let expected_prefix =
+        format!("identifier \"{expected_identifier}\" and certificate leaf = H\"");
+    ensure!(
+        new_req.starts_with(&expected_prefix) && leaf_sha1_of(&new_req).is_some(),
+        "designated requirement is not bound to expected identifier and certificate leaf: {new_req}"
+    );
+    Ok(new_req)
+}
 pub(crate) fn valid_identity(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 201
@@ -592,15 +619,15 @@ fn prepare_with(
     let helper_hash = hash(&helper)?;
     let keychain = home.join("signing/steve-signing.keychain-db");
     owned_file(&keychain)?;
-    sign(
-        &candidate.join("bin/steve-hub"),
-        &keychain,
-        password,
-        ident["hub_identifier"].as_str().unwrap(),
-        tools,
-    )?;
+    let hub_id = ident["hub_identifier"].as_str().unwrap();
+    let candidate_hub = candidate.join("bin/steve-hub");
+    sign(&candidate_hub, &keychain, password, hub_id, tools)?;
+    let current_hub = home.join("current/bin/steve-hub");
+    if current_hub.is_file() && read_node_designated_requirement(&current_hub, tools)?.is_some() {
+        verify_tcc_signing_continuity(&current_hub, &candidate_hub, hub_id, tools)?;
+    }
     ensure!(
-        hash(&helper)? == helper_hash && build_info(&candidate.join("bin/steve-hub"))? == info,
+        hash(&helper)? == helper_hash && build_info(&candidate_hub)? == info,
         "installed helper or prepared Hub identity changed"
     );
     Ok(json!({"candidate":candidate,"build":info,"source":"release-bundle"}))
@@ -2074,6 +2101,299 @@ esac
         assert_ne!(
             child_pgid, parent_pgid,
             "foreground maintenance child must not share the terminal's foreground process group"
+        );
+    }
+
+    #[test]
+    fn hub_upgrade_from_bundles_v1_to_v2_preserves_tcc_identifier_requirement_and_stable_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(dir.path()).unwrap();
+        let cert_sha1 = "11223344556677889900aabbccddeeff00112233";
+        let captured_pass = home.join("captured-setup-password");
+
+        let make_hub_bundle = |dir_name: &str, version: &str, commit: &str| -> PathBuf {
+            let candidate = home.join("releases").join(dir_name);
+            for sub in ["bin", "web/dist"] {
+                fs::create_dir_all(candidate.join(sub)).unwrap();
+            }
+            let manifest = json!({
+                "format_version": 1,
+                "version": version,
+                "commit": commit,
+                "hub_version": version,
+                "web_version": version,
+                "schema": { "target": 54 }
+            });
+            fs::write(
+                candidate.join("release.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                candidate.join("web/dist/release.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                candidate.join("web/dist/index.html"),
+                format!("<html><head><meta name=\"steve-web-version\" content=\"{version}\"></head></html>"),
+            )
+            .unwrap();
+            executable(
+                &candidate.join("bin/steve-hub"),
+                &format!(
+                    "#!/bin/sh\nif [ \"$2\" = provision-signing ]; then\n  cat > '{}'\n  exit $?\nfi\nprintf '%s\\n' '{{\"version\":\"{version}\",\"commit\":\"{commit}\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}}'\n",
+                    captured_pass.display()
+                ),
+            );
+            executable(
+                &candidate.join("bin/steve-keyhelper"),
+                "#!/bin/sh\nexit 0\n",
+            );
+            fs::canonicalize(candidate).unwrap()
+        };
+
+        let commit_v1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let commit_v2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let v1 = make_hub_bundle("bundles-v1", "1.0.0", commit_v1);
+        let v2 = make_hub_bundle("bundles-v2", "1.1.0", commit_v2);
+
+        let codesign = home.join("tcc-codesign");
+        executable(
+            &codesign,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+case "$1" in
+  --force)
+    ident=''
+    target=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --identifier) ident="$2"; shift 2 ;;
+        --sign|--keychain) shift 2 ;;
+        *) target="$1"; shift ;;
+      esac
+    done
+    printf '\n#HUB_ID:%s\n#HUB_REQ:designated => identifier "%s" and certificate leaf = H"{cert_sha1}"\n' "$ident" "$ident" >> "$target"
+    ;;
+  --verify)
+    target="$3"
+    grep -a -q '^#HUB_ID:' "$target"
+    ;;
+  -dv)
+    target="$2"
+    id=$(grep -a '^#HUB_ID:' "$target" | tail -n 1 | sed 's/^#HUB_ID://')
+    [ -n "$id" ] || exit 1
+    printf 'Identifier=%s\n' "$id" >&2
+    ;;
+  --display)
+    target="$3"
+    req=$(grep -a '^#HUB_REQ:' "$target" | tail -n 1 | sed 's/^#HUB_REQ://')
+    [ -n "$req" ] || exit 1
+    printf '%s\n' "$req"
+    ;;
+  *) exit 9 ;;
+esac
+"#
+            ),
+        );
+        let openssl = home.join("tcc-openssl");
+        executable(
+            &openssl,
+            r#"#!/bin/sh
+set -eu
+case "$1" in
+  req)
+    keyout=''; out=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -keyout) keyout="$2"; shift 2 ;;
+        -out) out="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'PRIVATE KEY\n' > "$keyout"
+    printf 'CERT\n' > "$out"
+    ;;
+  x509)
+    printf 'SHA1 Fingerprint=11:22:33:44:55:66:77:88:99:00:AA:BB:CC:DD:EE:FF:00:11:22:33\n'
+    ;;
+  pkcs12)
+    out=''
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -out) out="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'P12\n' > "$out"
+    ;;
+  *) exit 99 ;;
+esac
+"#,
+        );
+        let security = home.join("tcc-security");
+        executable(
+            &security,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+if [ "$1" = '-i' ]; then
+  line=$(cat)
+  cmd=$(printf '%s' "$line" | awk '{{print $1}}')
+  if [ "$cmd" = create-keychain ]; then
+    kc=$(printf '%s' "$line" | sed -n 's/^create-keychain -p [^ ]* "\(.*\)"$/\1/p')
+    umask 077
+    printf 'keychain\n' > "$kc"
+  fi
+  exit 0
+fi
+if [ "$1" = find-identity ]; then
+  printf '  1) {cert_sha1_upper} "Steve Hub"\n     1 identities found\n'
+fi
+exit 0
+"#,
+                cert_sha1_upper = cert_sha1.to_ascii_uppercase()
+            ),
+        );
+        let tools = Tools {
+            codesign,
+            security,
+            openssl,
+        };
+
+        // 1. Setup signs bundles/v1 and links <home>/current -> v1.
+        setup_with(&home, &v1, "io.github.infranite.steve.hub", &tools).unwrap();
+        let password = fs::read_to_string(&captured_pass)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(!password.is_empty());
+        std::os::unix::fs::symlink(&v1, home.join("current")).unwrap();
+        let setup_tcc_path = crate::service::file_access::tcc_executable_path("hub", &home);
+        assert_eq!(setup_tcc_path, home.join("current/bin/steve-hub"));
+        assert_eq!(
+            fs::canonicalize(&setup_tcc_path).unwrap(),
+            v1.join("bin/steve-hub")
+        );
+
+        // 2. Upgrade prepares bundles/v2 against the existing identity and checks TCC continuity.
+        prepare_with(&home, &v2, "1.1.0", commit_v2, &password, &tools).unwrap();
+        let continuity_req = verify_tcc_signing_continuity(
+            &v1.join("bin/steve-hub"),
+            &v2.join("bin/steve-hub"),
+            "io.github.infranite.steve.hub",
+            &tools,
+        )
+        .unwrap();
+        assert_eq!(
+            continuity_req,
+            self_signed_requirement("io.github.infranite.steve.hub", cert_sha1)
+        );
+
+        // 3. Switch <home>/current -> v2; setup and upgrade keep the exact same TCC path.
+        fs::remove_file(home.join("current")).unwrap();
+        std::os::unix::fs::symlink(&v2, home.join("current")).unwrap();
+        let upgrade_tcc_path = crate::service::file_access::tcc_executable_path("hub", &home);
+        assert_eq!(setup_tcc_path, upgrade_tcc_path);
+        assert_eq!(
+            fs::canonicalize(&upgrade_tcc_path).unwrap(),
+            v2.join("bin/steve-hub")
+        );
+
+        // 4. An ad-hoc / unsigned candidate without a certificate leaf fails TCC continuity.
+        let adhoc = home.join("adhoc-hub");
+        executable(&adhoc, "#!/bin/sh\n#HUB_ID:io.github.infranite.steve.hub\n");
+        assert!(
+            verify_tcc_signing_continuity(
+                &v1.join("bin/steve-hub"),
+                &adhoc,
+                "io.github.infranite.steve.hub",
+                &tools
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn node_upgrade_from_bundles_v1_to_v2_preserves_tcc_identifier_requirement_and_stable_runner() {
+        let (dir, home, tools) = node_signing_fixture();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let label = "io.github.infranite.steve.node";
+
+        let identity = ensure_node_identity(&home, label, &tools).unwrap();
+        let bundles_v1 = root.join("bundles/v1/bin");
+        let bundles_v2 = root.join("bundles/v2/bin");
+        fs::create_dir_all(&bundles_v1).unwrap();
+        fs::create_dir_all(&bundles_v2).unwrap();
+
+        let v1_node = bundles_v1.join("steve-node");
+        let v1_cli = bundles_v1.join("steve");
+        let v2_node = bundles_v2.join("steve-node");
+        let v2_cli = bundles_v2.join("steve");
+        for (path, body) in [
+            (&v1_node, "#!/bin/sh\necho node-v1\n"),
+            (&v1_cli, "#!/bin/sh\necho cli-v1\n"),
+            (&v2_node, "#!/bin/sh\necho node-v2\n"),
+            (&v2_cli, "#!/bin/sh\necho cli-v2\n"),
+        ] {
+            executable(path, body);
+        }
+
+        // Setup signs v1 binaries and stages the stable boot runner at services/node-boot-runner.
+        sign_node_binary(
+            &home,
+            &v1_node,
+            &identity,
+            &identity.node_identifier,
+            &tools,
+        )
+        .unwrap();
+        sign_node_binary(&home, &v1_cli, &identity, &identity.cli_identifier, &tools).unwrap();
+        let setup_runner = crate::service::file_access::tcc_executable_path("node", &home);
+        let staged_v1 =
+            stage_signed_node_runner(&home, &v1_cli, &home.join("services"), &identity, &tools)
+                .unwrap();
+        fs::rename(&staged_v1, &setup_runner).unwrap();
+
+        // Upgrade reuses the exact same identity on bundles/v2 and updates the stable runner in place.
+        let reloaded = ensure_node_identity(&home, label, &tools).unwrap();
+        assert_eq!(reloaded, identity);
+        sign_node_binary(
+            &home,
+            &v2_node,
+            &reloaded,
+            &reloaded.node_identifier,
+            &tools,
+        )
+        .unwrap();
+        sign_node_binary(&home, &v2_cli, &reloaded, &reloaded.cli_identifier, &tools).unwrap();
+        let upgrade_runner = crate::service::file_access::tcc_executable_path("node", &home);
+        assert_eq!(setup_runner, upgrade_runner);
+        let staged_v2 =
+            stage_signed_node_runner(&home, &v2_cli, &home.join("services"), &reloaded, &tools)
+                .unwrap();
+        fs::rename(&staged_v2, &upgrade_runner).unwrap();
+
+        assert_eq!(
+            read_node_designated_requirement(&v1_node, &tools).unwrap(),
+            read_node_designated_requirement(&v2_node, &tools).unwrap()
+        );
+        assert_eq!(
+            read_node_designated_requirement(&v1_node, &tools).unwrap(),
+            Some(identity.node_requirement())
+        );
+        assert_eq!(
+            read_node_designated_requirement(&v1_cli, &tools).unwrap(),
+            read_node_designated_requirement(&v2_cli, &tools).unwrap()
+        );
+        assert_eq!(
+            read_node_designated_requirement(&upgrade_runner, &tools).unwrap(),
+            Some(identity.cli_requirement())
         );
     }
 }

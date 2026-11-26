@@ -12,13 +12,14 @@ use std::time::{Duration, Instant};
 use steve_acp::AcpConfig;
 use steve_acp::adapters::{Probe, ProbeStatus};
 use steve_node_api::{
-    AdapterAuth, AdapterInfo, AdapterStatus, HarnessCapability, MissingCommandDiagnostic,
-    extract_login_shell_path, login_shell_path_script,
+    AdapterAuth, AdapterInfo, AdapterStatus, HarnessCapability, LOGIN_SHELL_PROBE_TIMEOUT_SECS,
+    MissingCommandDiagnostic, extract_login_shell_path, login_shell_path_script,
+    shell_supports_interactive_login,
 };
 
 const TTL: Duration = Duration::from_secs(1800);
 const INITIALIZE: Duration = Duration::from_secs(20);
-const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(LOGIN_SHELL_PROBE_TIMEOUT_SECS);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoginShellEnv {
@@ -55,29 +56,99 @@ fn resolve_user_login_shell() -> String {
     "/bin/sh".to_owned()
 }
 
-/// Probes the Node account's login shell (`$SHELL -l -c`) once to see whether a command missing
-/// from the service's own `PATH` is actually installed in the user's interactive/login `PATH`.
-pub(crate) async fn probe_login_shell_env() -> Option<LoginShellEnv> {
-    let shell = resolve_user_login_shell();
-    let script = login_shell_path_script(Path::new(&shell));
-    let output = tokio::time::timeout(
-        LOGIN_SHELL_PROBE_TIMEOUT,
-        tokio::process::Command::new(&shell)
-            .args(["-l", "-c", &script])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !output.status.success() {
+async fn run_shell_probe(
+    shell: &str,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+    timeout: Duration,
+) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.args(args)
+        .env("TERM", "dumb")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    #[cfg(unix)]
+    {
+        // Start a detached session (`setsid`) so interactive shells have no controlling `/dev/tty`
+        // (avoiding SIGTTIN/SIGTTOU stops or `/dev/tty` prompts) while still owning a dedicated
+        // process group (`pgid == pid`) that we can SIGKILL as a whole on timeout.
+        // SAFETY: `libc::setsid` is async-signal-safe per POSIX.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = cmd.spawn().ok()?;
+    let pid = child.id();
+    let mut stdout_pipe = child.stdout.take()?;
+    let read_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf).await;
+        buf
+    });
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        _ => {
+            #[cfg(unix)]
+            if let Some(pid) = pid {
+                // SAFETY: child runs in its own process group (`process_group(0)`), so `-pid`
+                // terminates only the timed-out shell probe and its descendants.
+                unsafe {
+                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                }
+            }
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            read_task.abort();
+            return None;
+        }
+    };
+    if !status.success() {
+        read_task.abort();
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let path = extract_login_shell_path(&stdout)?;
-    Some(LoginShellEnv { shell, path })
+    let stdout = read_task.await.ok()?;
+    extract_login_shell_path(&String::from_utf8_lossy(&stdout))
+}
+
+async fn probe_shell_env_for(
+    shell: &str,
+    extra_env: &[(&str, &str)],
+    timeout: Duration,
+) -> Option<LoginShellEnv> {
+    let script = login_shell_path_script(Path::new(shell));
+    if shell_supports_interactive_login(Path::new(shell))
+        && let Some(path) =
+            run_shell_probe(shell, &["-l", "-i", "-c", &script], extra_env, timeout).await
+    {
+        return Some(LoginShellEnv {
+            shell: shell.to_owned(),
+            path,
+        });
+    }
+    let path = run_shell_probe(shell, &["-l", "-c", &script], extra_env, timeout).await?;
+    Some(LoginShellEnv {
+        shell: shell.to_owned(),
+        path,
+    })
+}
+
+/// Probes the Node account's shell (`$SHELL -l -i -c` for zsh/bash, falling back to `$SHELL -l -c`)
+/// once to see whether a command missing from the service's own `PATH` is actually installed in
+/// the user's interactive/login `PATH`.
+pub(crate) async fn probe_login_shell_env() -> Option<LoginShellEnv> {
+    let shell = resolve_user_login_shell();
+    probe_shell_env_for(&shell, &[], LOGIN_SHELL_PROBE_TIMEOUT).await
 }
 
 fn missing_command_diagnostic(
@@ -510,6 +581,107 @@ rl.on("line", (line) => {
             offer
                 .variant_models
                 .contains(&"gemini-4-neon-xhigh".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_shell_env_loads_zshrc_only_path_and_falls_back_to_login_on_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let rc_bin = dir.path().join("zshrc-bin");
+        let login_bin = dir.path().join("zprofile-bin");
+        let zdotdir = dir.path().join("zdotdir");
+        std::fs::create_dir_all(&rc_bin).unwrap();
+        std::fs::create_dir_all(&login_bin).unwrap();
+        std::fs::create_dir_all(&zdotdir).unwrap();
+        let agy = rc_bin.join("agy");
+        std::fs::write(&agy, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Write PATH exclusively in .zshrc (never in .zprofile) and assert TERM=dumb + non-blocking stdin.
+        std::fs::write(
+            zdotdir.join(".zshrc"),
+            format!(
+                "if [ \"$TERM\" != \"dumb\" ]; then exit 42; fi\nread _ignored || true\nexport PATH=\"{}:$PATH\"\n",
+                rc_bin.display()
+            ),
+        )
+        .unwrap();
+
+        let fake_zsh = dir.path().join("zsh");
+        std::fs::write(
+            &fake_zsh,
+            r#"#!/bin/sh
+interactive=0
+login=0
+script=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -l) login=1; shift ;;
+    -i) interactive=1; shift ;;
+    -c) script="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$login" = "1" ] && [ -f "$ZDOTDIR/.zprofile" ]; then
+  . "$ZDOTDIR/.zprofile"
+fi
+if [ "$interactive" = "1" ] && [ -f "$ZDOTDIR/.zshrc" ]; then
+  . "$ZDOTDIR/.zshrc"
+fi
+exec /bin/sh -c "$script"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_zsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let zdotdir_str = zdotdir.to_str().unwrap();
+        let env = [
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", zdotdir_str),
+            ("ZDOTDIR", zdotdir_str),
+        ];
+
+        let probed =
+            probe_shell_env_for(fake_zsh.to_str().unwrap(), &env, LOGIN_SHELL_PROBE_TIMEOUT)
+                .await
+                .expect("interactive login probe should capture .zshrc-only PATH");
+        assert_eq!(
+            steve_acp::which_in("agy", Some(OsStr::new(&probed.path))),
+            Some(agy.clone()),
+            "expected agy from .zshrc in {:?}",
+            probed.path
+        );
+
+        // Also verify against real /bin/zsh when installed (macOS and zsh Linux hosts).
+        if steve_acp::is_executable_file(Path::new("/bin/zsh")) {
+            let real = probe_shell_env_for("/bin/zsh", &env, LOGIN_SHELL_PROBE_TIMEOUT)
+                .await
+                .expect("real /bin/zsh interactive login probe should succeed");
+            assert_eq!(
+                steve_acp::which_in("agy", Some(OsStr::new(&real.path))),
+                Some(agy.clone()),
+                "real /bin/zsh must load .zshrc-only PATH: {:?}",
+                real.path
+            );
+        }
+
+        // Hanging .zshrc times out cleanly and falls back to login-only (-l -c) reading .zprofile.
+        std::fs::write(
+            zdotdir.join(".zprofile"),
+            format!("export PATH=\"{}:$PATH\"\n", login_bin.display()),
+        )
+        .unwrap();
+        std::fs::write(zdotdir.join(".zshrc"), "sleep 10\n").unwrap();
+        let fallback =
+            probe_shell_env_for(fake_zsh.to_str().unwrap(), &env, Duration::from_millis(250))
+                .await
+                .expect("fallback to -l -c should succeed after interactive timeout");
+        assert!(
+            std::env::split_paths(OsStr::new(&fallback.path)).any(|p| p == login_bin),
+            "expected login_bin from .zprofile fallback in {:?}",
+            fallback.path
         );
     }
 }

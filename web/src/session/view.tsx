@@ -5,6 +5,7 @@ import { ArrowRightLeftIcon, DownloadIcon, LockIcon, MoreHorizontalIcon, PanelRi
 import { api } from "@/api"
 import { stats, type SessionTotals } from "@/api/stats"
 import { SessionCards } from "@/thread/decision-card"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { HarnessMark } from "@/components/harness-mark"
 import { PlacementWhy } from "@/bot-dispatch"
 import { SessionIdentity } from "@/components/session-identity"
@@ -20,10 +21,9 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useT } from "@/i18n"
 import { lazyView } from "@/lazy"
 import { queueNote, QueueStrip } from "@/queue"
-import { NativeIdLine } from "@/resume"
 import { useHubQuery } from "@/data/use-hub-query"
 import { fmtPct, fmtUsage, fmtUsageCost, fmtUsd } from "@/stats/format"
-import { closedSt, hm, interrupt, sessPatch, sessRemove, sessSend, st, toast, useItem, useSessionQueue, type Sess, useDeviceInventory } from "@/store"
+import { botName, closedSt, hm, interrupt, sessPatch, sessRemove, sessSend, st, toast, useItem, useSessionQueue, type Sess, useDeviceInventory } from "@/store"
 import { Empty, go, openSheet, Page, PANEL_W, Status } from "@/ui"
 import { Composer, type ComposerHandle } from "@/composer"
 import { formatEffortMapping } from "@/effort-picker"
@@ -125,10 +125,18 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
             /* the transcript's column, centred as it is: the composer and the transcript share both edges */
             <div className="mx-auto w-full max-w-[824px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div>
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-tertiary" data-session-runtime>
-                <span data-runtime-harness><SessionIdentity session={s} /></span>
-                {device && <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hidden hover:text-foreground sm:inline" data-runtime-device>{t("views:session.runsOn", { device: device.name })}</a>}
-                <SessionApproval id={k} />
-                <NativeIdLine k={k} label={t("views:session.nativeId")} className="w-auto" />
+                {s.ro ? (
+                  <span data-runtime-harness><SessionIdentity session={s} showNode={false} showStatus={false} /></span>
+                ) : s.b ? (
+                  <span className="inline-flex min-w-0 items-center gap-1.5 text-muted-foreground" data-runtime-bot>
+                    <ActorAvatar actorId={s.b} size={16} />
+                    <span className="truncate">{botName(s.b)}</span>
+                  </span>
+                ) : null}
+                {device
+                  ? <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hover:text-foreground" data-runtime-device>{t("views:session.runsOn", { device: device.name })}</a>
+                  : s.node ? <span data-runtime-device>{t("views:session.runsOn", { device: s.node })}</span> : null}
+                <SessionApproval id={k} showApplied={false} />
                 <span>{t("views:session.effortLabel")} <span className="text-muted-foreground" data-session-effort-mapping>{formatEffortMapping(t, s.effortMapping, s.h, s.reasoningEffort)}</span></span>
                 {/* a reported context is the composer's ring; that nothing is reported is said here */}
                 {!s.ro && !s.contextKnown && <span data-session-ctx-unreported>{t("views:session.ctxLabel")} <span className="text-muted-foreground">{t("views:session.unreported")}</span></span>}

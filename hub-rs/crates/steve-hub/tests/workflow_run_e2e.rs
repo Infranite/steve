@@ -2485,8 +2485,15 @@ async fn review_12_corrupt_options_json_errors_instead_of_silently_defaulting() 
     let call_id = snap.calls[0].id.clone();
     let child_id = snap.attempts[0].child_item_id.clone().unwrap();
     env.fail_child(&child_id, "force requeue").await;
+    // Wait for the async step spawned by child failure to pause the run so it cannot race with
+    // requeue/corruption or still hold `workflow_run_locks` during the post-error assertion.
+    env.wait_for_run_status(&run_id, WfRunStatus::Paused).await;
     env.store
-        .write(|w| WorkflowRuns(w).requeue_call_for_retry(&call_id))
+        .write(|w| {
+            let mut runs = WorkflowRuns(w);
+            runs.requeue_call_for_retry(&call_id)?;
+            runs.resume_run(&run_id)
+        })
         .unwrap();
     steve_store::testkit::workflow_runs::corrupt_call_options(&env.store, &call_id, "{corrupt")
         .unwrap();

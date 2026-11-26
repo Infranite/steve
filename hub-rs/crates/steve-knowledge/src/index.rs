@@ -11,7 +11,10 @@ use std::pin::Pin;
 use futures_util::StreamExt;
 use steve_modules::Modules;
 use steve_store::base::{Level, Visibility};
-use steve_store::knowledge::{ChunkMeta as StoredChunkMeta, Chunks, Documents, IndexChunk};
+use steve_store::knowledge::{
+    ChunkMeta as StoredChunkMeta, Chunks, DocRow, Documents, IndexChunk, MemoryEntries, SourceRole,
+    SourceRow,
+};
 use steve_store::{Result, W, sha};
 use tokio::sync::mpsc;
 
@@ -19,7 +22,6 @@ use crate::chunk::{Chunk, TRUNCATED_ERROR, chunk};
 use crate::extract_text::Extracted;
 use crate::seg::seg;
 use crate::state::Knowledge;
-use steve_store::knowledge::{DocRow, SourceRow};
 
 /// Documents per transaction in the queue worker.
 pub const BATCH: usize = 20;
@@ -120,13 +122,19 @@ pub fn rescope_source(w: &mut W<'_>, source: &SourceRow) -> Result<usize> {
     }
     let mut n = 0;
     for d in Documents(w).docs_of_source(&source.id)? {
-        n += rescope(
-            w,
-            "chunk",
-            &d.id,
-            &d.eff_visibility(source),
-            d.eff_level(source),
-        )?;
+        if source.role == SourceRole::Memory {
+            for e in MemoryEntries(w).active_by_source_path(&source.id, &d.r#ref)? {
+                n += rescope(w, "memory_entry", &e.id, &e.visibility, e.level)?;
+            }
+        } else {
+            n += rescope(
+                w,
+                "chunk",
+                &d.id,
+                &d.eff_visibility(source),
+                d.eff_level(source),
+            )?;
+        }
     }
     Ok(n)
 }
@@ -408,7 +416,11 @@ fn commit_loaded_batch(
                     } else {
                         &doc
                     };
-                    index_document(tx, d, src, ex, now, false)?;
+                    if src.role == SourceRole::Memory && src.kind == "folder" {
+                        crate::memory_file::reconcile_memory_extracted(tx, d, src, ex, now)?;
+                    } else {
+                        index_document(tx, d, src, ex, now, false)?;
+                    }
                 }
                 Loaded::Skipped(why) => {
                     // Title-only: one empty chunk carries the title into the index.
@@ -437,6 +449,9 @@ fn commit_loaded_batch(
                 }
                 Loaded::Failed(why) => fail_doc(tx, &doc, "failed", why, now)?,
                 Loaded::Gone => {
+                    if src.role == SourceRole::Memory {
+                        crate::memory_file::mark_file_deleted(tx, src, &doc.r#ref, now)?;
+                    }
                     remove(tx, "chunk", &doc.id)?;
                     Documents(tx).set_doc_indexed(&doc.id, "", 0, "deleted", None, now)?;
                 }

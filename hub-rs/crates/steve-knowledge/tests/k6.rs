@@ -15,6 +15,7 @@ use steve_store::testkit::knowledge as fixture;
 
 struct Env {
     env: TestEnv,
+    kb: Knowledge,
     app: Router,
 }
 
@@ -23,9 +24,13 @@ fn setup() -> Env {
         r.decision(candidates::SUBJECT, Box::new(MemDecisions));
     });
     let kb = Knowledge::new(|_| {});
-    let app = steve_knowledge::routes(kb).with_state(env.modules.clone());
+    kb.set_folder_policy(steve_knowledge::FolderPolicy::new(
+        env.dir.path(),
+        env.dir.path().join("steve_home"),
+    ));
+    let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
     fixture::seed_steward_subjects(env.store()).expect("seed");
-    Env { env, app }
+    Env { env, kb, app }
 }
 
 fn cx() -> McpCx {
@@ -115,6 +120,7 @@ async fn memories_say_where_they_came_from_and_how_often_they_were_used() {
     fixture::seed_steward_use(e.env.store(), &a).unwrap();
     let r = candidates::remember(
         &e.env.modules,
+        &e.kb,
         &cx(),
         &json!({"text": "Acme 每年三月续签", "kind": "fact", "about": "Acme"}),
     );
@@ -130,16 +136,21 @@ async fn memories_say_where_they_came_from_and_how_often_they_were_used() {
     assert_eq!(mine["origin"]["kind"], "you");
     assert_eq!(mine["origin"]["href"], "");
     assert_eq!(mine["used"], json!({"count": 1, "last": 50}));
-    let cand = list
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["status"] == "candidate")
+    // `steve_remember` now writes silently to file-backed `memory_entries` (zero Inbox confirm cards).
+    let entries = e
+        .env
+        .store()
+        .read(|r| steve_store::knowledge::MemoryEntries(r).list_active_ws(WS))
         .unwrap();
-    assert_eq!(cand["origin"]["kind"], "item");
-    assert_eq!(cand["origin"]["href"], "#/items/ST-12");
-    assert_eq!(cand["origin"]["writer"], "bot_steward");
-    assert_eq!(cand["used"]["count"], 0);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_id, "org_acme");
+    assert_eq!(
+        e.env
+            .store()
+            .read(|r| steve_store::DecisionRows(r).open_confirmations(WS, candidates::SUBJECT))
+            .unwrap(),
+        0
+    );
 
     // the 来源 tab: who writes the memories
     let (s, p) = e.me("GET", "/kb/providers", None).await;
@@ -150,7 +161,7 @@ async fn memories_say_where_they_came_from_and_how_often_they_were_used() {
         .iter()
         .map(|x| x["kind"].as_str().unwrap())
         .collect();
-    assert!(kinds.contains(&"you") && kinds.contains(&"item"), "{p}");
+    assert!(kinds.contains(&"you"), "{p}");
     assert_eq!(p["store"], "sqlite");
 
     // a subject: its memories and where they were used
@@ -194,11 +205,11 @@ async fn a_merge_waits_for_you_and_replaces_all_it_names() {
     let out = e
         .tidy(json!({"op": "merge", "ids": [a, b], "text": "提交信息用中文写", "reason": "两条说的是同一件事"}))
         .unwrap();
-    assert!(out.contains("candidate"), "{out}");
-    // nothing changed yet: the merge is a candidate in 待确认
+    assert!(out.contains("Merged silently"), "{out}");
+    // Silent merge takes effect immediately without opening any Inbox confirmation card.
     assert_eq!(
         (e.status(&a), e.status(&b)),
-        ("confirmed".into(), "confirmed".into())
+        ("stale".into(), "stale".into())
     );
     let ch = e.changes().await;
     assert_eq!(ch[0]["run_id"], "ST-12");
@@ -206,24 +217,11 @@ async fn a_merge_waits_for_you_and_replaces_all_it_names() {
     let merge = &ch[0]["changes"][0];
     assert_eq!(
         (merge["op"].as_str(), merge["state"].as_str()),
-        (Some("merge"), Some("pending"))
+        (Some("merge"), Some("confirmed"))
     );
     assert_eq!(merge["targets"].as_array().unwrap().len(), 2);
     let new = merge["mem"]["id"].as_str().unwrap().to_string();
-
-    let (s, v) = e
-        .me(
-            "POST",
-            "/kb/candidates/resolve",
-            Some(json!({"ids": [new], "choice": "yes"})),
-        )
-        .await;
-    assert_eq!(s, 200, "{v}");
-    assert_eq!(
-        (e.status(&a), e.status(&b), e.status(&new)),
-        ("stale".into(), "stale".into(), "confirmed".into())
-    );
-    assert_eq!(e.changes().await[0]["changes"][0]["state"], "confirmed");
+    assert_eq!(e.status(&new), "confirmed");
 
     // undone: both come back, the merge goes
     let id = merge["id"].as_str().unwrap();
@@ -237,7 +235,7 @@ async fn a_merge_waits_for_you_and_replaces_all_it_names() {
     let (s, _) = e.me("POST", &format!("/kb/changes/{id}/undo"), None).await;
     assert_eq!(s, 409);
 
-    // a merge still waiting, undone: its candidate is ignored
+    // a second silent merge can also be undone cleanly
     e.tidy(json!({"op": "merge", "ids": [a, c], "text": "x", "reason": "r"}))
         .unwrap();
     let ch = e.changes().await;
@@ -245,7 +243,7 @@ async fn a_merge_waits_for_you_and_replaces_all_it_names() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|x| x["state"] == "pending")
+        .find(|x| x["state"] == "confirmed")
         .unwrap()
         .clone();
     let (s, _) = e

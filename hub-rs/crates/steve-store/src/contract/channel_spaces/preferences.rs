@@ -42,6 +42,7 @@ pub struct SpaceSettings {
     pub attention: Option<String>,
     pub reply_as_you: Option<String>,
     pub bot_notices: Option<String>,
+    pub ai_mark: Option<bool>,
 }
 
 pub fn settings(r: &mut impl Read, space: &str) -> Result<Option<SpaceSettings>> {
@@ -61,6 +62,7 @@ pub fn settings(r: &mut impl Read, space: &str) -> Result<Option<SpaceSettings>>
                 ("p", "attention"),
                 ("p", "reply_as_you"),
                 ("p", "bot_notices"),
+                ("p", "ai_mark"),
             ])
             .from_as("space_settings", "s")
             .join_as(
@@ -87,6 +89,7 @@ pub fn settings(r: &mut impl Read, space: &str) -> Result<Option<SpaceSettings>>
                 attention: row.get(10)?,
                 reply_as_you: row.get(11)?,
                 bot_notices: row.get(12)?,
+                ai_mark: row.get::<Option<i64>>(13)?.map(|v| v != 0),
             })
         },
     )
@@ -123,6 +126,7 @@ pub enum Preference<'a> {
     ReplyAsYou(&'a str),
     BotNotices(&'a str),
     Voice(Option<&'a str>),
+    AiMark(Option<bool>),
 }
 
 pub fn set(w: &mut W<'_>, ws: &str, space: &str, change: Preference<'_>, now: i64) -> Result<()> {
@@ -131,6 +135,7 @@ pub fn set(w: &mut W<'_>, ws: &str, space: &str, change: Preference<'_>, now: i6
         Preference::ReplyAsYou(value) => ("reply_as_you", value.into()),
         Preference::BotNotices(value) => ("bot_notices", value.into()),
         Preference::Voice(value) => ("voice", value.into()),
+        Preference::AiMark(value) => ("ai_mark", value.map(i64::from).into()),
     };
     w.exec(
         Query::insert()

@@ -9,20 +9,20 @@ import { useMemo, useState, type ReactNode } from "react"
 import {
   ActivityIcon, ArrowUpCircleIcon, CheckCircle2Icon, ChevronRightIcon, CopyIcon, CpuIcon, DownloadIcon, FolderIcon,
   KeyRoundIcon, LoaderIcon, LockIcon, MessageCircleIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlusIcon,
-  RotateCcwIcon, ShieldAlertIcon, ShieldCheckIcon, StethoscopeIcon, TerminalIcon, WifiOffIcon,
+  RotateCcwIcon, ShieldAlertIcon, ShieldCheckIcon, StethoscopeIcon, TerminalIcon, WifiOffIcon, XIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
 import { CodeBlock } from "@/components/ui/code-block"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
+import { Switch } from "@/components/affect/switch-clean"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { RuntimeSetupPanel } from "@/runtime-setup"
+import { SetSelect } from "@/settings-controls"
 import { st, toast, refresh, useStore, deviceWorkEvidence } from "@/store"
-import { api } from "@/api"
+import { api, type AddHarnessModes, type AddHarnessProperties } from "@/api"
 import { go, Page, Empty, Loading } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
 import { useT } from "@/i18n"
@@ -308,17 +308,19 @@ function OverviewNodeTab({
   const contextChoice = v.node?.owner_context == null
     ? (contextDefault ? t("shell:devices.ownerContext.inherit", { value: t(`shell:devices.ownerContext.${contextDefault}`) }) : t("devices:context.inheritPlain"))
     : t(`shell:devices.ownerContext.${v.node.owner_context ? "on" : "off"}`)
-  const isRemoteMac = !v.local && v.node?.host?.os === "macos"
-  const fileAccess = isRemoteMac ? v.node?.host?.file_access : undefined
-  const accessText = v.local
-    ? t("devices:nodeOverview.summaryAccessLocal", { cfg: contextChoice })
-    : fileAccess?.status === "missing"
+  const isMac = v.node?.host?.os === "macos" || (!v.node?.host && hostOf(v).kind === "mac")
+  const fileAccess = isMac && v.linked && v.node?.host?.file_access?.status !== "not_applicable"
+    ? v.node?.host?.file_access
+    : undefined
+  const accessText = isMac && v.node?.host?.file_access?.status !== "not_applicable"
+    ? fileAccess?.status === "missing"
       ? t("devices:nodeOverview.summaryAccessMissing")
       : fileAccess?.status === "granted"
         ? t("devices:nodeOverview.summaryAccessGranted", { cfg: contextChoice })
-        : isRemoteMac
-          ? t("devices:nodeOverview.summaryAccessUnknown", { cfg: contextChoice })
-          : t("devices:nodeOverview.summaryAccessOther", { cfg: contextChoice })
+        : t("devices:nodeOverview.summaryAccessUnknown", { cfg: contextChoice })
+    : v.local
+      ? t("devices:nodeOverview.summaryAccessLocal", { cfg: contextChoice })
+      : t("devices:nodeOverview.summaryAccessOther", { cfg: contextChoice })
   const versionText = up.kind === "running"
     ? t("devices:nodeOverview.summaryVersionUpgrading", { to: up.run.version })
     : up.kind === "failed"
@@ -478,7 +480,7 @@ function HarnessNodeTab({
         )
       })}
       <NodeHarnesses v={v} actions={actions} onOpenTab={onOpenTab}>
-        {v.local && !upgradeOnly && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}
+        {v.local && !upgradeOnly && v.device?.can_configure && !st.down && <AddHarness />}
       </NodeHarnesses>
     </>
   )
@@ -530,17 +532,63 @@ function AccessNodeTab({
 
 function NodeFileAccess({ v, actions }: { v: NodeView; actions: NodeActions }) {
   const t = useT()
-  const isRemoteMac = !!v.node && !v.local && v.node.host?.os === "macos"
-  const report = v.linked ? v.node?.host?.file_access : undefined
-  const status = report?.status ?? "unknown"
   const host = hostOf(v)
+  const report = v.linked ? v.node?.host?.file_access : undefined
+  const isMac = v.node?.host?.os === "macos" || (!v.node?.host && host.kind === "mac")
 
-  if (!isRemoteMac) {
+  if (!isMac || report?.status === "not_applicable") {
     return (
-      <DCard icon={<FolderIcon />} title={t("devices:fileAccess.title")} data-node-file-access={v.local ? "local" : "not-applicable"}>
+      <DCard icon={<FolderIcon />} title={t("devices:fileAccess.title")} data-node-file-access="not-applicable">
         <p className="px-5 pb-5 type-callout text-muted-foreground">
-          {v.local ? t("devices:fileAccess.localNote") : t("devices:fileAccess.nonMacNote", { os: host.os || "Linux" })}
+          {t("devices:fileAccess.nonMacNote", { os: host.os || "Linux" })}
         </p>
+      </DCard>
+    )
+  }
+
+  const status = report?.status ?? "unknown"
+  const fda = report?.full_disk_access
+  const locations = report?.locations ?? []
+  const repairCmd = v.local ? "steve hub file-access" : "steve node file-access"
+
+  if (status === "granted") {
+    return (
+      <DCard
+        icon={<FolderIcon />}
+        title={t("devices:fileAccess.title")}
+        action={
+          <div className="flex items-center gap-2">
+            <Badge tone="success" size="sm" dot>{t("devices:fileAccess.state.granted")}</Badge>
+            <Button size="xs" variant="ghost" disabled={actions.fileAccessBusy || !v.linked} onClick={() => void actions.recheckFileAccess()} data-node-file-access-recheck>
+              {actions.fileAccessBusy && <Spinner className="size-3" />}{t("devices:fileAccess.recheckShort")}
+            </Button>
+          </div>
+        }
+        data-node-file-access="granted"
+      >
+        <div className="flex flex-wrap items-center gap-2 px-5 pb-4 type-footnote">
+          {fda && fda !== "not_applicable" && (
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-success/8 px-2.5 py-1 text-foreground" data-file-access-fda={fda}>
+              <span>{t("devices:fileAccess.fullDiskAccess")}</span>
+              <Badge tone={fda === "granted" ? "success" : "neutral"} size="sm">{t(`devices:fileAccess.state.${fda}`)}</Badge>
+            </span>
+          )}
+          {locations.map(({ location, status: locStatus, path }, idx) => (
+            <span
+              key={`${location}:${path ?? idx}`}
+              className="inline-flex items-center gap-1.5 rounded-md bg-success/8 px-2.5 py-1 text-foreground"
+              data-file-access-location={location}
+              data-file-access-path={path || undefined}
+              title={path}
+            >
+              <span>{t(`devices:fileAccess.location.${location}`)}</span>
+              <Badge tone="success" size="sm">{t(`devices:fileAccess.state.${locStatus}`)}</Badge>
+            </span>
+          ))}
+          {!locations.length && (!fda || fda === "not_applicable") && (
+            <p className="text-muted-foreground">{t("devices:fileAccess.noneNeeded")}</p>
+          )}
+        </div>
       </DCard>
     )
   }
@@ -549,18 +597,34 @@ function NodeFileAccess({ v, actions }: { v: NodeView; actions: NodeActions }) {
     <DCard
       icon={<FolderIcon />}
       title={t("devices:fileAccess.title")}
-      action={<Badge tone={status === "granted" ? "success" : status === "missing" ? "warning" : "neutral"} size="sm" dot>{t(`devices:fileAccess.state.${status}`)}</Badge>}
+      action={<Badge tone={status === "missing" ? "warning" : "neutral"} size="sm" dot>{t(`devices:fileAccess.state.${status}`)}</Badge>}
       data-node-file-access={status}
     >
       <div className="space-y-3 px-5 pb-5 type-callout">
-        {!report?.locations.length && (
-          <p className="text-muted-foreground">{report?.status === "granted" ? t("devices:fileAccess.noneNeeded") : t(`devices:fileAccess.state.${status}`)}</p>
+        {fda && fda !== "not_applicable" && (
+          <div className="flex items-center justify-between gap-2 rounded-lg bg-muted/50 px-3 py-2" data-file-access-fda={fda}>
+            <span className="text-foreground">{t("devices:fileAccess.fullDiskAccess")}</span>
+            <Badge tone={fda === "granted" ? "success" : fda === "missing" ? "warning" : "neutral"} size="sm">
+              {t(`devices:fileAccess.state.${fda}`)}
+            </Badge>
+          </div>
         )}
-        {!!report?.locations.length && (
+        {!locations.length && (!fda || fda === "not_applicable") && (
+          <p className="text-muted-foreground">{t(`devices:fileAccess.state.${status}`)}</p>
+        )}
+        {!!locations.length && (
           <ul className="flex flex-col gap-1.5 text-muted-foreground">
-            {report.locations.map(({ location, status: locStatus }) => (
-              <li key={location} className="flex items-center justify-between gap-2 rounded-lg bg-muted/50 px-3 py-2" data-file-access-location={location}>
-                <span className="text-foreground">{t(`devices:fileAccess.location.${location}`)}</span>
+            {locations.map(({ location, status: locStatus, path }, idx) => (
+              <li
+                key={`${location}:${path ?? idx}`}
+                className="flex items-center justify-between gap-2 rounded-lg bg-muted/50 px-3 py-2"
+                data-file-access-location={location}
+                data-file-access-path={path || undefined}
+              >
+                <div className="min-w-0">
+                  <div className="text-foreground">{t(`devices:fileAccess.location.${location}`)}</div>
+                  {path && <div className="break-all font-mono type-footnote text-muted-foreground">{path}</div>}
+                </div>
                 <Badge tone={locStatus === "granted" ? "success" : locStatus === "missing" ? "warning" : "neutral"} size="sm">
                   {t(`devices:fileAccess.state.${locStatus}`)}
                 </Badge>
@@ -568,10 +632,16 @@ function NodeFileAccess({ v, actions }: { v: NodeView; actions: NodeActions }) {
             ))}
           </ul>
         )}
+        {report?.executable_path && (
+          <div className="rounded-lg bg-muted/40 px-3 py-2 type-footnote" data-file-access-executable>
+            <div className="text-muted-foreground">{t("devices:fileAccess.executable")}</div>
+            <div className="mt-0.5 break-all font-mono text-foreground">{report.executable_path}</div>
+          </div>
+        )}
         {status === "missing" && (
           <div className="space-y-2">
-            <p className="text-muted-foreground">{t("devices:fileAccess.repair")}</p>
-            <CodeBlock code="steve node file-access" language="bash" />
+            <p className="text-muted-foreground">{t(v.local ? "devices:fileAccess.repairLocal" : "devices:fileAccess.repair")}</p>
+            <CodeBlock code={repairCmd} language="bash" />
           </div>
         )}
         <Button size="sm" variant="outline" disabled={actions.fileAccessBusy || !v.linked} onClick={() => void actions.recheckFileAccess()} data-node-file-access-recheck>
@@ -785,31 +855,179 @@ function Rename({ v, onClose, onDone }: { v: NodeView; onClose: () => void; onDo
   </DialogContent></Dialog>
 }
 
-/** declares a harness adapter of one's own in the Hub's manifest: an id, a name, its command, its arguments, and
- * (advanced) its declared properties as JSON. It is used once the Hub restarts. */
+const ADD_HARNESS_MODE_CHOICES = [
+  { v: "__default", lKey: "shell:devices.harness.modeDefault" },
+  { v: "default", l: "default" },
+  { v: "plan", l: "plan" },
+  { v: "acceptEdits", l: "acceptEdits" },
+  { v: "auto", l: "auto" },
+  { v: "bypassPermissions", l: "bypassPermissions" },
+] as const
+
+/** Declares a custom ACP harness adapter in the Hub's manifest using strongly-typed controls (no raw JSON). */
 function AddHarness() {
   const t = useT()
   const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("")
-  const [id, setId] = useState(""), [name, setName] = useState(""), [command, setCommand] = useState(""), [args, setArgs] = useState(""), [props, setProps] = useState("")
+  const [id, setId] = useState(""), [name, setName] = useState(""), [command, setCommand] = useState("")
+  const [args, setArgs] = useState<string[]>([]), [argDraft, setArgDraft] = useState("")
+  const [modeAsk, setModeAsk] = useState("default")
+  const [modePlan, setModePlan] = useState("plan")
+  const [modeAuto, setModeAuto] = useState("auto")
+  const [nestedSandbox, setNestedSandbox] = useState(true)
+  const [supportsResume, setSupportsResume] = useState(false)
+  const [resumeCli, setResumeCli] = useState("")
+
   if (!open) return <Button size="sm" variant="outline" onClick={() => setOpen(true)} data-add-harness><PlusIcon />{t("shell:devices.harness.add")}</Button>
+
+  const modeOptions = ADD_HARNESS_MODE_CHOICES.map((opt) => ({
+    v: opt.v,
+    l: "lKey" in opt ? t(opt.lKey) : opt.l,
+  }))
+
+  const addArg = () => {
+    const trimmed = argDraft.trim()
+    if (!trimmed) return
+    setArgs((cur) => [...cur, trimmed])
+    setArgDraft("")
+  }
+  const removeArg = (index: number) => setArgs((cur) => cur.filter((_, i) => i !== index))
+
   const save = async () => {
     setBusy(true); setError("")
     try {
-      let properties: Record<string, unknown> | undefined
-      if (props.trim()) { try { properties = JSON.parse(props) } catch { throw new Error(t("shell:devices.harness.badJson")) } }
-      await api.addHarness({ id: id.trim(), name: name.trim() || undefined, command: command.trim(), args: args.split(/\s+/).filter(Boolean), properties })
-      toast(t("shell:devices.harness.saved")); setOpen(false); await refresh()
+      const pendingArg = argDraft.trim()
+      const finalArgs = pendingArg ? [...args, pendingArg] : args
+      const modes: AddHarnessModes = {}
+      if (modeAsk !== "__default") modes.ask = modeAsk
+      if (modePlan !== "__default") modes.plan = modePlan
+      if (modeAuto !== "__default") modes.auto = modeAuto
+      const properties: AddHarnessProperties = {
+        nested_sandbox: nestedSandbox,
+        probe_initialize: true,
+        ...(Object.keys(modes).length ? { modes } : {}),
+        ...(supportsResume && resumeCli.trim() ? { resume_cli: resumeCli.trim() } : {}),
+      }
+      await api.addHarness({
+        id: id.trim(),
+        name: name.trim() || undefined,
+        command: command.trim(),
+        args: finalArgs,
+        properties,
+      })
+      toast(t("shell:devices.harness.saved"))
+      setOpen(false)
+      setId(""); setName(""); setCommand(""); setArgs([]); setArgDraft("")
+      setModeAsk("default"); setModePlan("plan"); setModeAuto("auto")
+      setNestedSandbox(true); setSupportsResume(false); setResumeCli("")
+      await refresh()
     } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
-  return <div className="anim-in flex flex-col gap-2 rounded-xl bg-muted/60 p-4" data-harness-form>
-    <div className="mb-1 type-callout text-muted-foreground">{t("shell:devices.harness.intro")}</div>
-    <Input placeholder={t("shell:devices.harness.id")} value={id} onChange={(e) => setId(e.target.value)} data-harness-id />
-    <Input placeholder={t("shell:devices.harness.name")} value={name} onChange={(e) => setName(e.target.value)} />
-    <Input placeholder={t("shell:devices.harness.command")} value={command} onChange={(e) => setCommand(e.target.value)} className="font-mono" data-harness-command />
-    <Input placeholder={t("shell:devices.harness.args")} value={args} onChange={(e) => setArgs(e.target.value)} className="font-mono" />
-    <details><summary className="cursor-pointer type-callout text-muted-foreground hover:text-foreground">{t("shell:devices.harness.advanced")}</summary>
-      <Textarea placeholder='{"modes": {"ask": "default"}, "nested_sandbox": true}' value={props} onChange={(e) => setProps(e.target.value)} className="mt-1 min-h-20 font-mono" /></details>
-    {error && <div className="type-callout text-attention" role="alert">{error}</div>}
-    <div className="mt-1 flex gap-2"><Button size="sm" disabled={busy || !id.trim() || !command.trim()} onClick={() => void save()} data-harness-save>{busy && <Spinner className="size-3" />}{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => setOpen(false)}>{t("common:action.cancel")}</Button></div>
-  </div>
+
+  return (
+    <div className="anim-in flex flex-col gap-3 rounded-xl bg-muted/60 p-4" data-harness-form>
+      <div className="type-callout text-muted-foreground">{t("shell:devices.harness.intro")}</div>
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        <label className="flex min-w-0 flex-col gap-1">
+          <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.idLabel")}</span>
+          <Input placeholder={t("shell:devices.harness.id")} value={id} onChange={(e) => setId(e.target.value)} data-harness-id />
+        </label>
+        <label className="flex min-w-0 flex-col gap-1">
+          <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.nameLabel")}</span>
+          <Input placeholder={t("shell:devices.harness.name")} value={name} onChange={(e) => setName(e.target.value)} data-harness-name />
+        </label>
+      </div>
+      <label className="flex min-w-0 flex-col gap-1">
+        <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.commandLabel")}</span>
+        <Input placeholder={t("shell:devices.harness.command")} value={command} onChange={(e) => setCommand(e.target.value)} className="font-mono" data-harness-command />
+      </label>
+      <div className="flex min-w-0 flex-col gap-1.5" data-harness-args-field>
+        <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.argsLabel")}</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <Input
+            placeholder={t("shell:devices.harness.argsPlaceholder")}
+            value={argDraft}
+            onChange={(e) => setArgDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addArg() } }}
+            className="min-w-0 flex-1 font-mono"
+            data-harness-arg-input
+          />
+          <Button type="button" size="sm" variant="outline" disabled={!argDraft.trim()} onClick={addArg} data-harness-arg-add>
+            <PlusIcon />{t("common:action.add")}
+          </Button>
+        </div>
+        {args.length > 0 && (
+          <ul className="flex flex-wrap gap-1.5" data-harness-args-list>
+            {args.map((arg, idx) => (
+              <li key={`${arg}:${idx}`} className="inline-flex items-center gap-1 rounded-md bg-background/80 px-2 py-1 font-mono type-footnote text-foreground ring-1 ring-border/70" data-harness-arg-item={arg}>
+                <span className="break-all">{arg}</span>
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground"
+                  aria-label={t("shell:devices.harness.removeArg", { arg })}
+                  onClick={() => removeArg(idx)}
+                  data-harness-arg-remove={idx}
+                >
+                  <XIcon className="size-3" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="flex min-w-0 flex-col gap-2.5 rounded-lg bg-background/60 p-3 ring-1 ring-border/60" data-harness-capabilities>
+        <div className="type-footnote font-medium text-foreground">{t("shell:devices.harness.modesTitle")}</div>
+        <div className="grid gap-2.5 sm:grid-cols-3">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.modeMapAsk")}</span>
+            <SetSelect wide testId="harness-mode-ask" label={t("shell:devices.harness.modeMapAsk")} value={modeAsk} onChange={setModeAsk} options={modeOptions} />
+          </div>
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.modeMapPlan")}</span>
+            <SetSelect wide testId="harness-mode-plan" label={t("shell:devices.harness.modeMapPlan")} value={modePlan} onChange={setModePlan} options={modeOptions} />
+          </div>
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.modeMapAuto")}</span>
+            <SetSelect wide testId="harness-mode-auto" label={t("shell:devices.harness.modeMapAuto")} value={modeAuto} onChange={setModeAuto} options={modeOptions} />
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 border-t border-border/60 pt-2.5">
+          <Switch
+            placement="end"
+            label={t("shell:devices.harness.nestedSandbox")}
+            description={t("shell:devices.harness.nestedSandboxHint")}
+            checked={nestedSandbox}
+            onChange={(e) => setNestedSandbox(e.currentTarget.checked)}
+            data-harness-nested-sandbox
+          />
+          <Switch
+            placement="end"
+            label={t("shell:devices.harness.supportsResume")}
+            description={t("shell:devices.harness.supportsResumeHint")}
+            checked={supportsResume}
+            onChange={(e) => setSupportsResume(e.currentTarget.checked)}
+            data-harness-supports-resume
+          />
+          {supportsResume && (
+            <label className="flex min-w-0 flex-col gap-1 pt-1">
+              <span className="type-footnote text-muted-foreground">{t("shell:devices.harness.resumeCliLabel")}</span>
+              <Input
+                placeholder={t("shell:devices.harness.resumeCliPlaceholder")}
+                value={resumeCli}
+                onChange={(e) => setResumeCli(e.target.value)}
+                className="font-mono"
+                data-harness-resume-cli
+              />
+            </label>
+          )}
+        </div>
+      </div>
+      {error && <div className="type-callout text-attention" role="alert">{error}</div>}
+      <div className="mt-1 flex gap-2">
+        <Button size="sm" disabled={busy || !id.trim() || !command.trim()} onClick={() => void save()} data-harness-save>
+          {busy && <Spinner className="size-3" />}{t("common:action.save")}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>{t("common:action.cancel")}</Button>
+      </div>
+    </div>
+  )
 }

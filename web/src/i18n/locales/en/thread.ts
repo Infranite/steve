@@ -256,6 +256,7 @@ export default {
   },
   chanOut: {
     draftBubble: "Draft reply",
+    draftPart: "Topic {{index}} / {{total}}",
     send: "Send",
     withReason: "{{label}}: {{reason}}",
     notSent: "Not sent to chat",

@@ -216,6 +216,8 @@ impl Assembly {
             media: Vec::new(),
             history: Vec::new(),
             connectors: Vec::new(),
+            links: Vec::new(),
+            syntaxes: Vec::new(),
             mail: Vec::new(),
             calendars: Vec::new(),
             event_sources: Vec::new(),
@@ -340,6 +342,8 @@ pub struct Declare<'a> {
     pub(crate) media: Vec<Arc<dyn MediaFetch>>,
     pub(crate) history: Vec<Arc<dyn steve_channels::ext::HistoryRead>>,
     pub(crate) connectors: Vec<Arc<dyn steve_channels::ext::ConnectorTools>>,
+    pub(crate) links: Vec<Arc<dyn steve_channels::ext::PlatformLinks>>,
+    pub(crate) syntaxes: Vec<Arc<dyn steve_channels::ext::PlatformSyntax>>,
     pub(crate) mail: Vec<Arc<dyn steve_mail::MailAdapter>>,
     pub(crate) calendars: Vec<Arc<dyn steve_calendar::CalendarSource>>,
     pub(crate) event_sources: Vec<Arc<dyn steve_flow::EventAdapter>>,
@@ -393,6 +397,8 @@ impl Declare<'_> {
         self.media.extend(side.media);
         self.history.extend(side.history);
         self.connectors.extend(side.connector);
+        self.links.extend(side.links);
+        self.syntaxes.extend(side.syntax);
         Ok(())
     }
 

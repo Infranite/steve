@@ -2,7 +2,7 @@
 "use client";
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
-import { t, useT } from "@/i18n";
+import { useT } from "@/i18n";
 
 /*
  * Select – a single self-contained file, clean style.
@@ -84,7 +84,7 @@ export function Select({
   ref,
   ...data
 }: SelectProps) {
-  useT(); // Steve: the default placeholder follows the current language
+  const t = useT();
   const placeholder = placeholderProp ?? t("common:picker.choose");
   const autoId = useId();
   const triggerId = id ?? `${autoId}-trigger`;

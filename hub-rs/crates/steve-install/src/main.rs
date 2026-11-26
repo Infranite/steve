@@ -127,10 +127,10 @@ fn setup_command(mut args: Vec<String>) -> Result<i32> {
     }
     if options.reconfigure {
         setup::reconfigure_existing(options)?;
+        Ok(0)
     } else {
-        setup::run(&bundle()?, options)?;
+        setup::run(&bundle()?, options)
     }
-    Ok(0)
 }
 
 fn service_command(command: &str, mut args: Vec<String>) -> Result<i32> {
@@ -172,28 +172,33 @@ fn service_command(command: &str, mut args: Vec<String>) -> Result<i32> {
         bail!("unknown service arguments");
     }
     anyhow::ensure!(
-        !matches!(action.as_str(), "enable-boot" | "file-access")
+        action != "enable-boot"
             || (cfg!(target_os = "macos") && command == "node" && release.is_none()),
-        "{action} is only for a prepared macOS Node; it takes no --release"
+        "enable-boot is only for a prepared macOS Node; it takes no --release"
+    );
+    anyhow::ensure!(
+        action != "file-access" || release.is_none(),
+        "file-access takes no --release"
     );
     anyhow::ensure!(
         action != "refresh-env" || release.is_none(),
         "refresh-env takes no --release"
     );
     if action == "file-access" {
-        steve_install::service::file_access::guide(&home, false, json)?;
-        return Ok(0);
+        let outcome =
+            steve_install::service::file_access::guide_for_role(command, &home, false, json)?;
+        return Ok(outcome.exit_code());
     }
     let mut service = steve_install::service::Service::new(&command, &home, label.as_deref())?;
     let mut report = service.dispatch(&action, release.as_deref(), wait)?;
-    let guide = action == "enable-boot"
-        && report["registered_now"] == true
-        && !json
-        && std::io::stdin().is_terminal()
-        && std::io::stdout().is_terminal();
+    let guide = action == "enable-boot" && report["registered_now"] == true && !json;
     print_service_report(command, &action, &home, label.as_deref(), &mut report, json)?;
     if guide {
-        steve_install::service::file_access::guide(&home, true, false)?;
+        let outcome =
+            steve_install::service::file_access::guide_for_role("node", &home, true, false)?;
+        if report["ok"] != false && outcome.exit_code() != 0 {
+            return Ok(outcome.exit_code());
+        }
     }
     Ok(if report["ok"] == false { 1 } else { 0 })
 }

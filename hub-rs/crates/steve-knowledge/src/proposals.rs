@@ -16,29 +16,33 @@ use steve_store::{Decision, DecisionRows, Read, References, W};
 
 use crate::candidates::{EVIDENCE_MAX, Origin};
 
-/// `subject_type` of project `AGENTS.md` proposal decisions.
+/// `subject_type` of project `AGENTS.md` / `SKILL.md` proposal decisions.
 pub const SUBJECT: &str = "agents_proposal";
 /// `project_proposals.kind` for `AGENTS.md` update suggestions.
 pub const KIND_AGENTS_MD: &str = "agents_md";
+/// `project_proposals.kind` for cross-repo reusable `SKILL.md` methodology suggestions.
+pub const KIND_SKILL_MD: &str = "skill_md";
 const NOUN: &str = "提议";
 
 /// A proposal ready to be persisted by extraction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewProposal {
-    pub project_id: String,
+    pub project_id: Option<String>,
     pub kind: String,
+    pub target_path: String,
     pub text: String,
     pub reason: String,
     pub evidence: String,
 }
 
-/// Public REST shape for one `AGENTS.md` proposal (`GET /kb/proposals`).
+/// Public REST shape for one `AGENTS.md` or `SKILL.md` proposal (`GET /kb/proposals`).
 #[derive(Debug, Clone, Serialize)]
 pub struct ProposalOut {
     pub id: String,
-    pub project_id: String,
+    pub project_id: Option<String>,
     pub project_name: String,
     pub kind: String,
+    pub target_path: String,
     pub text: String,
     pub reason: String,
     pub evidence: String,
@@ -70,14 +74,18 @@ fn origin_href(kind: &str, id: Option<&str>) -> String {
 }
 
 pub(crate) fn proposal_out(c: &mut impl Read, p: &ProjectProposal) -> ApiResult<ProposalOut> {
-    let project_name = References(c)
-        .name(&ObjRef::new("project", &p.project_id))?
-        .unwrap_or_default();
+    let project_name = match p.project_id.as_deref() {
+        Some(pid) => References(c)
+            .name(&ObjRef::new("project", pid))?
+            .unwrap_or_default(),
+        None => steve_i18n::t!("knowledge.proposal.skill_target"),
+    };
     Ok(ProposalOut {
         id: p.id.clone(),
         project_id: p.project_id.clone(),
         project_name,
         kind: p.kind.clone(),
+        target_path: p.target_path.clone(),
         text: p.text.clone(),
         reason: p.reason.clone(),
         evidence: p.evidence.clone(),
@@ -93,15 +101,25 @@ pub(crate) fn proposal_out(c: &mut impl Read, p: &ProjectProposal) -> ApiResult<
     })
 }
 
-/// Persists a project `AGENTS.md` proposal and opens its `confirm` decision.
+/// Persists a project `AGENTS.md` or cross-repo `SKILL.md` proposal and opens its `confirm` decision.
 pub fn propose_in(tx: &mut W<'_>, o: &Origin, p: &NewProposal) -> ApiResult<ProjectProposal> {
     let evidence = cut(&p.evidence, EVIDENCE_MAX);
     let origin_id = (!o.id.is_empty()).then_some(o.id.as_str());
+    let target_path = if p.target_path.is_empty() {
+        if p.kind == KIND_SKILL_MD {
+            "SKILL.md"
+        } else {
+            "AGENTS.md"
+        }
+    } else {
+        p.target_path.as_str()
+    };
     let mut row = ProjectProposals(tx).create(
         &o.ws,
         &NewProjectProposal {
-            project_id: &p.project_id,
+            project_id: p.project_id.as_deref(),
             kind: &p.kind,
+            target_path,
             text: &p.text,
             reason: &p.reason,
             evidence: &evidence,
@@ -112,10 +130,13 @@ pub fn propose_in(tx: &mut W<'_>, o: &Origin, p: &NewProposal) -> ApiResult<Proj
             created_by: &o.user,
         },
     )?;
-    let project_name = References(tx)
-        .name(&ObjRef::new("project", &p.project_id))?
-        .unwrap_or_else(|| p.project_id.clone());
-    let mut draft = format!("项目：{project_name}\n目标文件：AGENTS.md");
+    let target_label = match p.project_id.as_deref() {
+        Some(pid) => References(tx)
+            .name(&ObjRef::new("project", pid))?
+            .unwrap_or_else(|| pid.to_string()),
+        None => steve_i18n::stored(|| steve_i18n::t!("knowledge.proposal.skill_target")),
+    };
+    let mut draft = format!("项目：{target_label}\n目标文件：{target_path}");
     if !p.reason.trim().is_empty() {
         draft.push_str(&format!("\n为什么值得写入：{}", p.reason.trim()));
     }
@@ -125,7 +146,7 @@ pub fn propose_in(tx: &mut W<'_>, o: &Origin, p: &NewProposal) -> ApiResult<Proj
     if !evidence.is_empty() {
         draft.push_str(&format!("\n原话：{evidence}"));
     }
-    let question = format!("建议写入 {project_name} 的 AGENTS.md：{}", p.text);
+    let question = format!("建议写入 {target_label} 的 {target_path}：{}", p.text);
     let mut nd = decisions::confirm(&o.ws, SUBJECT, &row.id, &question, &o.writer);
     nd.draft = Some(draft);
     nd.session_id = o.session_id.clone();

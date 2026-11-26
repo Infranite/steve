@@ -151,12 +151,41 @@ fn state(h: &H, message: &str) -> Value {
     inspect::messages::chan_reaction_state_by_message(h.env.store(), message).unwrap()
 }
 
+fn activate_bot_group(h: &H, ext: &str, name: &str, external: bool) {
+    let now = h.ch.now();
+    h.env
+        .store()
+        .write(|tx| {
+            spaces::locate_or_create(
+                tx,
+                &spaces::NewSpace {
+                    ws: WS,
+                    system_id: FakeChannel::SYSTEM,
+                    connection_id: &h.bot,
+                    kind: SpaceKind::Group,
+                    external_id: ext,
+                    name,
+                    member_count: 0,
+                    has_external: external,
+                    muted: false,
+                    now,
+                    platform: Some(FakeChannel::SYSTEM),
+                },
+            )
+        })
+        .expect("activate bot group");
+}
+
 async fn setup(with_thread: bool) -> H {
     setup_answering(with_thread, REPLY).await
 }
 
 /// [`setup`] whose composer answers `composed` (the fake gateway keeps its first script per prefix).
 async fn setup_answering(with_thread: bool, composed: &str) -> H {
+    setup_with_groups(with_thread, composed, true).await
+}
+
+async fn setup_with_groups(with_thread: bool, composed: &str, preseed_bot_groups: bool) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
     let disclosure = Disclosure::new();
@@ -238,6 +267,14 @@ async fn setup_answering(with_thread: bool, composed: &str) -> H {
         &h.bot.clone(),
         json!([{"when": {"kind": "mention_or_dm"}, "act": "reply"}]),
     );
+    // Pre-configure active bot groups for IM conversation tests (new bot groups default to silent
+    // record until enabled; #213).
+    if preseed_bot_groups {
+        for (ext, name, external) in [("C_OPS", "运维群", false), ("C_ACME", "Acme 客户群", true)]
+        {
+            activate_bot_group(&h, ext, name, external);
+        }
+    }
     h.env.gateway.script(CHECK_HEAD, PASS);
     h.env.gateway.script(H_SAFETY, composed);
     h
@@ -1183,6 +1220,7 @@ async fn a_group_with_only_you_recorded_is_not_owner_only() {
     let t = h.thread.clone().unwrap();
     h.fake
         .space("G_ME", "新群", SpaceKind::Group, false, &[("upx", "我")]);
+    activate_bot_group(&h, "G_ME", "新群", false);
     push(
         &h,
         &h.bot.clone(),
@@ -1263,6 +1301,7 @@ async fn only_the_owner_starts_work_from_a_chat() {
         false,
         &[("upx", "我"), ("uli", "李雷")],
     );
+    activate_bot_group(&h, "G_W", "工作群", false);
     push(
         &h,
         &h.bot.clone(),
@@ -1363,6 +1402,7 @@ async fn the_conversation_card_says_who_asks_and_who_listens() {
         false,
         &[("upx", "我"), ("uli", "李雷")],
     );
+    activate_bot_group(&h, "G_C", "客户群", false);
     push(
         &h,
         &h.bot.clone(),
@@ -2677,7 +2717,7 @@ fn out_texts(h: &H) -> Vec<String> {
 /// composer's reply is a draft for your approval, and nothing reacts as you on the sender's message.
 #[tokio::test(flavor = "multi_thread")]
 async fn on_your_account_a_message_never_reaches_the_router() {
-    let h = setup(true).await;
+    let h = setup_with_groups(true, REPLY, false).await;
     let t = h.thread.clone().unwrap();
     let i = push(
         &h,
@@ -2848,7 +2888,7 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
 /// handoff to you say nothing in the space (they reach you in Steve).
 #[tokio::test(flavor = "multi_thread")]
 async fn on_your_account_no_receipt_is_said_as_you() {
-    let h = setup(false).await;
+    let h = setup_with_groups(false, REPLY, false).await;
     let me = h.me.clone();
     set_rules(
         &h,

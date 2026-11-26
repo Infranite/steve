@@ -55,8 +55,12 @@ async fn open_url(
 ) -> ApiResult<Json<Value>> {
     let v = viewer(&ch, &who)?;
     let ids = [id.clone()];
-    let mut urls = crate::open_link::message_urls(ch.store(), &v, &ids)?;
-    Ok(Json(json!({ "url": urls.remove(&id) })))
+    let mut links = crate::open_link::message_links(ch.store(), &v, &ids)?;
+    let link = links.remove(&id);
+    Ok(Json(json!({
+        "url": link.as_ref().map(|l| l.url.as_str()),
+        "provider": link.as_ref().map(|l| l.provider.as_str()),
+    })))
 }
 
 async fn authorization(
@@ -202,7 +206,7 @@ fn sender_name(
         Some(id) => steve_store::accounts::display_name(db, id)?,
         None => None,
     };
-    let visible_name = |n: &String| !n.trim().is_empty() && !n.starts_with("ou_");
+    let visible_name = |n: &String| !crate::context::raw_name(n);
     Ok(by_party
         .filter(visible_name)
         .or(by_account.filter(visible_name))
@@ -235,35 +239,99 @@ async fn context(Extension(ch): Cx, who: Caller, Path(id): Path<String>) -> ApiR
             None => None,
         };
         let mut before = Vec::new();
+        let mut reply_to_sender: Option<String> = None;
         let reply = match replied {
             Some(replied) => {
                 for msg in repo::preceding(db, &s.id, &replied, 3)?.into_iter().rev() {
                     let name = if msg.out {
                         "Steve".to_string()
                     } else {
-                        sender_name(db, msg.sender_party_id.as_deref(), msg.sender_account_id.as_deref())?
+                        sender_name(
+                            db,
+                            msg.sender_party_id.as_deref(),
+                            msg.sender_account_id.as_deref(),
+                        )?
                     };
                     before.push(json!({"sender": name, "text": msg.text, "at": msg.created}));
                 }
+                let sender = sender_name(
+                    db,
+                    replied.sender_party_id.as_deref(),
+                    replied.sender_account_id.as_deref(),
+                )?;
+                reply_to_sender = Some(sender.clone());
                 Some(json!({
                     "id": replied.id,
-                    "sender": sender_name(db, replied.sender_party_id.as_deref(), replied.sender_account_id.as_deref())?,
+                    "sender": sender,
                     "text": replied.text,
                     "at": replied.created,
                 }))
             }
             None => None,
         };
+        let ai_mark = if as_you {
+            if draft.on_behalf == "proxy" {
+                spaces::channel_settings(db, &v.ws, &s.connection_id)?
+                    .map(|cs| crate::rules::Trigger::from_value(&cs.trigger).mark)
+                    .unwrap_or(true)
+            } else {
+                spaces::effective_ai_mark(db, &v.ws, &s.id, &s.connection_id).unwrap_or(true)
+            }
+        } else {
+            false
+        };
+        let composed = steve_store::channel_message_repo::outbound::composer_result(db, &id)?;
+        let why = composed["why"]
+            .as_str()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                composed["reason"]
+                    .as_str()
+                    .and_then(crate::decide::Reason::parse)
+                    .map(|r| r.label().to_string())
+            })
+            .or_else(|| (draft.on_behalf == "proxy").then(|| "按你的触发词代发".into()));
+        let basis_row = crate::basis::of_message(db, &v.ws, &id)?;
+        let disclosure = basis_row.map(|b| {
+            json!({
+                "verdict": b.verdict,
+                "spans": b.spans,
+            })
+        });
+        let burst_id = steve_store::channel_message_repo::outbound::burst_id_of(db, &id)?;
+        let open = crate::open_link::space_link(db, &s)?;
         Ok(json!({
             "space": {
                 "id": s.id,
                 "name": space.title,
                 "kind": s.kind,
                 "external": s.has_external,
+                "member_count": space.member_count,
+            },
+            "recipient": {
+                "space_id": s.id,
+                "space_name": space.title,
+                "kind": s.kind,
+                "member_count": space.member_count,
+                "has_external": s.has_external,
+                "reply_to_sender": reply_to_sender,
+            },
+            "speaker": {
+                "as_you": as_you,
+                "mode": if as_you { "self" } else { "bot" },
+                "name": persona.as_deref().unwrap_or(if as_you { "你本人" } else { "Bot" }),
             },
             "as_you": as_you,
             "persona": persona,
             "text": draft.text,
+            "ai_mark": ai_mark,
+            "why": why,
+            "disclosure": disclosure,
+            "burst_id": burst_id,
+            "open_url": open.as_ref().map(|l| l.url.as_str()),
+            "open_provider": open.as_ref().map(|l| l.provider.as_str()),
             "reply_to": reply,
             "before": before,
         }))

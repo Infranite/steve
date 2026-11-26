@@ -48,6 +48,8 @@ pub struct ChannelSettings {
     pub before: i64,
     pub late: i64,
     pub history_at: Option<i64>,
+    /// Whether personal-account replies carry the `[AI]` prefix by default.
+    pub ai_mark: bool,
 }
 
 pub fn get(r: &mut impl Read, ws: &str, conn: &str) -> Result<Option<ChannelSettings>> {
@@ -66,6 +68,7 @@ pub fn get(r: &mut impl Read, ws: &str, conn: &str) -> Result<Option<ChannelSett
                 "history_before",
                 "history_late",
                 "history_at",
+                "ai_mark",
             ])
             .from("channel_settings")
             .and_where(Expr::col("workspace_id").eq(ws))
@@ -88,6 +91,7 @@ pub fn get(r: &mut impl Read, ws: &str, conn: &str) -> Result<Option<ChannelSett
                 before: row.get(9)?,
                 late: row.get(10)?,
                 history_at: row.get(11)?,
+                ai_mark: row.get::<i64>(12)? != 0,
             })
         },
     )
@@ -148,6 +152,7 @@ pub struct SettingsPatch<'a> {
     pub send_delay_s: Option<Option<i64>>,
     pub card_ttl_h: Option<Option<i64>>,
     pub late_ms: Option<i64>,
+    pub ai_mark: Option<bool>,
     pub revision: i64,
 }
 
@@ -175,6 +180,9 @@ pub fn patch(w: &mut W<'_>, conn: &str, patch: &SettingsPatch<'_>, now: i64) -> 
     }
     if let Some(value) = patch.late_ms {
         update.value("late_ms", value);
+    }
+    if let Some(value) = patch.ai_mark {
+        update.value("ai_mark", i64::from(value));
     }
     w.exec(&update)?;
     Ok(())

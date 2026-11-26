@@ -4,7 +4,6 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
-use steve_store::base::Level;
 use steve_store::digest::NewChange;
 use steve_store::digest::NewSummary;
 use steve_store::{StoreError, W};
@@ -717,90 +716,100 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
                     id
                 }
                 None => {
-                    use steve_knowledge::candidates::{
-                        NewCandidate, Origin, OriginKind, propose_in,
+                    use steve_knowledge::ingest::{
+                        IngestOutcome, fallback_policy_for_store, ingest_digest_memory_in,
                     };
+                    use steve_store::knowledge::MemoryKind;
                     let text = mm
                         .text
                         .filter(|s| !s.trim().is_empty() && s.chars().count() <= 2000)
                         .ok_or_else(|| bad("new memory needs text"))?;
-                    let kind = mm.kind.unwrap_or_else(|| "fact".into());
-                    if !["fact", "preference", "rule", "event"].contains(&kind.as_str()) {
+                    let kind_str = mm.kind.unwrap_or_else(|| "fact".into());
+                    let Some(mem_kind) = MemoryKind::parse(&kind_str).filter(|k| {
+                        matches!(
+                            k,
+                            MemoryKind::Fact
+                                | MemoryKind::Preference
+                                | MemoryKind::Rule
+                                | MemoryKind::Event
+                        )
+                    }) else {
                         return Err(bad("invalid memory kind"));
-                    }
+                    };
                     if let Some(old) = &mm.supersedes {
                         w.memory_index()
                             .visible_status(&viewer, old)?
                             .filter(|status| status == "confirmed")
                             .ok_or_else(|| bad("superseded memory not visible or confirmed"))?;
                     }
-                    let origin = Origin {
-                        ws: cx.ws.clone(),
-                        kind: OriginKind::Tool,
-                        id: p.id.clone(),
-                        label: p.conv.clone(),
-                        user: user.into(),
-                        writer: cx.bot_id.clone(),
-                        default_level: Level::Reasoning,
-                        item_id: cx.item_id.clone(),
-                        session_id: cx.session_id.clone(),
-                    };
-                    let mem = propose_in(
-                        w,
-                        &origin,
-                        &NewCandidate {
-                            kind,
-                            text,
-                            about: vec![],
-                            level: Level::Reasoning,
-                            evidence: format!("{} {}–{}", p.conv, r.first_id, r.last_id),
-                            supersedes: mm.supersedes,
-                            why: "Conversation digest".into(),
-                            scope: p.conv.clone(),
-                            owner_said: false,
-                        },
+                    let policy = fallback_policy_for_store(&m.store);
+                    let evidence = format!("{} {}–{}", p.conv, r.first_id, r.last_id);
+                    let outcome = ingest_digest_memory_in(
+                        w, &policy, &cx.ws, user, &cx.bot_id, &p.id, &p.conv, mem_kind, &text,
+                        &evidence, &people, now,
                     )?;
-                    w.digest_changes().record(NewChange {
-                        ws: &cx.ws,
-                        run,
-                        writer: &cx.bot_id,
-                        op: "mem_new",
-                        target: &mem.id,
-                        packet: Some(&p.id),
-                        before: &json!({}),
-                        after: &json!({"mem": mem.id}),
-                        now,
-                    })?;
+                    let (id, status) = match &outcome {
+                        IngestOutcome::Written { entry, .. } => (entry.id.clone(), "written"),
+                        IngestOutcome::Buffered { observation } => {
+                            (observation.id.clone(), "buffered")
+                        }
+                        IngestOutcome::Proposed { revision } => (revision.id.clone(), "proposed"),
+                        IngestOutcome::CorroboratedExisting { entry_id, .. } => {
+                            (entry_id.clone(), "corroborated")
+                        }
+                        IngestOutcome::RefusedReadOnly { source_id } => {
+                            (source_id.clone(), "refused_read_only")
+                        }
+                        IngestOutcome::Dropped(reason) => (String::new(), reason.code()),
+                    };
+                    if !id.is_empty() {
+                        w.digest_changes().record(NewChange {
+                            ws: &cx.ws,
+                            run,
+                            writer: &cx.bot_id,
+                            op: "mem_new",
+                            target: &id,
+                            packet: Some(&p.id),
+                            before: &json!({}),
+                            after: &json!({"mem": id, "status": status}),
+                            now,
+                        })?;
+                    }
                     out["memories"]
                         .as_array_mut()
                         .unwrap()
-                        .push(json!({"id": mem.id, "status": "candidate"}));
-                    mem.id
+                        .push(json!({"id": id, "status": status}));
+                    id
                 }
             };
+            if id.is_empty() {
+                continue;
+            }
             let target = target_at(mm.matter, mm.matter_at)?;
-            let added = memindex::link(
-                w,
-                &cx.ws,
-                &id,
-                &conversation,
-                target.as_deref(),
-                &people,
-                Some(&r),
-                Some(&p.id),
-            )
-            .map_err(storage)?;
-            w.digest_changes().record(NewChange {
-                ws: &cx.ws,
-                run,
-                writer: &cx.bot_id,
-                op: "mem_link",
-                target: &id,
-                packet: Some(&p.id),
-                before: &json!({}),
-                after: &json!(added),
-                now,
-            })?;
+            if id.starts_with("mm_") {
+                let added = memindex::link(
+                    w,
+                    &cx.ws,
+                    &id,
+                    &conversation,
+                    target.as_deref(),
+                    &people,
+                    Some(&r),
+                    Some(&p.id),
+                )
+                .map_err(storage)?;
+                w.digest_changes().record(NewChange {
+                    ws: &cx.ws,
+                    run,
+                    writer: &cx.bot_id,
+                    op: "mem_link",
+                    target: &id,
+                    packet: Some(&p.id),
+                    before: &json!({}),
+                    after: &json!(added),
+                    now,
+                })?;
+            }
         }
         w.digest_packets()
             .chunk_done(&p, a.chunk, true, None, now)?;

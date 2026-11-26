@@ -102,12 +102,23 @@ enum Outcome {
 }
 
 impl Outcome {
-    fn of(ans: Option<&ProfileAnswer>) -> Self {
-        let contact = crate::adapters::feishu::profiles::CONTACT_SCOPE;
+    fn of(ans: Option<&ProfileAnswer>, directory_scope: Option<&str>) -> Self {
         match ans {
             None => Self::Failed,
-            Some(a) if a.missing_scopes.iter().any(|(s, _)| s == contact) => Self::Refused,
-            Some(a) if a.granted_scopes.iter().any(|s| s == contact) => Self::Searched,
+            Some(a)
+                if directory_scope.map_or(!a.missing_scopes.is_empty(), |scope| {
+                    a.missing_scopes.iter().any(|(s, _)| s == scope)
+                }) =>
+            {
+                Self::Refused
+            }
+            Some(a)
+                if directory_scope.map_or(!a.granted_scopes.is_empty(), |scope| {
+                    a.granted_scopes.iter().any(|s| s == scope)
+                }) =>
+            {
+                Self::Searched
+            }
             Some(_) => Self::Members,
         }
     }
@@ -116,8 +127,8 @@ impl Outcome {
 /// The own organization keys of the installation whose identity answered for a candidate (or of
 /// every one), for [`Channels::note_lookup`].
 struct Evidence {
-    /// `(connection, outcome)` of every call that actually asked about them this run.
-    calls: Vec<(String, Outcome)>,
+    /// `(connection, outcome, directory_scope)` of every call that actually asked about them this run.
+    calls: Vec<(String, Outcome, Option<&'static str>)>,
     own_keys: Vec<String>,
 }
 
@@ -339,16 +350,47 @@ fn local_tenants(
     ws: &str,
 ) -> ChannelResult<HashMap<String, SeenTenant>> {
     let mut out = HashMap::new();
-    let sent = repo::sender_tenants(r, ws)?;
-    let mentioned = repo::mentioned_tenants(r, ws)?;
-    for row in sent.into_iter().chain(mentioned) {
-        if let Some(tenant) = row.tenant.filter(|key| !key.trim().is_empty()) {
-            out.entry(row.account).or_insert(SeenTenant {
-                tenant,
-                space: row.space,
-                party: row.party,
-                actor: row.actor,
+    let events = repo::raw_event_evidence(r, ws)?;
+    let mut mention_hits: Vec<(String, String, String)> = Vec::new();
+    let mut mention_handles: BTreeSet<String> = BTreeSet::new();
+    for ev in &events {
+        let parsed = crate::syntax::raw_tenant_evidence(&ev.payload);
+        if ev.sender_unlinked_human
+            && !parsed.sender_is_app
+            && let (Some(account), Some(party), Some(tenant)) = (
+                ev.sender_account.as_ref(),
+                ev.sender_party.as_ref(),
+                parsed.sender_tenant.as_ref(),
+            )
+        {
+            out.entry(account.clone()).or_insert(SeenTenant {
+                tenant: tenant.clone(),
+                space: ev.space.clone(),
+                party: party.clone(),
+                actor: ev.sender_actor.clone(),
             });
+        }
+        for (handle, tenant) in parsed.mentioned {
+            mention_handles.insert(handle.clone());
+            mention_hits.push((handle, tenant, ev.space.clone()));
+        }
+    }
+    if !mention_handles.is_empty() {
+        let handles: Vec<String> = mention_handles.into_iter().collect();
+        let by_handle: HashMap<String, repo::UnlinkedHandleAccount> =
+            repo::unlinked_handle_accounts(r, ws, &handles)?
+                .into_iter()
+                .map(|row| (row.handle.clone(), row))
+                .collect();
+        for (handle, tenant, space) in mention_hits {
+            if let Some(acc) = by_handle.get(&handle) {
+                out.entry(acc.account.clone()).or_insert(SeenTenant {
+                    tenant,
+                    space,
+                    party: acc.party.clone(),
+                    actor: acc.actor.clone(),
+                });
+            }
         }
     }
     Ok(out)
@@ -587,7 +629,6 @@ impl Channels {
         now: i64,
     ) -> ChannelResult<()> {
         use steve_modules::contacts::profile::{self as prof, Gap};
-        let contact = crate::adapters::feishu::profiles::CONTACT_SCOPE;
         self.store().write(|w| -> ChannelResult<()> {
             let Some(account) = steve_store::Accounts(w).get(&cand.account_id)? else {
                 return Ok(());
@@ -602,14 +643,21 @@ impl Channels {
             // no answer named the field: what the calls about them show — a failure (retry), an
             // address book searched without them, an address book refused for the permission (every
             // identity asked), or no search at all (retry)
-            let has = |o: Outcome| ev.calls.iter().any(|(_, x)| *x == o);
+            let has = |o: Outcome| ev.calls.iter().any(|(_, x, _)| *x == o);
+            let refused_scope = ev
+                .calls
+                .iter()
+                .find_map(|(_, x, scope)| (*x == Outcome::Refused).then_some(*scope).flatten());
             let unanswered = || {
                 if has(Outcome::Failed) {
                     Gap::new("pending")
                 } else if has(Outcome::Searched) {
                     Gap::new("not_visible")
                 } else if has(Outcome::Refused) {
-                    Gap::scope("permission", contact)
+                    match refused_scope {
+                        Some(scope) => Gap::scope("permission", scope),
+                        None => Gap::new("permission"),
+                    }
                 } else {
                     Gap::new("pending")
                 }

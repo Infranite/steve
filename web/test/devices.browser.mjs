@@ -9,7 +9,12 @@ const errors = [], writes = []
 page.on("pageerror", e => errors.push(e.message))
 const remote = { node_id: "fixture-remote", name: "Remote laptop", fingerprint: "9e3f5a07c21b84d60f9a77e3b10c4d52", state: "active", linked: true, local: false, max_sessions: 32, running: 32, waiting: 2, last_seen: Date.now() - 60_000,
   host: { os: "macos", os_version: "26.1", arch: "aarch64", cpus: 12, mem_total: 36 * 2 ** 30,
-    file_access: { status: "missing", locations: [{ location: "documents", status: "missing" }] } },
+    file_access: {
+      status: "missing",
+      full_disk_access: "missing",
+      locations: [{ location: "documents", status: "missing", path: "/Users/example/Documents" }],
+      executable_path: "/Users/example/.steve-node/services/node-boot-runner",
+    } },
   link: { route: "loopback", via: "tailcat", tls: false, since: 0, latency_ms: 38.2, latency_at: Date.now() },
   upgrade: { build: { version: "0.2.112", commit: "abc", target: "x" }, policy: "notify", own_policy: null, can: false, reason: "current", latest: null } }
 const sample = {
@@ -39,8 +44,23 @@ await page.route("**/*", async route => {
   }
   if (url.pathname === "/api/nodes/fixture-remote/upgrade/switch" && request.method() === "POST") return json(route, { operation: "nup_fixture" }, 202)
   if (url.pathname === "/api/nodes/fixture-remote/file-access" && request.method() === "POST") {
-    const report = { status: "granted", locations: [{ location: "documents", status: "granted" }] }
+    const report = {
+      status: "granted",
+      full_disk_access: "granted",
+      locations: [{ location: "documents", status: "granted", path: "/Users/example/Documents" }],
+      executable_path: "/Users/example/.steve-node/services/node-boot-runner",
+    }
     nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, host: { ...n.host, file_access: report } } : n)
+    return json(route, report)
+  }
+  if (url.pathname === "/api/nodes/local/file-access" && request.method() === "POST") {
+    const report = {
+      status: "granted",
+      full_disk_access: "granted",
+      locations: [{ location: "documents", status: "granted", path: "/Users/example/Documents" }],
+      executable_path: "/Users/example/.steve/current/bin/steve-hub",
+    }
+    nodes = nodes.map(n => n.local ? { ...n, host: { ...n.host, file_access: report } } : n)
     return json(route, report)
   }
   if (url.pathname === "/api/nodes/fixture-remote/pause" && request.method() === "POST") {
@@ -168,6 +188,22 @@ try {
   await page.locator("[data-back]").click()
   await page.waitForFunction(() => location.hash === "#/devices/nodes")
   await row().locator("[data-node-status=paused]").getByText("已暂停接收", { exact: true }).waitFor()
+
+  // Local macOS Node shows the same real FileAccessReport and recheck path instead of skipping with localNote
+  await page.locator('[data-node-row="local"]').click()
+  await page.waitForFunction(() => location.hash === "#/devices/nodes/local")
+  const localDetail = page.locator("[data-node-detail]")
+  await localDetail.locator('[data-node-action="fileAccess"]').waitFor()
+  await localDetail.locator('[data-node-tab="access"]').click()
+  const localAccess = localDetail.locator('[data-node-file-access="missing"]')
+  await localAccess.locator('[data-file-access-location="documents"]').getByText("/Users/example/Documents", { exact: true }).waitFor()
+  await localAccess.locator("[data-file-access-executable]").getByText("/Users/example/.steve-node/services/node-boot-runner", { exact: true }).waitFor()
+  await localAccess.getByText("steve hub file-access", { exact: true }).waitFor()
+  await localAccess.locator("[data-node-file-access-recheck]").click()
+  await localDetail.locator('[data-node-file-access="granted"] [data-file-access-location="documents"]').getByText("已确认可访问", { exact: true }).waitFor()
+  assert.deepEqual(writes.slice(-1), ["POST /api/nodes/local/file-access"])
+  await page.locator("[data-back]").click()
+  await page.waitForFunction(() => location.hash === "#/devices/nodes")
 
   for (const [change, kind, words] of [[{ state: "active", linked: false }, "offline", "离线 · 1 分钟前"], [{ state: "pending" }, "pending", "待确认指纹"], [{ state: "active", waiting: 0, linked: true }, "online", "在线"]]) {
     nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, ...change } : n)

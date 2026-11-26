@@ -249,6 +249,7 @@ pub fn sweep(m: &Modules) -> Result<usize> {
             sources::ensure_builtin(tx, ws, "steve", now)?;
             n += sweep_mems(tx, ws, now)?;
             n += sync_bot_mems(tx, ws, "steve", now)?;
+            n += crate::synthesis::expire_observations_in(tx, ws, now)?;
         }
         Ok(n)
     })

@@ -5,7 +5,7 @@ import { useEffect, useState } from "react"
 import { cn } from "cn"
 import { ChevronDownIcon, ChevronsUpDownIcon, PencilIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
+import { ModelPickerPanel, type PickerModel } from "@/components/affect/model-picker-clean"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { modelsApi, type Catalog, type CatalogModel, type Used } from "@/api/models"
@@ -37,7 +37,7 @@ export function useCatalog(harness: string | null | undefined): Catalog | null {
   useEffect(() => {
     let on = true
     setC(null)
-    if (harness && !usable) { cache.delete(harness); setC({ harness, name: harnessName(harness), source: t("shell:model.unreadable"), default: null, families: [], models: [] }) }
+    if (harness && !usable) { cache.delete(`${l}:${harness}`); setC({ harness, name: harnessName(harness), source: t("shell:model.unreadable"), default: null, families: [], models: [] }) }
     if (harness && usable) loadCatalog(harness).then((x) => on && setC(x), () => on && setC({ harness, name: harnessName(harness), source: t("shell:model.unreadable"), default: null, families: [], models: [] }))
     return () => { on = false }
   }, [harness, l, usable])
@@ -97,49 +97,66 @@ export function ModelPicker({ harness, value, onChange, allowDefault, defaultLab
           <ChevronsUpDownIcon className="size-3.5 shrink-0 opacity-50" />
         </PopoverTrigger>
       )}
-      {/* anchored under its trigger at a reading width; the list scrolls inside (CommandList's max height) */}
+      {/* anchored under its trigger at a reading width; shares affectUI ModelPickerPanel */}
       <PopoverContent align="start" className="w-[min(360px,calc(100vw-16px))] gap-0 overflow-hidden rounded-xl p-0" data-model-menu={testId ?? harness}>
-        <p className="break-words border-b px-3 py-2 type-footnote text-muted-foreground" data-model-scope>{t("shell:runtimeSetup.catalogScope")}</p>
-        {other ? (
-          <div className="flex flex-col gap-2 p-3">
-            <div className="type-footnote text-muted-foreground">{t("shell:model.otherHint", { harness: harnessName(harness) })}</div>
-            <div className="flex items-center gap-1.5">
-              <Input autoFocus value={free} onChange={(e) => setFree(e.target.value)} placeholder={t("shell:model.id")} aria-label={t("shell:model.id")} className="h-8 type-code" data-model-free
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing && free.trim()) pick(free.trim()) }} />
-              <Button size="sm" disabled={!free.trim()} onClick={() => pick(free.trim())}>{t("shell:model.useThis")}</Button>
+        <ModelPickerPanel
+          searchable={!other}
+          searchPlaceholder={t("shell:model.search", { harness: harnessName(harness) })}
+          query={q}
+          onQueryChange={setQ}
+          value={value}
+          onSelect={pick}
+          onClose={() => setOpen(false)}
+          label={t("shell:model.choose")}
+          emptyText={!cat ? t("shell:model.loading") : models.length || q ? t("shell:model.noMatch") : t("shell:model.none", { harness: harnessName(harness) })}
+          header={<p className="break-words border-b px-3 py-2 type-footnote text-muted-foreground" data-model-scope>{t("shell:runtimeSetup.catalogScope")}</p>}
+          body={other ? (
+            <div className="flex flex-col gap-2 p-3">
+              <div className="type-footnote text-muted-foreground">{t("shell:model.otherHint", { harness: harnessName(harness) })}</div>
+              <div className="flex items-center gap-1.5">
+                <Input autoFocus value={free} onChange={(e) => setFree(e.target.value)} placeholder={t("shell:model.id")} aria-label={t("shell:model.id")} className="h-8 type-code" data-model-free
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing && free.trim()) pick(free.trim()) }} />
+                <Button size="sm" disabled={!free.trim()} onClick={() => pick(free.trim())}>{t("shell:model.useThis")}</Button>
+              </div>
+              <Button size="sm" variant="ghost" className="self-start text-muted-foreground" onClick={() => setOther(false)}>{t("shell:model.backToList")}</Button>
             </div>
-            <Button size="sm" variant="ghost" className="self-start text-muted-foreground" onClick={() => setOther(false)}>{t("shell:model.backToList")}</Button>
-          </div>
-        ) : (
-          <Command className="rounded-xl" defaultValue={cur ? `${cur.id} ${cur.label} ${cur.family}` : value ? undefined : "__default"} filter={(v, search) => (v.toLowerCase().includes(search.toLowerCase()) ? 1 : 0)}>
-            <CommandInput placeholder={t("shell:model.search", { harness: harnessName(harness) })} value={q} onValueChange={setQ} data-model-search />
-            <CommandList className="max-h-[min(360px,55vh)]">
-              <CommandEmpty>{!cat ? t("shell:model.loading") : models.length || q ? t("shell:model.noMatch") : t("shell:model.none", { harness: harnessName(harness) })}</CommandEmpty>
-              {allowDefault && !q && <CommandGroup><CommandItem value="__default" data-checked={!value} onSelect={() => pick("")} data-model-opt="">{markOf(cat?.default ?? "")}<span className="min-w-0 truncate">{defLabel}</span></CommandItem></CommandGroup>}
-              {cat && cat.models.length === 0 && !q && allowDefault && <div className="px-3 py-2 type-footnote text-muted-foreground" data-model-empty-hint>{t("shell:model.none", { harness: harnessName(harness) })}</div>}
-              {fams.map((f) => (
-                <CommandGroup key={f} heading={f}>
-                  {models.filter((m) => m.family === f).map((m) => (
-                    <CommandItem key={m.id} value={`${m.id} ${m.label} ${f}`} data-checked={m.id === value} onSelect={() => pick(m.id)} data-model-opt={m.id} className="items-start">
-                      <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center" aria-hidden="true">{markOf(m.id)}</span>
-                      <span className="flex min-w-0 flex-1 flex-col">
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          <span className="truncate type-code">{m.via ? m.id.slice(m.via.length + 1) : m.id}</span>
-                          {m.via && <span className="shrink-0 inline-flex h-4.5 items-center rounded-md bg-muted px-1.5 type-label leading-none text-muted-foreground">{t("shell:model.via", { via: m.via })}</span>}
-                        </span>
-                        {(m.note || m.used) && <span className="flex min-w-0 items-center gap-2">{m.used && <UsedMark u={m.used} />}{m.note && <span className="truncate type-footnote text-muted-foreground" title={m.note}>{m.note}</span>}</span>}
-                      </span>
-                    </CommandItem>
-                  ))}
-                </CommandGroup>
-              ))}
-            </CommandList>
+          ) : undefined}
+          models={[
+            ...(allowDefault && !q.trim() ? [{
+              id: "",
+              name: defLabel,
+              icon: markOf(cat?.default ?? ""),
+              data: { "data-model-opt": "" },
+            } satisfies PickerModel] : []),
+            ...fams.flatMap((f) =>
+              models.filter((m) => m.family === f).map((m): PickerModel => ({
+                id: m.id,
+                name: m.via ? m.id.slice(m.via.length + 1) : m.id,
+                mono: true,
+                group: f,
+                badge: m.via ? t("shell:model.via", { via: m.via }) : undefined,
+                icon: markOf(m.id),
+                keywords: `${m.id} ${m.label} ${f}`,
+                meta: (m.note || m.used) ? (
+                  <>
+                    {m.used && <UsedMark u={m.used} />}
+                    {m.note && <span className="truncate type-footnote text-muted-foreground" title={m.note}>{m.note}</span>}
+                  </>
+                ) : undefined,
+                data: { "data-model-opt": m.id },
+              })),
+            ),
+          ]}
+          emptyHint={cat && cat.models.length === 0 && !q && allowDefault ? (
+            <div className="px-3 py-2 type-footnote text-muted-foreground" data-model-empty-hint>{t("shell:model.none", { harness: harnessName(harness) })}</div>
+          ) : undefined}
+          footer={(
             <div className="flex items-center justify-between gap-2 border-t px-3 py-2">
               <span className="min-w-0 truncate type-footnote text-muted-foreground" title={cat?.source}>{cat ? t("shell:model.count", { count: models.length, source: cat.source }) : ""}</span>
               <Button size="xs" variant="ghost" className="shrink-0 text-muted-foreground" onClick={() => { setFree(value); setOther(true) }} data-model-other><PencilIcon />{t("shell:model.other")}</Button>
             </div>
-          </Command>
-        )}
+          )}
+        />
       </PopoverContent>
     </Popover>
   )

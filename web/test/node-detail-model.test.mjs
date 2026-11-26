@@ -50,7 +50,12 @@ test("nodeActionItems surfaces offline, file access, harness auth, upgrades and 
       host: {
         os: "macos",
         arch: "aarch64",
-        file_access: { status: "missing", locations: [{ location: "documents", status: "missing" }] },
+        file_access: {
+          status: "missing",
+          full_disk_access: "missing",
+          locations: [{ location: "documents", status: "missing", path: "/Users/example/Documents" }],
+          executable_path: "/Users/example/.steve-node/services/node-boot-runner",
+        },
       },
       upgrade: {
         build: { version: "0.2.109", commit: "abc", target: "aarch64-apple-darwin" },
@@ -259,4 +264,57 @@ test("nodeActionItems surfaces single upgradeRequired item and suppresses harnes
   assert.equal(snap.node.link_mode, "upgrade_only")
   assert.equal(snap.node.protocol, 12)
   assert.equal(snap.node.hub_version, "0.11.1")
+})
+
+test("nodeActionItems surfaces fileAccess for local macOS Nodes and skips non-macOS not_applicable", () => {
+  const localMac = view({
+    id: "local",
+    local: true,
+    node: {
+      node_id: "local",
+      name: "Hub Mac",
+      fingerprint: "abcd",
+      state: "active",
+      linked: true,
+      local: true,
+      host: {
+        os: "macos",
+        arch: "aarch64",
+        file_access: {
+          status: "missing",
+          full_disk_access: "missing",
+          locations: [{ location: "documents", status: "missing", path: "/Users/example/Documents" }],
+          executable_path: "/Users/example/.steve/current/bin/steve-hub",
+        },
+      },
+    },
+  })
+  const macItems = nodeActionItems(localMac, { hubVersion: "0.2.112" })
+  assert.deepEqual(
+    macItems.map((i) => [i.kind, i.tone, i.tab, i.command, i.locations]),
+    [["fileAccess", "warn", "access", "recheckFileAccess", ["documents"]]],
+  )
+
+  const localLinux = view({
+    id: "local",
+    local: true,
+    node: {
+      node_id: "local",
+      name: "Hub Linux",
+      fingerprint: "abcd",
+      state: "active",
+      linked: true,
+      local: true,
+      host: {
+        os: "linux",
+        arch: "x86_64",
+        file_access: {
+          status: "not_applicable",
+          full_disk_access: "not_applicable",
+          locations: [],
+        },
+      },
+    },
+  })
+  assert.deepEqual(nodeActionItems(localLinux, { hubVersion: "0.2.112" }), [])
 })

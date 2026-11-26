@@ -1010,10 +1010,7 @@ async fn knowledge_note_is_found_over_http_and_mcp() {
     assert!(!out.contains("\"isError\":true"), "{out}");
     let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "steve_remember", "arguments": { "text": "发布要先灰度", "kind": "rule" } } })).await;
     assert_eq!(s, 200, "{out}");
-    assert!(
-        out.contains("Saved as a candidate; the user will confirm it."),
-        "{out}"
-    );
+    assert!(out.contains("Saved silently to "), "{out}");
 }
 
 /// Steve's reply to the `n`-th user message (counting from 1), from `/api/views/page?kind=message`. The item's own

@@ -1,10 +1,10 @@
 //! Local setup reads the same observation the running Node sends over discovery.
 
 use anyhow::{Context, Result, ensure};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use steve_node::LocalNode;
-use steve_node_api::{Discovery, FileAccessReport, NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET};
+use steve_node_api::{Discovery, FileAccessReport, NODE_FILE_ACCESS_SOCKET};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 
@@ -15,12 +15,16 @@ pub(crate) struct SetupProbe {
 
 impl SetupProbe {
     pub(crate) fn start(home: &Path, node: LocalNode) -> Result<Option<Self>> {
-        if std::env::var_os(NODE_BOOT_SERVICE_ENV).as_deref() != Some("1".as_ref()) {
-            return Ok(None);
-        }
         // The Node already holds its exclusive home lock. Only that Node can
         // have left a stale socket behind from a crash.
         let path = home.join(NODE_FILE_ACCESS_SOCKET);
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).context("create file-access socket directory")?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .context("secure file-access socket directory")?;
+        }
         if let Ok(meta) = path.symlink_metadata() {
             ensure!(
                 meta.file_type().is_socket() && meta.uid() == unsafe { libc::getuid() },

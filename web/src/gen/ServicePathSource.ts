@@ -4,4 +4,4 @@
 /**
  * Where a service definition's `PATH` was captured from.
  */
-export type ServicePathSource = "login_shell" | "process_env" | "default_fallback";
+export type ServicePathSource = "interactive_login" | "login" | "process_env" | "default_fallback";

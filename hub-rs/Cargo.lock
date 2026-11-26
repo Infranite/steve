@@ -6146,6 +6146,7 @@ dependencies = [
  "hex",
  "libc",
  "markdown",
+ "metrics",
  "pulldown-cmark",
  "rmcp",
  "rusqlite",

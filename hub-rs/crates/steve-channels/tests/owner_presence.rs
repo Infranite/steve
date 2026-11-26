@@ -21,9 +21,14 @@ use steve_channels::disclosure::{CHECK_HEAD, Disclosure};
 use steve_channels::fake::channel::FakeChannel;
 use steve_channels::inbound::{LABEL_REPLY_OFF, LABEL_REPLY_RECORD};
 use steve_channels::outbound::{OutLink, Outbox};
-use steve_channels::presence::{self, BY_LATER, BY_YOU, LABEL_LIVE, LABEL_REPLIED};
+use steve_channels::presence::{
+    self, BY_LATER, BY_REACTED, BY_YOU, LABEL_LIVE, LABEL_REACTED, LABEL_REPLIED,
+};
 use steve_channels::respond::SUBJECT_MESSAGE;
-use steve_channels::{Channels, Inbound, InboundMessage, Mention, Replies, SpaceKind, api, spaces};
+use steve_channels::{
+    Channels, Inbound, InboundMessage, Mention, ReactionEvent, ReactionOrigin, ReactionTimeSource,
+    Replies, SpaceKind, api, spaces,
+};
 use steve_flow::nodes::action::Action;
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor, NodeOutcome, RunCx};
@@ -719,6 +724,18 @@ async fn the_setting_does_not_apply_where_a_bot_speaks() {
     let space = push(&h, &oncall, msg(&h, "C_BOT", "b0", "uhan", "早", -3600))
         .await
         .space_id;
+    assert_eq!(
+        call(
+            &h.api,
+            Some(&caller(WS, ME)),
+            "PATCH",
+            &format!("/spaces/{space}"),
+            Some(&json!({"muted": false})),
+        )
+        .await
+        .0,
+        200
+    );
     assert_eq!(set_reply(&h, &space, "off").await.0, 200);
     let s = call(
         &h.api,
@@ -932,4 +949,253 @@ async fn a_draft_whose_message_a_later_turn_took_while_it_drafted_never_opens() 
     assert_eq!(drafts(&h), 0);
 }
 
-// ---------------------------------------------------------------- reply_as_you after the message came in
+// ---------------------------------------------------------------- incoming owner reactions (#277)
+
+fn reaction(
+    space: &str,
+    msg_ext: &str,
+    actor: &str,
+    emoji: &str,
+    origin: ReactionOrigin,
+    at: i64,
+    removed: bool,
+) -> ReactionEvent {
+    ReactionEvent {
+        space_ext_id: Some(space.into()),
+        message_ext_id: Some(msg_ext.into()),
+        message_source_id: None,
+        actor: FakeChannel::handle(actor),
+        actor_name: None,
+        actor_is_bot: false,
+        origin,
+        emoji: emoji.into(),
+        at,
+        time_source: ReactionTimeSource::Provider,
+        revision: None,
+        removed,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_reaction_manual_and_unknown_supersede_draft_without_silencing_later_messages() {
+    for origin in [ReactionOrigin::Manual, ReactionOrigin::Unknown] {
+        let h = setup().await;
+        let me = h.me.clone();
+        let first = push(&h, &me, msg(&h, "D_LI", "r1", "ulilei", "帮我看下报告", 0))
+            .await
+            .response
+            .unwrap();
+        let (draft1, card1) = (first.out_message_id.unwrap(), first.decision_id.unwrap());
+        assert_eq!(status(&h, &draft1), "draft");
+
+        h.ch.on_reaction(
+            WS,
+            &me,
+            reaction(
+                "D_LI",
+                "r1",
+                "upx",
+                "THUMBSUP",
+                origin,
+                h.ch.now() + 5_000,
+                false,
+            ),
+        )
+        .unwrap();
+        assert_eq!(status(&h, &draft1), "discarded");
+        let (st, res) = decision(&h, &card1);
+        assert_eq!(st, "expired");
+        assert_eq!(res["superseded"], BY_REACTED);
+
+        // A reaction is NOT a live-presence signal: a later message still gets drafted.
+        let second = push(
+            &h,
+            &me,
+            msg(&h, "D_LI", "r2", "ulilei", "另外明天的会几点？", 10),
+        )
+        .await
+        .response
+        .unwrap();
+        assert!(
+            second.out_message_id.is_some(),
+            "origin {origin:?}: {second:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automated_and_our_own_outgoing_reactions_never_handle_a_message() {
+    let h = setup().await;
+    let me = h.me.clone();
+    let first = push(&h, &me, msg(&h, "D_LI", "a1", "ulilei", "在吗", 0))
+        .await
+        .response
+        .unwrap();
+    let draft1 = first.out_message_id.unwrap();
+
+    // Automated reaction on owner's account must not supersede.
+    h.ch.on_reaction(
+        WS,
+        &me,
+        reaction(
+            "D_LI",
+            "a1",
+            "upx",
+            "OK",
+            ReactionOrigin::Automated,
+            h.ch.now() + 2_000,
+            false,
+        ),
+    )
+    .unwrap();
+    assert_eq!(status(&h, &draft1), "draft");
+
+    // Steve's own outgoing user-account lifecycle reaction echoed back must not supersede.
+    let inbound_id = h
+        .env
+        .store()
+        .read(|r| {
+            steve_store::channel_message_repo::incoming_reactions::resolve_target(
+                r, WS, &me, "D_LI", "a1", "",
+            )
+        })
+        .unwrap()
+        .unwrap();
+    h.env
+        .store()
+        .write(|w| {
+            steve_store::channel_message_repo::reactions::acknowledge(
+                w,
+                WS,
+                &inbound_id,
+                h.ch.now(),
+            )?;
+            steve_store::channel_message_repo::reactions::save_result(
+                w,
+                &inbound_id,
+                steve_store::channel_message_repo::reactions::Change {
+                    id: Some("rx_1"),
+                    emoji: Some("👀"),
+                    as_user: true,
+                    error: None,
+                },
+                None,
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    h.ch.on_reaction(
+        WS,
+        &me,
+        reaction(
+            "D_LI",
+            "a1",
+            "upx",
+            "👀",
+            ReactionOrigin::Manual,
+            h.ch.now() + 3_000,
+            false,
+        ),
+    )
+    .unwrap();
+    assert_eq!(status(&h, &draft1), "draft");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reaction_scope_group_exact_dm_burst_tombstone_and_out_of_order() {
+    let h = setup().await;
+    let me = h.me.clone();
+
+    // 1. Out-of-order reaction arrives before message: attaches and suppresses drafting.
+    h.ch.on_reaction(
+        WS,
+        &me,
+        reaction(
+            "D_LI",
+            "ooo1",
+            "upx",
+            "DONE",
+            ReactionOrigin::Unknown,
+            h.ch.now() + 1_000,
+            false,
+        ),
+    )
+    .unwrap();
+    let ooo = push(&h, &me, msg(&h, "D_LI", "ooo1", "ulilei", "麻烦确认下", 0))
+        .await
+        .response
+        .unwrap();
+    assert_eq!(ooo.out_message_id, None);
+    assert_eq!(ooo.label, LABEL_REACTED);
+
+    // 2. Removal tombstone prevents an older create from resurrecting.
+    h.ch.on_reaction(
+        WS,
+        &me,
+        reaction(
+            "D_LI",
+            "tomb1",
+            "upx",
+            "DONE",
+            ReactionOrigin::Manual,
+            h.ch.now() + 20_000,
+            true,
+        ),
+    )
+    .unwrap();
+    h.ch.on_reaction(
+        WS,
+        &me,
+        reaction(
+            "D_LI",
+            "tomb1",
+            "upx",
+            "DONE",
+            ReactionOrigin::Manual,
+            h.ch.now() + 10_000,
+            false,
+        ),
+    )
+    .unwrap();
+    let tomb = push(&h, &me, msg(&h, "D_LI", "tomb1", "ulilei", "还活着吗", 15))
+        .await
+        .response
+        .unwrap();
+    assert!(tomb.out_message_id.is_some());
+
+    // 3. Group reaction handles ONLY the reacted message, not an earlier message in the group.
+    let g1 = push(
+        &h,
+        &me,
+        at_you(msg(&h, "C_DEV", "g1", "ulilei", "第一个问题", 30)),
+    )
+    .await
+    .response
+    .unwrap();
+    let g1_draft = g1.out_message_id.unwrap();
+    let g2 = push(
+        &h,
+        &me,
+        at_you(msg(&h, "C_DEV", "g2", "uhan", "第二个问题", 35)),
+    )
+    .await
+    .response
+    .unwrap();
+    let g2_draft = g2.out_message_id.unwrap();
+    h.ch.on_reaction(
+        WS,
+        &me,
+        reaction(
+            "C_DEV",
+            "g2",
+            "upx",
+            "OK",
+            ReactionOrigin::Unknown,
+            h.ch.now() + 40_000,
+            false,
+        ),
+    )
+    .unwrap();
+    assert_eq!(status(&h, &g2_draft), "discarded");
+    assert_eq!(status(&h, &g1_draft), "draft");
+}

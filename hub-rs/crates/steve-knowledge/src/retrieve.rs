@@ -17,7 +17,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
 use steve_store::knowledge::{
-    BotMemories, Chunks, Documents, KnowledgeUses, Memories, RecordSearch,
+    BotMemories, Chunks, Documents, EntryStatus, KnowledgeUses, Memories, MemoryEntries,
+    MemoryKind, RecordSearch,
 };
 use steve_store::{R, Read, Result, W};
 
@@ -118,6 +119,11 @@ fn about_of(c: &mut impl Read, kind: &str, id: &str) -> Result<Vec<ObjRef>> {
     match kind {
         "chunk" => Documents(c).doc_about(id),
         "mem" => Memories(c).subjects(id),
+        "memory_entry" => Ok(MemoryEntries(c)
+            .get(id)?
+            .map(|e| ObjRef::new(&e.subject_type, &e.subject_id))
+            .into_iter()
+            .collect()),
         "bot_mem" => Ok(BotMemories(c)
             .bot(id)?
             .map(|id| ObjRef::new("bot", &id))
@@ -129,7 +135,7 @@ fn about_of(c: &mut impl Read, kind: &str, id: &str) -> Result<Vec<ObjRef>> {
 
 fn href(c: &Candidate, about: &[ObjRef]) -> String {
     match c.obj_type.as_str() {
-        "mem" => format!("#/knowledge?mem={}", c.obj_id),
+        "mem" | "memory_entry" => format!("#/knowledge?mem={}", c.obj_id),
         "bot_mem" => match about.iter().find(|a| a.kind == "bot") {
             Some(b) => format!("#/bots/{}", b.id),
             None => "#/bots".into(),
@@ -142,6 +148,7 @@ fn title(c: &Candidate) -> String {
     match c.obj_type.as_str() {
         "chunk" => c.title.clone().unwrap_or_default(),
         "mem" => sync::mem_title(&c.label).to_string(),
+        "memory_entry" => c.label.clone(),
         _ => c.label.clone(),
     }
 }
@@ -152,7 +159,7 @@ fn boosted(c: &Candidate, about: &[ObjRef], q: &Query) -> f64 {
     if !q.anchors.is_empty() && about.iter().any(|a| q.anchors.contains(a)) {
         s *= ANCHOR_BOOST;
     }
-    if c.obj_type == "mem" {
+    if c.obj_type == "mem" || c.obj_type == "memory_entry" {
         s *= MEM_BOOST;
     }
     s
@@ -423,6 +430,88 @@ pub fn anchor_mems(
             about: m.about,
         });
     }
+    let paused_sources: HashSet<String> = Documents(c)
+        .paused(&viewer.ws)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    let me_party = if !viewer.user.is_empty() {
+        steve_store::Contacts::new(c).user_party(&viewer.ws, &viewer.user)?
+    } else {
+        None
+    };
+    let mut file_entries = Vec::new();
+    for a in anchors {
+        let (st, sid) = if a.kind == "party" && me_party.as_deref() == Some(a.id.as_str()) {
+            ("me", "me")
+        } else {
+            (a.kind.as_str(), a.id.as_str())
+        };
+        for e in MemoryEntries(c).list_by_subject(&viewer.ws, st, sid)? {
+            if e.status != EntryStatus::Active
+                || e.kind == MemoryKind::Overview
+                || e.level == Level::Never
+                || paused_sources.contains(&e.source_id)
+                || !viewer.sees(&e.visibility, &e.created_by)
+                || (workspace_only && e.visibility != Visibility::Workspace)
+                || file_entries
+                    .iter()
+                    .any(|x: &steve_store::knowledge::MemoryEntryRow| x.id == e.id)
+            {
+                continue;
+            }
+            file_entries.push(e);
+        }
+    }
+    file_entries.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(|| a.kind.priority().cmp(&b.kind.priority()))
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    for e in file_entries {
+        let text = match Chunks(c).disclosure(&viewer.ws, "memory_entry", &e.id, 0)? {
+            Some((t, _, _)) if !t.is_empty() => t,
+            _ => match crate::memory_file::read_entry_text_from_disk(c, &e) {
+                Ok(Some(t)) => t,
+                _ => continue,
+            },
+        };
+        let entry_chars = text.chars().count().min(crate::context::SNIPPET_MAX);
+        if !hits.is_empty() && used_chars + entry_chars > max_chars {
+            break;
+        }
+        let text = if hits.is_empty() && entry_chars > max_chars {
+            if max_chars > 1 {
+                let mut t: String = text.chars().take(max_chars - 1).collect();
+                t.push('…');
+                t
+            } else {
+                text.chars().take(max_chars).collect()
+            }
+        } else {
+            text
+        };
+        used_chars += entry_chars.min(max_chars);
+        let label = format!("{} · {}", e.rel_path, e.heading_path);
+        hits.push(Hit {
+            n: hits.len() + 1,
+            obj_type: "memory_entry".into(),
+            href: format!("{MEM_HREF_PREFIX}{}", e.id),
+            obj_id: e.id.clone(),
+            seq: 0,
+            title: e.rel_path.clone(),
+            heading: e.heading_path.clone(),
+            text,
+            label,
+            source_kind: "folder".into(),
+            level: e.level,
+            visibility: e.visibility.clone(),
+            score: 0.0,
+            about: vec![ObjRef::new(&e.subject_type, &e.subject_id)],
+        });
+    }
     Ok(hits)
 }
 
@@ -440,8 +529,8 @@ pub(crate) fn use_hits(hits: &[Hit]) -> Vec<steve_store::knowledge::UseHit> {
         .collect()
 }
 
-/// Records which pieces a consumer saw, using the surrounding transaction, and emits
-/// `steve_memory_uses_total{consumer, stage="injected"}` for injected memory entries.
+/// Records which pieces a consumer saw, using the surrounding transaction, updates sidecar
+/// `memory_entries.use_count`/`last_used_at`, and emits `steve_memory_uses_total`.
 pub fn record_use(
     tx: &mut W<'_>,
     ws: &str,
@@ -450,16 +539,23 @@ pub fn record_use(
     hits: &[Hit],
 ) -> Result<String> {
     let id = KnowledgeUses(tx).record(ws, consumer, query, &use_hits(hits))?;
-    let mem_hits = hits.iter().filter(|h| h.obj_type == "mem").count() as u64;
+    let now = steve_store::now();
+    for h in hits {
+        if h.obj_type == "memory_entry" {
+            let _ = MemoryEntries(tx).record_use(&h.obj_id, now);
+        }
+    }
+    let mem_hits = hits
+        .iter()
+        .filter(|h| h.obj_type == "mem" || h.obj_type == "memory_entry")
+        .count() as u64;
     crate::uses::record_memory_uses(consumer.0, crate::uses::MemoryUseStage::Injected, mem_hits);
     Ok(id)
 }
 
 /// The knowledge a disclosure basis names (`entries` of `reply_basis` / a mail draft's basis), read again
-/// for a later check of the same text: a retrieved piece by its index position (`seq`), a memory shown
-/// by id by its id. The flag says whether every entry could be read again; when one cannot (removed
-/// since, or a basis written before pieces were recorded) the later check has less than the first one
-/// had and must not pass on that ([`steve_modules::outbound::R_BASIS_GONE`]).
+/// for a later check of the same text. For `memory_entry` items, reads the authoritative sidecar
+/// `memory_entries.level` & `visibility` so `OutboundCheck` always reflects per-entry disclosure rules.
 pub fn knowledge_again(
     c: &mut impl Read,
     ws: &str,
@@ -475,40 +571,70 @@ pub fn knowledge_again(
         }
         let id = e["source_id"].as_str().unwrap_or("");
         let label = e["source_label"].as_str().unwrap_or("").to_string();
-        let found = match e["seq"].as_i64() {
-            Some(seq) => {
-                Chunks(c)
-                    .disclosure(ws, kind, id, seq)?
-                    .map(|(text, level, visibility)| KnowledgeUse {
-                        source_type: kind.into(),
-                        source_id: id.into(),
-                        source_label: label.clone(),
-                        level,
-                        visibility,
-                        text,
-                        seq: Some(seq),
-                    })
-            }
-            None if kind == "mem" => {
-                Memories(c)
+        let found =
+            if kind == "memory_entry" {
+                MemoryEntries(c)
                     .get(id)?
-                    .filter(|m| m.workspace_id == ws)
-                    .map(|m| KnowledgeUse {
-                        source_type: "mem".into(),
-                        source_id: m.id.clone(),
-                        source_label: if label.is_empty() {
-                            "记忆".into()
-                        } else {
-                            label.clone()
-                        },
-                        level: m.level,
-                        visibility: m.visibility.code(),
-                        text: m.text.clone(),
-                        seq: None,
+                    .filter(|m| m.workspace_id == ws && m.status == EntryStatus::Active)
+                    .and_then(|m| {
+                        let text = Chunks(c)
+                            .disclosure(ws, "memory_entry", &m.id, 0)
+                            .ok()
+                            .flatten()
+                            .map(|(t, _, _)| t)
+                            .or_else(|| {
+                                crate::memory_file::read_entry_text_from_disk(c, &m)
+                                    .ok()
+                                    .flatten()
+                            })?;
+                        Some(KnowledgeUse {
+                            source_type: "memory_entry".into(),
+                            source_id: m.id.clone(),
+                            source_label: if label.is_empty() {
+                                m.rel_path.clone()
+                            } else {
+                                label.clone()
+                            },
+                            level: m.level,
+                            visibility: m.visibility.code(),
+                            text,
+                            seq: Some(0),
+                        })
                     })
-            }
-            None => None,
-        };
+            } else {
+                match e["seq"].as_i64() {
+                    Some(seq) => {
+                        Chunks(c)
+                            .disclosure(ws, kind, id, seq)?
+                            .map(|(text, level, visibility)| KnowledgeUse {
+                                source_type: kind.into(),
+                                source_id: id.into(),
+                                source_label: label.clone(),
+                                level,
+                                visibility,
+                                text,
+                                seq: Some(seq),
+                            })
+                    }
+                    None if kind == "mem" => Memories(c)
+                        .get(id)?
+                        .filter(|m| m.workspace_id == ws)
+                        .map(|m| KnowledgeUse {
+                            source_type: "mem".into(),
+                            source_id: m.id.clone(),
+                            source_label: if label.is_empty() {
+                                "记忆".into()
+                            } else {
+                                label.clone()
+                            },
+                            level: m.level,
+                            visibility: m.visibility.code(),
+                            text: m.text.clone(),
+                            seq: None,
+                        }),
+                    None => None,
+                }
+            };
         match found {
             Some(k) => out.push(k),
             None => complete = false,

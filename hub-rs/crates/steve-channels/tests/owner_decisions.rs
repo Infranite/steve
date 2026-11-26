@@ -426,7 +426,7 @@ async fn your_click_sends_the_draft_or_your_words_and_non_owners_cannot_approve(
     assert_eq!(status(&h, &out), "sent");
     assert_eq!(
         inspect::messages::message_text(h.env.store(), &out).unwrap()[0],
-        "周四可以"
+        "[AI] 周四可以"
     );
 
     // 按原文发: your words, as you wrote them; words are needed
@@ -439,7 +439,7 @@ async fn your_click_sends_the_draft_or_your_words_and_non_owners_cannot_approve(
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
     assert_eq!(
         inspect::messages::message_text_status(h.env.store(), &out).unwrap(),
-        vec![json!("周四三点吧"), json!("sent")]
+        vec![json!("[AI] 周四三点吧"), json!("sent")]
     );
     assert_eq!(h.fake.sent.lock().unwrap().len(), 2);
 }

@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Default)]
 struct Answers {
-    asked: HashMap<String, Vec<(String, Outcome)>>,
+    asked: HashMap<String, Vec<(String, Outcome, Option<&'static str>)>>,
     profiles: Vec<(Profile, Option<String>, String)>,
 }
 
@@ -287,13 +287,16 @@ impl Lookup<'_> {
                     rep,
                 )
                 .await;
-            let o = Outcome::of(ans.as_ref());
+            let scope = channels
+                .profile_adapter(&i.adapter)
+                .and_then(|a| a.directory_scope());
+            let o = Outcome::of(ans.as_ref(), scope);
             for c in open.iter().filter(|c| sp.accounts.contains(&c.account_id)) {
                 answers
                     .asked
                     .entry(c.account_id.clone())
                     .or_default()
-                    .push((i.id.clone(), o));
+                    .push((i.id.clone(), o, scope));
             }
             let Some(ans) = ans else {
                 continue;
@@ -389,13 +392,16 @@ impl Lookup<'_> {
                         rep,
                     )
                     .await;
-                let o = Outcome::of(ans.as_ref());
+                let scope = channels
+                    .profile_adapter(&i.adapter)
+                    .and_then(|a| a.directory_scope());
+                let o = Outcome::of(ans.as_ref(), scope);
                 for c in open.iter().filter(|c| left.contains(&c.handle)) {
                     answers
                         .asked
                         .entry(c.account_id.clone())
                         .or_default()
-                        .push((i.id.clone(), o));
+                        .push((i.id.clone(), o, scope));
                 }
                 let Some(ans) = ans else {
                     continue;
@@ -462,9 +468,8 @@ impl Lookup<'_> {
             let mut handles: Vec<ExtraHandle> = Vec::new();
             if let Some(h) = &p.handle {
                 for x in std::iter::once(&h.handle).chain(h.extra.iter()) {
-                    // `union_id`s hold everywhere; `open_id`s only under one app
-                    let conn = x
-                        .starts_with("ou_")
+                    // Globally scoped ids hold everywhere; connection-scoped handles stay under one installation.
+                    let conn = crate::syntax::is_connection_scoped_handle(x)
                         .then(|| inst.clone())
                         .filter(|c| !c.is_empty());
                     handles.push(ExtraHandle {

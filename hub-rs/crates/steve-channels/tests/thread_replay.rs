@@ -109,6 +109,7 @@ async fn setup_with(composed: &str) -> H {
         connections::register(r);
         r.outbound_check(Box::new(reg_disclosure.clone()));
         r.decision(SUBJECT_MESSAGE, reg_link.handler());
+        steve_channels::space_decisions::register(r);
     });
     disclosure.bind(env.store().clone(), env.gateway.clone());
     link.bind_clock(env.clock.clone());
@@ -181,7 +182,24 @@ async fn setup_with(composed: &str) -> H {
                 &h.bot,
                 &json!([{"when": {"kind": "mention_or_dm"}, "act": "reply"}]),
                 now,
-            )
+            )?;
+            spaces::locate_or_create(
+                tx,
+                &spaces::NewSpace {
+                    ws: WS,
+                    system_id: FakeChannel::SYSTEM,
+                    connection_id: &h.bot,
+                    kind: SpaceKind::Group,
+                    external_id: "C_OPS",
+                    name: "运维群",
+                    member_count: 0,
+                    has_external: false,
+                    muted: false,
+                    now,
+                    platform: None,
+                },
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
         })
         .unwrap();
     h.env.gateway.script(CHECK_HEAD, PASS);
@@ -744,5 +762,604 @@ async fn w34_thread_replay_channels() {
         );
     }
 
-    report.finish(14);
+    // -----------------------------------------------------------------
+    // Step 4 channel-reply replay scenarios (#258, #268, #275, #277, #278, #213, P1-21)
+    // -----------------------------------------------------------------
+
+    // 15 (#258): Group chat deterministic addressee gate & quoted parent resolution
+    {
+        let h = setup_with(REPLY_OK).await;
+        let now = h.ch.now();
+        // Set personal account rule to `all -> draft` in group so only deterministic G6 can stop it.
+        h.env
+            .store()
+            .write(|tx| {
+                spaces::set_account_rules(
+                    tx,
+                    &Viewer::bare(WS, ME),
+                    &h.me,
+                    &json!([{"when": {"kind": "all"}, "act": "draft"}]),
+                    now,
+                )
+            })
+            .unwrap();
+        // Seed `uhan` as a known account so structured mention resolves to her account_id.
+        let _ = push(
+            &h,
+            &h.me.clone(),
+            msg("C_OPS", "g_seed", "uhan", "大家好", false),
+        )
+        .await;
+        h.env.clock.advance(5 * 60_000);
+
+        // Message in group explicitly `@`-mentioning ONLY `uhan` (not owner): must be gated deterministically.
+        let mut to_other =
+            FakeChannel::message("C_OPS", "g_other", "ulilei", "@韩梅梅 帮我看下监控");
+        to_other.created = h.ch.now();
+        to_other.mentions.push(Mention {
+            handle: Some(FakeChannel::handle("uhan")),
+            name: "韩梅梅".into(),
+            is_connection: false,
+        });
+        let prompts_before = h.env.gateway.prompts.lock().unwrap().len();
+        let res_other = push(&h, &h.me.clone(), to_other).await;
+        let stopped_at_inbound = res_other.response.as_ref().is_some_and(|r| {
+            r.act == steve_channels::rules::Act::Record
+                && (r.label == steve_channels::rules::LABEL_UNADDRESSED
+                    || r.label == steve_channels::decide::LABEL_ADDRESSED_TO_OTHERS)
+        });
+        let g6_decision = h
+            .env
+            .store()
+            .read(|r| steve_channels::decide::gate(r, WS, &res_other.message_id, false, h.ch.now()))
+            .unwrap();
+        let gated_other = stopped_at_inbound
+            && g6_decision == Some(steve_channels::decide::Gate::AddressedToOthers);
+        let zero_llm_calls = h.env.gateway.prompts.lock().unwrap().len() == prompts_before;
+
+        // Owner speaks earlier, then 10 min later `ulilei` quotes owner's message via `reply_to`:
+        // context::load must deterministically resolve `reply_to_sender = "我"` and `reply_to_is_owner = true`.
+        h.env.clock.advance(5 * 60_000);
+        let mut own_m = FakeChannel::message("C_OPS", "g_own1", "upx", "今晚八点发版");
+        own_m.created = h.ch.now();
+        let own_in = push(&h, &h.me.clone(), own_m).await;
+        h.env.clock.advance(10 * 60_000);
+        let mut quote_m = FakeChannel::message("C_OPS", "g_q1", "ulilei", "收到，需要我值守吗？");
+        quote_m.created = h.ch.now();
+        quote_m.reply_to = Some("g_own1".into());
+        let q_in = push(&h, &h.me.clone(), quote_m).await;
+        let loaded = h
+            .env
+            .store()
+            .read(|r| {
+                let mine = steve_channels::context::mine(r, WS, &own_in.space_id)?;
+                steve_channels::context::load(
+                    r,
+                    &own_in.space_id,
+                    &q_in.message_id,
+                    &mine,
+                    spaces::Mode::Own,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let quote_resolved =
+            loaded.0.reply_to_is_owner && loaded.0.reply_to_sender.as_deref() == Some("我");
+
+        report.case(
+            "chan.reply.15_issue258_group_addressee_gate_and_quote_resolution",
+            &[
+                ("other_mention_gated_deterministically", gated_other),
+                ("zero_model_calls_for_other_mention", zero_llm_calls),
+                ("quoted_owner_message_resolved", quote_resolved),
+            ],
+            &[],
+        );
+    }
+
+    // 16 (#268): Burst single reply — 3 rapid DM messages on 1 topic -> 1 active draft
+    {
+        let h = setup_with(r#"{"outcome":"reply","text":"收到，今晚8点前我会同步测试同学。","needs_approval":false,"why":"合并回复整阵消息"}"#).await;
+        let me = h.me.clone();
+        let t0 = h.ch.now();
+        let mut m1 = FakeChannel::message("D_LI", "b1", "ulilei", "在吗");
+        m1.created = t0;
+        let in1 = push(&h, &me, m1).await;
+        let d1 = in1.response.as_ref().and_then(|r| r.out_message_id.clone());
+
+        h.env.clock.advance(10_000);
+        let mut m2 = FakeChannel::message("D_LI", "b2", "ulilei", "发版窗口改到今晚8点了");
+        m2.created = h.ch.now();
+        let in2 = push(&h, &me, m2).await;
+        let d2 = in2.response.as_ref().and_then(|r| r.out_message_id.clone());
+
+        h.env.clock.advance(10_000);
+        let mut m3 = FakeChannel::message("D_LI", "b3", "ulilei", "需要提前通知测试吗？");
+        m3.created = h.ch.now();
+        let in3 = push(&h, &me, m3).await;
+        let d3 = in3.response.as_ref().and_then(|r| r.out_message_id.clone());
+
+        let open_drafts = h
+            .env
+            .store()
+            .read(|r| steve_store::channel_message_repo::dialogue::pending(r, &in3.space_id, 10))
+            .unwrap();
+        // Combined burst text in the final composer prompt contains all 3 messages.
+        let saw_all_three = h
+            .env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|p| {
+                p.contains("在吗")
+                    && p.contains("发版窗口改到今晚8点了")
+                    && p.contains("需要提前通知测试吗")
+            });
+        report.case(
+            "chan.reply.16_issue268_burst_coalesces_to_single_draft",
+            &[
+                ("single_open_draft_remains", open_drafts.len() == 1),
+                (
+                    "earlier_drafts_superseded",
+                    d1.is_some() && d2.is_some() && d3.is_some(),
+                ),
+                ("composer_saw_full_burst", saw_all_three),
+            ],
+            &[],
+        );
+    }
+
+    // 17 (#268): Multi-topic burst splits into separate drafts sharing burst_id without retiring each other
+    {
+        let split_json = r#"{"outcome":"reply","text":"","replies":[{"topic":"评审时间","text":"明早10点评审可以。","needs_approval":false,"why":"确认评审时间"},{"topic":"报销单","text":"报销单我下午看下进度。","needs_approval":false,"why":"回复报销查询"}]}"#;
+        let h = setup_with(split_json).await;
+        let me = h.me.clone();
+        let mut m1 = FakeChannel::message(
+            "D_LI",
+            "s1",
+            "ulilei",
+            "明早10点评审能定吗？另外报销单审批过了吗？",
+        );
+        m1.created = h.ch.now();
+        let in1 = push(&h, &me, m1).await;
+        let open_drafts = h
+            .env
+            .store()
+            .read(|r| steve_store::channel_message_repo::dialogue::pending(r, &in1.space_id, 10))
+            .unwrap();
+        let has_both = open_drafts.len() == 2
+            && open_drafts
+                .iter()
+                .any(|(_, t)| t.contains("明早10点评审可以"))
+            && open_drafts
+                .iter()
+                .any(|(_, t)| t.contains("报销单我下午看下进度"));
+        report.case(
+            "chan.reply.17_issue268_multi_topic_burst_splits_cleanly",
+            &[("two_topic_drafts_open_together", has_both)],
+            &[],
+        );
+    }
+
+    // 18 (#275): Owner-voice cross-context reuses #573 me memories + other chat + main thread + open items
+    {
+        let h = setup_with(r#"{"outcome":"reply","text":"灰度准备中，今天会给结论。","needs_approval":false,"why":"结合上下文答复"}"#).await;
+        let me = h.me.clone();
+        let now = h.ch.now();
+        // (a) Owner `me` personal memory (#573)
+        h.env
+            .store()
+            .write(|w| {
+                let me_party = steve_store::Contacts::new(w).user_party(WS, ME)?.unwrap();
+                let _ = steve_store::knowledge::Memories(w).create(
+                    WS,
+                    &steve_store::base::mems::NewMem {
+                        kind: "fact".into(),
+                        text: "星河发布默认由主人最终签字确认".into(),
+                        source_type: "manual".into(),
+                        source_id: None,
+                        source_label: "主人记忆".into(),
+                        visibility: steve_store::base::Visibility::Workspace,
+                        level: steve_store::base::Level::Reasoning,
+                        status: "confirmed".into(),
+                        valid_until: None,
+                        writer: "manual".into(),
+                        decision_id: None,
+                        created_by: ME.into(),
+                        pinned: true,
+                        about: vec![steve_store::base::ObjRef::new("party", &me_party)],
+                    },
+                )?;
+                Ok::<_, steve_store::StoreError>(())
+            })
+            .unwrap();
+        // (c) Main Steve conversation turn
+        h.env
+            .store()
+            .messages()
+            .add(
+                WS,
+                "me",
+                "星河发布灰度配置已经在预发验证通过",
+                None,
+                &json!({}),
+                conversations::MAIN_CONV,
+            )
+            .unwrap();
+        // (d) Open work item
+        let feat_tag = h
+            .env
+            .store()
+            .tags()
+            .kinds(WS)
+            .unwrap()
+            .into_iter()
+            .find(|tag| tag.name == "feat")
+            .unwrap()
+            .id;
+        let _ = h
+            .env
+            .store()
+            .items()
+            .create(
+                WS,
+                &steve_store::NewItem {
+                    title: "星河发布灰度准备".into(),
+                    goal: "核对星河发布清单".into(),
+                    kind: Some("task".into()),
+                    tags: vec![feat_tag],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // (b) Other visible IM space message
+        let mut ops_msg =
+            FakeChannel::message("C_OPS", "ops_xh", "uhan", "星河发布压测已完成无报错");
+        ops_msg.created = now;
+        let _ = push(&h, &me, ops_msg).await;
+
+        // Now ulilei asks about 星河发布 in DM D_LI -> composer prompt must receive all 4 cross-context sources!
+        let mut ask = FakeChannel::message("D_LI", "dm_xh", "ulilei", "星河发布现在进度怎么样？");
+        ask.created = now + 5_000;
+        let _ = push(&h, &me, ask).await;
+        let prompt = h
+            .env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        report.case(
+            "chan.reply.18_issue275_owner_cross_context_and_573_reuse",
+            &[
+                (
+                    "includes_573_me_memory",
+                    prompt.contains("星河发布默认由主人最终签字确认"),
+                ),
+                (
+                    "includes_other_chat_snippet",
+                    prompt.contains("星河发布压测已完成无报错"),
+                ),
+                (
+                    "includes_main_thread_snippet",
+                    prompt.contains("星河发布灰度配置已经在预发验证通过"),
+                ),
+                ("includes_open_item", prompt.contains("星河发布灰度准备")),
+                ("tagged_for_reasoning_only", prompt.contains("仅用于推理")),
+            ],
+            &[],
+        );
+    }
+
+    // 19 (#277): Owner emoji reaction supersedes open draft and does NOT silence subsequent messages
+    {
+        let h = setup_with(REPLY_OK).await;
+        let me = h.me.clone();
+        let mut m1 = FakeChannel::message("D_LI", "rx1", "ulilei", "帮我看下这个文档");
+        m1.created = h.ch.now();
+        let in1 = push(&h, &me, m1).await;
+        let draft1 = in1
+            .response
+            .as_ref()
+            .and_then(|r| r.out_message_id.clone())
+            .unwrap();
+
+        h.ch.on_reaction(
+            WS,
+            &me,
+            steve_channels::ReactionEvent {
+                space_ext_id: Some("D_LI".into()),
+                message_ext_id: Some("rx1".into()),
+                message_source_id: None,
+                actor: FakeChannel::handle("upx"),
+                actor_name: Some("我".into()),
+                actor_is_bot: false,
+                origin: steve_channels::ReactionOrigin::Manual,
+                emoji: "THUMBSUP".into(),
+                at: h.ch.now() + 2_000,
+                time_source: steve_channels::ReactionTimeSource::Provider,
+                revision: None,
+                removed: false,
+            },
+        )
+        .unwrap();
+
+        let draft1_status = h
+            .env
+            .store()
+            .read(|r| steve_store::channel_message_repo::projection::get(r, &draft1))
+            .unwrap()
+            .unwrap()
+            .status;
+
+        // Subsequent unrelated message 10s later MUST still get drafted (reaction != live presence).
+        h.env.clock.advance(10_000);
+        let mut m2 = FakeChannel::message("D_LI", "rx2", "ulilei", "另外明天下午有空吗？");
+        m2.created = h.ch.now();
+        let in2 = push(&h, &me, m2).await;
+        let draft2_opened = in2
+            .response
+            .as_ref()
+            .and_then(|r| r.out_message_id.clone())
+            .is_some();
+
+        report.case(
+            "chan.reply.19_issue277_owner_reaction_supersedes_without_live_silencing",
+            &[
+                ("draft_superseded_by_reaction", draft1_status == "discarded"),
+                ("next_message_still_drafted", draft2_opened),
+            ],
+            &[],
+        );
+    }
+
+    // 20 (#278): Unsupported media explicitly asks owner instead of silently skipping or guessing
+    {
+        let h = setup_with(REPLY_OK).await;
+        let me = h.me.clone();
+        // Image-only message with no MediaSource wired -> must open an explicit MediaUnsupported card!
+        let mut img_m = FakeChannel::message("D_LI", "img1", "ulilei", "[image]");
+        img_m.created = h.ch.now();
+        img_m.attachments = vec![json!({"type": "image", "key": "img_k1", "name": "error.png"})];
+        let prompts_before = h.env.gateway.prompts.lock().unwrap().len();
+        let in_img = push(&h, &me, img_m).await;
+        let decision_id = in_img.response.as_ref().and_then(|r| r.decision_id.clone());
+        let question = decision_id
+            .as_deref()
+            .and_then(|id| {
+                h.env
+                    .store()
+                    .read(|r| steve_store::decision_repo::get(r, id))
+                    .ok()
+                    .flatten()
+            })
+            .map(|d| d.question)
+            .unwrap_or_default();
+        let explicit_card = decision_id.is_some()
+            && (question.contains("不支持")
+                || question.contains("未接通")
+                || question.contains("读取"));
+        let did_not_guess = h.env.gateway.prompts.lock().unwrap().len() == prompts_before;
+
+        report.case(
+            "chan.reply.20_issue278_unreadable_media_explicitly_reports_to_owner",
+            &[
+                ("explicit_owner_card_opened", explicit_card),
+                ("never_guessed_without_reading", did_not_guess),
+            ],
+            &[],
+        );
+    }
+
+    // 21 (#213 + outbound confirm + [AI] mark preference): context endpoint + default-on & toggleable [AI]
+    {
+        let h = setup_with(REPLY_OK).await;
+        let me = h.me.clone();
+        let api = steve_channels::api::routes(h.ch.clone())
+            .merge(steve_channels::channels_api::routes(h.ch.clone()))
+            .with_state(h.env.modules.clone());
+        let mut m1 = FakeChannel::message("D_LI", "ctx1", "ulilei", "上线前确认下配置");
+        m1.created = h.ch.now();
+        let in1 = push(&h, &me, m1).await;
+        let out_id = in1
+            .response
+            .as_ref()
+            .and_then(|r| r.out_message_id.clone())
+            .unwrap();
+        let (st, ctx) = steve_modules::testkit::call(
+            &api,
+            Some(&caller(WS, ME)),
+            "GET",
+            &format!("/chan-messages/{out_id}/context"),
+            None,
+        )
+        .await;
+        let has_who_what_why = st == 200
+            && ctx["recipient"]["space_id"] == json!(in1.space_id)
+            && ctx["recipient"]["reply_to_sender"].is_string()
+            && ctx["text"].as_str().is_some_and(|s| !s.is_empty())
+            && ctx["why"].as_str().is_some_and(|s| !s.is_empty())
+            && ctx["ai_mark"] == json!(true);
+
+        // Toggle `ai_mark = false` on the space and verify context reflects it.
+        let (pst, _) = steve_modules::testkit::call(
+            &api,
+            Some(&caller(WS, ME)),
+            "PATCH",
+            &format!("/spaces/{}", in1.space_id),
+            Some(&json!({"ai_mark": false})),
+        )
+        .await;
+        let (_, ctx_off) = steve_modules::testkit::call(
+            &api,
+            Some(&caller(WS, ME)),
+            "GET",
+            &format!("/chan-messages/{out_id}/context"),
+            None,
+        )
+        .await;
+        report.case(
+            "chan.reply.21_issue213_outbound_confirm_context_and_ai_mark_toggle",
+            &[
+                ("context_has_who_what_why_and_ai_mark", has_who_what_why),
+                (
+                    "space_ai_mark_toggle_persisted",
+                    pst == 200 && ctx_off["ai_mark"] == json!(false),
+                ),
+            ],
+            &[],
+        );
+    }
+
+    // 22 (P1-21): Generic non-Feishu provider open link resolves without any Feishu hardcoding
+    {
+        struct AcmeLinks;
+        impl steve_channels::open_link::PlatformLinks for AcmeLinks {
+            fn id(&self) -> &'static str {
+                "acme"
+            }
+            fn native(&self, adapter: &str) -> bool {
+                adapter == "acme_bot"
+            }
+            fn chat(&self, _config: &Value, chat_id: &str) -> Option<String> {
+                Some(format!("https://acme.example/chat/{chat_id}"))
+            }
+        }
+        steve_channels::open_link::register(Arc::new(AcmeLinks));
+        let p = steve_channels::open_link::platform_of("acme_bot", &json!({}));
+        let url = p.as_ref().and_then(|l| l.chat(&json!({}), "room_42"));
+        report.case(
+            "chan.reply.22_p1_21_generic_provider_open_link",
+            &[(
+                "resolves_generic_provider_link",
+                p.as_ref().map(|l| l.id()) == Some("acme")
+                    && url.as_deref() == Some("https://acme.example/chat/room_42"),
+            )],
+            &[],
+        );
+    }
+
+    // 23 (#213): Quiet-inbox rules — new bot group defaults to silent record (no inbox ask card),
+    // unhandled @/DM draft escalates after 4 working hours, and 3 ignores in 7d propose record-only
+    {
+        use steve_store::views::Views;
+        use steve_types::DecisionTier;
+        let h = setup_with(REPLY_OK).await;
+        h.fake.space(
+            "C_FRESH",
+            "新拉进的群",
+            SpaceKind::Group,
+            false,
+            &[("ulilei", "李雷")],
+        );
+        let fresh = push(
+            &h,
+            &h.bot.clone(),
+            msg("C_FRESH", "f1", "ulilei", "@值班小运 你好", true),
+        )
+        .await;
+        let fresh_set = h
+            .env
+            .store()
+            .read(|r| spaces::settings(r, &fresh.space_id))
+            .unwrap();
+        let fresh_silent = fresh.decision_id.is_none()
+            && fresh_set.muted
+            && !fresh_set.configured
+            && fresh.response.as_ref().is_some_and(|r| r.muted);
+
+        // 4 working-hour escalation on unhandled DM draft (Thu 2026-01-15 16:00 -> Fri 11:00 = 4h)
+        let tz = chrono_tz::Asia::Shanghai;
+        let zone = steve_modules::zone::Zone::new(tz);
+        let thu_16 = zone
+            .instant(
+                chrono::NaiveDate::from_ymd_opt(2026, 1, 15)
+                    .unwrap()
+                    .and_hms_opt(16, 0, 0)
+                    .unwrap(),
+            )
+            .unwrap();
+        let fri_11 = zone
+            .instant(
+                chrono::NaiveDate::from_ymd_opt(2026, 1, 16)
+                    .unwrap()
+                    .and_hms_opt(11, 0, 0)
+                    .unwrap(),
+            )
+            .unwrap();
+        h.env.clock.set(thu_16);
+        h.env
+            .store()
+            .settings()
+            .set(WS, json!({"tz": "Asia/Shanghai"}).as_object().unwrap(), ME)
+            .unwrap();
+        let mut dm_esc = msg("D_LI", "esc_1", "ulilei", "紧急问下进展", false);
+        dm_esc.created = thu_16;
+        let dm_res = push(&h, &h.me.clone(), dm_esc).await;
+        let dm_dec = dm_res.response.unwrap().decision_id.unwrap();
+        let tier_before = h
+            .env
+            .store()
+            .read(|r| r.decision_views().of(WS, &[dm_dec.clone()]))
+            .unwrap()
+            .pop()
+            .unwrap()
+            .tier;
+        h.env.clock.advance_to(fri_11);
+        let escalated_n = steve_channels::draft_escalation::escalate_due(&h.ch).unwrap();
+        let tier_after = h
+            .env
+            .store()
+            .read(|r| r.decision_views().of(WS, &[dm_dec.clone()]))
+            .unwrap()
+            .pop()
+            .unwrap()
+            .tier;
+
+        // 3 ignores within 7 days trigger a "record_only" proposal on the space.
+        steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, ME), &dm_dec, "no", "")
+            .unwrap()
+            .unwrap();
+        for n in 2..=3 {
+            h.env.clock.advance(86_400_000);
+            let mut m = msg("D_LI", &format!("esc_{n}"), "ulilei", "再问一次", false);
+            m.created = h.ch.now();
+            let r = push(&h, &h.me.clone(), m).await;
+            let d = r.response.unwrap().decision_id.unwrap();
+            steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, ME), &d, "no", "")
+                .unwrap()
+                .unwrap();
+        }
+        let sug = h
+            .env
+            .store()
+            .read(|r| {
+                steve_store::DecisionRows(r).open_for(WS, spaces::SUBJECT_SPACE, &dm_res.space_id)
+            })
+            .unwrap();
+        let suggested = sug
+            .as_ref()
+            .is_some_and(|d| d.kind == "propose" && d.options == vec!["record_only", "keep"]);
+
+        report.case(
+            "chan.reply.23_issue213_silent_new_group_escalation_and_ignore_rule_suggestion",
+            &[
+                ("new_bot_group_silent_no_inbox_card", fresh_silent),
+                (
+                    "dm_draft_escalates_after_4_work_hours",
+                    tier_before == DecisionTier::Draft
+                        && escalated_n == 1
+                        && tier_after == DecisionTier::Decide,
+                ),
+                ("three_ignores_in_7d_opens_record_only_proposal", suggested),
+            ],
+            &[],
+        );
+    }
+
+    report.finish(23);
 }

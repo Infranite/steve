@@ -20,6 +20,8 @@ use steve_harness_spec::UsageFallback;
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub const SETTLE_WAIT: Duration = Duration::from_secs(3);
+/// Spacing between tail settlement reads inside [`Sampler::finish`].
+const SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The effective home of the *spawned* adapter, including manifest, wrapper and principal
 /// overrides (last wins). Relative homes follow the adapter's cwd, not the Node's cwd.
@@ -297,7 +299,24 @@ impl Sampler {
 
     /// Success, cancellation and error all get the same full bounded tail window. A recent live
     /// tick does not establish that the producer flushed its last response.
-    pub async fn finish(&mut self, mut native: Vec<Fact>, wait: Duration) -> Vec<Fact> {
+    pub async fn finish(&mut self, native: Vec<Fact>, wait: Duration) -> Vec<Fact> {
+        let deadline = tokio::time::Instant::now() + wait;
+        self.finish_with(native, move || async move {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            tokio::time::sleep(SETTLE_POLL_INTERVAL.min(remaining)).await;
+            true
+        })
+        .await
+    }
+
+    async fn finish_with<F, Fut>(&mut self, mut native: Vec<Fact>, mut next_tick: F) -> Vec<Fact>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         // The producer has stopped. Late disk writes may contain existing responses, but new
         // source messages after this boundary belong elsewhere. The fence never waits on I/O.
         if let Some(end) = &self.source_end {
@@ -310,17 +329,11 @@ impl Sampler {
             );
         }
         if self.reader.is_some() {
-            let deadline = tokio::time::Instant::now() + wait;
             loop {
                 self.read(false).await;
-                if tokio::time::Instant::now() >= deadline {
+                if !next_tick().await {
                     break;
                 }
-                tokio::time::sleep(
-                    Duration::from_millis(100)
-                        .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
-                )
-                .await;
             }
         }
         let FinalReadings {
@@ -635,33 +648,58 @@ mod tests {
         let p = path(dir.path());
         let mut s = sampler(dir.path()).await;
         let line = tick();
-        let writer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(40)).await;
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(&p)
-                .unwrap();
-            let cut = line.len() / 2;
-            file.write_all(line[..cut].as_bytes()).unwrap();
-            tokio::time::sleep(Duration::from_millis(110)).await;
-            file.write_all(line[cut..].as_bytes()).unwrap();
-            tokio::time::sleep(Duration::from_millis(110)).await;
-            file.write_all(
-                line.replace("00.030Z", "00.040Z")
-                    .replace(":100", ":150")
-                    .replace(":60", ":80")
-                    .replace(":20", ":30")
-                    .as_bytes(),
-            )
-            .unwrap();
-        });
-        let facts = s.finish(vec![], Duration::from_millis(400)).await;
-        writer.await.unwrap();
+        let cut = line.len() / 2;
+        let mut file = None;
+        let mut step = 0usize;
+        // Drive each tail poll deterministically:
+        // read 0 sees no file yet; tick 1 creates the file with a partial record;
+        // tick 2 completes the first record; tick 3 appends a second tail tick.
+        let facts = s
+            .finish_with(vec![], || {
+                step += 1;
+                match step {
+                    1 => {
+                        let mut f = std::fs::OpenOptions::new()
+                            .append(true)
+                            .create(true)
+                            .open(&p)
+                            .unwrap();
+                        f.write_all(line[..cut].as_bytes()).unwrap();
+                        file = Some(f);
+                    }
+                    2 => {
+                        file.as_mut()
+                            .unwrap()
+                            .write_all(line[cut..].as_bytes())
+                            .unwrap();
+                    }
+                    3 => {
+                        file.as_mut()
+                            .unwrap()
+                            .write_all(
+                                line.replace("00.030Z", "00.040Z")
+                                    .replace(":100", ":150")
+                                    .replace(":60", ":80")
+                                    .replace(":20", ":30")
+                                    .as_bytes(),
+                            )
+                            .unwrap();
+                    }
+                    _ => return std::future::ready(false),
+                }
+                std::future::ready(true)
+            })
+            .await;
         let t = report(&facts, Measurement::Final).tokens;
         assert_eq!(
             (t.input, t.cache_read, t.output),
             (Some(70), Some(80), Some(30))
+        );
+        assert!(
+            !facts
+                .iter()
+                .any(|f| matches!(f, Fact::Event(EventBody::Diagnostic { .. }))),
+            "settled tail must not emit an incomplete diagnostic: {facts:?}"
         );
     }
 

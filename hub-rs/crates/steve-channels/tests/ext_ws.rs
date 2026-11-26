@@ -1925,7 +1925,24 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
     };
 
     // The first automatic refusal opens a full recovery card; retries require human action.
+    // New bot groups default to silent record (#213); activate the group so rule replies send.
     let plan = ask(1).await;
+    assert!(plan.muted, "new bot groups default to silent record");
+    h.env
+        .store()
+        .write(|tx| {
+            spaces::patch(
+                tx,
+                &Viewer::bare(WS, ME),
+                &plan.space_id,
+                &spaces::SpacePatch {
+                    muted: Some(false),
+                    ..Default::default()
+                },
+                now,
+            )
+        })
+        .unwrap();
     let first = outbox
         .deliver(&h.ch, &reply(&plan, Purpose::Reply))
         .await
@@ -2047,6 +2064,7 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
     let space_id = inbound[0][1].as_str().unwrap().to_string();
     let plan = steve_channels::flow_actions::plan_of(h.env.store(), WS, &source).unwrap();
     assert_eq!(plan.mode, spaces::Mode::Bot);
+    assert!(plan.muted, "new bot groups default to silent record");
     // A source-only reply keeps its real remote source_id, not the Hub's fp: id.
     let now = h.ch.now();
     h.env
@@ -2057,6 +2075,16 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
                 &Viewer::bare(WS, ME),
                 &id,
                 &json!([{"when":{"kind":"all"},"act":"reply"}]),
+                now,
+            )?;
+            spaces::patch(
+                tx,
+                &Viewer::bare(WS, ME),
+                &space_id,
+                &spaces::SpacePatch {
+                    muted: Some(false),
+                    ..Default::default()
+                },
                 now,
             )
         })
