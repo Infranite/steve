@@ -208,18 +208,18 @@ try {
 
   // 4a) Session view & panel showing recorded Codex effort mapping + transcript system event
   await page.goto(base + '/#/sessions/s-codex')
-  await page.locator('[data-session-effort-mapping]').waitFor()
+  await page.locator('[data-transcript="s-codex"] [data-sys]').waitFor()
   assert.equal(await page.locator('[data-session-effort-mapping]').innerText(), '高 → Codex xhigh')
   await page.locator('[data-session-panel] [data-runtime-toggle]').click()
   assert.equal(await page.locator('[data-session-panel] [data-session-panel-effort-mapping]').innerText(), '高 → Codex xhigh')
-  assert.match(await page.locator('body').innerText(), /思考强度：高 → codex xhigh/)
+  assert.match(await page.locator('[data-transcript="s-codex"] [data-sys]').innerText(), /思考强度：高 → codex xhigh/)
   await shot('effort-session-codex')
 
   // 4b) Session view showing recorded Antigravity unsupported fallback mapping
   await page.goto(base + '/#/sessions/s-agy')
-  await page.locator('[data-session-effort-mapping]').waitFor()
+  await page.locator('[data-transcript="s-agy"] [data-sys]').waitFor()
   assert.equal(await page.locator('[data-session-effort-mapping]').innerText(), '高 → 由模型自己决定')
-  assert.match(await page.locator('body').innerText(), /思考强度：高 → 由模型自己决定/)
+  assert.match(await page.locator('[data-transcript="s-agy"] [data-sys]').innerText(), /思考强度：高 → 由模型自己决定/)
   await shot('effort-session-agy-fallback')
 
   assert.deepEqual(errors, [])
