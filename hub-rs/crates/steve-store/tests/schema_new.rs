@@ -1744,6 +1744,99 @@ fn migration_128_strips_main_bot_from_teams_and_rewrites_steve_fallback() {
 }
 
 #[test]
+fn migration_145_adds_file_truth_memory_tables_and_supersedes_mem_confirm_cards() {
+    let before_145 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE memory_entries"))
+        .unwrap();
+    let (_dir, path) = at_version(before_145);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO kb_sources(id,workspace_id,kind,name,config,visibility,level,created_by,created,updated)
+             VALUES ('ks_mems','default','mems','Memories','{}','private','reasoning','usr_dev',1,1),
+                    ('ks_docs','default','folder','Docs','{"path":"/tmp/docs"}','workspace','public','usr_dev',1,1);
+           INSERT INTO projects(id,workspace_id,name,kind,path,created,updated)
+             VALUES ('pr_1','default','Repo','git','/tmp/repo',1,1);
+           INSERT INTO project_proposals(id,workspace_id,project_id,kind,text,reason,evidence,origin_kind,origin_label,status,writer,created_by,created,updated)
+             VALUES ('pp_1','default','pr_1','agents_md','Run fmt','keep style','quote','item','ST-1','pending','steve','usr_dev',1,1);
+           INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,question,draft,options,status,requested_by,created)
+             VALUES ('dec_mem_open','default','confirm','mem','mm_1','Keep?','','["yes","no"]','open','steve',10),
+                    ('dec_other_open','default','confirm','project_proposal','pp_1','Apply?','','["yes","no"]','open','steve',11);"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    store
+        .fixture_write(|c| {
+            // 1. kb_sources role & write_mode backfill
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM kb_sources WHERE id='ks_mems' AND role='memory' AND write_mode='direct_write'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM kb_sources WHERE id='ks_docs' AND role='knowledge' AND write_mode='read_only'"
+                ),
+                1
+            );
+            // 2. All 5 sidecar tables exist and `memory_entries` has NO prose text column
+            for t in [
+                "memory_entries",
+                "memory_evidence",
+                "observations",
+                "rejected_patterns",
+                "memory_revisions",
+            ] {
+                assert!(has_table(c, t), "missing table {t}");
+            }
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM pragma_table_info('memory_entries') WHERE name IN ('text','body','content')"
+                ),
+                0,
+                "memory_entries must not store a duplicate prose column"
+            );
+            // 3. project_proposals preserves existing rows and accepts nullable project_id + skill_md
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM project_proposals WHERE id='pp_1' AND project_id='pr_1' AND target_path='AGENTS.md'"
+                ),
+                1
+            );
+            c.execute(
+                "INSERT INTO project_proposals(id,workspace_id,project_id,kind,target_path,text,reason,evidence,origin_kind,origin_label,status,writer,created_by,created,updated)
+                 VALUES ('pp_skill','default',NULL,'skill_md','SKILL.md','Check contrast','workflow','quote','item','ST-2','pending','steve','usr_dev',2,2)",
+                [],
+            )?;
+            // 4. Legacy open `mem` decisions are superseded; non-mem decisions remain open
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM decisions WHERE id='dec_mem_open' AND status='superseded' AND resolved=10"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT count(*) FROM decisions WHERE id='dec_other_open' AND status='open'"
+                ),
+                1
+            );
+            assert_eq!(count(c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn migration_141_rebinds_work_tidy_to_item_lifecycle_preserving_cursor() {
     let (_dir, path) = at_version(140);
     let c = Connection::open(&path).unwrap();

@@ -84,6 +84,7 @@ Fs	steve-install/src/setup.rs	13
 Fs	steve-install/src/setup/reconfigure.rs	7
 Fs	steve-install/src/signing.rs	34
 Fs	steve-knowledge/src/eval.rs	3
+Fs	steve-knowledge/src/memory_file.rs	5
 Fs	steve-knowledge/src/sources/files.rs	1
 Fs	steve-knowledge/src/sources/folder.rs	1
 Fs	steve-mail/src/attach.rs	6

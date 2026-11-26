@@ -302,6 +302,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/143.sql"),
     // 144: attribute usage_records, agent_turns, gateway_calls, and stat_daily to Node (`node_id`).
     include_str!("../migrations/144.sql"),
+    // 145: file-as-truth memory architecture (source role/write_mode, sidecar memory_entries, evidence, observations, tombstones, revisions, SKILL.md proposals).
+    include_str!("../migrations/145.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

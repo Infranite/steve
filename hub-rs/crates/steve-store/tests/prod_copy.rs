@@ -720,6 +720,16 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
     // 136..=138: Normalize `bots.perm_mode`, drop legacy `project_dir`/`worktree` columns, and
     // canonicalize `reasoning_effort` + add `sessions.effort_mapping` (no table/row count change).
 
+    // 141: File-as-truth memory architecture (sidecar memory_entries, evidence, observation buffer,
+    // rejected_patterns tombstones, memory_revisions; project_proposals adds nullable project_id + target_path).
+    if v_before < 141 {
+        changes.create_table("memory_entries", 0);
+        changes.create_table("memory_evidence", 0);
+        changes.create_table("observations", 0);
+        changes.create_table("rejected_patterns", 0);
+        changes.create_table("memory_revisions", 0);
+    }
+
     changes
 }
 

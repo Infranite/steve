@@ -51,6 +51,8 @@ fn retrieve_on_eval_corpus() {
                 &json!({"path": "/tmp/wiki"}),
                 &Visibility::Private,
                 Level::Conclusion,
+                steve_store::knowledge::SourceRole::Knowledge,
+                steve_store::knowledge::WriteMode::ReadOnly,
                 ME,
                 now,
             )?;

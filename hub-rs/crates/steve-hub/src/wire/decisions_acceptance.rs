@@ -1451,8 +1451,9 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                 ProjectProposals(tx).create(
                     ws,
                     &NewProjectProposal {
-                        project_id: &project.id,
+                        project_id: Some(&project.id),
                         kind: "agents_md",
+                        target_path: "AGENTS.md",
                         text: "Run cargo check before handoff",
                         reason: "Avoid warnings",
                         evidence: "Always run cargo check",

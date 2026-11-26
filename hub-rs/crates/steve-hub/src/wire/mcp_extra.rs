@@ -147,6 +147,8 @@ pub(crate) fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::WorkflowRun)
     } else if name == "steve_upgrade" {
         Some(Owner::Upgrade)
+    } else if name == steve_knowledge::candidates::REMEMBER || name == mcp::REMEMBER {
+        Some(Owner::Remember)
     } else if mcp::handles(name) {
         Some(Owner::Contacts)
     } else if steve_digest::tools::handles(name) {
@@ -155,8 +157,6 @@ pub(crate) fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::Todos)
     } else if steve_knowledge::tools::handles(name) {
         Some(Owner::Knowledge)
-    } else if name == steve_knowledge::candidates::REMEMBER {
-        Some(Owner::Remember)
     } else if steve_modules::vault::mcp::handles(name) {
         Some(Owner::Vault)
     } else if steve_github::mcp::handles(name) {
@@ -574,8 +574,14 @@ async fn call_owned_inner(
         Owner::ReplySource => reply_source(x, &cx, &args).await,
         Owner::Remember => {
             let m = x.modules.clone();
+            let kb = x.kb.clone();
+            let tool_name = name.to_string();
             tokio::task::spawn_blocking(move || {
-                steve_knowledge::candidates::remember(&m, &cx, &args)
+                if tool_name == mcp::REMEMBER {
+                    steve_knowledge::ingest::remember_contact_tool(&m, &kb, &cx, &args)
+                } else {
+                    steve_knowledge::candidates::remember(&m, &kb, &cx, &args)
+                }
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))

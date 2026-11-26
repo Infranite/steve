@@ -1,27 +1,24 @@
-//! Candidate memories: writing them with their `confirm` decision, answering them
-//! (the `mem` decision handler, one at a time or in a batch), the 待确认 list, the 30-day expiry and
-//! the agent tool `steve_remember`.
-//!
-//! A candidate is a `mems` row with `status=candidate` plus its `mem_candidates` row (origin, quote,
-//! the memory it would replace). It takes effect only with a `yes` — the owner's, or, when the
-//! owner's own words in their conversation say to keep it (“记住…”, “以后…”) and it replaces nothing,
-//! Steve's at once (settled as a `yes` the owner can undo). An expired candidate can be restored.
+//! Legacy candidate memory inspection routes, `Origin` types, and the `steve_remember` tool
+//! entry point (which now routes directly through [`crate::ingest`] with zero Inbox confirmation
+//! cards).
 
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
-use steve_modules::contacts::memory::{MAX_OPEN_CONFIRMS, confirm_question, record_name};
+use steve_modules::contacts::memory::record_name;
 use steve_modules::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules};
-use steve_store::base::mems::{Mem, MemPatch, NewMem};
-use steve_store::base::{Level, ObjRef, Viewer, Visibility};
-use steve_store::knowledge::{CandidateInfo, CandidateOrigin, CandidateRows, Memories};
+use steve_store::base::mems::{Mem, MemPatch};
+use steve_store::base::{Level, ObjRef, Viewer};
+use steve_store::knowledge::{
+    CandidateInfo, CandidateRows, Memories, OriginClass, SourceTrustTier,
+};
 use steve_store::{Decision, DecisionRows, Read, W};
 
-use crate::extract::Names;
 use crate::service::{mem_json_for, prepare};
+use crate::state::Knowledge;
 use crate::sync;
 
 /// `subject_type` of memory confirm decisions.
@@ -61,39 +58,33 @@ impl OriginKind {
             .into_iter()
             .find(|k| k.code() == s)
     }
-
-    /// `mems.source_type` of what this origin writes.
-    fn source_type(self, has_item: bool) -> &'static str {
-        match self {
-            Self::Item => "item",
-            Self::Tool if has_item => "item",
-            Self::Tool => "steve",
-            Self::Chat | Self::Mail | Self::Space => "message",
-        }
-    }
 }
 
-/// One origin of candidates: who they belong to and how they are labelled.
+/// One origin of extracted memories/proposals: who they belong to and their trust provenance.
 #[derive(Debug, Clone)]
 pub struct Origin {
     pub ws: String,
     pub kind: OriginKind,
     /// `ST-12`, `chat:2026-10-31`, a thread or session id.
     pub id: String,
-    /// “ST-12 交付时”, “10-31 的对话”: shown on the card and the 待确认 page.
+    /// “ST-12 交付时”, “10-31 的对话”: provenance label.
     pub label: String,
-    /// The user of the workspace the candidates are for (`created_by`; they are private to them).
+    /// The user of the workspace the memories belong to (`created_by`; private by default).
     pub user: String,
     /// `steve`, or the bot that saved it (`writer`, `requested_by`).
     pub writer: String,
-    /// The level a candidate gets at least (item and chat: `conclusion`, mail: `reasoning`).
+    /// Minimum disclosure level enforced on writes from this origin (automatic writes clamp >= `reasoning`).
     pub default_level: Level,
-    /// The item behind it, if any (`source_id` of tool candidates).
+    /// The item behind it, if any.
     pub item_id: Option<String>,
     pub session_id: Option<String>,
+    /// Deterministic origin class for confidence & fast-path/buffer routing.
+    pub origin_class: OriginClass,
+    /// Deterministic source trust tier (Tier 3 external is blocked from writing `me`/global rules).
+    pub source_tier: SourceTrustTier,
 }
 
-/// A candidate ready to be written.
+/// A validated extraction item ready to pass into [`crate::ingest::ingest_in`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewCandidate {
     /// `fact` | `preference` | `rule` | `event`
@@ -102,204 +93,25 @@ pub struct NewCandidate {
     pub about: Vec<ObjRef>,
     pub level: Level,
     pub evidence: String,
-    /// A confirmed memory this one replaces once confirmed.
+    /// A memory this one supersedes/updates, if any.
     pub supersedes: Option<String>,
-    /// Why it is worth keeping, for the card (empty from `steve_remember`).
+    /// Why this changes agent behavior in another different task.
     pub why: String,
-    /// Where it applies, for the card.
+    /// Where it applies (`scope_hint`).
     pub scope: String,
-    /// The owner's own words say to keep it (“记住…”, “以后…”): it is confirmed at once, unless it
-    /// replaces a memory (that still asks). See [`owner_said`].
-    pub owner_said: bool,
+    /// Hard admission flag: must be `true` to pass ingestion (default NOOP).
+    pub changes_future_behavior: bool,
+    /// Effective origin class (may be refined per-item, e.g. OwnerRework vs ImplicitPattern).
+    pub origin_class: OriginClass,
+    /// Effective trust tier (e.g. Tier3External when quote comes from `[EXTERNAL_RECEIVED]`).
+    pub source_tier: SourceTrustTier,
+    /// Whether the owner explicitly stated a standing rule/correction.
+    pub is_explicit_rule: bool,
 }
 
-/// Words with which the owner says to keep something.
-pub const SAY_KEEP: [&str; 2] = ["记住", "以后"];
-
-/// `evidence` (quotes joined with “ / ”) is all the owner's own words in `text`, the lines that start
-/// with `owner_head` (`我（` in a day of chat), and one quote says to keep it ([`SAY_KEEP`]).
-pub fn owner_said(text: &str, owner_head: &str, evidence: &str) -> bool {
-    let norm = |s: &str| -> String {
-        s.chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect()
-    };
-    let owner: Vec<String> = text
-        .lines()
-        .filter(|l| l.trim_start().starts_with(owner_head))
-        .map(norm)
-        .collect();
-    let quotes: Vec<&str> = evidence
-        .split(" / ")
-        .map(str::trim)
-        .filter(|q| !q.is_empty())
-        .collect();
-    !quotes.is_empty()
-        && quotes.iter().all(|q| {
-            let pieces: Vec<String> = q
-                .split(['…', '⋯'])
-                .flat_map(|p| p.split("..."))
-                .map(norm)
-                .filter(|p| p.chars().count() >= 2)
-                .collect();
-            !pieces.is_empty()
-                && owner
-                    .iter()
-                    .any(|l| pieces.iter().all(|p| l.contains(p.as_str())))
-        })
-        && quotes
-            .iter()
-            .any(|q| SAY_KEEP.iter().any(|w| q.contains(w)))
-}
-
-fn cut(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
-}
-
-/// Writes a candidate: the private `mems` row, its `about` rows, its `mem_candidates` row and, while
-/// fewer than 20 memory decisions are open in the workspace, a `confirm` decision. Publishes `mm`
-/// (and `decision`). Returns the memory.
-pub fn propose_in(tx: &mut W<'_>, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
-    let source_id = match o.kind {
-        OriginKind::Tool => o.item_id.clone().or_else(|| o.session_id.clone()),
-        _ => Some(o.id.clone()).filter(|s| !s.is_empty()),
-    };
-    let mem = Memories(tx).create(
-        &o.ws,
-        &NewMem {
-            kind: c.kind.clone(),
-            text: c.text.clone(),
-            source_type: o.kind.source_type(o.item_id.is_some()).into(),
-            source_id,
-            source_label: o.label.clone(),
-            visibility: Visibility::Private,
-            level: c.level,
-            status: "candidate".into(),
-            writer: o.writer.clone(),
-            created_by: o.user.clone(),
-            about: c.about.clone(),
-            ..Default::default()
-        },
-    )?;
-    let evidence = cut(&c.evidence, EVIDENCE_MAX);
-    CandidateRows(tx).record(
-        &o.ws,
-        &mem.id,
-        CandidateOrigin {
-            kind: o.kind.code(),
-            id: &o.id,
-            label: &o.label,
-            evidence: &evidence,
-            supersedes: c.supersedes.as_deref(),
-            created: mem.created,
-        },
-    )?;
-    let mut mem = mem;
-    let auto = c.owner_said && c.supersedes.is_none();
-    if auto || DecisionRows(tx).open_confirmations(&o.ws, SUBJECT)? < MAX_OPEN_CONFIRMS {
-        mem = open_candidate_confirmation(tx, o, c, &mem, &evidence)?;
-    }
-    if auto {
-        // you said so yourself: kept now, the card settled as yours, undoable like your own yes
-        answer(tx, &o.ws, "steve", &mem.id, "yes", "")?;
-        if let Some(id) = mem.decision_id.as_deref()
-            && let Some(d) = DecisionRows(tx).get(id)?
-        {
-            DecisionRows(tx).resolve_choice(
-                &d,
-                &o.user,
-                "yes",
-                "",
-                &json!({"choice": "yes", "auto": "owner_said"}),
-                Some(&steve_store::DecisionUndo::Domain),
-            )?;
-        }
-        tx.audit(
-            &o.ws,
-            "steve",
-            "mm.auto_confirm",
-            &mem.id,
-            &json!({"origin": o.kind.code(), "origin_id": o.id}),
-        )?;
-        mem = Memories(tx)
-            .get(&mem.id)?
-            .ok_or_else(|| ApiError::not_found(NOUN))?;
-    }
-    tx.audit(
-        &o.ws,
-        &o.writer,
-        "mm.propose",
-        &mem.id,
-        &json!({"origin": o.kind.code(), "origin_id": o.id, "kind": c.kind}),
-    )?;
-    Ok(mem)
-}
-
-fn open_candidate_confirmation(
-    tx: &mut W<'_>,
-    o: &Origin,
-    c: &NewCandidate,
-    mem: &Mem,
-    evidence: &str,
-) -> ApiResult<Mem> {
-    let mut draft = format!("类型：{} · {}", record_name(&c.kind), kind_name(&c.kind));
-    for (head, v) in [(WHY, &c.why), (SCOPE, &c.scope)] {
-        if !v.trim().is_empty() {
-            draft.push_str(&format!("\n{head}{}", v.trim()));
-        }
-    }
-    draft.push_str(&format!("\n来源：{}", o.label));
-    if !evidence.is_empty() {
-        draft.push_str(&format!("\n原话：{evidence}"));
-    }
-    if let Some(id) = c.supersedes.as_deref()
-        && let Some(old) = Memories(tx).get(id)?
-    {
-        draft.push_str(&format!("\n会替换：{}", old.text));
-    }
-    let mut nd = decisions::confirm(
-        &o.ws,
-        SUBJECT,
-        &mem.id,
-        &confirm_question(&c.kind, &c.text),
-        &o.writer,
-    );
-    nd.draft = Some(draft);
-    nd.session_id = o.session_id.clone();
-    nd.source = Some(steve_store::DecisionSource::Record);
-    nd.wait = steve_types::WaitContract::bounded(
-        steve_types::WaitOwner::Owner,
-        mem.created,
-        EXPIRE_AFTER_MS,
-        steve_types::WaitTimeoutAction::Close,
-    )
-    .ok();
-    let d = DecisionRows(tx).open(&nd)?;
-    Memories(tx)
-        .patch(
-            &mem.id,
-            &MemPatch {
-                decision_id: Some(Some(d.id)),
-                ..Default::default()
-            },
-        )?
-        .ok_or_else(|| ApiError::not_found(NOUN))
-}
-
-/// Line heads of the confirm card's draft; the 待确认 list reads them back.
+/// Line heads of legacy confirm card drafts (retained read-only for pre-141 rows).
 const WHY: &str = "为什么值得保留：";
 const SCOPE: &str = "适用：";
-
-fn kind_name(kind: &str) -> &'static str {
-    match kind {
-        "preference" => "偏好",
-        "rule" => "规则",
-        "event" => "事件",
-        "summary" => "摘要",
-        _ => "事实",
-    }
-}
 
 /// `(why, scope)` written on a candidate's decision (empty without one, or from before ST-41).
 fn reasons(c: &mut impl Read, decision: Option<&str>) -> ApiResult<(String, String)> {
@@ -725,130 +537,29 @@ pub fn expire(m: &Modules, now: i64) -> ApiResult<usize> {
 // ---------------------------------------------------------------- steve_remember
 
 pub const REMEMBER: &str = "steve_remember";
-/// The answer of `steve_remember` (verbatim; does not end the turn).
-pub const SAVED: &str = "Saved as a candidate; the user will confirm it.";
 const TOOL_KINDS: [&str; 3] = ["fact", "preference", "rule"];
 
 /// The tool definition (`{name, description, inputSchema}`, like steve-mcp's `tools.json`).
 pub fn remember_tool() -> Value {
     json!({
         "name": REMEMBER,
-        "description": "Save personal knowledge that will matter beyond this task: a preference or rule the user explicitly says applies from now on, or a verified fact about a person, organization or project (`about` is required for kind=fact). Do not save task records, one-off debugging conclusions or repository engineering details here. It becomes a candidate the user confirms.",
+        "description": "Save personal context that will change how an agent behaves in another different task: a preference or rule the user explicitly stated, or a stable fact about a person, organization or project (`about` is required for kind=fact). Do not save one-off task records, troubleshooting notes or repository engineering details here. Writes silently to the personal context Markdown files (respecting the folder write_mode) without opening an Inbox confirmation card.",
         "inputSchema": {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
             "properties": {
                 "text": { "type": "string" },
                 "kind": { "type": "string", "enum": TOOL_KINDS },
-                "about": { "type": "string", "description": "a person, organization, team or project, by exact name or id (required when kind is fact)" }
+                "about": { "type": "string", "description": "a person, organization, team or project, by exact name or id (required when kind is fact)" },
+                "scope": { "type": "string", "description": "optional scope where this rule/preference applies" },
+                "why": { "type": "string", "description": "optional reason why this changes future agent behavior" }
             },
             "required": ["text", "kind"]
         }
     })
 }
 
-/// `steve_remember`: no model call, the text becomes a candidate of the user the
-/// agent works for. `Ok` is the result text, `Err` the `isError` text. Synchronous: call it from a
-/// blocking task.
-pub fn remember(m: &Modules, cx: &McpCx, args: &Value) -> Result<String, String> {
-    let s = |k: &str| args.get(k).and_then(Value::as_str);
-    let mut issues = Vec::new();
-    if s("text").is_none() {
-        issues.push("Invalid input: expected string at text".to_string());
-    }
-    match s("kind") {
-        Some(k) if TOOL_KINDS.contains(&k) => {}
-        _ => issues.push(
-            "Invalid option: expected one of \"fact\"|\"preference\"|\"rule\" at kind".to_string(),
-        ),
-    }
-    if args
-        .get("about")
-        .is_some_and(|v| !v.is_null() && !v.is_string())
-    {
-        issues.push("Invalid input: expected string at about".to_string());
-    }
-    if !issues.is_empty() {
-        return Err(format!(
-            "MCP error -32602: Input validation error: Invalid arguments for tool {REMEMBER}: {}",
-            issues.join("; ")
-        ));
-    }
-    let text = s("text").unwrap_or_default().trim().to_string();
-    let n = text.chars().count();
-    if n == 0 || n > 2000 {
-        return Err("text must be 1 to 2000 characters.".into());
-    }
-    let kind = s("kind").unwrap_or("fact").to_string();
-    let about = s("about").map(str::trim).filter(|a| !a.is_empty());
-    let who = Caller {
-        ws: cx.ws.clone(),
-        me: cx.user.clone(),
-    };
-    prepare(m, &who).map_err(|e| e.to_string())?;
-    let viewer = m.viewer(&who).map_err(|e| e.to_string())?;
-    let origin = Origin {
-        ws: cx.ws.clone(),
-        kind: OriginKind::Tool,
-        id: cx
-            .item_id
-            .clone()
-            .or_else(|| cx.session_id.clone())
-            .unwrap_or_default(),
-        label: match &cx.item_id {
-            Some(i) => format!("{i} 的会话"),
-            None => "Agent 会话".into(),
-        },
-        user: cx.user.clone(),
-        writer: cx.bot_id.clone(),
-        default_level: Level::Conclusion,
-        item_id: cx.item_id.clone(),
-        session_id: cx.session_id.clone(),
-    };
-    m.store
-        .write(|tx| {
-            let about = match about {
-                None => {
-                    if kind == "fact" {
-                        return Err(ApiError::rule(
-                            "A fact must name the person, organization, team or project it is about (pass `about`).",
-                        ));
-                    }
-                    Vec::new()
-                }
-                Some(a) => {
-                    let names = Names::load(tx, &viewer, None)?;
-                    match names.resolve_entity(a) {
-                        Some((r, ent)) if kind != "fact" || ent.is_fact_subject() => vec![r],
-                        Some(_) => {
-                            return Err(ApiError::rule(format!(
-                                "A fact must be about a person, organization, team or project, not \"{a}\"."
-                            )));
-                        }
-                        None => {
-                            return Err(ApiError::rule(format!(
-                                "No person, organization, project or bot is called \"{a}\". Pass the exact name or id."
-                            )));
-                        }
-                    }
-                }
-            };
-            propose_in(
-                tx,
-                &origin,
-                &NewCandidate {
-                    kind: kind.clone(),
-                    text: text.clone(),
-                    about,
-                    level: Level::Conclusion,
-                    evidence: String::new(),
-                    supersedes: None,
-                    why: String::new(),
-                    scope: String::new(),
-                    owner_said: false,
-                },
-            )
-        })
-        .map(|_| SAVED.to_string())
-        .map_err(|e: ApiError| e.to_string())
+/// `steve_remember`: unified single-pipeline silent memory write via [`crate::ingest::remember_tool`].
+pub fn remember(m: &Modules, kb: &Knowledge, cx: &McpCx, args: &Value) -> Result<String, String> {
+    crate::ingest::remember_tool(m, kb, cx, args)
 }

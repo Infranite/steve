@@ -8,14 +8,16 @@ use crate::{Read, Result, W, now, uid};
 
 pub struct ProjectProposals<'a, C>(pub &'a mut C);
 
-/// One project-level proposal (e.g. an `AGENTS.md` addition), kept apart from personal memories.
+/// One project-level or cross-repo skill proposal (e.g. `AGENTS.md` or `SKILL.md` addition),
+/// kept apart from personal memories.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectProposal {
     pub id: String,
     pub workspace_id: String,
-    pub project_id: String,
-    /// `agents_md`
+    pub project_id: Option<String>,
+    /// `agents_md` | `skill_md`
     pub kind: String,
+    pub target_path: String,
     pub text: String,
     pub reason: String,
     pub evidence: String,
@@ -33,8 +35,9 @@ pub struct ProjectProposal {
 
 #[derive(Debug, Clone)]
 pub struct NewProjectProposal<'a> {
-    pub project_id: &'a str,
+    pub project_id: Option<&'a str>,
     pub kind: &'a str,
+    pub target_path: &'a str,
     pub text: &'a str,
     pub reason: &'a str,
     pub evidence: &'a str,
@@ -45,11 +48,12 @@ pub struct NewProjectProposal<'a> {
     pub created_by: &'a str,
 }
 
-const COLUMNS: [&str; 16] = [
+const COLUMNS: [&str; 17] = [
     "id",
     "workspace_id",
     "project_id",
     "kind",
+    "target_path",
     "text",
     "reason",
     "evidence",
@@ -70,18 +74,19 @@ fn from_row(r: &Row<'_>) -> Result<ProjectProposal> {
         workspace_id: r.get(1)?,
         project_id: r.get(2)?,
         kind: r.get(3)?,
-        text: r.get(4)?,
-        reason: r.get(5)?,
-        evidence: r.get(6)?,
-        origin_kind: r.get(7)?,
-        origin_id: r.get(8)?,
-        origin_label: r.get(9)?,
-        status: r.get(10)?,
-        decision_id: r.get(11)?,
-        writer: r.get(12)?,
-        created_by: r.get(13)?,
-        created: r.get(14)?,
-        updated: r.get(15)?,
+        target_path: r.get(4)?,
+        text: r.get(5)?,
+        reason: r.get(6)?,
+        evidence: r.get(7)?,
+        origin_kind: r.get(8)?,
+        origin_id: r.get(9)?,
+        origin_label: r.get(10)?,
+        status: r.get(11)?,
+        decision_id: r.get(12)?,
+        writer: r.get(13)?,
+        created_by: r.get(14)?,
+        created: r.get(15)?,
+        updated: r.get(16)?,
     })
 }
 
@@ -117,7 +122,7 @@ impl<C: Read> ProjectProposals<'_, C> {
         self.0.all(&q, from_row)
     }
 
-    pub fn known_texts(&mut self, ws: &str) -> Result<Vec<(String, String)>> {
+    pub fn known_texts(&mut self, ws: &str) -> Result<Vec<(Option<String>, String)>> {
         self.0.all(
             Query::select()
                 .columns(["project_id", "text"])
@@ -138,6 +143,7 @@ impl<C: Read> ProjectProposals<'_, C> {
                 .from("project_proposals")
                 .and_where(Expr::col("workspace_id").eq(ws))
                 .and_where(Expr::col("status").eq("pending"))
+                .and_where(Expr::col("project_id").is_not_null())
                 .group_by_col("project_id"),
             |r| Ok((r.get::<String>(0)?, r.get::<i64>(1)?)),
         )?;
@@ -149,6 +155,11 @@ impl ProjectProposals<'_, W<'_>> {
     pub fn create(&mut self, ws: &str, p: &NewProjectProposal<'_>) -> Result<ProjectProposal> {
         let id = uid("prp");
         let at = now();
+        let target_path = if p.target_path.is_empty() {
+            "AGENTS.md"
+        } else {
+            p.target_path
+        };
         self.0.exec(
             Query::insert()
                 .into_table("project_proposals")
@@ -158,6 +169,7 @@ impl ProjectProposals<'_, W<'_>> {
                     ws.into(),
                     p.project_id.into(),
                     p.kind.into(),
+                    target_path.into(),
                     p.text.into(),
                     p.reason.into(),
                     p.evidence.into(),

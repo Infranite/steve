@@ -328,6 +328,7 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, removing only a stale socket of this user that no longer answers, and clearing the installation-owned startup readiness record"),
     e(Dir, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
     e(Fs, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
+    e(Fs, "steve-knowledge/src/memory_file.rs", Hub, "atomic reads and writes of Hub-owned `$STEVE_HOME/context/` and owner-authorized DirectWrite personal memory files"),
     e(Fs, "steve-auth/src/config.rs", Hub, "shared configuration secret files"),
     e(Fs, "steve-core/src/attachments.rs", Hub, "thread attachments into the Hub's scratch dir"),
     e(Fs, "steve-core/src/orchestrator.rs", Hub, "the scratch dir of an item with no project and verification of a Hub-owned design report before approval"),

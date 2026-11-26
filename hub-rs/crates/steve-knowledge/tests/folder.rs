@@ -1079,6 +1079,8 @@ async fn r7b_requested_scans_do_not_move_the_full_scan_deadline() {
                     &json!({"path": root}),
                     &Visibility::Workspace,
                     steve_store::base::Level::Public,
+                    steve_store::knowledge::SourceRole::Knowledge,
+                    steve_store::knowledge::WriteMode::ReadOnly,
                     ME,
                     1000,
                 )
