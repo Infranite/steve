@@ -66,8 +66,27 @@ HEADER_RE = re.compile(
 PR_MERGE_RE = re.compile(r"^Merge pull request #(\d+) from \S+")
 UPGRADE_RE = re.compile(r"^Upgrade:\s*(.*)$")
 BREAKING_RE = re.compile(r"^BREAKING[ -]CHANGE:\s*(.*)$")
+PROTOCOL_BUMP_RE = re.compile(r"^Protocol-Bump:\s*(.*)$")
+PROTOCOL_BUMP_VALUE_RE = re.compile(
+    r"^(?P<category>[a-z][a-z0-9-]*)\s+(?:—|–|--|-)\s+(?P<reason>\S.*)$",
+    re.S,
+)
+NODE_API_LIB = "hub-rs/crates/steve-node-api/src/lib.rs"
+ORDINARY_COMPAT_DIR = "hub-rs/crates/steve-node-api/tests/fixtures/ordinary_compat/"
+PROTOCOL_DECL_RE = re.compile(r"^\s*pub\s+const\s+PROTOCOL\b")
+PROTOCOL_VALUE_RE = re.compile(r"^\s*pub\s+const\s+PROTOCOL\s*:\s*u32\s*=\s*(\d+)\s*;(?:\s*//.*)?$")
+PROTOCOL_BUMP_CATEGORIES = (
+    "remove-or-rename",
+    "type-narrowing",
+    "required-field",
+    "semantic-break",
+    "transport-frame",
+)
+# Minimum non-whitespace characters required in a `Protocol-Bump:` justification so terse
+# placeholders ("bump", "wire change") cannot satisfy the gate without naming the contract break.
+PROTOCOL_BUMP_MIN_REASON_CHARS = 15
 TRAILER_STOP_RE = re.compile(
-    r"^(?:#{1,6}\s|---|===|```|~~~|Upgrade:\s*$|BREAKING[ -]CHANGE:\s*$"
+    r"^(?:#{1,6}\s|---|===|```|~~~|Upgrade:\s*$|BREAKING[ -]CHANGE:\s*$|Protocol-Bump:\s*$"
     r"|[A-Za-z][A-Za-z0-9-]*:\s|BREAKING[ -]CHANGE:\s|(?i:Closes|Fixes|Resolves|Refs)\s+#\d+)"
 )
 RELEASE_NOTE_HEADING_RE = re.compile(r"^##\s+Release notes?\s*$", re.I)
@@ -322,7 +341,7 @@ def _strip_trailers_outside_fences(lines):
             out.append(line)
             i += 1
             continue
-        if UPGRADE_RE.match(line) or BREAKING_RE.match(line):
+        if UPGRADE_RE.match(line) or BREAKING_RE.match(line) or PROTOCOL_BUMP_RE.match(line):
             i += 1
             while i < len(lines) and lines[i].strip() and not TRAILER_STOP_RE.match(lines[i]):
                 i += 1
@@ -1681,6 +1700,185 @@ def validate_release_dir_files(all_files, added_or_modified, added_only, release
     )
 
 
+def parse_protocol_bump_trailers(text):
+    """Extract `Protocol-Bump:` trailer values outside fenced code blocks and HTML comments."""
+    stripped = _strip_fences_and_comments(text)
+    if not stripped:
+        return []
+    lines = stripped.splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        m = PROTOCOL_BUMP_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        first = m.group(1)
+        i += 1
+        cont = []
+        while i < len(lines):
+            nxt = lines[i]
+            if not nxt.strip() or TRAILER_STOP_RE.match(nxt):
+                break
+            cont.append(nxt.rstrip())
+            i += 1
+        out.append(_clean_trailer_value(first, cont))
+    return out
+
+
+def detect_protocol_change(files):
+    """Inspect a PR/diff file list for changes to `PROTOCOL` in `steve-node-api/src/lib.rs`.
+
+    Returns `(old, new)` when `pub const PROTOCOL: u32 = <N>;` changed value, or `None` when
+    `PROTOCOL` was untouched. Raises `Refused` if the file was deleted/moved, its patch is
+    unavailable, or the declaration was removed/malformed.
+    """
+    if not files:
+        return None
+    for item in files:
+        if isinstance(item, dict):
+            name = item.get("filename") or ""
+            prev = item.get("previous_filename") or ""
+            status = item.get("status", "modified")
+            patch = item.get("patch")
+        else:
+            name, prev, status, patch = str(item), "", "modified", None
+        if prev == NODE_API_LIB and name != NODE_API_LIB:
+            raise Refused(
+                f"{NODE_API_LIB} was moved to {name}; keep `pub const PROTOCOL: u32` in {NODE_API_LIB} "
+                "so the protocol-bump guard can verify it."
+            )
+        if name != NODE_API_LIB:
+            continue
+        if status == "removed":
+            raise Refused(f"{NODE_API_LIB} was removed; `pub const PROTOCOL: u32` cannot be deleted.")
+        if patch is None:
+            raise Refused(
+                f"{NODE_API_LIB} changed, but its diff patch is unavailable to verify `PROTOCOL`."
+            )
+        removed_decl, added_decl = [], []
+        removed_vals, added_vals = [], []
+        for line in patch.splitlines():
+            if line.startswith("---") or line.startswith("+++"):
+                continue
+            if line.startswith("-"):
+                body_line = line[1:]
+                if PROTOCOL_DECL_RE.match(body_line):
+                    removed_decl.append(body_line.strip())
+                    if m := PROTOCOL_VALUE_RE.match(body_line):
+                        removed_vals.append(int(m.group(1)))
+            elif line.startswith("+"):
+                body_line = line[1:]
+                if PROTOCOL_DECL_RE.match(body_line):
+                    added_decl.append(body_line.strip())
+                    if m := PROTOCOL_VALUE_RE.match(body_line):
+                        added_vals.append(int(m.group(1)))
+        if not removed_decl and not added_decl:
+            return None
+        if status == "added" and not removed_decl and len(added_vals) == 1:
+            return None
+        if len(removed_decl) != 1 or len(added_decl) != 1 or len(removed_vals) != 1 or len(added_vals) != 1:
+            raise Refused(
+                f"{NODE_API_LIB} altered the `PROTOCOL` declaration in an unexpected way; "
+                "keep `pub const PROTOCOL: u32 = <N>;` as a single integer constant and increment by +1 only."
+            )
+        old_val, new_val = removed_vals[0], added_vals[0]
+        if old_val == new_val:
+            return None
+        return (old_val, new_val)
+    return None
+
+
+def _mutated_ordinary_compat_fixtures(files):
+    """Return existing files under `tests/fixtures/ordinary_compat/` that were modified, deleted, or renamed."""
+    mutated = []
+    for item in files or ():
+        if isinstance(item, dict):
+            name = item.get("filename") or ""
+            prev = item.get("previous_filename") or ""
+            status = item.get("status", "added")
+        else:
+            name, prev, status = str(item), "", "added"
+        if prev.startswith(ORDINARY_COMPAT_DIR) and prev != name:
+            mutated.append(prev)
+        elif name.startswith(ORDINARY_COMPAT_DIR) and status not in ("added", "copied"):
+            mutated.append(name)
+    return mutated
+
+
+def validate_protocol_bump(body, files, *, require_pr_trailers=True):
+    """Enforce Node `PROTOCOL` bump rules and ordinary-protocol baseline fixture immutability.
+
+    - Without a `PROTOCOL` increment: existing files under `tests/fixtures/ordinary_compat/` may
+      not be modified, renamed, or deleted (adding new baseline fixtures is allowed).
+    - With a `PROTOCOL` change:
+      1. `PROTOCOL` must increment by exactly +1 (`new == old + 1`).
+      2. When `require_pr_trailers` is True (PR lint), the PR description must include both
+         `Protocol-Bump: <category> — <justification>` (allowlisted category + concrete reason)
+         and an `Upgrade:` trailer.
+    """
+    if files is None:
+        return
+    change = detect_protocol_change(files)
+    mutated_fixtures = _mutated_ordinary_compat_fixtures(files)
+    if change is None:
+        if mutated_fixtures:
+            listed = ", ".join(mutated_fixtures)
+            raise Refused(
+                f"existing ordinary protocol compatibility fixture(s) modified or deleted without bumping PROTOCOL: {listed}. "
+                f"Do not rewrite, rename, or delete existing baseline fixtures under {ORDINARY_COMPAT_DIR} without "
+                f"incrementing `PROTOCOL` in {NODE_API_LIB} by +1 (adding new baseline fixtures is allowed without a bump)."
+            )
+        return
+
+    old_val, new_val = change
+    errors = []
+    if new_val != old_val + 1:
+        errors.append(
+            f"{NODE_API_LIB} changed PROTOCOL from {old_val} to {new_val}; "
+            f"PROTOCOL may only increment by +1 (expected {old_val + 1})."
+        )
+    if require_pr_trailers:
+        allowed = ", ".join(PROTOCOL_BUMP_CATEGORIES)
+        bumps = parse_protocol_bump_trailers(body)
+        if not bumps:
+            errors.append(
+                f"PROTOCOL changed ({old_val} -> {new_val}) without a `Protocol-Bump:` trailer in the PR description. "
+                f"Add `Protocol-Bump: <category> — <reason>` (category in: {allowed}; reason at least "
+                f"{PROTOCOL_BUMP_MIN_REASON_CHARS} non-whitespace characters naming the affected wire types and why "
+                "`#[serde(default)]` or capability negotiation cannot cover it)."
+            )
+        else:
+            for val in bumps:
+                m = PROTOCOL_BUMP_VALUE_RE.match(val)
+                if not m:
+                    errors.append(
+                        f"invalid `Protocol-Bump:` trailer {val!r}; expected "
+                        f"`Protocol-Bump: <category> — <reason>` (category in: {allowed})."
+                    )
+                    continue
+                category = m.group("category")
+                reason = m.group("reason").strip()
+                if category not in PROTOCOL_BUMP_CATEGORIES:
+                    errors.append(
+                        f"unknown `Protocol-Bump:` category {category!r}; allowed categories: {allowed}."
+                    )
+                if len("".join(reason.split())) < PROTOCOL_BUMP_MIN_REASON_CHARS:
+                    errors.append(
+                        f"`Protocol-Bump:` justification for {category!r} is too short "
+                        f"(need at least {PROTOCOL_BUMP_MIN_REASON_CHARS} non-whitespace characters naming the "
+                        "affected wire types and why `#[serde(default)]` or capability negotiation cannot cover it)."
+                    )
+        pr_upgrades, _ = parse_trailers(body)
+        if not pr_upgrades:
+            errors.append(
+                f"PROTOCOL changed ({old_val} -> {new_val}) without an `Upgrade:` trailer in the PR description. "
+                "Add `Upgrade: ...` telling operators to update the Hub and Nodes together."
+            )
+    if errors:
+        raise Refused("\n".join(errors))
+
+
 def lint_pr(title, body="", files=None, commits=None, *, require_issue_link=True):
     parsed = validate_header(title, label="PR title")
     if require_issue_link:
@@ -1702,6 +1900,7 @@ def lint_pr(title, body="", files=None, commits=None, *, require_issue_link=True
                 added_only.append(name)
         if err := validate_release_dir_files(all_files, added_or_modified, added_only, title):
             raise Refused(err)
+        validate_protocol_bump(body, files, require_pr_trailers=True)
 
 
 def lint_github_event(
@@ -1746,16 +1945,36 @@ def lint_github_event(
     lint_pr(title, body, files=files, commits=commits)
 
 
-def _commits_for_pr_lint(repo, base=None, head="HEAD", range_spec=None):
+def _resolve_pr_lint_range(repo, base=None, head="HEAD", range_spec=None):
     if range_spec:
         from_ref, to_ref = parse_range(range_spec)
         git("rev-parse", "--verify", f"{from_ref}^{{commit}}", cwd=repo)
         head_sha = git("rev-parse", "--verify", f"{to_ref}^{{commit}}", cwd=repo).stdout.strip()
-        base_ref = from_ref
-    else:
-        target_base = base or f"refs/remotes/origin/{default_branch(repo)}"
-        base_ref = git("merge-base", head, target_base, cwd=repo).stdout.strip()
-        head_sha = git("rev-parse", "--verify", f"{head}^{{commit}}", cwd=repo).stdout.strip()
+        return from_ref, head_sha
+    target_base = base or f"refs/remotes/origin/{default_branch(repo)}"
+    base_ref = git("merge-base", head, target_base, cwd=repo).stdout.strip()
+    head_sha = git("rev-parse", "--verify", f"{head}^{{commit}}", cwd=repo).stdout.strip()
+    return base_ref, head_sha
+
+
+def _files_for_diff(repo, base_ref, head_sha):
+    raw_changes = git("diff", "--name-status", "--no-renames", base_ref, head_sha, cwd=repo).stdout.splitlines()
+    status_map = {"A": "added", "M": "modified", "D": "removed", "T": "changed"}
+    files = []
+    for line in raw_changes:
+        if "\t" not in line:
+            continue
+        code, path = line.split("\t", 1)
+        status = status_map.get(code[:1], "modified")
+        entry = {"filename": path, "status": status}
+        if path == NODE_API_LIB and status != "removed":
+            entry["patch"] = git("diff", "-U0", base_ref, head_sha, "--", path, cwd=repo).stdout
+        files.append(entry)
+    return files
+
+
+def _commits_for_pr_lint(repo, base=None, head="HEAD", range_spec=None):
+    base_ref, head_sha = _resolve_pr_lint_range(repo, base, head, range_spec)
     raw = git("log", "-z", "--no-merges", "--format=%H%n%B", f"{base_ref}..{head_sha}", cwd=repo).stdout
     commits: list[PrCommit] = []
     for chunk in raw.split("\x00"):
@@ -1785,16 +2004,15 @@ def lint_commits(repo, base=None, head="HEAD", range_spec=None):
     shas = git("rev-list", "--first-parent", "--reverse", head_sha, *exclude, cwd=repo).stdout.split()
 
     if check_files:
-        raw_changes = git("diff", "--name-status", "--no-renames", base_ref, head_sha, cwd=repo).stdout.splitlines()
+        diff_files = _files_for_diff(repo, base_ref, head_sha)
         all_files, added_or_modified, added_only = [], [], []
-        for line in raw_changes:
-            if "\t" not in line:
-                continue
-            status, path = line.split("\t", 1)
+        for item in diff_files:
+            path = item["filename"]
+            status = item["status"]
             all_files.append(path)
-            if not status.startswith("D"):
+            if status != "removed":
                 added_or_modified.append(path)
-            if status == "A":
+            if status == "added":
                 added_only.append(path)
         release_title = None
         if len(shas) == 1:
@@ -1803,6 +2021,10 @@ def lint_commits(repo, base=None, head="HEAD", range_spec=None):
                 release_title = subj
         if err := validate_release_dir_files(all_files, added_or_modified, added_only, release_title):
             errors.append(err)
+        try:
+            validate_protocol_bump("", diff_files, require_pr_trailers=False)
+        except Refused as e:
+            errors.append(str(e))
 
     for sha in shas:
         parents, subject, body = commit_meta(repo, sha)
@@ -1912,12 +2134,12 @@ def main(argv=None):
                 lint_github_event(a.github_event)
             elif a.pr_title is not None:
                 body = Path(a.pr_body).read_text(encoding="utf-8") if a.pr_body else ""
-                commits = (
-                    _commits_for_pr_lint(repo, a.base, a.head, a.range_spec)
-                    if (a.range_spec or a.base)
-                    else None
-                )
-                lint_pr(a.pr_title, body, commits=commits, require_issue_link=(a.pr_body is not None))
+                commits, files = None, None
+                if a.range_spec or a.base:
+                    base_ref, head_sha = _resolve_pr_lint_range(repo, a.base, a.head, a.range_spec)
+                    commits = _commits_for_pr_lint(repo, a.base, a.head, a.range_spec)
+                    files = _files_for_diff(repo, base_ref, head_sha)
+                lint_pr(a.pr_title, body, files=files, commits=commits, require_issue_link=(a.pr_body is not None))
             else:
                 lint_commits(repo, a.base, a.head, a.range_spec)
     except Refused as e:

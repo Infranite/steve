@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "ev_compat_1",
+  "at": 1764200000000,
+  "cursor": {
+    "stream": "stream_1",
+    "epoch": "ep_1",
+    "seq": 1
+  },
+  "subject": {
+    "of": "execution",
+    "type": "turn",
+    "session": "s_compat_1",
+    "turn": "turn_1",
+    "attempt": "att_compat_1"
+  },
+  "body": {
+    "type": "attempt_ended",
+    "completion": {
+      "outcome": "succeeded",
+      "stop_reason": "end_turn"
+    }
+  }
+}
