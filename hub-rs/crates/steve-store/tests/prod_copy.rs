@@ -746,7 +746,8 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
     // 142: Retire non-terminal children of the removed dynamic work-graph engine. Mirrors the
     // migration's row effects; history of closed items is untouched.
     if v_before < 142 {
-        const LEGACY: &str = "(SELECT id, cycle FROM items WHERE phase <> 'closed' AND json_valid(source)
+        const LEGACY: &str =
+            "(SELECT id, cycle FROM items WHERE phase <> 'closed' AND json_valid(source)
                                  AND json_extract(source, '$[1]') = 'workflow')";
         changes.add_rows(
             "item_cycles",
@@ -786,7 +787,10 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
             )),
         );
         // `item_placement_waits` is created by a later migration than some prod copies have.
-        if q("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'item_placement_waits'") > 0 {
+        if q(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'item_placement_waits'",
+        ) > 0
+        {
             changes.remove_rows(
                 "item_placement_waits",
                 q(&format!(
