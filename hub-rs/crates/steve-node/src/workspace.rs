@@ -847,6 +847,16 @@ const WORKSPACE_PROBE_OUTPUT_CAP: usize = 256 * 1024;
 const WORKSPACE_STAT_PATHS_MAX: usize = 256;
 /// Maximum directory entries visited when fingerprinting a non-git workspace.
 const WORKSPACE_WALK_ENTRIES_MAX: usize = 1024;
+
+/// Directories the progress fingerprint never walks: every toolchain's in-tree build and cache
+/// directories, named in the toolchain data rather than here.
+static WALK_SKIPPED_DIRS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    steve_toolchains::Toolchains::builtin()
+        .in_tree_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+});
 /// Maximum recursion depth when fingerprinting a non-git workspace.
 const WORKSPACE_WALK_DEPTH_MAX: usize = 4;
 
@@ -1001,10 +1011,7 @@ fn collect_dir_entries(
             break;
         }
         let s = name.to_string_lossy();
-        if matches!(
-            s.as_ref(),
-            ".git" | "target" | "node_modules" | ".venv" | ".cache"
-        ) {
+        if s == ".git" || WALK_SKIPPED_DIRS.iter().any(|d| *d == s.as_ref()) {
             continue;
         }
         let child_rel = if rel.as_os_str().is_empty() {
