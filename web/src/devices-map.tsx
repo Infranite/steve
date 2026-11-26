@@ -96,7 +96,10 @@ export function DeviceMap() {
     if (!el) return
     /* the padding is the wide one in both layouts here, so the choice depends on the map's width alone and cannot flip back and forth */
     const isNarrow = el.clientWidth < wideMinWidth(show)
-    setNarrow(isNarrow)
+    if (isNarrow !== el.hasAttribute("data-narrow")) {
+      setNarrow(isNarrow)
+      return
+    }
     const cr = el.getBoundingClientRect()
     const box = (x: Element | null): Box | null => { if (!x) return null; const r = x.getBoundingClientRect(); return { l: r.left - cr.left, t: r.top - cr.top, r: r.right - cr.left, b: r.bottom - cr.top } }
     const hub = box(el.querySelector('[data-map-card="hub"]')), frame = box(el.querySelector("[data-map-machine]"))
@@ -133,13 +136,14 @@ export function DeviceMap() {
   useLayoutEffect(() => {
     const el = canvas.current
     if (!el) return
-    let frame = 0
-    const again = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(() => layoutRef.current()) }
-    const ro = new ResizeObserver(again)
+    let active = true
+    const run = () => { if (active) layoutRef.current() }
+    const ro = new ResizeObserver(run)
     ro.observe(el)
     el.querySelectorAll("[data-map-card], [data-map-machine]").forEach((x) => ro.observe(x))
-    void document.fonts?.ready.then(again)
-    return () => { ro.disconnect(); cancelAnimationFrame(frame) }
+    window.addEventListener("resize", run)
+    void document.fonts?.ready.then(run)
+    return () => { active = false; ro.disconnect(); window.removeEventListener("resize", run) }
   }, [shownNodes.length, shownClients.length, show])
 
   /* the arrow keys move within a column, as Tab moves through the whole map */
