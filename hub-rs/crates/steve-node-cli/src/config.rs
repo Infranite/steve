@@ -64,6 +64,31 @@ pub struct RootEntry {
     pub access: steve_node_api::RootAccess,
 }
 
+/// Normalize `p` to an absolute canonical path by resolving symlinks on its deepest existing
+/// ancestor (for example macOS `/var` -> `/private/var`) and re-appending missing trailing parts.
+pub(crate) fn canonicalize_path(p: &Path) -> PathBuf {
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut tail = Vec::new();
+    let mut cur = abs.as_path();
+    loop {
+        if let Ok(canon) = std::fs::canonicalize(cur) {
+            let mut out = canon;
+            for part in tail.into_iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        let Some(name) = cur.file_name() else {
+            return abs;
+        };
+        tail.push(name.to_os_string());
+        let Some(parent) = cur.parent() else {
+            return abs;
+        };
+        cur = parent;
+    }
+}
+
 pub struct Home(pub PathBuf);
 
 impl Home {
@@ -72,12 +97,11 @@ impl Home {
         if let Ok(h) = std::env::var("STEVE_HOME")
             && !h.is_empty()
         {
-            let p = PathBuf::from(h);
-            return Ok(Home(std::path::absolute(&p).unwrap_or(p)));
+            return Ok(Home(canonicalize_path(Path::new(&h))));
         }
         let home = std::env::var("HOME").context("HOME is not set")?;
         let p = Path::new(&home).join(".steve-node");
-        Ok(Home(std::path::absolute(&p).unwrap_or(p)))
+        Ok(Home(canonicalize_path(&p)))
     }
     pub fn identity(&self) -> PathBuf {
         self.0.join("node/identity.key")
@@ -176,7 +200,7 @@ impl Home {
     ) -> Result<steve_acp::AcpConfig> {
         let h = self.harness_from_vars(&var)?;
         let (declared_commands, declared) = steve_harness_spec::split_entries(h.adapters);
-        let steve_home = std::path::absolute(&self.0).unwrap_or_else(|_| self.0.clone());
+        let steve_home = canonicalize_path(&self.0);
         let mut root: Option<Option<PathBuf>> = None;
         let adapters = steve_acp::resolve_builtin_adapters(
             &steve_home,

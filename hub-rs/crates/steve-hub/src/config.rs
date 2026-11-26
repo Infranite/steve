@@ -346,6 +346,9 @@ pub fn home_dir() -> PathBuf {
 }
 
 /// `path.resolve`: absolute against the cwd, `.`/`..` folded lexically.
+/// Normalize `p` to an absolute canonical path: resolves symlinks on the deepest existing ancestor
+/// (for example macOS `/var` -> `/private/var` or `/tmp` -> `/private/tmp`) and re-appends any
+/// not-yet-created trailing components lexically.
 pub fn resolve(p: &Path) -> PathBuf {
     let abs = if p.is_absolute() {
         p.to_path_buf()
@@ -354,17 +357,35 @@ pub fn resolve(p: &Path) -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("/"))
             .join(p)
     };
-    let mut out = PathBuf::new();
+    let mut normalized = PathBuf::new();
     for c in abs.components() {
         match c {
             Component::ParentDir => {
-                out.pop();
+                normalized.pop();
             }
             Component::CurDir => {}
-            other => out.push(other.as_os_str()),
+            other => normalized.push(other.as_os_str()),
         }
     }
-    out
+    let mut tail = Vec::new();
+    let mut cur = normalized.as_path();
+    loop {
+        if let Ok(canon) = std::fs::canonicalize(cur) {
+            let mut out = canon;
+            for part in tail.into_iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        let Some(name) = cur.file_name() else {
+            return normalized;
+        };
+        tail.push(name.to_os_string());
+        let Some(parent) = cur.parent() else {
+            return normalized;
+        };
+        cur = parent;
+    }
 }
 
 /// JS `Number(s)` for config values: trimmed, empty → 0, otherwise a decimal (or 0x/0o/0b) number.
@@ -1016,10 +1037,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_canonicalizes_symlink_ancestors_and_missing_tails() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(unix)]
+        {
+            let expected = std::fs::canonicalize(&real).unwrap().join("worktrees/ST-1");
+            assert_eq!(resolve(&link.join("a/../worktrees/ST-1")), expected);
+        }
+    }
+
+    #[test]
     fn defaults_match_ts() {
         let c = cfg(&[("STEVE_HOME", "/tmp/sh/./a/../b")]);
-        assert_eq!(c.home, PathBuf::from("/tmp/sh/b"));
-        assert_eq!(c.data_dir, PathBuf::from("/tmp/sh/b/data"));
+        assert_eq!(c.home, resolve(Path::new("/tmp/sh/b")));
+        assert_eq!(c.data_dir, resolve(Path::new("/tmp/sh/b/data")));
         assert_eq!(
             c.listen,
             Listen {

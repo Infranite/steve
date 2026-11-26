@@ -10,7 +10,7 @@ use steve_node::{LocalNode, NodeConfig, PolicyCeiling, Root, Storage};
 use steve_node_api::{Capacity, NodeId};
 use steve_node_wire::Identity;
 
-use crate::config::{Home, Pairing};
+use crate::config::{Home, Pairing, canonicalize_path};
 
 const NODE_ID: &str = "local";
 const KEY: &str = "service-identity.key";
@@ -34,22 +34,20 @@ fn steve_home_from_env() -> Result<PathBuf> {
     if let Ok(h) = std::env::var("STEVE_HOME")
         && !h.is_empty()
     {
-        let p = PathBuf::from(h);
-        return Ok(std::path::absolute(&p).unwrap_or(p));
+        return Ok(canonicalize_path(Path::new(&h)));
     }
     let home = std::env::var("HOME").context("HOME is not set")?;
     let p = Path::new(&home).join(".steve");
-    Ok(std::path::absolute(&p).unwrap_or(p))
+    Ok(canonicalize_path(&p))
 }
 
 fn data_dir_from_env(steve_home: &Path) -> PathBuf {
     if let Ok(d) = std::env::var("STEVE_DATA_DIR")
         && !d.trim().is_empty()
     {
-        let p = PathBuf::from(d);
-        return std::path::absolute(&p).unwrap_or(p);
+        return canonicalize_path(Path::new(&d));
     }
-    steve_home.join("data")
+    canonicalize_path(&steve_home.join("data"))
 }
 
 fn retired(home: &Path, executable: &Path) -> bool {
