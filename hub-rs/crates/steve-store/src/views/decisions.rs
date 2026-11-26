@@ -60,6 +60,32 @@ use schema::Spaces as S;
 /// The `subject_type` of a decision about a chat message (steve-channels `respond::SUBJECT_MESSAGE`).
 pub const ABOUT_CHAT_MESSAGE: &str = "chan_message";
 
+/// High-stakes or irreversible decision kinds that justify interrupting the owner in "待我决定".
+/// Low-risk / informational kinds (`signal`, `party_merge`, `steward`, `attr_value`, `attr_def`,
+/// `mem`, etc.) fall outside this whitelist and fold into passive review (`DecisionTier::Folded`).
+fn is_decide_kind(d: &DecisionView) -> bool {
+    if d.kind == "fail" {
+        return true;
+    }
+    match d.subject_type.as_str() {
+        // Permission approvals
+        "tool_call" | "secret_use" | "connection" => true,
+        // Outbound approvals & channel handoff asks
+        ABOUT_CHAT_MESSAGE => d.kind == "ask",
+        "mail_draft" | "gh_pr_open" | "gh_pr_merge" | "gh_comment" | "release" => true,
+        // Delivery acceptance, design gate, blocking item questions & effectful actions
+        "design_implementation" | "question" | "action" => true,
+        "item" => matches!(d.kind.as_str(), "accept" | "propose" | "ask" | "approve"),
+        // Bot creation / placement decisions
+        "no_executor" | "handoff_unavailable" | "agents_proposal" => true,
+        // Failures & stalls
+        "stall" | "turn_stall" | "session_start" => true,
+        // High-risk flow approvals & run budget/recovery gates
+        "flow_step" | "flow_run" => true,
+        _ => false,
+    }
+}
+
 fn tier(
     d: &DecisionView,
     starred: bool,
@@ -83,8 +109,10 @@ fn tier(
         (DecisionTier::Folded, Some(FoldReason::Unsendable))
     } else if draft && d.status == DecisionStatus::Open && !escalated {
         (DecisionTier::Draft, None)
-    } else {
+    } else if is_decide_kind(d) {
         (DecisionTier::Decide, None)
+    } else {
+        (DecisionTier::Folded, Some(FoldReason::LowPriority))
     }
 }
 
@@ -414,5 +442,90 @@ impl<C: Read> DecisionViews<'_, C> {
             }
         });
         Ok((views, next))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(kind: &str, subject_type: &str) -> DecisionView {
+        DecisionView {
+            id: "dec_1".into(),
+            revision: 0,
+            ws: "default".into(),
+            kind: kind.into(),
+            subject_type: subject_type.into(),
+            subject_id: "sub_1".into(),
+            item_id: None,
+            session_id: None,
+            question: Said::Raw { text: "q".into() },
+            draft: String::new(),
+            options: vec![],
+            result: None,
+            requested_by: "steve".into(),
+            resolved_by: None,
+            created: Millis(1),
+            resolved: None,
+            undo_until: None,
+            status: DecisionStatus::Open,
+            space_id: None,
+            tier: DecisionTier::Decide,
+            folded: None,
+            wait: None,
+        }
+    }
+
+    #[test]
+    fn high_stakes_whitelist_decides_and_low_risk_kinds_fold() {
+        for (kind, subject) in [
+            ("approve", "tool_call"),
+            ("approve", "secret_use"),
+            ("approve", "connection"),
+            ("approve", "mail_draft"),
+            ("approve", "gh_pr_open"),
+            ("approve", "gh_pr_merge"),
+            ("approve", "gh_comment"),
+            ("approve", "release"),
+            ("accept", "item"),
+            ("ask", "design_implementation"),
+            ("ask", "question"),
+            ("approve", "action"),
+            ("propose", "item"),
+            ("ask", "no_executor"),
+            ("ask", "handoff_unavailable"),
+            ("propose", "agents_proposal"),
+            ("ask", "stall"),
+            ("ask", "turn_stall"),
+            ("fail", "session_start"),
+            ("fail", "anything"),
+            ("approve", "flow_step"),
+            ("ask", "flow_run"),
+            ("ask", ABOUT_CHAT_MESSAGE),
+        ] {
+            let view = sample(kind, subject);
+            assert_eq!(
+                tier(&view, false, false, false, false),
+                (DecisionTier::Decide, None),
+                "{kind}/{subject} should be Decide"
+            );
+        }
+
+        for (kind, subject) in [
+            ("ask", "signal"),
+            ("propose", "party_merge"),
+            ("confirm", "steward"),
+            ("confirm", "attr_value"),
+            ("confirm", "attr_def"),
+            ("confirm", "mem"),
+            ("ask", "space"),
+        ] {
+            let view = sample(kind, subject);
+            assert_eq!(
+                tier(&view, false, false, false, false),
+                (DecisionTier::Folded, Some(FoldReason::LowPriority)),
+                "{kind}/{subject} should fold as LowPriority"
+            );
+        }
     }
 }

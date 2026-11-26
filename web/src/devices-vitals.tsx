@@ -12,6 +12,8 @@ import { Meter } from "@/panel"
 import { agoText, disks, fillTone, linkRoute, loadPct, memPct, one, rttOf, type NodeView } from "@/device-model"
 import { useNodeVitals } from "@/devices-data"
 import { DCard, Figure } from "@/devices-ui"
+import { fmtBytes, fmtUsd } from "@/stats/format"
+import { getSession } from "@/store"
 
 const GIB = 2 ** 30
 
@@ -28,8 +30,13 @@ export function NodeFigures({ v, action }: { v: NodeView; action?: ReactNode }) 
   const offline = !v.linked && !v.local
   const l = vit?.latest, lp = loadPct(l), mp = memPct(l), disk = disks(l)[0], rtt = offline ? null : rttOf(v, l), route = linkRoute(v)
   const tokens = vit?.tokens
+  const procDisk = l?.process?.disk_written_bytes
+  const adapterDisk = l?.adapter_disk_written_bytes ?? 0
+  const hasDiskWrites = procDisk != null || adapterDisk > 0
+  const diskWritten = (procDisk ?? 0) + adapterDisk
+  const hasCost = tokens != null && (tokens.total_cost_usd > 0 || tokens.today_cost_usd > 0)
   const at = l ? l.sampled_at ?? l.at : null
-  const showFooter = (!v.local && rtt != null) || !!tokens || (stale && !!at && !offline) || vit === null
+  const showFooter = (!v.local && rtt != null) || !!tokens || hasDiskWrites || hasCost || (stale && !!at && !offline) || vit === null
   return (
     <DCard icon={<CpuIcon />} title={t("devices:nodeOverview.metricsTitle")} sub={offline && l ? t("devices:vitals.offlineSub") : undefined} action={action} data-node-figures>
       <div className="flex flex-col gap-4 px-5 pb-5">
@@ -66,6 +73,19 @@ export function NodeFigures({ v, action }: { v: NodeView; action?: ReactNode }) 
                 <span className="text-tertiary">· {t("devices:vitals.tokensToday", { n: compactTokens(tokens.today) })}</span>
               </span>
             )}
+            {hasCost && tokens && (
+              <span className="inline-flex items-center gap-1.5 tabular-nums" data-vital="cost">
+                <span>{t("devices:vitals.cost")}</span>
+                <strong className="font-medium text-foreground">{fmtUsd(tokens.total_cost_usd)}</strong>
+                {tokens.today_cost_usd > 0 && <span className="text-tertiary">· {t("devices:vitals.costToday", { usd: fmtUsd(tokens.today_cost_usd) })}</span>}
+              </span>
+            )}
+            {hasDiskWrites && (
+              <span className="inline-flex items-center gap-1.5 tabular-nums" data-vital="disk-written">
+                <span>{t("devices:vitals.diskWritten")}</span>
+                <strong className="font-medium text-foreground">{fmtBytes(diskWritten)}</strong>
+              </span>
+            )}
             {stale && at && !offline && (
               <span className="text-attention" title={date(at, { dateStyle: "medium", timeStyle: "medium" })} data-vitals-stale>
                 {t("devices:vitals.stale", { ago: agoText(at) })}
@@ -86,15 +106,27 @@ export function NodeResources({ v }: { v: NodeView }) {
   const allDisks = disks(l)
   const net = l?.network
   const tokens = vit?.tokens
+  const procDisk = l?.process?.disk_written_bytes
+  const adapterDisk = l?.adapter_disk_written_bytes ?? 0
+  const hasDiskWrites = procDisk != null || adapterDisk > 0
+  const diskWritten = (procDisk ?? 0) + adapterDisk
+  const hasCost = tokens != null && (tokens.total_cost_usd > 0 || tokens.today_cost_usd > 0)
+  const sessionVitals = l?.session_vitals ?? []
   const rtt = v.linked ? rttOf(v, l) : null
   const route = linkRoute(v)
   return (
     <DCard icon={<HardDriveIcon />} title={t("devices:resources.title")} sub={t("devices:resources.sub")} data-node-resources>
       <div className="flex flex-col gap-5 px-5 pb-5">
-        <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-5">
           <Figure label={t("devices:resources.tokens")} data-resource="tokens"
             value={tokens ? t("devices:vitals.tokensMinute", { n: compactTokens(tokens.per_minute) }) : "—"}
             sub={tokens ? t("devices:vitals.tokensToday", { n: compactTokens(tokens.today) }) : t("devices:resources.noTokens")} />
+          <Figure label={t("devices:resources.cost")} data-resource="cost"
+            value={hasCost && tokens ? fmtUsd(tokens.total_cost_usd) : "—"}
+            sub={hasCost && tokens ? t("devices:vitals.costToday", { usd: fmtUsd(tokens.today_cost_usd) }) : t("devices:resources.noCost")} />
+          <Figure label={t("devices:resources.diskWritten")} data-resource="disk-written"
+            value={hasDiskWrites ? fmtBytes(diskWritten) : "—"}
+            sub={hasDiskWrites ? t("devices:resources.diskWrittenSub", { proc: fmtBytes(procDisk ?? 0), sessions: fmtBytes(adapterDisk) }) : t("devices:resources.noDiskWritten")} />
           <Figure label={t("devices:resources.network")} data-resource="network"
             value={net ? <span title={t("devices:vitals.receive")}>↓ {bytesPerSecond(net.rx_bytes_per_second)}</span> : "—"}
             sub={net ? <span title={t("devices:vitals.send")}>↑ {bytesPerSecond(net.tx_bytes_per_second)}</span> : t("devices:resources.noNetwork")} />
@@ -102,6 +134,42 @@ export function NodeResources({ v }: { v: NodeView }) {
             <Figure label={t("devices:vitals.rtt")} data-resource="rtt"
               value={rtt ?? "—"} unit={rtt != null ? " ms" : undefined}
               sub={route ? t(`devices:route.${route}`) : undefined} />
+          )}
+        </div>
+        <div className="flex flex-col gap-2.5 border-t border-border/70 pt-4" data-node-session-vitals>
+          <h3 className="type-footnote font-medium text-muted-foreground">{t("devices:resources.sessionVitals")}</h3>
+          {sessionVitals.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-left type-footnote">
+                <thead>
+                  <tr className="border-b border-border/70 text-muted-foreground">
+                    <th className="py-1.5 pr-3 font-medium">{t("devices:resources.colSession")}</th>
+                    <th className="py-1.5 px-2 text-right font-medium">{t("devices:resources.colCpu")}</th>
+                    <th className="py-1.5 px-2 text-right font-medium">{t("devices:resources.colMem")}</th>
+                    <th className="py-1.5 pl-2 text-right font-medium">{t("devices:resources.colDiskWritten")}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/50">
+                  {sessionVitals.map((sv) => {
+                    const sess = getSession(sv.session_id)
+                    return (
+                      <tr key={sv.session_id} data-node-session-vital={sv.session_id}>
+                        <td className="max-w-[14rem] truncate py-2 pr-3">
+                          <a href={"#/sessions/" + sv.session_id} className="text-foreground hover:text-blue hover:underline" title={sess?.title ?? sv.session_id}>
+                            {sess?.title ?? sv.session_id}
+                          </a>
+                        </td>
+                        <td className="whitespace-nowrap py-2 px-2 text-right tabular-nums text-muted-foreground">{num(one(sv.cpu_seconds))} s</td>
+                        <td className="whitespace-nowrap py-2 px-2 text-right tabular-nums text-muted-foreground">{fmtBytes(sv.resident_bytes)}</td>
+                        <td className="whitespace-nowrap py-2 pl-2 text-right tabular-nums font-medium text-foreground">{fmtBytes(sv.disk_written_bytes)}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="type-footnote text-muted-foreground">{t("devices:resources.noSessionVitals")}</p>
           )}
         </div>
         <div className="flex flex-col gap-2.5 border-t border-border/70 pt-4">

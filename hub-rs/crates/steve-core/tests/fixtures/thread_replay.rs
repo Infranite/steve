@@ -445,7 +445,7 @@ async fn w34_thread_replay_core() {
     run_restart(&mut report).await;
     run_spaces(&mut report).await;
     run_routing(&mut report).await;
-    report.finish(104);
+    report.finish(101);
 }
 
 // =========================================================================
@@ -1421,48 +1421,6 @@ async fn run_claim(report: &mut Report) {
         );
     }
 
-    // 07: Double suggest(item) on same Core -> 1 item
-    {
-        let k = replay_kit(true);
-        let origin = k
-            .db()
-            .message_add(WS, "me", "整理页面", None, None)
-            .unwrap();
-        let card = k
-            .db()
-            .message_add(
-                WS,
-                "steve",
-                "建项吗？",
-                None,
-                Some(&json!({
-                    "origin": origin,
-                    "suggest": {
-                        "state": "open",
-                        "choices": [
-                            {"id": "here", "label": "在这答"},
-                            {"id": "item", "label": "建项", "title": "整理", "goal": "整理页面"}
-                        ]
-                    }
-                })),
-            )
-            .unwrap();
-        let h1 = k.core.suggest(WS, &card, "item", None).unwrap();
-        let h2 = k.core.suggest(WS, &card, "item", None).unwrap();
-        report.case(
-            "core.claim.07_concurrent_suggest_item_same_core",
-            &[
-                ("first_created", !h1.already),
-                ("second_already", h2.already),
-                (
-                    "le1_dispatch_per_intent",
-                    k.db().items(WS).unwrap().len() == 1,
-                ),
-            ],
-            &[],
-        );
-    }
-
     // 08: Concurrent promote on same Core -> 1 item via OnceCell
     {
         let k = replay_kit(true);
@@ -1595,49 +1553,6 @@ async fn run_claim(report: &mut Report) {
             &[
                 ("dismiss_ok", !d1.already),
                 ("take_after_dismiss_already", d2.already),
-                ("zero_items", k.db().items(WS).unwrap().is_empty()),
-            ],
-            &[],
-        );
-    }
-
-    // 12: Suggest chosen "here", then conflicting "item" -> already=true, 0 items
-    {
-        let k = replay_kit(true);
-        let fr = FakeResearch::new(vec![Step::Text("方案")]);
-        k.core.set_researcher(fr);
-        let origin = k
-            .db()
-            .message_add(WS, "me", "怎么设计", None, None)
-            .unwrap();
-        let card = k
-            .db()
-            .message_add(
-                WS,
-                "steve",
-                "怎么选？",
-                None,
-                Some(&json!({
-                    "origin": origin,
-                    "suggest": {
-                        "state": "open",
-                        "choices": [
-                            {"id": "here", "label": "在这出方案"},
-                            {"id": "item", "label": "建项", "title": "设计", "goal": "设计"}
-                        ]
-                    }
-                })),
-            )
-            .unwrap();
-        let h1 = k.core.suggest(WS, &card, "here", None).unwrap();
-        let h2 = k.core.suggest(WS, &card, "item", None).unwrap();
-        settle_replies(&k, WS, MAIN, &origin, 1).await;
-        wait_idle_main(&k, WS).await;
-        report.case(
-            "core.claim.12_suggest_different_choice_after_chosen_rejected",
-            &[
-                ("first_here_ok", !h1.already),
-                ("second_item_already", h2.already),
                 ("zero_items", k.db().items(WS).unwrap().is_empty()),
             ],
             &[],
@@ -1979,54 +1894,6 @@ async fn run_acl(report: &mut Report) {
         );
     }
 
-    // 10: suggest("here", Some(member)) must preserve caller user_id on run/request
-    {
-        let k = replay_kit(true);
-        let users = k.db().store().users();
-        let _owner = users.create("local:o10", "Owner", None, "owner").unwrap();
-        let member = users.create("local:m10", "Member", None, "member").unwrap();
-        let fr = FakeResearch::new(vec![Step::Text("方案来了")]);
-        k.core.set_researcher(fr.clone());
-        let origin = k
-            .db()
-            .message_add(WS, "me", "怎么设计", None, None)
-            .unwrap();
-        let card = k
-            .db()
-            .message_add(
-                WS,
-                "steve",
-                "怎么选？",
-                None,
-                Some(&json!({
-                    "origin": origin,
-                    "suggest": {"state": "open", "choices": [{"id": "here", "label": "在这答"}]}
-                })),
-            )
-            .unwrap();
-        k.core.suggest(WS, &card, "here", Some(&member)).unwrap();
-        settle_replies(&k, WS, MAIN, &origin, 1).await;
-        wait_idle_main(&k, WS).await;
-        let req_user = fr.seen.lock().unwrap()[0].user.clone();
-        let run_user = k
-            .db()
-            .store()
-            .read(|r| thread::receipt_by_origin(r, &origin))
-            .unwrap()
-            .unwrap()
-            .user_id
-            .clone();
-        report.case(
-            "core.acl.10_suggest_here_preserves_caller_user_id",
-            &[(
-                "caller_identity_preserved",
-                req_user.as_deref() == Some(member.as_str())
-                    && run_user.as_deref() == Some(member.as_str()),
-            )],
-            &[],
-        );
-    }
-
     // 11: reroute(Inline, Some(member)) must preserve caller user_id on run/request
     {
         let k = replay_kit(true);
@@ -2065,7 +1932,7 @@ async fn run_acl(report: &mut Report) {
         );
     }
 
-    // 12: Cross-workspace reroute/offer/suggest/promote/a2ui all fail closed
+    // 12: Cross-workspace reroute/offer/promote/a2ui all fail closed
     {
         let k = replay_kit(true);
         let ws2 = second_ws(&k);
@@ -2081,12 +1948,10 @@ async fn run_acl(report: &mut Report) {
                     "origin": origin,
                     "chat": "秘密",
                     "offer": {"title": "t", "goal": "g", "state": "open"},
-                    "suggest": {"state": "open", "choices": [{"id": "item", "label": "建", "title": "t", "goal": "g"}]}
                 })),
             )
             .unwrap();
         let e1 = k.core.offer(WS, &msg2, true, None).is_err();
-        let e2 = k.core.suggest(WS, &msg2, "item", None).is_err();
         let e3 = k.core.promote(WS, &msg2, None).await.is_err();
         let e4 = k
             .core
@@ -2114,7 +1979,7 @@ async fn run_acl(report: &mut Report) {
         report.case(
             "core.acl.12_cross_workspace_actions_fail_closed",
             &[
-                ("all_cross_ws_rejected", e1 && e2 && e3 && e4 && e5),
+                ("all_cross_ws_rejected", e1 && e3 && e4 && e5),
                 ("zero_foreign_items", k.db().items(&ws2).unwrap().is_empty()),
             ],
             &[],
@@ -2190,20 +2055,10 @@ async fn run_cancel(report: &mut Report) {
             .db()
             .message_add(WS, "me", "问题2为什么？", None, None)
             .unwrap();
-        let card = k
-            .db()
-            .message_add(
-                WS,
-                "steve",
-                "怎么选？",
-                None,
-                Some(&json!({
-                    "origin": m2,
-                    "suggest": {"state": "open", "choices": [{"id": "here", "label": "在这答"}]}
-                })),
-            )
+        k.core
+            .reroute(WS, &m2, RerouteTo::Inline, None)
+            .await
             .unwrap();
-        k.core.suggest(WS, &card, "here", None).unwrap();
         // Wait until m2 enters queued reply task
         let mut run2 = String::new();
         wait_until("m2 queued as task", || {
@@ -2223,8 +2078,7 @@ async fn run_cancel(report: &mut Report) {
         let stopped = k.core.stop_run(WS, &run2).unwrap();
         fr.open(1);
         settle_replies(&k, WS, MAIN, &m1, 1).await;
-        // m2 has the card + stop reply (2 messages with origin=m2); verify 1 stop reply & 0 execution
-        settle_replies(&k, WS, MAIN, &m2, 2).await;
+        settle_replies(&k, WS, MAIN, &m2, 1).await;
         wait_idle_main(&k, WS).await;
         let ran_m2 = fr.seen.lock().unwrap().iter().any(|r| r.mid == m2);
         let r2_outcome = k
@@ -2234,10 +2088,7 @@ async fn run_cancel(report: &mut Report) {
             .unwrap()
             .unwrap()
             .outcome;
-        let stop_replies = steve_replies_for(&k, WS, MAIN, &m2)
-            .into_iter()
-            .filter(|m| m.id != card)
-            .count();
+        let stop_replies = steve_replies_for(&k, WS, MAIN, &m2).len();
         report.case(
             "core.cancel.03_stop_during_queued_inline_zero_execution",
             &[
@@ -2261,20 +2112,10 @@ async fn run_cancel(report: &mut Report) {
             .db()
             .message_add(WS, "me", "问题2为什么？", None, None)
             .unwrap();
-        let card = k
-            .db()
-            .message_add(
-                WS,
-                "steve",
-                "怎么选？",
-                None,
-                Some(&json!({
-                    "origin": m2,
-                    "suggest": {"state": "open", "choices": [{"id": "here", "label": "在这答"}]}
-                })),
-            )
+        k.core
+            .reroute(WS, &m2, RerouteTo::Inline, None)
+            .await
             .unwrap();
-        k.core.suggest(WS, &card, "here", None).unwrap();
         let mut run2 = String::new();
         wait_until("m2 task queued", || {
             let tasks = k
@@ -2293,10 +2134,7 @@ async fn run_cancel(report: &mut Report) {
         fr.open(1);
         settle_replies(&k, WS, MAIN, &m1, 1).await;
         wait_idle_main(&k, WS).await;
-        let stop_replies = steve_replies_for(&k, WS, MAIN, &m2)
-            .into_iter()
-            .filter(|m| m.id != card)
-            .count();
+        let stop_replies = steve_replies_for(&k, WS, MAIN, &m2).len();
         report.case(
             "core.cancel.04_stop_run_twice_idempotent",
             &[

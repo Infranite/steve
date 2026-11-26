@@ -44,8 +44,8 @@ const NEW_TABLES: [(&str, i64); 36] = [
     ("thread_forwarded", 130),
     ("thread_delivery_refs", 130),
     ("thread_notices", 130),
-    ("chan_message_reactions", 143),
-    ("chan_reply_sources", 143),
+    ("chan_message_reactions", 145),
+    ("chan_reply_sources", 145),
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
@@ -1307,11 +1307,11 @@ fn migration_139_adds_mems_pinned_and_orders_anchors_by_pin_and_kind_priority() 
 
 #[test]
 fn migration_140_canonicalizes_reasoning_effort_and_adds_effort_mapping() {
-    let before_140 = db::MIGRATIONS
+    let before_145 = db::MIGRATIONS
         .iter()
         .position(|sql| sql.contains("ALTER TABLE sessions ADD COLUMN effort_mapping TEXT"))
         .unwrap();
-    let (_dir, path) = at_version(before_140);
+    let (_dir, path) = at_version(before_145);
     let c = Connection::open(&path).unwrap();
     c.execute_batch(
         r#"INSERT INTO bots(id,workspace_id,name,harness,reasoning_effort,updated)
@@ -1746,12 +1746,12 @@ fn migration_128_strips_main_bot_from_teams_and_rewrites_steve_fallback() {
 }
 
 #[test]
-fn migration_140_adds_reactions_reply_sources_burst_and_ai_mark() {
-    let before_140 = db::MIGRATIONS
+fn migration_145_adds_reactions_reply_sources_burst_and_ai_mark() {
+    let before_145 = db::MIGRATIONS
         .iter()
         .position(|sql| sql.contains("CREATE TABLE chan_message_reactions"))
         .unwrap();
-    let (_dir, path) = at_version(before_140);
+    let (_dir, path) = at_version(before_145);
     let c = Connection::open(&path).unwrap();
     assert!(!has_table(&c, "chan_message_reactions"));
     assert!(!has_table(&c, "chan_reply_sources"));
@@ -1773,4 +1773,68 @@ fn migration_140_adds_reactions_reply_sources_burst_and_ai_mark() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn migration_141_rebinds_work_tidy_to_item_lifecycle_preserving_cursor() {
+    let (_dir, path) = at_version(140);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "INSERT INTO outbox_events (seq, id, workspace_id, topic, version, payload, created)
+         VALUES
+           (10, 'evt_10', 'default', 'work.item.done', 1, '{}', 100),
+           (25, 'evt_25', 'default', 'work.item.done', 1, '{}', 200);
+         INSERT INTO outbox_consumers (id, topic, since_seq, enabled, registered)
+         VALUES
+           ('work.tidy', 'work.item.done', 0, 1, 100),
+           ('flow.item_events', 'work.item.done', 0, 1, 100);
+         INSERT INTO outbox_receipts (event_seq, consumer_id, workspace_id, done, outcome)
+         VALUES
+           (10, 'work.tidy', 'default', 150, 'ok'),
+           (25, 'work.tidy', 'default', 250, 'ok'),
+           (25, 'flow.item_events', 'default', 250, 'ok');
+         INSERT INTO outbox_leases (event_seq, consumer_id, attempts, last_error, next_at, dead, failing_since, updated)
+         VALUES (25, 'work.tidy', 2, 'retry', 300, 0, 200, 250);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    db::migrate(&c).unwrap();
+    let (topic, since_seq): (String, i64) = c
+        .query_row(
+            "SELECT topic, since_seq FROM outbox_consumers WHERE id = 'work.tidy'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(topic, "work.item.lifecycle");
+    assert_eq!(since_seq, 25);
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM outbox_receipts WHERE consumer_id = 'work.tidy'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM outbox_leases WHERE consumer_id = 'work.tidy'"
+        ),
+        0
+    );
+    let other_topic: String = c
+        .query_row(
+            "SELECT topic FROM outbox_consumers WHERE id = 'flow.item_events'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(other_topic, "work.item.done");
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM outbox_receipts WHERE consumer_id = 'flow.item_events'"
+        ),
+        1
+    );
 }

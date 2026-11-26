@@ -47,6 +47,21 @@ pub(super) fn describe() {
         Seconds,
         "Time to commit an owner's explicit item finish."
     );
+    describe_counter!(
+        "steve_worktree_cleanup_total",
+        Count,
+        "Closed-item worktree cleanup outcomes. Labels: backend (core, node), outcome (removed, dispatched, partial, dirty, deferred, failed), branch (deleted, preserved, delete_failed, kept, none)."
+    );
+    describe_histogram!(
+        "steve_worktree_cleanup_duration_seconds",
+        Seconds,
+        "Time spent cleaning or dispatching cleanup for one closed item's worktree. Label: backend (core, node)."
+    );
+    describe_counter!(
+        "steve_worktree_backfill_items_total",
+        Count,
+        "Items processed by the one-time closed-worktree backfill maintenance pass. Label: result (cleaned, enqueued, failed)."
+    );
     describe_histogram!(
         "steve_bot_selection_seconds",
         Seconds,
@@ -690,6 +705,16 @@ pub(super) fn describe() {
         "Resident memory of their live processes. Labels: node."
     );
     describe_gauge!(
+        "steve_node_adapter_disk_written_bytes",
+        Bytes,
+        "Bytes written to disk across all live harness adapter process groups on the Node. Labels: node."
+    );
+    describe_gauge!(
+        "steve_node_disk_written_bytes",
+        Bytes,
+        "Total bytes written to disk by the Node process and its live harness adapters. Labels: node."
+    );
+    describe_gauge!(
         "steve_node_process_cpu_seconds",
         Seconds,
         "The Node process's CPU time since it started. Labels: node."
@@ -1133,5 +1158,19 @@ pub(super) fn describe() {
         "steve_channel_new_group_silent_total",
         Count,
         "Newly discovered bot groups initialized in default silent-record mode instead of opening an inbox ask card."
+    describe_counter!(
+        "steve_window_cache_requests_total",
+        Count,
+        "In-process read-projection window cache lookups and issuances. Labels: cache (attention, feed), result (hit, reuse, issue, miss, expired)."
+    );
+    describe_counter!(
+        "steve_window_cache_evictions_total",
+        Count,
+        "Entries evicted by LRU capacity from in-process window caches. Labels: cache (attention, feed)."
+    );
+    describe_gauge!(
+        "steve_window_cache_entries",
+        Count,
+        "Current entries in each bounded in-process window cache. Labels: cache (attention, feed)."
     );
 }

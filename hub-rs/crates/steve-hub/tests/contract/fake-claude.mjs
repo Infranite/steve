@@ -16,7 +16,7 @@ serve((head, rest) => {
   } else if (prompt.startsWith("Draft a bot")) result = { name: "周报", role: "写周报", persona: "简洁", rules: "每周五提醒", model: "haiku" }
   else if (prompt.startsWith("Describe this project")) result = { name: "描述名", description: "一个用于契约测试的目录" }
   else if (prompt.startsWith("Which Steve configuration")) result = { target: "settings:items" }
-  else if (prompt.startsWith("You configure")) result = { changes: [{ key: "handoff", value: "90" }, { key: "nope", value: 1 }] }
+  else if (prompt.startsWith("You configure")) result = { changes: [{ key: "archDays", value: "90" }, { key: "nope", value: 1 }] }
   else if (prompt.startsWith("Manage item tags")) result = { create: [{ name: "财务", cat: "领域", description: "钱的事" }], edit: [] }
   else result = "这是 Steve 的回答。"
   return typeof result === "string" ? result : "```json\n" + JSON.stringify(result) + "\n```"

@@ -120,12 +120,27 @@ async fn branch_and_reason_reach_the_event() {
         handled_by, "steve",
         "no bot_id, no triage bot: the main bot"
     );
-    // the notify text came from the extracted field
-    let question = fixtures::decisions_for(e.env.store(), "signal", &evt)
+    // the notify text came from the extracted field and went to the passive notification Feed
+    assert!(
+        fixtures::decisions_for(e.env.store(), "signal", &evt)
+            .unwrap()
+            .is_empty()
+    );
+    let run = run_of(&e, &evt);
+    let feed = e
+        .env
+        .store()
+        .read(|r| steve_store::FeedReads(r).report_result(WS, &run, "n"))
         .unwrap()
-        .remove(0)
-        .question;
-    assert_eq!(question, "可以，改到 2 点。");
+        .expect("notify reminder feed entry");
+    let feed_id = feed["feed_entry_id"].as_str().expect("feed_entry_id");
+    let entry = e
+        .env
+        .store()
+        .read(|r| steve_store::feed::detail(r, WS, ME, feed_id))
+        .unwrap();
+    assert_eq!(entry.kind, "report");
+    assert_eq!(entry.title, "可以，改到 2 点。");
     // one fast-tier call; the prompt has the event as it came and the branches
     let calls = e.env.gateway.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
@@ -136,7 +151,6 @@ async fn branch_and_reason_reach_the_event() {
     assert!(p.contains(r#"["需要回复","其他"]"#));
     assert!(p.contains("sk-live-123456"));
     // the step output carries branch, reason and fields
-    let run = run_of(&e, &evt);
     let out = e
         .env
         .store()

@@ -3,39 +3,107 @@
 //! left out.
 
 use std::collections::BTreeMap;
-use steve_node_api::{NetworkBytes, NodeMeters, NodeVitals, ProcessMeters, RootVitals, Timestamp};
+use steve_node_api::{
+    MAX_REPORTED_SESSION_VITALS, NetworkBytes, NodeMeters, NodeVitals, ProcessMeters, RootVitals,
+    SessionId, SessionVitals, Timestamp,
+};
 
 use crate::journal::Journal;
 use crate::workspace::Root;
 
+/// Node-process meters plus per-session harness process-group resource breakdowns.
+pub(crate) struct SampledMeters {
+    pub(crate) meters: NodeMeters,
+    pub(crate) adapter_disk_written_bytes: u64,
+    pub(crate) session_vitals: Vec<SessionVitals>,
+}
+
+/// Aggregates per-session process-group counters, sums total adapter disk writes across all
+/// measured sessions, sorts descending by `disk_written_bytes + resident_bytes`, and truncates to
+/// [`MAX_REPORTED_SESSION_VITALS`].
+pub(crate) fn aggregate_session_vitals(
+    samples: impl IntoIterator<Item = (SessionId, f64, u64, u64)>,
+) -> (u64, Vec<SessionVitals>) {
+    let mut by_session: BTreeMap<SessionId, (f64, u64, u64)> = BTreeMap::new();
+    let mut total_disk_written = 0_u64;
+    for (session_id, cpu_seconds, resident_bytes, disk_written_bytes) in samples {
+        total_disk_written = total_disk_written.saturating_add(disk_written_bytes);
+        let entry = by_session.entry(session_id).or_insert((0.0, 0, 0));
+        entry.0 += cpu_seconds;
+        entry.1 = entry.1.saturating_add(resident_bytes);
+        entry.2 = entry.2.saturating_add(disk_written_bytes);
+    }
+    let mut sessions: Vec<SessionVitals> = by_session
+        .into_iter()
+        .map(
+            |(session_id, (cpu_seconds, resident_bytes, disk_written_bytes))| SessionVitals {
+                session_id,
+                cpu_seconds,
+                resident_bytes,
+                disk_written_bytes,
+            },
+        )
+        .collect();
+    sessions.sort_by(|a, b| {
+        let weight_b = b.disk_written_bytes.saturating_add(b.resident_bytes);
+        let weight_a = a.disk_written_bytes.saturating_add(a.resident_bytes);
+        weight_b
+            .cmp(&weight_a)
+            .then_with(|| a.session_id.as_str().cmp(b.session_id.as_str()))
+    });
+    sessions.truncate(MAX_REPORTED_SESSION_VITALS);
+    (total_disk_written, sessions)
+}
+
 /// The Node process's meters (S1): its journal, what it has not delivered yet, the harness process
-/// groups it runs and the process itself. A journal read that fails leaves its figures at zero.
-pub(crate) fn meters(j: &Journal) -> NodeMeters {
+/// groups it runs (including per-session CPU, memory and disk writes) and the process itself.
+/// A journal read that fails leaves its figures at zero.
+pub(crate) fn meters(j: &Journal) -> SampledMeters {
     let (journal_bytes, journal_file_bytes, journal_commits) = j.meters();
     let (event_backlog, event_backlog_bytes) = j.read(|t| t.backlog()).unwrap_or_default();
     let groups = j.read(|t| t.procs()).unwrap_or_default();
-    let used: Vec<_> = groups
-        .iter()
-        .filter_map(|p| steve_runtime::process::group(i32::try_from(p.pgid).ok()?))
-        .collect();
-    NodeMeters {
-        journal_bytes,
-        journal_file_bytes,
-        journal_commits,
-        event_backlog,
-        event_backlog_bytes,
-        adapters: groups.len() as u32,
-        adapter_cpu_seconds: used.iter().map(|u| u.cpu_seconds).sum(),
-        adapter_resident_bytes: used.iter().map(|u| u.resident_bytes).sum(),
-        network: network().unwrap_or_default(),
-        process: steve_runtime::process::this().map(|u| ProcessMeters {
-            cpu_seconds: u.cpu_seconds,
-            resident_bytes: u.resident_bytes,
-            open_fds: u.open_fds,
-            threads: u.threads,
-            disk_read_bytes: u.disk_read_bytes,
-            disk_written_bytes: u.disk_written_bytes,
-        }),
+    let mut adapter_cpu_seconds = 0.0_f64;
+    let mut adapter_resident_bytes = 0_u64;
+    let mut per_session = Vec::with_capacity(groups.len());
+    for p in &groups {
+        let Some(pgid) = i32::try_from(p.pgid).ok() else {
+            continue;
+        };
+        let Some(u) = steve_runtime::process::group(pgid) else {
+            continue;
+        };
+        adapter_cpu_seconds += u.cpu_seconds;
+        adapter_resident_bytes = adapter_resident_bytes.saturating_add(u.resident_bytes);
+        per_session.push((
+            p.session.clone(),
+            u.cpu_seconds,
+            u.resident_bytes,
+            u.disk_written_bytes.unwrap_or(0),
+        ));
+    }
+    let (adapter_disk_written_bytes, session_vitals) = aggregate_session_vitals(per_session);
+    SampledMeters {
+        meters: NodeMeters {
+            journal_bytes,
+            journal_file_bytes,
+            journal_commits,
+            event_backlog,
+            event_backlog_bytes,
+            adapters: groups.len() as u32,
+            adapter_cpu_seconds,
+            adapter_resident_bytes,
+            network: network().unwrap_or_default(),
+            process: steve_runtime::process::this().map(|u| ProcessMeters {
+                cpu_seconds: u.cpu_seconds,
+                resident_bytes: u.resident_bytes,
+                open_fds: u.open_fds,
+                threads: u.threads,
+                disk_read_bytes: u.disk_read_bytes,
+                disk_written_bytes: u.disk_written_bytes,
+            }),
+        },
+        adapter_disk_written_bytes,
+        session_vitals,
     }
 }
 
@@ -68,6 +136,8 @@ pub(crate) fn measure(roots: &[Root], sessions: u32) -> NodeVitals {
             })
             .collect(),
         sessions,
+        adapter_disk_written_bytes: 0,
+        session_vitals: Vec::new(),
         meters: None,
     }
 }
@@ -288,5 +358,35 @@ mod tests {
         assert_eq!(v.roots.len(), 1);
         assert!(v.roots[0].total >= v.roots[0].free && v.roots[0].total > 0);
         assert_eq!(v.sessions, 2);
+    }
+
+    #[test]
+    fn aggregate_session_vitals_sums_sorts_and_caps_at_limit() {
+        let sid = |n: usize| SessionId::new(format!("sess_{n:03}")).unwrap();
+        let mut samples = Vec::new();
+        // 70 distinct sessions (> MAX_REPORTED_SESSION_VITALS = 64), plus a duplicate entry for sess_000.
+        samples.push((sid(0), 1.5, 1_000, 2_000));
+        samples.push((sid(0), 0.5, 500, 3_000));
+        for i in 1..70 {
+            let disk = (i as u64) * 10_000;
+            let rss = (i as u64) * 1_000;
+            samples.push((sid(i), i as f64 * 0.1, rss, disk));
+        }
+        let expected_total: u64 = 5_000 + (1..70_u64).map(|i| i * 10_000).sum::<u64>();
+        let (total_disk, out) = aggregate_session_vitals(samples);
+        assert_eq!(total_disk, expected_total);
+        assert_eq!(out.len(), MAX_REPORTED_SESSION_VITALS);
+        // Highest weight (disk + resident) comes first: sess_069.
+        assert_eq!(out[0].session_id, sid(69));
+        assert_eq!(out[0].disk_written_bytes, 690_000);
+        assert_eq!(out[0].resident_bytes, 69_000);
+        // Verify strictly non-increasing weight ordering across the returned slice.
+        for pair in out.windows(2) {
+            let w0 = pair[0].disk_written_bytes + pair[0].resident_bytes;
+            let w1 = pair[1].disk_written_bytes + pair[1].resident_bytes;
+            assert!(w0 >= w1);
+        }
+        // sess_000 aggregated to 5_000 disk + 1_500 rss = 6_500, which is below sess_006..069 (64 items).
+        assert!(!out.iter().any(|s| s.session_id == sid(0)));
     }
 }

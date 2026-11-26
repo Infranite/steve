@@ -21,6 +21,7 @@ pub use crate::contract::node_write::runtime;
 mod sessions;
 mod stats;
 mod usage_ledger;
+pub(crate) mod window_cache;
 
 pub use self::annotations::*;
 pub use self::bots::*;

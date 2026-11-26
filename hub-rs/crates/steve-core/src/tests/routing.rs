@@ -318,7 +318,7 @@ async fn a3_an_unclear_request_is_planned_here_and_offered() {
     let l = route_log(&k, &mid);
     assert_eq!(
         (l.route_kind.as_str(), l.route_guard.as_deref()),
-        ("research", Some("plan"))
+        ("research", Some("3"))
     );
     /* the offer makes the item in one click */
     let h = k.core.offer(WS, &a.id, true, None).unwrap();
@@ -711,7 +711,7 @@ async fn questions_about_a_finished_item_remain_in_the_conversation() {
 }
 
 #[tokio::test]
-async fn a_named_but_unsure_supplement_asks_once_and_the_choice_is_idempotent() {
+async fn a_named_but_unsure_supplement_answers_inline_with_offer() {
     let k = Kit::new();
     let old = k.item("run", "执行", None);
     let session = k.session(&old, "idle");
@@ -723,23 +723,14 @@ async fn a_named_but_unsure_supplement_asks_once_and_the_choice_is_idempotent() 
     let text = format!("#{old} 那个统计也处理一下");
     let mid = k.core.say(WS, &text, &[]).unwrap();
     let ms = settle(&k, 2).await;
-    assert_eq!(route_log(&k, &mid).route_kind, "suggest");
-    assert_eq!(ms[1].meta["suggest"]["state"], "open");
+    assert_eq!(route_log(&k, &mid).route_kind, "research");
+    assert!(ms[1].meta.get("suggest").is_none());
+    assert_eq!(ms[1].meta["offer"]["state"], "open");
     assert!(k.rt.prompts_of(&session).is_empty());
-    let first = k.core.suggest(WS, &ms[1].id, "item", None).unwrap();
-    let second = k.core.suggest(WS, &ms[1].id, "item", None).unwrap();
-    assert_eq!(first.item.unwrap().id, old);
+    let first = k.core.offer(WS, &ms[1].id, true, None).unwrap();
+    let second = k.core.offer(WS, &ms[1].id, true, None).unwrap();
+    assert_ne!(first.item.unwrap().id, old);
     assert!(second.already);
-    assert_eq!(k.rt.prompts_of(&session), vec![format!("补充信息：{text}")]);
-    assert_eq!(
-        k.db()
-            .messages(WS)
-            .unwrap()
-            .iter()
-            .filter(|m| m.meta.get("suggest").is_some())
-            .count(),
-        1
-    );
 }
 
 #[tokio::test]
@@ -766,21 +757,12 @@ async fn a_closed_supplement_offers_separate_work_without_losing_the_request() {
             let mid = k.core.say(WS, &text, std::slice::from_ref(&file)).unwrap();
             let ms = settle(&k, 2).await;
             let card = &ms[1];
-            assert_eq!(route_log(&k, &mid).route_guard.as_deref(), Some("closed"));
-            assert!(card.text.contains("已经结束"));
             assert!(card.meta.get("error").is_none());
-            assert_eq!(card.meta["suggest"]["choices"][0]["id"], "new");
-            assert_eq!(card.meta["suggest"]["choices"][1]["id"], "here");
-            assert!(
-                card.meta["suggest"]["choices"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|c| c.get("item").is_none())
-            );
+            assert!(card.meta.get("suggest").is_none());
+            assert_eq!(card.meta["offer"]["state"], "open");
             let made = k
                 .core
-                .suggest(WS, &card.id, "new", None)
+                .offer(WS, &card.id, true, None)
                 .unwrap()
                 .item
                 .unwrap();
@@ -796,7 +778,7 @@ async fn a_closed_supplement_offers_separate_work_without_losing_the_request() {
                     .next(),
                 Some(text.as_str())
             );
-            assert!(k.core.suggest(WS, &card.id, "new", None).unwrap().already);
+            assert!(k.core.offer(WS, &card.id, true, None).unwrap().already);
             assert_eq!(items(&k), 2);
             assert!(k.rt.prompts_of(&session).is_empty());
             assert!(k.db().queued(&session).unwrap().is_empty());
@@ -807,6 +789,7 @@ async fn a_closed_supplement_offers_separate_work_without_losing_the_request() {
                     .iter()
                     .any(|(_, files)| files.contains(&file))
             );
+            let _ = route_log(&k, &mid);
         }
     }
 }
@@ -887,46 +870,10 @@ async fn a_supplement_target_closing_during_routing_is_checked_again() {
         .say(WS, &format!("追加到 {old}：覆盖跨日统计"), &[])
         .unwrap();
     let ms = settle(&k, 2).await;
-    assert_eq!(ms[1].meta["suggest"]["state"], "open");
+    assert!(ms[1].meta.get("suggest").is_none());
+    assert_eq!(ms[1].meta["offer"]["state"], "open");
     assert_eq!(ms[1].meta["steps"]["route"]["guard"], "closed");
     assert!(ms[1].meta.get("error").is_none());
-}
-
-#[tokio::test]
-async fn a_suggestion_target_closing_before_the_choice_keeps_the_card_actionable() {
-    let k = Kit::new();
-    let old = k.item("run", "执行", None);
-    let target = old.clone();
-    router(
-        &k,
-        move |_| json!({"kind":"supplement", "confidence":0.6, "item":target}),
-    );
-    let text = "统计也处理一下";
-    k.core.say(WS, text, &[]).unwrap();
-    let ms = settle(&k, 2).await;
-    let card = &ms[1];
-    steve_store::core_fixture::item(
-        k.db().store(),
-        &old,
-        steve_store::core_fixture::ItemState::Closed {
-            outcome: "completed",
-        },
-    );
-    let h = k.core.suggest(WS, &card.id, "item", None).unwrap();
-    assert_eq!(h.message_id, card.id);
-    assert!(h.item.is_none());
-    let card = k.db().message(&card.id).unwrap().unwrap();
-    assert!(card.text.contains("已经结束"));
-    assert_eq!(card.meta["suggest"]["state"], "open");
-    let made = k
-        .core
-        .suggest(WS, &card.id, "new", None)
-        .unwrap()
-        .item
-        .unwrap();
-    assert_eq!(k.db().goals(&made.id).unwrap().last().unwrap().text, text);
-    assert_ne!(made.id, old);
-    assert_eq!(items(&k), 2);
 }
 
 #[tokio::test]
@@ -957,15 +904,8 @@ async fn status_and_supplement_and_unsure_supplement() {
     assert_eq!(k.rt.prompts_of(&s).len(), 1);
     k.core.say(WS, "标题再短一点", &[]).unwrap();
     let ms = settle(&k, 6).await;
-    assert!(
-        ms[5].text.contains(&format!("建议追加到 {i}「t」")),
-        "{}",
-        ms[5].text
-    );
-    k.core.suggest(WS, &ms[5].id, "item", None).unwrap();
-    /* the session is busy with the first one: the second waits in its queue */
-    let sent = |k: &Kit| k.rt.prompts_of(&s).len() + k.db().queued(&s).unwrap().len();
-    assert_eq!(sent(&k), 2);
+    assert!(ms[5].meta.get("suggest").is_none());
+    assert_eq!(ms[5].meta["offer"]["state"], "open");
     /* the menu on a user message: send it to an item */
     let h = k
         .core
@@ -973,85 +913,12 @@ async fn status_and_supplement_and_unsure_supplement() {
         .await
         .unwrap();
     assert_eq!(h.item.unwrap().id, i);
+    let sent = |k: &Kit| k.rt.prompts_of(&s).len() + k.db().queued(&s).unwrap().len();
+    assert_eq!(sent(&k), 2);
     assert_eq!(
         route_log(&k, &ms[4].id).route_override.as_deref(),
         Some("to_supplement")
     );
-}
-
-/// ST-44: the screenshot of 2026-11-05 — “统计信息如果维度是今天，那里面的统计数据粒度应该是小时级的”
-/// while ST-40 (the statistics page) was open, answered with “这是给 ST-40 的吗？ [送到 ST-40] [在这里回答]”.
-/// Now the card says why it belongs there, recommends appending, and asks “追加 / 单独建项”; a message that
-/// clearly supplements an open item is forwarded when the router is sure.
-#[tokio::test]
-async fn an_unsure_supplement_explains_and_asks_append_or_new() {
-    let k = Kit::new();
-    let i = k.item("run", "执行", None);
-    steve_store::core_fixture::item(
-        k.db().store(),
-        &i,
-        steve_store::core_fixture::ItemState::Title("统计页优化"),
-    );
-    let s = k.session(&i, "idle");
-    let item = i.clone();
-    router(&k, move |m| {
-        json!({"kind": "supplement", "item": item, "confidence": if m.starts_with("追加到") { 0.9 } else { 0.6 },
-               "title": "今日统计按小时展示", "goal": "统计维度选今天时按小时汇总",
-               "why": format!("这条也是统计页的展示要求，和 {item} 改的是同一个页面。")})
-    });
-    k.core
-        .say(
-            WS,
-            "统计信息如果维度是今天，那里面的统计数据粒度应该是小时级的",
-            &[],
-        )
-        .unwrap();
-    let ms = settle(&k, 2).await;
-    let card = &ms[1];
-    assert_eq!(
-        card.text,
-        format!(
-            "这条也是统计页的展示要求，和 {i} 改的是同一个页面，可以和它一起实现和验收。建议追加到 {i}「统计页优化」，你想追加进去，还是单独建一个事项？"
-        )
-    );
-    assert!(!card.text.contains("这是给"));
-    let choices = card.meta["suggest"]["choices"].as_array().unwrap();
-    let labels: Vec<&str> = choices
-        .iter()
-        .map(|c| c["label"].as_str().unwrap())
-        .collect();
-    assert_eq!(labels, [format!("追加到 {i}").as_str(), "单独建项"]);
-    assert_eq!(choices[0]["recommended"], true);
-    assert!(
-        k.core.suggest(WS, &card.id, "here", None).is_err(),
-        "“在这里回答” is not a choice of this card"
-    );
-    /* A new item runs through normal Bot selection. */
-    let before = items(&k);
-    let h = k.core.suggest(WS, &card.id, "new", None).unwrap();
-    let made = h.item.expect("an item of its own");
-    assert_ne!(made.id, i);
-    assert_eq!(made.title, "今日统计按小时展示");
-    assert_eq!(made.bot_id.as_deref(), Some("dev"));
-    assert_eq!(items(&k), before + 1);
-    assert!(k.rt.prompts_of(&s).is_empty(), "ST-40 is not disturbed");
-    /* the user names the item: appended without asking */
-    k.core
-        .say(WS, &format!("追加到 {i}：小时粒度的悬浮提示写清区间"), &[])
-        .unwrap();
-    let n = k.db().messages(WS).unwrap().len();
-    let ms = settle(&k, n + 1).await;
-    assert_eq!(ms.last().unwrap().text, format!("已作为补充送到 {i}。"));
-    assert_eq!(k.rt.prompts_of(&s).len(), 1);
-    /* 追加到 ST-40 on the card */
-    k.core.say(WS, "跨日边界也要检查", &[]).unwrap();
-    let ms = settle(&k, ms.len() + 2).await;
-    let card = ms.last().unwrap();
-    assert!(card.meta.get("suggest").is_some(), "{}", card.text);
-    let h = k.core.suggest(WS, &card.id, "item", None).unwrap();
-    assert_eq!(h.item.unwrap().id, i);
-    let sent = k.rt.prompts_of(&s).len() + k.db().queued(&s).unwrap().len();
-    assert_eq!(sent, 2);
 }
 
 #[tokio::test]

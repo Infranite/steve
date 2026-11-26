@@ -57,15 +57,13 @@ fn reused_feed_and_attention_capabilities_are_read_only_and_expiry_is_background
     }).unwrap();
     let read = || {
         t.store
-            .write(|tx| -> Result<_> {
-                let f = feed::list(tx, WS, "u", &feed::Filter::default(), None, 10, 100)?;
-                let a = attention::page(tx, WS, "u", "feed", vec![], 0, None, None, 10, 100)?;
+            .read(|r| -> Result<_> {
+                let f = feed::list(r, WS, "u", &feed::Filter::default(), None, 10, 100)?;
+                let a = attention::page(r, WS, "u", "feed", vec![], 0, None, None, 10, 100)?;
                 Ok((f, a))
             })
             .unwrap()
     };
-    // First issuance persists the existing opaque-capability contract; repeated reads reuse it.
-    read();
     t.store
         .fixture_write(|c| {
             c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
@@ -78,11 +76,19 @@ fn reused_feed_and_attention_capabilities_are_read_only_and_expiry_is_background
         .modified()
         .unwrap();
     let changes = t.store.fixture_write(|c| Ok(c.total_changes())).unwrap();
+    let write_txs = t.store.write_tx_count();
+    // Both first and repeated reads live purely in the in-process LRU window cache: 0 write locks.
     read();
+    read();
+    assert_eq!(
+        t.store.write_tx_count(),
+        write_txs,
+        "read request never acquires the SQLite writer lock"
+    );
     assert_eq!(
         t.store.fixture_write(|c| Ok(c.total_changes())).unwrap(),
         changes,
-        "read request issues no INSERT/UPDATE/DELETE for reusable windows"
+        "read request issues no INSERT/UPDATE/DELETE for windows"
     );
     assert_eq!(std::fs::read(t.store.path()).unwrap(), bytes);
     assert_eq!(

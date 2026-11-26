@@ -625,6 +625,89 @@ async fn not_same_is_never_proposed_again() {
 }
 
 #[tokio::test]
+async fn me_match_proposes_without_auto_merge_and_folds_out_of_decide_tier() {
+    let t = env();
+    let r = app(&t);
+    let me_party = ok(&r, "GET", "/me/contact", Value::Null).await;
+    let me_id = id(&me_party);
+    ok(
+        &r,
+        "PATCH",
+        &format!("/contacts/{me_id}"),
+        json!({ "aliases": ["owner@corp.example"] }),
+    )
+    .await;
+    let seen = t
+        .store()
+        .write(|tx| {
+            identify(
+                tx,
+                WS,
+                ME,
+                "mail",
+                "owner@corp.example",
+                &Hints {
+                    display_name: Some("Owner Alt".into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    assert_ne!(seen.party_id, me_id);
+    let mp = t
+        .store()
+        .write(|tx| {
+            steve_modules::accounts::identify::propose_if_me(
+                tx,
+                WS,
+                &me_id,
+                &seen.party_id,
+                &seen.account_id,
+                Some("Owner Alt"),
+                &["owner@corp.example"],
+            )
+        })
+        .unwrap()
+        .expect("merge proposal id");
+    assert!(mp.starts_with("mp_"), "{mp}");
+    // Safety rule: an unconfirmed inbound contact is never silently merged into “我”.
+    assert_eq!(
+        fixture::party_status(t.store(), &seen.party_id).unwrap(),
+        "active"
+    );
+    let d = fixture::proposal_decision(t.store(), &mp).unwrap();
+    // Noise-reduction rule: the party_merge decision folds out of "待我决定" (zero Decide cards).
+    let open_views = t
+        .store()
+        .read(|r| steve_store::views::Views::decision_views(r).open())
+        .unwrap();
+    let view = open_views
+        .iter()
+        .find(|v| v.id.as_str() == d)
+        .expect("party_merge view");
+    assert_eq!(view.tier, steve_types::DecisionTier::Folded);
+    assert_eq!(view.folded, Some(steve_types::FoldReason::LowPriority));
+    assert_eq!(
+        open_views
+            .iter()
+            .filter(|v| v.tier == steve_types::DecisionTier::Decide)
+            .count(),
+        0
+    );
+
+    resolve(&t, &d, "merge").unwrap();
+    assert_eq!(
+        fixture::party_status(t.store(), &seen.party_id).unwrap(),
+        "merged"
+    );
+    undo(&t, &d).unwrap();
+    assert_eq!(
+        fixture::party_status(t.store(), &seen.party_id).unwrap(),
+        "active"
+    );
+}
+
+#[tokio::test]
 async fn manual_merge_settles_the_open_proposal() {
     let t = env();
     let r = app(&t);

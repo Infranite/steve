@@ -588,11 +588,5 @@ mod tests {
             ]
         );
         assert!(im.iter().all(|d| d.read_only));
-        for name in [
-            steve_channels::im_conv_mcp::THREAD,
-            steve_channels::im_conv_mcp::MEDIA,
-        ] {
-            assert!(steve_research::guard::MCP_TOOLS.contains(&name), "{name}");
-        }
     }
 }

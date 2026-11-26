@@ -14,6 +14,7 @@ pub struct CallBegin {
     pub bot: Option<String>,
     pub project: Option<String>,
     pub purpose: String,
+    pub node_id: Option<String>,
     pub started: i64,
     pub day: String,
 }
@@ -40,8 +41,8 @@ impl Stats<'_> {
                 Some(item) => tx.conn.query_row("SELECT bot_id,project_id FROM items WHERE id=? AND workspace_id=?",params![item,b.workspace],|r| Ok((r.get(0)?,r.get(1)?))).optional()?.unwrap_or_default(),
                 None => (None,None),
             };
-            tx.conn.execute("INSERT INTO gateway_calls(call_id,workspace_id,item_id,bot_id,project_id,purpose,started,day) VALUES(?,?,?,?,?,?,?,?)",
-                params![b.id,b.workspace,b.item,bot.or(b.bot.clone()),project.or(b.project.clone()),b.purpose,b.started,b.day])?;
+            tx.conn.execute("INSERT INTO gateway_calls(call_id,workspace_id,item_id,bot_id,project_id,purpose,node_id,started,day) VALUES(?,?,?,?,?,?,?,?,?)",
+                params![b.id,b.workspace,b.item,bot.or(b.bot.clone()),project.or(b.project.clone()),b.purpose,b.node_id.as_deref().unwrap_or(""),b.started,b.day])?;
             Ok(())
         })
     }
@@ -78,6 +79,17 @@ impl Stats<'_> {
                 params![job_attempt, attempt, standalone,job_attempt],
             )?;
             if linked!=1 {return Err(crate::StoreError::Hook("Job ownership is missing before dispatch".into()));}
+            if let Some((call, node)) = tx.conn.query_row(
+                "SELECT a.call_id, r.node_id FROM gateway_attempts a JOIN runtime_job_attempts r ON r.attempt_id=? WHERE a.attempt_id=?",
+                params![job_attempt, attempt],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            ).optional()? && !node.is_empty() {
+                tx.conn.execute("UPDATE gateway_calls SET node_id=? WHERE call_id=?", params![node, call])?;
+                let has_projection: bool = tx.conn.query_row("SELECT EXISTS(SELECT 1 FROM usage_records WHERE live_call_id=?)", [&call], |r| r.get(0))?;
+                if has_projection {
+                    project(self, &call)?;
+                }
+            }
             Ok(())
         })
     }
@@ -340,8 +352,17 @@ fn attempt_failures(tx: &mut crate::W<'_>, call: &str) -> Result<Vec<String>> {
 
 fn project(stats: &Stats<'_>, call_id: &str) -> Result<()> {
     stats.0.write(|tx| {
-        let (ws,item,bot_id,project_id,purpose,ts,day,ended,mut a): (String,Option<String>,Option<String>,Option<String>,String,i64,String,Option<i64>,CallFinish)=tx.conn.query_row(
-            "SELECT workspace_id,item_id,bot_id,project_id,purpose,started,day,ended,ok,model,harness,attempts,duration_ms,failures,fallback_usage FROM gateway_calls WHERE call_id=?",[call_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,CallFinish{ok:r.get(8)?,model:r.get(9)?,harness:r.get(10)?,attempts:r.get(11)?,duration_ms:r.get::<_,i64>(12)?.max(0) as u64,failures:vec![],usage:vec![]})))?;
+        let (ws,item,bot_id,project_id,purpose,mut node_id,ts,day,ended,mut a): (String,Option<String>,Option<String>,Option<String>,String,String,i64,String,Option<i64>,CallFinish)=tx.conn.query_row(
+            "SELECT workspace_id,item_id,bot_id,project_id,purpose,node_id,started,day,ended,ok,model,harness,attempts,duration_ms,failures,fallback_usage FROM gateway_calls WHERE call_id=?",[call_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,CallFinish{ok:r.get(9)?,model:r.get(10)?,harness:r.get(11)?,attempts:r.get(12)?,duration_ms:r.get::<_,i64>(13)?.max(0) as u64,failures:vec![],usage:vec![]})))?;
+        if node_id.is_empty() {
+            if let Some(linked_node) = tx.conn.query_row(
+                "SELECT g.node_id FROM gateway_job_accounts g JOIN gateway_attempts a ON a.attempt_id=g.attempt_id WHERE a.call_id=? AND g.node_id IS NOT NULL AND g.node_id<>'' ORDER BY a.ordinal DESC LIMIT 1",
+                [call_id],
+                |r| r.get::<_, String>(0),
+            ).optional()? {
+                node_id = linked_node;
+            }
+        }
         let (failures,fallback):(String,String)=tx.conn.query_row("SELECT failures,fallback_usage FROM gateway_calls WHERE call_id=?",[call_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
         a.failures=serde_json::from_str(&failures)?;
         let attempts=tx.conn.prepare_cached("SELECT attempt_id,model FROM gateway_attempts WHERE call_id=? ORDER BY ordinal")?.query_map([call_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -362,7 +383,7 @@ fn project(stats: &Stats<'_>, call_id: &str) -> Result<()> {
         }
         if !has_reports { a.usage=serde_json::from_str(&fallback)?; }
         // Pending calls have a concrete unknown row, so coverage is pending, never fabricated zero.
-        let tag=CallProjection { purpose:&purpose, item_id:&item };
+        let tag=CallProjection { purpose:&purpose, item_id:&item, node_id:&node_id };
         write_projection(tx,call_id,&ws,ts,&day,bot_id,project_id,&tag,&a,ended.is_none())?;
         tx.conn.execute("UPDATE gateway_calls SET projection_dirty=0 WHERE call_id=?",[call_id])?;
         tx.emit(stats_changed(&ws,Some(&day)));
@@ -372,6 +393,7 @@ fn project(stats: &Stats<'_>, call_id: &str) -> Result<()> {
 struct CallProjection<'a> {
     purpose: &'a str,
     item_id: &'a Option<String>,
+    node_id: &'a str,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -450,6 +472,7 @@ fn write_projection(
                     item_id: tag.item_id.clone(),
                     bot_id: bot_id.clone(),
                     project_id: project_id.clone(),
+                    node_id: (!tag.node_id.is_empty()).then(|| tag.node_id.to_string()),
                     usage,
                     /* the call's time and dispatch attempts once, on its first row */
                     duration_ms: first.then(|| i64::try_from(a.duration_ms).unwrap_or(i64::MAX)),

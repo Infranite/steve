@@ -143,7 +143,7 @@ export function Sidebar({ route: full }: { route: string }) {
         <I className="size-4! text-muted-foreground transition-colors" strokeWidth={1.75} /><span>{l}</span>
       </SidebarMenuButton>
       {!!cnt[h] && (h === "inbox"
-        ? <SidebarMenuBadge className="h-4.5 min-w-4.5 rounded-full bg-attention px-1.5 type-label font-semibold tabular-nums text-white! peer-hover/menu-button:text-white!">{cnt[h]}</SidebarMenuBadge>
+        ? <SidebarMenuBadge className="h-4.5 min-w-4.5 rounded-full bg-attention px-1.5 type-label font-semibold tabular-nums text-white! peer-hover/menu-button:text-white!" data-inbox-badge>{cnt[h]}</SidebarMenuBadge>
         : <SidebarMenuBadge className="type-footnote tabular-nums text-muted-foreground" title={h === "todos" ? t("core:sidebar.todoCount", { count: cnt[h] }) : undefined} data-nav-count={h}>{cnt[h]}</SidebarMenuBadge>)}
       {h === "calendar" && next && <SidebarMenuBadge className="type-footnote tabular-nums text-muted-foreground" title={t("core:sidebar.nextMeeting", { time: next.at, title: next.title ?? "" })} data-nav-next>{next.at}</SidebarMenuBadge>}
     </SidebarMenuItem>

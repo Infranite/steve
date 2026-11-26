@@ -63,6 +63,8 @@ pub struct TurnBegin {
     pub bot_id: Option<String>,
     pub project_id: Option<String>,
     pub harness: String,
+    /// Execution Node id; resolved from `runtime_sessions` when absent.
+    pub node_id: Option<String>,
     /// `events.seq` of the turn's first user event; `None` for continuations and retries.
     pub user_seq: Option<i64>,
     /// 0 = first try, k = k-th automatic retry.
@@ -93,7 +95,7 @@ pub struct TurnFinish {
 }
 
 /// A token record outside a turn: a gateway call, an autonomous adapter turn.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NewUsage {
     pub workspace_id: String,
     pub ts: i64,
@@ -107,6 +109,8 @@ pub struct NewUsage {
     pub item_id: Option<String>,
     pub bot_id: Option<String>,
     pub project_id: Option<String>,
+    /// Execution Node id; resolved from `runtime_sessions` when absent and `session_id` is set.
+    pub node_id: Option<String>,
     pub usage: ModelUsage,
     pub duration_ms: Option<i64>,
     pub ok: bool,
@@ -135,9 +139,10 @@ impl Stats<'_> {
     pub fn turn_begin(&self, b: &TurnBegin) -> Result<String> {
         self.0.write_conn(|w| {
             let id = uid("tn");
+            let node_id = resolve_node_id(w.c, b.node_id.as_deref(), Some(&b.session_id))?;
             w.c.run(
-                "INSERT INTO agent_turns (id, workspace_id, session_id, item_id, bot_id, project_id, harness, user_seq, attempt, started) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, b.workspace_id, b.session_id, b.item_id, b.bot_id, b.project_id, b.harness, b.user_seq, b.attempt, b.started],
+                "INSERT INTO agent_turns (id, workspace_id, session_id, item_id, bot_id, project_id, harness, node_id, user_seq, attempt, started) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, b.workspace_id, b.session_id, b.item_id, b.bot_id, b.project_id, b.harness, node_id, b.user_seq, b.attempt, b.started],
             )?;
             Ok(id)
         })
@@ -287,6 +292,26 @@ pub fn stats_changed(ws: &str, day: Option<&str>) -> steve_types::DomainEvent {
     })
 }
 
+fn resolve_node_id(
+    c: &Connection,
+    explicit: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<String> {
+    if let Some(n) = explicit.filter(|s| !s.is_empty()) {
+        return Ok(n.to_string());
+    }
+    if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+        let found: Option<String> = c
+            .prepare_cached("SELECT node_id FROM runtime_sessions WHERE session_id = ?")?
+            .query_row([sid], |r| r.get(0))
+            .optional()?;
+        if let Some(n) = found.filter(|s| !s.is_empty()) {
+            return Ok(n);
+        }
+    }
+    Ok(String::new())
+}
+
 /// Finishes an open turn; returns its workspace, or `None` if it was not open.
 fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
     struct Turn {
@@ -296,12 +321,13 @@ fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
         bot: Option<String>,
         project: Option<String>,
         harness: String,
+        node: String,
         attempt: i64,
         started: i64,
     }
     let t = c
         .prepare_cached(
-            "SELECT workspace_id, session_id, item_id, bot_id, project_id, harness, attempt, started FROM agent_turns WHERE id = ? AND ended IS NULL",
+            "SELECT workspace_id, session_id, item_id, bot_id, project_id, harness, node_id, attempt, started FROM agent_turns WHERE id = ? AND ended IS NULL",
         )?
         .query_row([&f.turn_id], |r| {
             Ok(Turn {
@@ -311,8 +337,9 @@ fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
                 bot: r.get(3)?,
                 project: r.get(4)?,
                 harness: r.get(5)?,
-                attempt: r.get(6)?,
-                started: r.get(7)?,
+                node: r.get(6)?,
+                attempt: r.get(7)?,
+                started: r.get(8)?,
             })
         })
         .optional()?;
@@ -332,6 +359,7 @@ fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
         model: &f.model,
         bot: t.bot.as_deref().unwrap_or(""),
         project: t.project.as_deref().unwrap_or(""),
+        node: &t.node,
     };
     upsert_daily(
         c,
@@ -371,6 +399,7 @@ fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
                 item_id: t.item.clone(),
                 bot_id: t.bot.clone(),
                 project_id: t.project.clone(),
+                node_id: (!t.node.is_empty()).then(|| t.node.clone()),
                 usage: u.clone(),
                 duration_ms: None,
                 ok: true,
@@ -386,11 +415,12 @@ fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
 
 pub(super) fn usage_in(c: &Connection, u: &NewUsage) -> Result<i64> {
     let k = &u.usage.tokens;
+    let node_id = resolve_node_id(c, u.node_id.as_deref(), u.session_id.as_deref())?;
     c.run(
-        "INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, model, turn_id, session_id, item_id, bot_id, project_id, input, output, cache_read, cache_write, reasoning, cost_reported, duration_ms, ok, attempts, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, model, turn_id, session_id, item_id, bot_id, project_id, node_id, input, output, cache_read, cache_write, reasoning, cost_reported, duration_ms, ok, attempts, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             u.workspace_id, u.ts, u.day, u.source, u.purpose, u.harness, u.usage.model, u.turn_id, u.session_id,
-            u.item_id, u.bot_id, u.project_id, k.input, k.output, k.cache_read, k.cache_write, k.reasoning,
+            u.item_id, u.bot_id, u.project_id, node_id, k.input, k.output, k.cache_read, k.cache_write, k.reasoning,
             u.usage.cost_reported, u.duration_ms, u.ok, u.attempts, detail_json(&u.usage.detail)?
         ],
     )?;
@@ -404,6 +434,7 @@ pub(super) fn usage_in(c: &Connection, u: &NewUsage) -> Result<i64> {
         model: &u.usage.model,
         bot: u.bot_id.as_deref().unwrap_or(""),
         project: u.project_id.as_deref().unwrap_or(""),
+        node: &node_id,
     };
     upsert_daily(
         c,
@@ -437,14 +468,14 @@ pub(super) fn remove_turn_usage_in(c: &Connection, turn: &str) -> Result<()> {
 pub(super) fn remove_usage_in(c: &Connection, column: &str, owner: &str) -> Result<()> {
     debug_assert!(matches!(column, "turn_id" | "live_call_id"));
     let rows = c.prepare_cached(&format!(
-        "SELECT workspace_id, day, source, purpose, harness, model, COALESCE(bot_id,''), COALESCE(project_id,''),
+        "SELECT workspace_id, day, source, purpose, harness, model, COALESCE(bot_id,''), COALESCE(project_id,''), node_id,
          input, output, cache_read, cache_write, reasoning, cost_reported, ok FROM usage_records WHERE {column}=?"
     ))?.query_map([owner], |r| Ok((
-        (r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,String>(4)?, r.get::<_,String>(5)?, r.get::<_,String>(6)?, r.get::<_,String>(7)?),
-        Tokens { input:r.get(8)?, output:r.get(9)?, cache_read:r.get(10)?, cache_write:r.get(11)?, reasoning:r.get(12)? },
-        r.get::<_,Option<f64>>(13)?, r.get::<_,bool>(14)?
+        (r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,String>(4)?, r.get::<_,String>(5)?, r.get::<_,String>(6)?, r.get::<_,String>(7)?, r.get::<_,String>(8)?),
+        Tokens { input:r.get(9)?, output:r.get(10)?, cache_read:r.get(11)?, cache_write:r.get(12)?, reasoning:r.get(13)? },
+        r.get::<_,Option<f64>>(14)?, r.get::<_,bool>(15)?
     )))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for ((ws, day, source, purpose, harness, model, bot, project), t, cost, ok) in rows {
+    for ((ws, day, source, purpose, harness, model, bot, project, node), t, cost, ok) in rows {
         upsert_daily(
             c,
             &Key {
@@ -456,6 +487,7 @@ pub(super) fn remove_usage_in(c: &Connection, column: &str, owner: &str) -> Resu
                 model: &model,
                 bot: &bot,
                 project: &project,
+                node: &node,
             },
             &Delta {
                 input: -t.input.unwrap_or(0),
@@ -488,6 +520,7 @@ struct Key<'a> {
     model: &'a str,
     bot: &'a str,
     project: &'a str,
+    node: &'a str,
 }
 
 /// What one write adds to a `stat_daily` row.
@@ -514,9 +547,9 @@ struct Delta<'a> {
 
 fn upsert_daily(c: &Connection, k: &Key, d: &Delta) -> Result<()> {
     c.run(
-        "INSERT INTO stat_daily (workspace_id, day, source, purpose, harness, model, bot_id, project_id, input, output, cache_read, cache_write, reasoning, hit_base, cost_reported, calls, failed_calls, turns, turn_ms, turn_errors, retries, interrupted, tools, tool_errors)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (workspace_id, day, source, purpose, harness, model, bot_id, project_id) DO UPDATE SET
+        "INSERT INTO stat_daily (workspace_id, day, source, purpose, harness, model, bot_id, project_id, node_id, input, output, cache_read, cache_write, reasoning, hit_base, cost_reported, calls, failed_calls, turns, turn_ms, turn_errors, retries, interrupted, tools, tool_errors)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (workspace_id, day, source, purpose, harness, model, bot_id, project_id, node_id) DO UPDATE SET
            input = input + excluded.input, output = output + excluded.output,
            cache_read = cache_read + excluded.cache_read, cache_write = cache_write + excluded.cache_write,
            reasoning = reasoning + excluded.reasoning, hit_base = hit_base + excluded.hit_base,
@@ -526,7 +559,7 @@ fn upsert_daily(c: &Connection, k: &Key, d: &Delta) -> Result<()> {
            retries = retries + excluded.retries, interrupted = interrupted + excluded.interrupted,
            tools = tools + excluded.tools, tool_errors = tool_errors + excluded.tool_errors",
         params![
-            k.ws, k.day, k.source, k.purpose, k.harness, k.model, k.bot, k.project, d.input, d.output,
+            k.ws, k.day, k.source, k.purpose, k.harness, k.model, k.bot, k.project, k.node, d.input, d.output,
             d.cache_read, d.cache_write, d.reasoning, d.hit_base, d.cost_reported, d.calls, d.failed_calls,
             d.turns, d.turn_ms, d.turn_errors, d.retries, d.interrupted, d.tools, d.tool_errors
         ],
@@ -536,10 +569,10 @@ fn upsert_daily(c: &Connection, k: &Key, d: &Delta) -> Result<()> {
     };
     // the per-kind counts are a JSON object, merged here rather than in SQL
     let pk = params![
-        k.ws, k.day, k.source, k.purpose, k.harness, k.model, k.bot, k.project
+        k.ws, k.day, k.source, k.purpose, k.harness, k.model, k.bot, k.project, k.node
     ];
     let cur: String = c.row(
-        "SELECT tool_kinds FROM stat_daily WHERE workspace_id = ? AND day = ? AND source = ? AND purpose = ? AND harness = ? AND model = ? AND bot_id = ? AND project_id = ?",
+        "SELECT tool_kinds FROM stat_daily WHERE workspace_id = ? AND day = ? AND source = ? AND purpose = ? AND harness = ? AND model = ? AND bot_id = ? AND project_id = ? AND node_id = ?",
         pk,
         |r| r.get(0),
     )?;
@@ -548,7 +581,7 @@ fn upsert_daily(c: &Connection, k: &Key, d: &Delta) -> Result<()> {
         *merged.entry(kind.clone()).or_default() += n;
     }
     c.run(
-        "UPDATE stat_daily SET tool_kinds = ? WHERE workspace_id = ? AND day = ? AND source = ? AND purpose = ? AND harness = ? AND model = ? AND bot_id = ? AND project_id = ?",
+        "UPDATE stat_daily SET tool_kinds = ? WHERE workspace_id = ? AND day = ? AND source = ? AND purpose = ? AND harness = ? AND model = ? AND bot_id = ? AND project_id = ? AND node_id = ?",
         params![
             to_json(&merged)?,
             k.ws,
@@ -558,7 +591,8 @@ fn upsert_daily(c: &Connection, k: &Key, d: &Delta) -> Result<()> {
             k.harness,
             k.model,
             k.bot,
-            k.project
+            k.project,
+            k.node
         ],
     )?;
     Ok(())

@@ -375,14 +375,31 @@ export function InlineDecision({ m }: { m: Mapped }) {
   return <AuDecisionCard className="steve-dc anim-in" decisions={[m.d]} onDecide={(_, a) => m.answer(a)} hold later={false} labels={dcLabels()} />
 }
 
-/** above the chat composer: every open decision in one card, paged, folded to a line until you open it */
-export function ComposerDecisions({ reveal, skip }: { reveal?: number; skip?: Set<string> }) {
+/** above the chat composer: at most 1 open Decide card directly blocking the current conversation,
+ *  rendered directly without a folded multi-count yellow bar (sidebar 待我决定 owns the global count). */
+export function ComposerDecisions({
+  reveal,
+  skip,
+  focus,
+  threadItems,
+}: {
+  reveal?: number
+  skip?: Set<string>
+  focus?: string | null
+  threadItems?: Set<string>
+}) {
   useT()
-  const cards = decideCards(useOpenDecisions()).filter(({ w }) => !skip?.has(w.decision))
-  const mapped = cards.map(({ i, w }) => mapDecision(i, w, "composer", true)).filter(Boolean) as Mapped[]
+  const open = decideCards(useOpenDecisions()).filter(({ w }) => !skip?.has(w.decision))
+  const direct = focus || threadItems
+    ? open.filter(({ i, w }) => (!!focus && i.id === focus) || (!!i.id && !!threadItems?.has(i.id)) || (!i.id && !!w.session))
+    : open
+  const blocking = focus
+    ? [...direct.filter(({ i }) => i.id === focus), ...direct.filter(({ i }) => i.id !== focus)]
+    : direct
+  const mapped = blocking.slice(0, 1).map(({ i, w }) => mapDecision(i, w, "composer", true)).filter(Boolean) as Mapped[]
   if (!mapped.length) return null
-  const by = new Map(mapped.map((m) => [m.d.id, m]))
+  const first = mapped[0]
   return <div className="mb-2" data-pending-strip>
-    <AuDecisionCard className="steve-dc" decisions={mapped.map((m) => m.d)} onDecide={(id, a) => by.get(id)?.answer(a)} hold defaultFolded reveal={reveal} labels={{ ...dcLabels(), later: tr("core:card.hide") }} />
+    <AuDecisionCard className="steve-dc" decisions={[first.d]} onDecide={(_, a) => first.answer(a)} hold later={false} reveal={reveal} labels={dcLabels()} />
   </div>
 }

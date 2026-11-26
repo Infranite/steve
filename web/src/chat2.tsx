@@ -18,7 +18,7 @@ import { steveToolIcon } from "@/tool-icons"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { st, tm, botName, projectName, tagName, decideCards, pendingCards, unreadNotices, readNotices, dismissNotice, WT, type Msg, type Steps } from "@/store"
+import { st, tm, botName, projectName, tagName, unreadNotices, readNotices, dismissNotice, type Msg, type Steps } from "@/store"
 import { ChatThinking } from "@/thread/thinking"
 import { go, StatusDot, ItemNo, SectionLabel, SidePanel, PanelHead } from "@/ui"
 import type { RNotice } from "@/api"
@@ -28,7 +28,7 @@ import { reducedMotion } from "@/lib/motion"
 
 /* ───────── what Steve did ───────── */
 /* labels are functions so they follow a language change */
-const KIND: Record<string, () => string> = { chat: () => t("shell:chat.kind.answer"), answer: () => t("shell:chat.kind.answer"), research: () => t("shell:chat.kind.research"), item: () => t("shell:chat.kind.item"), suggest: () => t("shell:chat.kind.suggest"), ask: () => t("shell:chat.kind.ask"), supplement: () => t("shell:chat.kind.supplement"), status: () => t("shell:chat.kind.status"), config: () => t("shell:chat.kind.config"), reroute: () => t("shell:chat.kind.reroute") }
+const KIND: Record<string, () => string> = { chat: () => t("shell:chat.kind.answer"), answer: () => t("shell:chat.kind.answer"), research: () => t("shell:chat.kind.research"), item: () => t("shell:chat.kind.item"), ask: () => t("shell:chat.kind.ask"), supplement: () => t("shell:chat.kind.supplement"), status: () => t("shell:chat.kind.status"), config: () => t("shell:chat.kind.config"), reroute: () => t("shell:chat.kind.reroute") }
 const kindLabel = (k: string) => KIND[k]?.() ?? k
 const TOOL: Record<string, [() => string, any]> = { create_item: [() => t("shell:chat.tool.createItem"), ListPlusIcon], draft_config: [() => t("shell:chat.tool.draftConfig"), SlidersHorizontalIcon], supplement: [() => t("shell:chat.tool.supplement"), SendIcon], digest: [() => t("shell:chat.tool.digest"), MegaphoneIcon] }
 /* a tenth of a second only matters under ten */
@@ -211,19 +211,19 @@ function Similar({ n, more, notice }: { n: RNotice; more: RNotice[]; notice: (n:
   </Collapsible>}</>
 }
 
-/** 事项: what Steve is following for you (running, waiting on you) and the notices, in the rail */
+/** 事项: what Steve is following for you (running items and notices) in the rail; waiting count lives solely in sidebar 待我决定 */
 export function RailToggle({ className }: { className?: string }) {
   const { railOpen: open, sheetOpen } = useRail(), t = useT()
   useNotices(open || sheetOpen)
   useShellSelector(() => st.noticeSeen)
   useWorkSummary()
-  const n = unreadNotices().length, waiting = decideCards().length, run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
-  const label = [t("shell:chat.railLabel.running", { count: run }), waiting && t("shell:chat.railLabel.waiting", { count: waiting }), n && t("shell:chat.railLabel.unread", { count: n })].filter(Boolean).join(t("shell:chat.railLabel.sep"))
+  const n = unreadNotices().length, run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
+  const label = [t("shell:chat.railLabel.running", { count: run }), n && t("shell:chat.railLabel.unread", { count: n })].filter(Boolean).join(t("shell:chat.railLabel.sep"))
   return (
     <Tooltip>
       <TooltipTrigger render={<Button variant="ghost" size="sm" aria-label={label} aria-pressed={open && wide()} onClick={toggleRail} className={cn("gap-1.5 px-2 text-muted-foreground aria-pressed:bg-muted aria-pressed:text-foreground", className)} data-rail-toggle />}>
-        <ListTodoIcon /><span className="max-sm:sr-only">{t("shell:chat.items")}</span>{run + waiting > 0 && <span className="tabular-nums text-foreground" data-rail-count>{run + waiting}</span>}
-        {waiting > 0 ? <span className="size-1.5 rounded-full bg-attention" aria-hidden data-rail-waiting /> : n > 0 && <span className="size-1.5 rounded-full bg-blue" aria-hidden data-unread />}
+        <ListTodoIcon /><span className="max-sm:sr-only">{t("shell:chat.items")}</span>
+        {n > 0 && <span className="size-1.5 rounded-full bg-blue" aria-hidden data-unread />}
       </TooltipTrigger>
       <TooltipContent>{open && wide() ? t("shell:chat.hideRail") : t("shell:chat.showRail")}</TooltipContent>
     </Tooltip>
@@ -290,7 +290,7 @@ function RailBody() {
   const unread = unreadNotices()
   /* what is on screen counts as read, after a moment so the new ones are seen highlighted */
   useEffect(() => { if (!unread.length) return; const h = setTimeout(readNotices, 2500); return () => clearTimeout(h) }, [unread.length])
-  const run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch), cards = pendingCards()
+  const run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch)
   const waiting = (n: RNotice) => !!n.item_id && !!getItem(n.item_id)?.wait
   /* failures stay on top until they are read and their item no longer waits on you, or until they are closed */
   const rows = notices()
@@ -312,10 +312,7 @@ function RailBody() {
   }
   return (
     <div className="flex flex-col gap-7" data-rail-body>
-      {/* what waits on you, then what runs for you, then what happened; Steve's own thinking stays in the thread */}
-      {cards.length > 0 && <section data-rail-wait><SectionLabel>{t("shell:chat.waitingHead", { count: cards.length })}</SectionLabel>
-        {cards.slice(0, 5).map(({ i, w }) => <Line key={w.decision} onClick={() => go(i.id ? "#/inbox" : "#/sessions/" + w.session)} test={"wait-" + w.decision}><StatusDot s="wait" />{i.id && <ItemNo id={i.id} />}<span className="min-w-0 flex-1 truncate type-callout">{i.id ? i.t : t("shell:chat.sessionTitle", { title: i.t })}</span><span className="shrink-0 type-footnote text-tertiary">{w.subject === "tool_call" ? t("shell:chat.permission") : WT[w.type]}</span></Line>)}
-        {cards.length > 5 && <Line onClick={() => go("#/inbox")}><span className="type-footnote text-muted-foreground">{t("shell:chat.moreWaiting", { count: cards.length - 5 })}</span></Line>}</section>}
+      {/* what runs for you, then what happened; waiting decisions stay in 待我决定 */}
       {run.length > 0 && <section data-rail-run><SectionLabel>{t("shell:chat.runningHead", { count: run.length })}</SectionLabel>
         {run.slice(0, 5).map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"run-" + i.id}><StatusDot s="run" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>{i.rel?.tone === "fail" && <span className="shrink-0 type-footnote text-destructive" data-rel="fail">{i.rel.outcome === "not_released" ? t("shell:chat.notReleased") : t("shell:chat.releaseFailed")}</span>}</Line>)}</section>}
       <section data-rail-notices><SectionLabel>{unread.length ? t("shell:chat.noticesUnread", { count: unread.length }) : t("shell:chat.notices")}</SectionLabel>

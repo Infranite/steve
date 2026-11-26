@@ -1724,6 +1724,7 @@ mod tests {
                     item_id: None,
                     bot_id: None,
                     project_id: None,
+                    node_id: None,
                     usage: steve_store::ModelUsage {
                         model: model.into(),
                         ..Default::default()
