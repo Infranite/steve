@@ -380,31 +380,43 @@ pub struct WfRunSnapshot {
     pub decision_id: Option<String>,
 }
 
+pub(crate) struct WorkflowRunLockEntry {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    /// Number of live callers holding or waiting on this run's lock.
+    /// Read and updated exclusively while holding `CoreInner::workflow_run_locks`.
+    refs: usize,
+}
+
 struct WorkflowRunLockGuard {
     core: Core,
     run_id: String,
     lock: Arc<tokio::sync::Mutex<()>>,
-    _guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl Drop for WorkflowRunLockGuard {
     fn drop(&mut self) {
-        // Release the per-run lock first so any queued waiter can run, then acquire the map lock.
-        // If strong_count == 2 (only `self.lock` and the map entry remain), no other task holds a
-        // clone of this lock, so removing it from the map is race-free.
-        self._guard.take();
+        // Decrement `refs`, remove the entry once idle, and release `guard` inside the same
+        // `workflow_run_locks` critical section. That guarantees:
+        // 1. An active holder or queued waiter keeps `refs >= 1`, so its entry is never deleted.
+        // 2. A waiter woken by dropping `guard` cannot race ahead and observe a stale refcount
+        //    from the releasing holder.
+        // 3. Dropping a cancelled waiter before `.await` finishes still decrements `refs` cleanly.
         let mut locks = self
             .core
             .0
             .workflow_run_locks
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = locks.get(&self.run_id)
-            && Arc::ptr_eq(entry, &self.lock)
-            && Arc::strong_count(entry) == 2
-        {
+        let remove = locks.get_mut(&self.run_id).is_some_and(|entry| {
+            debug_assert!(Arc::ptr_eq(&entry.lock, &self.lock));
+            entry.refs -= 1;
+            entry.refs == 0
+        });
+        if remove {
             locks.remove(&self.run_id);
         }
+        drop(self.guard.take());
     }
 }
 
@@ -776,24 +788,29 @@ impl Core {
     }
 
     async fn acquire_workflow_run_lock(&self, run_id: &str) -> WorkflowRunLockGuard {
-        let lock = {
+        let mut reservation = {
             let mut locks = self
                 .0
                 .workflow_run_locks
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            locks
+            let entry = locks
                 .entry(run_id.to_owned())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
+                .or_insert_with(|| WorkflowRunLockEntry {
+                    lock: Arc::new(tokio::sync::Mutex::new(())),
+                    refs: 0,
+                });
+            entry.refs += 1;
+            WorkflowRunLockGuard {
+                core: self.clone(),
+                run_id: run_id.to_owned(),
+                lock: entry.lock.clone(),
+                guard: None,
+            }
         };
-        let guard = lock.clone().lock_owned().await;
-        WorkflowRunLockGuard {
-            core: self.clone(),
-            run_id: run_id.to_owned(),
-            lock,
-            _guard: Some(guard),
-        }
+        let lock = reservation.lock.clone();
+        reservation.guard = Some(lock.lock_owned().await);
+        reservation
     }
 
     /// MCP entrypoint for `steve_workflow_run`.
@@ -3114,4 +3131,104 @@ impl Tx<'_> {
 enum DispatchCallResult {
     Dispatched,
     Blocked,
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::testkit::Kit;
+
+    async fn wait_for_refs(core: &crate::Core, run_id: &str, expected: usize) {
+        steve_runtime::testkit::eventually_sync("workflow_run_locks refcount", || {
+            core.0
+                .workflow_run_locks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(run_id)
+                .map_or(0, |entry| entry.refs)
+                == expected
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn contended_run_locks_preserve_exclusion_and_clean_up_deterministically() {
+        let kit = Kit::new();
+        let core = kit.core.clone();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..32 {
+            let core = core.clone();
+            let active = active.clone();
+            let max_active = max_active.clone();
+            set.spawn(async move {
+                for _ in 0..16 {
+                    let _guard = core.acquire_workflow_run_lock("run-contended").await;
+                    let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(cur, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                }
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            res.unwrap();
+        }
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            1,
+            "per-run lock must never allow concurrent holders for the same run_id"
+        );
+        assert_eq!(
+            core.workflow_run_lock_count(),
+            0,
+            "contended release must deterministically remove the idle lock entry"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_waiter_releases_its_ref_without_evicting_active_holder() {
+        let kit = Kit::new();
+        let core = kit.core.clone();
+
+        let holder = core.acquire_workflow_run_lock("run-cancel").await;
+        wait_for_refs(&core, "run-cancel", 1).await;
+
+        // Park a waiter on the same run entry, then abort it before the holder releases.
+        let waiter_core = core.clone();
+        let waiter = tokio::spawn(async move {
+            let _g = waiter_core.acquire_workflow_run_lock("run-cancel").await;
+        });
+        wait_for_refs(&core, "run-cancel", 2).await;
+        waiter.abort();
+        let _ = waiter.await;
+
+        // The holder's entry must remain tracked with refs == 1 and still block a fresh contender.
+        wait_for_refs(&core, "run-cancel", 1).await;
+        let entered = Arc::new(AtomicUsize::new(0));
+        let entered_c = entered.clone();
+        let contender_core = core.clone();
+        let contender = tokio::spawn(async move {
+            let _g = contender_core.acquire_workflow_run_lock("run-cancel").await;
+            entered_c.store(1, Ordering::SeqCst);
+        });
+        wait_for_refs(&core, "run-cancel", 2).await;
+        assert_eq!(
+            entered.load(Ordering::SeqCst),
+            0,
+            "cancelled waiter must not evict the active holder's mutex"
+        );
+
+        drop(holder);
+        contender.await.unwrap();
+        assert_eq!(entered.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            core.workflow_run_lock_count(),
+            0,
+            "lock table must be empty once holder and contender both drop"
+        );
+    }
 }
