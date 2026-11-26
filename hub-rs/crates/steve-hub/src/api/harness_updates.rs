@@ -32,6 +32,11 @@ const NODE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPT_WINDOW_MS: i64 = 30_000;
 /// Maximum time the Hub polls an in-flight harness upgrade receipt before yielding to normal polling.
 const WATCH_MAX_SECONDS: usize = 16 * 60;
+/// Fast initial poll cadence for newly submitted upgrades so quick completions persist promptly.
+const WATCH_FAST_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const WATCH_FAST_POLL_TICKS: usize = 5;
+/// Steady-state poll cadence for long-running harness upgrades.
+const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Delay after Hub boot before the background auto-upgrade loop runs its first check.
 const AUTO_UPGRADE_INITIAL_DELAY: Duration = Duration::from_secs(60);
 /// Cadence between Hub background auto-upgrade evaluation passes.
@@ -40,6 +45,36 @@ const AUTO_UPGRADE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MAX_ID_LEN: usize = 120;
 const MAX_VERSION_LEN: usize = 128;
 const MAX_COMPONENTS_PER_REQUEST: usize = 16;
+/// Maximum number of Nodes kept in the in-process harness update report cache.
+const HARNESS_REPORT_CACHE_MAX: usize = 128;
+
+/// Bounded in-process cache of recent per-Node harness update reports so `GET /node-harness-updates/{node}`
+/// never writes to SQLite while still returning the last good report when a Node disconnects.
+#[derive(Default)]
+pub struct ReportCache {
+    entries: std::sync::Mutex<std::collections::VecDeque<(String, na::HarnessUpdateReport, i64)>>,
+}
+
+impl ReportCache {
+    pub(crate) fn get(&self, node: &str) -> Option<(na::HarnessUpdateReport, i64)> {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = entries.iter().position(|(id, _, _)| id == node)?;
+        let item = entries.remove(idx).expect("index in bounds");
+        let out = (item.1.clone(), item.2);
+        entries.push_back(item);
+        Some(out)
+    }
+
+    pub(crate) fn put(&self, node: &str, report: na::HarnessUpdateReport, at: i64) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(idx) = entries.iter().position(|(id, _, _)| id == node) {
+            entries.remove(idx);
+        } else if entries.len() >= HARNESS_REPORT_CACHE_MAX {
+            entries.pop_front();
+        }
+        entries.push_back((node.to_owned(), report, at));
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Saved {
@@ -377,6 +412,9 @@ async fn persist_receipt(
                 } else if let Some(vers) = failed_auto_versions {
                     s.auto_failed.insert(harness_s.clone(), vers);
                 }
+                if let Some(ref info) = finished_notice {
+                    record_finished_notice_in(tx, &node_s, info);
+                }
                 save(tx, &node_s, &s)?;
                 Ok(finished_notice)
             },
@@ -386,12 +424,12 @@ async fn persist_receipt(
     .map_err(task_err)??;
 
     if let Some(ref info) = notice {
-        record_finished_outcome(store, node, info).await;
+        record_finished_metric(info);
     }
     Ok(notice)
 }
 
-async fn record_finished_outcome(store: &Store, node_id: &str, info: &FinishedNotice) {
+fn record_finished_metric(info: &FinishedNotice) {
     let trigger_label = match info.trigger {
         HarnessUpgradeTrigger::Manual => "manual",
         HarnessUpgradeTrigger::Auto => "auto",
@@ -406,69 +444,59 @@ async fn record_finished_outcome(store: &Store, node_id: &str, info: &FinishedNo
         "outcome" => outcome_label
     )
     .increment(1);
+}
 
-    let (store, node_id) = (store.clone(), node_id.to_string());
-    let (trigger, outcome, harness_name, versions, err_detail) = (
-        info.trigger,
-        info.outcome,
-        info.harness_name.clone(),
-        info.versions.clone(),
-        info.error.clone(),
-    );
-    let _ = tokio::task::spawn_blocking(move || {
-        let node_name = if node_id == "local" {
-            "local".to_string()
-        } else {
-            store
-                .read(|r| steve_store::nodes::get(r, &node_id))
-                .ok()
-                .flatten()
-                .map(|n| n.name)
-                .unwrap_or_else(|| node_id.clone())
-        };
-        let (level, text) = match (trigger, outcome) {
-            (HarnessUpgradeTrigger::Auto, na::Outcome::Succeeded) => (
-                "success",
-                steve_i18n::t!(
-                    "hub.node.harness_auto_upgraded",
-                    node = node_name,
-                    harness = harness_name,
-                    versions = versions
-                ),
+fn record_finished_notice_in(tx: &mut W<'_>, node_id: &str, info: &FinishedNotice) {
+    let node_name = if node_id == "local" {
+        "local".to_string()
+    } else {
+        steve_store::nodes::get(tx, node_id)
+            .ok()
+            .flatten()
+            .map(|n| n.name)
+            .unwrap_or_else(|| node_id.to_string())
+    };
+    let (level, text) = match (info.trigger, info.outcome) {
+        (HarnessUpgradeTrigger::Auto, na::Outcome::Succeeded) => (
+            "success",
+            steve_i18n::t!(
+                "hub.node.harness_auto_upgraded",
+                node = node_name,
+                harness = info.harness_name,
+                versions = info.versions
             ),
-            (HarnessUpgradeTrigger::Auto, _) => (
-                "fail",
-                steve_i18n::t!(
-                    "hub.node.harness_auto_upgrade_failed",
-                    node = node_name,
-                    harness = harness_name,
-                    error = err_detail
-                ),
+        ),
+        (HarnessUpgradeTrigger::Auto, _) => (
+            "fail",
+            steve_i18n::t!(
+                "hub.node.harness_auto_upgrade_failed",
+                node = node_name,
+                harness = info.harness_name,
+                error = info.error
             ),
-            (HarnessUpgradeTrigger::Manual, na::Outcome::Succeeded) => (
-                "success",
-                steve_i18n::t!(
-                    "hub.node.harness_upgraded",
-                    node = node_name,
-                    harness = harness_name,
-                    versions = versions
-                ),
+        ),
+        (HarnessUpgradeTrigger::Manual, na::Outcome::Succeeded) => (
+            "success",
+            steve_i18n::t!(
+                "hub.node.harness_upgraded",
+                node = node_name,
+                harness = info.harness_name,
+                versions = info.versions
             ),
-            (HarnessUpgradeTrigger::Manual, _) => (
-                "fail",
-                steve_i18n::t!(
-                    "hub.node.harness_upgrade_failed",
-                    node = node_name,
-                    harness = harness_name,
-                    error = err_detail
-                ),
+        ),
+        (HarnessUpgradeTrigger::Manual, _) => (
+            "fail",
+            steve_i18n::t!(
+                "hub.node.harness_upgrade_failed",
+                node = node_name,
+                harness = info.harness_name,
+                error = info.error
             ),
-        };
-        if let Err(e) = steve_store::notify::notify(&store, WS, "system", level, &text, None) {
-            tracing::warn!("harness upgrade notice failed: {e}");
-        }
-    })
-    .await;
+        ),
+    };
+    if let Err(e) = steve_store::notify::notify_in(tx, WS, "system", level, &text, None) {
+        tracing::warn!("harness upgrade notice failed: {e}");
+    }
 }
 
 /// Automatically re-probe the Node's harness version & availability after a successful upgrade.
@@ -531,6 +559,8 @@ pub struct Fresh {
 }
 
 /// Also returns the last good report when the Node is offline, marked with an error and its age.
+/// Pure read path: never writes to SQLite (caches fresh reports in memory and inspects unfinished
+/// runs read-only; durable receipt persistence belongs to `POST` watchers and background tasks).
 pub async fn get(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -542,6 +572,12 @@ pub async fn get(
     let mut saved = tokio::task::spawn_blocking(move || s.read(|db| load(db, &n)))
         .await
         .map_err(task_err)??;
+    if let Some((cached_report, cached_at)) = st.harness_reports.get(&id)
+        && cached_at >= saved.at
+    {
+        saved.report = Some(cached_report);
+        saved.at = cached_at;
+    }
     let mut error = None;
     let mut code = None;
     if node.is_upgrade_only() {
@@ -561,27 +597,10 @@ pub async fn get(
         });
         match result {
             Ok(report) if report.node.as_str() == id => {
-                saved.report = Some(report.clone());
-                saved.at = crate::nodes::now();
-                let (s, n, at) = (store.clone(), id.clone(), saved.at);
-                tokio::task::spawn_blocking(move || {
-                    s.write(|tx| {
-                        let mut current = load(tx, &n)?;
-                        current.report = Some(report);
-                        current.at = at;
-                        save(tx, &n, &current)
-                    })
-                })
-                .await
-                .map_err(task_err)??;
-                let succeeded = reconcile_runs(&store, &id, node.as_ref(), &mut saved).await?;
-                if succeeded {
-                    let (st_c, store_c, id_c, node_c) =
-                        (st.clone(), store.clone(), id.clone(), node.clone());
-                    tokio::spawn(async move {
-                        reprobe_after_upgrade(Some(&st_c), &store_c, &id_c, &node_c).await;
-                    });
-                }
+                let at = crate::nodes::now();
+                st.harness_reports.put(&id, report.clone(), at);
+                saved.report = Some(report);
+                saved.at = at;
             }
             Ok(_) => {
                 error = Some("Node returned another Node's update inventory".into());
@@ -808,8 +827,13 @@ async fn submit_and_watch(
         });
     } else if !receipt.state.is_finished() {
         tokio::spawn(async move {
-            for _ in 0..WATCH_MAX_SECONDS {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+            for tick in 0..(WATCH_FAST_POLL_TICKS + WATCH_MAX_SECONDS) {
+                let delay = if tick < WATCH_FAST_POLL_TICKS {
+                    WATCH_FAST_POLL_INTERVAL
+                } else {
+                    WATCH_POLL_INTERVAL
+                };
+                tokio::time::sleep(delay).await;
                 match inspect(node.as_ref(), &run).await {
                     Ok(r) => {
                         let done = r.state.is_finished()
@@ -828,6 +852,11 @@ async fn submit_and_watch(
                             }
                             Err(_) => break,
                         }
+                    }
+                    Err(e)
+                        if matches!(e.code, na::Code::Unavailable | na::Code::OutcomeUnknown) =>
+                    {
+                        continue;
                     }
                     Err(_) => break,
                 }

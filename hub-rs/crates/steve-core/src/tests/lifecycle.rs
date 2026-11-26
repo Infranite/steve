@@ -859,10 +859,8 @@ fn a_dropped_item_gives_back_its_clean_worktree_and_a_new_message_brings_it_back
         .unwrap();
     k.core.item_action(&i, ItemAction::Drop, "me").unwrap();
     assert_eq!(k.phase(&i), "closed");
-    steve_runtime::testkit::eventually_blocking(
-        "The dropped item's clean worktree is reclaimed.",
-        || !wt.exists(),
-    );
+    assert!(k.pump_outbox().done >= 1);
+    assert!(!wt.exists());
     g(&r, &["rev-parse", "--verify", &name]);
     // a message does not bring it back; an explicit new cycle with a goal does
     assert!(
@@ -918,16 +916,17 @@ fn a_finished_merged_item_gives_back_worktree_and_branch() {
         .resolve(&x.decision, "pass", "no-release", "me")
         .unwrap();
     assert!(wt.exists(), "the tidy is not part of finishing any more");
-    assert_eq!(k.pump_outbox().done, 1, "work.tidy, after the commit");
-    steve_runtime::testkit::eventually_blocking(
-        "The finished merged item's worktree and branch are reclaimed.",
-        || {
-            !wt.exists()
-                && g(&r, &["branch", "--list", &name]).is_empty()
-                && k.timeline_texts(&x.id)
-                    .last()
-                    .is_some_and(|t| t.contains("删除了已合并的分支"))
-        },
+    assert!(
+        k.pump_outbox().done >= 1,
+        "work.tidy runs after the closing commit"
+    );
+    assert!(!wt.exists());
+    assert!(g(&r, &["branch", "--list", &name]).is_empty());
+    assert!(
+        k.timeline_texts(&x.id)
+            .last()
+            .unwrap()
+            .contains("删除了已合并的分支")
     );
 }
 

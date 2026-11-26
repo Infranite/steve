@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn schema_is_well_formed_and_round_trips() {
-        assert_eq!(specs().len(), 17);
+        assert_eq!(specs().len(), 16);
         let mut keys = BTreeSet::new();
         for spec in specs() {
             assert!(keys.insert(&spec.key), "duplicate setting key {}", spec.key);
@@ -202,8 +202,8 @@ mod tests {
         assert!(allowed("quotaWaitMinutes", "0"));
         assert!(allowed("quotaWaitMinutes", "15"));
         assert!(!allowed("quotaWaitMinutes", "7"));
-        assert!(allowed("handoff", "70"));
-        assert!(!allowed("handoff", "75"));
+        assert!(!allowed("handoff", "70"));
+        assert!(!allowed("handoff", "80"));
         assert!(!allowed("nope", "x"));
 
         let parsed: WorkspaceSettingsSchema =

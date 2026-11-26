@@ -746,11 +746,10 @@ pub fn partial_str(t: &str, key: &str) -> Option<String> {
 pub const TAG_CATS: [&str; 4] = ["项目", "领域", "客户", "主题"];
 
 /// The routing results.
-pub const KINDS: [&str; 9] = [
+pub const KINDS: [&str; 8] = [
     "answer",
     "research",
     "item",
-    "suggest",
     "ask",
     "supplement",
     "status",
@@ -1153,6 +1152,7 @@ pub fn parse_routes(c: &RouteCtx, texts: &[String], raw: &str) -> Option<Vec<Rou
 
 fn parse_route_value(c: &RouteCtx, text: &str, r: &Value, promote: bool) -> Option<Route> {
     let kind = match r.get("kind").and_then(Value::as_str)? {
+        "suggest" => "research",
         k if KINDS.contains(&k) => k,
         _ => return None,
     };

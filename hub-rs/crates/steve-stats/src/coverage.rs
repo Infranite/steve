@@ -88,26 +88,32 @@ impl Coverage {
 
 /// The daily cube's dimensions, including missing attempts without a usage row.
 pub(crate) type Key = DailyKey;
+/// Cube key paired with `session_id` (`""` for non-session gateway/research calls).
+pub(crate) type SessionKey = (DailyKey, String);
 
-fn load(
+fn load_keyed<K: Ord>(
     c: &mut impl Read,
     q: Option<&Query>,
     scope: CoverageScope<'_>,
     hourly: bool,
-) -> Result<BTreeMap<Key, Coverage>> {
+    mut make_key: impl FnMut(DailyKey, String) -> K,
+) -> Result<BTreeMap<K, Coverage>> {
     let zone = match q {
         Some(q) => crate::refresh::timezone(c, &q.workspace_id)?,
         None => None,
     };
-    let mut cells = BTreeMap::<Key, Coverage>::new();
+    let mut cells = BTreeMap::<K, Coverage>::new();
     for mut row in CoverageRows(c).meters(&scope)? {
         let k = &mut row.key;
         if hourly {
             k.0 = crate::day::hour(row.at, zone);
         }
+        let session = row.session.unwrap_or_default();
         let model = q.and_then(|q| q.model.as_deref());
         if model.is_none_or(|model| model == k.4) {
-            let cell = cells.entry(k.clone()).or_default();
+            let cell = cells
+                .entry(make_key(k.clone(), session.clone()))
+                .or_default();
             match row.attribution {
                 Attribution::Meter => cell.observe(row.tokens, row.cost, row.pending),
                 Attribution::CostOnly => cell.add(&Coverage {
@@ -129,7 +135,10 @@ fn load(
             }
             let mut key = k.clone();
             key.4 = evidence.model;
-            cells.entry(key).or_default().observe(t, None, false);
+            cells
+                .entry(make_key(key, session.clone()))
+                .or_default()
+                .observe(t, None, false);
         }
     }
     let mut zones = BTreeMap::new();
@@ -152,25 +161,35 @@ fn load(
         } else {
             day
         };
+        let key = (
+            bucket,
+            "agent".into(),
+            "turn".into(),
+            row.harness,
+            row.model,
+            row.bot,
+            row.project,
+            row.node,
+        );
         cells
-            .entry((
-                bucket,
-                "agent".into(),
-                "turn".into(),
-                row.harness,
-                row.model,
-                row.bot,
-                row.project,
-            ))
+            .entry(make_key(key, row.session))
             .or_default()
             .observe(Tokens::default(), None, row.pending);
     }
     Ok(cells)
 }
 
-fn report(c: &mut impl Read, q: &Query, hourly: bool) -> Result<BTreeMap<Key, Coverage>> {
-    let tz = crate::refresh::timezone(c, &q.workspace_id)?;
-    let scope = CoverageScope::Report {
+fn load(
+    c: &mut impl Read,
+    q: Option<&Query>,
+    scope: CoverageScope<'_>,
+    hourly: bool,
+) -> Result<BTreeMap<Key, Coverage>> {
+    load_keyed(c, q, scope, hourly, |k, _| k)
+}
+
+fn report_scope<'a>(q: &'a Query, tz: Option<chrono_tz::Tz>) -> CoverageScope<'a> {
+    CoverageScope::Report {
         days: DailyFilter {
             ws: &q.workspace_id,
             from: &q.from,
@@ -179,9 +198,15 @@ fn report(c: &mut impl Read, q: &Query, hourly: bool) -> Result<BTreeMap<Key, Co
             bot: q.bot.as_deref(),
             model: q.model.as_deref(),
             source: q.source.as_deref(),
+            node: q.node.as_deref(),
         },
         turns: crate::metrics::bounds(&q.from, &q.to, tz),
-    };
+    }
+}
+
+fn report(c: &mut impl Read, q: &Query, hourly: bool) -> Result<BTreeMap<Key, Coverage>> {
+    let tz = crate::refresh::timezone(c, &q.workspace_id)?;
+    let scope = report_scope(q, tz);
     load(c, Some(q), scope, hourly)
 }
 
@@ -191,6 +216,16 @@ pub(crate) fn hourly_cells(c: &mut impl Read, q: &Query) -> Result<BTreeMap<Key,
 
 pub(crate) fn cells(c: &mut impl Read, q: &Query) -> Result<BTreeMap<Key, Coverage>> {
     report(c, q, false)
+}
+
+pub(crate) fn session_cells(
+    c: &mut impl Read,
+    q: &Query,
+    hourly: bool,
+) -> Result<BTreeMap<SessionKey, Coverage>> {
+    let tz = crate::refresh::timezone(c, &q.workspace_id)?;
+    let scope = report_scope(q, tz);
+    load_keyed(c, Some(q), scope, hourly, |k, session| (k, session))
 }
 
 fn subject<'a>(kind: &str, id: &'a str) -> Option<Entity<'a>> {

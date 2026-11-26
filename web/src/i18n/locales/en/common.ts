@@ -99,6 +99,7 @@ export default {
     copy: "Copy",
     copied: "Copied",
     optional: "Optional",
+    choose: "Choose…",
   },
   actor: {
     kind: { person: "Person", bot: "Bot", system: "System", org: "Organization", team: "Team" },

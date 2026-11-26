@@ -334,6 +334,9 @@ struct Live {
 impl Drop for Live {
     fn drop(&mut self) {
         self.retire.send_replace(true);
+        if !self.conn.has_exited() {
+            self.conn.signal(libc::SIGKILL);
+        }
     }
 }
 

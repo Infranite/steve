@@ -263,9 +263,11 @@ impl super::node_runtime::NodeDomain for HubHost {
                         )
                     }
                 }
-                WorkspaceFact::Tidied { item, removed, .. } => {
-                    core.workspace_tidied(&item, removed)
-                }
+                WorkspaceFact::Tidied {
+                    item,
+                    removed,
+                    note,
+                } => core.workspace_tidied(&item, removed, note.as_deref()),
             };
             if let Err(e) = r {
                 tracing::error!("workspace fact: {e}");
@@ -1293,6 +1295,10 @@ impl CoreDomain {
         );
         blocking(move || c.dependency_wait(&id, expected_cycle, &resume, &reason)).await
     }
+    pub async fn backfill_closed_worktrees(&self) -> BResult<steve_core::WorktreeBackfillReport> {
+        let c = self.core.clone();
+        blocking(move || c.backfill_closed_worktrees()).await
+    }
     pub async fn lifecycle_tick(&self) -> BResult<usize> {
         let c = self.core.clone();
         blocking(move || c.lifecycle_tick()).await
@@ -1721,22 +1727,6 @@ impl CoreDomain {
             by.to_string(),
         );
         handled(blocking(move || c.offer(&ws, &m, take, Some(&by))).await?)
-    }
-    pub async fn suggest(
-        &self,
-        ws: &str,
-        message: &str,
-        choice: &str,
-        by: &str,
-    ) -> BResult<(Obj, bool)> {
-        let (c, ws, m, ch, by) = (
-            self.core.clone(),
-            ws.to_string(),
-            message.to_string(),
-            choice.to_string(),
-            by.to_string(),
-        );
-        handled(blocking(move || c.suggest(&ws, &m, &ch, Some(&by))).await?)
     }
     pub async fn a2ui_action(
         &self,

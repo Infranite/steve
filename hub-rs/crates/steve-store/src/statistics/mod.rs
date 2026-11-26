@@ -36,7 +36,8 @@ pub use delivery::ConversationMeasures;
 
 mod views;
 pub use views::{
-    BotReads, ItemHead, ItemMark, ItemTurn, ItemView, TokenGroup, TreeItem, WaitingCard, WorkAt,
+    BotReads, ItemHead, ItemMark, ItemTurn, ItemView, NodeReads, TokenGroup, TreeItem, WaitingCard,
+    WorkAt,
 };
 
 mod telemetry;

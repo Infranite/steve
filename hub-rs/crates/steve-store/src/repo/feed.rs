@@ -1,5 +1,7 @@
 //! Durable reading entries, independent from delivery receipts and chat.
 
+use crate::repo::window_cache::FeedWindow;
+pub use crate::repo::window_cache::{FEED_WINDOW_CACHE_MAX, FEED_WINDOW_TTL_SECS};
 use crate::{Result, StoreError, W, uid};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -181,7 +183,7 @@ pub(crate) fn detail_on(c: &Connection, ws: &str, user: &str, id: &str) -> Resul
     .ok_or(StoreError::NotFound("feed entry"))
 }
 fn window(
-    tx: &mut W<'_>,
+    r: &impl crate::Read,
     ws: &str,
     user: &str,
     f: &Filter,
@@ -189,14 +191,25 @@ fn window(
     before: Option<i64>,
     now: i64,
 ) -> Result<String> {
-    // Polling an unchanged page reuses its capability rather than accumulating a token per read.
-    if let Some(token)=tx.conn.query_row("SELECT token FROM feed_windows WHERE workspace_id=? AND user_id=? AND kind IS ? AND source IS ? AND unread=? AND upper_seq=? AND before_seq IS ? AND expires>? LIMIT 1",params![ws,user,f.kind,f.source,f.unread,upper,before,now+3_600_000],|r|r.get::<_,String>(0)).optional()? { return Ok(token); }
-    let token = format!("{}{}", uid("fw"), uid(""));
-    tx.conn.execute("INSERT INTO feed_windows(token,workspace_id,user_id,kind,source,unread,upper_seq,before_seq,expires) VALUES(?,?,?,?,?,?,?,?,?)",params![token,ws,user,f.kind,f.source,f.unread,upper,before,now+86_400_000])?;
-    Ok(token)
+    let caches = r
+        .window_caches()
+        .ok_or_else(|| StoreError::Storage("feed window cache unavailable".into()))?;
+    Ok(caches.feed.issue(
+        "fw",
+        FeedWindow {
+            ws: ws.to_owned(),
+            user: user.to_owned(),
+            kind: f.kind.clone(),
+            source: f.source.clone(),
+            unread: f.unread,
+            upper,
+            before,
+        },
+        now,
+    ))
 }
 fn resolve(
-    c: &Connection,
+    r: &impl crate::Read,
     ws: &str,
     user: &str,
     f: &Filter,
@@ -204,15 +217,19 @@ fn resolve(
     cursor: bool,
     now: i64,
 ) -> Result<(i64, Option<i64>)> {
-    let row:Option<(Option<String>,Option<String>,bool,i64,Option<i64>)> = c.query_row("SELECT kind,source,unread,upper_seq,before_seq FROM feed_windows WHERE token=? AND workspace_id=? AND user_id=? AND expires>?",params![token,ws,user,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-    match row {
-        Some((kind, source, unread, upper, before))
-            if kind == f.kind
-                && source == f.source
-                && unread == f.unread
-                && before.is_some() == cursor =>
+    let caches = r
+        .window_caches()
+        .ok_or_else(|| StoreError::Storage("feed window cache unavailable".into()))?;
+    match caches.feed.resolve(token, now) {
+        Some((w, _version))
+            if w.ws == ws
+                && w.user == user
+                && w.kind == f.kind
+                && w.source == f.source
+                && w.unread == f.unread
+                && w.before.is_some() == cursor =>
         {
-            Ok((upper, before))
+            Ok((w.upper, w.before))
         }
         _ => Err(StoreError::Conflict(
             "Invalid or expired feed cursor/snapshot for this scope and filter".into(),
@@ -221,7 +238,7 @@ fn resolve(
 }
 const FILTER: &str = "(?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.source_type=?4)";
 pub fn list(
-    tx: &mut W<'_>,
+    r: &mut impl crate::Read,
     ws: &str,
     user: &str,
     f: &Filter,
@@ -229,24 +246,25 @@ pub fn list(
     limit: usize,
     now: i64,
 ) -> Result<Page> {
-    member_on(tx.conn, ws, user)?;
+    let conn = r.connection();
+    member_on(conn, ws, user)?;
     f.validate()?;
     if !(1..=100).contains(&limit) {
         return Err(StoreError::Conflict("Feed limit must be 1..100".into()));
     }
     let (upper, before) = if let Some(token) = cursor {
-        resolve(tx.conn, ws, user, f, token, true, now)?
+        resolve(r, ws, user, f, token, true, now)?
     } else {
         (
-            tx.conn.query_row(
+            conn.query_row(
                 &format!("SELECT coalesce(max(e.seq),0) FROM feed_entries e WHERE {SCOPE}"),
                 params![ws, user],
-                |r| r.get(0),
+                |row| row.get(0),
             )?,
             None,
         )
     };
-    let mut st=tx.conn.prepare(&format!("{SELECT} WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 AND (?7 IS NULL OR e.seq<?7) ORDER BY e.seq DESC LIMIT ?8"))?;
+    let mut st = conn.prepare(&format!("{SELECT} WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 AND (?7 IS NULL OR e.seq<?7) ORDER BY e.seq DESC LIMIT ?8"))?;
     let mut entries = st
         .query_map(
             params![
@@ -266,7 +284,7 @@ pub fn list(
     entries.truncate(limit);
     let next_cursor = if more {
         Some(window(
-            tx,
+            r,
             ws,
             user,
             f,
@@ -280,11 +298,11 @@ pub fn list(
     for e in &mut entries {
         e.body = None;
     }
-    let unread_count=tx.conn.query_row(&format!("SELECT count(*) FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND r.read_at IS NULL"),params![ws,user,f.kind,f.source],|r|r.get(0))?;
+    let unread_count = conn.query_row(&format!("SELECT count(*) FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND r.read_at IS NULL"), params![ws, user, f.kind, f.source], |row| row.get(0))?;
     Ok(Page {
         entries,
         next_cursor,
-        snapshot: window(tx, ws, user, f, upper, None, now)?,
+        snapshot: window(r, ws, user, f, upper, None, now)?,
         unread_count,
     })
 }
@@ -313,7 +331,7 @@ pub fn read_snapshot(
 ) -> Result<usize> {
     member_on(tx.conn, ws, user)?;
     f.validate()?;
-    let (upper, _) = resolve(tx.conn, ws, user, f, token, false, now)?;
+    let (upper, _) = resolve(tx, ws, user, f, token, false, now)?;
     Ok(tx.conn.execute(&format!("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) SELECT ?1,?2,e.id,?7 FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 ON CONFLICT DO NOTHING"),params![ws,user,f.kind,f.source,f.unread,upper,now])?)
 }
 /// Stable business identity includes the graph node, not only the run or content hash.

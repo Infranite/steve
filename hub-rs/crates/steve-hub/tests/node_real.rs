@@ -37,7 +37,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
-use steve_runtime::testkit::process::{Child, Command};
+use steve_runtime::testkit::process::{Command, ProcessGuard};
 use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
@@ -144,66 +144,22 @@ impl Home {
     }
 }
 
-/// A running Hub process (its own process group: killing it takes its agents along).
-struct Hub(Option<Child>);
+/// A running Hub process (its own process group, reaped by [`ProcessGuard`]).
+struct Hub(Option<ProcessGuard>);
 
 impl Hub {
     /// SIGKILL the Hub and its agents (each agent runs in its own process group).
     fn kill(&mut self) {
-        if let Some(child) = self.0.take() {
-            Self::kill_child(child);
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
-    }
-    fn kill_child(mut child: Child) {
-        // A completed child no longer pins its cached PID/group number.
-        if !matches!(child.try_wait(), Ok(None)) {
-            return;
-        }
-        let pid = child.id() as i32;
-        let children: Vec<i32> = Command::new("pgrep")
-            .args(["-P", &pid.to_string()])
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|l| l.trim().parse().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        unsafe {
-            libc::killpg(pid, libc::SIGKILL);
-            for c in &children {
-                libc::killpg(*c, libc::SIGKILL);
-                libc::kill(*c, libc::SIGKILL);
-            }
-        }
-        let _ = child.wait();
     }
     /// SIGTERM: the Hub stops its Node and the Node its harnesses; SIGKILL after 60 s.
     fn stop(&mut self) {
-        let Some(mut child) = self.0.take() else {
-            return;
-        };
-        if !matches!(child.try_wait(), Ok(None)) {
-            return;
+        if let Some(mut child) = self.0.take() {
+            child.terminate(Duration::from_secs(60));
         }
-        unsafe {
-            libc::kill(child.id() as i32, libc::SIGTERM);
-        }
-        let end = std::time::Instant::now() + Duration::from_secs(60);
-        while std::time::Instant::now() < end {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        Self::kill_child(child);
-    }
-}
-
-impl Drop for Hub {
-    fn drop(&mut self) {
-        self.kill();
     }
 }
 

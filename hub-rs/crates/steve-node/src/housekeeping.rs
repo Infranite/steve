@@ -559,65 +559,108 @@ fn landed(repo: &Path, branch: &str, base: &str) -> bool {
     v
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+fn default_base(repo: &Path) -> &'static str {
+    if git_read(
+        repo,
+        &["rev-parse", "--verify", "--quiet", "refs/heads/main"],
+    )
+    .is_ok()
+    {
+        "main"
+    } else if git_read(
+        repo,
+        &["rev-parse", "--verify", "--quiet", "refs/heads/master"],
+    )
+    .is_ok()
+    {
+        "master"
+    } else {
+        "HEAD"
+    }
+}
+
+fn is_git(dir: &Path) -> bool {
+    git_read(dir, &["rev-parse", "--is-inside-work-tree"]).is_ok()
+}
+
+fn branch_inspect(repo: &Path, branch: &str) -> (Option<bool>, Option<String>) {
+    if repo.as_os_str().is_empty() || branch.is_empty() || !is_git(repo) {
+        return (None, None);
+    }
+    let head_ref = format!("refs/heads/{branch}");
+    match git_read(repo, &["rev-parse", "--short", &head_ref]) {
+        Ok(short_sha) => {
+            let base = default_base(repo);
+            let merged = git_read(repo, &["merge-base", "--is-ancestor", &head_ref, base]).is_ok();
+            (Some(merged), Some(short_sha))
+        }
+        Err(_) => (Some(false), None),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WorktreeTidy {
     Removed,
-    Dirty,
-    Unmerged,
+    Dirty(String),
+    Failed(String),
     Absent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BranchTidy {
     Deleted,
-    Kept,
+    KeptUnmerged { short_sha: Option<String> },
+    KeptDueToWorktree,
+    DeleteFailed(String),
     Absent,
 }
 
 fn tidy_worktree(
     repo: &Path,
     worktree: &Path,
-    branch: &str,
-    only_merged: bool,
+    branch: Option<&str>,
     base: &str,
 ) -> (WorktreeTidy, BranchTidy) {
-    let head_ref = format!("refs/heads/{branch}");
-    let exists = git_read(repo, &["rev-parse", "--verify", "--quiet", &head_ref]).is_ok();
-    let merged =
-        exists && git_read(repo, &["merge-base", "--is-ancestor", &head_ref, base]).is_ok();
-    let is_landed = merged || (exists && landed(repo, branch, base));
+    let branch_info = branch.map(|b| {
+        let head_ref = format!("refs/heads/{b}");
+        let exists = git_read(repo, &["rev-parse", "--verify", "--quiet", &head_ref]).is_ok();
+        let merged =
+            exists && git_read(repo, &["merge-base", "--is-ancestor", &head_ref, base]).is_ok();
+        let _ = exists && (merged || landed(repo, b, base));
+        (b, head_ref, exists, merged)
+    });
     let mut wt = WorktreeTidy::Absent;
     if worktree.exists() {
-        wt = if only_merged && !is_landed {
-            WorktreeTidy::Unmerged
-        } else if git_write(repo, &["worktree", "remove", &worktree.to_string_lossy()]).is_ok() {
-            WorktreeTidy::Removed
-        } else {
-            WorktreeTidy::Dirty
+        wt = match git_write(repo, &["worktree", "remove", &worktree.to_string_lossy()]) {
+            Ok(_) => WorktreeTidy::Removed,
+            Err(err) => {
+                let dirty =
+                    git_read(worktree, &["status", "--porcelain"]).is_ok_and(|out| !out.is_empty());
+                if dirty {
+                    WorktreeTidy::Dirty(err)
+                } else {
+                    WorktreeTidy::Failed(err)
+                }
+            }
         };
     }
-    let mut br = if exists {
-        BranchTidy::Kept
-    } else {
-        BranchTidy::Absent
+    let br = match branch_info {
+        Some((b, head_ref, true, merged)) => {
+            if matches!(wt, WorktreeTidy::Dirty(_) | WorktreeTidy::Failed(_)) {
+                BranchTidy::KeptDueToWorktree
+            } else if merged {
+                match git_write(repo, &["branch", "-d", b]) {
+                    Ok(_) => BranchTidy::Deleted,
+                    Err(err) => BranchTidy::DeleteFailed(err),
+                }
+            } else {
+                let short_sha = git_read(repo, &["rev-parse", "--short", &head_ref]).ok();
+                BranchTidy::KeptUnmerged { short_sha }
+            }
+        }
+        _ => BranchTidy::Absent,
     };
-    if exists
-        && merged
-        && !matches!(wt, WorktreeTidy::Dirty | WorktreeTidy::Unmerged)
-        && git_write(repo, &["branch", "-d", branch]).is_ok()
-    {
-        br = BranchTidy::Deleted;
-    }
     (wt, br)
-}
-
-fn why_kept(wt: &Path, keep_unmerged: bool) -> &'static str {
-    match git_read(wt, &["status", "--porcelain"]).map(|s| !s.is_empty()) {
-        Ok(true) => REASON_DIRTY,
-        Ok(false) if keep_unmerged => REASON_UNMERGED,
-        Ok(false) => REASON_REMOVE_FAILED,
-        Err(_) => REASON_UNKNOWN_STATE,
-    }
 }
 
 // ── RPC entry points ──
@@ -626,6 +669,11 @@ pub fn disk_inspect(req: &DiskInspectRequest) -> DiskInspectResponse {
     let root = PathBuf::from(&req.worktrees_root);
     let procs = process_dirs();
     let measure_entry = |target: &DiskInspectTarget, in_scratch: bool| -> DiskEntryMeasure {
+        let (branch_merged, branch_head) = if !in_scratch {
+            branch_inspect(Path::new(&target.repo), &target.branch)
+        } else {
+            (None, None)
+        };
         let wt = Path::new(&target.path);
         if !wt.is_dir() {
             return DiskEntryMeasure {
@@ -635,6 +683,8 @@ pub fn disk_inspect(req: &DiskInspectRequest) -> DiskInspectResponse {
                 cache_bytes: 0,
                 caches: vec![],
                 in_use: None,
+                branch_merged,
+                branch_head,
             };
         }
         let caches = if in_scratch {
@@ -655,6 +705,8 @@ pub fn disk_inspect(req: &DiskInspectRequest) -> DiskInspectResponse {
             cache_bytes,
             caches: cache_names,
             in_use: procs.as_deref().map(|p| in_use(wt, p)),
+            branch_merged,
+            branch_head,
         }
     };
     let entries: Vec<DiskEntryMeasure> = req
@@ -701,6 +753,9 @@ pub fn disk_reclaim(req: &DiskReclaimRequest) -> DiskReclaimResponse {
     let mut kept = Vec::new();
     let mut deleted_branches = Vec::new();
     let mut kept_branches = Vec::new();
+    let mut branch_delete_failed = Vec::new();
+    let mut absent_deleted_branches = Vec::new();
+    let mut absent_branch_delete_failed = Vec::new();
     let procs = process_dirs();
 
     for path in &req.git_projects {
@@ -714,54 +769,93 @@ pub fn disk_reclaim(req: &DiskReclaimRequest) -> DiskReclaimResponse {
 
     for c in &req.closed_worktrees {
         let wt = Path::new(&c.path);
-        if !wt.is_dir() {
-            continue;
-        }
-        if procs.as_deref().is_some_and(|p| in_use(wt, p)) {
+        let wt_exists = wt.exists();
+        if wt_exists && procs.as_deref().is_some_and(|p| in_use(wt, p)) {
             kept.push(DiskKept {
                 item: c.item.clone(),
                 reason: REASON_IN_USE.into(),
+                detail: None,
             });
             continue;
         }
-        let _ = to_trash(&trash, &c.item, wt, &cache_dirs(wt));
-        let repo = Path::new(&c.repo);
-        if !c.repo.is_empty() && !c.branch.is_empty() {
-            let (_wt_res, br_res) = tidy_worktree(repo, wt, &c.branch, c.keep_unmerged, "main");
-            if wt.exists() {
+        if c.repo.is_empty() {
+            if wt_exists {
                 kept.push(DiskKept {
                     item: c.item.clone(),
-                    reason: why_kept(wt, c.keep_unmerged).into(),
+                    reason: REASON_REMOVE_FAILED.into(),
+                    detail: Some("project not found".into()),
                 });
-            } else {
-                removed.push(c.item.clone());
-                match br_res {
-                    BranchTidy::Deleted => {
-                        deleted_branches.push((c.item.clone(), c.branch.clone()));
-                    }
-                    BranchTidy::Kept => {
-                        if let Ok(head) = git_read(
-                            repo,
-                            &["rev-parse", "--short", &format!("refs/heads/{}", c.branch)],
-                        ) {
-                            kept_branches.push((
-                                c.item.clone(),
-                                c.path.clone(),
-                                c.branch.clone(),
-                                head,
-                            ));
-                        }
-                    }
-                    BranchTidy::Absent => {}
-                }
             }
-        } else if wt.exists() {
-            kept.push(DiskKept {
-                item: c.item.clone(),
-                reason: why_kept(wt, c.keep_unmerged).into(),
-            });
+            continue;
+        }
+        let repo = Path::new(&c.repo);
+        if !is_git(repo) {
+            if wt_exists {
+                kept.push(DiskKept {
+                    item: c.item.clone(),
+                    reason: REASON_REMOVE_FAILED.into(),
+                    detail: Some(format!("project repository is unavailable: {}", c.repo)),
+                });
+            }
+            continue;
+        }
+        let branch = if !c.branch.is_empty() {
+            Some(c.branch.clone())
+        } else if wt_exists {
+            git_read(wt, &["symbolic-ref", "--short", "HEAD"])
+                .ok()
+                .filter(|b| b.starts_with("steve/"))
         } else {
-            removed.push(c.item.clone());
+            None
+        };
+        if wt_exists {
+            let _ = to_trash(&trash, &c.item, wt, &cache_dirs(wt));
+        }
+        let base = default_base(repo);
+        let (wt_res, br_res) = tidy_worktree(repo, wt, branch.as_deref(), base);
+        let branch_name = branch.unwrap_or_default();
+        match (wt_res, br_res) {
+            (WorktreeTidy::Removed, BranchTidy::Deleted) => {
+                removed.push(c.item.clone());
+                deleted_branches.push((c.item.clone(), branch_name));
+            }
+            (WorktreeTidy::Removed, BranchTidy::KeptUnmerged { short_sha }) => {
+                removed.push(c.item.clone());
+                kept_branches.push((
+                    c.item.clone(),
+                    c.path.clone(),
+                    branch_name,
+                    short_sha.unwrap_or_default(),
+                ));
+            }
+            (WorktreeTidy::Removed, BranchTidy::DeleteFailed(err)) => {
+                removed.push(c.item.clone());
+                branch_delete_failed.push((c.item.clone(), branch_name, err));
+            }
+            (WorktreeTidy::Removed, _) => {
+                removed.push(c.item.clone());
+            }
+            (WorktreeTidy::Dirty(err), _) => {
+                kept.push(DiskKept {
+                    item: c.item.clone(),
+                    reason: REASON_DIRTY.into(),
+                    detail: Some(err),
+                });
+            }
+            (WorktreeTidy::Failed(err), _) => {
+                kept.push(DiskKept {
+                    item: c.item.clone(),
+                    reason: REASON_REMOVE_FAILED.into(),
+                    detail: Some(err),
+                });
+            }
+            (WorktreeTidy::Absent, BranchTidy::Deleted) => {
+                absent_deleted_branches.push((c.item.clone(), branch_name));
+            }
+            (WorktreeTidy::Absent, BranchTidy::DeleteFailed(err)) => {
+                absent_branch_delete_failed.push((c.item.clone(), branch_name, err));
+            }
+            (WorktreeTidy::Absent, _) => {}
         }
     }
     merge_freed(&mut freed, purge(&trash));
@@ -804,5 +898,8 @@ pub fn disk_reclaim(req: &DiskReclaimRequest) -> DiskReclaimResponse {
         kept,
         deleted_branches,
         kept_branches,
+        branch_delete_failed,
+        absent_deleted_branches,
+        absent_branch_delete_failed,
     }
 }

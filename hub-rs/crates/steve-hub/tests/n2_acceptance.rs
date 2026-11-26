@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
-use steve_runtime::testkit::process::{Child, Command};
+use steve_runtime::testkit::process::{Command, ProcessGuard};
 use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
@@ -32,36 +32,6 @@ use steve_node_api::*;
 use steve_node_wire::{Identity, RemoteSink, RemoteTools, identity};
 
 const VERSION: &str = "0.9.0";
-
-/// SIGKILL `pid`'s process group and every descendant's (adapters run in their own groups).
-fn kill_tree(pid: i32) {
-    fn descendants(pid: i32, out: &mut Vec<i32>) {
-        let kids: Vec<i32> = Command::new("pgrep")
-            .args(["-P", &pid.to_string()])
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|l| l.trim().parse().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        for k in kids {
-            descendants(k, out);
-            out.push(k);
-        }
-    }
-    let mut all = vec![];
-    descendants(pid, &mut all);
-    unsafe {
-        libc::killpg(pid, libc::SIGKILL);
-        libc::kill(pid, libc::SIGKILL);
-        for c in &all {
-            libc::killpg(*c, libc::SIGKILL);
-            libc::kill(*c, libc::SIGKILL);
-        }
-    }
-}
 
 fn tail(p: &Path) -> String {
     let s = std::fs::read_to_string(p).unwrap_or_default();
@@ -112,19 +82,13 @@ impl Home {
     }
 }
 
-/// A running Hub process (its own process group).
-struct Hub(Child);
+/// A running Hub process (its own process group, reaped by [`ProcessGuard`]).
+struct Hub(ProcessGuard);
 
 impl Hub {
     fn kill(&mut self) {
-        kill_tree(self.0.id() as i32);
+        let _ = self.0.kill();
         let _ = self.0.wait();
-    }
-}
-
-impl Drop for Hub {
-    fn drop(&mut self) {
-        self.kill();
     }
 }
 
@@ -452,21 +416,15 @@ impl NodeHome {
     }
 }
 
-struct NodeProc(Child);
+struct NodeProc(ProcessGuard);
 
 impl NodeProc {
     fn kill(&mut self) {
-        kill_tree(self.0.id() as i32);
+        let _ = self.0.kill();
         let _ = self.0.wait();
     }
     fn alive(&mut self) -> bool {
         matches!(self.0.try_wait(), Ok(None))
-    }
-}
-
-impl Drop for NodeProc {
-    fn drop(&mut self) {
-        self.kill();
     }
 }
 

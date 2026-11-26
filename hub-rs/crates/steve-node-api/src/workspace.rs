@@ -773,6 +773,10 @@ impl ProjectSetupStatus {
 pub struct DiskInspectTarget {
     pub item: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -794,6 +798,10 @@ pub struct DiskEntryMeasure {
     pub caches: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_use: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_merged: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_head: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -859,6 +867,8 @@ pub struct DiskFreed {
 pub struct DiskKept {
     pub item: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -876,9 +886,18 @@ pub struct DiskReclaimResponse {
     /// Branches deleted because they were already merged (`item -> branch`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deleted_branches: Vec<(String, String)>,
-    /// Branches kept with short head (`(item, path, branch, head)`).
+    /// Branches kept with short head (`(item, path, branch, head)` — `head` empty if unresolvable).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept_branches: Vec<(String, String, String, String)>,
+    /// Merged branches that failed `git branch -d` after the worktree was removed (`(item, branch, error)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branch_delete_failed: Vec<(String, String, String)>,
+    /// Merged branches deleted for an already-absent worktree (`(item, branch)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absent_deleted_branches: Vec<(String, String)>,
+    /// Merged branches that failed deletion for an already-absent worktree (`(item, branch, error)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absent_branch_delete_failed: Vec<(String, String, String)>,
 }
 
 /// External library `stdio` MCP server specification hosted inside the colocated Node's sandbox.

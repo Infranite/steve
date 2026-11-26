@@ -35,7 +35,6 @@ async fn describe_in_english() {
             ("When prerequisites finish", "Start automatically"),
             ("Auto-handoff on quota exhaustion", "On"),
             ("Quota recovery wait threshold", "10 minutes"),
-            ("Handoff threshold", "Never"),
             ("Archive automatically after finishing", "30 days"),
             ("Item number prefix", "ST"),
         ]
@@ -57,7 +56,6 @@ async fn describe_in_english() {
             ("前置完成后", "自动开始"),
             ("额度不足自动交接", "开"),
             ("额度恢复等待阈值", "10 分钟"),
-            ("交接阈值", "不换会话"),
             ("完成后自动归档", "30 天"),
             ("事项编号前缀", "ST"),
         ]

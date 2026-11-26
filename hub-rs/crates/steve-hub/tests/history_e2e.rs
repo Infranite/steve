@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
-use steve_runtime::testkit::process::Child;
+use steve_runtime::testkit::process::ProcessGuard;
 use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
@@ -26,20 +26,11 @@ fn write(p: &Path, text: &str) {
 }
 
 struct Hub {
-    child: Child,
+    _child: ProcessGuard,
     base: String,
     steve: PathBuf,
     /// Its port, held by the test (#429).
     _socket: handed::Socket,
-}
-
-impl Drop for Hub {
-    fn drop(&mut self) {
-        unsafe {
-            libc::killpg(self.child.id() as i32, libc::SIGKILL);
-        }
-        let _ = self.child.wait();
-    }
 }
 
 fn spawn(home: &Path, name: &str, diagnostic: bool) -> Hub {
@@ -90,7 +81,7 @@ fn spawn(home: &Path, name: &str, diagnostic: bool) -> Hub {
         c.env("STEVE_LOCAL_NODE_PORT", "0");
     }
     Hub {
-        child: c.spawn().expect("spawn hub"),
+        _child: c.spawn().expect("spawn hub"),
         base,
         steve,
         _socket: socket,

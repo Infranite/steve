@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use steve_node_api::{NetworkBytes, NodeVitals};
 use steve_types::devices::{
-    NetworkRate, NodeVitalsDay, NodeVitalsLatest, NodeVitalsPoint, VitalsGap, VitalsRoot,
-    VitalsSampling, VitalsTokens,
+    NetworkRate, NodeProcessVitals, NodeSessionVitals, NodeVitalsDay, NodeVitalsLatest,
+    NodeVitalsPoint, VitalsGap, VitalsRoot, VitalsSampling, VitalsTokens,
 };
 
 pub(crate) const EVERY: Duration = Duration::from_secs(60);
@@ -54,6 +54,26 @@ impl History {
                 let (before, counters) = previous.as_ref()?;
                 network_rate(counters, &meters.network, at - before)
             });
+            let process = vitals
+                .meters
+                .as_ref()
+                .and_then(|meters| meters.process.as_ref())
+                .map(|p| NodeProcessVitals {
+                    cpu_seconds: p.cpu_seconds,
+                    resident_bytes: p.resident_bytes,
+                    disk_read_bytes: p.disk_read_bytes,
+                    disk_written_bytes: p.disk_written_bytes,
+                });
+            let session_vitals = vitals
+                .session_vitals
+                .into_iter()
+                .map(|s| NodeSessionVitals {
+                    session_id: steve_types::SessionId::from(s.session_id.as_str()),
+                    cpu_seconds: s.cpu_seconds,
+                    resident_bytes: s.resident_bytes,
+                    disk_written_bytes: s.disk_written_bytes,
+                })
+                .collect();
             let latest = NodeVitalsLatest {
                 at,
                 sampled_at: vitals.at.0,
@@ -76,6 +96,9 @@ impl History {
                     })
                     .collect(),
                 sessions: vitals.sessions,
+                process,
+                adapter_disk_written_bytes: vitals.adapter_disk_written_bytes,
+                session_vitals,
                 rtt_ms: rtt,
             };
             let point = point(&latest);
@@ -108,6 +131,19 @@ impl History {
 
     pub(super) fn latest(&self, id: &str, since: i64) -> Option<&NodeVitalsLatest> {
         self.0.get(id).map(|n| &n.latest).filter(|n| n.at >= since)
+    }
+
+    pub(super) fn active_session_vitals(&self, since: i64) -> HashMap<String, NodeSessionVitals> {
+        let mut out = HashMap::new();
+        for node in self.0.values() {
+            if node.latest.at < since {
+                continue;
+            }
+            for s in &node.latest.session_vitals {
+                out.insert(s.session_id.as_str().to_owned(), s.clone());
+            }
+        }
+        out
     }
 
     pub(super) fn day(&self, id: &str, now: i64, tokens: VitalsTokens) -> Option<NodeVitalsDay> {
@@ -209,6 +245,8 @@ mod tests {
                         mem_available: Some(25),
                         roots: vec![],
                         sessions: 0,
+                        adapter_disk_written_bytes: 0,
+                        session_vitals: vec![],
                         meters: Some(NodeMeters {
                             network: [(
                                 interface.into(),

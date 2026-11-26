@@ -109,11 +109,33 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       reply(req.id, { stopReason: "end_turn" });
       continue;
     }
-    const bad = prompt === "violation";
+    if (prompt === "violation") {
+      send({
+        jsonrpc: "2.0",
+        id: "perm-violation",
+        method: "session/request_permission",
+        params: {
+          sessionId: "research-session",
+          toolCall: {
+            toolCallId: "call-0",
+            name: "arbitrary_reader",
+            kind: "edit",
+            status: "pending",
+            locations: [{ path: "src/lib.rs" }],
+            rawInput: { path: "src/lib.rs" },
+          },
+          options: [
+            { optionId: "yes", kind: "allow_once" },
+            { optionId: "no", kind: "reject_once" },
+          ],
+        },
+      });
+      continue;
+    }
     for (let i = 0; i < (prompt === "tools" ? 3 : 1); i++) {
       update({
         sessionUpdate: "tool_call", toolCallId: `call-${i}`,
-        name: "arbitrary_reader", kind: bad ? "edit" : "read", status: "completed",
+        name: "arbitrary_reader", kind: "read", status: "completed",
         locations: [{ path: "src/lib.rs" }], rawInput: { path: "src/lib.rs" },
       });
     }
@@ -127,3 +149,4 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     reply(req.id, {});
   }
 }
+process.exit(0);

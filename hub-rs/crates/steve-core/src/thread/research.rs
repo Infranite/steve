@@ -587,7 +587,7 @@ impl Core {
         let offer = if a.failed {
             None
         } else {
-            a.offer.clone().or_else(|| info.offer.clone())
+            info.offer.clone().or_else(|| a.offer.clone())
         };
         let mut meta = self.inline_meta(
             ws,

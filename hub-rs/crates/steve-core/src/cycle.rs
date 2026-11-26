@@ -1098,7 +1098,6 @@ impl Tx<'_> {
                 if let Some(s) = self.active_session(&i.id)? {
                     self.end_and_release(&s.id)?;
                 }
-                self.tidy_branch(&i.id)?;
                 self.hook(crate::modules::Point::Dropped, &i.id)?;
             }
         }
@@ -1253,10 +1252,16 @@ impl Tx<'_> {
                 &ws,
                 ITEM_LIFECYCLE,
                 ITEM_LIFECYCLE_V,
-                &json!({
-                    "item_id": id, "cycle": cycle, "revision": rev, "transition": "closed",
-                    "phase": CLOSED, "outcome": outcome, "acceptance": acceptance, "reason": reason,
-                }),
+                &serde_json::to_value(ItemLifecycle {
+                    item_id: id.clone(),
+                    cycle,
+                    revision: rev,
+                    transition: "closed".into(),
+                    phase: CLOSED.as_str().into(),
+                    outcome: Some(outcome.into()),
+                    acceptance: acceptance.clone(),
+                    reason: reason.clone(),
+                })?,
             )?;
             if outcome == "completed" {
                 let p = ItemDone {

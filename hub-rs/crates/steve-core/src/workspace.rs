@@ -292,6 +292,83 @@ impl Core {
         )
     }
 
+    /// Inspect a batch of worktree paths (and optional branch states) on the colocated Node.
+    pub(crate) fn inspect_worktrees(
+        &self,
+        entries: Vec<steve_node_api::DiskInspectTarget>,
+    ) -> Result<DiskInspectResponse> {
+        let Some(port) = self.node_housekeeping() else {
+            return Err(CoreError::NoNodeAvailable(
+                "本地设备节点未连接，无法检查工作区状态".into(),
+            ));
+        };
+        let req = DiskInspectRequest {
+            worktrees_root: self.config().worktrees.to_string_lossy().into_owned(),
+            entries,
+            scratch: vec![],
+        };
+        crate::node_git::block_on(port.disk_inspect(req))
+            .ok_or_else(|| CoreError::Msg("workspace disk inspect runtime unavailable".into()))?
+            .map_err(|e| {
+                if e.code == steve_node_api::Code::Unavailable {
+                    CoreError::NoNodeAvailable(format!("本地设备节点离线：{}", e.safe_detail))
+                } else {
+                    CoreError::Msg(e.safe_detail)
+                }
+            })
+    }
+
+    /// Ask the colocated Node whether `branch` in `repo` is merged into its default base and what
+    /// its short head SHA is (`None` head means the branch no longer exists).
+    pub(crate) fn inspect_branch(
+        &self,
+        repo: &str,
+        branch: &str,
+    ) -> Option<(bool, Option<String>)> {
+        if repo.is_empty() || branch.is_empty() {
+            return None;
+        }
+        let resp = self
+            .inspect_worktrees(vec![steve_node_api::DiskInspectTarget {
+                item: String::new(),
+                path: String::new(),
+                repo: repo.to_string(),
+                branch: branch.to_string(),
+            }])
+            .ok()?;
+        let m = resp.entries.into_iter().next()?;
+        m.branch_merged.map(|merged| (merged, m.branch_head))
+    }
+
+    /// Deterministically reclaim a single closed item's worktree and branch on the colocated Node.
+    pub(crate) fn reclaim_single_closed(
+        &self,
+        target: ReclaimClosedTarget,
+    ) -> Result<DiskReclaimResponse> {
+        let Some(port) = self.node_housekeeping() else {
+            return Err(CoreError::NoNodeAvailable(
+                "本地设备节点未连接，无法清理工作区".into(),
+            ));
+        };
+        let req = DiskReclaimRequest {
+            worktrees_root: self.config().worktrees.to_string_lossy().into_owned(),
+            git_projects: vec![],
+            closed_worktrees: vec![target],
+            idle_worktrees: vec![],
+            ended_scratch: vec![],
+            low_bytes: u64::MAX,
+        };
+        crate::node_git::block_on(port.disk_reclaim(req))
+            .ok_or_else(|| CoreError::Msg("workspace reclaim runtime unavailable".into()))?
+            .map_err(|e| {
+                if e.code == steve_node_api::Code::Unavailable {
+                    CoreError::NoNodeAvailable(format!("本地设备节点离线：{}", e.safe_detail))
+                } else {
+                    CoreError::Msg(e.safe_detail)
+                }
+            })
+    }
+
     /// One pass on the colocated Node: deletes trash, reclaims closed worktrees/caches, and under
     /// pressure sheds idle worktree and ended scratch caches until free space exceeds `DiskPolicy::low`.
     /// One pass at a time; a second caller gets `skipped`.
@@ -304,28 +381,21 @@ impl Core {
         }
         let r = self.reclaim_pass();
         self.0.reclaiming.store(false, Ordering::SeqCst);
-        let (reclaimed, deleted_branches, kept_branches) = r?;
+        let (reclaimed, resp) = r?;
         self.record_free(reclaimed.free_after.or(reclaimed.free_before));
         let t = self.tx();
-        t.note_freed(&reclaimed.freed)?;
-        t.note_worktree_removals(&deleted_branches, &kept_branches)?;
+        t.note_freed(&resp.freed)?;
+        t.note_reclaim_outcomes(&resp)?;
         Ok(reclaimed)
     }
 
-    #[allow(clippy::type_complexity)]
-    fn reclaim_pass(
-        &self,
-    ) -> Result<(
-        Reclaimed,
-        Vec<(String, String)>,
-        Vec<(String, String, String, String)>,
-    )> {
+    fn reclaim_pass(&self) -> Result<(Reclaimed, DiskReclaimResponse)> {
         let Some(port) = self.node_housekeeping() else {
             return Err(CoreError::NoNodeAvailable(
                 "本地设备节点未连接，无法执行工作区回收".into(),
             ));
         };
-        let req = self.tx().build_reclaim_request()?;
+        let (req, mut extra_kept) = self.tx().build_reclaim_request()?;
         let resp = crate::node_git::block_on(port.disk_reclaim(req))
             .ok_or_else(|| CoreError::Msg("workspace reclaim runtime unavailable".into()))?
             .map_err(|e| {
@@ -335,30 +405,27 @@ impl Core {
                     CoreError::Msg(e.safe_detail)
                 }
             })?;
+        extra_kept.extend(resp.kept.iter().map(|k| Kept {
+            item: k.item.clone(),
+            reason: localize_kept_reason(&k.reason),
+        }));
         let reclaimed = Reclaimed {
             skipped: false,
             free_before: resp.free_before,
             free_after: resp.free_after,
             freed: resp
                 .freed
-                .into_iter()
+                .iter()
                 .map(|f| Freed {
-                    item: f.item,
-                    caches: f.caches,
+                    item: f.item.clone(),
+                    caches: f.caches.clone(),
                     bytes: f.bytes,
                 })
                 .collect(),
-            removed: resp.removed,
-            kept: resp
-                .kept
-                .into_iter()
-                .map(|k| Kept {
-                    item: k.item,
-                    reason: localize_kept_reason(&k.reason),
-                })
-                .collect(),
+            removed: resp.removed.clone(),
+            kept: extra_kept,
         };
-        Ok((reclaimed, resp.deleted_branches, resp.kept_branches))
+        Ok((reclaimed, resp))
     }
 
     /// Every worktree of an item, its size, caches and state, and what is in the folder besides,
@@ -381,6 +448,8 @@ impl Core {
                 .map(|e| steve_node_api::DiskInspectTarget {
                     item: e.item.clone(),
                     path: e.path.clone(),
+                    repo: String::new(),
+                    branch: String::new(),
                 })
                 .collect(),
             scratch: scratch
@@ -388,6 +457,8 @@ impl Core {
                 .map(|e| steve_node_api::DiskInspectTarget {
                     item: e.item.clone(),
                     path: e.path.clone(),
+                    repo: String::new(),
+                    branch: String::new(),
                 })
                 .collect(),
         };
@@ -539,8 +610,7 @@ impl Core {
 
 impl Tx<'_> {
     fn under_root(&self, cwd: &str) -> bool {
-        let prefix = format!("{}/", self.cfg().worktrees.to_string_lossy());
-        cwd.starts_with(&prefix)
+        self.under_worktrees(cwd)
     }
 
     /// Whether `cwd` is an item's own scratch directory (`STEVE_HOME/scratch/<id>`).
@@ -548,13 +618,14 @@ impl Tx<'_> {
         Path::new(cwd) == self.cfg().scratch.join(item)
     }
 
-    fn build_reclaim_request(&self) -> Result<DiskReclaimRequest> {
+    fn build_reclaim_request(&self) -> Result<(DiskReclaimRequest, Vec<Kept>)> {
         let pol = self.cfg().disk;
         let at = now();
         let mut git_projects = Vec::new();
         let mut closed_worktrees = Vec::new();
         let mut idle_worktrees: Vec<(i64, ReclaimCacheTarget)> = Vec::new();
         let mut ended_scratch: Vec<(i64, ReclaimCacheTarget)> = Vec::new();
+        let mut extra_kept = Vec::new();
 
         for ws in self.db().workspace_ids()? {
             for p in self.db().projects(&ws)? {
@@ -563,29 +634,38 @@ impl Tx<'_> {
                 }
             }
             for i in self.db().items_all(&ws)? {
-                let busy = self
-                    .db()
-                    .sessions_of_item(&i.id)?
-                    .iter()
-                    .any(|s| self.busy(&s.id));
+                let sessions = self.db().sessions_of_item(&i.id)?;
+                let busy = sessions.iter().any(|s| self.busy(&s.id));
                 if busy {
                     continue;
                 }
                 if let Some(cwd) = i.cwd.as_deref().filter(|c| self.under_root(c)) {
                     if i.is_closed() {
-                        let (repo, branch) = match (
-                            self.db().project(i.project_id.as_deref())?,
-                            i.branch.as_deref().filter(|b| !b.is_empty()),
-                        ) {
-                            (Some(p), Some(b)) => (p.path, b.to_string()),
-                            _ => (String::new(), String::new()),
-                        };
+                        let mut releasing = false;
+                        for s in &sessions {
+                            if self.rt().release(&s.id)? != crate::Released::Gone {
+                                releasing = true;
+                            }
+                        }
+                        if releasing {
+                            extra_kept.push(Kept {
+                                item: i.id.clone(),
+                                reason: "会话正在释放，稍后清理工作区".into(),
+                            });
+                            continue;
+                        }
+                        let repo = self
+                            .db()
+                            .project(i.project_id.as_deref())?
+                            .map(|p| p.path)
+                            .unwrap_or_default();
+                        let branch = i.branch.clone().unwrap_or_default();
                         closed_worktrees.push(ReclaimClosedTarget {
                             item: i.id.clone(),
                             path: cwd.to_string(),
                             repo,
                             branch,
-                            keep_unmerged: i.is_completed() && !i.archived,
+                            keep_unmerged: false,
                         });
                     } else if at - i.updated >= pol.idle_ms {
                         idle_worktrees.push((
@@ -612,14 +692,17 @@ impl Tx<'_> {
         }
         idle_worktrees.sort_by_key(|(u, _)| *u);
         ended_scratch.sort_by_key(|(u, _)| *u);
-        Ok(DiskReclaimRequest {
-            worktrees_root: self.cfg().worktrees.to_string_lossy().into_owned(),
-            git_projects,
-            closed_worktrees,
-            idle_worktrees: idle_worktrees.into_iter().map(|(_, t)| t).collect(),
-            ended_scratch: ended_scratch.into_iter().map(|(_, t)| t).collect(),
-            low_bytes: pol.low,
-        })
+        Ok((
+            DiskReclaimRequest {
+                worktrees_root: self.cfg().worktrees.to_string_lossy().into_owned(),
+                git_projects,
+                closed_worktrees,
+                idle_worktrees: idle_worktrees.into_iter().map(|(_, t)| t).collect(),
+                ended_scratch: ended_scratch.into_iter().map(|(_, t)| t).collect(),
+                low_bytes: pol.low,
+            },
+            extra_kept,
+        ))
     }
 
     fn scratch_entries(&self) -> Result<Vec<Entry>> {
@@ -689,7 +772,7 @@ impl Tx<'_> {
     }
 
     /// One timeline note per item for the space its caches freed.
-    pub(crate) fn note_freed(&self, freed: &[Freed]) -> Result<()> {
+    pub(crate) fn note_freed(&self, freed: &[steve_node_api::DiskFreed]) -> Result<()> {
         for f in freed.iter().filter(|f| f.bytes > 0) {
             if self.db().item(&f.item)?.is_none() {
                 continue;
@@ -713,32 +796,95 @@ impl Tx<'_> {
         Ok(())
     }
 
-    fn note_worktree_removals(
-        &self,
-        deleted_branches: &[(String, String)],
-        kept_branches: &[(String, String, String, String)],
-    ) -> Result<()> {
-        for (item, branch) in deleted_branches {
+    fn note_reclaim_outcomes(&self, resp: &DiskReclaimResponse) -> Result<()> {
+        for (item, branch) in &resp.deleted_branches {
             let Some(i) = self.db().item(item)? else {
                 continue;
             };
-            let text = match i.cwd.as_deref().filter(|c| !c.is_empty()) {
-                Some(cwd) => format!("删除了工作区 {cwd}；删除了已合并的分支 {branch}"),
-                None => format!("删除了已合并的分支 {branch}"),
-            };
-            self.db().timeline_add(item, "steve", "sys", &text, None)?;
+            let text = steve_i18n::stored(|| match i.cwd.as_deref().filter(|c| !c.is_empty()) {
+                Some(cwd) => steve_i18n::t!(
+                    "core.worktree.removed_merged",
+                    cwd = cwd,
+                    branch = branch.as_str()
+                ),
+                None => steve_i18n::t!("core.worktree.branch_deleted", branch = branch.as_str()),
+            });
+            self.note_cleanup_once(item, &text)?;
         }
-        for (item, cwd, branch, head) in kept_branches {
+        for (item, cwd, branch, head) in &resp.kept_branches {
             if self.db().item(item)?.is_none() {
                 continue;
             }
-            self.db().timeline_add(
-                item,
-                "steve",
-                "sys",
-                &format!("删除了工作区 {cwd}（分支 {branch} 保留在 {head}，继续时从分支重建）"),
-                None,
-            )?;
+            let text = steve_i18n::stored(|| {
+                if head.is_empty() {
+                    steve_i18n::t!(
+                        "core.worktree.removed_unmerged_no_sha",
+                        cwd = cwd.as_str(),
+                        branch = branch.as_str()
+                    )
+                } else {
+                    steve_i18n::t!(
+                        "core.worktree.removed_unmerged",
+                        cwd = cwd.as_str(),
+                        branch = branch.as_str(),
+                        head = head.as_str()
+                    )
+                }
+            });
+            self.note_cleanup_once(item, &text)?;
+        }
+        for (item, branch, err) in &resp.branch_delete_failed {
+            let Some(i) = self.db().item(item)? else {
+                continue;
+            };
+            let cwd = i.cwd.as_deref().unwrap_or("");
+            let text = steve_i18n::stored(|| {
+                steve_i18n::t!(
+                    "core.worktree.removed_branch_failed",
+                    cwd = cwd,
+                    branch = branch.as_str(),
+                    error = err.as_str()
+                )
+            });
+            self.note_cleanup_once(item, &text)?;
+        }
+        for (item, branch) in &resp.absent_deleted_branches {
+            if self.db().item(item)?.is_none() {
+                continue;
+            }
+            let text = steve_i18n::stored(|| {
+                steve_i18n::t!("core.worktree.branch_deleted", branch = branch.as_str())
+            });
+            self.note_cleanup_once(item, &text)?;
+        }
+        for (item, branch, err) in &resp.absent_branch_delete_failed {
+            if self.db().item(item)?.is_none() {
+                continue;
+            }
+            let text = steve_i18n::stored(|| {
+                steve_i18n::t!(
+                    "core.worktree.branch_delete_failed",
+                    branch = branch.as_str(),
+                    error = err.as_str()
+                )
+            });
+            self.note_cleanup_once(item, &text)?;
+        }
+        for k in &resp.kept {
+            let Some(i) = self.db().item(&k.item)? else {
+                continue;
+            };
+            let cwd = i.cwd.as_deref().unwrap_or("");
+            let text = if k.reason == "in_use" {
+                steve_i18n::stored(|| steve_i18n::t!("core.worktree.cleanup_in_use", cwd = cwd))
+            } else if let Some(detail) = k.detail.as_deref() {
+                steve_i18n::stored(|| {
+                    steve_i18n::t!("core.worktree.cleanup_failed", cwd = cwd, error = detail)
+                })
+            } else {
+                continue;
+            };
+            self.note_cleanup_once(&k.item, &text)?;
         }
         Ok(())
     }

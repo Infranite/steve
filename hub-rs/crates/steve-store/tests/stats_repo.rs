@@ -67,6 +67,7 @@ fn begin(s: &Store, item: Option<&str>, attempt: i64, started: i64) -> String {
             bot_id: Some("steve".into()),
             project_id: None,
             harness: "claude-code".into(),
+            node_id: None,
             user_seq: Some(1),
             attempt,
             started,
@@ -87,6 +88,7 @@ fn gateway(model: &str, t: Tokens, ok: bool, day: &str) -> NewUsage {
         item_id: None,
         bot_id: None,
         project_id: None,
+        node_id: None,
         usage: ModelUsage {
             model: model.into(),
             tokens: t,
@@ -109,12 +111,12 @@ fn cube_and_details(c: &Connection) -> (Vec<String>, Vec<String>) {
             .map(Result::unwrap)
             .collect()
     };
-    let cols = "workspace_id||'|'||day||'|'||source||'|'||purpose||'|'||harness||'|'||model||'|'||bot_id||'|'||project_id||'|'";
+    let cols = "workspace_id||'|'||day||'|'||source||'|'||purpose||'|'||harness||'|'||model||'|'||bot_id||'|'||project_id||'|'||node_id||'|'";
     let cube = q(&format!(
         "SELECT {cols}||input||'|'||output||'|'||cache_read||'|'||cache_write||'|'||reasoning||'|'||hit_base||'|'||cost_reported||'|'||calls||'|'||failed_calls FROM stat_daily WHERE calls > 0 ORDER BY 1"
     ));
     let detail = q(&format!(
-        "SELECT {cols}||sum(ifnull(input,0))||'|'||sum(ifnull(output,0))||'|'||sum(ifnull(cache_read,0))||'|'||sum(ifnull(cache_write,0))||'|'||sum(ifnull(reasoning,0))||'|'||sum(CASE WHEN input IS NOT NULL AND cache_read IS NOT NULL THEN input+cache_read+ifnull(cache_write,0) ELSE 0 END)||'|'||total(cost_reported)||'|'||count(*)||'|'||sum(1-ok) FROM (SELECT workspace_id, day, source, purpose, harness, model, ifnull(bot_id,'') AS bot_id, ifnull(project_id,'') AS project_id, input, output, cache_read, cache_write, reasoning, cost_reported, ok FROM usage_records) GROUP BY workspace_id, day, source, purpose, harness, model, bot_id, project_id ORDER BY 1"
+        "SELECT {cols}||sum(ifnull(input,0))||'|'||sum(ifnull(output,0))||'|'||sum(ifnull(cache_read,0))||'|'||sum(ifnull(cache_write,0))||'|'||sum(ifnull(reasoning,0))||'|'||sum(CASE WHEN input IS NOT NULL AND cache_read IS NOT NULL THEN input+cache_read+ifnull(cache_write,0) ELSE 0 END)||'|'||total(cost_reported)||'|'||count(*)||'|'||sum(1-ok) FROM (SELECT workspace_id, day, source, purpose, harness, model, ifnull(bot_id,'') AS bot_id, ifnull(project_id,'') AS project_id, node_id, input, output, cache_read, cache_write, reasoning, cost_reported, ok FROM usage_records) GROUP BY workspace_id, day, source, purpose, harness, model, bot_id, project_id, node_id ORDER BY 1"
     ));
     (cube, detail)
 }

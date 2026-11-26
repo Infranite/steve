@@ -1068,18 +1068,19 @@ mod tests {
     async fn crashed_push() -> (tempfile::TempDir, u16, Arc<Mutex<usize>>) {
         let tmp = tempfile::tempdir().unwrap();
         let (port, seen) = hanging();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "wire::git_push::tests::child_push_crash",
-                "--nocapture",
-            ])
-            .env("STEVE_GIT_PUSH_CHILD_ROOT", tmp.path())
-            .env("STEVE_GIT_PUSH_CHILD_PORT", port.to_string())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child =
+            steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "wire::git_push::tests::child_push_crash",
+                    "--nocapture",
+                ])
+                .env("STEVE_GIT_PUSH_CHILD_ROOT", tmp.path())
+                .env("STEVE_GIT_PUSH_CHILD_PORT", port.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
         let t0 = Instant::now();
         while !(tmp.path().join("ready").exists() && *seen.lock().unwrap() > 0) {
             assert!(
@@ -1088,8 +1089,7 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child.simulate_crash().unwrap();
         (tmp, port, seen)
     }
 

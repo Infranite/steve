@@ -868,7 +868,7 @@ async fn child_push_process() {
 async fn a_node_that_dies_while_it_pushes_never_pushes_again() {
     let t = T::new();
     let server = hanging();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = steve_runtime::testkit::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_push_process", "--nocapture"])
         .env("STEVE_PUSH_CHILD_ROOT", &t.root)
         .env("STEVE_PUSH_CHILD_PORT", server.port.to_string())
@@ -892,8 +892,7 @@ async fn a_node_that_dies_while_it_pushes_never_pushes_again() {
         },
     )
     .await;
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.simulate_crash().unwrap();
 
     let n = t.node();
     let op = OperationId::new("op_crash").unwrap();

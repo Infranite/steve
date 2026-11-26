@@ -8,8 +8,8 @@ use chrono::{Days, NaiveDate};
 use serde::Serialize;
 use serde_json::{Value, json};
 use steve_store::statistics::{
-    BotReads, DecisionReads, Entity, ItemHistory, ItemStats, MarkReads, SessionReads, TokenGroup,
-    TurnReads, UsageReads,
+    BotReads, DecisionReads, Entity, ItemHistory, ItemStats, MarkReads, NodeReads, SessionReads,
+    TokenGroup, TurnReads, UsageReads,
 };
 use steve_store::{Read, Result, Tokens};
 
@@ -141,11 +141,13 @@ fn outcome_label(key: &str) -> Option<String> {
     })
 }
 
-/// Bot, project and declared harness names of a workspace, for labelling keys.
+/// Bot, project, Node, session, and declared harness names of a workspace, for labelling keys.
 #[derive(Debug, Default)]
 pub struct Names {
     bots: HashMap<String, String>,
     projects: HashMap<String, String>,
+    nodes: HashMap<String, String>,
+    sessions: HashMap<String, String>,
     harnesses: HashMap<String, String>,
 }
 
@@ -154,6 +156,8 @@ impl Names {
         Ok(Names {
             bots: BotReads(c).names()?.into_iter().collect(),
             projects: ItemHistory(c).project_names(ws)?.into_iter().collect(),
+            nodes: NodeReads(c).names()?.into_iter().collect(),
+            sessions: SessionReads(c).titles(ws)?.into_iter().collect(),
             harnesses: HashMap::new(),
         })
     }
@@ -164,12 +168,32 @@ impl Names {
         self
     }
 
-    /// The label of `key` in dimension `dim` (`model`, `bot`, `project`, `source`, `purpose`, …).
+    /// The label of `key` in dimension `dim` (`model`, `bot`, `project`, `node`, `session`, `source`, `purpose`, …).
     pub fn label(&self, dim: &str, key: &str) -> String {
         match (dim, key) {
             ("bot", "") => steve_i18n::t!("stats.label.no_bot"),
             ("project", "") => steve_i18n::t!("stats.label.no_project"),
             ("model", "") => steve_i18n::t!("stats.label.unknown_model"),
+            ("node", "") => steve_i18n::t!("stats.label.unattributed_node"),
+            ("node", "local") => self
+                .nodes
+                .get("local")
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| steve_i18n::t!("stats.label.local_node")),
+            ("node", k) => self
+                .nodes
+                .get(k)
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| k.into()),
+            ("session", "") => steve_i18n::t!("stats.label.no_session"),
+            ("session", k) => self
+                .sessions
+                .get(k)
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| k.into()),
             ("bot", k) => self.bots.get(k).cloned().unwrap_or_else(|| k.into()),
             ("project", k) => self.projects.get(k).cloned().unwrap_or_else(|| k.into()),
             ("model", k) | ("day", k) => k.into(),
@@ -347,6 +371,8 @@ fn group_key<'a>(d: &'a Daily, group: &str) -> &'a str {
         "harness" => &d.harness,
         "bot" => &d.bot_id,
         "project" => &d.project_id,
+        "node" => &d.node_id,
+        "session" => &d.session_id,
         "source" => &d.source,
         "purpose" => &d.purpose,
         _ => "total",
@@ -556,7 +582,9 @@ fn collect_usage_lines(
         ..
     } = scope;
 
-    let rows = if spans.is_some() {
+    let rows = if group == "session" {
+        metrics::by_session(c, q, spans.is_some())?
+    } else if spans.is_some() {
         metrics::hourly(c, q)?
     } else {
         metrics::daily(c, q)?
@@ -1369,6 +1397,49 @@ pub fn session(c: &mut impl Read, session_id: &str) -> Result<Option<(String, Se
             usage,
         },
     )))
+}
+
+/// Batched cumulative `(tokens, estimated_or_reported_cost_usd)` for a set of session IDs in `ws`.
+pub fn session_summaries(
+    c: &mut impl Read,
+    ws: &str,
+    ids: &[String],
+) -> Result<HashMap<String, (i64, Option<f64>)>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = UsageReads(c).for_sessions(ws, ids)?;
+    if rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let prices = metrics::book_of(c, ws, rows.iter().map(|(_, r)| r.0.as_str()))?;
+    let mut by_session: HashMap<String, (i64, f64, f64, bool)> = HashMap::new();
+    for (sid, (model, day, t, _hb, rep)) in &rows {
+        let total = t.input.unwrap_or(0)
+            + t.output.unwrap_or(0)
+            + t.cache_read.unwrap_or(0)
+            + t.cache_write.unwrap_or(0);
+        let entry = by_session.entry(sid.clone()).or_default();
+        entry.0 += total;
+        entry.2 += *rep;
+        if let Some(usd) = prices.cost(model, day, t) {
+            entry.1 += usd;
+            entry.3 = true;
+        }
+    }
+    Ok(by_session
+        .into_iter()
+        .map(|(sid, (tokens, est, rep, priced))| {
+            let cost = if priced {
+                Some(est)
+            } else if rep > 0.0 {
+                Some(rep)
+            } else {
+                None
+            };
+            (sid, (tokens, cost))
+        })
+        .collect())
 }
 
 /* ── the breakdowns that are not token rows ── */

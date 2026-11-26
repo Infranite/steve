@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
-use steve_runtime::testkit::process::{Child, Command};
+use steve_runtime::testkit::process::ProcessGuard;
 use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
@@ -89,17 +89,19 @@ impl Home {
 
 const VERSION: &str = "0.9.0";
 
-/// A running Hub process (its own process group) paired with its colocated service Node.
+/// A running Hub process (its own process group, reaped by [`ProcessGuard`]) paired with its
+/// colocated service Node.
 struct Hub {
-    child: Option<Child>,
+    child: Option<ProcessGuard>,
     node_pid_file: PathBuf,
 }
 
 impl Hub {
     /// SIGKILL the Hub, its colocated service Node, and any agents to simulate an abrupt machine stop.
     fn kill(&mut self) {
-        if let Some(child) = self.child.take() {
-            Self::kill_child(child);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
         if let Ok(text) = std::fs::read_to_string(&self.node_pid_file)
             && let Some(pid) = text
@@ -113,31 +115,6 @@ impl Hub {
                 libc::kill(pid, libc::SIGKILL);
             }
         }
-    }
-    fn kill_child(mut child: Child) {
-        // A completed child no longer pins its cached PID/group number.
-        if !matches!(child.try_wait(), Ok(None)) {
-            return;
-        }
-        let pid = child.id() as i32;
-        let children: Vec<i32> = Command::new("pgrep")
-            .args(["-P", &pid.to_string()])
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|l| l.trim().parse().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        unsafe {
-            libc::killpg(pid, libc::SIGKILL);
-            for c in &children {
-                libc::killpg(*c, libc::SIGKILL);
-                libc::kill(*c, libc::SIGKILL);
-            }
-        }
-        let _ = child.wait();
     }
 }
 

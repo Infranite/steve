@@ -337,7 +337,6 @@ async fn acp_think(
 ) -> Ran {
     use crate::acp_job::OneShotError;
     use serde_json::json;
-    use steve_acp::normalize::ToolFact;
 
     let failed = |error| Ran {
         reply: Err(error),
@@ -346,28 +345,6 @@ async fn acp_think(
     };
     let JobWork::Think(think) = &spec.work else {
         return failed(OneShotError::Failed("not a think job".into()));
-    };
-    let readable: Vec<PathBuf> = spec
-        .run
-        .prompt
-        .iter()
-        .filter_map(|part| match part {
-            Part::File { name, .. } => Some(dir.join(name)),
-            _ => None,
-        })
-        .collect();
-    let allow = |tool: &ToolFact| {
-        think_tool(
-            tool,
-            think.tools,
-            dir,
-            &readable,
-            inner
-                .cfg
-                .acp
-                .adapter_properties(&spec.run.choice.harness)
-                .self_read_only,
-        )
     };
     let mut prompt = vec![json!({"type": "text", "text": message})];
     prompt.extend(images.iter().map(steve_acp::oneshot::image_block));
@@ -411,7 +388,6 @@ async fn acp_think(
         on_session: None,
         max_output_bytes: spec.run.limits.max_output_bytes,
         on_activity: None,
-        allow_tool: &allow,
     };
     match crate::acp_job::run_cancellable(req, spawned, &event, stop_execution.notified()).await {
         Ok(out) => Ran {
@@ -542,77 +518,6 @@ fn record_think_event(
         }
         _ => {}
     }
-}
-
-fn think_tool(
-    tool: &steve_acp::normalize::ToolFact,
-    mode: ThinkToolMode,
-    dir: &Path,
-    files: &[PathBuf],
-    self_read_only: bool,
-) -> bool {
-    // Adapters report internal work such as context compaction as a tool. Only an
-    // action-free harness Think fact is inert; its display name grants no permission.
-    if tool.origin == ToolOrigin::Harness && tool.category == ToolCategory::Think {
-        return tool.command.is_none()
-            && tool.url.is_none()
-            && tool.paths.is_empty()
-            && tool.cwd.is_none();
-    }
-    mode == ThinkToolMode::ReadAttached && attached_tool(tool, dir, files, self_read_only)
-}
-
-fn attached_path(path: &str, dir: &Path, files: &[PathBuf]) -> bool {
-    let path = Path::new(path);
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        dir.join(path)
-    };
-    let Ok(path) = path.canonicalize() else {
-        return false;
-    };
-    files
-        .iter()
-        .any(|p| p.canonicalize().ok().as_ref() == Some(&path))
-}
-
-fn attached_tool(
-    tool: &steve_acp::normalize::ToolFact,
-    dir: &Path,
-    files: &[PathBuf],
-    self_read_only: bool,
-) -> bool {
-    if tool.origin != ToolOrigin::Harness || tool.url.is_some() {
-        return false;
-    }
-    if !tool
-        .paths
-        .iter()
-        .all(|path| attached_path(path, dir, files))
-        || tool.cwd.as_deref().is_some_and(|cwd| {
-            let cwd = if Path::new(cwd).is_absolute() {
-                PathBuf::from(cwd)
-            } else {
-                dir.join(cwd)
-            };
-            cwd.canonicalize().ok() != dir.canonicalize().ok()
-        })
-    {
-        return false;
-    }
-    if matches!(tool.category, ToolCategory::Read | ToolCategory::Search) {
-        return !tool.paths.is_empty() && tool.command.is_none() && tool.url.is_none();
-    }
-    if tool.category != ToolCategory::Exec || !self_read_only {
-        return false;
-    }
-    // Preserve the existing read-only CLI contract for attachment parsers (sed, Python, PDF
-    // tools, etc.). The adapter's declared OS sandbox enforces no writes; research's shared
-    // guard additionally rejects reported out-of-scope/secret paths. A program-name allowlist
-    // would break document reading when moving the same call from the CLI to ACP.
-    let scope = steve_research::Scope::new(dir, &[], Path::new("/"));
-    crate::research::acp::guard(tool, &scope, false, true).is_ok()
 }
 
 /// The id of the attempt's `n`th message.
@@ -902,128 +807,6 @@ async fn finish(inner: &Inner, f: impl Fn(&Tx) -> ApiResult<()> + Send + Sync) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod attachment_tests {
-    use super::*;
-    use serde_json::json;
-    use steve_acp::normalize::{Normalizer, ToolFact};
-
-    fn tool(command: &str) -> ToolFact {
-        let mut norm = Normalizer::new("/", "test", Epoch::new("test").unwrap());
-        norm.update(&json!({
-            "sessionUpdate":"tool_call", "toolCallId":"t", "kind":"execute",
-            "rawInput":{"command":command}
-        }));
-        norm.fact("t").unwrap().clone()
-    }
-
-    fn internal_thought() -> ToolFact {
-        let mut norm = Normalizer::new("/", "test", Epoch::new("test").unwrap());
-        norm.update(&json!({
-            "sessionUpdate": "tool_call", "toolCallId": "t", "kind": "think",
-            "name": "arbitrary_internal_step", "status": "in_progress"
-        }));
-        norm.fact("t").unwrap().clone()
-    }
-
-    #[test]
-    fn internal_thinking_is_allowed_without_attachment_permissions() {
-        let fact = internal_thought();
-        for mode in [ThinkToolMode::None, ThinkToolMode::ReadAttached] {
-            for self_read_only in [false, true] {
-                assert!(think_tool(&fact, mode, Path::new("/"), &[], self_read_only));
-            }
-        }
-    }
-
-    #[test]
-    fn internal_thinking_cannot_carry_actions_or_an_external_origin() {
-        let plain = internal_thought();
-        let mut command = plain.clone();
-        command.command = tool("cat input.txt").command;
-        let mut path = plain.clone();
-        path.paths.push("input.txt".into());
-        let mut cwd = plain.clone();
-        cwd.cwd = Some(".".into());
-        let mut url = plain.clone();
-        url.url = Some("https://example.invalid".into());
-        let mut external = plain.clone();
-        external.origin = ToolOrigin::External;
-        let mut steve = plain;
-        steve.origin = ToolOrigin::Steve;
-        for fact in [command, path, cwd, url, external, steve] {
-            for mode in [ThinkToolMode::None, ThinkToolMode::ReadAttached] {
-                assert!(!think_tool(&fact, mode, Path::new("/"), &[], true));
-            }
-        }
-        assert!(!think_tool(
-            &tool("cat input.txt"),
-            ThinkToolMode::None,
-            Path::new("/"),
-            &[],
-            true
-        ));
-    }
-
-    #[test]
-    fn sandboxed_attachment_parsers_keep_readonly_scope() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("attached file.txt");
-        std::fs::write(&file, "data").unwrap();
-        let files = [file];
-        assert!(attached_tool(
-            &tool("cat 'attached file.txt'"),
-            temp.path(),
-            &files,
-            true
-        ));
-        assert!(attached_tool(
-            &tool("/bin/zsh -lc \"head -n 20 'attached file.txt'\""),
-            temp.path(),
-            &files,
-            true
-        ));
-        assert!(!attached_tool(
-            &tool("cat 'attached file.txt'"),
-            temp.path(),
-            &files,
-            false
-        ));
-        for command in [
-            "sed -n '1,80p' 'attached file.txt'",
-            "python3 -c \"from pathlib import Path; print(Path('attached file.txt').read_text())\"",
-        ] {
-            assert!(
-                attached_tool(&tool(command), temp.path(), &files, true),
-                "{command}"
-            );
-        }
-        for command in [
-            "cat /etc/hosts",
-            "cat ~/.ssh/id_rsa",
-            "cat ../../outside.txt",
-        ] {
-            assert!(
-                !attached_tool(&tool(command), temp.path(), &files, true),
-                "{command}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_external_tool_cannot_claim_attachment_read_permissions() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("input.txt");
-        std::fs::write(&file, "data").unwrap();
-        let mut fact = tool("cat input.txt");
-        fact.category = ToolCategory::Read;
-        fact.command = None;
-        fact.paths = vec!["input.txt".into()];
-        fact.origin = ToolOrigin::External;
-        assert!(!attached_tool(&fact, temp.path(), &[file], true));
     }
 }
 

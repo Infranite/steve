@@ -52,8 +52,6 @@ export type RItemDetail = { id: string; source?: [string, string]; cwd?: string 
   thread?: { follow: boolean; origin_msg: string } | null }
 /** a message waiting for the session's next turn */
 export type RQueued = { id: string; session_id?: string; text: string; via: string; created: number; files?: RFile[] }
-/** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
-export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
 export type RExecutionSurface = { harness: string; model?: string | null; reasoning_effort?: ReasoningEffort | null }
 export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; owner?: string | null; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: ReasoningEffort | null; fallback_surfaces?: RExecutionSurface[]; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
@@ -388,9 +386,8 @@ export const api = {
   promote: (msg: string) => post<{ id: string }>(`/thread/${msg}/promote`),
   /* the first meeting (the instance owner's): Steve's welcome opens it in the main conversation; skip ends it or says there is none */
   onboardStart: () => post<{ message: string }>("/onboard/start"), onboardSkip: () => post("/onboard/skip"),
-  /* thread routing (§3.4–3.5, §7.2): offers, suggestion cards, corrections, research runs */
+  /* thread routing (§3.4–3.5, §7.2): offers, corrections, research runs */
   offer: (msg: string, take: boolean) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/offer`, { take }),
-  suggest: (msg: string, choice: SuggestChoice) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/suggest`, { choice }),
   /* an A2UI button in a reply (ST-46): the Hub keeps one submission per surface and says it in the conversation */
   a2ui: (msg: string, a: A2uiSubmit) => post<{ already: boolean; message_id?: string; action: A2uiRecord }>(`/thread/${msg}/a2ui`, a),
   reroute: (msg: string, to: string) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/reroute`, { to }),
