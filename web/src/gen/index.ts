@@ -154,6 +154,8 @@ export type { Snapshot } from "./Snapshot";
 export type { SnapshotId } from "./SnapshotId";
 export type { SnapshotViews } from "./SnapshotViews";
 export type { SpaceId } from "./SpaceId";
+export type { StallBlocker } from "./StallBlocker";
+export type { StallBlockerKind } from "./StallBlockerKind";
 export type { StatsEvent } from "./StatsEvent";
 export type { SteveError } from "./SteveError";
 export type { StreamControl } from "./StreamControl";

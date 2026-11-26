@@ -225,24 +225,32 @@ impl Tx<'_> {
             );
             return Ok(None);
         }
-        /* you stopped its last turn: going on is yours, whatever stopped it besides (a failure the
-         * coordinator was told of, a voided delivery); nothing of the budget is spent */
-        if self
-            .db()
-            .store()
-            .sessions()
-            .stop(&s.id)?
-            .is_some_and(|k| crate::turn_wait::held(&k))
-        {
-            self.diagnostic_session(
-                &s.id,
-                None,
-                "takeover.evaluated",
-                "user_stopped",
-                false,
-                Default::default(),
-            );
-            return Ok(Some(why.into()));
+        /* you stopped its last turn or the Hub's stall detector already held it: going on is yours,
+         * whatever stopped it besides (a failure the coordinator was told of, a voided delivery);
+         * nothing of the budget is spent */
+        if let Some(k) = self.db().store().sessions().stop(&s.id)? {
+            if crate::turn_wait::held(&k) {
+                self.diagnostic_session(
+                    &s.id,
+                    None,
+                    "takeover.evaluated",
+                    "user_stopped",
+                    false,
+                    Default::default(),
+                );
+                return Ok(Some(why.into()));
+            }
+            if crate::turn_wait::stall_reason(&k).is_some() {
+                self.diagnostic_session(
+                    &s.id,
+                    None,
+                    "takeover.evaluated",
+                    "turn_stalled",
+                    false,
+                    Default::default(),
+                );
+                return Ok(Some(why.into()));
+            }
         }
         /* its delivery was refused for the same reason again and again: delivering once more would
          * only be refused once more, so it is yours; a different reason is the agent's to work on */

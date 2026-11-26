@@ -172,6 +172,8 @@ fn bindings_match() {
         DecisionView,
         DecisionStatus,
         DecisionPrompt,
+        StallBlocker,
+        StallBlockerKind,
         WfBudgetScope,
         Said,
         ItemView,

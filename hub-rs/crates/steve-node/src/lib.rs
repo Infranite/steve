@@ -1150,7 +1150,10 @@ fn tool_evidence(
                         _ => return None,
                     }
                 }
-                ToolCategory::Read | ToolCategory::Edit | ToolCategory::Delete
+                ToolCategory::Read
+                | ToolCategory::Edit
+                | ToolCategory::Delete
+                | ToolCategory::Move
                     if !fact.paths.is_empty() =>
                 {
                     let paths = fact
@@ -1161,12 +1164,16 @@ fn tool_evidence(
                     // Preserve line ranges or other input that affects what the tool reads.
                     digest_of(&(paths, fact.input()))
                 }
+                ToolCategory::Search => digest_of(&("search", &fact.query, fact.input())),
+                ToolCategory::Fetch => digest_of(&("fetch", &fact.url, fact.input())),
+                ToolCategory::Steve => digest_of(&("steve", &fact.name, fact.input())),
                 _ => return None,
             }
             .ok()?;
             let exit = fact
                 .raw
                 .pointer("/rawOutput/exitCode")
+                .or_else(|| fact.raw.pointer("/rawOutput/exit_code"))
                 .and_then(serde_json::Value::as_i64);
             let signature =
                 digest_of(&(workspace, &fact.name, fact.category, target, exit)).ok()?;
@@ -1174,28 +1181,63 @@ fn tool_evidence(
         }
         ToolPhase::Succeeded if fact.category == ToolCategory::Edit => {
             let mut changed = Vec::new();
-            for diff in fact
+            if let Some(items) = fact
                 .raw
-                .get("content")?
-                .as_array()?
-                .iter()
-                .filter(|d| d["type"] == "diff")
+                .get("content")
+                .and_then(serde_json::Value::as_array)
             {
-                let new = diff.get("newText")?.as_str()?;
-                let old = diff.get("oldText").and_then(serde_json::Value::as_str);
-                if old != Some(new) {
-                    changed.push((
-                        scoped(diff.get("path")?.as_str()?)?,
-                        Digest::sha256(new.as_bytes()),
-                    ));
+                for diff in items.iter().filter(|d| d["type"] == "diff") {
+                    let new = diff.get("newText")?.as_str()?;
+                    let old = diff.get("oldText").and_then(serde_json::Value::as_str);
+                    if old != Some(new) {
+                        changed.push((
+                            scoped(diff.get("path")?.as_str()?)?,
+                            Digest::sha256(new.as_bytes()),
+                        ));
+                    }
                 }
             }
-            if changed.is_empty() {
-                return None;
+            if !changed.is_empty() {
+                changed.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                let signature = digest_of(&(workspace, changed)).ok()?;
+                return Some(ToolEvidence::ContentChanged { signature });
             }
-            changed.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-            let signature = digest_of(&(workspace, changed)).ok()?;
-            Some(ToolEvidence::ContentChanged { signature })
+            // Some adapters (e.g. write_file/edit_file without ACP diff content blocks) carry
+            // structured edit inputs rather than content diffs. Require a real edit input (not a
+            // no-op where old_string == new_string) bound to workspace paths.
+            if let Some(change) = &fact.change
+                && !fact.paths.is_empty()
+                && !fact.raw.get("content").is_some_and(|c| {
+                    c.as_array()
+                        .is_some_and(|items| items.iter().any(|d| d["type"] == "diff"))
+                })
+            {
+                let input = fact.input();
+                let noop_input = match (
+                    input
+                        .get("old_string")
+                        .or_else(|| input.get("Target"))
+                        .and_then(serde_json::Value::as_str),
+                    input
+                        .get("new_string")
+                        .or_else(|| input.get("Replacement"))
+                        .and_then(serde_json::Value::as_str),
+                ) {
+                    (Some(old), Some(new)) => old == new,
+                    _ => false,
+                };
+                if !noop_input {
+                    let mut paths = fact
+                        .paths
+                        .iter()
+                        .map(|p| scoped(p))
+                        .collect::<Option<Vec<_>>>()?;
+                    paths.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+                    let signature = digest_of(&(workspace, paths, change)).ok()?;
+                    return Some(ToolEvidence::ContentChanged { signature });
+                }
+            }
+            None
         }
         _ => None,
     }
@@ -4720,6 +4762,57 @@ mod binding_tests {
         let changed = edit("open", "closed");
         assert!(matches!(changed, Some(ToolEvidence::ContentChanged { .. })));
         assert_eq!(changed, edit("pending", "closed"));
+
+        // Snake-case exit_code (e.g. agy run_command) and Steve MCP failures also produce typed evidence
+        norm.update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "agy_exec", "kind": "execute",
+            "status": "failed", "rawInput": { "CommandLine": "cargo test" },
+            "rawOutput": { "exit_code": 101 },
+        }));
+        let agy_fail_101 = tool_evidence(norm.fact("agy_exec").unwrap(), dir.path(), &workspace);
+        norm.update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "agy_exec", "kind": "execute",
+            "status": "failed", "rawInput": { "CommandLine": "cargo test" },
+            "rawOutput": { "exit_code": 1 },
+        }));
+        let agy_fail_1 = tool_evidence(norm.fact("agy_exec").unwrap(), dir.path(), &workspace);
+        assert!(matches!(agy_fail_101, Some(ToolEvidence::Failed { .. })));
+        assert_ne!(agy_fail_101, agy_fail_1);
+
+        norm.update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "mcp_fail", "name": "mcp__steve__steve_item_read",
+            "kind": "other", "status": "failed", "rawInput": { "id": "ST-1" },
+        }));
+        assert!(matches!(
+            tool_evidence(norm.fact("mcp_fail").unwrap(), dir.path(), &workspace),
+            Some(ToolEvidence::Failed { .. })
+        ));
+
+        // Input-only edit without ACP diff content blocks still yields ContentChanged unless no-op
+        norm.update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "input_edit_noop", "kind": "edit",
+            "status": "completed", "rawInput": { "Path": "README.md", "Target": "same", "Replacement": "same" },
+        }));
+        assert_eq!(
+            tool_evidence(
+                norm.fact("input_edit_noop").unwrap(),
+                dir.path(),
+                &workspace
+            ),
+            None
+        );
+        norm.update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "input_edit_real", "kind": "edit",
+            "status": "completed", "rawInput": { "Path": "README.md", "Target": "old", "Replacement": "new" },
+        }));
+        assert!(matches!(
+            tool_evidence(
+                norm.fact("input_edit_real").unwrap(),
+                dir.path(),
+                &workspace
+            ),
+            Some(ToolEvidence::ContentChanged { .. })
+        ));
     }
 
     #[test]

@@ -502,7 +502,123 @@ fn antigravity_subagent_async_command_and_workflow() {
         .expect("async run_command emits BackgroundTask");
     assert_eq!(bg.origin, SubtaskOrigin::BackgroundTask);
     assert_eq!(bg.status, SubtaskStatus::Running);
+    assert_eq!(bg.external_id.as_deref(), Some("conv/task-99"));
     assert!(!bg.can_cancel);
+
+    // manage_task updates the same tracked background task via extracted task_id
+    let f2_done = norm.update_for_session(
+        Some("agy-1"),
+        &json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-manage-bg",
+            "name": "manage_task",
+            "kind": "other",
+            "title": "Run manage_task",
+            "status": "completed",
+            "rawInput": { "Action": "status", "TaskId": "conv/task-99" },
+            "rawOutput": { "output": "Task exited with code 0." }
+        }),
+    );
+    let bg_done = f2_done
+        .iter()
+        .find_map(|f| match f {
+            Fact::Event(EventBody::SubtaskChanged { subtask }) => Some(subtask),
+            _ => None,
+        })
+        .expect("manage_task updates correlated background task");
+    assert_eq!(bg_done.id, bg.id);
+    assert_eq!(bg_done.status, SubtaskStatus::Done);
+
+    // invoke_subagent is asynchronous: tool completion launches the subagent in Running state
+    let f3_launch = norm.update_for_session(
+        Some("agy-1"),
+        &json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-sub-async",
+            "name": "invoke_subagent",
+            "kind": "other",
+            "title": "Run invoke_subagent",
+            "status": "completed",
+            "rawInput": { "TypeName": "research", "Role": "Schema Auditor", "Prompt": "Audit migrations." },
+            "rawOutput": { "output": "Launched subagent with conversationId: conv-sub-42" }
+        }),
+    );
+    let sub = f3_launch
+        .iter()
+        .find_map(|f| match f {
+            Fact::Event(EventBody::SubtaskChanged { subtask }) => Some(subtask),
+            _ => None,
+        })
+        .expect("invoke_subagent emits Subagent subtask");
+    assert_eq!(sub.origin, SubtaskOrigin::Subagent);
+    assert_eq!(
+        sub.status,
+        SubtaskStatus::Running,
+        "async invoke_subagent launch must stay Running, not Done"
+    );
+    assert_eq!(sub.external_id.as_deref(), Some("conv-sub-42"));
+
+    // manage_subagents kill settles the tracked subagent to Cancelled
+    let f3_kill = norm.update_for_session(
+        Some("agy-1"),
+        &json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-sub-kill",
+            "name": "manage_subagents",
+            "kind": "other",
+            "title": "Run manage_subagents",
+            "status": "completed",
+            "rawInput": { "Action": "kill", "ConversationIds": ["conv-sub-42"] }
+        }),
+    );
+    let sub_killed = f3_kill
+        .iter()
+        .find_map(|f| match f {
+            Fact::Event(EventBody::SubtaskChanged { subtask }) => Some(subtask),
+            _ => None,
+        })
+        .expect("manage_subagents kill cancels tracked subagent");
+    assert_eq!(sub_killed.id, sub.id);
+    assert_eq!(sub_killed.status, SubtaskStatus::Cancelled);
+
+    // Second async subagent settled by manage_subagents kill_all
+    let f4_launch = norm.update_for_session(
+        Some("agy-1"),
+        &json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-sub-2",
+            "name": "invoke_subagent",
+            "kind": "other",
+            "title": "Run invoke_subagent",
+            "status": "completed",
+            "rawInput": { "TypeName": "research", "Role": "Second Auditor", "Prompt": "Inspect tests." }
+        }),
+    );
+    let sub2 = f4_launch
+        .iter()
+        .find_map(|f| match f {
+            Fact::Event(EventBody::SubtaskChanged { subtask }) => Some(subtask),
+            _ => None,
+        })
+        .expect("second subagent");
+    assert_eq!(sub2.status, SubtaskStatus::Running);
+    let f4_kill_all = norm.update_for_session(
+        Some("agy-1"),
+        &json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-sub-kill-all",
+            "name": "manage_subagents",
+            "kind": "other",
+            "title": "Run manage_subagents",
+            "status": "completed",
+            "rawInput": { "Action": "kill_all" }
+        }),
+    );
+    assert!(f4_kill_all.iter().any(|f| matches!(
+        f,
+        Fact::Event(EventBody::SubtaskChanged { subtask })
+            if subtask.id == sub2.id && subtask.status == SubtaskStatus::Cancelled
+    )));
 }
 
 #[test]
@@ -791,6 +907,11 @@ fn replay_antigravity_fixture() {
         .values()
         .find(|s| s.origin == SubtaskOrigin::Subagent)
         .expect("invoke_subagent subtask");
+    assert_eq!(
+        sub.status,
+        SubtaskStatus::Running,
+        "async invoke_subagent must remain Running until settled"
+    );
     assert!(!sub.can_cancel);
 
     let bg = out

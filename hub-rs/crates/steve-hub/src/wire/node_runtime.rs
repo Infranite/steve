@@ -777,6 +777,10 @@ enum Tell {
     After(After),
     End(End),
     Stalled(steve_types::orchestration::StallEvidence),
+    StallEval {
+        outcome: &'static str,
+        reason: &'static str,
+    },
     StalledUsage(steve_types::orchestration::StallReason, [i64; 4]),
     StalledAttemptStopped(steve_types::orchestration::StallReason, i64),
     /// A diagnostic record of an applied event.

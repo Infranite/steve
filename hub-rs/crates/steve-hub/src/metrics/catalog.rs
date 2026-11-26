@@ -547,6 +547,11 @@ pub(super) fn describe() {
         Count,
         "Logical turns held by a repeated failure or lack of progress. Labels: reason."
     );
+    describe_counter!(
+        "steve_orchestration_stall_evaluations_total",
+        Count,
+        "Turn stall progress evaluation outcomes by outcome (advanced, deduplicated, deferred, stalled) and reason."
+    );
     describe_histogram!(
         "steve_orchestration_stall_seconds",
         Seconds,
