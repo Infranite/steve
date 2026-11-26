@@ -32,6 +32,18 @@ fn main() -> anyhow::Result<()> {
     if let Some(code) = code {
         std::process::exit(code);
     }
+    // Load <STEVE_HOME>/steve.env before building the multi-threaded runtime so direct launches
+    // (launchd/systemd without wrapper shell scripts) match steve-node's direct execution.
+    // Skip unknown arguments and --check-config (which validates the exact caller-supplied env).
+    let should_load_env = match args.first().map(String::as_str) {
+        None => true,
+        Some("--supervise") if args.len() == 1 => true,
+        Some("--serve-web" | "--access" | "--admin") => true,
+        _ => false,
+    };
+    if should_load_env {
+        steve_hub::config::load_env_file()?;
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

@@ -388,8 +388,12 @@ impl Owner {
         {
             bail!("signed Hub service ownership is ambiguous")
         }
-        let entry = json!(["/bin/zsh", home.join("current/ops/run.sh")]);
-        if definition["ProgramArguments"] != entry {
+        let direct_entry = json!([home.join("current/bin/steve-hub")]);
+        let legacy_entry = json!(["/bin/zsh", home.join("current/ops/run.sh")]);
+        let valid_entry = definition["ProgramArguments"] == direct_entry
+            || (definition["ProgramArguments"] == legacy_entry
+                && home.join("current/ops/run.sh").is_file());
+        if !valid_entry {
             bail!("signed Hub service does not use its installed entry point")
         }
         let environment = definition
@@ -876,8 +880,11 @@ impl Owner {
             approved_by: Some(self.actor()),
             approved_at: Some(at),
             error: None,
+            error_code: None,
             previous: None,
+            previous_version: self.info["version"].as_str().map(normalize_version),
             target: None,
+            source: OperationSource::InApp,
             backup_snapshot: None,
             progress: None,
             drain: None,
@@ -1188,8 +1195,11 @@ mod tests {
             approved_by: Some(owner.actor()),
             approved_at: Some(1),
             error: None,
+            error_code: None,
             previous: None,
+            previous_version: None,
             target: None,
+            source: OperationSource::InApp,
             runner: None,
             backup_snapshot: None,
             progress: None,
@@ -1274,8 +1284,11 @@ mod tests {
             approved_by: Some(owner.actor()),
             approved_at: Some(1),
             error: None,
+            error_code: None,
             previous: None,
+            previous_version: None,
             target: None,
+            source: OperationSource::InApp,
             runner: None,
             backup_snapshot: None,
             progress: None,
@@ -1340,7 +1353,7 @@ mod tests {
         atomic(&release.join("release.json"), &info).unwrap();
         symlink(&release, home.join("current")).unwrap();
         let plist = account.join("Library/LaunchAgents/test.steve.plist");
-        let definition = json!({"Label":"test.steve","ProgramArguments":["/bin/zsh",home.join("current/ops/run.sh")],"EnvironmentVariables":{"STEVE_HOME":home}});
+        let definition = json!({"Label":"test.steve","ProgramArguments":[home.join("current/bin/steve-hub")],"EnvironmentVariables":{"STEVE_HOME":home}});
         atomic(&plist, &definition).unwrap();
         let execute: TestExecute = std::sync::Arc::new(move |args| {
             let mut out = Output {

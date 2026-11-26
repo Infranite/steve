@@ -3,8 +3,10 @@ import { t } from "./i18n/index.ts"
 import type { UpdateOperation, UpdateProgress, UpdateState } from "@/updates"
 
 /** How the Hub was installed (Hub `upgrades/install.rs`). Paths are only sent to the instance manager. */
-export type InstallKind = "managed" | "local_release" | "release_script" | "source" | "external"
-export type Install = { kind: InstallKind; home?: string; release?: string | null; repo?: string | null }
+export type InstallKind = "managed" | "local_release" | "legacy_macos_service" | "release_script" | "source" | "external"
+export type LegacyMacosServiceKind = "run_sh" | "run_managed_sh"
+export type CapabilityReasonCode = "legacy_macos_service"
+export type Install = { kind: InstallKind; home?: string; release?: string | null; repo?: string | null; legacy_service?: LegacyMacosServiceKind | null }
 export type GuideStep = { title: string; command?: string; note?: string }
 export type Guide = { label: string; summary: string; steps: GuideStep[]; backup: string; recovery: string[] }
 
@@ -18,17 +20,57 @@ export const enableOneClick = (kind: InstallKind): string | undefined =>
 
 const sh = (s: string) => /^[\w@%+=:,./~-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`
 
-/** The release package carries the same read-only maintenance entry when the Hub is unavailable. */
+/** The native CLI provides the same read-only maintenance entry when the Hub is unavailable. */
 export const serviceCommands = (home: string) => ["status", "doctor"].map(action =>
-  `python3 ${sh(`${home}/current/ops/steve-service.py`)} hub ${action} --home ${sh(home)}`)
+  `steve hub ${action} --home ${sh(home)}`)
+
+/** One-shot macOS migration command using only the Rust binary inside the new release package. */
+export function macosOneShotUpgradeCommand(home: string, version?: string | null, repository?: string | null): string {
+  const h = sh(home)
+  const v = version?.trim().replace(/^v/, "")
+  if (v) {
+    const repo = repository?.trim() || "Infranite/steve"
+    return `rm -rf /tmp/steve-upgrade && mkdir -p /tmp/steve-upgrade && curl -fsSL https://github.com/${repo}/releases/download/v${v}/steve-${v}-aarch64-apple-darwin.tar.gz | tar -xz -C /tmp/steve-upgrade && /tmp/steve-upgrade/bin/steve-hub --local-release upgrade-macos --home ${h}`
+  }
+  return `brew upgrade steve && "$(brew --prefix steve)/libexec/bin/steve-hub" --local-release upgrade-macos --home ${h}`
+}
+
+/** Manual rollback command restoring v0.12.0 release symlinks and original LaunchAgent plist. */
+export const macosRollbackCommand = (home: string) =>
+  `${sh(home)}/current/bin/steve-hub --local-release rollback-macos --home ${sh(home)}`
+
+/** Confirmation command archiving rollback metadata after verifying the upgraded Hub is stable. */
+export const macosConfirmCommand = (home: string) =>
+  `${sh(home)}/current/bin/steve-hub --local-release confirm-macos --home ${sh(home)}`
 
 /** Commands for an installation Steve does not switch itself, with this machine's paths filled in. */
-export function upgradeGuide(install: Install, version: string): Guide {
-  const v = version.replace(/^v/, ""), tag = `v${v}`
-  const home = install.home ? sh(install.home) : "~/.steve"
+export function upgradeGuide(install: Install, version: string, repository?: string): Guide {
+  const v = version.replace(/^v/, ""), tag = v ? `v${v}` : ""
+  const rawHome = install.home || "~/.steve"
+  const home = sh(rawHome)
   const repo = install.repo ? sh(install.repo) : t("pages:guide.repoPlaceholder")
   const verify: GuideStep = { title: t("pages:guide.verify.title"), note: t("pages:guide.verify.note", { v }) }
   switch (install.kind) {
+    case "legacy_macos_service": return {
+      label: t("pages:guide.legacyMacos.label"),
+      summary: t("pages:guide.legacyMacos.summary"),
+      steps: [
+        {
+          title: t("pages:guide.legacyMacos.upgrade"),
+          command: macosOneShotUpgradeCommand(rawHome, v, repository),
+          note: t("pages:guide.legacyMacos.upgradeNote"),
+        },
+        ...(v ? [verify] : []),
+      ],
+      backup: t("pages:guide.legacyMacos.backup", { home }),
+      recovery: [
+        t("pages:guide.legacyMacos.autoRollback"),
+        t("pages:guide.legacyMacos.manualRollback", {
+          command: macosRollbackCommand(rawHome),
+          confirm: macosConfirmCommand(rawHome),
+        }),
+      ],
+    }
     case "local_release": return {
       label: t("pages:guide.local.label"),
       summary: t("pages:guide.local.summary"),
@@ -47,14 +89,14 @@ export function upgradeGuide(install: Install, version: string): Guide {
       label: t("pages:guide.script.label"),
       summary: t("pages:guide.script.summary"),
       steps: [
-        { title: t("pages:guide.script.main"), command: `git -C ${repo} checkout main && git -C ${repo} pull --ff-only --tags origin main`, note: t("pages:guide.script.mainNote", { command: `git -C ${repo} merge-base --is-ancestor ${tag} main`, tag }) },
-        { title: t("pages:guide.script.release"), command: `zsh ${repo}/ops/release.sh main`, note: t("pages:guide.script.releaseNote") },
+        { title: t("pages:guide.script.main"), command: `steve hub doctor --home ${home}`, note: t("pages:guide.script.mainNote", { tag }) },
+        { title: t("pages:guide.script.release"), command: `steve setup --home ${home}`, note: t("pages:guide.script.releaseNote") },
         verify,
       ],
       backup: t("pages:guide.script.backup", { home }),
       recovery: [
         t("pages:guide.script.health", { home }),
-        t("pages:guide.script.manual", { home, command: `zsh ${repo}/ops/release.sh --rollback` }),
+        t("pages:guide.script.manual", { home, command: `steve hub restart --home ${home}` }),
       ],
     }
     case "source": return {
@@ -130,7 +172,45 @@ export function verifyUpgrade(target: string, health: Health | null, loadedWeb: 
 
 /** A version check older than this is repeated when the instance manager opens the page (the Hub caches it 10 minutes). */
 export const CHECK_STALE_MS = 3600_000
-export const checkStale = (state: Pick<UpdateState, "capability" | "check" | "operation">, now = Date.now()) =>
-  state.capability.owner === true && !(state.operation && !["succeeded", "rolled_back", "failed"].includes(state.operation.phase)) && (!state.check || now - state.check.checked_at > CHECK_STALE_MS)
-/** A failure after the switch: the new version stays (supervisor and ops/local-release.py both say so). */
-export const committedFailure = (op: UpdateOperation) => op.phase === "failed" && !!op.error && /升级已提交|Upgrade committed/.test(op.error)
+/** Transient upstream failures re-check automatically after the Hub's 1-minute failure cache expires. */
+export const CHECK_TRANSIENT_STALE_MS = 60_000
+/** Rate-limited checks wait for the Hub's 10-minute rate-limit cache before re-checking automatically. */
+export const CHECK_RATE_LIMITED_STALE_MS = 600_000
+export function checkStale(state: Pick<UpdateState, "capability" | "check" | "operation">, now = Date.now()): boolean {
+  if (state.capability.owner !== true) return false
+  if (state.operation && !["succeeded", "rolled_back", "failed"].includes(state.operation.phase)) return false
+  if (!state.check) return true
+  const ttl = state.check.status === "unavailable"
+    ? (state.check.error_kind === "rate_limited" ? CHECK_RATE_LIMITED_STALE_MS : CHECK_TRANSIENT_STALE_MS)
+    : CHECK_STALE_MS
+  return now - state.check.checked_at > ttl
+}
+/** Extract a clean release version from `previous_version` or a release directory path (never returns a raw path). */
+export function restoredVersion(op: Pick<UpdateOperation, "previous_version" | "previous">): string | null {
+  if (op.previous_version) return op.previous_version.replace(/^v/, "")
+  if (!op.previous) return null
+  const base = op.previous.replace(/\/+$/, "").split("/").pop() ?? ""
+  const match = /^v?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)$/.exec(base)
+  if (!match) return null
+  return match[1].replace(/-(?:local-[0-9a-f]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i, "")
+}
+/** Human-readable heading for an upgrade or terminal-deployment record. */
+export function operationTitle(op: Pick<UpdateOperation, "phase" | "version" | "previous_version" | "previous" | "source">): string {
+  const target = op.version.replace(/^v/, "")
+  if (op.phase === "rolled_back") {
+    const previous = restoredVersion(op)
+    return previous
+      ? t("pages:upgrade.record.rolledBack", { target, previous })
+      : t("pages:upgrade.record.rolledBackUnknown", { target })
+  }
+  if (op.phase === "failed") {
+    return t("pages:upgrade.record.failed", { target })
+  }
+  if (op.phase === "succeeded" && op.source === "terminal_deploy") {
+    return t("pages:upgrade.record.terminalSucceeded", { target })
+  }
+  return `${t(`misc:update.phase.${op.phase}`)} · ${op.version}`
+}
+/** A failure after the irreversible commit boundary: the new version and database stay in place. */
+export const committedFailure = (op: UpdateOperation) =>
+  op.phase === "failed" && op.error_code === "committed_startup_failed"

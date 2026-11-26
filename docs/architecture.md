@@ -36,7 +36,7 @@ flowchart LR
     CORE --- VAULT
     STORE -.-> BK
     MOD <--> PLG
-    CORE <-->|"Outbound WS · Protocol 14"| N1
+    CORE <-->|"Outbound WS · Protocol 16"| N1
     N1 --- ACP
     ACP --- WT
 ```
@@ -55,7 +55,7 @@ Default directories and ports: `~/.steve` (Hub) and `~/.steve-node` (separate No
 
 ## Hub–Node protocol
 
-Communication between Hub and Node uses `steve-node-api` (`PROTOCOL = 14`, `EVENT_SCHEMA = 1`) over `steve-node-wire`:
+Communication between Hub and Node uses `steve-node-api` (`PROTOCOL = 16`, `EVENT_SCHEMA = 1`) over `steve-node-wire`:
 
 - **Outbound-only dial**: Every remote `steve-node` dials out to the Hub over a single bidirectional WebSocket (direct HTTPS/TLS or optional `tailcat` loopback listener on Hub port + 2). Pairing uses a one-time code and human fingerprint confirmation in **Devices**.
 - **Typed ports**:
@@ -68,7 +68,7 @@ Communication between Hub and Node uses `steve-node-api` (`PROTOCOL = 14`, `EVEN
 
 ### Storage (`steve-store`, `steve-store-sqlite`)
 
-- **Production database**: SQLite in WAL mode with a single serialized writer connection (`BEGIN IMMEDIATE`) and a bounded `r2d2` read-only connection pool (4–16 connections, clamped to host CPU count). Schema history currently spans 139 migrations tracked in `hub-rs/crates/steve-store/migrations/LOCK`.
+- **Production database**: SQLite in WAL mode with a single serialized writer connection (`BEGIN IMMEDIATE`) and a bounded `r2d2` read-only connection pool (4–16 connections, clamped to host CPU count). Schema history currently spans 142 migrations tracked in `hub-rs/crates/steve-store/migrations/LOCK`.
 - **Typed query contract**: Domain reads and writes go through `Store::read` / `Store::write` built on `sea-query` (`steve-store/src/contract/`). A `#[cfg(test)]` PostgreSQL harness (`steve-store/src/contract/postgres/`) verifies backend dialect portability in CI (`postgres:18`); PostgreSQL is contract-tested only and is not a production Hub backend.
 
 ### Read-side projections (`steve-hub/src/projection/`, `steve-hub/src/api/views.rs`)
@@ -112,14 +112,14 @@ Steve isolates coding-CLI differences inside `steve-harness-spec` and `steve-acp
 
 ## Workspace layout
 
-The Rust workspace in `hub-rs/` contains **32 crates**:
+The Rust workspace in `hub-rs/` contains **34 crates**:
 
 | Layer | Crates | Role |
 |---|---|---|
-| **Contracts & primitives** | `steve-types`, `steve-runtime`, `steve-i18n`, `steve-harness-spec`, `steve-toolchains`, `steve-work-api` | Pure wire/domain types (`ts-rs` bindings), clocks/schedules/caches, localization, harness catalog, toolchain rules, work outbox contracts. |
-| **Node & execution** | `steve-node-api`, `steve-node-wire`, `steve-node`, `steve-node-cli`, `steve-acp`, `steve-transcript`, `steve-confine`, `steve-research` | Hub–Node protocol 14 and transport, Node execution engine & CLI, ACP client & runtime adapters, `steve.v1` transcripts, OS sandboxing, read-only research guard. |
-| **Storage & security** | `steve-store`, `steve-store-sqlite`, `steve-auth`, `steve-vault`, `steve-keyhelper`, `steve-mcp` | SQLite WAL + `sea-query` contract + 139 migrations, SQLite backup/intake primitives, OIDC/token auth, harness secret boundaries, macOS Keychain helper, `/mcp` server. |
-| **Core & modules** | `steve-core`, `steve-modules`, `steve-channels`, `steve-mail`, `steve-github`, `steve-calendar`, `steve-knowledge`, `steve-digest`, `steve-flow`, `steve-stats` | Coordinator/routing/items/handoff, module seams & vault/contacts/changesets, Feishu/Lark & `ext_ws`, IMAP/SMTP mail, GitHub, ICS/connector calendar, personal knowledge & proposals, conversation digest, flow engine, usage & delivery metrics. |
+| **Contracts & primitives** | `steve-types`, `steve-runtime`, `steve-i18n`, `steve-harness-spec`, `steve-toolchains`, `steve-work-api`, `steve-workflow-api` | Pure wire/domain types (`ts-rs` bindings), clocks/schedules/caches, localization, harness catalog, toolchain rules, work outbox & workflow contracts. |
+| **Node & execution** | `steve-node-api`, `steve-node-wire`, `steve-node`, `steve-node-cli`, `steve-acp`, `steve-transcript`, `steve-confine`, `steve-research` | Hub–Node protocol 16 and transport, Node execution engine & CLI, ACP client & runtime adapters, `steve.v1` transcripts, OS sandboxing, read-only research guard. |
+| **Storage & security** | `steve-store`, `steve-store-sqlite`, `steve-auth`, `steve-vault`, `steve-keyhelper`, `steve-mcp` | SQLite WAL + `sea-query` contract + 142 migrations, SQLite backup/intake primitives, OIDC/token auth, harness secret boundaries, macOS Keychain helper, `/mcp` server. |
+| **Core & modules** | `steve-core`, `steve-modules`, `steve-channels`, `steve-mail`, `steve-github`, `steve-calendar`, `steve-knowledge`, `steve-digest`, `steve-flow`, `steve-workflow-js`, `steve-stats` | Coordinator/routing/items/handoff, module seams & vault/contacts/changesets, Feishu/Lark & `ext_ws`, IMAP/SMTP mail, GitHub, ICS/connector calendar, personal knowledge & proposals, conversation digest, flow engine & sandboxed JS workflow runner, usage & delivery metrics. |
 | **Binaries & installer** | `steve-hub`, `steve-install` | `steve-hub` server/projections/plugins/backups/upgrades/metrics; `steve` native setup & service CLI. |
 
 Top-level directories outside `hub-rs/`:
@@ -127,5 +127,5 @@ Top-level directories outside `hub-rs/`:
 - `web/` — React 19 + Vite 8 + Tailwind CSS 4 + TypeScript 6 client and Playwright browser tests.
 - `apple/` — Native macOS 14+ and iOS 17+ Swift wrapper apps (`SteveClientKit`, `SteveMac`, `SteveIOS`).
 - `packaging/` — Homebrew tap formula template (`packaging/homebrew/tap/steve.rb.in`) and release sync checks.
-- `ops/` — Release cutting (`cut-release.py`), development runner (`dev.py`), service/backup scripts, and optional OpenViking helpers.
+- `ops/` — Maintainer release cutting (`cut-release.py`), migration lock verification (`check-migration-lock.sh`), development runner (`dev.py`), backup benchmark (`bench-backup.py`), and optional OpenViking helpers.
 - `docs/` — Architecture, concepts, deployment guide, generated release notes (`docs/releases/`), and visual assets.

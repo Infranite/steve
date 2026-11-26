@@ -29,7 +29,7 @@ class Steve < Formula
       glibc = Utils.safe_popen_read("getconf", "GNU_LIBC_VERSION").split.last
       odie "Steve requires glibc 2.35 or newer" if glibc.nil? || Version.new(glibc) < Version.new("2.35")
     end
-    libexec.install "bin", "ops", "web", "release.json", "LICENSE"
+    libexec.install "bin", "web", "release.json", "LICENSE"
     bin.install_symlink libexec/"bin/steve"
   end
 

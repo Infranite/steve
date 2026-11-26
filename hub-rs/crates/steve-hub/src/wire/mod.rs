@@ -135,6 +135,7 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     c.models_check = list("STEVE_MODELS_CHECK");
     c.default_models = cfg.default_models.clone().into_iter().collect();
     c.steve_repo = cfg.steve_repo.clone();
+    c.maintainer_workflow = cfg.maintainer_workflow;
     c.no_resume = cfg.diagnostic();
     c.debug_route = cfg.debug_route;
     c.disk = cfg.disk;

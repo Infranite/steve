@@ -27,6 +27,26 @@ pub fn get(store: &dyn KeyStore) -> Result<Option<Zeroizing<String>>, KeyStoreEr
         .map(|k| Zeroizing::new(data_encoding::HEXLOWER.encode(k.bytes()))))
 }
 
+/// Interactive macOS login-keychain lookup for an operator-invoked terminal upgrade command
+/// running from an unsigned release binary (which `steve-keyhelper` refuses by code signature).
+#[cfg(target_os = "macos")]
+pub fn get_interactive_keychain(service: &str) -> Result<Option<Zeroizing<String>>, KeyStoreError> {
+    Ok(super::KeychainStore::login()
+        .get_interactive(service, ACCOUNT)?
+        .map(|k| Zeroizing::new(data_encoding::HEXLOWER.encode(k.bytes()))))
+}
+
+/// Normalize a signing keychain password passed via `--keychain-pass-stdin`: accepts either the
+/// raw 64-hex signing keychain password or the 32-byte base64 Keychain item value printed by
+/// `security find-generic-password -a steve/signing/keychain-pass -w`.
+pub fn normalize_stdin_password(raw: &str) -> Zeroizing<String> {
+    let trimmed = raw.trim();
+    if let Ok(kek) = super::decode(trimmed.as_bytes()) {
+        return Zeroizing::new(data_encoding::HEXLOWER.encode(kek.bytes()));
+    }
+    Zeroizing::new(trimmed.to_owned())
+}
+
 /// Stores `pass` and reads it back; `Malformed` when it is not 64 lowercase hex digits.
 pub fn set(store: &dyn KeyStore, pass: &str) -> Result<(), KeyStoreError> {
     let k = encode(pass).ok_or(KeyStoreError::Malformed)?;

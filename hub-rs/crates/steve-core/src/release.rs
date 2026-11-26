@@ -376,7 +376,43 @@ impl Tx<'_> {
             .as_ref()
             .and_then(|p| p.release.as_ref())
             .map(|r| r.cmd.clone());
-        let Some((p, script)) = p.zip(script).filter(|(_, s)| Path::new(s).exists()) else {
+        let Some((p, script)) = p.zip(script) else {
+            let shown = item_project_script(self, &item.project_id)?;
+            return self.refuse_release(
+                item_id,
+                &format!("发布脚本不存在（{shown}）"),
+                &format!("这个项目的发布脚本不存在（{shown}），无法发布"),
+            );
+        };
+        let legacy_steve_script = is_legacy_steve_release_cmd(&script)
+            || (crate::config::is_steve_project(&p.path, &self.cfg().steve_repo)
+                && !Path::new(&script).exists()
+                && Path::new(&p.path).join("ops/cut-release.py").is_file());
+        let (program, cmd_args): (&str, Vec<String>) = if legacy_steve_script {
+            if !self.cfg().maintainer_workflow {
+                return Err(crate::error::CoreError::MaintainerWorkflowRequired);
+            }
+            let cut_release = Path::new(&p.path).join("ops/cut-release.py");
+            if !cut_release.is_file() {
+                return self.refuse_release(
+                    item_id,
+                    &format!("发布脚本不存在（{}）", cut_release.display()),
+                    &format!(
+                        "这个项目的维护者发布工具不存在（{}），无法发布",
+                        cut_release.display()
+                    ),
+                );
+            }
+            (
+                "python3",
+                vec![cut_release.to_string_lossy().into_owned(), "cut".into()],
+            )
+        } else if Path::new(&script).exists() {
+            (
+                "/bin/zsh",
+                vec![script, branch.to_owned(), item_id.to_owned()],
+            )
+        } else {
             let shown = item_project_script(self, &item.project_id)?;
             return self.refuse_release(
                 item_id,
@@ -400,7 +436,7 @@ impl Tx<'_> {
             .append(true)
             .open(&log)?;
         let tok = token();
-        let mut cmd = std::process::Command::new("/bin/zsh");
+        let mut cmd = std::process::Command::new(program);
         for key in [
             "STEVE_UPGRADE_CONTROL_TOKEN",
             "STEVE_SUPERVISOR_PID",
@@ -408,7 +444,8 @@ impl Tx<'_> {
         ] {
             cmd.env_remove(key);
         }
-        cmd.args([script.as_str(), branch, item_id])
+        cmd.args(&cmd_args)
+            .current_dir(&p.path)
             .stdin(std::process::Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out)
@@ -592,7 +629,7 @@ impl Tx<'_> {
         self.flush_queued()
     }
 
-    /// `releases/rollback.json` (ops/release.sh `--rollback`), once: noted on the item it undid and as a
+    /// `releases/rollback.json`, once: noted on the item it undid and as a
     /// notification. A rollback is
     /// never the item's release: nothing about the item's state changes.
     pub(crate) fn report_rollback(&mut self) -> Result<()> {
@@ -684,7 +721,7 @@ impl Tx<'_> {
             Some(v) => jstr(v),
             None => d.to_string(),
         };
-        /* kind (ops/release.sh): "hub" restarted the Hub, "web" only switched the web build, "hub+web" did both; absent before the split */
+        /* kind: "hub" restarted the Hub, "web" only switched the web build, "hub+web" did both; absent before the split */
         let kind = r.get("kind").and_then(Value::as_str).unwrap_or_default();
         let what = match kind {
             "web" => "前端",
@@ -923,7 +960,7 @@ pub(crate) fn pending_abandoned(last: &Path, at: Option<i64>, now_s: i64) -> boo
     !lock_holder(&lock).is_some_and(alive)
 }
 
-/// The pid holding a write lock on `f` (ops/release.sh takes it with `zsystem flock`, an fcntl lock).
+/// The pid holding a write lock on `f` (`fcntl` `F_WRLCK` on `releases/.release.lock`).
 pub(crate) fn lock_holder(f: &Path) -> Option<i32> {
     use std::os::fd::AsRawFd;
     let file = std::fs::OpenOptions::new()
@@ -945,6 +982,16 @@ fn alive(pid: i32) -> bool {
     pid > 0
         && (unsafe { libc::kill(pid, 0) } == 0
             || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
+/// True when a project's configured release command targets the retired Steve runtime release
+/// scripts (`ops/release.sh` or `schema_gate.py`).
+fn is_legacy_steve_release_cmd(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    trimmed == "ops/release.sh"
+        || trimmed.ends_with("/ops/release.sh")
+        || trimmed.contains("ops/release.sh")
+        || trimmed.contains("schema_gate.py")
 }
 
 /// `${script ?? "没有配置"}` for the missing-script failure.

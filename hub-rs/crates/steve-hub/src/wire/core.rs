@@ -124,6 +124,10 @@ fn cerr(e: CoreError) -> BackendError {
             },
         },
         CoreError::Status(status, message) => BackendError { status, message },
+        CoreError::MaintainerWorkflowRequired => BackendError {
+            status: 403,
+            message: steve_i18n::t!("hub.release.maintainer_workflow_required"),
+        },
         CoreError::Handoff(error) => BackendError {
             status: error.http_status(),
             message: handoff_error_text(error),

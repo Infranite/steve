@@ -308,6 +308,10 @@ pub struct Config {
     pub declared_adapters: BTreeMap<String, steve_harness_spec::Declaration>,
     /// Adapter ids explicitly listed in the Hub's harness manifest (`harness.json`).
     pub manifest_adapters: std::collections::BTreeSet<String>,
+    /// Adapter commands declared in the Hub's harness manifest (`harness.json`), for preflight checks.
+    pub(crate) manifest_commands: BTreeMap<String, PathBuf>,
+    /// Optional Node.js override declared in the Hub's harness manifest (`harness.json`).
+    pub(crate) manifest_node: Option<PathBuf>,
     /// Where that manifest is (the runtimes page adds adapters to it).
     pub harness_manifest: PathBuf,
     pub models: Models,
@@ -317,6 +321,8 @@ pub struct Config {
     pub version: String,
     /// Steve's own repository (`STEVE_REPO`): seed project, items about Steve itself, release repo.
     pub steve_repo: PathBuf,
+    /// `STEVE_MAINTAINER_WORKFLOW=1`: opt-in maintainer release cutting (`ops/cut-release.py`).
+    pub maintainer_workflow: bool,
     pub debug_route: bool,
     /// Where knowledge is stored and found (`STEVE_KB_STORE`): `None` = the Hub's own index only.
     pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
@@ -422,21 +428,120 @@ pub fn js_number(s: &str) -> f64 {
     t.parse::<f64>().unwrap_or(f64::NAN)
 }
 
+/// Reads a Hub-owned configuration text file (harness manifest or `steve.env`).
+fn read_config_text(path: &Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
+}
+
+/// Resolves `<STEVE_HOME>/steve.env` (defaulting `STEVE_HOME` to `$HOME/.steve`) and returns only
+/// variables not already set in `existing`. Missing `steve.env` is normal and returns an empty map;
+/// symbolic links and non-regular files are refused.
+fn read_env_file_vars(
+    existing: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, ConfigError> {
+    let steve_home = existing
+        .get("STEVE_HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            existing
+                .get("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".steve"))
+        });
+    let Some(home) = steve_home else {
+        return Ok(BTreeMap::new());
+    };
+    let home = resolve(&home);
+    let path = home.join("steve.env");
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(ConfigError::Input(e)),
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(ConfigError::Invalid {
+            var: "STEVE_HOME",
+            msg: "steve.env must be a regular file, not a symbolic link".into(),
+        });
+    }
+    let text = read_config_text(&path)?;
+    let mut base = existing.clone();
+    base.insert("STEVE_HOME".into(), home.to_string_lossy().into_owned());
+    let parsed =
+        steve_install::env_file::parse_runtime_env(text.as_bytes(), &base).map_err(|e| {
+            ConfigError::Invalid {
+                var: "STEVE_HOME",
+                msg: format!("steve.env: {e}"),
+            }
+        })?;
+    Ok(parsed
+        .into_iter()
+        .filter(|(k, _)| k == "PATH" || !existing.contains_key(k))
+        .collect())
+}
+
+/// Loads `<STEVE_HOME>/steve.env` into the process environment at startup without overriding
+/// variables already supplied by the caller or service manager — except `PATH`, where launchd
+/// always supplies a minimal default and an explicit `PATH` in `steve.env` must take effect.
+///
+/// Must be called once in `main()` before spawning worker threads or building the Tokio runtime.
+pub fn load_env_file() -> Result<(), ConfigError> {
+    let existing: BTreeMap<String, String> = std::env::vars().collect();
+    let to_set = read_env_file_vars(&existing)?;
+    for (key, value) in to_set {
+        if key == "PATH" || std::env::var_os(&key).is_none() {
+            // SAFETY: invoked at process startup in main() while single-threaded, before the
+            // Tokio runtime or any background threads exist.
+            unsafe {
+                std::env::set_var(&key, &value);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Default static web directory when `STEVE_WEB_DIR` is unset: prefer an installed `<home>/web/current`,
+/// then a sibling `web/dist` bundled next to the running executable, and finally the source checkout.
+fn default_web_dir(home: &Path) -> PathBuf {
+    let installed = home.join("web/current");
+    if installed.join("index.html").is_file() {
+        return installed;
+    }
+    if let Some(bundled) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| std::fs::canonicalize(exe).ok())
+        .and_then(|exe| {
+            exe.parent()
+                .and_then(Path::parent)
+                .map(|root| root.join("web/dist"))
+        })
+        .filter(|dir| dir.join("index.html").is_file())
+    {
+        return bundled;
+    }
+    // TS resolves ../../web/dist from hub/src; the Rust crate sits two levels deeper
+    resolve(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../web/dist"))
+}
+
 /// The adapters a harness manifest (`{"adapters": {…}}`, as a Node's `harness.json`) lists. A file
 /// that is missing lists none; one that does not read is logged and ignored, never a reason not to
 /// start.
 fn harness_manifest(
     path: &Path,
 ) -> (
-    std::collections::HashMap<String, PathBuf>,
+    BTreeMap<String, PathBuf>,
     BTreeMap<String, steve_harness_spec::Declaration>,
+    Option<PathBuf>,
 ) {
     #[derive(serde::Deserialize)]
     struct Manifest {
         #[serde(default)]
         adapters: std::collections::HashMap<String, steve_harness_spec::AdapterEntry>,
+        #[serde(default)]
+        node: Option<PathBuf>,
     }
-    let text = match std::fs::read_to_string(path) {
+    let text = match read_config_text(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Default::default(),
         Err(e) => {
@@ -447,7 +552,11 @@ fn harness_manifest(
     match serde_json::from_str::<Manifest>(&text) {
         Ok(m) => {
             let (commands, declared) = steve_harness_spec::split_entries(m.adapters);
-            (commands, declared.into_iter().collect())
+            (
+                commands.into_iter().collect(),
+                declared.into_iter().collect(),
+                m.node.filter(|p| !p.as_os_str().is_empty()),
+            )
         }
         Err(e) => {
             tracing::warn!("harness manifest {}: {e}; ignored", path.display());
@@ -708,9 +817,9 @@ impl Config {
             .filter(|p| !p.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join("harness.json"));
-        let (commands, declared_adapters) = harness_manifest(&manifest);
+        let (manifest_commands, declared_adapters, manifest_node) = harness_manifest(&manifest);
         let manifest_adapters: std::collections::BTreeSet<String> =
-            commands.keys().cloned().collect();
+            manifest_commands.keys().cloned().collect();
 
         let split = |s: String| {
             s.split(',')
@@ -784,10 +893,10 @@ impl Config {
             public_urls_defaulted,
             web_port,
             client_origins,
-            web_dir: get("STEVE_WEB_DIR").map(PathBuf::from).unwrap_or_else(|| {
-                // TS resolves ../../web/dist from hub/src; the Rust crate sits two levels deeper
-                resolve(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../web/dist"))
-            }),
+            web_dir: get("STEVE_WEB_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| default_web_dir(&home)),
             oidc: Oidc {
                 issuer,
                 client_id: get("STEVE_OIDC_CLIENT_ID"),
@@ -810,6 +919,8 @@ impl Config {
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
             declared_adapters,
             manifest_adapters,
+            manifest_commands,
+            manifest_node,
             harness_manifest: manifest,
             models: Models {
                 // none by default: every call follows the harness's own default model
@@ -835,6 +946,7 @@ impl Config {
                 .map(PathBuf::from)
                 .or_else(steve_core::config::steve_checkout_of_exe)
                 .unwrap_or_default(),
+            maintainer_workflow: steve_auth::flag(&get, "STEVE_MAINTAINER_WORKFLOW")?,
             debug_route: steve_auth::flag(&get, "STEVE_DEBUG_ROUTE")?,
             openviking,
             home,
@@ -883,7 +995,7 @@ impl Config {
             || self.declared_adapters.contains_key(id)
     }
 
-    /// The `last.json` the release script writes (ops/release.sh).
+    /// The `last.json` metadata written by release deployments.
     pub fn release_file(&self) -> PathBuf {
         self.home.join("releases/last.json")
     }
@@ -1220,5 +1332,94 @@ mod tests {
         assert!(js_number("abc").is_nan());
         assert!(js_number("inf").is_nan());
         assert_eq!(js_number("-Infinity"), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn env_file_fills_missing_vars_without_overriding_process_env_and_refuses_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("hub");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("steve.env"),
+            concat!(
+                "# hub config\n",
+                "STEVE_PORT=9123\n",
+                "STEVE_HOST=127.0.0.1\n",
+                "STEVE_WEB_DIR=$STEVE_HOME/web/current\n",
+                "STEVE_OIDC_CLIENT_SECRET_FILE=$HOME/secret\n",
+            ),
+        )
+        .unwrap();
+
+        let existing = BTreeMap::from([
+            ("HOME".into(), dir.path().display().to_string()),
+            ("STEVE_HOME".into(), home.display().to_string()),
+            ("STEVE_PORT".into(), "18888".into()),
+        ]);
+        let loaded = read_env_file_vars(&existing).unwrap();
+        assert!(
+            !loaded.contains_key("STEVE_PORT"),
+            "explicit process env must win over steve.env"
+        );
+        assert_eq!(loaded["STEVE_HOST"], "127.0.0.1");
+        assert_eq!(
+            loaded["STEVE_WEB_DIR"],
+            resolve(&home).join("web/current").display().to_string()
+        );
+        assert_eq!(
+            loaded["STEVE_OIDC_CLIENT_SECRET_FILE"],
+            dir.path().join("secret").display().to_string()
+        );
+
+        // Symlinked steve.env must be refused.
+        let target = dir.path().join("other.env");
+        std::fs::write(&target, "STEVE_PORT=9999\n").unwrap();
+        let sym_home = dir.path().join("sym-hub");
+        std::fs::create_dir_all(&sym_home).unwrap();
+        std::os::unix::fs::symlink(&target, sym_home.join("steve.env")).unwrap();
+        let err = read_env_file_vars(&BTreeMap::from([(
+            "STEVE_HOME".into(),
+            sym_home.display().to_string(),
+        )]))
+        .unwrap_err();
+        assert!(err.to_string().contains("symbolic link"), "{err}");
+    }
+
+    #[test]
+    fn default_web_dir_prefers_installed_web_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let web_current = dir.path().join("web/current");
+        std::fs::create_dir_all(&web_current).unwrap();
+        std::fs::write(web_current.join("index.html"), "<!doctype html>").unwrap();
+        let c = cfg(&[("STEVE_HOME", dir.path().to_str().unwrap())]);
+        assert_eq!(c.web_dir, resolve(&web_current));
+    }
+
+    #[test]
+    fn review593_4_steve_env_path_overrides_minimal_launchd_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("hub");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("steve.env"),
+            "PATH=/opt/homebrew/bin:/custom/tools:$PATH\nSTEVE_PORT=9123\n",
+        )
+        .unwrap();
+        // Simulate launchd passing a minimal PATH while steve.env declares Homebrew + custom tools.
+        let existing = BTreeMap::from([
+            ("STEVE_HOME".into(), home.display().to_string()),
+            ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+            ("STEVE_PORT".into(), "18888".into()),
+        ]);
+        let loaded = read_env_file_vars(&existing).unwrap();
+        assert_eq!(
+            loaded.get("PATH").map(String::as_str),
+            Some("/opt/homebrew/bin:/custom/tools:/usr/bin:/bin:/usr/sbin:/sbin"),
+            "PATH in steve.env must override launchd's minimal inherited PATH"
+        );
+        assert!(
+            !loaded.contains_key("STEVE_PORT"),
+            "non-PATH explicit caller overrides must still win over steve.env"
+        );
     }
 }

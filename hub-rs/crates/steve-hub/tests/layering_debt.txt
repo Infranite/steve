@@ -10,7 +10,6 @@ w3	g4	edge steve-node-cli steve-acp	1
 w3	g4	edge steve-node-cli steve-install	1
 w3	g4	edge steve-node-cli steve-node	1
 w3	g4	edge steve-node-cli steve-node-wire	1
-w3	g4	rusqlite steve-node	1
 w4	c1	edge steve-channels steve-flow	1
 w4	c1	edge steve-channels steve-i18n	1
 w4	c1	edge steve-channels steve-knowledge	1
