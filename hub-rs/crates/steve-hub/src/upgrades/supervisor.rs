@@ -316,6 +316,9 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
     super::client::validate_manifest(&manifest, &op.version)?;
     check_candidate(cfg, &target, &manifest).await?;
     op.previous = Some(previous.to_string_lossy().into());
+    if let Ok(old) = read::<Manifest>(&previous.join("release.json")) {
+        op.previous_version = Some(old.version);
+    }
     u.phase(op, "draining", None)?;
     if let Err(e) = drain(cfg, u, op).await {
         let cancel = release_maintenance(cfg, u).await;
@@ -886,6 +889,8 @@ server.serve_forever()
             repo: PathBuf::new(),
             kind: None,
             launch: crate::upgrades::runner::Launch::Launchd,
+            check_timeout: CHECK_HTTP_TIMEOUT,
+            check_backoff: default_check_backoff(),
         };
         let mut op = u.request("0.2.0", "integration", "owner", true).unwrap();
         op.target = Some(new.to_string_lossy().into());

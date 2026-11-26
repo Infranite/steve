@@ -1,7 +1,7 @@
 import { HubError, Unauthenticated } from "@/api"
 import { HubHealthSection } from "@/health-settings"
 import { useEffect, useRef, useState, type ReactNode } from "react"
-import { readableVersion, updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, checkStale, committedFailure, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
+import { readableVersion, updates, updateActive, updateKey, repairKey, sameReleaseVersion, checkStale, committedFailure, operationTitle, restoredVersion, type UpdateBackup, type UpdateCheck, type UpdateState, type UpdateOperation } from "@/updates"
 import { downloadPercent, enableOneClick, installLabel, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
 import { CheckIcon, CircleAlertIcon, CopyIcon, RefreshCwIcon, ServerIcon } from "lucide-react"
 import { Markdown } from "@/components/markdown"
@@ -135,44 +135,90 @@ export function UpgradeSettings() {
   const pairMismatch = !!state && !!check?.version && (!sameReleaseVersion(state.current.hub, check.version) || !sameReleaseVersion(state.current.web, check.version))
   const repair = !!state && check?.status === "available" && !!check.version && pairMismatch && (sameReleaseVersion(state.current.hub, check.version) || (op?.phase === "succeeded" && sameReleaseVersion(op.version, check.version)))
   const version = check?.version ?? ""
-  const messages = {
-    available: repair ? t("pages:upgrade.status.repair", { version }) : t("pages:upgrade.status.available", { version }),
-    up_to_date: t("pages:upgrade.status.up_to_date"), ahead: t("pages:upgrade.status.ahead"),
-    unknown_current: t("pages:upgrade.status.unknown_current"),
-    no_release: t("pages:upgrade.status.no_release"), error: t("pages:upgrade.status.error"), unsupported_platform: t("pages:upgrade.status.unsupported_platform"),
+  const checkSummary = (c: UpdateCheck) => {
+    switch (c.status) {
+      case "available": return repair ? t("pages:upgrade.status.repair", { version }) : t("pages:upgrade.status.available", { version })
+      case "up_to_date": return t("pages:upgrade.status.up_to_date")
+      case "ahead": return t("pages:upgrade.status.ahead")
+      case "unknown_current": return t("pages:upgrade.status.unknown_current")
+      case "no_release": return t("pages:upgrade.status.no_release")
+      case "unsupported_platform": return t("pages:upgrade.status.unsupported_platform")
+      case "unavailable":
+        return c.error_kind === "rate_limited"
+          ? t("pages:upgrade.status.unavailable_rate_limited")
+          : t("pages:upgrade.status.unavailable")
+      case "error":
+        if (c.error_kind === "invalid_manifest") return t("pages:upgrade.status.error_manifest")
+        if (c.error_kind === "invalid_release") return t("pages:upgrade.status.error_release")
+        return t("pages:upgrade.status.error")
+    }
+  }
+  const checkReason = (c: UpdateCheck) => {
+    if (c.status !== "unavailable") return null
+    switch (c.error_kind) {
+      case "upstream_server": return t("pages:upgrade.checkReason.upstream_server")
+      case "timeout": return t("pages:upgrade.checkReason.timeout")
+      case "connect": return t("pages:upgrade.checkReason.connect")
+      case "rate_limited": return t("pages:upgrade.checkReason.rate_limited")
+      default: return null
+    }
   }
   const releaseURL = (() => { try { const u = new URL(check?.release_url ?? ""); return u.protocol === "https:" ? u.href : undefined } catch { return undefined } })()
   const checked = check && t("pages:upgrade.checkedAt", { time: date(check.checked_at, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }) })
+  const history = state?.history ?? []
   return <Section data-upgrade-settings label={t("pages:upgrade.section")}>
     {state && !canExecute && <UpgradeUnavailable state={state} manual={manual} />}
     <Panel className="anim-in">
       <Row title="GitHub Release" sub={state?.repository ?? t("pages:upgrade.reading")}>
         <Button size="sm" variant="outline" disabled={!state || !owner || busy || active || !!connection} onClick={() => void action("check")} data-upgrade-check><RefreshCwIcon />{busy ? t("pages:upgrade.wait") : t("pages:upgrade.check")}</Button>
       </Row>
-      {state && check && <div className="flex flex-col gap-2 px-3 py-3 type-callout" data-upgrade-check-status={check.status}>
+      {state && check && <div className="flex flex-col gap-2 px-3 py-3 type-callout" data-upgrade-check-status={check.status} data-upgrade-check-kind={check.error_kind ?? undefined}>
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">
-            <p className="type-body">{messages[check.status]}</p>
+            <p className={cn("type-body", check.status === "error" && "text-destructive")}>{checkSummary(check)}</p>
+            {checkReason(check) && <p className="mt-0.5 type-footnote text-muted-foreground">{checkReason(check)}</p>}
             <p className="mt-0.5 type-footnote text-muted-foreground">{checked}</p>
           </div>
           {releaseURL && <a className="shrink-0 pt-0.5 type-footnote text-blue hover:underline" href={releaseURL} target="_blank" rel="noopener noreferrer">{t("pages:upgrade.releaseNotes")}</a>}
         </div>
-        {check.error && <p className="text-destructive">{check.error}</p>}
+        {check.error && <Fold label={t("pages:upgrade.details")} quiet>
+          <p className="type-code type-footnote break-all text-muted-foreground" data-upgrade-check-details>{check.error}</p>
+        </Fold>}
         {check.notes && <Fold label={t("pages:upgrade.changes")}><div className="max-h-[60vh] overflow-auto break-words text-muted-foreground" data-release-notes><Markdown text={check.notes} className="type-callout [&_h1]:mt-0 [&_h1]:type-headline [&_h2]:type-headline [&_h3]:type-body [&_h3]:font-semibold" /></div></Fold>}
         {canExecute && repair && !active && <Button className="self-start" size="sm" disabled={busy || !!connection} onClick={() => void action("repair")} data-upgrade-repair>{t("pages:upgrade.repairBtn", { version: check.version })}</Button>}
-        {canExecute && !repair && check.status === "available" && check.version && !active && op?.version !== check.version && <Button className="self-start" size="sm" disabled={busy || !!connection} onClick={() => void action("execute")} data-upgrade-execute>{t("pages:upgrade.executeBtn", { version: check.version })}</Button>}
+        {canExecute && !repair && check.status === "available" && check.version && !active && (!op || !sameReleaseVersion(op.version, check.version)) && <Button className="self-start" size="sm" disabled={busy || !!connection} onClick={() => void action("execute")} data-upgrade-execute>{t("pages:upgrade.executeBtn", { version: check.version })}</Button>}
       </div>}
-      {state && op && <div className="flex flex-col gap-2 px-3 py-3 type-callout" data-upgrade-phase={op.phase} role="status">
-        <p className="type-body font-medium">{updatePhaseLabel[op.phase]} · <span className="type-code break-all">{op.version}</span></p>
+      {state && op && <div className="flex flex-col gap-2 px-3 py-3 type-callout" data-upgrade-phase={op.phase} data-upgrade-source={op.source ?? "in_app"} role="status">
+        <div>
+          <p className="type-body font-medium" data-upgrade-record-title>{operationTitle(op)}</p>
+          {op.source === "terminal_deploy" && <p className="mt-0.5 type-footnote text-muted-foreground">
+            {t("pages:upgrade.record.sourceTerminal")}
+            {op.updated_at > 0 && <> · {date(op.updated_at, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}</>}
+          </p>}
+        </div>
         {op.phase === "awaiting_approval" && <><p className="text-muted-foreground">{t("pages:upgrade.requested", { who: op.requested_by })}</p>{canExecute && <div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || !!connection} onClick={() => void action("approve")} data-upgrade-approve>{t("pages:upgrade.approve")}</Button><Button size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("reject")} data-upgrade-reject>{t("pages:upgrade.reject")}</Button></div>}</>}
-        {(active || op.phase === "succeeded") && stageIndex(op.phase) >= 0 && <UpgradeProgress phase={op.phase} verified={verified === op.id} />}
+        {op.source !== "terminal_deploy" && (active || op.phase === "succeeded") && stageIndex(op.phase) >= 0 && <UpgradeProgress phase={op.phase} verified={verified === op.id} />}
         {op.progress && <UpgradeActivity op={op} connected={!connection} />}
         {op.phase === "draining" && op.drain && <UpgradeWaiting drain={op.drain} />}
         {active && op.phase !== "awaiting_approval" && <p className="text-muted-foreground">{t("pages:upgrade.restartNote")}</p>}
-        {canExecute && !repair && ["failed", "rolled_back"].includes(op.phase) && check?.status === "available" && check.version === op.version && <Button className="self-start" size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("retry")} data-upgrade-retry>{t("pages:upgrade.retry")}</Button>}
+        {canExecute && !repair && ["failed", "rolled_back"].includes(op.phase) && check?.status === "available" && !!check.version && sameReleaseVersion(check.version, op.version) && <Button className="self-start" size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("retry")} data-upgrade-retry>{t("pages:upgrade.retry")}</Button>}
         {op.error && <p className="text-destructive break-words">{op.error}</p>}
         {op.phase !== "awaiting_approval" && op.phase !== "succeeded" && <UpgradeRecovery op={op} backup={state.backup ?? null} install={install} />}
         {op.phase === "succeeded" && <UpgradeVerify target={op.version} embedded onResult={done => setVerified(done ? op.id : null)} />}
+      </div>}
+      {state && history.length > 0 && <div className="px-3 py-2.5 type-callout" data-upgrade-history>
+        <Fold label={t("pages:upgrade.history.title", { count: history.length })} quiet>
+          <ul className="space-y-2">
+            {history.map(item => <li key={item.id} className="space-y-0.5 rounded-md bg-muted/40 px-2.5 py-2 type-footnote" data-upgrade-history-item={item.phase}>
+              <p className="font-medium text-foreground">{operationTitle(item)}</p>
+              <p className="text-muted-foreground">
+                {t(item.source === "terminal_deploy" ? "pages:upgrade.record.sourceTerminal" : "pages:upgrade.record.sourceInApp")}
+                {item.updated_at > 0 && <> · {date(item.updated_at, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })}</>}
+              </p>
+              {item.error && <p className="break-words text-muted-foreground">{item.error}</p>}
+            </li>)}
+          </ul>
+        </Fold>
       </div>}
       {state && <div data-upgrade-services>
         <Row icon={<Tile I={ServerIcon} />} title={t("pages:upgrade.services.title")} sub={t("pages:upgrade.services.devices")} onClick={() => go("#/devices")}><Chevron /></Row>
@@ -186,7 +232,7 @@ export function UpgradeSettings() {
     </Panel>
     {connection && <p role="status" className="mt-2 px-1 type-footnote text-muted-foreground" data-upgrade-connection>{connection}</p>}
     {state && canExecute && <Note data-upgrade-capability data-install-kind={install?.kind}>{install?.kind === "local_release" ? t("pages:upgrade.local") : t("pages:upgrade.managed")}</Note>}
-    {state && !canExecute && manual && install && ((check?.status === "available" && check.version) || install.kind === "legacy_macos_service") && <ManualGuide install={install} version={check?.version ?? ""} repository={state.repository} onVerify={check?.version ? () => setVerifying(check.version) : undefined} />}
+    {state && !canExecute && manual && install && ((check?.status === "available" && check.version) || install.kind === "legacy_macos_service") && <ManualGuide install={install} version={check?.status === "available" ? (check.version ?? "") : ""} repository={state.repository} onVerify={check?.status === "available" && check.version ? () => setVerifying(check.version) : undefined} />}
     {verifying && <UpgradeVerify target={verifying} onClose={() => setVerifying(null)} />}
     {error && <p className="mt-2 px-1 type-footnote text-destructive" role="alert">{error}</p>}
   </Section>
@@ -361,7 +407,8 @@ function UpgradeRecovery({ op, backup, install }: { op: UpdateOperation; backup:
   if (snapshot) lines.push(t("pages:upgrade.recovery.backup", { snapshot }))
   else if (["staging", "ready", "draining", "stopping"].includes(op.phase)) lines.push(t("pages:upgrade.recovery.beforeStop"))
   if (op.phase === "rolling_back" || op.phase === "rolled_back_pending_health") lines.push(t("pages:upgrade.recovery.rollingBack"))
-  if (op.phase === "rolled_back") lines.push(t("pages:upgrade.recovery.rolledBack", { prev: op.previous ? t("pages:upgrade.recovery.prevParen", { v: op.previous }) : "" }))
+  const prevLabel = op.previous ?? restoredVersion(op)
+  if (op.phase === "rolled_back") lines.push(t("pages:upgrade.recovery.rolledBack", { prev: prevLabel ? t("pages:upgrade.recovery.prevParen", { v: prevLabel }) : "" }))
   else if (committed) lines.push(t("pages:upgrade.recovery.committed", { log: home ? `${home}/logs/hub.log` : t("pages:upgrade.recovery.logFallback"), prev: op.previous ?? t("pages:upgrade.recovery.prevFallback") }))
   else if (op.phase === "failed") lines.push(snapshot ? t("pages:upgrade.recovery.failedWithDb") : t("pages:upgrade.recovery.failedNoDb"))
   if (op.runner?.log && (updateActive(op) || ["failed", "rolled_back"].includes(op.phase))) lines.push(t("pages:upgrade.runnerLog", { log: op.runner.log }))

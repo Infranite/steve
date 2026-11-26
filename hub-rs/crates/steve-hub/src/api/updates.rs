@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 fn service(st: &AppState) -> Result<Updates, ApiError> {
     Updates::new(&st.cfg).map_err(err)
 }
@@ -25,29 +25,27 @@ fn owner(cx: &Ctx) -> Result<(), ApiError> {
 pub async fn status(
     State(st): State<AppState>,
     Extension(cx): Extension<Ctx>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<crate::upgrades::UpdateStatus>, ApiError> {
     let u = service(&st)?;
+    let is_owner = owner(&cx).is_ok();
     let mut v = u.status().map_err(err)?;
-    v["capability"]["can_execute"] = json!(u.execution_reason().is_none() && owner(&cx).is_ok());
-    v["capability"]["owner"] = json!(owner(&cx).is_ok());
-    v["install"] = json!(u.install(&st.cfg.steve_repo));
-    if owner(&cx).is_err() {
+    v.capability.can_execute = u.execution_reason().is_none() && is_owner;
+    v.capability.owner = is_owner;
+    let install = u.install(&st.cfg.steve_repo);
+    if is_owner {
+        v.install = crate::upgrades::InstallView::owner(install);
+    } else {
         // paths on this machine are the instance manager's
-        let mut safe_install = json!({"kind": v["install"]["kind"]});
-        if !v["install"]["legacy_service"].is_null() {
-            safe_install["legacy_service"] = v["install"]["legacy_service"].clone();
+        v.install = crate::upgrades::InstallView::redacted(install.kind, install.legacy_service);
+        v.backup = None;
+        v.capability.reason = steve_i18n::t!("hub.upgrade.owner_only_reason");
+        if let Some(op) = v.operation.as_mut() {
+            op.redact_paths();
         }
-        v["install"] = safe_install;
-        v["backup"] = Value::Null;
-        v["capability"]["reason"] = json!(steve_i18n::t!("hub.upgrade.owner_only_reason"));
-        if let Some(op) = v["operation"].as_object_mut() {
-            op.insert("previous".into(), Value::Null);
-            op.insert("target".into(), Value::Null);
-            op.remove("runner");
-            op.remove("backup_snapshot");
-            op.remove("drain");
+        for op in &mut v.history {
+            op.redact_paths();
         }
-    };
+    }
     Ok(Json(v))
 }
 /// Owner only: a check spends the instance's share of GitHub's unauthenticated rate limit.
@@ -117,6 +115,7 @@ pub async fn reject(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     #[test]
     fn workspace_owner_does_not_grant_instance_upgrade() {
         let mut cx = Ctx {
