@@ -8,15 +8,7 @@ use sha2::Digest as _;
 use steve_node_api::*;
 
 /// A directory the Node lets the Hub use, by logical id.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Root {
-    pub id: RootId,
-    pub path: PathBuf,
-    /// How it is shown (`~/code`).
-    pub display: String,
-    /// A read-only root is listed, read and scanned; no workspace is prepared in it.
-    pub access: RootAccess,
-}
+pub use steve_node_api::HostRoot as Root;
 
 /// The directory name for a resource: readable when it is simple, always unique (a hash suffix).
 pub(crate) fn dir_name(resource: &str) -> String {
@@ -150,7 +142,7 @@ pub(crate) struct Commands {
     pub inner: std::sync::Arc<crate::Inner>,
     pub op: OperationId,
 }
-fn common_git_dir(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn common_git_dir(dir: &Path) -> Option<PathBuf> {
     let resolve_common = |gitdir: &Path| -> PathBuf {
         let common = match std::fs::read_to_string(gitdir.join("commondir")) {
             Ok(rel) => {

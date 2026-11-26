@@ -295,6 +295,106 @@ pub fn locate(h: &Homes, source: &HistoryRef) -> ApiResult<HistoryLocation> {
     })
 }
 
+/// Probe working directory existence, non-default state env vars, and optional transcript metadata
+/// for resuming a harness session on this machine. Blocking.
+pub fn resume_probe(
+    h: &Homes,
+    declared: &HashMap<String, steve_harness_spec::Declaration>,
+    req: &ResumeProbeRequest,
+) -> ResumeProbeResponse {
+    let cwd_exists = !req.cwd.is_empty() && Path::new(&req.cwd).is_dir();
+    let props = steve_harness_spec::spec(&req.harness, declared.get(&req.harness)).properties;
+    let principal_dir = req
+        .principal_state_dir
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(Path::new);
+    let mut state_env = Vec::new();
+    match (props.state.as_ref(), principal_dir) {
+        (Some(state), Some(pdir)) => {
+            for (k, v) in state.isolation_env(pdir) {
+                let vp = PathBuf::from(v);
+                let vp = if vp.is_relative() {
+                    std::path::absolute(&vp).unwrap_or(vp)
+                } else {
+                    vp
+                };
+                state_env.push((
+                    k.to_string_lossy().into_owned(),
+                    vp.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+        (Some(state), None) if !state.env.is_empty() => {
+            let default = if state.home_override {
+                h.user_home.clone()
+            } else {
+                h.user_home.join(&state.default)
+            };
+            let dir = h
+                .state_dirs
+                .get(&req.harness)
+                .filter(|p| !p.as_os_str().is_empty())
+                .cloned()
+                .or_else(|| {
+                    std::env::var_os(&state.env)
+                        .filter(|v| !v.is_empty())
+                        .map(PathBuf::from)
+                })
+                .unwrap_or_else(|| default.clone());
+            if dir != default {
+                let abs = if dir.is_relative() {
+                    std::path::absolute(&dir).unwrap_or_else(|_| h.user_home.join(&dir))
+                } else {
+                    dir
+                };
+                state_env.push((state.env.clone(), abs.to_string_lossy().into_owned()));
+            }
+        }
+        _ => {}
+    }
+
+    let transcript = if req.check_transcript && props.local_transcript {
+        req.session_id
+            .as_deref()
+            .filter(|id| plain_id(id))
+            .and_then(|id| {
+                let mut eff = h.clone();
+                if let (Some(state), Some(pdir)) = (props.state.as_ref(), principal_dir) {
+                    for (k, v) in state.isolation_env(pdir) {
+                        if k == "HOME" {
+                            eff.user_home = PathBuf::from(v);
+                        } else if !state.env.is_empty() && k == state.env.as_str() {
+                            eff.state_dirs.insert(req.harness.clone(), PathBuf::from(v));
+                        }
+                    }
+                }
+                let file = find_transcript(&eff, &req.harness, id, &req.cwd)?;
+                let (recorded_id, recorded_cwd) = recorded(&file, &req.harness);
+                let updated = mtime_ms(&file).map(|t| Timestamp(t as i64));
+                Some(HistoryLocation {
+                    source: HistoryRef {
+                        harness: req.harness.clone(),
+                        key: format!("session:{id}"),
+                    },
+                    display: display(&eff, &file),
+                    resume: ResumeHandle::new(id.to_string()).ok(),
+                    updated,
+                    recorded_id,
+                    recorded_cwd,
+                })
+            })
+    } else {
+        None
+    };
+
+    ResumeProbeResponse {
+        cwd_exists,
+        transcript,
+        state_env,
+    }
+}
+
 // ── imports ──
 
 /// How long an import's pages are kept to be read, and how many imports at most.

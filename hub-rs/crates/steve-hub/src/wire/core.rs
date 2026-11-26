@@ -141,6 +141,10 @@ fn cerr(e: CoreError) -> BackendError {
             status: 409,
             message,
         },
+        CoreError::NoNodeAvailable(message) => BackendError {
+            status: 503,
+            message,
+        },
         e => BackendError::msg(e.to_string()),
     }
 }
@@ -331,7 +335,7 @@ impl super::node_runtime::NodeDomain for HubHost {
 /// new one no Node takes is refused ([`steve_core::AgentRuntime::refusal`]). Holds and counts
 /// cover every Node.
 pub struct RoutedRuntime {
-    /// The local Node's coordinator (`STEVE_NODE_MODE=local`).
+    /// The colocated local Node's coordinator.
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
     /// The remote Nodes' coordinators (enabled by default).
     pub fleet: Option<Arc<crate::nodes::NodeFleet>>,
@@ -824,13 +828,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node.as_ref().map_or(0, |n| n.running_turns())
             + self.fleet.as_ref().map_or(0, |f| f.running_turns())
     }
-    /// What a release waits for: the Hub's own Node's work, unless that Node runs in a process
-    /// of its own (B1), whose turns go on through the Hub's restart.
+    /// What a release waits for: the colocated Node runs in its own `steve-node` process and
+    /// outlives Hub restarts, so Hub-in-process working turns are always 0.
     fn node_working(&self) -> usize {
-        if self.host.local_node.get().is_some_and(|n| !n.in_process()) {
-            return 0;
-        }
-        self.node.as_ref().map_or(0, |n| n.working())
+        0
     }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
         use super::node_runtime::Planned;
@@ -894,10 +895,7 @@ pub struct CoreDomain {
     pub harnesses: Arc<crate::harnesses::HubHarnesses>,
     /// The runtime the core runs sessions on.
     pub routed: Arc<RoutedRuntime>,
-    /// The local Node (`STEVE_NODE_MODE=local`): stopped with the Hub, its harnesses
-    /// with it.
-    pub node: Option<Arc<steve_node::LocalNode>>,
-    /// Remote Nodes linked to this Hub, when the Node listener is enabled.
+    /// Remote Nodes (and the colocated service Node) linked to this Hub.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The connections' runs (long connections, pollers): stopped with the Hub.
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
@@ -905,9 +903,6 @@ pub struct CoreDomain {
     /// instead of aborting startup before the Hub serves or the Node reconciles.
     pub thread_recover_failed: Arc<std::sync::atomic::AtomicBool>,
 }
-
-/// How long the Hub's shutdown waits for the local Node to stop its harnesses.
-const NODE_SHUTDOWN: Duration = Duration::from_secs(5);
 
 fn refs(files: Vec<Value>) -> BResult<Vec<steve_core::repo::FileRef>> {
     files.into_iter().map(from_json).collect()
@@ -1008,7 +1003,6 @@ impl CoreDomain {
             core,
             harnesses,
             routed,
-            node: None,
             nodes: None,
             lifecycle: None,
             thread_recover_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1103,29 +1097,17 @@ impl CoreDomain {
         Ok(())
     }
     pub async fn shutdown(&self) {
-        let node = async {
-            match &self.node {
-                Some(n) => tokio::time::timeout(NODE_SHUTDOWN, n.shutdown())
-                    .await
-                    .is_ok(),
-                None => true,
-            }
-        };
         let lifecycle = async {
             if let Some(rt) = &self.lifecycle {
                 rt.shutdown().await;
             }
         };
-        let (research_stopped, node_stopped, ()) = tokio::join!(
+        let (research_stopped, ()) = tokio::join!(
             self.core.shutdown_research(Duration::from_secs(5)),
-            node,
             lifecycle,
         );
         if !research_stopped {
             tracing::error!("research process groups did not confirm shutdown before deadline");
-        }
-        if !node_stopped {
-            tracing::error!("the local Node did not stop its harnesses before the deadline");
         }
         // Consumers stay live while the Node and connection runtimes flush their final events.
         self.jobs.stop().await;
@@ -1821,12 +1803,9 @@ impl CoreDomain {
 
     pub async fn harnesses(&self, fresh: bool) -> BResult<Vec<steve_core::harnesses::Harness>> {
         if fresh {
-            let local = self
-                .node
-                .as_ref()
-                .map(|n| n.as_ref() as &dyn steve_node_api::Node);
+            let local = self.routed.workspaces.local_node();
             self.harnesses
-                .refresh_all(local, self.nodes.as_deref(), true)
+                .refresh_all(local.as_deref(), self.nodes.as_deref(), true)
                 .await;
         }
         Ok(self.core.models().harnesses())
@@ -2310,7 +2289,7 @@ mod routed_tests {
         let home = dir.path().join("node");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
-            home.join(steve_node_cli::dial::LINK_STATUS),
+            home.join(steve_node_wire::LINK_STATUS),
             r#"{"at":5,"error":"internal: control message hello is 69214 bytes, over the 65536 limit"}"#,
         )
         .unwrap();

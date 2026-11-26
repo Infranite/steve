@@ -28,94 +28,41 @@ use steve_node_api::{
 };
 use tokio::sync::mpsc;
 
-/// Why a one-shot call failed. The words a user sees are the caller's.
-#[derive(Debug, thiserror::Error)]
-pub enum OneShotError {
-    /// The accepted run's output/ingress budget was exhausted.
-    #[error("output limit")]
-    OutputLimit,
-    /// Still running after the timeout; the adapter is stopped.
-    #[error("timed out in {0}")]
-    Timeout(TimeoutPhase),
-    /// The adapter could not be started or opened.
-    #[error("{0}")]
-    Failed(String),
-    /// The model reached for a tool the call's policy does not allow (a call without tools, or
-    /// with a narrower set than it wanted): the request needs what this call cannot do, and the
-    /// caller decides where it goes instead.
-    #[error("read-only policy refused a tool")]
-    ToolRefused,
-    /// The adapter answered the prompt with an error (a JSON-RPC error: the provider, the model).
-    /// `transient`: it said the service was unavailable or overloaded, so another try may succeed.
-    #[error("{text}")]
-    Harness {
-        text: String,
-        code: Option<i64>,
-        transient: bool,
-    },
-    /// The adapter lacks what the call needs (`unsupported: images`).
-    #[error("unsupported: {0}")]
-    Unsupported(&'static str),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-}
+pub use steve_node_api::{Image, OneShotError};
 
-impl OneShotError {
-    /// Whether another try of the same call may succeed.
-    pub fn transient(&self) -> bool {
-        matches!(
-            self,
-            OneShotError::Harness {
-                transient: true,
-                ..
-            }
-        )
-    }
-
-    /// The adapter's error answer as a harness error: transient when its words say so.
-    pub fn harness(e: RpcError) -> Self {
-        let code = e
-            .data
-            .as_ref()
-            .and_then(|d| d.get("code"))
-            .and_then(Value::as_i64);
-        let detail = e
-            .data
-            .as_ref()
-            .and_then(|d| d.get("data"))
-            .map(|d| match d {
-                Value::String(s) => s.clone(),
-                d => d.to_string(),
-            })
-            .filter(|d| !d.is_empty() && !e.message.contains(d.as_str()));
-        let text = match detail {
-            Some(d) => format!("{}: {d}", e.message),
-            None => e.message,
-        };
-        let transient = crate::is_transient(&text);
-        OneShotError::Harness {
-            text,
-            code,
-            transient,
-        }
+/// The adapter's error answer as a harness error: transient when its words say so.
+pub fn harness_error(e: RpcError) -> OneShotError {
+    let code = e
+        .data
+        .as_ref()
+        .and_then(|d| d.get("code"))
+        .and_then(Value::as_i64);
+    let detail = e
+        .data
+        .as_ref()
+        .and_then(|d| d.get("data"))
+        .map(|d| match d {
+            Value::String(s) => s.clone(),
+            d => d.to_string(),
+        })
+        .filter(|d| !d.is_empty() && !e.message.contains(d.as_str()));
+    let text = match detail {
+        Some(d) => format!("{}: {d}", e.message),
+        None => e.message,
+    };
+    let transient = crate::is_transient(&text);
+    OneShotError::Harness {
+        text,
+        code,
+        transient,
     }
 }
 
-/// An image for the prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Image {
-    /// `image/png`, `image/jpeg`…
-    pub mime: String,
-    pub bytes: Vec<u8>,
-}
-
-impl Image {
-    /// The ACP `image` content block.
-    pub fn block(&self) -> Value {
-        use base64::Engine;
-        json!({"type": "image", "mimeType": self.mime,
-            "data": base64::engine::general_purpose::STANDARD.encode(&self.bytes)})
-    }
+/// The ACP `image` content block for an [`Image`].
+pub fn image_block(image: &Image) -> Value {
+    use base64::Engine;
+    json!({"type": "image", "mimeType": image.mime,
+        "data": base64::engine::general_purpose::STANDARD.encode(&image.bytes)})
 }
 
 /// An adapter's program and arguments.
@@ -484,7 +431,7 @@ where
     out.events(norm.finish(), on_event);
     result.map_err(|e| {
         if e.data.is_some() {
-            OneShotError::harness(e)
+            harness_error(e)
         } else {
             failed(e)
         }
@@ -1167,7 +1114,7 @@ for line in sys.stdin:
             bytes: vec![1, 2, 3],
         };
         let mut req = request(&cfg, temp.path(), &|_| false);
-        req.prompt.push(image.block());
+        req.prompt.push(image_block(&image));
         let out = run(req, &|_| true, &|_| {}).await;
         assert!(matches!(out, Err(OneShotError::Unsupported("images"))));
     }

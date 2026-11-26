@@ -87,7 +87,7 @@ fn spawn(home: &Path, name: &str, diagnostic: bool) -> Hub {
     if diagnostic {
         c.env("STEVE_NO_RESUME", "1");
     } else {
-        c.env("STEVE_NODE_MODE", "local");
+        c.env("STEVE_LOCAL_NODE_PORT", "0");
     }
     Hub {
         child: c.spawn().expect("spawn hub"),

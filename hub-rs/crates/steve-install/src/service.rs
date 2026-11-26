@@ -265,7 +265,7 @@ pub fn adapter_target(home: &Path, requested: Option<&str>) -> Result<(String, P
                     .all(|k| manifest[k] == record["build"][k])),
         "installed release manifest is missing, unsupported or differs from the Node registration"
     );
-    let binary = release.join(format!("bin/steve-{role}"));
+    let binary = release.join("bin/steve-node");
     crate::signing::owned_file(&binary)
         .context("installed release has no trusted adapter command")?;
     ensure!(
@@ -1693,7 +1693,8 @@ impl Service {
         let ours = |out: &Output| {
             let cmd = out.stdout.trim();
             out.code == 0
-                && cmd.ends_with("steve-hub --local-node")
+                && (cmd.ends_with("steve-node --local-node")
+                    || cmd.ends_with("steve-hub --local-node"))
                 && fs::canonicalize(&self.home).is_ok_and(|h| {
                     cmd.starts_with(&*h.to_string_lossy())
                         || cmd.starts_with(&*self.home.to_string_lossy())

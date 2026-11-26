@@ -26,8 +26,6 @@
 //! decision was answered, an operation reported) and by a periodic tick (queued turns and the release
 //! hold skip the turn-end callback). A close commits once per `(item, cycle)` (`item_cycles`).
 
-use std::path::Path;
-
 use serde_json::{Value, json};
 use steve_store::{ItemOperation, LifecycleWrite};
 pub use steve_types::{CloseKind, ClosePolicy, CloseRequest, ItemPhase};
@@ -86,104 +84,6 @@ pub(crate) fn unknown_effect_card(d: &steve_store::Decision) -> bool {
 
 pub(crate) fn conflict(m: impl Into<String>) -> CoreError {
     CoreError::Status(409, m.into())
-}
-
-/// The worktree's content: `HEAD` and the tree id of everything in the worktree that git would see
-/// (tracked and untracked files, staged or not; ignored files are not part of a result), written through a
-/// throwaway index so the item's own index is never touched. Content-addressed: any change of a file's
-/// bytes or mode changes it, even when `git status` reads the same. `None` when `cwd` is not a git
-/// worktree or git can't tell.
-pub(crate) fn fingerprint(cwd: Option<&str>) -> Option<String> {
-    fingerprint_now(cwd).ok().flatten()
-}
-
-/// How long the git of one fingerprint may take in all. It runs under the core's lock: a git that
-/// hangs (a huge worktree, a stuck filesystem) must not hold everything, and its answer is then
-/// unknown, never "the result changed".
-pub(crate) const PRINT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// The fingerprint could not be taken in time ([`PRINT_DEADLINE`]): the gate holds and asks again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PrintUnknown;
-
-/// [`fingerprint`], telling a git that ran out of time (`Err`: unknown) from no worktree or no git
-/// checkout (`Ok(None)`).
-pub(crate) fn fingerprint_now(
-    cwd: Option<&str>,
-) -> std::result::Result<Option<String>, PrintUnknown> {
-    fingerprint_within(cwd, PRINT_DEADLINE)
-}
-
-fn fingerprint_within(
-    cwd: Option<&str>,
-    deadline: std::time::Duration,
-) -> std::result::Result<Option<String>, PrintUnknown> {
-    let Some(cwd) = cwd.filter(|c| !c.is_empty() && Path::new(c).exists()) else {
-        return Ok(None);
-    };
-    let index = std::env::temp_dir().join(format!("steve-fingerprint-{}", uuid::Uuid::new_v4()));
-    let out = fingerprint_with(cwd, &index, std::time::Instant::now() + deadline);
-    let _ = std::fs::remove_file(&index);
-    /* a git killed at the deadline may leave its lock on the throwaway index */
-    let mut lock = index.into_os_string();
-    lock.push(".lock");
-    let _ = std::fs::remove_file(lock);
-    out
-}
-
-fn fingerprint_with(
-    cwd: &str,
-    index: &Path,
-    end: std::time::Instant,
-) -> std::result::Result<Option<String>, PrintUnknown> {
-    /* `Ok(None)`: git said no; `Err`: out of time */
-    let run =
-        |args: &[&str], own_index: bool| -> std::result::Result<Option<String>, PrintUnknown> {
-            let mut cmd = crate::git::command();
-            cmd.arg("-C")
-                .arg(cwd)
-                .args(args)
-                .env("GIT_TERMINAL_PROMPT", "0");
-            if own_index {
-                cmd.env("GIT_INDEX_FILE", index);
-            }
-            let left = end.saturating_duration_since(std::time::Instant::now());
-            match crate::util::run_deadline(cmd, left) {
-                Ok((true, out, _)) => Ok(Some(out.trim().to_string())),
-                Ok((false, ..)) | Err(crate::util::RunError::Spawn(_)) => Ok(None),
-                Err(e) => {
-                    tracing::warn!(cwd, "fingerprint: git {}: {e}", args.join(" "));
-                    Err(PrintUnknown)
-                }
-            }
-        };
-    let Some(head) = run(&["rev-parse", "HEAD"], true)? else {
-        return Ok(None);
-    };
-    /* start from the item's index (its stat cache keeps this fast), then take in the worktree */
-    let real = run(
-        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-        false,
-    )?;
-    if let Some(r) = real.filter(|r| Path::new(r).exists()) {
-        if std::fs::copy(r, index).is_err() {
-            return Ok(None);
-        }
-    } else if run(&["read-tree", "HEAD"], true)?.is_none() {
-        return Ok(None);
-    }
-    if run(&["add", "--all"], true)?.is_none() {
-        return Ok(None);
-    }
-    let Some(tree) = run(&["write-tree"], true)? else {
-        return Ok(None);
-    };
-    Ok(Some(
-        match crate::upstream::own_change(Path::new(cwd), &head, &tree) {
-            Some((base, patch)) => format!("{head}:{tree}:{base}:{patch}"),
-            None => format!("{head}:{tree}"),
-        },
-    ))
 }
 
 /// `HEAD` of a fingerprint.
@@ -508,7 +408,7 @@ impl Tx<'_> {
                 _ => (None, true),
             }
         } else {
-            (fingerprint(i.cwd.as_deref()), false)
+            (None, false)
         };
         let store = self.db().store().clone();
         store.write::<_, CoreError>(|_w| {
@@ -843,8 +743,7 @@ impl Tx<'_> {
             false => None,
             /* on a Node: what it said last, or the worktree left out */
             true if self.git_on_node(&i.id) => self.git_seen(&i.id).map(|s| Some(s.print.clone())),
-            /* a fingerprint git could not take in time leaves the worktree out */
-            true => fingerprint_now(i.cwd.as_deref()).ok(),
+            true => None,
         };
         self.delivery_blockers_at(i, c, now.as_ref().map(Option::as_deref))
     }
@@ -1028,23 +927,10 @@ impl Tx<'_> {
         /* the worktree is fingerprinted once (it runs `git add --all` over all of it), for the gate and
          * for saying what moved. On the periodic tick, not while something else still holds the closing
          * (a turn, an acceptance, an operation, a question): the check that clears it looks then. */
-        let held = self.delivery_blockers_at(&i, &c, None)?;
-        let others = held.turn || held.input || held.operation || held.acceptance || held.decision;
         let now = match looks_at_worktree(&i, &c) && !verified_manifest {
             false => None,
             true if node => print.clone(),
-            true if self.st.evaluating_closing_cycles && others && !held.changed => None,
-            true => match fingerprint_now(i.cwd.as_deref()) {
-                Ok(p) => Some(p),
-                Err(PrintUnknown) => {
-                    /* unknown is not "changed": the closing holds, and is checked again */
-                    tracing::info!(
-                        item = item_id,
-                        "closing check: the worktree's fingerprint took too long"
-                    );
-                    return Ok(false);
-                }
-            },
+            true => None,
         };
         let g = self.delivery_blockers_at(&i, &c, now.as_ref().map(Option::as_deref))?;
         /* a result that moved is void before anything is started on its acceptance (the acceptance
@@ -1055,7 +941,6 @@ impl Tx<'_> {
             let now = match now {
                 Some(n) => n,
                 None if node => print.clone().flatten(),
-                None if c.fingerprint.is_some() => fingerprint(i.cwd.as_deref()),
                 None => None,
             };
             let moved = seen
@@ -1063,14 +948,9 @@ impl Tx<'_> {
                 .and_then(|s| s.as_ref())
                 .and_then(|s| s.moved.clone());
             let what = match (&c.fingerprint, now) {
-                (Some(f), Some(n)) if node => {
+                (Some(f), Some(n)) => {
                     moved.unwrap_or_else(|| crate::upstream::describe_with(f, &n, |_, _| vec![]))
                 }
-                (Some(f), Some(n)) => crate::upstream::describe_change(
-                    Path::new(i.cwd.as_deref().unwrap_or("")),
-                    f,
-                    &n,
-                ),
                 (Some(_), None) => "工作区不见了".into(),
                 _ => "交付的版本变了".into(),
             };
@@ -1745,49 +1625,6 @@ mod tests {
         assert!(!g.clear());
         assert!(Gate::default().clear());
         assert_eq!(fingerprint_head("abc:0011"), "abc");
-        assert_eq!(fingerprint(Some("/nonexistent/x")), None);
-    }
-
-    #[test]
-    fn a_fingerprint_out_of_time_is_unknown_not_changed() {
-        let d = tempfile::tempdir().unwrap();
-        let cwd = d.path().to_string_lossy().into_owned();
-        let git = |args: &[&str]| {
-            let o = crate::git::command()
-                .arg("-C")
-                .arg(&cwd)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "t")
-                .env("GIT_AUTHOR_EMAIL", "t@example.com")
-                .env("GIT_COMMITTER_NAME", "t")
-                .env("GIT_COMMITTER_EMAIL", "t@example.com")
-                .output()
-                .unwrap();
-            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        };
-        git(&["init", "-q"]);
-        git(&["config", "commit.gpgsign", "false"]);
-        std::fs::write(d.path().join("a.txt"), "a").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-q", "-m", "a"]);
-        let full = fingerprint_within(Some(&cwd), PRINT_DEADLINE).unwrap();
-        assert!(full.is_some());
-        // no time at all: git is killed and the answer is unknown, which the gate holds on
-        assert_eq!(
-            fingerprint_within(Some(&cwd), std::time::Duration::ZERO),
-            Err(PrintUnknown)
-        );
-        // a missing worktree stays a known "no worktree"
-        assert_eq!(
-            fingerprint_within(Some("/nonexistent/x"), std::time::Duration::ZERO),
-            Ok(None)
-        );
-        // not a git checkout: known as well
-        let plain = tempfile::tempdir().unwrap();
-        assert_eq!(
-            fingerprint_now(Some(&plain.path().to_string_lossy())),
-            Ok(None)
-        );
     }
 }
 

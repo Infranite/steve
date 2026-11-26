@@ -24,7 +24,7 @@ use steve_store::{Result, StoreError, W, uid};
 
 use crate::extract_text::{self, ExtractError, Format, FrontMatter};
 use crate::index::{self, BATCH, BoxFuture, DocLoader, Loaded};
-use crate::scan::{self, MAX_FILE_BYTES, Rules};
+use crate::scan;
 use crate::service;
 use crate::sources::folder_node::{self, NodeFolders, NodeRead};
 use crate::sources::{is_builtin, source_json};
@@ -73,10 +73,12 @@ impl FolderPolicy {
     }
 }
 
-/// The path rules. Returns the canonical directory, or the reason it is refused (in the request's
-/// language: zh-CN in the background scan, which stores it).
-/// Overlap with existing folder sources is [`overlap`].
-pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathBuf, String> {
+/// Policy check on a Node-supplied [`steve_node_api::PathCheckResponse`] without touching local disk.
+pub fn check_path_probe(
+    policy: &FolderPolicy,
+    raw: &str,
+    probe: &steve_node_api::PathCheckResponse,
+) -> std::result::Result<PathBuf, String> {
     let p = Path::new(raw.trim());
     if raw.trim().is_empty() || !p.is_absolute() {
         return Err(steve_i18n::t!("knowledge.folder.need_absolute"));
@@ -84,14 +86,24 @@ pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathB
     if p.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(steve_i18n::t!("knowledge.folder.parent_dir"));
     }
-    let meta = match std::fs::metadata(p) {
-        Ok(m) => m,
-        Err(_) => return Err(steve_i18n::t!("knowledge.folder.missing")),
-    };
-    if !meta.is_dir() {
+    if !probe.exists {
+        return Err(steve_i18n::t!("knowledge.folder.missing"));
+    }
+    if !probe.is_dir {
         return Err(steve_i18n::t!("knowledge.folder.not_dir"));
     }
-    let c = std::fs::canonicalize(p).map_err(|_| steve_i18n::t!("knowledge.folder.missing"))?;
+    let c = probe
+        .canonical
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| steve_i18n::t!("knowledge.folder.missing"))?;
+    check_canonical_policy(policy, c)
+}
+
+fn check_canonical_policy(
+    policy: &FolderPolicy,
+    c: PathBuf,
+) -> std::result::Result<PathBuf, String> {
     if c.parent().is_none() {
         return Err(steve_i18n::t!("knowledge.folder.root"));
     }
@@ -118,6 +130,28 @@ pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathB
         return Err(outside_home());
     }
     Ok(c)
+}
+
+/// The path rules. Returns the canonical directory, or the reason it is refused (in the request's
+/// language: zh-CN in the background scan, which stores it).
+/// Overlap with existing folder sources is [`overlap`].
+pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathBuf, String> {
+    let p = Path::new(raw.trim());
+    if raw.trim().is_empty() || !p.is_absolute() {
+        return Err(steve_i18n::t!("knowledge.folder.need_absolute"));
+    }
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(steve_i18n::t!("knowledge.folder.parent_dir"));
+    }
+    let meta = match std::fs::metadata(p) {
+        Ok(m) => m,
+        Err(_) => return Err(steve_i18n::t!("knowledge.folder.missing")),
+    };
+    if !meta.is_dir() {
+        return Err(steve_i18n::t!("knowledge.folder.not_dir"));
+    }
+    let c = std::fs::canonicalize(p).map_err(|_| steve_i18n::t!("knowledge.folder.missing"))?;
+    check_canonical_policy(policy, c)
 }
 
 /// The cloud-drive folders of `~/Library` (iCloud Drive, Dropbox, OneDrive, Google Drive …): a
@@ -284,45 +318,7 @@ pub async fn load_bytes(format: Format, bytes: Vec<u8>) -> Loaded {
     }
 }
 
-enum Read {
-    Bytes(Vec<u8>),
-    Gone,
-    TooBig,
-    Refused(&'static str),
-}
-
-/// Reads `root/rel` only if it still resolves inside `root`.
-fn read_inside(root: &Path, rel: &str) -> Read {
-    let rp = Path::new(rel);
-    if rp.is_absolute() || rp.components().any(|c| !matches!(c, Component::Normal(_))) {
-        return Read::Refused(OUTSIDE);
-    }
-    let Ok(root) = std::fs::canonicalize(root) else {
-        return Read::Refused("找不到这个文件夹");
-    };
-    let target = match std::fs::canonicalize(root.join(rp)) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
-        Err(_) => return Read::Refused("文件读不出来"),
-    };
-    if !target.starts_with(&root) {
-        return Read::Refused(OUTSIDE);
-    }
-    match std::fs::metadata(&target) {
-        Ok(m) if !m.is_file() => return Read::Gone,
-        Ok(m) if m.len() > MAX_FILE_BYTES => return Read::TooBig,
-        Ok(_) => {}
-        Err(_) => return Read::Gone,
-    }
-    match std::fs::read(&target) {
-        Ok(b) if b.len() as u64 > MAX_FILE_BYTES => Read::TooBig,
-        Ok(b) => Read::Bytes(b),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Read::Gone,
-        Err(_) => Read::Refused("文件读不出来"),
-    }
-}
-
-/// Reads folder files for the index queue (through the folder's Node when one is wired).
+/// Reads folder files for the index queue through the folder's Node.
 pub struct FolderLoader {
     pub(crate) nodes: Arc<NodeFolders>,
 }
@@ -337,32 +333,16 @@ impl DocLoader for FolderLoader {
         doc: &'a DocRow,
         source: &'a SourceRow,
     ) -> BoxFuture<'a, Loaded> {
-        let root = folder_root(source);
         let rel = doc.r#ref.clone();
         let mime = doc.mime.clone();
         Box::pin(async move {
             match self.nodes.load(&source.id, &doc.id, &rel).await {
-                NodeRead::Hub => {}
-                NodeRead::Bytes(b) => return load_bytes(format_of(&mime, &rel, &b), b).await,
-                NodeRead::Gone => return Loaded::Gone,
-                NodeRead::TooBig => return Loaded::Skipped(TOO_BIG.into()),
-                NodeRead::Refused(why) => return Loaded::Failed(why.into()),
-                NodeRead::Changed => return Loaded::Retry { now: true },
-                NodeRead::Offline | NodeRead::Unsettled => return Loaded::Retry { now: false },
-            }
-            let Some(root) = root else {
-                return Loaded::Failed("这个来源没有设置文件夹".into());
-            };
-            let r2 = rel.clone();
-            let read = match tokio::task::spawn_blocking(move || read_inside(&root, &r2)).await {
-                Ok(r) => r,
-                Err(_) => return Loaded::Failed("文件读不出来".into()),
-            };
-            match read {
-                Read::Bytes(b) => load_bytes(format_of(&mime, &rel, &b), b).await,
-                Read::Gone => Loaded::Gone,
-                Read::TooBig => Loaded::Skipped(TOO_BIG.into()),
-                Read::Refused(why) => Loaded::Failed(why.into()),
+                NodeRead::Bytes(b) => load_bytes(format_of(&mime, &rel, &b), b).await,
+                NodeRead::Gone => Loaded::Gone,
+                NodeRead::TooBig => Loaded::Skipped(TOO_BIG.into()),
+                NodeRead::Refused(why) => Loaded::Failed(why.into()),
+                NodeRead::Changed => Loaded::Retry { now: true },
+                NodeRead::Offline | NodeRead::Unsettled => Loaded::Retry { now: false },
             }
         })
     }
@@ -552,40 +532,30 @@ async fn run(
 ) -> std::result::Result<(SyncReport, Value), String> {
     let root = folder_root(src).ok_or("这个来源没有设置文件夹")?;
     let include = scan_include(kb.folder_policy(), &root, str_list(&src.config, "include"));
-    let rules = Rules::new(include.clone(), str_list(&src.config, "exclude"));
-    let place = match kb.folder_nodes().places() {
-        Some(p) => p
-            .place(&src.id, true)
-            .await
-            .map_err(|u| folder_node::unplaced(&u))?,
-        None => None,
-    };
+    let places = kb
+        .folder_nodes()
+        .places()
+        .ok_or_else(|| folder_node::OFFLINE.to_string())?;
+    let place = places
+        .place(&src.id, true)
+        .await
+        .map_err(|u| folder_node::unplaced(&u))?
+        .ok_or_else(|| folder_node::OFFLINE.to_string())?;
     let policy = kb.folder_policy().clone();
-    let walk_here = place.is_none();
-    let walked = tokio::task::spawn_blocking(move || {
-        // The stored path was canonical and allowed; it must still be both (a link may have moved).
-        let c = check_path(&policy, &root.to_string_lossy()).map_err(|r| refusal(&r))?;
-        if c != root {
-            return Err("文件夹的位置变了（路径经过的链接指向了别处），请重新添加".to_string());
-        }
-        if !walk_here {
-            return Ok(None);
-        }
-        scan::walk(&root, &rules)
-            .map(Some)
-            .map_err(|e| format!("文件夹读不出来：{e}"))
-    })
-    .await
-    .map_err(|_| "扫描文件夹时出错".to_string())??;
-    // through the Node: every page read, or nothing is touched
-    let (walked, versions) = match (walked, place) {
-        (Some(w), _) => (w, None),
-        (None, Some(place)) => {
-            let s = folder_node::scan(&place, include, str_list(&src.config, "exclude")).await?;
-            (s.walk, Some(s.versions))
-        }
-        (None, None) => return Err("扫描文件夹时出错".to_string()),
+    let root_str = root.to_string_lossy().into_owned();
+    let canonical = match places
+        .check_path(&root_str)
+        .await
+        .map_err(|u| folder_node::unplaced(&u))?
+    {
+        Some(probe) => check_path_probe(&policy, &root_str, &probe).map_err(|r| refusal(&r))?,
+        None => return Err(folder_node::OFFLINE.to_string()),
     };
+    if canonical != root {
+        return Err("文件夹的位置变了（路径经过的链接指向了别处），请重新添加".to_string());
+    }
+    let scanned = folder_node::scan(&place, include, str_list(&src.config, "exclude")).await?;
+    let (walked, versions) = (scanned.walk, Some(scanned.versions));
 
     let now = m.clock.now();
     let mut rep = SyncReport {

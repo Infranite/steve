@@ -1,7 +1,7 @@
 //! The rest of the orchestrator: creating items and sessions, tool calls, turn ends, every decision kind,
 //! supplements and handoffs, item actions, goals, reassign, fork, dependencies, bots, housekeeping.
 
-use crate::git::tests::{g, repo};
+use crate::git::tests::repo;
 use crate::patch;
 use crate::repo::{PlanStep, WS};
 use crate::runtime::Output;
@@ -270,7 +270,10 @@ fn a_git_project_gets_a_worktree_on_the_item_branch() {
     assert_eq!(i.branch.as_deref(), Some("steve/st-1"));
     let wt = k.core.config().worktrees.join("ST-1");
     assert_eq!(i.cwd.as_deref(), Some(&*wt.to_string_lossy()));
-    assert_eq!(g(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]), "steve/st-1");
+    assert!(
+        !wt.exists(),
+        "Core plans the worktree path; the Node creates it"
+    );
     let prompt = &k.rt.prompts_of(&only_session(&k, &i.id).id)[0];
     assert!(prompt.contains(
         "(git worktree on branch steve/st-1; commit your work there, do not touch main)."
@@ -306,6 +309,10 @@ fn a_missing_project_dir_is_a_fail_card() {
             project: Some(Some(p.id)),
             ..Default::default()
         })
+        .unwrap();
+    let s = only_session(&k, &i.id);
+    k.core
+        .workspace_failed(&s.id, false, "项目目录不存在：/nonexistent/steve-test")
         .unwrap();
     assert_eq!(
         k.open_fails(&i.id),

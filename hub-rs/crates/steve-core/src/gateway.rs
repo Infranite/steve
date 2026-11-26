@@ -9,9 +9,9 @@ use regex::Regex;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-pub use steve_acp::{Image, OneShotError};
 pub use steve_modules::gateway::{GatewayError, TimeoutPhase};
 pub use steve_node_api::UsageReport;
+pub use steve_node_api::{Image, OneShotError};
 pub use steve_store::ModelUsage;
 
 /// "fast" is for routing and other short calls, "smart" for answers and drafts.

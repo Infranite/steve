@@ -4,6 +4,8 @@
 //! the PAT repository hook. Everything runs against the fake GitHub; the hooks are served on a real
 //! local port so the fake can POST to them.
 
+mod support_git_nodes;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,6 +88,7 @@ async fn setup_observing(observe: impl Fn(&steve_store::BusEvent) + Send + Sync 
     );
     let sink = RecordingSink::new();
     gh.set_event_sink(sink.clone());
+    gh.set_git_nodes(support_git_nodes::TestGitNodes::new(env.store().clone()));
     let api = manifest::routes(gh.clone())
         .merge(repos::routes(gh.clone()))
         .merge(connections::routes(conns.clone()))

@@ -74,6 +74,17 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
                 let a: PagesArgs = de(p)?;
                 en(&n.scan_page(a.operation, a.page).await?)
             }
+            HOST_BROWSE_DIR => en(&n.browse_dir(de(p)?).await?),
+            HOST_DESCRIBE_DIR => en(&n.describe_dir(de(p)?).await?),
+            HOST_PATH_CHECK => en(&n.path_check(de(p)?).await?),
+            HOST_PROJECT_SETUP_PREVIEW => en(&n.project_setup_preview(de(p)?).await?),
+            HOST_PROJECT_SETUP_START => en(&n.project_setup_start(de(p)?).await?),
+            HOST_PROJECT_SETUP_STATUS => en(&n.project_setup_status(de(p)?).await?),
+            WORKSPACE_DISK_INSPECT => en(&n.disk_inspect(de(p)?).await?),
+            WORKSPACE_DISK_RECLAIM => en(&n.disk_reclaim(de(p)?).await?),
+            MCP_STDIO_LIST => en(&n.mcp_stdio_list(de(p)?).await?),
+            MCP_STDIO_CALL => en(&n.mcp_stdio_call(de(p)?).await?),
+            MCP_STDIO_SWEEP => en(&n.mcp_stdio_sweep(de(p)?).await?),
             HARNESS_PROBE => {
                 let a: ProbeArgs = de(p)?;
                 en(&n.probe(a.fresh).await?)
@@ -91,6 +102,7 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
                 en(&n.import_page(a.operation, a.page).await?)
             }
             HISTORY_LOCATE => en(&n.locate(de(p)?).await?),
+            HISTORY_RESUME_PROBE => en(&n.resume_probe(de(p)?).await?),
             NODE_VITALS => en(&n.vitals().await?),
             NODE_HOST => en(&n.host().await?),
             NODE_SESSION_CAPACITY => en(&n.set_session_capacity(de(p)?).await?),

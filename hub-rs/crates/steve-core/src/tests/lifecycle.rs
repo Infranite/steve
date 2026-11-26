@@ -859,7 +859,10 @@ fn a_dropped_item_gives_back_its_clean_worktree_and_a_new_message_brings_it_back
         .unwrap();
     k.core.item_action(&i, ItemAction::Drop, "me").unwrap();
     assert_eq!(k.phase(&i), "closed");
-    assert!(!wt.exists());
+    steve_runtime::testkit::eventually_blocking(
+        "The dropped item's clean worktree is reclaimed.",
+        || !wt.exists(),
+    );
     g(&r, &["rev-parse", "--verify", &name]);
     // a message does not bring it back; an explicit new cycle with a goal does
     assert!(
@@ -881,10 +884,13 @@ fn a_dropped_item_gives_back_its_clean_worktree_and_a_new_message_brings_it_back
         )
         .unwrap();
     assert_eq!(k.phase(&i), "active");
-    assert!(
-        wt.join("x.txt").exists(),
-        "worktree re-created from the kept branch"
+    let reopened = k.db().item(&i).unwrap().unwrap();
+    assert_eq!(
+        reopened.branch.as_deref(),
+        Some(name.as_str()),
+        "kept branch stays named for the Node to recreate on open"
     );
+    assert_eq!(reopened.cwd.as_deref(), Some(wt.to_string_lossy().as_ref()),);
 }
 
 #[test]
@@ -913,19 +919,22 @@ fn a_finished_merged_item_gives_back_worktree_and_branch() {
         .unwrap();
     assert!(wt.exists(), "the tidy is not part of finishing any more");
     assert_eq!(k.pump_outbox().done, 1, "work.tidy, after the commit");
-    assert!(!wt.exists());
-    assert!(g(&r, &["branch", "--list", &name]).is_empty());
-    assert!(
-        k.timeline_texts(&x.id)
-            .last()
-            .unwrap()
-            .contains("删除了已合并的分支")
+    steve_runtime::testkit::eventually_blocking(
+        "The finished merged item's worktree and branch are reclaimed.",
+        || {
+            !wt.exists()
+                && g(&r, &["branch", "--list", &name]).is_empty()
+                && k.timeline_texts(&x.id)
+                    .last()
+                    .is_some_and(|t| t.contains("删除了已合并的分支"))
+        },
     );
 }
 
 /// A delivered item in a git project with a release action, on its own worktree branched from main;
 /// `commit` puts one commit on the branch.
 pub(super) fn delivered_in_git(k: &Kit, commit: bool) -> (super::Delivered, std::path::PathBuf) {
+    let _ = k.wire_node_git();
     let r = repo(k.home());
     let rel = crate::repo::Release {
         kind: "script".into(),

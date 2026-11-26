@@ -1,4 +1,4 @@
-//! The local Node (`STEVE_NODE_MODE=local`, the default), end to end on the real `steve-hub` binary: a temp
+//! The colocated local Node (`steve-node --local-node`), end to end on the real `steve-hub` binary: a temp
 //! STEVE_HOME, its own port, the fake ACP agent (`steve-acp/tests/fake-acp.js`, which logs every
 //! message it gets), real HTTP. Covers D5's acceptance on one Hub home:
 //! - a session created with the Node on is bound to it and its transcript is stored as `steve.v1`;
@@ -220,10 +220,10 @@ impl Drop for Hub {
     }
 }
 
-/// A runnable Hub with the in-process test Node, or an inert diagnostic Hub.
+/// A runnable Hub with its independent colocated service Node, or an inert diagnostic Hub.
 fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
     if node {
-        spawn_mode(h, Some("local"), extra)
+        spawn_mode(h, None, extra)
     } else {
         let mut diagnostic = vec![("STEVE_NO_RESUME", "1")];
         diagnostic.extend_from_slice(extra);
@@ -251,7 +251,7 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .create_new(true)
         .open(adapter_log.with_extension("hub.log"))
         .expect("hub log");
-    let service = mode != Some("local") && !extra.contains(&("STEVE_NO_RESUME", "1"));
+    let service = !extra.contains(&("STEVE_NO_RESUME", "1"));
     let executable = if service {
         h.service_executable()
     } else {
@@ -1879,31 +1879,45 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
 /// The fixture retires its own executable, so it never signals an unowned or reused PID.
 struct ServiceNodeGuard {
     executable: PathBuf,
+    node_executable: PathBuf,
     node_lock: PathBuf,
 }
 
 impl ServiceNodeGuard {
-    fn new(dir: &std::path::Path, home: PathBuf) -> std::io::Result<Self> {
-        let source = env!("CARGO_BIN_EXE_steve-hub");
-        let executable = dir.join("steve-hub");
-        match std::fs::hard_link(source, &executable) {
-            Ok(()) => {}
+    fn link_or_copy(source: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+        match std::fs::hard_link(source, dest) {
+            Ok(()) => Ok(()),
             Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                std::fs::copy(source, &executable)?;
+                std::fs::copy(source, dest)?;
+                Ok(())
             }
-            Err(e) => return Err(e),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn new(dir: &std::path::Path, home: PathBuf) -> std::io::Result<Self> {
+        let source = std::path::Path::new(env!("CARGO_BIN_EXE_steve-hub"));
+        let node_source = source.with_file_name("steve-node");
+        let executable = dir.join("steve-hub");
+        let node_executable = dir.join("steve-node");
+        Self::link_or_copy(source, &executable)?;
+        if node_source.is_file() {
+            Self::link_or_copy(&node_source, &node_executable)?;
         }
         Ok(Self {
             executable,
+            node_executable,
             node_lock: home.join("data/node/node.lock"),
         })
     }
 
     fn stop(&self) -> std::io::Result<()> {
-        match std::fs::remove_file(&self.executable) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+        for p in [&self.executable, &self.node_executable] {
+            match std::fs::remove_file(p) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
         }
         let lock = match File::open(&self.node_lock) {
             Ok(lock) => lock,

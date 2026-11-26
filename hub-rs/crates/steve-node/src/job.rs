@@ -370,7 +370,7 @@ async fn acp_think(
         )
     };
     let mut prompt = vec![json!({"type": "text", "text": message})];
-    prompt.extend(images.iter().map(Image::block));
+    prompt.extend(images.iter().map(steve_acp::oneshot::image_block));
     let properties = inner.cfg.acp.adapter_properties(&spec.run.choice.harness);
     if think.tools == ThinkToolMode::ReadAttached && !properties.read_attached {
         return failed(OneShotError::ToolRefused);

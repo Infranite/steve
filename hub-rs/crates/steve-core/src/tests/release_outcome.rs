@@ -87,6 +87,7 @@ fn fail_notices(k: &Kit) -> Vec<String> {
 #[test]
 fn a_rebase_conflict_records_not_released_and_keeps_the_item_open() {
     let k = Kit::new();
+    let _ng = k.wire_node_git();
     let r = repo(k.home());
     let p = project(&k, &r);
     let i0 = k.item("wait", "收尾", Some(&p));
@@ -101,9 +102,11 @@ fn a_rebase_conflict_records_not_released_and_keeps_the_item_open() {
         .unwrap();
     let s = k.session(&i0, "idle");
     let d = release_decision(&k, &i0, &s, &name);
-    let back = k.core.resolve(&d, "yes", "", "me").unwrap();
-    /* the answer the web gets back already says it was not released */
-    assert_eq!(back.result["outcome"], "not_released");
+    k.core.resolve(&d, "yes", "", "me").unwrap();
+    steve_runtime::testkit::eventually_blocking(
+        "The Node rebase conflict settles as not_released.",
+        || result(&k, &d)["outcome"] == "not_released",
+    );
     assert_eq!(
         result(&k, &d),
         json!({"approved": true, "text": "", "outcome": "not_released", "reason": "rebase 到 main 有冲突（a.txt）"})
@@ -124,7 +127,10 @@ fn a_rebase_conflict_records_not_released_and_keeps_the_item_open() {
     g(&wt, &["rebase", "-X", "theirs", "main"]);
     let d2 = release_decision(&k, &i0, &s, &name);
     k.core.resolve(&d2, "yes", "", "me").unwrap();
-    assert_eq!(result(&k, &d2)["outcome"], "releasing");
+    steve_runtime::testkit::eventually_blocking(
+        "The second approval rebases cleanly and starts releasing.",
+        || result(&k, &d2)["outcome"] == "releasing",
+    );
     assert_eq!(result(&k, &d)["outcome"], "not_released");
     std::fs::write(
         k.home().join("result.json"),
@@ -151,6 +157,7 @@ fn a_rebase_conflict_records_not_released_and_keeps_the_item_open() {
 #[test]
 fn a_dirty_worktree_records_not_released() {
     let k = Kit::new();
+    let _ng = k.wire_node_git();
     let r = repo(k.home());
     let p = project(&k, &r);
     let i = k.item("wait", "收尾", Some(&p));
@@ -165,6 +172,10 @@ fn a_dirty_worktree_records_not_released() {
     let s = k.session(&i, "idle");
     let d = release_decision(&k, &i, &s, &name);
     k.core.resolve(&d, "yes", "", "me").unwrap();
+    steve_runtime::testkit::eventually_blocking(
+        "The dirty worktree rebase refusal settles as not_released.",
+        || result(&k, &d)["outcome"] == "not_released",
+    );
     let res = result(&k, &d);
     assert_eq!(res["outcome"], "not_released");
     assert!(

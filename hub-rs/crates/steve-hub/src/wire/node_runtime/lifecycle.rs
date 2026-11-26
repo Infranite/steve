@@ -598,7 +598,7 @@ impl NodeRuntime {
 }
 
 /// `/healthz`'s `node` block: what rollout and rollback decisions read instead of the database.
-/// `local`: the local Node's coordinator when `STEVE_NODE_MODE=local`; `remote`: remote Nodes are
+/// `local`: the colocated local Node's coordinator; `remote`: remote Nodes are
 /// listened for (unless `STEVE_NODE_LISTEN=0`). The counts come from the store, so they are there with
 /// the Node off too:
 ///

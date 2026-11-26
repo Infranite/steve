@@ -1,6 +1,7 @@
-//! `/api/items/{id}/artifacts/{art}/preview` and `/raw`: what an item's output holds, so the item page can
-//! show it. A document, file or folder is read only inside the places the item worked in (its worktree or
-//! scratch dir, its project, the temp dir); a branch or commit comes from the project's git. Nothing is written.
+//! `/api/items/{id}/artifacts/{art}/preview` and `/raw`: what an item's output holds, so the item
+//! page can show it. Hub-owned durable deliverables (`<home>/workspaces/<id>/outputs/`) are served
+//! directly from the Hub; every project/worktree file, folder, branch, and commit is read strictly
+//! through the Node that holds the workspace via `steve-node-api`.
 
 use std::collections::HashMap;
 use std::path::{Component, Path as FsPath, PathBuf};
@@ -11,8 +12,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::Response;
 use serde_json::{Value, json};
-use steve_core::git::{git, is_git};
 
+use super::projects::offline;
 use super::{ApiResult, AppState, Ctx, Noun, blocking, ok, own, str_of};
 use crate::config::home_dir;
 use crate::error::BackendError;
@@ -44,16 +45,13 @@ pub(crate) struct Out {
     pub cwd: Option<PathBuf>,
     pub project: Option<PathBuf>,
     pub branch: Option<String>,
-    /// Where a file may be read from: the item's working places and the temp dir.
+    /// Allowed roots for this output (Hub-owned durable outputs directory when served from Hub, or
+    /// the item's places when resolved on its Node).
     pub roots: Vec<PathBuf>,
 }
 
-/// The temp directories an output may be in: the Hub's own.
-fn temp_dirs() -> Vec<PathBuf> {
-    vec![std::env::temp_dir(), "/tmp".into()]
-}
-
-/// The output, and where its Node reads it ([`node::view`]); no view: the Hub reads its own disk.
+/// The output, and where its Node reads it ([`node::view`]). Returns `None` ONLY for Hub-owned
+/// durable deliverables (`<home>/workspaces/<id>/outputs/`).
 async fn load(
     st: &AppState,
     ws: &str,
@@ -67,7 +65,7 @@ async fn load(
         st.cfg.clone(),
     );
     let id = item.clone();
-    let (o, project) = st
+    let (mut o, project) = st
         .read(move |r| {
             let i = own(r.item_get(&id)?, &ws, Noun::Item)?;
             let a = r
@@ -99,7 +97,6 @@ async fn load(
             roots.push(cfg.worktrees.join(&id));
             roots.push(cfg.scratch.join(&id));
             roots.push(cfg.home.join("workspaces").join(&id).join("outputs"));
-            roots.extend(temp_dirs());
             let o = Out {
                 kind: str_of(&a, "kind"),
                 title: str_of(&a, "title"),
@@ -113,19 +110,25 @@ async fn load(
         })
         .await?;
     // Durable deliverables belong to the Hub, even when the item ran on a remote Node that is
-    // now offline. `locate` still canonicalizes and checks the item's allowed roots.
+    // now offline. `locate` still canonicalizes and checks the Hub-owned durable outputs dir only.
     let durable = st.cfg.home.join("workspaces").join(&item).join("outputs");
     let v = if o
         .loc
         .as_ref()
         .is_some_and(|loc| FsPath::new(loc).starts_with(&durable))
     {
+        o.roots = vec![durable];
+        None
+    } else if o
+        .loc
+        .as_deref()
+        .is_some_and(|l| l.starts_with("http://") || l.starts_with("https://"))
+    {
+        // External URL link previews need neither disk nor Node access.
         None
     } else {
-        match st.workspaces.clone() {
-            Some(ws) => node::view(ws, item, project, &o, temp_dirs()).await?,
-            None => None,
-        }
+        let ws = st.workspaces.clone().ok_or_else(offline)?;
+        Some(node::view(ws, item, project, &o).await?)
     };
     Ok((o, v))
 }
@@ -259,7 +262,6 @@ async fn raw_source(o: Out, v: Option<node::View>, sub: Option<String>) -> Resul
         None => Src::Disk(blocking(move || on_disk(locate(&o, sub.as_deref()))).await?),
         Some(v) => match node::locate(&o, v, sub.as_deref()).await {
             Ok(node::Located::Node(a, e)) if !e.is_dir() => Src::Node(a, e),
-            Ok(node::Located::Disk(f)) => Src::Disk(blocking(move || on_disk(Ok(f))).await?),
             Ok(_) => return Err(not_a_file()),
             Err(node::Fail::Missing(r)) => return Err(ApiError::not_found(r)),
             Err(node::Fail::Api(e)) => return Err(e),
@@ -296,7 +298,7 @@ pub(super) fn byte_range(v: &str, total: usize) -> Option<(usize, usize)> {
     (a <= b && b < total).then_some((a, b))
 }
 
-/// The preview of an output: a `type` and what that type needs.
+/// The preview of a Hub-owned durable deliverable (or link): a `type` and what that type needs.
 pub(crate) fn describe(o: &Out, sub: Option<&str>) -> Value {
     if let Some(u) = o
         .loc
@@ -305,32 +307,15 @@ pub(crate) fn describe(o: &Out, sub: Option<&str>) -> Value {
     {
         return json!({ "type": "link", "url": u });
     }
-    let k = o.kind.to_lowercase();
-    if sub.is_none() {
-        if k.contains("提交") || k == "commit" {
-            return commit(o);
-        }
-        if k.contains("分支") || k == "branch" {
-            return branch(o);
-        }
-    }
     match locate(o, sub) {
-        Ok(f) => shown(f),
+        Ok(Found::Disk(p, shown)) if p.is_dir() => dir(&p, &shown),
+        Ok(Found::Disk(p, shown)) => file(&p, &shown),
         Err(e) => json!({ "type": "missing", "reason": e }),
     }
 }
 
-/// The preview of what [`locate`] found.
-fn shown(f: Found) -> Value {
-    match f {
-        Found::Disk(p, shown) if p.is_dir() => dir(&p, &shown),
-        Found::Disk(p, shown) => file(&p, &shown),
-        Found::Git(rev, rel, text) => from_git(&rev, &rel, &text),
-    }
-}
-
-/// A document git still has at `rev`.
-fn from_git(rev: &str, rel: &str, text: &str) -> Value {
+/// A document git still has at `rev` (returned by the Node's git face).
+pub(crate) fn from_git(rev: &str, rel: &str, text: &str) -> Value {
     let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
     let mut v = text_value(&name, text.as_bytes());
     v["path"] = json!(rel);
@@ -339,10 +324,8 @@ fn from_git(rev: &str, rel: &str, text: &str) -> Value {
 }
 
 pub(crate) enum Found {
-    /// The canonical path and how to show it.
+    /// The canonical path and how to show it (Hub-owned durable deliverable only).
     Disk(PathBuf, String),
-    /// The file is gone from disk but git still has it: rev, path, content.
-    Git(String, String, String),
 }
 
 /// Only plain names below the output: no `..`, no absolute path.
@@ -360,7 +343,7 @@ fn inside(p: &FsPath, roots: &[PathBuf]) -> bool {
         .any(|r| p.starts_with(r))
 }
 
-/// Where the output is, and the entry `sub` below it when it is a folder.
+/// Where a Hub-owned durable deliverable is, and the entry `sub` below it when it is a folder.
 pub(crate) fn locate(o: &Out, sub: Option<&str>) -> Result<Found, String> {
     let Some(loc) = o.loc.as_deref().map(str::trim).filter(|l| !l.is_empty()) else {
         return Err(steve_i18n::t!("hub.output.no_location"));
@@ -376,15 +359,7 @@ pub(crate) fn locate(o: &Out, sub: Option<&str>) -> Result<Found, String> {
             .map(|d| d.join(&loc))
             .collect()
     };
-    let Some(base) = candidates.iter().find(|p| p.exists()) else {
-        // a document of a finished item: its worktree is gone, the branch or main still has it
-        if !abs
-            && sub.is_none()
-            && plain(&loc).is_some()
-            && let Some(g) = git_doc(o, &loc)
-        {
-            return Ok(g);
-        }
+    let Some(base) = candidates.iter().find(|p| p.canonicalize().is_ok()) else {
         return Err(steve_i18n::t!("hub.output.cleaned_up", loc = loc));
     };
     let base = base.canonicalize().map_err(|e| e.to_string())?;
@@ -409,24 +384,6 @@ pub(crate) fn locate(o: &Out, sub: Option<&str>) -> Result<Found, String> {
             ))
         }
     }
-}
-
-/// The document `loc` as the item's branch, else HEAD, has it in the item's git repository.
-fn git_doc(o: &Out, loc: &str) -> Option<Found> {
-    let g = git_dir(o)?;
-    // a rev that starts with `-` would be read as an option of `git show` (as in `branch`)
-    let revs = o
-        .branch
-        .iter()
-        .filter(|b| !b.is_empty() && !b.starts_with('-'))
-        .cloned()
-        .chain(["HEAD".to_string()]);
-    for rev in revs {
-        if let Ok(t) = git(&g, &["show", &format!("{rev}:{loc}")]) {
-            return Some(Found::Git(rev, loc.to_string(), t));
-        }
-    }
-    None
 }
 
 fn home_tilde(p: &FsPath) -> String {
@@ -617,35 +574,6 @@ pub(crate) fn text_value(name: &str, b: &[u8]) -> Value {
     json!({ "type": "text", "name": name, "lang": lang(name), "text": s, "truncated": cut })
 }
 
-/// The git repository of the item: its project, or its own directory.
-fn git_dir(o: &Out) -> Option<PathBuf> {
-    [&o.project, &o.cwd]
-        .into_iter()
-        .flatten()
-        .find(|d| d.exists() && is_git(d))
-        .cloned()
-}
-
-/// A stat or diff with paths as they are (`docs/对话.md`, not `"docs/\345…"`); empty when git fails.
-fn unquoted(g: &FsPath, args: &[&str]) -> String {
-    let all: Vec<&str> = ["-c", "core.quotePath=false"]
-        .iter()
-        .chain(args)
-        .copied()
-        .collect();
-    git(g, &all).unwrap_or_default()
-}
-fn cut_diff(d: String) -> (String, bool) {
-    if d.len() <= DIFF_MAX {
-        return (d, false);
-    }
-    let mut end = DIFF_MAX;
-    while !d.is_char_boundary(end) {
-        end -= 1;
-    }
-    (d[..end].to_string(), true)
-}
-
 fn is_hash(s: &str) -> bool {
     (7..=40).contains(&s.len()) && s.bytes().all(|c| c.is_ascii_hexdigit())
 }
@@ -656,123 +584,6 @@ fn first_word(s: &str) -> &str {
         .split(|c: char| c.is_whitespace() || c == '（' || c == '(')
         .next()
         .unwrap_or_default()
-}
-
-fn commit(o: &Out) -> Value {
-    let hash = [
-        first_word(&o.title),
-        o.loc.as_deref().map(first_word).unwrap_or_default(),
-    ]
-    .into_iter()
-    .find(|h| is_hash(h));
-    let Some(hash) = hash else {
-        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.no_commit_hash") });
-    };
-    let Some(g) = git_dir(o) else {
-        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.no_repo") });
-    };
-    let Ok(meta) = git(&g, &["show", "-s", "--format=%H%x1f%an%x1f%ct%x1f%B", hash]) else {
-        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.commit_gone", hash = hash) });
-    };
-    let f: Vec<&str> = meta.splitn(4, '\u{1f}').collect();
-    let stat = unquoted(&g, &["show", "--format=", "--stat=120", hash]);
-    let (diff, cut) = cut_diff(unquoted(
-        &g,
-        &["show", "--format=", "--patch", "--no-color", hash],
-    ));
-    json!({
-        "type": "commit",
-        "hash": f.first().copied().unwrap_or(hash),
-        "author": f.get(1).copied().unwrap_or_default(),
-        "at": f.get(2).and_then(|t| t.parse::<u64>().ok()).map(|t| t * 1000),
-        "message": f.get(3).copied().unwrap_or_default().trim(),
-        "stat": stat,
-        "diff": diff,
-        "truncated": cut,
-    })
-}
-
-fn branch(o: &Out) -> Value {
-    let Some(g) = git_dir(o) else {
-        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.no_repo") });
-    };
-    let has = |b: &str| {
-        git(
-            &g,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{b}"),
-            ],
-        )
-        .is_ok()
-    };
-    let named = first_word(&o.title);
-    let name = [Some(named), o.branch.as_deref()]
-        .into_iter()
-        .flatten()
-        .find(|b| !b.is_empty() && !b.starts_with('-') && has(b));
-    let Some(name) = name else {
-        let shown = if named.is_empty() {
-            o.branch.as_deref().unwrap_or_default()
-        } else {
-            named
-        };
-        return json!({ "type": "missing", "reason": steve_i18n::t!("hub.output.branch_gone", branch = shown) });
-    };
-    let base = ["main", "master"]
-        .into_iter()
-        .find(|b| *b != name && has(b));
-    let range = base
-        .map(|b| format!("{b}..{name}"))
-        .unwrap_or_else(|| name.to_string());
-    let log = git(
-        &g,
-        &[
-            "log",
-            "--no-color",
-            "-n",
-            "200",
-            "--format=%h%x1f%s%x1f%an%x1f%ct",
-            &range,
-        ],
-    )
-    .unwrap_or_default();
-    let commits: Vec<Value> = log
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| {
-            let f: Vec<&str> = l.splitn(4, '\u{1f}').collect();
-            json!({
-                "hash": f.first().copied().unwrap_or_default(),
-                "subject": f.get(1).copied().unwrap_or_default(),
-                "author": f.get(2).copied().unwrap_or_default(),
-                "at": f.get(3).and_then(|t| t.parse::<u64>().ok()).map(|t| t * 1000),
-            })
-        })
-        .collect();
-    let (stat, diff) = match base {
-        Some(b) => {
-            let span = format!("{b}...{name}");
-            (
-                unquoted(&g, &["diff", "--stat=120", &span]),
-                unquoted(&g, &["diff", "--no-color", &span]),
-            )
-        }
-        None => (String::new(), String::new()),
-    };
-    let (diff, cut) = cut_diff(diff);
-    json!({
-        "type": "branch",
-        "branch": name,
-        "base": base,
-        "worktree": o.loc.as_deref().filter(|l| FsPath::new(l).exists()).map(|l| home_tilde(FsPath::new(l))),
-        "commits": commits,
-        "stat": stat,
-        "diff": diff,
-        "truncated": cut,
-    })
 }
 
 #[cfg(test)]
@@ -798,8 +609,20 @@ mod tests {
     }
 
     pub(super) fn g(dir: &FsPath, args: &[&str]) -> String {
-        git(dir, args).unwrap_or_else(|e| panic!("git {args:?}: {e}"))
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
+
     /// A repo on main with one commit.
     pub(super) fn repo(root: &FsPath) -> PathBuf {
         let r = root.join("repo");
@@ -870,11 +693,9 @@ mod tests {
         assert_eq!(v["entries"][0]["form"], "image");
         assert_eq!(describe(&d, Some("a.png"))["type"], "image");
         assert_eq!(describe(&d, Some("b.bin"))["type"], "binary");
-        // nothing above the output, even through its own folder
         assert_eq!(describe(&d, Some("../说明.md"))["type"], "missing");
         assert_eq!(describe(&d, Some("/etc/hosts"))["type"], "missing");
         assert!(matches!(locate(&d, Some("a.png")), Ok(Found::Disk(p, _)) if p.ends_with("a.png")));
-        // Word, Excel and PowerPoint files go to the page as they are, to be rendered there
         std::fs::write(w.join("docs/报告.docx"), [b'P', b'K', 3, 4, 0]).unwrap();
         let v = describe(&out("文档", "报告", Some("docs/报告.docx"), &w, None), None);
         assert_eq!(
@@ -904,7 +725,6 @@ mod tests {
         let v = describe(&o, None);
         assert_eq!(v["type"], "missing");
         assert!(v["reason"].as_str().unwrap().contains("不在"), "{v}");
-        // a link out of the worktree is followed to where it really is
         std::os::unix::fs::symlink(&elsewhere, w.join("link")).unwrap();
         assert_eq!(
             describe(&out("文件", "x", Some("link/key"), &w, None), None)["type"],
@@ -934,66 +754,6 @@ mod tests {
     }
 
     #[test]
-    fn branches_commits_and_documents_from_git() {
-        let t = tempfile::tempdir().unwrap();
-        let r = repo(t.path());
-        g(&r, &["checkout", "-q", "-b", "steve/st-1"]);
-        std::fs::create_dir_all(r.join("docs")).unwrap();
-        std::fs::write(r.join("docs/方案.md"), "# 方案\n").unwrap();
-        g(&r, &["add", "."]);
-        g(&r, &["commit", "-q", "-m", "加方案"]);
-        let hash = g(&r, &["rev-parse", "--short", "HEAD"]);
-        g(&r, &["checkout", "-q", "main"]);
-        let gone = t.path().join("gone-worktree");
-
-        let mut b = out(
-            "分支",
-            "steve/st-1（已 rebase 到 0.2.19）",
-            Some(&gone.to_string_lossy()),
-            &gone,
-            Some(&r),
-        );
-        let v = describe(&b, None);
-        assert_eq!(v["type"], "branch", "{v}");
-        assert_eq!(v["base"], "main");
-        assert_eq!(v["commits"][0]["subject"], "加方案");
-        assert!(v["diff"].as_str().unwrap().contains("+# 方案"));
-        assert_eq!(v["worktree"], Value::Null);
-
-        let v = describe(
-            &out("提交", &format!("{hash} 加方案"), None, &gone, Some(&r)),
-            None,
-        );
-        assert_eq!(v["type"], "commit", "{v}");
-        assert_eq!(v["message"], "加方案");
-        assert!(v["stat"].as_str().unwrap().contains("docs/方案.md"));
-        assert!(
-            v["diff"]
-                .as_str()
-                .unwrap()
-                .contains("diff --git a/docs/方案.md")
-        );
-        assert_eq!(
-            describe(&out("提交", "1234567 不存在", None, &gone, Some(&r)), None)["type"],
-            "missing"
-        );
-
-        // the worktree is gone and main does not have it: the branch still does
-        b.kind = "文档".into();
-        b.loc = Some("docs/方案.md".into());
-        b.branch = Some("steve/st-1".into());
-        let v = describe(&b, None);
-        assert_eq!(v["type"], "text", "{v}");
-        assert_eq!(v["text"], "# 方案");
-        assert_eq!(v["from"], "git steve/st-1");
-
-        b.kind = "分支".into();
-        b.title = "steve/st-9".into();
-        b.branch = None;
-        assert_eq!(describe(&b, None)["type"], "missing");
-    }
-
-    #[test]
     fn ranges() {
         assert_eq!(byte_range("bytes=0-1", 10), Some((0, 1)));
         assert_eq!(byte_range("bytes=5-", 10), Some((5, 9)));
@@ -1001,25 +761,6 @@ mod tests {
         assert_eq!(byte_range("bytes=8-100", 10), Some((8, 9)));
         assert_eq!(byte_range("bytes=11-12", 10), None);
         assert_eq!(byte_range("bytes=0-1,3-4", 10), None);
-    }
-
-    /// A branch that reads as an option never reaches `git show`: the document comes from HEAD and
-    /// no file is written by `--output`.
-    #[test]
-    fn git_doc_skips_a_branch_that_starts_with_a_dash() {
-        let root = tempfile::tempdir().unwrap();
-        let r = repo(root.path());
-        let target = root.path().join("written");
-        let mut o = out("file", "a", Some("a.txt"), &r, Some(&r));
-        o.branch = Some(format!("--output={}", target.display()));
-        match git_doc(&o, "a.txt") {
-            Some(Found::Git(rev, _, text)) => {
-                assert_eq!(rev, "HEAD");
-                assert_eq!(text.trim_end(), "a");
-            }
-            _ => panic!("read from HEAD"),
-        }
-        assert!(!target.exists());
     }
 }
 

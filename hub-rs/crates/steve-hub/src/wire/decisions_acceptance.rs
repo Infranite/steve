@@ -36,11 +36,12 @@ use super::{Vars, Wired, wire_with};
 
 struct Harness {
     _dir: tempfile::TempDir,
+    _local_node: Option<super::test_local_node::AttachedLocalNode>,
     w: Wired,
     store: Store,
 }
 
-fn wire_hub() -> Harness {
+async fn wire_hub() -> Harness {
     steve_modules::net::forbid_in_this_process();
     let dir = tempfile::tempdir().expect("tmp");
     let h = dir.path().to_path_buf();
@@ -54,8 +55,7 @@ fn wire_hub() -> Harness {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NODE_MODE", "local".into()),
-        ("STEVE_NODE_LISTEN", "0".into()),
+        ("STEVE_LOCAL_NODE_PORT", "0".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
@@ -65,7 +65,10 @@ fn wire_hub() -> Harness {
     .map(|(k, v)| (k.to_string(), v))
     .collect();
     let vars = Arc::new(vars);
-    let get: Vars = Arc::new(move |k: &str| vars.get(k).cloned());
+    let get: Vars = Arc::new({
+        let vars = vars.clone();
+        move |k: &str| vars.get(k).cloned()
+    });
     let cfg = Arc::new(crate::config::Config::from_vars(&*get).expect("config"));
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
@@ -74,6 +77,11 @@ fn wire_hub() -> Harness {
         Default::default(),
     )));
     let w = wire_with(&cfg, &bus, get).expect("wire");
+    let local_node = if w.nodes.is_some() {
+        Some(super::test_local_node::attach(&w, &cfg, Default::default()).await)
+    } else {
+        None
+    };
     let store = w.core.store().store().clone();
     store.ensure_workspace().expect("workspace");
     store
@@ -101,6 +109,7 @@ fn wire_hub() -> Harness {
         .expect("seed users");
     Harness {
         _dir: dir,
+        _local_node: local_node,
         w,
         store,
     }
@@ -302,7 +311,7 @@ fn assert_success_replay_and_conflict(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_registered_decision_subject_has_success_and_refusal_contract() {
-    let h = wire_hub();
+    let h = wire_hub().await;
     let store = &h.store;
     let ws = "default";
     let owner = caller(ws, "owner");

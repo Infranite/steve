@@ -1,24 +1,12 @@
-//! An item's worktree made and given back by its session's backend (N0e-E11a): with the local Node
-//! on, the core no longer runs `git worktree add` or `git worktree remove` under its lock for a
-//! session bound there.
+//! An item's worktree planned and tidied via its session's Node backend.
 //!
-//! - Plan, under the lock: a new session of an item on a git worktree is created with the
-//!   directory its worktree goes to (`<worktrees>/<item id>`, on `steve/<id>`), made or not. The
-//!   backend binds it with that plan ([`AgentRuntime::created`](crate::AgentRuntime::created)); one
-//!   that does not make it after all leaves it to the core, which makes it as before.
-//! - Off the lock, the backend makes it (refusing below the disk floor) and opens the session.
-//! - Apply, under the lock again: [`Core::workspace_ready`] records where it is, only while the
-//!   session is still the item's current one (a late answer for an older session changes nothing);
-//!   [`Core::workspace_failed`] raises the card a start that could not prepare its worktree raises.
-//! - A finished item's worktree it made is given back by it ([`Tx::tidy_by_backend`]): the core
-//!   decides from the branch's facts (unmerged work stays; a merged branch goes too), the backend
-//!   removes it once its harness is gone, and [`Core::workspace_tidied`] writes what was done.
-
-use std::path::Path;
+//! Core never invokes `git worktree` directly: it names the worktree path and branch under the
+//! lock, lets the backend/Node prepare or remove it off the lock, and applies the result when it
+//! comes back.
 
 use crate::error::Result;
 use crate::repo::Item;
-use crate::{Core, Tx, git, patch};
+use crate::{Core, Tx, patch};
 
 impl Core {
     /// The worktree `session` waited for is at `path` (on `branch`).
@@ -54,87 +42,33 @@ impl Core {
     }
 }
 
-/// Preserve the familiar branch unless another worktree already owns it. Separate installations
-/// can share a repository and item numbers: never steal that other installation's branch.
-pub(crate) fn worktree_branch(item: &Item, repo: &Path, target: &Path) -> String {
-    let branch = item
-        .branch
+/// Deterministic item worktree branch name (never queries local git on the Hub).
+pub(crate) fn worktree_branch(item: &Item) -> String {
+    item.branch
         .clone()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("steve/{}", item.id.to_lowercase()));
-    // Branch names cannot contain newlines. Avoid parsing porcelain paths: older Git lacks -z,
-    // and its C quoting of Unicode/control characters does not name the literal directory.
-    let listing = git::git(repo, &["worktree", "list", "--porcelain"]).unwrap_or_default();
-    let occupied = listing
-        .lines()
-        .any(|l| l.strip_prefix("branch refs/heads/") == Some(branch.as_str()));
-    let same_worktree = occupied
-        && git::git(target, &["rev-parse", "--show-toplevel"])
-            .is_ok_and(|root| same_dir(&root, &target.to_string_lossy()))
-        && git::git(target, &["symbolic-ref", "--short", "HEAD"]).is_ok_and(|head| head == branch);
-    if !occupied || same_worktree {
-        return branch;
-    }
-    let namespace = crate::util::sha(&target.parent().unwrap_or(target).to_string_lossy());
-    format!("steve/{}-{}", &namespace[..12], item.id.to_lowercase())
-}
-
-/// Two spellings of the same directory (a symlinked temp dir, say).
-fn same_dir(a: &str, b: &str) -> bool {
-    a == b
-        || matches!(
-            (Path::new(a).canonicalize(), Path::new(b).canonicalize()),
-            (Ok(x), Ok(y)) if x == y
-        )
+        .unwrap_or_else(|| format!("steve/{}", item.id.to_lowercase()))
 }
 
 impl Tx<'_> {
-    /// Where the item's worktree goes when its session's backend may make it: `(dir, branch)`.
-    /// `None`: the core makes the item's directory itself ([`Self::prepare_cwd`] says why not, if
-    /// it cannot).
+    /// Where the item's worktree goes on its Node: `(dir, branch)`.
     pub(crate) fn planned_worktree(&self, item: &Item) -> Result<Option<(String, String)>> {
-        if !self.rt().makes_worktrees() {
-            return Ok(None);
-        }
         let Some(p) = self.db().project(item.project_id.as_deref())? else {
             return Ok(None);
         };
-        let path = Path::new(&p.path);
-        if p.device_id != "hub"
-            || p.kind != "git"
-            || !p.worktree
-            || !path.exists()
-            || !git::is_git(path)
-        {
+        if p.device_id != "hub" || p.kind != "git" || !p.worktree {
             return Ok(None);
         }
         Ok(Some((
             self.cfg().worktrees.join(&item.id).to_string_lossy().into(),
-            worktree_branch(item, path, &self.cfg().worktrees.join(&item.id)),
+            worktree_branch(item),
         )))
     }
 
-    /// The item's current session works in a worktree its backend makes again when it opens:
-    /// a removed one is not made here.
-    pub(crate) fn backend_remakes(&self, item_id: &str) -> Result<bool> {
-        if !self.rt().makes_worktrees() {
-            return Ok(false);
-        }
-        Ok(self
-            .active_session(item_id)?
-            .is_some_and(|s| self.rt().makes_workspace(&s.id)))
-    }
-
-    /// A finished item's worktree that its backend made is given back by it. `true`: decided
-    /// (unmerged work stays, or the backend has it on its way); `false`: the core tidies as
-    /// before (no such backend, or nothing of it there).
-    pub(crate) fn tidy_by_backend(
-        &self,
-        i: &Item,
-        p: &crate::repo::Project,
-        branch: &str,
-        cwd: &str,
-    ) -> Result<bool> {
+    /// A finished item's worktree that its backend made is given back by it. `true`: handled here
+    /// (archived/cancelled tidy sent to the session backend); `false`: defer to Node housekeeping
+    /// (`disk_reclaim`), which verifies landed/merged status and sheds caches safely on the Node.
+    pub(crate) fn tidy_by_backend(&self, i: &Item) -> Result<bool> {
         if !self.rt().makes_worktrees() {
             return Ok(false);
         }
@@ -147,17 +81,10 @@ impl Tx<'_> {
         else {
             return Ok(false);
         };
-        /* the backend that made the worktree is the only one that gives it back: once it is gone, the
-         * backend did (its result is told when its receipt is applied), never the Hub's own git */
-        if !Path::new(cwd).exists() {
-            return Ok(true);
+        if i.is_completed() && !i.archived {
+            return Ok(false);
         }
-        let f = git::branch_facts(Path::new(&p.path), branch, "main");
-        /* an archived item gives back a clean worktree even when its branch is not in main */
-        if i.is_completed() && !i.archived && !f.landed {
-            return Ok(true);
-        }
-        self.rt().tidy(&s.id, !f.merged)
+        self.rt().tidy(&s.id, true)
     }
 
     fn current(&self, session: &str) -> Result<Option<(crate::repo::Session, Item)>> {
@@ -184,7 +111,7 @@ impl Tx<'_> {
         let Some((s, i)) = self.current(session)? else {
             return Ok(());
         };
-        if !i.cwd.as_deref().is_some_and(|c| same_dir(c, path)) {
+        if i.cwd.as_deref() != Some(path) {
             self.db().item_patch(&i.id, patch![cwd: path])?;
         }
         if let Some(b) = branch
@@ -192,7 +119,7 @@ impl Tx<'_> {
         {
             self.db().item_patch(&i.id, patch![branch: b])?;
         }
-        if !same_dir(&s.cwd, path) {
+        if s.cwd != path {
             self.db().session_patch(&s.id, patch![cwd: path])?;
         }
         Ok(())
@@ -217,8 +144,7 @@ impl Tx<'_> {
         let Some(i) = self.db().item(item_id)? else {
             return Ok(());
         };
-        let (Some(p), Some(branch), Some(cwd)) = (
-            self.db().project(i.project_id.as_deref())?,
+        let (Some(branch), Some(cwd)) = (
             i.branch.as_deref().filter(|b| !b.is_empty()),
             i.cwd.as_deref().filter(|c| !c.is_empty()),
         ) else {
@@ -227,16 +153,7 @@ impl Tx<'_> {
         if !removed {
             return Ok(());
         }
-        let head = git::git(
-            Path::new(&p.path),
-            &["rev-parse", "--short", &format!("refs/heads/{branch}")],
-        );
-        let said = match head {
-            Ok(h) => {
-                format!("删除了工作区 {cwd}（分支 {branch} 保留在 {h}，继续时从分支重建）")
-            }
-            Err(_) => format!("删除了工作区 {cwd}；删除了已合并的分支 {branch}"),
-        };
+        let said = format!("删除了工作区 {cwd}（分支 {branch} 保留，继续时从分支重建）");
         self.db()
             .timeline_add(item_id, "steve", "sys", &said, None)?;
         Ok(())

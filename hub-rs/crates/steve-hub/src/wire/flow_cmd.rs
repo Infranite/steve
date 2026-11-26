@@ -1,5 +1,5 @@
 //! `cmd` flow steps on the Node that holds the project (N0e-E6), for a Hub whose local Node is on
-//! (`STEVE_NODE_MODE=local`): the project is found through [`Workspaces`], its directory prepared
+//! (colocated `steve-node`): the project is found through [`Workspaces`], its directory prepared
 //! as a workspace of the project and that directory (`project:<id>:<dir>`, so a project moved to
 //! another path is a new one), and the command written to the Node's ledger for the run
 //! (`flow_run:<run>`) before it is sent, so it runs at most once. A retry you ask for after a

@@ -3,7 +3,7 @@
 //! device is a paired remote Node, through N2's [`NodeFleet`]. A Node that is not there gives
 //! [`PlacementError::Offline`] (`设备离线`), never a fallback to the Hub's own disk.
 //!
-//! The local Node's workspace faces open with it, only with `STEVE_NODE_MODE=local` and never on
+//! The local Node's workspace faces open with the colocated `steve-node` process and never on
 //! a `STEVE_NO_RESUME` copy (D8): without it, the Hub's own device answers
 //! [`PlacementError::LocalOff`] and callers keep their own path.
 //!
@@ -33,7 +33,7 @@ use crate::nodes::NodeFleet;
 /// The id of the Hub's own device (`projects.device_id`, `sessions.device_id`).
 pub const HUB_DEVICE: &str = "hub";
 
-/// The local Node: the Node itself (host bridges such as [`steve_node::LocalNode::set_roots`])
+/// The local Node: the Node itself (host bridges such as [`HostNode::set_roots`])
 /// and its coordinator.
 pub struct LocalFace {
     pub node: Arc<dyn super::host_node::HostNode>,
@@ -239,9 +239,14 @@ impl Workspaces {
         })
     }
 
+    /// The colocated Node handle, when enabled (not a diagnostic copy).
+    pub fn local_node(&self) -> Option<Arc<dyn Node>> {
+        self.local.as_ref().map(|l| l.node.node())
+    }
+
     /// The local Node's roots as the Hub configures them now (what [`Workspaces::refresh_roots`]
     /// gives it). [`PlacementError::LocalOff`] without a local Node.
-    pub fn local_roots(&self) -> Result<Vec<steve_node::Root>, PlacementError> {
+    pub fn local_roots(&self) -> Result<Vec<HostRoot>, PlacementError> {
         if self.local.is_none() {
             return Err(PlacementError::LocalOff);
         }
@@ -385,11 +390,31 @@ impl steve_knowledge::sources::folder_node::FolderPlaces for KbFolders {
             Err(PlacementError::Store(e)) => Err(Unplaced::Failed(e.to_string())),
         }
     }
+
+    async fn check_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<PathCheckResponse>, steve_knowledge::sources::folder_node::Unplaced> {
+        use steve_knowledge::sources::folder_node::Unplaced;
+        let Some(node) = self.0.local_node() else {
+            return Err(Unplaced::Offline);
+        };
+        match node
+            .path_check(PathCheckRequest {
+                path: path.to_string(),
+            })
+            .await
+        {
+            Ok(resp) => Ok(Some(resp)),
+            Err(e) if e.code == Code::Unavailable => Err(Unplaced::Offline),
+            Err(e) => Err(Unplaced::Failed(e.safe_detail)),
+        }
+    }
 }
 
 /// `path` (absolute, normalized) as a place under the deepest root that holds it; the match is by
 /// whole path components, made on the names alone.
-pub(crate) fn within(roots: &[steve_node::Root], path: &Path) -> Option<RootPath> {
+pub(crate) fn within(roots: &[HostRoot], path: &Path) -> Option<RootPath> {
     roots
         .iter()
         .filter_map(|r| {

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_node_api::*;
 
-use crate::git::tests::{branch_with, g, repo};
+use crate::git::tests::{branch_with, g, git_test, repo};
 use crate::node_git::{Applied, Ask, NodeGit};
 use crate::patch;
 use crate::repo::{Release, WS};
@@ -303,15 +303,13 @@ fn a_delivery_on_a_node_is_frozen_and_checked_there() {
         || !closing(&k, &i).print_pending,
     );
     let frozen = closing(&k, &i).fingerprint.unwrap();
-    assert_eq!(
-        Some(&frozen),
-        crate::cycle::fingerprint(wt.to_str()).as_ref()
-    );
+    let probe = crate::testkit::TestNodeGit::new(k.home(), k.core.store().clone());
+    assert_eq!(Some(&frozen), probe.fingerprint_dir(&wt).as_ref());
     assert_eq!(k.phase(&i), "closing");
 
     /* the result moves: the gate learns it from the Node and says what moved */
     std::fs::write(wt.join("c.txt"), "c\n").unwrap();
-    let now = crate::cycle::fingerprint(wt.to_str()).unwrap();
+    let now = probe.fingerprint_dir(&wt).unwrap();
     let words = crate::upstream::describe_change(&wt, &frozen, &now);
     assert!(!k.core.tx().evaluate_cycle_close(&i).unwrap());
     // the phase changes first, the timeline line is written a moment later: wait for both
@@ -515,7 +513,7 @@ fn head_moving_between_the_facts_and_the_rebase_refuses_it_and_nothing_is_releas
     assert_ne!(g(&wt, &["rev-parse", "HEAD"]), head);
     g(&wt, &["merge-base", "--is-ancestor", "HEAD~1", "HEAD"]);
     assert!(
-        !crate::git::git_test(&wt, &["merge-base", "--is-ancestor", "main", "HEAD"]).unwrap(),
+        !git_test(&wt, &["merge-base", "--is-ancestor", "main", "HEAD"]).unwrap(),
         "not rebased"
     );
     assert!(
@@ -533,7 +531,7 @@ fn head_moving_between_the_facts_and_the_rebase_refuses_it_and_nothing_is_releas
         "The new release attempt reaches the releasing state.",
         || outcome(&k, &d2)["outcome"] == "releasing",
     );
-    assert!(crate::git::git_test(&wt, &["merge-base", "--is-ancestor", "main", "HEAD"]).unwrap());
+    assert!(git_test(&wt, &["merge-base", "--is-ancestor", "main", "HEAD"]).unwrap());
     assert!(
         k.timeline_texts(&i)
             .iter()

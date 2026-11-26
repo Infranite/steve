@@ -2,8 +2,11 @@
 //! lines, apply, undo); a draft with a refused path has one line with the reason and no operation;
 //! plus the `kb_source:<id>` patch (owner rule, staleness) and `doc.patch` / `note.create`.
 
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use steve_store::testkit::knowledge as fixture;
 
@@ -39,6 +42,9 @@ fn setup() -> Env {
     )
     .unwrap();
     assert!(kb.set_folder_policy(FolderPolicy::new(&home, home.join(".steve"))));
+    assert!(kb.set_folder_places(Arc::new(common::TestDiskRouter(
+        common::TestDiskPlaces::new(env.store().clone())
+    ))));
     fixture::seed_draft_org(env.store()).unwrap();
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
     Env {

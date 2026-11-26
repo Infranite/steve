@@ -97,9 +97,9 @@ pub struct Wired {
     pub tools: modules::Tools,
     /// Remote Nodes (enabled by default): their routes and the coordinators sessions go to.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
-    /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
+    /// The colocated service Node's coordinator, for `/healthz`.
     pub node: Option<Arc<node_runtime::NodeRuntime>>,
-    /// Local history discovery: session Node when present, otherwise the jobs Node.
+    /// Local history discovery via the colocated Node.
     pub history: Option<Arc<dyn steve_node_api::Discovery>>,
     /// Where projects', items', sessions' and knowledge folders' files are (which Node).
     pub workspaces: Arc<workspaces::Workspaces>,
@@ -155,249 +155,45 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     c
 }
 
-fn acp_config(cfg: &Config) -> steve_acp::AcpConfig {
-    steve_acp::AcpConfig {
-        declared: cfg
-            .declared_adapters
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-        adapters: cfg
-            .adapters
-            .iter()
-            .map(|(k, v)| (k.clone(), v.into()))
-            .collect(),
-        node: cfg.node.clone().into(),
-        claude_executable: cfg.claude_executable.clone().into(),
-        claude_config_dir: cfg.claude_config_dir.clone(),
-        steve_home: cfg.home.clone(),
-        codex_home: cfg.codex_home.clone(),
-        user_home: crate::config::home_dir(),
-        version: cfg.version.clone(),
-    }
-}
-
 /// Where the sibling crates read their environment variables from (the process environment, or
 /// a map in tests).
 pub type Vars = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// The opt-in local host: the coordinator, and the tools port that gets its ToolService once
-/// core/modules exist.
-/// The Node the Hub's sessions run on (in this process or in one of its own).
+/// The colocated Node the Hub runs sessions, model jobs, research, and host operations on.
 struct SessionHost {
     runtime: Arc<node_runtime::NodeRuntime>,
     node: Arc<dyn host_node::HostNode>,
     tools: Arc<node_tools::NodeTools>,
 }
 
-struct NodeHost {
-    runtime: Arc<node_runtime::NodeRuntime>,
-    /// The Node itself, for the same-machine host bridge (where a bound workspace is).
-    node: Arc<steve_node::LocalNode>,
-    tools: Arc<node_tools::NodeTools>,
-}
-
-/// Construct the local host in unit tests (`wire::node_binding::tests`).
-#[cfg(test)]
-fn node_runtime(
-    cfg: &Config,
-    store: &steve_store::Store,
-    domain: Arc<dyn node_runtime::NodeDomain>,
-    vars: &Vars,
-    secrets: &Arc<node_secrets::NodeSecrets>,
-    jobs: &mut Vec<modules::Job>,
-) -> Result<Option<NodeHost>, BackendError> {
-    let Some(mode) = node_mode(vars, cfg.diagnostic())? else {
-        return Ok(None);
-    };
-    open_in_process_node(
-        cfg,
-        store,
-        domain,
-        vars,
-        secrets,
-        jobs,
-        mode == NodeMode::Local,
-    )
-    .map(Some)
-}
-
-/// Opens the Hub's in-process Node: shared with agent sessions (`"local"`, `<data>/node`) only
-/// when `sessions_here` is true (`STEVE_NODE_MODE=local`), and isolated on `"local-jobs"`
-/// (`<data>/node-jobs`, zero session capacity) when sessions live in the service Node.
-fn open_in_process_node(
-    cfg: &Config,
-    store: &steve_store::Store,
-    domain: Arc<dyn node_runtime::NodeDomain>,
-    vars: &Vars,
-    secrets: &Arc<node_secrets::NodeSecrets>,
-    jobs: &mut Vec<modules::Job>,
-    sessions_here: bool,
-) -> Result<NodeHost, BackendError> {
-    /* a log line: in en whatever language the Hub answers people in */
-    for warning in steve_i18n::with(steve_i18n::EN, || {
-        crate::check::local_node_warnings(cfg, vars)
-    }) {
-        tracing::warn!("{warning}");
-    }
-    let (id, home) = if sessions_here {
-        ("local", cfg.data_dir.join("node"))
-    } else {
-        ("local-jobs", cfg.data_dir.join("node-jobs"))
-    };
-    let node_id = steve_node_api::NodeId::new(id).expect("constant node id");
-    let tools = node_tools::NodeTools::open(store.clone(), node_id.clone(), &home)
-        .map_err(|e| BackendError::msg(e.to_string()))?;
-    let roots = node_binding::roots(store, &workspaces::configured(cfg))
-        .map_err(|e| BackendError::msg(e.to_string()))?;
-    let mut node_cfg = local_node_config(cfg, node_id.clone(), home, roots, true);
-    if !sessions_here {
-        node_cfg.capacity.sessions = 0;
-    }
-    let node = Arc::new(
-        steve_node::LocalNode::open(node_cfg).map_err(|e| BackendError::msg(e.to_string()))?,
-    );
-    local_node_extras(&node, cfg, true);
-    let runtime = node_runtime::NodeRuntime::new(store.clone(), node.clone(), domain);
-    runtime.set_configured_roots(workspaces::configured(cfg));
-    runtime.set_principal_state(principal_state(vars));
-    // an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
-    runtime.set_idle_release(cfg.idle_release_ms as i64);
-    runtime.set_cost_caps(cost_caps(vars));
-    // an attempt's deadline (default 6 h); the end-to-end tests shorten it to see a card expire
-    if let Some(ms) = turn_limit(vars) {
-        runtime.set_turn_limit(ms);
-    }
-    // vault uses' values, for this Node's commands only (N0e-E7)
-    node.connect_secrets(secrets.for_node(node_id.clone()));
-    node.connect(
-        Arc::new(node_runtime::Sink(Arc::downgrade(&runtime))),
-        Some(Arc::new(
-            node_files::NodeFiles::new(store.clone(), node_id, cfg.data_dir.clone())
-                .with_reply_source(
-                    crate::deliveries::Service::new(
-                        store.clone(),
-                        cfg.home.clone(),
-                        cfg.public_url.clone(),
-                    ),
-                    node.clone(),
-                ),
-        )),
-    );
-    jobs.push(crate::wire::modules::Job::new(
-        "node.local",
-        start_node(runtime.clone(), node.clone(), tools.clone()),
-    ));
-    Ok(NodeHost {
-        runtime,
-        tools,
-        node,
-    })
-}
-
-/// The Hub's own Node as the Hub configures it (in its process, or in one of its own, B1): no
-/// ceiling, 32 concurrent turns until its saved device setting is synchronized, the Hub's harnesses
-/// and roots, sessions, flow commands, and with `jobs` Steve's own model work (think and research).
-pub(crate) fn local_node_config(
-    cfg: &Config,
-    node: steve_node_api::NodeId,
-    home: std::path::PathBuf,
-    roots: Vec<steve_node::Root>,
-    jobs: bool,
-) -> steve_node::NodeConfig {
-    steve_node::NodeConfig {
-        ceiling: steve_node::PolicyCeiling::unlimited(),
-        node,
-        home,
-        acp: acp_config(cfg),
-        roots,
-        capacity: steve_node_api::Capacity {
-            sessions: steve_node_api::Capacity::SESSIONS_DEFAULT,
-            // think and research jobs share it
-            jobs: if jobs { LOCAL_JOB_CAPACITY } else { 0 },
-            // flow `cmd` steps (N0e-E6)
-            execs: 16,
-        },
-        // a 256 MiB journal at most, 512 MiB left free on the disk, new work again below 80%;
-        // no new item's worktree below Steve's disk floor
-        storage: steve_node::Storage {
-            worktree_floor: cfg.disk.floor,
-            ..steve_node::Storage::default()
-        },
-    }
-}
-
-/// Research (on the Node that runs jobs) and discovery: the history and harnesses the Hub would
-/// read itself, its own homes and binaries.
-pub(crate) fn local_node_extras(node: &steve_node::LocalNode, cfg: &Config, jobs: bool) {
-    if jobs {
-        node.enable_research(steve_research::ResearchConfig::new(
-            cfg.scratch.join("research"),
-        ));
-    }
-    let homes = crate::resume::Homes::of(cfg);
-    let mut state_dirs = std::collections::BTreeMap::new();
-    let mut bins = std::collections::BTreeMap::new();
-    for b in steve_harness_spec::builtins() {
-        if let Some(state) = &b.properties.state {
-            let dir = match state.env.as_str() {
-                "CLAUDE_CONFIG_DIR" => Some(homes.claude_dir.clone()),
-                "CODEX_HOME" => Some(homes.codex_home.clone()),
-                _ => None,
-            };
-            if let Some(dir) = dir {
-                state_dirs.insert(b.id.to_string(), dir);
-            }
-        }
-        if b.properties.executable_env.as_deref() == Some("CLAUDE_CODE_EXECUTABLE") {
-            bins.insert(b.id.to_string(), cfg.claude_executable.clone().into());
-        } else if b.properties.usage_fallback == steve_harness_spec::UsageFallback::CodexRollout {
-            bins.insert(b.id.to_string(), cfg.codex_executable.clone().into());
-        }
-    }
-    node.set_discovery(steve_node::history::DiscoveryConfig {
-        homes: steve_node::history::Homes {
-            user_home: homes.home,
-            steve_home: cfg.home.clone(),
-            state_dirs,
-        },
-        binaries: steve_node::history::Binaries { bins },
-    });
-}
-
-/// Where the Hub's own Node runs sessions (`STEVE_NODE_MODE`).
+/// Where the Hub's colocated Node runs (`STEVE_NODE_MODE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NodeMode {
-    /// In the Hub's process: its turns stop when the Hub does.
-    Local,
-    /// In a process of its own on this machine (B1): a Hub restart or upgrade leaves its turns
-    /// running.
+    /// In an independent `steve-node --local-node` process on this machine: a Hub restart or
+    /// upgrade leaves its turns running.
     Service,
 }
 
-/// The Hub runtime decides whether this installation runs any Nodes.
+/// The Hub runtime decides whether this installation runs its colocated Node.
 pub(crate) fn node_mode(vars: &Vars, diagnostic: bool) -> Result<Option<NodeMode>, BackendError> {
     let mode = vars("STEVE_NODE_MODE")
         .map(|v| v.trim().to_ascii_lowercase())
         .filter(|v| !v.is_empty());
     let selected = match mode.as_deref() {
         None | Some("service") => NodeMode::Service,
-        Some("local") => NodeMode::Local,
+        Some("local") => {
+            return Err(BackendError::msg(
+                "STEVE_NODE_MODE=local has been removed; unset STEVE_NODE_MODE or set STEVE_NODE_MODE=service so the Hub runs its independent steve-node process",
+            ));
+        }
         Some(other) => {
             return Err(BackendError::msg(format!(
-                "STEVE_NODE_MODE={other:?} is not a mode: use service (the default) or local"
+                "STEVE_NODE_MODE={other:?} is not a mode: use service (the default) or leave unset"
             )));
         }
     };
     Ok((!diagnostic).then_some(selected))
 }
-
-/// Think jobs the local Node may run at once: no limit, as in process. A bound here would turn a
-/// burst of calls into start_jobs refused as exhausted and backed off (2 s doubling) with nothing
-/// waking them when a slot frees, so a call that answers in process today could time out and fall
-/// back instead; a start left unknown after a refused abandon would also hold its slot until the
-/// next boot.
-pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
 
 // The stored scheduler setting and the executor's actual limiter use the same defaults/range.
 const _: () = assert!(
@@ -534,24 +330,6 @@ async fn start_fleet(fleet: Arc<crate::nodes::NodeFleet>, store: steve_store::St
     }
 }
 
-/// The local Node's startup job: its tools endpoint, then the coordinator's workers. A Node
-/// whose tools cannot connect runs nothing: the coordinator is stopped (its sessions refuse
-/// work visibly instead of queueing commands nobody sends) and the Node shut down.
-async fn start_node(
-    runtime: Arc<node_runtime::NodeRuntime>,
-    node: Arc<steve_node::LocalNode>,
-    tools: Arc<dyn steve_node_api::HubTools>,
-) {
-    match node.connect_tools(tools).await {
-        Ok(()) => runtime.start(),
-        Err(e) => {
-            tracing::error!("local Node tools failed; dispatch remains stopped: {e}");
-            runtime.stop(&format!("its tools did not connect ({e})"));
-            node.shutdown().await;
-        }
-    }
-}
-
 /// [`wire_with`] on the process environment.
 pub fn wire(cfg: &Arc<Config>, bus: &Bus) -> Result<Wired, BackendError> {
     wire_with(cfg, bus, Arc::new(|k: &str| std::env::var(k).ok()))
@@ -600,6 +378,135 @@ pub fn wire_assembly(
         )
     }));
     Ok(wired)
+}
+
+#[cfg(test)]
+pub(crate) mod test_local_node {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    /// Attaches a real `steve_node::LocalNode` (`"local"`) to `wired.nodes` over an in-memory
+    /// duplex wire (`steve_node_wire::testkit::pair`), with zero TCP sockets and full colocated
+    /// RPCs, tools, files, and secrets — mirroring `steve-node --local-node` in tests.
+    pub(crate) struct AttachedLocalNode {
+        pub node: Arc<steve_node::LocalNode>,
+        _hub_conn: Arc<steve_node_wire::Conn>,
+        _node_conn: Arc<steve_node_wire::Conn>,
+    }
+
+    impl AttachedLocalNode {
+        pub(crate) async fn shutdown(&self) {
+            self.node.shutdown().await;
+        }
+    }
+
+    pub(crate) async fn attach(
+        wired: &Wired,
+        cfg: &Config,
+        adapters: HashMap<String, PathBuf>,
+    ) -> AttachedLocalNode {
+        let svc = wired
+            .nodes
+            .as_ref()
+            .expect("NodeService must be enabled to attach test local Node");
+        let node_id = steve_node_api::NodeId::new(local_service::NODE_ID).unwrap();
+        let home = local_service::home(cfg);
+        let roots_file = host_node::roots_file(&home);
+        let roots: Vec<steve_node_api::HostRoot> = std::fs::read(&roots_file)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let node_cfg = steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
+            node: node_id.clone(),
+            home: home.clone(),
+            acp: steve_acp::AcpConfig {
+                declared: cfg
+                    .declared_adapters
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                adapters,
+                node: "node".into(),
+                claude_executable: "/usr/bin/false".into(),
+                claude_config_dir: None,
+                steve_home: cfg.home.clone(),
+                codex_home: cfg.home.join("codex"),
+                user_home: crate::config::home_dir(),
+                version: cfg.version.clone(),
+            },
+            roots,
+            capacity: steve_node_api::Capacity {
+                sessions: steve_node_api::Capacity::SESSIONS_DEFAULT,
+                jobs: u32::MAX,
+                execs: 16,
+            },
+            storage: steve_node::Storage {
+                worktree_floor: cfg.disk.floor,
+                ..Default::default()
+            },
+        };
+        let local = Arc::new(steve_node::LocalNode::open(node_cfg).expect("open test LocalNode"));
+        local.follow_roots_file(roots_file);
+        local.enable_research(steve_research::ResearchConfig::new(
+            cfg.scratch.join("research"),
+        ));
+
+        let (hub_end, node_end) = steve_node_wire::testkit::pair();
+        let hub_server = Arc::new(steve_node_wire::ServeHub {
+            sink: svc.fleet.sink_for(&node_id),
+            tools: svc.fleet.tools_for(&node_id),
+            files: Some(svc.fleet.files_for(&node_id)),
+            secrets: svc.secrets.get().map(|s| s.for_node(node_id.clone())),
+        });
+        let node_server = steve_node_wire::NodeServer::new(local.clone());
+        let hub_conn = steve_node_wire::Conn::spawn(
+            hub_end.sink,
+            hub_end.stream,
+            1,
+            hub_server,
+            steve_node_wire::ConnOptions {
+                side: "h",
+                ..Default::default()
+            },
+        );
+        let node_conn = steve_node_wire::Conn::spawn(
+            node_end.sink,
+            node_end.stream,
+            1,
+            node_server,
+            steve_node_wire::ConnOptions {
+                side: "n",
+                ..Default::default()
+            },
+        );
+        let hub_link = steve_node_wire::HubLink::new();
+        hub_link.set(Some(node_conn.clone()));
+        local.connect(
+            Arc::new(steve_node_wire::RemoteSink(hub_link.clone())),
+            Some(Arc::new(steve_node_wire::RemoteFiles(hub_link.clone()))),
+        );
+        local.connect_secrets(Arc::new(steve_node_wire::RemoteSecrets(hub_link.clone())));
+        local
+            .connect_tools(Arc::new(steve_node_wire::RemoteTools(hub_link)))
+            .await
+            .expect("connect test local tools");
+
+        assert!(
+            svc.registry
+                .install(local_service::NODE_ID, 1, hub_conn.clone())
+        );
+        let remote = svc.fleet.remote(&node_id);
+        assert!(remote.attach(hub_conn.clone(), false));
+        svc.fleet.linked(&node_id, steve_node_api::PROTOCOL);
+
+        AttachedLocalNode {
+            node: local,
+            _hub_conn: hub_conn,
+            _node_conn: node_conn,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -661,7 +568,6 @@ mod tests {
             "HOME" | "STEVE_HOME" => Some(db_home.display().to_string()),
             "STEVE_NO_RESUME" | "STEVE_NODE_LISTEN" => Some("1".into()),
             "STEVE_VAULT_KEYSTORE" => Some("file".into()),
-            "STEVE_ADAPTER_CLAUDE" | "STEVE_ADAPTER_CODEX" => Some(adapter.display().to_string()),
             _ => None,
         };
         let cfg = Arc::new(Config::from_vars(&get).unwrap());
@@ -696,13 +602,6 @@ mod tests {
                 .unwrap()
                 .is(steve_types::ConfigReason::DiagnosticModelDisabled)
         );
-        assert!(
-            local_service::run(&cfg)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("STEVE_NO_RESUME")
-        );
         assert!(!cfg.data_dir.join("node").exists());
         assert!(!cfg.data_dir.join("node-jobs").exists());
         assert!(!spawn_log.exists());
@@ -710,61 +609,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_listener_defaults_on_without_registering_devices_and_copies_stay_inert() {
+    async fn remote_listener_defaults_on_and_copies_stay_inert() {
         steve_modules::net::forbid_in_this_process();
-        for (listen, copy, expected) in [
-            (None, false, true),
-            (Some("0"), false, false),
-            (Some("off"), false, false),
-            (None, true, false),
-            (Some("1"), true, false),
+        for (listen, copy, expected_ok, expected_nodes) in [
+            (None, false, true, true),
+            (Some("0"), false, false, false),
+            (Some("off"), false, false, false),
+            (None, true, true, false),
+            (Some("1"), true, true, false),
         ] {
             let tmp = tempfile::tempdir().unwrap();
+            let service_port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
             let mut kv = std::collections::HashMap::from([
                 ("STEVE_HOME".to_string(), tmp.path().display().to_string()),
                 ("HOME".to_string(), tmp.path().display().to_string()),
                 ("STEVE_VAULT_KEYSTORE".into(), "file".into()),
-                ("STEVE_ADAPTER_CLAUDE".into(), "/usr/bin/false".into()),
-                ("STEVE_ADAPTER_CODEX".into(), "/usr/bin/false".into()),
+                ("STEVE_LOCAL_NODE_PORT".into(), service_port.to_string()),
             ]);
             if let Some(value) = listen {
                 kv.insert("STEVE_NODE_LISTEN".into(), value.into());
             }
             if copy {
                 kv.insert("STEVE_NO_RESUME".into(), "1".into());
-            } else {
-                kv.insert("STEVE_NODE_MODE".into(), "local".into());
             }
             let get: Vars = Arc::new(move |k| kv.get(k).cloned());
             let cfg = Arc::new(Config::from_vars(|k| get(k)).unwrap());
             for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
                 std::fs::create_dir_all(d).unwrap();
             }
-            let w = wire_with(
+            let res = wire_with(
                 &cfg,
                 &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
                     Default::default(),
                 ))),
                 get,
-            )
-            .unwrap();
-            assert_eq!(
-                w.nodes.is_some(),
-                expected,
-                "listen={listen:?}, copy={copy}"
             );
-            assert_eq!(w.node.is_none(), copy);
-            let store =
-                steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
-            let registered = steve_store::testkit::hub::hub_fixtures::node_count(&store).unwrap();
-            assert_eq!(registered, 0, "enabling a listener never registers a Node");
-            w.domain.shutdown().await;
+            assert_eq!(res.is_ok(), expected_ok, "listen={listen:?}, copy={copy}");
+            if let Ok(w) = res {
+                assert_eq!(
+                    w.nodes.is_some(),
+                    expected_nodes,
+                    "listen={listen:?}, copy={copy}"
+                );
+                assert_eq!(w.node.is_none(), copy);
+                w.domain.shutdown().await;
+            }
         }
     }
 
-    /// The default Hub runs conversation model calls through the Node job runtime.
+    /// The default Hub runs conversation model calls through its colocated service Node.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn think_streams_on_the_node_without_an_opt_in_switch() {
+    async fn think_streams_on_the_colocated_service_node() {
         steve_modules::net::forbid_in_this_process();
         let dir = tempfile::tempdir().unwrap();
         let h = dir.path().canonicalize().unwrap();
@@ -785,8 +684,6 @@ mod tests {
             ("STEVE_REPO", "/nonexistent".into()),
             ("STEVE_VAULT_KEYSTORE", "file".into()),
             ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-            ("STEVE_ADAPTER_CLAUDE", adapter.display().to_string()),
-            ("STEVE_ADAPTER_CODEX", adapter.display().to_string()),
             ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
         ]
         .into_iter()
@@ -805,6 +702,15 @@ mod tests {
         )
         .unwrap();
         assert!(w.node.is_some());
+        let attached = test_local_node::attach(
+            &w,
+            &cfg,
+            std::collections::HashMap::from([
+                ("claude-code".into(), adapter.clone()),
+                ("codex".into(), adapter),
+            ]),
+        )
+        .await;
         for job in w.jobs {
             job.start(w.domain.background_tasks().unwrap().as_ref());
         }
@@ -824,23 +730,28 @@ mod tests {
             steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
         let n = steve_store::testkit::hub::hub_fixtures::job_count(&store).unwrap();
         assert_eq!(n, 1);
+        attached.shutdown().await;
         w.domain.shutdown().await;
     }
 
     #[test]
-    fn node_mode_defaults_to_service_and_diagnostic_copies_disable_it() {
+    fn node_mode_defaults_to_service_rejects_local_and_diagnostic_copies_disable_it() {
         let mode = |value: Option<&'static str>, copy| {
             let get: Vars = Arc::new(move |_| value.map(String::from));
             node_mode(&get, copy)
         };
         assert_eq!(mode(None, false).unwrap(), Some(NodeMode::Service));
         assert_eq!(mode(Some(""), false).unwrap(), Some(NodeMode::Service));
-        assert_eq!(mode(Some(" Local "), false).unwrap(), Some(NodeMode::Local));
+        assert_eq!(
+            mode(Some(" service "), false).unwrap(),
+            Some(NodeMode::Service)
+        );
+        let err = mode(Some("local"), false).unwrap_err().to_string();
+        assert!(err.contains("STEVE_NODE_MODE=local"), "{err}");
+        assert!(mode(Some("local"), true).is_err());
         assert!(mode(Some("off"), false).is_err());
         assert_eq!(mode(None, true).unwrap(), None);
-        for explicit in ["local", "service"] {
-            assert_eq!(mode(Some(explicit), true).unwrap(), None);
-        }
+        assert_eq!(mode(Some("service"), true).unwrap(), None);
         assert!(
             mode(Some("loacl"), false)
                 .unwrap_err()

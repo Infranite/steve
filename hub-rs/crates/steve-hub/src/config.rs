@@ -303,11 +303,6 @@ pub struct Config {
     pub disk: steve_core::workspace::DiskPolicy,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds (`None`: looked up by the core).
     pub gh: Option<PathBuf>,
-    pub claude_executable: String,
-    /// `CODEX_EXECUTABLE`: `codex exec` for Steve's judgments when they run on Codex.
-    pub codex_executable: String,
-    /// Adapter entry point per harness id; a `.js` path runs with `node`.
-    pub adapters: BTreeMap<String, String>,
     /// What the Hub's harness manifest declares about adapters beyond their command
     /// (`STEVE_HARNESS_MANIFEST`, default `<STEVE_HOME>/harness.json`; [`steve_harness_spec`]).
     pub declared_adapters: BTreeMap<String, steve_harness_spec::Declaration>,
@@ -323,10 +318,6 @@ pub struct Config {
     /// Steve's own repository (`STEVE_REPO`): seed project, items about Steve itself, release repo.
     pub steve_repo: PathBuf,
     pub debug_route: bool,
-    pub claude_config_dir: Option<PathBuf>,
-    pub codex_home: PathBuf,
-    /// Node used to run `.js` adapters (TS used its own `process.execPath`).
-    pub node: String,
     /// Where knowledge is stored and found (`STEVE_KB_STORE`): `None` = the Hub's own index only.
     pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
 }
@@ -410,38 +401,6 @@ pub fn js_number(s: &str) -> f64 {
     t.parse::<f64>().unwrap_or(f64::NAN)
 }
 
-/// `npm root -g`, or the Homebrew default when npm is missing.
-fn npm_root() -> String {
-    // npm's global prefix is the directory above `node`'s bin unless an npmrc moves it; when that
-    // directory is there, that is what `npm root -g` would print, without spawning npm at boot
-    let on_path = std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|d| d.join("node"))
-        .find(|n| n.is_file());
-    if let Some(node) = on_path
-        && let Some(root) = node
-            .parent()
-            .and_then(Path::parent)
-            .map(|p| p.join("lib/node_modules"))
-        && root.is_dir()
-    {
-        return root.to_string_lossy().into_owned();
-    }
-    std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/opt/homebrew/lib/node_modules".into())
-}
-
-/// codex-acp's bin is a Node wrapper that spawnSyncs a native binary; killing the wrapper would orphan it,
-/// so Steve runs the platform binary directly when it is installed.
 /// The adapters a harness manifest (`{"adapters": {…}}`, as a Node's `harness.json`) lists. A file
 /// that is missing lists none; one that does not read is logged and ignored, never a reason not to
 /// start.
@@ -723,8 +682,7 @@ impl Config {
         }
         let openviking = knowledge_backend(&get)?;
 
-        // the harness manifest: adapters of one's own, and commands for the built-in ones where no
-        // STEVE_ADAPTER_* names one
+        // the harness manifest: adapters of one's own declared for UI/routing metadata
         let manifest = get("STEVE_HARNESS_MANIFEST")
             .filter(|p| !p.is_empty())
             .map(PathBuf::from)
@@ -732,19 +690,6 @@ impl Config {
         let (commands, declared_adapters) = harness_manifest(&manifest);
         let manifest_adapters: std::collections::BTreeSet<String> =
             commands.keys().cloned().collect();
-        // npm root -g only when an npm-managed adapter default is actually needed
-        let mut root: Option<String> = None;
-        let path_var = get("PATH");
-        let adapters: BTreeMap<String, String> = steve_acp::resolve_builtin_adapters(
-            &home,
-            &commands,
-            |var| get(var).filter(|v| !v.is_empty()).map(PathBuf::from),
-            path_var.as_deref().map(std::ffi::OsStr::new),
-            || PathBuf::from(root.get_or_insert_with(npm_root).as_str()),
-        )
-        .into_iter()
-        .map(|(id, c)| (id, c.to_string_lossy().into_owned()))
-        .collect();
 
         let split = |s: String| {
             s.split(',')
@@ -842,15 +787,6 @@ impl Config {
             )?,
             disk,
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
-            claude_executable: env("CLAUDE_CODE_EXECUTABLE", "/opt/homebrew/bin/claude"),
-            codex_executable: get("CODEX_EXECUTABLE").unwrap_or_else(|| {
-                ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
-                    .into_iter()
-                    .find(|p| Path::new(p).exists())
-                    .unwrap_or("/opt/homebrew/bin/codex")
-                    .to_string()
-            }),
-            adapters,
             declared_adapters,
             manifest_adapters,
             harness_manifest: manifest,
@@ -879,14 +815,6 @@ impl Config {
                 .or_else(steve_core::config::steve_checkout_of_exe)
                 .unwrap_or_default(),
             debug_route: steve_auth::flag(&get, "STEVE_DEBUG_ROUTE")?,
-            claude_config_dir: get("CLAUDE_CONFIG_DIR")
-                .filter(|v| !v.trim().is_empty())
-                .map(PathBuf::from),
-            codex_home: get("CODEX_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home_dir().join(".codex")),
-            // the Node.js binary for `.js` adapters; the Steve Node switch is STEVE_NODE_MODE
-            node: get("STEVE_NODE").unwrap_or_else(|| "node".into()),
             openviking,
             home,
         })
@@ -919,7 +847,19 @@ impl Config {
     /// The harness adapters the Hub knows (built-in, and its manifest's), sorted: what a bot may
     /// run on.
     pub fn harness_ids(&self) -> Vec<String> {
-        self.adapters.keys().cloned().collect()
+        let mut ids: std::collections::BTreeSet<String> = steve_harness_spec::builtin_ids()
+            .map(str::to_string)
+            .collect();
+        ids.extend(self.manifest_adapters.iter().cloned());
+        ids.extend(self.declared_adapters.keys().cloned());
+        ids.into_iter().collect()
+    }
+
+    /// Whether `id` is a built-in harness or declared in the Hub's harness manifest.
+    pub fn knows_harness(&self, id: &str) -> bool {
+        steve_harness_spec::builtin(id).is_some()
+            || self.manifest_adapters.contains(id)
+            || self.declared_adapters.contains_key(id)
     }
 
     /// The `last.json` the release script writes (ops/release.sh).
@@ -1031,16 +971,6 @@ mod tests {
     }
 
     #[test]
-    fn steve_node_is_only_the_node_js_binary() {
-        // the Steve Node's switch has its own name and never reaches the adapters' Node.js
-        assert_eq!(cfg(&[("STEVE_NODE_MODE", "local")]).node, "node");
-        assert_eq!(
-            cfg(&[("STEVE_NODE", "/opt/x/bin/node")]).node,
-            "/opt/x/bin/node"
-        );
-    }
-
-    #[test]
     fn handed_sockets_are_only_this_processs() {
         // another process's sockets (a child inherits its parent's LISTEN_*): none taken
         let other = (std::process::id() + 1).to_string();
@@ -1100,7 +1030,6 @@ mod tests {
         );
         assert_eq!(c.public_url, "http://127.0.0.1:8440");
         assert_eq!(c.public_urls, vec!["http://127.0.0.1:8440"]);
-        assert_eq!(c.claude_executable, "/opt/homebrew/bin/claude");
         // no model named anywhere: the harness's own default
         assert!(c.models.fast.is_empty() && c.models.smart.is_empty());
         assert!(c.default_models.is_empty());
@@ -1221,14 +1150,14 @@ mod tests {
         )
         .unwrap();
         let c = cfg(&[("STEVE_HOME", home)]);
-        assert_eq!(c.adapters["mine"], "/m/mine");
+        assert!(c.knows_harness("mine"));
+        assert!(c.harness_ids().iter().any(|id| id == "mine"));
         assert_eq!(c.declared_adapters["mine"].name.as_deref(), Some("Mine"));
-        // the test's explicit STEVE_ADAPTER_* stay
-        assert_eq!(c.adapters["claude-code"], "/x/claude.js");
-        assert_eq!(c.adapters["codex"], "/x/codex");
+        assert!(c.knows_harness("claude-code"));
+        assert!(c.knows_harness("codex"));
         std::fs::write(dir.path().join("harness.json"), "not json").unwrap();
         let c = cfg(&[("STEVE_HOME", home)]);
-        assert!(!c.adapters.contains_key("mine"));
+        assert!(!c.knows_harness("mine"));
         assert!(c.declared_adapters.is_empty());
     }
 

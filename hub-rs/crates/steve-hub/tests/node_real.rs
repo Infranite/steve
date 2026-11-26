@@ -1,4 +1,4 @@
-//! A7: the local Node (`STEVE_NODE_MODE=local`) against the real Claude, end to end on the real
+//! A7: the colocated service Node against the real Claude, end to end on the real
 //! `steve-hub` binary. They cost model calls and use the user's Claude login (read-only), so every
 //! case is `#[ignore]`d and run by hand only:
 //!
@@ -207,7 +207,7 @@ impl Drop for Hub {
     }
 }
 
-/// The real Hub with the local Node on (`STEVE_NODE_MODE=local`). On a [`Home::fake`] the scripted agent replaces claude and
+/// The real Hub with its colocated service Node. On a [`Home::fake`] the scripted agent replaces claude and
 /// `HOME` is the temp dir, so nothing of the user's login is read.
 fn spawn(h: &Home) -> Hub {
     let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", &h.socket)]);
@@ -223,7 +223,8 @@ fn spawn(h: &Home) -> Hub {
         .env("STEVE_WEB_DIR", &h.web)
         .env("STEVE_HARNESS_MANIFEST", h.steve().join("harness.json"))
         .env_remove("STEVE_NODE")
-        .env("STEVE_NODE_MODE", "local")
+        .env_remove("STEVE_NODE_MODE")
+        .env("STEVE_LOCAL_NODE_PORT", "0")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         // no "you ended without delivering" follow-up turn: each case counts its own turns
         .env("STEVE_TAKEOVER_CONTINUES", "0")

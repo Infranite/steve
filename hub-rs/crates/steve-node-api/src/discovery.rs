@@ -564,6 +564,31 @@ pub struct ImportedPage {
     pub next: Option<Cursor>,
 }
 
+/// Ask the Node where a session's working directory and harness transcript stand, plus any
+/// non-default state environment variables needed to resume it in the harness CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeProbeRequest {
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_state_dir: Option<String>,
+    #[serde(default)]
+    pub check_transcript: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeProbeResponse {
+    pub cwd_exists: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<HistoryLocation>,
+    /// Explicit `KEY=VALUE` pairs to prepend to the CLI resume/fork command (only when isolated or
+    /// overriding the harness's default state directory).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_env: Vec<(String, String)>,
+}
+
 #[cfg(test)]
 mod component_tests {
     use super::*;

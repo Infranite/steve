@@ -364,6 +364,112 @@ impl WorkspaceExecutor for RemoteNode {
         };
         self.go(SCAN_PAGE, &a, None, false).await
     }
+    async fn browse_dir(&self, q: BrowseDirRequest) -> ApiResult<BrowseDirResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host directory browsing is limited to the colocated node",
+            ));
+        }
+        self.go(HOST_BROWSE_DIR, &q, None, false).await
+    }
+    async fn describe_dir(&self, q: DescribeDirRequest) -> ApiResult<DescribeDirResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host directory inspection is limited to the colocated node",
+            ));
+        }
+        self.go(HOST_DESCRIBE_DIR, &q, None, false).await
+    }
+    async fn path_check(&self, q: PathCheckRequest) -> ApiResult<PathCheckResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host path checks are limited to the colocated node",
+            ));
+        }
+        self.go(HOST_PATH_CHECK, &q, None, false).await
+    }
+    async fn project_setup_preview(
+        &self,
+        q: ProjectSetupPreviewRequest,
+    ) -> ApiResult<ProjectSetupPreview> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host project setup is limited to the colocated node",
+            ));
+        }
+        self.go(HOST_PROJECT_SETUP_PREVIEW, &q, None, false).await
+    }
+    async fn project_setup_start(
+        &self,
+        c: Command<ProjectSetupRequest>,
+    ) -> ApiResult<ProjectSetupStatus> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host project setup is limited to the colocated node",
+            ));
+        }
+        let op = c.id.clone();
+        self.go(HOST_PROJECT_SETUP_START, &c, Some(&op), true).await
+    }
+    async fn project_setup_status(&self, op: OperationId) -> ApiResult<ProjectSetupStatus> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host project setup is limited to the colocated node",
+            ));
+        }
+        self.go(HOST_PROJECT_SETUP_STATUS, &op, None, false).await
+    }
+    async fn disk_inspect(&self, q: DiskInspectRequest) -> ApiResult<DiskInspectResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "workspace disk inspection is limited to the colocated node",
+            ));
+        }
+        self.go(WORKSPACE_DISK_INSPECT, &q, None, false).await
+    }
+    async fn disk_reclaim(&self, q: DiskReclaimRequest) -> ApiResult<DiskReclaimResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "workspace disk reclamation is limited to the colocated node",
+            ));
+        }
+        self.go(WORKSPACE_DISK_RECLAIM, &q, None, false).await
+    }
+    async fn mcp_stdio_list(&self, server: McpStdioServer) -> ApiResult<Vec<McpStdioTool>> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "stdio MCP hosting is limited to the colocated node",
+            ));
+        }
+        self.go(MCP_STDIO_LIST, &server, None, false).await
+    }
+    async fn mcp_stdio_call(&self, req: McpStdioCallRequest) -> ApiResult<McpStdioCallResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "stdio MCP hosting is limited to the colocated node",
+            ));
+        }
+        self.go(MCP_STDIO_CALL, &req, None, false).await
+    }
+    async fn mcp_stdio_sweep(&self, req: McpStdioSweepRequest) -> ApiResult<()> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "stdio MCP hosting is limited to the colocated node",
+            ));
+        }
+        self.go(MCP_STDIO_SWEEP, &req, None, false).await
+    }
 }
 
 #[async_trait]
@@ -478,6 +584,9 @@ impl Discovery for RemoteNode {
     }
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
         self.go(HISTORY_LOCATE, &source, None, false).await
+    }
+    async fn resume_probe(&self, req: ResumeProbeRequest) -> ApiResult<ResumeProbeResponse> {
+        self.go(HISTORY_RESUME_PROBE, &req, None, false).await
     }
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         self.go(NODE_VITALS, &serde_json::json!({}), None, false)

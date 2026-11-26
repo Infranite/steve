@@ -72,7 +72,7 @@ pub struct Inner {
     pub optional_modules: steve_types::integrations::OptionalModules,
     /// Remote Nodes (enabled by default): pairing, the `/node/ws` listener, their coordinators.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
-    /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
+    /// The colocated local Node's coordinator, for `/healthz`.
     pub node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>,
     /// Local history discovery, independent of whether agent sessions run here.
     pub history: Option<Arc<dyn steve_node_api::Discovery>>,

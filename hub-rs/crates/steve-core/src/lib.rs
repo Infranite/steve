@@ -103,10 +103,14 @@ pub(crate) struct Inner {
     hook_queue: modules::HookQueue,
     /// What Steve has to tell a session with its next message (a delivery that went void meanwhile).
     steve_notes: Mutex<HashMap<String, String>>,
-    /// A reclaim pass or trash purge is running (`workspace`): one at a time.
+    /// A reclaim pass is running (`workspace`): one at a time.
     reclaiming: std::sync::atomic::AtomicBool,
-    /// The way to items' Nodes, once wired (`node_git`); unset: the Hub's own git everywhere.
+    /// Last observed free bytes on the worktrees volume (reported by Node housekeeping; `u64::MAX` = unknown).
+    last_free_bytes: std::sync::atomic::AtomicU64,
+    /// The way to items' Nodes, once wired (`node_git`).
     node_git: OnceLock<Arc<dyn node_git::NodeGit>>,
+    /// Workspace disk inspection and reclamation on the colocated Node (`workspace`).
+    housekeeping: OnceLock<Arc<dyn workspace::NodeHousekeeping>>,
     /// Out-of-process JS workflow step executor (`StepRunner` wired by `steve-hub`).
     workflow_executor: OnceLock<Arc<dyn workflow_run::WorkflowStepExecutor>>,
     /// Per-run async locks serializing `step_workflow_run` executions for the same `run_id`.
@@ -209,7 +213,9 @@ impl Core {
             hook_queue: OnceLock::new(),
             steve_notes: Default::default(),
             reclaiming: Default::default(),
+            last_free_bytes: std::sync::atomic::AtomicU64::new(u64::MAX),
             node_git: OnceLock::new(),
+            housekeeping: OnceLock::new(),
             workflow_executor: OnceLock::new(),
             workflow_run_locks: Default::default(),
             workflow_step_permits: Arc::new(tokio::sync::Semaphore::new(

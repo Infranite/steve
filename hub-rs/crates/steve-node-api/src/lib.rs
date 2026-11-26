@@ -19,6 +19,7 @@ pub mod glob;
 pub mod harness_updates;
 pub mod ids;
 pub mod intent;
+pub mod oneshot;
 pub mod ports;
 pub mod run;
 pub mod stop;
@@ -37,6 +38,7 @@ pub use events::*;
 pub use harness_updates::*;
 pub use ids::*;
 pub use intent::{Intent, IntentKey};
+pub use oneshot::*;
 pub use ports::*;
 pub use run::*;
 pub use steve_types::devices::{
@@ -55,7 +57,7 @@ pub use workspace::*;
 
 /// Exact ordinary wire contract. Every wire-format change increments this in the same commit.
 /// A different value permits only the independent, permanent upgrade protocol.
-pub const PROTOCOL: u32 = 16;
+pub const PROTOCOL: u32 = 17;
 
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness
 /// with it, is gone): what the Hub gives up and continues on its own (B6), unlike other unknowns.

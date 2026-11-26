@@ -99,14 +99,6 @@ impl Consumer for WorkTidy {
             tx.after_cycle_closed(&item, "completed", &d.acceptance, "owner_finished")
                 .map_err(retry)?;
         }
-        /* a process still running in the worktree (a dev server) keeps it; the workspace watcher looks
-         * again. Listed before the lock: it takes about a second */
-        if let Some(cwd) = item.cwd.as_deref().filter(|c| !c.is_empty())
-            && crate::workspace::process_dirs()
-                .is_some_and(|p| crate::workspace::in_use(std::path::Path::new(cwd), &p))
-        {
-            return Ok(());
-        }
         match self.core.tx().tidy_branch_now(&d.item_id) {
             Ok(true) => Ok(()),
             Ok(false) => Err(ConsumeError::Retry(format!(

@@ -64,6 +64,9 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("--local-node") {
+        return steve_node_cli::local_node::run().await;
+    }
     let home = Home::from_env()?;
     match args.first().map(String::as_str) {
         // the switch helper a Hub-asked upgrade starts, outside the service (see `upgrade`)

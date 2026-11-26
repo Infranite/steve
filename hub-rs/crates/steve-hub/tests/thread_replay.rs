@@ -81,8 +81,6 @@ async fn boot_on(
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_PI", "/usr/bin/false".into()),
-        ("STEVE_NODE_MODE", "local".into()),
-        ("STEVE_NODE_LISTEN", "0".into()),
         (
             "STEVE_WEB_DIR",
             home_path.join("no-web").display().to_string(),
@@ -1421,13 +1419,12 @@ async fn failing_thread_recovery_is_reported_and_hub_still_serves_in_process() {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_NO_RESUME", "0".into()),
+        ("STEVE_LOCAL_NODE_PORT", "0".into()),
         ("STEVE_BACKUP", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_PI", "/usr/bin/false".into()),
-        ("STEVE_NODE_MODE", "local".into()),
-        ("STEVE_NODE_LISTEN", "0".into()),
         (
             "STEVE_WEB_DIR",
             home_path.join("no-web").display().to_string(),

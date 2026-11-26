@@ -406,12 +406,18 @@ fn shown(mut list: Value) -> Value {
 
 fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -> Vec<Value> {
     use steve_node_api::AdapterStatus;
-    cfg.adapters
-        .iter()
-        .map(|(id, path)| {
+    cfg.harness_ids()
+        .into_iter()
+        .map(|id| {
+            let id = id.as_str();
             let declared = cfg.declared_adapters.get(id);
             let spec = crate::harnesses::adapter_spec(id, declared);
-            let reported = harnesses.and_then(|hs| hs.iter().find(|h| &h.name == id));
+            let reported = harnesses.and_then(|hs| hs.iter().find(|h| h.name == id));
+            let path = reported
+                .and_then(|h| h.setup.as_ref())
+                .and_then(|s| s.components.first())
+                .and_then(|c| c.path.as_deref())
+                .unwrap_or_default();
             let adapter = reported.and_then(|h| h.adapter.as_ref());
             let session = adapter.and_then(|a| a.session.as_ref()).filter(|_| {
                 reported.and_then(|h| h.setup.as_ref()).is_none_or(|s| s.state == steve_node_api::SetupState::Ready)

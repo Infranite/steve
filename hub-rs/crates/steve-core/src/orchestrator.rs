@@ -1,7 +1,6 @@
 //! orchestrator.ts: items ↔ sessions ↔ decisions. The only place that knows the item lifecycle.
 
 use crate::error::{CoreError, Result, msg};
-use crate::git;
 use crate::lifecycle::{deps_open, supersede};
 use crate::marks::reject;
 use crate::modules::Point;
@@ -21,7 +20,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use steve_modules::outbound::{UNTRUSTED_CLOSE, UNTRUSTED_OPEN, quote_untrusted};
 use steve_store::decision_repo::DecisionChange;
 use steve_store::{DecisionUndo, Ingest, bots, file_repo, seeded};
@@ -179,25 +178,6 @@ pub(crate) enum To {
         live: Option<String>,
         item: Option<String>,
     },
-}
-
-/// The directory exists and a file can be created in it (an agent would work there).
-fn cwd_usable(dir: &Path) -> bool {
-    if !dir.is_dir() {
-        return false;
-    }
-    let probe = dir.join(format!(".steve-write-check-{}", crate::util::uid("w")));
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-    {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
 }
 
 fn settle_answer(
@@ -1336,32 +1316,15 @@ impl Tx<'_> {
     }
 
     /* ── items and sessions ── */
-    /// The item's working directory: its scratch dir, the project dir, or a worktree on `steve/<id>`.
+    /// The item's working directory: its Hub-owned scratch dir (project-less items) or the
+    /// project's configured path. Git worktrees are prepared on the Node via `planned_worktree`.
     fn prepare_cwd(&self, item: &Item) -> Result<(String, Option<String>)> {
         let Some(p) = self.db().project(item.project_id.as_deref())? else {
             let dir = self.cfg().scratch.join(&item.id);
             std::fs::create_dir_all(&dir)?;
             return Ok((dir.to_string_lossy().into(), None));
         };
-        let path = Path::new(&p.path);
-        if !path.exists() {
-            return Err(msg(steve_i18n::t!(
-                "core.project.dir_missing",
-                path = p.path
-            )));
-        }
-        if p.kind != "git" || !p.worktree || !git::is_git(path) {
-            return Ok((p.path.clone(), None));
-        }
-        let wt: PathBuf = self.cfg().worktrees.join(&item.id);
-        let branch = crate::worktrees::worktree_branch(item, path, &wt);
-        /* a new item waits for disk space; one that had a worktree gets its sources back (megabytes) */
-        if !wt.exists() && item.cwd.as_deref().is_none_or(str::is_empty) {
-            self.c.disk_floor()?;
-        }
-        git::add_worktree(path, &wt, &branch)
-            .map_err(|e| msg(format!("Command failed: git worktree add\n{e}")))?;
-        Ok((wt.to_string_lossy().into(), Some(branch)))
+        Ok((p.path.clone(), item.branch.clone()))
     }
 
     pub(crate) fn create_item(&mut self, n: CreateItem) -> Result<Item> {
@@ -2288,18 +2251,11 @@ impl Tx<'_> {
         }
         let item = self.item(item_id)?;
         /* a worktree its backend makes is only named here: made off the lock before the session opens */
-        let (cwd, branch, planned) = match item
-            .cwd
-            .as_deref()
-            .filter(|c| !c.is_empty() && Path::new(c).exists())
-        {
-            Some(c) => (c.to_string(), item.branch.clone(), false),
+        let (cwd, branch) = match item.cwd.as_deref().filter(|c| !c.is_empty()) {
+            Some(c) => (c.to_string(), item.branch.clone()),
             None => match self.planned_worktree(&item)? {
-                Some((wt, br)) => (wt, Some(br), true),
-                None => {
-                    let (c, b) = self.prepare_cwd(&item)?;
-                    (c, b, false)
-                }
+                Some((wt, br)) => (wt, Some(br)),
+                None => self.prepare_cwd(&item)?,
             },
         };
         self.db().item_patch(
@@ -2320,12 +2276,6 @@ impl Tx<'_> {
             token: tok.clone(),
         })?;
         self.st.tokens.insert(s.id.clone(), tok);
-        /* a session its backend binds otherwise (a directory it only opens) gets the worktree
-         * before it is bound, as without it: the backend opens it right away */
-        let core_makes = planned && !self.rt().would_make_workspace(&s.id);
-        if core_makes {
-            self.unplan_on_err(&item, &s.id, self.prepare_cwd(&item))?;
-        }
         let session_ctx = self.c.session_context(&item);
         let native_system_context = self.rt().supports_append_system_context(&s.harness);
         let (open_system_context, protocol_ctx) =
@@ -2360,10 +2310,6 @@ impl Tx<'_> {
             )?;
             return Err(msg(why));
         }
-        if planned && !core_makes && !self.rt().makes_workspace(&s.id) {
-            /* not bound where the worktree is made after all: made here, as without it */
-            self.unplan_on_err(&item, &s.id, self.prepare_cwd(&item))?;
-        }
         if let Some((actor, line)) = start.pre_timeline {
             self.db()
                 .timeline_add(item_id, actor, "sys", &line, Some(&s.id))?;
@@ -2386,19 +2332,6 @@ impl Tx<'_> {
         self.db()
             .event_add(&s.id, "system", json!({"steve_protocol_hash": hash}))?;
         Ok(s)
-    }
-
-    /// A start whose worktree the core could not make after it named it leaves nothing named: the
-    /// session ends and the item is back as it was (a worktree never made is no worktree to
-    /// restore, so a retry still waits for disk space).
-    fn unplan_on_err<T>(&self, before: &Item, session: &str, r: Result<T>) -> Result<()> {
-        let Err(e) = r else { return Ok(()) };
-        self.db().session_patch(session, patch![status: "ended"])?;
-        self.db().item_patch(
-            &before.id,
-            patch![cwd: before.cwd.as_deref(), branch: before.branch.as_deref()],
-        )?;
-        Err(e)
     }
 
     /// Session tokens live only in memory: after a restart each session gets a fresh one on its next start.
@@ -3553,9 +3486,10 @@ impl Tx<'_> {
             return Ok(true);
         };
         let prefix = format!("{}/", self.cfg().worktrees.to_string_lossy());
-        if !i.is_closed() || !cwd.starts_with(&prefix) || !git::is_git(Path::new(&p.path)) {
+        if !i.is_closed() || !cwd.starts_with(&prefix) || p.kind != "git" {
             return Ok(true);
         }
+        let _ = branch;
         /* only once no harness can be in the worktree any more: a release on its way (a Node's) is
          * asked about again later */
         let ss = self.db().sessions_of_item(item_id)?;
@@ -3569,62 +3503,23 @@ impl Tx<'_> {
         if !gone {
             return Ok(false);
         }
-        /* the caches go to the trash first (a rename): removing the worktree under the lock is then quick,
-         * and they are deleted outside it */
-        let shed = self.shed_closed_caches(item_id, Path::new(cwd));
-        if !shed.is_empty() {
-            self.c.purge_soon();
-        }
         /* a worktree its backend made is given back by it (off the lock); what it did is told later */
-        if self.tidy_by_backend(&i, &p, branch, cwd)? {
+        if self.tidy_by_backend(&i)? {
             return Ok(true);
         }
-        /* an archived item gives back a clean worktree even when its branch is not in main: the branch
-         * stays, and the worktree can be made again from it */
-        let (wt, br) = git::tidy_worktree(
-            Path::new(&p.path),
-            Path::new(cwd),
-            branch,
-            i.is_completed() && !i.archived,
-            "main",
-        );
-        let mut said = vec![];
-        if wt == git::WorktreeTidy::Removed {
-            let head = git::git(
-                Path::new(&p.path),
-                &["rev-parse", "--short", &format!("refs/heads/{branch}")],
-            );
-            said.push(match (br, head) {
-                (git::BranchTidy::Kept, Ok(h)) => {
-                    format!("删除了工作区 {cwd}（分支 {branch} 保留在 {h}，继续时从分支重建）")
+        if self.c.node_housekeeping().is_some() {
+            let core = self.c.clone();
+            crate::detach(move || {
+                if let Err(e) = core.reclaim_workspaces() {
+                    tracing::debug!("tidy reclaim: {e}");
                 }
-                _ => format!("删除了工作区 {cwd}"),
             });
-        }
-        if br == git::BranchTidy::Deleted {
-            said.push(format!("删除了已合并的分支 {branch}"));
-        }
-        if !said.is_empty() {
-            self.db()
-                .timeline_add(item_id, "steve", "sys", &said.join("；"), None)?;
         }
         Ok(true)
     }
 
-    /// A removed worktree comes back (from the kept branch, or fresh from main) when the item continues.
-    pub(crate) fn ensure_cwd(&self, item_id: &str) -> Result<()> {
-        let Some(i) = self.db().item(item_id)? else {
-            return Ok(());
-        };
-        if i.branch.as_deref().is_some_and(|b| !b.is_empty())
-            && i.cwd
-                .as_deref()
-                .is_some_and(|c| !c.is_empty() && !Path::new(c).exists())
-            && !self.backend_remakes(item_id)?
-            && let Err(e) = self.prepare_cwd(&i)
-        {
-            tracing::error!("worktree {e}");
-        }
+    /// A removed worktree comes back via its Node backend when the item continues.
+    pub(crate) fn ensure_cwd(&self, _item_id: &str) -> Result<()> {
         Ok(())
     }
 
@@ -5664,9 +5559,6 @@ impl Tx<'_> {
             self.reactivate(s.item_id.as_deref())?;
             return Ok(SendNow::Interrupted);
         }
-        if !cwd_usable(Path::new(&s.cwd)) {
-            return Ok(SendNow::Waiting(steve_i18n::t!("core.queue.wait_cwd")));
-        }
         if s.status == "ended" {
             self.db().session_patch(sid, patch![status: "idle"])?;
         }
@@ -6248,10 +6140,6 @@ impl Tx<'_> {
             return Ok(());
         };
         if s.status == "ended" || self.db().queued(sid)?.is_empty() {
-            return Ok(());
-        }
-        if !cwd_usable(Path::new(&s.cwd)) {
-            tracing::warn!("not flushing {sid}: cwd {} unusable", s.cwd);
             return Ok(());
         }
         if !self.waits_on_user(s.item_id.as_deref())? {

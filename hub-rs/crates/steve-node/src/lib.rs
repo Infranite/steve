@@ -30,9 +30,11 @@ mod harness_login;
 mod harness_updates;
 pub mod history;
 mod host;
+pub mod housekeeping;
 mod inline_images;
 mod job;
 mod journal;
+mod library_mcp;
 mod procs;
 pub mod project_setup;
 mod research;
@@ -59,7 +61,12 @@ use tokio::sync::mpsc;
 use actor::{Actor, Msg};
 pub use artifact::read_delivery_file;
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
+pub use steve_node_api::LocalDir;
 pub use workspace::Root;
+
+/// Concurrent think/research jobs allowed on the colocated local Node (unbounded by slot count,
+/// matching the prior in-process behavior so bursts do not back off on job capacity).
+pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
 
 /// What stages and switches a Node's release when the Hub asks ([`Discovery::upgrade_stage`]):
 /// the host that installed the Node as a service (`steve-node`), never the Node library itself.
@@ -466,6 +473,12 @@ pub(crate) struct Inner {
     research: research::Research,
     /// The OS sandbox around what this Node starts for runs ([`confine`]).
     confine: confine::Confine,
+    /// Host project creation/clone operations on this machine.
+    setup_mgr: Arc<project_setup::SetupManager>,
+    /// Sandboxed `stdio` library MCP servers hosted on this Node.
+    stdio_mcp: library_mcp::StdioMcpHost,
+    /// Optional OS sandbox around capability servers (`stdio` MCP).
+    capability_sandbox: Mutex<Option<Arc<steve_confine::Sandbox>>>,
 }
 
 impl Inner {
@@ -1436,16 +1449,6 @@ fn failed(e: Error) -> Observed {
 #[derive(Clone)]
 pub struct LocalNode(Arc<Inner>);
 
-/// A bound workspace's directory on this machine, for a Hub running on the same machine as its
-/// Node (see [`LocalNode::local_dir`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalDir {
-    /// Canonical, checked against the Node's roots when asked.
-    pub path: PathBuf,
-    /// The Node made it (a worktree or scratch dir), rather than adopting an existing directory.
-    pub owned: bool,
-}
-
 struct NodeUpgradeHold<'a> {
     active: &'a AtomicBool,
     _prefix: steve_acp::managed::PrefixLock,
@@ -1549,6 +1552,9 @@ impl LocalNode {
             push_timeout: AtomicU64::new(git::PUSH_TIMEOUT.as_millis() as u64),
             tasks: Mutex::new(Vec::new()),
             research: Default::default(),
+            setup_mgr: Arc::new(project_setup::SetupManager::new()),
+            stdio_mcp: Default::default(),
+            capability_sandbox: Mutex::new(None),
         }));
         node.0
             .j
@@ -1718,6 +1724,7 @@ impl LocalNode {
                 let _ = wait.await;
             }
         }
+        self.0.stdio_mcp.shutdown();
         // All effects have quiesced. Preserve unresolved outcomes for explicit Hub recovery.
         let _ = self.0.j.tx(|t| t.mark_unknown());
         self.0.wake.notify_one();
@@ -1803,6 +1810,22 @@ impl LocalNode {
     /// Hub last wrote to `path` (a JSON list of [`Root`]), read again whenever the file changed.
     pub fn follow_roots_file(&self, path: PathBuf) {
         *self.0.roots_file.lock().unwrap() = Some((path, None));
+    }
+
+    /// Host bridge: run research jobs with scratch/attachments stored in `scratch`.
+    pub fn enable_research_in(&self, scratch: PathBuf) {
+        self.enable_research(steve_research::ResearchConfig::new(scratch));
+    }
+
+    /// Host bridge: configure the OS sandbox used for Node-hosted `stdio` library MCP servers.
+    pub fn set_capability_sandbox(&self, sandbox: Option<steve_confine::Sandbox>) {
+        *self.0.capability_sandbox.lock().unwrap() = sandbox.map(Arc::new);
+    }
+
+    /// Host bridge: enable the default OS sandbox for Node-hosted `stdio` library MCP servers.
+    pub fn enable_capability_sandbox(&self) {
+        let sandbox = steve_confine::Sandbox::open(&self.0.cfg.acp.steve_home, &self.0.cfg.home);
+        self.set_capability_sandbox(Some(sandbox));
     }
 
     /// Host bridge, like [`Self::set_roots`]: where this machine's harnesses keep their history and
@@ -4177,6 +4200,63 @@ impl WorkspaceExecutor for LocalNode {
             }
         }
     }
+
+    async fn browse_dir(&self, q: BrowseDirRequest) -> ApiResult<BrowseDirResponse> {
+        blocking(move || Ok(project_setup::browse_dir(&q.path))).await
+    }
+
+    async fn describe_dir(&self, q: DescribeDirRequest) -> ApiResult<DescribeDirResponse> {
+        blocking(move || project_setup::describe_dir(&q.path, q.with_readme)).await
+    }
+
+    async fn path_check(&self, q: PathCheckRequest) -> ApiResult<PathCheckResponse> {
+        blocking(move || Ok(project_setup::path_check(&q.path))).await
+    }
+
+    async fn project_setup_preview(
+        &self,
+        q: ProjectSetupPreviewRequest,
+    ) -> ApiResult<ProjectSetupPreview> {
+        let mgr = self.0.setup_mgr.clone();
+        blocking(move || Ok(mgr.preview(&q))).await
+    }
+
+    async fn project_setup_start(
+        &self,
+        c: Command<ProjectSetupRequest>,
+    ) -> ApiResult<ProjectSetupStatus> {
+        c.check_window()?;
+        self.0.setup_mgr.start(c.id, c.body).await
+    }
+
+    async fn project_setup_status(&self, op: OperationId) -> ApiResult<ProjectSetupStatus> {
+        self.0.setup_mgr.status(&op)
+    }
+
+    async fn disk_inspect(&self, q: DiskInspectRequest) -> ApiResult<DiskInspectResponse> {
+        blocking(move || Ok(housekeeping::disk_inspect(&q))).await
+    }
+
+    async fn disk_reclaim(&self, q: DiskReclaimRequest) -> ApiResult<DiskReclaimResponse> {
+        blocking(move || Ok(housekeeping::disk_reclaim(&q))).await
+    }
+
+    async fn mcp_stdio_list(&self, server: McpStdioServer) -> ApiResult<Vec<McpStdioTool>> {
+        let sandbox = self.0.capability_sandbox.lock().unwrap().clone();
+        let secrets = self.0.secrets.lock().unwrap().clone();
+        self.0.stdio_mcp.list(sandbox, secrets, server).await
+    }
+
+    async fn mcp_stdio_call(&self, req: McpStdioCallRequest) -> ApiResult<McpStdioCallResponse> {
+        let sandbox = self.0.capability_sandbox.lock().unwrap().clone();
+        let secrets = self.0.secrets.lock().unwrap().clone();
+        self.0.stdio_mcp.call(sandbox, secrets, req).await
+    }
+
+    async fn mcp_stdio_sweep(&self, req: McpStdioSweepRequest) -> ApiResult<()> {
+        self.0.stdio_mcp.sweep(&req.live);
+        Ok(())
+    }
 }
 
 /// A scan's place among the kept scans while it walks: given back when dropped.
@@ -4656,6 +4736,38 @@ impl Discovery for LocalNode {
         tokio::task::spawn_blocking(move || history::locate(&d.homes, &source))
             .await
             .map_err(|e| Error::new(Code::Internal, format!("locate: {e}")))?
+    }
+    async fn resume_probe(&self, req: ResumeProbeRequest) -> ApiResult<ResumeProbeResponse> {
+        let homes = match self.0.discovery.read().unwrap().as_ref() {
+            Some(d) => d.homes.clone(),
+            None => {
+                let acp = &self.0.cfg.acp;
+                let mut state_dirs = std::collections::BTreeMap::new();
+                for b in steve_harness_spec::builtins() {
+                    if let Some(state) = &b.properties.state {
+                        let dir = match state.env.as_str() {
+                            "CLAUDE_CONFIG_DIR" => Some(
+                                acp.claude_config_dir
+                                    .clone()
+                                    .unwrap_or_else(|| acp.user_home.join(&state.default)),
+                            ),
+                            "CODEX_HOME" => Some(acp.codex_home.clone()),
+                            _ => None,
+                        };
+                        if let Some(dir) = dir {
+                            state_dirs.insert(b.id.to_string(), dir);
+                        }
+                    }
+                }
+                history::Homes {
+                    user_home: acp.user_home.clone(),
+                    steve_home: acp.steve_home.clone(),
+                    state_dirs,
+                }
+            }
+        };
+        let declared = self.0.cfg.acp.declared.clone();
+        blocking(move || Ok(history::resume_probe(&homes, &declared, &req))).await
     }
 }
 

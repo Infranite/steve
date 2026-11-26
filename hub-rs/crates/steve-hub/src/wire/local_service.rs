@@ -1,19 +1,19 @@
-//! The Hub's own Node in a process of its own (`STEVE_NODE_MODE=service`, B1): a Hub restart or
+//! The Hub's own Node in a process of its own (`steve-node --local-node`): a Hub restart or
 //! upgrade leaves its turns running, as a remote Node's do.
 //!
 //! - The Node keeps its id (`local`) and its home (`<data>/node`): sessions bound to it before
 //!   carry on there, their journal and harness state where they were.
-//! - It is `steve-hub --local-node`, built from the Hub's own configuration
-//!   ([`super::local_node_config`]) by the same binary, and it links to the Hub over loopback like a
-//!   paired Node: the Hub registers it (`nodes`, `local`, active) with a key it writes into the
-//!   Node's home, and the Node checks the Hub's signed welcome. A listener on
+//! - It is `steve-node --local-node` (sibling binary to `steve-hub`), and it links to the Hub over
+//!   loopback like a paired Node: the Hub registers it (`nodes`, `local`, active) with a key it
+//!   writes into the Node's home, and the Node checks the Hub's signed welcome. A listener on
 //!   `127.0.0.1:<STEVE_LOCAL_NODE_PORT>` (default: the Hub's port + 3) answers it, whatever
 //!   addresses the Hub's own port is on; a listener handed to the Hub as `local-node`
 //!   ([`crate::config::Handed`]) instead, on its own port.
-//! - The Hub drives it with a coordinator of its own (trusted as the in-process Node is, none of a
-//!   remote Node's limits), and answers the host bridges from the roots it writes to the Node's
-//!   home ([`super::host_node::ServiceNode`]).
-//! - Steve's think and research jobs stay in the Hub's process (`local-jobs`, `<data>/node-jobs`).
+//! - The Hub drives it with a coordinator of its own, and answers the host allowlist from the
+//!   roots it writes to the Node's home ([`super::host_node::ServiceNode`]).
+//! - All sessions, model calls (think/routing/summary), research jobs, commands, disk
+//!   housekeeping, project setup, and stdio MCP servers run on the independent `steve-node`
+//!   process.
 //! - The Hub starts the process when none is linked: in a session of its own (and, under systemd,
 //!   in a scope of its own), so stopping the Hub's service does not stop it. A Node of another
 //!   build is restarted once it has no turn running.
@@ -37,7 +37,6 @@ pub const NODE_ID: &str = "local";
 const KEY: &str = "service-identity.key";
 const LINK: &str = "service.json";
 const PID: &str = "service.pid";
-const INSTALLATION_CHECK: Duration = Duration::from_secs(1);
 /// Maximum consecutive restarts before assuming the newly spawned binary still fails to match
 /// the Hub and refusing to enter a kill loop.
 const MAX_CONSECUTIVE_RESTARTS: u32 = 3;
@@ -56,7 +55,6 @@ pub fn home(cfg: &Config) -> PathBuf {
 pub fn port(cfg: &Config, vars: &super::Vars) -> u16 {
     vars("STEVE_LOCAL_NODE_PORT")
         .and_then(|v| v.trim().parse::<u16>().ok())
-        .filter(|p| *p != 0)
         .unwrap_or(cfg.listen.port.saturating_add(3))
 }
 
@@ -116,12 +114,12 @@ pub(crate) fn host(
         .transpose()
         .map_err(|e| err(&e))?;
     let listener = match handed {
-        Some(listener) => listener,
+        Some(listener) => listener.into_std().map_err(|e| err(&e))?,
         None => {
             let listener =
                 std::net::TcpListener::bind(("127.0.0.1", port(cfg, vars))).map_err(|e| err(&e))?;
             listener.set_nonblocking(true).map_err(|e| err(&e))?;
-            tokio::net::TcpListener::from_std(listener).map_err(|e| err(&e))?
+            listener
         }
     };
     let addr = listener.local_addr().map_err(|e| err(&e))?;
@@ -134,6 +132,7 @@ pub(crate) fn host(
             "hub_url": format!("http://127.0.0.1:{port}"),
             "hub_id": svc.hub_id,
             "hub_key": hub_key,
+            "disk_floor": cfg.disk.floor,
         }))
         .unwrap_or_default(),
     )
@@ -162,6 +161,9 @@ pub(crate) fn host(
     let app = crate::nodes::node_router_at(svc.clone(), crate::nodes::link::Door::Colocated);
     let listen = async move {
         use axum::serve::ListenerExt as _;
+        let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
+            return;
+        };
         let l = listener
             .tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
         let _ = axum::serve(
@@ -391,21 +393,34 @@ fn keep_running_task(
     )
 }
 
-/// `steve-hub --local-node`, detached from the Hub: its own session, and its own systemd scope
+/// `steve-node --local-node`, detached from the Hub: its own session, and its own systemd scope
 /// when the Hub runs under systemd, so the Hub's service stopping leaves it running.
 fn spawn(home: &Path) -> std::io::Result<()> {
-    let exe = std::env::current_exe()?;
-    // only the Hub's own binary has `--local-node` (a test harness wiring the Hub in its own
-    // process starts the Node itself, or runs without it)
-    if !exe
-        .file_name()
-        .is_some_and(|n| n.to_string_lossy().starts_with("steve-hub"))
-    {
-        return Err(std::io::Error::other(format!(
-            "{} is not steve-hub: start `steve-hub --local-node` yourself",
-            exe.display()
-        )));
-    }
+    let exe = if let Some(bin) = std::env::var_os("STEVE_NODE_BIN").filter(|v| !v.is_empty()) {
+        PathBuf::from(bin)
+    } else {
+        let hub = std::env::current_exe()?;
+        // only a real steve-hub installation (with sibling steve-node) auto-spawns; a test
+        // harness wiring the Hub in its own process attaches its own Node over loopback
+        if !hub
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("steve-hub"))
+        {
+            return Err(std::io::Error::other(format!(
+                "{} is not steve-hub: start `steve-node --local-node` yourself",
+                hub.display()
+            )));
+        }
+        let sibling = hub.with_file_name("steve-node");
+        if !sibling.is_file() {
+            return Err(std::io::Error::other(format!(
+                "{} not found next to {}: start `steve-node --local-node` yourself",
+                sibling.display(),
+                hub.display()
+            )));
+        }
+        sibling
+    };
     let log_dir = home.join("logs");
     std::fs::create_dir_all(&log_dir)?;
     let log = std::fs::OpenOptions::new()
@@ -441,96 +456,10 @@ fn spawn(home: &Path) -> std::io::Result<()> {
     let child = cmd.spawn()?;
     tracing::info!(
         pid = child.id(),
+        exe = %exe.display(),
         "started the local Node in a process of its own"
     );
     Ok(())
-}
-
-fn retired(home: &Path, executable: &Path) -> bool {
-    if let Some(missing) = [home, executable]
-        .into_iter()
-        .find(|path| matches!(path.try_exists(), Ok(false)))
-    {
-        tracing::info!(path = %missing.display(), "the local Node's installation is gone");
-        return true;
-    }
-    false
-}
-
-async fn wait_for_retirement(home: &Path, executable: &Path) {
-    let mut tick = tokio::time::interval(INSTALLATION_CHECK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tick.tick().await;
-        if retired(home, executable) {
-            return;
-        }
-    }
-}
-
-/// The Hub's own Node, which reconnects across Hub restarts while its installation exists.
-pub async fn run(cfg: &Config) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !cfg.diagnostic(),
-        "--local-node is disabled on STEVE_NO_RESUME copies"
-    );
-    use anyhow::Context;
-    let executable = std::env::current_exe().context("the local Node's executable")?;
-    let executable = executable.canonicalize().unwrap_or(executable);
-    if retired(&cfg.home, &executable) {
-        return Ok(());
-    }
-    let home = home(cfg);
-    let link: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(home.join(LINK)).context("the Hub has not set up its local Node yet")?,
-    )?;
-    let id = Identity::load(&home.join(KEY)).context("the local Node's key")?;
-    let roots_file = super::host_node::roots_file(&home);
-    let roots: Vec<steve_node::Root> = std::fs::read(&roots_file)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    let node_id = NodeId::new(NODE_ID).expect("constant node id");
-    let node = steve_node::LocalNode::open(super::local_node_config(
-        cfg,
-        node_id.clone(),
-        home.clone(),
-        roots,
-        false,
-    ))
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
-    node.follow_roots_file(roots_file);
-    super::local_node_extras(&node, cfg, false);
-    let pairing = steve_node_cli::config::Pairing {
-        hub_url: link["hub_url"].as_str().context("hub_url")?.to_string(),
-        node_id: NODE_ID.into(),
-        hub_id: link["hub_id"].as_str().context("hub_id")?.to_string(),
-        pin: None,
-        loopback: true,
-        hub_key: link["hub_key"].as_str().map(str::to_string),
-        name: NODE_ID.into(),
-    };
-    tracing::info!(
-        "the local Node, in a process of its own, links to {}",
-        pairing.hub_url
-    );
-    std::fs::write(
-        home.join(PID),
-        format!("{}\n{}\n", std::process::id(), cfg.version),
-    )?;
-    let r = steve_node_cli::dial::serve_until_stopped(
-        node,
-        Some(&home),
-        &pairing,
-        &id,
-        &steve_node_wire::tls::Trust::LoopbackPlaintext,
-        wait_for_retirement(&cfg.home, &executable),
-    )
-    .await;
-    if read_service(&home).0 == Some(std::process::id()) {
-        let _ = std::fs::remove_file(home.join(PID));
-    }
-    r
 }
 
 #[cfg(test)]

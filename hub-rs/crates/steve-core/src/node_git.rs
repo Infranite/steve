@@ -374,6 +374,7 @@ impl Core {
             let want = t.git_want(&i);
             let s = t.st.git.entry(item.into()).or_default();
             s.asked += 1;
+            s.running = Some((s.asked, now(), want.clone()));
             (s.asked, want)
         };
         let Some(got) = block_on(async {
@@ -381,10 +382,19 @@ impl Core {
                 .await
                 .unwrap_or_else(|_| Err("timed out".into()))
         }) else {
+            let mut t = self.tx();
+            if let Some(s) = t.st.git.get_mut(item)
+                && s.running.as_ref().is_some_and(|(a, _, _)| *a == ask)
+            {
+                s.running = None;
+            }
             return;
         };
         let mut t = self.tx();
         let s = t.st.git.entry(item.into()).or_default();
+        if s.running.as_ref().is_some_and(|(a, _, _)| *a == ask) {
+            s.running = None;
+        }
         /* only the newest ask makes them fresh; a gathering of an older one still running stays */
         if s.asked == ask {
             s.last = Some(got);
@@ -397,6 +407,9 @@ impl Core {
     pub(crate) fn git_arrived(&self, item: &str, ask: u64, got: Gathered) {
         let mut t = self.tx();
         let s = t.st.git.entry(item.into()).or_default();
+        if s.running.as_ref().is_some_and(|(a, _, _)| *a != ask) {
+            return;
+        }
         s.running = None;
         if s.asked > ask {
             /* asked again while it ran: what it found may be older than that ask */

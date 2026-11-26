@@ -664,6 +664,7 @@ impl Kit {
             reported: Mutex::new(Some("fake-model".into())),
         });
         let core = Core::new(store, rt.clone(), gw.clone(), cfg);
+        core.set_housekeeping(Arc::new(TestNodeHousekeeping));
         core.seed().unwrap();
         /* the second Bot the tests give work to: an installation has it only beside Steve's own source */
         core.store()
@@ -693,12 +694,21 @@ impl Kit {
             steve_store::NoPublisher,
         )
         .unwrap();
-        Core::new(
+        let core = Core::new(
             Store::new(raw),
             self.rt.clone(),
             self.gw.clone(),
             self.core.config().clone(),
-        )
+        );
+        core.set_housekeeping(Arc::new(TestNodeHousekeeping));
+        core
+    }
+    /// Wires a real `LocalNode`-backed [`crate::node_git::NodeGit`] rooted at `self.home()`,
+    /// serving any item whose `cwd` lies under `self.home()`.
+    pub fn wire_node_git(&self) -> Arc<TestNodeGit> {
+        let port = TestNodeGit::new(self.home(), self.core.store().clone());
+        self.core.set_node_git(port.clone());
+        port
     }
     /// One outbox pass with Work's consumers (`work.tidy`), as the Hub's dispatcher does after a commit.
     pub fn pump_outbox(&self) -> steve_store::outbox::Pumped {
@@ -931,7 +941,7 @@ impl crate::OneModel for ModelScript {
             "model": (!model.is_empty()).then_some(model),
             "effort": effort.map(|e| e.as_str()),
             "prompt": call.prompt,
-            "images": call.images.iter().map(crate::gateway::Image::block).collect::<Vec<_>>(),
+            "images": call.images.iter().map(steve_acp::oneshot::image_block).collect::<Vec<_>>(),
         }));
         if matches!(model, "broken" | "busy") {
             return Tried::failed(crate::error::msg("model unavailable"));
@@ -956,5 +966,320 @@ impl crate::OneModel for ModelScript {
             }],
             reported_model: (!model.is_empty()).then(|| model.to_string()),
         }
+    }
+}
+
+/// Test [`crate::workspace::NodeHousekeeping`] adapter delegating directly to
+/// `steve_node::housekeeping` so `steve-core` tests exercise the real Node housekeeping logic.
+pub struct TestNodeHousekeeping;
+
+#[async_trait]
+impl crate::workspace::NodeHousekeeping for TestNodeHousekeeping {
+    async fn disk_inspect(
+        &self,
+        req: steve_node_api::DiskInspectRequest,
+    ) -> steve_node_api::ApiResult<steve_node_api::DiskInspectResponse> {
+        tokio::task::spawn_blocking(move || steve_node::housekeeping::disk_inspect(&req))
+            .await
+            .map_err(|e| steve_node_api::Error::new(steve_node_api::Code::Internal, e.to_string()))
+    }
+
+    async fn disk_reclaim(
+        &self,
+        req: steve_node_api::DiskReclaimRequest,
+    ) -> steve_node_api::ApiResult<steve_node_api::DiskReclaimResponse> {
+        tokio::task::spawn_blocking(move || steve_node::housekeeping::disk_reclaim(&req))
+            .await
+            .map_err(|e| steve_node_api::Error::new(steve_node_api::Code::Internal, e.to_string()))
+    }
+}
+
+/// Test [`crate::node_git::NodeGit`] adapter backed by a real `steve_node::LocalNode` rooted at a
+/// test kit's home directory.
+pub struct TestNodeGit {
+    rt: tokio::runtime::Runtime,
+    node: steve_node::LocalNode,
+    _home: tempfile::TempDir,
+    root: std::path::PathBuf,
+    store: crate::repo::Db,
+    workspaces: Mutex<HashMap<(String, String), steve_node_api::WorkspaceRef>>,
+}
+
+impl TestNodeGit {
+    pub fn new(root: &std::path::Path, store: crate::repo::Db) -> Arc<Self> {
+        use steve_node_api::*;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let root = root.to_path_buf();
+        let cfg = steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
+            node: NodeId::new("local").unwrap(),
+            home: home.path().join("node"),
+            acp: steve_acp::AcpConfig {
+                declared: Default::default(),
+                adapters: HashMap::new(),
+                node: "node".into(),
+                claude_executable: "claude".into(),
+                claude_config_dir: None,
+                steve_home: home.path().join("steve"),
+                codex_home: home.path().join("codex"),
+                user_home: home.path().into(),
+                version: "test".into(),
+            },
+            roots: vec![steve_node::Root {
+                id: RootId::new("home").unwrap(),
+                path: root.clone(),
+                display: "~".into(),
+                access: RootAccess::ReadWrite,
+            }],
+            capacity: Capacity {
+                sessions: 0,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: steve_node::Storage::default(),
+        };
+        let node = {
+            let _in = rt.enter();
+            steve_node::LocalNode::open(cfg).unwrap()
+        };
+        Arc::new(Self {
+            rt,
+            node,
+            _home: home,
+            root,
+            store,
+            workspaces: Default::default(),
+        })
+    }
+
+    async fn workspace(
+        &self,
+        item: &str,
+    ) -> steve_node_api::ApiResult<steve_node_api::WorkspaceRef> {
+        use steve_node_api::*;
+        let cwd = self
+            .store
+            .item(item)
+            .ok()
+            .flatten()
+            .and_then(|i| i.cwd)
+            .ok_or_else(|| Error::new(Code::Invalid, "no cwd"))?;
+        let key = (item.to_string(), cwd.clone());
+        if let Some(w) = self.workspaces.lock().unwrap().get(&key) {
+            return Ok(w.clone());
+        }
+        let rel = std::path::Path::new(&cwd)
+            .strip_prefix(&self.root)
+            .map_err(|_| Error::new(Code::Forbidden, "outside root"))?
+            .to_string_lossy()
+            .to_string();
+        let now = crate::util::now();
+        let uid = crate::util::uid("w");
+        let cmd = Command {
+            id: OperationId::new(format!("prep-{uid}")).unwrap(),
+            issued_at: Timestamp(now),
+            accept_before: Timestamp(now + 60_000),
+            grant: GrantId::new("grant").unwrap(),
+            body: Prepare {
+                resource: format!("item:{item}:{uid}"),
+                kind: PrepareKind::Existing {
+                    dir: RootPath {
+                        root: RootId::new("home").unwrap(),
+                        rel: RelPath::new(rel).unwrap(),
+                    },
+                },
+            },
+        };
+        let node = self.node.clone();
+        let r = self
+            .rt
+            .spawn(async move { node.prepare_workspace(cmd).await })
+            .await
+            .unwrap()?;
+        let op = r.operation;
+        let node = self.node.clone();
+        let ws = self
+            .rt
+            .spawn(async move {
+                loop {
+                    let rec = node.operation(op.clone()).await?;
+                    match rec.state {
+                        Observed::Finished {
+                            result: Some(OperationResult::Workspace(v)),
+                            ..
+                        } => return Ok(v.workspace),
+                        Observed::Finished { error: Some(e), .. } => return Err(e),
+                        Observed::Finished { .. } | Observed::Unknown { .. } => {
+                            return Err(Error::new(
+                                Code::Internal,
+                                format!("prepare_workspace ended unexpectedly: {:?}", rec.state),
+                            ));
+                        }
+                        _ => tokio::time::sleep(Duration::from_millis(10)).await,
+                    }
+                }
+            })
+            .await
+            .unwrap()?;
+        self.workspaces.lock().unwrap().insert(key, ws.clone());
+        Ok(ws)
+    }
+
+    /// Computes a Node git fingerprint for any directory under `self.root`.
+    pub fn fingerprint_dir(&self, dir: &std::path::Path) -> Option<String> {
+        use steve_node_api::*;
+        let rel = dir
+            .strip_prefix(&self.root)
+            .ok()?
+            .to_string_lossy()
+            .to_string();
+        let key = format!("fp-{}", crate::util::uid("t"));
+        let now = crate::util::now();
+        let cmd = Command {
+            id: OperationId::new(format!("prep-{key}")).unwrap(),
+            issued_at: Timestamp(now),
+            accept_before: Timestamp(now + 60_000),
+            grant: GrantId::new("grant").unwrap(),
+            body: Prepare {
+                resource: format!("dir:{key}"),
+                kind: PrepareKind::Existing {
+                    dir: RootPath {
+                        root: RootId::new("home").unwrap(),
+                        rel: RelPath::new(rel).unwrap(),
+                    },
+                },
+            },
+        };
+        let node = self.node.clone();
+        self.rt.block_on(async move {
+            let r = node.prepare_workspace(cmd).await.ok()?;
+            let ws = loop {
+                let rec = node.operation(r.operation.clone()).await.ok()?;
+                match rec.state {
+                    Observed::Finished {
+                        result: Some(OperationResult::Workspace(v)),
+                        ..
+                    } => break v.workspace,
+                    Observed::Finished { .. } | Observed::Unknown { .. } => return None,
+                    _ => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            };
+            let facts = node
+                .git_facts(GitQuery {
+                    workspace: ws,
+                    refs: vec![],
+                    ranges: vec![],
+                    fetch: false,
+                    reads: vec![GitRead::Fingerprint],
+                    heads_only: false,
+                })
+                .await
+                .ok()?;
+            match facts.reads.into_iter().next().map(|r| r.answer) {
+                Some(GitAnswer::Fingerprint {
+                    tree,
+                    own: Some(own),
+                }) => Some(format!("{}:{tree}:{}:{}", facts.head, own.base, own.patch)),
+                Some(GitAnswer::Fingerprint { tree, own: None }) => {
+                    Some(format!("{}:{tree}", facts.head))
+                }
+                _ => None,
+            }
+        })
+    }
+}
+
+#[async_trait]
+impl crate::node_git::NodeGit for TestNodeGit {
+    fn on_node(&self, item: &str) -> bool {
+        self.store
+            .item(item)
+            .ok()
+            .flatten()
+            .and_then(|i| i.cwd)
+            .is_some_and(|cwd| std::path::Path::new(&cwd).starts_with(&self.root))
+    }
+
+    async fn facts(
+        &self,
+        item: &str,
+        q: crate::node_git::Ask,
+    ) -> steve_node_api::ApiResult<steve_node_api::GitFacts> {
+        use steve_node_api::*;
+        let w = self.workspace(item).await?;
+        let node = self.node.clone();
+        self.rt
+            .spawn(async move {
+                node.git_facts(GitQuery {
+                    workspace: w,
+                    refs: q.refs,
+                    ranges: q.ranges,
+                    fetch: q.fetch,
+                    reads: q.reads,
+                    heads_only: q.heads_only,
+                })
+                .await
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn apply(
+        &self,
+        item: &str,
+        operation: &str,
+        _subject: &str,
+        on: &steve_node_api::GitFacts,
+        action: steve_node_api::GitAction,
+    ) -> crate::node_git::Applied {
+        use steve_node_api::*;
+        let w = match self.workspace(item).await {
+            Ok(w) => w,
+            Err(e) => return crate::node_git::Applied::Failed(e),
+        };
+        let now = crate::util::now();
+        let cmd = Command {
+            id: OperationId::new(operation).unwrap(),
+            issued_at: Timestamp(now),
+            accept_before: Timestamp(now + 60_000),
+            grant: GrantId::new("grant").unwrap(),
+            body: GitApply {
+                workspace: w,
+                expected: on.revision.clone(),
+                expected_head: on.head.clone(),
+                action,
+            },
+        };
+        let node = self.node.clone();
+        self.rt
+            .spawn(async move {
+                let r = match node.git_apply(cmd).await {
+                    Ok(r) => r,
+                    Err(e) => return crate::node_git::Applied::Failed(e),
+                };
+                loop {
+                    let rec = node.operation(r.operation.clone()).await.unwrap();
+                    match rec.state {
+                        Observed::Finished {
+                            result: Some(OperationResult::Git(f)),
+                            ..
+                        } => return crate::node_git::Applied::Done(f),
+                        Observed::Finished { error: Some(e), .. } => {
+                            return crate::node_git::Applied::Failed(e);
+                        }
+                        Observed::Finished { .. } | Observed::Unknown { .. } => {
+                            return crate::node_git::Applied::Unknown(format!("{:?}", rec.state));
+                        }
+                        _ => tokio::time::sleep(Duration::from_millis(10)).await,
+                    }
+                }
+            })
+            .await
+            .unwrap()
     }
 }

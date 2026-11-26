@@ -157,6 +157,30 @@ impl FolderPlaces for Places {
             },
         }))
     }
+
+    async fn check_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<steve_node_api::PathCheckResponse>, Unplaced> {
+        if self.unlinked.load(Ordering::SeqCst) {
+            return Err(Unplaced::Offline);
+        }
+        let p = std::path::Path::new(path.trim());
+        match fs::metadata(p) {
+            Ok(meta) => Ok(Some(steve_node_api::PathCheckResponse {
+                exists: true,
+                is_dir: meta.is_dir(),
+                canonical: fs::canonicalize(p)
+                    .ok()
+                    .map(|c| c.to_string_lossy().into_owned()),
+            })),
+            Err(_) => Ok(Some(steve_node_api::PathCheckResponse {
+                exists: false,
+                is_dir: false,
+                canonical: None,
+            })),
+        }
+    }
 }
 
 struct Env {

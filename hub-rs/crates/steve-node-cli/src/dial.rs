@@ -392,16 +392,12 @@ pub async fn serve_at(
     serve_with(node, home, status, p, id, trust).await
 }
 
-/// The file in a Node's home that says why its last link to the Hub failed,
-/// `{"at": <ms>, "error": "…"}`; gone once it links. Its Hub reads its own Node's; a remote Node
-/// tells its Hub a fault in a handshake report instead (`tell_hub`).
-pub const LINK_STATUS: &str = "link-status.json";
+pub use steve_node_wire::LINK_STATUS;
 
 /// Why the Node in `home` could not link last, and when (ms): `None` once it linked.
 pub fn link_status(home: &Path) -> Option<(i64, String)> {
-    let v: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.join(LINK_STATUS)).ok()?).ok()?;
-    Some((v["at"].as_i64()?, v["error"].as_str()?.to_string()))
+    let bytes = std::fs::read(home.join(LINK_STATUS)).ok()?;
+    steve_node_wire::parse_link_status(&bytes)
 }
 
 /// Where the dial loop notes how linking went ([`LINK_STATUS`]); `None`: nowhere.

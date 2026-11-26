@@ -1,5 +1,5 @@
 //! `/api/items/:id/artifacts/:art/preview` and `/raw` on the wired Hub, with the local Node off
-//! and on (`STEVE_NODE_MODE=local`, N0e-E5b): the same files give the same JSON, the same bytes
+//! and with a colocated local Node attached (N0e-E5b): the same files give the same JSON, the same bytes
 //! and the same Range. Temp STEVE_HOME, no agent, no real host.
 
 use std::collections::HashMap;
@@ -35,8 +35,12 @@ fn g(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     home: std::path::PathBuf,
     db: std::path::PathBuf,
     /// Where files are: its local roots are built again when asked (`follow` is not run here).
@@ -99,7 +103,7 @@ async fn start() -> Env {
     start_with(false).await
 }
 
-/// `node`: with the local Node on (`STEVE_NODE_MODE=local`, so not a `STEVE_NO_RESUME` copy).
+/// `node`: with the colocated local Node attached (not a `STEVE_NO_RESUME` copy).
 async fn start_with(node: bool) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().unwrap();
@@ -127,7 +131,7 @@ async fn start_with(node: bool) -> Env {
     }
     if node {
         vars.remove("STEVE_NO_RESUME");
-        vars.insert("STEVE_NODE_MODE".into(), "local".into());
+        vars.insert("STEVE_LOCAL_NODE_PORT".into(), "0".into());
     }
     let vars = Arc::new(vars);
     let get = {
@@ -142,6 +146,7 @@ async fn start_with(node: bool) -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).unwrap();
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
         .with_workspaces(Some(w.workspaces.clone()));
@@ -170,6 +175,7 @@ async fn start_with(node: bool) -> Env {
         .unwrap();
     Env {
         _home: home,
+        _local_node: local_node,
         home: h,
         db: cfg.data_dir.join("steve.sqlite3"),
         workspaces: w.workspaces,

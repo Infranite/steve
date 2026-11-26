@@ -89,15 +89,29 @@ impl Home {
 
 const VERSION: &str = "0.9.0";
 
-/// A running Hub process (its own process group: killing it takes its agent along).
-struct Hub(Option<Child>);
+/// A running Hub process (its own process group) paired with its colocated service Node.
+struct Hub {
+    child: Option<Child>,
+    node_pid_file: PathBuf,
+}
 
 impl Hub {
-    /// SIGKILL the Hub and its agents. The Hub puts each agent in its own process group, so they
-    /// are found as its children first (and their groups killed), then the Hub's group.
+    /// SIGKILL the Hub, its colocated service Node, and any agents to simulate an abrupt machine stop.
     fn kill(&mut self) {
-        if let Some(child) = self.0.take() {
+        if let Some(child) = self.child.take() {
             Self::kill_child(child);
+        }
+        if let Ok(text) = std::fs::read_to_string(&self.node_pid_file)
+            && let Some(pid) = text
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse::<i32>().ok())
+            && pid > 0
+        {
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+                libc::kill(pid, libc::SIGKILL);
+            }
         }
     }
     fn kill_child(mut child: Child) {
@@ -157,9 +171,8 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
         // a turn that ends without a delivery is not continued by Steve: the queue stays the test's
         .env("STEVE_TAKEOVER_CONTINUES", "0")
         .env_remove("STEVE_NO_RESUME")
-        // the local Node, the default
-        // the Node in the Hub's process: killing the Hub cuts its turns, which is what is tested
-        .env("STEVE_NODE_MODE", "local")
+        .env_remove("STEVE_NODE_MODE")
+        .env("STEVE_LOCAL_NODE_PORT", "0")
         .env_remove("STEVE_NODE")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
@@ -176,7 +189,10 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
     if let Some(id) = upgrade {
         c.env("STEVE_UPGRADE_ID", id);
     }
-    Hub(Some(c.spawn().expect("spawn hub")))
+    Hub {
+        child: Some(c.spawn().expect("spawn hub")),
+        node_pid_file: h.steve().join("data/node/service.pid"),
+    }
 }
 
 async fn health(h: &Home) -> Option<Value> {

@@ -5,6 +5,10 @@
 //! tool rows, and Steve's research tools reach the Hub through the Node's endpoint with the job's
 //! grant. Without the local Node there is no research.
 
+pub mod answer;
+pub mod policy;
+pub mod prompt;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,8 +18,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use steve_core::thread::{ResearchOutcome, ResearchRequest, ResearchSink, RunEnd, ToolSeen};
 use steve_node_api as api;
-use steve_research as r;
 
+use self::policy as r;
 use super::node_runtime::{News, NodeRuntime, ResearchAttempt, ResearchFile};
 
 /// The deadline of a run on the Node when the setting names no wall time. The Node needs one, but
@@ -29,7 +33,7 @@ pub struct NodeResearch {
     pub runtime: Arc<NodeRuntime>,
     /// The local Node's roots now: a run's directories are named under them. A directory under
     /// none of them cannot be read: the run fails, counted.
-    pub roots: Arc<dyn Fn() -> Result<Vec<steve_node::Root>, String> + Send + Sync>,
+    pub roots: Arc<dyn Fn() -> Result<Vec<api::HostRoot>, String> + Send + Sync>,
 }
 
 pub struct ResearchAdapter {
@@ -179,13 +183,8 @@ impl ResearchAdapter {
             ),
             None => (prompt, None),
         };
-        let mut req = r::ResearchRequest::new(&q.ws, &q.question, prompt);
-        req.run_id = Some(q.run.clone());
+        let mut req = r::ResearchRequest::new(prompt);
         req.resume = resume;
-        req.mcp = q.mcp.as_ref().map(|m| r::McpAccess {
-            url: m.url.clone(),
-            token: m.token.clone(),
-        });
         req.add_dirs = q
             .readable
             .iter()
@@ -199,22 +198,6 @@ impl ResearchAdapter {
         }
         req.effort = q.models.effort.map(|e| e.as_str().to_owned());
         req.harness = q.models.harness.clone();
-        /* the question's own files, then the ones of the message it follows up on */
-        let own = q.files.iter().map(|f| (f, false));
-        let earlier = q.earlier_files.iter().map(|f| (f, true));
-        req.attachments = own
-            .chain(earlier)
-            .filter_map(|(r, earlier)| {
-                let f = self.db.file(&r.id).ok().flatten()?;
-                Some(r::Attachment {
-                    path: steve_core::attachments::blob_path(&self.data_dir, &f),
-                    name: f.name.clone(),
-                    mime: f.mime.clone(),
-                    size: u64::try_from(f.size).unwrap_or(0),
-                    earlier,
-                })
-            })
-            .collect();
         req
     }
 }
@@ -715,7 +698,7 @@ impl OnNode<'_> {
             .filter(|text: &String| !text.is_empty())
             .unwrap_or_else(|| self.text.clone());
         let files_read = report.map(|j| j.files_read.clone()).unwrap_or_default();
-        let (mut answer, offer, citations) = r::present(&status, &raw, question, &files_read);
+        let (mut answer, offer, _citations) = r::present(&status, &raw, question, &files_read);
         if self.unavailable && !answer.is_empty() {
             answer.push_str("\n\n（Node 连接中断，已请求停止，尚未确认执行结束。）");
         }
@@ -728,13 +711,9 @@ impl OnNode<'_> {
                 .map(|h| h.to_string()),
             answer,
             offer,
-            citations,
-            files_read,
             turns: report.map_or(0, |j| j.turns),
             ms,
             first_text_ms: self.first_text_ms,
-            sandboxed: report.is_some_and(|j| j.sandboxed),
-            raw,
         }
     }
 }
