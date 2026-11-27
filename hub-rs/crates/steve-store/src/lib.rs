@@ -152,6 +152,12 @@ fn readers() -> u32 {
         .clamp(4, 16)
 }
 
+/// Minimum idle read connections forced by r2d2: 0 avoids both eager connection opening on
+/// `Store::open` and r2d2's background replenishment opening extra readers whenever a single warm
+/// reader is briefly checked out. Opened readers remain warm in the pool until r2d2's idle
+/// timeout (10 minutes) and still scale up to [`readers()`] under real concurrent read load.
+const READER_POOL_MIN_IDLE: u32 = 0;
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error(transparent)]
@@ -358,7 +364,7 @@ impl Store {
         // a checkout test (an empty statement per `get`) finds nothing on a local file
         let readers = r2d2::Pool::builder()
             .max_size(if admin { 1 } else { readers() })
-            .min_idle(if admin { Some(0) } else { None })
+            .min_idle(Some(READER_POOL_MIN_IDLE))
             .test_on_check_out(false)
             .build(manager)?;
         contract::Backend::lock_instance(&mut contract::Sqlite(&writer))?;

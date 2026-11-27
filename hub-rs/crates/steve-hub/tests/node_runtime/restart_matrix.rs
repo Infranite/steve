@@ -439,6 +439,10 @@ struct HubProcess {
     tokio: Option<tokio::runtime::Runtime>,
 }
 
+/// Bounded wait when tearing down a simulated Hub Tokio runtime so worker threads and blocking
+/// tasks finish dropping their `Store` handles before the next phase opens another store.
+const HUB_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl HubProcess {
     fn spawn(
         store: Store,
@@ -446,11 +450,18 @@ impl HubProcess {
         domain: Arc<DomainLog>,
         clock: Arc<FakeClock>,
     ) -> Self {
+        // FakeNode + Store + FakeClock only use timers; omit the unused IO/signal driver so each
+        // simulated Hub does not allocate extra kqueue/epoll/socketpair descriptors.
         let tokio = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .enable_all()
+            .enable_time()
             .build()
-            .unwrap();
+            .unwrap_or_else(|e| {
+                panic!(
+                    "HubProcess::spawn tokio runtime failed: {e}; fds={:?}",
+                    open_fd_inventory()
+                )
+            });
         let rt = NodeRuntime::with_clock(store, node, domain, clock);
         {
             let _guard = tokio.enter();
@@ -464,10 +475,14 @@ impl HubProcess {
 
     async fn kill(mut self) {
         let weak = Arc::downgrade(&self.rt);
-        if let Some(tokio) = self.tokio.take() {
-            tokio.shutdown_background();
-        }
+        let tokio = self.tokio.take();
         drop(self);
+        if let Some(tokio) = tokio {
+            let _ = tokio::task::spawn_blocking(move || {
+                tokio.shutdown_timeout(HUB_SHUTDOWN_TIMEOUT);
+            })
+            .await;
+        }
         eventually_sync("crashed Hub runtime dropped", || weak.upgrade().is_none()).await;
     }
 }
@@ -592,6 +607,12 @@ impl MatrixRig {
         self.node.restart();
         self.proxy.bump_generation();
         self.rt().reconcile_again().await.unwrap();
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(old) = self.hub.take() {
+            old.kill().await;
+        }
     }
 
     async fn restart(&mut self, side: RestartSide) {
@@ -803,6 +824,7 @@ async fn baseline_trace() -> NormalizedTrace {
     assert_eq!(trace.duplicate_node_events, 0);
     assert_eq!(trace.faulted_streams, 0);
     assert_eq!(trace.node_unacked, 0);
+    rig.shutdown().await;
     trace
 }
 
@@ -1128,6 +1150,7 @@ async fn run_matrix_cell(bp: Breakpoint, side: RestartSide, expected: ExpectedOu
                 .await;
         }
     }
+    rig.shutdown().await;
 }
 
 macro_rules! matrix_cells {
@@ -1247,6 +1270,7 @@ async fn virtual_clock_transient_turn_retry_uses_injected_clock_not_wall_clock()
     )
     .await;
     assert_eq!(rig.ends(), [(SESSION.into(), "end_turn".into(), None)]);
+    rig.shutdown().await;
 }
 
 /// Idle 48h virtual-clock stability: an idle session with no business input creates 0 new
@@ -1303,4 +1327,194 @@ async fn idle_session_across_48h_virtual_clock_plans_zero_new_turns() {
         "exactly one idle release across 48h"
     );
     assert_eq!(rig.ends().len(), 1);
+    rig.shutdown().await;
+}
+
+#[derive(Debug, Default)]
+struct FdInventory {
+    total: usize,
+    by_kind: std::collections::BTreeMap<String, usize>,
+    paths: Vec<std::path::PathBuf>,
+}
+
+impl FdInventory {
+    fn count_under(&self, dir: &std::path::Path) -> usize {
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        self.paths
+            .iter()
+            .filter(|p| p.starts_with(dir) || p.starts_with(&canon))
+            .count()
+    }
+
+    fn non_vnode(&self) -> usize {
+        self.by_kind
+            .iter()
+            .filter(|(k, _)| !k.starts_with("vnode:") && !k.starts_with("file:"))
+            .map(|(_, v)| *v)
+            .sum()
+    }
+}
+
+fn open_fd_inventory() -> FdInventory {
+    let mut inv = FdInventory::default();
+    #[cfg(target_os = "macos")]
+    {
+        let pid = std::process::id() as libc::c_int;
+        let bytes =
+            unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+        if bytes <= 0 {
+            return inv;
+        }
+        let elem = std::mem::size_of::<libc::proc_fdinfo>();
+        let cap = (bytes as usize / elem) + 32;
+        let mut buf: Vec<libc::proc_fdinfo> = vec![unsafe { std::mem::zeroed() }; cap];
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * elem) as libc::c_int,
+            )
+        };
+        if got <= 0 {
+            return inv;
+        }
+        let count = got as usize / elem;
+        inv.total = count;
+        for info in &buf[..count] {
+            let kind = match info.proc_fdtype as libc::c_int {
+                libc::PROX_FDTYPE_VNODE => {
+                    let mut path = [0u8; libc::MAXPATHLEN as usize];
+                    let ok =
+                        unsafe { libc::fcntl(info.proc_fd, libc::F_GETPATH, path.as_mut_ptr()) }
+                            == 0;
+                    if ok {
+                        let end = path.iter().position(|b| *b == 0).unwrap_or(path.len());
+                        let s = String::from_utf8_lossy(&path[..end]);
+                        inv.paths.push(std::path::PathBuf::from(s.as_ref()));
+                        if s.ends_with(".sqlite3") {
+                            "vnode:sqlite3".into()
+                        } else if s.ends_with("-wal") {
+                            "vnode:sqlite3-wal".into()
+                        } else if s.ends_with("-shm") {
+                            "vnode:sqlite3-shm".into()
+                        } else {
+                            "vnode:other".into()
+                        }
+                    } else {
+                        "vnode:unknown".into()
+                    }
+                }
+                libc::PROX_FDTYPE_SOCKET => "socket".into(),
+                libc::PROX_FDTYPE_PIPE => "pipe".into(),
+                libc::PROX_FDTYPE_KQUEUE => "kqueue".into(),
+                other => format!("type:{other}"),
+            };
+            *inv.by_kind.entry(kind).or_insert(0) += 1;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+            for entry in entries.flatten() {
+                inv.total += 1;
+                let kind = match std::fs::read_link(entry.path()) {
+                    Ok(target) => {
+                        let s = target.to_string_lossy();
+                        if s.starts_with("socket:") {
+                            "socket".into()
+                        } else if s.starts_with("pipe:") {
+                            "pipe".into()
+                        } else if s.starts_with("anon_inode:") {
+                            s.into_owned()
+                        } else {
+                            inv.paths.push(target.clone());
+                            if s.ends_with(".sqlite3") {
+                                "file:sqlite3".into()
+                            } else if s.ends_with("-wal") {
+                                "file:sqlite3-wal".into()
+                            } else if s.ends_with("-shm") {
+                                "file:sqlite3-shm".into()
+                            } else {
+                                "file:other".into()
+                            }
+                        }
+                    }
+                    Err(_) => "unreadable".into(),
+                };
+                *inv.by_kind.entry(kind).or_insert(0) += 1;
+            }
+        }
+    }
+    inv
+}
+
+/// Contract: repeated Hub and Node restarts must keep open file descriptors bounded (no per-restart
+/// leak of SQLite handles, runtimes, or event-loop fds), and shutting down a rig must release all
+/// of its store descriptors immediately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_restarts_do_not_leak_file_descriptors() {
+    const RESTART_ROUNDS: usize = 30;
+    /// Lazy reader pool (1 writer + 1 warm reader, plus at most a few concurrent burst readers)
+    /// must stay well below the old eager 16-reader footprint (35 fds per Store).
+    const MAX_RIG_STORE_FDS: usize = 12;
+
+    let mut rig = MatrixRig::ready().await;
+    // Canonicalize before `rig.shutdown()` deletes the TempDir so macOS `/var` -> `/private/var`
+    // paths returned by `F_GETPATH` still match even after the directory is removed.
+    let rig_dir =
+        std::fs::canonicalize(rig._dir.path()).unwrap_or_else(|_| rig._dir.path().to_path_buf());
+    let after_ready = open_fd_inventory();
+    let ready_store_fds = after_ready.count_under(&rig_dir);
+    assert!(
+        ready_store_fds > 0 && ready_store_fds <= MAX_RIG_STORE_FDS,
+        "expected lazy Store reader pool to stay <= {MAX_RIG_STORE_FDS} fds, got {ready_store_fds}: {after_ready:?}"
+    );
+
+    for i in 1..=RESTART_ROUNDS {
+        if i % 2 == 0 {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            rig.proxy
+                .intercept_start(Some(StartIntercept::BlockBeforeNode {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                }));
+            let _ = rig.rt().prompt(SESSION, "active restart", "user", &[]);
+            tokio::select! {
+                _ = entered.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+        }
+        rig.restart_hub().await;
+    }
+    for _ in 1..=RESTART_ROUNDS {
+        rig.restart_node().await;
+    }
+
+    let after_restarts = open_fd_inventory();
+    let restarted_store_fds = after_restarts.count_under(&rig_dir);
+    assert!(
+        restarted_store_fds <= MAX_RIG_STORE_FDS,
+        "store fds grew past bound after {RESTART_ROUNDS} Hub + {RESTART_ROUNDS} Node restarts: ready={ready_store_fds}, after={restarted_store_fds}, inv={after_restarts:?}"
+    );
+    // Even if sibling tests in the same cargo-test binary briefly open runtimes, a per-restart
+    // kqueue/pipe/socket leak across 2 * RESTART_ROUNDS restarts would exceed this ceiling.
+    assert!(
+        after_restarts.non_vnode() <= after_ready.non_vnode() + RESTART_ROUNDS,
+        "non-file fds grew unexpectedly across restarts: ready={after_ready:?}, after={after_restarts:?}"
+    );
+
+    rig.shutdown().await;
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "all Store fds close after MatrixRig::shutdown(); inv={:?}",
+                open_fd_inventory()
+            )
+        }),
+        || open_fd_inventory().count_under(&rig_dir) == 0,
+    )
+    .await;
 }
