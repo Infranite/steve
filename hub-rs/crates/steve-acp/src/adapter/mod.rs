@@ -73,9 +73,6 @@ pub trait HarnessAdapter: Send + Sync {
         None
     }
 
-    /// Optional tool result enrichment from harness-specific `_meta` fields (e.g. terminal deltas).
-    fn enrich_tool_result(&self, _raw: &Value, _existing: &mut Vec<Part>) {}
-
     /// Intercept harness-specific or child-session `session/update` frames before standard
     /// normalization.
     fn normalize_update(

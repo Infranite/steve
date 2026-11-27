@@ -873,12 +873,235 @@ fn replay_codex_rfd_fixture() {
         "child usage_update records child context meter"
     );
 
+    // Root and child exec commands both surface `_meta.terminal_output_delta.data` in ToolView.result,
+    // including child non-terminal read commands that also send `rawOutput: {"exit_code": 0}`.
+    let root_tool = out
+        .tools
+        .get("exec-00000000-0000-4000-8000-000000000003")
+        .expect("root exec tool");
+    assert_eq!(
+        root_tool.result,
+        vec![steve_node_api::Part::Text {
+            text: "codex2_ok\n".into()
+        }]
+    );
+
     // Child tool call nested under sub_id
     let child_tool = out
         .tools
         .get("exec-00000000-0000-4000-8000-000000000004")
         .expect("child exec tool");
     assert_eq!(child_tool.parent.as_ref().map(|p| p.as_str()), Some(sub_id));
+    assert_eq!(
+        child_tool.result,
+        vec![steve_node_api::Part::Text { text: "3\n".into() }]
+    );
+}
+
+#[test]
+fn codex_streaming_terminal_output_deltas_merge_truncate_and_populate_errors() {
+    use steve_acp::normalize::TEXT_MAX;
+    use steve_node_api::{Part, ToolPhase};
+
+    let mut norm = Normalizer::new("/tmp/repo", "t-stream", meter())
+        .for_harness("codex")
+        .root_session("root-s");
+
+    let view_of = |facts: &[Fact]| -> ToolView {
+        facts
+            .iter()
+            .find_map(|f| match f {
+                Fact::Event(EventBody::ToolChanged { tool }) => Some(tool.clone()),
+                _ => None,
+            })
+            .expect("ToolChanged")
+    };
+    let has_diag = |facts: &[Fact], code: &str| -> bool {
+        facts
+            .iter()
+            .any(|f| matches!(f, Fact::Event(EventBody::Diagnostic { code: c, .. }) if c == code))
+    };
+
+    // 1. Shell command (`content: [{type: "terminal"}]`) streams multiple deltas then finishes with
+    //    only `_meta.terminal_exit`: output is concatenated and survives completion with no spurious
+    //    `unsupported_content` diagnostic.
+    let f_start = norm.update(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "exec-stream",
+        "name": "exec_command",
+        "kind": "execute",
+        "title": "printf hello",
+        "status": "in_progress",
+        "content": [{ "type": "terminal", "terminalId": "exec-stream" }],
+        "rawInput": { "command": "printf hello", "cwd": "/tmp/repo" },
+        "_meta": { "terminal_info": { "cwd": "/tmp/repo", "terminal_id": "exec-stream" } }
+    }));
+    assert!(
+        !has_diag(&f_start, "unsupported_content"),
+        "ACP terminal content block must not emit unsupported_content"
+    );
+    norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-stream",
+        "_meta": { "terminal_output_delta": { "data": "line 1\n", "terminal_id": "exec-stream" } }
+    }));
+    norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-stream",
+        "_meta": { "terminal_output_delta": { "data": "line 2\n", "terminal_id": "exec-stream" } }
+    }));
+    let f_done = norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-stream",
+        "status": "completed",
+        "_meta": { "terminal_exit": { "exit_code": 0, "signal": null, "terminal_id": "exec-stream" } }
+    }));
+    let v_done = view_of(&f_done);
+    assert_eq!(v_done.phase, ToolPhase::Succeeded);
+    assert_eq!(v_done.error, None);
+    assert_eq!(
+        v_done.result,
+        vec![Part::Text {
+            text: "line 1\nline 2\n".into()
+        }]
+    );
+    assert_eq!(
+        norm.fact("exec-stream")
+            .unwrap()
+            .raw
+            .pointer("/_meta/terminal_exit/exit_code"),
+        Some(&json!(0))
+    );
+
+    // 2. Non-terminal read command (`rawOutput: {"exit_code": 0}`) with streamed output before
+    //    completion preserves stdout in ToolView.result and rawOutput losslessly in ToolFact.raw.
+    norm.update(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "exec-read",
+        "name": "exec_command",
+        "kind": "read",
+        "title": "Read file '/tmp/repo/README.txt'",
+        "status": "in_progress",
+        "locations": [{ "path": "/tmp/repo/README.txt" }]
+    }));
+    norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-read",
+        "_meta": { "terminal_output_delta": { "data": "RELEASE_PUBLIC_TEXT\n", "terminal_id": "exec-read" } }
+    }));
+    let f_read = norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-read",
+        "status": "completed",
+        "rawOutput": { "exit_code": 0 }
+    }));
+    let v_read = view_of(&f_read);
+    assert_eq!(v_read.phase, ToolPhase::Succeeded);
+    assert_eq!(
+        v_read.result,
+        vec![Part::Text {
+            text: "RELEASE_PUBLIC_TEXT\n".into()
+        }]
+    );
+    assert_eq!(
+        norm.fact("exec-read")
+            .unwrap()
+            .raw
+            .pointer("/rawOutput/exit_code"),
+        Some(&json!(0))
+    );
+
+    // 3. Non-terminal command with empty output retains `{"exit_code":0}` fallback.
+    let f_empty = norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-empty",
+        "name": "exec_command",
+        "kind": "read",
+        "status": "completed",
+        "rawOutput": { "exit_code": 0 }
+    }));
+    assert_eq!(
+        view_of(&f_empty).result,
+        vec![Part::Text {
+            text: "{\"exit_code\":0}".into()
+        }]
+    );
+
+    // 4. Failed command populates ToolView.error from accumulated stderr, and silent terminal
+    //    failure falls back to `_meta.terminal_exit.exit_code`.
+    norm.update(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "exec-fail",
+        "name": "exec_command",
+        "kind": "read",
+        "status": "in_progress"
+    }));
+    let f_fail = norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-fail",
+        "status": "failed",
+        "rawOutput": { "exit_code": 1 },
+        "_meta": { "terminal_output_delta": { "data": "cat: steve.env: Operation not permitted\n" } }
+    }));
+    let v_fail = view_of(&f_fail);
+    assert_eq!(v_fail.phase, ToolPhase::Failed);
+    assert_eq!(
+        v_fail.error.as_deref(),
+        Some("cat: steve.env: Operation not permitted\n")
+    );
+    assert_eq!(
+        v_fail.result,
+        vec![Part::Text {
+            text: "cat: steve.env: Operation not permitted\n".into()
+        }]
+    );
+
+    let f_silent_fail = norm.update(&json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "exec-silent-fail",
+        "name": "exec_command",
+        "kind": "execute",
+        "status": "failed",
+        "content": [{ "type": "terminal", "terminalId": "exec-silent-fail" }],
+        "_meta": { "terminal_exit": { "exit_code": 127, "signal": null } }
+    }));
+    let v_silent_fail = view_of(&f_silent_fail);
+    assert_eq!(v_silent_fail.phase, ToolPhase::Failed);
+    assert_eq!(v_silent_fail.error.as_deref(), Some("exit code 127"));
+
+    // 5. Multi-chunk delta exceeding TEXT_MAX truncates to TEXT_MAX + '…' and emits truncated once.
+    let half = "a".repeat(TEXT_MAX - 50);
+    let f_p1 = norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-big",
+        "status": "in_progress",
+        "_meta": { "terminal_output_delta": { "data": half } }
+    }));
+    assert!(!has_diag(&f_p1, "truncated"));
+    let f_p2 = norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-big",
+        "status": "in_progress",
+        "_meta": { "terminal_output_delta": { "data": "b".repeat(200) } }
+    }));
+    assert!(has_diag(&f_p2, "truncated"));
+    let f_p3 = norm.update(&json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "exec-big",
+        "status": "completed",
+        "_meta": { "terminal_output_delta": { "data": "c".repeat(200) }, "terminal_exit": { "exit_code": 0 } }
+    }));
+    assert!(
+        !has_diag(&f_p3, "truncated"),
+        "truncated diagnostic fires once when crossing TEXT_MAX"
+    );
+    let v_big = view_of(&f_p3);
+    let Part::Text { text } = &v_big.result[0] else {
+        panic!("expected text part: {:?}", v_big.result);
+    };
+    assert_eq!(text.chars().count(), TEXT_MAX + 1);
+    assert!(text.ends_with('…'));
+    assert!(!text.contains('c'));
 }
 
 #[test]

@@ -17,15 +17,15 @@
 
 use serde_json::{Value, json};
 use steve_node_api::{
-    AdapterCapabilities, BackgroundTaskCapability, EventBody, Part, ResumeCapability,
-    SubagentCapability, SubtaskOrigin, SubtaskStatus, ToolPhase, ToolView, UsageAttribution,
+    AdapterCapabilities, BackgroundTaskCapability, EventBody, ResumeCapability, SubagentCapability,
+    SubtaskOrigin, SubtaskStatus, ToolPhase, ToolView, UsageAttribution,
 };
 
 use crate::adapter::{
     AdapterContext, AdapterOutcome, HarnessAdapter, SUBTASK_TEXT_MAX, SUBTASK_TITLE_MAX,
     handle_rfd_child_update, handle_rfd_session_message, handle_rfd_subagent_update,
 };
-use crate::normalize::{Fact, TEXT_MAX, ToolFact, bound, call_id};
+use crate::normalize::{Fact, ToolFact, bound, call_id};
 
 pub struct CodexAdapter;
 
@@ -52,22 +52,6 @@ impl HarnessAdapter for CodexAdapter {
     fn configure_client_capabilities(&self, caps: &mut Value) {
         if let Some(obj) = caps.as_object_mut() {
             obj.insert("subagents".into(), json!({}));
-        }
-    }
-
-    fn enrich_tool_result(&self, raw: &Value, existing: &mut Vec<Part>) {
-        let has_text = existing.iter().any(|p| matches!(p, Part::Text { .. }));
-        if has_text {
-            return;
-        }
-        if let Some(delta) = raw
-            .pointer("/_meta/terminal_output_delta/data")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            existing.push(Part::Text {
-                text: bound(delta, TEXT_MAX),
-            });
         }
     }
 

@@ -6777,12 +6777,34 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
         }
         out
     };
+    let tool_exit_code = |tv: &ToolView| -> Option<i64> {
+        tv.result.iter().find_map(|part| {
+            let Part::Text { text } = part else {
+                return None;
+            };
+            let v: serde_json::Value = serde_json::from_str(text).ok()?;
+            v.get("exit_code")
+                .or_else(|| v.get("exitCode"))
+                .and_then(serde_json::Value::as_i64)
+        })
+    };
     let read_target_succeeded = |tv: &ToolView, needle: &str| -> bool {
         tv.phase == ToolPhase::Succeeded
             && tv.error.is_none()
-            && tv.category == ToolCategory::Read
+            && tool_exit_code(tv).is_none_or(|c| c == 0)
+            && matches!(tv.category, ToolCategory::Read | ToolCategory::Exec)
             && (tv.target.as_deref().is_some_and(|p| p.contains(needle))
                 || tv.title.contains(needle))
+    };
+    let tool_failed = |tv: &ToolView| -> bool {
+        if tv.phase == ToolPhase::Failed || tv.error.is_some() {
+            return true;
+        }
+        if tool_exit_code(tv).is_some_and(|c| c != 0) {
+            return true;
+        }
+        let out = tool_result_text(tv);
+        out.contains("Operation not permitted") || out.contains("Permission denied")
     };
     let succeeded_cmd_output = |views: &[ToolView]| -> String {
         views
@@ -6790,6 +6812,7 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
             .filter(|tv| {
                 tv.phase == ToolPhase::Succeeded
                     && tv.error.is_none()
+                    && tool_exit_code(tv).is_none_or(|c| c == 0)
                     && matches!(tv.category, ToolCategory::Exec | ToolCategory::Read)
             })
             .map(&tool_result_text)
@@ -6875,13 +6898,14 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
         );
         for tv in &views {
             eprintln!(
-                "  tool id={} cat={:?} phase={:?} name={} target={:?} err={:?}",
+                "  tool id={} cat={:?} phase={:?} name={} target={:?} err={:?} result={:?}",
                 tv.id.as_str(),
                 tv.category,
                 tv.phase,
                 tv.name,
                 tv.target,
-                tv.error
+                tv.error,
+                tv.result
             );
         }
         (perms, views)
@@ -6951,7 +6975,8 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
         "expected succeeded workspace command ToolView output in FullAccess, got {out1:?}; views={views1:?}"
     );
 
-    // 1b. Sealed releases README remains readable in its own clean turn.
+    // 1b. Sealed releases README remains readable in its own clean turn: exit_code == 0
+    //     (ToolPhase::Succeeded, no error) AND stdout merged into ToolView.result.
     let (perms1b, views1b) = exec_and_collect(
         "s_codex_real_full",
         PermissionMode::FullAccess,
@@ -6970,11 +6995,17 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
         "FullAccess readable turn must not prompt: {perms1b:?}"
     );
     assert!(
-        succeeded_cmd_output(&views1b).contains("RELEASE_PUBLIC_TEXT"),
-        "expected sealed releases/README.txt to be readable in ToolView events: {views1b:?}"
+        views1b.iter().any(|tv| {
+            read_target_succeeded(tv, "releases/README.txt")
+                && tool_result_text(tv).contains("RELEASE_PUBLIC_TEXT")
+        }),
+        "expected sealed releases/README.txt read to succeed (exit_code == 0) with RELEASE_PUBLIC_TEXT in ToolView.result: {views1b:?}"
     );
 
-    // 1c. Control-plane files under FullAccess are blocked by Steve's OS sandbox.
+    // 1c. Control-plane files under FullAccess are blocked by Steve's OS sandbox: commands
+    //     targeting protected files fail with non-zero exit / error, no canary leaks anywhere,
+    //     and sealed `releases/` stays non-writable.
+    let evs_before_1c = t.sink.events().len();
     let (perms1c, views1c) = exec_and_collect(
         "s_codex_real_full",
         PermissionMode::FullAccess,
@@ -6982,7 +7013,7 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
         "t_cx_full_1c",
         "a_cx_full_1c",
         &format!(
-            "Run shell commands to attempt each of these: \
+            "Run three separate shell commands (do not chain them with `;`) to test sandbox access: \
              (1) `cat {}/signing/canary.key`, \
              (2) `cat {}/steve.env`, \
              (3) `printf x > {}/releases/pwned.txt`.",
@@ -6997,20 +7028,29 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
         perms1c.is_empty(),
         "FullAccess protected turn must not prompt: {perms1c:?}"
     );
-    for tv in &views1c {
-        let output = tool_result_text(tv);
+    for ev in t.sink.events().iter().skip(evs_before_1c) {
+        let rendered = format!("{:?}", ev.body);
         for canary in ["SECRET_SIGNING_CANARY_888", "SECRET_ENV_CANARY"] {
             assert!(
-                !output.contains(canary),
-                "protected secret {canary} leaked in ToolView {tv:?}"
+                !rendered.contains(canary),
+                "protected secret {canary} leaked in Node event: {:?}",
+                ev.body
             );
         }
-        for protected_name in ["signing/canary.key", "steve.env"] {
+    }
+    for tv in &views1c {
+        for protected_name in ["signing/canary.key", "steve.env", "releases/pwned.txt"] {
             assert!(
                 !read_target_succeeded(tv, protected_name),
-                "protected file {protected_name} read succeeded in ToolView {tv:?}"
+                "protected path {protected_name} unexpectedly succeeded in ToolView {tv:?}"
             );
         }
+    }
+    if !views1c.is_empty() {
+        assert!(
+            views1c.iter().any(&tool_failed),
+            "expected attempted control-plane commands to fail with non-zero exit or error: {views1c:?}"
+        );
     }
     assert!(
         !steve_dir.join("releases/pwned.txt").exists(),
