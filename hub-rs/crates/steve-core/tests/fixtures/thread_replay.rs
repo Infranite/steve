@@ -1365,8 +1365,8 @@ async fn run_claim(report: &mut Report) {
                 Some(&json!({"origin": origin, "offer": {"title": "修评论", "goal": "支持markdown", "state": "open"}})),
             )
             .unwrap();
-        let h1 = k.core.offer(WS, &reply, true, None).unwrap();
-        let h2 = k.core.offer(WS, &reply, true, None).unwrap();
+        let h1 = k.core.offer(WS, &reply, true, None, None).unwrap();
+        let h2 = k.core.offer(WS, &reply, true, None, None).unwrap();
         report.case(
             "core.claim.05_concurrent_offer_same_core",
             &[
@@ -1411,8 +1411,8 @@ async fn run_claim(report: &mut Report) {
             .unwrap();
         let c1 = k.reopened();
         let c2 = k.reopened();
-        let _ = c1.offer(WS, &reply, true, None).unwrap();
-        let _ = c2.offer(WS, &reply2, true, None).unwrap();
+        let _ = c1.offer(WS, &reply, true, None, None).unwrap();
+        let _ = c2.offer(WS, &reply2, true, None, None).unwrap();
         let items = k.db().items(WS).unwrap().len();
         report.case(
             "core.claim.06_two_offers_same_origin_single_dispatch",
@@ -1546,8 +1546,8 @@ async fn run_claim(report: &mut Report) {
                 Some(&json!({"origin": origin, "offer": {"title": "改", "goal": "改", "state": "open"}})),
             )
             .unwrap();
-        let d1 = k.core.offer(WS, &reply, false, None).unwrap();
-        let d2 = k.core.offer(WS, &reply, true, None).unwrap();
+        let d1 = k.core.offer(WS, &reply, false, None, None).unwrap();
+        let d2 = k.core.offer(WS, &reply, true, None, None).unwrap();
         report.case(
             "core.claim.11_offer_take_after_dismiss_rejected",
             &[
@@ -1951,7 +1951,7 @@ async fn run_acl(report: &mut Report) {
                 })),
             )
             .unwrap();
-        let e1 = k.core.offer(WS, &msg2, true, None).is_err();
+        let e1 = k.core.offer(WS, &msg2, true, None, None).is_err();
         let e3 = k.core.promote(WS, &msg2, None).await.is_err();
         let e4 = k
             .core

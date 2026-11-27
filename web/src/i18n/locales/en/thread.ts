@@ -86,6 +86,11 @@ export default {
   offer: {
     folded: "Suggested earlier: {{title}}",
     question: "Want me to change it?",
+    chooseBot: "Choose target Bot",
+    botAuto: "Auto assign Bot",
+    botAutoPreview: "Auto · {{bot}}",
+    botAutoUnassigned: "Auto (no eligible Bot)",
+    botAutoUnassignedHint: "Pick a Bot here to assign directly",
     take: "Make it an item: {{title}}",
     dismiss: "No thanks",
   },

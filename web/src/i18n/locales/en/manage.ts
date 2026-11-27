@@ -46,7 +46,7 @@ export default {
       specialty: "Matched Bot specialties",
       description: "Matched the Bot description",
       project_preference: "Matched the project preference",
-      stable_order: "Selected by execution Node priority and Bot ID",
+      stable_order: "Selected by generalist fit, Team order, and execution Node priority",
       coordinator_deferred: "Handled by Steve",
       existing_assignment: "Used the Bot assigned to this item",
       handoff_quota_exhausted: "Handed off after quota exhaustion",

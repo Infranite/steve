@@ -403,7 +403,7 @@ export const api = {
   /* the first meeting (the instance owner's): Steve's welcome opens it in the main conversation; skip ends it or says there is none */
   onboardStart: () => post<{ message: string }>("/onboard/start"), onboardSkip: () => post("/onboard/skip"),
   /* thread routing (§3.4–3.5, §7.2): offers, corrections, research runs */
-  offer: (msg: string, take: boolean) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/offer`, { take }),
+  offer: (msg: string, take: boolean, bot?: string) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/offer`, bot ? { take, bot } : { take }),
   /* an A2UI button in a reply (ST-46): the Hub keeps one submission per surface and says it in the conversation */
   a2ui: (msg: string, a: A2uiSubmit) => post<{ already: boolean; message_id?: string; action: A2uiRecord }>(`/thread/${msg}/a2ui`, a),
   reroute: (msg: string, to: string) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/reroute`, { to }),

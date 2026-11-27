@@ -46,7 +46,7 @@ export default {
       specialty: "匹配 Bot 专长",
       description: "匹配 Bot 职责说明",
       project_preference: "符合项目执行偏好",
-      stable_order: "按执行节点优先级和 Bot ID 选定",
+      stable_order: "按通用度、Team 顺序与执行节点优先级选定",
       coordinator_deferred: "Steve 自己做",
       existing_assignment: "使用事项已指派的 Bot",
       handoff_quota_exhausted: "额度不足自动交接",

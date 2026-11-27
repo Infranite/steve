@@ -434,4 +434,52 @@ async fn stats_node_session_vitals_and_session_views_contract() {
         .expect("ended session in page");
     assert_eq!(ended_page["tokens"].as_i64(), Some(240_000));
     assert!(ended_page["cost_usd"].as_f64().unwrap() > 0.0);
+
+    // 4. HTTP /api/system/health supports 15m/1h/24h windows, golden series, validation, and owner gate.
+    // Sample a second snapshot after HTTP traffic so `series` has an interval between snapshots.
+    vitals::sample_once(Some(&local_node), None).await;
+    for win in ["15m", "1h", "24h"] {
+        let health = env
+            .get_json(&format!("/api/system/health?window={win}"))
+            .await;
+        assert_eq!(health["window"].as_str(), Some(win));
+        assert!(health["sampled_at"].as_i64().unwrap_or(0) > 0);
+        assert!(health["checks"].is_array());
+        assert!(health["warnings"].is_array());
+        let series = health["series"].as_array().expect("health series array");
+        assert!(!series.is_empty(), "expected non-empty series for {win}");
+        let last = series.last().unwrap();
+        assert!(last["at"].as_i64().unwrap_or(0) > 0);
+        assert!(last.get("http_p95").is_some());
+        assert!(last.get("write_lock_wait_p95").is_some());
+        assert!(last.get("hub_cpu").is_some());
+        assert!(last.get("hub_memory").is_some());
+    }
+    let default_health = env.get_json("/api/system/health").await;
+    assert_eq!(default_health["window"].as_str(), Some("15m"));
+
+    let (bad_status, _, _) = send_req(
+        &env.app,
+        Some(&env.cookie),
+        "GET",
+        "/api/system/health?window=invalid",
+    )
+    .await;
+    assert_eq!(bad_status, 400);
+
+    let member = s
+        .users()
+        .create("obs_member", "Observer", None, "member")
+        .unwrap();
+    s.auth_sessions()
+        .create(&member, "obs-member-session", 60_000)
+        .unwrap();
+    let (member_status, _, _) = send_req(
+        &env.app,
+        Some("steve_session=obs-member-session"),
+        "GET",
+        "/api/system/health?window=15m",
+    )
+    .await;
+    assert_eq!(member_status, 403);
 }
