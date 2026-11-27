@@ -40,7 +40,6 @@ const RATIONALE: &[(&str, &str)] = &[
     ("steve-install/src/setup/reconfigure.rs", "runtime.release is an absolute validated installation directory joined with bin/steve-hub"),
     ("steve-modules/src/vault/keystore/helper.rs", "HelperStore::find enforces bin.is_absolute() and std::fs::canonicalize before constructing HelperStore"),
     ("steve-node/src/exec.rs", "program is always /bin/sh or Confine::wrap_in(\"/bin/sh\", ...) (/usr/bin/sandbox-exec or bwrap), always absolute"),
-    ("steve-node-cli/src/upgrade.rs", "bin is <staging_dir>/bin/steve-node or bin/steve inside the verified release staging directory"),
     ("steve-runtime/src/process/bounded.rs", "internal build_resolved_std_command(resolved: &Path, ...) helper invoked exclusively with resolve_program() output"),
 ];
 

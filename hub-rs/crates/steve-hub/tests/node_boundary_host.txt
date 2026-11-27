@@ -138,7 +138,7 @@ Spawn	steve-hub/src/wire/local_service.rs	2
 Spawn	steve-i18n/src/lib.rs	1
 Spawn	steve-install/src/common.rs	1
 Spawn	steve-install/src/release.rs	2
-Spawn	steve-install/src/service.rs	1
+Spawn	steve-install/src/service.rs	2
 Spawn	steve-install/src/service/boot.rs	2
 Spawn	steve-install/src/service/file_access.rs	1
 Spawn	steve-install/src/setup.rs	1

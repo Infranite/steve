@@ -7,6 +7,5 @@ steve-hub/src/check.rs	1
 steve-hub/src/upgrades/cli.rs	1
 steve-install/src/setup/reconfigure.rs	1
 steve-modules/src/vault/keystore/helper.rs	1
-steve-node-cli/src/upgrade.rs	1
 steve-node/src/exec.rs	1
 steve-runtime/src/process/bounded.rs	1

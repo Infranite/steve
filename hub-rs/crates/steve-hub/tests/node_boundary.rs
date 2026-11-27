@@ -8,7 +8,8 @@
 //! leaving out comments, literals and test-only items. Four things are counted per file:
 //!
 //! - [`Rule::Spawn`]: a process or confined capability subprocess started (`Command::new`,
-//!   `Command::from`, `spawn_capability`, a renamed `Command`, `fork`/`exec`/`posix_spawn`).
+//!   `Command::from`, `DetachedCommand::new`, `spawn_capability`, a renamed `Command`,
+//!   `fork`/`exec`/`posix_spawn`).
 //! - [`Rule::Harness`]: a harness execution entry point, a handle on one, or a direct `steve_node`
 //!   call/import.
 //! - [`Rule::Dir`]: a directory listing or a folder walk (`read_dir`, `scan::walk`).
@@ -72,6 +73,7 @@ impl Rule {
             Rule::Spawn => &[
                 "Command::new(",
                 "Command::from(",
+                "DetachedCommand::new(",
                 "spawn_capability(",
                 "libc::fork",
                 "libc::exec",
@@ -129,6 +131,7 @@ impl Rule {
             Rule::Spawn => &[
                 ("std::process::Command", Renamed),
                 ("tokio::process::Command", Renamed),
+                ("steve_runtime::process::DetachedCommand", Renamed),
                 ("libc::fork", Any),
                 ("libc::execv", Any),
                 ("libc::execvp", Any),
@@ -949,6 +952,20 @@ fn a_test_only_field_does_not_hide_what_follows() {
 fn a_test_only_file_is_left_out() {
     assert!(scan::production("//! doc\n#![cfg(test)]\nfn f() { Command::new(\"x\"); }").is_none());
     assert!(scan::production("#![cfg(unix)]\nfn f() {}").is_some());
+}
+
+#[test]
+fn detached_command_counts_as_spawn_including_renamed_import() {
+    let src = "fn f() { let _ = steve_node::LocalNode::open(cfg); }\nfn g() { let _ = steve_runtime::process::DetachedCommand::new(\"sh\"); }\nuse steve_runtime::process::DetachedCommand as Dc;\n";
+    let s = vec![Source {
+        rel: "steve-x/src/lib.rs".into(),
+        code: scan::production(src).unwrap(),
+    }];
+    let spawn_lines: Vec<usize> = sites(Rule::Spawn, "steve-x", &s)
+        .iter()
+        .map(|s| s.line)
+        .collect();
+    assert_eq!(spawn_lines, vec![2, 3]);
 }
 
 /// The review's evasions: each import form and each file operation below is a site, at its line.
