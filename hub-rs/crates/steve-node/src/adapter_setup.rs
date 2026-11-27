@@ -99,21 +99,29 @@ pub(crate) struct Requirements {
     pub npm_error: Option<String>,
 }
 
+/// Cached result of probing the configured Node.js / npm runtime once per Node discovery pass.
+#[derive(Clone, Default)]
+pub(crate) struct NodeRuntimeProbe {
+    npm: Option<PathBuf>,
+    node_present: bool,
+    node_version: Option<Vec<u64>>,
+}
+
 /// Bound for probing the configured Node.js executable's `--version`.
 const NODE_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Per-stream output ceiling for `node --version` (64 KiB leaves ample margin for version text).
 const NODE_VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// Probe the actual configured executable, not npm metadata or the Hub's process environment.
-pub(crate) async fn requirements(cfg: &AcpConfig, id: &str) -> Requirements {
-    let mut r = Requirements {
-        npm: managed::npm(Some(&cfg.node)).and_then(|p| executable(&p)),
-        node_error: None,
-        npm_error: None,
-    };
+/// Probe the actual configured Node.js / npm executables once; callers evaluate per-harness
+/// minimum Node versions against the returned snapshot without spawning `node --version` per harness.
+pub(crate) async fn probe_node_runtime(cfg: &AcpConfig) -> NodeRuntimeProbe {
+    let npm = managed::npm(Some(&cfg.node)).and_then(|p| executable(&p));
     let Some(node) = executable(&cfg.node) else {
-        r.node_error = Some("Node.js is missing; install Node.js and set STEVE_NODE in the Node service environment".into());
-        return r;
+        return NodeRuntimeProbe {
+            npm,
+            node_present: false,
+            node_version: None,
+        };
     };
     let mut cmd = std::process::Command::new(node);
     cmd.arg("--version");
@@ -129,7 +137,7 @@ pub(crate) async fn requirements(cfg: &AcpConfig, id: &str) -> Requirements {
         },
     )
     .await;
-    let version = match output {
+    let node_version = match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .trim()
             .trim_start_matches('v')
@@ -139,12 +147,37 @@ pub(crate) async fn requirements(cfg: &AcpConfig, id: &str) -> Requirements {
             .ok(),
         _ => None,
     };
+    NodeRuntimeProbe {
+        npm,
+        node_present: true,
+        node_version,
+    }
+}
+
+/// Evaluate harness `id`'s setup requirements against a single [`NodeRuntimeProbe`].
+pub(crate) fn requirements_from(probe: &NodeRuntimeProbe, id: &str) -> Requirements {
+    let mut r = Requirements {
+        npm: probe.npm.clone(),
+        node_error: None,
+        npm_error: None,
+    };
+    if !probe.node_present {
+        r.node_error = Some(
+            "Node.js is missing; install Node.js and set STEVE_NODE in the Node service environment"
+                .into(),
+        );
+        return r;
+    }
     let min = steve_harness_spec::components(id)
         .iter()
         .map(|c| c.node_min)
         .max()
         .unwrap_or((20, 0, 0));
-    if !version.is_some_and(|v| v.len() == 3 && (v[0], v[1], v[2]) >= min) {
+    if !probe
+        .node_version
+        .as_ref()
+        .is_some_and(|v| v.len() == 3 && (v[0], v[1], v[2]) >= min)
+    {
         r.node_error = Some(format!(
             "Node.js >= {}.{}.{} is required; check STEVE_NODE and the Node service PATH",
             min.0, min.1, min.2
@@ -156,6 +189,12 @@ pub(crate) async fn requirements(cfg: &AcpConfig, id: &str) -> Requirements {
         );
     }
     r
+}
+
+/// Probe the actual configured executable, not npm metadata or the Hub's process environment.
+pub(crate) async fn requirements(cfg: &AcpConfig, id: &str) -> Requirements {
+    let probe = probe_node_runtime(cfg).await;
+    requirements_from(&probe, id)
 }
 
 /// Prefix changes wait for all accepted execution and live harness processes. This inspection

@@ -31,6 +31,8 @@ impl NodeRuntime {
             );
         }
         self.reconciled.store(true, Ordering::SeqCst);
+        self.ledger_rev
+            .send_modify(|rev| *rev = rev.wrapping_add(1));
         let me = self.clone();
         let _ = tokio::task::spawn_blocking(move || {
             me.plan_waiting();
