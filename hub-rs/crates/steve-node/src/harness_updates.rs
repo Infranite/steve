@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
+use std::process::Command as StdCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Deserialize;
 use steve_acp::adapters::{self, DetectedInstall, InstallEvidence, UpdateComponent, UpgradeAction};
@@ -28,14 +28,14 @@ const CHECK_FRESHNESS_MS: i64 = 86_400_000;
 const MAX_CONCURRENT_CHECKS: usize = 4;
 /// Bound for reading a local CLI's `--version`.
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-stream output ceiling for `--version` CLI probes (64 KiB leaves ample margin for version text).
+const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Bound for one `brew info --json=v2` metadata lookup.
 const BREW_INFO_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bound for one external package-manager or CLI self-update command.
 const EXTERNAL_UPGRADE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Fallback poll cadence alongside `inner.wake` while a queued upgrade waits for active sessions.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// Poll interval inside blocking subprocess wait loops.
-const SUBPROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 struct Check {
@@ -310,22 +310,25 @@ async fn executable_version(cfg: &AcpConfig, c: &UpdateComponent) -> Option<Stri
     // Only built-in catalog entries reach this function; manifest commands are excluded.
     let path = command(c)?;
     let mut cmd = if steve_acp::is_node_script(&path) && !steve_acp::is_executable_file(&path) {
-        let mut cmd = tokio::process::Command::new(&cfg.node);
+        let mut cmd = StdCommand::new(&cfg.node);
         cmd.arg(&path);
         cmd
     } else {
-        tokio::process::Command::new(path)
+        StdCommand::new(&path)
     };
-    let output = tokio::time::timeout(
-        VERSION_PROBE_TIMEOUT,
-        cmd.arg("--version")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
+    cmd.arg("--version");
+    let output = steve_runtime::process::run_bounded_async(
+        cmd,
+        path.to_string_lossy().into_owned(),
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: VERSION_PROBE_MAX_OUTPUT_BYTES,
+            ..steve_runtime::process::BoundedOptions::capture(
+                "harness_version_probe",
+                VERSION_PROBE_TIMEOUT,
+            )
+        },
     )
     .await
-    .ok()?
     .ok()?;
     if !output.status.success() {
         return None;
@@ -341,60 +344,31 @@ fn run_subprocess_observed(
     timeout: Duration,
     on_spawn: impl FnOnce(u32) -> Result<(), String>,
 ) -> Result<String, SubprocessError> {
-    use std::os::unix::process::CommandExt;
     let mut cmd = StdCommand::new(program);
-    let mut child = cmd
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|_| SubprocessError::SpawnFailed)?;
-    if let Err(reason) = on_spawn(child.id()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(SubprocessError::Journal(reason));
-    }
-    let stdout_handle = child.stdout.take().map(|mut r| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = std::io::Read::read_to_string(&mut r, &mut s);
-            s
-        })
-    });
-    let stderr_handle = child.stderr.take().map(|mut r| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = std::io::Read::read_to_string(&mut r, &mut s);
-            s
-        })
-    });
-    let until = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|_| SubprocessError::WaitFailed)? {
-            break status;
+    cmd.args(args);
+    let label = program.to_string_lossy();
+    let out = steve_runtime::process::run_bounded_observed(
+        &mut cmd,
+        &label,
+        steve_runtime::process::BoundedOptions::capture("harness_update", timeout),
+        on_spawn,
+    )
+    .map_err(|err| match err {
+        steve_runtime::process::ObservedCommandError::Hook(reason) => {
+            SubprocessError::Journal(reason)
         }
-        if Instant::now() >= until {
-            unsafe {
-                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(SubprocessError::TimedOut);
-        }
-        std::thread::sleep(SUBPROCESS_POLL_INTERVAL);
-    };
-    let out = stdout_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let _err = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    if status.success() {
-        Ok(out)
+        steve_runtime::process::ObservedCommandError::Command(
+            steve_runtime::process::CommandError::Spawn { .. },
+        ) => SubprocessError::SpawnFailed,
+        steve_runtime::process::ObservedCommandError::Command(
+            steve_runtime::process::CommandError::TimedOut { .. },
+        ) => SubprocessError::TimedOut,
+        steve_runtime::process::ObservedCommandError::Command(_) => SubprocessError::WaitFailed,
+    })?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(SubprocessError::NonZeroExit(status.code()))
+        Err(SubprocessError::NonZeroExit(out.status.code()))
     }
 }
 

@@ -1360,16 +1360,55 @@ fn into_plain_output(mut out: ZeroizingOutput) -> Output {
     }
 }
 
+/// Failure of [`run_bounded_observed`]: either the subprocess primitive itself failed or the
+/// caller's post-spawn hook rejected the child (in which case the process group has already been
+/// killed and reaped).
+#[derive(Debug)]
+pub enum ObservedCommandError<E> {
+    Command(CommandError),
+    Hook(E),
+}
+
+/// Like [`run_bounded`], invoking `on_spawn(pid)` right after the child starts in its own process
+/// group (`pgid == pid`). If `on_spawn` returns `Err(err)`, the process group is killed and reaped
+/// before returning `Err(ObservedCommandError::Hook(err))`.
+pub fn run_bounded_observed<E>(
+    command: &mut Command,
+    program: &str,
+    opts: BoundedOptions<'_>,
+    on_spawn: impl FnOnce(u32) -> Result<(), E>,
+) -> Result<Output, ObservedCommandError<E>> {
+    let started = Instant::now();
+    let mut fds = spawn_std_process_group(command, program, opts).map_err(|err| {
+        record_metrics(Some(opts.operation), "error", started);
+        ObservedCommandError::Command(err)
+    })?;
+    if let Err(hook_err) = on_spawn(fds.child.pid) {
+        fds.child.teardown_once(true);
+        record_metrics(Some(opts.operation), "error", started);
+        return Err(ObservedCommandError::Hook(hook_err));
+    }
+    let mut noop = || {};
+    drive_spawned(
+        fds, program, started, opts, true, false, false, None, &mut noop,
+    )
+    .map(into_plain_output)
+    .map_err(|(err, _, _)| ObservedCommandError::Command(err))
+}
+
 /// Run `command` synchronously in an isolated process group (`pgid == pid`).
 pub fn run_bounded(
     command: &mut Command,
     program: &str,
     opts: BoundedOptions<'_>,
 ) -> Result<Output, CommandError> {
-    execute_bounded(program, opts, false, None, || {
-        spawn_std_process_group(command, program, opts)
-    })
-    .map(into_plain_output)
+    match run_bounded_observed(command, program, opts, |_| {
+        Ok::<(), std::convert::Infallible>(())
+    }) {
+        Ok(out) => Ok(out),
+        Err(ObservedCommandError::Command(err)) => Err(err),
+        Err(ObservedCommandError::Hook(never)) => match never {},
+    }
 }
 
 /// Like [`run_bounded`], returning pre-allocated `Zeroizing<Vec<u8>>` stdout (`<= ZEROIZE_MAX_OUTPUT_BYTES`).
@@ -1978,5 +2017,32 @@ mod tests {
             .is_none()
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_bounded_observed_tears_down_on_hook_error() {
+        let mut seen = None;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "exec sleep 60"]);
+        let err = run_bounded_observed(
+            &mut cmd,
+            "sh",
+            BoundedOptions::capture("test_observed_hook_err", Duration::from_secs(10)),
+            |pid| {
+                seen = Some(pid);
+                Err("journal refused")
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ObservedCommandError::Hook("journal refused")));
+        let pid = seen.expect("on_spawn receives live pid") as libc::pid_t;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
     }
 }

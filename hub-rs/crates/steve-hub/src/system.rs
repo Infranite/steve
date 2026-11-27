@@ -1,6 +1,6 @@
 //! What this machine is and what it can run (system.ts): the Hub registers itself as a device, reports the
 //! harnesses it finds, and imports local harness history through the Node as read-only sessions.
-//! Host commands run through `tokio::process` with an 8 s timeout.
+//! Host commands run through `steve_runtime::process::run_bounded_async` with [`HOST_FACT_TIMEOUT`].
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,19 +25,30 @@ pub fn sha_hex(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
 
+/// Timeout for querying one local host fact (`sw_vers`, `sysctl`, `uname`, `scutil`, `hostname`).
+const HOST_FACT_TIMEOUT: Duration = Duration::from_secs(8);
+/// Per-stream output ceiling for one host fact command (single-line value; 64 KiB bounds anomalies).
+const HOST_FACT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
 /// `execFileSync(cmd, args, {timeout: 8000})` → trimmed stdout, `""` on any failure.
 pub async fn run(cmd: &str, args: &[&str]) -> String {
-    let child = tokio::process::Command::new(cmd)
+    let mut command = std::process::Command::new(cmd);
+    command
         .env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
         .env_remove("STEVE_SUPERVISOR_PID")
         .env_remove("STEVE_UPGRADE_ID")
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
-    match tokio::time::timeout(Duration::from_secs(8), child).await {
-        Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        .args(args);
+    match steve_runtime::process::run_bounded_async(
+        command,
+        cmd.to_owned(),
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: HOST_FACT_MAX_OUTPUT_BYTES,
+            ..steve_runtime::process::BoundedOptions::capture("host_fact", HOST_FACT_TIMEOUT)
+        },
+    )
+    .await
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => String::new(),
     }
 }
