@@ -247,7 +247,7 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-acp/src/config.rs", Library, "`npm root -g`, to find the adapters"),
     e(Fs, "steve-acp/src/config.rs", Library, "extensionless npm bin shebang check (`#!/usr/bin/env node`), so Node runs JS adapters directly"),
     e(Fs, "steve-acp/src/state_dir.rs", Library, "checks `$HOME/.gitconfig` existence when preparing a harness state directory on the Node"),
-    e(Fs, "steve-acp/src/adapters.rs", Library, "adapter package.json `bin` entry resolution under `<steve-home>/adapters` or `npm root -g`"),
+    e(Fs, "steve-acp/src/adapters.rs", Library, "adapter package.json `bin` entry resolution under `<steve-home>/adapters` or `npm root -g`, and the probe telling a missing adapter command from one that fails to start"),
     e(Dir, "steve-acp/src/adapter/claude_code.rs", Library, "Claude project transcript directory listing encapsulated in the adapter module"),
     e(Fs, "steve-acp/src/adapter/claude_code.rs", Library, "Claude transcript read/peek encapsulated in the adapter module"),
     e(Fs, "steve-acp/src/adapter/codex.rs", Library, "Codex rollout transcript read encapsulated in the adapter module"),
