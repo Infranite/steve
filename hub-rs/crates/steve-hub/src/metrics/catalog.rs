@@ -1074,6 +1074,11 @@ pub(super) fn describe() {
         "Subprocess process-group SIGKILLs issued before reaping. Labels: operation, reason (timeout, pipe_drain, post_exit, output_limit, cancelled, error)."
     );
     describe_counter!(
+        "steve_process_program_resolve_failures_total",
+        Count,
+        "Subprocess executable path resolutions that failed before spawn. Labels: reason (empty_program, empty_path, not_found, permission_denied, not_absolute, cwd_error)."
+    );
+    describe_counter!(
         "steve_supervisor_step_total",
         Count,
         "Upgrade supervisor boundary step outcomes (persisted offline when --supervise has no live recorder). Labels: step (build_info, check_config, drain, stop, startup_gate, vault_probe), result (ok, timeout, pipe_drain_timeout, error)."
