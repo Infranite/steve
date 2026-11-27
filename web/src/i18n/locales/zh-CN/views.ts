@@ -360,7 +360,7 @@ export default {
     fromChat: "对话",
     noFollow: "不在对话里跟进",
     propDesignGate: "设计确认",
-    designGateHint: "交付时先由你确认设计，再决定是否实现；YOLO 不会代答",
+    designGateHint: "交付时先由你确认设计，再决定是否实现；不会自动跳过",
     designGateOwnerOnly: "只有主人能开关",
   },
   /* the item's lifecycle stages, shown as a breadcrumb */

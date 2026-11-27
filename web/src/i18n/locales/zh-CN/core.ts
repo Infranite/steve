@@ -211,18 +211,52 @@ export default {
     tagMerged: "已把「{{from}}」合并到「{{into}}」",
   },
   approval: {
-    "title": "原生免批（YOLO）",
-    "description": "只有支持的 harness 会接管工具审批。Agent 提问和 Steve 对外操作仍走各自的授权流程。",
-    "on": "免批：开",
-    "off": "免批：关",
-    "unsupported": "免批：该 harness 不支持",
+    "title": "权限",
+    "description": "Plan 和只读会话永远不放宽。Agent 提问、Steve 工具权限、保险箱密钥、本人外发与设计决定仍需主人确认。",
+    "ownerOnly": "仅工作空间主人可修改。",
+    "levels": {
+      "ask": {
+        "name": "询问",
+        "text": "会话使用 harness 的询问模式，到达 Steve 的权限请求都会出决定卡。"
+      },
+      "auto": {
+        "name": "自动",
+        "text": "使用支持的 harness 原生自动模式；不支持的 harness 保持询问，不模拟。"
+      },
+      "full_access": {
+        "name": "完全放开",
+        "text": "使用 harness 声明的完全放开模式，不再询问命令。"
+      }
+    },
+    "tableHarness": "已发现的 harness",
+    "supported": "支持",
+    "notSupported": "不支持",
+    "outsideSandboxTag": "自带沙箱",
+    "harnessesEmpty": "Node 上暂未发现可用的 harness。",
+    "confirm": {
+      "title": "确认切换到「完全放开」？",
+      "desc": "切换前请确认以下风险，生效后将应用于本工作空间的空闲会话及后续回合。",
+      "proceed": "确认切换到完全放开",
+      "noPrompts": "harness 不再询问任何命令；",
+      "writeAndNetwork": "它能改、能删它有写权限的东西，也能用网络；",
+      "steveSandbox": "Steve 的沙箱仍然挡住 Steve 自己的文件；",
+      "outsideSandboxNamed": "自带沙箱、不在 Steve 沙箱里的 harness（{{harnesses}}）也能碰到这些文件。",
+      "outsideSandboxGeneric": "自带沙箱、不在 Steve 沙箱里的 harness 也能碰到这些文件。"
+    },
+    "status": {
+      "applied": "权限：{{level}} · 已生效",
+      "pending": "权限：{{level}} · 待生效",
+      "unsupported": "权限：{{level}} · 不支持",
+      "refused": "权限：{{level}} · 已拒绝"
+    },
     "applied": "实际：{{mode}}",
     "pending": "待生效：{{mode}}",
     "unreported": "未报告",
     "refused": "切换未生效：{{reason}}",
-    "stats": "原生免批",
-    "sessions": "有免批回合的会话",
-    "turns": "免批回合",
+    "stats": "权限",
+    "sessions": "会话数",
+    "turns": "回合数",
+    "modeSummary": "{{sessions}} 个会话 · {{turns}} 个回合",
     "permissions": "到达 Steve 的权限请求",
     "questions": "Agent 提问",
     "resolver": {
@@ -610,7 +644,7 @@ export default {
     designImplement: "按方案实现",
     designKeep: "只保留设计",
     designRevise: "修改设计",
-    designGateNote: "这个事项开了设计确认：是否实现由你决定，YOLO 不会代答。",
+    designGateNote: "这个事项开了设计确认：是否实现由你决定，不会自动跳过。",
     answer: "回答",
     submitting: "提交中…",
     needsYou: "需要你",

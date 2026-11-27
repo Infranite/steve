@@ -33,15 +33,17 @@ export type AutonomyChoiceProps<T extends string> = {
   onChange: (v: T) => void;
   /** One line under the tiles: what the pick means, or what always holds whatever is picked */
   means?: ReactNode;
+  disabled?: boolean;
   className?: string;
   /** test hook on the radio group; each tile carries data-choice={value} */
   testId?: string;
 };
 
-export function AutonomyChoice<T extends string>({ label, options, value, onChange, means, className, testId }: AutonomyChoiceProps<T>) {
+export function AutonomyChoice<T extends string>({ label, options, value, onChange, means, disabled, className, testId }: AutonomyChoiceProps<T>) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const at = options.findIndex((o) => o.value === value);
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (disabled) return;
     const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
     if (!step) return;
     e.preventDefault();
@@ -59,8 +61,10 @@ export function AutonomyChoice<T extends string>({ label, options, value, onChan
           className="ui-apm-tiles"
           role="radiogroup"
           aria-label={label}
+          aria-disabled={disabled || undefined}
           onKeyDown={onKey}
           data-choices={testId}
+          data-disabled={disabled || undefined}
           data-hidden-thumb={at < 0 || undefined}
           style={{ ["--apm-at" as string]: Math.max(0, at), ["--apm-n" as string]: options.length }}
         >
@@ -76,8 +80,9 @@ export function AutonomyChoice<T extends string>({ label, options, value, onChan
               role="radio"
               className="ui-apm-tile"
               aria-checked={value === o.value}
-              tabIndex={value === o.value || (at < 0 && i === 0) ? 0 : -1}
-              onClick={() => onChange(o.value)}
+              disabled={disabled}
+              tabIndex={disabled ? -1 : value === o.value || (at < 0 && i === 0) ? 0 : -1}
+              onClick={() => { if (!disabled) onChange(o.value); }}
               data-choice={o.value}
             >
               <span className="ui-apm-tile__head">
@@ -138,6 +143,7 @@ const css = /* css */ `
 .ui-apm-tiles__thumb { position: absolute; z-index: -1; top: 3px; bottom: 3px; left: 3px; width: calc((100% - 6px - (var(--apm-n, 3) - 1) * 2px) / var(--apm-n, 3)); border-radius: var(--aui-radius, 7px); background: var(--apm-thumb, var(--apm-card)); box-shadow: var(--apm-card-shadow); transform: translateX(calc(var(--apm-at, 0) * (100% + 2px))); transition: transform 260ms var(--apm-out); }
 .ui-apm-tiles[data-hidden-thumb] .ui-apm-tiles__thumb { display: none; }
 .ui-apm-tile { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 10px 12px 12px; border: 0; border-radius: var(--aui-radius, 7px); background: none; font: inherit; text-align: left; cursor: pointer; transition: color 180ms ease; }
+.ui-apm-tile:disabled { cursor: not-allowed; opacity: 0.65; }
 .ui-apm-tile:focus-visible { outline-offset: -2px; }
 .ui-apm-tile__head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .ui-apm-tile__icon { display: grid; flex: none; place-items: center; width: 16px; color: var(--apm-faint); transition: color 180ms ease; }

@@ -21,6 +21,7 @@ const open = async (pane, { width = 1440, theme = "light" } = {}) => {
     calls.push({ method: r.method(), path: u.pathname, body: r.postData() ? JSON.parse(r.postData()) : null })
     // a save's refresh never lands by itself here: the test lands it with __land when it wants to
     if (u.pathname === "/api/shell") return
+    if (u.pathname === "/api/permission-policy" && r.method() === "GET") return route.fulfill({ contentType: "application/json", body: JSON.stringify({ policy: { mode: "ask", revision: 0, actor: null }, editable: true, harnesses: [], unconfined_harnesses: ["Codex"] }) })
     if (["PATCH", "DELETE", "POST"].includes(r.method())) return route.fulfill({ contentType: "application/json", body: "{}" })
     return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "fixture" }) })
   })

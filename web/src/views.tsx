@@ -1,4 +1,4 @@
-import { ApprovalSwitch, SessionApproval } from "@/approval"
+import { PermissionPolicyPanel, SessionPermission } from "@/approval"
 import type { BotPlacementError } from "@/api"
 import { useTranscript } from "@/data/transcript"
 import { HarnessMark } from "@/components/harness-mark"
@@ -677,7 +677,7 @@ export function ItemView({ id }: { id: string }) {
                       <details className="type-footnote text-muted-foreground" data-item-session-details>
                         <summary className="cursor-pointer select-none text-tertiary hover:text-foreground">{t("views:item.sessionTechDetails")}</summary>
                         <div className="mt-1 flex flex-col gap-1 border-l border-border/60 pl-2">
-                          <SessionApproval id={k} />
+                          <SessionPermission id={k} />
                           {s?.placement && <PlacementWhy value={s.placement} />}
                           <NativeIdLine k={k} label="ID" />
                         </div>
@@ -763,7 +763,7 @@ export function MoreView() {
         ))}</Panel></Section>)}
         <HubMore />
         <Panel><GitHubMoreRow /></Panel>
-        <Panel><ApprovalSwitch /></Panel>
+        <Section label={t("core:approval.title")}><PermissionPolicyPanel /></Section>
         <Panel><Row title={t("views:more.appearance")}><ThemeSwitch labels /></Row></Panel>
       </div>
     </Page>

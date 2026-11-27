@@ -77,6 +77,7 @@ export const SMOKE = [
   "offer-card",
   "onboarding",
   "people-management",
+  "permissions",
   "person-avatar",
   "personal-triggers",
   "plugins",

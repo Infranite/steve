@@ -26,7 +26,7 @@ An **Item** is the unit of tracked work.
 - **Lifecycle**: `ready → active → closing → closed`, plus `paused`. Reopening a closed item starts a new cycle (`cycle + 1`) while preserving prior cycles, plans, and deliveries.
 - **Five-gate closing**: Moving through `closing` freezes the git worktree's content-addressed result and checks five gates before closing: (1) no active turns or queued human messages, (2) no open required operations (such as an in-flight release), (3) the frozen result has not drifted or is verified on the default branch, (4) acceptance is settled (`automatic` by default, `human`, or `waived`), and (5) no open question or approval was raised after close began.
 - **Type and Delivery tags**: Each item carries one **Type** tag (`Fix`, `Feature`, `Docs`, `Refactor`, `Ops`, `Chore`) and multi-select **Delivery** tags (`Plan`, `Code`, `Report`, `Content`, `Data`, `Operation`) so outcomes are distinguished from work categories.
-- **Design gate**: When a goal asks for a design without authorizing implementation, the delivered design pauses for an explicit decision (`implement`, `keep design only`, or `revise`). Native approval (YOLO) cannot bypass this gate.
+- **Design gate**: When a goal asks for a design without authorizing implementation, the delivered design pauses for an explicit decision (`implement`, `keep design only`, or `revise`). Workspace permission levels cannot bypass this gate.
 - **Goal edits**: Editing an item's goal sends the updated version (`vN`) directly to the running session without replacing the session behind the agent's back.
 - **Worktrees, outputs, and preview links**: Git items run in isolated worktrees on `steve/<id>` branches with disk-floor protection. Non-Git deliverables persist in `<STEVE_HOME>/workspaces/<item>/outputs`. Bots (`steve_deliver_file`) and humans (`steve publish <file|folder>`) can publish immutable Hub-hosted preview links (static HTML by default, or an isolated sandboxed interactive frame with no access to Steve or the network) and optional revocable share tokens.
 - **Pull request merging**: For git projects with a *merged* (or *merged and tagged*) completion rule, agents commit and open a pull request on the host but never push or merge the default branch. Steve never enables host auto-merge; after acceptance and a human merge approval bound to the exact repository, PR number, full head SHA, and item cycle, Steve merges once CI passes via `gh pr merge --match-head-commit`.
@@ -43,15 +43,29 @@ Every human action — reviews, approvals, agent questions, proposals, failures,
   - `folded`: Collapsed one-line entries (already replied, expired, or unsendable) expandable in place.
 - Decisions support **Snooze** and a **Handled** tab covering the last 7 days with 24-hour undo where reversible.
 
-## Native harness approval (YOLO)
+## Permissions
 
-Steve does not simulate YOLO or rewrite your harness configuration files.
+Steve does not simulate automatic approvals or rewrite your harness configuration files. Each workspace has a three-level **Permissions** setting (`ApprovalMode`: `ask`, `auto`, `full_access`), controlled only by the workspace owner and defaulting to **Ask**.
 
-- Harnesses map onto five canonical `PermissionMode` values: `plan`, `ask`, `accept_edits`, `auto`, and `full_access`.
-- Turning on **Native approval (YOLO)** (`ApprovalMode::HarnessAuto`) requests `PermissionMode::Auto` **only** on harnesses that declare native approval support (`claude-code`, `codex`, `goose`, `mistral-vibe`, `antigravity`). Running turns finish in their current mode; the switch takes effect at the next idle boundary or session open.
-- **Hard limits**:
-  - Unsupported harnesses stay on `ask` — no simulated auto-allow.
-  - `full_access_only` harnesses (such as Pi) are not widened or simulated by this switch; `plan` mode is never widened.
+- **Ask (`ask`)**: Sessions use the harness's asking mode. Permission requests that reach Steve open a decision card for the owner.
+- **Auto (`auto`)**: Requests `PermissionMode::Auto` only on harnesses that declare native automatic approval (`native_approval`). Unsupported or refusing harnesses are shown honestly as unsupported or refused — never simulated.
+- **Full access (`full_access`)**: Requests the harness's declared full-access mode (`modes.full_access`, `mode_args.full_access`, or `mode_meta.full_access`). Switching to **Full access** requires confirming a risk dialog in the UI (and `confirmed: true` in the API) stating that the harness stops asking before commands, can modify/delete writable files and use the network, Steve's sandbox still protects Steve's own files, and self-sandboxed harnesses (`nested_sandbox = false`) running outside Steve's sandbox can still reach those files.
+
+| Harness | Auto | Full access |
+| --- | --- | --- |
+| Claude Code | `auto` | `bypassPermissions` |
+| Codex | `agent` (workspace-write with automatic reviewer) | `agent-full-access` (runs outside Steve's sandbox, `nested_sandbox = false`) |
+| Antigravity CLI | `auto` (inside Steve's sandbox its own terminal sandbox cannot start; its classifier lets safe commands run and asks before risky ones) | `--dangerously-skip-permissions` (still inside Steve's sandbox) |
+| goose | `smart_approve` | `auto` |
+| Mistral Vibe | `smart-approve` | `auto-approve` |
+| Pi | Unsupported | Native (`full_access_only`, requires Bot configured for `full_access`) |
+| Other built-ins declaring full access (Gemini CLI, GitHub Copilot CLI, Qwen Code, Kimi Code, Grok Build, Factory Droid, CodeBuddy Code, Qoder CLI) | Unsupported | Declared `modes.full_access` / `mode_meta.full_access` |
+| OpenCode, Kilo Code, Cursor, Kiro CLI | Unsupported | Unsupported |
+
+- **Invariants**:
+  - `plan` and read-only sessions are never widened.
+  - A Node owner's ceiling (`PolicyCeiling`) still caps the widest mode allowed on that Node.
+  - Running turns keep their current mode; changes take effect at the next idle boundary or session open.
   - Agent questions, Steve tool permissions, vault secret use, personal external sends, design decisions, and SHA-pinned PR merges always require human confirmation.
 
 ## Deterministic session handoff

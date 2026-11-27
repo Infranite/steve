@@ -28,5 +28,11 @@ install! { routes(reg, cx) [mut built, db, harnesses, host, price_url, routed] =
             crate::api::stats::StatsApi::new(db.clone(), bus.clone(), price_url)
                 .with_harness_source(harnesses.source()),
         ))
-        .merge(crate::api::approval::routes(db.clone(), routed.clone(), host.approval.clone(), cfg.diagnostic()));
+        .merge(crate::api::approval::routes(
+            db.clone(),
+            routed.clone(),
+            host.approval.clone(),
+            harnesses.clone(),
+            cfg.diagnostic(),
+        ));
 }}

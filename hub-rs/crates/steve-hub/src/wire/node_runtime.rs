@@ -818,7 +818,7 @@ enum Tell {
 
 /// What the business side hears after a commit.
 enum After {
-    AutoTurn,
+    PermissionTurn(steve_types::ApprovalMode),
     PermissionIngress {
         resolver: &'static str,
         outcome: &'static str,

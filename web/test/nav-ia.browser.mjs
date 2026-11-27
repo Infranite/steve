@@ -72,7 +72,7 @@ async function open({ lang = "zh-CN", width = 1440, height = 900, hash = "/#/inb
     if (path === "/api/digest/todos") return json({ todos })
     if (path === "/api/calendar/sources") return json(calSources)
     if (path === "/api/calendar/events") return json({ range: { from: "2026-11-18 00:00", to: "2026-11-18 24:00", tz: TZ, from_ms: 0, to_ms: 0 }, events: calEvents, calendars: [] })
-    if (path === "/api/approval-policy") return json({ policy: { mode: "ask_owner", revision: 1 }, editable: true })
+    if (path === "/api/permission-policy") return json({ policy: { mode: "ask", revision: 1, actor: null }, editable: true, harnesses: [], unconfined_harnesses: ["Codex"] })
     if (path === "/api/github/repos") return json([])
     if (path === "/api/summary") return json({ ws: ws.id, workspace_name: ws.name, thinking: false, hold: null })
     if (path === "/api/notifications") return json([])

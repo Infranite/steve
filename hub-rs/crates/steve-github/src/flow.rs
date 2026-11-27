@@ -195,7 +195,7 @@ pub fn template_graph() -> Value {
 
 /// D2: a new issue on a linked repository → a suggestion card (a proposed item, its text quoted as
 /// untrusted). The user starts it; set the node's mode to `start` to have Steve start such items
-/// itself. YOLO never accepts a GitHub-sourced proposal on its own.
+/// itself. Nothing accepts a GitHub-sourced proposal on your behalf.
 pub fn issue_template_graph() -> Value {
     json!({
         "nodes": [

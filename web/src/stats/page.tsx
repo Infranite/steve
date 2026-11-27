@@ -130,6 +130,16 @@ function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f:
             <dd className="type-headline tabular-nums">{s.human.approval[key]}</dd>
           </div>)}
         </dl>
+        {s.human.approval.by_mode && <dl className="mt-3 grid gap-3 sm:grid-cols-3" data-stats-approval-modes>
+          {(["ask", "auto", "full_access"] as const).map((mode) => {
+            const counts = s.human.approval.by_mode?.[mode]
+            if (!counts) return null
+            return <div key={mode} data-stats-mode={mode}>
+              <dt className="type-footnote text-muted-foreground">{t(`core:approval.levels.${mode}.name`)}</dt>
+              <dd className="type-callout tabular-nums">{t("core:approval.modeSummary", counts)}</dd>
+            </div>
+          })}
+        </dl>}
         <ul className="mt-3 space-y-1 type-footnote text-muted-foreground">
           {Object.entries(s.human.approval.permissions_by_resolver).map(([resolver, outcomes]) =>
             <li key={resolver}>{t(`core:approval.resolver.${resolver}`, { defaultValue: resolver })}:{" "}

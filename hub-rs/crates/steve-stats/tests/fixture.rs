@@ -74,7 +74,7 @@ fn metrics_match_the_hand_count() {
     assert_eq!(lead.p50, Some(20 * MIN));
     assert_eq!(lead.p85, Some(55 * MIN));
     assert_eq!(lead.avg, Some((75 * MIN + 5 * MIN + 1_000) as f64 / 3.0));
-    // D4: ST-1 = [4, 20] (ask 4–8, fail 6–12, accept 10–20 overlap); ST-2 = 5 + 10 + 2 + 5 + 1, the YOLO card not counted
+    // D4: ST-1 = [4, 20] (ask 4–8, fail 6–12, accept 10–20 overlap); ST-2 = 5 + 10 + 2 + 5 + 1, the card Steve settled not counted
     assert_eq!(sm.time.wait.sum, (16 + 23) * MIN);
     // D5: ST-1 9 min, ST-2 9 + 2 + 8, ST-3 4
     assert_eq!(sm.time.agent.sum, (9 + 19 + 4) * MIN);
@@ -114,7 +114,7 @@ fn metrics_match_the_hand_count() {
     assert_eq!(h.by_kind["approve/release"], 2);
     assert_eq!(h.by_kind["approve/tool_call"], 1);
     assert_eq!(h.by_kind["ask/question"], 1);
-    // 8 resolved by a person (the YOLO one and the open stall card are not)
+    // 8 resolved by a person (the one Steve settled and the open stall card are not)
     assert_eq!(h.response.n, 8);
     assert_eq!(h.messages, 1);
     assert_eq!(h.approval.permissions, 0);

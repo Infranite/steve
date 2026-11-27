@@ -1,9 +1,9 @@
 //! When Steve replies for you, says nothing or asks you, on your own account, and the card it opens
 //! (synthetic chats; names A/B and made-up text): the gates before any model (nothing to answer, a
 //! nudge onto the open card, a bot's notice by its structure), the card's content and its choices
-//! (send the draft, tell it how to reply, your words as written; YOLO clicks none of them), its life
+//! (send the draft, tell it how to reply, your words as written; nothing clicks them for you), its life
 //! (a newer card that shows it, the lifetime you set), starred contacts, and what a draft keeps for
-//! YOLO.
+//! your decision.
 
 #[path = "support/digest_env.rs"]
 mod digest_env;
@@ -976,7 +976,7 @@ async fn a_bots_notice_becomes_an_item_by_its_structure_not_its_words() {
     assert_eq!(h.core.created().len(), 2);
 }
 
-// ---------------------------------------------------------------- what a draft keeps for YOLO
+// ---------------------------------------------------------------- what a draft keeps for your decision
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_draft_keeps_what_the_composer_said_about_it() {

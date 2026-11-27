@@ -918,25 +918,27 @@ fn approval_policy_is_an_owner_cas_and_only_emits_changes() {
         store.write(|w| steve_store::approval::set(w, "default", who, revision, mode))
     };
     assert!(matches!(
-        set("m", 0, HarnessAuto),
+        set("m", 0, Auto),
         Err(steve_store::StoreError::Rejected(_))
     ));
     assert!(receiver.try_recv().is_err());
-    let policy = set("o", 0, HarnessAuto).unwrap();
+    let policy = set("o", 0, Auto).unwrap();
     assert_eq!(
         (
             policy.mode,
             policy.revision,
             policy.actor.as_ref().map(|s| s.as_str())
         ),
-        (HarnessAuto, 1, Some("o"))
+        (Auto, 1, Some("o"))
     );
-    assert_eq!(set("o", 1, HarnessAuto).unwrap(), policy);
+    assert_eq!(set("o", 1, Auto).unwrap(), policy);
     assert!(matches!(
-        set("o", 0, AskOwner),
+        set("o", 0, Ask),
         Err(steve_store::StoreError::Conflict(_))
     ));
-    assert_eq!(set("o", 1, AskOwner).unwrap().revision, 2);
+    let full = set("o", 1, FullAccess).unwrap();
+    assert_eq!((full.mode, full.revision), (FullAccess, 2));
+    assert_eq!(set("o", 2, Ask).unwrap().revision, 3);
     let mut emitted = Vec::new();
     while let Ok(ev) = receiver.try_recv() {
         let value = serde_json::to_value(ev).unwrap();
@@ -944,7 +946,80 @@ fn approval_policy_is_an_owner_cas_and_only_emits_changes() {
             emitted.push(value["policy"]["revision"].as_i64().unwrap());
         }
     }
-    assert_eq!(emitted, [1, 2]);
+    assert_eq!(emitted, [1, 2, 3]);
+}
+
+#[test]
+fn migration_147_rewrites_approval_policies_and_tracks_turn_modes() {
+    let before_147 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE approval_policies_new"))
+        .unwrap();
+    let (_dir, path) = at_version(before_147);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO workspaces(id,name,description,item_prefix,sort,created)
+             VALUES ('ws_ask','Ask','','AK',1,1),
+                    ('ws_auto','Auto','','AU',2,1);
+           INSERT INTO approval_policies(workspace_id,mode,revision,actor)
+             VALUES ('ws_ask','ask_owner',1,'o'),
+                    ('ws_auto','harness_auto',2,'o');
+           INSERT INTO sessions(id,workspace_id,device_id,source,harness,title,cwd,status,created,updated)
+             VALUES ('s_147','ws_auto','hub','Steve','claude-code','t','', 'idle', 1, 1);
+           INSERT INTO approval_turns(session_id,turn_id,created)
+             VALUES ('s_147','turn_legacy',10);"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    assert_eq!(
+        store
+            .read(|r| steve_store::approval::policy(r, "ws_ask"))
+            .unwrap()
+            .mode,
+        steve_types::ApprovalMode::Ask
+    );
+    assert_eq!(
+        store
+            .read(|r| steve_store::approval::policy(r, "ws_auto"))
+            .unwrap()
+            .mode,
+        steve_types::ApprovalMode::Auto
+    );
+    store
+        .fixture_write(|c| {
+            assert_eq!(
+                count(
+                    c,
+                    "SELECT COUNT(*) FROM approval_turns WHERE session_id='s_147' AND turn_id='turn_legacy' AND mode='auto'"
+                ),
+                1
+            );
+            assert!(
+                c.execute(
+                    "INSERT INTO approval_policies(workspace_id,mode,revision,actor) VALUES ('default','harness_auto',1,'o')",
+                    [],
+                )
+                .is_err(),
+                "legacy harness_auto must be rejected by CHECK constraint"
+            );
+            assert!(
+                c.execute(
+                    "INSERT INTO approval_policies(workspace_id,mode,revision,actor) VALUES ('default','ask_owner',1,'o')",
+                    [],
+                )
+                .is_err(),
+                "legacy ask_owner must be rejected by CHECK constraint"
+            );
+            c.execute(
+                "INSERT INTO approval_policies(workspace_id,mode,revision,actor) VALUES ('default','full_access',1,'o')",
+                [],
+            )?;
+            assert_eq!(count(c, "SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

@@ -20,7 +20,7 @@
 //!   so a rejection counts only when you said nothing yourself in that space from shortly before the
 //!   message ([`crate::presence::OWNER_LIVE_MS`]) until you rejected it, and its message was not
 //!   merged into a later turn. A draft you approved unchanged teaches nothing (it may have been a
-//!   test click); one approved by YOLO is not your verdict.
+//!   test click); one decided by anyone but you is not your verdict.
 //! - **The rules of writing as you** ([`RULES`]) and, after the model answered, **the checks**
 //!   ([`problems`]): a list of options, more than one question, a draft far longer than you write
 //!   (over [`OVER_P90`] × your P90 in the situation), an opening you never use. They apply only to
@@ -684,7 +684,7 @@ pub fn people_names(c: &mut impl Read, ws: &str, conn: &str) -> ChannelResult<Ve
     Ok(names)
 }
 
-/// Your verdicts on drafts written as you on `conn` (not YOLO's): `(rejected, edited)`, the same
+/// Your verdicts on drafts written as you on `conn` (decided by you, not by Steve): `(rejected, edited)`, the same
 /// space's first, then the most recent; from another space only when [`portable`]. A rejected draft
 /// as it was, and only when your being there does not explain it ([`rejected_for_its_words`]); an
 /// edited one as you sent it.

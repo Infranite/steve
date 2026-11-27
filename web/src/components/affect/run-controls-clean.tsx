@@ -10,8 +10,8 @@ import type { HTMLAttributes, KeyboardEvent, ReactNode } from "react";
  *   · what waits for the run sits above the field, next first, each with its own controls
  *   · how full the context is, as a small ring
  * Steve: the run itself is shown by Steve's own transcript and run bar, so the demo's answer log, its Resume / Retry /
- * Dismiss, the Chat / Act mode and the permission menu are left out (Steve has no resume-from-a-word, its autonomy is
- * the Hub-wide YOLO setting). What is left are the pieces Steve's composers put together: RunActions, RunQueue and
+ * Dismiss, the Chat / Act mode and the permission menu are left out (Steve has no resume-from-a-word, its permissions
+ * live in the workspace settings). What is left are the pieces Steve's composers put together: RunActions, RunQueue and
  * RunQueued, RunContext. The words come from the caller (Steve's i18n).
  * Icons: Hugeicons Free (MIT, © Hugeicons, hugeicons.com).
  */

@@ -563,6 +563,36 @@ impl AdapterProperties {
             self.native_approval
         }
     }
+
+    /// Adapter mode id for native `auto` approval when declared.
+    pub fn auto_mode_id(&self) -> Option<String> {
+        self.native_approval().map(|_| self.modes.auto.clone())
+    }
+
+    /// Declared `full_access` mechanism (`modes.full_access`, `mode_args.full_access`,
+    /// `mode_meta.full_access`, or native full-access-only execution).
+    /// An alias for `ask` is not a distinct full-access mode.
+    pub fn full_access_mode(&self) -> Option<String> {
+        if self.native_execution || self.permission_policy == PermissionPolicy::FullAccessOnly {
+            return Some("full_access".into());
+        }
+        let mode = self.modes.full_access.as_str();
+        if !mode.is_empty() && mode != self.modes.ask {
+            return Some(mode.to_owned());
+        }
+        if let Some(args) = self.mode_args.get("full_access").filter(|a| !a.is_empty()) {
+            return Some(args.join(" "));
+        }
+        if self.mode_meta.contains_key("full_access") {
+            return Some("full_access".into());
+        }
+        None
+    }
+
+    /// Whether this adapter declares a full-access mode.
+    pub fn supports_full_access(&self) -> bool {
+        self.full_access_mode().is_some()
+    }
 }
 
 adapter_properties! {
@@ -576,7 +606,7 @@ adapter_properties! {
     /// gives each principal its own (`None`: it cannot, and every run uses the Node's).
     state: Option<StateDir> = None => Option<StateDir>, "Option::is_none", state;
 
-    /// Opt in to YOLO using the adapter's declared `modes.auto` ACP mode.
+    /// Opt in to native auto approval using the adapter's declared `modes.auto` ACP mode.
     native_approval: Option<NativeApprovalFallback> = None => Option<NativeApprovalFallback>, "Option::is_none", copied_option;
     modes: ModeMap = ModeMap::default() => BTreeMap<String, String>, "BTreeMap::is_empty", modes;
     /// Send `session/set_mode` even when `session/new|load` reports no `availableModes`, and offer

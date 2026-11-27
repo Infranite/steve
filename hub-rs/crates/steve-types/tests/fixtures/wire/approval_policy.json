@@ -1,1 +1,1 @@
-{"type":"approval_policy","ws":"workspace-a","policy":{"mode":"ask_owner","revision":0,"actor":null}}
+{"type":"approval_policy","policy":{"mode":"ask","revision":0,"actor":null}}

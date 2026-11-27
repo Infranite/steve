@@ -29,7 +29,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/011.sql"),
     include_str!("../migrations/012.sql"),
     // 13 is a comment-only placeholder that stays empty (the delivery queue takes the next free number);
-    // versions are positions in this list, so it keeps the later ones in place. 14: YOLO.
+    // versions are positions in this list, so it keeps the later ones in place. 14: the former approval engine.
     // 15: statistics. 16: thread routing. All new tables only.
     include_str!("../migrations/013.sql"),
     include_str!("../migrations/014.sql"),
@@ -282,7 +282,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/133.sql"),
     // 134: remove legacy raw ACP event rows and backfill sessions.first_tool_at from steve.v1 tool events.
     include_str!("../migrations/134.sql"),
-    // 135: migrate retired YOLO rows to Steve settlement and backfill bot_node_bindings.
+    // 135: migrate the former approval engine's rows to Steve settlement and backfill bot_node_bindings.
     include_str!("../migrations/135.sql"),
     // 136: migrate bots.perm_mode to Steve PermissionMode values and default to ask.
     include_str!("../migrations/136.sql"),
@@ -306,6 +306,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/145.sql"),
     // 146: incoming channel reactions (#277), durable reply-to-source links, burst grouping (#268), and [AI] mark preference.
     include_str!("../migrations/146.sql"),
+    // 147: three-level workspace permissions (`ask`, `auto`, `full_access`) and per-mode turn counts (#622).
+    include_str!("../migrations/147.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

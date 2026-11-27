@@ -1694,7 +1694,7 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
         assert_eq!(settled.status, DecisionStatus::Expired);
     }
 
-    // Core 6: design_implementation (YOLO refused, invalid option refused, valid "只保留设计" succeeds)
+    // Core 6: design_implementation (owner-only, invalid option refused, valid "只保留设计" succeeds)
     {
         let design_item = create_item(store, ws, "Design item", "Design only");
         let design_content = "# Design\n\nDetails\n";
@@ -1795,7 +1795,7 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
         );
     }
 
-    // Core 8: session_start (SESSION_START_FAILURE: YOLO & wrong choice refused; ended session refused;
+    // Core 8: session_start (SESSION_START_FAILURE: owner-only & wrong choice refused; ended session refused;
     // valid retry verified via dismiss/refusal + open contract)
     {
         let start_item = create_item(store, ws, "Start failure item", "Start failure");
@@ -1866,7 +1866,7 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
         assert!(expired);
     }
 
-    // Core 9: turn_stall (TURN_STALL: YOLO refused, unconfirmed continue refused, drop succeeds)
+    // Core 9: turn_stall (TURN_STALL: owner-only, unconfirmed continue refused, drop succeeds)
     {
         let ts_item = create_item(store, ws, "Turn stall item", "Turn stall");
         let d = open_with_dedupe(
@@ -2129,6 +2129,7 @@ impl NodeDomain for ApprovalDomain {
                 policy: target.policy,
                 native_id: target.native_id.clone(),
                 native: target.native,
+                policy_supported: target.policy_supported,
             }))
     }
     fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
@@ -2359,9 +2360,10 @@ async fn ask_owner_and_harness_native_permission_flow_through_unified_settlement
         let domain = Arc::new(ApprovalDomain(std::sync::Mutex::new(Some(
             super::node_runtime::ApprovalTarget {
                 mode: PermissionMode::Auto,
-                policy: steve_types::ApprovalMode::HarnessAuto,
+                policy: steve_types::ApprovalMode::Auto,
                 native_id: Some("auto".into()),
                 native: Some(NativeApprovalFallback::Reject),
+                policy_supported: true,
             },
         ))));
         let fake_node = FakeNode::new("n_perm_native");
