@@ -2019,6 +2019,12 @@ impl LocalNode {
                 "native auto approval is not declared for this harness",
             ));
         }
+        if p.permissions == PermissionMode::FullAccess && !properties.supports_full_access() {
+            return Err(Error::new(
+                Code::Unsupported,
+                "full access mode is not declared for this harness",
+            ));
+        }
         properties
             .permission_policy
             .check(p.permissions)

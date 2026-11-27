@@ -306,6 +306,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/145.sql"),
     // 146: incoming channel reactions (#277), durable reply-to-source links, burst grouping (#268), and [AI] mark preference.
     include_str!("../migrations/146.sql"),
+    // 147: three-level workspace permissions (`ask`, `auto`, `full_access`) and per-mode turn counts (#622).
+    include_str!("../migrations/147.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -79,7 +79,7 @@ export function CardTools({ i, w }: { i: Item; w: Wait }) {
   </span>
 }
 
-/** what the question is about: the conversation a reply goes to, the draft, the YOLO note, the agent still working */
+/** what the question is about: the conversation a reply goes to, the draft, the agent still working */
 function Detail({ w, extra, reply = false }: { w: Wait; extra?: ReactNode; reply?: boolean }) {
   const t = useT()
   return <>
@@ -246,7 +246,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
   }
   if (w.type === "ask" && w.subject === "design_implementation") {
     /* the typed note goes with every choice; a revision needs one. The owner turned the item's design gate on,
-     * and only a person answers it: the card says so rather than wait for YOLO */
+     * and only a person answers it: automatic permissions never bypass this card */
     const [impl, keep, revise] = w.options
     const rows = [impl && opt(impl, tr("core:card.designImplement"), { "data-design-choice": "0" }), keep && opt(keep, tr("core:card.designKeep"), { "data-design-choice": "1" })].filter(Boolean) as DecisionOption[]
     const note = <div className="type-footnote text-muted-foreground" data-design-gate-note>{tr("core:card.designGateNote")}</div>

@@ -366,7 +366,7 @@ pub struct DecisionView {
     /// What it was settled with, as recorded.
     pub result: Option<RawJson>,
     pub requested_by: String,
-    /// Actor who settled the decision (a user id, `"yolo"`, or `None` when expired/system-settled).
+    /// Actor who settled the decision (a user id, `"steve"`, or `None` when expired/system-settled).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub resolved_by: Option<String>,

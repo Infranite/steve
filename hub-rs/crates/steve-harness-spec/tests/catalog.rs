@@ -228,6 +228,38 @@ fn only_declared_native_approval_modes_are_offered() {
             (mode == "custom-reviewed").then_some(NativeApprovalFallback::Reject)
         );
     }
+
+    // Full access covers modes.full_access, mode_args.full_access, mode_meta.full_access, and native-only;
+    // aliases of ask (like opencode's "build") and empty declarations are unsupported.
+    assert_eq!(
+        builtin("claude-code")
+            .unwrap()
+            .properties
+            .full_access_mode()
+            .as_deref(),
+        Some("bypassPermissions")
+    );
+    assert_eq!(
+        builtin("codex")
+            .unwrap()
+            .properties
+            .full_access_mode()
+            .as_deref(),
+        Some("agent-full-access")
+    );
+    assert_eq!(
+        builtin("antigravity")
+            .unwrap()
+            .properties
+            .full_access_mode()
+            .as_deref(),
+        Some("--dangerously-skip-permissions")
+    );
+    assert_eq!(
+        builtin("opencode").unwrap().properties.full_access_mode(),
+        None
+    );
+    assert_eq!(builtin("kilo").unwrap().properties.full_access_mode(), None);
 }
 
 #[test]

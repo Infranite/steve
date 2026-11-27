@@ -36,11 +36,15 @@ pub fn task(
             async move {
                 let sample_store = store.clone();
                 let approval = tokio::task::spawn_blocking(move || {
-                    sample_store.read(|r| steve_store::statistics::approval::applied_sessions(r))
+                    sample_store
+                        .read(|r| steve_store::statistics::approval::applied_sessions_by_mode(r))
                 })
                 .await;
-                if let Ok(Ok(n)) = approval {
-                    ::metrics::gauge!("steve_approval_auto_sessions").set(n as f64);
+                if let Ok(Ok(by_mode)) = approval {
+                    for (mode, n) in by_mode {
+                        ::metrics::gauge!("steve_permission_sessions", "mode" => mode.as_str())
+                            .set(n as f64);
+                    }
                 }
                 sample_once(local.as_ref(), svc.as_ref()).await;
                 if svc.is_some() {

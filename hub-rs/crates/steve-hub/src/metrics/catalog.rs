@@ -24,22 +24,30 @@ pub(super) const LONG: &[&str] = &[
 pub(super) const TOKENS: &[&str] = &["steve_turn_context_peak_tokens"];
 
 pub(super) fn describe() {
-    // Session approval: applied-mode gauge and post-commit request/turn counts.
+    // Session permissions: applied-level gauge, post-commit turn/request counts, and full-access confirmations.
     describe_gauge!(
-        "steve_approval_auto_sessions",
+        "steve_permission_sessions",
         Count,
-        "Sessions with the native auto mode applied, sampled every minute."
+        "Active sessions by applied permission level, sampled every minute. Label: mode (ask, auto, full_access)."
     );
     describe_counter!(
-        "steve_approval_auto_turns_total",
-        "Logical session turns started in the harness-native approval mode."
+        "steve_permission_turns_total",
+        Count,
+        "Logical session turns started by applied permission level. Label: mode (ask, auto, full_access)."
+    );
+    describe_counter!(
+        "steve_permission_full_access_confirmations_total",
+        Count,
+        "Owner risk confirmations completed when switching workspace permissions to full_access."
     );
     describe_counter!(
         "steve_approval_requests_total",
+        Count,
         "Session ACP permission requests received by Steve, by resolver and ingress outcome."
     );
     describe_counter!(
         "steve_approval_questions_total",
+        Count,
         "Agent question cards created for the owner."
     );
     describe_histogram!(

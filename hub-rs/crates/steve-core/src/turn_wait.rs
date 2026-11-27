@@ -41,7 +41,7 @@ pub(crate) fn yours(s: &SessionStop) -> bool {
 
 /// Your Stop holds the session: its last turn was stopped by you ([`yours`]), or you asked for a
 /// Stop whose turn end has not come (the backend could not confirm it, or that turn's end is still
-/// on its way). Either way going on is yours, never Steve's or YOLO's.
+/// on its way). Either way going on is yours, never Steve's or automatic.
 pub(crate) fn held(s: &SessionStop) -> bool {
     s.stop_reason.is_some() && yours(s) || s.stop_asked.is_some()
 }

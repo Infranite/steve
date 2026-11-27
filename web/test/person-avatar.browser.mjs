@@ -128,7 +128,7 @@ const SETTLED_DECISIONS = [
     revision: 1,
   },
   {
-    id: "dec_yolo",
+    id: "dec_steve",
     ws: "default",
     kind: "approve",
     subject_type: "permission",
@@ -139,9 +139,9 @@ const SETTLED_DECISIONS = [
     draft: "",
     options: ["yes", "no"],
     status: "resolved",
-    result: { approved: true, choice: "自动放行", decided_by: "yolo", reason: "只读验证命令" },
+    result: { approved: true, choice: "自动放行", decided_by: "steve", reason: "只读验证命令" },
     requested_by: "code",
-    resolved_by: "yolo",
+    resolved_by: "steve",
     created: NOW - 55 * MIN,
     resolved: NOW - 50 * MIN,
     undo_until: null,
@@ -269,7 +269,6 @@ async function runTheme(theme) {
     if (p === "/api/shell") return json(shellState())
     if (p === "/api/me") return json({ user: { id: me.user_id, name: me.name, login: me.login, email: me.email, role: me.role, party_id: me.party_id, avatar: me.avatar, subtitle: me.subtitle }, person: me, auth: "cookie", token: false })
     if (p === "/api/summary") return json({ ws: "default", workspace_name: "星河研发", thinking: false, hold: null })
-    if (p === "/api/yolo") return json({ on: false, active: false, forced_off: null, forced_reason: null, paused: null, window: null, scopes: [], counts: { decided: 1, declined: 0, scheduled: 0 } })
     if (p === "/api/snapshot") return json({ epoch: "fixture", rev: 1, cursor: "fixture:1", views: { item: [ITEM_VIEW], session: [], decision: [] } })
     if (p === "/api/views") return json({ rev: 1, views: [], missing: [] })
     if (p === "/api/views/page") {
@@ -418,7 +417,7 @@ async function runTheme(theme) {
   await approvalImg.waitFor()
   assert.equal(await approvalImg.getAttribute("src"), uploadedSrc, "uploaded photo propagates to item timeline actor")
 
-  // 3. Inbox settled decisions show settler avatars (me, collaborator, Steve/YOLO, system)
+  // 3. Inbox settled decisions show settler avatars (me, collaborator, Steve, system)
   await page.goto(`${base}/#/inbox`)
   await page.locator("button", { hasText: "已处理" }).click()
   const doneRow = page.locator('[data-done-row="ST-42"]')

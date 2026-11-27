@@ -1,4 +1,4 @@
-//! Approval policy is a workspace-scoped CAS, independent of Bot and item settings.
+//! Workspace permission policy is a workspace-scoped CAS, independent of Bot and item settings.
 
 use sea_query::{Expr, ExprTrait, OnConflict, Query};
 use steve_types::{ApprovalMode, ApprovalPolicy, AutonomyEvent};
@@ -12,12 +12,11 @@ pub fn policy(r: &mut impl Read, ws: &str) -> Result<ApprovalPolicy> {
             .from("approval_policies")
             .and_where(Expr::col("workspace_id").eq(ws)),
         |r| {
+            let raw = r.get::<String>(0)?;
+            let mode = ApprovalMode::parse(&raw)
+                .ok_or_else(|| StoreError::Conflict("invalid stored permission mode".into()))?;
             Ok(ApprovalPolicy {
-                mode: match r.get::<String>(0)?.as_str() {
-                    "ask_owner" => ApprovalMode::AskOwner,
-                    "harness_auto" => ApprovalMode::HarnessAuto,
-                    _ => return Err(StoreError::Conflict("invalid stored approval mode".into())),
-                },
+                mode,
                 revision: r.get(1)?,
                 actor: Some(r.get::<String>(2)?.into()),
             })
@@ -39,13 +38,13 @@ pub fn set(
 ) -> Result<ApprovalPolicy> {
     if !owner(w, ws, actor)? {
         return Err(StoreError::Rejected(
-            "only the workspace owner may change approval policy".into(),
+            "only the workspace owner may change permission policy".into(),
         ));
     }
     let before = policy(w, ws)?;
     if before.revision != expected {
         return Err(StoreError::Conflict(
-            "approval policy changed; reload before updating".into(),
+            "permission policy changed; reload before updating".into(),
         ));
     }
     if before.mode == mode {
@@ -56,15 +55,16 @@ pub fn set(
         revision: expected + 1,
         actor: Some(actor.into()),
     };
-    let key = match mode {
-        ApprovalMode::AskOwner => "ask_owner",
-        ApprovalMode::HarnessAuto => "harness_auto",
-    };
     w.exec(
         Query::insert()
             .into_table("approval_policies")
             .columns(["workspace_id", "mode", "revision", "actor"])
-            .values_panic([ws.into(), key.into(), next.revision.into(), actor.into()])
+            .values_panic([
+                ws.into(),
+                mode.as_str().into(),
+                next.revision.into(),
+                actor.into(),
+            ])
             .on_conflict(
                 OnConflict::column("workspace_id")
                     .update_columns(["mode", "revision", "actor"])
@@ -78,20 +78,26 @@ pub fn set(
     w.audit(
         ws,
         actor,
-        "approval_policy.set",
+        "permission_policy.set",
         ws,
         &serde_json::json!({"before": before, "after": next}),
     )?;
     Ok(next)
 }
 
-/// The same logical turn may have several attempts; count it once.
-pub fn auto_turn(w: &mut W<'_>, session: &str, turn: &str, at: i64) -> Result<bool> {
+/// The same logical turn may have several attempts; count it once with its applied permission mode.
+pub fn record_turn(
+    w: &mut W<'_>,
+    session: &str,
+    turn: &str,
+    mode: ApprovalMode,
+    at: i64,
+) -> Result<bool> {
     Ok(w.exec(
         Query::insert()
             .into_table("approval_turns")
-            .columns(["session_id", "turn_id", "created"])
-            .values_panic([session.into(), turn.into(), at.into()])
+            .columns(["session_id", "turn_id", "mode", "created"])
+            .values_panic([session.into(), turn.into(), mode.as_str().into(), at.into()])
             .on_conflict(
                 OnConflict::columns(["session_id", "turn_id"])
                     .do_nothing()

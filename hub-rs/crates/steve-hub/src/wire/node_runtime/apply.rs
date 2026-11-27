@@ -215,8 +215,22 @@ impl NodeRuntime {
     /// The Hub's side of an applied event or a settle, after its commit.
     fn after(&self, a: After) {
         match a {
-            After::AutoTurn => {
-                crate::metrics::once!(counter "steve_approval_auto_turns_total").increment(1)
+            After::PermissionTurn(mode) => {
+                thread_local! {
+                    static PERMISSION_TURNS: std::cell::RefCell<
+                        std::collections::HashMap<&'static str, metrics::Counter>,
+                    > = std::cell::RefCell::new(std::collections::HashMap::new());
+                }
+                let label = mode.as_str();
+                PERMISSION_TURNS.with(|cache| {
+                    cache
+                        .borrow_mut()
+                        .entry(label)
+                        .or_insert_with(
+                            || metrics::counter!("steve_permission_turns_total", "mode" => label),
+                        )
+                        .increment(1);
+                });
             }
             After::PermissionIngress { resolver, outcome } => {
                 if outcome != "owner_decision" {
@@ -405,15 +419,19 @@ impl NodeRuntime {
                     && state == "planned"
                 {
                     if let Subject::Execution(ExecutionRef::Turn { turn, .. }) = &ev.subject
-                        && self
-                            .domain
-                            .approval(&session)?
-                            .is_some_and(|m| m.native.is_some())
-                        && rt::session_modes(w, self.node_id.as_str(), &session)?
-                            .is_some_and(|m| m.applied.as_deref() == Some("auto"))
-                        && steve_store::approval::auto_turn(w, &session, turn.as_str(), ev.at.0)?
+                        && let Some(applied) =
+                            rt::session_modes(w, self.node_id.as_str(), &session)?
+                                .and_then(|m| m.applied)
+                        && let Some(mode) = steve_types::ApprovalMode::parse(&applied)
+                        && steve_store::approval::record_turn(
+                            w,
+                            &session,
+                            turn.as_str(),
+                            mode,
+                            ev.at.0,
+                        )?
                     {
-                        out.push(After::AutoTurn);
+                        out.push(After::PermissionTurn(mode));
                     }
                     let ordinal = node_turns::ordinal(w, a)?;
                     node_sessions::set_status(w, &session, "running", self.clock.now())?;

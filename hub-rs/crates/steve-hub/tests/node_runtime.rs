@@ -37,9 +37,10 @@ impl NodeDomain for Ends {
     fn approval(&self, _: &str) -> steve_store::Result<Option<ApprovalTarget>> {
         Ok(self.3.lock().unwrap().map(|native| ApprovalTarget {
             mode: PermissionMode::Auto,
-            policy: steve_types::ApprovalMode::HarnessAuto,
+            policy: steve_types::ApprovalMode::Auto,
             native: Some(native),
             native_id: Some("fixture-auto".into()),
+            policy_supported: true,
         }))
     }
 
@@ -2705,6 +2706,42 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     assert_eq!(s.applied.as_deref(), Some("full_access"));
     assert_eq!(s.refused, None);
     assert_eq!(node_checks::mode_refusal_code(&h.store).unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_node_ceiling_refusing_full_access_does_not_retry_on_idle_boundaries() {
+    let h = hub();
+    h.bind();
+    h.ready().await;
+    h.node.script_once(
+        "configure_session",
+        Scripted::Refuse(Error::new(
+            Code::Forbidden,
+            "this node's owner allows at most permission mode auto here (asked: full_access)",
+        )),
+    );
+    // Request FullAccess: ceiling rejects it and session stays on ask.
+    assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
+    eventually_sync("full_access refused", || h.cfg_states() == ["rejected"]).await;
+    h.ready().await;
+    let s = h.rt.mode_state(S).unwrap().unwrap();
+    assert_eq!(s.applied.as_deref(), Some("ask"));
+    assert!(
+        s.refused
+            .as_deref()
+            .is_some_and(|r| r.contains("at most permission mode auto"))
+    );
+
+    // Subsequent turn under the same policy does not keep re-sending the refused widening.
+    *h.ends.3.lock().unwrap() = Some(steve_harness_spec::NativeApprovalFallback::AskOwner);
+    let exec = h.running("follow-up under refused widening").await;
+    h.node.finish(&exec, build::done()).await.unwrap();
+    eventually_sync("turn finished", || h.ends().len() == 1).await;
+    assert_eq!(
+        h.cfg_states(),
+        ["rejected"],
+        "refused widening must not retry automatically"
+    );
 }
 
 /// Reconnect keeps a card the Node still waits for; it never answers it on its own.

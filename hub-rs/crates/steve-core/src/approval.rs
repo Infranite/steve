@@ -76,11 +76,13 @@ pub fn resolve(
         return AskOwner.resolve(request);
     }
     match (policy, applied_native) {
-        // A turn may still run in native mode while an owner edit to AskOwner is pending.
-        (ApprovalMode::AskOwner | ApprovalMode::HarnessAuto, Some(fallback)) => {
+        // A turn may still run in native mode while an owner edit to Ask is pending.
+        (ApprovalMode::Ask | ApprovalMode::Auto | ApprovalMode::FullAccess, Some(fallback)) => {
             HarnessNative(fallback).resolve(request)
         }
-        (ApprovalMode::AskOwner | ApprovalMode::HarnessAuto, None) => AskOwner.resolve(request),
+        (ApprovalMode::Ask | ApprovalMode::Auto | ApprovalMode::FullAccess, None) => {
+            AskOwner.resolve(request)
+        }
     }
 }
 
@@ -91,7 +93,7 @@ mod tests {
     #[test]
     fn questions_are_for_the_owner_even_in_native_mode() {
         let q = resolve(
-            ApprovalMode::HarnessAuto,
+            ApprovalMode::Auto,
             Some(NativeApprovalFallback::Reject),
             Request::Question(Question {
                 text: "What next?",

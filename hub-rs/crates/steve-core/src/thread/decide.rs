@@ -129,10 +129,8 @@ static ITEM_REF: LazyLock<Regex> =
 /// Words of Steve's own settings: a question about them gets the settings as they are (router kind
 /// `config`), not research.
 static CONFIG: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)设置|配置|开关|免打扰|提醒|通知|汇报|yolo|模型|权限|规则|默认|偏好|定时|Bot|机器人",
-    )
-    .expect("valid regex")
+    Regex::new(r"(?i)设置|配置|开关|免打扰|提醒|通知|汇报|模型|权限|规则|默认|偏好|定时|Bot|机器人")
+        .expect("valid regex")
 });
 
 pub fn is_config_phrase(text: &str) -> bool {
@@ -334,7 +332,7 @@ mod tests {
             "事项页面改版做到哪一步了？",
             "st40 为什么还没好？",
             "现在免打扰是几点？",
-            "YOLO 现在怎么设置的？",
+            "权限现在怎么设置的？",
             "现在steve的知识系统是怎么运作的？给我讲一下",
             "事项页面信息太散了，得优化一下，你看看怎么设计一下",
             "",

@@ -75,6 +75,7 @@ export const SMOKE = [
   "node-tabs",
   "onboarding",
   "people-management",
+  "permissions",
   "person-avatar",
   "personal-triggers",
   "plugins",

@@ -83,6 +83,6 @@ mod tests {
 
     #[test]
     fn chinese_readers_get_the_stored_text() {
-        assert_eq!(with(ZH_CN, || shown("YOLO 已暂停：连续出错")), None);
+        assert_eq!(with(ZH_CN, || shown("自动任务已暂停：连续出错")), None);
     }
 }

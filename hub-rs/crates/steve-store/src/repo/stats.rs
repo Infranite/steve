@@ -128,7 +128,7 @@ pub struct NewMark {
     pub kind: String,
     pub from_v: Option<String>,
     pub to_v: Option<String>,
-    /// me | steve | yolo | <bot id>; `""` when the caller cannot tell
+    /// me | steve | <bot id>; `""` when the caller cannot tell
     pub actor: String,
     pub r#ref: Option<String>,
     pub detail: serde_json::Value,

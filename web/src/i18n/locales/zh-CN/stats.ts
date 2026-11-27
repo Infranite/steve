@@ -322,7 +322,7 @@ export default {
     agentDef: "这件事项所有回合时间的并集。",
     wait: "等你",
     decisions_other: "{{count}} 个决定",
-    waitDef: "需要你处理的卡片挂着的时间的并集（YOLO 代办的不算）。",
+    waitDef: "需要你处理的卡片挂着的时间的并集（自动结算的不算）。",
     reworks: "返工",
     noVerdict: "还没有裁决",
     firstPass: "第一次交付就通过",

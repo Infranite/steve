@@ -336,6 +336,8 @@ impl NodeRuntime {
             {
                 self.approval_desired(session, true)?;
                 self.boundary_in(tx, session)?;
+            } else if binding.name == "active" || binding.active_attempt.is_some() {
+                self.approval_desired(session, true)?;
             }
             Ok(())
         })
@@ -355,12 +357,14 @@ impl NodeRuntime {
         {
             return Ok(());
         }
-        // Do not repeat a refused widening on every idle boundary. Disabling always narrows,
-        // and a later explicit policy edit can retry a refused widening .
+        // Do not repeat a refused widening on every idle boundary. Narrowing always proceeds,
+        // and a later explicit policy edit can retry or change a refused widening.
         let fact = self
             .store
             .read(|r| rt::session_modes(r, self.node_id.as_str(), session))?;
-        if !explicit_edit && target.mode == PermissionMode::Auto && fact.is_some_and(|m| m.refused)
+        if !explicit_edit
+            && rank(target.mode) > rank(open.policy.permissions)
+            && fact.is_some_and(|m| m.refused)
         {
             return Ok(());
         }
